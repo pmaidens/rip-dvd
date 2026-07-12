@@ -1,0 +1,2 @@
+"""DVD ripping assistant package."""
+
