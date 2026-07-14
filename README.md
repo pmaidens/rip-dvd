@@ -19,30 +19,35 @@ On Raspberry Pi OS or Debian-like systems, the system dependencies are typically
 
 ```bash
 sudo apt update
-sudo apt install handbrake-cli lsdvd util-linux ffmpeg
+sudo apt install git handbrake-cli lsdvd util-linux ffmpeg
 ```
 
-`blkid` is provided by `util-linux`. If you use Jellyfin's bundled ffmpeg, the tool will prefer `/usr/lib/jellyfin-ffmpeg/ffmpeg` and `/usr/lib/jellyfin-ffmpeg/ffprobe` when those files exist.
+`git` is only needed to clone or update the checkout. `blkid` is provided by `util-linux`. If you use Jellyfin's bundled ffmpeg, the tool will prefer `/usr/lib/jellyfin-ffmpeg/ffmpeg` and `/usr/lib/jellyfin-ffmpeg/ffprobe` when those files exist.
 
 ## Quick Start
 
-Clone the repository on the Raspberry Pi:
+Clone the repository into a stable install directory on the Raspberry Pi:
 
 ```bash
-git clone git@github.com:pmaidens/rip-dvd.git
-cd rip-dvd
+git clone https://github.com/pmaidens/rip-dvd.git ~/.local/share/rip-dvd
 ```
 
-Run the command from the repository:
+Install the `rip-dvd` command for your user:
 
 ```bash
-./rip-dvd --help
+~/.local/share/rip-dvd/install.sh
+```
+
+If this is a shared system and you want the command in `/usr/local/bin`, install the wrapper system-wide:
+
+```bash
+sudo ~/.local/share/rip-dvd/install.sh --system
 ```
 
 Start the interactive assistant:
 
 ```bash
-./rip-dvd
+rip-dvd
 ```
 
 The default paths are:
@@ -54,8 +59,8 @@ The default paths are:
 Override them when needed:
 
 ```bash
-./rip-dvd scan --device /dev/dvd
-./rip-dvd rip --library /media/movies --preset "Fast 576p25"
+rip-dvd scan --device /dev/dvd
+rip-dvd rip --library /media/movies --preset "Fast 576p25"
 ```
 
 ## Commands
@@ -63,7 +68,7 @@ Override them when needed:
 ### Interactive Mode
 
 ```bash
-./rip-dvd
+rip-dvd
 ```
 
 Scans the disc, shows likely main features and extras, then prompts for what to rip.
@@ -71,7 +76,7 @@ Scans the disc, shows likely main features and extras, then prompts for what to 
 ### Scan Only
 
 ```bash
-./rip-dvd scan
+rip-dvd scan
 ```
 
 Lists DVD titles, durations, chapter counts, audio streams, subtitle counts, and a rough classification. This does not rip anything.
@@ -79,7 +84,7 @@ Lists DVD titles, durations, chapter counts, audio streams, subtitle counts, and
 ### Rip the Main Feature
 
 ```bash
-./rip-dvd rip
+rip-dvd rip
 ```
 
 Uses HandBrake's `--main-feature` mode and writes the output under the movie library.
@@ -87,19 +92,19 @@ Uses HandBrake's `--main-feature` mode and writes the output under the movie lib
 Provide a manual title and year when disc metadata is missing or unhelpful:
 
 ```bash
-./rip-dvd rip --name "The Matrix" --year 1999
+rip-dvd rip --name "The Matrix" --year 1999
 ```
 
 Preview the planned command without ripping:
 
 ```bash
-./rip-dvd rip --name "The Matrix" --year 1999 --dry-run
+rip-dvd rip --name "The Matrix" --year 1999 --dry-run
 ```
 
 ### Rip a Specific DVD Title
 
 ```bash
-./rip-dvd title 3 --name "Movie Title" --year 2001
+rip-dvd title 3 --name "Movie Title" --year 2001
 ```
 
 Use this after `scan` when the main feature is not the title HandBrake would choose automatically.
@@ -107,7 +112,7 @@ Use this after `scan` when the main feature is not the title HandBrake would cho
 ### Rip the Main Feature Plus Extras
 
 ```bash
-./rip-dvd extras --extras 2,3,4 --name "Movie Title" --year 2001
+rip-dvd extras --extras 2,3,4 --name "Movie Title" --year 2001
 ```
 
 This rips the main feature first, then writes selected bonus titles into an `extras/` folder inside the movie directory.
@@ -115,19 +120,19 @@ This rips the main feature first, then writes selected bonus titles into an `ext
 You can also pass extras positionally:
 
 ```bash
-./rip-dvd extras 2 3 4 --name "Movie Title"
+rip-dvd extras 2 3 4 --name "Movie Title"
 ```
 
 ### Join Part Files
 
 ```bash
-./rip-dvd join part1.mkv part2.mkv --output "Movie.mkv"
+rip-dvd join part1.mkv part2.mkv --output "Movie.mkv"
 ```
 
 The join command uses ffmpeg concat mode with stream copy, so it does not re-encode the files. It leaves the original parts in place unless you pass:
 
 ```bash
-./rip-dvd join part1.mkv part2.mkv --output "Movie.mkv" --delete-parts
+rip-dvd join part1.mkv part2.mkv --output "Movie.mkv" --delete-parts
 ```
 
 ## Optional TMDb Lookup
@@ -136,7 +141,7 @@ Set `TMDB_API_KEY` to let the tool look up a movie title and year from the disc 
 
 ```bash
 export TMDB_API_KEY="your-api-key"
-./rip-dvd rip
+rip-dvd rip
 ```
 
 Manual `--name` and `--year` arguments always take priority.
@@ -145,17 +150,26 @@ Manual `--name` and `--year` arguments always take priority.
 
 Because `rip-dvd` imports the local `rip_dvd/` package, do not copy only the `rip-dvd` wrapper into `/usr/local/bin`.
 
-The simplest reliable approach is to keep the repository checked out and add a shell wrapper:
+Use the installer from the checked-out repository:
 
 ```bash
-sudo tee /usr/local/bin/rip-dvd >/dev/null <<'EOF'
-#!/bin/sh
-exec /home/pi/rip-dvd/rip-dvd "$@"
-EOF
-sudo chmod +x /usr/local/bin/rip-dvd
+./install.sh
 ```
 
-Adjust `/home/pi/rip-dvd` to wherever you cloned the repository.
+The default install creates `~/.local/bin/rip-dvd`. The wrapper points back to this checkout, so keep the repository directory in place. To install system-wide instead, run:
+
+```bash
+sudo ./install.sh --system
+```
+
+## Updating
+
+`rip-dvd` does not update itself. Update the checkout directly with Git, then keep using the same installed wrapper:
+
+```bash
+cd ~/.local/share/rip-dvd
+git pull --ff-only
+```
 
 ## Testing
 
@@ -175,4 +189,3 @@ The tests cover the pure logic: duration parsing, filename cleanup, `lsdvd` pars
 - `rip_dvd/cli.py`: command-line workflow and user interaction
 - `rip_dvd/output.py`: logging and prompts
 - `tests/test_core.py`: unit tests for the pure logic
-
