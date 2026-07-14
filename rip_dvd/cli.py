@@ -21,7 +21,7 @@ from .core import (
     suggested_extra_titles,
 )
 from .external import ffmpeg_tool, resolve_movie_metadata, scan_dvd_titles
-from .output import log, log_error, prompt, prompt_yes_no
+from .output import RipProgressDisplay, log, log_error, prompt, prompt_yes_no
 
 
 DEFAULT_PRESET = "Fast 480p30"
@@ -132,25 +132,66 @@ def build_extra_plan(device, preset, movie_dir, title_number, title_info=None, e
     return plan
 
 
-def execute_rip_plan(plan, dry_run=False, verbose=False):
+def progress_label(plan, index, total):
+    if total == 1:
+        return plan.output.stem
+    if index == 0:
+        prefix = "Movie"
+    else:
+        prefix = f"Extra {index}"
+    return f"{prefix}: {plan.output.stem}"
+
+
+def execute_rip_plan(plan, dry_run=False, verbose=False, progress_display=None, progress_index=0):
     if dry_run or verbose:
         log("Command:")
         log(quote_cmd(plan.cmd))
     if dry_run:
         return 0
 
+    own_progress = None
+    if progress_display is None and not verbose:
+        own_progress = RipProgressDisplay([progress_label(plan, 0, 1)])
+        progress_display = own_progress
+        progress_display.begin()
+
     plan.movie_dir.mkdir(parents=True, exist_ok=True)
-    return stream_handbrake(plan.cmd, plan.output, verbose=verbose)
+    code = stream_handbrake(plan.cmd, plan.output, verbose=verbose, progress_display=progress_display, progress_index=progress_index)
+    if code == 0 and own_progress is not None:
+        own_progress.finish()
+        log(f"Done: {plan.output}")
+    return code
 
 
 def execute_rip_plans(plans, dry_run=False, verbose=False):
+    if not plans:
+        return 0
+
+    progress = None
+    if not dry_run and not verbose:
+        labels = [progress_label(plan, index, len(plans)) for index, plan in enumerate(plans)]
+        progress = RipProgressDisplay(labels)
+        progress.begin()
+
     for index, plan in enumerate(plans, start=1):
-        log(f"Rip {index} of {len(plans)}")
-        code = execute_rip_plan(plan, dry_run=dry_run, verbose=verbose)
+        if progress is None:
+            log(f"Rip {index} of {len(plans)}")
+        else:
+            progress.update(index - 1, 0, "starting")
+        code = execute_rip_plan(
+            plan,
+            dry_run=dry_run,
+            verbose=verbose,
+            progress_display=progress,
+            progress_index=index - 1,
+        )
         if code != 0:
             if index < len(plans):
                 log_error("Stopping remaining rips because this rip failed.")
             return code
+    if progress is not None:
+        progress.finish()
+        log("All rips complete.")
     return 0
 
 
@@ -433,11 +474,14 @@ def join_mode(parts, output, delete_parts=False, verbose=False):
     return 0
 
 
-def stream_handbrake(cmd, output, verbose=False):
+def stream_handbrake(cmd, output, verbose=False, progress_display=None, progress_index=0):
+    if verbose:
+        progress_display = None
+
     if verbose:
         log("Running HandBrake in verbose mode:")
         log(quote_cmd(cmd))
-    else:
+    elif progress_display is None:
         log("Scanning DVD and starting encoder...")
 
     proc = subprocess.Popen(
@@ -490,20 +534,31 @@ def stream_handbrake(cmd, output, verbose=False):
         if progress.phase == "rip":
             if percent != last_rip_percent:
                 eta = format_duration(progress.eta_seconds) if progress.eta_seconds is not None else rip_eta.estimate(progress.percent_value)
-                log(f"Ripping: {percent}% (ETA {eta})")
+                if progress_display is not None:
+                    progress_display.update(progress_index, percent, "ripping", f"ETA {eta}")
+                else:
+                    log(f"Ripping: {percent}% (ETA {eta})")
                 last_rip_percent = percent
                 saw_progress = True
             continue
 
         if progress.phase == "scan":
             if percent != last_scan_percent:
-                log(f"Scanning titles: {percent}% (ETA about {scan_eta.estimate(progress.percent_value)})")
+                eta = scan_eta.estimate(progress.percent_value)
+                if progress_display is not None:
+                    progress_display.update(progress_index, percent, "scanning", f"ETA about {eta}")
+                else:
+                    log(f"Scanning titles: {percent}% (ETA about {eta})")
                 last_scan_percent = percent
             continue
 
         if progress.phase == "preview":
             if percent != last_preview_percent:
-                log(f"Scanning previews: {percent}% (ETA about {preview_eta.estimate(progress.percent_value)})")
+                eta = preview_eta.estimate(progress.percent_value)
+                if progress_display is not None:
+                    progress_display.update(progress_index, percent, "previews", f"ETA about {eta}")
+                else:
+                    log(f"Scanning previews: {percent}% (ETA about {eta})")
                 last_preview_percent = percent
             continue
 
@@ -513,10 +568,19 @@ def stream_handbrake(cmd, output, verbose=False):
     return_code = proc.wait()
     if return_code == 0:
         if not verbose and saw_progress and last_rip_percent != 100:
-            log("Ripping: 100%")
-        log(f"Done: {output}")
+            if progress_display is not None:
+                progress_display.update(progress_index, 100, "done")
+            else:
+                log("Ripping: 100%")
+        elif progress_display is not None:
+            progress_display.update(progress_index, 100, "done")
+        if progress_display is None:
+            log(f"Done: {output}")
         return 0
 
+    if progress_display is not None:
+        progress_display.update(progress_index, max(last_rip_percent or last_preview_percent or last_scan_percent or 0, 0), "failed")
+        progress_display.finish()
     log_error(f"HandBrake failed with exit code {return_code}.")
     if not verbose:
         log_error("Recent HandBrake output:")
