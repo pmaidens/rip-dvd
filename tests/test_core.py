@@ -4,6 +4,8 @@ import unittest
 from rip_dvd.core import (
     DvdTitle,
     MovieMetadata,
+    build_disc_archive_plan,
+    build_encode_plan,
     build_extra_plan,
     build_rip_plan,
     classify_title,
@@ -70,7 +72,6 @@ Title: 03, Length: 00:00:45.000 Chapters: 1, Cells: 1, Audio streams: 1, Subpict
 
         self.assertEqual([title.number for title in suggested_extra_titles(scan)], [2])
 
-
 class PlanningTests(unittest.TestCase):
     def test_parse_title_numbers_deduplicates_and_accepts_commas_or_spaces(self):
         self.assertEqual(parse_title_numbers("2, 3 2,4"), [2, 3, 4])
@@ -99,6 +100,40 @@ class PlanningTests(unittest.TestCase):
 
         self.assertEqual(plan.output, Path("/movies/Film/extras/Behind Scenes.mkv"))
         self.assertEqual(plan.cmd[0:4], ["HandBrakeCLI", "--title", "4", "-i"])
+
+    def test_build_disc_archive_plan_saves_iso_under_originals_library(self):
+        metadata = MovieMetadata(hint="Disc", title="Example Movie", year="1999")
+        plan = build_disc_archive_plan("/dev/sr0", "/srv/media/Movies", "/srv/media/DVD Originals", metadata)
+
+        self.assertEqual(plan.output, Path("/srv/media/DVD Originals/Example Movie (1999)/Example Movie (1999).iso"))
+        self.assertEqual(plan.metadata_path, Path("/srv/media/DVD Originals/Example Movie (1999)/Example Movie (1999).rip-dvd.json"))
+        self.assertEqual(plan.cmd[0], "dd")
+        self.assertIn("if=/dev/sr0", plan.cmd)
+        self.assertIn("of=/srv/media/DVD Originals/Example Movie (1999)/.Example Movie (1999).iso.rip-dvd-partial", plan.cmd)
+
+    def test_build_encode_plan_reads_iso_title_and_writes_final_output(self):
+        plan = build_encode_plan(
+            "/originals/Example Movie.iso",
+            "/movies/Example Movie/Example Movie.mkv",
+            "Fast 480p30",
+            2,
+        )
+
+        self.assertEqual(plan.output, Path("/movies/Example Movie/Example Movie.mkv"))
+        self.assertEqual(plan.cmd[0:3], ["HandBrakeCLI", "--title", "2"])
+        self.assertIn("/originals/Example Movie.iso", plan.cmd)
+        self.assertIn("av_mkv", plan.cmd)
+
+    def test_build_encode_plan_can_defer_main_feature_selection_to_handbrake(self):
+        plan = build_encode_plan(
+            "/originals/Example Movie.iso",
+            "/movies/Example Movie/Example Movie.mkv",
+            "Fast 480p30",
+            None,
+        )
+
+        self.assertEqual(plan.cmd[0:2], ["HandBrakeCLI", "--main-feature"])
+        self.assertNotIn("--title", plan.cmd)
 
 
 class HandBrakeProgressTests(unittest.TestCase):
