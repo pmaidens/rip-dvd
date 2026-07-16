@@ -38,6 +38,24 @@ class RipPlan:
 
 
 @dataclass(frozen=True)
+class DiscArchivePlan:
+    cmd: List[str]
+    output: Path
+    metadata_path: Path
+    movie_dir: Path
+
+
+@dataclass(frozen=True)
+class EncodeQueueItem:
+    source: Path
+    output: Path
+    preset: str
+    metadata_path: Path
+    label: str
+    title_number: Optional[int]
+
+
+@dataclass(frozen=True)
 class HandBrakeProgress:
     phase: str
     percent_value: float
@@ -199,12 +217,31 @@ def default_extra_name(title_number, title_info=None, sequence=None):
     return f"{label} {index:02d}{suffix}"
 
 
-def build_rip_plan(device, library, preset, metadata, command="rip", selected_title_number=None):
+def build_movie_paths(library, metadata):
     title = metadata.title
     resolved_year = metadata.year
     year_part = f" ({resolved_year})" if resolved_year else ""
     movie_dir = Path(library) / f"{title}{year_part}"
     output = movie_dir / f"{title}{year_part}.mkv"
+    return movie_dir, output
+
+
+def original_image_for(final_output, library, originals_library):
+    final_output = Path(final_output)
+    try:
+        relative_output = final_output.relative_to(Path(library))
+    except ValueError:
+        relative_output = Path(final_output.name)
+    return (Path(originals_library) / relative_output).with_suffix(".iso")
+
+
+def partial_output_path(output):
+    output = Path(output)
+    return output.with_name(f".{output.name}.rip-dvd-partial")
+
+
+def build_rip_plan(device, library, preset, metadata, command="rip", selected_title_number=None):
+    movie_dir, output = build_movie_paths(library, metadata)
 
     if command == "title":
         cmd = [
@@ -224,6 +261,25 @@ def build_rip_plan(device, library, preset, metadata, command="rip", selected_ti
     return RipPlan(cmd=cmd, output=output, movie_dir=movie_dir)
 
 
+def build_disc_archive_plan(device, library, originals_library, metadata, dd="dd"):
+    movie_dir, final_output = build_movie_paths(library, metadata)
+    output = original_image_for(final_output, library, originals_library)
+    cmd = [
+        dd,
+        f"if={device}",
+        f"of={partial_output_path(output)}",
+        "bs=2048",
+        "status=progress",
+        "conv=noerror,sync",
+    ]
+    return DiscArchivePlan(
+        cmd=cmd,
+        output=output,
+        metadata_path=output.with_suffix(".rip-dvd.json"),
+        movie_dir=movie_dir,
+    )
+
+
 def build_extra_plan(device, preset, movie_dir, title_number, title_info=None, extra_name=None, sequence=None):
     default_name = default_extra_name(title_number, title_info=title_info, sequence=sequence)
     safe_name = sanitize_filename(extra_name or default_name)
@@ -240,6 +296,23 @@ def build_extra_plan(device, preset, movie_dir, title_number, title_info=None, e
         preset,
     ]
     return RipPlan(cmd=cmd, output=output, movie_dir=output.parent)
+
+
+def build_encode_plan(source, output, preset, title_number):
+    selection = ["--main-feature"] if title_number is None else ["--title", str(title_number)]
+    cmd = [
+        "HandBrakeCLI",
+        *selection,
+        "-i",
+        str(source),
+        "-o",
+        str(output),
+        "--format",
+        "av_mkv",
+        "--preset",
+        preset,
+    ]
+    return RipPlan(cmd=cmd, output=Path(output), movie_dir=Path(output).parent)
 
 
 def concat_escape(path):
@@ -268,4 +341,3 @@ def parse_handbrake_progress(segment):
         return HandBrakeProgress("preview", float(preview_match.group(1)))
 
     return None
-
