@@ -243,7 +243,12 @@ The TypeScript runtimes use Node.js 22.23.1 and pnpm 11.15.1, matching the
 Docker images and workspace metadata. The supported Node range starts at
 22.12.0 because that is the minimum Node 22 release supported by Vite 8.
 
-The shared `@rip-dvd/config` package validates the runtime environment for the web app and both workers. Copy `.env.example` to `.env` when overriding the Docker Compose defaults.
+The shared `@rip-dvd/config` package validates the runtime environment for the
+web app and both workers. Copy `.env.example` to `.env` when overriding the
+Docker Compose defaults. Compose fixes the database and library paths to
+`/data/rip-dvd.sqlite`, `/media/movies`, and `/media/originals` so they always
+remain inside the declared persistent mounts. Direct, non-Compose launches can
+still set those three `RIP_DVD_*_PATH` variables through the shared loader.
 
 Build and start all three runtimes with:
 
@@ -271,20 +276,24 @@ Existing library directories should keep their intended ownership; grant UID
 blindly. The web runtime mounts both libraries read-only, while the archive
 worker writes originals and the encode worker writes media.
 
-After building the worker images, exercise their real entry points and output
-mounts as the non-root user with fresh named-volume and bind-mount Compose
-projects:
+After building the worker images, exercise their configured image commands and
+output mounts as the non-root user with fresh named-volume and bind-mount
+Compose projects:
 
 ```bash
-COMPOSE_PROJECT_NAME=rip-dvd-worker-smoke-$(date +%s) pnpm test:compose-workers
+pnpm test:compose-workers
 ```
 
 The default `all` mode first checks project-scoped named volumes, then creates
 fresh temporary host directories, initializes only those directories to
 UID/GID 1000, and checks native-Linux-style bind writes. Run
 `sh scripts/smoke-compose-workers.sh named` or replace `named` with `bind` to
-exercise one mode directly. The smoke command removes its
-temporary containers but deliberately retains the uniquely named volumes and
+exercise one mode directly. Each mode uses a collision-resistant project name
+and refuses to run when Docker already contains resources for the resolved
+name. `COMPOSE_PROJECT_NAME` can provide a readable base name, but it must be
+fresh; the script appends the mode and performs the same collision preflight.
+The smoke command removes only its short-lived write-probe containers and
+deliberately retains the worker containers, uniquely named volumes, and
 temporary bind directories for non-destructive inspection.
 
 The archive worker image includes DVD discovery tools and the encode worker image includes HandBrake and ffmpeg. Optical-device passthrough is intentionally not enabled by the scaffold; add the appropriate Linux device mapping when the archive workflow is implemented.
