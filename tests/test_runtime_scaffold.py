@@ -8,6 +8,34 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
+def run_smoke_with_docker_stub(
+    stub_body: str,
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    with tempfile.TemporaryDirectory() as directory:
+        temporary = pathlib.Path(directory)
+        calls = temporary / "calls"
+        docker = temporary / "docker"
+        docker.write_text(
+            '#!/bin/sh\nprintf "%s\\n" "$*" >> "$DOCKER_CALL_LOG"\n' + stub_body
+        )
+        docker.chmod(0o755)
+        environment = {
+            **os.environ,
+            "COMPOSE_PROJECT_NAME": "fresh-test-project",
+            "DOCKER_CALL_LOG": str(calls),
+            "PATH": f"{temporary}:{os.environ['PATH']}",
+        }
+
+        result = subprocess.run(
+            ["sh", str(ROOT / "scripts" / "smoke-compose-workers.sh"), "named"],
+            capture_output=True,
+            check=False,
+            env=environment,
+            text=True,
+        )
+        return result, calls.read_text().splitlines()
+
+
 class RuntimeScaffoldTests(unittest.TestCase):
     def test_compose_runtime_paths_are_fixed_to_persistent_mounts(self) -> None:
         compose = (ROOT / "compose.yaml").read_text()
@@ -50,34 +78,30 @@ class RuntimeScaffoldTests(unittest.TestCase):
         self.assertIn('${run_token}', smoke)
 
     def test_worker_smoke_stops_when_docker_preflight_fails(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            temporary = pathlib.Path(directory)
-            calls = temporary / "calls"
-            docker = temporary / "docker"
-            docker.write_text(
-                '#!/bin/sh\nprintf "%s\\n" "$*" >> "$DOCKER_CALL_LOG"\nexit 17\n'
-            )
-            docker.chmod(0o755)
-            environment = {
-                **os.environ,
-                "COMPOSE_PROJECT_NAME": "fresh-test-project",
-                "DOCKER_CALL_LOG": str(calls),
-                "PATH": f"{temporary}:{os.environ['PATH']}",
-            }
+        result, calls = run_smoke_with_docker_stub("exit 17\n")
 
-            result = subprocess.run(
-                ["sh", str(ROOT / "scripts" / "smoke-compose-workers.sh"), "named"],
-                capture_output=True,
-                check=False,
-                env=environment,
-                text=True,
-            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("refusing to continue", result.stderr)
+        self.assertEqual(
+            calls,
+            [
+                "ps --all --quiet --filter "
+                "label=com.docker.compose.project=fresh-test-project-named"
+            ],
+        )
 
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("refusing to continue", result.stderr)
-            self.assertEqual(calls.read_text().splitlines(), [
-                "ps --all --quiet --filter label=com.docker.compose.project=fresh-test-project-named"
-            ])
+    def test_worker_smoke_stops_when_project_resources_exist(self) -> None:
+        result, calls = run_smoke_with_docker_stub('printf "existing-container\\n"\n')
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("matching containers already exist", result.stderr)
+        self.assertEqual(
+            calls,
+            [
+                "ps --all --quiet --filter "
+                "label=com.docker.compose.project=fresh-test-project-named"
+            ],
+        )
 
 
 if __name__ == "__main__":
