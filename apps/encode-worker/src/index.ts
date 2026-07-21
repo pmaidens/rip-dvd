@@ -1,20 +1,16 @@
 import { loadConfig } from "@rip-dvd/config";
+import {
+  nodeWorkerLifecycleHost,
+  startWorkerLifecycle,
+} from "@rip-dvd/worker-runtime";
 
 const config = loadConfig();
 
-console.log(
-  `Encode worker ready (concurrency: ${config.encodeWorkerConcurrency})`,
+startWorkerLifecycle(
+  {
+    pollIntervalMs: config.workerPollIntervalMs,
+    readyMessage: `Encode worker ready (concurrency: ${config.encodeWorkerConcurrency})`,
+    workerName: "Encode",
+  },
+  nodeWorkerLifecycleHost,
 );
-
-const heartbeat = setInterval(() => {
-  // Job polling is added in a later worker ticket. Keeping this runtime alive
-  // proves that Compose manages it independently from the web process.
-}, config.workerPollIntervalMs);
-
-function shutdown(signal: string): void {
-  clearInterval(heartbeat);
-  console.log(`Encode worker received ${signal}; stopping`);
-}
-
-process.once("SIGINT", () => shutdown("SIGINT"));
-process.once("SIGTERM", () => shutdown("SIGTERM"));

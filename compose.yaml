@@ -13,7 +13,8 @@ services:
   web:
     build:
       context: .
-      dockerfile: docker/web.Dockerfile
+      dockerfile: docker/runtime.Dockerfile
+      target: web
     environment: *runtime-environment
     ports:
       - "${RIP_DVD_WEB_PORT:-3000}:3000"
@@ -38,7 +39,8 @@ services:
   archive-worker:
     build:
       context: .
-      dockerfile: docker/archive-worker.Dockerfile
+      dockerfile: docker/runtime.Dockerfile
+      target: archive-worker
     environment: *runtime-environment
     volumes:
       - rip-dvd-data:/data
@@ -48,7 +50,8 @@ services:
   encode-worker:
     build:
       context: .
-      dockerfile: docker/encode-worker.Dockerfile
+      dockerfile: docker/runtime.Dockerfile
+      target: encode-worker
     environment: *runtime-environment
     volumes:
       - rip-dvd-data:/data

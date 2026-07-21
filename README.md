@@ -272,14 +272,20 @@ blindly. The web runtime mounts both libraries read-only, while the archive
 worker writes originals and the encode worker writes media.
 
 After building the worker images, exercise their real entry points and output
-mounts as the non-root user with a fresh Compose project:
+mounts as the non-root user with fresh named-volume and bind-mount Compose
+projects:
 
 ```bash
 COMPOSE_PROJECT_NAME=rip-dvd-worker-smoke-$(date +%s) pnpm test:compose-workers
 ```
 
-The smoke command removes its temporary containers but deliberately retains
-the uniquely named volumes for non-destructive inspection.
+The default `all` mode first checks project-scoped named volumes, then creates
+fresh temporary host directories, initializes only those directories to
+UID/GID 1000, and checks native-Linux-style bind writes. Run
+`sh scripts/smoke-compose-workers.sh named` or replace `named` with `bind` to
+exercise one mode directly. The smoke command removes its
+temporary containers but deliberately retains the uniquely named volumes and
+temporary bind directories for non-destructive inspection.
 
 The archive worker image includes DVD discovery tools and the encode worker image includes HandBrake and ffmpeg. Optical-device passthrough is intentionally not enabled by the scaffold; add the appropriate Linux device mapping when the archive workflow is implemented.
 
@@ -296,5 +302,6 @@ The archive worker image includes DVD discovery tools and the encode worker imag
 - `apps/archive-worker`: archive-worker process entry point
 - `apps/encode-worker`: encode-worker process entry point
 - `packages/config`: shared runtime environment loader
-- `docker/`: separate runtime image definitions
+- `packages/worker-runtime`: shared worker heartbeat and signal lifecycle
+- `docker/runtime.Dockerfile`: shared multi-target definition for three role-specific images
 - `compose.yaml`: local three-service deployment

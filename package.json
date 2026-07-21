@@ -9,7 +9,7 @@
     "build": "pnpm -r --if-present build",
     "check": "pnpm typecheck && pnpm test",
     "dev": "pnpm --filter @rip-dvd/web dev",
-    "test": "pnpm --filter @rip-dvd/config test",
+    "test": "pnpm --filter @rip-dvd/config --filter @rip-dvd/worker-runtime test",
     "test:compose-workers": "sh scripts/smoke-compose-workers.sh",
     "typecheck": "pnpm -r --if-present typecheck"
   },
