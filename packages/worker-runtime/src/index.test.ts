@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { loadConfig } from "@rip-dvd/config";
 
 import {
   startConfiguredWorker,
@@ -16,6 +17,12 @@ const environment = {
   RIP_DVD_ARCHIVE_WORKER_CONCURRENCY: "2",
   RIP_DVD_ENCODE_WORKER_CONCURRENCY: "3",
 };
+
+describe("workspace test resolution", () => {
+  it("loads config by package name without prebuilt artifacts", () => {
+    expect(loadConfig(environment).archiveDevicePath).toBe("/dev/test-dvd");
+  });
+});
 
 describe("startWorkerLifecycle", () => {
   it.each(["SIGINT", "SIGTERM"] as const)(
