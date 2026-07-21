@@ -1,0 +1,60 @@
+name: rip-dvd
+
+x-runtime-environment: &runtime-environment
+  RIP_DVD_DATABASE_PATH: ${RIP_DVD_DATABASE_PATH:-/data/rip-dvd.sqlite}
+  RIP_DVD_MEDIA_LIBRARY_PATH: ${RIP_DVD_MEDIA_LIBRARY_PATH:-/media/movies}
+  RIP_DVD_ORIGINALS_LIBRARY_PATH: ${RIP_DVD_ORIGINALS_LIBRARY_PATH:-/media/originals}
+  RIP_DVD_ARCHIVE_DEVICE_PATH: ${RIP_DVD_ARCHIVE_DEVICE_PATH:-/dev/sr0}
+  RIP_DVD_WORKER_POLL_INTERVAL_MS: ${RIP_DVD_WORKER_POLL_INTERVAL_MS:-5000}
+  RIP_DVD_ARCHIVE_WORKER_CONCURRENCY: ${RIP_DVD_ARCHIVE_WORKER_CONCURRENCY:-1}
+  RIP_DVD_ENCODE_WORKER_CONCURRENCY: ${RIP_DVD_ENCODE_WORKER_CONCURRENCY:-1}
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: docker/web.Dockerfile
+    environment: *runtime-environment
+    ports:
+      - "${RIP_DVD_WEB_PORT:-3000}:3000"
+    volumes:
+      - rip-dvd-data:/data
+      - ${RIP_DVD_MEDIA_LIBRARY_HOST_PATH:-./.local/media}:/media/movies:ro
+      - ${RIP_DVD_ORIGINALS_LIBRARY_HOST_PATH:-./.local/originals}:/media/originals:ro
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  archive-worker:
+    build:
+      context: .
+      dockerfile: docker/archive-worker.Dockerfile
+    environment: *runtime-environment
+    volumes:
+      - rip-dvd-data:/data
+      - ${RIP_DVD_ORIGINALS_LIBRARY_HOST_PATH:-./.local/originals}:/media/originals
+    restart: unless-stopped
+
+  encode-worker:
+    build:
+      context: .
+      dockerfile: docker/encode-worker.Dockerfile
+    environment: *runtime-environment
+    volumes:
+      - rip-dvd-data:/data
+      - ${RIP_DVD_MEDIA_LIBRARY_HOST_PATH:-./.local/media}:/media/movies
+      - ${RIP_DVD_ORIGINALS_LIBRARY_HOST_PATH:-./.local/originals}:/media/originals:ro
+    restart: unless-stopped
+
+volumes:
+  rip-dvd-data:

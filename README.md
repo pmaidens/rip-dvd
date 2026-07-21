@@ -4,6 +4,8 @@
 
 The project is intentionally plain Python with no third-party Python package dependencies. The heavy work is done by system tools such as HandBrake and ffmpeg.
 
+The existing CLI remains available while a Dockerized TypeScript replacement is developed alongside it. The initial workspace contains a Next.js control plane and separate archive and encode worker runtimes.
+
 ## Requirements
 
 - Python 3.9 or newer
@@ -227,6 +229,28 @@ python3 -B -m unittest discover -s tests
 
 The tests cover pure planning logic and CLI workflow boundaries, including archive identity checks, atomic sidecar updates, queue discovery, interrupted encodes, final-file publication, and progress streaming. They do not require a DVD drive.
 
+### TypeScript runtime
+
+Install the workspace dependencies and validate the TypeScript skeleton with:
+
+```bash
+pnpm install
+pnpm check
+pnpm build
+```
+
+The shared `@rip-dvd/config` package validates the runtime environment for the web app and both workers. Copy `.env.example` to `.env` when overriding the Docker Compose defaults.
+
+Build and start all three runtimes with:
+
+```bash
+docker compose up --build
+```
+
+Then open <http://localhost:3000>. Compose stores application data in the named `rip-dvd-data` volume and, by default, bind-mounts development media directories under `.local/`. Set `RIP_DVD_MEDIA_LIBRARY_HOST_PATH` and `RIP_DVD_ORIGINALS_LIBRARY_HOST_PATH` to use real host libraries.
+
+The archive worker image includes DVD discovery tools and the encode worker image includes HandBrake and ffmpeg. Optical-device passthrough is intentionally not enabled by the scaffold; add the appropriate Linux device mapping when the archive workflow is implemented.
+
 ## Project Layout
 
 - `rip-dvd`: executable command wrapper
@@ -236,3 +260,9 @@ The tests cover pure planning logic and CLI workflow boundaries, including archi
 - `rip_dvd/output.py`: logging and prompts
 - `tests/test_core.py`: unit tests for the pure logic
 - `tests/test_cli.py`: archive and encode queue workflow regression tests
+- `apps/web`: Next.js web control plane
+- `apps/archive-worker`: archive-worker process entry point
+- `apps/encode-worker`: encode-worker process entry point
+- `packages/config`: shared runtime environment loader
+- `docker/`: separate runtime image definitions
+- `compose.yaml`: local three-service deployment
