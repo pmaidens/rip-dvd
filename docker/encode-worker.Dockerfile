@@ -23,8 +23,11 @@ RUN apt-get update \
 ENV NODE_ENV="production"
 WORKDIR /app
 RUN mkdir --parents /data && chown node:node /data
-COPY --from=builder --chown=node:node /app/node_modules ./node_modules
-COPY --from=builder --chown=node:node /app/apps/encode-worker ./apps/encode-worker
-COPY --from=builder --chown=node:node /app/packages/config ./packages/config
+COPY --from=builder --chown=node:node /app/apps/encode-worker/package.json ./apps/encode-worker/package.json
+COPY --from=builder --chown=node:node /app/apps/encode-worker/dist ./apps/encode-worker/dist
+COPY --from=builder --chown=node:node /app/packages/config/package.json ./packages/config/package.json
+COPY --from=builder --chown=node:node /app/packages/config/dist ./packages/config/dist
+RUN mkdir --parents apps/encode-worker/node_modules/@rip-dvd \
+  && ln --symbolic ../../../../packages/config apps/encode-worker/node_modules/@rip-dvd/config
 USER node
 CMD ["node", "apps/encode-worker/dist/index.js"]
