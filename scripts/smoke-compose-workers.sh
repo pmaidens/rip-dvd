@@ -6,7 +6,30 @@ smoke_mode="${1:-all}"
 readiness_attempts=30
 run_token="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
 test -n "$run_token"
-project_name_base="${COMPOSE_PROJECT_NAME:-rip-dvd-worker-smoke-$(date -u +%Y%m%d%H%M%S)-${run_token}}"
+project_name_prefix="${COMPOSE_PROJECT_NAME:-rip-dvd-worker-smoke-$(date -u +%Y%m%d%H%M%S)}"
+project_name_base="${project_name_prefix}-${run_token}"
+worker_roles="archive encode"
+
+load_worker_descriptor() {
+  case "$1" in
+    archive)
+      worker_service=archive-worker
+      worker_writable_path=/media/originals
+      worker_ready_message="Archive worker ready"
+      worker_shutdown_message="Archive worker received SIGTERM; stopping"
+      ;;
+    encode)
+      worker_service=encode-worker
+      worker_writable_path=/media/movies
+      worker_ready_message="Encode worker ready"
+      worker_shutdown_message="Encode worker received SIGTERM; stopping"
+      ;;
+    *)
+      printf 'Unknown worker role: %s\n' "$1" >&2
+      exit 2
+      ;;
+  esac
+}
 
 compose() {
   RIP_DVD_MEDIA_LIBRARY_HOST_PATH="$media_source" \
@@ -47,12 +70,25 @@ preflight_project() {
   check_project_resource "$candidate" networks \
     docker network ls --quiet --filter label=com.docker.compose.project="$candidate"
 
-  for repository in \
-    "$candidate-web" \
-    "$candidate-archive-worker" \
-    "$candidate-encode-worker"
+  for service in web archive-worker encode-worker
   do
-    check_project_resource "$candidate" images docker image ls --quiet "$repository"
+    check_project_resource "$candidate" containers \
+      docker ps --all --quiet --filter name=^/"${candidate}-${service}-[0-9][0-9]*"$
+  done
+
+  for volume in rip-dvd-data rip-dvd-media rip-dvd-originals
+  do
+    check_project_resource "$candidate" volumes \
+      docker volume ls --quiet --filter name=^"${candidate}_${volume}"$
+  done
+
+  check_project_resource "$candidate" networks \
+    docker network ls --quiet --filter name=^"${candidate}_default"$
+
+  for service in web archive-worker encode-worker
+  do
+    check_project_resource "$candidate" images \
+      docker image ls --quiet "${candidate}-${service}"
   done
 }
 
@@ -101,11 +137,12 @@ wait_for_ready() {
   exit 1
 }
 
-smoke_worker() {
-  service="$1"
-  writable_path="$2"
-  ready_message="$3"
-  shutdown_message="$4"
+smoke_worker() (
+  load_worker_descriptor "$1"
+  service="$worker_service"
+  writable_path="$worker_writable_path"
+  ready_message="$worker_ready_message"
+  shutdown_message="$worker_shutdown_message"
   marker_name=".rip-dvd-${service}-write-smoke-${run_token}"
 
   probe_worker_write "$service" "$writable_path" "$marker_name"
@@ -123,20 +160,13 @@ smoke_worker() {
   printf '%s\n' "$logs" | grep -F "$shutdown_message" >/dev/null
   test -n "$container_id"
   test "$(docker inspect --format '{{.State.ExitCode}}' "$container_id")" -eq 0
-}
+)
 
 smoke_workers() {
-  smoke_worker \
-    archive-worker \
-    /media/originals \
-    "Archive worker ready" \
-    "Archive worker received SIGTERM; stopping"
-
-  smoke_worker \
-    encode-worker \
-    /media/movies \
-    "Encode worker ready" \
-    "Encode worker received SIGTERM; stopping"
+  for worker_role in $worker_roles
+  do
+    smoke_worker "$worker_role"
+  done
 
   printf 'Worker smoke test passed as UID 1000 using Compose project %s.\n' "$project_name"
 }

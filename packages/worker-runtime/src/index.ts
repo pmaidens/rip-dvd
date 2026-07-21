@@ -1,3 +1,5 @@
+import { loadConfig, type RuntimeConfig } from "@rip-dvd/config";
+
 export type WorkerSignal = "SIGINT" | "SIGTERM";
 
 export interface WorkerLifecycleHost<TimerHandle> {
@@ -11,6 +13,16 @@ export interface WorkerLifecycleOptions {
   pollIntervalMs: number;
   readyMessage: string;
   workerName: string;
+}
+
+export interface ConfiguredWorkerDescriptor {
+  readyMessage(config: RuntimeConfig): string;
+  workerName: string;
+}
+
+export interface ConfiguredWorkerDependencies<TimerHandle> {
+  environment: Readonly<Record<string, string | undefined>>;
+  lifecycleHost: WorkerLifecycleHost<TimerHandle>;
 }
 
 export const nodeWorkerLifecycleHost: WorkerLifecycleHost<
@@ -40,4 +52,23 @@ export function startWorkerLifecycle<TimerHandle>(
 
   host.once("SIGINT", () => shutdown("SIGINT"));
   host.once("SIGTERM", () => shutdown("SIGTERM"));
+}
+
+export function startConfiguredWorker<TimerHandle>(
+  descriptor: ConfiguredWorkerDescriptor,
+  dependencies?: ConfiguredWorkerDependencies<TimerHandle>,
+): void {
+  const config = loadConfig(dependencies?.environment);
+  const lifecycleOptions: WorkerLifecycleOptions = {
+    pollIntervalMs: config.workerPollIntervalMs,
+    readyMessage: descriptor.readyMessage(config),
+    workerName: descriptor.workerName,
+  };
+
+  if (dependencies) {
+    startWorkerLifecycle(lifecycleOptions, dependencies.lifecycleHost);
+    return;
+  }
+
+  startWorkerLifecycle(lifecycleOptions, nodeWorkerLifecycleHost);
 }

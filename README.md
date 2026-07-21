@@ -288,10 +288,11 @@ The default `all` mode first checks project-scoped named volumes, then creates
 fresh temporary host directories, initializes only those directories to
 UID/GID 1000, and checks native-Linux-style bind writes. Run
 `sh scripts/smoke-compose-workers.sh named` or replace `named` with `bind` to
-exercise one mode directly. Each mode uses a collision-resistant project name
+exercise one mode directly. Each mode adds collision-resistant entropy to its
+project name, including when `COMPOSE_PROJECT_NAME` supplies a readable base,
 and refuses to run when Docker already contains resources for the resolved
-name. `COMPOSE_PROJECT_NAME` can provide a readable base name, but it must be
-fresh; the script appends the mode and performs the same collision preflight.
+name. The preflight checks both Compose labels and exact derived resource names
+before creating anything.
 The smoke command removes only its short-lived write-probe containers and
 deliberately retains the worker containers, uniquely named volumes, and
 temporary bind directories for non-destructive inspection.

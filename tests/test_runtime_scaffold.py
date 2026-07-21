@@ -36,6 +36,11 @@ def run_smoke_with_docker_stub(
         return result, calls.read_text().splitlines()
 
 
+def resolved_project_name(calls: list[str]) -> str:
+    prefix = "ps --all --quiet --filter label=com.docker.compose.project="
+    return calls[0].removeprefix(prefix)
+
+
 class RuntimeScaffoldTests(unittest.TestCase):
     def test_compose_runtime_paths_are_fixed_to_persistent_mounts(self) -> None:
         compose = (ROOT / "compose.yaml").read_text()
@@ -69,6 +74,28 @@ class RuntimeScaffoldTests(unittest.TestCase):
         self.assertIn('"$shutdown_message"', smoke)
         self.assertNotIn('node "$entry_point"', smoke)
 
+    def test_worker_smoke_dispatches_complete_worker_descriptors(self) -> None:
+        smoke = (ROOT / "scripts" / "smoke-compose-workers.sh").read_text()
+
+        self.assertIn('worker_roles="archive encode"', smoke)
+        self.assertIn("worker_service=archive-worker", smoke)
+        self.assertIn("worker_writable_path=/media/originals", smoke)
+        self.assertIn('worker_ready_message="Archive worker ready"', smoke)
+        self.assertIn(
+            'worker_shutdown_message="Archive worker received SIGTERM; stopping"',
+            smoke,
+        )
+        self.assertIn("worker_service=encode-worker", smoke)
+        self.assertIn("worker_writable_path=/media/movies", smoke)
+        self.assertIn('worker_ready_message="Encode worker ready"', smoke)
+        self.assertIn(
+            'worker_shutdown_message="Encode worker received SIGTERM; stopping"',
+            smoke,
+        )
+        self.assertIn('smoke_worker "$worker_role"', smoke)
+        self.assertNotIn("IFS='|'", smoke)
+        self.assertNotIn("smoke_worker \\\n    archive-worker", smoke)
+
     def test_worker_smoke_fails_closed_on_project_and_marker_collisions(self) -> None:
         smoke = (ROOT / "scripts" / "smoke-compose-workers.sh").read_text()
 
@@ -82,12 +109,10 @@ class RuntimeScaffoldTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("refusing to continue", result.stderr)
-        self.assertEqual(
-            calls,
-            [
-                "ps --all --quiet --filter "
-                "label=com.docker.compose.project=fresh-test-project-named"
-            ],
+        self.assertEqual(len(calls), 1)
+        self.assertRegex(
+            resolved_project_name(calls),
+            r"^fresh-test-project-[0-9a-f]{16}-named$",
         )
 
     def test_worker_smoke_stops_when_project_resources_exist(self) -> None:
@@ -95,13 +120,60 @@ class RuntimeScaffoldTests(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("matching containers already exist", result.stderr)
-        self.assertEqual(
-            calls,
-            [
-                "ps --all --quiet --filter "
-                "label=com.docker.compose.project=fresh-test-project-named"
-            ],
+        self.assertEqual(len(calls), 1)
+        self.assertRegex(
+            resolved_project_name(calls),
+            r"^fresh-test-project-[0-9a-f]{16}-named$",
         )
+
+    def test_explicit_project_base_always_gets_fresh_entropy(self) -> None:
+        first_result, first_calls = run_smoke_with_docker_stub("exit 17\n")
+        second_result, second_calls = run_smoke_with_docker_stub("exit 17\n")
+
+        self.assertNotEqual(first_result.returncode, 0)
+        self.assertNotEqual(second_result.returncode, 0)
+        first_project = resolved_project_name(first_calls)
+        second_project = resolved_project_name(second_calls)
+        self.assertRegex(first_project, r"^fresh-test-project-[0-9a-f]{16}-named$")
+        self.assertRegex(second_project, r"^fresh-test-project-[0-9a-f]{16}-named$")
+        self.assertNotEqual(first_project, second_project)
+
+    def test_worker_smoke_rejects_an_unlabelled_exact_name_volume(self) -> None:
+        result, calls = run_smoke_with_docker_stub(
+            'case "$*" in\n'
+            '  "volume ls --quiet --filter name="*"_rip-dvd-data$")\n'
+            '    printf "unlabelled-volume\\n"\n'
+            "    exit 0\n"
+            "    ;;\n"
+            "esac\n"
+            'case "$1" in\n'
+            "  ps|volume|network|image) exit 0 ;;\n"
+            "  *) exit 17 ;;\n"
+            "esac\n"
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("matching volumes already exist", result.stderr)
+        self.assertTrue(
+            any(
+                call.startswith("volume ls --quiet --filter name=^")
+                and call.endswith("_rip-dvd-data$")
+                for call in calls
+            )
+        )
+
+    def test_production_sharp_override_is_patched(self) -> None:
+        workspace = (ROOT / "pnpm-workspace.yaml").read_text()
+        lockfile = (ROOT / "pnpm-lock.yaml").read_text()
+        dockerfile = (ROOT / "docker" / "runtime.Dockerfile").read_text()
+
+        self.assertIn("sharp: 0.35.0", workspace)
+        self.assertIn("sharp@0.35.0", lockfile)
+        self.assertNotIn("sharp@0.34.5", lockfile)
+        self.assertIn("@img+sharp-libvips-linux-*", dockerfile)
+        self.assertIn('cp --archive "$source/." "$destination/"', dockerfile)
+        self.assertIn("lib/libvips-cpp.so.*", dockerfile)
+        self.assertIn("&& ldconfig", dockerfile)
 
 
 if __name__ == "__main__":

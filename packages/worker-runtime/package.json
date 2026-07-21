@@ -12,6 +12,9 @@
     }
   },
   "files": ["dist"],
+  "dependencies": {
+    "@rip-dvd/config": "workspace:*"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "test": "vitest run",
