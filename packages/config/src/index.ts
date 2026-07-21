@@ -14,6 +14,7 @@ const DEFAULT_ARCHIVE_DEVICE_PATH = "/dev/sr0";
 const DEFAULT_WORKER_POLL_INTERVAL_MS = 5_000;
 const DEFAULT_ARCHIVE_WORKER_CONCURRENCY = 1;
 const DEFAULT_ENCODE_WORKER_CONCURRENCY = 1;
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 function requiredValue(environment: Environment, name: string): string {
   const value = environment[name]?.trim();
@@ -44,6 +45,20 @@ function positiveInteger(
   return value;
 }
 
+function timerDelayMilliseconds(
+  environment: Environment,
+  name: string,
+  defaultValue: number,
+): number {
+  const value = positiveInteger(environment, name, defaultValue);
+
+  if (value > MAX_TIMER_DELAY_MS) {
+    throw new Error(`${name} must be at most ${MAX_TIMER_DELAY_MS}`);
+  }
+
+  return value;
+}
+
 export function loadConfig(environment: Environment = process.env): RuntimeConfig {
   return {
     databasePath: requiredValue(environment, "RIP_DVD_DATABASE_PATH"),
@@ -55,7 +70,7 @@ export function loadConfig(environment: Environment = process.env): RuntimeConfi
     archiveDevicePath:
       environment.RIP_DVD_ARCHIVE_DEVICE_PATH?.trim() ||
       DEFAULT_ARCHIVE_DEVICE_PATH,
-    workerPollIntervalMs: positiveInteger(
+    workerPollIntervalMs: timerDelayMilliseconds(
       environment,
       "RIP_DVD_WORKER_POLL_INTERVAL_MS",
       DEFAULT_WORKER_POLL_INTERVAL_MS,

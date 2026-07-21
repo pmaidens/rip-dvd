@@ -38,6 +38,29 @@ describe("loadConfig", () => {
     });
   });
 
+  it("accepts Node's maximum timer delay for worker polling", () => {
+    expect(
+      loadConfig({
+        ...requiredEnvironment,
+        RIP_DVD_WORKER_POLL_INTERVAL_MS: "2147483647",
+      }).workerPollIntervalMs,
+    ).toBe(2_147_483_647);
+  });
+
+  it.each(["2147483648", "9007199254740991"])(
+    "rejects worker poll delays that overflow Node timers (%s)",
+    (value) => {
+      expect(() =>
+        loadConfig({
+          ...requiredEnvironment,
+          RIP_DVD_WORKER_POLL_INTERVAL_MS: value,
+        }),
+      ).toThrow(
+        "RIP_DVD_WORKER_POLL_INTERVAL_MS must be at most 2147483647",
+      );
+    },
+  );
+
   it.each([
     "RIP_DVD_DATABASE_PATH",
     "RIP_DVD_MEDIA_LIBRARY_PATH",

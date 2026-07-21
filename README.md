@@ -239,6 +239,10 @@ pnpm check
 pnpm build
 ```
 
+The TypeScript runtimes use Node.js 22.23.1 and pnpm 11.15.1, matching the
+Docker images and workspace metadata. The supported Node range starts at
+22.12.0 because that is the minimum Node 22 release supported by Vite 8.
+
 The shared `@rip-dvd/config` package validates the runtime environment for the web app and both workers. Copy `.env.example` to `.env` when overriding the Docker Compose defaults.
 
 Build and start all three runtimes with:
@@ -247,7 +251,35 @@ Build and start all three runtimes with:
 docker compose up --build
 ```
 
-Then open <http://localhost:3000>. Compose stores application data in the named `rip-dvd-data` volume and, by default, bind-mounts development media directories under `.local/`. Set `RIP_DVD_MEDIA_LIBRARY_HOST_PATH` and `RIP_DVD_ORIGINALS_LIBRARY_HOST_PATH` to use real host libraries.
+Then open <http://localhost:3000>. Compose stores application data, encoded
+media, and original backups in the project-scoped `rip-dvd-data`,
+`rip-dvd-media`, and `rip-dvd-originals` named volumes by default. Their mount
+points are owned by the non-root runtime user (UID/GID 1000), so the archive
+and encode workers can write their outputs without running as root.
+
+To use host libraries instead, set `RIP_DVD_MEDIA_LIBRARY_HOST_PATH` and
+`RIP_DVD_ORIGINALS_LIBRARY_HOST_PATH`. On native Linux, create new bind-source
+directories with ownership that matches the container user before starting
+Compose:
+
+```bash
+sudo install -d -o 1000 -g 1000 -m 0775 .local/media .local/originals
+```
+
+Existing library directories should keep their intended ownership; grant UID
+1000 write access through their owner, group, or ACL rather than changing them
+blindly. The web runtime mounts both libraries read-only, while the archive
+worker writes originals and the encode worker writes media.
+
+After building the worker images, exercise their real entry points and output
+mounts as the non-root user with a fresh Compose project:
+
+```bash
+COMPOSE_PROJECT_NAME=rip-dvd-worker-smoke-$(date +%s) pnpm test:compose-workers
+```
+
+The smoke command removes its temporary containers but deliberately retains
+the uniquely named volumes for non-destructive inspection.
 
 The archive worker image includes DVD discovery tools and the encode worker image includes HandBrake and ffmpeg. Optical-device passthrough is intentionally not enabled by the scaffold; add the appropriate Linux device mapping when the archive workflow is implemented.
 

@@ -1,4 +1,4 @@
-FROM node:22-bookworm-slim AS base
+FROM node:22.23.1-bookworm-slim AS base
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
 RUN corepack enable
@@ -16,13 +16,14 @@ COPY apps/encode-worker apps/encode-worker
 COPY packages/config packages/config
 RUN pnpm --filter @rip-dvd/config build && pnpm --filter @rip-dvd/encode-worker build
 
-FROM node:22-bookworm-slim AS runner
+FROM node:22.23.1-bookworm-slim AS runner
 RUN apt-get update \
   && apt-get install --yes --no-install-recommends handbrake-cli ffmpeg util-linux \
   && rm -rf /var/lib/apt/lists/*
 ENV NODE_ENV="production"
 WORKDIR /app
-RUN mkdir --parents /data && chown node:node /data
+RUN mkdir --parents /data /media/movies /media/originals \
+  && chown node:node /data /media/movies /media/originals
 COPY --from=builder --chown=node:node /app/apps/encode-worker/package.json ./apps/encode-worker/package.json
 COPY --from=builder --chown=node:node /app/apps/encode-worker/dist ./apps/encode-worker/dist
 COPY --from=builder --chown=node:node /app/packages/config/package.json ./packages/config/package.json
