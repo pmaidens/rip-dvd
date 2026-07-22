@@ -265,6 +265,13 @@ media, and original backups in the project-scoped `rip-dvd-data`,
 points are owned by the non-root runtime user (UID/GID 1000), so the archive
 and encode workers can write their outputs without running as root.
 
+The web root is an operations dashboard for Optical Drives, Detected Discs,
+Archive Jobs, Encode Jobs, and Original Disc Archives needing catalog review.
+It reads the shared SQLite source of truth through the data-access facade and
+the non-cacheable `/api/dashboard` HTTP route. A fresh database intentionally
+shows an empty state in each section until workers or another facade caller
+record operations; the web app does not infer catalog state from library files.
+
 To use host libraries instead, set `RIP_DVD_MEDIA_LIBRARY_HOST_PATH` and
 `RIP_DVD_ORIGINALS_LIBRARY_HOST_PATH`. On native Linux, create new bind-source
 directories with ownership that matches the container user before starting
