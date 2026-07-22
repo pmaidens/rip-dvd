@@ -37,3 +37,10 @@ main > p:last-child {
   font-size: 1.125rem;
   line-height: 1.6;
 }
+
+.health-link {
+  display: inline-block;
+  margin-top: 1rem;
+  color: #fbbf24;
+  font-weight: 700;
+}

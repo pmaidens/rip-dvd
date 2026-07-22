@@ -25,7 +25,11 @@ const nextConfig: NextConfig = {
   },
   output: "standalone",
   outputFileTracingRoot: path.join(import.meta.dirname, "../.."),
+  outputFileTracingIncludes: {
+    "/*": ["../../packages/data-access/drizzle/**/*"],
+  },
   poweredByHeader: false,
+  serverExternalPackages: ["@rip-dvd/data-access"],
 };
 
 export default nextConfig;

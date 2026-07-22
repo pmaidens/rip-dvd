@@ -6,10 +6,12 @@
     "build": "next build",
     "dev": "next dev",
     "start": "next start",
+    "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@rip-dvd/config": "workspace:*",
+    "@rip-dvd/data-access": "workspace:*",
     "next": "16.2.11",
     "react": "19.2.8",
     "react-dom": "19.2.8"

@@ -1,0 +1,28 @@
+{
+  "name": "@rip-dvd/data-access",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "drizzle"],
+  "dependencies": {
+    "drizzle-orm": "1.0.0-rc.4"
+  },
+  "devDependencies": {
+    "drizzle-kit": "1.0.0-rc.4"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "db:check": "drizzle-kit check --config drizzle.config.ts",
+    "db:generate": "drizzle-kit generate --config drizzle.config.ts",
+    "test": "pnpm build && vitest run --config vitest.config.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}

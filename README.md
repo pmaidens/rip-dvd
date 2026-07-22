@@ -240,8 +240,11 @@ pnpm build
 ```
 
 The TypeScript runtimes use Node.js 22.23.1 and pnpm 11.15.1, matching the
-Docker images and workspace metadata. The supported Node range starts at
-22.12.0 because that is the minimum Node 22 release supported by Vite 8.
+Docker images and workspace metadata. `pnpm check:toolchain` fails unless the
+running tools and both Docker stages match those exact project pins; the
+supported Node range therefore starts at 22.23.1. When that exact toolchain is
+not installed on the host, run the same frozen-install check, database migration
+check, tests, and build with `docker compose --profile validation build validation`.
 
 The shared `@rip-dvd/config` package validates the runtime environment for the
 web app and both workers. Copy `.env.example` to `.env` when overriding the
@@ -299,6 +302,65 @@ temporary bind directories for non-destructive inspection.
 
 The archive worker image includes DVD discovery tools and the encode worker image includes HandBrake and ffmpeg. Optical-device passthrough is intentionally not enabled by the scaffold; add the appropriate Linux device mapping when the archive workflow is implemented.
 
+## SQLite Catalog and Queues
+
+`@rip-dvd/data-access` is the shared persistence boundary for the web app and
+workers. It applies versioned Drizzle migrations when it opens the configured
+SQLite file, enables foreign keys, WAL journaling, a 5000 ms busy timeout, and
+normal WAL synchronization. Compose stores `/data/rip-dvd.sqlite` in the
+persistent `rip-dvd-data` volume.
+
+The facade exposes catalog operations and separate Archive Job and Encode Job
+queues without exposing Drizzle or a general transaction API to callers.
+Archive Jobs are conditionally enqueued or requeued only while a Detected Disc
+is approved;
+approval revocation or archive publication removes obsolete queued work in the
+same short transaction. The atomic claim statement rechecks both current
+approval and the absence of an Original Disc Archive with the same fingerprint
+before returning preservation work, and permits only one running Archive Job
+for a fingerprint across all Optical Drives. Approval freezes the reviewed Disc
+Kind and scan data until approval is revoked. A fingerprint has one Disc Kind
+across Optical Drives. Archive publication marks every observation of the
+fingerprint archived. Later rediscovery matches archived
+fingerprints across Optical Drives, marks the new observation archived, and
+rejects a contradictory Disc Kind.
+A worker must let the claim commit and only then start `dd`, `lsdvd`,
+`HandBrakeCLI`, or any other external process. External process execution must
+never occur inside a database transaction.
+
+Claims carry unique attempt tokens, and all running mutations use the job ID,
+running state, and token as a compare-and-set guard. Progress reports share a
+coalescing policy: persist the first value, then write after one second or a
+five-point change, while completion always stores 100% and failure stores the
+latest pending value. First-run migrations are serialized with a short-lived
+lock beside the database so simultaneous service startup cannot apply the same
+migration twice.
+
+DVD title and chapter coordinates in Disc Selections must be positive safe
+integers. The facade validates that contract and the SQLite migration also
+requires integer storage so direct SQL cannot persist fractional coordinates.
+Encoding Profile versions follow the same positive-safe-integer facade contract
+and integer-storage database constraint.
+
+The canonical catalog terms are:
+
+- **Optical Drive**: configured or discovered disc-reading hardware.
+- **Detected Disc**: a fingerprinted disc observed in an Optical Drive.
+- **Original Disc Archive**: the preserved source content, initially a DVD ISO.
+- **Media Item**: catalog meaning such as a movie, show, episode, trailer, or
+  bonus feature; Media Items may form parent-child hierarchies.
+- **Disc Selection**: an explicit source slice from an Original Disc Archive
+  mapped to a Media Item.
+- **Encoding Profile**: immutable versioned encoding settings within a media
+  domain.
+- **Archive Job** and **Encode Job**: separate mutable queue records with
+  queued, running, completed, and failed lifecycles.
+
+Visit `/health` for the visible service/database status or `/api/health` for
+the machine-readable health response. Validate schema history with
+`pnpm db:check`; the normal `pnpm check` command runs the facade integration
+tests against isolated SQLite files.
+
 ## Project Layout
 
 - `rip-dvd`: executable command wrapper
@@ -312,6 +374,7 @@ The archive worker image includes DVD discovery tools and the encode worker imag
 - `apps/archive-worker`: archive-worker process entry point
 - `apps/encode-worker`: encode-worker process entry point
 - `packages/config`: shared runtime environment loader
+- `packages/data-access`: Drizzle schema, versioned migrations, and domain-level SQLite facade
 - `packages/worker-runtime`: shared worker heartbeat and signal lifecycle
 - `docker/runtime.Dockerfile`: shared multi-target definition for three role-specific images
 - `compose.yaml`: local three-service deployment
