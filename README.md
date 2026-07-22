@@ -299,6 +299,40 @@ temporary bind directories for non-destructive inspection.
 
 The archive worker image includes DVD discovery tools and the encode worker image includes HandBrake and ffmpeg. Optical-device passthrough is intentionally not enabled by the scaffold; add the appropriate Linux device mapping when the archive workflow is implemented.
 
+## SQLite Catalog and Queues
+
+`@rip-dvd/data-access` is the shared persistence boundary for the web app and
+workers. It applies versioned Drizzle migrations when it opens the configured
+SQLite file, enables foreign keys, WAL journaling, a 5000 ms busy timeout, and
+normal WAL synchronization. Compose stores `/data/rip-dvd.sqlite` in the
+persistent `rip-dvd-data` volume.
+
+The facade exposes catalog operations and separate Archive Job and Encode Job
+queues without exposing Drizzle or a general transaction API to callers. Queue
+claims are atomic, single-statement updates. A worker must claim a job, let that
+statement commit, and only then start `dd`, `lsdvd`, `HandBrakeCLI`, or any
+other external process. External process execution must never occur inside a
+database transaction.
+
+The canonical catalog terms are:
+
+- **Optical Drive**: configured or discovered disc-reading hardware.
+- **Detected Disc**: a fingerprinted disc observed in an Optical Drive.
+- **Original Disc Archive**: the preserved source content, initially a DVD ISO.
+- **Media Item**: catalog meaning such as a movie, show, episode, trailer, or
+  bonus feature; Media Items may form parent-child hierarchies.
+- **Disc Selection**: an explicit source slice from an Original Disc Archive
+  mapped to a Media Item.
+- **Encoding Profile**: immutable versioned encoding settings within a media
+  domain.
+- **Archive Job** and **Encode Job**: separate mutable queue records with
+  queued, running, completed, and failed lifecycles.
+
+Visit `/health` for the visible service/database status or `/api/health` for
+the machine-readable health response. Validate schema history with
+`pnpm db:check`; the normal `pnpm check` command runs the facade integration
+tests against isolated SQLite files.
+
 ## Project Layout
 
 - `rip-dvd`: executable command wrapper
@@ -312,6 +346,7 @@ The archive worker image includes DVD discovery tools and the encode worker imag
 - `apps/archive-worker`: archive-worker process entry point
 - `apps/encode-worker`: encode-worker process entry point
 - `packages/config`: shared runtime environment loader
+- `packages/data-access`: Drizzle schema, versioned migrations, and domain-level SQLite facade
 - `packages/worker-runtime`: shared worker heartbeat and signal lifecycle
 - `docker/runtime.Dockerfile`: shared multi-target definition for three role-specific images
 - `compose.yaml`: local three-service deployment

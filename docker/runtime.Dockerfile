@@ -10,14 +10,17 @@ COPY apps/web/package.json apps/web/package.json
 COPY apps/archive-worker/package.json apps/archive-worker/package.json
 COPY apps/encode-worker/package.json apps/encode-worker/package.json
 COPY packages/config/package.json packages/config/package.json
+COPY packages/data-access/package.json packages/data-access/package.json
 COPY packages/worker-runtime/package.json packages/worker-runtime/package.json
 RUN pnpm install --frozen-lockfile
 
 FROM dependencies AS shared-builder
 COPY tsconfig.base.json ./
 COPY packages/config packages/config
+COPY packages/data-access packages/data-access
 COPY packages/worker-runtime packages/worker-runtime
 RUN pnpm --filter @rip-dvd/config build \
+  && pnpm --filter @rip-dvd/data-access build \
   && pnpm --filter @rip-dvd/worker-runtime build
 
 FROM shared-builder AS web-builder
@@ -56,6 +59,7 @@ RUN mkdir --parents /media/movies /media/originals \
   && chown node:node /media/movies /media/originals
 COPY --from=web-builder --chown=node:node /app/apps/web/.next/standalone ./
 COPY --from=web-builder --chown=node:node /app/apps/web/.next/static ./apps/web/.next/static
+COPY --from=shared-builder --chown=node:node /app/packages/data-access/drizzle ./packages/data-access/drizzle
 # Sharp 0.35 loads libvips through the system dynamic loader. Keep the traced
 # package as the source of truth and expose its versioned shared object through
 # a standard loader directory without duplicating it in the image.
