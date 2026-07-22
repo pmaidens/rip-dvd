@@ -1,0 +1,39 @@
+:root {
+  color-scheme: light dark;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+
+body {
+  display: grid;
+  min-height: 100vh;
+  margin: 0;
+  place-items: center;
+  background: #111827;
+  color: #f9fafb;
+}
+
+main {
+  width: min(36rem, calc(100% - 3rem));
+}
+
+.eyebrow {
+  margin: 0 0 0.75rem;
+  color: #fbbf24;
+  font-size: 0.875rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+h1 {
+  margin: 0;
+  font-size: clamp(2.25rem, 7vw, 4rem);
+  line-height: 1;
+}
+
+main > p:last-child {
+  max-width: 34rem;
+  color: #d1d5db;
+  font-size: 1.125rem;
+  line-height: 1.6;
+}

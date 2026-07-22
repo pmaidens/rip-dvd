@@ -1,0 +1,21 @@
+{
+  "name": "rip-dvd",
+  "private": true,
+  "packageManager": "pnpm@11.15.1",
+  "engines": {
+    "node": ">=22.12.0 <23"
+  },
+  "scripts": {
+    "build": "pnpm -r --if-present build",
+    "check": "pnpm typecheck && pnpm test",
+    "dev": "pnpm --filter @rip-dvd/web dev",
+    "test": "pnpm --filter @rip-dvd/config --filter @rip-dvd/worker-runtime test",
+    "test:compose-workers": "sh scripts/smoke-compose-workers.sh",
+    "typecheck": "pnpm -r --if-present typecheck"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.0",
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
+  }
+}
