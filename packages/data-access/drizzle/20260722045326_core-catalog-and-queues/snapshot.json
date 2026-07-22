@@ -1420,7 +1420,7 @@
       "table": "disc_selections"
     },
     {
-      "value": "(\"kind\" = 'main_feature' and \"title_number\" is null and \"chapter_start\" is null and \"chapter_end\" is null) or (\"kind\" = 'dvd_title' and \"title_number\" is not null and \"title_number\" > 0 and \"chapter_start\" is null and \"chapter_end\" is null) or (\"kind\" = 'dvd_chapters' and \"title_number\" is not null and \"title_number\" > 0 and \"chapter_start\" is not null and \"chapter_start\" > 0 and \"chapter_end\" is not null and \"chapter_end\" >= \"chapter_start\")",
+      "value": "(\"kind\" = 'main_feature' and \"title_number\" is null and \"chapter_start\" is null and \"chapter_end\" is null) or (\"kind\" = 'dvd_title' and typeof(\"title_number\") = 'integer' and \"title_number\" > 0 and \"chapter_start\" is null and \"chapter_end\" is null) or (\"kind\" = 'dvd_chapters' and typeof(\"title_number\") = 'integer' and \"title_number\" > 0 and typeof(\"chapter_start\") = 'integer' and \"chapter_start\" > 0 and typeof(\"chapter_end\") = 'integer' and \"chapter_end\" >= \"chapter_start\")",
       "name": "disc_selections_shape_check",
       "entityType": "checks",
       "table": "disc_selections"

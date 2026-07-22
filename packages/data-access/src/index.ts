@@ -38,7 +38,10 @@ import {
   createJobQueueController,
   type JobQueueAdapter,
 } from "./internal/job-queue.js";
-import { requireNonEmpty } from "./internal/validation.js";
+import {
+  requireNonEmpty,
+  requirePositiveSafeInteger,
+} from "./internal/validation.js";
 import {
   DomainInvariantError,
   InvalidStatusTransitionError,
@@ -110,6 +113,15 @@ function asRunningEncodeJob(job: EncodeJob): RunningEncodeJob {
     throw new DomainInvariantError("Claimed Encode Job is not running");
   }
   return job as RunningEncodeJob;
+}
+
+function queuedArchiveJobsForFingerprint(fingerprint: string) {
+  return sql`${archiveJobs.status} = 'queued'
+    and ${archiveJobs.detectedDiscId} in (
+      select ${detectedDiscs.id}
+      from ${detectedDiscs}
+      where ${detectedDiscs.fingerprint} = ${fingerprint}
+    )`;
 }
 
 function toDiscSelection(
@@ -279,6 +291,22 @@ export function createDataAccess({
     return new Date();
   }
 
+  const insertApprovedArchiveJob = sqlite.prepare(`
+    insert into archive_jobs (
+      id, detected_disc_id, priority, created_at, updated_at
+    )
+    select ?, detected_discs.id, ?, ?, ?
+    from detected_discs
+    where detected_discs.id = ?
+      and detected_discs.status = 'approved'
+      and not exists (
+        select 1
+        from original_disc_archives
+        where original_disc_archives.fingerprint = detected_discs.fingerprint
+      )
+    on conflict (detected_disc_id) do nothing
+  `);
+
   const archiveJobAdapter = {
     recordType: "archive job",
     find: (id) =>
@@ -300,6 +328,11 @@ export function createDataAccess({
           on ${detectedDiscs.id} = ${archiveJobs.detectedDiscId}
         where ${archiveJobs.status} = 'queued'
           and ${detectedDiscs.status} = 'approved'
+          and not exists (
+            select 1
+            from ${originalDiscArchives}
+            where ${originalDiscArchives.fingerprint} = ${detectedDiscs.fingerprint}
+          )
         order by ${archiveJobs.priority} desc,
           ${archiveJobs.createdAt} asc,
           ${archiveJobs.id} asc
@@ -562,6 +595,20 @@ export function createDataAccess({
         const timestamp = now();
         const fingerprint = requireNonEmpty(input.fingerprint, "fingerprint");
         return database.transaction((transaction) => {
+          const matchingArchive = transaction
+            .select({ discKind: originalDiscArchives.discKind })
+            .from(originalDiscArchives)
+            .where(eq(originalDiscArchives.fingerprint, fingerprint))
+            .get();
+          if (
+            matchingArchive &&
+            matchingArchive.discKind !== input.discKind
+          ) {
+            throw new DomainInvariantError(
+              "Rediscovered disc kind must match existing archive provenance",
+            );
+          }
+
           transaction
             .insert(detectedDiscs)
             .values({
@@ -571,6 +618,7 @@ export function createDataAccess({
               fingerprint,
               volumeLabel: input.volumeLabel,
               scanData: input.scanData,
+              status: matchingArchive ? "archived" : "detected",
               detectedAt: timestamp,
               createdAt: timestamp,
               updatedAt: timestamp,
@@ -586,6 +634,7 @@ export function createDataAccess({
               discKind: input.discKind,
               volumeLabel: input.volumeLabel,
               scanData: input.scanData,
+              ...(matchingArchive ? { status: "archived" as const } : {}),
               detectedAt: timestamp,
               updatedAt: timestamp,
             })
@@ -593,23 +642,25 @@ export function createDataAccess({
               and(
                 eq(detectedDiscs.opticalDriveId, input.opticalDriveId),
                 eq(detectedDiscs.fingerprint, fingerprint),
-                or(
-                  eq(detectedDiscs.discKind, input.discKind),
-                  and(
-                    ne(detectedDiscs.status, "archived"),
-                    notExists(
-                      transaction
-                        .select({ id: originalDiscArchives.id })
-                        .from(originalDiscArchives)
-                        .where(
-                          eq(
-                            originalDiscArchives.detectedDiscId,
-                            detectedDiscs.id,
-                          ),
+                matchingArchive
+                  ? undefined
+                  : or(
+                      eq(detectedDiscs.discKind, input.discKind),
+                      and(
+                        ne(detectedDiscs.status, "archived"),
+                        notExists(
+                          transaction
+                            .select({ id: originalDiscArchives.id })
+                            .from(originalDiscArchives)
+                            .where(
+                              eq(
+                                originalDiscArchives.detectedDiscId,
+                                detectedDiscs.id,
+                              ),
+                            ),
                         ),
+                      ),
                     ),
-                  ),
-                ),
               ),
             )
             .returning()
@@ -618,6 +669,12 @@ export function createDataAccess({
             throw new DomainInvariantError(
               "Rediscovery cannot change a Detected Disc kind with archive provenance",
             );
+          }
+          if (matchingArchive) {
+            transaction
+              .delete(archiveJobs)
+              .where(queuedArchiveJobsForFingerprint(fingerprint))
+              .run();
           }
           return registered;
         });
@@ -637,74 +694,57 @@ export function createDataAccess({
       },
 
       updateDetectedDiscStatus(id, status) {
-        const current = requireRow(
-          database
-            .select()
-            .from(detectedDiscs)
-            .where(eq(detectedDiscs.id, id))
-            .get(),
-          "detected disc",
-          id,
-        );
-        if (!detectedDiscTransitions[current.status].includes(status)) {
-          throw new InvalidStatusTransitionError(
-            "detected disc",
-            current.status,
-            status,
-          );
-        }
-
-        return requireRow(
-          database
+        const allowedFrom = Object.entries(detectedDiscTransitions)
+          .filter(([, targets]) => targets.includes(status))
+          .map(([source]) => source as DetectedDiscStatus);
+        return database.transaction((transaction) => {
+          const updated = transaction
             .update(detectedDiscs)
             .set({ status, updatedAt: now() })
             .where(
               and(
                 eq(detectedDiscs.id, id),
-                eq(detectedDiscs.status, current.status),
+                inArray(detectedDiscs.status, allowedFrom),
               ),
             )
             .returning()
-            .get(),
-          "detected disc",
-          id,
-        );
+            .get();
+          if (!updated) {
+            const current = requireRow(
+              transaction
+                .select()
+                .from(detectedDiscs)
+                .where(eq(detectedDiscs.id, id))
+                .get(),
+              "detected disc",
+              id,
+            );
+            throw new InvalidStatusTransitionError(
+              "detected disc",
+              current.status,
+              status,
+            );
+          }
+          if (status !== "approved") {
+            transaction
+              .delete(archiveJobs)
+              .where(
+                and(
+                  eq(archiveJobs.detectedDiscId, id),
+                  eq(archiveJobs.status, "queued"),
+                ),
+              )
+              .run();
+          }
+          return updated;
+        });
       },
 
       createOriginalDiscArchive(input) {
         const timestamp = now();
+        const fingerprint = requireNonEmpty(input.fingerprint, "fingerprint");
+        const archivePath = requireNonEmpty(input.archivePath, "archivePath");
         return database.transaction((transaction) => {
-          const disc = requireRow(
-            transaction
-              .select()
-              .from(detectedDiscs)
-              .where(eq(detectedDiscs.id, input.detectedDiscId))
-              .get(),
-            "detected disc",
-            input.detectedDiscId,
-          );
-          if (disc.status !== "approved") {
-            throw new InvalidStatusTransitionError(
-              "detected disc",
-              disc.status,
-              "archived",
-            );
-          }
-          const fingerprint = requireNonEmpty(
-            input.fingerprint,
-            "fingerprint",
-          );
-          if (disc.discKind !== input.discKind) {
-            throw new DomainInvariantError(
-              "Original Disc Archive kind must match its Detected Disc",
-            );
-          }
-          if (disc.fingerprint !== fingerprint) {
-            throw new DomainInvariantError(
-              "Original Disc Archive fingerprint must match its Detected Disc",
-            );
-          }
-
           const transitioned = transaction
             .update(detectedDiscs)
             .set({ status: "archived", updatedAt: timestamp })
@@ -712,11 +752,39 @@ export function createDataAccess({
               and(
                 eq(detectedDiscs.id, input.detectedDiscId),
                 eq(detectedDiscs.status, "approved"),
+                eq(detectedDiscs.discKind, input.discKind),
+                eq(detectedDiscs.fingerprint, fingerprint),
               ),
             )
             .returning({ id: detectedDiscs.id })
             .get();
           if (!transitioned) {
+            const disc = requireRow(
+              transaction
+                .select()
+                .from(detectedDiscs)
+                .where(eq(detectedDiscs.id, input.detectedDiscId))
+                .get(),
+              "detected disc",
+              input.detectedDiscId,
+            );
+            if (disc.status !== "approved") {
+              throw new InvalidStatusTransitionError(
+                "detected disc",
+                disc.status,
+                "archived",
+              );
+            }
+            if (disc.discKind !== input.discKind) {
+              throw new DomainInvariantError(
+                "Original Disc Archive kind must match its Detected Disc",
+              );
+            }
+            if (disc.fingerprint !== fingerprint) {
+              throw new DomainInvariantError(
+                "Original Disc Archive fingerprint must match its Detected Disc",
+              );
+            }
             throw new InvalidStatusTransitionError(
               "detected disc",
               "approved",
@@ -732,7 +800,7 @@ export function createDataAccess({
                 detectedDiscId: input.detectedDiscId,
                 discKind: input.discKind,
                 archiveFormat: input.archiveFormat,
-                archivePath: requireNonEmpty(input.archivePath, "archivePath"),
+                archivePath,
                 fingerprint,
                 sizeBytes: input.sizeBytes,
                 archivedAt: timestamp,
@@ -744,6 +812,10 @@ export function createDataAccess({
             "original disc archive",
             input.detectedDiscId,
           );
+          transaction
+            .delete(archiveJobs)
+            .where(queuedArchiveJobsForFingerprint(fingerprint))
+            .run();
           return archive;
         });
       },
@@ -800,15 +872,36 @@ export function createDataAccess({
             ? { titleNumber: null, chapterStart: null, chapterEnd: null }
             : input.kind === "dvd_title"
               ? {
-                  titleNumber: input.titleNumber,
+                  titleNumber: requirePositiveSafeInteger(
+                    input.titleNumber,
+                    "titleNumber",
+                  ),
                   chapterStart: null,
                   chapterEnd: null,
                 }
               : {
-                  titleNumber: input.titleNumber,
-                  chapterStart: input.chapterStart,
-                  chapterEnd: input.chapterEnd,
+                  titleNumber: requirePositiveSafeInteger(
+                    input.titleNumber,
+                    "titleNumber",
+                  ),
+                  chapterStart: requirePositiveSafeInteger(
+                    input.chapterStart,
+                    "chapterStart",
+                  ),
+                  chapterEnd: requirePositiveSafeInteger(
+                    input.chapterEnd,
+                    "chapterEnd",
+                  ),
                 };
+        if (
+          coordinates.chapterStart !== null &&
+          coordinates.chapterEnd !== null &&
+          coordinates.chapterEnd < coordinates.chapterStart
+        ) {
+          throw new DomainInvariantError(
+            "chapterEnd must be greater than or equal to chapterStart",
+          );
+        }
         return toDiscSelection(
           requireRow(
             database
@@ -897,39 +990,52 @@ export function createDataAccess({
     archiveJobs: {
       enqueue(input) {
         const timestamp = now();
-        const disc = requireRow(
+        insertApprovedArchiveJob.run(
+          newId<ArchiveJobId>(),
+          input.priority ?? 0,
+          timestamp.getTime(),
+          timestamp.getTime(),
+          input.detectedDiscId,
+        );
+        const eligible = database
+          .select({ job: archiveJobs })
+          .from(archiveJobs)
+          .innerJoin(
+            detectedDiscs,
+            eq(detectedDiscs.id, archiveJobs.detectedDiscId),
+          )
+          .where(
+            and(
+              eq(archiveJobs.detectedDiscId, input.detectedDiscId),
+              eq(detectedDiscs.status, "approved"),
+              notExists(
+                database
+                  .select({ id: originalDiscArchives.id })
+                  .from(originalDiscArchives)
+                  .where(
+                    eq(
+                      originalDiscArchives.fingerprint,
+                      detectedDiscs.fingerprint,
+                    ),
+                  ),
+              ),
+            ),
+          )
+          .get()?.job;
+        if (eligible) {
+          return eligible;
+        }
+        requireRow(
           database
-            .select()
+            .select({ id: detectedDiscs.id })
             .from(detectedDiscs)
             .where(eq(detectedDiscs.id, input.detectedDiscId))
             .get(),
           "detected disc",
           input.detectedDiscId,
         );
-        if (disc.status !== "approved") {
-          throw new DomainInvariantError(
-            "Only an approved Detected Disc can be queued for archiving",
-          );
-        }
-        database
-          .insert(archiveJobs)
-          .values({
-            id: newId<ArchiveJobId>(),
-            detectedDiscId: input.detectedDiscId,
-            priority: input.priority ?? 0,
-            createdAt: timestamp,
-            updatedAt: timestamp,
-          })
-          .onConflictDoNothing({ target: archiveJobs.detectedDiscId })
-          .run();
-        return requireRow(
-          database
-            .select()
-            .from(archiveJobs)
-            .where(eq(archiveJobs.detectedDiscId, input.detectedDiscId))
-            .get(),
-          "archive job",
-          input.detectedDiscId,
+        throw new DomainInvariantError(
+          "Only an approved, unarchived Detected Disc can be queued for archiving",
         );
       },
 

@@ -33,6 +33,12 @@ import type {
 const createdAt = () => integer("created_at", { mode: "timestamp_ms" }).notNull();
 const updatedAt = () => integer("updated_at", { mode: "timestamp_ms" }).notNull();
 
+function sqliteStringLiterals(values: readonly string[]) {
+  return sql.raw(
+    values.map((value) => `'${value.replaceAll("'", "''")}'`).join(", "),
+  );
+}
+
 export const opticalDrives = sqliteTable(
   "optical_drives",
   {
@@ -86,11 +92,11 @@ export const detectedDiscs = sqliteTable(
     index("detected_discs_status_idx").on(table.status),
     check(
       "detected_discs_kind_check",
-      sql`${table.discKind} in ('dvd', 'blu_ray', 'audio_cd')`,
+      sql`${table.discKind} in (${sqliteStringLiterals(DISC_KINDS)})`,
     ),
     check(
       "detected_discs_status_check",
-      sql`${table.status} in ('detected', 'scanned', 'approved', 'archived', 'rejected')`,
+      sql`${table.status} in (${sqliteStringLiterals(DETECTED_DISC_STATUSES)})`,
     ),
   ],
 );
@@ -121,7 +127,7 @@ export const originalDiscArchives = sqliteTable(
     uniqueIndex("original_disc_archives_fingerprint_unique").on(table.fingerprint),
     check(
       "original_disc_archives_kind_check",
-      sql`${table.discKind} in ('dvd', 'blu_ray', 'audio_cd')`,
+      sql`${table.discKind} in (${sqliteStringLiterals(DISC_KINDS)})`,
     ),
     check(
       "original_disc_archives_format_check",
@@ -156,7 +162,7 @@ export const mediaItems = sqliteTable(
     index("media_items_parent_idx").on(table.parentId),
     check(
       "media_items_kind_check",
-      sql`${table.kind} in ('movie', 'tv_show', 'season', 'episode', 'trailer', 'bonus_feature')`,
+      sql`${table.kind} in (${sqliteStringLiterals(MEDIA_ITEM_KINDS)})`,
     ),
     check(
       "media_items_year_check",
@@ -203,11 +209,11 @@ export const discSelections = sqliteTable(
     index("disc_selections_media_item_idx").on(table.mediaItemId),
     check(
       "disc_selections_kind_check",
-      sql`${table.kind} in ('main_feature', 'dvd_title', 'dvd_chapters')`,
+      sql`${table.kind} in (${sqliteStringLiterals(DISC_SELECTION_KINDS)})`,
     ),
     check(
       "disc_selections_shape_check",
-      sql`(${table.kind} = 'main_feature' and ${table.titleNumber} is null and ${table.chapterStart} is null and ${table.chapterEnd} is null) or (${table.kind} = 'dvd_title' and ${table.titleNumber} is not null and ${table.titleNumber} > 0 and ${table.chapterStart} is null and ${table.chapterEnd} is null) or (${table.kind} = 'dvd_chapters' and ${table.titleNumber} is not null and ${table.titleNumber} > 0 and ${table.chapterStart} is not null and ${table.chapterStart} > 0 and ${table.chapterEnd} is not null and ${table.chapterEnd} >= ${table.chapterStart})`,
+      sql`(${table.kind} = 'main_feature' and ${table.titleNumber} is null and ${table.chapterStart} is null and ${table.chapterEnd} is null) or (${table.kind} = 'dvd_title' and typeof(${table.titleNumber}) = 'integer' and ${table.titleNumber} > 0 and ${table.chapterStart} is null and ${table.chapterEnd} is null) or (${table.kind} = 'dvd_chapters' and typeof(${table.titleNumber}) = 'integer' and ${table.titleNumber} > 0 and typeof(${table.chapterStart}) = 'integer' and ${table.chapterStart} > 0 and typeof(${table.chapterEnd}) = 'integer' and ${table.chapterEnd} >= ${table.chapterStart})`,
     ),
   ],
 );
@@ -235,7 +241,7 @@ export const encodingProfiles = sqliteTable(
     ),
     check(
       "encoding_profiles_domain_check",
-      sql`${table.mediaDomain} in ('dvd_video', 'audio')`,
+      sql`${table.mediaDomain} in (${sqliteStringLiterals(MEDIA_DOMAINS)})`,
     ),
     check("encoding_profiles_version_check", sql`${table.version} > 0`),
   ],
@@ -270,7 +276,7 @@ export const archiveJobs = sqliteTable(
     index("archive_jobs_queue_idx").on(table.status, table.priority, table.createdAt),
     check(
       "archive_jobs_status_check",
-      sql`${table.status} in ('queued', 'running', 'completed', 'failed')`,
+      sql`${table.status} in (${sqliteStringLiterals(JOB_STATUSES)})`,
     ),
     check(
       "archive_jobs_progress_check",
@@ -314,7 +320,7 @@ export const encodeJobs = sqliteTable(
     index("encode_jobs_queue_idx").on(table.status, table.priority, table.createdAt),
     check(
       "encode_jobs_status_check",
-      sql`${table.status} in ('queued', 'running', 'completed', 'failed')`,
+      sql`${table.status} in (${sqliteStringLiterals(JOB_STATUSES)})`,
     ),
     check(
       "encode_jobs_progress_check",

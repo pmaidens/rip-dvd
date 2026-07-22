@@ -53,7 +53,7 @@ CREATE TABLE `disc_selections` (
 	CONSTRAINT `fk_disc_selections_media_item_id_media_items_id_fk` FOREIGN KEY (`media_item_id`) REFERENCES `media_items`(`id`) ON DELETE RESTRICT,
 	CONSTRAINT "disc_selections_id_not_null" CHECK("id" is not null),
 	CONSTRAINT "disc_selections_kind_check" CHECK("kind" in ('main_feature', 'dvd_title', 'dvd_chapters')),
-	CONSTRAINT "disc_selections_shape_check" CHECK(("kind" = 'main_feature' and "title_number" is null and "chapter_start" is null and "chapter_end" is null) or ("kind" = 'dvd_title' and "title_number" is not null and "title_number" > 0 and "chapter_start" is null and "chapter_end" is null) or ("kind" = 'dvd_chapters' and "title_number" is not null and "title_number" > 0 and "chapter_start" is not null and "chapter_start" > 0 and "chapter_end" is not null and "chapter_end" >= "chapter_start"))
+	CONSTRAINT "disc_selections_shape_check" CHECK(("kind" = 'main_feature' and "title_number" is null and "chapter_start" is null and "chapter_end" is null) or ("kind" = 'dvd_title' and typeof("title_number") = 'integer' and "title_number" > 0 and "chapter_start" is null and "chapter_end" is null) or ("kind" = 'dvd_chapters' and typeof("title_number") = 'integer' and "title_number" > 0 and typeof("chapter_start") = 'integer' and "chapter_start" > 0 and typeof("chapter_end") = 'integer' and "chapter_end" >= "chapter_start"))
 );
 --> statement-breakpoint
 CREATE TABLE `encode_jobs` (
