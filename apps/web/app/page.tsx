@@ -1,4 +1,5 @@
 import { loadConfig } from "@rip-dvd/config";
+import Link from "next/link";
 
 export const dynamic = "force-dynamic";
 
@@ -13,6 +14,9 @@ export default function Home() {
         Web, archive, and encode runtimes are ready for the next implementation
         slice.
       </p>
+      <Link className="health-link" href="/health">
+        View service health
+      </Link>
     </main>
   );
 }
