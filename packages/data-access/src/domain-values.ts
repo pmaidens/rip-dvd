@@ -1,5 +1,7 @@
 export const DISC_KINDS = ["dvd", "blu_ray", "audio_cd"] as const;
 
+export const ARCHIVE_FORMATS = ["iso"] as const;
+
 export const DETECTED_DISC_STATUSES = [
   "detected",
   "scanned",

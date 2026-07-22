@@ -9,12 +9,14 @@ import {
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
+import { isDeepStrictEqual } from "node:util";
 
 import {
   and,
   asc,
   desc,
   eq,
+  exists,
   inArray,
   ne,
   notExists,
@@ -84,7 +86,7 @@ const detectedDiscTransitions: Readonly<
 > = {
   detected: ["scanned", "rejected"],
   scanned: ["approved", "rejected"],
-  approved: ["archived", "rejected"],
+  approved: ["rejected"],
   archived: [],
   rejected: ["detected"],
 };
@@ -333,6 +335,14 @@ export function createDataAccess({
             from ${originalDiscArchives}
             where ${originalDiscArchives.fingerprint} = ${detectedDiscs.fingerprint}
           )
+          and not exists (
+            select 1
+            from archive_jobs as running_archive_jobs
+            inner join detected_discs as running_detected_discs
+              on running_detected_discs.id = running_archive_jobs.detected_disc_id
+            where running_archive_jobs.status = 'running'
+              and running_detected_discs.fingerprint = ${detectedDiscs.fingerprint}
+          )
         order by ${archiveJobs.priority} desc,
           ${archiveJobs.createdAt} asc,
           ${archiveJobs.id} asc
@@ -422,6 +432,28 @@ export function createDataAccess({
           and(
             eq(archiveJobs.id, id),
             eq(archiveJobs.status, expectedStatus),
+            exists(
+              database
+                .select({ id: detectedDiscs.id })
+                .from(detectedDiscs)
+                .where(
+                  and(
+                    eq(detectedDiscs.id, archiveJobs.detectedDiscId),
+                    eq(detectedDiscs.status, "approved"),
+                    notExists(
+                      database
+                        .select({ id: originalDiscArchives.id })
+                        .from(originalDiscArchives)
+                        .where(
+                          eq(
+                            originalDiscArchives.fingerprint,
+                            detectedDiscs.fingerprint,
+                          ),
+                        ),
+                    ),
+                  ),
+                ),
+            ),
           ),
         )
         .returning()
@@ -608,6 +640,44 @@ export function createDataAccess({
               "Rediscovered disc kind must match existing archive provenance",
             );
           }
+          const matchingObservation = transaction
+            .select({ discKind: detectedDiscs.discKind })
+            .from(detectedDiscs)
+            .where(eq(detectedDiscs.fingerprint, fingerprint))
+            .get();
+          if (
+            matchingObservation &&
+            matchingObservation.discKind !== input.discKind
+          ) {
+            throw new DomainInvariantError(
+              "Rediscovered disc kind must match existing fingerprint identity",
+            );
+          }
+          const existing = transaction
+            .select({
+              discKind: detectedDiscs.discKind,
+              scanData: detectedDiscs.scanData,
+              status: detectedDiscs.status,
+            })
+            .from(detectedDiscs)
+            .where(
+              and(
+                eq(detectedDiscs.opticalDriveId, input.opticalDriveId),
+                eq(detectedDiscs.fingerprint, fingerprint),
+              ),
+            )
+            .get();
+          if (
+            !matchingArchive &&
+            existing?.status === "approved" &&
+            (existing.discKind !== input.discKind ||
+              (input.scanData !== undefined &&
+                !isDeepStrictEqual(existing.scanData, input.scanData)))
+          ) {
+            throw new DomainInvariantError(
+              "Rediscovery cannot change reviewed data for an approved Detected Disc",
+            );
+          }
 
           transaction
             .insert(detectedDiscs)
@@ -677,7 +747,7 @@ export function createDataAccess({
               .run();
           }
           return registered;
-        });
+        }, { behavior: "immediate" });
       },
 
       listDetectedDiscs(statuses) {
@@ -813,6 +883,11 @@ export function createDataAccess({
             input.detectedDiscId,
           );
           transaction
+            .update(detectedDiscs)
+            .set({ status: "archived", updatedAt: timestamp })
+            .where(eq(detectedDiscs.fingerprint, fingerprint))
+            .run();
+          transaction
             .delete(archiveJobs)
             .where(queuedArchiveJobsForFingerprint(fingerprint))
             .run();
@@ -937,6 +1012,7 @@ export function createDataAccess({
       createEncodingProfile(input) {
         const timestamp = now();
         const id = newId<EncodingProfileId>();
+        const version = requirePositiveSafeInteger(input.version, "version");
         return requireRow(
           database
             .insert(encodingProfiles)
@@ -945,7 +1021,7 @@ export function createDataAccess({
               key: requireNonEmpty(input.key, "key"),
               displayName: requireNonEmpty(input.displayName, "displayName"),
               mediaDomain: input.mediaDomain,
-              version: input.version,
+              version,
               settings: input.settings,
               createdAt: timestamp,
               updatedAt: timestamp,
@@ -959,6 +1035,7 @@ export function createDataAccess({
 
       findEncodingProfile(input) {
         const key = requireNonEmpty(input.key, "key");
+        const version = requirePositiveSafeInteger(input.version, "version");
         return (
           database
             .select()
@@ -967,7 +1044,7 @@ export function createDataAccess({
               and(
                 eq(encodingProfiles.mediaDomain, input.mediaDomain),
                 eq(encodingProfiles.key, key),
-                eq(encodingProfiles.version, input.version),
+                eq(encodingProfiles.version, version),
               ),
             )
             .get() ?? null

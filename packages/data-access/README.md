@@ -20,11 +20,21 @@ and failure commands accept the claimed running job and compare its ID, running
 status, and token in the update. Output from a stale worker attempt therefore
 cannot mutate a retried job.
 
-Archive Jobs can be enqueued only while their Detected Disc is approved. The
+Archive Jobs can be enqueued or requeued only while their Detected Disc is
+approved and no archive exists for its fingerprint. The
 single-statement claim also joins the current Detected Disc state and returns
 only approved work, so a revocation between enqueue and claim prevents an
-external preservation process from starting. Once archive provenance exists,
-rediscovery may refresh metadata but cannot change the Detected Disc kind.
+external preservation process from starting. It also excludes another running
+Archive Job for the same fingerprint across Optical Drives. Approval freezes
+the reviewed Disc Kind and scan data until approval is revoked, and every
+observation of a fingerprint must have the same Disc Kind. Archive publication
+marks every observation of the fingerprint archived. Once archive
+provenance exists, rediscovery may refresh metadata but cannot change the
+Detected Disc kind.
+
+DVD title/chapter coordinates and Encoding Profile versions must be positive
+safe integers at the facade. SQLite CHECK constraints also require integer
+storage, preventing fractional values inserted through direct SQL.
 
 Both queues share one progress coalescer. The first report is persisted
 immediately. Later reports persist when at least one second has elapsed or the

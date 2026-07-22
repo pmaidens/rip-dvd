@@ -90,7 +90,7 @@ CREATE TABLE `encoding_profiles` (
 	`updated_at` integer NOT NULL,
 	CONSTRAINT "encoding_profiles_id_not_null" CHECK("id" is not null),
 	CONSTRAINT "encoding_profiles_domain_check" CHECK("media_domain" in ('dvd_video', 'audio')),
-	CONSTRAINT "encoding_profiles_version_check" CHECK("version" > 0)
+	CONSTRAINT "encoding_profiles_version_check" CHECK(typeof("version") = 'integer' and "version" > 0)
 );
 --> statement-breakpoint
 CREATE TABLE `media_items` (

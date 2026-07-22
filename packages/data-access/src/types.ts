@@ -1,4 +1,5 @@
 import type {
+  ARCHIVE_FORMATS,
   DETECTED_DISC_STATUSES,
   DISC_KINDS,
   DISC_SELECTION_KINDS,
@@ -7,6 +8,7 @@ import type {
   MEDIA_ITEM_KINDS,
 } from "./domain-values.js";
 
+export type ArchiveFormat = (typeof ARCHIVE_FORMATS)[number];
 export type DiscKind = (typeof DISC_KINDS)[number];
 export type DetectedDiscStatus = (typeof DETECTED_DISC_STATUSES)[number];
 export type MediaItemKind = (typeof MEDIA_ITEM_KINDS)[number];
@@ -68,7 +70,7 @@ export interface OriginalDiscArchive {
   id: OriginalDiscArchiveId;
   detectedDiscId: DetectedDiscId;
   discKind: DiscKind;
-  archiveFormat: "iso";
+  archiveFormat: ArchiveFormat;
   archivePath: string;
   fingerprint: string;
   sizeBytes: number | null;
@@ -232,7 +234,7 @@ export interface CatalogAccess {
   createOriginalDiscArchive(input: {
     detectedDiscId: DetectedDiscId;
     discKind: DiscKind;
-    archiveFormat: "iso";
+    archiveFormat: ArchiveFormat;
     archivePath: string;
     fingerprint: string;
     sizeBytes?: number;

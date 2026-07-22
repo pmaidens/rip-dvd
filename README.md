@@ -312,13 +312,18 @@ persistent `rip-dvd-data` volume.
 
 The facade exposes catalog operations and separate Archive Job and Encode Job
 queues without exposing Drizzle or a general transaction API to callers.
-Archive Jobs are conditionally enqueued only while a Detected Disc is approved;
+Archive Jobs are conditionally enqueued or requeued only while a Detected Disc
+is approved;
 approval revocation or archive publication removes obsolete queued work in the
 same short transaction. The atomic claim statement rechecks both current
 approval and the absence of an Original Disc Archive with the same fingerprint
-before returning preservation work. Rediscovery matches archived fingerprints
-across Optical Drives, marks the new observation archived, and rejects a
-contradictory Disc Kind.
+before returning preservation work, and permits only one running Archive Job
+for a fingerprint across all Optical Drives. Approval freezes the reviewed Disc
+Kind and scan data until approval is revoked. A fingerprint has one Disc Kind
+across Optical Drives. Archive publication marks every observation of the
+fingerprint archived. Later rediscovery matches archived
+fingerprints across Optical Drives, marks the new observation archived, and
+rejects a contradictory Disc Kind.
 A worker must let the claim commit and only then start `dd`, `lsdvd`,
 `HandBrakeCLI`, or any other external process. External process execution must
 never occur inside a database transaction.
@@ -334,6 +339,8 @@ migration twice.
 DVD title and chapter coordinates in Disc Selections must be positive safe
 integers. The facade validates that contract and the SQLite migration also
 requires integer storage so direct SQL cannot persist fractional coordinates.
+Encoding Profile versions follow the same positive-safe-integer facade contract
+and integer-storage database constraint.
 
 The canonical catalog terms are:
 

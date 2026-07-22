@@ -1456,7 +1456,7 @@
       "table": "encoding_profiles"
     },
     {
-      "value": "\"version\" > 0",
+      "value": "typeof(\"version\") = 'integer' and \"version\" > 0",
       "name": "encoding_profiles_version_check",
       "entityType": "checks",
       "table": "encoding_profiles"

@@ -10,6 +10,7 @@ import {
 } from "drizzle-orm/sqlite-core";
 
 import {
+  ARCHIVE_FORMATS,
   DETECTED_DISC_STATUSES,
   DISC_KINDS,
   DISC_SELECTION_KINDS,
@@ -110,7 +111,7 @@ export const originalDiscArchives = sqliteTable(
       .notNull()
       .references(() => detectedDiscs.id, { onDelete: "restrict" }),
     discKind: text("disc_kind", { enum: DISC_KINDS }).notNull(),
-    archiveFormat: text("archive_format", { enum: ["iso"] }).notNull(),
+    archiveFormat: text("archive_format", { enum: ARCHIVE_FORMATS }).notNull(),
     archivePath: text("archive_path").notNull(),
     fingerprint: text("fingerprint").notNull(),
     sizeBytes: integer("size_bytes"),
@@ -131,7 +132,7 @@ export const originalDiscArchives = sqliteTable(
     ),
     check(
       "original_disc_archives_format_check",
-      sql`${table.archiveFormat} in ('iso')`,
+      sql`${table.archiveFormat} in (${sqliteStringLiterals(ARCHIVE_FORMATS)})`,
     ),
     check(
       "original_disc_archives_size_check",
@@ -243,7 +244,10 @@ export const encodingProfiles = sqliteTable(
       "encoding_profiles_domain_check",
       sql`${table.mediaDomain} in (${sqliteStringLiterals(MEDIA_DOMAINS)})`,
     ),
-    check("encoding_profiles_version_check", sql`${table.version} > 0`),
+    check(
+      "encoding_profiles_version_check",
+      sql`typeof(${table.version}) = 'integer' and ${table.version} > 0`,
+    ),
   ],
 );
 
