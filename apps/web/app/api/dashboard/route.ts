@@ -6,31 +6,31 @@ import { readDashboardSnapshot } from "../../../lib/dashboard";
 export const dynamic = "force-dynamic";
 
 export function createDashboardResponse(access: DataAccess): Response {
-  try {
-    return Response.json(readDashboardSnapshot(access), {
+  return Response.json(readDashboardSnapshot(access), {
+    headers: { "Cache-Control": "no-store" },
+  });
+}
+
+function dashboardUnavailableResponse(): Response {
+  return Response.json(
+    { status: "error" },
+    {
       headers: { "Cache-Control": "no-store" },
-    });
+      status: 503,
+    },
+  );
+}
+
+export function createDashboardRoute(
+  getAccess: () => DataAccess = getDataAccess,
+): Response {
+  try {
+    return createDashboardResponse(getAccess());
   } catch {
-    return Response.json(
-      { status: "error" },
-      {
-        headers: { "Cache-Control": "no-store" },
-        status: 503,
-      },
-    );
+    return dashboardUnavailableResponse();
   }
 }
 
 export function GET(): Response {
-  try {
-    return createDashboardResponse(getDataAccess());
-  } catch {
-    return Response.json(
-      { status: "error" },
-      {
-        headers: { "Cache-Control": "no-store" },
-        status: 503,
-      },
-    );
-  }
+  return createDashboardRoute();
 }

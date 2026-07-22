@@ -265,39 +265,22 @@ h3 {
 }
 
 .item-heading p,
-.item-meta,
 .item-time,
-.item-footer,
-.path {
+.item-footer {
   margin-bottom: 0;
   color: #829790;
   font-size: 0.78rem;
   line-height: 1.45;
 }
 
-.item-meta,
-.item-time,
-.path {
-  margin-top: 0.95rem;
-}
-
 .item-time {
-  color: #647c74;
+  margin-top: 0.95rem;
+  color: #9fb0ab;
 }
 
 .item-footer {
   margin-top: 1rem;
-  color: #6f8f85;
-}
-
-.mono {
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-}
-
-.path {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  color: #9fb0ab;
 }
 
 .status,
@@ -374,7 +357,7 @@ h3 {
   justify-content: space-between;
   gap: 1rem;
   padding: 2rem 0 0.25rem;
-  color: #587068;
+  color: #9fb0ab;
   font-size: 0.72rem;
   font-weight: 700;
   letter-spacing: 0.08em;

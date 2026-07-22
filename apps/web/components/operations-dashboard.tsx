@@ -2,18 +2,46 @@
 
 import React, { useEffect, useState } from "react";
 
-import type { DashboardSnapshot } from "../lib/dashboard";
+import type {
+  DashboardArchiveJob,
+  DashboardCatalogReviewItem,
+  DashboardDetectedDisc,
+  DashboardEncodeJob,
+  DashboardOpticalDrive,
+  DashboardSectionResult,
+  DashboardSnapshot,
+  DashboardStatus,
+} from "../lib/dashboard";
 
-export type DashboardLoadState =
+export type DashboardSectionLoadState<T> =
   | { status: "loading" }
-  | { status: "error" }
-  | { status: "loaded"; data: DashboardSnapshot };
+  | DashboardSectionResult<T>;
+
+export interface DashboardLoadState {
+  generatedAt?: string;
+  opticalDrives: DashboardSectionLoadState<DashboardOpticalDrive>;
+  detectedDiscs: DashboardSectionLoadState<DashboardDetectedDisc>;
+  archiveJobs: DashboardSectionLoadState<DashboardArchiveJob>;
+  encodeJobs: DashboardSectionLoadState<DashboardEncodeJob>;
+  catalogReview: DashboardSectionLoadState<DashboardCatalogReviewItem>;
+}
+
+function dashboardState(
+  status: "loading" | "error",
+): DashboardLoadState {
+  return {
+    opticalDrives: { status },
+    detectedDiscs: { status },
+    archiveJobs: { status },
+    encodeJobs: { status },
+    catalogReview: { status },
+  };
+}
 
 interface SectionProps<T> {
   title: string;
   eyebrow: string;
-  state: DashboardLoadState;
-  selectItems: (dashboard: DashboardSnapshot) => T[];
+  state: DashboardSectionLoadState<T>;
   emptyMessage: string;
   renderItem: (item: T) => React.ReactNode;
   className?: string;
@@ -52,15 +80,47 @@ function Progress({ value }: { value: number }) {
   );
 }
 
-function StatusBadge({ value }: { value: string }) {
+function StatusBadge({ value }: { value: DashboardStatus }) {
   return <span className={`status status-${value}`}>{displayTerm(value)}</span>;
+}
+
+interface DashboardJobItemProps {
+  title: React.ReactNode;
+  subtitle: string;
+  status: DashboardArchiveJob["status"];
+  progressPercent: number;
+}
+
+function DashboardJobItem({
+  title,
+  subtitle,
+  status,
+  progressPercent,
+}: DashboardJobItemProps) {
+  return (
+    <article className="operation-item">
+      <div className="item-heading">
+        <div>
+          <h3>{title}</h3>
+          <p>{subtitle}</p>
+        </div>
+        <StatusBadge value={status} />
+      </div>
+      <div className="progress-row">
+        <Progress value={progressPercent} />
+        <strong>{progressPercent}%</strong>
+      </div>
+      {status === "failed" ? (
+        <p className="job-error">Worker reported a failure.</p>
+      ) : null}
+    </article>
+  );
 }
 
 function DashboardSection<T>({
   title,
   eyebrow,
   state,
-  selectItems,
   emptyMessage,
   renderItem,
   className = "",
@@ -84,13 +144,12 @@ function DashboardSection<T>({
       </div>
     );
   } else {
-    const items = selectItems(state.data);
-    if (items.length === 0) {
+    if (state.items.length === 0) {
       sectionState = "empty";
       content = <div className="section-message">{emptyMessage}</div>;
     } else {
       sectionState = "populated";
-      content = <div className="item-list">{items.map(renderItem)}</div>;
+      content = <div className="item-list">{state.items.map(renderItem)}</div>;
     }
   }
 
@@ -116,21 +175,17 @@ export function DashboardView({ state }: { state: DashboardLoadState }) {
       <DashboardSection
         title="Optical Drives"
         eyebrow="Hardware"
-        state={state}
-        selectItems={(dashboard) => dashboard.opticalDrives}
+        state={state.opticalDrives}
         emptyMessage="No Optical Drives have been discovered."
         renderItem={(drive) => (
           <article className="operation-item" key={drive.id}>
             <div className="item-heading">
               <div>
                 <h3>{drive.displayName}</h3>
-                <p className="mono">{drive.devicePath}</p>
+                <p>{drive.hardwareName ?? "Hardware details unavailable"}</p>
               </div>
               <StatusBadge value={drive.state} />
             </div>
-            <p className="item-meta">
-              {drive.hardwareName ?? "Hardware details unavailable"}
-            </p>
             <p className="item-time">
               Last seen {formatTimestamp(drive.lastSeenAt)}
             </p>
@@ -141,8 +196,7 @@ export function DashboardView({ state }: { state: DashboardLoadState }) {
       <DashboardSection
         title="Detected Discs"
         eyebrow="Intake"
-        state={state}
-        selectItems={(dashboard) => dashboard.detectedDiscs}
+        state={state.detectedDiscs}
         emptyMessage="No Detected Discs are currently known."
         renderItem={(disc) => (
           <article className="operation-item" key={disc.id}>
@@ -164,26 +218,16 @@ export function DashboardView({ state }: { state: DashboardLoadState }) {
       <DashboardSection
         title="Archive Jobs"
         eyebrow="Preservation queue"
-        state={state}
-        selectItems={(dashboard) => dashboard.archiveJobs}
+        state={state.archiveJobs}
         emptyMessage="No Archive Jobs are recorded."
         renderItem={(job) => (
-          <article className="operation-item" key={job.id}>
-            <div className="item-heading">
-              <div>
-                <h3>{job.discLabel}</h3>
-                <p>{job.opticalDriveName}</p>
-              </div>
-              <StatusBadge value={job.status} />
-            </div>
-            <div className="progress-row">
-              <Progress value={job.progressPercent} />
-              <strong>{job.progressPercent}%</strong>
-            </div>
-            {job.errorMessage ? (
-              <p className="job-error">{job.errorMessage}</p>
-            ) : null}
-          </article>
+          <DashboardJobItem
+            key={job.id}
+            title={job.discLabel}
+            subtitle={job.opticalDriveName}
+            status={job.status}
+            progressPercent={job.progressPercent}
+          />
         )}
       />
 
@@ -191,30 +235,16 @@ export function DashboardView({ state }: { state: DashboardLoadState }) {
         title="Encode Jobs"
         eyebrow="Media queue"
         className="wide-section"
-        state={state}
-        selectItems={(dashboard) => dashboard.encodeJobs}
+        state={state.encodeJobs}
         emptyMessage="No Encode Jobs are recorded."
         renderItem={(job) => (
-          <article className="operation-item" key={job.id}>
-            <div className="item-heading">
-              <div>
-                <h3>
-                  {job.mediaTitle}
-                  {job.mediaYear ? ` (${job.mediaYear})` : ""}
-                </h3>
-                <p>{job.encodingProfileName}</p>
-              </div>
-              <StatusBadge value={job.status} />
-            </div>
-            <div className="progress-row">
-              <Progress value={job.progressPercent} />
-              <strong>{job.progressPercent}%</strong>
-            </div>
-            <p className="mono path">{job.outputPath}</p>
-            {job.errorMessage ? (
-              <p className="job-error">{job.errorMessage}</p>
-            ) : null}
-          </article>
+          <DashboardJobItem
+            key={job.id}
+            title={`${job.mediaTitle}${job.mediaYear ? ` (${job.mediaYear})` : ""}`}
+            subtitle={job.encodingProfileName}
+            status={job.status}
+            progressPercent={job.progressPercent}
+          />
         )}
       />
 
@@ -222,8 +252,7 @@ export function DashboardView({ state }: { state: DashboardLoadState }) {
         title="Catalog Review"
         eyebrow="Needs attention"
         className="wide-section"
-        state={state}
-        selectItems={(dashboard) => dashboard.catalogReview}
+        state={state.catalogReview}
         emptyMessage="No Original Disc Archives need catalog review."
         renderItem={(archive) => (
           <article className="operation-item review-item" key={archive.id}>
@@ -239,7 +268,6 @@ export function DashboardView({ state }: { state: DashboardLoadState }) {
                 Review
               </span>
             </div>
-            <p className="mono path">{archive.archivePath}</p>
             <p className="item-time">
               Archived {formatTimestamp(archive.archivedAt)}
             </p>
@@ -251,12 +279,14 @@ export function DashboardView({ state }: { state: DashboardLoadState }) {
 }
 
 export function OperationsDashboard() {
-  const [state, setState] = useState<DashboardLoadState>({ status: "loading" });
+  const [state, setState] = useState<DashboardLoadState>(
+    () => dashboardState("loading"),
+  );
   const [requestNumber, setRequestNumber] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
-    setState({ status: "loading" });
+    setState(dashboardState("loading"));
 
     fetch("/api/dashboard", {
       cache: "no-store",
@@ -270,12 +300,12 @@ export function OperationsDashboard() {
       })
       .then((data) => {
         if (!cancelled) {
-          setState({ status: "loaded", data });
+          setState(data);
         }
       })
       .catch(() => {
         if (!cancelled) {
-          setState({ status: "error" });
+          setState(dashboardState("error"));
         }
       });
 
@@ -283,6 +313,19 @@ export function OperationsDashboard() {
       cancelled = true;
     };
   }, [requestNumber]);
+
+  const sectionStates = [
+    state.opticalDrives.status,
+    state.detectedDiscs.status,
+    state.archiveJobs.status,
+    state.encodeJobs.status,
+    state.catalogReview.status,
+  ];
+  const connectionStatus = sectionStates.includes("loading")
+    ? "loading"
+    : sectionStates.includes("error")
+      ? "error"
+      : "loaded";
 
   return (
     <main className="dashboard-shell">
@@ -297,19 +340,19 @@ export function OperationsDashboard() {
           </p>
         </div>
         <div className="dashboard-controls">
-          <span className={`connection-state connection-${state.status}`}>
+          <span className={`connection-state connection-${connectionStatus}`}>
             <span aria-hidden="true" />
-            {state.status === "loaded"
+            {connectionStatus === "loaded"
               ? "Database connected"
-              : state.status === "error"
-                ? "Database unavailable"
+              : connectionStatus === "error"
+                ? "Some data unavailable"
                 : "Refreshing state"}
           </span>
           <button
             type="button"
             onClick={() => setRequestNumber((value) => value + 1)}
           >
-            {state.status === "error" ? "Try again" : "Refresh"}
+            {connectionStatus === "error" ? "Try again" : "Refresh"}
           </button>
         </div>
       </header>
@@ -318,8 +361,8 @@ export function OperationsDashboard() {
 
       <footer className="dashboard-footer">
         <span>Local control plane</span>
-        {state.status === "loaded" ? (
-          <span>Updated {formatTimestamp(state.data.generatedAt)}</span>
+        {state.generatedAt ? (
+          <span>Updated {formatTimestamp(state.generatedAt)}</span>
         ) : null}
       </footer>
     </main>
