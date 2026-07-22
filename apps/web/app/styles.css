@@ -257,6 +257,15 @@ h2 {
   align-items: flex-start;
 }
 
+.item-heading > div {
+  min-width: 0;
+}
+
+.item-heading h3,
+.item-heading p {
+  overflow-wrap: anywhere;
+}
+
 h3 {
   margin-bottom: 0.28rem;
   color: #eef4f1;
