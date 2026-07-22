@@ -4,6 +4,8 @@
 
 The project is intentionally plain Python with no third-party Python package dependencies. The heavy work is done by system tools such as HandBrake and ffmpeg.
 
+The existing CLI remains available while a Dockerized TypeScript replacement is developed alongside it. The initial workspace contains a Next.js control plane and separate archive and encode worker runtimes.
+
 ## Requirements
 
 - Python 3.9 or newer
@@ -227,6 +229,76 @@ python3 -B -m unittest discover -s tests
 
 The tests cover pure planning logic and CLI workflow boundaries, including archive identity checks, atomic sidecar updates, queue discovery, interrupted encodes, final-file publication, and progress streaming. They do not require a DVD drive.
 
+### TypeScript runtime
+
+Install the workspace dependencies and validate the TypeScript skeleton with:
+
+```bash
+pnpm install
+pnpm check
+pnpm build
+```
+
+The TypeScript runtimes use Node.js 22.23.1 and pnpm 11.15.1, matching the
+Docker images and workspace metadata. The supported Node range starts at
+22.12.0 because that is the minimum Node 22 release supported by Vite 8.
+
+The shared `@rip-dvd/config` package validates the runtime environment for the
+web app and both workers. Copy `.env.example` to `.env` when overriding the
+Docker Compose defaults. Compose fixes the database and library paths to
+`/data/rip-dvd.sqlite`, `/media/movies`, and `/media/originals` so they always
+remain inside the declared persistent mounts. Direct, non-Compose launches can
+still set those three `RIP_DVD_*_PATH` variables through the shared loader.
+
+Build and start all three runtimes with:
+
+```bash
+docker compose up --build
+```
+
+Then open <http://localhost:3000>. Compose stores application data, encoded
+media, and original backups in the project-scoped `rip-dvd-data`,
+`rip-dvd-media`, and `rip-dvd-originals` named volumes by default. Their mount
+points are owned by the non-root runtime user (UID/GID 1000), so the archive
+and encode workers can write their outputs without running as root.
+
+To use host libraries instead, set `RIP_DVD_MEDIA_LIBRARY_HOST_PATH` and
+`RIP_DVD_ORIGINALS_LIBRARY_HOST_PATH`. On native Linux, create new bind-source
+directories with ownership that matches the container user before starting
+Compose:
+
+```bash
+sudo install -d -o 1000 -g 1000 -m 0775 .local/media .local/originals
+```
+
+Existing library directories should keep their intended ownership; grant UID
+1000 write access through their owner, group, or ACL rather than changing them
+blindly. The web runtime mounts both libraries read-only, while the archive
+worker writes originals and the encode worker writes media.
+
+After building the worker images, exercise their configured image commands and
+output mounts as the non-root user with fresh named-volume and bind-mount
+Compose projects:
+
+```bash
+pnpm test:compose-workers
+```
+
+The default `all` mode first checks project-scoped named volumes, then creates
+fresh temporary host directories, initializes only those directories to
+UID/GID 1000, and checks native-Linux-style bind writes. Run
+`sh scripts/smoke-compose-workers.sh named` or replace `named` with `bind` to
+exercise one mode directly. Each mode adds collision-resistant entropy to its
+project name, including when `COMPOSE_PROJECT_NAME` supplies a readable base,
+and refuses to run when Docker already contains resources for the resolved
+name. The preflight checks both Compose labels and exact derived resource names
+before creating anything.
+The smoke command removes only its short-lived write-probe containers and
+deliberately retains the worker containers, uniquely named volumes, and
+temporary bind directories for non-destructive inspection.
+
+The archive worker image includes DVD discovery tools and the encode worker image includes HandBrake and ffmpeg. Optical-device passthrough is intentionally not enabled by the scaffold; add the appropriate Linux device mapping when the archive workflow is implemented.
+
 ## Project Layout
 
 - `rip-dvd`: executable command wrapper
@@ -236,3 +308,10 @@ The tests cover pure planning logic and CLI workflow boundaries, including archi
 - `rip_dvd/output.py`: logging and prompts
 - `tests/test_core.py`: unit tests for the pure logic
 - `tests/test_cli.py`: archive and encode queue workflow regression tests
+- `apps/web`: Next.js web control plane
+- `apps/archive-worker`: archive-worker process entry point
+- `apps/encode-worker`: encode-worker process entry point
+- `packages/config`: shared runtime environment loader
+- `packages/worker-runtime`: shared worker heartbeat and signal lifecycle
+- `docker/runtime.Dockerfile`: shared multi-target definition for three role-specific images
+- `compose.yaml`: local three-service deployment
