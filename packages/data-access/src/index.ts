@@ -1,5 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import {
+  closeSync,
+  mkdirSync,
+  openSync,
+  statSync,
+  unlinkSync,
+} from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
@@ -18,16 +24,42 @@ import {
   opticalDrives,
   originalDiscArchives,
 } from "./internal/schema.js";
+import {
+  createJobQueueController,
+  type JobQueueAdapter,
+} from "./internal/job-queue.js";
+import {
+  DomainInvariantError,
+  InvalidStatusTransitionError,
+  RecordNotFoundError,
+} from "./errors.js";
 import type {
+  ArchiveJobClaimToken,
+  ArchiveJobId,
   ArchiveJob,
   DataAccess,
+  DetectedDiscId,
   DetectedDiscStatus,
+  DiscSelection,
+  DiscSelectionId,
+  EncodeJobClaimToken,
+  EncodeJobId,
   EncodeJob,
+  EncodingProfileId,
+  MediaItemId,
+  OpticalDriveId,
+  OriginalDiscArchiveId,
+  RunningArchiveJob,
+  RunningEncodeJob,
 } from "./types.js";
 
 export type * from "./types.js";
+export * from "./errors.js";
 
 const BUSY_TIMEOUT_MS = 5_000;
+const MIGRATION_LOCK_TIMEOUT_MS = 15_000;
+const MIGRATION_LOCK_STALE_MS = 300_000;
+const MIGRATION_LOCK_POLL_MS = 10;
 const DEFAULT_MIGRATIONS_FOLDER = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../drizzle",
@@ -43,20 +75,6 @@ const detectedDiscTransitions: Readonly<
   rejected: ["detected"],
 };
 
-export class RecordNotFoundError extends Error {
-  constructor(recordType: string, id: string) {
-    super(`${recordType} not found: ${id}`);
-    this.name = "RecordNotFoundError";
-  }
-}
-
-export class InvalidStatusTransitionError extends Error {
-  constructor(recordType: string, from: string, to: string) {
-    super(`Invalid ${recordType} status transition: ${from} -> ${to}`);
-    this.name = "InvalidStatusTransitionError";
-  }
-}
-
 function requireRow<T>(row: T | undefined, recordType: string, id: string): T {
   if (!row) {
     throw new RecordNotFoundError(recordType, id);
@@ -68,20 +86,89 @@ function requireRow<T>(row: T | undefined, recordType: string, id: string): T {
 function requireNonEmpty(value: string, name: string): string {
   const normalized = value.trim();
   if (!normalized) {
-    throw new Error(`${name} must not be empty`);
+    throw new DomainInvariantError(`${name} must not be empty`);
   }
   return normalized;
 }
 
-function requireProgress(progressPercent: number): number {
-  if (
-    !Number.isInteger(progressPercent) ||
-    progressPercent < 0 ||
-    progressPercent > 100
-  ) {
-    throw new Error("progressPercent must be an integer between 0 and 100");
+function newId<Id extends string>(): Id {
+  return randomUUID() as Id;
+}
+
+function asRunningArchiveJob(job: ArchiveJob): RunningArchiveJob {
+  if (job.status !== "running" || job.claimToken === null) {
+    throw new DomainInvariantError("Claimed Archive Job is not running");
   }
-  return progressPercent;
+  return job as RunningArchiveJob;
+}
+
+function asRunningEncodeJob(job: EncodeJob): RunningEncodeJob {
+  if (job.status !== "running" || job.claimToken === null) {
+    throw new DomainInvariantError("Claimed Encode Job is not running");
+  }
+  return job as RunningEncodeJob;
+}
+
+function toDiscSelection(
+  row: typeof discSelections.$inferSelect,
+): DiscSelection {
+  const common = {
+    id: row.id,
+    originalDiscArchiveId: row.originalDiscArchiveId,
+    mediaItemId: row.mediaItemId,
+    sourceKey: row.sourceKey,
+    label: row.label,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+
+  switch (row.kind) {
+    case "main_feature":
+      if (
+        row.titleNumber !== null ||
+        row.chapterStart !== null ||
+        row.chapterEnd !== null
+      ) {
+        throw new DomainInvariantError("Invalid main feature selection shape");
+      }
+      return {
+        ...common,
+        kind: row.kind,
+        titleNumber: null,
+        chapterStart: null,
+        chapterEnd: null,
+      };
+    case "dvd_title":
+      if (
+        row.titleNumber === null ||
+        row.chapterStart !== null ||
+        row.chapterEnd !== null
+      ) {
+        throw new DomainInvariantError("Invalid DVD title selection shape");
+      }
+      return {
+        ...common,
+        kind: row.kind,
+        titleNumber: row.titleNumber,
+        chapterStart: null,
+        chapterEnd: null,
+      };
+    case "dvd_chapters":
+      if (
+        row.titleNumber === null ||
+        row.chapterStart === null ||
+        row.chapterEnd === null
+      ) {
+        throw new DomainInvariantError("Invalid DVD chapter selection shape");
+      }
+      return {
+        ...common,
+        kind: row.kind,
+        titleNumber: row.titleNumber,
+        chapterStart: row.chapterStart,
+        chapterEnd: row.chapterEnd,
+      };
+  }
 }
 
 export interface CreateDataAccessOptions {
@@ -89,10 +176,65 @@ export interface CreateDataAccessOptions {
   migrationsFolder?: string;
 }
 
+function acquireMigrationLock(databasePath: string): () => void {
+  const lockPath = `${resolve(databasePath)}.migrate.lock`;
+  const deadline = Date.now() + MIGRATION_LOCK_TIMEOUT_MS;
+  const sleepState = new Int32Array(new SharedArrayBuffer(4));
+
+  while (true) {
+    try {
+      const descriptor = openSync(lockPath, "wx", 0o600);
+      let released = false;
+      return () => {
+        if (released) {
+          return;
+        }
+        released = true;
+        closeSync(descriptor);
+        try {
+          unlinkSync(lockPath);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+            throw error;
+          }
+        }
+      };
+    } catch (error) {
+      const fileError = error as NodeJS.ErrnoException;
+      if (fileError.code !== "EEXIST") {
+        throw error;
+      }
+      try {
+        const age = Date.now() - statSync(lockPath).mtimeMs;
+        if (age >= MIGRATION_LOCK_STALE_MS) {
+          unlinkSync(lockPath);
+          continue;
+        }
+      } catch (statError) {
+        if ((statError as NodeJS.ErrnoException).code === "ENOENT") {
+          continue;
+        }
+        throw statError;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `Timed out waiting for SQLite migration lock: ${lockPath}`,
+        );
+      }
+      Atomics.wait(sleepState, 0, 0, MIGRATION_LOCK_POLL_MS);
+    }
+  }
+}
+
 function openMigratedDatabase(databasePath: string, migrationsFolder: string) {
-  const sqlite = new DatabaseSync(databasePath);
+  const releaseMigrationLock =
+    databasePath === ":memory:"
+      ? () => undefined
+      : acquireMigrationLock(databasePath);
+  let sqlite: DatabaseSync | undefined;
 
   try {
+    sqlite = new DatabaseSync(databasePath);
     sqlite.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
     sqlite.exec("PRAGMA foreign_keys = ON");
     const journal = sqlite.prepare("PRAGMA journal_mode = WAL").get() as {
@@ -107,9 +249,11 @@ function openMigratedDatabase(databasePath: string, migrationsFolder: string) {
 
     const database = drizzle({ client: sqlite });
     migrate(database, { migrationsFolder });
+    releaseMigrationLock();
     return { database, sqlite };
   } catch (error) {
-    sqlite.close();
+    sqlite?.close();
+    releaseMigrationLock();
     throw error;
   }
 }
@@ -132,88 +276,210 @@ export function createDataAccess({
     return new Date();
   }
 
-  function findArchiveJob(id: string): ArchiveJob {
-    return requireRow(
+  const archiveJobAdapter = {
+    recordType: "archive job",
+    find: (id) =>
       database.select().from(archiveJobs).where(eq(archiveJobs.id, id)).get(),
-      "archive job",
-      id,
-    );
-  }
-
-  function findEncodeJob(id: string): EncodeJob {
-    return requireRow(
-      database.select().from(encodeJobs).where(eq(encodeJobs.id, id)).get(),
-      "encode job",
-      id,
-    );
-  }
-
-  function requeueArchiveJob(id: string): ArchiveJob {
-    const current = findArchiveJob(id);
-    if (current.status !== "failed" && current.status !== "completed") {
-      throw new InvalidStatusTransitionError(
-        "archive job",
-        current.status,
-        "queued",
-      );
-    }
-
-    return requireRow(
+    list: (statuses) =>
       database
+        .select()
+        .from(archiveJobs)
+        .where(
+          statuses?.length ? inArray(archiveJobs.status, statuses) : undefined,
+        )
+        .orderBy(desc(archiveJobs.priority), asc(archiveJobs.createdAt))
+        .all(),
+    claim: (workerId, token, timestamp) => {
+      const claimed = database
         .update(archiveJobs)
         .set({
-          status: "queued",
-          progressPercent: 0,
-          claimedBy: null,
-          claimedAt: null,
-          startedAt: null,
-          completedAt: null,
+          status: "running",
+          claimedBy: workerId,
+          claimToken: token,
+          claimedAt: timestamp,
+          startedAt: timestamp,
           errorMessage: null,
-          updatedAt: now(),
+          updatedAt: timestamp,
         })
-        .where(and(eq(archiveJobs.id, id), eq(archiveJobs.status, current.status)))
+        .where(
+          and(
+            eq(archiveJobs.status, "queued"),
+            eq(
+              archiveJobs.id,
+              sql<ArchiveJobId>`(select ${archiveJobs.id} from ${archiveJobs} where ${archiveJobs.status} = 'queued' order by ${archiveJobs.priority} desc, ${archiveJobs.createdAt} asc, ${archiveJobs.id} asc limit 1)`,
+            ),
+          ),
+        )
+        .returning()
+        .get();
+      return claimed ? asRunningArchiveJob(claimed) : undefined;
+    },
+    updateAttempt: (claim, update, originalDiscArchiveId) => {
+      const attemptCondition = and(
+        eq(archiveJobs.id, claim.id),
+        eq(archiveJobs.status, "running"),
+        eq(archiveJobs.claimToken, claim.claimToken),
+      );
+      if (update.status !== "completed") {
+        return database
+          .update(archiveJobs)
+          .set(update)
+          .where(attemptCondition)
+          .returning()
+          .get();
+      }
+      if (!originalDiscArchiveId) {
+        throw new DomainInvariantError(
+          "Completing an Archive Job requires an Original Disc Archive",
+        );
+      }
+
+      return database.transaction((transaction) => {
+        const current = transaction
+          .select()
+          .from(archiveJobs)
+          .where(attemptCondition)
+          .get();
+        if (!current) {
+          return undefined;
+        }
+        const matchingArchive = transaction
+          .select({ id: originalDiscArchives.id })
+          .from(originalDiscArchives)
+          .where(
+            and(
+              eq(originalDiscArchives.id, originalDiscArchiveId),
+              eq(
+                originalDiscArchives.detectedDiscId,
+                current.detectedDiscId,
+              ),
+            ),
+          )
+          .get();
+        if (!matchingArchive) {
+          throw new DomainInvariantError(
+            "Archive Job result must belong to the job's Detected Disc",
+          );
+        }
+        return transaction
+          .update(archiveJobs)
+          .set({ ...update, originalDiscArchiveId })
+          .where(attemptCondition)
+          .returning()
+          .get();
+      });
+    },
+    requeue: (id, expectedStatus, update) =>
+      database
+        .update(archiveJobs)
+        .set(update)
+        .where(
+          and(
+            eq(archiveJobs.id, id),
+            eq(archiveJobs.status, expectedStatus),
+          ),
+        )
         .returning()
         .get(),
-      "archive job",
-      id,
-    );
-  }
+  } satisfies JobQueueAdapter<
+    ArchiveJob,
+    RunningArchiveJob,
+    ArchiveJobId,
+    ArchiveJobClaimToken,
+    OriginalDiscArchiveId,
+    void
+  >;
 
-  function requeueEncodeJob(
-    id: string,
-    updates: { outputPath?: string; priority?: number } = {},
-  ): EncodeJob {
-    const current = findEncodeJob(id);
-    if (current.status !== "failed" && current.status !== "completed") {
-      throw new InvalidStatusTransitionError(
-        "encode job",
-        current.status,
-        "queued",
-      );
-    }
+  type EncodeRequeueOptions = {
+    outputPath?: string;
+    priority?: number;
+  };
 
-    return requireRow(
+  const encodeJobAdapter = {
+    recordType: "encode job",
+    find: (id) =>
+      database.select().from(encodeJobs).where(eq(encodeJobs.id, id)).get(),
+    list: (statuses) =>
+      database
+        .select()
+        .from(encodeJobs)
+        .where(
+          statuses?.length ? inArray(encodeJobs.status, statuses) : undefined,
+        )
+        .orderBy(desc(encodeJobs.priority), asc(encodeJobs.createdAt))
+        .all(),
+    claim: (workerId, token, timestamp) => {
+      const claimed = database
+        .update(encodeJobs)
+        .set({
+          status: "running",
+          claimedBy: workerId,
+          claimToken: token,
+          claimedAt: timestamp,
+          startedAt: timestamp,
+          errorMessage: null,
+          updatedAt: timestamp,
+        })
+        .where(
+          and(
+            eq(encodeJobs.status, "queued"),
+            eq(
+              encodeJobs.id,
+              sql<EncodeJobId>`(select ${encodeJobs.id} from ${encodeJobs} where ${encodeJobs.status} = 'queued' order by ${encodeJobs.priority} desc, ${encodeJobs.createdAt} asc, ${encodeJobs.id} asc limit 1)`,
+            ),
+          ),
+        )
+        .returning()
+        .get();
+      return claimed ? asRunningEncodeJob(claimed) : undefined;
+    },
+    updateAttempt: (claim, update) =>
+      database
+        .update(encodeJobs)
+        .set(update)
+        .where(
+          and(
+            eq(encodeJobs.id, claim.id),
+            eq(encodeJobs.status, "running"),
+            eq(encodeJobs.claimToken, claim.claimToken),
+          ),
+        )
+        .returning()
+        .get(),
+    requeue: (id, expectedStatus, update, options) =>
       database
         .update(encodeJobs)
         .set({
-          status: "queued",
-          progressPercent: 0,
-          claimedBy: null,
-          claimedAt: null,
-          startedAt: null,
-          completedAt: null,
-          errorMessage: null,
-          outputPath: updates.outputPath,
-          priority: updates.priority,
-          updatedAt: now(),
+          ...update,
+          outputPath: options?.outputPath,
+          priority: options?.priority,
         })
-        .where(and(eq(encodeJobs.id, id), eq(encodeJobs.status, current.status)))
+        .where(
+          and(eq(encodeJobs.id, id), eq(encodeJobs.status, expectedStatus)),
+        )
         .returning()
         .get(),
-      "encode job",
-      id,
-    );
-  }
+  } satisfies JobQueueAdapter<
+    EncodeJob,
+    RunningEncodeJob,
+    EncodeJobId,
+    EncodeJobClaimToken,
+    void,
+    EncodeRequeueOptions
+  >;
+
+  const archiveJobQueue = createJobQueueController({
+    adapter: archiveJobAdapter,
+    createToken: () => newId<ArchiveJobClaimToken>(),
+    now,
+    requeueFrom: ["failed"],
+  });
+  const encodeJobQueue = createJobQueueController({
+    adapter: encodeJobAdapter,
+    createToken: () => newId<EncodeJobClaimToken>(),
+    now,
+    requeueFrom: ["failed", "completed"],
+  });
 
   const access: DataAccess = {
     checkHealth() {
@@ -242,7 +508,7 @@ export function createDataAccess({
         const inserted = database
           .insert(opticalDrives)
           .values({
-            id: randomUUID(),
+            id: newId<OpticalDriveId>(),
             devicePath,
             displayName: input.displayName,
             vendor: input.vendor,
@@ -286,7 +552,7 @@ export function createDataAccess({
         const inserted = database
           .insert(detectedDiscs)
           .values({
-            id: randomUUID(),
+            id: newId<DetectedDiscId>(),
             opticalDriveId: input.opticalDriveId,
             discKind: input.discKind,
             fingerprint,
@@ -362,16 +628,66 @@ export function createDataAccess({
       createOriginalDiscArchive(input) {
         const timestamp = now();
         return database.transaction((transaction) => {
+          const disc = requireRow(
+            transaction
+              .select()
+              .from(detectedDiscs)
+              .where(eq(detectedDiscs.id, input.detectedDiscId))
+              .get(),
+            "detected disc",
+            input.detectedDiscId,
+          );
+          if (disc.status !== "approved") {
+            throw new InvalidStatusTransitionError(
+              "detected disc",
+              disc.status,
+              "archived",
+            );
+          }
+          const fingerprint = requireNonEmpty(
+            input.fingerprint,
+            "fingerprint",
+          );
+          if (disc.discKind !== input.discKind) {
+            throw new DomainInvariantError(
+              "Original Disc Archive kind must match its Detected Disc",
+            );
+          }
+          if (disc.fingerprint !== fingerprint) {
+            throw new DomainInvariantError(
+              "Original Disc Archive fingerprint must match its Detected Disc",
+            );
+          }
+
+          const transitioned = transaction
+            .update(detectedDiscs)
+            .set({ status: "archived", updatedAt: timestamp })
+            .where(
+              and(
+                eq(detectedDiscs.id, input.detectedDiscId),
+                eq(detectedDiscs.status, "approved"),
+              ),
+            )
+            .returning({ id: detectedDiscs.id })
+            .get();
+          if (!transitioned) {
+            throw new InvalidStatusTransitionError(
+              "detected disc",
+              "approved",
+              "archived",
+            );
+          }
+
           const archive = requireRow(
             transaction
               .insert(originalDiscArchives)
               .values({
-                id: randomUUID(),
+                id: newId<OriginalDiscArchiveId>(),
                 detectedDiscId: input.detectedDiscId,
                 discKind: input.discKind,
                 archiveFormat: input.archiveFormat,
                 archivePath: requireNonEmpty(input.archivePath, "archivePath"),
-                fingerprint: requireNonEmpty(input.fingerprint, "fingerprint"),
+                fingerprint,
                 sizeBytes: input.sizeBytes,
                 archivedAt: timestamp,
                 createdAt: timestamp,
@@ -382,11 +698,6 @@ export function createDataAccess({
             "original disc archive",
             input.detectedDiscId,
           );
-          transaction
-            .update(detectedDiscs)
-            .set({ status: "archived", updatedAt: timestamp })
-            .where(eq(detectedDiscs.id, input.detectedDiscId))
-            .run();
           return archive;
         });
       },
@@ -401,7 +712,7 @@ export function createDataAccess({
 
       createMediaItem(input) {
         const timestamp = now();
-        const id = randomUUID();
+        const id = newId<MediaItemId>();
         return requireRow(
           database
             .insert(mediaItems)
@@ -437,27 +748,41 @@ export function createDataAccess({
 
       createDiscSelection(input) {
         const timestamp = now();
-        const id = randomUUID();
-        return requireRow(
-          database
-            .insert(discSelections)
-            .values({
-              id,
-              originalDiscArchiveId: input.originalDiscArchiveId,
-              mediaItemId: input.mediaItemId,
-              sourceKey: requireNonEmpty(input.sourceKey, "sourceKey"),
-              kind: input.kind,
-              titleNumber: input.titleNumber,
-              chapterStart: input.chapterStart,
-              chapterEnd: input.chapterEnd,
-              label: input.label,
-              createdAt: timestamp,
-              updatedAt: timestamp,
-            })
-            .returning()
-            .get(),
-          "disc selection",
-          id,
+        const id = newId<DiscSelectionId>();
+        const coordinates =
+          input.kind === "main_feature"
+            ? { titleNumber: null, chapterStart: null, chapterEnd: null }
+            : input.kind === "dvd_title"
+              ? {
+                  titleNumber: input.titleNumber,
+                  chapterStart: null,
+                  chapterEnd: null,
+                }
+              : {
+                  titleNumber: input.titleNumber,
+                  chapterStart: input.chapterStart,
+                  chapterEnd: input.chapterEnd,
+                };
+        return toDiscSelection(
+          requireRow(
+            database
+              .insert(discSelections)
+              .values({
+                id,
+                originalDiscArchiveId: input.originalDiscArchiveId,
+                mediaItemId: input.mediaItemId,
+                sourceKey: requireNonEmpty(input.sourceKey, "sourceKey"),
+                kind: input.kind,
+                ...coordinates,
+                label: input.label,
+                createdAt: timestamp,
+                updatedAt: timestamp,
+              })
+              .returning()
+              .get(),
+            "disc selection",
+            id,
+          ),
         );
       },
 
@@ -466,12 +791,13 @@ export function createDataAccess({
           .select()
           .from(discSelections)
           .orderBy(asc(discSelections.createdAt), asc(discSelections.id))
-          .all();
+          .all()
+          .map(toDiscSelection);
       },
 
       createEncodingProfile(input) {
         const timestamp = now();
-        const id = randomUUID();
+        const id = newId<EncodingProfileId>();
         return requireRow(
           database
             .insert(encodingProfiles)
@@ -492,11 +818,32 @@ export function createDataAccess({
         );
       },
 
+      findEncodingProfile(input) {
+        const key = requireNonEmpty(input.key, "key");
+        return (
+          database
+            .select()
+            .from(encodingProfiles)
+            .where(
+              and(
+                eq(encodingProfiles.mediaDomain, input.mediaDomain),
+                eq(encodingProfiles.key, key),
+                eq(encodingProfiles.version, input.version),
+              ),
+            )
+            .get() ?? null
+        );
+      },
+
       listEncodingProfiles() {
         return database
           .select()
           .from(encodingProfiles)
-          .orderBy(asc(encodingProfiles.key), asc(encodingProfiles.version))
+          .orderBy(
+            asc(encodingProfiles.mediaDomain),
+            asc(encodingProfiles.key),
+            asc(encodingProfiles.version),
+          )
           .all();
       },
     },
@@ -507,7 +854,7 @@ export function createDataAccess({
         database
           .insert(archiveJobs)
           .values({
-            id: randomUUID(),
+            id: newId<ArchiveJobId>(),
             detectedDiscId: input.detectedDiscId,
             priority: input.priority ?? 0,
             createdAt: timestamp,
@@ -526,121 +873,12 @@ export function createDataAccess({
         );
       },
 
-      claimNext(workerId) {
-        const timestamp = now();
-        return (
-          database
-            .update(archiveJobs)
-            .set({
-              status: "running",
-              claimedBy: requireNonEmpty(workerId, "workerId"),
-              claimedAt: timestamp,
-              startedAt: timestamp,
-              errorMessage: null,
-              updatedAt: timestamp,
-            })
-            .where(
-              and(
-                eq(archiveJobs.status, "queued"),
-                eq(
-                  archiveJobs.id,
-                  sql<string>`(select ${archiveJobs.id} from ${archiveJobs} where ${archiveJobs.status} = 'queued' order by ${archiveJobs.priority} desc, ${archiveJobs.createdAt} asc, ${archiveJobs.id} asc limit 1)`,
-                ),
-              ),
-            )
-            .returning()
-            .get() ?? null
-        );
-      },
-
-      list(statuses) {
-        return database
-          .select()
-          .from(archiveJobs)
-          .where(statuses?.length ? inArray(archiveJobs.status, statuses) : undefined)
-          .orderBy(desc(archiveJobs.priority), asc(archiveJobs.createdAt))
-          .all();
-      },
-
-      updateProgress(id, progressPercent) {
-        const current = findArchiveJob(id);
-        if (current.status !== "running") {
-          throw new InvalidStatusTransitionError(
-            "archive job",
-            current.status,
-            "running progress",
-          );
-        }
-        return requireRow(
-          database
-            .update(archiveJobs)
-            .set({
-              progressPercent: requireProgress(progressPercent),
-              updatedAt: now(),
-            })
-            .where(and(eq(archiveJobs.id, id), eq(archiveJobs.status, "running")))
-            .returning()
-            .get(),
-          "archive job",
-          id,
-        );
-      },
-
-      complete(id, originalDiscArchiveId) {
-        const current = findArchiveJob(id);
-        if (current.status !== "running") {
-          throw new InvalidStatusTransitionError(
-            "archive job",
-            current.status,
-            "completed",
-          );
-        }
-        const timestamp = now();
-        return requireRow(
-          database
-            .update(archiveJobs)
-            .set({
-              status: "completed",
-              progressPercent: 100,
-              originalDiscArchiveId,
-              completedAt: timestamp,
-              errorMessage: null,
-              updatedAt: timestamp,
-            })
-            .where(and(eq(archiveJobs.id, id), eq(archiveJobs.status, "running")))
-            .returning()
-            .get(),
-          "archive job",
-          id,
-        );
-      },
-
-      fail(id, errorMessage) {
-        const current = findArchiveJob(id);
-        if (current.status !== "running") {
-          throw new InvalidStatusTransitionError(
-            "archive job",
-            current.status,
-            "failed",
-          );
-        }
-        return requireRow(
-          database
-            .update(archiveJobs)
-            .set({
-              status: "failed",
-              errorMessage: requireNonEmpty(errorMessage, "errorMessage"),
-              updatedAt: now(),
-            })
-            .where(and(eq(archiveJobs.id, id), eq(archiveJobs.status, "running")))
-            .returning()
-            .get(),
-          "archive job",
-          id,
-        );
-      },
-
-      requeue: requeueArchiveJob,
+      claimNext: archiveJobQueue.claimNext,
+      list: archiveJobQueue.list,
+      updateProgress: archiveJobQueue.updateProgress,
+      complete: archiveJobQueue.complete,
+      fail: archiveJobQueue.fail,
+      requeue: archiveJobQueue.requeue,
     },
 
     encodeJobs: {
@@ -649,7 +887,7 @@ export function createDataAccess({
         database
           .insert(encodeJobs)
           .values({
-            id: randomUUID(),
+            id: newId<EncodeJobId>(),
             discSelectionId: input.discSelectionId,
             encodingProfileId: input.encodingProfileId,
             outputPath: requireNonEmpty(input.outputPath, "outputPath"),
@@ -677,7 +915,7 @@ export function createDataAccess({
           `${input.discSelectionId}/${input.encodingProfileId}`,
         );
         if (existing.status === "failed" || existing.status === "completed") {
-          return requeueEncodeJob(existing.id, {
+          return encodeJobQueue.requeue(existing.id, {
             outputPath: requireNonEmpty(input.outputPath, "outputPath"),
             priority: input.priority ?? 0,
           });
@@ -685,120 +923,12 @@ export function createDataAccess({
         return existing;
       },
 
-      claimNext(workerId) {
-        const timestamp = now();
-        return (
-          database
-            .update(encodeJobs)
-            .set({
-              status: "running",
-              claimedBy: requireNonEmpty(workerId, "workerId"),
-              claimedAt: timestamp,
-              startedAt: timestamp,
-              errorMessage: null,
-              updatedAt: timestamp,
-            })
-            .where(
-              and(
-                eq(encodeJobs.status, "queued"),
-                eq(
-                  encodeJobs.id,
-                  sql<string>`(select ${encodeJobs.id} from ${encodeJobs} where ${encodeJobs.status} = 'queued' order by ${encodeJobs.priority} desc, ${encodeJobs.createdAt} asc, ${encodeJobs.id} asc limit 1)`,
-                ),
-              ),
-            )
-            .returning()
-            .get() ?? null
-        );
-      },
-
-      list(statuses) {
-        return database
-          .select()
-          .from(encodeJobs)
-          .where(statuses?.length ? inArray(encodeJobs.status, statuses) : undefined)
-          .orderBy(desc(encodeJobs.priority), asc(encodeJobs.createdAt))
-          .all();
-      },
-
-      updateProgress(id, progressPercent) {
-        const current = findEncodeJob(id);
-        if (current.status !== "running") {
-          throw new InvalidStatusTransitionError(
-            "encode job",
-            current.status,
-            "running progress",
-          );
-        }
-        return requireRow(
-          database
-            .update(encodeJobs)
-            .set({
-              progressPercent: requireProgress(progressPercent),
-              updatedAt: now(),
-            })
-            .where(and(eq(encodeJobs.id, id), eq(encodeJobs.status, "running")))
-            .returning()
-            .get(),
-          "encode job",
-          id,
-        );
-      },
-
-      complete(id) {
-        const current = findEncodeJob(id);
-        if (current.status !== "running") {
-          throw new InvalidStatusTransitionError(
-            "encode job",
-            current.status,
-            "completed",
-          );
-        }
-        const timestamp = now();
-        return requireRow(
-          database
-            .update(encodeJobs)
-            .set({
-              status: "completed",
-              progressPercent: 100,
-              completedAt: timestamp,
-              errorMessage: null,
-              updatedAt: timestamp,
-            })
-            .where(and(eq(encodeJobs.id, id), eq(encodeJobs.status, "running")))
-            .returning()
-            .get(),
-          "encode job",
-          id,
-        );
-      },
-
-      fail(id, errorMessage) {
-        const current = findEncodeJob(id);
-        if (current.status !== "running") {
-          throw new InvalidStatusTransitionError(
-            "encode job",
-            current.status,
-            "failed",
-          );
-        }
-        return requireRow(
-          database
-            .update(encodeJobs)
-            .set({
-              status: "failed",
-              errorMessage: requireNonEmpty(errorMessage, "errorMessage"),
-              updatedAt: now(),
-            })
-            .where(and(eq(encodeJobs.id, id), eq(encodeJobs.status, "running")))
-            .returning()
-            .get(),
-          "encode job",
-          id,
-        );
-      },
-
-      requeue: requeueEncodeJob,
+      claimNext: encodeJobQueue.claimNext,
+      list: encodeJobQueue.list,
+      updateProgress: encodeJobQueue.updateProgress,
+      complete: (claim) => encodeJobQueue.complete(claim, undefined),
+      fail: encodeJobQueue.fail,
+      requeue: encodeJobQueue.requeue,
     },
 
     close() {

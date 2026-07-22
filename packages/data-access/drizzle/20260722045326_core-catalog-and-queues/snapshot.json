@@ -1,7 +1,7 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "ef96de0d-8789-4839-8145-eee20838a5fb",
+  "id": "71ee1ca7-645b-4e42-ae52-273ba511910e",
   "prevIds": [
     "00000000-0000-0000-0000-000000000000"
   ],
@@ -105,6 +105,16 @@
       "default": null,
       "generated": null,
       "name": "claimed_by",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "claim_token",
       "entityType": "columns",
       "table": "archive_jobs"
     },
@@ -455,6 +465,16 @@
       "default": null,
       "generated": null,
       "name": "claimed_by",
+      "entityType": "columns",
+      "table": "encode_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "claim_token",
       "entityType": "columns",
       "table": "encode_jobs"
     },
@@ -1262,6 +1282,10 @@
     {
       "columns": [
         {
+          "value": "media_domain",
+          "isExpression": false
+        },
+        {
           "value": "key",
           "isExpression": false
         },
@@ -1273,7 +1297,7 @@
       "isUnique": true,
       "where": null,
       "origin": "manual",
-      "name": "encoding_profiles_key_version_unique",
+      "name": "encoding_profiles_domain_key_version_unique",
       "entityType": "indexes",
       "table": "encoding_profiles"
     },
@@ -1396,14 +1420,8 @@
       "table": "disc_selections"
     },
     {
-      "value": "\"title_number\" is null or \"title_number\" > 0",
-      "name": "disc_selections_title_number_check",
-      "entityType": "checks",
-      "table": "disc_selections"
-    },
-    {
-      "value": "(\"chapter_start\" is null and \"chapter_end\" is null) or (\"chapter_start\" > 0 and \"chapter_end\" >= \"chapter_start\")",
-      "name": "disc_selections_chapter_range_check",
+      "value": "(\"kind\" = 'main_feature' and \"title_number\" is null and \"chapter_start\" is null and \"chapter_end\" is null) or (\"kind\" = 'dvd_title' and \"title_number\" is not null and \"title_number\" > 0 and \"chapter_start\" is null and \"chapter_end\" is null) or (\"kind\" = 'dvd_chapters' and \"title_number\" is not null and \"title_number\" > 0 and \"chapter_start\" is not null and \"chapter_start\" > 0 and \"chapter_end\" is not null and \"chapter_end\" >= \"chapter_start\")",
+      "name": "disc_selections_shape_check",
       "entityType": "checks",
       "table": "disc_selections"
     },

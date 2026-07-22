@@ -10,6 +10,14 @@ x-runtime-environment: &runtime-environment
   RIP_DVD_ENCODE_WORKER_CONCURRENCY: ${RIP_DVD_ENCODE_WORKER_CONCURRENCY:-1}
 
 services:
+  validation:
+    profiles: ["validation"]
+    build:
+      context: .
+      dockerfile: docker/runtime.Dockerfile
+      target: validation
+    command: ["true"]
+
   web:
     build:
       context: .

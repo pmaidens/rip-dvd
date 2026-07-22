@@ -9,6 +9,19 @@ import {
   uniqueIndex,
 } from "drizzle-orm/sqlite-core";
 
+import type {
+  ArchiveJobId,
+  ArchiveJobClaimToken,
+  DetectedDiscId,
+  DiscSelectionId,
+  EncodeJobId,
+  EncodeJobClaimToken,
+  EncodingProfileId,
+  MediaItemId,
+  OpticalDriveId,
+  OriginalDiscArchiveId,
+} from "../types.js";
+
 const discKinds = ["dvd", "blu_ray", "audio_cd"] as const;
 const detectedDiscStatuses = [
   "detected",
@@ -39,7 +52,7 @@ const updatedAt = () => integer("updated_at", { mode: "timestamp_ms" }).notNull(
 export const opticalDrives = sqliteTable(
   "optical_drives",
   {
-    id: text("id").notNull().primaryKey(),
+    id: text("id").$type<OpticalDriveId>().notNull().primaryKey(),
     devicePath: text("device_path").notNull(),
     displayName: text("display_name"),
     vendor: text("vendor"),
@@ -64,8 +77,9 @@ export const opticalDrives = sqliteTable(
 export const detectedDiscs = sqliteTable(
   "detected_discs",
   {
-    id: text("id").notNull().primaryKey(),
+    id: text("id").$type<DetectedDiscId>().notNull().primaryKey(),
     opticalDriveId: text("optical_drive_id")
+      .$type<OpticalDriveId>()
       .notNull()
       .references(() => opticalDrives.id, { onDelete: "restrict" }),
     discKind: text("disc_kind", { enum: discKinds }).notNull(),
@@ -100,8 +114,9 @@ export const detectedDiscs = sqliteTable(
 export const originalDiscArchives = sqliteTable(
   "original_disc_archives",
   {
-    id: text("id").notNull().primaryKey(),
+    id: text("id").$type<OriginalDiscArchiveId>().notNull().primaryKey(),
     detectedDiscId: text("detected_disc_id")
+      .$type<DetectedDiscId>()
       .notNull()
       .references(() => detectedDiscs.id, { onDelete: "restrict" }),
     discKind: text("disc_kind", { enum: discKinds }).notNull(),
@@ -138,10 +153,12 @@ export const originalDiscArchives = sqliteTable(
 export const mediaItems = sqliteTable(
   "media_items",
   {
-    id: text("id").notNull().primaryKey(),
-    parentId: text("parent_id").references((): AnySQLiteColumn => mediaItems.id, {
-      onDelete: "restrict",
-    }),
+    id: text("id").$type<MediaItemId>().notNull().primaryKey(),
+    parentId: text("parent_id")
+      .$type<MediaItemId>()
+      .references((): AnySQLiteColumn => mediaItems.id, {
+        onDelete: "restrict",
+      }),
     kind: text("kind", { enum: mediaItemKinds }).notNull(),
     title: text("title").notNull(),
     year: integer("year"),
@@ -175,11 +192,13 @@ export const mediaItems = sqliteTable(
 export const discSelections = sqliteTable(
   "disc_selections",
   {
-    id: text("id").notNull().primaryKey(),
+    id: text("id").$type<DiscSelectionId>().notNull().primaryKey(),
     originalDiscArchiveId: text("original_disc_archive_id")
+      .$type<OriginalDiscArchiveId>()
       .notNull()
       .references(() => originalDiscArchives.id, { onDelete: "restrict" }),
     mediaItemId: text("media_item_id")
+      .$type<MediaItemId>()
       .notNull()
       .references(() => mediaItems.id, { onDelete: "restrict" }),
     sourceKey: text("source_key").notNull(),
@@ -203,12 +222,8 @@ export const discSelections = sqliteTable(
       sql`${table.kind} in ('main_feature', 'dvd_title', 'dvd_chapters')`,
     ),
     check(
-      "disc_selections_title_number_check",
-      sql`${table.titleNumber} is null or ${table.titleNumber} > 0`,
-    ),
-    check(
-      "disc_selections_chapter_range_check",
-      sql`(${table.chapterStart} is null and ${table.chapterEnd} is null) or (${table.chapterStart} > 0 and ${table.chapterEnd} >= ${table.chapterStart})`,
+      "disc_selections_shape_check",
+      sql`(${table.kind} = 'main_feature' and ${table.titleNumber} is null and ${table.chapterStart} is null and ${table.chapterEnd} is null) or (${table.kind} = 'dvd_title' and ${table.titleNumber} is not null and ${table.titleNumber} > 0 and ${table.chapterStart} is null and ${table.chapterEnd} is null) or (${table.kind} = 'dvd_chapters' and ${table.titleNumber} is not null and ${table.titleNumber} > 0 and ${table.chapterStart} is not null and ${table.chapterStart} > 0 and ${table.chapterEnd} is not null and ${table.chapterEnd} >= ${table.chapterStart})`,
     ),
   ],
 );
@@ -216,7 +231,7 @@ export const discSelections = sqliteTable(
 export const encodingProfiles = sqliteTable(
   "encoding_profiles",
   {
-    id: text("id").notNull().primaryKey(),
+    id: text("id").$type<EncodingProfileId>().notNull().primaryKey(),
     key: text("key").notNull(),
     displayName: text("display_name").notNull(),
     mediaDomain: text("media_domain", { enum: mediaDomains }).notNull(),
@@ -229,7 +244,8 @@ export const encodingProfiles = sqliteTable(
   },
   (table) => [
     check("encoding_profiles_id_not_null", sql`${table.id} is not null`),
-    uniqueIndex("encoding_profiles_key_version_unique").on(
+    uniqueIndex("encoding_profiles_domain_key_version_unique").on(
+      table.mediaDomain,
       table.key,
       table.version,
     ),
@@ -244,18 +260,19 @@ export const encodingProfiles = sqliteTable(
 export const archiveJobs = sqliteTable(
   "archive_jobs",
   {
-    id: text("id").notNull().primaryKey(),
+    id: text("id").$type<ArchiveJobId>().notNull().primaryKey(),
     detectedDiscId: text("detected_disc_id")
+      .$type<DetectedDiscId>()
       .notNull()
       .references(() => detectedDiscs.id, { onDelete: "restrict" }),
-    originalDiscArchiveId: text("original_disc_archive_id").references(
-      () => originalDiscArchives.id,
-      { onDelete: "restrict" },
-    ),
+    originalDiscArchiveId: text("original_disc_archive_id")
+      .$type<OriginalDiscArchiveId>()
+      .references(() => originalDiscArchives.id, { onDelete: "restrict" }),
     status: text("status", { enum: jobStatuses }).notNull().default("queued"),
     priority: integer("priority").notNull().default(0),
     progressPercent: integer("progress_percent").notNull().default(0),
     claimedBy: text("claimed_by"),
+    claimToken: text("claim_token").$type<ArchiveJobClaimToken>(),
     claimedAt: integer("claimed_at", { mode: "timestamp_ms" }),
     startedAt: integer("started_at", { mode: "timestamp_ms" }),
     completedAt: integer("completed_at", { mode: "timestamp_ms" }),
@@ -281,11 +298,13 @@ export const archiveJobs = sqliteTable(
 export const encodeJobs = sqliteTable(
   "encode_jobs",
   {
-    id: text("id").notNull().primaryKey(),
+    id: text("id").$type<EncodeJobId>().notNull().primaryKey(),
     discSelectionId: text("disc_selection_id")
+      .$type<DiscSelectionId>()
       .notNull()
       .references(() => discSelections.id, { onDelete: "restrict" }),
     encodingProfileId: text("encoding_profile_id")
+      .$type<EncodingProfileId>()
       .notNull()
       .references(() => encodingProfiles.id, { onDelete: "restrict" }),
     outputPath: text("output_path").notNull(),
@@ -293,6 +312,7 @@ export const encodeJobs = sqliteTable(
     priority: integer("priority").notNull().default(0),
     progressPercent: integer("progress_percent").notNull().default(0),
     claimedBy: text("claimed_by"),
+    claimToken: text("claim_token").$type<EncodeJobClaimToken>(),
     claimedAt: integer("claimed_at", { mode: "timestamp_ms" }),
     startedAt: integer("started_at", { mode: "timestamp_ms" }),
     completedAt: integer("completed_at", { mode: "timestamp_ms" }),

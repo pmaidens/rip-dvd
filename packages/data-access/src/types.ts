@@ -19,6 +19,22 @@ export type DiscSelectionKind =
 export type MediaDomain = "dvd_video" | "audio";
 export type JobStatus = "queued" | "running" | "completed" | "failed";
 
+declare const domainIdBrand: unique symbol;
+type DomainId<Name extends string> = string & {
+  readonly [domainIdBrand]: Name;
+};
+
+export type OpticalDriveId = DomainId<"OpticalDrive">;
+export type DetectedDiscId = DomainId<"DetectedDisc">;
+export type OriginalDiscArchiveId = DomainId<"OriginalDiscArchive">;
+export type MediaItemId = DomainId<"MediaItem">;
+export type DiscSelectionId = DomainId<"DiscSelection">;
+export type EncodingProfileId = DomainId<"EncodingProfile">;
+export type ArchiveJobId = DomainId<"ArchiveJob">;
+export type EncodeJobId = DomainId<"EncodeJob">;
+export type ArchiveJobClaimToken = DomainId<"ArchiveJobClaim">;
+export type EncodeJobClaimToken = DomainId<"EncodeJobClaim">;
+
 export interface ServiceHealth {
   status: "ok";
   sqliteVersion: string;
@@ -27,7 +43,7 @@ export interface ServiceHealth {
 }
 
 export interface OpticalDrive {
-  id: string;
+  id: OpticalDriveId;
   devicePath: string;
   displayName: string | null;
   vendor: string | null;
@@ -41,8 +57,8 @@ export interface OpticalDrive {
 }
 
 export interface DetectedDisc {
-  id: string;
-  opticalDriveId: string;
+  id: DetectedDiscId;
+  opticalDriveId: OpticalDriveId;
   discKind: DiscKind;
   fingerprint: string;
   volumeLabel: string | null;
@@ -54,8 +70,8 @@ export interface DetectedDisc {
 }
 
 export interface OriginalDiscArchive {
-  id: string;
-  detectedDiscId: string;
+  id: OriginalDiscArchiveId;
+  detectedDiscId: DetectedDiscId;
   discKind: DiscKind;
   archiveFormat: "iso";
   archivePath: string;
@@ -67,8 +83,8 @@ export interface OriginalDiscArchive {
 }
 
 export interface MediaItem {
-  id: string;
-  parentId: string | null;
+  id: MediaItemId;
+  parentId: MediaItemId | null;
   kind: MediaItemKind;
   title: string;
   year: number | null;
@@ -78,22 +94,69 @@ export interface MediaItem {
   updatedAt: Date;
 }
 
-export interface DiscSelection {
-  id: string;
-  originalDiscArchiveId: string;
-  mediaItemId: string;
+interface DiscSelectionBase {
+  id: DiscSelectionId;
+  originalDiscArchiveId: OriginalDiscArchiveId;
+  mediaItemId: MediaItemId;
   sourceKey: string;
-  kind: DiscSelectionKind;
-  titleNumber: number | null;
-  chapterStart: number | null;
-  chapterEnd: number | null;
   label: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
 
+export type DiscSelection = DiscSelectionBase &
+  (
+    | {
+        kind: "main_feature";
+        titleNumber: null;
+        chapterStart: null;
+        chapterEnd: null;
+      }
+    | {
+        kind: "dvd_title";
+        titleNumber: number;
+        chapterStart: null;
+        chapterEnd: null;
+      }
+    | {
+        kind: "dvd_chapters";
+        titleNumber: number;
+        chapterStart: number;
+        chapterEnd: number;
+      }
+  );
+
+type CreateDiscSelectionBase = {
+  originalDiscArchiveId: OriginalDiscArchiveId;
+  mediaItemId: MediaItemId;
+  sourceKey: string;
+  label?: string;
+};
+
+export type CreateDiscSelectionInput = CreateDiscSelectionBase &
+  (
+    | {
+        kind: "main_feature";
+        titleNumber?: never;
+        chapterStart?: never;
+        chapterEnd?: never;
+      }
+    | {
+        kind: "dvd_title";
+        titleNumber: number;
+        chapterStart?: never;
+        chapterEnd?: never;
+      }
+    | {
+        kind: "dvd_chapters";
+        titleNumber: number;
+        chapterStart: number;
+        chapterEnd: number;
+      }
+  );
+
 export interface EncodingProfile {
-  id: string;
+  id: EncodingProfileId;
   key: string;
   displayName: string;
   mediaDomain: MediaDomain;
@@ -104,13 +167,14 @@ export interface EncodingProfile {
 }
 
 export interface ArchiveJob {
-  id: string;
-  detectedDiscId: string;
-  originalDiscArchiveId: string | null;
+  id: ArchiveJobId;
+  detectedDiscId: DetectedDiscId;
+  originalDiscArchiveId: OriginalDiscArchiveId | null;
   status: JobStatus;
   priority: number;
   progressPercent: number;
   claimedBy: string | null;
+  claimToken: ArchiveJobClaimToken | null;
   claimedAt: Date | null;
   startedAt: Date | null;
   completedAt: Date | null;
@@ -120,14 +184,15 @@ export interface ArchiveJob {
 }
 
 export interface EncodeJob {
-  id: string;
-  discSelectionId: string;
-  encodingProfileId: string;
+  id: EncodeJobId;
+  discSelectionId: DiscSelectionId;
+  encodingProfileId: EncodingProfileId;
   outputPath: string;
   status: JobStatus;
   priority: number;
   progressPercent: number;
   claimedBy: string | null;
+  claimToken: EncodeJobClaimToken | null;
   claimedAt: Date | null;
   startedAt: Date | null;
   completedAt: Date | null;
@@ -135,6 +200,16 @@ export interface EncodeJob {
   createdAt: Date;
   updatedAt: Date;
 }
+
+export type RunningArchiveJob = ArchiveJob & {
+  status: "running";
+  claimToken: ArchiveJobClaimToken;
+};
+
+export type RunningEncodeJob = EncodeJob & {
+  status: "running";
+  claimToken: EncodeJobClaimToken;
+};
 
 export interface CatalogAccess {
   upsertOpticalDrive(input: {
@@ -148,7 +223,7 @@ export interface CatalogAccess {
   }): OpticalDrive;
   listOpticalDrives(): OpticalDrive[];
   registerDetectedDisc(input: {
-    opticalDriveId: string;
+    opticalDriveId: OpticalDriveId;
     discKind: DiscKind;
     fingerprint: string;
     volumeLabel?: string;
@@ -156,11 +231,11 @@ export interface CatalogAccess {
   }): DetectedDisc;
   listDetectedDiscs(statuses?: DetectedDiscStatus[]): DetectedDisc[];
   updateDetectedDiscStatus(
-    id: string,
+    id: DetectedDiscId,
     status: DetectedDiscStatus,
   ): DetectedDisc;
   createOriginalDiscArchive(input: {
-    detectedDiscId: string;
+    detectedDiscId: DetectedDiscId;
     discKind: DiscKind;
     archiveFormat: "iso";
     archivePath: string;
@@ -169,7 +244,7 @@ export interface CatalogAccess {
   }): OriginalDiscArchive;
   listOriginalDiscArchives(): OriginalDiscArchive[];
   createMediaItem(input: {
-    parentId?: string;
+    parentId?: MediaItemId;
     kind: MediaItemKind;
     title: string;
     year?: number;
@@ -177,16 +252,7 @@ export interface CatalogAccess {
     episodeNumber?: number;
   }): MediaItem;
   listMediaItems(): MediaItem[];
-  createDiscSelection(input: {
-    originalDiscArchiveId: string;
-    mediaItemId: string;
-    sourceKey: string;
-    kind: DiscSelectionKind;
-    titleNumber?: number;
-    chapterStart?: number;
-    chapterEnd?: number;
-    label?: string;
-  }): DiscSelection;
+  createDiscSelection(input: CreateDiscSelectionInput): DiscSelection;
   listDiscSelections(): DiscSelection[];
   createEncodingProfile(input: {
     key: string;
@@ -195,32 +261,43 @@ export interface CatalogAccess {
     version: number;
     settings: Record<string, unknown>;
   }): EncodingProfile;
+  findEncodingProfile(input: {
+    key: string;
+    mediaDomain: MediaDomain;
+    version: number;
+  }): EncodingProfile | null;
   listEncodingProfiles(): EncodingProfile[];
 }
 
 export interface ArchiveJobAccess {
-  enqueue(input: { detectedDiscId: string; priority?: number }): ArchiveJob;
-  claimNext(workerId: string): ArchiveJob | null;
+  enqueue(input: { detectedDiscId: DetectedDiscId; priority?: number }): ArchiveJob;
+  claimNext(workerId: string): RunningArchiveJob | null;
   list(statuses?: JobStatus[]): ArchiveJob[];
-  updateProgress(id: string, progressPercent: number): ArchiveJob;
-  complete(id: string, originalDiscArchiveId?: string): ArchiveJob;
-  fail(id: string, errorMessage: string): ArchiveJob;
-  requeue(id: string): ArchiveJob;
+  updateProgress(
+    claim: RunningArchiveJob,
+    progressPercent: number,
+  ): ArchiveJob;
+  complete(
+    claim: RunningArchiveJob,
+    originalDiscArchiveId: OriginalDiscArchiveId,
+  ): ArchiveJob;
+  fail(claim: RunningArchiveJob, errorMessage: string): ArchiveJob;
+  requeue(id: ArchiveJobId): ArchiveJob;
 }
 
 export interface EncodeJobAccess {
   enqueue(input: {
-    discSelectionId: string;
-    encodingProfileId: string;
+    discSelectionId: DiscSelectionId;
+    encodingProfileId: EncodingProfileId;
     outputPath: string;
     priority?: number;
   }): EncodeJob;
-  claimNext(workerId: string): EncodeJob | null;
+  claimNext(workerId: string): RunningEncodeJob | null;
   list(statuses?: JobStatus[]): EncodeJob[];
-  updateProgress(id: string, progressPercent: number): EncodeJob;
-  complete(id: string): EncodeJob;
-  fail(id: string, errorMessage: string): EncodeJob;
-  requeue(id: string): EncodeJob;
+  updateProgress(claim: RunningEncodeJob, progressPercent: number): EncodeJob;
+  complete(claim: RunningEncodeJob): EncodeJob;
+  fail(claim: RunningEncodeJob, errorMessage: string): EncodeJob;
+  requeue(id: EncodeJobId): EncodeJob;
 }
 
 export interface DataAccess {

@@ -5,7 +5,9 @@ RUN corepack enable
 WORKDIR /app
 
 FROM build-base AS dependencies
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .node-version ./
+COPY scripts/check-toolchain.mjs scripts/check-toolchain.mjs
+COPY docker/runtime.Dockerfile docker/runtime.Dockerfile
 COPY apps/web/package.json apps/web/package.json
 COPY apps/archive-worker/package.json apps/archive-worker/package.json
 COPY apps/encode-worker/package.json apps/encode-worker/package.json
@@ -13,6 +15,7 @@ COPY packages/config/package.json packages/config/package.json
 COPY packages/data-access/package.json packages/data-access/package.json
 COPY packages/worker-runtime/package.json packages/worker-runtime/package.json
 RUN pnpm install --frozen-lockfile
+RUN pnpm check:toolchain
 
 FROM dependencies AS shared-builder
 COPY tsconfig.base.json ./
@@ -22,6 +25,12 @@ COPY packages/worker-runtime packages/worker-runtime
 RUN pnpm --filter @rip-dvd/config build \
   && pnpm --filter @rip-dvd/data-access build \
   && pnpm --filter @rip-dvd/worker-runtime build
+
+FROM dependencies AS validation
+COPY . .
+RUN pnpm check \
+  && pnpm db:check \
+  && pnpm build
 
 FROM shared-builder AS web-builder
 COPY apps/web apps/web

@@ -6,6 +6,7 @@ CREATE TABLE `archive_jobs` (
 	`priority` integer DEFAULT 0 NOT NULL,
 	`progress_percent` integer DEFAULT 0 NOT NULL,
 	`claimed_by` text,
+	`claim_token` text,
 	`claimed_at` integer,
 	`started_at` integer,
 	`completed_at` integer,
@@ -52,8 +53,7 @@ CREATE TABLE `disc_selections` (
 	CONSTRAINT `fk_disc_selections_media_item_id_media_items_id_fk` FOREIGN KEY (`media_item_id`) REFERENCES `media_items`(`id`) ON DELETE RESTRICT,
 	CONSTRAINT "disc_selections_id_not_null" CHECK("id" is not null),
 	CONSTRAINT "disc_selections_kind_check" CHECK("kind" in ('main_feature', 'dvd_title', 'dvd_chapters')),
-	CONSTRAINT "disc_selections_title_number_check" CHECK("title_number" is null or "title_number" > 0),
-	CONSTRAINT "disc_selections_chapter_range_check" CHECK(("chapter_start" is null and "chapter_end" is null) or ("chapter_start" > 0 and "chapter_end" >= "chapter_start"))
+	CONSTRAINT "disc_selections_shape_check" CHECK(("kind" = 'main_feature' and "title_number" is null and "chapter_start" is null and "chapter_end" is null) or ("kind" = 'dvd_title' and "title_number" is not null and "title_number" > 0 and "chapter_start" is null and "chapter_end" is null) or ("kind" = 'dvd_chapters' and "title_number" is not null and "title_number" > 0 and "chapter_start" is not null and "chapter_start" > 0 and "chapter_end" is not null and "chapter_end" >= "chapter_start"))
 );
 --> statement-breakpoint
 CREATE TABLE `encode_jobs` (
@@ -65,6 +65,7 @@ CREATE TABLE `encode_jobs` (
 	`priority` integer DEFAULT 0 NOT NULL,
 	`progress_percent` integer DEFAULT 0 NOT NULL,
 	`claimed_by` text,
+	`claim_token` text,
 	`claimed_at` integer,
 	`started_at` integer,
 	`completed_at` integer,
@@ -152,7 +153,7 @@ CREATE INDEX `disc_selections_media_item_idx` ON `disc_selections` (`media_item_
 CREATE UNIQUE INDEX `encode_jobs_selection_profile_unique` ON `encode_jobs` (`disc_selection_id`,`encoding_profile_id`);--> statement-breakpoint
 CREATE UNIQUE INDEX `encode_jobs_output_path_unique` ON `encode_jobs` (`output_path`);--> statement-breakpoint
 CREATE INDEX `encode_jobs_queue_idx` ON `encode_jobs` (`status`,`priority`,`created_at`);--> statement-breakpoint
-CREATE UNIQUE INDEX `encoding_profiles_key_version_unique` ON `encoding_profiles` (`key`,`version`);--> statement-breakpoint
+CREATE UNIQUE INDEX `encoding_profiles_domain_key_version_unique` ON `encoding_profiles` (`media_domain`,`key`,`version`);--> statement-breakpoint
 CREATE INDEX `media_items_parent_idx` ON `media_items` (`parent_id`);--> statement-breakpoint
 CREATE UNIQUE INDEX `optical_drives_device_path_unique` ON `optical_drives` (`device_path`);--> statement-breakpoint
 CREATE UNIQUE INDEX `original_disc_archives_detected_disc_unique` ON `original_disc_archives` (`detected_disc_id`);--> statement-breakpoint

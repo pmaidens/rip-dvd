@@ -240,8 +240,11 @@ pnpm build
 ```
 
 The TypeScript runtimes use Node.js 22.23.1 and pnpm 11.15.1, matching the
-Docker images and workspace metadata. The supported Node range starts at
-22.12.0 because that is the minimum Node 22 release supported by Vite 8.
+Docker images and workspace metadata. `pnpm check:toolchain` fails unless the
+running tools and both Docker stages match those exact project pins; the
+supported Node range therefore starts at 22.23.1. When that exact toolchain is
+not installed on the host, run the same frozen-install check, database migration
+check, tests, and build with `docker compose --profile validation build validation`.
 
 The shared `@rip-dvd/config` package validates the runtime environment for the
 web app and both workers. Copy `.env.example` to `.env` when overriding the
@@ -313,6 +316,14 @@ claims are atomic, single-statement updates. A worker must claim a job, let that
 statement commit, and only then start `dd`, `lsdvd`, `HandBrakeCLI`, or any
 other external process. External process execution must never occur inside a
 database transaction.
+
+Claims carry unique attempt tokens, and all running mutations use the job ID,
+running state, and token as a compare-and-set guard. Progress reports share a
+coalescing policy: persist the first value, then write after one second or a
+five-point change, while completion always stores 100% and failure stores the
+latest pending value. First-run migrations are serialized with a short-lived
+lock beside the database so simultaneous service startup cannot apply the same
+migration twice.
 
 The canonical catalog terms are:
 
