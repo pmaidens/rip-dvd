@@ -20,6 +20,12 @@ and failure commands accept the claimed running job and compare its ID, running
 status, and token in the update. Output from a stale worker attempt therefore
 cannot mutate a retried job.
 
+Archive Jobs can be enqueued only while their Detected Disc is approved. The
+single-statement claim also joins the current Detected Disc state and returns
+only approved work, so a revocation between enqueue and claim prevents an
+external preservation process from starting. Once archive provenance exists,
+rediscovery may refresh metadata but cannot change the Detected Disc kind.
+
 Both queues share one progress coalescer. The first report is persisted
 immediately. Later reports persist when at least one second has elapsed or the
 reported value differs from the last persisted value by at least five

@@ -10,7 +10,17 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 
-import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  inArray,
+  ne,
+  notExists,
+  or,
+  sql,
+} from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-sqlite";
 import { migrate } from "drizzle-orm/node-sqlite/migrator";
 
@@ -28,6 +38,7 @@ import {
   createJobQueueController,
   type JobQueueAdapter,
 } from "./internal/job-queue.js";
+import { requireNonEmpty } from "./internal/validation.js";
 import {
   DomainInvariantError,
   InvalidStatusTransitionError,
@@ -81,14 +92,6 @@ function requireRow<T>(row: T | undefined, recordType: string, id: string): T {
   }
 
   return row;
-}
-
-function requireNonEmpty(value: string, name: string): string {
-  const normalized = value.trim();
-  if (!normalized) {
-    throw new DomainInvariantError(`${name} must not be empty`);
-  }
-  return normalized;
 }
 
 function newId<Id extends string>(): Id {
@@ -290,6 +293,18 @@ export function createDataAccess({
         .orderBy(desc(archiveJobs.priority), asc(archiveJobs.createdAt))
         .all(),
     claim: (workerId, token, timestamp) => {
+      const nextApprovedJobId = sql<ArchiveJobId>`(
+        select ${archiveJobs.id}
+        from ${archiveJobs}
+        inner join ${detectedDiscs}
+          on ${detectedDiscs.id} = ${archiveJobs.detectedDiscId}
+        where ${archiveJobs.status} = 'queued'
+          and ${detectedDiscs.status} = 'approved'
+        order by ${archiveJobs.priority} desc,
+          ${archiveJobs.createdAt} asc,
+          ${archiveJobs.id} asc
+        limit 1
+      )`;
       const claimed = database
         .update(archiveJobs)
         .set({
@@ -304,10 +319,7 @@ export function createDataAccess({
         .where(
           and(
             eq(archiveJobs.status, "queued"),
-            eq(
-              archiveJobs.id,
-              sql<ArchiveJobId>`(select ${archiveJobs.id} from ${archiveJobs} where ${archiveJobs.status} = 'queued' order by ${archiveJobs.priority} desc, ${archiveJobs.createdAt} asc, ${archiveJobs.id} asc limit 1)`,
-            ),
+            eq(archiveJobs.id, nextApprovedJobId),
           ),
         )
         .returning()
@@ -549,32 +561,66 @@ export function createDataAccess({
       registerDetectedDisc(input) {
         const timestamp = now();
         const fingerprint = requireNonEmpty(input.fingerprint, "fingerprint");
-        const inserted = database
-          .insert(detectedDiscs)
-          .values({
-            id: newId<DetectedDiscId>(),
-            opticalDriveId: input.opticalDriveId,
-            discKind: input.discKind,
-            fingerprint,
-            volumeLabel: input.volumeLabel,
-            scanData: input.scanData,
-            detectedAt: timestamp,
-            createdAt: timestamp,
-            updatedAt: timestamp,
-          })
-          .onConflictDoUpdate({
-            target: [detectedDiscs.opticalDriveId, detectedDiscs.fingerprint],
-            set: {
+        return database.transaction((transaction) => {
+          transaction
+            .insert(detectedDiscs)
+            .values({
+              id: newId<DetectedDiscId>(),
+              opticalDriveId: input.opticalDriveId,
+              discKind: input.discKind,
+              fingerprint,
+              volumeLabel: input.volumeLabel,
+              scanData: input.scanData,
+              detectedAt: timestamp,
+              createdAt: timestamp,
+              updatedAt: timestamp,
+            })
+            .onConflictDoNothing({
+              target: [detectedDiscs.opticalDriveId, detectedDiscs.fingerprint],
+            })
+            .run();
+
+          const registered = transaction
+            .update(detectedDiscs)
+            .set({
               discKind: input.discKind,
               volumeLabel: input.volumeLabel,
               scanData: input.scanData,
               detectedAt: timestamp,
               updatedAt: timestamp,
-            },
-          })
-          .returning()
-          .get();
-        return requireRow(inserted, "detected disc", fingerprint);
+            })
+            .where(
+              and(
+                eq(detectedDiscs.opticalDriveId, input.opticalDriveId),
+                eq(detectedDiscs.fingerprint, fingerprint),
+                or(
+                  eq(detectedDiscs.discKind, input.discKind),
+                  and(
+                    ne(detectedDiscs.status, "archived"),
+                    notExists(
+                      transaction
+                        .select({ id: originalDiscArchives.id })
+                        .from(originalDiscArchives)
+                        .where(
+                          eq(
+                            originalDiscArchives.detectedDiscId,
+                            detectedDiscs.id,
+                          ),
+                        ),
+                    ),
+                  ),
+                ),
+              ),
+            )
+            .returning()
+            .get();
+          if (!registered) {
+            throw new DomainInvariantError(
+              "Rediscovery cannot change a Detected Disc kind with archive provenance",
+            );
+          }
+          return registered;
+        });
       },
 
       listDetectedDiscs(statuses) {
@@ -851,6 +897,20 @@ export function createDataAccess({
     archiveJobs: {
       enqueue(input) {
         const timestamp = now();
+        const disc = requireRow(
+          database
+            .select()
+            .from(detectedDiscs)
+            .where(eq(detectedDiscs.id, input.detectedDiscId))
+            .get(),
+          "detected disc",
+          input.detectedDiscId,
+        );
+        if (disc.status !== "approved") {
+          throw new DomainInvariantError(
+            "Only an approved Detected Disc can be queued for archiving",
+          );
+        }
         database
           .insert(archiveJobs)
           .values({

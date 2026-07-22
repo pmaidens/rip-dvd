@@ -1,23 +1,18 @@
-export type DiscKind = "dvd" | "blu_ray" | "audio_cd";
-export type DetectedDiscStatus =
-  | "detected"
-  | "scanned"
-  | "approved"
-  | "archived"
-  | "rejected";
-export type MediaItemKind =
-  | "movie"
-  | "tv_show"
-  | "season"
-  | "episode"
-  | "trailer"
-  | "bonus_feature";
-export type DiscSelectionKind =
-  | "main_feature"
-  | "dvd_title"
-  | "dvd_chapters";
-export type MediaDomain = "dvd_video" | "audio";
-export type JobStatus = "queued" | "running" | "completed" | "failed";
+import type {
+  DETECTED_DISC_STATUSES,
+  DISC_KINDS,
+  DISC_SELECTION_KINDS,
+  JOB_STATUSES,
+  MEDIA_DOMAINS,
+  MEDIA_ITEM_KINDS,
+} from "./domain-values.js";
+
+export type DiscKind = (typeof DISC_KINDS)[number];
+export type DetectedDiscStatus = (typeof DETECTED_DISC_STATUSES)[number];
+export type MediaItemKind = (typeof MEDIA_ITEM_KINDS)[number];
+export type DiscSelectionKind = (typeof DISC_SELECTION_KINDS)[number];
+export type MediaDomain = (typeof MEDIA_DOMAINS)[number];
+export type JobStatus = (typeof JOB_STATUSES)[number];
 
 declare const domainIdBrand: unique symbol;
 type DomainId<Name extends string> = string & {

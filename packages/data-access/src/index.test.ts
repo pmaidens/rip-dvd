@@ -6,7 +6,11 @@ import { Worker } from "node:worker_threads";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { createDataAccess, InvalidStatusTransitionError } from "./index.js";
+import {
+  createDataAccess,
+  DomainInvariantError,
+  InvalidStatusTransitionError,
+} from "./index.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -374,6 +378,57 @@ describe("data-access facade", () => {
     access.close();
   });
 
+  it("preserves archived disc identity when the same media is rediscovered", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "immutable-disc",
+      volumeLabel: "ORIGINAL_LABEL",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Immutable Disc.iso",
+      fingerprint: "immutable-disc",
+    });
+
+    expect(
+      access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint: "immutable-disc",
+        volumeLabel: "REFRESHED_LABEL",
+      }),
+    ).toMatchObject({
+      id: disc.id,
+      discKind: "dvd",
+      volumeLabel: "REFRESHED_LABEL",
+      status: "archived",
+    });
+    expect(() =>
+      access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "blu_ray",
+        fingerprint: "immutable-disc",
+      }),
+    ).toThrow(DomainInvariantError);
+    expect(access.catalog.listDetectedDiscs(["archived"])).toEqual([
+      expect.objectContaining({ id: disc.id, discKind: "dvd" }),
+    ]);
+    expect(access.catalog.listOriginalDiscArchives()).toEqual([
+      expect.objectContaining({ id: archive.id, discKind: "dvd" }),
+    ]);
+    access.close();
+  });
+
   it("rejects persisted Disc Selections whose fields contradict their kind", () => {
     const databasePath = createTestDatabasePath();
     const access = openTestDatabase(databasePath);
@@ -463,6 +518,10 @@ describe("data-access facade", () => {
       discKind: "dvd",
       fingerprint: "second-disc",
     });
+    access.catalog.updateDetectedDiscStatus(firstDisc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(firstDisc.id, "approved");
+    access.catalog.updateDetectedDiscStatus(secondDisc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(secondDisc.id, "approved");
     const firstJob = access.archiveJobs.enqueue({
       detectedDiscId: firstDisc.id,
       priority: 1,
@@ -501,8 +560,6 @@ describe("data-access facade", () => {
       throw new Error("Expected the failed Archive Job to be reclaimed");
     }
     expect(reclaimed.claimToken).not.toBe(firstClaim.claimToken);
-    access.catalog.updateDetectedDiscStatus(firstDisc.id, "scanned");
-    access.catalog.updateDetectedDiscStatus(firstDisc.id, "approved");
     const firstArchive = access.catalog.createOriginalDiscArchive({
       detectedDiscId: firstDisc.id,
       discKind: "dvd",
@@ -516,6 +573,94 @@ describe("data-access facade", () => {
     ).toThrow();
     expect(() => access.archiveJobs.fail(firstClaim, "stale failure")).toThrow();
     access.archiveJobs.fail(reclaimed, "second attempt failed");
+    access.close();
+  });
+
+  it("requires current explicit approval to enqueue or claim archive work", () => {
+    const databasePath = createTestDatabasePath();
+    const access = openTestDatabase(databasePath);
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "approval-race-disc",
+    });
+
+    expect(() =>
+      access.archiveJobs.enqueue({ detectedDiscId: disc.id }),
+    ).toThrow(DomainInvariantError);
+    access.catalog.updateDetectedDiscStatus(disc.id, "rejected");
+    expect(() =>
+      access.archiveJobs.enqueue({ detectedDiscId: disc.id }),
+    ).toThrow(DomainInvariantError);
+    access.catalog.updateDetectedDiscStatus(disc.id, "detected");
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const job = access.archiveJobs.enqueue({ detectedDiscId: disc.id });
+
+    const concurrentAccess = openTestDatabase(databasePath);
+    concurrentAccess.catalog.updateDetectedDiscStatus(disc.id, "rejected");
+    expect(access.archiveJobs.claimNext("archive-worker-rejected")).toBeNull();
+    expect(access.archiveJobs.list(["queued"])).toEqual([
+      expect.objectContaining({ id: job.id }),
+    ]);
+
+    const eligibleDisc = concurrentAccess.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "still-approved-disc",
+    });
+    concurrentAccess.catalog.updateDetectedDiscStatus(
+      eligibleDisc.id,
+      "scanned",
+    );
+    concurrentAccess.catalog.updateDetectedDiscStatus(
+      eligibleDisc.id,
+      "approved",
+    );
+    const eligibleJob = access.archiveJobs.enqueue({
+      detectedDiscId: eligibleDisc.id,
+    });
+    const eligibleClaim = access.archiveJobs.claimNext(
+      "archive-worker-approved",
+    );
+    expect(eligibleClaim?.id).toBe(eligibleJob.id);
+    if (!eligibleClaim) {
+      throw new Error("Expected the still-approved Archive Job to be claimed");
+    }
+    access.archiveJobs.fail(eligibleClaim, "approval gate regression");
+
+    expect(() =>
+      access.archiveJobs.enqueue({ detectedDiscId: disc.id }),
+    ).toThrow(DomainInvariantError);
+
+    concurrentAccess.catalog.updateDetectedDiscStatus(disc.id, "detected");
+    expect(access.archiveJobs.claimNext("archive-worker-detected")).toBeNull();
+    expect(() =>
+      access.archiveJobs.enqueue({ detectedDiscId: disc.id }),
+    ).toThrow(DomainInvariantError);
+
+    concurrentAccess.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    concurrentAccess.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    concurrentAccess.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Approval Race Disc.iso",
+      fingerprint: "approval-race-disc",
+    });
+    expect(access.archiveJobs.claimNext("archive-worker-archived")).toBeNull();
+    expect(() =>
+      access.archiveJobs.enqueue({ detectedDiscId: disc.id }),
+    ).toThrow(DomainInvariantError);
+    expect(access.archiveJobs.list(["queued"])).toEqual([
+      expect.objectContaining({ id: job.id }),
+    ]);
+
+    concurrentAccess.close();
     access.close();
   });
 
@@ -596,13 +741,13 @@ describe("data-access facade", () => {
           fingerprint: `${queue}-contention-disc-${round}`,
         });
         let queuedId: string;
+        access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+        access.catalog.updateDetectedDiscStatus(disc.id, "approved");
         if (queue === "archive") {
           queuedId = access.archiveJobs.enqueue({
             detectedDiscId: disc.id,
           }).id;
         } else {
-          access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
-          access.catalog.updateDetectedDiscStatus(disc.id, "approved");
           const archive = access.catalog.createOriginalDiscArchive({
             detectedDiscId: disc.id,
             discKind: "dvd",

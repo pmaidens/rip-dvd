@@ -9,6 +9,14 @@ import {
   uniqueIndex,
 } from "drizzle-orm/sqlite-core";
 
+import {
+  DETECTED_DISC_STATUSES,
+  DISC_KINDS,
+  DISC_SELECTION_KINDS,
+  JOB_STATUSES,
+  MEDIA_DOMAINS,
+  MEDIA_ITEM_KINDS,
+} from "../domain-values.js";
 import type {
   ArchiveJobId,
   ArchiveJobClaimToken,
@@ -21,30 +29,6 @@ import type {
   OpticalDriveId,
   OriginalDiscArchiveId,
 } from "../types.js";
-
-const discKinds = ["dvd", "blu_ray", "audio_cd"] as const;
-const detectedDiscStatuses = [
-  "detected",
-  "scanned",
-  "approved",
-  "archived",
-  "rejected",
-] as const;
-const mediaItemKinds = [
-  "movie",
-  "tv_show",
-  "season",
-  "episode",
-  "trailer",
-  "bonus_feature",
-] as const;
-const selectionKinds = [
-  "main_feature",
-  "dvd_title",
-  "dvd_chapters",
-] as const;
-const mediaDomains = ["dvd_video", "audio"] as const;
-const jobStatuses = ["queued", "running", "completed", "failed"] as const;
 
 const createdAt = () => integer("created_at", { mode: "timestamp_ms" }).notNull();
 const updatedAt = () => integer("updated_at", { mode: "timestamp_ms" }).notNull();
@@ -82,10 +66,10 @@ export const detectedDiscs = sqliteTable(
       .$type<OpticalDriveId>()
       .notNull()
       .references(() => opticalDrives.id, { onDelete: "restrict" }),
-    discKind: text("disc_kind", { enum: discKinds }).notNull(),
+    discKind: text("disc_kind", { enum: DISC_KINDS }).notNull(),
     fingerprint: text("fingerprint").notNull(),
     volumeLabel: text("volume_label"),
-    status: text("status", { enum: detectedDiscStatuses })
+    status: text("status", { enum: DETECTED_DISC_STATUSES })
       .notNull()
       .default("detected"),
     scanData: text("scan_data", { mode: "json" }).$type<unknown>(),
@@ -119,7 +103,7 @@ export const originalDiscArchives = sqliteTable(
       .$type<DetectedDiscId>()
       .notNull()
       .references(() => detectedDiscs.id, { onDelete: "restrict" }),
-    discKind: text("disc_kind", { enum: discKinds }).notNull(),
+    discKind: text("disc_kind", { enum: DISC_KINDS }).notNull(),
     archiveFormat: text("archive_format", { enum: ["iso"] }).notNull(),
     archivePath: text("archive_path").notNull(),
     fingerprint: text("fingerprint").notNull(),
@@ -159,7 +143,7 @@ export const mediaItems = sqliteTable(
       .references((): AnySQLiteColumn => mediaItems.id, {
         onDelete: "restrict",
       }),
-    kind: text("kind", { enum: mediaItemKinds }).notNull(),
+    kind: text("kind", { enum: MEDIA_ITEM_KINDS }).notNull(),
     title: text("title").notNull(),
     year: integer("year"),
     seasonNumber: integer("season_number"),
@@ -202,7 +186,7 @@ export const discSelections = sqliteTable(
       .notNull()
       .references(() => mediaItems.id, { onDelete: "restrict" }),
     sourceKey: text("source_key").notNull(),
-    kind: text("kind", { enum: selectionKinds }).notNull(),
+    kind: text("kind", { enum: DISC_SELECTION_KINDS }).notNull(),
     titleNumber: integer("title_number"),
     chapterStart: integer("chapter_start"),
     chapterEnd: integer("chapter_end"),
@@ -234,7 +218,7 @@ export const encodingProfiles = sqliteTable(
     id: text("id").$type<EncodingProfileId>().notNull().primaryKey(),
     key: text("key").notNull(),
     displayName: text("display_name").notNull(),
-    mediaDomain: text("media_domain", { enum: mediaDomains }).notNull(),
+    mediaDomain: text("media_domain", { enum: MEDIA_DOMAINS }).notNull(),
     version: integer("version").notNull(),
     settings: text("settings", { mode: "json" })
       .$type<Record<string, unknown>>()
@@ -268,7 +252,7 @@ export const archiveJobs = sqliteTable(
     originalDiscArchiveId: text("original_disc_archive_id")
       .$type<OriginalDiscArchiveId>()
       .references(() => originalDiscArchives.id, { onDelete: "restrict" }),
-    status: text("status", { enum: jobStatuses }).notNull().default("queued"),
+    status: text("status", { enum: JOB_STATUSES }).notNull().default("queued"),
     priority: integer("priority").notNull().default(0),
     progressPercent: integer("progress_percent").notNull().default(0),
     claimedBy: text("claimed_by"),
@@ -308,7 +292,7 @@ export const encodeJobs = sqliteTable(
       .notNull()
       .references(() => encodingProfiles.id, { onDelete: "restrict" }),
     outputPath: text("output_path").notNull(),
-    status: text("status", { enum: jobStatuses }).notNull().default("queued"),
+    status: text("status", { enum: JOB_STATUSES }).notNull().default("queued"),
     priority: integer("priority").notNull().default(0),
     progressPercent: integer("progress_percent").notNull().default(0),
     claimedBy: text("claimed_by"),

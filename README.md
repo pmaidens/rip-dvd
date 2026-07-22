@@ -311,11 +311,12 @@ normal WAL synchronization. Compose stores `/data/rip-dvd.sqlite` in the
 persistent `rip-dvd-data` volume.
 
 The facade exposes catalog operations and separate Archive Job and Encode Job
-queues without exposing Drizzle or a general transaction API to callers. Queue
-claims are atomic, single-statement updates. A worker must claim a job, let that
-statement commit, and only then start `dd`, `lsdvd`, `HandBrakeCLI`, or any
-other external process. External process execution must never occur inside a
-database transaction.
+queues without exposing Drizzle or a general transaction API to callers.
+Archive Jobs can be enqueued only for approved Detected Discs, and the atomic
+claim statement rechecks that approval before returning preservation work.
+A worker must let the claim commit and only then start `dd`, `lsdvd`,
+`HandBrakeCLI`, or any other external process. External process execution must
+never occur inside a database transaction.
 
 Claims carry unique attempt tokens, and all running mutations use the job ID,
 running state, and token as a compare-and-set guard. Progress reports share a

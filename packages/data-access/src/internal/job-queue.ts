@@ -5,6 +5,7 @@ import {
   StaleJobAttemptError,
 } from "../errors.js";
 import type { JobStatus } from "../types.js";
+import { requireNonEmpty } from "./validation.js";
 
 const PROGRESS_WRITE_INTERVAL_MS = 1_000;
 const PROGRESS_WRITE_DELTA = 5;
@@ -82,14 +83,6 @@ export interface JobQueueController<
   complete(claim: Running, completion: Completion): Job;
   fail(claim: Running, errorMessage: string): Job;
   requeue(id: Id, options?: RequeueOptions): Job;
-}
-
-function requireNonEmpty(value: string, name: string): string {
-  const normalized = value.trim();
-  if (!normalized) {
-    throw new DomainInvariantError(`${name} must not be empty`);
-  }
-  return normalized;
 }
 
 function requireProgress(progressPercent: number): number {
