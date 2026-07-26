@@ -13,6 +13,12 @@ the checked-in Drizzle migrations. A short-lived lock file beside the database
 serializes first-run migrations across web and worker processes; stale locks
 expire after five minutes. Opening an already-migrated file is safe.
 
+`catalog.reconcileOpticalDrives()` applies one complete discovery snapshot in a
+short transaction. Seen drives become present and advance `lastSeenAt`; drives
+absent from a successful snapshot become missing without changing their last
+seen time. Existing enabled/disabled choices are preserved, while a caller may
+choose the enabled default only for a newly discovered drive.
+
 ## Queue attempts and progress
 
 Every claim returns a unique, queue-specific claim token. Progress, completion,

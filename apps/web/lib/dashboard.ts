@@ -21,7 +21,17 @@ export interface DashboardDetectedDisc {
   discKind: DiscKind;
   status: DetectedDiscStatus;
   opticalDriveName: string;
+  fingerprint: string;
+  titles: DashboardDvdTitle[];
   detectedAt: string;
+}
+
+export interface DashboardDvdTitle {
+  number: number;
+  durationSeconds: number;
+  chapters: number;
+  audioStreams: number;
+  subtitles: number;
 }
 
 export interface DashboardArchiveJob {
@@ -95,6 +105,53 @@ function driveDisplayName(drive: OpticalDriveRecord): string {
   return drive.displayName ?? "Unnamed Optical Drive";
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readDvdTitles(scanData: unknown): DashboardDvdTitle[] {
+  if (
+    !isRecord(scanData) ||
+    scanData.schemaVersion !== 1 ||
+    !Array.isArray(scanData.titles) ||
+    scanData.titles.length > 512
+  ) {
+    return [];
+  }
+  const titles: DashboardDvdTitle[] = [];
+  for (const value of scanData.titles) {
+    if (!isRecord(value)) {
+      return [];
+    }
+    const fields = [
+      value.number,
+      value.durationSeconds,
+      value.chapters,
+      value.audioStreams,
+      value.subtitles,
+    ];
+    if (
+      fields.some(
+        (field) =>
+          typeof field !== "number" ||
+          !Number.isSafeInteger(field) ||
+          field < 0,
+      ) ||
+      value.number === 0
+    ) {
+      return [];
+    }
+    titles.push({
+      number: value.number as number,
+      durationSeconds: value.durationSeconds as number,
+      chapters: value.chapters as number,
+      audioStreams: value.audioStreams as number,
+      subtitles: value.subtitles as number,
+    });
+  }
+  return titles;
+}
+
 function readDashboardSnapshotRecords(
   access: ConsistentReadAccess,
 ): DashboardSnapshot {
@@ -156,6 +213,8 @@ function readDashboardSnapshotRecords(
                 opticalDriveName: drive
                   ? driveDisplayName(drive)
                   : "Unknown Optical Drive",
+                fingerprint: disc.fingerprint,
+                titles: readDvdTitles(disc.scanData),
                 detectedAt: disc.detectedAt.toISOString(),
               };
             }),

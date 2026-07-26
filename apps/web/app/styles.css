@@ -408,6 +408,63 @@ h3 {
   color: #9fb0ab;
 }
 
+.disc-scan {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid #1b342e;
+}
+
+.disc-fingerprint {
+  display: grid;
+  gap: 0.3rem;
+  margin-bottom: 0;
+  color: #6f8f85;
+  font-size: 0.65rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.disc-fingerprint code {
+  overflow-wrap: anywhere;
+  color: #a8bbb5;
+  font-size: 0.7rem;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.dvd-title-map {
+  display: grid;
+  gap: 0.55rem;
+  max-height: 18rem;
+  margin: 0.9rem 0 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.dvd-title-map li {
+  padding: 0.65rem 0.75rem;
+  border-radius: 0.55rem;
+  background: #10231e;
+}
+
+.dvd-title-map li > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  color: #dbe6e2;
+  font-size: 0.76rem;
+}
+
+.dvd-title-map p {
+  margin: 0.25rem 0 0;
+  color: #829790;
+  font-size: 0.7rem;
+  line-height: 1.4;
+}
+
 .status,
 .attention-mark {
   flex: 0 0 auto;

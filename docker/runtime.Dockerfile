@@ -50,7 +50,8 @@ RUN for source in node_modules/.pnpm/@img+sharp-libvips-linux-*/node_modules/@im
 
 FROM shared-builder AS archive-worker-builder
 COPY apps/archive-worker apps/archive-worker
-RUN pnpm --filter @rip-dvd/archive-worker build
+RUN pnpm --filter @rip-dvd/archive-worker build \
+  && pnpm --filter @rip-dvd/archive-worker --prod deploy --legacy /archive-worker
 
 FROM shared-builder AS encode-worker-builder
 COPY apps/encode-worker apps/encode-worker
@@ -94,10 +95,7 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 RUN mkdir --parents /media/originals \
   && chown node:node /media/originals
-COPY --from=archive-worker-builder --chown=node:node /app/apps/archive-worker/package.json ./apps/archive-worker/package.json
-COPY --from=archive-worker-builder --chown=node:node /app/apps/archive-worker/dist ./apps/archive-worker/dist
-RUN mkdir --parents apps/archive-worker/node_modules/@rip-dvd \
-  && ln --symbolic ../../../../packages/worker-runtime apps/archive-worker/node_modules/@rip-dvd/worker-runtime
+COPY --from=archive-worker-builder --chown=node:node /archive-worker ./apps/archive-worker
 USER node
 CMD ["node", "apps/archive-worker/dist/index.js"]
 

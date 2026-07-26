@@ -316,7 +316,40 @@ The smoke command removes only its short-lived write-probe containers and
 deliberately retains the worker containers, uniquely named volumes, and
 temporary bind directories for non-destructive inspection.
 
-The archive worker image includes DVD discovery tools and the encode worker image includes HandBrake and ffmpeg. Optical-device passthrough is intentionally not enabled by the scaffold; add the appropriate Linux device mapping when the archive workflow is implemented.
+The archive worker image includes `lsblk` and `lsdvd`; the encode worker image
+includes HandBrake and ffmpeg. The archive worker discovers Linux block devices
+reported as optical drives, records attached/missing and last-seen state in
+SQLite, and scans DVDs only in enabled drives. The configured
+`RIP_DVD_ARCHIVE_DEVICE_PATH` is enabled when it is first discovered. Other new
+drives are recorded disabled so attaching temporary hardware does not silently
+change scanning behavior.
+
+Docker cannot see host optical devices unless they are passed through. Add only
+the devices the archive worker should inspect in a local Compose override, for
+example:
+
+```yaml
+services:
+  archive-worker:
+    devices:
+      - /dev/sr0:/dev/sr0:r
+    group_add:
+      - "${RIP_DVD_OPTICAL_DEVICE_GID:-24}"
+```
+
+Set `RIP_DVD_OPTICAL_DEVICE_GID` to the host group that can read the device
+(often the `cdrom` group). The read-only device permission is sufficient for
+discovery and scanning; this worker does not eject media.
+
+The worker runs discovery on each configured poll interval. An empty drive is a
+normal state. Scanner failures are logged per drive without hiding other drives,
+and a failed discovery does not mark every known drive missing. Successful DVD
+scans store title numbers, durations, chapter counts, audio-stream counts,
+subtitle counts, and a deterministic SHA-256 fingerprint. Repeated polls update
+the same Detected Disc. A fingerprint already present in Original Disc Archives
+is shown as **Already archived**, and any obsolete queued Archive Job for that
+fingerprint is removed by the data-access facade. Discovery never approves or
+queues new archive work; those actions remain explicit later workflows.
 
 ## SQLite Catalog and Queues
 

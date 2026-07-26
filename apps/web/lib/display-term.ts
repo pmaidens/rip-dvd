@@ -1,4 +1,5 @@
 const domainTerms: Readonly<Record<string, string>> = {
+  archived: "Already archived",
   audio_cd: "Audio CD",
   blu_ray: "Blu-ray",
   dvd: "DVD",

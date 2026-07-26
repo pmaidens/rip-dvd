@@ -70,7 +70,18 @@ describe("readDashboardSnapshot", () => {
       discKind: "dvd",
       fingerprint: "waiting-disc",
       volumeLabel: "WAITING_DISC",
-      scanData: { titles: 12 },
+      scanData: {
+        schemaVersion: 1,
+        titles: [
+          {
+            number: 1,
+            durationSeconds: 5_711,
+            chapters: 12,
+            audioStreams: 2,
+            subtitles: 1,
+          },
+        ],
+      },
     });
     access.catalog.updateDetectedDiscStatus(waitingDisc.id, "scanned");
     access.catalog.updateDetectedDiscStatus(waitingDisc.id, "approved");
@@ -157,6 +168,16 @@ describe("readDashboardSnapshot", () => {
           volumeLabel: "WAITING_DISC",
           status: "approved",
           opticalDriveName: "Upper drive",
+          fingerprint: "waiting-disc",
+          titles: [
+            {
+              number: 1,
+              durationSeconds: 5_711,
+              chapters: 12,
+              audioStreams: 2,
+              subtitles: 1,
+            },
+          ],
         }),
       ]),
     });
