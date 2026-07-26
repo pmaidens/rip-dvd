@@ -39,6 +39,7 @@ DEFAULT_PRESET = "Fast 480p30"
 DEFAULT_DEVICE = "/dev/sr0"
 DEFAULT_LIBRARY = "/srv/media/Movies"
 DEFAULT_ORIGINALS_LIBRARY = "/srv/media/DVD Originals"
+LEGACY_QUEUE_CUTOVER_MARKER = ".rip-dvd-sqlite-catalog"
 
 
 class EtaTracker:
@@ -439,9 +440,25 @@ def read_queue_metadata(metadata_path):
         return None
 
 
+def legacy_queue_is_retired(originals_library):
+    return (Path(originals_library) / LEGACY_QUEUE_CUTOVER_MARKER).exists()
+
+
+def refuse_retired_legacy_queue(originals_library):
+    if not legacy_queue_is_retired(originals_library):
+        return False
+    log_error(
+        "Legacy sidecar queue commands are inactive for this library because its "
+        "SQLite catalog is authoritative. Use the SQLite catalog and workers instead."
+    )
+    return True
+
+
 def discover_encode_jobs(originals_library):
     queue_root = Path(originals_library)
     if not queue_root.exists():
+        return []
+    if legacy_queue_is_retired(queue_root):
         return []
 
     jobs = []
@@ -822,6 +839,8 @@ def archive_mode(
 
 
 def encode_mode(originals_library, dry_run=False, verbose=False, watch=False, interval=300, limit=None, idle=True):
+    if refuse_retired_legacy_queue(originals_library):
+        return 2
     if idle:
         try:
             os.nice(10)
@@ -883,6 +902,8 @@ def encode_mode(originals_library, dry_run=False, verbose=False, watch=False, in
 
 
 def queue_mode(originals_library):
+    if refuse_retired_legacy_queue(originals_library):
+        return 2
     queue_root = Path(originals_library)
     if not queue_root.exists():
         log(f"No originals library found: {queue_root}")

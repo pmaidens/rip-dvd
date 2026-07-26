@@ -1,4 +1,5 @@
-import type { DataAccess } from "@rip-dvd/data-access";
+import { createDataAccess, type DataAccess } from "@rip-dvd/data-access";
+import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -61,7 +62,9 @@ describe("readDashboardSnapshot", () => {
     const libraryRoot = mkdtempSync(join(tmpdir(), "rip-dvd-dashboard-import-"));
     const originalsLibraryPath = join(libraryRoot, "originals");
     mkdirSync(originalsLibraryPath, { recursive: true });
-    const access = dataAccessFixture.create();
+    const databasePath = join(libraryRoot, "dashboard.sqlite");
+    const access = createDataAccess({ databasePath });
+    const importer = createLegacySidecarDataAccess({ databasePath });
     try {
       const queuedArchivePath = join(originalsLibraryPath, "Queued Movie.iso");
       const reviewArchivePath = join(originalsLibraryPath, "Review Movie.iso");
@@ -97,7 +100,7 @@ describe("readDashboardSnapshot", () => {
           jobs: [],
         }),
       );
-      access.legacySidecars.importLibrary({ originalsLibraryPath });
+      importer.legacySidecars.importLibrary({ originalsLibraryPath });
 
       const dashboard = readDashboardSnapshot(access);
 
@@ -117,6 +120,8 @@ describe("readDashboardSnapshot", () => {
         items: [expect.objectContaining({ discLabel: "Review Movie" })],
       });
     } finally {
+      importer.close();
+      access.close();
       rmSync(libraryRoot, { force: true, recursive: true });
     }
   });

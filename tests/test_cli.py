@@ -11,11 +11,13 @@ from rip_dvd.cli import (
     atomic_write_json,
     disc_fingerprint,
     discover_encode_jobs,
+    encode_mode,
     execute_archive_plan,
     execute_encode_job,
     encode_lock_path,
     failed_output_path,
     partial_output_path,
+    queue_mode,
     queue_job,
     validate_archive_identity,
     write_queue_metadata,
@@ -93,6 +95,41 @@ class EncodeQueueDiscoveryTests(unittest.TestCase):
             metadata_path.write_text("[]", encoding="utf-8")
 
             self.assertEqual(discover_encode_jobs(root), [])
+
+    def test_sqlite_cutover_retires_the_legacy_encode_queue(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "Film.iso"
+            output = root / "Film.mkv"
+            source.write_bytes(b"iso")
+            (root / "Film.rip-dvd.json").write_text(
+                json.dumps(
+                    {
+                        "source": str(source),
+                        "jobs": [
+                            {
+                                "label": "Movie: Film",
+                                "output": str(output),
+                                "selection": "main_feature",
+                                "title_number": None,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (root / ".rip-dvd-sqlite-catalog").write_text("{}\n", encoding="utf-8")
+            errors = []
+
+            with patch("rip_dvd.cli.log_error", side_effect=errors.append):
+                jobs = discover_encode_jobs(root)
+                code = encode_mode(root, dry_run=True, idle=False)
+                queue_code = queue_mode(root)
+
+            self.assertEqual(jobs, [])
+            self.assertEqual(code, 2)
+            self.assertEqual(queue_code, 2)
+            self.assertTrue(any("SQLite catalog" in message for message in errors))
 
     def test_failed_output_path_does_not_overwrite_existing_failed_file(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -4,10 +4,10 @@ This package is the only runtime persistence boundary for rip-dvd. Its public
 interface speaks in Optical Drives, Detected Discs, Original Disc Archives,
 Media Items, Disc Selections, Encoding Profiles, Archive Jobs, and Encode Jobs.
 Drizzle tables, SQL, SQLite connections, and transaction objects remain
-private. The explicit `legacySidecars` migration boundary is the sole
-format-named exception; it converts legacy persistence into those domain
-records and does not expose Drizzle or SQLite. Aggregate identifiers are opaque
-domain types, so callers cannot
+private. The migration-only `@rip-dvd/data-access/legacy-sidecars` entrypoint is
+the sole format-named exception; it converts legacy persistence into those
+domain records and does not expose Drizzle or SQLite. Aggregate identifiers are
+opaque domain types, so callers cannot
 cross-wire, for example, a Media Item ID into an Original Disc Archive field.
 
 `createDataAccess()` opens the configured local SQLite file, configures WAL,
@@ -113,10 +113,16 @@ import.
 
 Schema-two `created_at` and `updated_at` values provide the historical record
 dates. When they are absent, the archive file modification time is the fallback;
-a completed Encode Job uses its output file modification time. Re-import may
-promote an imported queued job when its output appears, but never replaces a
-running or terminal SQLite status or clears its error. This operation only
-reads sidecars—SQLite remains the active catalog and queue state afterward.
+a completed Encode Job uses its output file modification time. Re-import never
+replaces an existing SQLite Encode Job's status, output, priority, progress, or
+error, including an intentional retry.
+
+After a successful import, the migration-only entrypoint creates a
+`.rip-dvd-sqlite-catalog` marker at the originals-library root. It never writes
+the sidecars themselves. The legacy encoder refuses a marked library, making
+SQLite the enforceable catalog and queue authority. Recursive traversal and the
+cutover writer live behind the `@rip-dvd/data-access/legacy-sidecars` entrypoint
+and are excluded from the web runtime graph.
 
 The repository-level `pnpm import:legacy-sidecars -- ...` command invokes this
 facade operation for users and automation.

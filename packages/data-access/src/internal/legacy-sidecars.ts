@@ -4,6 +4,7 @@ import {
   readdirSync,
   readFileSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { isAbsolute, join, normalize, resolve } from "node:path";
 
@@ -13,6 +14,7 @@ import type {
 } from "../types.js";
 
 const DEFAULT_HANDBRAKE_PRESET = "Fast 480p30";
+const LEGACY_QUEUE_CUTOVER_MARKER = ".rip-dvd-sqlite-catalog";
 
 export interface ParsedLegacyJob {
   completedAt: Date | null;
@@ -78,13 +80,19 @@ function nonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null;
 }
 
-function positiveInteger(value: unknown): number | null {
-  if (typeof value === "string" && /^\d+$/.test(value.trim())) {
+function legacyInteger(value: unknown, defaultValue?: number): number | null {
+  if (value === undefined && defaultValue !== undefined) {
+    return defaultValue;
+  }
+  if (typeof value === "string" && /^-?\d+$/.test(value.trim())) {
     value = Number(value);
   }
-  return Number.isSafeInteger(value) && Number(value) > 0
-    ? Number(value)
-    : null;
+  return Number.isSafeInteger(value) ? Number(value) : null;
+}
+
+function positiveInteger(value: unknown): number | null {
+  const integer = legacyInteger(value);
+  return integer !== null && integer > 0 ? integer : null;
 }
 
 function optionalYear(value: unknown): number | null {
@@ -101,12 +109,8 @@ function recordedDate(value: unknown): Date | null {
 }
 
 function nonNegativeInteger(value: unknown): number | null {
-  if (typeof value === "string" && /^\d+$/.test(value.trim())) {
-    value = Number(value);
-  }
-  return Number.isSafeInteger(value) && Number(value) >= 0
-    ? Number(value)
-    : null;
+  const integer = legacyInteger(value);
+  return integer !== null && integer >= 0 ? integer : null;
 }
 
 type RecordedPathResolution =
@@ -160,15 +164,6 @@ function derivedFingerprint(data: Record<string, unknown>): string | null {
     return null;
   }
   const discTitle = String(data.disc_title ?? "").trim();
-  const legacyInteger = (value: unknown, defaultValue?: number) => {
-    if (value === undefined && defaultValue !== undefined) {
-      return defaultValue;
-    }
-    if (typeof value === "string" && /^-?\d+$/.test(value.trim())) {
-      value = Number(value);
-    }
-    return Number.isSafeInteger(value) ? Number(value) : null;
-  };
   const titles = data.titles.map((value) => {
     const title = objectValue(value);
     const number = legacyInteger(title?.number);
@@ -498,4 +493,26 @@ export function discoverLegacySidecars(
   originalsLibraryPath: string,
 ): LegacySidecarDiscovery[] {
   return findSidecars(originalsLibraryPath).map(parseSidecar);
+}
+
+export function retireLegacySidecarQueue(originalsLibraryPath: string): void {
+  try {
+    writeFileSync(
+      join(originalsLibraryPath, LEGACY_QUEUE_CUTOVER_MARKER),
+      `${JSON.stringify({
+        schemaVersion: 1,
+        legacyQueueStatus: "retired",
+        authoritativeStore: "sqlite",
+      })}\n`,
+      { encoding: "utf8", flag: "wx" },
+    );
+  } catch (error) {
+    if (
+      !(error instanceof Error) ||
+      !("code" in error) ||
+      error.code !== "EEXIST"
+    ) {
+      throw error;
+    }
+  }
 }

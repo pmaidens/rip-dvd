@@ -2,6 +2,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -54,9 +55,11 @@ describe("legacy sidecar import command", () => {
     const outputPath = join(root, "movies", "Command Movie.mkv");
     mkdirSync(originalsLibraryPath, { recursive: true });
     writeFileSync(archivePath, "archive");
-    writeFileSync(
-      join(originalsLibraryPath, "Command Movie.rip-dvd.json"),
-      JSON.stringify({
+    const sidecarPath = join(
+      originalsLibraryPath,
+      "Command Movie.rip-dvd.json",
+    );
+    const sidecarContents = JSON.stringify({
         schema_version: 2,
         source: archivePath,
         title: "Command Movie",
@@ -71,8 +74,8 @@ describe("legacy sidecar import command", () => {
             title_number: null,
           },
         ],
-      }),
-    );
+      });
+    writeFileSync(sidecarPath, sidecarContents);
     const output: string[] = [];
     const errors: string[] = [];
 
@@ -101,6 +104,10 @@ describe("legacy sidecar import command", () => {
     expect(access.encodeJobs.list()).toEqual([
       expect.objectContaining({ outputPath, status: "queued" }),
     ]);
+    expect(
+      existsSync(join(originalsLibraryPath, ".rip-dvd-sqlite-catalog")),
+    ).toBe(true);
+    expect(readFileSync(sidecarPath, "utf8")).toBe(sidecarContents);
     access.close();
   });
 });

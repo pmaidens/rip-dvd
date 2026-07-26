@@ -35,6 +35,10 @@ RUN pnpm check \
 FROM shared-builder AS web-builder
 COPY apps/web apps/web
 RUN pnpm --filter @rip-dvd/web build
+# Migration-only recursive filesystem traversal must not enter the web runtime
+# graph or standalone artifact.
+RUN ! grep --recursive --include="*.nft.json" --quiet \
+    "internal/legacy-sidecars.js" apps/web/.next
 # Next's standalone tracer omits Sharp's dynamically loaded libvips shared
 # objects. Restore only those native runtime files to the traced output.
 RUN for source in node_modules/.pnpm/@img+sharp-libvips-linux-*/node_modules/@img/sharp-libvips-linux-*/lib; do \
