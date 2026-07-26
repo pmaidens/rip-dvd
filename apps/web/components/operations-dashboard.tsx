@@ -15,6 +15,7 @@ import {
   watchDashboardActivity,
   type DashboardStreamStatus,
 } from "../lib/dashboard-activity";
+import { EncodingProfilesManager } from "./encoding-profiles";
 
 export type DashboardSectionLoadState<T> =
   | { status: "loading" }
@@ -370,6 +371,8 @@ export function OperationsDashboard() {
           </button>
         </div>
       </header>
+
+      <EncodingProfilesManager />
 
       <DashboardView state={state} />
 

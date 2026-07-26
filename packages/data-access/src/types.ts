@@ -158,6 +158,7 @@ export interface EncodingProfile {
   displayName: string;
   mediaDomain: MediaDomain;
   version: number;
+  isActive: boolean;
   settings: Record<string, unknown>;
   createdAt: Date;
   updatedAt: Date;
@@ -251,19 +252,34 @@ export interface CatalogAccess {
   listMediaItems(): MediaItem[];
   createDiscSelection(input: CreateDiscSelectionInput): DiscSelection;
   listDiscSelections(): DiscSelection[];
-  createEncodingProfile(input: {
+}
+
+export interface EncodingProfileAccess {
+  create(input: {
     key: string;
     displayName: string;
     mediaDomain: MediaDomain;
-    version: number;
     settings: Record<string, unknown>;
   }): EncodingProfile;
-  findEncodingProfile(input: {
+  createVersion(input: {
+    sourceProfileId: EncodingProfileId;
+    mediaDomain: MediaDomain;
+    settings: Record<string, unknown>;
+  }): EncodingProfile;
+  find(input: {
     key: string;
     mediaDomain: MediaDomain;
     version: number;
   }): EncodingProfile | null;
-  listEncodingProfiles(): EncodingProfile[];
+  setActive(input: {
+    id: EncodingProfileId;
+    mediaDomain: MediaDomain;
+    isActive: boolean;
+  }): EncodingProfile;
+  list(input?: {
+    mediaDomain?: MediaDomain;
+    activeOnly?: boolean;
+  }): EncodingProfile[];
 }
 
 export interface ArchiveJobAccess {
@@ -304,17 +320,18 @@ export type SnapshotCatalogAccess = Pick<
   | "listOriginalDiscArchives"
   | "listMediaItems"
   | "listDiscSelections"
-  | "listEncodingProfiles"
 >;
 
 export interface ConsistentReadAccess {
   readonly catalog: SnapshotCatalogAccess;
+  readonly encodingProfiles: Pick<EncodingProfileAccess, "list">;
   readonly archiveJobs: Pick<ArchiveJobAccess, "list">;
   readonly encodeJobs: Pick<EncodeJobAccess, "list">;
 }
 
 export interface DataAccess {
   readonly catalog: CatalogAccess;
+  readonly encodingProfiles: EncodingProfileAccess;
   readonly archiveJobs: ArchiveJobAccess;
   readonly encodeJobs: EncodeJobAccess;
   readConsistentSnapshot<T>(read: (access: ConsistentReadAccess) => T): T;

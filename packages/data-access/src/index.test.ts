@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -332,46 +332,6 @@ describe("data-access facade", () => {
       }),
     ).toThrow();
 
-    const profileV1 = access.catalog.createEncodingProfile({
-      key: "dvd-library",
-      displayName: "DVD library",
-      mediaDomain: "dvd_video",
-      version: 1,
-      settings: { preset: "Fast 480p30" },
-    });
-    const profileV2 = access.catalog.createEncodingProfile({
-      key: "dvd-library",
-      displayName: "DVD library",
-      mediaDomain: "dvd_video",
-      version: 2,
-      settings: { preset: "HQ 480p30" },
-    });
-    expect(profileV2.id).not.toBe(profileV1.id);
-    const audioProfileV1 = access.catalog.createEncodingProfile({
-      key: "dvd-library",
-      displayName: "Audio library",
-      mediaDomain: "audio",
-      version: 1,
-      settings: { codec: "flac" },
-    });
-    expect(audioProfileV1.id).not.toBe(profileV1.id);
-    expect(
-      access.catalog.findEncodingProfile({
-        key: "dvd-library",
-        mediaDomain: "audio",
-        version: 1,
-      }),
-    ).toEqual(expect.objectContaining({ id: audioProfileV1.id }));
-    expect(() =>
-      access.catalog.createEncodingProfile({
-        key: "dvd-library",
-        displayName: "Duplicate",
-        mediaDomain: "dvd_video",
-        version: 2,
-        settings: {},
-      }),
-    ).toThrow();
-
     expect(access.catalog.listOriginalDiscArchives()).toEqual([
       expect.objectContaining({ id: archive.id, fingerprint: "disc-fingerprint" }),
     ]);
@@ -382,36 +342,33 @@ describe("data-access facade", () => {
   it("requires positive safe integer Encoding Profile versions", () => {
     const databasePath = createTestDatabasePath();
     const access = openTestDatabase(databasePath);
-    for (const version of [
-      0,
-      -1,
-      1.5,
-      Number.NaN,
-      Number.POSITIVE_INFINITY,
-      Number.MAX_SAFE_INTEGER + 1,
-    ]) {
-      expect(() =>
-        access.catalog.createEncodingProfile({
-          key: `invalid-version-${String(version)}`,
-          displayName: "Invalid version",
-          mediaDomain: "dvd_video",
-          version,
-          settings: {},
-        }),
-      ).toThrow(DomainInvariantError);
-    }
-    expect(() =>
-      access.catalog.findEncodingProfile({
-        key: "invalid-version-lookup",
-        mediaDomain: "dvd_video",
-        version: 1.5,
-      }),
-    ).toThrow(DomainInvariantError);
+    const profile = access.encodingProfiles.create({
+      key: "version-boundary",
+      displayName: "Version boundary",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
     access.close();
 
     const sqlite = new DatabaseSync(databasePath);
+    sqlite
+      .prepare("update encoding_profiles set version = ? where id = ?")
+      .run(Number.MAX_SAFE_INTEGER, profile.id);
+    sqlite.close();
+
+    const reopened = openTestDatabase(databasePath);
     expect(() =>
-      sqlite
+      reopened.encodingProfiles.createVersion({
+        sourceProfileId: profile.id,
+        mediaDomain: "dvd_video",
+        settings: {},
+      }),
+    ).toThrow(DomainInvariantError);
+    reopened.close();
+
+    const directSql = new DatabaseSync(databasePath);
+    expect(() =>
+      directSql
         .prepare(`
           insert into encoding_profiles (
             id, key, display_name, media_domain, version, settings,
@@ -425,7 +382,211 @@ describe("data-access facade", () => {
           1.5,
         ),
     ).toThrow();
+    directSql.close();
+  });
+
+  it("creates an active first Encoding Profile version within its media domain", () => {
+    const access = openTestDatabase();
+
+    const dvdProfile = access.encodingProfiles.create({
+      key: "library",
+      displayName: "DVD library",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30", container: "mkv" },
+    });
+    const audioProfile = access.encodingProfiles.create({
+      key: "library",
+      displayName: "Audio library",
+      mediaDomain: "audio",
+      settings: { codec: "flac" },
+    });
+
+    expect(dvdProfile).toEqual(
+      expect.objectContaining({
+        key: "library",
+        mediaDomain: "dvd_video",
+        version: 1,
+        isActive: true,
+      }),
+    );
+    expect(
+      access.encodingProfiles.list({ mediaDomain: "dvd_video" }),
+    ).toEqual([expect.objectContaining({ id: dvdProfile.id })]);
+    expect(
+      access.encodingProfiles.list({ mediaDomain: "dvd_video" }),
+    ).not.toContainEqual(expect.objectContaining({ id: audioProfile.id }));
+    expect(() =>
+      access.encodingProfiles.create({
+        key: "library",
+        displayName: "Duplicate DVD library",
+        mediaDomain: "dvd_video",
+        settings: { preset: "Fast 576p25", container: "mkv" },
+      }),
+    ).toThrow(DomainInvariantError);
+
+    access.close();
+  });
+
+  it("migrates the latest historical version in each media domain as active", () => {
+    const sqlite = new DatabaseSync(createTestDatabasePath());
+    sqlite.exec(`
+      create table encoding_profiles (
+        id text primary key,
+        key text not null,
+        display_name text not null,
+        media_domain text not null,
+        version integer not null,
+        settings text not null,
+        created_at integer not null,
+        updated_at integer not null
+      );
+      insert into encoding_profiles values
+        ('dvd-v1', 'library', 'DVD library', 'dvd_video', 1, '{}', 0, 0),
+        ('dvd-v2', 'library', 'DVD library', 'dvd_video', 2, '{}', 0, 0),
+        ('audio-v1', 'library', 'Audio library', 'audio', 1, '{}', 0, 0);
+    `);
+    const migration = readFileSync(
+      new URL(
+        "../drizzle/20260726160810_encoding-profile-active-state/migration.sql",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    for (const statement of migration.split("--> statement-breakpoint")) {
+      if (statement.trim()) {
+        sqlite.exec(statement);
+      }
+    }
+
+    expect(
+      sqlite
+        .prepare(`
+          select id, is_active as isActive
+          from encoding_profiles
+          order by id
+        `)
+        .all(),
+    ).toEqual([
+      { id: "audio-v1", isActive: 1 },
+      { id: "dvd-v1", isActive: 0 },
+      { id: "dvd-v2", isActive: 1 },
+    ]);
+    expect(() =>
+      sqlite
+        .prepare(`
+          update encoding_profiles
+          set is_active = 1
+          where id = 'dvd-v1'
+        `)
+        .run(),
+    ).toThrow();
     sqlite.close();
+  });
+
+  it("creates sequential immutable Encoding Profile versions without crossing media domains", () => {
+    const access = openTestDatabase();
+    const versionOne = access.encodingProfiles.create({
+      key: "library",
+      displayName: "DVD library",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30", container: "mkv" },
+    });
+
+    const versionTwo = access.encodingProfiles.createVersion({
+      sourceProfileId: versionOne.id,
+      mediaDomain: "dvd_video",
+      settings: { preset: "HQ 480p30", container: "mkv" },
+    });
+
+    expect(versionTwo).toEqual(
+      expect.objectContaining({
+        key: "library",
+        displayName: "DVD library",
+        mediaDomain: "dvd_video",
+        version: 2,
+        isActive: false,
+        settings: { preset: "HQ 480p30", container: "mkv" },
+      }),
+    );
+    expect(
+      access.encodingProfiles.find({
+        key: "library",
+        mediaDomain: "dvd_video",
+        version: 1,
+      }),
+    ).toEqual(
+      expect.objectContaining({
+        id: versionOne.id,
+        isActive: true,
+        settings: { preset: "Fast 480p30", container: "mkv" },
+      }),
+    );
+    expect(() =>
+      access.encodingProfiles.createVersion({
+        sourceProfileId: versionOne.id,
+        mediaDomain: "audio",
+        settings: { codec: "flac" },
+      }),
+    ).toThrow(DomainInvariantError);
+
+    access.close();
+  });
+
+  it("activates at most one Encoding Profile version and permits deactivation", () => {
+    const access = openTestDatabase();
+    const versionOne = access.encodingProfiles.create({
+      key: "library",
+      displayName: "DVD library",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30", container: "mkv" },
+    });
+    const versionTwo = access.encodingProfiles.createVersion({
+      sourceProfileId: versionOne.id,
+      mediaDomain: "dvd_video",
+      settings: { preset: "HQ 480p30", container: "mkv" },
+    });
+
+    expect(
+      access.encodingProfiles.setActive({
+        id: versionTwo.id,
+        mediaDomain: "dvd_video",
+        isActive: true,
+      }),
+    ).toEqual(expect.objectContaining({ id: versionTwo.id, isActive: true }));
+    expect(
+      access.encodingProfiles.list({
+        mediaDomain: "dvd_video",
+        activeOnly: true,
+      }),
+    ).toEqual([expect.objectContaining({ id: versionTwo.id })]);
+    expect(
+      access.encodingProfiles.find({
+        key: "library",
+        mediaDomain: "dvd_video",
+        version: 1,
+      }),
+    ).toEqual(expect.objectContaining({ id: versionOne.id, isActive: false }));
+
+    access.encodingProfiles.setActive({
+      id: versionTwo.id,
+      mediaDomain: "dvd_video",
+      isActive: false,
+    });
+    expect(
+      access.encodingProfiles.list({
+        mediaDomain: "dvd_video",
+        activeOnly: true,
+      }),
+    ).toEqual([]);
+    expect(() =>
+      access.encodingProfiles.setActive({
+        id: versionTwo.id,
+        mediaDomain: "audio",
+        isActive: true,
+      }),
+    ).toThrow(DomainInvariantError);
+
+    access.close();
   });
 
   it("creates archives only from matching approved detected discs", () => {
@@ -1277,11 +1438,10 @@ describe("data-access facade", () => {
       devicePath: "/dev/sr0",
       isPresent: true,
     });
-    const profile = access.catalog.createEncodingProfile({
+    const profile = access.encodingProfiles.create({
       key: "contention",
       displayName: "Contention",
       mediaDomain: "dvd_video",
-      version: 1,
       settings: {},
     });
 
@@ -1435,11 +1595,10 @@ describe("data-access facade", () => {
       sourceKey: "dvd:main-feature",
       kind: "main_feature",
     });
-    const profile = access.catalog.createEncodingProfile({
+    const profile = access.encodingProfiles.create({
       key: "dvd-library",
       displayName: "DVD library",
       mediaDomain: "dvd_video",
-      version: 1,
       settings: { preset: "Fast 480p30" },
     });
 

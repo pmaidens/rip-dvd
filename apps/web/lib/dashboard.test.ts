@@ -40,11 +40,10 @@ function seedEncodeJob(access: DataAccess): void {
     kind: "main_feature",
     label: "Main feature",
   });
-  const profile = access.catalog.createEncodingProfile({
+  const profile = access.encodingProfiles.create({
     key: "enrichment-profile",
     displayName: "Enriched profile",
     mediaDomain: "dvd_video",
-    version: 1,
     settings: {},
   });
   access.encodeJobs.enqueue({
@@ -121,11 +120,10 @@ describe("readDashboardSnapshot", () => {
       kind: "main_feature",
       label: "Main feature",
     });
-    const profile = access.catalog.createEncodingProfile({
+    const profile = access.encodingProfiles.create({
       key: "dvd-library",
       displayName: "DVD library",
       mediaDomain: "dvd_video",
-      version: 1,
       settings: { preset: "Fast 480p30" },
     });
     const encodeJob = access.encodeJobs.enqueue({
@@ -406,7 +404,10 @@ describe("readDashboardSnapshot", () => {
         listMediaItems() {
           throw new Error("media catalog unavailable");
         },
-        listEncodingProfiles() {
+      },
+      encodingProfiles: {
+        ...access.encodingProfiles,
+        list() {
           throw new Error("profile catalog unavailable");
         },
       },

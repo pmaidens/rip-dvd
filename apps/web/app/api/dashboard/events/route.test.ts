@@ -96,11 +96,10 @@ describe("GET /api/dashboard/events", () => {
       sourceKey: "main-feature",
       kind: "main_feature",
     });
-    const profile = access.catalog.createEncodingProfile({
+    const profile = access.encodingProfiles.create({
       key: "streamed-profile",
       displayName: "DVD library",
       mediaDomain: "dvd_video",
-      version: 1,
       settings: {},
     });
     access.encodeJobs.enqueue({

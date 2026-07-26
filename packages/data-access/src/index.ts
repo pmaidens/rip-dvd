@@ -570,8 +570,9 @@ export function createDataAccess({
             access.catalog.listOriginalDiscArchives(),
           listMediaItems: () => access.catalog.listMediaItems(),
           listDiscSelections: () => access.catalog.listDiscSelections(),
-          listEncodingProfiles: () =>
-            access.catalog.listEncodingProfiles(),
+        },
+        encodingProfiles: {
+          list: (input) => access.encodingProfiles.list(input),
         },
         archiveJobs: {
           list: (statuses) => access.archiveJobs.list(statuses),
@@ -1045,32 +1046,124 @@ export function createDataAccess({
           .all()
           .map(toDiscSelection);
       },
+    },
 
-      createEncodingProfile(input) {
+    encodingProfiles: {
+      create(input) {
         const timestamp = now();
         const id = newId<EncodingProfileId>();
-        const version = requirePositiveSafeInteger(input.version, "version");
-        return requireRow(
-          database
-            .insert(encodingProfiles)
-            .values({
-              id,
-              key: requireNonEmpty(input.key, "key"),
-              displayName: requireNonEmpty(input.displayName, "displayName"),
-              mediaDomain: input.mediaDomain,
-              version,
-              settings: input.settings,
-              createdAt: timestamp,
-              updatedAt: timestamp,
-            })
-            .returning()
-            .get(),
-          "encoding profile",
-          id,
-        );
+        const key = requireNonEmpty(input.key, "key");
+        return database.transaction((transaction) => {
+          const existing = transaction
+            .select({ id: encodingProfiles.id })
+            .from(encodingProfiles)
+            .where(
+              and(
+                eq(encodingProfiles.mediaDomain, input.mediaDomain),
+                eq(encodingProfiles.key, key),
+              ),
+            )
+            .get();
+          if (existing) {
+            throw new DomainInvariantError(
+              "Encoding Profile key already exists in this media domain",
+            );
+          }
+          return requireRow(
+            transaction
+              .insert(encodingProfiles)
+              .values({
+                id,
+                key,
+                displayName: requireNonEmpty(input.displayName, "displayName"),
+                mediaDomain: input.mediaDomain,
+                version: 1,
+                isActive: true,
+                settings: input.settings,
+                createdAt: timestamp,
+                updatedAt: timestamp,
+              })
+              .returning()
+              .get(),
+            "encoding profile",
+            id,
+          );
+        });
       },
 
-      findEncodingProfile(input) {
+      createVersion(input) {
+        const timestamp = now();
+        return database.transaction((transaction) => {
+          const source = transaction
+            .select()
+            .from(encodingProfiles)
+            .where(
+              and(
+                eq(encodingProfiles.id, input.sourceProfileId),
+                eq(encodingProfiles.mediaDomain, input.mediaDomain),
+              ),
+            )
+            .get();
+          if (!source) {
+            const existing = transaction
+              .select({ mediaDomain: encodingProfiles.mediaDomain })
+              .from(encodingProfiles)
+              .where(eq(encodingProfiles.id, input.sourceProfileId))
+              .get();
+            if (existing) {
+              throw new DomainInvariantError(
+                "Encoding Profile does not belong to the requested media domain",
+              );
+            }
+            throw new RecordNotFoundError(
+              "encoding profile",
+              input.sourceProfileId,
+            );
+          }
+          const latest = requireRow(
+            transaction
+              .select({ version: encodingProfiles.version })
+              .from(encodingProfiles)
+              .where(
+                and(
+                  eq(encodingProfiles.mediaDomain, source.mediaDomain),
+                  eq(encodingProfiles.key, source.key),
+                ),
+              )
+              .orderBy(desc(encodingProfiles.version))
+              .limit(1)
+              .get(),
+            "encoding profile",
+            source.id,
+          );
+          const version = requirePositiveSafeInteger(
+            latest.version + 1,
+            "version",
+          );
+          const id = newId<EncodingProfileId>();
+          return requireRow(
+            transaction
+              .insert(encodingProfiles)
+              .values({
+                id,
+                key: source.key,
+                displayName: source.displayName,
+                mediaDomain: source.mediaDomain,
+                version,
+                isActive: false,
+                settings: input.settings,
+                createdAt: timestamp,
+                updatedAt: timestamp,
+              })
+              .returning()
+              .get(),
+            "encoding profile",
+            id,
+          );
+        });
+      },
+
+      find(input) {
         const key = requireNonEmpty(input.key, "key");
         const version = requirePositiveSafeInteger(input.version, "version");
         return (
@@ -1088,10 +1181,72 @@ export function createDataAccess({
         );
       },
 
-      listEncodingProfiles() {
+      setActive(input) {
+        const timestamp = now();
+        return database.transaction((transaction) => {
+          const profile = transaction
+            .select()
+            .from(encodingProfiles)
+            .where(
+              and(
+                eq(encodingProfiles.id, input.id),
+                eq(encodingProfiles.mediaDomain, input.mediaDomain),
+              ),
+            )
+            .get();
+          if (!profile) {
+            const existing = transaction
+              .select({ mediaDomain: encodingProfiles.mediaDomain })
+              .from(encodingProfiles)
+              .where(eq(encodingProfiles.id, input.id))
+              .get();
+            if (existing) {
+              throw new DomainInvariantError(
+                "Encoding Profile does not belong to the requested media domain",
+              );
+            }
+            throw new RecordNotFoundError("encoding profile", input.id);
+          }
+
+          if (input.isActive) {
+            transaction
+              .update(encodingProfiles)
+              .set({ isActive: false, updatedAt: timestamp })
+              .where(
+                and(
+                  eq(encodingProfiles.mediaDomain, profile.mediaDomain),
+                  eq(encodingProfiles.key, profile.key),
+                  eq(encodingProfiles.isActive, true),
+                  ne(encodingProfiles.id, profile.id),
+                ),
+              )
+              .run();
+          }
+
+          return requireRow(
+            transaction
+              .update(encodingProfiles)
+              .set({ isActive: input.isActive, updatedAt: timestamp })
+              .where(eq(encodingProfiles.id, profile.id))
+              .returning()
+              .get(),
+            "encoding profile",
+            profile.id,
+          );
+        });
+      },
+
+      list(input = {}) {
+        const conditions = [
+          input.mediaDomain
+            ? eq(encodingProfiles.mediaDomain, input.mediaDomain)
+            : undefined,
+          input.activeOnly ? eq(encodingProfiles.isActive, true) : undefined,
+        ].filter((condition) => condition !== undefined);
         return database
           .select()
           .from(encodingProfiles)
+          .where(conditions.length > 0 ? and(...conditions) : undefined)
           .orderBy(
             asc(encodingProfiles.mediaDomain),
             asc(encodingProfiles.key),
