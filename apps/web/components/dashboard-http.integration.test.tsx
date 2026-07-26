@@ -32,4 +32,33 @@ describe("database-backed dashboard over HTTP", () => {
     expect(html).toContain("No Detected Discs are currently known.");
     expect(html).not.toContain("/dev/sr0");
   });
+
+  it("renders a dependency outage as a section error after HTTP serialization", async () => {
+    const access = dataAccessFixture.create();
+    access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      displayName: "Healthy drive",
+      isEnabled: true,
+      isPresent: true,
+    });
+
+    const response = createDashboardResponse({
+      ...access,
+      catalog: {
+        ...access.catalog,
+        listEncodingProfiles() {
+          throw new Error("profile catalog unavailable");
+        },
+      },
+    });
+    const dashboard = (await response.json()) as DashboardSnapshot;
+    const html = renderToStaticMarkup(<DashboardView state={dashboard} />);
+
+    expect(response.status).toBe(200);
+    expect(dashboard.encodeJobs).toEqual({ status: "error" });
+    expect(dashboard.opticalDrives.status).toBe("loaded");
+    expect(html.match(/data-state="error"/g)).toHaveLength(1);
+    expect(html).toContain("Current state is unavailable.");
+    expect(html).not.toContain("Unknown Encoding Profile");
+  });
 });

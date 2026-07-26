@@ -86,10 +86,6 @@ function unavailable<T>(): DashboardSectionResult<T> {
   return { status: "error" };
 }
 
-function valueOrEmpty<T>(source: SourceResult<T[]>): T[] {
-  return source.status === "loaded" ? source.value : [];
-}
-
 type OpticalDriveRecord = ReturnType<
   DataAccess["catalog"]["listOpticalDrives"]
 >[number];
@@ -117,6 +113,14 @@ export function readDashboardSnapshot(access: DataAccess): DashboardSnapshot {
   const profileSource = readSource(() =>
     access.catalog.listEncodingProfiles(),
   );
+  const drivesById =
+    opticalDriveSource.status === "loaded"
+      ? new Map(opticalDriveSource.value.map((drive) => [drive.id, drive]))
+      : null;
+  const discsById =
+    detectedDiscSource.status === "loaded"
+      ? new Map(detectedDiscSource.value.map((disc) => [disc.id, disc]))
+      : null;
 
   const opticalDrives =
     opticalDriveSource.status === "error"
@@ -137,12 +141,9 @@ export function readDashboardSnapshot(access: DataAccess): DashboardSnapshot {
         );
 
   const detectedDiscs =
-    detectedDiscSource.status === "error"
+    detectedDiscSource.status === "error" || drivesById === null
       ? unavailable<DashboardDetectedDisc>()
       : (() => {
-          const drivesById = new Map(
-            valueOrEmpty(opticalDriveSource).map((drive) => [drive.id, drive]),
-          );
           return loaded(
             detectedDiscSource.value.map((disc) => {
               const drive = drivesById.get(disc.opticalDriveId);
@@ -161,15 +162,11 @@ export function readDashboardSnapshot(access: DataAccess): DashboardSnapshot {
         })();
 
   const archiveJobs =
-    archiveJobSource.status === "error"
+    archiveJobSource.status === "error" ||
+    drivesById === null ||
+    discsById === null
       ? unavailable<DashboardArchiveJob>()
       : (() => {
-          const drivesById = new Map(
-            valueOrEmpty(opticalDriveSource).map((drive) => [drive.id, drive]),
-          );
-          const discsById = new Map(
-            valueOrEmpty(detectedDiscSource).map((disc) => [disc.id, disc]),
-          );
           return loaded(
             archiveJobSource.value.map((job) => {
               const disc = discsById.get(job.detectedDiscId);
@@ -190,20 +187,23 @@ export function readDashboardSnapshot(access: DataAccess): DashboardSnapshot {
         })();
 
   const encodeJobs =
-    encodeJobSource.status === "error"
+    encodeJobSource.status === "error" ||
+    selectionSource.status === "error" ||
+    mediaItemSource.status === "error" ||
+    profileSource.status === "error"
       ? unavailable<DashboardEncodeJob>()
       : (() => {
           const selectionsById = new Map(
-            valueOrEmpty(selectionSource).map((selection) => [
+            selectionSource.value.map((selection) => [
               selection.id,
               selection,
             ]),
           );
           const mediaItemsById = new Map(
-            valueOrEmpty(mediaItemSource).map((item) => [item.id, item]),
+            mediaItemSource.value.map((item) => [item.id, item]),
           );
           const profilesById = new Map(
-            valueOrEmpty(profileSource).map((profile) => [profile.id, profile]),
+            profileSource.value.map((profile) => [profile.id, profile]),
           );
           return loaded(
             encodeJobSource.value.map((job) => {
@@ -227,12 +227,10 @@ export function readDashboardSnapshot(access: DataAccess): DashboardSnapshot {
 
   const catalogReview =
     archiveSource.status === "error" ||
-    selectionSource.status === "error"
+    selectionSource.status === "error" ||
+    discsById === null
       ? unavailable<DashboardCatalogReviewItem>()
       : (() => {
-          const discsById = new Map(
-            valueOrEmpty(detectedDiscSource).map((disc) => [disc.id, disc]),
-          );
           const selectedArchiveIds = new Set(
             selectionSource.value.map(
               (selection) => selection.originalDiscArchiveId,

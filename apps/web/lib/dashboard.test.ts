@@ -6,6 +6,51 @@ import { useDataAccessFixture } from "../test/data-access-fixture";
 
 const dataAccessFixture = useDataAccessFixture();
 
+function seedEncodeJob(access: DataAccess): void {
+  const drive = access.catalog.upsertOpticalDrive({
+    devicePath: "/dev/sr0",
+    isEnabled: true,
+    isPresent: true,
+  });
+  const disc = access.catalog.registerDetectedDisc({
+    opticalDriveId: drive.id,
+    discKind: "dvd",
+    fingerprint: "encode-enrichment-disc",
+  });
+  access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+  access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+  const archive = access.catalog.createOriginalDiscArchive({
+    detectedDiscId: disc.id,
+    discKind: "dvd",
+    archiveFormat: "iso",
+    archivePath: "/media/originals/encode-enrichment.iso",
+    fingerprint: "encode-enrichment-disc",
+  });
+  const mediaItem = access.catalog.createMediaItem({
+    kind: "movie",
+    title: "Enriched title",
+  });
+  const selection = access.catalog.createDiscSelection({
+    originalDiscArchiveId: archive.id,
+    mediaItemId: mediaItem.id,
+    sourceKey: "main-feature",
+    kind: "main_feature",
+    label: "Main feature",
+  });
+  const profile = access.catalog.createEncodingProfile({
+    key: "enrichment-profile",
+    displayName: "Enriched profile",
+    mediaDomain: "dvd_video",
+    version: 1,
+    settings: {},
+  });
+  access.encodeJobs.enqueue({
+    discSelectionId: selection.id,
+    encodingProfileId: profile.id,
+    outputPath: "/media/movies/enrichment.mkv",
+  });
+}
+
 describe("readDashboardSnapshot", () => {
   it("returns the five operations sections from facade-backed SQLite state", () => {
     const access = dataAccessFixture.create();
@@ -188,7 +233,7 @@ describe("readDashboardSnapshot", () => {
     expect(dashboard.catalogReview).toEqual({ status: "loaded", items: [] });
   });
 
-  it("keeps primary records available when display enrichment fails", () => {
+  it("marks drive-dependent sections unavailable when the drive read fails", () => {
     const access = dataAccessFixture.create();
     const drive = access.catalog.upsertOpticalDrive({
       devicePath: "/dev/sr0",
@@ -217,27 +262,13 @@ describe("readDashboardSnapshot", () => {
     });
 
     expect(dashboard.opticalDrives).toEqual({ status: "error" });
-    expect(dashboard.detectedDiscs).toEqual({
-      status: "loaded",
-      items: [
-        expect.objectContaining({
-          volumeLabel: "ENRICHMENT_DISC",
-          opticalDriveName: "Unknown Optical Drive",
-        }),
-      ],
-    });
-    expect(dashboard.archiveJobs).toEqual({
-      status: "loaded",
-      items: [
-        expect.objectContaining({
-          discLabel: "ENRICHMENT_DISC",
-          opticalDriveName: "Unknown Optical Drive",
-        }),
-      ],
-    });
+    expect(dashboard.detectedDiscs).toEqual({ status: "error" });
+    expect(dashboard.archiveJobs).toEqual({ status: "error" });
+    expect(dashboard.encodeJobs).toEqual({ status: "loaded", items: [] });
+    expect(dashboard.catalogReview).toEqual({ status: "loaded", items: [] });
   });
 
-  it("does not hide archive jobs when detected-disc enrichment fails", () => {
+  it("marks Archive Jobs unavailable when the Detected Disc read fails", () => {
     const access = dataAccessFixture.create();
     const drive = access.catalog.upsertOpticalDrive({
       devicePath: "/dev/sr0",
@@ -266,19 +297,12 @@ describe("readDashboardSnapshot", () => {
     });
 
     expect(dashboard.detectedDiscs).toEqual({ status: "error" });
-    expect(dashboard.archiveJobs).toEqual({
-      status: "loaded",
-      items: [
-        expect.objectContaining({
-          discLabel: "Unlabeled disc",
-          opticalDriveName: "Unknown Optical Drive",
-        }),
-      ],
-    });
+    expect(dashboard.archiveJobs).toEqual({ status: "error" });
     expect(dashboard.opticalDrives.status).toBe("loaded");
+    expect(dashboard.encodeJobs).toEqual({ status: "loaded", items: [] });
   });
 
-  it("keeps catalog review available when disc labels cannot be enriched", () => {
+  it("marks Catalog Review unavailable when the Detected Disc read fails", () => {
     const access = dataAccessFixture.create();
     const drive = access.catalog.upsertOpticalDrive({
       devicePath: "/dev/sr0",
@@ -310,56 +334,14 @@ describe("readDashboardSnapshot", () => {
       },
     });
 
-    expect(dashboard.catalogReview).toEqual({
-      status: "loaded",
-      items: [expect.objectContaining({ discLabel: "Unlabeled disc" })],
-    });
+    expect(dashboard.catalogReview).toEqual({ status: "error" });
+    expect(dashboard.opticalDrives.status).toBe("loaded");
+    expect(dashboard.encodeJobs.status).toBe("loaded");
   });
 
-  it("keeps encode jobs available when optional catalog labels fail", () => {
+  it("marks Encode Jobs unavailable when media and profile reads fail", () => {
     const access = dataAccessFixture.create();
-    const drive = access.catalog.upsertOpticalDrive({
-      devicePath: "/dev/sr0",
-      isEnabled: true,
-      isPresent: true,
-    });
-    const disc = access.catalog.registerDetectedDisc({
-      opticalDriveId: drive.id,
-      discKind: "dvd",
-      fingerprint: "encode-enrichment-disc",
-    });
-    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
-    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
-    const archive = access.catalog.createOriginalDiscArchive({
-      detectedDiscId: disc.id,
-      discKind: "dvd",
-      archiveFormat: "iso",
-      archivePath: "/media/originals/encode-enrichment.iso",
-      fingerprint: "encode-enrichment-disc",
-    });
-    const mediaItem = access.catalog.createMediaItem({
-      kind: "movie",
-      title: "Enriched title",
-    });
-    const selection = access.catalog.createDiscSelection({
-      originalDiscArchiveId: archive.id,
-      mediaItemId: mediaItem.id,
-      sourceKey: "main-feature",
-      kind: "main_feature",
-      label: "Main feature",
-    });
-    const profile = access.catalog.createEncodingProfile({
-      key: "enrichment-profile",
-      displayName: "Enriched profile",
-      mediaDomain: "dvd_video",
-      version: 1,
-      settings: {},
-    });
-    access.encodeJobs.enqueue({
-      discSelectionId: selection.id,
-      encodingProfileId: profile.id,
-      outputPath: "/media/movies/enrichment.mkv",
-    });
+    seedEncodeJob(access);
 
     const dashboard = readDashboardSnapshot({
       ...access,
@@ -374,14 +356,30 @@ describe("readDashboardSnapshot", () => {
       },
     });
 
-    expect(dashboard.encodeJobs).toEqual({
-      status: "loaded",
-      items: [
-        expect.objectContaining({
-          mediaTitle: "Unknown Media Item",
-          encodingProfileName: "Unknown Encoding Profile",
-        }),
-      ],
+    expect(dashboard.encodeJobs).toEqual({ status: "error" });
+    expect(dashboard.opticalDrives.status).toBe("loaded");
+    expect(dashboard.detectedDiscs.status).toBe("loaded");
+    expect(dashboard.catalogReview.status).toBe("loaded");
+  });
+
+  it("marks both selection-dependent sections unavailable when selections fail", () => {
+    const access = dataAccessFixture.create();
+    seedEncodeJob(access);
+
+    const dashboard = readDashboardSnapshot({
+      ...access,
+      catalog: {
+        ...access.catalog,
+        listDiscSelections() {
+          throw new Error("disc selections unavailable");
+        },
+      },
     });
+
+    expect(dashboard.encodeJobs).toEqual({ status: "error" });
+    expect(dashboard.catalogReview).toEqual({ status: "error" });
+    expect(dashboard.opticalDrives.status).toBe("loaded");
+    expect(dashboard.detectedDiscs.status).toBe("loaded");
+    expect(dashboard.archiveJobs.status).toBe("loaded");
   });
 });
