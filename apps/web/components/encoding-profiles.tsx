@@ -193,7 +193,7 @@ export function EncodingProfilesView({
                 <div className="profile-actions">
                   <button
                     type="button"
-                    aria-label={`Create new version of ${profile.displayName}, version ${profile.version}`}
+                    aria-label={`Create new version of ${profile.displayName}, profile key ${profile.key}, version ${profile.version}`}
                     onClick={() => onCreateVersion(profile.id)}
                     disabled={isSaving}
                   >
@@ -201,7 +201,7 @@ export function EncodingProfilesView({
                   </button>
                   <button
                     type="button"
-                    aria-label={`${profile.isActive ? "Deactivate" : "Activate"} ${profile.displayName}, version ${profile.version}`}
+                    aria-label={`${profile.isActive ? "Deactivate" : "Activate"} ${profile.displayName}, profile key ${profile.key}, version ${profile.version}`}
                     onClick={() => onSetActive(profile.id, !profile.isActive)}
                     disabled={isSaving}
                   >

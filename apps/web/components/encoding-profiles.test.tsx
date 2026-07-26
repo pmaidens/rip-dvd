@@ -57,16 +57,16 @@ describe("EncodingProfilesView", () => {
     expect(html).toContain("Activate");
     expect(html).toContain("Try again");
     expect(html).toContain(
-      'aria-label="Create new version of DVD library, version 1"',
+      'aria-label="Create new version of DVD library, profile key dvd-library, version 1"',
     );
     expect(html).toContain(
-      'aria-label="Create new version of DVD library, version 2"',
+      'aria-label="Create new version of DVD library, profile key dvd-library, version 2"',
     );
     expect(html).toContain(
-      'aria-label="Deactivate DVD library, version 1"',
+      'aria-label="Deactivate DVD library, profile key dvd-library, version 1"',
     );
     expect(html).toContain(
-      'aria-label="Activate DVD library, version 2"',
+      'aria-label="Activate DVD library, profile key dvd-library, version 2"',
     );
   });
 
@@ -87,5 +87,56 @@ describe("EncodingProfilesView", () => {
 
     expect(html).toContain("Encoding Profiles are unavailable");
     expect(html).toContain("Try again");
+  });
+
+  it("gives distinct same-name profile versions unique action names", () => {
+    const html = renderToStaticMarkup(
+      <EncodingProfilesView
+        state={{
+          status: "loaded",
+          profiles: [
+            {
+              id: "fast-profile",
+              key: "fast",
+              displayName: "DVD library",
+              mediaDomain: "dvd_video",
+              version: 1,
+              isActive: true,
+              settings: { preset: "Fast 480p30", container: "mkv" },
+            },
+            {
+              id: "archive-profile",
+              key: "archive",
+              displayName: "DVD library",
+              mediaDomain: "dvd_video",
+              version: 1,
+              isActive: true,
+              settings: { preset: "HQ 480p30", container: "mkv" },
+            },
+          ],
+        }}
+        versionSourceId={null}
+        isSaving={false}
+        hasRequestError={false}
+        onSave={() => undefined}
+        onCreateVersion={() => undefined}
+        onCancelVersion={() => undefined}
+        onRetry={() => undefined}
+        onSetActive={() => undefined}
+      />,
+    );
+
+    expect(html).toContain(
+      'aria-label="Create new version of DVD library, profile key fast, version 1"',
+    );
+    expect(html).toContain(
+      'aria-label="Create new version of DVD library, profile key archive, version 1"',
+    );
+    expect(html).toContain(
+      'aria-label="Deactivate DVD library, profile key fast, version 1"',
+    );
+    expect(html).toContain(
+      'aria-label="Deactivate DVD library, profile key archive, version 1"',
+    );
   });
 });
