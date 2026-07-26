@@ -113,9 +113,7 @@ function readDashboardSnapshotRecords(
     access.catalog.listDiscSelections(),
   );
   const mediaItemSource = readSource(() => access.catalog.listMediaItems());
-  const profileSource = readSource(() =>
-    access.catalog.listEncodingProfiles(),
-  );
+  const profileSource = readSource(() => access.encodingProfiles.list());
   const drivesById =
     opticalDriveSource.status === "loaded"
       ? new Map(opticalDriveSource.value.map((drive) => [drive.id, drive]))
