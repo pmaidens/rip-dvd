@@ -410,6 +410,82 @@ describe("legacy sidecar import", () => {
     fixture.access.close();
   });
 
+  it("distinguishes identical and conflicting logical jobs across sidecars", () => {
+    const root = mkdtempSync(join(tmpdir(), "rip-dvd-cross-sidecar-job-"));
+    temporaryDirectories.push(root);
+    const originalsLibraryPath = join(root, "originals");
+    const archivePath = join(originalsLibraryPath, "Shared Movie.iso");
+    const firstOutputPath = join(root, "movies", "Shared Movie.mkv");
+    const conflictingOutputPath = join(
+      root,
+      "movies",
+      "Shared Movie alternate.mkv",
+    );
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    writeFileSync(archivePath, "shared archive");
+    const sidecarPath = (name: string) =>
+      join(originalsLibraryPath, `${name}.rip-dvd.json`);
+    const writeSidecar = (name: string, outputPath: string) => {
+      writeFileSync(
+        sidecarPath(name),
+        JSON.stringify({
+          schema_version: 2,
+          source: archivePath,
+          title: "Shared Movie",
+          disc_fingerprint: "shared-movie-fingerprint",
+          jobs: [
+            {
+              label: "Movie: Shared Movie",
+              source: archivePath,
+              output: outputPath,
+              preset: "Fast 480p30",
+              selection: "main_feature",
+              title_number: null,
+            },
+          ],
+        }),
+      );
+    };
+    writeSidecar("a-first", firstOutputPath);
+    writeSidecar("b-identical", firstOutputPath);
+    writeSidecar("c-conflicting", conflictingOutputPath);
+    const sidecarBytes = new Map(
+      ["a-first", "b-identical", "c-conflicting"].map((name) => [
+        sidecarPath(name),
+        readFileSync(sidecarPath(name)),
+      ]),
+    );
+    const access = createLegacySidecarDataAccess({
+      databasePath: join(root, "catalog.sqlite"),
+    });
+
+    const report = access.legacySidecars.importLibrary({
+      originalsLibraryPath,
+    });
+
+    expect(report).toMatchObject({
+      sidecarsFound: 3,
+      sidecarsImported: 3,
+      sidecarsSkipped: 0,
+      issues: [
+        expect.objectContaining({
+          code: "duplicate_record",
+          jobIndex: 0,
+          sidecarPath: sidecarPath("c-conflicting"),
+          message: expect.stringMatching(/logical Encode Job conflicts/i),
+        }),
+      ],
+    });
+    expect(access.encodeJobs.list()).toEqual([
+      expect.objectContaining({ outputPath: firstOutputPath }),
+    ]);
+    for (const [path, bytes] of sidecarBytes) {
+      expect(readFileSync(path)).toEqual(bytes);
+    }
+
+    access.close();
+  });
+
   it("preserves authoritative failed Encode Job state on re-import", () => {
     const fixture = createFixture();
     fixture.access.legacySidecars.importLibrary({

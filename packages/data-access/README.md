@@ -117,12 +117,15 @@ a completed Encode Job uses its output file modification time. Re-import never
 replaces an existing SQLite Encode Job's status, output, priority, progress, or
 error, including an intentional retry.
 
-After a successful import, the migration-only entrypoint creates a
-`.rip-dvd-sqlite-catalog` marker at the originals-library root. It never writes
-the sidecars themselves. The legacy encoder refuses a marked library, making
-SQLite the enforceable catalog and queue authority. Recursive traversal and the
-cutover writer live behind the `@rip-dvd/data-access/legacy-sidecars` entrypoint
-and are excluded from the web runtime graph.
+Before committing any imported records, the migration-only entrypoint
+atomically writes and synchronizes a `.rip-dvd-sqlite-catalog` marker at the
+originals-library root. A marker failure exposes no imported SQLite state; a
+restart after marker publication safely resumes the idempotent import with the
+legacy queue already inactive. It never writes the sidecars themselves. All
+legacy archive and queue commands refuse a marked library, making SQLite the
+enforceable catalog and queue authority. Recursive traversal and the cutover
+writer live behind the `@rip-dvd/data-access/legacy-sidecars` entrypoint and are
+excluded from the web runtime graph.
 
 The repository-level `pnpm import:legacy-sidecars -- ...` command invokes this
 facade operation for users and automation.

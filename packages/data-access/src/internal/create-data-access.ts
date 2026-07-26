@@ -40,7 +40,10 @@ import {
   createJobQueueController,
   type JobQueueAdapter,
 } from "./job-queue.js";
-import type { LegacySidecarDiscovery } from "./legacy-sidecars.js";
+import type {
+  LegacySidecarDiscovery,
+  ParsedLegacyJob,
+} from "./legacy-sidecars.js";
 import {
   requireNonEmpty,
   requirePositiveSafeInteger,
@@ -1401,6 +1404,11 @@ export function createDataAccessInternal(
           );
         const discoveries =
           legacySidecarMigration.discover(originalsLibraryPath);
+        if (
+          discoveries.some((discovery) => discovery.outcome === "parsed")
+        ) {
+          legacySidecarMigration.retireQueue(originalsLibraryPath);
+        }
         const report: LegacySidecarImportReport = {
           originalsLibraryPath,
           sidecarsFound: discoveries.length,
@@ -1411,6 +1419,10 @@ export function createDataAccessInternal(
           recordsUnchanged: 0,
           issues: [],
         };
+        const persistedLegacyJobs = new Map<
+          string,
+          { job: ParsedLegacyJob; sidecarPath: string }
+        >();
 
         for (const discovery of discoveries) {
           if (discovery.outcome === "skipped") {
@@ -1421,10 +1433,33 @@ export function createDataAccessInternal(
 
           const { sidecar } = discovery;
           report.issues.push(...sidecar.issues);
+          const acceptedJobs = sidecar.jobs.filter((job) => {
+            const logicalKey = `${sidecar.fingerprint}\0${job.sourceKey}\0${job.profileKey}`;
+            const persisted = persistedLegacyJobs.get(logicalKey);
+            if (!persisted) {
+              return true;
+            }
+            if (
+              isDeepStrictEqual(
+                { ...persisted.job, jobIndex: 0 },
+                { ...job, jobIndex: 0 },
+              )
+            ) {
+              return true;
+            }
+            report.issues.push({
+              code: "duplicate_record",
+              jobIndex: job.jobIndex,
+              message: `Logical Encode Job conflicts with an earlier record in ${persisted.sidecarPath}`,
+              sidecarPath: sidecar.sidecarPath,
+            });
+            return false;
+          });
           const created = emptyLegacyImportRecordCounts();
           let updated = 0;
           let unchanged = 0;
           const persistenceIssues: LegacySidecarImportReport["issues"] = [];
+          const persistedJobs: ParsedLegacyJob[] = [];
 
           try {
             database.transaction((transaction) => {
@@ -1651,7 +1686,7 @@ export function createDataAccessInternal(
                 return movieItem;
               };
 
-              for (const job of sidecar.jobs) {
+              for (const job of acceptedJobs) {
                 const importedJobState = job.completedAt
                   ? {
                       status: "completed" as const,
@@ -1870,6 +1905,7 @@ export function createDataAccessInternal(
                 } else {
                   unchanged += 1;
                 }
+                persistedJobs.push(job);
               }
             });
           } catch (error) {
@@ -1886,6 +1922,16 @@ export function createDataAccessInternal(
             continue;
           }
 
+          for (const job of persistedJobs) {
+            const logicalKey = `${sidecar.fingerprint}\0${job.sourceKey}\0${job.profileKey}`;
+            if (!persistedLegacyJobs.has(logicalKey)) {
+              persistedLegacyJobs.set(logicalKey, {
+                job,
+                sidecarPath: sidecar.sidecarPath,
+              });
+            }
+          }
+
           report.sidecarsImported += 1;
           for (const key of Object.keys(created) as Array<keyof typeof created>) {
             report.recordsCreated[key] += created[key];
@@ -1895,9 +1941,6 @@ export function createDataAccessInternal(
           report.issues.push(...persistenceIssues);
         }
 
-        if (report.sidecarsImported > 0) {
-          legacySidecarMigration.retireQueue(originalsLibraryPath);
-        }
         return report;
       },
     },
