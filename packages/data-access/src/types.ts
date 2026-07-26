@@ -297,10 +297,27 @@ export interface EncodeJobAccess {
   requeue(id: EncodeJobId): EncodeJob;
 }
 
+export type SnapshotCatalogAccess = Pick<
+  CatalogAccess,
+  | "listOpticalDrives"
+  | "listDetectedDiscs"
+  | "listOriginalDiscArchives"
+  | "listMediaItems"
+  | "listDiscSelections"
+  | "listEncodingProfiles"
+>;
+
+export interface ConsistentReadAccess {
+  readonly catalog: SnapshotCatalogAccess;
+  readonly archiveJobs: Pick<ArchiveJobAccess, "list">;
+  readonly encodeJobs: Pick<EncodeJobAccess, "list">;
+}
+
 export interface DataAccess {
   readonly catalog: CatalogAccess;
   readonly archiveJobs: ArchiveJobAccess;
   readonly encodeJobs: EncodeJobAccess;
+  readConsistentSnapshot<T>(read: (access: ConsistentReadAccess) => T): T;
   checkHealth(): ServiceHealth;
   close(): void;
 }

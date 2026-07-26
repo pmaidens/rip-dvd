@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import { createDashboardResponse, createDashboardRoute } from "./route";
-import { useDataAccessFixture } from "../../../test/data-access-fixture";
+import {
+  useDataAccessFixture,
+  withSnapshotOverrides,
+} from "../../../test/data-access-fixture";
 
 const dataAccessFixture = useDataAccessFixture();
 
@@ -48,15 +51,13 @@ describe("GET /api/dashboard", () => {
       isPresent: true,
     });
 
-    const response = createDashboardResponse({
-      ...access,
+    const response = createDashboardResponse(withSnapshotOverrides(access, {
       encodeJobs: {
-        ...access.encodeJobs,
         list() {
           throw new Error("encode queue unavailable");
         },
       },
-    });
+    }));
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual(
       expect.objectContaining({

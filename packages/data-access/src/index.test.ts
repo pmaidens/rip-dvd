@@ -183,6 +183,64 @@ describe("data-access facade", () => {
     }
   });
 
+  it("keeps cross-query reads coherent while another facade commits", () => {
+    const databasePath = createTestDatabasePath();
+    const reader = openTestDatabase(databasePath);
+    const writer = openTestDatabase(databasePath);
+    const drive = writer.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const disc = writer.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "consistent-snapshot-disc",
+    });
+    writer.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    writer.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const job = writer.archiveJobs.enqueue({ detectedDiscId: disc.id });
+
+    const snapshot = reader.readConsistentSnapshot((snapshotAccess) => {
+      const detectedDiscsBeforeCommit =
+        snapshotAccess.catalog.listDetectedDiscs();
+      writer.catalog.createOriginalDiscArchive({
+        detectedDiscId: disc.id,
+        discKind: "dvd",
+        archiveFormat: "iso",
+        archivePath: "/media/originals/Consistent Snapshot.iso",
+        fingerprint: "consistent-snapshot-disc",
+      });
+
+      return {
+        detectedDiscsBeforeCommit,
+        detectedDiscsAfterCommit:
+          snapshotAccess.catalog.listDetectedDiscs(),
+        archiveJobsAfterCommit: snapshotAccess.archiveJobs.list(),
+        archivesAfterCommit:
+          snapshotAccess.catalog.listOriginalDiscArchives(),
+      };
+    });
+
+    expect(snapshot.detectedDiscsBeforeCommit).toEqual([
+      expect.objectContaining({ id: disc.id, status: "approved" }),
+    ]);
+    expect(snapshot.detectedDiscsAfterCommit).toEqual([
+      expect.objectContaining({ id: disc.id, status: "approved" }),
+    ]);
+    expect(snapshot.archiveJobsAfterCommit).toEqual([
+      expect.objectContaining({ id: job.id, status: "queued" }),
+    ]);
+    expect(snapshot.archivesAfterCommit).toEqual([]);
+    expect(reader.catalog.listDetectedDiscs()).toEqual([
+      expect.objectContaining({ id: disc.id, status: "archived" }),
+    ]);
+    expect(reader.archiveJobs.list()).toEqual([]);
+    expect(reader.catalog.listOriginalDiscArchives()).toHaveLength(1);
+
+    reader.close();
+    writer.close();
+  });
+
   it("creates the catalog graph and enforces its domain uniqueness rules", () => {
     const access = openTestDatabase();
     const drive = access.catalog.upsertOpticalDrive({
