@@ -4,7 +4,10 @@ This package is the only runtime persistence boundary for rip-dvd. Its public
 interface speaks in Optical Drives, Detected Discs, Original Disc Archives,
 Media Items, Disc Selections, Encoding Profiles, Archive Jobs, and Encode Jobs.
 Drizzle tables, SQL, SQLite connections, and transaction objects remain
-private. Aggregate identifiers are opaque domain types, so callers cannot
+private. The explicit `legacySidecars` migration boundary is the sole
+format-named exception; it converts legacy persistence into those domain
+records and does not expose Drizzle or SQLite. Aggregate identifiers are opaque
+domain types, so callers cannot
 cross-wire, for example, a Media Item ID into an Original Disc Archive field.
 
 `createDataAccess()` opens the configured local SQLite file, configures WAL,
@@ -93,6 +96,20 @@ use short internal transactions. Queue claims use one atomic
 `UPDATE ... RETURNING` statement and return only after that statement has
 committed. Workers must start external programs only after `claimNext()`
 returns; process execution never belongs in a database transaction.
+
+## Legacy sidecar import
+
+`legacySidecars.importLibrary()` is the idempotent migration boundary for
+existing `.rip-dvd.json` files. It scans an originals library once, validates
+schema-one and schema-two sidecars, and writes each valid sidecar to SQLite in
+a short transaction. Valid jobs in a partially invalid sidecar still import;
+corrupt sidecars, invalid jobs, missing archives, and duplicates are returned
+in a structured report. Completion is inferred from the final output file at
+import time. This operation only reads sidecars—SQLite remains the active
+catalog and queue state afterward.
+
+The repository-level `pnpm import:legacy-sidecars -- ...` command invokes this
+facade operation for users and automation.
 
 Generate and review schema changes with:
 

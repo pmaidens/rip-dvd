@@ -213,6 +213,17 @@ function newId<Id extends string>(): Id {
   return randomUUID() as Id;
 }
 
+function emptyLegacyImportRecordCounts():
+  LegacySidecarImportReport["recordsCreated"] {
+  return {
+    originalDiscArchives: 0,
+    discSelections: 0,
+    mediaItems: 0,
+    encodingProfiles: 0,
+    encodeJobs: 0,
+  };
+}
+
 function asRunningArchiveJob(job: ArchiveJob): RunningArchiveJob {
   if (job.status !== "running" || job.claimToken === null) {
     throw new DomainInvariantError("Claimed Archive Job is not running");
@@ -1848,13 +1859,7 @@ export function createDataAccess({
           sidecarsFound: discoveries.length,
           sidecarsImported: 0,
           sidecarsSkipped: 0,
-          recordsCreated: {
-            originalDiscArchives: 0,
-            discSelections: 0,
-            mediaItems: 0,
-            encodingProfiles: 0,
-            encodeJobs: 0,
-          },
+          recordsCreated: emptyLegacyImportRecordCounts(),
           recordsUpdated: 0,
           recordsUnchanged: 0,
           issues: [],
@@ -1869,15 +1874,10 @@ export function createDataAccess({
 
           const { sidecar } = discovery;
           report.issues.push(...sidecar.issues);
-          const created = {
-            originalDiscArchives: 0,
-            discSelections: 0,
-            mediaItems: 0,
-            encodingProfiles: 0,
-            encodeJobs: 0,
-          };
+          const created = emptyLegacyImportRecordCounts();
           let updated = 0;
           let unchanged = 0;
+          const persistenceIssues: LegacySidecarImportReport["issues"] = [];
 
           try {
             database.transaction((transaction) => {
@@ -2089,6 +2089,37 @@ export function createDataAccess({
 
               for (const job of sidecar.jobs) {
                 let selection = selectionsBySourceKey.get(job.sourceKey);
+                let profile = transaction
+                  .select()
+                  .from(encodingProfiles)
+                  .where(
+                    and(
+                      eq(encodingProfiles.mediaDomain, "dvd_video"),
+                      eq(encodingProfiles.key, job.profileKey),
+                      eq(encodingProfiles.version, 1),
+                    ),
+                  )
+                  .get();
+                const outputJob = transaction
+                  .select()
+                  .from(encodeJobs)
+                  .where(eq(encodeJobs.outputPath, job.outputPath))
+                  .get();
+                if (
+                  outputJob &&
+                  (!selection ||
+                    !profile ||
+                    outputJob.discSelectionId !== selection.id ||
+                    outputJob.encodingProfileId !== profile.id)
+                ) {
+                  persistenceIssues.push({
+                    code: "duplicate_record",
+                    jobIndex: job.jobIndex,
+                    message: `Encode Job output is already assigned: ${job.outputPath}`,
+                    sidecarPath: sidecar.sidecarPath,
+                  });
+                  continue;
+                }
                 let mediaItem: typeof mediaItems.$inferSelect;
                 if (selection) {
                   if (
@@ -2211,17 +2242,6 @@ export function createDataAccess({
                   created.discSelections += 1;
                 }
 
-                let profile = transaction
-                  .select()
-                  .from(encodingProfiles)
-                  .where(
-                    and(
-                      eq(encodingProfiles.mediaDomain, "dvd_video"),
-                      eq(encodingProfiles.key, job.profileKey),
-                      eq(encodingProfiles.version, 1),
-                    ),
-                  )
-                  .get();
                 if (!profile) {
                   profile = requireRow(
                     transaction
@@ -2256,20 +2276,6 @@ export function createDataAccess({
                     ),
                   )
                   .get();
-                const outputJob = transaction
-                  .select()
-                  .from(encodeJobs)
-                  .where(eq(encodeJobs.outputPath, job.outputPath))
-                  .get();
-                if (
-                  logicalJob &&
-                  outputJob &&
-                  logicalJob.id !== outputJob.id
-                ) {
-                  throw new DomainInvariantError(
-                    `Encode Job output is already assigned: ${job.outputPath}`,
-                  );
-                }
                 const existingJob = logicalJob ?? outputJob;
                 if (!existingJob) {
                   transaction
@@ -2319,7 +2325,10 @@ export function createDataAccess({
           } catch (error) {
             report.sidecarsSkipped += 1;
             report.issues.push({
-              code: "duplicate_record",
+              code:
+                error instanceof DomainInvariantError
+                  ? "duplicate_record"
+                  : "invalid_sidecar",
               message:
                 error instanceof Error ? error.message : String(error),
               sidecarPath: sidecar.sidecarPath,
@@ -2333,6 +2342,7 @@ export function createDataAccess({
           }
           report.recordsUpdated += updated;
           report.recordsUnchanged += unchanged;
+          report.issues.push(...persistenceIssues);
         }
 
         return report;

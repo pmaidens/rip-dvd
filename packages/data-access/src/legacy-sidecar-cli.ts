@@ -53,16 +53,21 @@ export function runLegacySidecarImportCli({
       environment.RIP_DVD_ORIGINALS_LIBRARY_PATH?.trim() ??
       "";
   } catch (error) {
-    writeError(`${error instanceof Error ? error.message : String(error)}\n${usage}`);
+    writeError(
+      `${error instanceof Error ? error.message : String(error)}\n${usage}`,
+    );
     return 2;
   }
   if (!databasePath || !originalsLibraryPath) {
-    writeError(`Both the database and originals library paths are required.\n${usage}`);
+    writeError(
+      `Both the database and originals library paths are required.\n${usage}`,
+    );
     return 2;
   }
 
-  const access = createDataAccess({ databasePath });
+  let access: ReturnType<typeof createDataAccess> | undefined;
   try {
+    access = createDataAccess({ databasePath });
     const report = access.legacySidecars.importLibrary({
       originalsLibraryPath,
     });
@@ -86,6 +91,6 @@ export function runLegacySidecarImportCli({
     );
     return 2;
   } finally {
-    access.close();
+    access?.close();
   }
 }
