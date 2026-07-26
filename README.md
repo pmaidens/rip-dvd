@@ -372,6 +372,22 @@ The canonical catalog terms are:
 - **Archive Job** and **Encode Job**: separate mutable queue records with
   queued, running, completed, and failed lifecycles.
 
+### Encoding Profiles
+
+The operations dashboard includes an Encoding Profiles workspace for DVD video.
+Each logical profile starts at version 1 with immutable HandBrake preset and MKV
+container settings. Creating a new version inserts the next sequential version
+without changing older records, so existing Encode Jobs retain the exact
+settings identity they referenced.
+
+One version per media-domain/profile-key pair can be active at a time. New
+profiles are active, new versions start inactive, activating a version
+atomically deactivates its sibling version, and the active version may be
+deactivated without selecting a replacement. The web API exposes the same
+workflow at `GET`, `POST`, and `PATCH /api/encoding-profiles`; it is fixed to
+the `dvd_video` media domain while the shared facade requires explicit domain
+scope for version and activation commands.
+
 Visit `/health` for the visible service/database status or `/api/health` for
 the machine-readable health response. Validate schema history with
 `pnpm db:check`; the normal `pnpm check` command runs the facade integration

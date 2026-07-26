@@ -46,8 +46,8 @@ describe("database-backed dashboard over HTTP", () => {
     });
 
     const response = createDashboardResponse(withSnapshotOverrides(access, {
-      catalog: {
-        listEncodingProfiles() {
+      encodingProfiles: {
+        list() {
           throw new Error("profile catalog unavailable");
         },
       },

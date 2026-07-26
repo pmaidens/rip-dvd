@@ -227,6 +227,9 @@ export const encodingProfiles = sqliteTable(
     displayName: text("display_name").notNull(),
     mediaDomain: text("media_domain", { enum: MEDIA_DOMAINS }).notNull(),
     version: integer("version").notNull(),
+    isActive: integer("is_active", { mode: "boolean" })
+      .notNull()
+      .default(false),
     settings: text("settings", { mode: "json" })
       .$type<Record<string, unknown>>()
       .notNull(),
@@ -240,6 +243,9 @@ export const encodingProfiles = sqliteTable(
       table.key,
       table.version,
     ),
+    uniqueIndex("encoding_profiles_one_active_version_unique")
+      .on(table.mediaDomain, table.key)
+      .where(sql`${table.isActive} = 1`),
     check(
       "encoding_profiles_domain_check",
       sql`${table.mediaDomain} in (${sqliteStringLiterals(MEDIA_DOMAINS)})`,

@@ -11,6 +11,7 @@ import { afterEach } from "vitest";
 
 type SnapshotOverrides = {
   catalog?: Partial<ConsistentReadAccess["catalog"]>;
+  encodingProfiles?: Partial<ConsistentReadAccess["encodingProfiles"]>;
   archiveJobs?: Partial<ConsistentReadAccess["archiveJobs"]>;
   encodeJobs?: Partial<ConsistentReadAccess["encodeJobs"]>;
 };
@@ -27,6 +28,10 @@ export function withSnapshotOverrides(
           catalog: {
             ...snapshotAccess.catalog,
             ...overrides.catalog,
+          },
+          encodingProfiles: {
+            ...snapshotAccess.encodingProfiles,
+            ...overrides.encodingProfiles,
           },
           archiveJobs: {
             ...snapshotAccess.archiveJobs,

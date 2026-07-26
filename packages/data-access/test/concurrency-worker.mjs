@@ -71,6 +71,26 @@ try {
       type: "result",
       value: { outcome: "archived", id: archive.id },
     });
+  } else if (workerData.operation === "create-profile-version") {
+    const profile = access.encodingProfiles.createVersion({
+      sourceProfileId: workerData.sourceProfileId,
+      mediaDomain: "dvd_video",
+      settings: { preset: workerData.preset, container: "mkv" },
+    });
+    parentPort.postMessage({
+      type: "result",
+      value: { outcome: "versioned", id: profile.id, version: profile.version },
+    });
+  } else if (workerData.operation === "activate-profile-version") {
+    const profile = access.encodingProfiles.setActive({
+      id: workerData.id,
+      mediaDomain: "dvd_video",
+      isActive: true,
+    });
+    parentPort.postMessage({
+      type: "result",
+      value: { outcome: "activated", id: profile.id },
+    });
   } else {
     throw new Error(`Unknown concurrency operation: ${workerData.operation}`);
   }

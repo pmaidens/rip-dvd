@@ -36,6 +36,20 @@ DVD title/chapter coordinates and Encoding Profile versions must be positive
 safe integers at the facade. SQLite CHECK constraints also require integer
 storage, preventing fractional values inserted through direct SQL.
 
+## Encoding Profile versions
+
+Encoding Profiles have a dedicated facade because callers must not choose or
+rewrite version numbers. `create` inserts active version 1 within an explicit
+media domain. `createVersion` inherits the source profile key and display name,
+inserts the next sequential version with a new immutable settings snapshot, and
+starts it inactive. `setActive` is domain-scoped and atomically deactivates any
+active sibling before activation; deactivation may leave the logical profile
+without an active version. `list` supports domain and active-only filters.
+
+The database retains every version referenced by an Encode Job. Active state is
+mutable selection policy, while the key, name, domain, version, and settings
+that define historical job meaning have no update operation.
+
 Both queues share one progress coalescer. The first report is persisted
 immediately. Later reports persist when at least one second has elapsed or the
 reported value differs from the last persisted value by at least five
