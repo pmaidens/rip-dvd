@@ -162,7 +162,7 @@ describe("legacy sidecar import", () => {
         expect.objectContaining({ kind: "bonus_feature", title: "Trailer" }),
       ]),
     );
-    expect(fixture.access.catalog.listEncodingProfiles()).toEqual(
+    expect(fixture.access.encodingProfiles.list()).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ settings: { preset: "Fast 480p30" } }),
         expect.objectContaining({
@@ -245,7 +245,7 @@ describe("legacy sidecar import", () => {
     expect(access.catalog.listDiscSelections()).toEqual([
       expect.objectContaining({ kind: "dvd_title", titleNumber: 1 }),
     ]);
-    expect(access.catalog.listEncodingProfiles()).toEqual([
+    expect(access.encodingProfiles.list()).toEqual([
       expect.objectContaining({ settings: { preset: "Fast 480p30" } }),
     ]);
     expect(readFileSync(sidecarPath, "utf8")).toBe(beforeImport);

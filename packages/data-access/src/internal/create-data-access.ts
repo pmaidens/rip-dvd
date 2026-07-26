@@ -73,7 +73,6 @@ import type {
   RunningEncodeJob,
 } from "../types.js";
 
-
 const BUSY_TIMEOUT_MS = 5_000;
 const MIGRATION_LOCK_TIMEOUT_MS = 15_000;
 const MIGRATION_LOCK_STALE_MS = 300_000;
@@ -1868,30 +1867,8 @@ export function createDataAccessInternal(
                     })
                     .run();
                   created.encodeJobs += 1;
-                } else if (
-                  existingJob.status !== "queued" ||
-                  (existingJob.outputPath === job.outputPath &&
-                    existingJob.status === importedJobState.status &&
-                    existingJob.progressPercent ===
-                      importedJobState.progressPercent)
-                ) {
-                  unchanged += 1;
                 } else {
-                  transaction
-                    .update(encodeJobs)
-                    .set({
-                      outputPath: job.outputPath,
-                      ...importedJobState,
-                      claimedBy: null,
-                      claimToken: null,
-                      claimedAt: null,
-                      startedAt: null,
-                      errorMessage: null,
-                      updatedAt: importedJobState.completedAt ?? timestamp,
-                    })
-                    .where(eq(encodeJobs.id, existingJob.id))
-                    .run();
-                  updated += 1;
+                  unchanged += 1;
                 }
               }
             });

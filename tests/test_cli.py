@@ -2,6 +2,7 @@ import json
 import fcntl
 from pathlib import Path
 from io import StringIO
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -16,6 +17,7 @@ from rip_dvd.cli import (
     execute_encode_job,
     encode_lock_path,
     failed_output_path,
+    main,
     partial_output_path,
     queue_mode,
     queue_job,
@@ -130,6 +132,84 @@ class EncodeQueueDiscoveryTests(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertEqual(queue_code, 2)
             self.assertTrue(any("SQLite catalog" in message for message in errors))
+
+    def test_sqlite_cutover_refuses_every_legacy_queue_command_without_touching_sidecars(self):
+        command_arguments = (
+            ["interactive"],
+            ["rip"],
+            ["title", "1"],
+            ["extras", "--extras", "2"],
+            ["queue"],
+            ["encode", "--normal-priority"],
+        )
+
+        for arguments in command_arguments:
+            with self.subTest(command=arguments[0]), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                originals = root / "Originals"
+                originals.mkdir()
+                existing_sidecar = originals / "Existing.rip-dvd.json"
+                existing_sidecar.write_bytes(b'{"sentinel":true}\n')
+                (originals / ".rip-dvd-sqlite-catalog").write_text(
+                    "{}\n", encoding="utf-8"
+                )
+                sidecars_before = {
+                    path.relative_to(originals): path.read_bytes()
+                    for path in originals.rglob("*.rip-dvd.json")
+                }
+                errors = []
+                argv = [
+                    "rip-dvd",
+                    *arguments,
+                    "--device",
+                    str(root / "missing-device"),
+                    "--library",
+                    str(root / "Movies"),
+                    "--originals-library",
+                    str(originals),
+                ]
+
+                with patch.object(sys, "argv", argv):
+                    with patch("rip_dvd.cli.log_error", side_effect=errors.append):
+                        with patch("rip_dvd.cli.scan_dvd_titles") as scan:
+                            with patch("rip_dvd.cli.execute_archive_plan") as archive:
+                                code = main()
+
+                sidecars_after = {
+                    path.relative_to(originals): path.read_bytes()
+                    for path in originals.rglob("*.rip-dvd.json")
+                }
+                self.assertEqual(code, 2)
+                self.assertTrue(any("SQLite catalog" in message for message in errors))
+                self.assertEqual(sidecars_after, sidecars_before)
+                scan.assert_not_called()
+                archive.assert_not_called()
+
+    def test_sqlite_cutover_still_allows_read_only_disc_scanning(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            originals = root / "Originals"
+            device = root / "dvd-device"
+            originals.mkdir()
+            device.write_bytes(b"device")
+            (originals / ".rip-dvd-sqlite-catalog").write_text(
+                "{}\n", encoding="utf-8"
+            )
+            argv = [
+                "rip-dvd",
+                "scan",
+                "--device",
+                str(device),
+                "--originals-library",
+                str(originals),
+            ]
+
+            with patch.object(sys, "argv", argv):
+                with patch("rip_dvd.cli.scan_dvd_titles", return_value=sample_scan()) as scan:
+                    code = main()
+
+            self.assertEqual(code, 0)
+            scan.assert_called_once_with(str(device))
 
     def test_failed_output_path_does_not_overwrite_existing_failed_file(self):
         with tempfile.TemporaryDirectory() as temp:
