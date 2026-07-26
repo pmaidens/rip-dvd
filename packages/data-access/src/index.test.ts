@@ -358,6 +358,69 @@ describe("data-access facade", () => {
     access.close();
   });
 
+  it("reconciles discovered Optical Drives without changing missing drives' last-seen time", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-26T18:00:00.000Z"));
+    const access = openTestDatabase();
+    const internalDrive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      displayName: "Internal drive",
+      isEnabled: true,
+      isPresent: true,
+    });
+
+    vi.setSystemTime(new Date("2026-07-26T18:05:00.000Z"));
+    expect(
+      access.catalog.reconcileOpticalDrives([
+        {
+          devicePath: "/dev/sr1",
+          displayName: "USB drive",
+          isEnabledWhenNew: false,
+        },
+      ]),
+    ).toEqual([
+      expect.objectContaining({
+        id: internalDrive.id,
+        devicePath: "/dev/sr0",
+        isEnabled: true,
+        isPresent: false,
+        lastSeenAt: new Date("2026-07-26T18:00:00.000Z"),
+      }),
+      expect.objectContaining({
+        devicePath: "/dev/sr1",
+        isEnabled: false,
+        isPresent: true,
+        lastSeenAt: new Date("2026-07-26T18:05:00.000Z"),
+      }),
+    ]);
+
+    vi.setSystemTime(new Date("2026-07-26T18:10:00.000Z"));
+    expect(
+      access.catalog.reconcileOpticalDrives([
+        {
+          devicePath: "/dev/sr0",
+          displayName: "Internal drive rediscovered",
+          isEnabledWhenNew: false,
+        },
+      ]),
+    ).toEqual([
+      expect.objectContaining({
+        id: internalDrive.id,
+        displayName: "Internal drive rediscovered",
+        isEnabled: true,
+        isPresent: true,
+        lastSeenAt: new Date("2026-07-26T18:10:00.000Z"),
+      }),
+      expect.objectContaining({
+        devicePath: "/dev/sr1",
+        isPresent: false,
+        lastSeenAt: new Date("2026-07-26T18:05:00.000Z"),
+      }),
+    ]);
+
+    access.close();
+  });
+
   it("requires positive safe integer Encoding Profile versions", () => {
     const databasePath = createTestDatabasePath();
     const access = openTestDatabase(databasePath);

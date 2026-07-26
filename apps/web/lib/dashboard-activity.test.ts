@@ -63,6 +63,8 @@ describe("watchDashboardActivity", () => {
             discKind: "dvd",
             status: "approved",
             opticalDriveName: "Upper drive",
+            fingerprint: "sha256:live-disc",
+            titles: [],
             detectedAt: "2026-07-26T15:58:00.000Z",
           },
         ],

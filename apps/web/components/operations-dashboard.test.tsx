@@ -97,6 +97,16 @@ describe("DashboardView", () => {
             discKind: "dvd",
             status: "scanned",
             opticalDriveName: "Upper drive",
+            fingerprint: "sha256:reviewable-disc",
+            titles: [
+              {
+                number: 1,
+                durationSeconds: 5_711,
+                chapters: 12,
+                audioStreams: 2,
+                subtitles: 1,
+              },
+            ],
             detectedAt: "2026-07-22T07:58:00.000Z",
           },
         ],
@@ -145,6 +155,10 @@ describe("DashboardView", () => {
     expect(html).toContain("Upper drive");
     expect(html).toContain("MY_MOVIE");
     expect(html).toContain(">DVD<");
+    expect(html).toContain("Title 1");
+    expect(html).toContain("1h 35m 11s");
+    expect(html).toContain("12 chapters · 2 audio · 1 subtitle");
+    expect(html).toContain("sha256:reviewable-disc");
     expect(html).toContain("42%");
     expect(html).toContain("My Movie");
     expect(html).toContain("BONUS_DISC");

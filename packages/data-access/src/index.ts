@@ -650,6 +650,65 @@ export function createDataAccess({
     },
 
     catalog: {
+      reconcileOpticalDrives(discovered) {
+        const timestamp = now();
+        const normalized = discovered.map((drive) => ({
+          ...drive,
+          devicePath: requireNonEmpty(drive.devicePath, "devicePath"),
+        }));
+        const uniquePaths = new Set(normalized.map((drive) => drive.devicePath));
+        if (uniquePaths.size !== normalized.length) {
+          throw new DomainInvariantError(
+            "Discovered Optical Drive paths must be unique",
+          );
+        }
+
+        return database.transaction((transaction) => {
+          transaction
+            .update(opticalDrives)
+            .set({ isPresent: false, updatedAt: timestamp })
+            .where(eq(opticalDrives.isPresent, true))
+            .run();
+
+          for (const drive of normalized) {
+            transaction
+              .insert(opticalDrives)
+              .values({
+                id: newId<OpticalDriveId>(),
+                devicePath: drive.devicePath,
+                displayName: drive.displayName,
+                vendor: drive.vendor,
+                product: drive.product,
+                serialNumber: drive.serialNumber,
+                isEnabled: drive.isEnabledWhenNew ?? false,
+                isPresent: true,
+                lastSeenAt: timestamp,
+                createdAt: timestamp,
+                updatedAt: timestamp,
+              })
+              .onConflictDoUpdate({
+                target: opticalDrives.devicePath,
+                set: {
+                  displayName: drive.displayName,
+                  vendor: drive.vendor,
+                  product: drive.product,
+                  serialNumber: drive.serialNumber,
+                  isPresent: true,
+                  lastSeenAt: timestamp,
+                  updatedAt: timestamp,
+                },
+              })
+              .run();
+          }
+
+          return transaction
+            .select()
+            .from(opticalDrives)
+            .orderBy(asc(opticalDrives.devicePath))
+            .all();
+        }, { behavior: "immediate" });
+      },
+
       upsertOpticalDrive(input) {
         const timestamp = now();
         const devicePath = requireNonEmpty(input.devicePath, "devicePath");

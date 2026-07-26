@@ -210,6 +210,16 @@ export type RunningEncodeJob = EncodeJob & {
 };
 
 export interface CatalogAccess {
+  reconcileOpticalDrives(
+    discovered: readonly {
+      devicePath: string;
+      displayName?: string;
+      vendor?: string;
+      product?: string;
+      serialNumber?: string;
+      isEnabledWhenNew?: boolean;
+    }[],
+  ): OpticalDrive[];
   upsertOpticalDrive(input: {
     devicePath: string;
     displayName?: string;

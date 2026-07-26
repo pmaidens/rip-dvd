@@ -59,6 +59,21 @@ function formatTimestamp(value: string): string {
   }).format(new Date(value));
 }
 
+function formatDuration(totalSeconds: number): string {
+  const hours = Math.floor(totalSeconds / 3_600);
+  const minutes = Math.floor((totalSeconds % 3_600) / 60);
+  const seconds = totalSeconds % 60;
+  return [
+    ...(hours > 0 ? [`${hours}h`] : []),
+    ...(minutes > 0 ? [`${minutes}m`] : []),
+    `${seconds}s`,
+  ].join(" ");
+}
+
+function countLabel(count: number, singular: string, plural = `${singular}s`) {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
 function Progress({ value }: { value: number }) {
   return (
     <div className="progress" aria-label={`${value}% complete`}>
@@ -197,6 +212,29 @@ export function DashboardView({ state }: { state: DashboardLoadState }) {
             <div className="item-footer">
               <span>{displayTerm(disc.discKind)}</span>
               <span>{formatTimestamp(disc.detectedAt)}</span>
+            </div>
+            <div className="disc-scan">
+              <p className="disc-fingerprint">
+                <span>Fingerprint</span>
+                <code>{disc.fingerprint}</code>
+              </p>
+              {disc.titles.length > 0 ? (
+                <ol className="dvd-title-map" aria-label="DVD title map">
+                  {disc.titles.map((title) => (
+                    <li key={title.number}>
+                      <div>
+                        <strong>Title {title.number}</strong>
+                        <span>{formatDuration(title.durationSeconds)}</span>
+                      </div>
+                      <p>
+                        {countLabel(title.chapters, "chapter")} ·{" "}
+                        {countLabel(title.audioStreams, "audio", "audio")} ·{" "}
+                        {countLabel(title.subtitles, "subtitle")}
+                      </p>
+                    </li>
+                  ))}
+                </ol>
+              ) : null}
             </div>
           </article>
         )}
