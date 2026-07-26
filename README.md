@@ -204,11 +204,15 @@ records. Encode Job completion is inferred from the final output file only when
 the job is first imported. Re-running the command is safe and preserves every
 existing SQLite Encode Job status, output, priority, progress, and error.
 
-After at least one sidecar imports, the command creates a
-`.rip-dvd-sqlite-catalog` cutover marker at the originals-library root. It never
-writes the sidecars themselves. The marker makes SQLite the enforceable queue
-authority: legacy `rip-dvd encode` refuses that library, so run the SQLite
-Encode Job worker instead.
+Before publishing records from any parseable sidecar, the command atomically
+writes and synchronizes a `.rip-dvd-sqlite-catalog` cutover marker at the
+originals-library root. If marker publication fails, no imported SQLite records
+are committed. If the process stops after publication, rerunning the command
+resumes the idempotent import while the legacy queue remains inactive. The
+command never writes the sidecars themselves. The marker makes SQLite the
+enforceable queue authority: legacy `interactive`, `rip`, `title`, `extras`,
+`queue`, and `encode` commands refuse that library, so use the SQLite catalog
+and workers instead.
 
 ### Join Part Files
 

@@ -1,9 +1,14 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
+  closeSync,
   existsSync,
+  fsyncSync,
+  openSync,
   readdirSync,
   readFileSync,
+  renameSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { isAbsolute, join, normalize, resolve } from "node:path";
@@ -496,23 +501,45 @@ export function discoverLegacySidecars(
 }
 
 export function retireLegacySidecarQueue(originalsLibraryPath: string): void {
+  const markerPath = join(
+    originalsLibraryPath,
+    LEGACY_QUEUE_CUTOVER_MARKER,
+  );
+  if (existsSync(markerPath)) {
+    return;
+  }
+  const temporaryMarkerPath = `${markerPath}.${process.pid}.${randomUUID()}.tmp`;
+  let markerDescriptor: number | undefined;
   try {
+    markerDescriptor = openSync(temporaryMarkerPath, "wx", 0o600);
     writeFileSync(
-      join(originalsLibraryPath, LEGACY_QUEUE_CUTOVER_MARKER),
+      markerDescriptor,
       `${JSON.stringify({
         schemaVersion: 1,
         legacyQueueStatus: "retired",
         authoritativeStore: "sqlite",
       })}\n`,
-      { encoding: "utf8", flag: "wx" },
+      { encoding: "utf8" },
     );
-  } catch (error) {
+    fsyncSync(markerDescriptor);
+    closeSync(markerDescriptor);
+    markerDescriptor = undefined;
+    renameSync(temporaryMarkerPath, markerPath);
+
+    const libraryDescriptor = openSync(originalsLibraryPath, "r");
+    try {
+      fsyncSync(libraryDescriptor);
+    } finally {
+      closeSync(libraryDescriptor);
+    }
+  } finally {
+    if (markerDescriptor !== undefined) {
+      closeSync(markerDescriptor);
+    }
     if (
-      !(error instanceof Error) ||
-      !("code" in error) ||
-      error.code !== "EEXIST"
+      existsSync(temporaryMarkerPath)
     ) {
-      throw error;
+      unlinkSync(temporaryMarkerPath);
     }
   }
 }
