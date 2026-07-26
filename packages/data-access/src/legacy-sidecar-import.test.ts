@@ -3,6 +3,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -101,6 +102,7 @@ function createFixture() {
     archivePath,
     movieOutputPath,
     originalsLibraryPath,
+    sidecarPath,
     trailerOutputPath,
   };
 }
@@ -112,6 +114,20 @@ afterEach(() => {
 });
 
 describe("legacy sidecar import", () => {
+  it("rejects a nonexistent originals library", () => {
+    const root = mkdtempSync(join(tmpdir(), "rip-dvd-missing-library-"));
+    temporaryDirectories.push(root);
+    const access = createDataAccess({ databasePath: join(root, "catalog.sqlite") });
+
+    expect(() =>
+      access.legacySidecars.importLibrary({
+        originalsLibraryPath: join(root, "does-not-exist"),
+      }),
+    ).toThrow(/originals library does not exist/i);
+
+    access.close();
+  });
+
   it("imports a valid sidecar as catalog records and preserves legacy job state", () => {
     const fixture = createFixture();
 
@@ -184,6 +200,8 @@ describe("legacy sidecar import", () => {
     const outputPath = join(root, "movies", "Schema One.mkv");
     mkdirSync(originalsLibraryPath, { recursive: true });
     writeFileSync(archivePath, "legacy archive");
+    const archiveFileTime = new Date("1998-06-07T08:09:10.000Z");
+    utimesSync(archivePath, archiveFileTime, archiveFileTime);
     const schemaOneSidecar = {
       schema_version: 1,
       source: archivePath,
@@ -219,6 +237,7 @@ describe("legacy sidecar import", () => {
     expect(report).toMatchObject({ sidecarsImported: 1, issues: [] });
     expect(access.catalog.listOriginalDiscArchives()).toEqual([
       expect.objectContaining({
+        archivedAt: archiveFileTime,
         fingerprint:
           "796dcf764a8d40802e7b99c87e720c857abef3feeb6e045eef75e3f93d1c3a55",
       }),
@@ -230,6 +249,119 @@ describe("legacy sidecar import", () => {
       expect.objectContaining({ settings: { preset: "Fast 480p30" } }),
     ]);
     expect(readFileSync(sidecarPath, "utf8")).toBe(beforeImport);
+
+    access.close();
+  });
+
+  it("resolves relative schema-one paths from the legacy invocation directory", () => {
+    const root = mkdtempSync(join(tmpdir(), "rip-dvd-relative-import-"));
+    temporaryDirectories.push(root);
+    const archiveDirectory = join(root, "Originals", "Relative Movie");
+    const archivePath = join(archiveDirectory, "Relative Movie.iso");
+    const outputPath = join(root, "Movies", "Relative Movie.mkv");
+    mkdirSync(archiveDirectory, { recursive: true });
+    writeFileSync(archivePath, "relative archive");
+    writeFileSync(
+      join(archiveDirectory, "Relative Movie.rip-dvd.json"),
+      JSON.stringify({
+        schema_version: 1,
+        source: "Originals/Relative Movie/Relative Movie.iso",
+        title: "Relative Movie",
+        disc_title: "RELATIVE_MOVIE",
+        titles: [
+          {
+            number: 1,
+            seconds: 5_400,
+            chapters: 10,
+            audio_streams: 2,
+            subtitles: 1,
+          },
+        ],
+        jobs: [
+          {
+            label: "Movie: Relative Movie",
+            source: "Originals/Relative Movie/Relative Movie.iso",
+            output: "Movies/Relative Movie.mkv",
+            title_number: 1,
+          },
+        ],
+      }),
+    );
+    const access = createDataAccess({ databasePath: join(root, "catalog.sqlite") });
+    const previousWorkingDirectory = process.cwd();
+
+    let report;
+    try {
+      process.chdir(root);
+      report = access.legacySidecars.importLibrary({
+        originalsLibraryPath: "Originals",
+      });
+    } finally {
+      process.chdir(previousWorkingDirectory);
+    }
+
+    expect(report).toMatchObject({ sidecarsImported: 1, issues: [] });
+    expect(access.catalog.listOriginalDiscArchives()).toEqual([
+      expect.objectContaining({ archivePath }),
+    ]);
+    expect(access.encodeJobs.list()).toEqual([
+      expect.objectContaining({ outputPath }),
+    ]);
+
+    access.close();
+  });
+
+  it("reports ambiguous relative paths instead of guessing", () => {
+    const root = mkdtempSync(join(tmpdir(), "rip-dvd-ambiguous-import-"));
+    temporaryDirectories.push(root);
+    const sidecarDirectory = join(root, "Originals", "Ambiguous Movie");
+    const invocationArchive = join(root, "Shared", "Ambiguous.iso");
+    const sidecarRelativeArchive = join(
+      sidecarDirectory,
+      "Shared",
+      "Ambiguous.iso",
+    );
+    mkdirSync(join(root, "Shared"), { recursive: true });
+    mkdirSync(join(sidecarDirectory, "Shared"), { recursive: true });
+    writeFileSync(invocationArchive, "invocation archive");
+    writeFileSync(sidecarRelativeArchive, "sidecar-relative archive");
+    writeFileSync(
+      join(sidecarDirectory, "Ambiguous Movie.rip-dvd.json"),
+      JSON.stringify({
+        schema_version: 2,
+        archive_status: "ready",
+        source: "Shared/Ambiguous.iso",
+        title: "Ambiguous Movie",
+        disc_fingerprint: "ambiguous-fingerprint",
+        titles: [],
+        jobs: [],
+      }),
+    );
+    const access = createDataAccess({ databasePath: join(root, "catalog.sqlite") });
+    const previousWorkingDirectory = process.cwd();
+
+    let report;
+    try {
+      process.chdir(root);
+      report = access.legacySidecars.importLibrary({
+        originalsLibraryPath: "Originals",
+      });
+    } finally {
+      process.chdir(previousWorkingDirectory);
+    }
+
+    expect(report).toMatchObject({
+      sidecarsFound: 1,
+      sidecarsImported: 0,
+      sidecarsSkipped: 1,
+      issues: [
+        expect.objectContaining({
+          code: "invalid_sidecar",
+          message: expect.stringMatching(/ambiguous/i),
+        }),
+      ],
+    });
+    expect(access.catalog.listOriginalDiscArchives()).toEqual([]);
 
     access.close();
   });
@@ -274,6 +406,77 @@ describe("legacy sidecar import", () => {
     expect(fixture.access.catalog.listOriginalDiscArchives()).toHaveLength(1);
     expect(fixture.access.catalog.listDiscSelections()).toHaveLength(2);
     expect(fixture.access.catalog.listMediaItems()).toHaveLength(2);
+
+    fixture.access.close();
+  });
+
+  it("preserves authoritative failed Encode Job state on re-import", () => {
+    const fixture = createFixture();
+    fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+    const claim = fixture.access.encodeJobs.claimNext("encode-worker-review");
+    if (!claim) {
+      throw new Error("Expected the imported queued Encode Job to be claimable");
+    }
+    fixture.access.encodeJobs.updateProgress(claim, 37);
+    fixture.access.encodeJobs.fail(claim, "transcode failed");
+
+    const report = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+
+    expect(report).toMatchObject({
+      sidecarsImported: 1,
+      sidecarsSkipped: 0,
+      recordsUpdated: 0,
+      issues: [],
+    });
+    expect(fixture.access.encodeJobs.list(["failed"])).toEqual([
+      expect.objectContaining({
+        id: claim.id,
+        status: "failed",
+        progressPercent: 37,
+        errorMessage: "transcode failed",
+      }),
+    ]);
+
+    fixture.access.close();
+  });
+
+  it("preserves legacy archive and completion timestamps", () => {
+    const fixture = createFixture();
+    const sidecar = JSON.parse(
+      readFileSync(fixture.sidecarPath, "utf8"),
+    ) as Record<string, unknown>;
+    sidecar.created_at = "2001-01-02T03:04:05+00:00";
+    sidecar.updated_at = "2001-01-03T04:05:06+00:00";
+    writeFileSync(fixture.sidecarPath, JSON.stringify(sidecar));
+    const archiveFileTime = new Date("2001-01-03T04:00:00.000Z");
+    const outputFileTime = new Date("2001-02-03T04:05:06.000Z");
+    utimesSync(fixture.archivePath, archiveFileTime, archiveFileTime);
+    utimesSync(fixture.movieOutputPath, outputFileTime, outputFileTime);
+
+    const report = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+
+    expect(report).toMatchObject({ sidecarsImported: 1, issues: [] });
+    expect(fixture.access.catalog.listOriginalDiscArchives()).toEqual([
+      expect.objectContaining({
+        archivedAt: new Date("2001-01-03T04:05:06.000Z"),
+        createdAt: new Date("2001-01-02T03:04:05.000Z"),
+      }),
+    ]);
+    expect(fixture.access.encodeJobs.list()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          outputPath: fixture.movieOutputPath,
+          completedAt: outputFileTime,
+          createdAt: new Date("2001-01-02T03:04:05.000Z"),
+        }),
+      ]),
+    );
 
     fixture.access.close();
   });
@@ -374,6 +577,73 @@ describe("legacy sidecar import", () => {
     expect(access.encodeJobs.list()).toHaveLength(2);
 
     access.close();
+  });
+
+  it("rejects malformed present metadata without aborting valid sidecars", () => {
+    const fixture = createFixture();
+    const malformedCases: Array<[string, Record<string, unknown>]> = [
+      ["schema-version", { schema_version: null }],
+      ["archive-status", { archive_status: null }],
+      ["title", { title: { text: "not a string" } }],
+      ["empty-title", { title: "" }],
+      ["year", { year: { value: 2001 } }],
+      ["disc-title", { disc_title: ["not", "a", "string"] }],
+      ["titles", { titles: "not an array" }],
+      ["null-titles", { titles: null }],
+      ["created-at", { created_at: "not a date" }],
+      ["updated-at", { updated_at: { value: "not a date" } }],
+      [
+        "fingerprint",
+        {
+          disc_fingerprint: { value: "not a string" },
+          disc_title: "DERIVABLE",
+          titles: [{ number: 1 }],
+        },
+      ],
+    ];
+    for (const [name, malformedFields] of malformedCases) {
+      const archivePath = join(fixture.originalsLibraryPath, `${name}.iso`);
+      writeFileSync(archivePath, name);
+      writeFileSync(
+        join(fixture.originalsLibraryPath, `${name}.rip-dvd.json`),
+        JSON.stringify({
+          schema_version: 2,
+          archive_status: "ready",
+          source: archivePath,
+          title: name,
+          year: "2001",
+          disc_title: name.toUpperCase(),
+          disc_fingerprint: `${name}-fingerprint`,
+          titles: [],
+          jobs: [],
+          ...malformedFields,
+        }),
+      );
+    }
+
+    const report = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+
+    expect(report).toMatchObject({
+      sidecarsFound: malformedCases.length + 1,
+      sidecarsImported: 1,
+      sidecarsSkipped: malformedCases.length,
+    });
+    expect(report.issues).toHaveLength(malformedCases.length);
+    expect(report.issues).toEqual(
+      expect.arrayContaining(
+        malformedCases.map(([name]) =>
+          expect.objectContaining({
+            code: "invalid_sidecar",
+            sidecarPath: expect.stringContaining(`${name}.rip-dvd.json`),
+          }),
+        ),
+      ),
+    );
+    expect(fixture.access.catalog.listOriginalDiscArchives()).toHaveLength(1);
+
+    fixture.access.close();
   });
 
   it("reports an output owned by another job and imports later jobs", () => {

@@ -1,4 +1,10 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -16,6 +22,29 @@ afterEach(() => {
 });
 
 describe("legacy sidecar import command", () => {
+  it("fails before creating a catalog for a nonexistent library", () => {
+    const root = mkdtempSync(join(tmpdir(), "rip-dvd-missing-cli-library-"));
+    temporaryDirectories.push(root);
+    const databasePath = join(root, "catalog.sqlite");
+    const errors: string[] = [];
+
+    const exitCode = runLegacySidecarImportCli({
+      argv: [
+        "--database",
+        databasePath,
+        "--originals-library",
+        join(root, "does-not-exist"),
+      ],
+      environment: {},
+      writeError: (message) => errors.push(message),
+      writeOutput: () => undefined,
+    });
+
+    expect(exitCode).toBe(2);
+    expect(errors.join("")).toMatch(/originals library does not exist/i);
+    expect(existsSync(databasePath)).toBe(false);
+  });
+
   it("imports an originals library into the requested SQLite catalog", () => {
     const root = mkdtempSync(join(tmpdir(), "rip-dvd-legacy-cli-"));
     temporaryDirectories.push(root);

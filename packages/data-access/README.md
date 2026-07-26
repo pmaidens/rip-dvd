@@ -105,8 +105,18 @@ schema-one and schema-two sidecars, and writes each valid sidecar to SQLite in
 a short transaction. Valid jobs in a partially invalid sidecar still import;
 corrupt sidecars, invalid jobs, missing archives, and duplicates are returned
 in a structured report. Completion is inferred from the final output file at
-import time. This operation only reads sidecars—SQLite remains the active
-catalog and queue state afterward.
+import time. Relative recorded paths use the legacy CLI's invocation-directory
+semantics; an existing sidecar-relative path is accepted as a compatibility
+candidate, but two existing candidates are reported as ambiguous. A missing or
+unreadable originals library is an input error rather than an empty successful
+import.
+
+Schema-two `created_at` and `updated_at` values provide the historical record
+dates. When they are absent, the archive file modification time is the fallback;
+a completed Encode Job uses its output file modification time. Re-import may
+promote an imported queued job when its output appears, but never replaces a
+running or terminal SQLite status or clears its error. This operation only
+reads sidecars—SQLite remains the active catalog and queue state afterward.
 
 The repository-level `pnpm import:legacy-sidecars -- ...` command invokes this
 facade operation for users and automation.
