@@ -40,6 +40,7 @@ import {
   createJobQueueController,
   type JobQueueAdapter,
 } from "./internal/job-queue.js";
+import { discoverLegacySidecars } from "./internal/legacy-sidecars.js";
 import {
   requireNonEmpty,
   requirePositiveSafeInteger,
@@ -68,6 +69,7 @@ import type {
   EncodingProfileId,
   JobStatus,
   MediaDomain,
+  LegacySidecarImportReport,
   MediaItemId,
   OpticalDriveId,
   OriginalDiscArchiveId,
@@ -1833,6 +1835,508 @@ export function createDataAccess({
       complete: (claim) => encodeJobQueue.complete(claim, undefined),
       fail: encodeJobQueue.fail,
       requeue: encodeJobQueue.requeue,
+    },
+
+    legacySidecars: {
+      importLibrary(input) {
+        const originalsLibraryPath = resolve(
+          requireNonEmpty(input.originalsLibraryPath, "originalsLibraryPath"),
+        );
+        const discoveries = discoverLegacySidecars(originalsLibraryPath);
+        const report: LegacySidecarImportReport = {
+          originalsLibraryPath,
+          sidecarsFound: discoveries.length,
+          sidecarsImported: 0,
+          sidecarsSkipped: 0,
+          recordsCreated: {
+            originalDiscArchives: 0,
+            discSelections: 0,
+            mediaItems: 0,
+            encodingProfiles: 0,
+            encodeJobs: 0,
+          },
+          recordsUpdated: 0,
+          recordsUnchanged: 0,
+          issues: [],
+        };
+
+        for (const discovery of discoveries) {
+          if (discovery.outcome === "skipped") {
+            report.sidecarsSkipped += 1;
+            report.issues.push(discovery.issue);
+            continue;
+          }
+
+          const { sidecar } = discovery;
+          report.issues.push(...sidecar.issues);
+          const created = {
+            originalDiscArchives: 0,
+            discSelections: 0,
+            mediaItems: 0,
+            encodingProfiles: 0,
+            encodeJobs: 0,
+          };
+          let updated = 0;
+          let unchanged = 0;
+
+          try {
+            database.transaction((transaction) => {
+              const existingByFingerprint = transaction
+                .select()
+                .from(originalDiscArchives)
+                .where(
+                  eq(originalDiscArchives.fingerprint, sidecar.fingerprint),
+                )
+                .get();
+              const existingByPath = transaction
+                .select()
+                .from(originalDiscArchives)
+                .where(eq(originalDiscArchives.archivePath, sidecar.archivePath))
+                .get();
+              if (
+                existingByFingerprint &&
+                existingByPath &&
+                existingByFingerprint.id !== existingByPath.id
+              ) {
+                throw new DomainInvariantError(
+                  "Archive fingerprint and path belong to different records",
+                );
+              }
+
+              const timestamp = now();
+              let archive = existingByFingerprint ?? existingByPath;
+              if (
+                existingByPath &&
+                existingByPath.fingerprint !== sidecar.fingerprint
+              ) {
+                throw new DomainInvariantError(
+                  "Archive path is already assigned to a different fingerprint",
+                );
+              }
+              if (!archive) {
+                const legacyDevicePath = `legacy-sidecar:${originalsLibraryPath}`;
+                transaction
+                  .insert(opticalDrives)
+                  .values({
+                    id: newId<OpticalDriveId>(),
+                    devicePath: legacyDevicePath,
+                    displayName: "Legacy sidecar import",
+                    isEnabled: false,
+                    isPresent: false,
+                    lastSeenAt: timestamp,
+                    createdAt: timestamp,
+                    updatedAt: timestamp,
+                  })
+                  .onConflictDoNothing({ target: opticalDrives.devicePath })
+                  .run();
+                const drive = requireRow(
+                  transaction
+                    .select()
+                    .from(opticalDrives)
+                    .where(eq(opticalDrives.devicePath, legacyDevicePath))
+                    .get(),
+                  "legacy import source",
+                  legacyDevicePath,
+                );
+                transaction
+                  .insert(detectedDiscs)
+                  .values({
+                    id: newId<DetectedDiscId>(),
+                    opticalDriveId: drive.id,
+                    discKind: "dvd",
+                    fingerprint: sidecar.fingerprint,
+                    volumeLabel: sidecar.movieTitle,
+                    status: "archived",
+                    scanData: sidecar.scanData,
+                    detectedAt: timestamp,
+                    createdAt: timestamp,
+                    updatedAt: timestamp,
+                  })
+                  .onConflictDoNothing({
+                    target: [
+                      detectedDiscs.opticalDriveId,
+                      detectedDiscs.fingerprint,
+                    ],
+                  })
+                  .run();
+                const disc = requireRow(
+                  transaction
+                    .select()
+                    .from(detectedDiscs)
+                    .where(
+                      and(
+                        eq(detectedDiscs.opticalDriveId, drive.id),
+                        eq(detectedDiscs.fingerprint, sidecar.fingerprint),
+                      ),
+                    )
+                    .get(),
+                  "legacy detected disc",
+                  sidecar.fingerprint,
+                );
+                archive = requireRow(
+                  transaction
+                    .insert(originalDiscArchives)
+                    .values({
+                      id: newId<OriginalDiscArchiveId>(),
+                      detectedDiscId: disc.id,
+                      discKind: "dvd",
+                      archiveFormat: "iso",
+                      archivePath: sidecar.archivePath,
+                      fingerprint: sidecar.fingerprint,
+                      sizeBytes: sidecar.archiveSizeBytes,
+                      archivedAt: timestamp,
+                      createdAt: timestamp,
+                      updatedAt: timestamp,
+                    })
+                    .returning()
+                    .get(),
+                  "original disc archive",
+                  sidecar.archivePath,
+                );
+                created.originalDiscArchives += 1;
+              } else {
+                const archiveChanged =
+                  archive.archivePath !== sidecar.archivePath ||
+                  archive.sizeBytes !== sidecar.archiveSizeBytes;
+                if (archiveChanged) {
+                  archive = requireRow(
+                    transaction
+                      .update(originalDiscArchives)
+                      .set({
+                        archivePath: sidecar.archivePath,
+                        sizeBytes: sidecar.archiveSizeBytes,
+                        updatedAt: timestamp,
+                      })
+                      .where(eq(originalDiscArchives.id, archive.id))
+                      .returning()
+                      .get(),
+                    "original disc archive",
+                    archive.id,
+                  );
+                  updated += 1;
+                } else {
+                  unchanged += 1;
+                }
+              }
+
+              let movieItem: typeof mediaItems.$inferSelect | undefined;
+              const existingSelections = transaction
+                .select()
+                .from(discSelections)
+                .where(
+                  eq(discSelections.originalDiscArchiveId, archive.id),
+                )
+                .all();
+              const selectionsBySourceKey = new Map(
+                existingSelections.map((selection) => [
+                  selection.sourceKey,
+                  selection,
+                ]),
+              );
+              const existingMovieSelection = sidecar.jobs
+                .filter((job) => job.mediaItemKind === "movie")
+                .map((job) => selectionsBySourceKey.get(job.sourceKey))
+                .find((selection) => selection !== undefined);
+              if (existingMovieSelection) {
+                movieItem = transaction
+                  .select()
+                  .from(mediaItems)
+                  .where(eq(mediaItems.id, existingMovieSelection.mediaItemId))
+                  .get();
+              } else {
+                const existingExtraSelection = sidecar.jobs
+                  .filter((job) => job.mediaItemKind === "bonus_feature")
+                  .map((job) => selectionsBySourceKey.get(job.sourceKey))
+                  .find((selection) => selection !== undefined);
+                if (existingExtraSelection) {
+                  const extra = transaction
+                    .select()
+                    .from(mediaItems)
+                    .where(eq(mediaItems.id, existingExtraSelection.mediaItemId))
+                    .get();
+                  if (extra?.parentId) {
+                    movieItem = transaction
+                      .select()
+                      .from(mediaItems)
+                      .where(eq(mediaItems.id, extra.parentId))
+                      .get();
+                  }
+                }
+              }
+              const requireMovieItem = () => {
+                if (movieItem) {
+                  return movieItem;
+                }
+                movieItem = requireRow(
+                  transaction
+                    .insert(mediaItems)
+                    .values({
+                      id: newId<MediaItemId>(),
+                      kind: "movie",
+                      title: sidecar.movieTitle,
+                      year: sidecar.movieYear,
+                      createdAt: timestamp,
+                      updatedAt: timestamp,
+                    })
+                    .returning()
+                    .get(),
+                  "legacy media item",
+                  sidecar.movieTitle,
+                );
+                created.mediaItems += 1;
+                return movieItem;
+              };
+
+              for (const job of sidecar.jobs) {
+                let selection = selectionsBySourceKey.get(job.sourceKey);
+                let mediaItem: typeof mediaItems.$inferSelect;
+                if (selection) {
+                  if (
+                    selection.kind !== job.kind ||
+                    selection.titleNumber !== job.titleNumber
+                  ) {
+                    throw new DomainInvariantError(
+                      `Disc Selection ${job.sourceKey} has incompatible coordinates`,
+                    );
+                  }
+                  mediaItem = requireRow(
+                    transaction
+                      .select()
+                      .from(mediaItems)
+                      .where(eq(mediaItems.id, selection.mediaItemId))
+                      .get(),
+                    "legacy media item",
+                    selection.mediaItemId,
+                  );
+                  if (
+                    job.mediaItemKind === "movie" &&
+                    mediaItem.id !== requireMovieItem().id
+                  ) {
+                    throw new DomainInvariantError(
+                      `Movie Disc Selection ${job.sourceKey} maps to a duplicate Media Item`,
+                    );
+                  }
+                  const parentId =
+                    job.mediaItemKind === "movie"
+                      ? null
+                      : requireMovieItem().id;
+                  const year =
+                    job.mediaItemKind === "movie" ? sidecar.movieYear : null;
+                  const mediaChanged =
+                    mediaItem.kind !== job.mediaItemKind ||
+                    mediaItem.title !== job.mediaTitle ||
+                    mediaItem.year !== year ||
+                    mediaItem.parentId !== parentId;
+                  if (mediaChanged) {
+                    mediaItem = requireRow(
+                      transaction
+                        .update(mediaItems)
+                        .set({
+                          kind: job.mediaItemKind,
+                          title: job.mediaTitle,
+                          year,
+                          parentId,
+                          updatedAt: timestamp,
+                        })
+                        .where(eq(mediaItems.id, mediaItem.id))
+                        .returning()
+                        .get(),
+                      "legacy media item",
+                      mediaItem.id,
+                    );
+                    updated += 1;
+                  } else {
+                    unchanged += 1;
+                  }
+                  if (selection.label !== job.label) {
+                    selection = requireRow(
+                      transaction
+                        .update(discSelections)
+                        .set({ label: job.label, updatedAt: timestamp })
+                        .where(eq(discSelections.id, selection.id))
+                        .returning()
+                        .get(),
+                      "legacy disc selection",
+                      selection.id,
+                    );
+                    updated += 1;
+                  } else {
+                    unchanged += 1;
+                  }
+                } else {
+                  mediaItem =
+                    job.mediaItemKind === "movie"
+                      ? requireMovieItem()
+                      : requireRow(
+                          transaction
+                            .insert(mediaItems)
+                            .values({
+                              id: newId<MediaItemId>(),
+                              parentId: requireMovieItem().id,
+                              kind: "bonus_feature",
+                              title: job.mediaTitle,
+                              createdAt: timestamp,
+                              updatedAt: timestamp,
+                            })
+                            .returning()
+                            .get(),
+                          "legacy media item",
+                          job.mediaTitle,
+                        );
+                  if (job.mediaItemKind !== "movie") {
+                    created.mediaItems += 1;
+                  }
+                  selection = requireRow(
+                    transaction
+                      .insert(discSelections)
+                      .values({
+                        id: newId<DiscSelectionId>(),
+                        originalDiscArchiveId: archive.id,
+                        mediaItemId: mediaItem.id,
+                        sourceKey: job.sourceKey,
+                        kind: job.kind,
+                        titleNumber: job.titleNumber,
+                        chapterStart: null,
+                        chapterEnd: null,
+                        label: job.label,
+                        createdAt: timestamp,
+                        updatedAt: timestamp,
+                      })
+                      .returning()
+                      .get(),
+                    "legacy disc selection",
+                    job.sourceKey,
+                  );
+                  selectionsBySourceKey.set(job.sourceKey, selection);
+                  created.discSelections += 1;
+                }
+
+                let profile = transaction
+                  .select()
+                  .from(encodingProfiles)
+                  .where(
+                    and(
+                      eq(encodingProfiles.mediaDomain, "dvd_video"),
+                      eq(encodingProfiles.key, job.profileKey),
+                      eq(encodingProfiles.version, 1),
+                    ),
+                  )
+                  .get();
+                if (!profile) {
+                  profile = requireRow(
+                    transaction
+                      .insert(encodingProfiles)
+                      .values({
+                        id: newId<EncodingProfileId>(),
+                        key: job.profileKey,
+                        displayName: job.preset,
+                        mediaDomain: "dvd_video",
+                        version: 1,
+                        settings: { preset: job.preset },
+                        createdAt: timestamp,
+                        updatedAt: timestamp,
+                      })
+                      .returning()
+                      .get(),
+                    "legacy encoding profile",
+                    job.profileKey,
+                  );
+                  created.encodingProfiles += 1;
+                } else {
+                  unchanged += 1;
+                }
+
+                const logicalJob = transaction
+                  .select()
+                  .from(encodeJobs)
+                  .where(
+                    and(
+                      eq(encodeJobs.discSelectionId, selection.id),
+                      eq(encodeJobs.encodingProfileId, profile.id),
+                    ),
+                  )
+                  .get();
+                const outputJob = transaction
+                  .select()
+                  .from(encodeJobs)
+                  .where(eq(encodeJobs.outputPath, job.outputPath))
+                  .get();
+                if (
+                  logicalJob &&
+                  outputJob &&
+                  logicalJob.id !== outputJob.id
+                ) {
+                  throw new DomainInvariantError(
+                    `Encode Job output is already assigned: ${job.outputPath}`,
+                  );
+                }
+                const existingJob = logicalJob ?? outputJob;
+                if (!existingJob) {
+                  transaction
+                    .insert(encodeJobs)
+                    .values({
+                      id: newId<EncodeJobId>(),
+                      discSelectionId: selection.id,
+                      encodingProfileId: profile.id,
+                      outputPath: job.outputPath,
+                      status: job.completed ? "completed" : "queued",
+                      progressPercent: job.completed ? 100 : 0,
+                      completedAt: job.completed ? timestamp : null,
+                      createdAt: timestamp,
+                      updatedAt: timestamp,
+                    })
+                    .run();
+                  created.encodeJobs += 1;
+                } else if (
+                  existingJob.status === "running" ||
+                  (existingJob.outputPath === job.outputPath &&
+                    existingJob.status ===
+                      (job.completed ? "completed" : "queued") &&
+                    existingJob.progressPercent === (job.completed ? 100 : 0))
+                ) {
+                  unchanged += 1;
+                } else {
+                  transaction
+                    .update(encodeJobs)
+                    .set({
+                      outputPath: job.outputPath,
+                      status: job.completed ? "completed" : "queued",
+                      progressPercent: job.completed ? 100 : 0,
+                      claimedBy: null,
+                      claimToken: null,
+                      claimedAt: null,
+                      startedAt: null,
+                      completedAt: job.completed ? timestamp : null,
+                      errorMessage: null,
+                      updatedAt: timestamp,
+                    })
+                    .where(eq(encodeJobs.id, existingJob.id))
+                    .run();
+                  updated += 1;
+                }
+              }
+            });
+          } catch (error) {
+            report.sidecarsSkipped += 1;
+            report.issues.push({
+              code: "duplicate_record",
+              message:
+                error instanceof Error ? error.message : String(error),
+              sidecarPath: sidecar.sidecarPath,
+            });
+            continue;
+          }
+
+          report.sidecarsImported += 1;
+          for (const key of Object.keys(created) as Array<keyof typeof created>) {
+            report.recordsCreated[key] += created[key];
+          }
+          report.recordsUpdated += updated;
+          report.recordsUnchanged += unchanged;
+        }
+
+        return report;
+      },
     },
 
     close() {

@@ -171,6 +171,27 @@ The sidecar is the durable queue. It is written atomically and records a fingerp
 
 A job is pending when its source ISO exists and its final output `.mkv` does not. A job is complete when the final output exists. Failed or interrupted partial files are moved aside with a `.failed` suffix before retrying. The ISO remains as the long-term original backup either way.
 
+### Import legacy sidecars into SQLite
+
+After configuring the TypeScript application, import an existing originals
+library once with:
+
+```bash
+pnpm import:legacy-sidecars -- \
+  --database /srv/rip-dvd/rip-dvd.sqlite \
+  --originals-library "/srv/media/DVD Originals"
+```
+
+The command also accepts `RIP_DVD_DATABASE_PATH` and
+`RIP_DVD_ORIGINALS_LIBRARY_PATH`, and `--json` emits a machine-readable report.
+It recursively reads `.rip-dvd.json` files, imports valid Original Disc
+Archives, Disc Selections, Media Items, Encoding Profiles, and Encode Jobs, and
+continues past corrupt sidecars, invalid jobs, missing archives, and duplicate
+records. Re-running it is safe and updates the existing imported records.
+Encode Job completion is inferred from the final output file at import time.
+The importer never writes to sidecars; after import SQLite is the active catalog
+and queue state.
+
 ### Join Part Files
 
 ```bash
