@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import {
+  DashboardConnectionStatus,
   DashboardView,
   type DashboardLoadState,
 } from "./operations-dashboard";
@@ -191,5 +192,21 @@ describe("DashboardView", () => {
     expect(html.match(/data-state="error"/g)).toHaveLength(1);
     expect(html).toContain("Upper drive");
     expect(html).toContain("NEEDS_REVIEW");
+  });
+});
+
+describe("DashboardConnectionStatus", () => {
+  it("announces a reconnecting live stream as an atomic polite status", () => {
+    const html = renderToStaticMarkup(
+      <DashboardConnectionStatus
+        connectionStatus="loaded"
+        streamStatus="reconnecting"
+      />,
+    );
+
+    expect(html).toContain('role="status"');
+    expect(html).toContain('aria-live="polite"');
+    expect(html).toContain('aria-atomic="true"');
+    expect(html).toContain("Live updates reconnecting");
   });
 });

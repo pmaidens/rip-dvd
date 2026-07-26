@@ -53,6 +53,7 @@ import type {
   ArchiveJobClaimToken,
   ArchiveJobId,
   ArchiveJob,
+  ConsistentReadAccess,
   DataAccess,
   DetectedDiscId,
   DetectedDiscStatus,
@@ -559,6 +560,42 @@ export function createDataAccess({
   });
 
   const access: DataAccess = {
+    readConsistentSnapshot(read) {
+      const snapshotAccess: ConsistentReadAccess = {
+        catalog: {
+          listOpticalDrives: () => access.catalog.listOpticalDrives(),
+          listDetectedDiscs: (statuses) =>
+            access.catalog.listDetectedDiscs(statuses),
+          listOriginalDiscArchives: () =>
+            access.catalog.listOriginalDiscArchives(),
+          listMediaItems: () => access.catalog.listMediaItems(),
+          listDiscSelections: () => access.catalog.listDiscSelections(),
+          listEncodingProfiles: () =>
+            access.catalog.listEncodingProfiles(),
+        },
+        archiveJobs: {
+          list: (statuses) => access.archiveJobs.list(statuses),
+        },
+        encodeJobs: {
+          list: (statuses) => access.encodeJobs.list(statuses),
+        },
+      };
+      sqlite.exec("BEGIN");
+      try {
+        const result = read(snapshotAccess);
+        if (result instanceof Promise) {
+          throw new DomainInvariantError(
+            "Consistent snapshot reads must be synchronous",
+          );
+        }
+        sqlite.exec("COMMIT");
+        return result;
+      } catch (error) {
+        sqlite.exec("ROLLBACK");
+        throw error;
+      }
+    },
+
     checkHealth() {
       const version = sqlite
         .prepare("select sqlite_version() as version")

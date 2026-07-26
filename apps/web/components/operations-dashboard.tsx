@@ -9,9 +9,12 @@ import type {
   DashboardEncodeJob,
   DashboardOpticalDrive,
   DashboardSectionResult,
-  DashboardSnapshot,
   DashboardStatus,
 } from "../lib/dashboard";
+import {
+  watchDashboardActivity,
+  type DashboardStreamStatus,
+} from "../lib/dashboard-activity";
 
 export type DashboardSectionLoadState<T> =
   | { status: "loading" }
@@ -278,40 +281,55 @@ export function DashboardView({ state }: { state: DashboardLoadState }) {
   );
 }
 
+type DashboardConnection = "loading" | "error" | "loaded";
+
+export function DashboardConnectionStatus({
+  connectionStatus,
+  streamStatus,
+}: {
+  connectionStatus: DashboardConnection;
+  streamStatus: DashboardStreamStatus;
+}) {
+  const label =
+    connectionStatus === "loading"
+      ? "Refreshing state"
+      : connectionStatus === "error"
+        ? "Some data unavailable"
+        : streamStatus === "live"
+          ? "Live updates connected"
+          : streamStatus === "reconnecting"
+            ? "Live updates reconnecting"
+            : "Database connected";
+
+  return (
+    <span
+      className={`connection-state connection-${connectionStatus}`}
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+    >
+      <span aria-hidden="true" />
+      {label}
+    </span>
+  );
+}
+
 export function OperationsDashboard() {
   const [state, setState] = useState<DashboardLoadState>(
     () => dashboardState("loading"),
   );
   const [requestNumber, setRequestNumber] = useState(0);
+  const [streamStatus, setStreamStatus] =
+    useState<DashboardStreamStatus>("connecting");
 
   useEffect(() => {
-    let cancelled = false;
     setState(dashboardState("loading"));
-
-    fetch("/api/dashboard", {
-      cache: "no-store",
-      headers: { Accept: "application/json" },
-    })
-      .then(async (response) => {
-        if (!response.ok) {
-          throw new Error("Dashboard request failed");
-        }
-        return (await response.json()) as DashboardSnapshot;
-      })
-      .then((data) => {
-        if (!cancelled) {
-          setState(data);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setState(dashboardState("error"));
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
+    setStreamStatus("connecting");
+    return watchDashboardActivity({
+      onSnapshot: setState,
+      onInitialLoadError: () => setState(dashboardState("error")),
+      onStreamStatus: setStreamStatus,
+    });
   }, [requestNumber]);
 
   const sectionStates = [
@@ -340,14 +358,10 @@ export function OperationsDashboard() {
           </p>
         </div>
         <div className="dashboard-controls">
-          <span className={`connection-state connection-${connectionStatus}`}>
-            <span aria-hidden="true" />
-            {connectionStatus === "loaded"
-              ? "Database connected"
-              : connectionStatus === "error"
-                ? "Some data unavailable"
-                : "Refreshing state"}
-          </span>
+          <DashboardConnectionStatus
+            connectionStatus={connectionStatus}
+            streamStatus={streamStatus}
+          />
           <button
             type="button"
             onClick={() => setRequestNumber((value) => value + 1)}

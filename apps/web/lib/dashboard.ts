@@ -1,5 +1,6 @@
 import type {
   ArchiveFormat,
+  ConsistentReadAccess,
   DataAccess,
   DetectedDiscStatus,
   DiscKind,
@@ -94,7 +95,9 @@ function driveDisplayName(drive: OpticalDriveRecord): string {
   return drive.displayName ?? "Unnamed Optical Drive";
 }
 
-export function readDashboardSnapshot(access: DataAccess): DashboardSnapshot {
+function readDashboardSnapshotRecords(
+  access: ConsistentReadAccess,
+): DashboardSnapshot {
   const opticalDriveSource = readSource(() =>
     access.catalog.listOpticalDrives(),
   );
@@ -259,4 +262,10 @@ export function readDashboardSnapshot(access: DataAccess): DashboardSnapshot {
     encodeJobs,
     catalogReview,
   };
+}
+
+export function readDashboardSnapshot(access: DataAccess): DashboardSnapshot {
+  return access.readConsistentSnapshot((snapshotAccess) =>
+    readDashboardSnapshotRecords(snapshotAccess),
+  );
 }

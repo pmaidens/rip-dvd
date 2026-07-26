@@ -2,7 +2,10 @@ import type { DataAccess } from "@rip-dvd/data-access";
 import { describe, expect, it } from "vitest";
 
 import { readDashboardSnapshot } from "./dashboard";
-import { useDataAccessFixture } from "../test/data-access-fixture";
+import {
+  useDataAccessFixture,
+  withSnapshotOverrides,
+} from "../test/data-access-fixture";
 
 const dataAccessFixture = useDataAccessFixture();
 
@@ -203,6 +206,69 @@ describe("readDashboardSnapshot", () => {
     });
   });
 
+  it("does not combine dashboard records from opposite sides of a worker commit", () => {
+    const [reader, writer] = dataAccessFixture.createPair();
+    const drive = writer.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      displayName: "Archive drive",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const disc = writer.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "interleaved-dashboard-disc",
+      volumeLabel: "INTERLEAVED_DISC",
+    });
+    writer.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    writer.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const job = writer.archiveJobs.enqueue({ detectedDiscId: disc.id });
+    let archiveCommitted = false;
+    const interleavedReader: DataAccess = {
+      ...reader,
+      readConsistentSnapshot(read) {
+        return reader.readConsistentSnapshot((snapshotAccess) =>
+          read({
+            ...snapshotAccess,
+            catalog: {
+              ...snapshotAccess.catalog,
+              listDetectedDiscs(statuses) {
+                const records =
+                  snapshotAccess.catalog.listDetectedDiscs(statuses);
+                if (!archiveCommitted) {
+                  archiveCommitted = true;
+                  writer.catalog.createOriginalDiscArchive({
+                    detectedDiscId: disc.id,
+                    discKind: "dvd",
+                    archiveFormat: "iso",
+                    archivePath: "/media/originals/Interleaved Disc.iso",
+                    fingerprint: "interleaved-dashboard-disc",
+                  });
+                }
+                return records;
+              },
+            },
+          }),
+        );
+      },
+    };
+
+    const dashboard = readDashboardSnapshot(interleavedReader);
+
+    expect(dashboard.detectedDiscs).toEqual({
+      status: "loaded",
+      items: [expect.objectContaining({ id: disc.id, status: "approved" })],
+    });
+    expect(dashboard.archiveJobs).toEqual({
+      status: "loaded",
+      items: [expect.objectContaining({ id: job.id, status: "queued" })],
+    });
+    expect(dashboard.catalogReview).toEqual({ status: "loaded", items: [] });
+    expect(writer.catalog.listDetectedDiscs()).toEqual([
+      expect.objectContaining({ id: disc.id, status: "archived" }),
+    ]);
+  });
+
   it("keeps unrelated sections available when one facade read fails", () => {
     const access = dataAccessFixture.create();
     access.catalog.upsertOpticalDrive({
@@ -211,15 +277,13 @@ describe("readDashboardSnapshot", () => {
       isEnabled: true,
       isPresent: true,
     });
-    const partiallyUnavailableAccess: DataAccess = {
-      ...access,
+    const partiallyUnavailableAccess = withSnapshotOverrides(access, {
       encodeJobs: {
-        ...access.encodeJobs,
         list() {
           throw new Error("encode queue unavailable");
         },
       },
-    };
+    });
 
     const dashboard = readDashboardSnapshot(partiallyUnavailableAccess);
 
@@ -251,15 +315,13 @@ describe("readDashboardSnapshot", () => {
     access.catalog.updateDetectedDiscStatus(disc.id, "approved");
     access.archiveJobs.enqueue({ detectedDiscId: disc.id });
 
-    const dashboard = readDashboardSnapshot({
-      ...access,
+    const dashboard = readDashboardSnapshot(withSnapshotOverrides(access, {
       catalog: {
-        ...access.catalog,
         listOpticalDrives() {
           throw new Error("drive inventory unavailable");
         },
       },
-    });
+    }));
 
     expect(dashboard.opticalDrives).toEqual({ status: "error" });
     expect(dashboard.detectedDiscs).toEqual({ status: "error" });
@@ -286,15 +348,13 @@ describe("readDashboardSnapshot", () => {
     access.catalog.updateDetectedDiscStatus(disc.id, "approved");
     access.archiveJobs.enqueue({ detectedDiscId: disc.id });
 
-    const dashboard = readDashboardSnapshot({
-      ...access,
+    const dashboard = readDashboardSnapshot(withSnapshotOverrides(access, {
       catalog: {
-        ...access.catalog,
         listDetectedDiscs() {
           throw new Error("disc inventory unavailable");
         },
       },
-    });
+    }));
 
     expect(dashboard.detectedDiscs).toEqual({ status: "error" });
     expect(dashboard.archiveJobs).toEqual({ status: "error" });
@@ -324,15 +384,13 @@ describe("readDashboardSnapshot", () => {
       fingerprint: "catalog-enrichment-disc",
     });
 
-    const dashboard = readDashboardSnapshot({
-      ...access,
+    const dashboard = readDashboardSnapshot(withSnapshotOverrides(access, {
       catalog: {
-        ...access.catalog,
         listDetectedDiscs() {
           throw new Error("disc inventory unavailable");
         },
       },
-    });
+    }));
 
     expect(dashboard.catalogReview).toEqual({ status: "error" });
     expect(dashboard.opticalDrives.status).toBe("loaded");
@@ -343,10 +401,8 @@ describe("readDashboardSnapshot", () => {
     const access = dataAccessFixture.create();
     seedEncodeJob(access);
 
-    const dashboard = readDashboardSnapshot({
-      ...access,
+    const dashboard = readDashboardSnapshot(withSnapshotOverrides(access, {
       catalog: {
-        ...access.catalog,
         listMediaItems() {
           throw new Error("media catalog unavailable");
         },
@@ -354,7 +410,7 @@ describe("readDashboardSnapshot", () => {
           throw new Error("profile catalog unavailable");
         },
       },
-    });
+    }));
 
     expect(dashboard.encodeJobs).toEqual({ status: "error" });
     expect(dashboard.opticalDrives.status).toBe("loaded");
@@ -366,15 +422,13 @@ describe("readDashboardSnapshot", () => {
     const access = dataAccessFixture.create();
     seedEncodeJob(access);
 
-    const dashboard = readDashboardSnapshot({
-      ...access,
+    const dashboard = readDashboardSnapshot(withSnapshotOverrides(access, {
       catalog: {
-        ...access.catalog,
         listDiscSelections() {
           throw new Error("disc selections unavailable");
         },
       },
-    });
+    }));
 
     expect(dashboard.encodeJobs).toEqual({ status: "error" });
     expect(dashboard.catalogReview).toEqual({ status: "error" });
