@@ -32,9 +32,11 @@ describe("EncodingProfilesView", () => {
         }}
         versionSourceId={null}
         isSaving={false}
+        hasRequestError={true}
         onSave={() => undefined}
         onCreateVersion={() => undefined}
         onCancelVersion={() => undefined}
+        onRetry={() => undefined}
         onSetActive={() => undefined}
       />,
     );
@@ -53,5 +55,37 @@ describe("EncodingProfilesView", () => {
     expect(html).toContain("Create new version");
     expect(html).toContain("Deactivate");
     expect(html).toContain("Activate");
+    expect(html).toContain("Try again");
+    expect(html).toContain(
+      'aria-label="Create new version of DVD library, version 1"',
+    );
+    expect(html).toContain(
+      'aria-label="Create new version of DVD library, version 2"',
+    );
+    expect(html).toContain(
+      'aria-label="Deactivate DVD library, version 1"',
+    );
+    expect(html).toContain(
+      'aria-label="Activate DVD library, version 2"',
+    );
+  });
+
+  it("offers a retry when the initial profile load fails", () => {
+    const html = renderToStaticMarkup(
+      <EncodingProfilesView
+        state={{ status: "error" }}
+        versionSourceId={null}
+        isSaving={false}
+        hasRequestError={false}
+        onSave={() => undefined}
+        onCreateVersion={() => undefined}
+        onCancelVersion={() => undefined}
+        onRetry={() => undefined}
+        onSetActive={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("Encoding Profiles are unavailable");
+    expect(html).toContain("Try again");
   });
 });

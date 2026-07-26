@@ -2,10 +2,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 
-import {
-  dvdVideoSettings,
-  type EncodingProfileDto,
-} from "../lib/encoding-profiles";
+import type { EncodingProfileDto } from "../lib/encoding-profiles";
 
 export type EncodingProfilesLoadState =
   | { status: "loading" }
@@ -23,9 +20,11 @@ interface EncodingProfilesViewProps {
   state: EncodingProfilesLoadState;
   versionSourceId: string | null;
   isSaving: boolean;
+  hasRequestError: boolean;
   onSave(input: SaveEncodingProfileInput): void;
   onCreateVersion(id: string): void;
   onCancelVersion(): void;
+  onRetry(): void;
   onSetActive(id: string, isActive: boolean): void;
 }
 
@@ -37,9 +36,11 @@ export function EncodingProfilesView({
   state,
   versionSourceId,
   isSaving,
+  hasRequestError,
   onSave,
   onCreateVersion,
   onCancelVersion,
+  onRetry,
   onSetActive,
 }: EncodingProfilesViewProps) {
   const profiles = state.status === "loaded" ? state.profiles : [];
@@ -111,7 +112,7 @@ export function EncodingProfilesView({
               required
               defaultValue={
                 versionSource
-                  ? (dvdVideoSettings(versionSource)?.preset ?? "")
+                  ? (versionSource.settings.preset ?? "")
                   : "Fast 480p30"
               }
             />
@@ -130,13 +131,28 @@ export function EncodingProfilesView({
         </button>
       </form>
 
+      {hasRequestError && state.status === "loaded" ? (
+        <div className="section-message section-error" role="alert">
+          <span>
+            The latest Encoding Profile request failed. Existing profile data
+            is still available.{" "}
+          </span>
+          <button type="button" onClick={onRetry}>
+            Try again
+          </button>
+        </div>
+      ) : null}
+
       {state.status === "loading" ? (
         <div className="section-message" aria-live="polite">
           Loading Encoding Profiles…
         </div>
       ) : state.status === "error" ? (
         <div className="section-message section-error" role="status">
-          Encoding Profiles are unavailable.
+          <span>Encoding Profiles are unavailable. </span>
+          <button type="button" onClick={onRetry}>
+            Try again
+          </button>
         </div>
       ) : profiles.length === 0 ? (
         <div className="section-message">
@@ -145,7 +161,7 @@ export function EncodingProfilesView({
       ) : (
         <div className="profile-list">
           {profiles.map((profile) => {
-            const settings = dvdVideoSettings(profile);
+            const { settings } = profile;
             return (
               <article className="profile-card" key={profile.id}>
                 <div className="item-heading">
@@ -165,16 +181,19 @@ export function EncodingProfilesView({
                 <dl className="profile-settings">
                   <div>
                     <dt>HandBrake preset</dt>
-                    <dd>{settings?.preset ?? "Unavailable"}</dd>
+                    <dd>{settings.preset ?? "Unavailable"}</dd>
                   </div>
                   <div>
                     <dt>Container</dt>
-                    <dd>{settings?.container.toUpperCase() ?? "Unavailable"}</dd>
+                    <dd>
+                      {settings.container?.toUpperCase() ?? "Unavailable"}
+                    </dd>
                   </div>
                 </dl>
                 <div className="profile-actions">
                   <button
                     type="button"
+                    aria-label={`Create new version of ${profile.displayName}, version ${profile.version}`}
                     onClick={() => onCreateVersion(profile.id)}
                     disabled={isSaving}
                   >
@@ -182,6 +201,7 @@ export function EncodingProfilesView({
                   </button>
                   <button
                     type="button"
+                    aria-label={`${profile.isActive ? "Deactivate" : "Activate"} ${profile.displayName}, version ${profile.version}`}
                     onClick={() => onSetActive(profile.id, !profile.isActive)}
                     disabled={isSaving}
                   >
@@ -199,11 +219,13 @@ export function EncodingProfilesView({
 
 export function EncodingProfilesManager() {
   const mounted = useRef(false);
+  const loadedProfiles = useRef<EncodingProfileDto[] | null>(null);
   const [state, setState] = useState<EncodingProfilesLoadState>({
     status: "loading",
   });
   const [versionSourceId, setVersionSourceId] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [hasRequestError, setHasRequestError] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -218,11 +240,18 @@ export function EncodingProfilesManager() {
         profiles: EncodingProfileDto[];
       };
       if (mounted.current) {
+        loadedProfiles.current = body.profiles;
         setState({ status: "loaded", profiles: body.profiles });
+        setHasRequestError(false);
       }
     } catch {
       if (mounted.current) {
-        setState({ status: "error" });
+        setState(
+          loadedProfiles.current === null
+            ? { status: "error" }
+            : { status: "loaded", profiles: loadedProfiles.current },
+        );
+        setHasRequestError(true);
       }
     }
   }, []);
@@ -235,27 +264,32 @@ export function EncodingProfilesManager() {
     };
   }, [load]);
 
-  async function save(input: SaveEncodingProfileInput) {
+  async function runMutation(
+    method: "PATCH" | "POST",
+    body: unknown,
+    onSuccess?: () => void,
+  ) {
     setIsSaving(true);
+    setHasRequestError(false);
     try {
       const response = await fetch("/api/encoding-profiles", {
-        method: "POST",
+        method,
         headers: {
           Accept: "application/json",
           "Content-Type": "application/json",
         },
-        body: JSON.stringify(input),
+        body: JSON.stringify(body),
       });
       if (!response.ok) {
-        throw new Error("Encoding Profile save failed");
+        throw new Error("Encoding Profile mutation failed");
       }
       if (mounted.current) {
-        setVersionSourceId(null);
+        onSuccess?.();
       }
       await load();
     } catch {
       if (mounted.current) {
-        setState({ status: "error" });
+        setHasRequestError(true);
       }
     } finally {
       if (mounted.current) {
@@ -264,30 +298,12 @@ export function EncodingProfilesManager() {
     }
   }
 
-  async function setActive(id: string, isActive: boolean) {
-    setIsSaving(true);
-    try {
-      const response = await fetch("/api/encoding-profiles", {
-        method: "PATCH",
-        headers: {
-          Accept: "application/json",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ id, isActive }),
-      });
-      if (!response.ok) {
-        throw new Error("Encoding Profile state update failed");
-      }
-      await load();
-    } catch {
-      if (mounted.current) {
-        setState({ status: "error" });
-      }
-    } finally {
-      if (mounted.current) {
-        setIsSaving(false);
-      }
+  function retry() {
+    setHasRequestError(false);
+    if (loadedProfiles.current === null) {
+      setState({ status: "loading" });
     }
+    void load();
   }
 
   return (
@@ -295,10 +311,16 @@ export function EncodingProfilesManager() {
       state={state}
       versionSourceId={versionSourceId}
       isSaving={isSaving}
-      onSave={(input) => void save(input)}
+      hasRequestError={hasRequestError}
+      onSave={(input) =>
+        void runMutation("POST", input, () => setVersionSourceId(null))
+      }
       onCreateVersion={setVersionSourceId}
       onCancelVersion={() => setVersionSourceId(null)}
-      onSetActive={(id, isActive) => void setActive(id, isActive)}
+      onRetry={retry}
+      onSetActive={(id, isActive) =>
+        void runMutation("PATCH", { id, isActive })
+      }
     />
   );
 }

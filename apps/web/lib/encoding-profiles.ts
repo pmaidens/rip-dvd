@@ -37,12 +37,3 @@ export function toEncodingProfileDto(
     },
   };
 }
-
-export function dvdVideoSettings(
-  profile: EncodingProfileDto,
-): DvdVideoEncodingSettings | null {
-  const { preset, container } = profile.settings;
-  return preset !== null && container === "mkv"
-    ? { preset, container }
-    : null;
-}

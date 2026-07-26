@@ -12,12 +12,22 @@ import {
   InvalidStatusTransitionError,
 } from "./index.js";
 import type { DetectedDiscId, DiscKind } from "./index.js";
+import type { EncodingProfileId } from "./index.js";
 
 const temporaryDirectories: string[] = [];
 
 type ConcurrentWorkerResult =
   | "ok"
-  | { outcome: "archived" | "enqueued" | "rejected"; id?: string }
+  | {
+      outcome:
+        | "activated"
+        | "archived"
+        | "enqueued"
+        | "rejected"
+        | "versioned";
+      id?: string;
+      version?: number;
+    }
   | { id: string; claimToken: string }
   | null;
 
@@ -30,6 +40,15 @@ type ConcurrentOperation =
       discKind: DiscKind;
       archivePath: string;
       fingerprint: string;
+    }
+  | {
+      operation: "create-profile-version";
+      sourceProfileId: EncodingProfileId;
+      preset: string;
+    }
+  | {
+      operation: "activate-profile-version";
+      id: EncodingProfileId;
     };
 
 type BarrierWorkerOptions = {
@@ -427,21 +446,27 @@ describe("data-access facade", () => {
     access.close();
   });
 
-  it("migrates the latest historical version in each media domain as active", () => {
+  it("migrates historical active state without rewriting legacy settings", () => {
     const sqlite = new DatabaseSync(createTestDatabasePath());
+    const prePrMigration = readFileSync(
+      new URL(
+        "../drizzle/20260722045326_core-catalog-and-queues/migration.sql",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    for (const statement of prePrMigration.split("--> statement-breakpoint")) {
+      if (statement.trim()) {
+        sqlite.exec(statement);
+      }
+    }
     sqlite.exec(`
-      create table encoding_profiles (
-        id text primary key,
-        key text not null,
-        display_name text not null,
-        media_domain text not null,
-        version integer not null,
-        settings text not null,
-        created_at integer not null,
-        updated_at integer not null
-      );
-      insert into encoding_profiles values
-        ('dvd-v1', 'library', 'DVD library', 'dvd_video', 1, '{}', 0, 0),
+      insert into encoding_profiles (
+        id, key, display_name, media_domain, version, settings,
+        created_at, updated_at
+      ) values
+        ('dvd-v1', 'library', 'DVD library', 'dvd_video', 1,
+          '{"preset":"Fast 480p30"}', 0, 0),
         ('dvd-v2', 'library', 'DVD library', 'dvd_video', 2, '{}', 0, 0),
         ('audio-v1', 'library', 'Audio library', 'audio', 1, '{}', 0, 0);
     `);
@@ -471,6 +496,11 @@ describe("data-access facade", () => {
       { id: "dvd-v1", isActive: 0 },
       { id: "dvd-v2", isActive: 1 },
     ]);
+    expect(
+      sqlite
+        .prepare("select settings from encoding_profiles where id = 'dvd-v1'")
+        .get(),
+    ).toEqual({ settings: '{"preset":"Fast 480p30"}' });
     expect(() =>
       sqlite
         .prepare(`
@@ -532,6 +562,47 @@ describe("data-access facade", () => {
     access.close();
   });
 
+  it("allocates every Encoding Profile version under simultaneous writers", async () => {
+    const databasePath = createTestDatabasePath();
+    const access = openTestDatabase(databasePath);
+    const versionOne = access.encodingProfiles.create({
+      key: "concurrent-library",
+      displayName: "Concurrent DVD library",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30", container: "mkv" },
+    });
+
+    const results = await runBarrierWorkers({
+      databasePath,
+      mode: "operation",
+      operations: [
+        {
+          operation: "create-profile-version",
+          sourceProfileId: versionOne.id,
+          preset: "HQ 480p30",
+        },
+        {
+          operation: "create-profile-version",
+          sourceProfileId: versionOne.id,
+          preset: "Super HQ 480p30",
+        },
+      ],
+    });
+
+    expect(results).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ outcome: "versioned", version: 2 }),
+        expect.objectContaining({ outcome: "versioned", version: 3 }),
+      ]),
+    );
+    expect(
+      access.encodingProfiles
+        .list({ mediaDomain: "dvd_video" })
+        .map((profile) => profile.version),
+    ).toEqual([1, 2, 3]);
+    access.close();
+  });
+
   it("activates at most one Encoding Profile version and permits deactivation", () => {
     const access = openTestDatabase();
     const versionOne = access.encodingProfiles.create({
@@ -586,6 +657,48 @@ describe("data-access facade", () => {
       }),
     ).toThrow(DomainInvariantError);
 
+    access.close();
+  });
+
+  it("serializes simultaneous Encoding Profile activations", async () => {
+    const databasePath = createTestDatabasePath();
+    const access = openTestDatabase(databasePath);
+    const versionOne = access.encodingProfiles.create({
+      key: "concurrent-activation",
+      displayName: "Concurrent activation",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30", container: "mkv" },
+    });
+    const versionTwo = access.encodingProfiles.createVersion({
+      sourceProfileId: versionOne.id,
+      mediaDomain: "dvd_video",
+      settings: { preset: "HQ 480p30", container: "mkv" },
+    });
+    const versionThree = access.encodingProfiles.createVersion({
+      sourceProfileId: versionTwo.id,
+      mediaDomain: "dvd_video",
+      settings: { preset: "Super HQ 480p30", container: "mkv" },
+    });
+
+    const results = await runBarrierWorkers({
+      databasePath,
+      mode: "operation",
+      operations: [
+        { operation: "activate-profile-version", id: versionTwo.id },
+        { operation: "activate-profile-version", id: versionThree.id },
+      ],
+    });
+
+    expect(results).toEqual([
+      expect.objectContaining({ outcome: "activated", id: versionTwo.id }),
+      expect.objectContaining({ outcome: "activated", id: versionThree.id }),
+    ]);
+    expect(
+      access.encodingProfiles.list({
+        mediaDomain: "dvd_video",
+        activeOnly: true,
+      }),
+    ).toHaveLength(1);
     access.close();
   });
 

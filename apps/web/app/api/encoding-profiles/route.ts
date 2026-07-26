@@ -22,6 +22,31 @@ function response(body: unknown, status = 200): Response {
   });
 }
 
+function mutationRequestProblem(request: Request): Response | null {
+  const contentType = request.headers
+    .get("Content-Type")
+    ?.split(";", 1)[0]
+    ?.trim()
+    .toLowerCase();
+  if (contentType !== "application/json") {
+    return response({ error: "JSON content type required" }, 415);
+  }
+
+  const requestOrigin = new URL(request.url).origin;
+  const origin = request.headers.get("Origin");
+  const fetchSite = request.headers.get("Sec-Fetch-Site")?.toLowerCase();
+  if (
+    (origin !== null && origin !== requestOrigin) ||
+    (fetchSite !== undefined &&
+      fetchSite !== "same-origin" &&
+      fetchSite !== "none")
+  ) {
+    return response({ error: "Cross-origin mutation rejected" }, 403);
+  }
+
+  return null;
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -50,8 +75,8 @@ export async function createEncodingProfilesRoute(
   getAccess: () => DataAccess = getDataAccess,
 ): Promise<Response> {
   try {
-    const access = getAccess();
     if (request.method === "GET") {
+      const access = getAccess();
       return response({
         profiles: access.encodingProfiles
           .list({ mediaDomain: "dvd_video" })
@@ -60,6 +85,11 @@ export async function createEncodingProfilesRoute(
     }
 
     if (request.method === "POST") {
+      const problem = mutationRequestProblem(request);
+      if (problem) {
+        return problem;
+      }
+      const access = getAccess();
       const body = asRecord(await request.json().catch(() => null));
       const sourceProfileId = requiredString(body?.sourceProfileId);
       const key = requiredString(body?.key);
@@ -89,6 +119,11 @@ export async function createEncodingProfilesRoute(
     }
 
     if (request.method === "PATCH") {
+      const problem = mutationRequestProblem(request);
+      if (problem) {
+        return problem;
+      }
+      const access = getAccess();
       const body = asRecord(await request.json().catch(() => null));
       const id = requiredString(body?.id);
       if (!body || !id || typeof body.isActive !== "boolean") {

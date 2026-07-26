@@ -63,6 +63,7 @@ import type {
   EncodeJobId,
   EncodeJob,
   EncodingProfileId,
+  MediaDomain,
   MediaItemId,
   OpticalDriveId,
   OriginalDiscArchiveId,
@@ -292,6 +293,38 @@ export function createDataAccess({
 
   function now(): Date {
     return new Date();
+  }
+
+  function requireEncodingProfileInDomain(
+    querySource: Pick<typeof database, "select">,
+    id: EncodingProfileId,
+    mediaDomain: MediaDomain,
+  ): typeof encodingProfiles.$inferSelect {
+    const profile = querySource
+      .select()
+      .from(encodingProfiles)
+      .where(
+        and(
+          eq(encodingProfiles.id, id),
+          eq(encodingProfiles.mediaDomain, mediaDomain),
+        ),
+      )
+      .get();
+    if (profile) {
+      return profile;
+    }
+
+    const existing = querySource
+      .select({ mediaDomain: encodingProfiles.mediaDomain })
+      .from(encodingProfiles)
+      .where(eq(encodingProfiles.id, id))
+      .get();
+    if (existing) {
+      throw new DomainInvariantError(
+        "Encoding Profile does not belong to the requested media domain",
+      );
+    }
+    throw new RecordNotFoundError("encoding profile", id);
   }
 
   const insertApprovedArchiveJob = sqlite.prepare(`
@@ -1053,73 +1086,58 @@ export function createDataAccess({
         const timestamp = now();
         const id = newId<EncodingProfileId>();
         const key = requireNonEmpty(input.key, "key");
-        return database.transaction((transaction) => {
-          const existing = transaction
-            .select({ id: encodingProfiles.id })
-            .from(encodingProfiles)
-            .where(
-              and(
-                eq(encodingProfiles.mediaDomain, input.mediaDomain),
-                eq(encodingProfiles.key, key),
-              ),
-            )
-            .get();
-          if (existing) {
-            throw new DomainInvariantError(
-              "Encoding Profile key already exists in this media domain",
+        return database.transaction(
+          (transaction) => {
+            const existing = transaction
+              .select({ id: encodingProfiles.id })
+              .from(encodingProfiles)
+              .where(
+                and(
+                  eq(encodingProfiles.mediaDomain, input.mediaDomain),
+                  eq(encodingProfiles.key, key),
+                ),
+              )
+              .get();
+            if (existing) {
+              throw new DomainInvariantError(
+                "Encoding Profile key already exists in this media domain",
+              );
+            }
+            return requireRow(
+              transaction
+                .insert(encodingProfiles)
+                .values({
+                  id,
+                  key,
+                  displayName: requireNonEmpty(
+                    input.displayName,
+                    "displayName",
+                  ),
+                  mediaDomain: input.mediaDomain,
+                  version: 1,
+                  isActive: true,
+                  settings: input.settings,
+                  createdAt: timestamp,
+                  updatedAt: timestamp,
+                })
+                .returning()
+                .get(),
+              "encoding profile",
+              id,
             );
-          }
-          return requireRow(
-            transaction
-              .insert(encodingProfiles)
-              .values({
-                id,
-                key,
-                displayName: requireNonEmpty(input.displayName, "displayName"),
-                mediaDomain: input.mediaDomain,
-                version: 1,
-                isActive: true,
-                settings: input.settings,
-                createdAt: timestamp,
-                updatedAt: timestamp,
-              })
-              .returning()
-              .get(),
-            "encoding profile",
-            id,
-          );
-        });
+          },
+          { behavior: "immediate" },
+        );
       },
 
       createVersion(input) {
         const timestamp = now();
         return database.transaction((transaction) => {
-          const source = transaction
-            .select()
-            .from(encodingProfiles)
-            .where(
-              and(
-                eq(encodingProfiles.id, input.sourceProfileId),
-                eq(encodingProfiles.mediaDomain, input.mediaDomain),
-              ),
-            )
-            .get();
-          if (!source) {
-            const existing = transaction
-              .select({ mediaDomain: encodingProfiles.mediaDomain })
-              .from(encodingProfiles)
-              .where(eq(encodingProfiles.id, input.sourceProfileId))
-              .get();
-            if (existing) {
-              throw new DomainInvariantError(
-                "Encoding Profile does not belong to the requested media domain",
-              );
-            }
-            throw new RecordNotFoundError(
-              "encoding profile",
-              input.sourceProfileId,
-            );
-          }
+          const source = requireEncodingProfileInDomain(
+            transaction,
+            input.sourceProfileId,
+            input.mediaDomain,
+          );
           const latest = requireRow(
             transaction
               .select({ version: encodingProfiles.version })
@@ -1160,7 +1178,7 @@ export function createDataAccess({
             "encoding profile",
             id,
           );
-        });
+        }, { behavior: "immediate" });
       },
 
       find(input) {
@@ -1184,29 +1202,11 @@ export function createDataAccess({
       setActive(input) {
         const timestamp = now();
         return database.transaction((transaction) => {
-          const profile = transaction
-            .select()
-            .from(encodingProfiles)
-            .where(
-              and(
-                eq(encodingProfiles.id, input.id),
-                eq(encodingProfiles.mediaDomain, input.mediaDomain),
-              ),
-            )
-            .get();
-          if (!profile) {
-            const existing = transaction
-              .select({ mediaDomain: encodingProfiles.mediaDomain })
-              .from(encodingProfiles)
-              .where(eq(encodingProfiles.id, input.id))
-              .get();
-            if (existing) {
-              throw new DomainInvariantError(
-                "Encoding Profile does not belong to the requested media domain",
-              );
-            }
-            throw new RecordNotFoundError("encoding profile", input.id);
-          }
+          const profile = requireEncodingProfileInDomain(
+            transaction,
+            input.id,
+            input.mediaDomain,
+          );
 
           if (input.isActive) {
             transaction
@@ -1233,7 +1233,7 @@ export function createDataAccess({
             "encoding profile",
             profile.id,
           );
-        });
+        }, { behavior: "immediate" });
       },
 
       list(input = {}) {

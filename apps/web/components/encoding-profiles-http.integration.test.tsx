@@ -40,9 +40,11 @@ describe("database-backed Encoding Profiles over HTTP", () => {
         state={{ status: "loaded", profiles: body.profiles }}
         versionSourceId={null}
         isSaving={false}
+        hasRequestError={false}
         onSave={() => undefined}
         onCreateVersion={() => undefined}
         onCancelVersion={() => undefined}
+        onRetry={() => undefined}
         onSetActive={() => undefined}
       />,
     );
@@ -55,5 +57,40 @@ describe("database-backed Encoding Profiles over HTTP", () => {
     expect(html).toContain("Inactive");
     expect(html).toContain("Active");
     expect(html).toContain("DVD video");
+  });
+
+  it("renders a migrated DVD preset even when legacy settings have no container", async () => {
+    const access = dataAccessFixture.create();
+    const legacyProfile = access.encodingProfiles.create({
+      key: "legacy-library",
+      displayName: "Legacy DVD library",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Legacy Fast 480p30" },
+    });
+
+    const response = await createEncodingProfilesRoute(
+      new Request("http://localhost/api/encoding-profiles"),
+      () => access,
+    );
+    const body = (await response.json()) as {
+      profiles: EncodingProfileDto[];
+    };
+    const html = renderToStaticMarkup(
+      <EncodingProfilesView
+        state={{ status: "loaded", profiles: body.profiles }}
+        versionSourceId={legacyProfile.id}
+        isSaving={false}
+        hasRequestError={false}
+        onSave={() => undefined}
+        onCreateVersion={() => undefined}
+        onCancelVersion={() => undefined}
+        onRetry={() => undefined}
+        onSetActive={() => undefined}
+      />,
+    );
+
+    expect(response.status).toBe(200);
+    expect(html).toContain("Legacy Fast 480p30");
+    expect(html).toContain('value="Legacy Fast 480p30"');
   });
 });

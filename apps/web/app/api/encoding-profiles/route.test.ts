@@ -185,4 +185,75 @@ describe("Encoding Profiles API", () => {
       access.encodingProfiles.list({ mediaDomain: "audio" }),
     ).toHaveLength(1);
   });
+
+  it("rejects cross-origin and non-JSON mutations before parsing input", async () => {
+    const access = dataAccessFixture.create();
+    const input = JSON.stringify({
+      key: "hostile",
+      displayName: "Hostile",
+      settings: { preset: "Fast 480p30", container: "mkv" },
+    });
+
+    const textResponse = await createEncodingProfilesRoute(
+      new Request("http://localhost/api/encoding-profiles", {
+        method: "POST",
+        headers: {
+          "Content-Type": "text/plain",
+          Origin: "http://localhost",
+        },
+        body: input,
+      }),
+      () => access,
+    );
+    expect(textResponse.status).toBe(415);
+
+    const crossOriginResponse = await createEncodingProfilesRoute(
+      new Request("http://localhost/api/encoding-profiles", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: "https://attacker.example",
+        },
+        body: input,
+      }),
+      () => access,
+    );
+    expect(crossOriginResponse.status).toBe(403);
+
+    const crossSitePatchResponse = await createEncodingProfilesRoute(
+      new Request("http://localhost/api/encoding-profiles", {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json; charset=utf-8",
+          "Sec-Fetch-Site": "cross-site",
+        },
+        body: JSON.stringify({ id: "profile-id", isActive: true }),
+      }),
+      () => access,
+    );
+    expect(crossSitePatchResponse.status).toBe(403);
+
+    const malformedResponse = await createEncodingProfilesRoute(
+      new Request("http://localhost/api/encoding-profiles", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{",
+      }),
+      () => access,
+    );
+    expect(malformedResponse.status).toBe(400);
+
+    const arrayResponse = await createEncodingProfilesRoute(
+      new Request("http://localhost/api/encoding-profiles", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "[]",
+      }),
+      () => access,
+    );
+    expect(arrayResponse.status).toBe(400);
+    expect(
+      access.encodingProfiles.list({ mediaDomain: "dvd_video" }),
+    ).toEqual([]);
+  });
 });
