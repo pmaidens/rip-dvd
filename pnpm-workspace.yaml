@@ -2,8 +2,8 @@ packages:
   - apps/*
   - packages/*
 overrides:
-  # GHSA-qx2v-qp2m-jg93 affects PostCSS releases before 8.5.10.
-  postcss: 8.5.10
+  # GHSA-6g55-p6wh-862q and GHSA-r28c-9q8g-f849 affect PostCSS releases before 8.5.18.
+  postcss: 8.5.23
   # GHSA-f88m-g3jw-g9cj affects Sharp releases before 0.35.0.
   sharp: 0.35.0
 allowBuilds:
