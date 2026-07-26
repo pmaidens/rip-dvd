@@ -40,6 +40,9 @@ DEFAULT_DEVICE = "/dev/sr0"
 DEFAULT_LIBRARY = "/srv/media/Movies"
 DEFAULT_ORIGINALS_LIBRARY = "/srv/media/DVD Originals"
 LEGACY_QUEUE_CUTOVER_MARKER = ".rip-dvd-sqlite-catalog"
+LEGACY_QUEUE_COMMANDS = frozenset(
+    {"interactive", "rip", "title", "extras", "queue", "encode"}
+)
 
 
 class EtaTracker:
@@ -1369,6 +1372,11 @@ def main():
     parser.add_argument("--normal-priority", action="store_true", help="With 'encode', do not lower CPU/I/O priority")
     parser.add_argument("--verbose", "--debug", action="store_true", help="Print full raw HandBrake output for debugging")
     args = parser.parse_args()
+
+    if args.command in LEGACY_QUEUE_COMMANDS and refuse_retired_legacy_queue(
+        args.originals_library
+    ):
+        return 2
 
     if args.command == "interactive":
         return interactive_mode(args.device, args.library, args.originals_library, args.preset, verbose=args.verbose)
