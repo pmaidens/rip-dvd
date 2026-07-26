@@ -1,4 +1,5 @@
 import { createDataAccess } from "./index.js";
+import { resolveLegacyOriginalsLibrary } from "./internal/legacy-sidecars.js";
 
 type Environment = Readonly<Record<string, string | undefined>>;
 
@@ -61,6 +62,14 @@ export function runLegacySidecarImportCli({
   if (!databasePath || !originalsLibraryPath) {
     writeError(
       `Both the database and originals library paths are required.\n${usage}`,
+    );
+    return 2;
+  }
+  try {
+    originalsLibraryPath = resolveLegacyOriginalsLibrary(originalsLibraryPath);
+  } catch (error) {
+    writeError(
+      `Legacy sidecar import failed: ${error instanceof Error ? error.message : String(error)}\n`,
     );
     return 2;
   }

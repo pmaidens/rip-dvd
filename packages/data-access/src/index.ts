@@ -40,7 +40,10 @@ import {
   createJobQueueController,
   type JobQueueAdapter,
 } from "./internal/job-queue.js";
-import { discoverLegacySidecars } from "./internal/legacy-sidecars.js";
+import {
+  discoverLegacySidecars,
+  resolveLegacyOriginalsLibrary,
+} from "./internal/legacy-sidecars.js";
 import {
   requireNonEmpty,
   requirePositiveSafeInteger,
@@ -1850,7 +1853,7 @@ export function createDataAccess({
 
     legacySidecars: {
       importLibrary(input) {
-        const originalsLibraryPath = resolve(
+        const originalsLibraryPath = resolveLegacyOriginalsLibrary(
           requireNonEmpty(input.originalsLibraryPath, "originalsLibraryPath"),
         );
         const discoveries = discoverLegacySidecars(originalsLibraryPath);
@@ -1912,6 +1915,8 @@ export function createDataAccess({
               }
 
               const timestamp = now();
+              const importedCreatedAt = sidecar.createdAt;
+              const importedUpdatedAt = sidecar.updatedAt;
               let archive = existingByFingerprint ?? existingByPath;
               if (
                 existingByPath &&
@@ -1956,9 +1961,9 @@ export function createDataAccess({
                     volumeLabel: sidecar.movieTitle,
                     status: "archived",
                     scanData: sidecar.scanData,
-                    detectedAt: timestamp,
-                    createdAt: timestamp,
-                    updatedAt: timestamp,
+                    detectedAt: importedCreatedAt,
+                    createdAt: importedCreatedAt,
+                    updatedAt: importedUpdatedAt,
                   })
                   .onConflictDoNothing({
                     target: [
@@ -1992,9 +1997,9 @@ export function createDataAccess({
                       archivePath: sidecar.archivePath,
                       fingerprint: sidecar.fingerprint,
                       sizeBytes: sidecar.archiveSizeBytes,
-                      archivedAt: timestamp,
-                      createdAt: timestamp,
-                      updatedAt: timestamp,
+                      archivedAt: sidecar.archivedAt,
+                      createdAt: importedCreatedAt,
+                      updatedAt: importedUpdatedAt,
                     })
                     .returning()
                     .get(),
@@ -2041,10 +2046,19 @@ export function createDataAccess({
                   selection,
                 ]),
               );
-              const existingMovieSelection = sidecar.jobs
-                .filter((job) => job.mediaItemKind === "movie")
-                .map((job) => selectionsBySourceKey.get(job.sourceKey))
-                .find((selection) => selection !== undefined);
+              const findExistingSelection = (
+                mediaItemKind: "movie" | "bonus_feature",
+              ) => {
+                const job = sidecar.jobs.find(
+                  (candidate) =>
+                    candidate.mediaItemKind === mediaItemKind &&
+                    selectionsBySourceKey.has(candidate.sourceKey),
+                );
+                return job
+                  ? selectionsBySourceKey.get(job.sourceKey)
+                  : undefined;
+              };
+              const existingMovieSelection = findExistingSelection("movie");
               if (existingMovieSelection) {
                 movieItem = transaction
                   .select()
@@ -2052,10 +2066,8 @@ export function createDataAccess({
                   .where(eq(mediaItems.id, existingMovieSelection.mediaItemId))
                   .get();
               } else {
-                const existingExtraSelection = sidecar.jobs
-                  .filter((job) => job.mediaItemKind === "bonus_feature")
-                  .map((job) => selectionsBySourceKey.get(job.sourceKey))
-                  .find((selection) => selection !== undefined);
+                const existingExtraSelection =
+                  findExistingSelection("bonus_feature");
                 if (existingExtraSelection) {
                   const extra = transaction
                     .select()
@@ -2083,8 +2095,8 @@ export function createDataAccess({
                       kind: "movie",
                       title: sidecar.movieTitle,
                       year: sidecar.movieYear,
-                      createdAt: timestamp,
-                      updatedAt: timestamp,
+                      createdAt: importedCreatedAt,
+                      updatedAt: importedUpdatedAt,
                     })
                     .returning()
                     .get(),
@@ -2096,6 +2108,17 @@ export function createDataAccess({
               };
 
               for (const job of sidecar.jobs) {
+                const importedJobState = job.completedAt
+                  ? {
+                      status: "completed" as const,
+                      progressPercent: 100,
+                      completedAt: job.completedAt,
+                    }
+                  : {
+                      status: "queued" as const,
+                      progressPercent: 0,
+                      completedAt: null,
+                    };
                 let selection = selectionsBySourceKey.get(job.sourceKey);
                 let profile = transaction
                   .select()
@@ -2214,8 +2237,8 @@ export function createDataAccess({
                               parentId: requireMovieItem().id,
                               kind: "bonus_feature",
                               title: job.mediaTitle,
-                              createdAt: timestamp,
-                              updatedAt: timestamp,
+                              createdAt: importedCreatedAt,
+                              updatedAt: importedUpdatedAt,
                             })
                             .returning()
                             .get(),
@@ -2238,8 +2261,8 @@ export function createDataAccess({
                         chapterStart: null,
                         chapterEnd: null,
                         label: job.label,
-                        createdAt: timestamp,
-                        updatedAt: timestamp,
+                        createdAt: importedCreatedAt,
+                        updatedAt: importedUpdatedAt,
                       })
                       .returning()
                       .get(),
@@ -2261,8 +2284,8 @@ export function createDataAccess({
                         mediaDomain: "dvd_video",
                         version: 1,
                         settings: { preset: job.preset },
-                        createdAt: timestamp,
-                        updatedAt: timestamp,
+                        createdAt: importedCreatedAt,
+                        updatedAt: importedUpdatedAt,
                       })
                       .returning()
                       .get(),
@@ -2293,20 +2316,19 @@ export function createDataAccess({
                       discSelectionId: selection.id,
                       encodingProfileId: profile.id,
                       outputPath: job.outputPath,
-                      status: job.completed ? "completed" : "queued",
-                      progressPercent: job.completed ? 100 : 0,
-                      completedAt: job.completed ? timestamp : null,
-                      createdAt: timestamp,
-                      updatedAt: timestamp,
+                      ...importedJobState,
+                      createdAt: importedCreatedAt,
+                      updatedAt:
+                        importedJobState.completedAt ?? importedUpdatedAt,
                     })
                     .run();
                   created.encodeJobs += 1;
                 } else if (
-                  existingJob.status === "running" ||
+                  existingJob.status !== "queued" ||
                   (existingJob.outputPath === job.outputPath &&
-                    existingJob.status ===
-                      (job.completed ? "completed" : "queued") &&
-                    existingJob.progressPercent === (job.completed ? 100 : 0))
+                    existingJob.status === importedJobState.status &&
+                    existingJob.progressPercent ===
+                      importedJobState.progressPercent)
                 ) {
                   unchanged += 1;
                 } else {
@@ -2314,15 +2336,13 @@ export function createDataAccess({
                     .update(encodeJobs)
                     .set({
                       outputPath: job.outputPath,
-                      status: job.completed ? "completed" : "queued",
-                      progressPercent: job.completed ? 100 : 0,
+                      ...importedJobState,
                       claimedBy: null,
                       claimToken: null,
                       claimedAt: null,
                       startedAt: null,
-                      completedAt: job.completed ? timestamp : null,
                       errorMessage: null,
-                      updatedAt: timestamp,
+                      updatedAt: importedJobState.completedAt ?? timestamp,
                     })
                     .where(eq(encodeJobs.id, existingJob.id))
                     .run();

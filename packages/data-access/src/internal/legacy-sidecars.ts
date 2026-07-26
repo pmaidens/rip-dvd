@@ -5,7 +5,7 @@ import {
   readFileSync,
   statSync,
 } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join, normalize, resolve } from "node:path";
 
 import type {
   LegacySidecarImportIssue,
@@ -15,7 +15,7 @@ import type {
 const DEFAULT_HANDBRAKE_PRESET = "Fast 480p30";
 
 export interface ParsedLegacyJob {
-  completed: boolean;
+  completedAt: Date | null;
   jobIndex: number;
   kind: "main_feature" | "dvd_title";
   label: string;
@@ -31,6 +31,8 @@ export interface ParsedLegacyJob {
 export interface ParsedLegacySidecar {
   archivePath: string;
   archiveSizeBytes: number;
+  archivedAt: Date;
+  createdAt: Date;
   fingerprint: string;
   issues: LegacySidecarImportIssue[];
   jobs: ParsedLegacyJob[];
@@ -38,11 +40,33 @@ export interface ParsedLegacySidecar {
   movieYear: number | null;
   scanData: unknown;
   sidecarPath: string;
+  updatedAt: Date;
 }
 
 export type LegacySidecarDiscovery =
   | { outcome: "parsed"; sidecar: ParsedLegacySidecar }
   | { outcome: "skipped"; issue: LegacySidecarImportIssue };
+
+export function resolveLegacyOriginalsLibrary(path: string): string {
+  const resolvedPath = isAbsolute(path)
+    ? normalize(path)
+    : resolve(path);
+  let libraryStat;
+  try {
+    libraryStat = statSync(resolvedPath);
+    readdirSync(resolvedPath);
+  } catch (error) {
+    throw new Error(
+      `Originals library does not exist or is not readable: ${resolvedPath}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+  if (!libraryStat.isDirectory()) {
+    throw new Error(`Originals library is not a directory: ${resolvedPath}`);
+  }
+  return resolvedPath;
+}
 
 function objectValue(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -68,8 +92,53 @@ function optionalYear(value: unknown): number | null {
   return year !== null && year >= 1800 && year <= 9999 ? year : null;
 }
 
-function resolveRecordedPath(path: string, sidecarPath: string): string {
-  return isAbsolute(path) ? path : resolve(sidecarPath, "..", path);
+function recordedDate(value: unknown): Date | null {
+  if (typeof value !== "string" || value.trim() === "") {
+    return null;
+  }
+  const milliseconds = Date.parse(value);
+  return Number.isFinite(milliseconds) ? new Date(milliseconds) : null;
+}
+
+function nonNegativeInteger(value: unknown): number | null {
+  if (typeof value === "string" && /^\d+$/.test(value.trim())) {
+    value = Number(value);
+  }
+  return Number.isSafeInteger(value) && Number(value) >= 0
+    ? Number(value)
+    : null;
+}
+
+type RecordedPathResolution =
+  | { outcome: "resolved"; path: string }
+  | { outcome: "ambiguous"; message: string };
+
+function resolveRecordedPath(
+  path: string,
+  sidecarPath: string,
+): RecordedPathResolution {
+  if (isAbsolute(path)) {
+    return { outcome: "resolved", path: normalize(path) };
+  }
+  const candidates = [
+    resolve(path),
+    resolve(sidecarPath, "..", path),
+  ].filter((candidate, index, paths) => paths.indexOf(candidate) === index);
+  const existingCandidates = candidates.filter((candidate) =>
+    existsSync(candidate),
+  );
+  if (existingCandidates.length > 1) {
+    return {
+      outcome: "ambiguous",
+      message: `Recorded path is ambiguous between: ${existingCandidates.join(
+        ", ",
+      )}`,
+    };
+  }
+  return {
+    outcome: "resolved",
+    path: existingCandidates[0] ?? candidates[0]!,
+  };
 }
 
 function profileKey(preset: string): string {
@@ -155,13 +224,20 @@ function parseJob(
   if (!output) {
     return invalid("Encode job output must be a non-empty path");
   }
-  const outputPath = resolveRecordedPath(output, sidecarPath);
+  const outputResolution = resolveRecordedPath(output, sidecarPath);
+  if (outputResolution.outcome === "ambiguous") {
+    return invalid(outputResolution.message);
+  }
+  const outputPath = outputResolution.path;
   const jobSource = nonEmptyString(job.source);
-  if (
-    jobSource &&
-    resolveRecordedPath(jobSource, sidecarPath) !== archivePath
-  ) {
-    return invalid("Encode job source does not match the sidecar archive");
+  if (jobSource) {
+    const sourceResolution = resolveRecordedPath(jobSource, sidecarPath);
+    if (sourceResolution.outcome === "ambiguous") {
+      return invalid(sourceResolution.message);
+    }
+    if (sourceResolution.path !== archivePath) {
+      return invalid("Encode job source does not match the sidecar archive");
+    }
   }
   if (!("title_number" in job)) {
     return invalid("Encode job must include title_number");
@@ -185,14 +261,15 @@ function parseJob(
     ? movieTitle
     : label.replace(/^extra\s+\d+\s*:\s*/i, "").trim() || label;
   const preset = nonEmptyString(job.preset) ?? DEFAULT_HANDBRAKE_PRESET;
-  let completed = false;
+  let completedAt: Date | null = null;
   try {
-    completed = statSync(outputPath).isFile();
+    const outputStat = statSync(outputPath);
+    completedAt = outputStat.isFile() ? outputStat.mtime : null;
   } catch {
-    completed = false;
+    completedAt = null;
   }
   return {
-    completed,
+    completedAt,
     jobIndex: index,
     kind: titleNumber === null ? "main_feature" : "dvd_title",
     label,
@@ -229,18 +306,99 @@ function parseSidecar(sidecarPath: string): LegacySidecarDiscovery {
   if (!data) {
     return invalid("Top-level sidecar value must be an object");
   }
-  const schemaVersion = data.schema_version ?? 1;
+  const schemaVersion =
+    "schema_version" in data ? data.schema_version : 1;
   if (schemaVersion !== 1 && schemaVersion !== 2) {
     return invalid("Only legacy sidecar schema versions 1 and 2 are supported");
   }
-  if ((data.archive_status ?? "ready") !== "ready") {
+  const archiveStatus =
+    "archive_status" in data ? data.archive_status : "ready";
+  if (typeof archiveStatus !== "string") {
+    return invalid("Sidecar archive_status must be a string when provided");
+  }
+  if (archiveStatus !== "ready") {
     return invalid("Original Disc Archive is not marked ready");
+  }
+  for (const field of [
+    "movie_dir",
+    "title",
+    "disc_hint",
+    "disc_title",
+  ] as const) {
+    if (field in data && typeof data[field] !== "string") {
+      return invalid(`Sidecar ${field} must be a string when provided`);
+    }
+  }
+  if ("title" in data && !nonEmptyString(data.title)) {
+    return invalid("Sidecar title must be non-empty when provided");
+  }
+  if (
+    "year" in data &&
+    data.year !== null &&
+    data.year !== "" &&
+    optionalYear(data.year) === null
+  ) {
+    return invalid("Sidecar year must be a valid year when provided");
+  }
+  const createdAt =
+    "created_at" in data ? recordedDate(data.created_at) : null;
+  if ("created_at" in data && !createdAt) {
+    return invalid("Sidecar created_at must be a valid date when provided");
+  }
+  const updatedAt =
+    "updated_at" in data ? recordedDate(data.updated_at) : null;
+  if ("updated_at" in data && !updatedAt) {
+    return invalid("Sidecar updated_at must be a valid date when provided");
+  }
+  if (createdAt && updatedAt && updatedAt < createdAt) {
+    return invalid("Sidecar updated_at must not be earlier than created_at");
+  }
+  if (
+    "disc_fingerprint" in data &&
+    data.disc_fingerprint !== null &&
+    typeof data.disc_fingerprint !== "string"
+  ) {
+    return invalid(
+      "Sidecar disc_fingerprint must be a string or null when provided",
+    );
+  }
+  const rawTitles = "titles" in data ? data.titles : [];
+  if (!Array.isArray(rawTitles)) {
+    return invalid("Sidecar titles must be an array when provided");
+  }
+  for (const [index, value] of rawTitles.entries()) {
+    const title = objectValue(value);
+    if (!title || positiveInteger(title.number) === null) {
+      return invalid(`Sidecar title ${index} must have a positive number`);
+    }
+    if (
+      "duration_text" in title &&
+      typeof title.duration_text !== "string"
+    ) {
+      return invalid(`Sidecar title ${index} duration_text must be a string`);
+    }
+    for (const field of [
+      "seconds",
+      "chapters",
+      "audio_streams",
+      "subtitles",
+    ] as const) {
+      if (field in title && nonNegativeInteger(title[field]) === null) {
+        return invalid(
+          `Sidecar title ${index} ${field} must be a non-negative integer`,
+        );
+      }
+    }
   }
   const source = nonEmptyString(data.source);
   if (!source) {
     return invalid("Sidecar source must be a non-empty archive path");
   }
-  const archivePath = resolveRecordedPath(source, sidecarPath);
+  const archiveResolution = resolveRecordedPath(source, sidecarPath);
+  if (archiveResolution.outcome === "ambiguous") {
+    return invalid(archiveResolution.message);
+  }
+  const archivePath = archiveResolution.path;
   let archiveStat;
   try {
     archiveStat = statSync(archivePath);
@@ -305,6 +463,8 @@ function parseSidecar(sidecarPath: string): LegacySidecarDiscovery {
     sidecar: {
       archivePath,
       archiveSizeBytes: archiveStat.size,
+      archivedAt: updatedAt ?? archiveStat.mtime,
+      createdAt: createdAt ?? archiveStat.mtime,
       fingerprint,
       issues,
       jobs,
@@ -316,14 +476,12 @@ function parseSidecar(sidecarPath: string): LegacySidecarDiscovery {
         titles: data.titles ?? [],
       },
       sidecarPath,
+      updatedAt: updatedAt ?? archiveStat.mtime,
     },
   };
 }
 
 function findSidecars(directory: string): string[] {
-  if (!existsSync(directory)) {
-    return [];
-  }
   const paths: string[] = [];
   for (const entry of readdirSync(directory, { withFileTypes: true })) {
     const path = join(directory, entry.name);
