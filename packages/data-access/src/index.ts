@@ -1902,6 +1902,14 @@ export function createDataAccess({
                   "Archive fingerprint and path belong to different records",
                 );
               }
+              if (
+                existingByFingerprint &&
+                existingByFingerprint.archivePath !== sidecar.archivePath
+              ) {
+                throw new DomainInvariantError(
+                  "Archive fingerprint is already assigned to a different path",
+                );
+              }
 
               const timestamp = now();
               let archive = existingByFingerprint ?? existingByPath;

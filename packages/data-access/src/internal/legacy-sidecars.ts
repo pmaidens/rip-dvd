@@ -173,7 +173,7 @@ function parseJob(
   }
   const selection = nonEmptyString(job.selection);
   if (
-    (titleNumber === null && selection !== null && selection !== "main_feature") ||
+    (titleNumber === null && selection !== "main_feature") ||
     (titleNumber !== null && selection !== null && selection !== "title")
   ) {
     return invalid("Encode job selection does not match title_number");

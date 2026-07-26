@@ -325,6 +325,11 @@ describe("legacy sidecar import", () => {
             title_number: 3,
           },
           {
+            label: "Missing main-feature selector",
+            output: join(root, "movies", "Missing selection.mkv"),
+            title_number: null,
+          },
+          {
             label: "Duplicate movie",
             source: archivePath,
             output: movieOutputPath,
@@ -361,7 +366,8 @@ describe("legacy sidecar import", () => {
         expect.objectContaining({ code: "missing_archive" }),
         expect.objectContaining({ code: "invalid_job", jobIndex: 1 }),
         expect.objectContaining({ code: "invalid_job", jobIndex: 2 }),
-        expect.objectContaining({ code: "duplicate_record", jobIndex: 3 }),
+        expect.objectContaining({ code: "invalid_job", jobIndex: 3 }),
+        expect.objectContaining({ code: "duplicate_record", jobIndex: 4 }),
       ]),
     );
     expect(access.catalog.listOriginalDiscArchives()).toHaveLength(1);
@@ -431,6 +437,46 @@ describe("legacy sidecar import", () => {
         expect.objectContaining({ outputPath: uniqueOutputPath }),
       ]),
     );
+
+    fixture.access.close();
+  });
+
+  it("reports an archive fingerprint found at another source path", () => {
+    const fixture = createFixture();
+    fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+    const duplicateArchivePath = join(
+      fixture.originalsLibraryPath,
+      "Duplicate Copy.iso",
+    );
+    writeFileSync(duplicateArchivePath, "duplicate archive copy");
+    writeFileSync(
+      join(fixture.originalsLibraryPath, "Duplicate Copy.rip-dvd.json"),
+      JSON.stringify({
+        schema_version: 2,
+        source: duplicateArchivePath,
+        title: "Duplicate Copy",
+        disc_fingerprint: "example-disc-fingerprint",
+        jobs: [],
+      }),
+    );
+
+    const report = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+
+    expect(report).toMatchObject({
+      sidecarsFound: 2,
+      sidecarsImported: 1,
+      sidecarsSkipped: 1,
+    });
+    expect(report.issues).toEqual([
+      expect.objectContaining({ code: "duplicate_record" }),
+    ]);
+    expect(fixture.access.catalog.listOriginalDiscArchives()).toEqual([
+      expect.objectContaining({ archivePath: fixture.archivePath }),
+    ]);
 
     fixture.access.close();
   });
