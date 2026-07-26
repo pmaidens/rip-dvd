@@ -1,25 +1,10 @@
 import { setTimeout as delay } from "node:timers/promises";
 
-import type { DataAccess } from "@rip-dvd/data-access";
-
-export interface DiscoveredOpticalDrive {
-  devicePath: string;
-  displayName?: string;
-  vendor?: string;
-  product?: string;
-  serialNumber?: string;
-}
-
-export interface DvdTitleMap {
-  schemaVersion: 1;
-  titles: readonly {
-    number: number;
-    durationSeconds: number;
-    chapters: number;
-    audioStreams: number;
-    subtitles: number;
-  }[];
-}
+import type {
+  DataAccess,
+  DiscoveredOpticalDrive,
+} from "@rip-dvd/data-access";
+import type { DvdTitleMap } from "@rip-dvd/data-access/dvd-scan";
 
 export interface ScannedDvd {
   fingerprint: string;

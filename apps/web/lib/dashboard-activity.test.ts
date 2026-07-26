@@ -15,6 +15,75 @@ function emptySnapshot(generatedAt: string): DashboardSnapshot {
 }
 
 describe("watchDashboardActivity", () => {
+  it("retains HTTP title details when activity events carry disc summaries", async () => {
+    const detailed = emptySnapshot("2026-07-26T16:00:00.000Z");
+    detailed.detectedDiscs = {
+      status: "loaded",
+      items: [
+        {
+          id: "disc-1",
+          volumeLabel: "DETAILED_DISC",
+          discKind: "dvd",
+          status: "scanned",
+          opticalDriveName: "Upper drive",
+          fingerprint: "sha256:disc-1",
+          titles: [
+            {
+              number: 1,
+              durationSeconds: 60,
+              chapters: 1,
+              audioStreams: [
+                { id: 128, language: "English", format: "ac3", channels: 6 },
+              ],
+              subtitles: [],
+            },
+          ],
+          detectedAt: "2026-07-26T15:58:00.000Z",
+        },
+      ],
+    };
+    const activity: DashboardSnapshot = {
+      ...detailed,
+      generatedAt: "2026-07-26T16:00:01.000Z",
+      detectedDiscs: {
+        status: "loaded",
+        items: [{ ...detailed.detectedDiscs.items[0]!, titles: [] }],
+      },
+    };
+    let dashboardListener: ((event: MessageEvent<string>) => void) | undefined;
+    const eventSource = {
+      onerror: null as (() => void) | null,
+      onopen: null as (() => void) | null,
+      addEventListener(
+        type: string,
+        listener: (event: MessageEvent<string>) => void,
+      ) {
+        if (type === "dashboard") {
+          dashboardListener = listener;
+        }
+      },
+      close: vi.fn(),
+    };
+    const onSnapshot = vi.fn();
+
+    const stop = watchDashboardActivity({
+      loadSnapshot: async () => detailed,
+      openEventSource: () => eventSource,
+      onSnapshot,
+      onInitialLoadError: vi.fn(),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    dashboardListener?.({
+      data: JSON.stringify(activity),
+    } as MessageEvent<string>);
+
+    expect(
+      (onSnapshot.mock.calls.at(-1)?.[0] as DashboardSnapshot).detectedDiscs,
+    ).toEqual(detailed.detectedDiscs);
+    stop();
+  });
+
   it("keeps the normal HTTP snapshot when SSE is unavailable", async () => {
     const snapshot = emptySnapshot("2026-07-26T16:00:00.000Z");
     const onSnapshot = vi.fn();

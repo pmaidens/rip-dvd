@@ -209,16 +209,22 @@ export type RunningEncodeJob = EncodeJob & {
   claimToken: EncodeJobClaimToken;
 };
 
+export interface DiscoveredOpticalDrive {
+  devicePath: string;
+  displayName?: string;
+  vendor?: string;
+  product?: string;
+  serialNumber?: string;
+}
+
+export interface OpticalDriveReconciliationInput
+  extends DiscoveredOpticalDrive {
+  isEnabledWhenNew?: boolean;
+}
+
 export interface CatalogAccess {
   reconcileOpticalDrives(
-    discovered: readonly {
-      devicePath: string;
-      displayName?: string;
-      vendor?: string;
-      product?: string;
-      serialNumber?: string;
-      isEnabledWhenNew?: boolean;
-    }[],
+    discovered: readonly OpticalDriveReconciliationInput[],
   ): OpticalDrive[];
   upsertOpticalDrive(input: {
     devicePath: string;
@@ -237,7 +243,10 @@ export interface CatalogAccess {
     volumeLabel?: string;
     scanData?: unknown;
   }): DetectedDisc;
-  listDetectedDiscs(statuses?: DetectedDiscStatus[]): DetectedDisc[];
+  listDetectedDiscs(
+    statuses?: DetectedDiscStatus[],
+    options?: { limit?: number },
+  ): DetectedDisc[];
   updateDetectedDiscStatus(
     id: DetectedDiscId,
     status: DetectedDiscStatus,

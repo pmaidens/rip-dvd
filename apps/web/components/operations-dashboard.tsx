@@ -74,6 +74,17 @@ function countLabel(count: number, singular: string, plural = `${singular}s`) {
   return `${count} ${count === 1 ? singular : plural}`;
 }
 
+function formatStreamId(id: number): string {
+  return `0x${id.toString(16)}`;
+}
+
+function streamLanguage(stream: {
+  language?: string;
+  languageCode?: string;
+}): string {
+  return stream.language ?? stream.languageCode ?? "Unknown language";
+}
+
 function Progress({ value }: { value: number }) {
   return (
     <div className="progress" aria-label={`${value}% complete`}>
@@ -228,9 +239,49 @@ export function DashboardView({ state }: { state: DashboardLoadState }) {
                       </div>
                       <p>
                         {countLabel(title.chapters, "chapter")} ·{" "}
-                        {countLabel(title.audioStreams, "audio", "audio")} ·{" "}
-                        {countLabel(title.subtitles, "subtitle")}
+                        {countLabel(
+                          title.audioStreams.length,
+                          "audio",
+                          "audio",
+                        )} ·{" "}
+                        {countLabel(title.subtitles.length, "subtitle")}
                       </p>
+                      {title.audioStreams.length > 0 ? (
+                        <ul className="dvd-stream-list" aria-label="Audio streams">
+                          {title.audioStreams.map((stream) => (
+                            <li key={stream.id}>
+                              {[
+                                streamLanguage(stream),
+                                stream.format,
+                                stream.channels
+                                  ? countLabel(stream.channels, "channel")
+                                  : undefined,
+                                formatStreamId(stream.id),
+                              ]
+                                .filter(Boolean)
+                                .join(" · ")}
+                            </li>
+                          ))}
+                        </ul>
+                      ) : null}
+                      {title.subtitles.length > 0 ? (
+                        <ul
+                          className="dvd-stream-list"
+                          aria-label="Subtitle streams"
+                        >
+                          {title.subtitles.map((stream) => (
+                            <li key={stream.id}>
+                              {[
+                                streamLanguage(stream),
+                                stream.content,
+                                formatStreamId(stream.id),
+                              ]
+                                .filter(Boolean)
+                                .join(" · ")}
+                            </li>
+                          ))}
+                        </ul>
+                      ) : null}
                     </li>
                   ))}
                 </ol>

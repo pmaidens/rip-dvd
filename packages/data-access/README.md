@@ -17,7 +17,14 @@ expire after five minutes. Opening an already-migrated file is safe.
 short transaction. Seen drives become present and advance `lastSeenAt`; drives
 absent from a successful snapshot become missing without changing their last
 seen time. Existing enabled/disabled choices are preserved, while a caller may
-choose the enabled default only for a newly discovered drive.
+choose the enabled default only for a newly discovered drive. A changed stable
+serial or model identity at the same device path is replacement hardware and is
+atomically reset to disabled.
+
+The package exports the versioned, bounded DVD title-map contract through
+`@rip-dvd/data-access/dvd-scan`. Hardware parsing, worker persistence, and web
+rendering share its schema-v2 decoder, stream limits, metadata types, and
+content-ID validation instead of maintaining separate scan shapes.
 
 ## Queue attempts and progress
 

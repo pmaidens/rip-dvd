@@ -3,8 +3,21 @@ import { execFile } from "node:child_process";
 import { platform as operatingSystem } from "node:os";
 import { isAbsolute, normalize } from "node:path";
 
+import {
+  decodeDvdTitleMap,
+  DVD_TITLE_MAP_SCHEMA_VERSION,
+  MAX_DVD_AUDIO_STREAMS_PER_TITLE,
+  MAX_DVD_SCAN_INTEGER,
+  MAX_DVD_STREAM_TEXT_LENGTH,
+  MAX_DVD_SUBTITLES_PER_TITLE,
+  MAX_DVD_TITLES,
+  type DvdAudioStream,
+  type DvdSubtitleStream,
+  type DvdTitle,
+} from "@rip-dvd/data-access/dvd-scan";
+import type { DiscoveredOpticalDrive } from "@rip-dvd/data-access";
+
 import type {
-  DiscoveredOpticalDrive,
   OpticalDriveHardware,
   ScannedDvd,
 } from "./archive-worker.js";
@@ -13,9 +26,12 @@ const COMMAND_TIMEOUT_MS = 90_000;
 const MAX_COMMAND_OUTPUT_BYTES = 1_048_576;
 const MAX_DISCOVERED_DEVICES = 32;
 const MAX_BLOCK_DEVICE_NODES = 256;
-const MAX_DVD_TITLES = 512;
 const MAX_DEVICE_PATH_LENGTH = 4_096;
 const MAX_LABEL_LENGTH = 256;
+const DVD_SECTOR_BYTES = 2_048;
+const DVD_CONTENT_SAMPLE_SECTORS = 16;
+const DVD_CONTENT_SAMPLE_BYTES =
+  DVD_SECTOR_BYTES * DVD_CONTENT_SAMPLE_SECTORS;
 
 export interface CommandResult {
   exitCode: number;
@@ -35,6 +51,20 @@ export interface CommandRunner {
     arguments_: readonly string[],
     options: CommandRunnerOptions,
   ): Promise<CommandResult>;
+}
+
+export interface BinaryCommandResult {
+  exitCode: number;
+  stdout: Buffer;
+  stderr: Buffer;
+}
+
+export interface BinaryCommandRunner {
+  run(
+    executable: string,
+    arguments_: readonly string[],
+    options: CommandRunnerOptions,
+  ): Promise<BinaryCommandResult>;
 }
 
 export const nodeCommandRunner: CommandRunner = {
@@ -70,9 +100,43 @@ export const nodeCommandRunner: CommandRunner = {
   },
 };
 
+export const nodeBinaryCommandRunner: BinaryCommandRunner = {
+  run(executable, arguments_, options) {
+    return new Promise((resolve, reject) => {
+      execFile(
+        executable,
+        [...arguments_],
+        {
+          encoding: null,
+          maxBuffer: options.maxBufferBytes,
+          shell: false,
+          signal: options.signal,
+          timeout: options.timeoutMs,
+        },
+        (error, stdout, stderr) => {
+          if (!error) {
+            resolve({ exitCode: 0, stdout, stderr });
+            return;
+          }
+          if (options.signal.aborted || error.name === "AbortError") {
+            reject(error);
+            return;
+          }
+          if (typeof error.code === "number") {
+            resolve({ exitCode: error.code, stdout, stderr });
+            return;
+          }
+          reject(error);
+        },
+      );
+    });
+  },
+};
+
 interface LinuxOpticalDriveHardwareOptions {
   platform?: NodeJS.Platform;
   runner?: CommandRunner;
+  binaryRunner?: BinaryCommandRunner;
 }
 
 type UnknownRecord = Record<string, unknown>;
@@ -175,39 +239,134 @@ function parseDiscoveredDrives(output: string): DiscoveredOpticalDrive[] {
 
 function boundedNonNegativeInteger(value: string, field: string): number {
   const number = Number(value);
-  if (!Number.isSafeInteger(number) || number < 0 || number > 100_000) {
+  if (
+    !Number.isSafeInteger(number) ||
+    number < 0 ||
+    number > MAX_DVD_SCAN_INTEGER
+  ) {
     throw new Error(`lsdvd returned an invalid ${field}`);
   }
   return number;
 }
 
-function parseDvdScan(output: string): ScannedDvd {
+interface ParsedDvdTitle extends DvdTitle {
+  audioStreams: DvdAudioStream[];
+  subtitles: DvdSubtitleStream[];
+  expectedAudioStreams: number;
+  expectedSubtitles: number;
+}
+
+function parseStreamId(value: string): number {
+  const parsed = value.toLowerCase().startsWith("0x")
+    ? Number.parseInt(value, 16)
+    : Number(value);
+  return boundedNonNegativeInteger(
+    String(parsed),
+    "stream id",
+  );
+}
+
+function boundedStreamText(value: string, field: string): string {
+  const text = optionalText(value, MAX_DVD_STREAM_TEXT_LENGTH);
+  if (text === undefined) {
+    throw new Error(`lsdvd returned invalid ${field}`);
+  }
+  return text;
+}
+
+function parseDvdMetadata(output: string): {
+  volumeLabel?: string;
+  titles: DvdTitle[];
+} {
   if (Buffer.byteLength(output) > MAX_COMMAND_OUTPUT_BYTES) {
     throw new Error("lsdvd output exceeds the scan size limit");
   }
   const volumeMatch = output.match(/^Disc Title:\s*(.+)$/im);
   const volumeLabel = optionalText(volumeMatch?.[1]);
-  const titles: ScannedDvd["scanData"]["titles"][number][] = [];
+  const titles: ParsedDvdTitle[] = [];
   const titlePattern =
-    /Title:\s*(\d+),\s*Length:\s*(\d+):(\d{2}):(\d{2})(?:\.\d+)?\s*Chapters:\s*(\d+).*?Audio streams:\s*(\d+),\s*Subpictures:\s*(\d+)/gi;
-  for (const match of output.matchAll(titlePattern)) {
-    if (titles.length >= MAX_DVD_TITLES) {
-      throw new Error(`lsdvd returned more than ${MAX_DVD_TITLES} DVD titles`);
+    /^\s*Title:\s*(\d+),\s*Length:\s*(\d+):(\d{2}):(\d{2})(?:\.\d+)?\s*Chapters:\s*(\d+),\s*Cells:\s*\d+,\s*Audio streams:\s*(\d+),\s*Subpictures:\s*(\d+)\s*$/i;
+  const audioPattern =
+    /^\s*Audio:\s*\d+,\s*Language:\s*([^\s,]+)\s*-\s*([^,]+),\s*Format:\s*([^,]+),.*?\sChannels:\s*(\d+),.*?\sStream id:\s*(0x[0-9a-f]+|\d+)\s*$/i;
+  const subtitlePattern =
+    /^\s*(?:Subtitle|Subpicture):\s*\d+,\s*Language:\s*([^\s,]+)\s*-\s*([^,]+),\s*Content:\s*([^,]+),\s*Stream id:\s*(0x[0-9a-f]+|\d+)\s*$/i;
+  let currentTitle: ParsedDvdTitle | undefined;
+  for (const line of output.split(/\r?\n/)) {
+    if (/^\s*Title:/i.test(line)) {
+      const match = line.match(titlePattern);
+      if (!match) {
+        throw new Error("lsdvd returned a malformed DVD title summary");
+      }
+      if (titles.length >= MAX_DVD_TITLES) {
+        throw new Error(
+          `lsdvd returned more than ${MAX_DVD_TITLES} DVD titles`,
+        );
+      }
+      const number = boundedNonNegativeInteger(match[1], "title number");
+      const hours = boundedNonNegativeInteger(match[2], "duration hours");
+      const minutes = boundedNonNegativeInteger(match[3], "duration minutes");
+      const seconds = boundedNonNegativeInteger(match[4], "duration seconds");
+      if (number === 0 || minutes >= 60 || seconds >= 60) {
+        throw new Error("lsdvd returned an invalid DVD title map");
+      }
+      currentTitle = {
+        number,
+        durationSeconds: hours * 3_600 + minutes * 60 + seconds,
+        chapters: boundedNonNegativeInteger(match[5], "chapter count"),
+        audioStreams: [],
+        subtitles: [],
+        expectedAudioStreams: boundedNonNegativeInteger(
+          match[6],
+          "audio stream count",
+        ),
+        expectedSubtitles: boundedNonNegativeInteger(
+          match[7],
+          "subtitle count",
+        ),
+      };
+      if (
+        currentTitle.expectedAudioStreams > MAX_DVD_AUDIO_STREAMS_PER_TITLE ||
+        currentTitle.expectedSubtitles > MAX_DVD_SUBTITLES_PER_TITLE
+      ) {
+        throw new Error("lsdvd returned too many DVD streams");
+      }
+      titles.push(currentTitle);
+      continue;
     }
-    const number = boundedNonNegativeInteger(match[1], "title number");
-    const hours = boundedNonNegativeInteger(match[2], "duration hours");
-    const minutes = boundedNonNegativeInteger(match[3], "duration minutes");
-    const seconds = boundedNonNegativeInteger(match[4], "duration seconds");
-    if (number === 0 || minutes >= 60 || seconds >= 60) {
-      throw new Error("lsdvd returned an invalid DVD title map");
+    if (/^\s*Audio:/i.test(line)) {
+      const match = line.match(audioPattern);
+      if (!currentTitle || !match) {
+        throw new Error("lsdvd returned malformed DVD audio metadata");
+      }
+      currentTitle.audioStreams.push({
+        id: parseStreamId(match[5]),
+        languageCode: boundedStreamText(match[1], "audio language code"),
+        language: boundedStreamText(match[2], "audio language"),
+        format: boundedStreamText(match[3], "audio format"),
+        channels: boundedNonNegativeInteger(match[4], "channel count"),
+      });
+      if (
+        currentTitle.audioStreams.length > MAX_DVD_AUDIO_STREAMS_PER_TITLE
+      ) {
+        throw new Error("lsdvd returned too many DVD audio streams");
+      }
+      continue;
     }
-    titles.push({
-      number,
-      durationSeconds: hours * 3_600 + minutes * 60 + seconds,
-      chapters: boundedNonNegativeInteger(match[5], "chapter count"),
-      audioStreams: boundedNonNegativeInteger(match[6], "audio stream count"),
-      subtitles: boundedNonNegativeInteger(match[7], "subtitle count"),
-    });
+    if (/^\s*(?:Subtitle|Subpicture):/i.test(line)) {
+      const match = line.match(subtitlePattern);
+      if (!currentTitle || !match) {
+        throw new Error("lsdvd returned malformed DVD subtitle metadata");
+      }
+      currentTitle.subtitles.push({
+        id: parseStreamId(match[4]),
+        languageCode: boundedStreamText(match[1], "subtitle language code"),
+        language: boundedStreamText(match[2], "subtitle language"),
+        content: boundedStreamText(match[3], "subtitle content"),
+      });
+      if (currentTitle.subtitles.length > MAX_DVD_SUBTITLES_PER_TITLE) {
+        throw new Error("lsdvd returned too many DVD subtitles");
+      }
+    }
   }
   if (titles.length === 0) {
     throw new Error("lsdvd returned no reviewable DVD titles");
@@ -216,18 +375,86 @@ function parseDvdScan(output: string): ScannedDvd {
   if (new Set(titles.map((title) => title.number)).size !== titles.length) {
     throw new Error("lsdvd returned duplicate DVD title numbers");
   }
-  const identity = {
-    discKind: "dvd",
-    volumeLabel: volumeLabel ?? "",
-    titles,
-  };
+  for (const title of titles) {
+    if (
+      title.audioStreams.length !== title.expectedAudioStreams ||
+      title.subtitles.length !== title.expectedSubtitles
+    ) {
+      throw new Error("lsdvd returned incomplete DVD stream metadata");
+    }
+  }
   return {
-    fingerprint: `sha256:${createHash("sha256")
-      .update(JSON.stringify(identity))
-      .digest("hex")}`,
     ...(volumeLabel ? { volumeLabel } : {}),
-    scanData: { schemaVersion: 1, titles },
+    titles: titles.map(
+      ({ expectedAudioStreams: _audio, expectedSubtitles: _subtitles, ...title }) =>
+        title,
+    ),
   };
+}
+
+async function readDvdContentId(
+  devicePath: string,
+  signal: AbortSignal,
+  runner: CommandRunner,
+  binaryRunner: BinaryCommandRunner,
+): Promise<string> {
+  const sizeResult = await runner.run(
+    "blockdev",
+    ["--getsize64", devicePath],
+    { maxBufferBytes: 128, signal, timeoutMs: COMMAND_TIMEOUT_MS },
+  );
+  if (sizeResult.exitCode !== 0) {
+    throw commandFailure("blockdev", sizeResult);
+  }
+  const sizeBytes = Number(sizeResult.stdout.trim());
+  const sectorCount = Math.floor(sizeBytes / DVD_SECTOR_BYTES);
+  if (
+    !Number.isSafeInteger(sizeBytes) ||
+    sizeBytes <= 0 ||
+    sectorCount < DVD_CONTENT_SAMPLE_SECTORS
+  ) {
+    throw new Error("blockdev returned an invalid DVD size");
+  }
+  const offsets = [
+    0,
+    Math.floor((sectorCount - DVD_CONTENT_SAMPLE_SECTORS) / 2),
+    sectorCount - DVD_CONTENT_SAMPLE_SECTORS,
+  ].filter((offset, index, values) => values.indexOf(offset) === index);
+  const hash = createHash("sha256");
+  hash.update("rip-dvd-content-v1\0");
+  hash.update(String(sizeBytes));
+  for (const offset of offsets) {
+    signal.throwIfAborted();
+    const sample = await binaryRunner.run(
+      "dd",
+      [
+        `if=${devicePath}`,
+        `bs=${DVD_SECTOR_BYTES}`,
+        `skip=${offset}`,
+        `count=${DVD_CONTENT_SAMPLE_SECTORS}`,
+        "status=none",
+      ],
+      {
+        maxBufferBytes: DVD_CONTENT_SAMPLE_BYTES,
+        signal,
+        timeoutMs: COMMAND_TIMEOUT_MS,
+      },
+    );
+    if (sample.exitCode !== 0) {
+      const result: CommandResult = {
+        exitCode: sample.exitCode,
+        stdout: sample.stdout.toString("utf8"),
+        stderr: sample.stderr.toString("utf8"),
+      };
+      throw commandFailure("dd", result);
+    }
+    if (sample.stdout.length !== DVD_CONTENT_SAMPLE_BYTES) {
+      throw new Error("dd returned an incomplete DVD content sample");
+    }
+    hash.update(`\0${offset}\0`);
+    hash.update(sample.stdout);
+  }
+  return `sha256:${hash.digest("hex")}`;
 }
 
 function commandFailure(tool: string, result: CommandResult): Error {
@@ -243,6 +470,7 @@ function commandFailure(tool: string, result: CommandResult): Error {
 export function createLinuxOpticalDriveHardware({
   platform = operatingSystem(),
   runner = nodeCommandRunner,
+  binaryRunner = nodeBinaryCommandRunner,
 }: LinuxOpticalDriveHardwareOptions = {}): OpticalDriveHardware {
   return {
     async discover(signal) {
@@ -268,7 +496,7 @@ export function createLinuxOpticalDriveHardware({
       const safeDevicePath = requireSafeDevicePath(devicePath);
       const result = await runner.run(
         "lsdvd",
-        ["-a", "-c", "-s", safeDevicePath],
+        ["-Oh", "-a", "-c", "-s", safeDevicePath],
         {
           maxBufferBytes: MAX_COMMAND_OUTPUT_BYTES,
           signal,
@@ -282,7 +510,26 @@ export function createLinuxOpticalDriveHardware({
         }
         throw commandFailure("lsdvd", result);
       }
-      return parseDvdScan(`${result.stdout}\n${result.stderr}`);
+      const metadata = parseDvdMetadata(`${result.stdout}\n${result.stderr}`);
+      const contentId = await readDvdContentId(
+        safeDevicePath,
+        signal,
+        runner,
+        binaryRunner,
+      );
+      const scanData = decodeDvdTitleMap({
+        schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+        contentId,
+        titles: metadata.titles,
+      });
+      if (scanData === null) {
+        throw new Error("lsdvd returned an invalid DVD title map");
+      }
+      return {
+        fingerprint: contentId,
+        ...(metadata.volumeLabel ? { volumeLabel: metadata.volumeLabel } : {}),
+        scanData,
+      };
     },
   };
 }

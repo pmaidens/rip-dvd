@@ -465,6 +465,17 @@ h3 {
   line-height: 1.4;
 }
 
+.dvd-stream-list {
+  display: grid;
+  gap: 0.2rem;
+  margin: 0.45rem 0 0;
+  padding: 0;
+  color: #9fb0ab;
+  font-size: 0.68rem;
+  line-height: 1.4;
+  list-style: none;
+}
+
 .status,
 .attention-mark {
   flex: 0 0 auto;

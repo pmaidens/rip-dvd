@@ -1,5 +1,10 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+import {
+  pollArchiveWorker,
+  type OpticalDriveHardware,
+} from "../../archive-worker/src/archive-worker.js";
 
 import type { DashboardSnapshot } from "../lib/dashboard";
 import {
@@ -14,37 +19,63 @@ const dataAccessFixture = useDataAccessFixture();
 describe("database-backed dashboard over HTTP", () => {
   it("renders persisted discovery and scan results including an already archived match", async () => {
     const access = dataAccessFixture.create();
-    const [drive] = access.catalog.reconcileOpticalDrives([
-      {
-        devicePath: "/dev/sr0",
-        displayName: "Mocked Optical Drive",
-        vendor: "Pioneer",
-        product: "DVD-RW",
-        isEnabledWhenNew: true,
-      },
-    ]);
-    const disc = access.catalog.registerDetectedDisc({
-      opticalDriveId: drive.id,
-      discKind: "dvd",
-      fingerprint: "sha256:mocked-dashboard-disc",
-      volumeLabel: "MOCKED_DISC",
-      scanData: {
-        schemaVersion: 1,
-        titles: [
-          {
-            number: 7,
-            durationSeconds: 3_723,
-            chapters: 9,
-            audioStreams: 2,
-            subtitles: 3,
-          },
-        ],
-      },
+    const hardware: OpticalDriveHardware = {
+      discover: vi.fn().mockResolvedValue([
+        {
+          devicePath: "/dev/sr0",
+          displayName: "Mocked Optical Drive",
+          vendor: "Pioneer",
+          product: "DVD-RW",
+          serialNumber: "MOCK-001",
+        },
+      ]),
+      scanDvd: vi.fn().mockResolvedValue({
+        fingerprint:
+          "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        volumeLabel: "MOCKED_DISC",
+        scanData: {
+          schemaVersion: 2,
+          contentId:
+            "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+          titles: [
+            {
+              number: 7,
+              durationSeconds: 3_723,
+              chapters: 9,
+              audioStreams: [
+                {
+                  id: 128,
+                  languageCode: "en",
+                  language: "English",
+                  format: "ac3",
+                  channels: 6,
+                },
+              ],
+              subtitles: [
+                {
+                  id: 32,
+                  languageCode: "fr",
+                  language: "Francais",
+                  content: "Normal",
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    };
+    await pollArchiveWorker({
+      access,
+      configuredDevicePath: "/dev/sr0",
+      hardware,
+      log: vi.fn(),
+      signal: new AbortController().signal,
     });
-    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
-    expect(access.catalog.listDetectedDiscs()[0]).toMatchObject({
+    const disc = access.catalog.listDetectedDiscs()[0];
+    expect(disc).toMatchObject({
       status: "scanned",
-      fingerprint: "sha256:mocked-dashboard-disc",
+      fingerprint:
+        "sha256:2222222222222222222222222222222222222222222222222222222222222222",
     });
     access.catalog.updateDetectedDiscStatus(disc.id, "approved");
     access.catalog.createOriginalDiscArchive({
@@ -52,7 +83,7 @@ describe("database-backed dashboard over HTTP", () => {
       discKind: "dvd",
       archiveFormat: "iso",
       archivePath: "/media/originals/Mocked Disc.iso",
-      fingerprint: disc.fingerprint,
+      fingerprint: disc!.fingerprint,
     });
 
     const response = createDashboardResponse(access);
@@ -65,8 +96,14 @@ describe("database-backed dashboard over HTTP", () => {
     expect(html).toContain("Already archived");
     expect(html).toContain("Title 7");
     expect(html).toContain("1h 2m 3s");
-    expect(html).toContain("9 chapters · 2 audio · 3 subtitles");
-    expect(html).toContain("sha256:mocked-dashboard-disc");
+    expect(html).toContain("9 chapters · 1 audio · 1 subtitle");
+    expect(html).toContain("English · ac3 · 6 channels · 0x80");
+    expect(html).toContain("Francais · Normal · 0x20");
+    expect(html).toContain(
+      "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    );
+    expect(hardware.discover).toHaveBeenCalledOnce();
+    expect(hardware.scanDvd).toHaveBeenCalledOnce();
   });
 
   it("renders mixed populated and empty sections from the serialized response", async () => {

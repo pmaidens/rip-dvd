@@ -421,6 +421,41 @@ describe("data-access facade", () => {
     access.close();
   });
 
+  it("defaults replacement hardware at an enabled device path to disabled", () => {
+    const access = openTestDatabase();
+    const original = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      displayName: "Original drive",
+      vendor: "Pioneer",
+      product: "DVD-RW",
+      serialNumber: "ORIGINAL-001",
+      isEnabled: true,
+      isPresent: true,
+    });
+
+    expect(
+      access.catalog.reconcileOpticalDrives([
+        {
+          devicePath: "/dev/sr0",
+          displayName: "Replacement drive",
+          vendor: "Pioneer",
+          product: "DVD-RW",
+          serialNumber: "REPLACEMENT-002",
+          isEnabledWhenNew: true,
+        },
+      ]),
+    ).toEqual([
+      expect.objectContaining({
+        id: original.id,
+        serialNumber: "REPLACEMENT-002",
+        isEnabled: false,
+        isPresent: true,
+      }),
+    ]);
+
+    access.close();
+  });
+
   it("requires positive safe integer Encoding Profile versions", () => {
     const databasePath = createTestDatabasePath();
     const access = openTestDatabase(databasePath);
