@@ -2,6 +2,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 
+import { displayTerm } from "../lib/display-term";
 import type { EncodingProfileDto } from "../lib/encoding-profiles";
 
 export type EncodingProfilesLoadState =
@@ -26,10 +27,6 @@ interface EncodingProfilesViewProps {
   onCancelVersion(): void;
   onRetry(): void;
   onSetActive(id: string, isActive: boolean): void;
-}
-
-function displayMediaDomain(value: string): string {
-  return value === "dvd_video" ? "DVD video" : value;
 }
 
 export function EncodingProfilesView({
@@ -168,7 +165,7 @@ export function EncodingProfilesView({
                   <div>
                     <h3>{profile.displayName}</h3>
                     <p>
-                      {displayMediaDomain(profile.mediaDomain)} · Version{" "}
+                      {displayTerm(profile.mediaDomain)} · Version{" "}
                       {profile.version}
                     </p>
                   </div>

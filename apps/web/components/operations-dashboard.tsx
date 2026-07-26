@@ -15,6 +15,7 @@ import {
   watchDashboardActivity,
   type DashboardStreamStatus,
 } from "../lib/dashboard-activity";
+import { displayTerm } from "../lib/display-term";
 import { EncodingProfilesManager } from "./encoding-profiles";
 
 export type DashboardSectionLoadState<T> =
@@ -49,24 +50,6 @@ interface SectionProps<T> {
   emptyMessage: string;
   renderItem: (item: T) => React.ReactNode;
   className?: string;
-}
-
-function displayTerm(value: string): string {
-  const domainTerms: Record<string, string> = {
-    audio_cd: "Audio CD",
-    blu_ray: "Blu-ray",
-    dvd: "DVD",
-    dvd_video: "DVD video",
-  };
-
-  if (domainTerms[value]) {
-    return domainTerms[value];
-  }
-
-  return value
-    .split("_")
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(" ");
 }
 
 function formatTimestamp(value: string): string {
