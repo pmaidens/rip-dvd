@@ -6,7 +6,7 @@
     "build": "next build",
     "dev": "next dev",
     "start": "next start",
-    "test": "vitest run",
+    "test": "tsc -p ../../packages/config/tsconfig.build.json && tsc -p ../../packages/data-access/tsconfig.build.json && vitest run",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
