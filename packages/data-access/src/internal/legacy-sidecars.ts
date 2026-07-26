@@ -83,36 +83,49 @@ function profileKey(preset: string): string {
 }
 
 function derivedFingerprint(data: Record<string, unknown>): string | null {
-  const discTitle = nonEmptyString(data.disc_title);
-  if (!discTitle || !Array.isArray(data.titles) || data.titles.length === 0) {
+  if (
+    !("disc_title" in data) ||
+    !Array.isArray(data.titles) ||
+    data.titles.length === 0
+  ) {
     return null;
   }
+  const discTitle = String(data.disc_title ?? "").trim();
+  const legacyInteger = (value: unknown, defaultValue?: number) => {
+    if (value === undefined && defaultValue !== undefined) {
+      return defaultValue;
+    }
+    if (typeof value === "string" && /^-?\d+$/.test(value.trim())) {
+      value = Number(value);
+    }
+    return Number.isSafeInteger(value) ? Number(value) : null;
+  };
   const titles = data.titles.map((value) => {
     const title = objectValue(value);
-    const number = positiveInteger(title?.number);
+    const number = legacyInteger(title?.number);
     if (!title || number === null) {
       return null;
     }
     const integer = (field: string) => {
-      const value = title[field];
-      return Number.isSafeInteger(value) && Number(value) >= 0
-        ? Number(value)
-        : 0;
+      return legacyInteger(title[field], 0);
     };
-    return {
+    const identity = {
       audio_streams: integer("audio_streams"),
       chapters: integer("chapters"),
       number,
       seconds: integer("seconds"),
       subtitles: integer("subtitles"),
     };
+    return Object.values(identity).some((item) => item === null)
+      ? null
+      : identity;
   });
   if (titles.some((title) => title === null)) {
     return null;
   }
   titles.sort((left, right) => (left?.number ?? 0) - (right?.number ?? 0));
   return createHash("sha256")
-    .update(JSON.stringify({ disc_title: discTitle.trim(), titles }))
+    .update(JSON.stringify({ disc_title: discTitle, titles }))
     .digest("hex");
 }
 
@@ -132,6 +145,11 @@ function parseJob(
   });
   if (!job) {
     return invalid("Encode job must be an object");
+  }
+  for (const field of ["source", "selection", "label", "preset"] as const) {
+    if (field in job && typeof job[field] !== "string") {
+      return invalid(`Encode job ${field} must be a string when provided`);
+    }
   }
   const output = nonEmptyString(job.output);
   if (!output) {
@@ -160,7 +178,8 @@ function parseJob(
   ) {
     return invalid("Encode job selection does not match title_number");
   }
-  const label = nonEmptyString(job.label) ?? outputPath.split("/").at(-1) ?? outputPath;
+  const label =
+    nonEmptyString(job.label) ?? outputPath.split("/").at(-1) ?? outputPath;
   const isMovie = titleNumber === null || /^movie\s*:/i.test(label);
   const mediaTitle = isMovie
     ? movieTitle
@@ -241,7 +260,9 @@ function parseSidecar(sidecarPath: string): LegacySidecarDiscovery {
   const fingerprint =
     nonEmptyString(data.disc_fingerprint) ?? derivedFingerprint(data);
   if (!fingerprint) {
-    return invalid("Sidecar has neither a fingerprint nor a valid DVD title map");
+    return invalid(
+      "Sidecar has neither a fingerprint nor a valid DVD title map",
+    );
   }
   if (!Array.isArray(data.jobs)) {
     return invalid("Sidecar jobs must be an array");
@@ -269,7 +290,8 @@ function parseSidecar(sidecarPath: string): LegacySidecarDiscovery {
       issues.push({
         code: "duplicate_record",
         jobIndex: job.jobIndex,
-        message: "Encode job duplicates an earlier output or selection/profile mapping",
+        message:
+          "Encode job duplicates an earlier output or selection/profile mapping",
         sidecarPath,
       });
       continue;

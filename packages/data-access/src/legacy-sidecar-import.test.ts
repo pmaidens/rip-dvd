@@ -193,10 +193,10 @@ describe("legacy sidecar import", () => {
       titles: [
         {
           number: 1,
-          seconds: 5_400,
-          chapters: 10,
-          audio_streams: 2,
-          subtitles: 1,
+          seconds: "5400",
+          chapters: "10",
+          audio_streams: "2",
+          subtitles: "1",
         },
       ],
       jobs: [
@@ -319,6 +319,12 @@ describe("legacy sidecar import", () => {
           },
           { label: "Broken job", title_number: 0 },
           {
+            label: "Malformed preset",
+            output: join(root, "movies", "Malformed.mkv"),
+            preset: 480,
+            title_number: 3,
+          },
+          {
             label: "Duplicate movie",
             source: archivePath,
             output: movieOutputPath,
@@ -354,12 +360,78 @@ describe("legacy sidecar import", () => {
         expect.objectContaining({ code: "invalid_sidecar" }),
         expect.objectContaining({ code: "missing_archive" }),
         expect.objectContaining({ code: "invalid_job", jobIndex: 1 }),
-        expect.objectContaining({ code: "duplicate_record", jobIndex: 2 }),
+        expect.objectContaining({ code: "invalid_job", jobIndex: 2 }),
+        expect.objectContaining({ code: "duplicate_record", jobIndex: 3 }),
       ]),
     );
     expect(access.catalog.listOriginalDiscArchives()).toHaveLength(1);
     expect(access.encodeJobs.list()).toHaveLength(2);
 
     access.close();
+  });
+
+  it("reports an output owned by another job and imports later jobs", () => {
+    const fixture = createFixture();
+    fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+    const secondArchivePath = join(
+      fixture.originalsLibraryPath,
+      "Second Movie.iso",
+    );
+    const uniqueOutputPath = join(
+      fixture.originalsLibraryPath,
+      "Second Featurette.mkv",
+    );
+    writeFileSync(secondArchivePath, "second archive");
+    writeFileSync(
+      join(fixture.originalsLibraryPath, "Second Movie.rip-dvd.json"),
+      JSON.stringify({
+        schema_version: 2,
+        source: secondArchivePath,
+        title: "Second Movie",
+        disc_fingerprint: "second-movie-fingerprint",
+        jobs: [
+          {
+            label: "Movie: Second Movie",
+            source: secondArchivePath,
+            output: fixture.movieOutputPath,
+            preset: "Fast 480p30",
+            selection: "main_feature",
+            title_number: null,
+          },
+          {
+            label: "Extra 1: Second Featurette",
+            source: secondArchivePath,
+            output: uniqueOutputPath,
+            preset: "Fast 480p30",
+            selection: "title",
+            title_number: 2,
+          },
+        ],
+      }),
+    );
+
+    const report = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+
+    expect(report).toMatchObject({
+      sidecarsFound: 2,
+      sidecarsImported: 2,
+      sidecarsSkipped: 0,
+    });
+    expect(report.issues).toEqual([
+      expect.objectContaining({ code: "duplicate_record", jobIndex: 0 }),
+    ]);
+    expect(fixture.access.catalog.listOriginalDiscArchives()).toHaveLength(2);
+    expect(fixture.access.encodeJobs.list()).toHaveLength(3);
+    expect(fixture.access.encodeJobs.list()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ outputPath: uniqueOutputPath }),
+      ]),
+    );
+
+    fixture.access.close();
   });
 });
