@@ -58,8 +58,12 @@ export function createDashboardEventResponse(
         cleanup();
         controller.close();
       };
-      const sendSnapshot = (prefix = "") => {
-        if (closed) {
+      const sendSnapshot = (prefix = "", force = false) => {
+        if (
+          closed ||
+          (!force &&
+            (controller.desiredSize === null || controller.desiredSize <= 0))
+        ) {
           return;
         }
         const snapshot = readDashboardSnapshot(access);
@@ -68,7 +72,7 @@ export function createDashboardEventResponse(
         );
       };
 
-      sendSnapshot(`retry: ${RECONNECT_DELAY_MS}\n`);
+      sendSnapshot(`retry: ${RECONNECT_DELAY_MS}\n`, true);
 
       if (signal.aborted) {
         close();

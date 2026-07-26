@@ -45,12 +45,14 @@ recording the terminal status.
 
 ## Transaction boundary
 
-The facade deliberately has no `transaction(callback)` escape hatch. The few
-multi-statement catalog mutations use short internal transactions. Queue claims
-use one atomic `UPDATE ... RETURNING` statement and return only after that
-statement has committed. Workers must start external programs only after
-`claimNext()` returns; process execution never belongs in a database
-transaction.
+The facade deliberately has no general mutation `transaction(callback)` escape
+hatch. The `readConsistentSnapshot()` boundary supplies only synchronous read
+operations and keeps composed cross-table reads on one short SQLite snapshot;
+it rejects asynchronous callbacks. The few multi-statement catalog mutations
+use short internal transactions. Queue claims use one atomic
+`UPDATE ... RETURNING` statement and return only after that statement has
+committed. Workers must start external programs only after `claimNext()`
+returns; process execution never belongs in a database transaction.
 
 Generate and review schema changes with:
 

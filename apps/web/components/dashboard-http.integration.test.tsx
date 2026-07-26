@@ -2,7 +2,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import type { DashboardSnapshot } from "../lib/dashboard";
-import { useDataAccessFixture } from "../test/data-access-fixture";
+import {
+  useDataAccessFixture,
+  withSnapshotOverrides,
+} from "../test/data-access-fixture";
 import { createDashboardResponse } from "../app/api/dashboard/route";
 import { DashboardView } from "./operations-dashboard";
 
@@ -42,15 +45,13 @@ describe("database-backed dashboard over HTTP", () => {
       isPresent: true,
     });
 
-    const response = createDashboardResponse({
-      ...access,
+    const response = createDashboardResponse(withSnapshotOverrides(access, {
       catalog: {
-        ...access.catalog,
         listEncodingProfiles() {
           throw new Error("profile catalog unavailable");
         },
       },
-    });
+    }));
     const dashboard = (await response.json()) as DashboardSnapshot;
     const html = renderToStaticMarkup(<DashboardView state={dashboard} />);
 

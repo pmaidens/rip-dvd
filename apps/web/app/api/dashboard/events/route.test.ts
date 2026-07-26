@@ -130,6 +130,40 @@ describe("GET /api/dashboard/events", () => {
     expect(event).not.toContain("/media/");
   });
 
+  it("coalesces updates while a slow client has not consumed its queued event", async () => {
+    vi.useFakeTimers();
+    const access = dataAccessFixture.create();
+    access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      displayName: "Initial drive name",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const abortController = new AbortController();
+    const response = createDashboardEventResponse(access, {
+      signal: abortController.signal,
+      pollIntervalMs: 1,
+    });
+    const reader = response.body!.getReader();
+
+    await vi.advanceTimersByTimeAsync(20);
+    access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      displayName: "Latest drive name",
+      isEnabled: true,
+      isPresent: true,
+    });
+
+    const firstEvent = new TextDecoder().decode((await reader.read()).value);
+    const nextEventPromise = reader.read();
+    await vi.advanceTimersByTimeAsync(1);
+    const nextEvent = new TextDecoder().decode((await nextEventPromise).value);
+    abortController.abort();
+
+    expect(firstEvent).toContain('"displayName":"Initial drive name"');
+    expect(nextEvent).toContain('"displayName":"Latest drive name"');
+  });
+
   it("returns a safe service-unavailable response when data access cannot open", () => {
     const response = createDashboardEventRoute(
       new Request("http://localhost/api/dashboard/events"),

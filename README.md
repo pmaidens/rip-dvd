@@ -270,15 +270,16 @@ Archive Jobs, Encode Jobs, and Original Disc Archives needing catalog review.
 It reads the shared SQLite source of truth through the data-access facade and
 the non-cacheable `/api/dashboard` HTTP route. After that normal HTTP load, the
 browser connects to `/api/dashboard/events` for Server-Sent Events. The Next.js
-route periodically reads a fresh dashboard snapshot from SQLite, so Archive Job
-and Encode Job progress updates reach the existing drive, disc, queue, and
-catalog-review sections without workers owning browser connections. EventSource
-reconnects automatically after interruptions and each new connection starts
-with the current database state. If SSE is unavailable, the HTTP-loaded
-dashboard and manual Refresh control continue to work. A fresh database
-intentionally shows an empty state in each section until workers or another
-facade caller record operations; the web app does not infer catalog state from
-library files or process streams.
+route periodically reads one coherent dashboard snapshot from SQLite, so
+Archive Job and Encode Job progress updates reach the existing drive, disc,
+queue, and catalog-review sections without workers owning browser connections.
+Slow clients retain at most one queued event and receive the latest state after
+catching up. EventSource reconnects automatically after interruptions and each
+new connection starts with the current database state. If SSE is unavailable,
+the HTTP-loaded dashboard and manual Refresh control continue to work. A fresh
+database intentionally shows an empty state in each section until workers or
+another facade caller record operations; the web app does not infer catalog
+state from library files or process streams.
 
 To use host libraries instead, set `RIP_DVD_MEDIA_LIBRARY_HOST_PATH` and
 `RIP_DVD_ORIGINALS_LIBRARY_HOST_PATH`. On native Linux, create new bind-source

@@ -281,6 +281,39 @@ export function DashboardView({ state }: { state: DashboardLoadState }) {
   );
 }
 
+type DashboardConnection = "loading" | "error" | "loaded";
+
+export function DashboardConnectionStatus({
+  connectionStatus,
+  streamStatus,
+}: {
+  connectionStatus: DashboardConnection;
+  streamStatus: DashboardStreamStatus;
+}) {
+  const label =
+    connectionStatus === "loading"
+      ? "Refreshing state"
+      : connectionStatus === "error"
+        ? "Some data unavailable"
+        : streamStatus === "live"
+          ? "Live updates connected"
+          : streamStatus === "reconnecting"
+            ? "Live updates reconnecting"
+            : "Database connected";
+
+  return (
+    <span
+      className={`connection-state connection-${connectionStatus}`}
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+    >
+      <span aria-hidden="true" />
+      {label}
+    </span>
+  );
+}
+
 export function OperationsDashboard() {
   const [state, setState] = useState<DashboardLoadState>(
     () => dashboardState("loading"),
@@ -311,16 +344,6 @@ export function OperationsDashboard() {
     : sectionStates.includes("error")
       ? "error"
       : "loaded";
-  const connectionLabel =
-    connectionStatus === "loading"
-      ? "Refreshing state"
-      : connectionStatus === "error"
-        ? "Some data unavailable"
-        : streamStatus === "live"
-          ? "Live updates connected"
-          : streamStatus === "reconnecting"
-            ? "Live updates reconnecting"
-            : "Database connected";
 
   return (
     <main className="dashboard-shell">
@@ -335,10 +358,10 @@ export function OperationsDashboard() {
           </p>
         </div>
         <div className="dashboard-controls">
-          <span className={`connection-state connection-${connectionStatus}`}>
-            <span aria-hidden="true" />
-            {connectionLabel}
-          </span>
+          <DashboardConnectionStatus
+            connectionStatus={connectionStatus}
+            streamStatus={streamStatus}
+          />
           <button
             type="button"
             onClick={() => setRequestNumber((value) => value + 1)}
