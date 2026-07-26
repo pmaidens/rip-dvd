@@ -72,6 +72,7 @@ import type {
 } from "./types.js";
 
 export type * from "./types.js";
+export * from "./dvd-scan.js";
 export * from "./errors.js";
 
 const BUSY_TIMEOUT_MS = 5_000;
@@ -597,8 +598,8 @@ export function createDataAccess({
       const snapshotAccess: ConsistentReadAccess = {
         catalog: {
           listOpticalDrives: () => access.catalog.listOpticalDrives(),
-          listDetectedDiscs: (statuses) =>
-            access.catalog.listDetectedDiscs(statuses),
+          listDetectedDiscs: (statuses, options) =>
+            access.catalog.listDetectedDiscs(statuses, options),
           listOriginalDiscArchives: () =>
             access.catalog.listOriginalDiscArchives(),
           listMediaItems: () => access.catalog.listMediaItems(),
@@ -671,6 +672,31 @@ export function createDataAccess({
             .run();
 
           for (const drive of normalized) {
+            const existing = transaction
+              .select({
+                serialNumber: opticalDrives.serialNumber,
+                vendor: opticalDrives.vendor,
+                product: opticalDrives.product,
+              })
+              .from(opticalDrives)
+              .where(eq(opticalDrives.devicePath, drive.devicePath))
+              .get();
+            const serialChanged =
+              existing?.serialNumber !== null &&
+              existing?.serialNumber !== undefined &&
+              drive.serialNumber !== undefined &&
+              existing.serialNumber !== drive.serialNumber;
+            const existingModel = [existing?.vendor, existing?.product]
+              .filter(Boolean)
+              .join("\u0000");
+            const discoveredModel = [drive.vendor, drive.product]
+              .filter(Boolean)
+              .join("\u0000");
+            const modelChanged =
+              existingModel.length > 0 &&
+              discoveredModel.length > 0 &&
+              existingModel !== discoveredModel;
+            const isReplacement = serialChanged || modelChanged;
             transaction
               .insert(opticalDrives)
               .values({
@@ -693,6 +719,7 @@ export function createDataAccess({
                   vendor: drive.vendor,
                   product: drive.product,
                   serialNumber: drive.serialNumber,
+                  ...(isReplacement ? { isEnabled: false } : {}),
                   isPresent: true,
                   lastSeenAt: timestamp,
                   updatedAt: timestamp,
@@ -880,7 +907,22 @@ export function createDataAccess({
         }, { behavior: "immediate" });
       },
 
-      listDetectedDiscs(statuses) {
+      listDetectedDiscs(statuses, options) {
+        if (options?.limit !== undefined) {
+          const limit = requirePositiveSafeInteger(options.limit, "limit");
+          return database
+            .select()
+            .from(detectedDiscs)
+            .where(
+              statuses?.length
+                ? inArray(detectedDiscs.status, statuses)
+                : undefined,
+            )
+            .orderBy(desc(detectedDiscs.detectedAt), desc(detectedDiscs.id))
+            .limit(limit)
+            .all()
+            .reverse();
+        }
         return database
           .select()
           .from(detectedDiscs)

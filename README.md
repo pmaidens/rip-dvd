@@ -322,7 +322,9 @@ reported as optical drives, records attached/missing and last-seen state in
 SQLite, and scans DVDs only in enabled drives. The configured
 `RIP_DVD_ARCHIVE_DEVICE_PATH` is enabled when it is first discovered. Other new
 drives are recorded disabled so attaching temporary hardware does not silently
-change scanning behavior.
+change scanning behavior. If a stable serial or model identity changes at an
+existing device path, the replacement is reset to disabled rather than
+inheriting the previous drive's authorization.
 
 Docker cannot see host optical devices unless they are passed through. Add only
 the devices the archive worker should inspect in a local Compose override, for
@@ -344,12 +346,20 @@ discovery and scanning; this worker does not eject media.
 The worker runs discovery on each configured poll interval. An empty drive is a
 normal state. Scanner failures are logged per drive without hiding other drives,
 and a failed discovery does not mark every known drive missing. Successful DVD
-scans store title numbers, durations, chapter counts, audio-stream counts,
-subtitle counts, and a deterministic SHA-256 fingerprint. Repeated polls update
-the same Detected Disc. A fingerprint already present in Original Disc Archives
-is shown as **Already archived**, and any obsolete queued Archive Job for that
-fingerprint is removed by the data-access facade. Discovery never approves or
-queues new archive work; those actions remain explicit later workflows.
+scans store title numbers, durations, chapter counts, bounded per-stream
+language/format/channel/source-ID metadata, and a deterministic SHA-256 content
+identity. The identity hashes three bounded raw-disc samples (start, middle,
+and end) so structurally similar DVDs are not globally deduplicated by title
+summaries alone. Reads are shell-free, limited, timed out, and
+cancellation-aware. Repeated polls update the same Detected Disc. A fingerprint
+already present in Original Disc Archives is shown as **Already archived**, and
+any obsolete queued Archive Job for that fingerprint is removed by the
+data-access facade. Discovery never approves or queues new archive work; those
+actions remain explicit later workflows.
+
+The dashboard's one-time HTTP snapshot carries review details. One-second SSE
+activity events carry at most the 20 most recent Detected Disc summaries and no
+title maps; the browser merges those summaries into its cached detailed state.
 
 ## SQLite Catalog and Queues
 

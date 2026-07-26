@@ -24,6 +24,39 @@ export type DashboardStreamStatus =
   | "reconnecting"
   | "unavailable";
 
+function mergeActivitySnapshot(
+  detailed: DashboardSnapshot,
+  activity: DashboardSnapshot,
+): DashboardSnapshot {
+  if (
+    detailed.detectedDiscs.status !== "loaded" ||
+    activity.detectedDiscs.status !== "loaded"
+  ) {
+    return activity;
+  }
+  const detailedById = new Map(
+    detailed.detectedDiscs.items.map((disc) => [disc.id, disc]),
+  );
+  const activityIds = new Set(
+    activity.detectedDiscs.items.map((disc) => disc.id),
+  );
+  return {
+    ...activity,
+    detectedDiscs: {
+      status: "loaded",
+      items: [
+        ...detailed.detectedDiscs.items.filter(
+          (disc) => !activityIds.has(disc.id),
+        ),
+        ...activity.detectedDiscs.items.map((disc) => ({
+          ...disc,
+          titles: detailedById.get(disc.id)?.titles ?? disc.titles,
+        })),
+      ],
+    },
+  };
+}
+
 async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
   const response = await fetch("/api/dashboard", {
     cache: "no-store",
@@ -61,12 +94,14 @@ export function watchDashboardActivity({
 }: WatchDashboardActivityOptions): () => void {
   let active = true;
   let eventSource: DashboardEventSource | undefined;
+  let latestSnapshot: DashboardSnapshot | undefined;
 
   void loadSnapshot()
     .then((snapshot) => {
       if (!active) {
         return;
       }
+      latestSnapshot = snapshot;
       onSnapshot(snapshot);
       try {
         onStreamStatus("connecting");
@@ -86,7 +121,11 @@ export function watchDashboardActivity({
             return;
           }
           try {
-            onSnapshot(JSON.parse(event.data) as DashboardSnapshot);
+            const activity = JSON.parse(event.data) as DashboardSnapshot;
+            latestSnapshot = latestSnapshot
+              ? mergeActivitySnapshot(latestSnapshot, activity)
+              : activity;
+            onSnapshot(latestSnapshot);
           } catch {
             // Ignore malformed events and retain the last database snapshot.
           }

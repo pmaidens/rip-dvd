@@ -11,6 +11,7 @@ export const runtime = "nodejs";
 
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
 const RECONNECT_DELAY_MS = 3_000;
+const ACTIVITY_DETECTED_DISC_LIMIT = 20;
 
 interface DashboardEventResponseOptions {
   signal: AbortSignal;
@@ -74,7 +75,10 @@ export function createDashboardEventResponse(
         ) {
           return;
         }
-        const snapshot = readDashboardSnapshot(access);
+        const snapshot = readDashboardSnapshot(access, {
+          detectedDiscLimit: ACTIVITY_DETECTED_DISC_LIMIT,
+          includeDetectedDiscDetails: false,
+        });
         controller.enqueue(
           encoder.encode(`${prefix}${formatDashboardEvent(snapshot)}`),
         );

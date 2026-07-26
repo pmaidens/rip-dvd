@@ -46,14 +46,23 @@ describe("archive worker polling", () => {
           "sha256:88f29ef28f93bb183060ae0fd252ad660ab4f00e68a44ecb4006f20d223c5470",
         volumeLabel: "EXAMPLE_DISC",
         scanData: {
-          schemaVersion: 1,
+          schemaVersion: 2,
+          contentId:
+            "sha256:88f29ef28f93bb183060ae0fd252ad660ab4f00e68a44ecb4006f20d223c5470",
           titles: [
             {
               number: 1,
               durationSeconds: 5_711,
               chapters: 12,
-              audioStreams: 2,
-              subtitles: 1,
+              audioStreams: [
+                {
+                  id: 128,
+                  language: "English",
+                  format: "ac3",
+                  channels: 6,
+                },
+              ],
+              subtitles: [{ id: 32, language: "English", content: "Normal" }],
             },
           ],
         },
@@ -85,14 +94,23 @@ describe("archive worker polling", () => {
         volumeLabel: "EXAMPLE_DISC",
         status: "scanned",
         scanData: {
-          schemaVersion: 1,
+          schemaVersion: 2,
+          contentId:
+            "sha256:88f29ef28f93bb183060ae0fd252ad660ab4f00e68a44ecb4006f20d223c5470",
           titles: [
             {
               number: 1,
               durationSeconds: 5_711,
               chapters: 12,
-              audioStreams: 2,
-              subtitles: 1,
+              audioStreams: [
+                {
+                  id: 128,
+                  language: "English",
+                  format: "ac3",
+                  channels: 6,
+                },
+              ],
+              subtitles: [{ id: 32, language: "English", content: "Normal" }],
             },
           ],
         },
@@ -113,14 +131,16 @@ describe("archive worker polling", () => {
       fingerprint: "sha256:repeat-disc",
       volumeLabel: "REPEAT_DISC",
       scanData: {
-        schemaVersion: 1,
+        schemaVersion: 2,
+        contentId:
+          "sha256:3333333333333333333333333333333333333333333333333333333333333333",
         titles: [
           {
             number: 1,
             durationSeconds: 3_600,
             chapters: 10,
-            audioStreams: 1,
-            subtitles: 0,
+            audioStreams: [{ id: 128, format: "ac3", channels: 2 }],
+            subtitles: [],
           },
         ],
       },
@@ -231,7 +251,20 @@ describe("archive worker polling", () => {
       discKind: "dvd",
       fingerprint: "sha256:archived-disc",
       volumeLabel: "ARCHIVED_DISC",
-      scanData: { schemaVersion: 1, titles: [] },
+      scanData: {
+        schemaVersion: 2,
+        contentId:
+          "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+        titles: [
+          {
+            number: 1,
+            durationSeconds: 4_200,
+            chapters: 12,
+            audioStreams: [{ id: 128, format: "ac3", channels: 6 }],
+            subtitles: [],
+          },
+        ],
+      },
     });
     access.catalog.updateDetectedDiscStatus(sourceDisc.id, "scanned");
     access.catalog.updateDetectedDiscStatus(sourceDisc.id, "approved");
@@ -254,14 +287,16 @@ describe("archive worker polling", () => {
           fingerprint: "sha256:archived-disc",
           volumeLabel: "ARCHIVED_DISC",
           scanData: {
-            schemaVersion: 1,
+            schemaVersion: 2,
+            contentId:
+              "sha256:4444444444444444444444444444444444444444444444444444444444444444",
             titles: [
               {
                 number: 1,
                 durationSeconds: 4_200,
                 chapters: 12,
-                audioStreams: 2,
-                subtitles: 1,
+                audioStreams: [{ id: 128, format: "ac3", channels: 6 }],
+                subtitles: [{ id: 32, language: "English" }],
               },
             ],
           },
@@ -278,6 +313,71 @@ describe("archive worker polling", () => {
           .listOpticalDrives()
           .find((drive) => drive.devicePath === "/dev/sr1")?.id,
         fingerprint: "sha256:archived-disc",
+      }),
+    ]);
+    expect(access.archiveJobs.list()).toEqual([]);
+    access.close();
+  });
+
+  it("does not suppress a structurally identical disc with a different content identity", async () => {
+    const access = openTestDataAccess();
+    const sourceDrive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const sourceDisc = access.catalog.registerDetectedDisc({
+      opticalDriveId: sourceDrive.id,
+      discKind: "dvd",
+      fingerprint:
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      volumeLabel: "GENERIC_DISC",
+    });
+    access.catalog.updateDetectedDiscStatus(sourceDisc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(sourceDisc.id, "approved");
+    access.catalog.createOriginalDiscArchive({
+      detectedDiscId: sourceDisc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Generic Disc.iso",
+      fingerprint: sourceDisc.fingerprint,
+    });
+
+    await pollArchiveWorker({
+      access,
+      configuredDevicePath: "/dev/sr1",
+      hardware: {
+        discover: vi.fn().mockResolvedValue([{ devicePath: "/dev/sr1" }]),
+        scanDvd: vi.fn().mockResolvedValue({
+          fingerprint:
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          volumeLabel: "GENERIC_DISC",
+          scanData: {
+            schemaVersion: 2,
+            contentId:
+              "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            titles: [
+              {
+                number: 1,
+                durationSeconds: 4_200,
+                chapters: 12,
+                audioStreams: [{ id: 128, format: "ac3", channels: 6 }],
+                subtitles: [],
+              },
+            ],
+          },
+        }),
+      },
+      log: vi.fn(),
+      signal: new AbortController().signal,
+    });
+
+    expect(access.catalog.listDetectedDiscs()).toEqual([
+      expect.objectContaining({ id: sourceDisc.id, status: "archived" }),
+      expect.objectContaining({
+        fingerprint:
+          "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        status: "scanned",
       }),
     ]);
     expect(access.archiveJobs.list()).toEqual([]);

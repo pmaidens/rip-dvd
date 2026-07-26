@@ -14,6 +14,73 @@ afterEach(() => {
 });
 
 describe("GET /api/dashboard/events", () => {
+  it("bounds activity events to recent disc summaries without title maps", async () => {
+    vi.useFakeTimers();
+    const access = dataAccessFixture.create();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      displayName: "Archive drive",
+      isEnabled: true,
+      isPresent: true,
+    });
+    for (let index = 0; index < 25; index += 1) {
+      vi.setSystemTime(new Date(Date.UTC(2026, 6, 26, 18, 0, index)));
+      const contentId = `sha256:${index.toString(16).padStart(64, "0")}`;
+      access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint: contentId,
+        volumeLabel: `DISC_${index.toString().padStart(2, "0")}`,
+        scanData: {
+          schemaVersion: 2,
+          contentId,
+          titles: Array.from({ length: 64 }, (_, titleIndex) => ({
+            number: titleIndex + 1,
+            durationSeconds: 60,
+            chapters: 1,
+            audioStreams: [
+              {
+                id: 128,
+                language: "English",
+                format: "ac3",
+                channels: 6,
+              },
+            ],
+            subtitles: [{ id: 32, language: "English", content: "Normal" }],
+          })),
+        },
+      });
+    }
+    const abortController = new AbortController();
+    const response = createDashboardEventResponse(access, {
+      signal: abortController.signal,
+      pollIntervalMs: 60_000,
+    });
+
+    const event = new TextDecoder().decode(
+      (await response.body!.getReader().read()).value,
+    );
+    abortController.abort();
+    const dataLine = event
+      .split("\n")
+      .find((line) => line.startsWith("data: "))!;
+    const snapshot = JSON.parse(dataLine.slice("data: ".length)) as {
+      detectedDiscs: {
+        status: string;
+        items: { volumeLabel: string; titles: unknown[] }[];
+      };
+    };
+
+    expect(snapshot.detectedDiscs.status).toBe("loaded");
+    expect(snapshot.detectedDiscs.items).toHaveLength(20);
+    expect(snapshot.detectedDiscs.items[0]?.volumeLabel).toBe("DISC_05");
+    expect(snapshot.detectedDiscs.items.at(-1)?.volumeLabel).toBe("DISC_24");
+    expect(
+      snapshot.detectedDiscs.items.every((disc) => disc.titles.length === 0),
+    ).toBe(true);
+    expect(Buffer.byteLength(event)).toBeLessThan(20_000);
+  });
+
   it("frames the current database snapshot as a reconnectable dashboard event", async () => {
     const access = dataAccessFixture.create();
     access.catalog.upsertOpticalDrive({

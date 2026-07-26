@@ -6,6 +6,10 @@ import type {
   DiscKind,
   JobStatus,
 } from "@rip-dvd/data-access";
+import {
+  decodeDvdTitleMap,
+  type DvdTitle,
+} from "@rip-dvd/data-access/dvd-scan";
 
 export interface DashboardOpticalDrive {
   id: string;
@@ -22,16 +26,8 @@ export interface DashboardDetectedDisc {
   status: DetectedDiscStatus;
   opticalDriveName: string;
   fingerprint: string;
-  titles: DashboardDvdTitle[];
+  titles: readonly DvdTitle[];
   detectedAt: string;
-}
-
-export interface DashboardDvdTitle {
-  number: number;
-  durationSeconds: number;
-  chapters: number;
-  audioStreams: number;
-  subtitles: number;
 }
 
 export interface DashboardArchiveJob {
@@ -77,6 +73,11 @@ export interface DashboardSnapshot {
   catalogReview: DashboardSectionResult<DashboardCatalogReviewItem>;
 }
 
+export interface DashboardSnapshotOptions {
+  detectedDiscLimit?: number;
+  includeDetectedDiscDetails?: boolean;
+}
+
 type SourceResult<T> =
   | { status: "loaded"; value: T }
   | { status: "error" };
@@ -105,61 +106,21 @@ function driveDisplayName(drive: OpticalDriveRecord): string {
   return drive.displayName ?? "Unnamed Optical Drive";
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function readDvdTitles(scanData: unknown): DashboardDvdTitle[] {
-  if (
-    !isRecord(scanData) ||
-    scanData.schemaVersion !== 1 ||
-    !Array.isArray(scanData.titles) ||
-    scanData.titles.length > 512
-  ) {
-    return [];
-  }
-  const titles: DashboardDvdTitle[] = [];
-  for (const value of scanData.titles) {
-    if (!isRecord(value)) {
-      return [];
-    }
-    const fields = [
-      value.number,
-      value.durationSeconds,
-      value.chapters,
-      value.audioStreams,
-      value.subtitles,
-    ];
-    if (
-      fields.some(
-        (field) =>
-          typeof field !== "number" ||
-          !Number.isSafeInteger(field) ||
-          field < 0,
-      ) ||
-      value.number === 0
-    ) {
-      return [];
-    }
-    titles.push({
-      number: value.number as number,
-      durationSeconds: value.durationSeconds as number,
-      chapters: value.chapters as number,
-      audioStreams: value.audioStreams as number,
-      subtitles: value.subtitles as number,
-    });
-  }
-  return titles;
-}
-
 function readDashboardSnapshotRecords(
   access: ConsistentReadAccess,
+  {
+    detectedDiscLimit,
+    includeDetectedDiscDetails = true,
+  }: DashboardSnapshotOptions = {},
 ): DashboardSnapshot {
   const opticalDriveSource = readSource(() =>
     access.catalog.listOpticalDrives(),
   );
   const detectedDiscSource = readSource(() =>
-    access.catalog.listDetectedDiscs(),
+    access.catalog.listDetectedDiscs(
+      undefined,
+      detectedDiscLimit === undefined ? undefined : { limit: detectedDiscLimit },
+    ),
   );
   const archiveJobSource = readSource(() => access.archiveJobs.list());
   const encodeJobSource = readSource(() => access.encodeJobs.list());
@@ -214,7 +175,9 @@ function readDashboardSnapshotRecords(
                   ? driveDisplayName(drive)
                   : "Unknown Optical Drive",
                 fingerprint: disc.fingerprint,
-                titles: readDvdTitles(disc.scanData),
+                titles: includeDetectedDiscDetails
+                  ? (decodeDvdTitleMap(disc.scanData)?.titles ?? [])
+                  : [],
                 detectedAt: disc.detectedAt.toISOString(),
               };
             }),
@@ -321,8 +284,11 @@ function readDashboardSnapshotRecords(
   };
 }
 
-export function readDashboardSnapshot(access: DataAccess): DashboardSnapshot {
+export function readDashboardSnapshot(
+  access: DataAccess,
+  options: DashboardSnapshotOptions = {},
+): DashboardSnapshot {
   return access.readConsistentSnapshot((snapshotAccess) =>
-    readDashboardSnapshotRecords(snapshotAccess),
+    readDashboardSnapshotRecords(snapshotAccess, options),
   );
 }

@@ -71,14 +71,38 @@ describe("readDashboardSnapshot", () => {
       fingerprint: "waiting-disc",
       volumeLabel: "WAITING_DISC",
       scanData: {
-        schemaVersion: 1,
+        schemaVersion: 2,
+        contentId:
+          "sha256:1111111111111111111111111111111111111111111111111111111111111111",
         titles: [
           {
             number: 1,
             durationSeconds: 5_711,
             chapters: 12,
-            audioStreams: 2,
-            subtitles: 1,
+            audioStreams: [
+              {
+                id: 128,
+                languageCode: "en",
+                language: "English",
+                format: "ac3",
+                channels: 6,
+              },
+              {
+                id: 137,
+                languageCode: "fr",
+                language: "Francais",
+                format: "dts",
+                channels: 2,
+              },
+            ],
+            subtitles: [
+              {
+                id: 32,
+                languageCode: "en",
+                language: "English",
+                content: "Normal",
+              },
+            ],
           },
         ],
       },
@@ -174,8 +198,30 @@ describe("readDashboardSnapshot", () => {
               number: 1,
               durationSeconds: 5_711,
               chapters: 12,
-              audioStreams: 2,
-              subtitles: 1,
+              audioStreams: [
+                {
+                  id: 128,
+                  languageCode: "en",
+                  language: "English",
+                  format: "ac3",
+                  channels: 6,
+                },
+                {
+                  id: 137,
+                  languageCode: "fr",
+                  language: "Francais",
+                  format: "dts",
+                  channels: 2,
+                },
+              ],
+              subtitles: [
+                {
+                  id: 32,
+                  languageCode: "en",
+                  language: "English",
+                  content: "Normal",
+                },
+              ],
             },
           ],
         }),
