@@ -37,19 +37,19 @@ export function createDashboardEventResponse(
   const encoder = new TextEncoder();
   let interval: ReturnType<typeof setInterval> | undefined;
   let removeAbortListener: (() => void) | undefined;
+  const cleanup = () => {
+    if (interval !== undefined) {
+      clearInterval(interval);
+      interval = undefined;
+    }
+    removeAbortListener?.();
+    removeAbortListener = undefined;
+  };
 
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       let closed = false;
 
-      const cleanup = () => {
-        if (interval !== undefined) {
-          clearInterval(interval);
-          interval = undefined;
-        }
-        removeAbortListener?.();
-        removeAbortListener = undefined;
-      };
       const close = () => {
         if (closed) {
           return;
@@ -57,6 +57,14 @@ export function createDashboardEventResponse(
         closed = true;
         cleanup();
         controller.close();
+      };
+      const fail = (error: unknown) => {
+        if (closed) {
+          return;
+        }
+        closed = true;
+        cleanup();
+        controller.error(error);
       };
       const sendSnapshot = (prefix = "", force = false) => {
         if (
@@ -82,15 +90,16 @@ export function createDashboardEventResponse(
       const onAbort = () => close();
       signal.addEventListener("abort", onAbort, { once: true });
       removeAbortListener = () => signal.removeEventListener("abort", onAbort);
-      interval = setInterval(sendSnapshot, pollIntervalMs);
+      interval = setInterval(() => {
+        try {
+          sendSnapshot();
+        } catch (error) {
+          fail(error);
+        }
+      }, pollIntervalMs);
     },
     cancel() {
-      if (interval !== undefined) {
-        clearInterval(interval);
-        interval = undefined;
-      }
-      removeAbortListener?.();
-      removeAbortListener = undefined;
+      cleanup();
     },
   });
 

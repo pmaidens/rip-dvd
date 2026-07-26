@@ -1,3 +1,4 @@
+import type { DataAccess } from "@rip-dvd/data-access";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { useDataAccessFixture } from "../../../../test/data-access-fixture";
@@ -162,6 +163,64 @@ describe("GET /api/dashboard/events", () => {
 
     expect(firstEvent).toContain('"displayName":"Initial drive name"');
     expect(nextEvent).toContain('"displayName":"Latest drive name"');
+  });
+
+  it("errors and cleans up the stream when a later database snapshot fails", async () => {
+    vi.useFakeTimers();
+    const access = dataAccessFixture.create();
+    const failure = new Error("database unavailable");
+    let snapshotReads = 0;
+    const failingAccess: DataAccess = {
+      ...access,
+      readConsistentSnapshot(read) {
+        snapshotReads += 1;
+        if (snapshotReads === 2) {
+          throw failure;
+        }
+        return access.readConsistentSnapshot(read);
+      },
+    };
+    const abortController = new AbortController();
+    const response = createDashboardEventResponse(failingAccess, {
+      signal: abortController.signal,
+      pollIntervalMs: 1_000,
+    });
+    const reader = response.body!.getReader();
+    await reader.read();
+    const failedRead = reader.read().catch((error: unknown) => error);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(await failedRead).toBe(failure);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(snapshotReads).toBe(2);
+    expect(() => abortController.abort()).not.toThrow();
+  });
+
+  it("stops reading database snapshots after the browser cancels", async () => {
+    vi.useFakeTimers();
+    const access = dataAccessFixture.create();
+    let snapshotReads = 0;
+    const observedAccess: DataAccess = {
+      ...access,
+      readConsistentSnapshot(read) {
+        snapshotReads += 1;
+        return access.readConsistentSnapshot(read);
+      },
+    };
+    const abortController = new AbortController();
+    const response = createDashboardEventResponse(observedAccess, {
+      signal: abortController.signal,
+      pollIntervalMs: 1_000,
+    });
+    const reader = response.body!.getReader();
+    await reader.read();
+
+    await reader.cancel();
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(snapshotReads).toBe(1);
+    expect(() => abortController.abort()).not.toThrow();
   });
 
   it("returns a safe service-unavailable response when data access cannot open", () => {
