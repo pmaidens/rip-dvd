@@ -11,7 +11,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { createDataAccess } from "./index.js";
+import { createLegacySidecarDataAccess } from "./legacy-sidecars.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -94,7 +94,7 @@ function createFixture() {
     }),
   );
 
-  const access = createDataAccess({
+  const access = createLegacySidecarDataAccess({
     databasePath: join(root, "catalog.sqlite"),
   });
   return {
@@ -117,7 +117,7 @@ describe("legacy sidecar import", () => {
   it("rejects a nonexistent originals library", () => {
     const root = mkdtempSync(join(tmpdir(), "rip-dvd-missing-library-"));
     temporaryDirectories.push(root);
-    const access = createDataAccess({ databasePath: join(root, "catalog.sqlite") });
+    const access = createLegacySidecarDataAccess({ databasePath: join(root, "catalog.sqlite") });
 
     expect(() =>
       access.legacySidecars.importLibrary({
@@ -188,7 +188,7 @@ describe("legacy sidecar import", () => {
     fixture.access.close();
   });
 
-  it("imports schema-one title maps and derives their legacy fingerprint", () => {
+  it("coerces schema-one integer strings consistently while deriving identity", () => {
     const root = mkdtempSync(join(tmpdir(), "rip-dvd-schema-one-import-"));
     temporaryDirectories.push(root);
     const originalsLibraryPath = join(root, "originals");
@@ -206,15 +206,15 @@ describe("legacy sidecar import", () => {
       schema_version: 1,
       source: archivePath,
       title: "Schema One",
-      year: "1998",
+      year: " 1998 ",
       disc_title: "SCHEMA_ONE",
       titles: [
         {
-          number: 1,
-          seconds: "5400",
-          chapters: "10",
-          audio_streams: "2",
-          subtitles: "1",
+          number: " 1 ",
+          seconds: " 5400 ",
+          chapters: " 10 ",
+          audio_streams: " 2 ",
+          subtitles: " 1 ",
         },
       ],
       jobs: [
@@ -222,13 +222,13 @@ describe("legacy sidecar import", () => {
           label: "Movie: Schema One",
           source: archivePath,
           output: outputPath,
-          title_number: "1",
+          title_number: " 1 ",
         },
       ],
     };
     writeFileSync(sidecarPath, JSON.stringify(schemaOneSidecar));
     const beforeImport = readFileSync(sidecarPath, "utf8");
-    const access = createDataAccess({ databasePath: join(root, "catalog.sqlite") });
+    const access = createLegacySidecarDataAccess({ databasePath: join(root, "catalog.sqlite") });
 
     const report = access.legacySidecars.importLibrary({
       originalsLibraryPath,
@@ -287,7 +287,7 @@ describe("legacy sidecar import", () => {
         ],
       }),
     );
-    const access = createDataAccess({ databasePath: join(root, "catalog.sqlite") });
+    const access = createLegacySidecarDataAccess({ databasePath: join(root, "catalog.sqlite") });
     const previousWorkingDirectory = process.cwd();
 
     let report;
@@ -337,7 +337,7 @@ describe("legacy sidecar import", () => {
         jobs: [],
       }),
     );
-    const access = createDataAccess({ databasePath: join(root, "catalog.sqlite") });
+    const access = createLegacySidecarDataAccess({ databasePath: join(root, "catalog.sqlite") });
     const previousWorkingDirectory = process.cwd();
 
     let report;
@@ -366,7 +366,7 @@ describe("legacy sidecar import", () => {
     access.close();
   });
 
-  it("re-imports idempotently and updates the existing legacy job status", () => {
+  it("re-imports idempotently without replacing existing queue state", () => {
     const fixture = createFixture();
     const firstReport = fixture.access.legacySidecars.importLibrary({
       originalsLibraryPath: fixture.originalsLibraryPath,
@@ -389,7 +389,7 @@ describe("legacy sidecar import", () => {
         encodingProfiles: 0,
         encodeJobs: 0,
       },
-      recordsUpdated: 1,
+      recordsUpdated: 0,
       issues: [],
     });
     expect(fixture.access.encodeJobs.list()).toEqual(
@@ -398,7 +398,7 @@ describe("legacy sidecar import", () => {
           expect.objectContaining({
             id: job.id,
             outputPath: job.outputPath,
-            status: "completed",
+            status: job.status,
           }),
         ),
       ),
@@ -440,6 +440,55 @@ describe("legacy sidecar import", () => {
         errorMessage: "transcode failed",
       }),
     ]);
+
+    fixture.access.close();
+  });
+
+  it("preserves an authoritative Encode Job retry on re-import", () => {
+    const fixture = createFixture();
+    fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+    const completedJob = fixture.access.encodeJobs
+      .list(["completed"])
+      .find((job) => job.outputPath === fixture.movieOutputPath);
+    if (!completedJob) {
+      throw new Error("Expected the completed imported Encode Job");
+    }
+    const retryOutputPath = join(
+      fixture.originalsLibraryPath,
+      "retries",
+      "Example Movie retry.mkv",
+    );
+    const retry = fixture.access.encodeJobs.enqueue({
+      discSelectionId: completedJob.discSelectionId,
+      encodingProfileId: completedJob.encodingProfileId,
+      outputPath: retryOutputPath,
+      priority: 17,
+    });
+
+    const report = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+
+    expect(report).toMatchObject({
+      sidecarsImported: 1,
+      sidecarsSkipped: 0,
+      recordsUpdated: 0,
+      issues: [],
+    });
+    expect(fixture.access.encodeJobs.list()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: retry.id,
+          outputPath: retryOutputPath,
+          priority: 17,
+          status: "queued",
+          progressPercent: 0,
+          completedAt: null,
+        }),
+      ]),
+    );
 
     fixture.access.close();
   });
@@ -551,7 +600,7 @@ describe("legacy sidecar import", () => {
         ],
       }),
     );
-    const access = createDataAccess({ databasePath: join(root, "catalog.sqlite") });
+    const access = createLegacySidecarDataAccess({ databasePath: join(root, "catalog.sqlite") });
 
     const report = access.legacySidecars.importLibrary({
       originalsLibraryPath,

@@ -425,7 +425,10 @@ export interface DataAccess {
   readonly archiveJobs: ArchiveJobAccess;
   readonly encodeJobs: EncodeJobAccess;
   readConsistentSnapshot<T>(read: (access: ConsistentReadAccess) => T): T;
-  readonly legacySidecars: LegacySidecarAccess;
   checkHealth(): ServiceHealth;
   close(): void;
+}
+
+export interface LegacySidecarDataAccess extends DataAccess {
+  readonly legacySidecars: LegacySidecarAccess;
 }

@@ -13,6 +13,10 @@
     "./dvd-scan": {
       "types": "./src/dvd-scan.ts",
       "default": "./dist/dvd-scan.js"
+    },
+    "./legacy-sidecars": {
+      "types": "./src/legacy-sidecars.ts",
+      "default": "./dist/legacy-sidecars.js"
     }
   },
   "files": ["dist", "drizzle"],

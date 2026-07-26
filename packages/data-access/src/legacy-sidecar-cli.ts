@@ -1,4 +1,4 @@
-import { createDataAccess } from "./index.js";
+import { createLegacySidecarDataAccess } from "./legacy-sidecars.js";
 import { resolveLegacyOriginalsLibrary } from "./internal/legacy-sidecars.js";
 
 type Environment = Readonly<Record<string, string | undefined>>;
@@ -74,9 +74,9 @@ export function runLegacySidecarImportCli({
     return 2;
   }
 
-  let access: ReturnType<typeof createDataAccess> | undefined;
+  let access: ReturnType<typeof createLegacySidecarDataAccess> | undefined;
   try {
-    access = createDataAccess({ databasePath });
+    access = createLegacySidecarDataAccess({ databasePath });
     const report = access.legacySidecars.importLibrary({
       originalsLibraryPath,
     });
