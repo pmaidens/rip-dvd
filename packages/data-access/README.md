@@ -121,11 +121,16 @@ Before committing any imported records, the migration-only entrypoint
 atomically writes and synchronizes a `.rip-dvd-sqlite-catalog` marker at the
 originals-library root. A marker failure exposes no imported SQLite state; a
 restart after marker publication safely resumes the idempotent import with the
-legacy queue already inactive. It never writes the sidecars themselves. All
-legacy archive and queue commands refuse a marked library, making SQLite the
-enforceable catalog and queue authority. Recursive traversal and the cutover
-writer live behind the `@rip-dvd/data-access/legacy-sidecars` entrypoint and are
-excluded from the web runtime graph.
+legacy queue already inactive. The marker records the immutable logical-job
+configuration captured at cutover, allowing restart/retry to report later
+sidecar conflicts while preserving authoritative SQLite requeues. A shared
+library-scoped lease serializes discovery, marker publication, and import with
+in-flight legacy archive/encode batches. It never writes the sidecars
+themselves. All legacy archive and queue commands refuse a marked library,
+making SQLite the enforceable catalog and queue authority. Recursive traversal,
+the lease, and the cutover writer live behind the
+`@rip-dvd/data-access/legacy-sidecars` entrypoint and are excluded from the web
+runtime graph.
 
 The repository-level `pnpm import:legacy-sidecars -- ...` command invokes this
 facade operation for users and automation.

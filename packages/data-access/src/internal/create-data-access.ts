@@ -41,9 +41,14 @@ import {
   type JobQueueAdapter,
 } from "./job-queue.js";
 import type {
+  LegacyQueueCutover,
   LegacySidecarDiscovery,
   ParsedLegacyJob,
 } from "./legacy-sidecars.js";
+import {
+  legacyJobLogicalKey,
+  legacyJobSignature,
+} from "./legacy-sidecar-identity.js";
 import {
   requireNonEmpty,
   requirePositiveSafeInteger,
@@ -211,7 +216,10 @@ export interface CreateDataAccessOptions {
 export interface LegacySidecarMigrationAdapter {
   discover(originalsLibraryPath: string): LegacySidecarDiscovery[];
   resolveOriginalsLibrary(path: string): string;
-  retireQueue(originalsLibraryPath: string): void;
+  retireQueue(
+    originalsLibraryPath: string,
+    discoveries: readonly LegacySidecarDiscovery[],
+  ): LegacyQueueCutover;
 }
 
 function acquireMigrationLock(databasePath: string): () => void {
@@ -1404,11 +1412,17 @@ export function createDataAccessInternal(
           );
         const discoveries =
           legacySidecarMigration.discover(originalsLibraryPath);
-        if (
-          discoveries.some((discovery) => discovery.outcome === "parsed")
-        ) {
-          legacySidecarMigration.retireQueue(originalsLibraryPath);
-        }
+        const cutover = discoveries.some(
+          (discovery) => discovery.outcome === "parsed",
+        )
+          ? legacySidecarMigration.retireQueue(
+              originalsLibraryPath,
+              discoveries,
+            )
+          : {
+              jobSignatures: new Map<string, readonly string[]>(),
+              wasAlreadyPublished: false,
+            };
         const report: LegacySidecarImportReport = {
           originalsLibraryPath,
           sidecarsFound: discoveries.length,
@@ -1434,17 +1448,32 @@ export function createDataAccessInternal(
           const { sidecar } = discovery;
           report.issues.push(...sidecar.issues);
           const acceptedJobs = sidecar.jobs.filter((job) => {
-            const logicalKey = `${sidecar.fingerprint}\0${job.sourceKey}\0${job.profileKey}`;
+            const logicalKey = legacyJobLogicalKey(
+              sidecar.fingerprint,
+              job,
+            );
+            const signature = legacyJobSignature(job);
             const persisted = persistedLegacyJobs.get(logicalKey);
             if (!persisted) {
+              const publishedSignatures =
+                cutover.jobSignatures.get(logicalKey);
+              if (
+                cutover.wasAlreadyPublished &&
+                publishedSignatures !== undefined &&
+                !publishedSignatures.includes(signature)
+              ) {
+                report.issues.push({
+                  code: "duplicate_record",
+                  jobIndex: job.jobIndex,
+                  message:
+                    "Logical Encode Job conflicts with the record captured at SQLite cutover",
+                  sidecarPath: sidecar.sidecarPath,
+                });
+                return false;
+              }
               return true;
             }
-            if (
-              isDeepStrictEqual(
-                { ...persisted.job, jobIndex: 0 },
-                { ...job, jobIndex: 0 },
-              )
-            ) {
+            if (legacyJobSignature(persisted.job) === signature) {
               return true;
             }
             report.issues.push({
@@ -1715,6 +1744,39 @@ export function createDataAccessInternal(
                   .from(encodeJobs)
                   .where(eq(encodeJobs.outputPath, job.outputPath))
                   .get();
+                const logicalJob =
+                  selection && profile
+                    ? transaction
+                        .select()
+                        .from(encodeJobs)
+                        .where(
+                          and(
+                            eq(encodeJobs.discSelectionId, selection.id),
+                            eq(encodeJobs.encodingProfileId, profile.id),
+                          ),
+                        )
+                        .get()
+                    : undefined;
+                if (
+                  logicalJob &&
+                  logicalJob.outputPath !== job.outputPath &&
+                  !(
+                    cutover.wasAlreadyPublished &&
+                    cutover.jobSignatures
+                      .get(
+                        legacyJobLogicalKey(sidecar.fingerprint, job),
+                      )
+                      ?.includes(legacyJobSignature(job))
+                  )
+                ) {
+                  persistenceIssues.push({
+                    code: "duplicate_record",
+                    jobIndex: job.jobIndex,
+                    message: `Logical Encode Job conflicts with the imported output: ${logicalJob.outputPath}`,
+                    sidecarPath: sidecar.sidecarPath,
+                  });
+                  continue;
+                }
                 if (
                   outputJob &&
                   (!selection ||
@@ -1876,16 +1938,6 @@ export function createDataAccessInternal(
                   unchanged += 1;
                 }
 
-                const logicalJob = transaction
-                  .select()
-                  .from(encodeJobs)
-                  .where(
-                    and(
-                      eq(encodeJobs.discSelectionId, selection.id),
-                      eq(encodeJobs.encodingProfileId, profile.id),
-                    ),
-                  )
-                  .get();
                 const existingJob = logicalJob ?? outputJob;
                 if (!existingJob) {
                   transaction
@@ -1923,7 +1975,10 @@ export function createDataAccessInternal(
           }
 
           for (const job of persistedJobs) {
-            const logicalKey = `${sidecar.fingerprint}\0${job.sourceKey}\0${job.profileKey}`;
+            const logicalKey = legacyJobLogicalKey(
+              sidecar.fingerprint,
+              job,
+            );
             if (!persistedLegacyJobs.has(logicalKey)) {
               persistedLegacyJobs.set(logicalKey, {
                 job,
@@ -1933,7 +1988,9 @@ export function createDataAccessInternal(
           }
 
           report.sidecarsImported += 1;
-          for (const key of Object.keys(created) as Array<keyof typeof created>) {
+          for (const key of Object.keys(created) as Array<
+            keyof typeof created
+          >) {
             report.recordsCreated[key] += created[key];
           }
           report.recordsUpdated += updated;

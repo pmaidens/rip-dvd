@@ -1,5 +1,6 @@
 import argparse
 from collections import deque
+from contextlib import contextmanager
 import datetime as dt
 import fcntl
 import hashlib
@@ -40,6 +41,9 @@ DEFAULT_DEVICE = "/dev/sr0"
 DEFAULT_LIBRARY = "/srv/media/Movies"
 DEFAULT_ORIGINALS_LIBRARY = "/srv/media/DVD Originals"
 LEGACY_QUEUE_CUTOVER_MARKER = ".rip-dvd-sqlite-catalog"
+LEGACY_QUEUE_LOCK_DIRECTORY = ".rip-dvd-legacy-queue.lock"
+LEGACY_QUEUE_LOCK_POLL_SECONDS = 0.01
+LEGACY_QUEUE_LOCK_TIMEOUT_SECONDS = 15
 LEGACY_QUEUE_COMMANDS = frozenset(
     {"interactive", "rip", "title", "extras", "queue", "encode"}
 )
@@ -457,6 +461,28 @@ def refuse_retired_legacy_queue(originals_library):
     return True
 
 
+@contextmanager
+def legacy_queue_command_lease(originals_library):
+    queue_root = Path(originals_library)
+    queue_root.mkdir(parents=True, exist_ok=True)
+    lock_path = queue_root / LEGACY_QUEUE_LOCK_DIRECTORY
+    deadline = time.monotonic() + LEGACY_QUEUE_LOCK_TIMEOUT_SECONDS
+    while True:
+        try:
+            lock_path.mkdir(mode=0o700)
+            break
+        except FileExistsError:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"Timed out waiting for the SQLite cutover lock: {lock_path}"
+                )
+            time.sleep(LEGACY_QUEUE_LOCK_POLL_SECONDS)
+    try:
+        yield not refuse_retired_legacy_queue(queue_root)
+    finally:
+        lock_path.rmdir()
+
+
 def discover_encode_jobs(originals_library):
     queue_root = Path(originals_library)
     if not queue_root.exists():
@@ -720,6 +746,48 @@ def archive_mode(
     if not Path(device).exists():
         log_error(f"DVD device not found: {device}")
         return 2
+    try:
+        with legacy_queue_command_lease(originals_library) as active:
+            if not active:
+                return 2
+            return _archive_mode_locked(
+                device,
+                library,
+                originals_library,
+                preset,
+                command=command,
+                selected_title_number=selected_title_number,
+                extra_title_numbers=extra_title_numbers,
+                name=name,
+                year=year,
+                dry_run=dry_run,
+                verbose=verbose,
+                scan=scan,
+                extra_names=extra_names,
+            )
+    except TimeoutError as exc:
+        log_error(str(exc))
+        return 2
+
+
+def _archive_mode_locked(
+    device,
+    library,
+    originals_library,
+    preset,
+    command="rip",
+    selected_title_number=None,
+    extra_title_numbers=None,
+    name=None,
+    year=None,
+    dry_run=False,
+    verbose=False,
+    scan=None,
+    extra_names=None,
+):
+    if not Path(device).exists():
+        log_error(f"DVD device not found: {device}")
+        return 2
 
     scan, code = scan_for_archive(device, scan=scan)
     if code != 0:
@@ -842,8 +910,35 @@ def archive_mode(
 
 
 def encode_mode(originals_library, dry_run=False, verbose=False, watch=False, interval=300, limit=None, idle=True):
-    if refuse_retired_legacy_queue(originals_library):
+    if not Path(originals_library).exists():
+        return _encode_mode_locked(
+            originals_library,
+            dry_run=dry_run,
+            verbose=verbose,
+            watch=watch,
+            interval=interval,
+            limit=limit,
+            idle=idle,
+        )
+    try:
+        with legacy_queue_command_lease(originals_library) as active:
+            if not active:
+                return 2
+            return _encode_mode_locked(
+                originals_library,
+                dry_run=dry_run,
+                verbose=verbose,
+                watch=watch,
+                interval=interval,
+                limit=limit,
+                idle=idle,
+            )
+    except TimeoutError as exc:
+        log_error(str(exc))
         return 2
+
+
+def _encode_mode_locked(originals_library, dry_run=False, verbose=False, watch=False, interval=300, limit=None, idle=True):
     if idle:
         try:
             os.nice(10)

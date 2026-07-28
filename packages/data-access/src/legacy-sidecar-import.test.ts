@@ -1,23 +1,20 @@
 import {
   mkdirSync,
-  mkdtempSync,
   readFileSync,
-  rmSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createLegacySidecarDataAccess } from "./legacy-sidecars.js";
+import { createTemporaryDirectoryFixture } from "./legacy-sidecar.test-support.js";
 
-const temporaryDirectories: string[] = [];
+const temporaryDirectories = createTemporaryDirectoryFixture();
 
 function createFixture() {
-  const root = mkdtempSync(join(tmpdir(), "rip-dvd-legacy-import-"));
-  temporaryDirectories.push(root);
+  const root = temporaryDirectories.create("rip-dvd-legacy-import-");
   const originalsLibraryPath = join(root, "originals");
   const archiveDirectory = join(originalsLibraryPath, "Example Movie (2001)");
   const archivePath = join(archiveDirectory, "Example Movie (2001).iso");
@@ -94,12 +91,12 @@ function createFixture() {
     }),
   );
 
-  const access = createLegacySidecarDataAccess({
-    databasePath: join(root, "catalog.sqlite"),
-  });
+  const databasePath = join(root, "catalog.sqlite");
+  const access = createLegacySidecarDataAccess({ databasePath });
   return {
     access,
     archivePath,
+    databasePath,
     movieOutputPath,
     originalsLibraryPath,
     sidecarPath,
@@ -108,15 +105,12 @@ function createFixture() {
 }
 
 afterEach(() => {
-  for (const directory of temporaryDirectories.splice(0)) {
-    rmSync(directory, { force: true, recursive: true });
-  }
+  temporaryDirectories.cleanup();
 });
 
 describe("legacy sidecar import", () => {
   it("rejects a nonexistent originals library", () => {
-    const root = mkdtempSync(join(tmpdir(), "rip-dvd-missing-library-"));
-    temporaryDirectories.push(root);
+    const root = temporaryDirectories.create("rip-dvd-missing-library-");
     const access = createLegacySidecarDataAccess({ databasePath: join(root, "catalog.sqlite") });
 
     expect(() =>
@@ -189,8 +183,7 @@ describe("legacy sidecar import", () => {
   });
 
   it("coerces schema-one integer strings consistently while deriving identity", () => {
-    const root = mkdtempSync(join(tmpdir(), "rip-dvd-schema-one-import-"));
-    temporaryDirectories.push(root);
+    const root = temporaryDirectories.create("rip-dvd-schema-one-import-");
     const originalsLibraryPath = join(root, "originals");
     const archivePath = join(originalsLibraryPath, "Schema One.iso");
     const sidecarPath = join(
@@ -254,8 +247,7 @@ describe("legacy sidecar import", () => {
   });
 
   it("resolves relative schema-one paths from the legacy invocation directory", () => {
-    const root = mkdtempSync(join(tmpdir(), "rip-dvd-relative-import-"));
-    temporaryDirectories.push(root);
+    const root = temporaryDirectories.create("rip-dvd-relative-import-");
     const archiveDirectory = join(root, "Originals", "Relative Movie");
     const archivePath = join(archiveDirectory, "Relative Movie.iso");
     const outputPath = join(root, "Movies", "Relative Movie.mkv");
@@ -312,8 +304,7 @@ describe("legacy sidecar import", () => {
   });
 
   it("reports ambiguous relative paths instead of guessing", () => {
-    const root = mkdtempSync(join(tmpdir(), "rip-dvd-ambiguous-import-"));
-    temporaryDirectories.push(root);
+    const root = temporaryDirectories.create("rip-dvd-ambiguous-import-");
     const sidecarDirectory = join(root, "Originals", "Ambiguous Movie");
     const invocationArchive = join(root, "Shared", "Ambiguous.iso");
     const sidecarRelativeArchive = join(
@@ -411,8 +402,7 @@ describe("legacy sidecar import", () => {
   });
 
   it("distinguishes identical and conflicting logical jobs across sidecars", () => {
-    const root = mkdtempSync(join(tmpdir(), "rip-dvd-cross-sidecar-job-"));
-    temporaryDirectories.push(root);
+    const root = temporaryDirectories.create("rip-dvd-cross-sidecar-job-");
     const originalsLibraryPath = join(root, "originals");
     const archivePath = join(originalsLibraryPath, "Shared Movie.iso");
     const firstOutputPath = join(root, "movies", "Shared Movie.mkv");
@@ -484,6 +474,79 @@ describe("legacy sidecar import", () => {
     }
 
     access.close();
+  });
+
+  it("reports a logical-job conflict after restart while importing other records", () => {
+    const fixture = createFixture();
+    fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+    const originalJobs = fixture.access.encodeJobs.list();
+    const originalMovieJob = originalJobs.find(
+      (job) => job.outputPath === fixture.movieOutputPath,
+    );
+    expect(originalMovieJob).toBeDefined();
+    fixture.access.close();
+
+    const conflictingOutputPath = join(
+      dirname(fixture.movieOutputPath),
+      "Example Movie alternate.mkv",
+    );
+    const additionalOutputPath = join(
+      dirname(fixture.trailerOutputPath),
+      "Interview.mkv",
+    );
+    const sidecar = JSON.parse(
+      readFileSync(fixture.sidecarPath, "utf8"),
+    ) as { jobs: Array<Record<string, unknown>> };
+    sidecar.jobs[0]!.output = conflictingOutputPath;
+    sidecar.jobs.push({
+      label: "Extra 2: Interview",
+      source: fixture.archivePath,
+      output: additionalOutputPath,
+      preset: "Fast 480p30",
+      selection: "title",
+      title_number: 3,
+    });
+    writeFileSync(fixture.sidecarPath, JSON.stringify(sidecar));
+    const changedSidecarBytes = readFileSync(fixture.sidecarPath);
+    const retry = createLegacySidecarDataAccess({
+      databasePath: fixture.databasePath,
+    });
+
+    const report = retry.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+
+    expect(report).toMatchObject({
+      sidecarsImported: 1,
+      sidecarsSkipped: 0,
+      recordsCreated: { encodeJobs: 1 },
+      issues: [
+        expect.objectContaining({
+          code: "duplicate_record",
+          jobIndex: 0,
+          sidecarPath: fixture.sidecarPath,
+          message: expect.stringMatching(/logical Encode Job conflicts/i),
+        }),
+      ],
+    });
+    expect(retry.encodeJobs.list()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: originalMovieJob!.id,
+          outputPath: fixture.movieOutputPath,
+        }),
+        expect.objectContaining({ outputPath: additionalOutputPath }),
+      ]),
+    );
+    expect(retry.encodeJobs.list()).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ outputPath: conflictingOutputPath }),
+      ]),
+    );
+    expect(readFileSync(fixture.sidecarPath)).toEqual(changedSidecarBytes);
+    retry.close();
   });
 
   it("preserves authoritative failed Encode Job state on re-import", () => {
@@ -607,8 +670,7 @@ describe("legacy sidecar import", () => {
   });
 
   it("reports bad sidecars and jobs without aborting the rest of the library", () => {
-    const root = mkdtempSync(join(tmpdir(), "rip-dvd-partial-import-"));
-    temporaryDirectories.push(root);
+    const root = temporaryDirectories.create("rip-dvd-partial-import-");
     const originalsLibraryPath = join(root, "originals");
     const archivePath = join(originalsLibraryPath, "Valid.iso");
     const movieOutputPath = join(root, "movies", "Valid.mkv");

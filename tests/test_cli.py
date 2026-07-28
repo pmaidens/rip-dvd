@@ -4,6 +4,8 @@ from pathlib import Path
 from io import StringIO
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -217,6 +219,149 @@ class EncodeQueueDiscoveryTests(unittest.TestCase):
             output.with_suffix(".mkv.failed").write_bytes(b"old failure")
 
             self.assertEqual(failed_output_path(output), output.with_suffix(".mkv.failed.1"))
+
+
+class LegacyQueueCutoverRaceTests(unittest.TestCase):
+    def start_cutover_contender(self, originals, command_started):
+        marker = originals / ".rip-dvd-sqlite-catalog"
+        lock = originals / ".rip-dvd-legacy-queue.lock"
+        attempted = threading.Event()
+
+        def publish_cutover():
+            command_started.wait()
+            attempted.set()
+            while True:
+                try:
+                    lock.mkdir()
+                    break
+                except FileExistsError:
+                    time.sleep(0.005)
+            marker.write_text("{}\n", encoding="utf-8")
+            lock.rmdir()
+
+        contender = threading.Thread(target=publish_cutover)
+        contender.start()
+        return contender, attempted, marker
+
+    def marker_appeared_before_release(self, marker, attempted):
+        self.assertTrue(attempted.wait(timeout=1))
+        deadline = time.monotonic() + 0.2
+        while time.monotonic() < deadline and not marker.exists():
+            time.sleep(0.005)
+        return marker.exists()
+
+    def test_in_flight_archive_finishes_before_cutover_is_published(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            device = root / "dvd-device"
+            originals = root / "Originals"
+            device.write_bytes(b"device")
+            originals.mkdir()
+            command_started = threading.Event()
+            allow_finish = threading.Event()
+            result = []
+            metadata = MovieMetadata(hint="Race", title="Race Movie", year="2001")
+
+            def fake_archive(plan, **kwargs):
+                command_started.set()
+                allow_finish.wait()
+                plan.output.parent.mkdir(parents=True, exist_ok=True)
+                plan.output.write_bytes(b"archive")
+                return 0
+
+            def run_archive():
+                result.append(
+                    archive_mode(
+                        device,
+                        root / "Movies",
+                        originals,
+                        "Fast 480p30",
+                        scan=sample_scan(),
+                    )
+                )
+
+            with patch("rip_dvd.cli.resolve_movie_metadata", return_value=metadata):
+                with patch("rip_dvd.cli.execute_archive_plan", side_effect=fake_archive):
+                    command = threading.Thread(target=run_archive)
+                    command.start()
+                    contender, attempted, marker = self.start_cutover_contender(
+                        originals, command_started
+                    )
+                    marker_during_archive = self.marker_appeared_before_release(
+                        marker, attempted
+                    )
+                    allow_finish.set()
+                    command.join(timeout=2)
+                    contender.join(timeout=2)
+
+            self.assertFalse(marker_during_archive)
+            self.assertEqual(result, [0])
+            self.assertTrue(marker.exists())
+            sidecar = (
+                originals
+                / "Race Movie (2001)"
+                / "Race Movie (2001).rip-dvd.json"
+            )
+            self.assertEqual(
+                json.loads(sidecar.read_text(encoding="utf-8"))["archive_status"],
+                "ready",
+            )
+
+    def test_in_flight_encode_finishes_before_cutover_is_published(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            originals = root / "Originals"
+            source = originals / "Race Movie.iso"
+            output = root / "Movies" / "Race Movie.mkv"
+            originals.mkdir()
+            source.write_bytes(b"archive")
+            (originals / "Race Movie.rip-dvd.json").write_text(
+                json.dumps(
+                    {
+                        "source": str(source),
+                        "jobs": [
+                            {
+                                "label": "Movie: Race Movie",
+                                "output": str(output),
+                                "selection": "main_feature",
+                                "title_number": None,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            command_started = threading.Event()
+            allow_finish = threading.Event()
+            result = []
+
+            def fake_encode(job, **kwargs):
+                command_started.set()
+                allow_finish.wait()
+                job.output.parent.mkdir(parents=True, exist_ok=True)
+                job.output.write_bytes(b"encode")
+                return 0
+
+            def run_encode():
+                result.append(encode_mode(originals, idle=False))
+
+            with patch("rip_dvd.cli.execute_encode_job", side_effect=fake_encode):
+                command = threading.Thread(target=run_encode)
+                command.start()
+                contender, attempted, marker = self.start_cutover_contender(
+                    originals, command_started
+                )
+                marker_during_encode = self.marker_appeared_before_release(
+                    marker, attempted
+                )
+                allow_finish.set()
+                command.join(timeout=2)
+                contender.join(timeout=2)
+
+            self.assertFalse(marker_during_encode)
+            self.assertEqual(result, [0])
+            self.assertEqual(output.read_bytes(), b"encode")
+            self.assertTrue(marker.exists())
 
 
 class ArchiveIdentityTests(unittest.TestCase):

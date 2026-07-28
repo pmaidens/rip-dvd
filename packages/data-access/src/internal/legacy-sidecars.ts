@@ -3,10 +3,12 @@ import {
   closeSync,
   existsSync,
   fsyncSync,
+  mkdirSync,
   openSync,
   readdirSync,
   readFileSync,
   renameSync,
+  rmdirSync,
   statSync,
   unlinkSync,
   writeFileSync,
@@ -17,9 +19,16 @@ import type {
   LegacySidecarImportIssue,
   MediaItemKind,
 } from "../types.js";
+import {
+  legacyJobLogicalKey,
+  legacyJobSignature,
+} from "./legacy-sidecar-identity.js";
 
 const DEFAULT_HANDBRAKE_PRESET = "Fast 480p30";
 const LEGACY_QUEUE_CUTOVER_MARKER = ".rip-dvd-sqlite-catalog";
+const LEGACY_QUEUE_LOCK_DIRECTORY = ".rip-dvd-legacy-queue.lock";
+const LEGACY_QUEUE_LOCK_POLL_MS = 10;
+const LEGACY_QUEUE_LOCK_TIMEOUT_MS = 15_000;
 
 export interface ParsedLegacyJob {
   completedAt: Date | null;
@@ -53,6 +62,11 @@ export interface ParsedLegacySidecar {
 export type LegacySidecarDiscovery =
   | { outcome: "parsed"; sidecar: ParsedLegacySidecar }
   | { outcome: "skipped"; issue: LegacySidecarImportIssue };
+
+export interface LegacyQueueCutover {
+  jobSignatures: ReadonlyMap<string, readonly string[]>;
+  wasAlreadyPublished: boolean;
+}
 
 export function resolveLegacyOriginalsLibrary(path: string): string {
   const resolvedPath = isAbsolute(path)
@@ -500,13 +514,102 @@ export function discoverLegacySidecars(
   return findSidecars(originalsLibraryPath).map(parseSidecar);
 }
 
-export function retireLegacySidecarQueue(originalsLibraryPath: string): void {
+export function acquireLegacyQueueCutoverLock(
+  originalsLibraryPath: string,
+): () => void {
+  const lockPath = join(
+    originalsLibraryPath,
+    LEGACY_QUEUE_LOCK_DIRECTORY,
+  );
+  const deadline = Date.now() + LEGACY_QUEUE_LOCK_TIMEOUT_MS;
+  const sleepState = new Int32Array(new SharedArrayBuffer(4));
+
+  while (true) {
+    try {
+      mkdirSync(lockPath, { mode: 0o700 });
+      let released = false;
+      return () => {
+        if (released) {
+          return;
+        }
+        released = true;
+        rmdirSync(lockPath);
+      };
+    } catch (error) {
+      const fileError = error as NodeJS.ErrnoException;
+      if (fileError.code !== "EEXIST") {
+        throw error;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `Timed out waiting for an active legacy queue command: ${lockPath}`,
+        );
+      }
+      Atomics.wait(sleepState, 0, 0, LEGACY_QUEUE_LOCK_POLL_MS);
+    }
+  }
+}
+
+function synchronizeDirectory(path: string): void {
+  const descriptor = openSync(path, "r");
+  try {
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+export function retireLegacySidecarQueue(
+  originalsLibraryPath: string,
+  discoveries: readonly LegacySidecarDiscovery[],
+): LegacyQueueCutover {
   const markerPath = join(
     originalsLibraryPath,
     LEGACY_QUEUE_CUTOVER_MARKER,
   );
   if (existsSync(markerPath)) {
-    return;
+    synchronizeDirectory(originalsLibraryPath);
+    const marker = JSON.parse(readFileSync(markerPath, "utf8")) as {
+      legacyJobs?: unknown;
+    };
+    const jobSignatures = new Map<string, string[]>();
+    if (Array.isArray(marker.legacyJobs)) {
+      for (const entry of marker.legacyJobs) {
+        if (
+          entry !== null &&
+          typeof entry === "object" &&
+          "logicalKey" in entry &&
+          typeof entry.logicalKey === "string" &&
+          "signature" in entry &&
+          typeof entry.signature === "string"
+        ) {
+          const signatures = jobSignatures.get(entry.logicalKey) ?? [];
+          if (!signatures.includes(entry.signature)) {
+            signatures.push(entry.signature);
+          }
+          jobSignatures.set(entry.logicalKey, signatures);
+        }
+      }
+    }
+    return { jobSignatures, wasAlreadyPublished: true };
+  }
+  const jobSignatures = new Map<string, string[]>();
+  for (const discovery of discoveries) {
+    if (discovery.outcome !== "parsed") {
+      continue;
+    }
+    for (const job of discovery.sidecar.jobs) {
+      const logicalKey = legacyJobLogicalKey(
+        discovery.sidecar.fingerprint,
+        job,
+      );
+      const signature = legacyJobSignature(job);
+      const signatures = jobSignatures.get(logicalKey) ?? [];
+      if (!signatures.includes(signature)) {
+        signatures.push(signature);
+      }
+      jobSignatures.set(logicalKey, signatures);
+    }
   }
   const temporaryMarkerPath = `${markerPath}.${process.pid}.${randomUUID()}.tmp`;
   let markerDescriptor: number | undefined;
@@ -515,9 +618,13 @@ export function retireLegacySidecarQueue(originalsLibraryPath: string): void {
     writeFileSync(
       markerDescriptor,
       `${JSON.stringify({
-        schemaVersion: 1,
+        schemaVersion: 2,
         legacyQueueStatus: "retired",
         authoritativeStore: "sqlite",
+        legacyJobs: [...jobSignatures].flatMap(
+          ([logicalKey, signatures]) =>
+            signatures.map((signature) => ({ logicalKey, signature })),
+        ),
       })}\n`,
       { encoding: "utf8" },
     );
@@ -525,13 +632,7 @@ export function retireLegacySidecarQueue(originalsLibraryPath: string): void {
     closeSync(markerDescriptor);
     markerDescriptor = undefined;
     renameSync(temporaryMarkerPath, markerPath);
-
-    const libraryDescriptor = openSync(originalsLibraryPath, "r");
-    try {
-      fsyncSync(libraryDescriptor);
-    } finally {
-      closeSync(libraryDescriptor);
-    }
+    synchronizeDirectory(originalsLibraryPath);
   } finally {
     if (markerDescriptor !== undefined) {
       closeSync(markerDescriptor);
@@ -542,4 +643,5 @@ export function retireLegacySidecarQueue(originalsLibraryPath: string): void {
       unlinkSync(temporaryMarkerPath);
     }
   }
+  return { jobSignatures, wasAlreadyPublished: false };
 }

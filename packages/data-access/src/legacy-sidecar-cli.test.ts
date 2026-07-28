@@ -1,31 +1,28 @@
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readFileSync,
-  rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createDataAccess } from "./index.js";
 import { runLegacySidecarImportCli } from "./legacy-sidecar-cli.js";
+import { createTemporaryDirectoryFixture } from "./legacy-sidecar.test-support.js";
 
-const temporaryDirectories: string[] = [];
+const temporaryDirectories = createTemporaryDirectoryFixture();
 
 afterEach(() => {
-  for (const directory of temporaryDirectories.splice(0)) {
-    rmSync(directory, { force: true, recursive: true });
-  }
+  temporaryDirectories.cleanup();
 });
 
 describe("legacy sidecar import command", () => {
   it("fails before creating a catalog for a nonexistent library", () => {
-    const root = mkdtempSync(join(tmpdir(), "rip-dvd-missing-cli-library-"));
-    temporaryDirectories.push(root);
+    const root = temporaryDirectories.create(
+      "rip-dvd-missing-cli-library-",
+    );
     const databasePath = join(root, "catalog.sqlite");
     const errors: string[] = [];
 
@@ -47,8 +44,7 @@ describe("legacy sidecar import command", () => {
   });
 
   it("imports an originals library into the requested SQLite catalog", () => {
-    const root = mkdtempSync(join(tmpdir(), "rip-dvd-legacy-cli-"));
-    temporaryDirectories.push(root);
+    const root = temporaryDirectories.create("rip-dvd-legacy-cli-");
     const originalsLibraryPath = join(root, "originals");
     const databasePath = join(root, "catalog.sqlite");
     const archivePath = join(originalsLibraryPath, "Command Movie.iso");
