@@ -62,7 +62,7 @@ time.sleep(60)
                 gate.close()
                 intent.close()
 
-    def test_kernel_lease_remains_live_despite_pid_collision_metadata(self):
+    def test_kernel_lease_ignores_cross_namespace_pid_collision_metadata(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             gate_path = root / QUEUE_GATE_LOCK
