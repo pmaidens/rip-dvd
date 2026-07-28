@@ -198,7 +198,7 @@ describe("legacy sidecar cutover", () => {
     retry.close();
   });
 
-  it("waits for an in-flight legacy mutation before publishing cutover", async () => {
+  it("waits past the former deadline for an in-flight legacy mutation", async () => {
     const root = temporaryDirectories.create("rip-dvd-cutover-race-");
     const originalsLibraryPath = join(root, "originals");
     const archivePath = join(originalsLibraryPath, "Race Movie.iso");
@@ -283,7 +283,17 @@ fcntl.flock(gate, fcntl.LOCK_UN)`,
     markerFault.failure = null;
     const access = createLegacySidecarDataAccess({ databasePath });
 
-    const report = access.legacySidecars.importLibrary({ originalsLibraryPath });
+    const dateNow = vi
+      .spyOn(Date, "now")
+      .mockReturnValueOnce(0)
+      .mockReturnValue(20_000);
+    const report = (() => {
+      try {
+        return access.legacySidecars.importLibrary({ originalsLibraryPath });
+      } finally {
+        dateNow.mockRestore();
+      }
+    })();
     expect(report).toMatchObject({
       sidecarsImported: 1,
       issues: [],
