@@ -92,7 +92,9 @@ RUN mkdir --parents packages/worker-runtime/node_modules/@rip-dvd \
 FROM worker-runtime-base AS archive-worker
 RUN apt-get update \
   && apt-get install --yes --no-install-recommends lsdvd util-linux \
-  && rm -rf /var/lib/apt/lists/*
+  && rm -rf /var/lib/apt/lists/* \
+  && lsblk --json --output PATH,TYPE,TRAN,VENDOR,MODEL,SERIAL >/dev/null \
+  && node -e "const { constants } = require('node:fs'); if (!Number.isInteger(constants.O_NONBLOCK)) process.exit(1)"
 RUN mkdir --parents /media/originals \
   && chown node:node /media/originals
 COPY --from=archive-worker-builder --chown=node:node /archive-worker ./apps/archive-worker

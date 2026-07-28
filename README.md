@@ -350,9 +350,13 @@ normal state. Scanner failures are logged per drive without hiding other drives,
 and a failed discovery does not mark every known drive missing. Successful DVD
 scans store title numbers, durations, chapter counts, bounded per-stream
 language/format/channel/source-ID metadata, and a deterministic SHA-256 content
-identity over every declared raw-disc byte. The worker verifies that the full
-identity is unchanged before and after its authoritative metadata read, so a
-tray change cannot bind one disc's title map to another disc's fingerprint.
+identity over every declared raw-disc byte. Before trusting a cached scan and
+again after a new scan, the worker opens the device read-only and nonblocking.
+That open actively asks Linux's optical driver to observe media events before
+the worker reads the resulting sysfs generation. A generation change fails the
+scan closed so one disc's title map cannot be bound to another disc's
+fingerprint. If active generation observation is unavailable, that drive's scan
+also fails closed and retries on a later poll.
 Reads are shell-free, size-capped, streaming, timed out, and cancellation-aware.
 Repeated polls update the same Detected Disc. A fingerprint
 already present in Original Disc Archives is shown as **Already archived**, and
@@ -361,8 +365,9 @@ data-access facade. Discovery never approves or queues new archive work; those
 actions remain explicit later workflows.
 
 The dashboard's HTTP snapshot carries review details. One-second SSE activity
-events carry at most 20 recent records per operations section and no title maps,
-while retaining the bounded relationship rows required for labels. The browser
+events retain up to 100 live Detected Discs and jobs ahead of 20 terminal-history
+records, include every attached Optical Drive plus at most 20 missing drives,
+and carry no title maps. Bounded relationship rows preserve labels. The browser
 merges unchanged summaries into its cache and reloads HTTP details when a disc
 is first observed or rescanned.
 

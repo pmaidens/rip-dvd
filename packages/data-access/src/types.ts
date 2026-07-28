@@ -215,10 +215,16 @@ export interface DiscoveredOpticalDrive {
   vendor?: string;
   product?: string;
   serialNumber?: string;
-  mediaGeneration?: string;
 }
 
 export interface JobListOptions {
+  limit?: number;
+  activeLimit?: number;
+  historyLimit?: number;
+}
+
+export interface DetectedDiscListOptions {
+  ids?: readonly DetectedDiscId[];
   limit?: number;
   activeLimit?: number;
   historyLimit?: number;
@@ -256,7 +262,7 @@ export interface CatalogAccess {
   }): DetectedDisc;
   listDetectedDiscs(
     statuses?: DetectedDiscStatus[],
-    options?: { ids?: readonly DetectedDiscId[]; limit?: number },
+    options?: DetectedDiscListOptions,
   ): DetectedDisc[];
   updateDetectedDiscStatus(
     id: DetectedDiscId,

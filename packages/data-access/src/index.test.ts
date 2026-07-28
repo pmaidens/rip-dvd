@@ -150,6 +150,107 @@ afterEach(() => {
 });
 
 describe("data-access facade", () => {
+  it("keeps every attached drive lane while bounding all missing-drive history", () => {
+    const access = openTestDatabase();
+    for (let index = 0; index < 32; index += 1) {
+      access.catalog.upsertOpticalDrive({
+        devicePath: `/dev/sr${index}`,
+        isEnabled: index % 2 === 0,
+        isPresent: true,
+      });
+    }
+    for (let index = 32; index < 92; index += 1) {
+      access.catalog.upsertOpticalDrive({
+        devicePath: `/dev/sr${index}`,
+        isEnabled: true,
+        isPresent: false,
+      });
+    }
+
+    const activity = access.catalog.listOpticalDrives({ historicalLimit: 20 });
+
+    expect(activity.filter((drive) => drive.isPresent)).toHaveLength(32);
+    expect(activity.filter((drive) => !drive.isPresent)).toHaveLength(20);
+    expect(activity).toHaveLength(52);
+    access.close();
+  });
+
+  it("keeps live Detected Disc review work ahead of bounded terminal history", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const reviewDisc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "older-live-review",
+      volumeLabel: "OLDER_LIVE_REVIEW",
+    });
+    access.catalog.updateDetectedDiscStatus(reviewDisc.id, "scanned");
+    for (let index = 0; index < 30; index += 1) {
+      const terminal = access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint: `terminal-${index}`,
+        volumeLabel: `TERMINAL_${index}`,
+      });
+      access.catalog.updateDetectedDiscStatus(terminal.id, "rejected");
+    }
+
+    const activity = access.catalog.listDetectedDiscs(undefined, {
+      activeLimit: 100,
+      historyLimit: 20,
+    });
+
+    expect(activity).toHaveLength(21);
+    expect(activity).toContainEqual(
+      expect.objectContaining({ id: reviewDisc.id, status: "scanned" }),
+    );
+    expect(activity.filter((disc) => disc.status === "rejected")).toHaveLength(
+      20,
+    );
+    access.close();
+  });
+
+  it("applies explicit independent bounds to live and terminal Detected Discs", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    for (let index = 0; index < 105; index += 1) {
+      access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint: `live-${index}`,
+      });
+    }
+    for (let index = 0; index < 30; index += 1) {
+      const terminal = access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint: `history-${index}`,
+      });
+      access.catalog.updateDetectedDiscStatus(terminal.id, "rejected");
+    }
+
+    const activity = access.catalog.listDetectedDiscs(undefined, {
+      activeLimit: 100,
+      historyLimit: 20,
+    });
+
+    expect(
+      activity.filter((disc) =>
+        ["detected", "scanned", "approved"].includes(disc.status),
+      ),
+    ).toHaveLength(100);
+    expect(
+      activity.filter((disc) => ["archived", "rejected"].includes(disc.status)),
+    ).toHaveLength(20);
+    access.close();
+  });
+
   it("migrates a persistent database and reports its SQLite configuration", () => {
     const databasePath = createTestDatabasePath();
     const access = openTestDatabase(databasePath);

@@ -887,10 +887,7 @@ export function createDataAccess({
             .where(
               and(
                 condition,
-                or(
-                  eq(opticalDrives.isPresent, true),
-                  eq(opticalDrives.isEnabled, true),
-                ),
+                eq(opticalDrives.isPresent, true),
               ),
             )
             .all();
@@ -901,7 +898,6 @@ export function createDataAccess({
               and(
                 condition,
                 eq(opticalDrives.isPresent, false),
-                eq(opticalDrives.isEnabled, false),
               ),
             )
             .orderBy(desc(opticalDrives.lastSeenAt), desc(opticalDrives.id))
@@ -1078,26 +1074,56 @@ export function createDataAccess({
         if (options?.ids !== undefined && options.ids.length === 0) {
           return [];
         }
-        const conditions = [
-          statuses?.length
-            ? inArray(detectedDiscs.status, statuses)
-            : undefined,
-          options?.ids
-            ? inArray(detectedDiscs.id, [...options.ids])
-            : undefined,
-        ].filter((condition) => condition !== undefined);
-        const condition =
-          conditions.length > 0 ? and(...conditions) : undefined;
-        if (options?.limit !== undefined) {
-          const limit = requirePositiveSafeInteger(options.limit, "limit");
-          return database
+        const idCondition = options?.ids
+          ? inArray(detectedDiscs.id, [...options.ids])
+          : undefined;
+        const conditionFor = (selectedStatuses?: DetectedDiscStatus[]) => {
+          const conditions = [
+            selectedStatuses?.length
+              ? inArray(detectedDiscs.status, selectedStatuses)
+              : undefined,
+            idCondition,
+          ].filter((condition) => condition !== undefined);
+          return conditions.length > 0 ? and(...conditions) : undefined;
+        };
+        const chronological = (rows: typeof detectedDiscs.$inferSelect[]) =>
+          rows.sort(
+            (left, right) =>
+              left.detectedAt.getTime() - right.detectedAt.getTime() ||
+              left.id.localeCompare(right.id),
+          );
+        const readNewest = (
+          selectedStatuses: DetectedDiscStatus[] | undefined,
+          limit: number,
+        ) =>
+          database
             .select()
             .from(detectedDiscs)
-            .where(condition)
+            .where(conditionFor(selectedStatuses))
             .orderBy(desc(detectedDiscs.detectedAt), desc(detectedDiscs.id))
             .limit(limit)
-            .all()
-            .reverse();
+            .all();
+        if (options?.activeLimit !== undefined && statuses === undefined) {
+          const active = readNewest(
+            ["detected", "scanned", "approved"],
+            requirePositiveSafeInteger(options.activeLimit, "activeLimit"),
+          );
+          const history =
+            options.historyLimit === undefined
+              ? []
+              : readNewest(
+                  ["archived", "rejected"],
+                  requirePositiveSafeInteger(
+                    options.historyLimit,
+                    "historyLimit",
+                  ),
+                );
+          return chronological([...active, ...history]);
+        }
+        const condition = conditionFor(statuses);
+        if (options?.limit !== undefined) {
+          const limit = requirePositiveSafeInteger(options.limit, "limit");
+          return chronological(readNewest(statuses, limit));
         }
         return database
           .select()
