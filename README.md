@@ -322,9 +322,11 @@ reported as optical drives, records attached/missing and last-seen state in
 SQLite, and scans DVDs only in enabled drives. The configured
 `RIP_DVD_ARCHIVE_DEVICE_PATH` is enabled when it is first discovered. Other new
 drives are recorded disabled so attaching temporary hardware does not silently
-change scanning behavior. If a stable serial or model identity changes at an
-existing device path, the replacement is reset to disabled rather than
-inheriting the previous drive's authorization.
+change scanning behavior. If stable hardware identity changes at an existing
+device path, the replacement is reset to disabled rather than inheriting the
+previous drive's authorization. A drive that disappears may keep authorization
+only when the same serial proves continuity when it returns; uncertain
+same-path hardware fails closed.
 
 Docker cannot see host optical devices unless they are passed through. Add only
 the devices the archive worker should inspect in a local Compose override, for
@@ -348,18 +350,21 @@ normal state. Scanner failures are logged per drive without hiding other drives,
 and a failed discovery does not mark every known drive missing. Successful DVD
 scans store title numbers, durations, chapter counts, bounded per-stream
 language/format/channel/source-ID metadata, and a deterministic SHA-256 content
-identity. The identity hashes three bounded raw-disc samples (start, middle,
-and end) so structurally similar DVDs are not globally deduplicated by title
-summaries alone. Reads are shell-free, limited, timed out, and
-cancellation-aware. Repeated polls update the same Detected Disc. A fingerprint
+identity over every declared raw-disc byte. The worker verifies that the full
+identity is unchanged before and after its authoritative metadata read, so a
+tray change cannot bind one disc's title map to another disc's fingerprint.
+Reads are shell-free, size-capped, streaming, timed out, and cancellation-aware.
+Repeated polls update the same Detected Disc. A fingerprint
 already present in Original Disc Archives is shown as **Already archived**, and
 any obsolete queued Archive Job for that fingerprint is removed by the
 data-access facade. Discovery never approves or queues new archive work; those
 actions remain explicit later workflows.
 
-The dashboard's one-time HTTP snapshot carries review details. One-second SSE
-activity events carry at most the 20 most recent Detected Disc summaries and no
-title maps; the browser merges those summaries into its cached detailed state.
+The dashboard's HTTP snapshot carries review details. One-second SSE activity
+events carry at most 20 recent records per operations section and no title maps,
+while retaining the bounded relationship rows required for labels. The browser
+merges unchanged summaries into its cache and reloads HTTP details when a disc
+is first observed or rescanned.
 
 ## SQLite Catalog and Queues
 

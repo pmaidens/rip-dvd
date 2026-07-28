@@ -57,6 +57,25 @@ function mergeActivitySnapshot(
   };
 }
 
+function needsDetailRefresh(
+  detailed: DashboardSnapshot,
+  activity: DashboardSnapshot,
+): boolean {
+  if (activity.detectedDiscs.status !== "loaded") {
+    return false;
+  }
+  if (detailed.detectedDiscs.status !== "loaded") {
+    return true;
+  }
+  const detailedById = new Map(
+    detailed.detectedDiscs.items.map((disc) => [disc.id, disc]),
+  );
+  return activity.detectedDiscs.items.some((disc) => {
+    const cached = detailedById.get(disc.id);
+    return cached === undefined || cached.detectedAt !== disc.detectedAt;
+  });
+}
+
 async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
   const response = await fetch("/api/dashboard", {
     cache: "no-store",
@@ -95,6 +114,7 @@ export function watchDashboardActivity({
   let active = true;
   let eventSource: DashboardEventSource | undefined;
   let latestSnapshot: DashboardSnapshot | undefined;
+  let detailRefresh: Promise<void> | undefined;
 
   void loadSnapshot()
     .then((snapshot) => {
@@ -122,10 +142,29 @@ export function watchDashboardActivity({
           }
           try {
             const activity = JSON.parse(event.data) as DashboardSnapshot;
+            const refreshRequired = latestSnapshot
+              ? needsDetailRefresh(latestSnapshot, activity)
+              : false;
             latestSnapshot = latestSnapshot
               ? mergeActivitySnapshot(latestSnapshot, activity)
               : activity;
             onSnapshot(latestSnapshot);
+            if (refreshRequired && detailRefresh === undefined) {
+              detailRefresh = loadSnapshot()
+                .then((snapshot) => {
+                  if (!active) {
+                    return;
+                  }
+                  latestSnapshot = snapshot;
+                  onSnapshot(snapshot);
+                })
+                .catch(() => {
+                  // Retain the last coherent snapshot and retry on later activity.
+                })
+                .finally(() => {
+                  detailRefresh = undefined;
+                });
+            }
           } catch {
             // Ignore malformed events and retain the last database snapshot.
           }

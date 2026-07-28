@@ -407,7 +407,7 @@ describe("data-access facade", () => {
       expect.objectContaining({
         id: internalDrive.id,
         displayName: "Internal drive rediscovered",
-        isEnabled: true,
+        isEnabled: false,
         isPresent: true,
         lastSeenAt: new Date("2026-07-26T18:10:00.000Z"),
       }),
@@ -449,6 +449,65 @@ describe("data-access facade", () => {
         id: original.id,
         serialNumber: "REPLACEMENT-002",
         isEnabled: false,
+        isPresent: true,
+      }),
+    ]);
+
+    access.close();
+  });
+
+  it("disables uncertain same-path hardware after a disappearance", () => {
+    const access = openTestDatabase();
+    const original = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      displayName: "Original drive",
+      vendor: "Pioneer",
+      product: "DVD-RW",
+      isEnabled: true,
+      isPresent: true,
+    });
+
+    access.catalog.reconcileOpticalDrives([]);
+    expect(
+      access.catalog.reconcileOpticalDrives([
+        {
+          devicePath: "/dev/sr0",
+          displayName: "Replacement drive",
+          vendor: "Pioneer",
+          product: "DVD-RW",
+          serialNumber: "NEW-SERIAL",
+        },
+      ]),
+    ).toEqual([
+      expect.objectContaining({
+        id: original.id,
+        isEnabled: false,
+        isPresent: true,
+        serialNumber: "NEW-SERIAL",
+      }),
+    ]);
+
+    access.close();
+  });
+
+  it("preserves authorization when a matching serial proves continuity", () => {
+    const access = openTestDatabase();
+    const original = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      serialNumber: "STABLE-SERIAL",
+      isEnabled: true,
+      isPresent: true,
+    });
+
+    access.catalog.reconcileOpticalDrives([]);
+    expect(
+      access.catalog.reconcileOpticalDrives([
+        { devicePath: "/dev/sr0", serialNumber: "STABLE-SERIAL" },
+      ]),
+    ).toEqual([
+      expect.objectContaining({
+        id: original.id,
+        isEnabled: true,
         isPresent: true,
       }),
     ]);

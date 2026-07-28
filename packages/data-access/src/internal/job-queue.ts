@@ -54,7 +54,7 @@ export interface JobQueueAdapter<
 > {
   readonly recordType: string;
   find(id: Id): Job | undefined;
-  list(statuses?: JobStatus[]): Job[];
+  list(statuses?: JobStatus[], options?: { limit?: number }): Job[];
   claim(workerId: string, token: Token, timestamp: Date): Running | undefined;
   updateAttempt(
     claim: Running,
@@ -78,7 +78,7 @@ export interface JobQueueController<
   RequeueOptions,
 > {
   claimNext(workerId: string): Running | null;
-  list(statuses?: JobStatus[]): Job[];
+  list(statuses?: JobStatus[], options?: { limit?: number }): Job[];
   updateProgress(claim: Running, progressPercent: number): Job;
   complete(claim: Running, completion: Completion): Job;
   fail(claim: Running, errorMessage: string): Job;
