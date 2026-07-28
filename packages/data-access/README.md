@@ -18,15 +18,21 @@ short transaction. Seen drives become present and advance `lastSeenAt`; drives
 absent from a successful snapshot become missing without changing their last
 seen time. Existing enabled/disabled choices are preserved, while a caller may
 choose the enabled default only for a newly discovered drive. A changed stable
-serial or model identity at the same device path is replacement hardware and is
-atomically reset to disabled. After a disappearance, authorization is preserved
-only when a matching serial proves physical-drive continuity; uncertain
-same-path hardware is disabled.
+serial, a loss or appearance of serial evidence, or a changed model identity at
+the same device path is replacement hardware and is atomically reset to
+disabled. After a disappearance, authorization is preserved only when a
+matching serial proves physical-drive continuity; uncertain same-path hardware
+is disabled.
 
 The package exports the versioned, bounded DVD title-map contract through
 `@rip-dvd/data-access/dvd-scan`. Hardware parsing, worker persistence, and web
 rendering share its schema-v2 decoder, stream limits, metadata types, and
 content-ID validation instead of maintaining separate scan shapes.
+
+Bounded dashboard reads keep current state ahead of history: every present or
+enabled Optical Drive is returned before the missing-drive history allowance,
+and the shared Archive/Encode Job list policy gives queued/running work its own
+explicit cap before adding recent terminal history.
 
 ## Queue attempts and progress
 

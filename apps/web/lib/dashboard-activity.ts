@@ -1,4 +1,7 @@
-import type { DashboardSnapshot } from "./dashboard";
+import type {
+  DashboardDetectedDiscDetails,
+  DashboardSnapshot,
+} from "./dashboard";
 
 export interface DashboardEventSource {
   onerror: (() => void) | null;
@@ -12,6 +15,11 @@ export interface DashboardEventSource {
 
 interface WatchDashboardActivityOptions {
   loadSnapshot?: () => Promise<DashboardSnapshot>;
+  loadDiscDetails?: (
+    id: string,
+    detectedAt: string,
+    signal: AbortSignal,
+  ) => Promise<DashboardDetectedDiscDetails>;
   openEventSource?: () => DashboardEventSource;
   onSnapshot(snapshot: DashboardSnapshot): void;
   onInitialLoadError(): void;
@@ -37,43 +45,39 @@ function mergeActivitySnapshot(
   const detailedById = new Map(
     detailed.detectedDiscs.items.map((disc) => [disc.id, disc]),
   );
-  const activityIds = new Set(
-    activity.detectedDiscs.items.map((disc) => disc.id),
-  );
   return {
     ...activity,
     detectedDiscs: {
       status: "loaded",
-      items: [
-        ...detailed.detectedDiscs.items.filter(
-          (disc) => !activityIds.has(disc.id),
-        ),
-        ...activity.detectedDiscs.items.map((disc) => ({
-          ...disc,
-          titles: detailedById.get(disc.id)?.titles ?? disc.titles,
-        })),
-      ],
+      items: activity.detectedDiscs.items.map((disc) => ({
+        ...disc,
+        titles:
+          detailedById.get(disc.id)?.detectedAt === disc.detectedAt
+            ? (detailedById.get(disc.id)?.titles ?? disc.titles)
+            : disc.titles,
+      })),
     },
   };
 }
 
-function needsDetailRefresh(
-  detailed: DashboardSnapshot,
-  activity: DashboardSnapshot,
-): boolean {
-  if (activity.detectedDiscs.status !== "loaded") {
-    return false;
+function mergeDiscDetails(
+  snapshot: DashboardSnapshot,
+  details: DashboardDetectedDiscDetails,
+): DashboardSnapshot {
+  if (snapshot.detectedDiscs.status !== "loaded") {
+    return snapshot;
   }
-  if (detailed.detectedDiscs.status !== "loaded") {
-    return true;
-  }
-  const detailedById = new Map(
-    detailed.detectedDiscs.items.map((disc) => [disc.id, disc]),
-  );
-  return activity.detectedDiscs.items.some((disc) => {
-    const cached = detailedById.get(disc.id);
-    return cached === undefined || cached.detectedAt !== disc.detectedAt;
-  });
+  return {
+    ...snapshot,
+    detectedDiscs: {
+      status: "loaded",
+      items: snapshot.detectedDiscs.items.map((disc) =>
+        disc.id === details.id && disc.detectedAt === details.detectedAt
+          ? { ...disc, titles: details.titles }
+          : disc,
+      ),
+    },
+  };
 }
 
 async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
@@ -85,6 +89,25 @@ async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
     throw new Error("Dashboard request failed");
   }
   return (await response.json()) as DashboardSnapshot;
+}
+
+async function loadDashboardDiscDetails(
+  id: string,
+  detectedAt: string,
+  signal: AbortSignal,
+): Promise<DashboardDetectedDiscDetails> {
+  const response = await fetch(
+    `/api/dashboard/discs/${encodeURIComponent(id)}?detectedAt=${encodeURIComponent(detectedAt)}`,
+    {
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+      signal,
+    },
+  );
+  if (!response.ok) {
+    throw new Error("Detected Disc detail request failed");
+  }
+  return (await response.json()) as DashboardDetectedDiscDetails;
 }
 
 function openDashboardEventSource(): DashboardEventSource {
@@ -106,6 +129,7 @@ function openDashboardEventSource(): DashboardEventSource {
 
 export function watchDashboardActivity({
   loadSnapshot = loadDashboardSnapshot,
+  loadDiscDetails = loadDashboardDiscDetails,
   openEventSource = openDashboardEventSource,
   onSnapshot,
   onInitialLoadError,
@@ -114,7 +138,70 @@ export function watchDashboardActivity({
   let active = true;
   let eventSource: DashboardEventSource | undefined;
   let latestSnapshot: DashboardSnapshot | undefined;
+  const detailAbortController = new AbortController();
+  const detailQueue: Array<{ id: string; detectedAt: string }> = [];
+  const attemptedDetailVersions = new Set<string>();
   let detailRefresh: Promise<void> | undefined;
+  const maximumQueuedDetails = 20;
+  const maximumRememberedVersions = 100;
+
+  const rememberAttempt = (key: string) => {
+    attemptedDetailVersions.delete(key);
+    attemptedDetailVersions.add(key);
+    while (attemptedDetailVersions.size > maximumRememberedVersions) {
+      const oldest = attemptedDetailVersions.values().next().value;
+      if (oldest === undefined) {
+        break;
+      }
+      attemptedDetailVersions.delete(oldest);
+    }
+  };
+
+  const startNextDetailRefresh = () => {
+    if (!active || detailRefresh !== undefined) {
+      return;
+    }
+    const next = detailQueue.shift();
+    if (!next) {
+      return;
+    }
+    detailRefresh = loadDiscDetails(
+      next.id,
+      next.detectedAt,
+      detailAbortController.signal,
+    )
+      .then((details) => {
+        if (!active || latestSnapshot === undefined) {
+          return;
+        }
+        latestSnapshot = mergeDiscDetails(latestSnapshot, details);
+        onSnapshot(latestSnapshot);
+      })
+      .catch(() => {
+        // Retain the live snapshot. A new Detected Disc version may retry.
+      })
+      .finally(() => {
+        detailRefresh = undefined;
+        startNextDetailRefresh();
+      });
+  };
+
+  const queueMissingDetails = (snapshot: DashboardSnapshot) => {
+    if (snapshot.detectedDiscs.status !== "loaded") {
+      return;
+    }
+    for (const disc of snapshot.detectedDiscs.items) {
+      const key = `${disc.id}\0${disc.detectedAt}`;
+      if (attemptedDetailVersions.has(key)) {
+        continue;
+      }
+      if (detailQueue.length < maximumQueuedDetails) {
+        rememberAttempt(key);
+        detailQueue.push({ id: disc.id, detectedAt: disc.detectedAt });
+      }
+    }
+    startNextDetailRefresh();
+  };
 
   void loadSnapshot()
     .then((snapshot) => {
@@ -122,6 +209,11 @@ export function watchDashboardActivity({
         return;
       }
       latestSnapshot = snapshot;
+      if (snapshot.detectedDiscs.status === "loaded") {
+        for (const disc of snapshot.detectedDiscs.items) {
+          rememberAttempt(`${disc.id}\0${disc.detectedAt}`);
+        }
+      }
       onSnapshot(snapshot);
       try {
         onStreamStatus("connecting");
@@ -142,29 +234,11 @@ export function watchDashboardActivity({
           }
           try {
             const activity = JSON.parse(event.data) as DashboardSnapshot;
-            const refreshRequired = latestSnapshot
-              ? needsDetailRefresh(latestSnapshot, activity)
-              : false;
             latestSnapshot = latestSnapshot
               ? mergeActivitySnapshot(latestSnapshot, activity)
               : activity;
             onSnapshot(latestSnapshot);
-            if (refreshRequired && detailRefresh === undefined) {
-              detailRefresh = loadSnapshot()
-                .then((snapshot) => {
-                  if (!active) {
-                    return;
-                  }
-                  latestSnapshot = snapshot;
-                  onSnapshot(snapshot);
-                })
-                .catch(() => {
-                  // Retain the last coherent snapshot and retry on later activity.
-                })
-                .finally(() => {
-                  detailRefresh = undefined;
-                });
-            }
+            queueMissingDetails(activity);
           } catch {
             // Ignore malformed events and retain the last database snapshot.
           }
@@ -182,6 +256,7 @@ export function watchDashboardActivity({
 
   return () => {
     active = false;
+    detailAbortController.abort();
     eventSource?.close();
   };
 }

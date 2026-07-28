@@ -215,6 +215,13 @@ export interface DiscoveredOpticalDrive {
   vendor?: string;
   product?: string;
   serialNumber?: string;
+  mediaGeneration?: string;
+}
+
+export interface JobListOptions {
+  limit?: number;
+  activeLimit?: number;
+  historyLimit?: number;
 }
 
 export interface OpticalDriveReconciliationInput
@@ -238,6 +245,7 @@ export interface CatalogAccess {
   listOpticalDrives(options?: {
     ids?: readonly OpticalDriveId[];
     limit?: number;
+    historicalLimit?: number;
   }): OpticalDrive[];
   registerDetectedDisc(input: {
     opticalDriveId: OpticalDriveId;
@@ -314,7 +322,7 @@ export interface EncodingProfileAccess {
 export interface ArchiveJobAccess {
   enqueue(input: { detectedDiscId: DetectedDiscId; priority?: number }): ArchiveJob;
   claimNext(workerId: string): RunningArchiveJob | null;
-  list(statuses?: JobStatus[], options?: { limit?: number }): ArchiveJob[];
+  list(statuses?: JobStatus[], options?: JobListOptions): ArchiveJob[];
   updateProgress(
     claim: RunningArchiveJob,
     progressPercent: number,
@@ -335,7 +343,7 @@ export interface EncodeJobAccess {
     priority?: number;
   }): EncodeJob;
   claimNext(workerId: string): RunningEncodeJob | null;
-  list(statuses?: JobStatus[], options?: { limit?: number }): EncodeJob[];
+  list(statuses?: JobStatus[], options?: JobListOptions): EncodeJob[];
   updateProgress(claim: RunningEncodeJob, progressPercent: number): EncodeJob;
   complete(claim: RunningEncodeJob): EncodeJob;
   fail(claim: RunningEncodeJob, errorMessage: string): EncodeJob;

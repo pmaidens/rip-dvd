@@ -34,6 +34,10 @@ export interface DvdTitleMap {
   titles: readonly DvdTitle[];
 }
 
+export function isDvdContentId(value: unknown): value is string {
+  return typeof value === "string" && /^sha256:[0-9a-f]{64}$/.test(value);
+}
+
 type UnknownRecord = Record<string, unknown>;
 
 function isRecord(value: unknown): value is UnknownRecord {
@@ -166,8 +170,7 @@ export function decodeDvdTitleMap(value: unknown): DvdTitleMap | null {
   if (
     !isRecord(value) ||
     value.schemaVersion !== DVD_TITLE_MAP_SCHEMA_VERSION ||
-    typeof value.contentId !== "string" ||
-    !/^sha256:[0-9a-f]{64}$/.test(value.contentId) ||
+    !isDvdContentId(value.contentId) ||
     !Array.isArray(value.titles) ||
     value.titles.length === 0 ||
     value.titles.length > MAX_DVD_TITLES

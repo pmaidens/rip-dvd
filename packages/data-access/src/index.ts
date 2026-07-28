@@ -63,6 +63,8 @@ import type {
   EncodeJobId,
   EncodeJob,
   EncodingProfileId,
+  JobListOptions,
+  JobStatus,
   MediaDomain,
   MediaItemId,
   OpticalDriveId,
@@ -93,6 +95,52 @@ const detectedDiscTransitions: Readonly<
   archived: [],
   rejected: ["detected"],
 };
+
+interface ChronologicalJobRecord {
+  id: string;
+  updatedAt: Date;
+}
+
+function createJobList<Job extends ChronologicalJobRecord>({
+  readQueue,
+  readNewest,
+}: {
+  readQueue(statuses?: JobStatus[]): Job[];
+  readNewest(statuses: JobStatus[] | undefined, limit: number): Job[];
+}) {
+  const chronological = (rows: Job[]) =>
+    rows.sort(
+      (left, right) =>
+        left.updatedAt.getTime() - right.updatedAt.getTime() ||
+        left.id.localeCompare(right.id),
+    );
+
+  return (statuses?: JobStatus[], options?: JobListOptions): Job[] => {
+    if (options?.activeLimit !== undefined && statuses === undefined) {
+      const active = readNewest(
+        ["queued", "running"],
+        requirePositiveSafeInteger(options.activeLimit, "activeLimit"),
+      );
+      const history =
+        options.historyLimit === undefined
+          ? []
+          : readNewest(
+              ["completed", "failed"],
+              requirePositiveSafeInteger(options.historyLimit, "historyLimit"),
+            );
+      return chronological([...active, ...history]);
+    }
+    if (options?.limit !== undefined) {
+      return chronological(
+        readNewest(
+          statuses,
+          requirePositiveSafeInteger(options.limit, "limit"),
+        ),
+      );
+    }
+    return readQueue(statuses);
+  };
+}
 
 function requireRow<T>(row: T | undefined, recordType: string, id: string): T {
   if (!row) {
@@ -344,31 +392,39 @@ export function createDataAccess({
     on conflict (detected_disc_id) do nothing
   `);
 
+  const listArchiveJobs = createJobList<ArchiveJob>({
+    readQueue(statuses) {
+      return database
+        .select()
+        .from(archiveJobs)
+        .where(
+          statuses?.length
+            ? inArray(archiveJobs.status, statuses)
+            : undefined,
+        )
+        .orderBy(desc(archiveJobs.priority), asc(archiveJobs.createdAt))
+        .all();
+    },
+    readNewest(statuses, limit) {
+      return database
+        .select()
+        .from(archiveJobs)
+        .where(
+          statuses?.length
+            ? inArray(archiveJobs.status, statuses)
+            : undefined,
+        )
+        .orderBy(desc(archiveJobs.updatedAt), desc(archiveJobs.id))
+        .limit(limit)
+        .all();
+    },
+  });
+
   const archiveJobAdapter = {
     recordType: "archive job",
     find: (id) =>
       database.select().from(archiveJobs).where(eq(archiveJobs.id, id)).get(),
-    list: (statuses, options) => {
-      const condition = statuses?.length
-        ? inArray(archiveJobs.status, statuses)
-        : undefined;
-      if (options?.limit !== undefined) {
-        return database
-          .select()
-          .from(archiveJobs)
-          .where(condition)
-          .orderBy(desc(archiveJobs.updatedAt), desc(archiveJobs.id))
-          .limit(requirePositiveSafeInteger(options.limit, "limit"))
-          .all()
-          .reverse();
-      }
-      return database
-        .select()
-        .from(archiveJobs)
-        .where(condition)
-        .orderBy(desc(archiveJobs.priority), asc(archiveJobs.createdAt))
-        .all();
-    },
+    list: listArchiveJobs,
     claim: (workerId, token, timestamp) => {
       const nextApprovedJobId = sql<ArchiveJobId>`(
         select ${archiveJobs.id}
@@ -519,31 +575,35 @@ export function createDataAccess({
     priority?: number;
   };
 
+  const listEncodeJobs = createJobList<EncodeJob>({
+    readQueue(statuses) {
+      return database
+        .select()
+        .from(encodeJobs)
+        .where(
+          statuses?.length ? inArray(encodeJobs.status, statuses) : undefined,
+        )
+        .orderBy(desc(encodeJobs.priority), asc(encodeJobs.createdAt))
+        .all();
+    },
+    readNewest(statuses, limit) {
+      return database
+        .select()
+        .from(encodeJobs)
+        .where(
+          statuses?.length ? inArray(encodeJobs.status, statuses) : undefined,
+        )
+        .orderBy(desc(encodeJobs.updatedAt), desc(encodeJobs.id))
+        .limit(limit)
+        .all();
+    },
+  });
+
   const encodeJobAdapter = {
     recordType: "encode job",
     find: (id) =>
       database.select().from(encodeJobs).where(eq(encodeJobs.id, id)).get(),
-    list: (statuses, options) => {
-      const condition = statuses?.length
-        ? inArray(encodeJobs.status, statuses)
-        : undefined;
-      if (options?.limit !== undefined) {
-        return database
-          .select()
-          .from(encodeJobs)
-          .where(condition)
-          .orderBy(desc(encodeJobs.updatedAt), desc(encodeJobs.id))
-          .limit(requirePositiveSafeInteger(options.limit, "limit"))
-          .all()
-          .reverse();
-      }
-      return database
-        .select()
-        .from(encodeJobs)
-        .where(condition)
-        .orderBy(desc(encodeJobs.priority), asc(encodeJobs.createdAt))
-        .all();
-    },
+    list: listEncodeJobs,
     claim: (workerId, token, timestamp) => {
       const claimed = database
         .update(encodeJobs)
@@ -712,11 +772,9 @@ export function createDataAccess({
 
           for (const drive of normalized) {
             const existing = existingByPath.get(drive.devicePath);
+            const existingSerial = existing?.serialNumber ?? undefined;
             const serialChanged =
-              existing?.serialNumber !== null &&
-              existing?.serialNumber !== undefined &&
-              drive.serialNumber !== undefined &&
-              existing.serialNumber !== drive.serialNumber;
+              existing !== undefined && existingSerial !== drive.serialNumber;
             const existingModel = [existing?.vendor, existing?.product]
               .filter(Boolean)
               .join("\u0000");
@@ -761,7 +819,7 @@ export function createDataAccess({
                   displayName: drive.displayName,
                   vendor: drive.vendor,
                   product: drive.product,
-                  serialNumber: drive.serialNumber,
+                  serialNumber: drive.serialNumber ?? null,
                   ...(isReplacement ? { isEnabled: false } : {}),
                   isPresent: true,
                   lastSeenAt: timestamp,
@@ -822,6 +880,42 @@ export function createDataAccess({
         const condition = options?.ids
           ? inArray(opticalDrives.id, [...options.ids])
           : undefined;
+        if (options?.historicalLimit !== undefined) {
+          const current = database
+            .select()
+            .from(opticalDrives)
+            .where(
+              and(
+                condition,
+                or(
+                  eq(opticalDrives.isPresent, true),
+                  eq(opticalDrives.isEnabled, true),
+                ),
+              ),
+            )
+            .all();
+          const history = database
+            .select()
+            .from(opticalDrives)
+            .where(
+              and(
+                condition,
+                eq(opticalDrives.isPresent, false),
+                eq(opticalDrives.isEnabled, false),
+              ),
+            )
+            .orderBy(desc(opticalDrives.lastSeenAt), desc(opticalDrives.id))
+            .limit(
+              requirePositiveSafeInteger(
+                options.historicalLimit,
+                "historicalLimit",
+              ),
+            )
+            .all();
+          return [...current, ...history].sort((left, right) =>
+            left.devicePath.localeCompare(right.devicePath),
+          );
+        }
         if (options?.limit !== undefined) {
           return database
             .select()
@@ -875,6 +969,9 @@ export function createDataAccess({
               discKind: detectedDiscs.discKind,
               scanData: detectedDiscs.scanData,
               status: detectedDiscs.status,
+              volumeLabel: detectedDiscs.volumeLabel,
+              detectedAt: detectedDiscs.detectedAt,
+              updatedAt: detectedDiscs.updatedAt,
             })
             .from(detectedDiscs)
             .where(
@@ -884,6 +981,13 @@ export function createDataAccess({
               ),
             )
             .get();
+          const observationChanged =
+            existing === undefined ||
+            existing.discKind !== input.discKind ||
+            existing.volumeLabel !== (input.volumeLabel ?? null) ||
+            !isDeepStrictEqual(existing.scanData, input.scanData ?? null);
+          const statusChanged =
+            matchingArchive !== undefined && existing?.status !== "archived";
           if (
             !matchingArchive &&
             existing?.status === "approved" &&
@@ -922,8 +1026,11 @@ export function createDataAccess({
               volumeLabel: input.volumeLabel,
               scanData: input.scanData,
               ...(matchingArchive ? { status: "archived" as const } : {}),
-              detectedAt: timestamp,
-              updatedAt: timestamp,
+              ...(observationChanged
+                ? { detectedAt: timestamp, updatedAt: timestamp }
+                : statusChanged
+                  ? { updatedAt: timestamp }
+                  : {}),
             })
             .where(
               and(

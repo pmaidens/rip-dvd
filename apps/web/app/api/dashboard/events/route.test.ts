@@ -23,6 +23,14 @@ describe("GET /api/dashboard/events", () => {
       isEnabled: true,
       isPresent: true,
     });
+    for (let index = 1; index < 32; index += 1) {
+      access.catalog.upsertOpticalDrive({
+        devicePath: `/dev/sr${index}`,
+        displayName: `Attached drive ${index}`,
+        isEnabled: index % 2 === 0,
+        isPresent: true,
+      });
+    }
     const profile = access.encodingProfiles.create({
       key: "activity-profile",
       displayName: "Activity profile",
@@ -121,6 +129,7 @@ describe("GET /api/dashboard/events", () => {
       .split("\n")
       .find((line) => line.startsWith("data: "))!;
     const snapshot = JSON.parse(dataLine.slice("data: ".length)) as {
+      opticalDrives: { status: string; items: unknown[] };
       detectedDiscs: {
         status: string;
         items: { volumeLabel: string; titles: unknown[] }[];
@@ -140,6 +149,7 @@ describe("GET /api/dashboard/events", () => {
     };
 
     expect(snapshot.detectedDiscs.status).toBe("loaded");
+    expect(snapshot.opticalDrives.items).toHaveLength(32);
     expect(snapshot.detectedDiscs.items).toHaveLength(20);
     expect(
       snapshot.detectedDiscs.items.every((disc) =>
@@ -152,13 +162,13 @@ describe("GET /api/dashboard/events", () => {
     expect(
       snapshot.detectedDiscs.items.every((disc) => disc.titles.length === 0),
     ).toBe(true);
-    expect(snapshot.archiveJobs.items).toHaveLength(20);
+    expect(snapshot.archiveJobs.items).toHaveLength(25);
     expect(
       snapshot.archiveJobs.items.every(
         (job) => job.discLabel !== "Unlabeled disc",
       ),
     ).toBe(true);
-    expect(snapshot.encodeJobs.items).toHaveLength(20);
+    expect(snapshot.encodeJobs.items).toHaveLength(25);
     expect(
       snapshot.encodeJobs.items.every(
         (job) =>
