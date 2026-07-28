@@ -1,19 +1,23 @@
 import { createHash, randomUUID } from "node:crypto";
+import { spawn, spawnSync } from "node:child_process";
 import {
   closeSync,
   existsSync,
   fsyncSync,
-  linkSync,
   lstatSync,
+  mkdtempSync,
   openSync,
   readdirSync,
   readFileSync,
   renameSync,
+  rmSync,
   statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { isAbsolute, join, normalize, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { dirname, isAbsolute, join, normalize, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import type {
   LegacySidecarImportIssue,
@@ -26,11 +30,7 @@ import {
 
 const DEFAULT_HANDBRAKE_PRESET = "Fast 480p30";
 const LEGACY_QUEUE_CUTOVER_MARKER = ".rip-dvd-sqlite-catalog";
-const LEGACY_QUEUE_CUTOVER_LOCK = ".rip-dvd-legacy-queue.lock";
-const LEGACY_QUEUE_SHARED_LEASE_PREFIX =
-  ".rip-dvd-legacy-queue.shared.";
 const LEGACY_QUEUE_LOCK_POLL_MS = 10;
-const LEGACY_QUEUE_LOCK_TIMEOUT_MS = 15_000;
 
 export interface ParsedLegacyJob {
   completedAt: Date | null;
@@ -66,8 +66,18 @@ export type LegacySidecarDiscovery =
   | { outcome: "skipped"; issue: LegacySidecarImportIssue };
 
 export interface LegacyQueueCutover {
-  jobSignatures: ReadonlyMap<string, string>;
+  jobSnapshots: ReadonlyMap<string, LegacyQueueJobSnapshot>;
+  mode: "schema-one" | "snapshot";
+  upgradeSchemaOne(
+    jobSnapshots: ReadonlyMap<string, LegacyQueueJobSnapshot>,
+  ): void;
   wasAlreadyPublished: boolean;
+}
+
+export interface LegacyQueueJobSnapshot {
+  jobIndex: number;
+  sidecarPath: string;
+  signature: string;
 }
 
 export function resolveLegacyOriginalsLibrary(path: string): string {
@@ -583,118 +593,67 @@ export function discoverLegacySidecars(
 export function acquireLegacyQueueCutoverLock(
   originalsLibraryPath: string,
 ): () => void {
-  const lockPath = join(originalsLibraryPath, LEGACY_QUEUE_CUTOVER_LOCK);
-  const ownerPath = join(
-    originalsLibraryPath,
-    `${LEGACY_QUEUE_CUTOVER_LOCK}.${process.pid}.${randomUUID()}.owner`,
-  );
-  const ownerDescriptor = openSync(ownerPath, "wx", 0o600);
-  try {
-    writeFileSync(
-      ownerDescriptor,
-      `${JSON.stringify({ schemaVersion: 1, pid: process.pid, role: "cutover" })}\n`,
-      { encoding: "utf8" },
-    );
-    fsyncSync(ownerDescriptor);
-  } finally {
-    closeSync(ownerDescriptor);
+  const helperCandidates = [
+    resolve(process.cwd(), "rip_dvd", "legacy_queue_lease.py"),
+    resolve(process.cwd(), "..", "..", "rip_dvd", "legacy_queue_lease.py"),
+    resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      "..",
+      "..",
+      "..",
+      "..",
+      "rip_dvd",
+      "legacy_queue_lease.py",
+    ),
+  ];
+  const helperPath = helperCandidates.find((path) => existsSync(path));
+  if (!helperPath) {
+    throw new Error("Could not locate the legacy queue lease helper");
   }
-  const deadline = Date.now() + LEGACY_QUEUE_LOCK_TIMEOUT_MS;
+  const python = process.env.RIP_DVD_PYTHON?.trim() || "python3";
+  const pythonProbe = spawnSync(python, ["--version"], { stdio: "ignore" });
+  if (pythonProbe.status !== 0) {
+    throw new Error(`Could not run the legacy queue lease helper with ${python}`);
+  }
+  const stateDirectory = mkdtempSync(join(tmpdir(), "rip-dvd-cutover-"));
+  const statePath = (name: string) => join(stateDirectory, name);
+  const helper = spawn(
+    python,
+    [helperPath, "hold-cutover", originalsLibraryPath, stateDirectory],
+    { stdio: ["pipe", "ignore", "inherit"] },
+  );
   const sleepState = new Int32Array(new SharedArrayBuffer(4));
-  let acquired = false;
-
-  const ownerIsDead = (path: string): boolean => {
-    try {
-      const file = lstatSync(path);
-      if (!file.isFile() || file.isSymbolicLink()) {
-        return false;
-      }
-      const owner = JSON.parse(readFileSync(path, "utf8")) as unknown;
-      if (
-        !owner ||
-        typeof owner !== "object" ||
-        !("schemaVersion" in owner) ||
-        owner.schemaVersion !== 1 ||
-        !("role" in owner) ||
-        (owner.role !== "cutover" && owner.role !== "legacy-command") ||
-        !("pid" in owner) ||
-        !Number.isSafeInteger(owner.pid) ||
-        Number(owner.pid) <= 0
-      ) {
-        return false;
-      }
-      try {
-        process.kill(Number(owner.pid), 0);
-        return false;
-      } catch (error) {
-        return (error as NodeJS.ErrnoException).code === "ESRCH";
-      }
-    } catch {
-      return false;
-    }
-  };
-
-  const wait = (message: string): void => {
-    if (Date.now() >= deadline) {
-      throw new Error(message);
-    }
-    Atomics.wait(sleepState, 0, 0, LEGACY_QUEUE_LOCK_POLL_MS);
-  };
 
   try {
-    while (true) {
-      try {
-        linkSync(ownerPath, lockPath);
-        acquired = true;
-        break;
-      } catch (error) {
-        const fileError = error as NodeJS.ErrnoException;
-        if (fileError.code !== "EEXIST") {
-          throw error;
-        }
-        if (ownerIsDead(lockPath)) {
-          unlinkSync(lockPath);
-          continue;
-        }
-        wait(`Timed out waiting for another SQLite cutover: ${lockPath}`);
+    while (!existsSync(statePath("intent-ready"))) {
+      if (existsSync(statePath("error"))) {
+        throw new Error(readFileSync(statePath("error"), "utf8"));
       }
+      Atomics.wait(sleepState, 0, 0, LEGACY_QUEUE_LOCK_POLL_MS);
     }
-    unlinkSync(ownerPath);
-
-    while (true) {
-      const sharedLeases = readdirSync(originalsLibraryPath)
-        .filter((name) => name.startsWith(LEGACY_QUEUE_SHARED_LEASE_PREFIX))
-        .map((name) => join(originalsLibraryPath, name));
-      for (const leasePath of sharedLeases) {
-        if (ownerIsDead(leasePath)) {
-          unlinkSync(leasePath);
-        }
+    while (!existsSync(statePath("ready"))) {
+      if (existsSync(statePath("error"))) {
+        throw new Error(readFileSync(statePath("error"), "utf8"));
       }
-      const activeLeases = sharedLeases.filter((path) => existsSync(path));
-      if (activeLeases.length === 0) {
-        break;
-      }
-      wait(
-        `Timed out waiting for an active legacy queue command: ${activeLeases[0]}`,
-      );
+      Atomics.wait(sleepState, 0, 0, LEGACY_QUEUE_LOCK_POLL_MS);
     }
-
     let released = false;
     return () => {
-      if (!released) {
-        released = true;
-        unlinkSync(lockPath);
+      if (released) {
+        return;
       }
+      released = true;
+      writeFileSync(statePath("release"), "", { flag: "wx", mode: 0o600 });
+      while (!existsSync(statePath("released"))) {
+        Atomics.wait(sleepState, 0, 0, LEGACY_QUEUE_LOCK_POLL_MS);
+      }
+      helper.stdin.end();
+      rmSync(stateDirectory, { force: true, recursive: true });
     };
   } catch (error) {
-    if (acquired && existsSync(lockPath)) {
-      unlinkSync(lockPath);
-    }
+    helper.kill("SIGTERM");
+    rmSync(stateDirectory, { force: true, recursive: true });
     throw error;
-  } finally {
-    if (existsSync(ownerPath)) {
-      unlinkSync(ownerPath);
-    }
   }
 }
 
@@ -715,38 +674,66 @@ export function retireLegacySidecarQueue(
     originalsLibraryPath,
     LEGACY_QUEUE_CUTOVER_MARKER,
   );
-  const discoveredSignatures = new Map<string, string>();
+  const discoveredSnapshots = new Map<string, LegacyQueueJobSnapshot>();
+  let hasParsedSidecar = false;
   for (const discovery of discoveries) {
     if (discovery.outcome !== "parsed") {
       continue;
     }
+    hasParsedSidecar = true;
     for (const job of discovery.sidecar.jobs) {
       const logicalKey = legacyJobLogicalKey(
         discovery.sidecar.fingerprint,
         job,
       );
       const signature = legacyJobSignature(job);
-      if (!discoveredSignatures.has(logicalKey)) {
-        discoveredSignatures.set(logicalKey, signature);
+      if (!discoveredSnapshots.has(logicalKey)) {
+        discoveredSnapshots.set(logicalKey, {
+          jobIndex: job.jobIndex,
+          sidecarPath: discovery.sidecar.sidecarPath,
+          signature,
+        });
       }
     }
   }
 
-  const legacyJobs = [...discoveredSignatures].map(
-    ([logicalKey, signature]) => ({ logicalKey, signature }),
-  );
-  const snapshotDigest = createHash("sha256")
-    .update(JSON.stringify(legacyJobs))
-    .digest("hex");
-  const markerContents = `${JSON.stringify({
-    schemaVersion: 2,
-    legacyQueueStatus: "retired",
-    authoritativeStore: "sqlite",
-    legacyJobs,
-    snapshotDigest,
-  })}\n`;
+  const writeMarker = (
+    snapshots: ReadonlyMap<string, LegacyQueueJobSnapshot>,
+  ): void => {
+    const legacyJobs = [...snapshots].map(([logicalKey, snapshot]) => ({
+      logicalKey,
+      ...snapshot,
+    }));
+    const snapshotDigest = createHash("sha256")
+      .update(JSON.stringify(legacyJobs))
+      .digest("hex");
+    const markerContents = `${JSON.stringify({
+      schemaVersion: 2,
+      legacyQueueStatus: "retired",
+      authoritativeStore: "sqlite",
+      legacyJobs,
+      snapshotDigest,
+    })}\n`;
+    const temporaryMarkerPath = `${markerPath}.${process.pid}.${randomUUID()}.tmp`;
+    let markerDescriptor: number | undefined;
+    try {
+      markerDescriptor = openSync(temporaryMarkerPath, "wx", 0o600);
+      writeFileSync(markerDescriptor, markerContents, { encoding: "utf8" });
+      fsyncSync(markerDescriptor);
+      closeSync(markerDescriptor);
+      markerDescriptor = undefined;
+      renameSync(temporaryMarkerPath, markerPath);
+      synchronizeDirectory(originalsLibraryPath);
+    } finally {
+      if (markerDescriptor !== undefined) {
+        closeSync(markerDescriptor);
+      }
+      if (existsSync(temporaryMarkerPath)) {
+        unlinkSync(temporaryMarkerPath);
+      }
+    }
+  };
 
-  let replaceSchemaOneMarker = false;
   if (existsSync(markerPath)) {
     synchronizeDirectory(originalsLibraryPath);
     const markerStat = lstatSync(markerPath);
@@ -766,27 +753,42 @@ export function retireLegacySidecarQueue(
       value?.legacyQueueStatus === "retired" &&
       value.authoritativeStore === "sqlite";
     if (value?.schemaVersion === 1 && hasCutoverDiscriminators) {
-      replaceSchemaOneMarker = true;
+      return {
+        jobSnapshots: new Map(),
+        mode: "schema-one",
+        upgradeSchemaOne: writeMarker,
+        wasAlreadyPublished: true,
+      };
     } else if (value?.schemaVersion === 2 && hasCutoverDiscriminators) {
       if (!Array.isArray(value.legacyJobs)) {
         throw new Error("Invalid SQLite cutover marker: legacyJobs must be an array");
       }
-      const entries: Array<{ logicalKey: string; signature: string }> = [];
-      const jobSignatures = new Map<string, string>();
+      const entries: Array<{
+        jobIndex: number;
+        logicalKey: string;
+        sidecarPath: string;
+        signature: string;
+      }> = [];
+      const jobSnapshots = new Map<string, LegacyQueueJobSnapshot>();
       for (const entry of value.legacyJobs) {
         const item = objectValue(entry);
         const logicalKey = nonEmptyString(item?.logicalKey);
         const signature = nonEmptyString(item?.signature);
+        const sidecarPath = nonEmptyString(item?.sidecarPath);
+        const jobIndex = nonNegativeInteger(item?.jobIndex);
         if (
           !logicalKey ||
           !signature ||
+          !sidecarPath ||
+          jobIndex === null ||
           !isValidPublishedJob(logicalKey, signature) ||
-          jobSignatures.has(logicalKey)
+          jobSnapshots.has(logicalKey)
         ) {
           throw new Error("Invalid SQLite cutover marker: malformed or duplicate legacy job");
         }
-        entries.push({ logicalKey, signature });
-        jobSignatures.set(logicalKey, signature);
+        const snapshot = { jobIndex, sidecarPath, signature };
+        entries.push({ logicalKey, ...snapshot });
+        jobSnapshots.set(logicalKey, snapshot);
       }
       const expectedDigest = createHash("sha256")
         .update(JSON.stringify(entries))
@@ -794,38 +796,29 @@ export function retireLegacySidecarQueue(
       if (value.snapshotDigest !== expectedDigest) {
         throw new Error("Invalid SQLite cutover marker: snapshot digest mismatch");
       }
-      return { jobSignatures, wasAlreadyPublished: true };
+      return {
+        jobSnapshots,
+        mode: "snapshot",
+        upgradeSchemaOne() {},
+        wasAlreadyPublished: true,
+      };
     } else {
       throw new Error("Invalid SQLite cutover marker: unsupported schema or status");
     }
   }
-
-  const temporaryMarkerPath = `${markerPath}.${process.pid}.${randomUUID()}.tmp`;
-  let markerDescriptor: number | undefined;
-  try {
-    markerDescriptor = openSync(temporaryMarkerPath, "wx", 0o600);
-    writeFileSync(
-      markerDescriptor,
-      markerContents,
-      { encoding: "utf8" },
-    );
-    fsyncSync(markerDescriptor);
-    closeSync(markerDescriptor);
-    markerDescriptor = undefined;
-    renameSync(temporaryMarkerPath, markerPath);
-    synchronizeDirectory(originalsLibraryPath);
-  } finally {
-    if (markerDescriptor !== undefined) {
-      closeSync(markerDescriptor);
-    }
-    if (
-      existsSync(temporaryMarkerPath)
-    ) {
-      unlinkSync(temporaryMarkerPath);
-    }
+  if (!hasParsedSidecar) {
+    return {
+      jobSnapshots: new Map(),
+      mode: "snapshot",
+      upgradeSchemaOne() {},
+      wasAlreadyPublished: false,
+    };
   }
+  writeMarker(discoveredSnapshots);
   return {
-    jobSignatures: discoveredSignatures,
-    wasAlreadyPublished: replaceSchemaOneMarker,
+    jobSnapshots: discoveredSnapshots,
+    mode: "snapshot",
+    upgradeSchemaOne() {},
+    wasAlreadyPublished: false,
   };
 }

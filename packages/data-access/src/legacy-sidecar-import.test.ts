@@ -657,20 +657,20 @@ describe("legacy sidecar import", () => {
     fixture.access.close();
   });
 
-  it("upgrades a schema-1 marker while preserving authoritative SQLite requeues", () => {
+  it("fails closed when schema-1 sidecars drift beyond authoritative SQLite state", () => {
     const fixture = createFixture();
     const markerPath = join(
       fixture.originalsLibraryPath,
       ".rip-dvd-sqlite-catalog",
     );
+    fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
     writeFileSync(markerPath, JSON.stringify({
       schemaVersion: 1,
       legacyQueueStatus: "retired",
       authoritativeStore: "sqlite",
     }));
-    fixture.access.legacySidecars.importLibrary({
-      originalsLibraryPath: fixture.originalsLibraryPath,
-    });
     const completedJob = fixture.access.encodeJobs
       .list(["completed"])
       .find((job) => job.outputPath === fixture.movieOutputPath)!;
@@ -681,6 +681,18 @@ describe("legacy sidecar import", () => {
       outputPath: retryOutputPath,
       priority: 23,
     });
+    const sidecar = JSON.parse(readFileSync(fixture.sidecarPath, "utf8")) as {
+      jobs: Array<Record<string, unknown>>;
+    };
+    sidecar.jobs.push({
+      label: "Extra 2: Post-cutover drift",
+      source: fixture.archivePath,
+      output: join(fixture.originalsLibraryPath, "drift.mkv"),
+      preset: "Fast 480p30",
+      selection: "title",
+      title_number: 3,
+    });
+    writeFileSync(fixture.sidecarPath, JSON.stringify(sidecar));
 
     const report = fixture.access.legacySidecars.importLibrary({
       originalsLibraryPath: fixture.originalsLibraryPath,
@@ -690,7 +702,20 @@ describe("legacy sidecar import", () => {
       snapshotDigest?: string;
     };
 
-    expect(report.issues).toEqual([]);
+    expect(report.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "duplicate_record",
+          jobIndex: 0,
+          message: expect.stringMatching(/schema-1.*ambiguous/i),
+        }),
+        expect.objectContaining({
+          code: "duplicate_record",
+          jobIndex: 2,
+          message: expect.stringMatching(/schema-1.*ambiguous/i),
+        }),
+      ]),
+    );
     expect(upgradedMarker).toMatchObject({
       schemaVersion: 2,
       snapshotDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
@@ -705,6 +730,7 @@ describe("legacy sidecar import", () => {
         }),
       ]),
     );
+    expect(fixture.access.encodeJobs.list()).toHaveLength(2);
     fixture.access.close();
   });
 

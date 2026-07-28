@@ -223,6 +223,20 @@ class EncodeQueueDiscoveryTests(unittest.TestCase):
 
 
 class LegacyQueueCutoverRaceTests(unittest.TestCase):
+    def test_reused_live_pid_does_not_keep_a_crashed_lease_alive(self):
+        with tempfile.TemporaryDirectory() as temp:
+            originals = Path(temp)
+            (originals / ".rip-dvd-legacy-queue.lock").write_text(
+                json.dumps({
+                    "schemaVersion": 1,
+                    "pid": os.getpid(),
+                    "role": "cutover",
+                }),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(encode_mode(originals, dry_run=True, idle=False), 0)
+
     def test_crashed_cutover_lease_is_reclaimed_before_and_after_publication(self):
         with tempfile.TemporaryDirectory() as temp:
             originals = Path(temp)
@@ -237,7 +251,7 @@ class LegacyQueueCutoverRaceTests(unittest.TestCase):
             )
 
             self.assertEqual(encode_mode(originals, dry_run=True, idle=False), 0)
-            self.assertFalse(lock.exists())
+            self.assertTrue(lock.exists())
 
             (originals / ".rip-dvd-sqlite-catalog").write_text(
                 "{}\n", encoding="utf-8"
@@ -251,7 +265,7 @@ class LegacyQueueCutoverRaceTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertEqual(encode_mode(originals, dry_run=True, idle=False), 2)
-            self.assertFalse(lock.exists())
+            self.assertTrue(lock.exists())
 
     def test_encode_watch_releases_its_lease_between_iterations(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -262,10 +276,16 @@ class LegacyQueueCutoverRaceTests(unittest.TestCase):
                 pass
 
             def stop_between_iterations(_interval):
-                self.assertFalse(lock.exists())
-                self.assertEqual(
-                    list(originals.glob(".rip-dvd-legacy-queue.shared.*")), []
-                )
+                intent = (originals / ".rip-dvd-legacy-queue.intent.lock").open("a+")
+                gate = lock.open("a+")
+                try:
+                    fcntl.flock(intent, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.flock(gate, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    fcntl.flock(gate, fcntl.LOCK_UN)
+                    fcntl.flock(intent, fcntl.LOCK_UN)
+                    gate.close()
+                    intent.close()
                 raise WatchStopped()
 
             with patch("rip_dvd.cli.time.sleep", side_effect=stop_between_iterations):
@@ -281,31 +301,18 @@ class LegacyQueueCutoverRaceTests(unittest.TestCase):
     def start_cutover_contender(self, originals, command_started):
         marker = originals / ".rip-dvd-sqlite-catalog"
         lock = originals / ".rip-dvd-legacy-queue.lock"
-        owner = originals / ".rip-dvd-legacy-queue.cutover-owner.tmp"
+        intent = originals / ".rip-dvd-legacy-queue.intent.lock"
         attempted = threading.Event()
 
         def publish_cutover():
             command_started.wait()
             attempted.set()
-            owner.write_text(
-                json.dumps({
-                    "schemaVersion": 1,
-                    "pid": os.getpid(),
-                    "role": "cutover",
-                }),
-                encoding="utf-8",
-            )
-            while True:
-                try:
-                    os.link(owner, lock)
-                    break
-                except FileExistsError:
-                    time.sleep(0.005)
-            owner.unlink()
-            while list(originals.glob(".rip-dvd-legacy-queue.shared.*")):
-                time.sleep(0.005)
-            marker.write_text("{}\n", encoding="utf-8")
-            lock.unlink()
+            with intent.open("a+") as intent_file, lock.open("a+") as gate_file:
+                fcntl.flock(intent_file, fcntl.LOCK_EX)
+                fcntl.flock(gate_file, fcntl.LOCK_EX)
+                marker.write_text("{}\n", encoding="utf-8")
+                fcntl.flock(gate_file, fcntl.LOCK_UN)
+                fcntl.flock(intent_file, fcntl.LOCK_UN)
 
         contender = threading.Thread(target=publish_cutover)
         contender.start()

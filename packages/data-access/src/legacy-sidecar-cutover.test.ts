@@ -1,7 +1,10 @@
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import {
   existsSync,
   mkdirSync,
   readFileSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -211,14 +214,6 @@ describe("legacy sidecar cutover", () => {
     const initialOutputPath = join(root, "movies", "Race Movie.mkv");
     const finalOutputPath = join(root, "movies", "Interview.mkv");
     mkdirSync(originalsLibraryPath, { recursive: true });
-    writeFileSync(
-      lockPath,
-      JSON.stringify({
-        schemaVersion: 1,
-        pid: process.pid,
-        role: "legacy-command",
-      }),
-    );
     writeFileSync(archivePath, "archive");
     const sidecar = {
       schema_version: 2,
@@ -255,26 +250,40 @@ describe("legacy sidecar cutover", () => {
         ],
       }),
     );
-    const legacyMutation = spawn(process.execPath, [
-      "-e",
-      `const { copyFileSync, unlinkSync } = require("node:fs");
-       setTimeout(() => {
-         copyFileSync(process.argv[1], process.argv[2]);
-         unlinkSync(process.argv[3]);
-       }, 200);`,
+    const intentPath = join(
+      originalsLibraryPath,
+      ".rip-dvd-legacy-queue.intent.lock",
+    );
+    const legacyMutation = spawn("python3", [
+      "-c",
+      `import fcntl, sys, time
+intent = open(sys.argv[1], "a+")
+gate = open(sys.argv[2], "a+")
+fcntl.flock(intent, fcntl.LOCK_EX)
+fcntl.flock(gate, fcntl.LOCK_SH)
+fcntl.flock(intent, fcntl.LOCK_UN)
+print("ready", flush=True)
+time.sleep(0.2)
+with open(sys.argv[3], "rb") as source:
+    contents = source.read()
+with open(sys.argv[4], "wb") as destination:
+    destination.write(contents)
+fcntl.flock(gate, fcntl.LOCK_UN)`,
+      intentPath,
+      lockPath,
       completedSidecarPath,
       sidecarPath,
-      lockPath,
-    ]);
+    ], { stdio: ["ignore", "pipe", "inherit"] });
+    if (!legacyMutation.stdout) {
+      throw new Error("Expected the legacy mutation readiness pipe");
+    }
+    await once(legacyMutation.stdout, "data");
+    legacyMutation.stdout.destroy();
+    legacyMutation.unref();
     markerFault.failure = null;
     const access = createLegacySidecarDataAccess({ databasePath });
 
-    const report = access.legacySidecars.importLibrary({
-      originalsLibraryPath,
-    });
-    const [exitCode] = await once(legacyMutation, "exit");
-
-    expect(exitCode).toBe(0);
+    const report = access.legacySidecars.importLibrary({ originalsLibraryPath });
     expect(report).toMatchObject({
       sidecarsImported: 1,
       issues: [],
@@ -289,6 +298,82 @@ describe("legacy sidecar cutover", () => {
     expect(readFileSync(sidecarPath)).toEqual(
       readFileSync(completedSidecarPath),
     );
+    access.close();
+  });
+
+  it("reports a captured winner missing after marker publication and restart", () => {
+    const root = temporaryDirectories.create("rip-dvd-cutover-missing-winner-");
+    const originalsLibraryPath = join(root, "originals");
+    const archivePath = join(originalsLibraryPath, "Missing.iso");
+    const sidecarPath = join(originalsLibraryPath, "Missing.rip-dvd.json");
+    const databasePath = join(root, "catalog.sqlite");
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    writeFileSync(archivePath, "archive");
+    writeFileSync(sidecarPath, JSON.stringify({
+      schema_version: 2,
+      source: archivePath,
+      title: "Missing",
+      disc_fingerprint: "missing-winner-fingerprint",
+      jobs: [{
+        label: "Movie: Missing",
+        source: archivePath,
+        output: join(root, "movies", "Missing.mkv"),
+        preset: "Fast 480p30",
+        selection: "main_feature",
+        title_number: null,
+      }],
+    }));
+    markerFault.failure = "directory-sync";
+    const interrupted = createLegacySidecarDataAccess({ databasePath });
+    expect(() => interrupted.legacySidecars.importLibrary({ originalsLibraryPath }))
+      .toThrow(/directory sync failure/);
+    interrupted.close();
+    unlinkSync(sidecarPath);
+    markerFault.failure = null;
+    const retry = createLegacySidecarDataAccess({ databasePath });
+
+    const report = retry.legacySidecars.importLibrary({ originalsLibraryPath });
+
+    expect(report.issues).toEqual([
+      expect.objectContaining({
+        code: "invalid_job",
+        jobIndex: 0,
+        sidecarPath,
+        message: expect.stringMatching(/captured.*missing/i),
+      }),
+    ]);
+    expect(retry.encodeJobs.list()).toEqual([]);
+    retry.close();
+  });
+
+  it("scavenges crash-orphan owner artifacts without trusting a reused PID", () => {
+    const root = temporaryDirectories.create("rip-dvd-cutover-orphans-");
+    const originalsLibraryPath = join(root, "originals");
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    const orphanPaths = [
+      join(originalsLibraryPath, `.rip-dvd-legacy-queue.lock.${process.pid}.orphan.owner`),
+      join(originalsLibraryPath, `.rip-dvd-legacy-queue.owner.${process.pid}.orphan.tmp`),
+      join(originalsLibraryPath, `.rip-dvd-legacy-queue.shared.${process.pid}.orphan`),
+    ];
+    for (const path of orphanPaths) {
+      writeFileSync(path, JSON.stringify({
+        schemaVersion: 1,
+        pid: process.pid,
+        role: "legacy-command",
+      }));
+    }
+    markerFault.failure = null;
+    const access = createLegacySidecarDataAccess({
+      databasePath: join(root, "catalog.sqlite"),
+    });
+
+    expect(access.legacySidecars.importLibrary({ originalsLibraryPath }).issues)
+      .toEqual([]);
+    expect(orphanPaths.map((path) => existsSync(path))).toEqual([
+      false,
+      false,
+      false,
+    ]);
     access.close();
   });
 
@@ -340,10 +425,8 @@ describe("legacy sidecar cutover", () => {
     writeFileSync(cutoverLockPath, staleOwner);
     expect(access.legacySidecars.importLibrary({ originalsLibraryPath }).issues)
       .toEqual([]);
-    expect(existsSync(cutoverLockPath)).toBe(false);
+    expect(existsSync(cutoverLockPath)).toBe(true);
     expect(access.encodeJobs.list()).toHaveLength(1);
     access.close();
   });
 });
-import { spawn } from "node:child_process";
-import { once } from "node:events";

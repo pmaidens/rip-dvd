@@ -1,6 +1,6 @@
 import argparse
 from collections import deque
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 import datetime as dt
 import fcntl
 import hashlib
@@ -12,7 +12,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import uuid
 from dataclasses import replace
 
 from .core import (
@@ -34,6 +33,7 @@ from .core import (
     suggested_extra_titles,
 )
 from .external import ffmpeg_tool, resolve_movie_metadata, scan_dvd_titles
+from .legacy_queue_lease import legacy_queue_command_lease
 from .output import RipProgressDisplay, log, log_error, prompt, prompt_yes_no
 
 
@@ -42,10 +42,6 @@ DEFAULT_DEVICE = "/dev/sr0"
 DEFAULT_LIBRARY = "/srv/media/Movies"
 DEFAULT_ORIGINALS_LIBRARY = "/srv/media/DVD Originals"
 LEGACY_QUEUE_CUTOVER_MARKER = ".rip-dvd-sqlite-catalog"
-LEGACY_QUEUE_CUTOVER_LOCK = ".rip-dvd-legacy-queue.lock"
-LEGACY_QUEUE_SHARED_LEASE_PREFIX = ".rip-dvd-legacy-queue.shared."
-LEGACY_QUEUE_LOCK_POLL_SECONDS = 0.01
-LEGACY_QUEUE_LOCK_TIMEOUT_SECONDS = 15
 LEGACY_QUEUE_COMMANDS = frozenset(
     {"interactive", "rip", "title", "extras", "queue", "encode"}
 )
@@ -463,91 +459,6 @@ def refuse_retired_legacy_queue(originals_library):
     return True
 
 
-@contextmanager
-def legacy_queue_command_lease(originals_library):
-    queue_root = Path(originals_library)
-    queue_root.mkdir(parents=True, exist_ok=True)
-    lock_path = queue_root / LEGACY_QUEUE_CUTOVER_LOCK
-    owner_path = queue_root / (
-        f"{LEGACY_QUEUE_SHARED_LEASE_PREFIX}{os.getpid()}.{uuid.uuid4().hex}"
-    )
-    temporary_owner_path = queue_root / (
-        f".rip-dvd-legacy-queue.owner.{os.getpid()}.{uuid.uuid4().hex}.tmp"
-    )
-    with temporary_owner_path.open("x", encoding="utf-8") as owner_file:
-        json.dump(
-            {"schemaVersion": 1, "pid": os.getpid(), "role": "legacy-command"},
-            owner_file,
-        )
-        owner_file.write("\n")
-        owner_file.flush()
-        os.fsync(owner_file.fileno())
-    deadline = time.monotonic() + LEGACY_QUEUE_LOCK_TIMEOUT_SECONDS
-
-    def owner_is_dead(path):
-        try:
-            stat = path.lstat()
-            if not path.is_file() or path.is_symlink() or stat.st_nlink < 1:
-                return False
-            owner = json.loads(path.read_text(encoding="utf-8"))
-            pid = owner.get("pid") if isinstance(owner, dict) else None
-            if (
-                not isinstance(owner, dict)
-                or owner.get("schemaVersion") != 1
-                or owner.get("role") not in {"cutover", "legacy-command"}
-                or not isinstance(pid, int)
-                or isinstance(pid, bool)
-                or pid <= 0
-            ):
-                return False
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                return True
-            except PermissionError:
-                return False
-            return False
-        except (OSError, ValueError):
-            return False
-
-    def wait_for_cutover():
-        if time.monotonic() >= deadline:
-            raise TimeoutError(
-                f"Timed out waiting for the SQLite cutover lock: {lock_path}"
-            )
-        time.sleep(LEGACY_QUEUE_LOCK_POLL_SECONDS)
-
-    acquired = False
-    try:
-        while True:
-            if lock_path.exists():
-                if owner_is_dead(lock_path):
-                    lock_path.unlink()
-                    continue
-                wait_for_cutover()
-                continue
-            try:
-                os.link(temporary_owner_path, owner_path)
-                acquired = True
-            except FileExistsError:
-                if owner_is_dead(owner_path):
-                    owner_path.unlink()
-                    continue
-                wait_for_cutover()
-                continue
-            if lock_path.exists():
-                owner_path.unlink()
-                acquired = False
-                continue
-            break
-        yield not refuse_retired_legacy_queue(queue_root)
-    finally:
-        if acquired and owner_path.exists():
-            owner_path.unlink()
-        if temporary_owner_path.exists():
-            temporary_owner_path.unlink()
-
-
 def discover_encode_jobs(originals_library):
     queue_root = Path(originals_library)
     if not queue_root.exists():
@@ -812,8 +723,8 @@ def archive_mode(
         log_error(f"DVD device not found: {device}")
         return 2
     try:
-        with legacy_queue_command_lease(originals_library) as active:
-            if not active:
+        with legacy_queue_command_lease(originals_library):
+            if refuse_retired_legacy_queue(originals_library):
                 return 2
             return _archive_mode_locked(
                 device,
@@ -1001,8 +912,8 @@ def _encode_mode_locked(originals_library, dry_run=False, verbose=False, watch=F
             else nullcontext(True)
         )
         try:
-            with lease as active:
-                if not active:
+            with lease:
+                if refuse_retired_legacy_queue(originals_library):
                     return 2
                 if limit is not None and processed >= limit:
                     return 0
