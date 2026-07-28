@@ -31,6 +31,14 @@ describe("GET /api/dashboard/events", () => {
         isPresent: true,
       });
     }
+    for (let index = 32; index < 92; index += 1) {
+      access.catalog.upsertOpticalDrive({
+        devicePath: `/dev/sr${index}`,
+        displayName: `Missing configured drive ${index}`,
+        isEnabled: true,
+        isPresent: false,
+      });
+    }
     const profile = access.encodingProfiles.create({
       key: "activity-profile",
       displayName: "Activity profile",
@@ -149,11 +157,11 @@ describe("GET /api/dashboard/events", () => {
     };
 
     expect(snapshot.detectedDiscs.status).toBe("loaded");
-    expect(snapshot.opticalDrives.items).toHaveLength(32);
-    expect(snapshot.detectedDiscs.items).toHaveLength(20);
+    expect(snapshot.opticalDrives.items).toHaveLength(52);
+    expect(snapshot.detectedDiscs.items).toHaveLength(45);
     expect(
-      snapshot.detectedDiscs.items.every((disc) =>
-        /_(?:18|19|2[0-4])$/.test(disc.volumeLabel),
+      snapshot.detectedDiscs.items.some(
+        (disc) => disc.volumeLabel === "DISC_00",
       ),
     ).toBe(true);
     expect(

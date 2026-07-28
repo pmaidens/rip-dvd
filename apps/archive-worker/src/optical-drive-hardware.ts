@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { createReadStream } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { constants as fsConstants, createReadStream } from "node:fs";
+import { open, readFile } from "node:fs/promises";
 import { platform as operatingSystem } from "node:os";
 import { basename, isAbsolute, normalize } from "node:path";
 
@@ -145,23 +145,55 @@ interface LinuxOpticalDriveHardwareOptions {
   platform?: NodeJS.Platform;
   runner?: CommandRunner;
   contentReader?: DiscContentReader;
-  mediaGenerationReader?: MediaGenerationReader;
+  mediaGenerationObserver?: MediaGenerationObserver;
 }
 
-export interface MediaGenerationReader {
-  read(devicePath: string, signal: AbortSignal): Promise<string>;
+export interface MediaGenerationObserver {
+  observe(devicePath: string, signal: AbortSignal): Promise<string>;
 }
 
-export const nodeMediaGenerationReader: MediaGenerationReader = {
-  async read(devicePath, signal) {
-    const safeDevicePath = requireSafeDevicePath(devicePath);
-    const value = await readFile(
-      `/sys/class/block/${basename(safeDevicePath)}/diskseq`,
-      { encoding: "utf8", signal },
-    );
-    return requireMediaGeneration(value);
-  },
-};
+interface OpticalDeviceHandle {
+  close(): Promise<void>;
+}
+
+interface NodeMediaGenerationObserverOptions {
+  openDevice?: (path: string, flags: number) => Promise<OpticalDeviceHandle>;
+  readGenerationFile?: (
+    path: string,
+    options: { encoding: "utf8"; signal: AbortSignal },
+  ) => Promise<string>;
+}
+
+export function createNodeMediaGenerationObserver({
+  openDevice = (path, flags) => open(path, flags),
+  readGenerationFile = (path, options) => readFile(path, options),
+}: NodeMediaGenerationObserverOptions = {}): MediaGenerationObserver {
+  return {
+    async observe(devicePath, signal) {
+      const safeDevicePath = requireSafeDevicePath(devicePath);
+      signal.throwIfAborted();
+      // Opening the block device makes Linux run the optical driver's media
+      // event check. Keep the handle open until the resulting disk sequence is
+      // read so a passive sysfs value is never used as the cache authority.
+      const device = await openDevice(
+        safeDevicePath,
+        fsConstants.O_RDONLY | fsConstants.O_NONBLOCK,
+      );
+      try {
+        const value = await readGenerationFile(
+          `/sys/class/block/${basename(safeDevicePath)}/diskseq`,
+          { encoding: "utf8", signal },
+        );
+        return requireMediaGeneration(value);
+      } finally {
+        await device.close();
+      }
+    },
+  };
+}
+
+export const nodeMediaGenerationObserver =
+  createNodeMediaGenerationObserver();
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -250,10 +282,6 @@ function parseDiscoveredDrives(output: string): DiscoveredOpticalDrive[] {
       const vendor = optionalText(record.vendor);
       const product = optionalText(record.model);
       const serialNumber = optionalText(record.serial);
-      const mediaGeneration =
-        record.diskseq === undefined
-          ? undefined
-          : requireMediaGeneration(record.diskseq);
       const displayName = [vendor, product].filter(Boolean).join(" ");
       return {
         devicePath: requireSafeDevicePath(record.path),
@@ -261,7 +289,6 @@ function parseDiscoveredDrives(output: string): DiscoveredOpticalDrive[] {
         ...(vendor ? { vendor } : {}),
         ...(product ? { product } : {}),
         ...(serialNumber ? { serialNumber } : {}),
-        ...(mediaGeneration ? { mediaGeneration } : {}),
       };
     });
   if (drives.length > MAX_DISCOVERED_DEVICES) {
@@ -499,9 +526,8 @@ export function createLinuxOpticalDriveHardware({
   platform = operatingSystem(),
   runner = nodeCommandRunner,
   contentReader = nodeDiscContentReader,
-  mediaGenerationReader = nodeMediaGenerationReader,
+  mediaGenerationObserver = nodeMediaGenerationObserver,
 }: LinuxOpticalDriveHardwareOptions = {}): OpticalDriveHardware {
-  const observedGenerations = new Map<string, string>();
   const scanCache = new Map<
     string,
     { generation: string; result: ScannedDvd | null }
@@ -513,7 +539,7 @@ export function createLinuxOpticalDriveHardware({
       }
       const result = await runner.run(
         "lsblk",
-        ["--json", "--output", "PATH,TYPE,TRAN,VENDOR,MODEL,SERIAL,DISKSEQ"],
+        ["--json", "--output", "PATH,TYPE,TRAN,VENDOR,MODEL,SERIAL"],
         {
           maxBufferBytes: MAX_COMMAND_OUTPUT_BYTES,
           signal,
@@ -530,14 +556,6 @@ export function createLinuxOpticalDriveHardware({
       for (const cachedPath of scanCache.keys()) {
         if (!discoveredPaths.has(cachedPath)) {
           scanCache.delete(cachedPath);
-          observedGenerations.delete(cachedPath);
-        }
-      }
-      for (const drive of discovered) {
-        if (drive.mediaGeneration === undefined) {
-          observedGenerations.delete(drive.devicePath);
-        } else {
-          observedGenerations.set(drive.devicePath, drive.mediaGeneration);
         }
       }
       return discovered;
@@ -545,24 +563,17 @@ export function createLinuxOpticalDriveHardware({
 
     async scanDvd(devicePath, signal) {
       const safeDevicePath = requireSafeDevicePath(devicePath);
-      const generationBefore = await mediaGenerationReader.read(
+      const generationBefore = await mediaGenerationObserver.observe(
         safeDevicePath,
         signal,
       );
-      const expectedGeneration = observedGenerations.get(safeDevicePath);
-      if (
-        expectedGeneration !== undefined &&
-        generationBefore !== expectedGeneration
-      ) {
-        throw new Error("DVD medium changed during scanning");
-      }
       const cached = scanCache.get(safeDevicePath);
       if (cached?.generation === generationBefore) {
         return cached.result;
       }
       const metadata = await inspectDvd(safeDevicePath, signal, runner);
       if (metadata === null) {
-        const generationAfter = await mediaGenerationReader.read(
+        const generationAfter = await mediaGenerationObserver.observe(
           safeDevicePath,
           signal,
         );
@@ -581,7 +592,7 @@ export function createLinuxOpticalDriveHardware({
         runner,
         contentReader,
       );
-      const generationAfter = await mediaGenerationReader.read(
+      const generationAfter = await mediaGenerationObserver.observe(
         safeDevicePath,
         signal,
       );

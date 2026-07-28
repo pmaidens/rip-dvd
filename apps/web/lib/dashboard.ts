@@ -86,6 +86,7 @@ export interface DashboardSnapshotOptions {
 }
 
 const DASHBOARD_ACTIVE_JOB_LIMIT = 100;
+const DASHBOARD_ACTIVE_DISC_LIMIT = 100;
 
 type SourceResult<T> =
   | { status: "loaded"; value: T }
@@ -132,7 +133,12 @@ function readDashboardSnapshotRecords(
   const detectedDiscSource = readSource(() =>
     access.catalog.listDetectedDiscs(
       undefined,
-      activityLimit === undefined ? undefined : { limit: activityLimit },
+      activityLimit === undefined
+        ? undefined
+        : {
+            activeLimit: DASHBOARD_ACTIVE_DISC_LIMIT,
+            historyLimit: activityLimit,
+          },
     ),
   );
   const archiveJobSource = readSource(() =>
