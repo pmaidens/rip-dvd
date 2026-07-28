@@ -212,9 +212,11 @@ resumes the idempotent import while the legacy queue remains inactive. The
 marker also records the immutable legacy-job configuration captured at cutover,
 so a later retry reports sidecar conflicts without confusing them with an
 authoritative SQLite requeue. The importer and legacy archive/encode commands
-share a library-scoped lease: cutover waits for an in-flight legacy batch to
-finish, and a new legacy batch waits for cutover and then refuses the marked
-library. The command never writes the sidecars themselves. The marker makes
+share kernel-held library-scoped locks: durable cutover intent prevents new
+legacy batches from starting, then waits without a batch-duration timeout for
+in-flight work to drain. Locks are released by the operating system after a
+process crash and do not rely on PIDs or mutable owner paths. The command never
+writes the sidecars themselves. The marker makes
 SQLite the enforceable queue authority: legacy `interactive`, `rip`, `title`,
 `extras`, `queue`, and `encode` commands refuse that library, so use the SQLite
 catalog and workers instead.

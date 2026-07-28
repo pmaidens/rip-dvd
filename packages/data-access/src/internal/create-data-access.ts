@@ -42,6 +42,7 @@ import {
 } from "./job-queue.js";
 import type {
   LegacyQueueCutover,
+  LegacyQueueJobSnapshot,
   LegacySidecarDiscovery,
   ParsedLegacyJob,
 } from "./legacy-sidecars.js";
@@ -1412,17 +1413,10 @@ export function createDataAccessInternal(
           );
         const discoveries =
           legacySidecarMigration.discover(originalsLibraryPath);
-        const cutover = discoveries.some(
-          (discovery) => discovery.outcome === "parsed",
-        )
-          ? legacySidecarMigration.retireQueue(
-              originalsLibraryPath,
-              discoveries,
-            )
-          : {
-              jobSignatures: new Map<string, string>(),
-              wasAlreadyPublished: false,
-            };
+        const cutover = legacySidecarMigration.retireQueue(
+          originalsLibraryPath,
+          discoveries,
+        );
         const report: LegacySidecarImportReport = {
           originalsLibraryPath,
           sidecarsFound: discoveries.length,
@@ -1437,6 +1431,11 @@ export function createDataAccessInternal(
           string,
           { job: ParsedLegacyJob; sidecarPath: string }
         >();
+        const reconciledSnapshotKeys = new Set<string>();
+        const trustedSchemaOneSnapshots = new Map<
+          string,
+          LegacyQueueJobSnapshot
+        >();
 
         for (const discovery of discoveries) {
           if (discovery.outcome === "skipped") {
@@ -1447,6 +1446,95 @@ export function createDataAccessInternal(
 
           const { sidecar } = discovery;
           report.issues.push(...sidecar.issues);
+          if (cutover.mode === "schema-one") {
+            for (const job of sidecar.jobs) {
+              const archive = database
+                .select()
+                .from(originalDiscArchives)
+                .where(
+                  and(
+                    eq(originalDiscArchives.fingerprint, sidecar.fingerprint),
+                    eq(originalDiscArchives.archivePath, sidecar.archivePath),
+                  ),
+                )
+                .get();
+              const selection = archive
+                ? database
+                    .select()
+                    .from(discSelections)
+                    .where(
+                      and(
+                        eq(discSelections.originalDiscArchiveId, archive.id),
+                        eq(discSelections.sourceKey, job.sourceKey),
+                      ),
+                    )
+                    .get()
+                : undefined;
+              const profile = database
+                .select()
+                .from(encodingProfiles)
+                .where(
+                  and(
+                    eq(encodingProfiles.mediaDomain, "dvd_video"),
+                    eq(encodingProfiles.key, job.profileKey),
+                    eq(encodingProfiles.version, 1),
+                  ),
+                )
+                .get();
+              const mediaItem = selection
+                ? database
+                    .select()
+                    .from(mediaItems)
+                    .where(eq(mediaItems.id, selection.mediaItemId))
+                    .get()
+                : undefined;
+              const logicalJobs =
+                selection && profile
+                  ? database
+                      .select()
+                      .from(encodeJobs)
+                      .where(
+                        and(
+                          eq(encodeJobs.discSelectionId, selection.id),
+                          eq(encodeJobs.encodingProfileId, profile.id),
+                        ),
+                      )
+                      .all()
+                  : [];
+              const exactMatch =
+                selection?.kind === job.kind &&
+                selection.titleNumber === job.titleNumber &&
+                selection.label === job.label &&
+                mediaItem?.kind === job.mediaItemKind &&
+                mediaItem.title === job.mediaTitle &&
+                profile?.displayName === job.preset &&
+                isDeepStrictEqual(profile.settings, { preset: job.preset }) &&
+                logicalJobs.length === 1 &&
+                logicalJobs[0]?.outputPath === job.outputPath;
+              const logicalKey = legacyJobLogicalKey(
+                sidecar.fingerprint,
+                job,
+              );
+              if (exactMatch) {
+                trustedSchemaOneSnapshots.set(logicalKey, {
+                  jobIndex: job.jobIndex,
+                  sidecarPath: sidecar.sidecarPath,
+                  signature: legacyJobSignature(job),
+                });
+                report.recordsUnchanged += 1;
+              } else {
+                report.issues.push({
+                  code: "duplicate_record",
+                  jobIndex: job.jobIndex,
+                  message:
+                    "Schema-1 cutover is ambiguous because this legacy job cannot be distinguished from post-cutover drift; SQLite state was preserved",
+                  sidecarPath: sidecar.sidecarPath,
+                });
+              }
+            }
+            report.sidecarsImported += 1;
+            continue;
+          }
           const acceptedJobs = sidecar.jobs.filter((job) => {
             const logicalKey = legacyJobLogicalKey(
               sidecar.fingerprint,
@@ -1455,10 +1543,10 @@ export function createDataAccessInternal(
             const signature = legacyJobSignature(job);
             const persisted = persistedLegacyJobs.get(logicalKey);
             if (!persisted) {
-              const publishedSignature =
-                cutover.jobSignatures.get(logicalKey);
+              const publishedSnapshot =
+                cutover.jobSnapshots.get(logicalKey);
               if (
-                publishedSignature !== signature
+                publishedSnapshot?.signature !== signature
               ) {
                 report.issues.push({
                   code: "duplicate_record",
@@ -1469,6 +1557,7 @@ export function createDataAccessInternal(
                 });
                 return false;
               }
+              reconciledSnapshotKeys.add(logicalKey);
               return true;
             }
             if (legacyJobSignature(persisted.job) === signature) {
@@ -1765,11 +1854,11 @@ export function createDataAccessInternal(
                   logicalJob.outputPath !== job.outputPath &&
                   !(
                     cutover.wasAlreadyPublished &&
-                    cutover.jobSignatures
+                    cutover.jobSnapshots
                       .get(
                         legacyJobLogicalKey(sidecar.fingerprint, job),
                       )
-                      === legacyJobSignature(job)
+                      ?.signature === legacyJobSignature(job)
                   )
                 ) {
                   persistenceIssues.push({
@@ -1999,6 +2088,77 @@ export function createDataAccessInternal(
           report.recordsUpdated += updated;
           report.recordsUnchanged += unchanged;
           report.issues.push(...persistenceIssues);
+        }
+
+        if (cutover.mode === "schema-one") {
+          cutover.upgradeSchemaOne(trustedSchemaOneSnapshots);
+        } else {
+          for (const [logicalKey, snapshot] of cutover.jobSnapshots) {
+            if (reconciledSnapshotKeys.has(logicalKey)) {
+              continue;
+            }
+            const profileSeparator = logicalKey.lastIndexOf("\0");
+            const sourceSeparator = logicalKey.lastIndexOf(
+              "\0",
+              profileSeparator - 1,
+            );
+            const fingerprint = logicalKey.slice(0, sourceSeparator);
+            const sourceKey = logicalKey.slice(
+              sourceSeparator + 1,
+              profileSeparator,
+            );
+            const profileKey = logicalKey.slice(profileSeparator + 1);
+            const archive = database
+              .select()
+              .from(originalDiscArchives)
+              .where(eq(originalDiscArchives.fingerprint, fingerprint))
+              .get();
+            const selection = archive
+              ? database
+                  .select()
+                  .from(discSelections)
+                  .where(
+                    and(
+                      eq(discSelections.originalDiscArchiveId, archive.id),
+                      eq(discSelections.sourceKey, sourceKey),
+                    ),
+                  )
+                  .get()
+              : undefined;
+            const profile = database
+              .select()
+              .from(encodingProfiles)
+              .where(
+                and(
+                  eq(encodingProfiles.mediaDomain, "dvd_video"),
+                  eq(encodingProfiles.key, profileKey),
+                  eq(encodingProfiles.version, 1),
+                ),
+              )
+              .get();
+            const reconciledJob =
+              selection && profile
+                ? database
+                    .select({ id: encodeJobs.id })
+                    .from(encodeJobs)
+                    .where(
+                      and(
+                        eq(encodeJobs.discSelectionId, selection.id),
+                        eq(encodeJobs.encodingProfileId, profile.id),
+                      ),
+                    )
+                    .get()
+                : undefined;
+            if (!reconciledJob) {
+              report.issues.push({
+                code: "invalid_job",
+                jobIndex: snapshot.jobIndex,
+                message:
+                  "The Encode Job captured at SQLite cutover is missing from both the legacy sidecars and SQLite catalog",
+                sidecarPath: snapshot.sidecarPath,
+              });
+            }
+          }
         }
 
         return report;

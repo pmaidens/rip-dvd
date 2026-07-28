@@ -5,6 +5,9 @@ RUN corepack enable
 WORKDIR /app
 
 FROM build-base AS dependencies
+RUN apt-get update \
+  && apt-get install --yes --no-install-recommends python3-minimal \
+  && rm -rf /var/lib/apt/lists/*
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .node-version ./
 COPY scripts/check-toolchain.mjs scripts/check-toolchain.mjs
 COPY docker/runtime.Dockerfile docker/runtime.Dockerfile
