@@ -2,11 +2,18 @@ import { describe, expect, it } from "vitest";
 
 import {
   decodeDvdTitleMap,
+  isDvdContentId,
   MAX_DVD_AUDIO_STREAMS_PER_TITLE,
   MAX_DVD_TITLES,
 } from "./dvd-scan.js";
 
 describe("versioned DVD title-map contract", () => {
+  it("shares the versioned content identity validator", () => {
+    expect(isDvdContentId(`sha256:${"a".repeat(64)}`)).toBe(true);
+    expect(isDvdContentId(`sha256:${"A".repeat(64)}`)).toBe(false);
+    expect(isDvdContentId("sha256:short")).toBe(false);
+  });
+
   it("decodes bounded reviewable stream metadata from schema version 2", () => {
     const scan = {
       schemaVersion: 2,

@@ -515,6 +515,70 @@ describe("data-access facade", () => {
     access.close();
   });
 
+  it.each([
+    ["loses serial evidence", undefined],
+    ["gains serial evidence", "NEW-SERIAL"],
+  ])("disables a present same-model drive when it %s", (_case, nextSerial) => {
+    const access = openTestDatabase();
+    const original = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      vendor: "Pioneer",
+      product: "DVD-RW",
+      ...(nextSerial === undefined ? { serialNumber: "KNOWN-SERIAL" } : {}),
+      isEnabled: true,
+      isPresent: true,
+    });
+
+    expect(
+      access.catalog.reconcileOpticalDrives([
+        {
+          devicePath: "/dev/sr0",
+          vendor: "Pioneer",
+          product: "DVD-RW",
+          ...(nextSerial === undefined ? {} : { serialNumber: nextSerial }),
+        },
+      ]),
+    ).toEqual([
+      expect.objectContaining({
+        id: original.id,
+        isEnabled: false,
+        serialNumber: nextSerial ?? null,
+      }),
+    ]);
+
+    access.close();
+  });
+
+  it("does not advance a Detected Disc version for identical scan data", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-26T18:00:00.000Z"));
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const input = {
+      opticalDriveId: drive.id,
+      discKind: "dvd" as const,
+      fingerprint: `sha256:${"a".repeat(64)}`,
+      volumeLabel: "UNCHANGED_DISC",
+      scanData: {
+        schemaVersion: 2,
+        contentId: `sha256:${"a".repeat(64)}`,
+        titles: [],
+      },
+    };
+    const first = access.catalog.registerDetectedDisc(input);
+
+    vi.setSystemTime(new Date("2026-07-26T18:05:00.000Z"));
+    const repeated = access.catalog.registerDetectedDisc(input);
+
+    expect(repeated.detectedAt).toEqual(first.detectedAt);
+    expect(repeated.updatedAt).toEqual(first.updatedAt);
+    access.close();
+  });
+
   it("requires positive safe integer Encoding Profile versions", () => {
     const databasePath = createTestDatabasePath();
     const access = openTestDatabase(databasePath);

@@ -1,12 +1,14 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { createReadStream } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { platform as operatingSystem } from "node:os";
-import { isAbsolute, normalize } from "node:path";
+import { basename, isAbsolute, normalize } from "node:path";
 
 import {
   decodeDvdTitleMap,
   DVD_TITLE_MAP_SCHEMA_VERSION,
+  isDvdContentId,
   MAX_DVD_AUDIO_STREAMS_PER_TITLE,
   MAX_DVD_SCAN_INTEGER,
   MAX_DVD_STREAM_TEXT_LENGTH,
@@ -143,7 +145,23 @@ interface LinuxOpticalDriveHardwareOptions {
   platform?: NodeJS.Platform;
   runner?: CommandRunner;
   contentReader?: DiscContentReader;
+  mediaGenerationReader?: MediaGenerationReader;
 }
+
+export interface MediaGenerationReader {
+  read(devicePath: string, signal: AbortSignal): Promise<string>;
+}
+
+export const nodeMediaGenerationReader: MediaGenerationReader = {
+  async read(devicePath, signal) {
+    const safeDevicePath = requireSafeDevicePath(devicePath);
+    const value = await readFile(
+      `/sys/class/block/${basename(safeDevicePath)}/diskseq`,
+      { encoding: "utf8", signal },
+    );
+    return requireMediaGeneration(value);
+  },
+};
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -173,6 +191,17 @@ function requireSafeDevicePath(value: unknown): string {
     throw new Error("Optical Drive discovery returned an unsafe device path");
   }
   return path;
+}
+
+function requireMediaGeneration(value: unknown): string {
+  const generation =
+    typeof value === "number" && Number.isSafeInteger(value)
+      ? String(value)
+      : optionalText(value, 32);
+  if (generation === undefined || !/^\d+$/.test(generation)) {
+    throw new Error("Optical Drive media generation is unavailable");
+  }
+  return generation;
 }
 
 function flattenBlockDevices(value: unknown): UnknownRecord[] {
@@ -221,6 +250,10 @@ function parseDiscoveredDrives(output: string): DiscoveredOpticalDrive[] {
       const vendor = optionalText(record.vendor);
       const product = optionalText(record.model);
       const serialNumber = optionalText(record.serial);
+      const mediaGeneration =
+        record.diskseq === undefined
+          ? undefined
+          : requireMediaGeneration(record.diskseq);
       const displayName = [vendor, product].filter(Boolean).join(" ");
       return {
         devicePath: requireSafeDevicePath(record.path),
@@ -228,6 +261,7 @@ function parseDiscoveredDrives(output: string): DiscoveredOpticalDrive[] {
         ...(vendor ? { vendor } : {}),
         ...(product ? { product } : {}),
         ...(serialNumber ? { serialNumber } : {}),
+        ...(mediaGeneration ? { mediaGeneration } : {}),
       };
     });
   if (drives.length > MAX_DISCOVERED_DEVICES) {
@@ -421,7 +455,7 @@ async function readDvdContentId(
     throw new Error("blockdev returned an invalid DVD size");
   }
   const contentId = await contentReader.hash(devicePath, sizeBytes, signal);
-  if (!/^sha256:[0-9a-f]{64}$/.test(contentId)) {
+  if (!isDvdContentId(contentId)) {
     throw new Error("DVD content reader returned an invalid content identity");
   }
   return contentId;
@@ -465,7 +499,13 @@ export function createLinuxOpticalDriveHardware({
   platform = operatingSystem(),
   runner = nodeCommandRunner,
   contentReader = nodeDiscContentReader,
+  mediaGenerationReader = nodeMediaGenerationReader,
 }: LinuxOpticalDriveHardwareOptions = {}): OpticalDriveHardware {
+  const observedGenerations = new Map<string, string>();
+  const scanCache = new Map<
+    string,
+    { generation: string; result: ScannedDvd | null }
+  >();
   return {
     async discover(signal) {
       if (platform !== "linux") {
@@ -473,7 +513,7 @@ export function createLinuxOpticalDriveHardware({
       }
       const result = await runner.run(
         "lsblk",
-        ["--json", "--output", "PATH,TYPE,TRAN,VENDOR,MODEL,SERIAL"],
+        ["--json", "--output", "PATH,TYPE,TRAN,VENDOR,MODEL,SERIAL,DISKSEQ"],
         {
           maxBufferBytes: MAX_COMMAND_OUTPUT_BYTES,
           signal,
@@ -483,24 +523,57 @@ export function createLinuxOpticalDriveHardware({
       if (result.exitCode !== 0) {
         throw commandFailure("lsblk", result);
       }
-      return parseDiscoveredDrives(result.stdout);
+      const discovered = parseDiscoveredDrives(result.stdout);
+      const discoveredPaths = new Set(
+        discovered.map((drive) => drive.devicePath),
+      );
+      for (const cachedPath of scanCache.keys()) {
+        if (!discoveredPaths.has(cachedPath)) {
+          scanCache.delete(cachedPath);
+          observedGenerations.delete(cachedPath);
+        }
+      }
+      for (const drive of discovered) {
+        if (drive.mediaGeneration === undefined) {
+          observedGenerations.delete(drive.devicePath);
+        } else {
+          observedGenerations.set(drive.devicePath, drive.mediaGeneration);
+        }
+      }
+      return discovered;
     },
 
     async scanDvd(devicePath, signal) {
       const safeDevicePath = requireSafeDevicePath(devicePath);
-      const probe = await inspectDvd(safeDevicePath, signal, runner);
-      if (probe === null) {
-        return null;
-      }
-      const contentIdBefore = await readDvdContentId(
+      const generationBefore = await mediaGenerationReader.read(
         safeDevicePath,
         signal,
-        runner,
-        contentReader,
       );
+      const expectedGeneration = observedGenerations.get(safeDevicePath);
+      if (
+        expectedGeneration !== undefined &&
+        generationBefore !== expectedGeneration
+      ) {
+        throw new Error("DVD medium changed during scanning");
+      }
+      const cached = scanCache.get(safeDevicePath);
+      if (cached?.generation === generationBefore) {
+        return cached.result;
+      }
       const metadata = await inspectDvd(safeDevicePath, signal, runner);
       if (metadata === null) {
-        throw new Error("DVD medium changed during scanning");
+        const generationAfter = await mediaGenerationReader.read(
+          safeDevicePath,
+          signal,
+        );
+        if (generationBefore !== generationAfter) {
+          throw new Error("DVD medium changed during scanning");
+        }
+        scanCache.set(safeDevicePath, {
+          generation: generationAfter,
+          result: null,
+        });
+        return null;
       }
       const contentId = await readDvdContentId(
         safeDevicePath,
@@ -508,7 +581,11 @@ export function createLinuxOpticalDriveHardware({
         runner,
         contentReader,
       );
-      if (contentIdBefore !== contentId) {
+      const generationAfter = await mediaGenerationReader.read(
+        safeDevicePath,
+        signal,
+      );
+      if (generationBefore !== generationAfter) {
         throw new Error("DVD medium changed during scanning");
       }
       const scanData = decodeDvdTitleMap({
@@ -519,11 +596,16 @@ export function createLinuxOpticalDriveHardware({
       if (scanData === null) {
         throw new Error("lsdvd returned an invalid DVD title map");
       }
-      return {
+      const result = {
         fingerprint: contentId,
         ...(metadata.volumeLabel ? { volumeLabel: metadata.volumeLabel } : {}),
         scanData,
       };
+      scanCache.set(safeDevicePath, {
+        generation: generationAfter,
+        result,
+      });
+      return result;
     },
   };
 }

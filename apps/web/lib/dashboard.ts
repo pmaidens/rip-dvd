@@ -2,6 +2,7 @@ import type {
   ArchiveFormat,
   ConsistentReadAccess,
   DataAccess,
+  DetectedDiscId,
   DetectedDiscStatus,
   DiscKind,
   JobStatus,
@@ -28,6 +29,12 @@ export interface DashboardDetectedDisc {
   fingerprint: string;
   titles: readonly DvdTitle[];
   detectedAt: string;
+}
+
+export interface DashboardDetectedDiscDetails {
+  id: string;
+  detectedAt: string;
+  titles: readonly DvdTitle[];
 }
 
 export interface DashboardArchiveJob {
@@ -78,6 +85,8 @@ export interface DashboardSnapshotOptions {
   includeDetectedDiscDetails?: boolean;
 }
 
+const DASHBOARD_ACTIVE_JOB_LIMIT = 100;
+
 type SourceResult<T> =
   | { status: "loaded"; value: T }
   | { status: "error" };
@@ -115,7 +124,9 @@ function readDashboardSnapshotRecords(
 ): DashboardSnapshot {
   const opticalDriveSource = readSource(() =>
     access.catalog.listOpticalDrives(
-      activityLimit === undefined ? undefined : { limit: activityLimit },
+      activityLimit === undefined
+        ? undefined
+        : { historicalLimit: activityLimit },
     ),
   );
   const detectedDiscSource = readSource(() =>
@@ -127,13 +138,23 @@ function readDashboardSnapshotRecords(
   const archiveJobSource = readSource(() =>
     access.archiveJobs.list(
       undefined,
-      activityLimit === undefined ? undefined : { limit: activityLimit },
+      activityLimit === undefined
+        ? undefined
+        : {
+            activeLimit: DASHBOARD_ACTIVE_JOB_LIMIT,
+            historyLimit: activityLimit,
+          },
     ),
   );
   const encodeJobSource = readSource(() =>
     access.encodeJobs.list(
       undefined,
-      activityLimit === undefined ? undefined : { limit: activityLimit },
+      activityLimit === undefined
+        ? undefined
+        : {
+            activeLimit: DASHBOARD_ACTIVE_JOB_LIMIT,
+            historyLimit: activityLimit,
+          },
     ),
   );
   const archiveSource = readSource(() =>
@@ -384,4 +405,25 @@ export function readDashboardSnapshot(
   return access.readConsistentSnapshot((snapshotAccess) =>
     readDashboardSnapshotRecords(snapshotAccess, options),
   );
+}
+
+export function readDashboardDetectedDiscDetails(
+  access: DataAccess,
+  id: string,
+  detectedAt: string,
+): DashboardDetectedDiscDetails | null {
+  return access.readConsistentSnapshot((snapshotAccess) => {
+    const disc = snapshotAccess.catalog.listDetectedDiscs(undefined, {
+      ids: [id as DetectedDiscId],
+    })[0];
+    if (!disc || disc.detectedAt.toISOString() !== detectedAt) {
+      return null;
+    }
+    const scan = decodeDvdTitleMap(disc.scanData);
+    return {
+      id: disc.id,
+      detectedAt,
+      titles: scan?.titles ?? [],
+    };
+  });
 }

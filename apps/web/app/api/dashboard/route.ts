@@ -4,11 +4,15 @@ import { getDataAccess } from "../../../lib/data-access";
 import { readDashboardSnapshot } from "../../../lib/dashboard";
 
 export const dynamic = "force-dynamic";
+const DASHBOARD_HISTORY_LIMIT = 20;
 
 export function createDashboardResponse(access: DataAccess): Response {
-  return Response.json(readDashboardSnapshot(access), {
-    headers: { "Cache-Control": "no-store" },
-  });
+  return Response.json(
+    readDashboardSnapshot(access, { activityLimit: DASHBOARD_HISTORY_LIMIT }),
+    {
+      headers: { "Cache-Control": "no-store" },
+    },
+  );
 }
 
 function dashboardUnavailableResponse(): Response {
