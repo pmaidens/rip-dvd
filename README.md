@@ -209,10 +209,15 @@ writes and synchronizes a `.rip-dvd-sqlite-catalog` cutover marker at the
 originals-library root. If marker publication fails, no imported SQLite records
 are committed. If the process stops after publication, rerunning the command
 resumes the idempotent import while the legacy queue remains inactive. The
-command never writes the sidecars themselves. The marker makes SQLite the
-enforceable queue authority: legacy `interactive`, `rip`, `title`, `extras`,
-`queue`, and `encode` commands refuse that library, so use the SQLite catalog
-and workers instead.
+marker also records the immutable legacy-job configuration captured at cutover,
+so a later retry reports sidecar conflicts without confusing them with an
+authoritative SQLite requeue. The importer and legacy archive/encode commands
+share a library-scoped lease: cutover waits for an in-flight legacy batch to
+finish, and a new legacy batch waits for cutover and then refuses the marked
+library. The command never writes the sidecars themselves. The marker makes
+SQLite the enforceable queue authority: legacy `interactive`, `rip`, `title`,
+`extras`, `queue`, and `encode` commands refuse that library, so use the SQLite
+catalog and workers instead.
 
 ### Join Part Files
 
