@@ -1,5 +1,6 @@
 import json
 import fcntl
+import os
 from pathlib import Path
 from io import StringIO
 import sys
@@ -222,22 +223,89 @@ class EncodeQueueDiscoveryTests(unittest.TestCase):
 
 
 class LegacyQueueCutoverRaceTests(unittest.TestCase):
+    def test_crashed_cutover_lease_is_reclaimed_before_and_after_publication(self):
+        with tempfile.TemporaryDirectory() as temp:
+            originals = Path(temp)
+            lock = originals / ".rip-dvd-legacy-queue.lock"
+            lock.write_text(
+                json.dumps({
+                    "schemaVersion": 1,
+                    "pid": 999_999,
+                    "role": "cutover",
+                }),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(encode_mode(originals, dry_run=True, idle=False), 0)
+            self.assertFalse(lock.exists())
+
+            (originals / ".rip-dvd-sqlite-catalog").write_text(
+                "{}\n", encoding="utf-8"
+            )
+            lock.write_text(
+                json.dumps({
+                    "schemaVersion": 1,
+                    "pid": 999_999,
+                    "role": "cutover",
+                }),
+                encoding="utf-8",
+            )
+            self.assertEqual(encode_mode(originals, dry_run=True, idle=False), 2)
+            self.assertFalse(lock.exists())
+
+    def test_encode_watch_releases_its_lease_between_iterations(self):
+        with tempfile.TemporaryDirectory() as temp:
+            originals = Path(temp)
+            lock = originals / ".rip-dvd-legacy-queue.lock"
+
+            class WatchStopped(Exception):
+                pass
+
+            def stop_between_iterations(_interval):
+                self.assertFalse(lock.exists())
+                self.assertEqual(
+                    list(originals.glob(".rip-dvd-legacy-queue.shared.*")), []
+                )
+                raise WatchStopped()
+
+            with patch("rip_dvd.cli.time.sleep", side_effect=stop_between_iterations):
+                with self.assertRaises(WatchStopped):
+                    encode_mode(
+                        originals,
+                        dry_run=True,
+                        watch=True,
+                        interval=1,
+                        idle=False,
+                    )
+
     def start_cutover_contender(self, originals, command_started):
         marker = originals / ".rip-dvd-sqlite-catalog"
         lock = originals / ".rip-dvd-legacy-queue.lock"
+        owner = originals / ".rip-dvd-legacy-queue.cutover-owner.tmp"
         attempted = threading.Event()
 
         def publish_cutover():
             command_started.wait()
             attempted.set()
+            owner.write_text(
+                json.dumps({
+                    "schemaVersion": 1,
+                    "pid": os.getpid(),
+                    "role": "cutover",
+                }),
+                encoding="utf-8",
+            )
             while True:
                 try:
-                    lock.mkdir()
+                    os.link(owner, lock)
                     break
                 except FileExistsError:
                     time.sleep(0.005)
+            owner.unlink()
+            while list(originals.glob(".rip-dvd-legacy-queue.shared.*")):
+                time.sleep(0.005)
             marker.write_text("{}\n", encoding="utf-8")
-            lock.rmdir()
+            lock.unlink()
 
         contender = threading.Thread(target=publish_cutover)
         contender.start()

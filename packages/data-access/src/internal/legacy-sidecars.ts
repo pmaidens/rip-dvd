@@ -3,12 +3,12 @@ import {
   closeSync,
   existsSync,
   fsyncSync,
-  mkdirSync,
+  linkSync,
+  lstatSync,
   openSync,
   readdirSync,
   readFileSync,
   renameSync,
-  rmdirSync,
   statSync,
   unlinkSync,
   writeFileSync,
@@ -26,7 +26,9 @@ import {
 
 const DEFAULT_HANDBRAKE_PRESET = "Fast 480p30";
 const LEGACY_QUEUE_CUTOVER_MARKER = ".rip-dvd-sqlite-catalog";
-const LEGACY_QUEUE_LOCK_DIRECTORY = ".rip-dvd-legacy-queue.lock";
+const LEGACY_QUEUE_CUTOVER_LOCK = ".rip-dvd-legacy-queue.lock";
+const LEGACY_QUEUE_SHARED_LEASE_PREFIX =
+  ".rip-dvd-legacy-queue.shared.";
 const LEGACY_QUEUE_LOCK_POLL_MS = 10;
 const LEGACY_QUEUE_LOCK_TIMEOUT_MS = 15_000;
 
@@ -64,7 +66,7 @@ export type LegacySidecarDiscovery =
   | { outcome: "skipped"; issue: LegacySidecarImportIssue };
 
 export interface LegacyQueueCutover {
-  jobSignatures: ReadonlyMap<string, readonly string[]>;
+  jobSignatures: ReadonlyMap<string, string>;
   wasAlreadyPublished: boolean;
 }
 
@@ -130,6 +132,70 @@ function recordedDate(value: unknown): Date | null {
 function nonNegativeInteger(value: unknown): number | null {
   const integer = legacyInteger(value);
   return integer !== null && integer >= 0 ? integer : null;
+}
+
+function isValidPublishedJob(
+  logicalKey: string,
+  signature: string,
+): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(signature);
+  } catch {
+    return false;
+  }
+  const job = objectValue(parsed);
+  if (!job || JSON.stringify(job) !== signature) {
+    return false;
+  }
+  const expectedFields = [
+    "kind",
+    "label",
+    "mediaItemKind",
+    "mediaTitle",
+    "outputPath",
+    "preset",
+    "profileKey",
+    "sourceKey",
+    "titleNumber",
+  ];
+  const fields = Object.keys(job);
+  if (
+    fields.length !== expectedFields.length ||
+    expectedFields.some((field, index) => fields[index] !== field)
+  ) {
+    return false;
+  }
+  const sourceKey = nonEmptyString(job.sourceKey);
+  const profile = nonEmptyString(job.profileKey);
+  const titleNumber =
+    job.titleNumber === null ? null : positiveInteger(job.titleNumber);
+  if (
+    (job.kind !== "main_feature" && job.kind !== "dvd_title") ||
+    (job.mediaItemKind !== "movie" &&
+      job.mediaItemKind !== "bonus_feature") ||
+    !nonEmptyString(job.label) ||
+    !nonEmptyString(job.mediaTitle) ||
+    !nonEmptyString(job.outputPath) ||
+    !nonEmptyString(job.preset) ||
+    !sourceKey ||
+    !profile ||
+    (job.titleNumber !== null && titleNumber === null) ||
+    (job.kind === "main_feature" &&
+      (titleNumber !== null || sourceKey !== "dvd:main-feature")) ||
+    (job.kind === "dvd_title" &&
+      (titleNumber === null || sourceKey !== `dvd:title:${titleNumber}`))
+  ) {
+    return false;
+  }
+  const profileSeparator = logicalKey.lastIndexOf("\0");
+  const sourceSeparator = logicalKey.lastIndexOf("\0", profileSeparator - 1);
+  return (
+    sourceSeparator > 0 &&
+    profileSeparator > sourceSeparator + 1 &&
+    logicalKey.slice(sourceSeparator + 1, profileSeparator) === sourceKey &&
+    logicalKey.slice(profileSeparator + 1) === profile
+  );
 }
 
 type RecordedPathResolution =
@@ -517,35 +583,117 @@ export function discoverLegacySidecars(
 export function acquireLegacyQueueCutoverLock(
   originalsLibraryPath: string,
 ): () => void {
-  const lockPath = join(
+  const lockPath = join(originalsLibraryPath, LEGACY_QUEUE_CUTOVER_LOCK);
+  const ownerPath = join(
     originalsLibraryPath,
-    LEGACY_QUEUE_LOCK_DIRECTORY,
+    `${LEGACY_QUEUE_CUTOVER_LOCK}.${process.pid}.${randomUUID()}.owner`,
   );
+  const ownerDescriptor = openSync(ownerPath, "wx", 0o600);
+  try {
+    writeFileSync(
+      ownerDescriptor,
+      `${JSON.stringify({ schemaVersion: 1, pid: process.pid, role: "cutover" })}\n`,
+      { encoding: "utf8" },
+    );
+    fsyncSync(ownerDescriptor);
+  } finally {
+    closeSync(ownerDescriptor);
+  }
   const deadline = Date.now() + LEGACY_QUEUE_LOCK_TIMEOUT_MS;
   const sleepState = new Int32Array(new SharedArrayBuffer(4));
+  let acquired = false;
 
-  while (true) {
+  const ownerIsDead = (path: string): boolean => {
     try {
-      mkdirSync(lockPath, { mode: 0o700 });
-      let released = false;
-      return () => {
-        if (released) {
-          return;
+      const file = lstatSync(path);
+      if (!file.isFile() || file.isSymbolicLink()) {
+        return false;
+      }
+      const owner = JSON.parse(readFileSync(path, "utf8")) as unknown;
+      if (
+        !owner ||
+        typeof owner !== "object" ||
+        !("schemaVersion" in owner) ||
+        owner.schemaVersion !== 1 ||
+        !("role" in owner) ||
+        (owner.role !== "cutover" && owner.role !== "legacy-command") ||
+        !("pid" in owner) ||
+        !Number.isSafeInteger(owner.pid) ||
+        Number(owner.pid) <= 0
+      ) {
+        return false;
+      }
+      try {
+        process.kill(Number(owner.pid), 0);
+        return false;
+      } catch (error) {
+        return (error as NodeJS.ErrnoException).code === "ESRCH";
+      }
+    } catch {
+      return false;
+    }
+  };
+
+  const wait = (message: string): void => {
+    if (Date.now() >= deadline) {
+      throw new Error(message);
+    }
+    Atomics.wait(sleepState, 0, 0, LEGACY_QUEUE_LOCK_POLL_MS);
+  };
+
+  try {
+    while (true) {
+      try {
+        linkSync(ownerPath, lockPath);
+        acquired = true;
+        break;
+      } catch (error) {
+        const fileError = error as NodeJS.ErrnoException;
+        if (fileError.code !== "EEXIST") {
+          throw error;
         }
+        if (ownerIsDead(lockPath)) {
+          unlinkSync(lockPath);
+          continue;
+        }
+        wait(`Timed out waiting for another SQLite cutover: ${lockPath}`);
+      }
+    }
+    unlinkSync(ownerPath);
+
+    while (true) {
+      const sharedLeases = readdirSync(originalsLibraryPath)
+        .filter((name) => name.startsWith(LEGACY_QUEUE_SHARED_LEASE_PREFIX))
+        .map((name) => join(originalsLibraryPath, name));
+      for (const leasePath of sharedLeases) {
+        if (ownerIsDead(leasePath)) {
+          unlinkSync(leasePath);
+        }
+      }
+      const activeLeases = sharedLeases.filter((path) => existsSync(path));
+      if (activeLeases.length === 0) {
+        break;
+      }
+      wait(
+        `Timed out waiting for an active legacy queue command: ${activeLeases[0]}`,
+      );
+    }
+
+    let released = false;
+    return () => {
+      if (!released) {
         released = true;
-        rmdirSync(lockPath);
-      };
-    } catch (error) {
-      const fileError = error as NodeJS.ErrnoException;
-      if (fileError.code !== "EEXIST") {
-        throw error;
+        unlinkSync(lockPath);
       }
-      if (Date.now() >= deadline) {
-        throw new Error(
-          `Timed out waiting for an active legacy queue command: ${lockPath}`,
-        );
-      }
-      Atomics.wait(sleepState, 0, 0, LEGACY_QUEUE_LOCK_POLL_MS);
+    };
+  } catch (error) {
+    if (acquired && existsSync(lockPath)) {
+      unlinkSync(lockPath);
+    }
+    throw error;
+  } finally {
+    if (existsSync(ownerPath)) {
+      unlinkSync(ownerPath);
     }
   }
 }
@@ -567,33 +715,7 @@ export function retireLegacySidecarQueue(
     originalsLibraryPath,
     LEGACY_QUEUE_CUTOVER_MARKER,
   );
-  if (existsSync(markerPath)) {
-    synchronizeDirectory(originalsLibraryPath);
-    const marker = JSON.parse(readFileSync(markerPath, "utf8")) as {
-      legacyJobs?: unknown;
-    };
-    const jobSignatures = new Map<string, string[]>();
-    if (Array.isArray(marker.legacyJobs)) {
-      for (const entry of marker.legacyJobs) {
-        if (
-          entry !== null &&
-          typeof entry === "object" &&
-          "logicalKey" in entry &&
-          typeof entry.logicalKey === "string" &&
-          "signature" in entry &&
-          typeof entry.signature === "string"
-        ) {
-          const signatures = jobSignatures.get(entry.logicalKey) ?? [];
-          if (!signatures.includes(entry.signature)) {
-            signatures.push(entry.signature);
-          }
-          jobSignatures.set(entry.logicalKey, signatures);
-        }
-      }
-    }
-    return { jobSignatures, wasAlreadyPublished: true };
-  }
-  const jobSignatures = new Map<string, string[]>();
+  const discoveredSignatures = new Map<string, string>();
   for (const discovery of discoveries) {
     if (discovery.outcome !== "parsed") {
       continue;
@@ -604,28 +726,87 @@ export function retireLegacySidecarQueue(
         job,
       );
       const signature = legacyJobSignature(job);
-      const signatures = jobSignatures.get(logicalKey) ?? [];
-      if (!signatures.includes(signature)) {
-        signatures.push(signature);
+      if (!discoveredSignatures.has(logicalKey)) {
+        discoveredSignatures.set(logicalKey, signature);
       }
-      jobSignatures.set(logicalKey, signatures);
     }
   }
+
+  const legacyJobs = [...discoveredSignatures].map(
+    ([logicalKey, signature]) => ({ logicalKey, signature }),
+  );
+  const snapshotDigest = createHash("sha256")
+    .update(JSON.stringify(legacyJobs))
+    .digest("hex");
+  const markerContents = `${JSON.stringify({
+    schemaVersion: 2,
+    legacyQueueStatus: "retired",
+    authoritativeStore: "sqlite",
+    legacyJobs,
+    snapshotDigest,
+  })}\n`;
+
+  let replaceSchemaOneMarker = false;
+  if (existsSync(markerPath)) {
+    synchronizeDirectory(originalsLibraryPath);
+    const markerStat = lstatSync(markerPath);
+    if (!markerStat.isFile() || markerStat.isSymbolicLink()) {
+      throw new Error("SQLite cutover marker must be a regular file");
+    }
+    let marker: unknown;
+    try {
+      marker = JSON.parse(readFileSync(markerPath, "utf8"));
+    } catch (error) {
+      throw new Error(
+        `Invalid SQLite cutover marker: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    const value = objectValue(marker);
+    const hasCutoverDiscriminators =
+      value?.legacyQueueStatus === "retired" &&
+      value.authoritativeStore === "sqlite";
+    if (value?.schemaVersion === 1 && hasCutoverDiscriminators) {
+      replaceSchemaOneMarker = true;
+    } else if (value?.schemaVersion === 2 && hasCutoverDiscriminators) {
+      if (!Array.isArray(value.legacyJobs)) {
+        throw new Error("Invalid SQLite cutover marker: legacyJobs must be an array");
+      }
+      const entries: Array<{ logicalKey: string; signature: string }> = [];
+      const jobSignatures = new Map<string, string>();
+      for (const entry of value.legacyJobs) {
+        const item = objectValue(entry);
+        const logicalKey = nonEmptyString(item?.logicalKey);
+        const signature = nonEmptyString(item?.signature);
+        if (
+          !logicalKey ||
+          !signature ||
+          !isValidPublishedJob(logicalKey, signature) ||
+          jobSignatures.has(logicalKey)
+        ) {
+          throw new Error("Invalid SQLite cutover marker: malformed or duplicate legacy job");
+        }
+        entries.push({ logicalKey, signature });
+        jobSignatures.set(logicalKey, signature);
+      }
+      const expectedDigest = createHash("sha256")
+        .update(JSON.stringify(entries))
+        .digest("hex");
+      if (value.snapshotDigest !== expectedDigest) {
+        throw new Error("Invalid SQLite cutover marker: snapshot digest mismatch");
+      }
+      return { jobSignatures, wasAlreadyPublished: true };
+    } else {
+      throw new Error("Invalid SQLite cutover marker: unsupported schema or status");
+    }
+  }
+
   const temporaryMarkerPath = `${markerPath}.${process.pid}.${randomUUID()}.tmp`;
   let markerDescriptor: number | undefined;
   try {
     markerDescriptor = openSync(temporaryMarkerPath, "wx", 0o600);
     writeFileSync(
       markerDescriptor,
-      `${JSON.stringify({
-        schemaVersion: 2,
-        legacyQueueStatus: "retired",
-        authoritativeStore: "sqlite",
-        legacyJobs: [...jobSignatures].flatMap(
-          ([logicalKey, signatures]) =>
-            signatures.map((signature) => ({ logicalKey, signature })),
-        ),
-      })}\n`,
+      markerContents,
       { encoding: "utf8" },
     );
     fsyncSync(markerDescriptor);
@@ -643,5 +824,8 @@ export function retireLegacySidecarQueue(
       unlinkSync(temporaryMarkerPath);
     }
   }
-  return { jobSignatures, wasAlreadyPublished: false };
+  return {
+    jobSignatures: discoveredSignatures,
+    wasAlreadyPublished: replaceSchemaOneMarker,
+  };
 }

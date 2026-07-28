@@ -1420,7 +1420,7 @@ export function createDataAccessInternal(
               discoveries,
             )
           : {
-              jobSignatures: new Map<string, readonly string[]>(),
+              jobSignatures: new Map<string, string>(),
               wasAlreadyPublished: false,
             };
         const report: LegacySidecarImportReport = {
@@ -1455,12 +1455,10 @@ export function createDataAccessInternal(
             const signature = legacyJobSignature(job);
             const persisted = persistedLegacyJobs.get(logicalKey);
             if (!persisted) {
-              const publishedSignatures =
+              const publishedSignature =
                 cutover.jobSignatures.get(logicalKey);
               if (
-                cutover.wasAlreadyPublished &&
-                publishedSignatures !== undefined &&
-                !publishedSignatures.includes(signature)
+                publishedSignature !== signature
               ) {
                 report.issues.push({
                   code: "duplicate_record",
@@ -1489,6 +1487,11 @@ export function createDataAccessInternal(
           let unchanged = 0;
           const persistenceIssues: LegacySidecarImportReport["issues"] = [];
           const persistedJobs: ParsedLegacyJob[] = [];
+
+          if (sidecar.jobs.length > 0 && acceptedJobs.length === 0) {
+            report.sidecarsImported += 1;
+            continue;
+          }
 
           try {
             database.transaction((transaction) => {
@@ -1766,7 +1769,7 @@ export function createDataAccessInternal(
                       .get(
                         legacyJobLogicalKey(sidecar.fingerprint, job),
                       )
-                      ?.includes(legacyJobSignature(job))
+                      === legacyJobSignature(job)
                   )
                 ) {
                   persistenceIssues.push({
