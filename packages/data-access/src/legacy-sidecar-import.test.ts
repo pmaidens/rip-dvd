@@ -1,6 +1,8 @@
 import {
   mkdirSync,
   readFileSync,
+  symlinkSync,
+  unlinkSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -476,7 +478,7 @@ describe("legacy sidecar import", () => {
     access.close();
   });
 
-  it("reports a logical-job conflict after restart while importing other records", () => {
+  it("rejects new and changed legacy jobs after cutover", () => {
     const fixture = createFixture();
     fixture.access.legacySidecars.importLibrary({
       originalsLibraryPath: fixture.originalsLibraryPath,
@@ -521,13 +523,19 @@ describe("legacy sidecar import", () => {
     expect(report).toMatchObject({
       sidecarsImported: 1,
       sidecarsSkipped: 0,
-      recordsCreated: { encodeJobs: 1 },
+      recordsCreated: { encodeJobs: 0 },
       issues: [
         expect.objectContaining({
           code: "duplicate_record",
           jobIndex: 0,
           sidecarPath: fixture.sidecarPath,
           message: expect.stringMatching(/logical Encode Job conflicts/i),
+        }),
+        expect.objectContaining({
+          code: "duplicate_record",
+          jobIndex: 2,
+          sidecarPath: fixture.sidecarPath,
+          message: expect.stringMatching(/cutover/i),
         }),
       ],
     });
@@ -537,7 +545,6 @@ describe("legacy sidecar import", () => {
           id: originalMovieJob!.id,
           outputPath: fixture.movieOutputPath,
         }),
-        expect.objectContaining({ outputPath: additionalOutputPath }),
       ]),
     );
     expect(retry.encodeJobs.list()).not.toEqual(
@@ -547,6 +554,201 @@ describe("legacy sidecar import", () => {
     );
     expect(readFileSync(fixture.sidecarPath)).toEqual(changedSidecarBytes);
     retry.close();
+  });
+
+  it("keeps the canonical winner when a rejected sidecar remains after restart", () => {
+    const root = temporaryDirectories.create("rip-dvd-winner-snapshot-");
+    const originalsLibraryPath = join(root, "originals");
+    const archivePath = join(originalsLibraryPath, "Winner.iso");
+    const winnerPath = join(originalsLibraryPath, "a-winner.rip-dvd.json");
+    const rejectedPath = join(originalsLibraryPath, "b-rejected.rip-dvd.json");
+    const winnerOutput = join(root, "movies", "Winner.mkv");
+    const rejectedOutput = join(root, "movies", "Rejected.mkv");
+    const databasePath = join(root, "catalog.sqlite");
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    writeFileSync(archivePath, "archive");
+    const sidecar = (output: string) =>
+      JSON.stringify({
+        schema_version: 2,
+        source: archivePath,
+        title: "Winner",
+        disc_fingerprint: "winner-fingerprint",
+        jobs: [{
+          label: "Movie: Winner",
+          source: archivePath,
+          output,
+          preset: "Fast 480p30",
+          selection: "main_feature",
+          title_number: null,
+        }],
+      });
+    writeFileSync(winnerPath, sidecar(winnerOutput));
+    writeFileSync(rejectedPath, sidecar(rejectedOutput));
+    const first = createLegacySidecarDataAccess({ databasePath });
+
+    expect(first.legacySidecars.importLibrary({ originalsLibraryPath }).issues)
+      .toEqual([expect.objectContaining({ sidecarPath: rejectedPath })]);
+    first.close();
+    unlinkSync(winnerPath);
+
+    const retry = createLegacySidecarDataAccess({ databasePath });
+    const report = retry.legacySidecars.importLibrary({ originalsLibraryPath });
+
+    expect(report.issues).toEqual([
+      expect.objectContaining({
+        code: "duplicate_record",
+        sidecarPath: rejectedPath,
+        message: expect.stringMatching(/cutover/i),
+      }),
+    ]);
+    expect(retry.encodeJobs.list()).toEqual([
+      expect.objectContaining({ outputPath: winnerOutput }),
+    ]);
+    retry.close();
+  });
+
+  it("does not admit a brand-new sidecar after SQLite cutover", () => {
+    const fixture = createFixture();
+    fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+    const newArchivePath = join(fixture.originalsLibraryPath, "Late.iso");
+    const newSidecarPath = join(
+      fixture.originalsLibraryPath,
+      "Late.rip-dvd.json",
+    );
+    const newOutputPath = join(dirname(fixture.movieOutputPath), "Late.mkv");
+    writeFileSync(newArchivePath, "late archive");
+    writeFileSync(
+      newSidecarPath,
+      JSON.stringify({
+        schema_version: 2,
+        source: newArchivePath,
+        title: "Late",
+        disc_fingerprint: "late-fingerprint",
+        jobs: [{
+          label: "Movie: Late",
+          source: newArchivePath,
+          output: newOutputPath,
+          preset: "Fast 480p30",
+          selection: "main_feature",
+          title_number: null,
+        }],
+      }),
+    );
+
+    const report = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+
+    expect(report.issues).toEqual([
+      expect.objectContaining({
+        code: "duplicate_record",
+        sidecarPath: newSidecarPath,
+        message: expect.stringMatching(/cutover/i),
+      }),
+    ]);
+    expect(fixture.access.catalog.listOriginalDiscArchives()).toHaveLength(1);
+    expect(fixture.access.encodeJobs.list()).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ outputPath: newOutputPath }),
+      ]),
+    );
+    fixture.access.close();
+  });
+
+  it("upgrades a schema-1 marker while preserving authoritative SQLite requeues", () => {
+    const fixture = createFixture();
+    const markerPath = join(
+      fixture.originalsLibraryPath,
+      ".rip-dvd-sqlite-catalog",
+    );
+    writeFileSync(markerPath, JSON.stringify({
+      schemaVersion: 1,
+      legacyQueueStatus: "retired",
+      authoritativeStore: "sqlite",
+    }));
+    fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+    const completedJob = fixture.access.encodeJobs
+      .list(["completed"])
+      .find((job) => job.outputPath === fixture.movieOutputPath)!;
+    const retryOutputPath = join(fixture.originalsLibraryPath, "retry.mkv");
+    const retryJob = fixture.access.encodeJobs.enqueue({
+      discSelectionId: completedJob.discSelectionId,
+      encodingProfileId: completedJob.encodingProfileId,
+      outputPath: retryOutputPath,
+      priority: 23,
+    });
+
+    const report = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+    const upgradedMarker = JSON.parse(readFileSync(markerPath, "utf8")) as {
+      schemaVersion: number;
+      snapshotDigest?: string;
+    };
+
+    expect(report.issues).toEqual([]);
+    expect(upgradedMarker).toMatchObject({
+      schemaVersion: 2,
+      snapshotDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    expect(fixture.access.encodeJobs.list()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: retryJob.id,
+          outputPath: retryOutputPath,
+          priority: 23,
+          status: "queued",
+        }),
+      ]),
+    );
+    fixture.access.close();
+  });
+
+  it.each([
+    ["malformed", { schemaVersion: 2 }],
+    ["tampered", {
+      schemaVersion: 2,
+      legacyQueueStatus: "retired",
+      authoritativeStore: "sqlite",
+      legacyJobs: [],
+      snapshotDigest: "0".repeat(64),
+    }],
+  ])("fails closed for a %s schema-2 marker", (_name, marker) => {
+    const fixture = createFixture();
+    writeFileSync(
+      join(fixture.originalsLibraryPath, ".rip-dvd-sqlite-catalog"),
+      JSON.stringify(marker),
+    );
+
+    expect(() => fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    })).toThrow(/cutover marker/i);
+    expect(fixture.access.encodeJobs.list()).toEqual([]);
+    fixture.access.close();
+  });
+
+  it("rejects a cutover marker symlink", () => {
+    const fixture = createFixture();
+    const markerTarget = join(fixture.originalsLibraryPath, "marker-target");
+    writeFileSync(markerTarget, JSON.stringify({
+      schemaVersion: 1,
+      legacyQueueStatus: "retired",
+      authoritativeStore: "sqlite",
+    }));
+    symlinkSync(
+      markerTarget,
+      join(fixture.originalsLibraryPath, ".rip-dvd-sqlite-catalog"),
+    );
+
+    expect(() => fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    })).toThrow(/regular file/i);
+    expect(fixture.access.encodeJobs.list()).toEqual([]);
+    fixture.access.close();
   });
 
   it("preserves authoritative failed Encode Job state on re-import", () => {
@@ -835,9 +1037,6 @@ describe("legacy sidecar import", () => {
 
   it("reports an output owned by another job and imports later jobs", () => {
     const fixture = createFixture();
-    fixture.access.legacySidecars.importLibrary({
-      originalsLibraryPath: fixture.originalsLibraryPath,
-    });
     const secondArchivePath = join(
       fixture.originalsLibraryPath,
       "Second Movie.iso",

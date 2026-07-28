@@ -211,7 +211,14 @@ describe("legacy sidecar cutover", () => {
     const initialOutputPath = join(root, "movies", "Race Movie.mkv");
     const finalOutputPath = join(root, "movies", "Interview.mkv");
     mkdirSync(originalsLibraryPath, { recursive: true });
-    mkdirSync(lockPath);
+    writeFileSync(
+      lockPath,
+      JSON.stringify({
+        schemaVersion: 1,
+        pid: process.pid,
+        role: "legacy-command",
+      }),
+    );
     writeFileSync(archivePath, "archive");
     const sidecar = {
       schema_version: 2,
@@ -250,10 +257,10 @@ describe("legacy sidecar cutover", () => {
     );
     const legacyMutation = spawn(process.execPath, [
       "-e",
-      `const { copyFileSync, rmdirSync } = require("node:fs");
+      `const { copyFileSync, unlinkSync } = require("node:fs");
        setTimeout(() => {
          copyFileSync(process.argv[1], process.argv[2]);
-         rmdirSync(process.argv[3]);
+         unlinkSync(process.argv[3]);
        }, 200);`,
       completedSidecarPath,
       sidecarPath,
@@ -282,6 +289,59 @@ describe("legacy sidecar cutover", () => {
     expect(readFileSync(sidecarPath)).toEqual(
       readFileSync(completedSidecarPath),
     );
+    access.close();
+  });
+
+  it("reclaims crashed command and cutover leases before and after publication", () => {
+    const root = temporaryDirectories.create("rip-dvd-cutover-stale-lease-");
+    const originalsLibraryPath = join(root, "originals");
+    const archivePath = join(originalsLibraryPath, "Crash.iso");
+    const sidecarPath = join(originalsLibraryPath, "Crash.rip-dvd.json");
+    const databasePath = join(root, "catalog.sqlite");
+    const staleOwner = JSON.stringify({
+      schemaVersion: 1,
+      pid: 999_999,
+      role: "legacy-command",
+    });
+    const sharedLeasePath = join(
+      originalsLibraryPath,
+      ".rip-dvd-legacy-queue.shared.crashed",
+    );
+    const cutoverLockPath = join(
+      originalsLibraryPath,
+      ".rip-dvd-legacy-queue.lock",
+    );
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    writeFileSync(archivePath, "archive");
+    writeFileSync(
+      sidecarPath,
+      JSON.stringify({
+        schema_version: 2,
+        source: archivePath,
+        title: "Crash",
+        disc_fingerprint: "crash-fingerprint",
+        jobs: [{
+          label: "Movie: Crash",
+          source: archivePath,
+          output: join(root, "movies", "Crash.mkv"),
+          preset: "Fast 480p30",
+          selection: "main_feature",
+          title_number: null,
+        }],
+      }),
+    );
+    writeFileSync(sharedLeasePath, staleOwner);
+    markerFault.failure = null;
+    const access = createLegacySidecarDataAccess({ databasePath });
+
+    expect(access.legacySidecars.importLibrary({ originalsLibraryPath }).issues)
+      .toEqual([]);
+    expect(existsSync(sharedLeasePath)).toBe(false);
+    writeFileSync(cutoverLockPath, staleOwner);
+    expect(access.legacySidecars.importLibrary({ originalsLibraryPath }).issues)
+      .toEqual([]);
+    expect(existsSync(cutoverLockPath)).toBe(false);
+    expect(access.encodeJobs.list()).toHaveLength(1);
     access.close();
   });
 });
