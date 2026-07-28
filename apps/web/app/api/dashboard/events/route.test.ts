@@ -23,10 +23,16 @@ describe("GET /api/dashboard/events", () => {
       isEnabled: true,
       isPresent: true,
     });
+    const profile = access.encodingProfiles.create({
+      key: "activity-profile",
+      displayName: "Activity profile",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
     for (let index = 0; index < 25; index += 1) {
       vi.setSystemTime(new Date(Date.UTC(2026, 6, 26, 18, 0, index)));
       const contentId = `sha256:${index.toString(16).padStart(64, "0")}`;
-      access.catalog.registerDetectedDisc({
+      const disc = access.catalog.registerDetectedDisc({
         opticalDriveId: drive.id,
         discKind: "dvd",
         fingerprint: contentId,
@@ -50,6 +56,56 @@ describe("GET /api/dashboard/events", () => {
           })),
         },
       });
+      access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+      access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+      access.archiveJobs.enqueue({ detectedDiscId: disc.id });
+
+      const encodeDisc = access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint: `encode-${index}`,
+        volumeLabel: `ENCODE_DISC_${index}`,
+      });
+      access.catalog.updateDetectedDiscStatus(encodeDisc.id, "scanned");
+      access.catalog.updateDetectedDiscStatus(encodeDisc.id, "approved");
+      const encodeArchive = access.catalog.createOriginalDiscArchive({
+        detectedDiscId: encodeDisc.id,
+        discKind: "dvd",
+        archiveFormat: "iso",
+        archivePath: `/media/originals/encode-${index}.iso`,
+        fingerprint: `encode-${index}`,
+      });
+      const mediaItem = access.catalog.createMediaItem({
+        kind: "movie",
+        title: `Encode Movie ${index}`,
+      });
+      const selection = access.catalog.createDiscSelection({
+        originalDiscArchiveId: encodeArchive.id,
+        mediaItemId: mediaItem.id,
+        sourceKey: "main-feature",
+        kind: "main_feature",
+      });
+      access.encodeJobs.enqueue({
+        discSelectionId: selection.id,
+        encodingProfileId: profile.id,
+        outputPath: `/media/movies/encode-${index}.mkv`,
+      });
+
+      const reviewDisc = access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint: `review-${index}`,
+        volumeLabel: `REVIEW_DISC_${index}`,
+      });
+      access.catalog.updateDetectedDiscStatus(reviewDisc.id, "scanned");
+      access.catalog.updateDetectedDiscStatus(reviewDisc.id, "approved");
+      access.catalog.createOriginalDiscArchive({
+        detectedDiscId: reviewDisc.id,
+        discKind: "dvd",
+        archiveFormat: "iso",
+        archivePath: `/media/originals/review-${index}.iso`,
+        fingerprint: `review-${index}`,
+      });
     }
     const abortController = new AbortController();
     const response = createDashboardEventResponse(access, {
@@ -69,16 +125,54 @@ describe("GET /api/dashboard/events", () => {
         status: string;
         items: { volumeLabel: string; titles: unknown[] }[];
       };
+      archiveJobs: {
+        status: string;
+        items: { discLabel: string }[];
+      };
+      encodeJobs: {
+        status: string;
+        items: { mediaTitle: string; encodingProfileName: string }[];
+      };
+      catalogReview: {
+        status: string;
+        items: { discLabel: string }[];
+      };
     };
 
     expect(snapshot.detectedDiscs.status).toBe("loaded");
     expect(snapshot.detectedDiscs.items).toHaveLength(20);
-    expect(snapshot.detectedDiscs.items[0]?.volumeLabel).toBe("DISC_05");
-    expect(snapshot.detectedDiscs.items.at(-1)?.volumeLabel).toBe("DISC_24");
+    expect(
+      snapshot.detectedDiscs.items.every((disc) =>
+        /_(?:18|19|2[0-4])$/.test(disc.volumeLabel),
+      ),
+    ).toBe(true);
+    expect(
+      snapshot.detectedDiscs.items.some((disc) => disc.volumeLabel.endsWith("24")),
+    ).toBe(true);
     expect(
       snapshot.detectedDiscs.items.every((disc) => disc.titles.length === 0),
     ).toBe(true);
-    expect(Buffer.byteLength(event)).toBeLessThan(20_000);
+    expect(snapshot.archiveJobs.items).toHaveLength(20);
+    expect(
+      snapshot.archiveJobs.items.every(
+        (job) => job.discLabel !== "Unlabeled disc",
+      ),
+    ).toBe(true);
+    expect(snapshot.encodeJobs.items).toHaveLength(20);
+    expect(
+      snapshot.encodeJobs.items.every(
+        (job) =>
+          job.mediaTitle !== "Unknown Media Item" &&
+          job.encodingProfileName === "Activity profile",
+      ),
+    ).toBe(true);
+    expect(snapshot.catalogReview.items).toHaveLength(20);
+    expect(
+      snapshot.catalogReview.items.every(
+        (item) => item.discLabel !== "Unlabeled disc",
+      ),
+    ).toBe(true);
+    expect(Buffer.byteLength(event)).toBeLessThan(50_000);
   });
 
   it("frames the current database snapshot as a reconnectable dashboard event", async () => {

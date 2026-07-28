@@ -84,6 +84,150 @@ describe("watchDashboardActivity", () => {
     stop();
   });
 
+  it("loads review details for a disc first observed through activity", async () => {
+    const initial = emptySnapshot("2026-07-26T16:00:00.000Z");
+    const activity = emptySnapshot("2026-07-26T16:00:01.000Z");
+    activity.detectedDiscs = {
+      status: "loaded",
+      items: [
+        {
+          id: "disc-new",
+          volumeLabel: "NEW_DISC",
+          discKind: "dvd",
+          status: "scanned",
+          opticalDriveName: "Upper drive",
+          fingerprint: "sha256:new-disc",
+          titles: [],
+          detectedAt: "2026-07-26T16:00:01.000Z",
+        },
+      ],
+    };
+    const detailed = structuredClone(activity);
+    if (detailed.detectedDiscs.status === "loaded") {
+      detailed.detectedDiscs.items[0]!.titles = [
+        {
+          number: 1,
+          durationSeconds: 90,
+          chapters: 2,
+          audioStreams: [],
+          subtitles: [],
+        },
+      ];
+    }
+    const loadSnapshot = vi
+      .fn()
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(detailed);
+    let dashboardListener: ((event: MessageEvent<string>) => void) | undefined;
+    const eventSource = {
+      onerror: null as (() => void) | null,
+      onopen: null as (() => void) | null,
+      addEventListener(
+        type: string,
+        listener: (event: MessageEvent<string>) => void,
+      ) {
+        if (type === "dashboard") {
+          dashboardListener = listener;
+        }
+      },
+      close: vi.fn(),
+    };
+    const onSnapshot = vi.fn();
+
+    const stop = watchDashboardActivity({
+      loadSnapshot,
+      openEventSource: () => eventSource,
+      onSnapshot,
+      onInitialLoadError: vi.fn(),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    dashboardListener?.({
+      data: JSON.stringify(activity),
+    } as MessageEvent<string>);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(loadSnapshot).toHaveBeenCalledTimes(2);
+    expect(onSnapshot).toHaveBeenLastCalledWith(detailed);
+    stop();
+  });
+
+  it("reloads review details when a known disc is rescanned", async () => {
+    const initial = emptySnapshot("2026-07-26T16:00:00.000Z");
+    initial.detectedDiscs = {
+      status: "loaded",
+      items: [
+        {
+          id: "disc-1",
+          volumeLabel: "DISC",
+          discKind: "dvd",
+          status: "detected",
+          opticalDriveName: "Upper drive",
+          fingerprint: "sha256:disc",
+          titles: [],
+          detectedAt: "2026-07-26T15:59:00.000Z",
+        },
+      ],
+    };
+    const activity = structuredClone(initial);
+    activity.generatedAt = "2026-07-26T16:00:01.000Z";
+    if (activity.detectedDiscs.status === "loaded") {
+      activity.detectedDiscs.items[0]!.status = "scanned";
+      activity.detectedDiscs.items[0]!.detectedAt =
+        "2026-07-26T16:00:01.000Z";
+    }
+    const detailed = structuredClone(activity);
+    if (detailed.detectedDiscs.status === "loaded") {
+      detailed.detectedDiscs.items[0]!.titles = [
+        {
+          number: 1,
+          durationSeconds: 120,
+          chapters: 3,
+          audioStreams: [],
+          subtitles: [],
+        },
+      ];
+    }
+    const loadSnapshot = vi
+      .fn()
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(detailed);
+    let dashboardListener: ((event: MessageEvent<string>) => void) | undefined;
+    const eventSource = {
+      onerror: null as (() => void) | null,
+      onopen: null as (() => void) | null,
+      addEventListener(
+        type: string,
+        listener: (event: MessageEvent<string>) => void,
+      ) {
+        if (type === "dashboard") {
+          dashboardListener = listener;
+        }
+      },
+      close: vi.fn(),
+    };
+    const onSnapshot = vi.fn();
+
+    const stop = watchDashboardActivity({
+      loadSnapshot,
+      openEventSource: () => eventSource,
+      onSnapshot,
+      onInitialLoadError: vi.fn(),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    dashboardListener?.({
+      data: JSON.stringify(activity),
+    } as MessageEvent<string>);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(loadSnapshot).toHaveBeenCalledTimes(2);
+    expect(onSnapshot).toHaveBeenLastCalledWith(detailed);
+    stop();
+  });
+
   it("keeps the normal HTTP snapshot when SSE is unavailable", async () => {
     const snapshot = emptySnapshot("2026-07-26T16:00:00.000Z");
     const onSnapshot = vi.fn();

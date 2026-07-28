@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
+import { createReadStream } from "node:fs";
 import { platform as operatingSystem } from "node:os";
 import { isAbsolute, normalize } from "node:path";
 
@@ -28,10 +29,9 @@ const MAX_DISCOVERED_DEVICES = 32;
 const MAX_BLOCK_DEVICE_NODES = 256;
 const MAX_DEVICE_PATH_LENGTH = 4_096;
 const MAX_LABEL_LENGTH = 256;
-const DVD_SECTOR_BYTES = 2_048;
-const DVD_CONTENT_SAMPLE_SECTORS = 16;
-const DVD_CONTENT_SAMPLE_BYTES =
-  DVD_SECTOR_BYTES * DVD_CONTENT_SAMPLE_SECTORS;
+const MAX_DVD_CONTENT_BYTES = 9_000_000_000;
+const DVD_CONTENT_READ_BUFFER_BYTES = 1_048_576;
+const DVD_CONTENT_HASH_TIMEOUT_MS = 30 * 60_000;
 
 export interface CommandResult {
   exitCode: number;
@@ -51,20 +51,6 @@ export interface CommandRunner {
     arguments_: readonly string[],
     options: CommandRunnerOptions,
   ): Promise<CommandResult>;
-}
-
-export interface BinaryCommandResult {
-  exitCode: number;
-  stdout: Buffer;
-  stderr: Buffer;
-}
-
-export interface BinaryCommandRunner {
-  run(
-    executable: string,
-    arguments_: readonly string[],
-    options: CommandRunnerOptions,
-  ): Promise<BinaryCommandResult>;
 }
 
 export const nodeCommandRunner: CommandRunner = {
@@ -100,43 +86,63 @@ export const nodeCommandRunner: CommandRunner = {
   },
 };
 
-export const nodeBinaryCommandRunner: BinaryCommandRunner = {
-  run(executable, arguments_, options) {
-    return new Promise((resolve, reject) => {
-      execFile(
-        executable,
-        [...arguments_],
-        {
-          encoding: null,
-          maxBuffer: options.maxBufferBytes,
-          shell: false,
-          signal: options.signal,
-          timeout: options.timeoutMs,
-        },
-        (error, stdout, stderr) => {
-          if (!error) {
-            resolve({ exitCode: 0, stdout, stderr });
-            return;
-          }
-          if (options.signal.aborted || error.name === "AbortError") {
-            reject(error);
-            return;
-          }
-          if (typeof error.code === "number") {
-            resolve({ exitCode: error.code, stdout, stderr });
-            return;
-          }
-          reject(error);
-        },
-      );
-    });
+export interface DiscContentReader {
+  hash(
+    devicePath: string,
+    sizeBytes: number,
+    signal: AbortSignal,
+  ): Promise<string>;
+}
+
+export const nodeDiscContentReader: DiscContentReader = {
+  async hash(devicePath, sizeBytes, signal) {
+    const timeoutController = new AbortController();
+    const timeout = setTimeout(
+      () => timeoutController.abort(),
+      DVD_CONTENT_HASH_TIMEOUT_MS,
+    );
+    timeout.unref();
+    const readSignal = AbortSignal.any([signal, timeoutController.signal]);
+    const hash = createHash("sha256");
+    hash.update("rip-dvd-content-v2\0");
+    hash.update(String(sizeBytes));
+    let bytesRead = 0;
+    try {
+      const stream = createReadStream(devicePath, {
+        end: sizeBytes - 1,
+        highWaterMark: DVD_CONTENT_READ_BUFFER_BYTES,
+        signal: readSignal,
+        start: 0,
+      });
+      for await (const chunk of stream) {
+        bytesRead += chunk.length;
+        if (bytesRead > sizeBytes) {
+          throw new Error("DVD content read exceeded the declared media size");
+        }
+        hash.update(chunk);
+      }
+    } catch (error) {
+      if (signal.aborted) {
+        signal.throwIfAborted();
+      }
+      if (timeoutController.signal.aborted) {
+        throw new Error("DVD content hashing timed out");
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+    if (bytesRead !== sizeBytes) {
+      throw new Error("DVD content read ended before the declared media size");
+    }
+    return `sha256:${hash.digest("hex")}`;
   },
 };
 
 interface LinuxOpticalDriveHardwareOptions {
   platform?: NodeJS.Platform;
   runner?: CommandRunner;
-  binaryRunner?: BinaryCommandRunner;
+  contentReader?: DiscContentReader;
 }
 
 type UnknownRecord = Record<string, unknown>;
@@ -289,7 +295,7 @@ function parseDvdMetadata(output: string): {
   const audioPattern =
     /^\s*Audio:\s*\d+,\s*Language:\s*([^\s,]+)\s*-\s*([^,]+),\s*Format:\s*([^,]+),.*?\sChannels:\s*(\d+),.*?\sStream id:\s*(0x[0-9a-f]+|\d+)\s*$/i;
   const subtitlePattern =
-    /^\s*(?:Subtitle|Subpicture):\s*\d+,\s*Language:\s*([^\s,]+)\s*-\s*([^,]+),\s*Content:\s*([^,]+),\s*Stream id:\s*(0x[0-9a-f]+|\d+)\s*$/i;
+    /^\s*(?:Subtitle|Subpicture):\s*\d+,\s*Language:\s*([^\s,]+)\s*-\s*([^,]+),\s*Content:\s*([^,]+),\s*Stream id:\s*(0x[0-9a-f]+|\d+),?\s*$/i;
   let currentTitle: ParsedDvdTitle | undefined;
   for (const line of output.split(/\r?\n/)) {
     if (/^\s*Title:/i.test(line)) {
@@ -396,7 +402,7 @@ async function readDvdContentId(
   devicePath: string,
   signal: AbortSignal,
   runner: CommandRunner,
-  binaryRunner: BinaryCommandRunner,
+  contentReader: DiscContentReader,
 ): Promise<string> {
   const sizeResult = await runner.run(
     "blockdev",
@@ -407,54 +413,18 @@ async function readDvdContentId(
     throw commandFailure("blockdev", sizeResult);
   }
   const sizeBytes = Number(sizeResult.stdout.trim());
-  const sectorCount = Math.floor(sizeBytes / DVD_SECTOR_BYTES);
   if (
     !Number.isSafeInteger(sizeBytes) ||
     sizeBytes <= 0 ||
-    sectorCount < DVD_CONTENT_SAMPLE_SECTORS
+    sizeBytes > MAX_DVD_CONTENT_BYTES
   ) {
     throw new Error("blockdev returned an invalid DVD size");
   }
-  const offsets = [
-    0,
-    Math.floor((sectorCount - DVD_CONTENT_SAMPLE_SECTORS) / 2),
-    sectorCount - DVD_CONTENT_SAMPLE_SECTORS,
-  ].filter((offset, index, values) => values.indexOf(offset) === index);
-  const hash = createHash("sha256");
-  hash.update("rip-dvd-content-v1\0");
-  hash.update(String(sizeBytes));
-  for (const offset of offsets) {
-    signal.throwIfAborted();
-    const sample = await binaryRunner.run(
-      "dd",
-      [
-        `if=${devicePath}`,
-        `bs=${DVD_SECTOR_BYTES}`,
-        `skip=${offset}`,
-        `count=${DVD_CONTENT_SAMPLE_SECTORS}`,
-        "status=none",
-      ],
-      {
-        maxBufferBytes: DVD_CONTENT_SAMPLE_BYTES,
-        signal,
-        timeoutMs: COMMAND_TIMEOUT_MS,
-      },
-    );
-    if (sample.exitCode !== 0) {
-      const result: CommandResult = {
-        exitCode: sample.exitCode,
-        stdout: sample.stdout.toString("utf8"),
-        stderr: sample.stderr.toString("utf8"),
-      };
-      throw commandFailure("dd", result);
-    }
-    if (sample.stdout.length !== DVD_CONTENT_SAMPLE_BYTES) {
-      throw new Error("dd returned an incomplete DVD content sample");
-    }
-    hash.update(`\0${offset}\0`);
-    hash.update(sample.stdout);
+  const contentId = await contentReader.hash(devicePath, sizeBytes, signal);
+  if (!/^sha256:[0-9a-f]{64}$/.test(contentId)) {
+    throw new Error("DVD content reader returned an invalid content identity");
   }
-  return `sha256:${hash.digest("hex")}`;
+  return contentId;
 }
 
 function commandFailure(tool: string, result: CommandResult): Error {
@@ -467,10 +437,34 @@ function commandFailure(tool: string, result: CommandResult): Error {
   );
 }
 
+async function inspectDvd(
+  devicePath: string,
+  signal: AbortSignal,
+  runner: CommandRunner,
+): Promise<ReturnType<typeof parseDvdMetadata> | null> {
+  const result = await runner.run(
+    "lsdvd",
+    ["-Oh", "-a", "-c", "-s", devicePath],
+    {
+      maxBufferBytes: MAX_COMMAND_OUTPUT_BYTES,
+      signal,
+      timeoutMs: COMMAND_TIMEOUT_MS,
+    },
+  );
+  if (result.exitCode !== 0) {
+    const output = `${result.stdout}\n${result.stderr}`;
+    if (/no medium found|medium not present|device not ready/i.test(output)) {
+      return null;
+    }
+    throw commandFailure("lsdvd", result);
+  }
+  return parseDvdMetadata(`${result.stdout}\n${result.stderr}`);
+}
+
 export function createLinuxOpticalDriveHardware({
   platform = operatingSystem(),
   runner = nodeCommandRunner,
-  binaryRunner = nodeBinaryCommandRunner,
+  contentReader = nodeDiscContentReader,
 }: LinuxOpticalDriveHardwareOptions = {}): OpticalDriveHardware {
   return {
     async discover(signal) {
@@ -494,29 +488,29 @@ export function createLinuxOpticalDriveHardware({
 
     async scanDvd(devicePath, signal) {
       const safeDevicePath = requireSafeDevicePath(devicePath);
-      const result = await runner.run(
-        "lsdvd",
-        ["-Oh", "-a", "-c", "-s", safeDevicePath],
-        {
-          maxBufferBytes: MAX_COMMAND_OUTPUT_BYTES,
-          signal,
-          timeoutMs: COMMAND_TIMEOUT_MS,
-        },
-      );
-      if (result.exitCode !== 0) {
-        const output = `${result.stdout}\n${result.stderr}`;
-        if (/no medium found|medium not present|device not ready/i.test(output)) {
-          return null;
-        }
-        throw commandFailure("lsdvd", result);
+      const probe = await inspectDvd(safeDevicePath, signal, runner);
+      if (probe === null) {
+        return null;
       }
-      const metadata = parseDvdMetadata(`${result.stdout}\n${result.stderr}`);
+      const contentIdBefore = await readDvdContentId(
+        safeDevicePath,
+        signal,
+        runner,
+        contentReader,
+      );
+      const metadata = await inspectDvd(safeDevicePath, signal, runner);
+      if (metadata === null) {
+        throw new Error("DVD medium changed during scanning");
+      }
       const contentId = await readDvdContentId(
         safeDevicePath,
         signal,
         runner,
-        binaryRunner,
+        contentReader,
       );
+      if (contentIdBefore !== contentId) {
+        throw new Error("DVD medium changed during scanning");
+      }
       const scanData = decodeDvdTitleMap({
         schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
         contentId,

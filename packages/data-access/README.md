@@ -19,7 +19,9 @@ absent from a successful snapshot become missing without changing their last
 seen time. Existing enabled/disabled choices are preserved, while a caller may
 choose the enabled default only for a newly discovered drive. A changed stable
 serial or model identity at the same device path is replacement hardware and is
-atomically reset to disabled.
+atomically reset to disabled. After a disappearance, authorization is preserved
+only when a matching serial proves physical-drive continuity; uncertain
+same-path hardware is disabled.
 
 The package exports the versioned, bounded DVD title-map contract through
 `@rip-dvd/data-access/dvd-scan`. Hardware parsing, worker persistence, and web

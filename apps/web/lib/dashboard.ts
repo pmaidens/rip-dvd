@@ -74,7 +74,7 @@ export interface DashboardSnapshot {
 }
 
 export interface DashboardSnapshotOptions {
-  detectedDiscLimit?: number;
+  activityLimit?: number;
   includeDetectedDiscDetails?: boolean;
 }
 
@@ -109,36 +109,125 @@ function driveDisplayName(drive: OpticalDriveRecord): string {
 function readDashboardSnapshotRecords(
   access: ConsistentReadAccess,
   {
-    detectedDiscLimit,
+    activityLimit,
     includeDetectedDiscDetails = true,
   }: DashboardSnapshotOptions = {},
 ): DashboardSnapshot {
   const opticalDriveSource = readSource(() =>
-    access.catalog.listOpticalDrives(),
+    access.catalog.listOpticalDrives(
+      activityLimit === undefined ? undefined : { limit: activityLimit },
+    ),
   );
   const detectedDiscSource = readSource(() =>
     access.catalog.listDetectedDiscs(
       undefined,
-      detectedDiscLimit === undefined ? undefined : { limit: detectedDiscLimit },
+      activityLimit === undefined ? undefined : { limit: activityLimit },
     ),
   );
-  const archiveJobSource = readSource(() => access.archiveJobs.list());
-  const encodeJobSource = readSource(() => access.encodeJobs.list());
+  const archiveJobSource = readSource(() =>
+    access.archiveJobs.list(
+      undefined,
+      activityLimit === undefined ? undefined : { limit: activityLimit },
+    ),
+  );
+  const encodeJobSource = readSource(() =>
+    access.encodeJobs.list(
+      undefined,
+      activityLimit === undefined ? undefined : { limit: activityLimit },
+    ),
+  );
   const archiveSource = readSource(() =>
-    access.catalog.listOriginalDiscArchives(),
+    access.catalog.listOriginalDiscArchives(
+      activityLimit === undefined
+        ? undefined
+        : { limit: activityLimit, uncatalogedOnly: true },
+    ),
   );
+  const relevantDetectedDiscIds =
+    activityLimit === undefined
+      ? undefined
+      : [
+          ...(detectedDiscSource.status === "loaded"
+            ? detectedDiscSource.value.map((disc) => disc.id)
+            : []),
+          ...(archiveJobSource.status === "loaded"
+            ? archiveJobSource.value.map((job) => job.detectedDiscId)
+            : []),
+          ...(archiveSource.status === "loaded"
+            ? archiveSource.value.map((archive) => archive.detectedDiscId)
+            : []),
+        ];
+  const linkedDetectedDiscSource =
+    activityLimit === undefined
+      ? detectedDiscSource
+      : readSource(() =>
+          access.catalog.listDetectedDiscs(undefined, {
+            ids: [...new Set(relevantDetectedDiscIds ?? [])],
+          }),
+        );
+  const relevantOpticalDriveIds =
+    activityLimit === undefined
+      ? undefined
+      : [
+          ...(opticalDriveSource.status === "loaded"
+            ? opticalDriveSource.value.map((drive) => drive.id)
+            : []),
+          ...(linkedDetectedDiscSource.status === "loaded"
+            ? linkedDetectedDiscSource.value.map((disc) => disc.opticalDriveId)
+            : []),
+        ];
+  const linkedOpticalDriveSource =
+    activityLimit === undefined
+      ? opticalDriveSource
+      : readSource(() =>
+          access.catalog.listOpticalDrives({
+            ids: [...new Set(relevantOpticalDriveIds ?? [])],
+          }),
+        );
+  const relevantSelectionIds =
+    activityLimit === undefined || encodeJobSource.status === "error"
+      ? undefined
+      : encodeJobSource.value.map((job) => job.discSelectionId);
   const selectionSource = readSource(() =>
-    access.catalog.listDiscSelections(),
+    access.catalog.listDiscSelections(
+      relevantSelectionIds === undefined
+        ? undefined
+        : { ids: [...new Set(relevantSelectionIds)] },
+    ),
   );
-  const mediaItemSource = readSource(() => access.catalog.listMediaItems());
-  const profileSource = readSource(() => access.encodingProfiles.list());
+  const relevantMediaItemIds =
+    activityLimit === undefined || selectionSource.status === "error"
+      ? undefined
+      : selectionSource.value.map((selection) => selection.mediaItemId);
+  const mediaItemSource = readSource(() =>
+    access.catalog.listMediaItems(
+      relevantMediaItemIds === undefined
+        ? undefined
+        : { ids: [...new Set(relevantMediaItemIds)] },
+    ),
+  );
+  const relevantProfileIds =
+    activityLimit === undefined || encodeJobSource.status === "error"
+      ? undefined
+      : encodeJobSource.value.map((job) => job.encodingProfileId);
+  const profileSource = readSource(() =>
+    access.encodingProfiles.list(
+      relevantProfileIds === undefined
+        ? undefined
+        : { ids: [...new Set(relevantProfileIds)] },
+    ),
+  );
   const drivesById =
-    opticalDriveSource.status === "loaded"
-      ? new Map(opticalDriveSource.value.map((drive) => [drive.id, drive]))
+    linkedOpticalDriveSource.status === "loaded"
+      ? new Map(
+          linkedOpticalDriveSource.value.map((drive) => [drive.id, drive]),
+        )
       : null;
   const discsById =
-    detectedDiscSource.status === "loaded"
-      ? new Map(detectedDiscSource.value.map((disc) => [disc.id, disc]))
+    linkedDetectedDiscSource.status === "loaded"
+      ? new Map(
+          linkedDetectedDiscSource.value.map((disc) => [disc.id, disc]),
+        )
       : null;
 
   const opticalDrives =
@@ -261,7 +350,11 @@ function readDashboardSnapshotRecords(
           );
           return loaded(
             archiveSource.value
-              .filter((archive) => !selectedArchiveIds.has(archive.id))
+              .filter(
+                (archive) =>
+                  activityLimit !== undefined ||
+                  !selectedArchiveIds.has(archive.id),
+              )
               .map((archive) => ({
                 id: archive.id,
                 discLabel:

@@ -348,15 +348,27 @@ export function createDataAccess({
     recordType: "archive job",
     find: (id) =>
       database.select().from(archiveJobs).where(eq(archiveJobs.id, id)).get(),
-    list: (statuses) =>
-      database
+    list: (statuses, options) => {
+      const condition = statuses?.length
+        ? inArray(archiveJobs.status, statuses)
+        : undefined;
+      if (options?.limit !== undefined) {
+        return database
+          .select()
+          .from(archiveJobs)
+          .where(condition)
+          .orderBy(desc(archiveJobs.updatedAt), desc(archiveJobs.id))
+          .limit(requirePositiveSafeInteger(options.limit, "limit"))
+          .all()
+          .reverse();
+      }
+      return database
         .select()
         .from(archiveJobs)
-        .where(
-          statuses?.length ? inArray(archiveJobs.status, statuses) : undefined,
-        )
+        .where(condition)
         .orderBy(desc(archiveJobs.priority), asc(archiveJobs.createdAt))
-        .all(),
+        .all();
+    },
     claim: (workerId, token, timestamp) => {
       const nextApprovedJobId = sql<ArchiveJobId>`(
         select ${archiveJobs.id}
@@ -511,15 +523,27 @@ export function createDataAccess({
     recordType: "encode job",
     find: (id) =>
       database.select().from(encodeJobs).where(eq(encodeJobs.id, id)).get(),
-    list: (statuses) =>
-      database
+    list: (statuses, options) => {
+      const condition = statuses?.length
+        ? inArray(encodeJobs.status, statuses)
+        : undefined;
+      if (options?.limit !== undefined) {
+        return database
+          .select()
+          .from(encodeJobs)
+          .where(condition)
+          .orderBy(desc(encodeJobs.updatedAt), desc(encodeJobs.id))
+          .limit(requirePositiveSafeInteger(options.limit, "limit"))
+          .all()
+          .reverse();
+      }
+      return database
         .select()
         .from(encodeJobs)
-        .where(
-          statuses?.length ? inArray(encodeJobs.status, statuses) : undefined,
-        )
+        .where(condition)
         .orderBy(desc(encodeJobs.priority), asc(encodeJobs.createdAt))
-        .all(),
+        .all();
+    },
     claim: (workerId, token, timestamp) => {
       const claimed = database
         .update(encodeJobs)
@@ -597,22 +621,24 @@ export function createDataAccess({
     readConsistentSnapshot(read) {
       const snapshotAccess: ConsistentReadAccess = {
         catalog: {
-          listOpticalDrives: () => access.catalog.listOpticalDrives(),
+          listOpticalDrives: (options) =>
+            access.catalog.listOpticalDrives(options),
           listDetectedDiscs: (statuses, options) =>
             access.catalog.listDetectedDiscs(statuses, options),
-          listOriginalDiscArchives: () =>
-            access.catalog.listOriginalDiscArchives(),
-          listMediaItems: () => access.catalog.listMediaItems(),
-          listDiscSelections: () => access.catalog.listDiscSelections(),
+          listOriginalDiscArchives: (options) =>
+            access.catalog.listOriginalDiscArchives(options),
+          listMediaItems: (options) => access.catalog.listMediaItems(options),
+          listDiscSelections: (options) =>
+            access.catalog.listDiscSelections(options),
         },
         encodingProfiles: {
           list: (input) => access.encodingProfiles.list(input),
         },
         archiveJobs: {
-          list: (statuses) => access.archiveJobs.list(statuses),
+          list: (statuses, options) => access.archiveJobs.list(statuses, options),
         },
         encodeJobs: {
-          list: (statuses) => access.encodeJobs.list(statuses),
+          list: (statuses, options) => access.encodeJobs.list(statuses, options),
         },
       };
       sqlite.exec("BEGIN");
@@ -665,6 +691,19 @@ export function createDataAccess({
         }
 
         return database.transaction((transaction) => {
+          const existingByPath = new Map(
+            transaction
+              .select({
+                devicePath: opticalDrives.devicePath,
+                isPresent: opticalDrives.isPresent,
+                serialNumber: opticalDrives.serialNumber,
+                vendor: opticalDrives.vendor,
+                product: opticalDrives.product,
+              })
+              .from(opticalDrives)
+              .all()
+              .map((drive) => [drive.devicePath, drive]),
+          );
           transaction
             .update(opticalDrives)
             .set({ isPresent: false, updatedAt: timestamp })
@@ -672,15 +711,7 @@ export function createDataAccess({
             .run();
 
           for (const drive of normalized) {
-            const existing = transaction
-              .select({
-                serialNumber: opticalDrives.serialNumber,
-                vendor: opticalDrives.vendor,
-                product: opticalDrives.product,
-              })
-              .from(opticalDrives)
-              .where(eq(opticalDrives.devicePath, drive.devicePath))
-              .get();
+            const existing = existingByPath.get(drive.devicePath);
             const serialChanged =
               existing?.serialNumber !== null &&
               existing?.serialNumber !== undefined &&
@@ -696,7 +727,19 @@ export function createDataAccess({
               existingModel.length > 0 &&
               discoveredModel.length > 0 &&
               existingModel !== discoveredModel;
-            const isReplacement = serialChanged || modelChanged;
+            const stableIdentityMatches =
+              existing?.serialNumber !== null &&
+              existing?.serialNumber !== undefined &&
+              drive.serialNumber !== undefined &&
+              existing.serialNumber === drive.serialNumber;
+            const continuityUnprovenAfterDisappearance =
+              existing !== undefined &&
+              !existing.isPresent &&
+              !stableIdentityMatches;
+            const isReplacement =
+              serialChanged ||
+              modelChanged ||
+              continuityUnprovenAfterDisappearance;
             transaction
               .insert(opticalDrives)
               .values({
@@ -772,10 +815,27 @@ export function createDataAccess({
         return requireRow(inserted, "optical drive", devicePath);
       },
 
-      listOpticalDrives() {
+      listOpticalDrives(options) {
+        if (options?.ids !== undefined && options.ids.length === 0) {
+          return [];
+        }
+        const condition = options?.ids
+          ? inArray(opticalDrives.id, [...options.ids])
+          : undefined;
+        if (options?.limit !== undefined) {
+          return database
+            .select()
+            .from(opticalDrives)
+            .where(condition)
+            .orderBy(desc(opticalDrives.lastSeenAt), desc(opticalDrives.id))
+            .limit(requirePositiveSafeInteger(options.limit, "limit"))
+            .all()
+            .reverse();
+        }
         return database
           .select()
           .from(opticalDrives)
+          .where(condition)
           .orderBy(asc(opticalDrives.devicePath))
           .all();
       },
@@ -908,16 +968,25 @@ export function createDataAccess({
       },
 
       listDetectedDiscs(statuses, options) {
+        if (options?.ids !== undefined && options.ids.length === 0) {
+          return [];
+        }
+        const conditions = [
+          statuses?.length
+            ? inArray(detectedDiscs.status, statuses)
+            : undefined,
+          options?.ids
+            ? inArray(detectedDiscs.id, [...options.ids])
+            : undefined,
+        ].filter((condition) => condition !== undefined);
+        const condition =
+          conditions.length > 0 ? and(...conditions) : undefined;
         if (options?.limit !== undefined) {
           const limit = requirePositiveSafeInteger(options.limit, "limit");
           return database
             .select()
             .from(detectedDiscs)
-            .where(
-              statuses?.length
-                ? inArray(detectedDiscs.status, statuses)
-                : undefined,
-            )
+            .where(condition)
             .orderBy(desc(detectedDiscs.detectedAt), desc(detectedDiscs.id))
             .limit(limit)
             .all()
@@ -926,11 +995,7 @@ export function createDataAccess({
         return database
           .select()
           .from(detectedDiscs)
-          .where(
-            statuses?.length
-              ? inArray(detectedDiscs.status, statuses)
-              : undefined,
-          )
+          .where(condition)
           .orderBy(asc(detectedDiscs.detectedAt), asc(detectedDiscs.id))
           .all();
       },
@@ -1067,10 +1132,47 @@ export function createDataAccess({
         });
       },
 
-      listOriginalDiscArchives() {
+      listOriginalDiscArchives(options) {
+        if (options?.ids !== undefined && options.ids.length === 0) {
+          return [];
+        }
+        const conditions = [
+          options?.ids
+            ? inArray(originalDiscArchives.id, [...options.ids])
+            : undefined,
+          options?.uncatalogedOnly
+            ? notExists(
+                database
+                  .select({ id: discSelections.id })
+                  .from(discSelections)
+                  .where(
+                    eq(
+                      discSelections.originalDiscArchiveId,
+                      originalDiscArchives.id,
+                    ),
+                  ),
+              )
+            : undefined,
+        ].filter((condition) => condition !== undefined);
+        const condition =
+          conditions.length > 0 ? and(...conditions) : undefined;
+        if (options?.limit !== undefined) {
+          return database
+            .select()
+            .from(originalDiscArchives)
+            .where(condition)
+            .orderBy(
+              desc(originalDiscArchives.archivedAt),
+              desc(originalDiscArchives.id),
+            )
+            .limit(requirePositiveSafeInteger(options.limit, "limit"))
+            .all()
+            .reverse();
+        }
         return database
           .select()
           .from(originalDiscArchives)
+          .where(condition)
           .orderBy(asc(originalDiscArchives.archivedAt))
           .all();
       },
@@ -1099,10 +1201,18 @@ export function createDataAccess({
         );
       },
 
-      listMediaItems() {
+      listMediaItems(options) {
+        if (options?.ids !== undefined && options.ids.length === 0) {
+          return [];
+        }
         return database
           .select()
           .from(mediaItems)
+          .where(
+            options?.ids
+              ? inArray(mediaItems.id, [...options.ids])
+              : undefined,
+          )
           .orderBy(
             asc(mediaItems.parentId),
             asc(mediaItems.createdAt),
@@ -1172,10 +1282,18 @@ export function createDataAccess({
         );
       },
 
-      listDiscSelections() {
+      listDiscSelections(options) {
+        if (options?.ids !== undefined && options.ids.length === 0) {
+          return [];
+        }
         return database
           .select()
           .from(discSelections)
+          .where(
+            options?.ids
+              ? inArray(discSelections.id, [...options.ids])
+              : undefined,
+          )
           .orderBy(asc(discSelections.createdAt), asc(discSelections.id))
           .all()
           .map(toDiscSelection);
@@ -1338,7 +1456,13 @@ export function createDataAccess({
       },
 
       list(input = {}) {
+        if (input.ids !== undefined && input.ids.length === 0) {
+          return [];
+        }
         const conditions = [
+          input.ids
+            ? inArray(encodingProfiles.id, [...input.ids])
+            : undefined,
           input.mediaDomain
             ? eq(encodingProfiles.mediaDomain, input.mediaDomain)
             : undefined,

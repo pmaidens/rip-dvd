@@ -235,7 +235,10 @@ export interface CatalogAccess {
     isEnabled?: boolean;
     isPresent: boolean;
   }): OpticalDrive;
-  listOpticalDrives(): OpticalDrive[];
+  listOpticalDrives(options?: {
+    ids?: readonly OpticalDriveId[];
+    limit?: number;
+  }): OpticalDrive[];
   registerDetectedDisc(input: {
     opticalDriveId: OpticalDriveId;
     discKind: DiscKind;
@@ -245,7 +248,7 @@ export interface CatalogAccess {
   }): DetectedDisc;
   listDetectedDiscs(
     statuses?: DetectedDiscStatus[],
-    options?: { limit?: number },
+    options?: { ids?: readonly DetectedDiscId[]; limit?: number },
   ): DetectedDisc[];
   updateDetectedDiscStatus(
     id: DetectedDiscId,
@@ -259,7 +262,11 @@ export interface CatalogAccess {
     fingerprint: string;
     sizeBytes?: number;
   }): OriginalDiscArchive;
-  listOriginalDiscArchives(): OriginalDiscArchive[];
+  listOriginalDiscArchives(options?: {
+    ids?: readonly OriginalDiscArchiveId[];
+    limit?: number;
+    uncatalogedOnly?: boolean;
+  }): OriginalDiscArchive[];
   createMediaItem(input: {
     parentId?: MediaItemId;
     kind: MediaItemKind;
@@ -268,9 +275,11 @@ export interface CatalogAccess {
     seasonNumber?: number;
     episodeNumber?: number;
   }): MediaItem;
-  listMediaItems(): MediaItem[];
+  listMediaItems(options?: { ids?: readonly MediaItemId[] }): MediaItem[];
   createDiscSelection(input: CreateDiscSelectionInput): DiscSelection;
-  listDiscSelections(): DiscSelection[];
+  listDiscSelections(options?: {
+    ids?: readonly DiscSelectionId[];
+  }): DiscSelection[];
 }
 
 export interface EncodingProfileAccess {
@@ -296,6 +305,7 @@ export interface EncodingProfileAccess {
     isActive: boolean;
   }): EncodingProfile;
   list(input?: {
+    ids?: readonly EncodingProfileId[];
     mediaDomain?: MediaDomain;
     activeOnly?: boolean;
   }): EncodingProfile[];
@@ -304,7 +314,7 @@ export interface EncodingProfileAccess {
 export interface ArchiveJobAccess {
   enqueue(input: { detectedDiscId: DetectedDiscId; priority?: number }): ArchiveJob;
   claimNext(workerId: string): RunningArchiveJob | null;
-  list(statuses?: JobStatus[]): ArchiveJob[];
+  list(statuses?: JobStatus[], options?: { limit?: number }): ArchiveJob[];
   updateProgress(
     claim: RunningArchiveJob,
     progressPercent: number,
@@ -325,7 +335,7 @@ export interface EncodeJobAccess {
     priority?: number;
   }): EncodeJob;
   claimNext(workerId: string): RunningEncodeJob | null;
-  list(statuses?: JobStatus[]): EncodeJob[];
+  list(statuses?: JobStatus[], options?: { limit?: number }): EncodeJob[];
   updateProgress(claim: RunningEncodeJob, progressPercent: number): EncodeJob;
   complete(claim: RunningEncodeJob): EncodeJob;
   fail(claim: RunningEncodeJob, errorMessage: string): EncodeJob;

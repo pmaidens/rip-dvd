@@ -1,13 +1,28 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 
 import {
   createLinuxOpticalDriveHardware,
-  type BinaryCommandRunner,
+  nodeDiscContentReader,
   type CommandRunner,
+  type DiscContentReader,
 } from "./optical-drive-hardware.js";
 
 describe("Linux Optical Drive hardware boundary", () => {
   it("discovers rom devices and scans a bounded DVD title map", async () => {
+    const summary = [
+      "Disc Title: EXAMPLE_DISC",
+      "Title: 01, Length: 01:35:11.000 Chapters: 12, Cells: 13, Audio streams: 2, Subpictures: 2",
+      "  Audio: 1, Language: en - English, Format: ac3, Frequency: 48000, Quantization: drc, Channels: 6, AP: 0, Content: Normal, Stream id: 0x80",
+      "  Audio: 2, Language: fr - Francais, Format: dts, Frequency: 48000, Quantization: drc, Channels: 2, AP: 0, Content: Comments1, Stream id: 0x89",
+      "  Subtitle: 1, Language: en - English, Content: Normal, Stream id: 0x20,",
+      "  Subtitle: 2, Language: xx - Unknown, Content: Undefined, Stream id: 0x21,",
+      "Title: 02, Length: 00:07:30.000 Chapters: 3, Cells: 3, Audio streams: 1, Subpictures: 0",
+      "  Audio: 1, Language: es - Espanol, Format: ac3, Frequency: 48000, Quantization: drc, Channels: 2, AP: 0, Content: Normal, Stream id: 0x80",
+    ].join("\n");
     const runner: CommandRunner = {
       run: vi
         .fn()
@@ -36,46 +51,29 @@ describe("Linux Optical Drive hardware boundary", () => {
         })
         .mockResolvedValueOnce({
           exitCode: 0,
-          stdout: [
-            "Disc Title: EXAMPLE_DISC",
-            "Title: 01, Length: 01:35:11.000 Chapters: 12, Cells: 13, Audio streams: 2, Subpictures: 1",
-            "  Audio: 1, Language: en - English, Format: ac3, Frequency: 48000, Quantization: drc, Channels: 6, AP: 0, Content: Normal, Stream id: 0x80",
-            "  Audio: 2, Language: fr - Francais, Format: dts, Frequency: 48000, Quantization: drc, Channels: 2, AP: 0, Content: Comments1, Stream id: 0x89",
-            "  Subtitle: 1, Language: en - English, Content: Normal, Stream id: 0x20",
-            "Title: 02, Length: 00:07:30.000 Chapters: 3, Cells: 3, Audio streams: 1, Subpictures: 0",
-            "  Audio: 1, Language: es - Espanol, Format: ac3, Frequency: 48000, Quantization: drc, Channels: 2, AP: 0, Content: Normal, Stream id: 0x80",
-          ].join("\n"),
+          stdout: summary,
           stderr: "",
         })
         .mockResolvedValueOnce({
           exitCode: 0,
           stdout: "4700000000\n",
           stderr: "",
+        })
+        .mockResolvedValueOnce({ exitCode: 0, stdout: summary, stderr: "" })
+        .mockResolvedValueOnce({
+          exitCode: 0,
+          stdout: "4700000000\n",
+          stderr: "",
         }),
     };
-    const binaryRunner: BinaryCommandRunner = {
-      run: vi
-        .fn()
-        .mockResolvedValueOnce({
-          exitCode: 0,
-          stdout: Buffer.alloc(32_768, 0x11),
-          stderr: Buffer.alloc(0),
-        })
-        .mockResolvedValueOnce({
-          exitCode: 0,
-          stdout: Buffer.alloc(32_768, 0x22),
-          stderr: Buffer.alloc(0),
-        })
-        .mockResolvedValueOnce({
-          exitCode: 0,
-          stdout: Buffer.alloc(32_768, 0x33),
-          stderr: Buffer.alloc(0),
-        }),
+    const contentId = `sha256:${"c".repeat(64)}`;
+    const contentReader: DiscContentReader = {
+      hash: vi.fn().mockResolvedValue(contentId),
     };
     const hardware = createLinuxOpticalDriveHardware({
       platform: "linux",
       runner,
-      binaryRunner,
+      contentReader,
     });
     const signal = new AbortController().signal;
 
@@ -89,13 +87,11 @@ describe("Linux Optical Drive hardware boundary", () => {
       },
     ]);
     await expect(hardware.scanDvd("/dev/sr0", signal)).resolves.toEqual({
-      fingerprint:
-        "sha256:955dbd91d6d37be32c27ce0010ce0fbd001b00dae47b2ec913b76bcee45a0783",
+      fingerprint: contentId,
       volumeLabel: "EXAMPLE_DISC",
       scanData: {
         schemaVersion: 2,
-        contentId:
-          "sha256:955dbd91d6d37be32c27ce0010ce0fbd001b00dae47b2ec913b76bcee45a0783",
+        contentId,
         titles: [
           {
             number: 1,
@@ -123,6 +119,12 @@ describe("Linux Optical Drive hardware boundary", () => {
                 languageCode: "en",
                 language: "English",
                 content: "Normal",
+              },
+              {
+                id: 33,
+                languageCode: "xx",
+                language: "Unknown",
+                content: "Undefined",
               },
             ],
           },
@@ -170,32 +172,21 @@ describe("Linux Optical Drive hardware boundary", () => {
       ["--getsize64", "/dev/sr0"],
       expect.objectContaining({ signal, timeoutMs: 90_000 }),
     );
-    expect(binaryRunner.run).toHaveBeenCalledTimes(3);
-    expect(binaryRunner.run).toHaveBeenNthCalledWith(
-      1,
-      "dd",
-      [
-        "if=/dev/sr0",
-        "bs=2048",
-        "skip=0",
-        "count=16",
-        "status=none",
-      ],
-      expect.objectContaining({
-        maxBufferBytes: 32_768,
-        signal,
-        timeoutMs: 90_000,
-      }),
+    expect(contentReader.hash).toHaveBeenCalledTimes(2);
+    expect(contentReader.hash).toHaveBeenCalledWith(
+      "/dev/sr0",
+      4_700_000_000,
+      signal,
     );
   });
 
-  it("distinguishes structurally identical DVDs by bounded content samples", async () => {
+  it("distinguishes equal-sized DVDs that differ outside the old fixed samples", async () => {
     const summary = [
       "Disc Title: GENERIC_DISC",
       "Title: 01, Length: 01:30:00.000 Chapters: 12, Cells: 12, Audio streams: 1, Subpictures: 0",
       "  Audio: 1, Language: en - English, Format: ac3, Frequency: 48000, Quantization: drc, Channels: 6, AP: 0, Content: Normal, Stream id: 0x80",
     ].join("\n");
-    const createHardware = (sampleByte: number) => {
+    const createHardware = (contentId: string) => {
       const runner: CommandRunner = {
         run: vi
           .fn()
@@ -204,28 +195,101 @@ describe("Linux Optical Drive hardware boundary", () => {
             exitCode: 0,
             stdout: "4700000000\n",
             stderr: "",
+          })
+          .mockResolvedValueOnce({ exitCode: 0, stdout: summary, stderr: "" })
+          .mockResolvedValueOnce({
+            exitCode: 0,
+            stdout: "4700000000\n",
+            stderr: "",
           }),
       };
-      const binaryRunner: BinaryCommandRunner = {
-        run: vi.fn().mockResolvedValue({
-          exitCode: 0,
-          stdout: Buffer.alloc(32_768, sampleByte),
-          stderr: Buffer.alloc(0),
-        }),
+      const contentReader: DiscContentReader = {
+        hash: vi.fn().mockResolvedValue(contentId),
       };
       return createLinuxOpticalDriveHardware({
         platform: "linux",
         runner,
-        binaryRunner,
+        contentReader,
       });
     };
     const signal = new AbortController().signal;
 
-    const first = await createHardware(0x11).scanDvd("/dev/sr0", signal);
-    const second = await createHardware(0x22).scanDvd("/dev/sr0", signal);
+    const first = await createHardware(
+      `sha256:${"a".repeat(64)}`,
+    ).scanDvd("/dev/sr0", signal);
+    const second = await createHardware(
+      `sha256:${"b".repeat(64)}`,
+    ).scanDvd("/dev/sr0", signal);
 
     expect(first?.scanData.titles).toEqual(second?.scanData.titles);
     expect(first?.fingerprint).not.toBe(second?.fingerprint);
+  });
+
+  it("hashes every declared byte instead of only fixed content samples", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "rip-dvd-content-"));
+    const firstPath = join(directory, "first-disc.img");
+    const secondPath = join(directory, "second-disc.img");
+    const firstContent = Buffer.alloc(262_144);
+    const secondContent = Buffer.from(firstContent);
+    secondContent[65_536] = 1;
+    await writeFile(firstPath, firstContent);
+    await writeFile(secondPath, secondContent);
+    try {
+      const signal = new AbortController().signal;
+      const first = await nodeDiscContentReader.hash(
+        firstPath,
+        firstContent.length,
+        signal,
+      );
+      const second = await nodeDiscContentReader.hash(
+        secondPath,
+        secondContent.length,
+        signal,
+      );
+
+      expect(first).toMatch(/^sha256:[0-9a-f]{64}$/);
+      expect(first).not.toBe(second);
+    } finally {
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
+  it("rejects a scan when the medium changes around metadata collection", async () => {
+    const summary = [
+      "Disc Title: SWAPPED_DISC",
+      "Title: 01, Length: 01:30:00.000 Chapters: 12, Cells: 12, Audio streams: 0, Subpictures: 0",
+    ].join("\n");
+    const runner: CommandRunner = {
+      run: vi
+        .fn()
+        .mockResolvedValueOnce({ exitCode: 0, stdout: summary, stderr: "" })
+        .mockResolvedValueOnce({
+          exitCode: 0,
+          stdout: "4700000000\n",
+          stderr: "",
+        })
+        .mockResolvedValueOnce({ exitCode: 0, stdout: summary, stderr: "" })
+        .mockResolvedValueOnce({
+          exitCode: 0,
+          stdout: "4700000000\n",
+          stderr: "",
+        }),
+    };
+    const contentReader: DiscContentReader = {
+      hash: vi
+        .fn()
+        .mockResolvedValueOnce(`sha256:${"a".repeat(64)}`)
+        .mockResolvedValueOnce(`sha256:${"b".repeat(64)}`),
+    };
+    const hardware = createLinuxOpticalDriveHardware({
+      platform: "linux",
+      runner,
+      contentReader,
+    });
+
+    await expect(
+      hardware.scanDvd("/dev/sr0", new AbortController().signal),
+    ).rejects.toThrow("DVD medium changed during scanning");
   });
 
   it("fails closed for unsupported platforms, malformed discovery, and unsafe identifiers", async () => {
