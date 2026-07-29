@@ -831,6 +831,77 @@ describe("legacy sidecar import", () => {
     },
   );
 
+  it("preserves schema-1 recovery when a previously imported sidecar disappears", () => {
+    const fixture = createFixture();
+    const secondArchivePath = join(
+      fixture.originalsLibraryPath,
+      "Second Movie.iso",
+    );
+    const secondSidecarPath = join(
+      fixture.originalsLibraryPath,
+      "Second Movie.rip-dvd.json",
+    );
+    const secondOutputPath = join(
+      dirname(fixture.movieOutputPath),
+      "Second Movie.mkv",
+    );
+    writeFileSync(secondArchivePath, "second DVD image");
+    writeFileSync(
+      secondSidecarPath,
+      JSON.stringify({
+        schema_version: 2,
+        source: secondArchivePath,
+        title: "Second Movie",
+        disc_fingerprint: "second-disc-fingerprint",
+        jobs: [{
+          label: "Movie: Second Movie",
+          source: secondArchivePath,
+          output: secondOutputPath,
+          preset: "Fast 480p30",
+          selection: "main_feature",
+          title_number: null,
+        }],
+      }),
+    );
+    fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+    const markerPath = join(
+      fixture.originalsLibraryPath,
+      ".rip-dvd-sqlite-catalog",
+    );
+    const schemaOneMarker = {
+      schemaVersion: 1,
+      legacyQueueStatus: "retired",
+      authoritativeStore: "sqlite",
+    };
+    writeFileSync(markerPath, JSON.stringify(schemaOneMarker));
+    unlinkSync(secondSidecarPath);
+
+    const report = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+
+    expect(report.issues).toEqual([
+      expect.objectContaining({
+        code: "invalid_job",
+        message: expect.stringMatching(/schema-1.*missing.*recovery input/i),
+        sidecarPath: secondArchivePath,
+      }),
+    ]);
+    expect(fixture.access.encodeJobs.list()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ outputPath: fixture.movieOutputPath }),
+        expect.objectContaining({ outputPath: fixture.trailerOutputPath }),
+        expect.objectContaining({ outputPath: secondOutputPath }),
+      ]),
+    );
+    expect(JSON.parse(readFileSync(markerPath, "utf8"))).toEqual(
+      schemaOneMarker,
+    );
+    fixture.access.close();
+  });
+
   it("resumes from the prior durable schema-2 marker layout", () => {
     const fixture = createFixture();
     const markerPath = join(

@@ -2106,6 +2106,79 @@ export function createDataAccessInternal(
         }
 
         if (cutover.mode === "schema-one") {
+          const legacyImportSource = database
+            .select()
+            .from(opticalDrives)
+            .where(
+              eq(
+                opticalDrives.devicePath,
+                `legacy-sidecar:${originalsLibraryPath}`,
+              ),
+            )
+            .get();
+          const importedJobs = legacyImportSource
+            ? database
+                .select({
+                  archivePath: originalDiscArchives.archivePath,
+                  fingerprint: originalDiscArchives.fingerprint,
+                  profileKey: encodingProfiles.key,
+                  sourceKey: discSelections.sourceKey,
+                })
+                .from(encodeJobs)
+                .innerJoin(
+                  discSelections,
+                  eq(discSelections.id, encodeJobs.discSelectionId),
+                )
+                .innerJoin(
+                  originalDiscArchives,
+                  eq(
+                    originalDiscArchives.id,
+                    discSelections.originalDiscArchiveId,
+                  ),
+                )
+                .innerJoin(
+                  detectedDiscs,
+                  eq(
+                    detectedDiscs.id,
+                    originalDiscArchives.detectedDiscId,
+                  ),
+                )
+                .innerJoin(
+                  encodingProfiles,
+                  eq(encodingProfiles.id, encodeJobs.encodingProfileId),
+                )
+                .where(
+                  eq(detectedDiscs.opticalDriveId, legacyImportSource.id),
+                )
+                .all()
+            : [];
+          for (const importedJob of importedJobs) {
+            const logicalKey = [
+              importedJob.fingerprint,
+              importedJob.sourceKey,
+              importedJob.profileKey,
+            ].join("\0");
+            if (trustedSchemaOneSnapshots.has(logicalKey)) {
+              continue;
+            }
+            const discoveredWithKnownIssues = discoveries.some(
+              (discovery) =>
+                discovery.outcome === "parsed" &&
+                discovery.sidecar.fingerprint === importedJob.fingerprint &&
+                discovery.sidecar.archivePath === importedJob.archivePath &&
+                discovery.sidecar.issues.length > 0,
+            );
+            if (discoveredWithKnownIssues) {
+              continue;
+            }
+            schemaOneHasUnresolvedWork = true;
+            report.issues.push({
+              code: "invalid_job",
+              message:
+                "Schema-1 cutover recovery is missing a legacy sidecar recovery input for an Encode Job already attributable to this library; SQLite state and the schema-1 marker were preserved",
+              sidecarPath: importedJob.archivePath,
+            });
+          }
           if (!schemaOneHasUnresolvedWork) {
             cutover.upgradeSchemaOne(trustedSchemaOneSnapshots);
           }

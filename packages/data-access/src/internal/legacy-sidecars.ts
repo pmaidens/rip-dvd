@@ -33,6 +33,8 @@ const DEFAULT_HANDBRAKE_PRESET = "Fast 480p30";
 const LEGACY_QUEUE_CUTOVER_MARKER = ".rip-dvd-sqlite-catalog";
 const LEGACY_QUEUE_LOCK_POLL_MS = 10;
 const LEGACY_QUEUE_WORKER_STALL_MS = 2_000;
+const LEGACY_QUEUE_RELEASE_ACKNOWLEDGEMENT_MS = 1_000;
+const LEGACY_QUEUE_HELPER_TERMINATION_GRACE_MS = 250;
 const LEGACY_QUEUE_HELPER_STATE = {
   starting: 0,
   intentReady: 1,
@@ -66,6 +68,9 @@ const sharedState = new Int32Array(workerData.sharedState);
 const statePath = (name) => join(workerData.stateDirectory, name);
 let finished = false;
 let releaseSent = false;
+let failurePublished = false;
+let terminationRequestedAt;
+let terminationSignalSentAt;
 let timer;
 
 function publishHeartbeat() {
@@ -89,10 +94,11 @@ function finish() {
   parentPort.close();
 }
 
-function fail(message) {
-  if (finished) {
+function publishFailure(message) {
+  if (failurePublished) {
     return;
   }
+  failurePublished = true;
   try {
     writeFileSync(statePath("worker-error"), message, {
       encoding: "utf8",
@@ -101,9 +107,78 @@ function fail(message) {
     });
   } catch {}
   publishState(FAILED);
-  finish();
+}
+
+function requestHelperTermination() {
   if (helper.exitCode === null && helper.signalCode === null) {
-    helper.kill("SIGTERM");
+    if (terminationRequestedAt === undefined) {
+      terminationRequestedAt = Date.now();
+      return;
+    }
+    if (
+      terminationSignalSentAt === undefined &&
+      Date.now() - terminationRequestedAt >=
+        ${LEGACY_QUEUE_HELPER_TERMINATION_GRACE_MS}
+    ) {
+      terminationSignalSentAt = Date.now();
+      helper.kill("SIGTERM");
+    } else if (
+      terminationSignalSentAt !== undefined &&
+      Date.now() - terminationSignalSentAt >=
+      ${LEGACY_QUEUE_HELPER_TERMINATION_GRACE_MS}
+    ) {
+      helper.kill("SIGKILL");
+    }
+  }
+}
+
+function stateExists(name) {
+  try {
+    return existsSync(statePath(name));
+  } catch (error) {
+    publishFailure(
+      "Legacy queue lease worker failed during " +
+        phase() +
+        ": could not inspect state " +
+        name +
+        ": " +
+        error.message,
+    );
+    return false;
+  }
+}
+
+function readState(name) {
+  if (!stateExists(name)) {
+    return null;
+  }
+  try {
+    return readFileSync(statePath(name), "utf8");
+  } catch (error) {
+    publishFailure(
+      "Legacy queue lease worker failed during " +
+        phase() +
+        ": could not read state " +
+        name +
+        ": " +
+        error.message,
+    );
+    return null;
+  }
+}
+
+function markReleased() {
+  try {
+    writeFileSync(statePath("released"), "", {
+      flag: "wx",
+      mode: 0o600,
+    });
+  } catch (error) {
+    if (error.code !== "EEXIST") {
+      publishFailure(
+        "Could not publish legacy queue lease release: " + error.message,
+      );
+    }
   }
 }
 
@@ -121,13 +196,13 @@ function phase() {
 function observeSentinels() {
   if (
     Atomics.load(sharedState, STATE_INDEX) < INTENT_READY &&
-    existsSync(statePath("intent-ready"))
+    stateExists("intent-ready")
   ) {
     publishState(INTENT_READY);
   }
   if (
     Atomics.load(sharedState, STATE_INDEX) < READY &&
-    existsSync(statePath("ready"))
+    stateExists("ready")
   ) {
     publishState(READY);
   }
@@ -146,37 +221,44 @@ const helper = spawn(
 publishHeartbeat();
 
 helper.once("error", (error) => {
-  fail("Legacy queue lease helper failed to start: " + error.message);
+  publishFailure("Legacy queue lease helper failed to start: " + error.message);
 });
 helper.once("exit", (code, signal) => {
-  if (existsSync(statePath("released"))) {
+  const helperError = readState("error");
+  const released = stateExists("released");
+  const aborted = stateExists("supervisor-abort");
+  if (helperError !== null) {
+    publishFailure(helperError);
+  } else if (!released && !aborted && !failurePublished) {
+    observeSentinels();
+    publishFailure(
+      "Legacy queue lease helper exited during " +
+        phase() +
+        " (code " +
+        String(code) +
+        ", signal " +
+        String(signal) +
+        ")",
+    );
+  }
+  markReleased();
+  if (!failurePublished) {
     publishState(RELEASED);
-    finish();
-    return;
   }
-  if (existsSync(statePath("error"))) {
-    fail(readFileSync(statePath("error"), "utf8"));
-    return;
-  }
-  observeSentinels();
-  fail(
-    "Legacy queue lease helper exited during " +
-      phase() +
-      " (code " +
-      String(code) +
-      ", signal " +
-      String(signal) +
-      ")",
-  );
+  finish();
 });
 
 timer = setInterval(() => {
   publishHeartbeat();
-  if (existsSync(statePath("error"))) {
-    fail(readFileSync(statePath("error"), "utf8"));
+  const helperError = readState("error");
+  if (helperError !== null) {
+    publishFailure(helperError);
     return;
   }
   observeSentinels();
+  if (stateExists("supervisor-abort")) {
+    requestHelperTermination();
+  }
   if (
     !releaseSent &&
     Atomics.load(sharedState, RELEASE_INDEX) === 1
@@ -189,13 +271,11 @@ timer = setInterval(() => {
       });
       helper.stdin.end();
     } catch (error) {
-      fail("Could not release the legacy queue lease: " + error.message);
+      publishFailure(
+        "Could not release the legacy queue lease: " + error.message,
+      );
       return;
     }
-  }
-  if (existsSync(statePath("released"))) {
-    publishState(RELEASED);
-    finish();
   }
 }, ${LEGACY_QUEUE_LOCK_POLL_MS});
 `;
@@ -831,7 +911,11 @@ export function acquireLegacyQueueCutoverLock(
     }
     return "release acknowledgement";
   };
-  const waitForState = (expectedState: number): void => {
+  const waitForState = (
+    expectedState: number,
+    maximumWaitMilliseconds?: number,
+  ): void => {
+    const phaseStartedAt = process.hrtime.bigint();
     let heartbeat = Atomics.load(
       helperState,
       LEGACY_QUEUE_HELPER_HEARTBEAT_INDEX,
@@ -848,6 +932,15 @@ export function acquireLegacyQueueCutoverLock(
       if (state >= expectedState) {
         return;
       }
+      if (
+        maximumWaitMilliseconds !== undefined &&
+        Number(process.hrtime.bigint() - phaseStartedAt) / 1_000_000 >=
+          maximumWaitMilliseconds
+      ) {
+        throw new Error(
+          `Legacy queue lease helper did not complete ${waitPhase(expectedState)} within ${maximumWaitMilliseconds}ms`,
+        );
+      }
       const currentHeartbeat = Atomics.load(
         helperState,
         LEGACY_QUEUE_HELPER_HEARTBEAT_INDEX,
@@ -860,7 +953,6 @@ export function acquireLegacyQueueCutoverLock(
           process.hrtime.bigint() - heartbeatObservedAt,
         ) / 1_000_000;
         if (stalledForMilliseconds >= LEGACY_QUEUE_WORKER_STALL_MS) {
-          workerStoppedResponding = true;
           throw new Error(
             `Legacy queue lease worker stopped responding during ${waitPhase(expectedState)}`,
           );
@@ -874,7 +966,6 @@ export function acquireLegacyQueueCutoverLock(
       );
     }
   };
-  let workerStoppedResponding = false;
   const stopUnresponsiveWorker = (): boolean => {
     for (const name of ["release", LEGACY_QUEUE_SUPERVISOR_ABORT]) {
       if (existsSync(statePath(name))) {
@@ -888,7 +979,6 @@ export function acquireLegacyQueueCutoverLock(
     }
     Atomics.store(helperState, LEGACY_QUEUE_HELPER_RELEASE_INDEX, 1);
     Atomics.notify(helperState, LEGACY_QUEUE_HELPER_RELEASE_INDEX);
-    void worker.terminate();
     const deadline =
       process.hrtime.bigint() +
       BigInt(LEGACY_QUEUE_WORKER_STALL_MS) * 1_000_000n;
@@ -903,7 +993,9 @@ export function acquireLegacyQueueCutoverLock(
         LEGACY_QUEUE_LOCK_POLL_MS,
       );
     }
-    return existsSync(statePath("released"));
+    const helperReleased = existsSync(statePath("released"));
+    void worker.terminate();
+    return helperReleased;
   };
   const cleanUpUnresponsiveWorker = (): void => {
     const helperReleased = stopUnresponsiveWorker();
@@ -941,23 +1033,18 @@ export function acquireLegacyQueueCutoverLock(
       );
       Atomics.notify(helperState, LEGACY_QUEUE_HELPER_RELEASE_INDEX);
       try {
-        waitForState(LEGACY_QUEUE_HELPER_STATE.released);
+        waitForState(
+          LEGACY_QUEUE_HELPER_STATE.released,
+          LEGACY_QUEUE_RELEASE_ACKNOWLEDGEMENT_MS,
+        );
       } catch (error) {
-        if (workerStoppedResponding) {
-          cleanUpUnresponsiveWorker();
-        } else {
-          cleanUpResponsiveWorker();
-        }
+        cleanUpUnresponsiveWorker();
         throw error;
       }
       cleanUpResponsiveWorker();
     };
   } catch (error) {
-    if (workerStoppedResponding) {
-      cleanUpUnresponsiveWorker();
-    } else {
-      cleanUpResponsiveWorker();
-    }
+    cleanUpUnresponsiveWorker();
     throw error;
   }
 }
