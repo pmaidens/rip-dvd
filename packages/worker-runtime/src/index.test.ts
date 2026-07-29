@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import { loadConfig } from "@rip-dvd/config";
 
 import {
+  runConfiguredAsyncWorker,
   startConfiguredWorker,
   startWorkerLifecycle,
+  type AsyncWorkerLifecycleHost,
   type WorkerLifecycleHost,
   type WorkerSignal,
 } from "./index.js";
@@ -92,5 +94,45 @@ describe("startConfiguredWorker", () => {
       "Archive worker ready (device: /dev/test-dvd, concurrency: 2)",
     ]);
     expect([...registeredSignals.keys()]).toEqual(["SIGINT", "SIGTERM"]);
+  });
+});
+
+describe("runConfiguredAsyncWorker", () => {
+  it("aborts async work and removes shared signal listeners on shutdown", async () => {
+    const logs: string[] = [];
+    const registeredSignals = new Map<WorkerSignal, () => void>();
+    const removedSignals: WorkerSignal[] = [];
+    const host: AsyncWorkerLifecycleHost = {
+      log: (message) => logs.push(message),
+      once: (signal, listener) => registeredSignals.set(signal, listener),
+      removeListener: (signal) => removedSignals.push(signal),
+    };
+    let receivedSignal: AbortSignal | undefined;
+
+    const running = runConfiguredAsyncWorker(
+      {
+        readyMessage: (config) =>
+          `Archive worker ready (device: ${config.archiveDevicePath})`,
+        workerName: "Archive",
+      },
+      async ({ signal }) => {
+        receivedSignal = signal;
+        await new Promise<void>((resolve) =>
+          signal.addEventListener("abort", () => resolve(), { once: true }),
+        );
+      },
+      { environment, lifecycleHost: host },
+    );
+
+    expect([...registeredSignals.keys()]).toEqual(["SIGINT", "SIGTERM"]);
+    registeredSignals.get("SIGTERM")?.();
+    await running;
+
+    expect(receivedSignal?.aborted).toBe(true);
+    expect(logs).toEqual([
+      "Archive worker ready (device: /dev/test-dvd)",
+      "Archive worker received SIGTERM; stopping",
+    ]);
+    expect(removedSignals).toEqual(["SIGINT", "SIGTERM"]);
   });
 });
