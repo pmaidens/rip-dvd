@@ -163,6 +163,11 @@ interface ActiveMediaProbe {
   cancel(): void;
 }
 
+interface TrackedMediaProbe {
+  probe: ActiveMediaProbe;
+  cancellationRequested: boolean;
+}
+
 export interface MediaGenerationProbeLauncher {
   start(
     devicePath: string,
@@ -173,6 +178,7 @@ export interface MediaGenerationProbeLauncher {
 
 interface NodeMediaGenerationProbeLauncherOptions {
   scriptPath?: string;
+  terminateProcess?: (child: { kill(signal: NodeJS.Signals): boolean }) => void;
 }
 
 const MAX_MEDIA_PROBE_OUTPUT_BYTES = 4_096;
@@ -183,6 +189,8 @@ export function createNodeMediaGenerationProbeLauncher(
   const scriptPath =
     options.scriptPath ??
     fileURLToPath(new URL("./optical-media-probe.js", import.meta.url));
+  const terminateProcess =
+    options.terminateProcess ?? ((child) => void child.kill("SIGKILL"));
   return {
     start(devicePath, flags, generationPath) {
       const child = spawn(
@@ -250,7 +258,7 @@ export function createNodeMediaGenerationProbeLauncher(
           cancellationRequested = true;
           child.stdout.destroy();
           child.stderr.destroy();
-          child.kill("SIGKILL");
+          terminateProcess(child);
           // A helper stuck in an uninterruptible kernel open can survive until
           // Linux error recovery completes. It must not retain parent handles.
           child.unref();
@@ -272,7 +280,7 @@ export function createNodeMediaGenerationObserver(
   if (!Number.isSafeInteger(observationTimeoutMs) || observationTimeoutMs <= 0) {
     throw new Error("Optical Drive media observation timeout is invalid");
   }
-  const activeProbes = new Map<string, ActiveMediaProbe>();
+  const activeProbes = new Map<string, TrackedMediaProbe>();
   return {
     async observe(devicePath, signal) {
       const safeDevicePath = requireSafeDevicePath(devicePath);
@@ -281,15 +289,16 @@ export function createNodeMediaGenerationObserver(
       // Opening the block device makes Linux run the optical driver's media
       // event check. Keep the handle open until the resulting disk sequence is
       // read so a passive sysfs value is never used as the cache authority.
-      let probe = activeProbes.get(safeDevicePath);
-      if (probe === undefined) {
-        probe = probeLauncher.start(
+      let trackedProbe = activeProbes.get(safeDevicePath);
+      if (trackedProbe === undefined) {
+        const probe = probeLauncher.start(
           safeDevicePath,
           fsConstants.O_RDONLY | fsConstants.O_NONBLOCK,
           generationPath,
         );
-        activeProbes.set(safeDevicePath, probe);
-        const startedProbe = probe;
+        trackedProbe = { cancellationRequested: false, probe };
+        activeProbes.set(safeDevicePath, trackedProbe);
+        const startedProbe = trackedProbe;
         void probe.result
           .finally(() => {
             if (activeProbes.get(safeDevicePath) === startedProbe) {
@@ -319,15 +328,23 @@ export function createNodeMediaGenerationObserver(
         observationTimeout.unref();
       });
       try {
-        const value = await Promise.race([probe.result, aborted, timedOut]);
+        const value = await Promise.race([
+          trackedProbe.probe.result,
+          aborted,
+          timedOut,
+        ]);
         return requireMediaGeneration(value);
       } finally {
         clearTimeout(observationTimeout);
         removeAbortListener();
-        if (activeProbes.get(safeDevicePath) === probe) {
-          activeProbes.delete(safeDevicePath);
+        // Cancellation can be delayed indefinitely while the helper is in
+        // uninterruptible kernel/SCSI I/O. Keep that helper as this device's
+        // single-flight tombstone until its result settles on actual close;
+        // otherwise every worker poll can abandon another live process.
+        if (!trackedProbe.cancellationRequested) {
+          trackedProbe.cancellationRequested = true;
+          trackedProbe.probe.cancel();
         }
-        probe.cancel();
       }
     },
   };
