@@ -44,13 +44,13 @@ async function createStuckThenSuccessfulProbeFixture() {
   };
 }
 
-async function expectProbeProcessesExited(pidPath: string) {
+async function expectProbeProcessesExited(pidPath: string, count = 2) {
   await vi.waitFor(async () => {
     const pids = (await readFile(pidPath, "utf8"))
       .trim()
       .split("\n")
       .map(Number);
-    expect(pids).toHaveLength(2);
+    expect(pids).toHaveLength(count);
     for (const pid of pids) {
       expect(() => process.kill(pid, 0)).toThrow();
     }
@@ -121,6 +121,7 @@ describe("Linux Optical Drive hardware boundary", () => {
       await expect(
         observer.observe("/dev/sr0", new AbortController().signal),
       ).rejects.toThrow("media observation timed out");
+      await expectProbeProcessesExited(fixture.pidPath, 1);
       await expect(
         observer.observe("/dev/sr0", new AbortController().signal),
       ).resolves.toBe("29");
@@ -148,11 +149,115 @@ describe("Linux Optical Drive hardware boundary", () => {
       });
       controller.abort();
       await expect(observation).rejects.toThrow(/abort/i);
+      await expectProbeProcessesExited(fixture.pidPath, 1);
       await expect(
         observer.observe("/dev/sr0", new AbortController().signal),
       ).resolves.toBe("29");
       await expectProbeProcessesExited(fixture.pidPath);
     } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it("keeps a timed-out probe single-flight until the helper actually closes", async () => {
+    const pendingProbes: Array<{
+      cancel: ReturnType<typeof vi.fn>;
+      reject(error: Error): void;
+      resolve(value: string): void;
+    }> = [];
+    const launcher = {
+      start: vi.fn(() => {
+        let rejectResult!: (error: Error) => void;
+        let resolveResult!: (value: string) => void;
+        const result = new Promise<string>((resolve, reject) => {
+          rejectResult = reject;
+          resolveResult = resolve;
+        });
+        const probe = {
+          cancel: vi.fn(),
+          reject: rejectResult,
+          resolve: resolveResult,
+        };
+        pendingProbes.push(probe);
+        return { cancel: probe.cancel, result };
+      }),
+    };
+    const observer = createNodeMediaGenerationObserver({
+      observationTimeoutMs: 10,
+      probeLauncher: launcher,
+    });
+
+    await expect(
+      observer.observe("/dev/sr0", new AbortController().signal),
+    ).rejects.toThrow("media observation timed out");
+    await expect(
+      observer.observe("/dev/sr0", new AbortController().signal),
+    ).rejects.toThrow("media observation timed out");
+
+    expect(launcher.start).toHaveBeenCalledTimes(1);
+    expect(pendingProbes[0]?.cancel).toHaveBeenCalledTimes(1);
+
+    pendingProbes[0]?.reject(new Error("probe closed after cancellation"));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const recoveredObservation = observer.observe(
+      "/dev/sr0",
+      new AbortController().signal,
+    );
+    expect(launcher.start).toHaveBeenCalledTimes(2);
+    pendingProbes[1]?.resolve("31\n");
+    await expect(recoveredObservation).resolves.toBe("31");
+  });
+
+  it("bounds repeated polls while a production child-process probe stays stuck", async () => {
+    const fixture = await createStuckThenSuccessfulProbeFixture();
+    const terminateProcess = vi.fn();
+    const launcher = createNodeMediaGenerationProbeLauncher({
+      scriptPath: fixture.scriptPath,
+      // Model SIGKILL remaining pending during uninterruptible SCSI I/O. The
+      // launcher still executes its real cancellation and unref path.
+      terminateProcess,
+    });
+    const observer = createNodeMediaGenerationObserver({
+      observationTimeoutMs: 500,
+      probeLauncher: launcher,
+    });
+    let stuckPid: number | undefined;
+    try {
+      for (let poll = 0; poll < 3; poll += 1) {
+        await expect(
+          observer.observe("/dev/sr0", new AbortController().signal),
+        ).rejects.toThrow("media observation timed out");
+      }
+
+      const pids = (await readFile(fixture.pidPath, "utf8"))
+        .trim()
+        .split("\n")
+        .map(Number);
+      expect(pids).toHaveLength(1);
+      expect(terminateProcess).toHaveBeenCalledTimes(1);
+      stuckPid = pids[0];
+      if (stuckPid === undefined) {
+        throw new Error("stuck production probe did not report its pid");
+      }
+
+      process.kill(stuckPid, "SIGKILL");
+      await expectProbeProcessesExited(fixture.pidPath, 1);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      await expect(
+        observer.observe("/dev/sr0", new AbortController().signal),
+      ).resolves.toBe("29");
+      await expectProbeProcessesExited(fixture.pidPath);
+    } finally {
+      if (stuckPid !== undefined) {
+        try {
+          process.kill(stuckPid, "SIGKILL");
+        } catch {
+          // Already reaped.
+        }
+      }
       await fixture.cleanup();
     }
   });
