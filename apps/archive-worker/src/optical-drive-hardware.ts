@@ -1,10 +1,9 @@
 import { createHash } from "node:crypto";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { constants as fsConstants, createReadStream } from "node:fs";
-import { open, readFile } from "node:fs/promises";
 import { platform as operatingSystem } from "node:os";
 import { basename, isAbsolute, normalize } from "node:path";
-import { Worker } from "node:worker_threads";
+import { fileURLToPath } from "node:url";
 
 import {
   decodeDvdTitleMap,
@@ -154,17 +153,9 @@ export interface MediaGenerationObserver {
   observe(devicePath: string, signal: AbortSignal): Promise<string>;
 }
 
-interface OpticalDeviceHandle {
-  close(): Promise<void>;
-}
-
 interface NodeMediaGenerationObserverOptions {
   observationTimeoutMs?: number;
-  openDevice?: (path: string, flags: number) => Promise<OpticalDeviceHandle>;
-  readGenerationFile?: (
-    path: string,
-    options: { encoding: "utf8"; signal: AbortSignal },
-  ) => Promise<string>;
+  probeLauncher?: MediaGenerationProbeLauncher;
 }
 
 interface ActiveMediaProbe {
@@ -172,119 +163,110 @@ interface ActiveMediaProbe {
   cancel(): void;
 }
 
-const ACTIVE_MEDIA_PROBE_SOURCE = String.raw`
-  "use strict";
-  void (async () => {
-    const fs = await import("node:fs");
-    const { parentPort, workerData } = await import("node:worker_threads");
+export interface MediaGenerationProbeLauncher {
+  start(
+    devicePath: string,
+    flags: number,
+    generationPath: string,
+  ): ActiveMediaProbe;
+}
 
-    let descriptor;
-    try {
-      descriptor = fs.openSync(workerData.devicePath, workerData.flags);
-      const generation = fs.readFileSync(workerData.generationPath, "utf8");
-      fs.closeSync(descriptor);
-      descriptor = undefined;
-      parentPort.postMessage({ generation });
-    } catch (error) {
-      if (descriptor !== undefined) {
-        try {
-          fs.closeSync(descriptor);
-        } catch {}
-      }
-      const message = error instanceof Error ? error.message : String(error);
-      parentPort.postMessage({ error: message.slice(0, 500) });
-    }
-  })();
-`;
+interface NodeMediaGenerationProbeLauncherOptions {
+  scriptPath?: string;
+}
 
-function startActiveMediaProbe(
-  devicePath: string,
-  flags: number,
-  generationPath: string,
-): ActiveMediaProbe {
-  const worker = new Worker(ACTIVE_MEDIA_PROBE_SOURCE, {
-    eval: true,
-    workerData: { devicePath, flags, generationPath },
-  });
-  let receivedReply = false;
-  let cancellationRequested = false;
-  const result = new Promise<string>((resolve, reject) => {
-    worker.once("message", (message: unknown) => {
-      receivedReply = true;
-      if (!isRecord(message)) {
-        reject(
-          new Error("Optical Drive media observation returned malformed data"),
-        );
-        return;
-      }
-      if (typeof message.generation === "string") {
-        resolve(message.generation);
-        return;
-      }
-      const detail = optionalText(message.error, 500);
-      reject(
-        new Error(
-          `Optical Drive media observation failed${detail ? `: ${detail}` : ""}`,
-        ),
-      );
-    });
-    worker.once("error", reject);
-    worker.once("exit", (code) => {
-      if (!receivedReply) {
-        reject(
-          new Error(`Optical Drive media observation exited with status ${code}`),
-        );
-      }
-    });
-  });
+const MAX_MEDIA_PROBE_OUTPUT_BYTES = 4_096;
+
+export function createNodeMediaGenerationProbeLauncher(
+  options: NodeMediaGenerationProbeLauncherOptions = {},
+): MediaGenerationProbeLauncher {
+  const scriptPath =
+    options.scriptPath ??
+    fileURLToPath(new URL("./optical-media-probe.js", import.meta.url));
   return {
-    result,
-    cancel() {
-      if (cancellationRequested) {
-        return;
-      }
-      cancellationRequested = true;
-      // Do not await termination: a worker blocked in the kernel may not be
-      // schedulable until SCSI error recovery finishes. Unreferencing it first
-      // ensures this best-effort termination cannot delay worker shutdown.
-      worker.unref();
-      void worker.terminate();
+    start(devicePath, flags, generationPath) {
+      const child = spawn(
+        process.execPath,
+        [scriptPath, devicePath, String(flags), generationPath],
+        { shell: false, stdio: ["ignore", "pipe", "pipe"] },
+      );
+      let stdout = "";
+      let stderr = "";
+      let settled = false;
+      let cancellationRequested = false;
+      const result = new Promise<string>((resolve, reject) => {
+        child.stdout.setEncoding("utf8");
+        child.stderr.setEncoding("utf8");
+        const capture = (current: string, chunk: string) =>
+          `${current}${chunk}`.slice(0, MAX_MEDIA_PROBE_OUTPUT_BYTES + 1);
+        child.stdout.on("data", (chunk: string) => {
+          stdout = capture(stdout, chunk);
+          if (stdout.length > MAX_MEDIA_PROBE_OUTPUT_BYTES) {
+            child.kill("SIGKILL");
+          }
+        });
+        child.stderr.on("data", (chunk: string) => {
+          stderr = capture(stderr, chunk);
+          if (stderr.length > MAX_MEDIA_PROBE_OUTPUT_BYTES) {
+            child.kill("SIGKILL");
+          }
+        });
+        child.once("error", (error) => {
+          settled = true;
+          reject(error);
+        });
+        child.once("close", (code, signal) => {
+          settled = true;
+          if (cancellationRequested) {
+            reject(new Error("Optical Drive media observation was cancelled"));
+            return;
+          }
+          if (stdout.length > MAX_MEDIA_PROBE_OUTPUT_BYTES) {
+            reject(
+              new Error(
+                "Optical Drive media observation output exceeded its bound",
+              ),
+            );
+            return;
+          }
+          if (code === 0) {
+            resolve(stdout);
+            return;
+          }
+          const detail = optionalText(stderr, 500);
+          reject(
+            new Error(
+              `Optical Drive media observation failed${detail ? `: ${detail}` : ` with ${signal ?? `status ${code}`}`}`,
+            ),
+          );
+        });
+      });
+      return {
+        result,
+        cancel() {
+          if (cancellationRequested || settled) {
+            return;
+          }
+          cancellationRequested = true;
+          child.stdout.destroy();
+          child.stderr.destroy();
+          child.kill("SIGKILL");
+          // A helper stuck in an uninterruptible kernel open can survive until
+          // Linux error recovery completes. It must not retain parent handles.
+          child.unref();
+        },
+      };
     },
   };
 }
 
-async function observeMediaGenerationInline(
-  devicePath: string,
-  generationPath: string,
-  signal: AbortSignal,
-  openDevice: NonNullable<NodeMediaGenerationObserverOptions["openDevice"]>,
-  readGenerationFile: NonNullable<
-    NodeMediaGenerationObserverOptions["readGenerationFile"]
-  >,
-): Promise<string> {
-  const device = await openDevice(
-    devicePath,
-    fsConstants.O_RDONLY | fsConstants.O_NONBLOCK,
-  );
-  try {
-    return await readGenerationFile(generationPath, {
-      encoding: "utf8",
-      signal,
-    });
-  } finally {
-    await device.close();
-  }
-}
+export const nodeMediaGenerationProbeLauncher =
+  createNodeMediaGenerationProbeLauncher();
 
 export function createNodeMediaGenerationObserver(
   options: NodeMediaGenerationObserverOptions = {},
 ): MediaGenerationObserver {
-  const openDevice = options.openDevice ?? ((path, flags) => open(path, flags));
-  const readGenerationFile =
-    options.readGenerationFile ??
-    ((path, readOptions) => readFile(path, readOptions));
-  const useInlineBoundary =
-    options.openDevice !== undefined || options.readGenerationFile !== undefined;
+  const probeLauncher = options.probeLauncher ?? nodeMediaGenerationProbeLauncher;
   const observationTimeoutMs =
     options.observationTimeoutMs ?? MEDIA_GENERATION_OBSERVATION_TIMEOUT_MS;
   if (!Number.isSafeInteger(observationTimeoutMs) || observationTimeoutMs <= 0) {
@@ -301,22 +283,11 @@ export function createNodeMediaGenerationObserver(
       // read so a passive sysfs value is never used as the cache authority.
       let probe = activeProbes.get(safeDevicePath);
       if (probe === undefined) {
-        probe = useInlineBoundary
-          ? {
-              result: observeMediaGenerationInline(
-                safeDevicePath,
-                generationPath,
-                signal,
-                openDevice,
-                readGenerationFile,
-              ),
-              cancel() {},
-            }
-          : startActiveMediaProbe(
-              safeDevicePath,
-              fsConstants.O_RDONLY | fsConstants.O_NONBLOCK,
-              generationPath,
-            );
+        probe = probeLauncher.start(
+          safeDevicePath,
+          fsConstants.O_RDONLY | fsConstants.O_NONBLOCK,
+          generationPath,
+        );
         activeProbes.set(safeDevicePath, probe);
         const startedProbe = probe;
         void probe.result
@@ -345,6 +316,7 @@ export function createNodeMediaGenerationObserver(
           () => reject(new Error("Optical Drive media observation timed out")),
           observationTimeoutMs,
         );
+        observationTimeout.unref();
       });
       try {
         const value = await Promise.race([probe.result, aborted, timedOut]);
@@ -352,6 +324,9 @@ export function createNodeMediaGenerationObserver(
       } finally {
         clearTimeout(observationTimeout);
         removeAbortListener();
+        if (activeProbes.get(safeDevicePath) === probe) {
+          activeProbes.delete(safeDevicePath);
+        }
         probe.cancel();
       }
     },

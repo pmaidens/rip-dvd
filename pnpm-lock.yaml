@@ -30,6 +30,9 @@ importers:
       '@rip-dvd/data-access':
         specifier: workspace:*
         version: link:../../packages/data-access
+      '@rip-dvd/worker-runtime':
+        specifier: workspace:*
+        version: link:../../packages/worker-runtime
 
   apps/encode-worker:
     dependencies:

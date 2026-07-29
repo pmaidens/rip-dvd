@@ -356,7 +356,10 @@ That open actively asks Linux's optical driver to observe media events before
 the worker reads the resulting sysfs generation. A generation change fails the
 scan closed so one disc's title map cannot be bound to another disc's
 fingerprint. If active generation observation is unavailable, that drive's scan
-also fails closed and retries on a later poll.
+also fails closed and retries on a later poll. The potentially blocking open is
+isolated in a bounded helper process. Timeout or shutdown kills and detaches the
+helper, retires its per-drive single-flight entry, and lets a later poll retry
+without keeping the archive worker alive.
 Reads are shell-free, size-capped, streaming, timed out, and cancellation-aware.
 Repeated polls update the same Detected Disc. A fingerprint
 already present in Original Disc Archives is shown as **Already archived**, and

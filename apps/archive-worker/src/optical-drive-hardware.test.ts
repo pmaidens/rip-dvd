@@ -1,5 +1,5 @@
 import { constants as fsConstants } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -7,94 +7,154 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   createLinuxOpticalDriveHardware,
+  createNodeMediaGenerationProbeLauncher,
   createNodeMediaGenerationObserver,
   nodeDiscContentReader,
   type CommandRunner,
   type DiscContentReader,
   type MediaGenerationObserver,
 } from "./optical-drive-hardware.js";
+import { readActiveMediaGeneration } from "./optical-media-probe.js";
+
+async function createStuckThenSuccessfulProbeFixture() {
+  const directory = await mkdtemp(join(tmpdir(), "rip-dvd-stuck-probe-"));
+  const scriptPath = join(directory, "probe.mjs");
+  const countPath = join(directory, "count");
+  const pidPath = join(directory, "pids");
+  await writeFile(countPath, "0");
+  await writeFile(
+    scriptPath,
+    [
+      'import { appendFileSync, readFileSync, writeFileSync } from "node:fs";',
+      `const countPath = ${JSON.stringify(countPath)};`,
+      `const pidPath = ${JSON.stringify(pidPath)};`,
+      'appendFileSync(pidPath, `${process.pid}\\n`);',
+      'const count = Number(readFileSync(countPath, "utf8"));',
+      'writeFileSync(countPath, String(count + 1));',
+      'if (count === 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);',
+      'process.stdout.write("29\\n");',
+    ].join("\n"),
+  );
+  return {
+    async cleanup() {
+      await rm(directory, { force: true, recursive: true });
+    },
+    pidPath,
+    scriptPath,
+  };
+}
+
+async function expectProbeProcessesExited(pidPath: string) {
+  await vi.waitFor(async () => {
+    const pids = (await readFile(pidPath, "utf8"))
+      .trim()
+      .split("\n")
+      .map(Number);
+    expect(pids).toHaveLength(2);
+    for (const pid of pids) {
+      expect(() => process.kill(pid, 0)).toThrow();
+    }
+  });
+}
 
 describe("Linux Optical Drive hardware boundary", () => {
   const stableMediaGenerationObserver = (): MediaGenerationObserver => ({
     observe: vi.fn().mockResolvedValue("1"),
   });
 
-  it("actively observes generation while holding a read-only nonblocking device handle", async () => {
+  it("uses the production probe module to hold the device open while reading generation", () => {
     const events: string[] = [];
-    const observer = createNodeMediaGenerationObserver({
-      openDevice: vi.fn(async (path, flags) => {
-        events.push(`open:${path}:${flags}`);
-        return {
-          close: vi.fn(async () => {
-            events.push("close");
-          }),
-        };
-      }),
-      readGenerationFile: vi.fn(async (path) => {
-        events.push(`read:${path}`);
-        return "17\n";
-      }),
-    });
+    const value = readActiveMediaGeneration(
+      "/dev/sr0",
+      fsConstants.O_RDONLY | fsConstants.O_NONBLOCK,
+      "/sys/class/block/sr0/diskseq",
+      {
+        openSync(path: string, flags: number) {
+          events.push(`open:${path}:${flags}`);
+          return 7;
+        },
+        readFileSync(path: string, encoding: "utf8") {
+          events.push(`read:${path}:${encoding}`);
+          return "17\n";
+        },
+        closeSync(descriptor: number) {
+          events.push(`close:${descriptor}`);
+        },
+      },
+    );
 
-    await expect(
-      observer.observe("/dev/sr0", new AbortController().signal),
-    ).resolves.toBe("17");
+    expect(value).toBe("17\n");
     expect(events).toEqual([
       `open:/dev/sr0:${fsConstants.O_RDONLY | fsConstants.O_NONBLOCK}`,
-      "read:/sys/class/block/sr0/diskseq",
-      "close",
+      "read:/sys/class/block/sr0/diskseq:utf8",
+      "close:7",
     ]);
   });
 
-  it("abandons a pending active media observation when shutdown is requested", async () => {
-    const controller = new AbortController();
-    const observer = createNodeMediaGenerationObserver({
-      openDevice: vi.fn(() => new Promise<never>(() => undefined)),
-    });
-
-    const observation = observer.observe("/dev/sr0", controller.signal);
-    controller.abort();
-
-    await expect(
-      Promise.race([
-        observation,
-        new Promise<never>((_resolve, reject) => {
-          setTimeout(
-            () => reject(new Error("media observation remained pending")),
-            50,
-          ).unref();
-        }),
-      ]),
-    ).rejects.toThrow(/abort/i);
+  it("runs the deployed child-process probe module", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "rip-dvd-generation-"));
+    const generationPath = join(directory, "diskseq");
+    await writeFile(generationPath, "23\n");
+    try {
+      const probe = createNodeMediaGenerationProbeLauncher().start(
+        "/dev/null",
+        fsConstants.O_RDONLY | fsConstants.O_NONBLOCK,
+        generationPath,
+      );
+      await expect(probe.result).resolves.toBe("23\n");
+      probe.cancel();
+    } finally {
+      await rm(directory, { force: true, recursive: true });
+    }
   });
 
-  it("bounds a pending active media observation", async () => {
-    const observer = createNodeMediaGenerationObserver({
-      observationTimeoutMs: 10,
-      openDevice: vi.fn(() => new Promise<never>(() => undefined)),
+  it("kills and retires a timed-out production probe before the next observation", async () => {
+    const fixture = await createStuckThenSuccessfulProbeFixture();
+    const launcher = createNodeMediaGenerationProbeLauncher({
+      scriptPath: fixture.scriptPath,
     });
-
-    await expect(
-      Promise.race([
+    const observer = createNodeMediaGenerationObserver({
+      observationTimeoutMs: 500,
+      probeLauncher: launcher,
+    });
+    try {
+      await expect(
         observer.observe("/dev/sr0", new AbortController().signal),
-        new Promise<never>((_resolve, reject) => {
-          setTimeout(
-            () => reject(new Error("media observation exceeded its bound")),
-            100,
-          ).unref();
-        }),
-      ]),
-    ).rejects.toThrow("media observation timed out");
+      ).rejects.toThrow("media observation timed out");
+      await expect(
+        observer.observe("/dev/sr0", new AbortController().signal),
+      ).resolves.toBe("29");
+
+      await expectProbeProcessesExited(fixture.pidPath);
+    } finally {
+      await fixture.cleanup();
+    }
   });
 
-  it("runs the production active observation in its worker boundary", async () => {
+  it("kills and retires an aborted production probe before the next observation", async () => {
+    const fixture = await createStuckThenSuccessfulProbeFixture();
+    const launcher = createNodeMediaGenerationProbeLauncher({
+      scriptPath: fixture.scriptPath,
+    });
     const observer = createNodeMediaGenerationObserver({
       observationTimeoutMs: 2_000,
+      probeLauncher: launcher,
     });
-
-    await expect(
-      observer.observe("/dev/null", new AbortController().signal),
-    ).rejects.toThrow("media observation failed");
+    const controller = new AbortController();
+    try {
+      const observation = observer.observe("/dev/sr0", controller.signal);
+      await vi.waitFor(async () => {
+        expect((await readFile(fixture.pidPath, "utf8")).trim()).not.toBe("");
+      });
+      controller.abort();
+      await expect(observation).rejects.toThrow(/abort/i);
+      await expect(
+        observer.observe("/dev/sr0", new AbortController().signal),
+      ).resolves.toBe("29");
+      await expectProbeProcessesExited(fixture.pidPath);
+    } finally {
+      await fixture.cleanup();
+    }
   });
 
   it("fails closed before scanning when active media generation is unavailable", async () => {

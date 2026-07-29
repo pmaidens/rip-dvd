@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@rip-dvd/config": "workspace:*",
-    "@rip-dvd/data-access": "workspace:*"
+    "@rip-dvd/data-access": "workspace:*",
+    "@rip-dvd/worker-runtime": "workspace:*"
   }
 }
