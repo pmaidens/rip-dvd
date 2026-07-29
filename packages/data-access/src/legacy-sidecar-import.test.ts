@@ -781,6 +781,56 @@ describe("legacy sidecar import", () => {
     fixture.access.close();
   });
 
+  it.each(["all-invalid", "mixed-valid-invalid"] as const)(
+    "preserves schema-1 operator recovery state for %s jobs",
+    (scenario) => {
+      const fixture = createFixture();
+      const markerPath = join(
+        fixture.originalsLibraryPath,
+        ".rip-dvd-sqlite-catalog",
+      );
+      const marker = {
+        schemaVersion: 1,
+        legacyQueueStatus: "retired",
+        authoritativeStore: "sqlite",
+      };
+      const sidecar = JSON.parse(readFileSync(fixture.sidecarPath, "utf8")) as {
+        jobs: Array<Record<string, unknown>>;
+      };
+
+      if (scenario === "mixed-valid-invalid") {
+        fixture.access.legacySidecars.importLibrary({
+          originalsLibraryPath: fixture.originalsLibraryPath,
+        });
+        sidecar.jobs = [
+          sidecar.jobs[0]!,
+          { ...sidecar.jobs[1]!, title_number: 0 },
+        ];
+      } else {
+        sidecar.jobs = [{ ...sidecar.jobs[0]!, title_number: 0 }];
+      }
+      writeFileSync(fixture.sidecarPath, JSON.stringify(sidecar));
+      writeFileSync(markerPath, JSON.stringify(marker));
+
+      const report = fixture.access.legacySidecars.importLibrary({
+        originalsLibraryPath: fixture.originalsLibraryPath,
+      });
+
+      expect(report).toMatchObject({
+        sidecarsImported: 0,
+        sidecarsSkipped: 1,
+        issues: [
+          expect.objectContaining({
+            code: "invalid_job",
+            message: expect.stringMatching(/title_number/),
+          }),
+        ],
+      });
+      expect(JSON.parse(readFileSync(markerPath, "utf8"))).toEqual(marker);
+      fixture.access.close();
+    },
+  );
+
   it("resumes from the prior durable schema-2 marker layout", () => {
     const fixture = createFixture();
     const markerPath = join(

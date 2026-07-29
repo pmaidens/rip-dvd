@@ -32,6 +32,7 @@ import {
 const DEFAULT_HANDBRAKE_PRESET = "Fast 480p30";
 const LEGACY_QUEUE_CUTOVER_MARKER = ".rip-dvd-sqlite-catalog";
 const LEGACY_QUEUE_LOCK_POLL_MS = 10;
+const LEGACY_QUEUE_WORKER_STALL_MS = 2_000;
 const LEGACY_QUEUE_HELPER_STATE = {
   starting: 0,
   intentReady: 1,
@@ -41,6 +42,8 @@ const LEGACY_QUEUE_HELPER_STATE = {
 } as const;
 const LEGACY_QUEUE_HELPER_STATE_INDEX = 0;
 const LEGACY_QUEUE_HELPER_RELEASE_INDEX = 1;
+const LEGACY_QUEUE_HELPER_HEARTBEAT_INDEX = 2;
+const LEGACY_QUEUE_SUPERVISOR_ABORT = "supervisor-abort";
 const LEGACY_QUEUE_CUTOVER_WORKER = String.raw`
 const { spawn } = require("node:child_process");
 const {
@@ -58,11 +61,17 @@ const RELEASED = 3;
 const FAILED = 4;
 const STATE_INDEX = 0;
 const RELEASE_INDEX = 1;
+const HEARTBEAT_INDEX = 2;
 const sharedState = new Int32Array(workerData.sharedState);
 const statePath = (name) => join(workerData.stateDirectory, name);
 let finished = false;
 let releaseSent = false;
 let timer;
+
+function publishHeartbeat() {
+  Atomics.add(sharedState, HEARTBEAT_INDEX, 1);
+  Atomics.notify(sharedState, HEARTBEAT_INDEX);
+}
 
 function publishState(state) {
   if (finished && state !== FAILED) {
@@ -134,6 +143,7 @@ const helper = spawn(
   ],
   { stdio: ["pipe", "ignore", "inherit"] },
 );
+publishHeartbeat();
 
 helper.once("error", (error) => {
   fail("Legacy queue lease helper failed to start: " + error.message);
@@ -161,6 +171,7 @@ helper.once("exit", (code, signal) => {
 });
 
 timer = setInterval(() => {
+  publishHeartbeat();
   if (existsSync(statePath("error"))) {
     fail(readFileSync(statePath("error"), "utf8"));
     return;
@@ -774,7 +785,7 @@ export function acquireLegacyQueueCutoverLock(
   }
   const stateDirectory = mkdtempSync(join(tmpdir(), "rip-dvd-cutover-"));
   const statePath = (name: string) => join(stateDirectory, name);
-  const helperState = new Int32Array(new SharedArrayBuffer(8));
+  const helperState = new Int32Array(new SharedArrayBuffer(12));
   const worker = new Worker(LEGACY_QUEUE_CUTOVER_WORKER, {
     eval: true,
     workerData: {
@@ -785,15 +796,47 @@ export function acquireLegacyQueueCutoverLock(
       stateDirectory,
     },
   });
+  let workerFailure: string | undefined;
+  worker.on("error", (error) => {
+    workerFailure = `Legacy queue lease worker failed: ${error.message}`;
+  });
+  worker.on("exit", (code) => {
+    if (code !== 0 && !workerFailure) {
+      workerFailure = `Legacy queue lease worker exited with code ${code}`;
+    }
+  });
   const helperFailure = () => {
+    if (workerFailure) {
+      return workerFailure;
+    }
     for (const name of ["worker-error", "error"]) {
       if (existsSync(statePath(name))) {
-        return readFileSync(statePath(name), "utf8");
+        try {
+          return readFileSync(statePath(name), "utf8");
+        } catch (error) {
+          return `Could not read the legacy queue lease failure record: ${
+            error instanceof Error ? error.message : String(error)
+          }`;
+        }
       }
     }
     return "Legacy queue lease helper terminated unexpectedly";
   };
+  const waitPhase = (expectedState: number): string => {
+    if (expectedState === LEGACY_QUEUE_HELPER_STATE.intentReady) {
+      return "intent acquisition";
+    }
+    if (expectedState === LEGACY_QUEUE_HELPER_STATE.ready) {
+      return "queue drain";
+    }
+    return "release acknowledgement";
+  };
   const waitForState = (expectedState: number): void => {
+    let heartbeat = Atomics.load(
+      helperState,
+      LEGACY_QUEUE_HELPER_HEARTBEAT_INDEX,
+    );
+    let heartbeatObservedAt = process.hrtime.bigint();
     while (true) {
       const state = Atomics.load(
         helperState,
@@ -805,6 +848,24 @@ export function acquireLegacyQueueCutoverLock(
       if (state >= expectedState) {
         return;
       }
+      const currentHeartbeat = Atomics.load(
+        helperState,
+        LEGACY_QUEUE_HELPER_HEARTBEAT_INDEX,
+      );
+      if (currentHeartbeat !== heartbeat) {
+        heartbeat = currentHeartbeat;
+        heartbeatObservedAt = process.hrtime.bigint();
+      } else {
+        const stalledForMilliseconds = Number(
+          process.hrtime.bigint() - heartbeatObservedAt,
+        ) / 1_000_000;
+        if (stalledForMilliseconds >= LEGACY_QUEUE_WORKER_STALL_MS) {
+          workerStoppedResponding = true;
+          throw new Error(
+            `Legacy queue lease worker stopped responding during ${waitPhase(expectedState)}`,
+          );
+        }
+      }
       Atomics.wait(
         helperState,
         LEGACY_QUEUE_HELPER_STATE_INDEX,
@@ -812,6 +873,56 @@ export function acquireLegacyQueueCutoverLock(
         LEGACY_QUEUE_LOCK_POLL_MS,
       );
     }
+  };
+  let workerStoppedResponding = false;
+  const stopUnresponsiveWorker = (): boolean => {
+    for (const name of ["release", LEGACY_QUEUE_SUPERVISOR_ABORT]) {
+      if (existsSync(statePath(name))) {
+        continue;
+      }
+      try {
+        writeFileSync(statePath(name), "", { flag: "wx", mode: 0o600 });
+      } catch {
+        // The helper may have concurrently published or consumed the state.
+      }
+    }
+    Atomics.store(helperState, LEGACY_QUEUE_HELPER_RELEASE_INDEX, 1);
+    Atomics.notify(helperState, LEGACY_QUEUE_HELPER_RELEASE_INDEX);
+    void worker.terminate();
+    const deadline =
+      process.hrtime.bigint() +
+      BigInt(LEGACY_QUEUE_WORKER_STALL_MS) * 1_000_000n;
+    while (
+      !existsSync(statePath("released")) &&
+      process.hrtime.bigint() < deadline
+    ) {
+      Atomics.wait(
+        helperState,
+        LEGACY_QUEUE_HELPER_STATE_INDEX,
+        Atomics.load(helperState, LEGACY_QUEUE_HELPER_STATE_INDEX),
+        LEGACY_QUEUE_LOCK_POLL_MS,
+      );
+    }
+    return existsSync(statePath("released"));
+  };
+  const cleanUpUnresponsiveWorker = (): void => {
+    const helperReleased = stopUnresponsiveWorker();
+    if (helperReleased) {
+      rmSync(stateDirectory, { force: true, recursive: true });
+      return;
+    }
+    const cleanupTimer = setInterval(() => {
+      if (!existsSync(statePath("released"))) {
+        return;
+      }
+      clearInterval(cleanupTimer);
+      rmSync(stateDirectory, { force: true, recursive: true });
+    }, LEGACY_QUEUE_LOCK_POLL_MS);
+    cleanupTimer.unref();
+  };
+  const cleanUpResponsiveWorker = (): void => {
+    void worker.terminate();
+    rmSync(stateDirectory, { force: true, recursive: true });
   };
 
   try {
@@ -831,14 +942,22 @@ export function acquireLegacyQueueCutoverLock(
       Atomics.notify(helperState, LEGACY_QUEUE_HELPER_RELEASE_INDEX);
       try {
         waitForState(LEGACY_QUEUE_HELPER_STATE.released);
-      } finally {
-        void worker.terminate();
-        rmSync(stateDirectory, { force: true, recursive: true });
+      } catch (error) {
+        if (workerStoppedResponding) {
+          cleanUpUnresponsiveWorker();
+        } else {
+          cleanUpResponsiveWorker();
+        }
+        throw error;
       }
+      cleanUpResponsiveWorker();
     };
   } catch (error) {
-    void worker.terminate();
-    rmSync(stateDirectory, { force: true, recursive: true });
+    if (workerStoppedResponding) {
+      cleanUpUnresponsiveWorker();
+    } else {
+      cleanUpResponsiveWorker();
+    }
     throw error;
   }
 }
