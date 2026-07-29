@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   mkdirSync,
   readFileSync,
@@ -697,7 +698,7 @@ describe("legacy sidecar import", () => {
     const report = fixture.access.legacySidecars.importLibrary({
       originalsLibraryPath: fixture.originalsLibraryPath,
     });
-    const upgradedMarker = JSON.parse(readFileSync(markerPath, "utf8")) as {
+    const preservedMarker = JSON.parse(readFileSync(markerPath, "utf8")) as {
       schemaVersion: number;
       snapshotDigest?: string;
     };
@@ -716,9 +717,10 @@ describe("legacy sidecar import", () => {
         }),
       ]),
     );
-    expect(upgradedMarker).toMatchObject({
-      schemaVersion: 2,
-      snapshotDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+    expect(preservedMarker).toEqual({
+      schemaVersion: 1,
+      legacyQueueStatus: "retired",
+      authoritativeStore: "sqlite",
     });
     expect(fixture.access.encodeJobs.list()).toEqual(
       expect.arrayContaining([
@@ -730,6 +732,85 @@ describe("legacy sidecar import", () => {
         }),
       ]),
     );
+    expect(fixture.access.encodeJobs.list()).toHaveLength(2);
+    fixture.access.close();
+  });
+
+  it("preserves an unresolved schema-1 marker after a crash before the first import transaction", () => {
+    const fixture = createFixture();
+    const markerPath = join(
+      fixture.originalsLibraryPath,
+      ".rip-dvd-sqlite-catalog",
+    );
+    const marker = {
+      schemaVersion: 1,
+      legacyQueueStatus: "retired",
+      authoritativeStore: "sqlite",
+    };
+    writeFileSync(markerPath, JSON.stringify(marker));
+
+    const firstReport = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+    const secondReport = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+
+    expect(firstReport).toMatchObject({
+      sidecarsImported: 0,
+      sidecarsSkipped: 1,
+      recordsCreated: { encodeJobs: 0 },
+      issues: [
+        expect.objectContaining({
+          code: "duplicate_record",
+          message: expect.stringMatching(/schema-1.*recovery/i),
+        }),
+        expect.objectContaining({
+          code: "duplicate_record",
+          message: expect.stringMatching(/schema-1.*recovery/i),
+        }),
+      ],
+    });
+    expect(secondReport).toMatchObject({
+      sidecarsImported: 0,
+      sidecarsSkipped: 1,
+      recordsCreated: { encodeJobs: 0 },
+    });
+    expect(fixture.access.encodeJobs.list()).toEqual([]);
+    expect(JSON.parse(readFileSync(markerPath, "utf8"))).toEqual(marker);
+    fixture.access.close();
+  });
+
+  it("resumes from the prior durable schema-2 marker layout", () => {
+    const fixture = createFixture();
+    const markerPath = join(
+      fixture.originalsLibraryPath,
+      ".rip-dvd-sqlite-catalog",
+    );
+    fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+    const currentMarker = JSON.parse(readFileSync(markerPath, "utf8")) as {
+      legacyJobs: Array<{ logicalKey: string; signature: string }>;
+    };
+    const legacyJobs = currentMarker.legacyJobs.map(
+      ({ logicalKey, signature }) => ({ logicalKey, signature }),
+    );
+    writeFileSync(markerPath, JSON.stringify({
+      schemaVersion: 2,
+      legacyQueueStatus: "retired",
+      authoritativeStore: "sqlite",
+      legacyJobs,
+      snapshotDigest: createHash("sha256")
+        .update(JSON.stringify(legacyJobs))
+        .digest("hex"),
+    }));
+
+    const report = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+
+    expect(report.issues).toEqual([]);
     expect(fixture.access.encodeJobs.list()).toHaveLength(2);
     fixture.access.close();
   });
