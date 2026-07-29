@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import {
   chmodSync,
@@ -94,6 +94,44 @@ esac
     return helperPath;
   }
 
+  function crashingWorkerHelper(
+    root: string,
+    phase: "before-intent" | "before-ready" | "before-released",
+  ): { exitMarkerPath: string; helperPath: string } {
+    const helperPath = join(root, `worker-crash-${phase}.sh`);
+    const exitMarkerPath = join(root, `worker-crash-${phase}.exited`);
+    writeFileSync(
+      helperPath,
+      `#!/bin/sh
+if [ "$1" = "--version" ]; then
+  exit 0
+fi
+state_directory="$4"
+trap ': > "${exitMarkerPath}"' EXIT
+case "${phase}" in
+  before-intent)
+    mkdir "$state_directory/error"
+    ;;
+  before-ready)
+    : > "$state_directory/intent-ready"
+    sleep 0.5
+    mkdir "$state_directory/error"
+    ;;
+  before-released)
+    : > "$state_directory/intent-ready"
+    : > "$state_directory/ready"
+    while [ ! -e "$state_directory/release" ]; do sleep 0.01; done
+    mkdir "$state_directory/error"
+    ;;
+esac
+while [ ! -e "$state_directory/supervisor-abort" ]; do sleep 0.01; done
+: > "$state_directory/released"
+`,
+    );
+    chmodSync(helperPath, 0o755);
+    return { exitMarkerPath, helperPath };
+  }
+
   it.each([
     ["before-intent", /intent acquisition/i],
     ["before-ready", /queue drain/i],
@@ -118,6 +156,75 @@ esac
         }),
       ).toThrow(expectedPhase);
       access.close();
+    },
+  );
+
+  it.each([
+    ["before-intent", /intent acquisition/i],
+    ["before-ready", /queue drain/i],
+    ["before-released", /release acknowledgement/i],
+  ] as const)(
+    "fails cleanly and releases the helper when the supervising Worker crashes %s",
+    (phase, expectedPhase) => {
+      const root = temporaryDirectories.create(
+        `rip-dvd-worker-crash-${phase}-`,
+      );
+      const originalsLibraryPath = join(root, "originals");
+      const databasePath = join(root, "catalog.sqlite");
+      mkdirSync(originalsLibraryPath, { recursive: true });
+      const { exitMarkerPath, helperPath } = crashingWorkerHelper(
+        root,
+        phase,
+      );
+      const legacySidecarsModuleUrl = new URL(
+        "../dist/legacy-sidecars.js",
+        import.meta.url,
+      ).href;
+      const child = spawnSync(
+        process.execPath,
+        [
+          "--eval",
+          `(async () => {
+const { existsSync } = await import("node:fs");
+const { createLegacySidecarDataAccess } = await import(${JSON.stringify(legacySidecarsModuleUrl)});
+const [, databasePath, originalsLibraryPath, exitMarkerPath] = process.argv;
+const access = createLegacySidecarDataAccess({ databasePath });
+let failedAsExpected = false;
+try {
+  access.legacySidecars.importLibrary({ originalsLibraryPath });
+} catch (error) {
+  failedAsExpected = true;
+  console.error(error instanceof Error ? error.message : String(error));
+} finally {
+  access.close();
+}
+const sleepState = new Int32Array(new SharedArrayBuffer(4));
+const deadline = Date.now() + 3_000;
+while (!existsSync(exitMarkerPath) && Date.now() < deadline) {
+  Atomics.wait(sleepState, 0, 0, 10);
+}
+if (!failedAsExpected || !existsSync(exitMarkerPath)) {
+  process.exitCode = 1;
+}
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});`,
+          databasePath,
+          originalsLibraryPath,
+          exitMarkerPath,
+        ],
+        {
+          encoding: "utf8",
+          env: { ...process.env, RIP_DVD_PYTHON: helperPath },
+          timeout: 7_000,
+        },
+      );
+
+      expect(child.error).toBeUndefined();
+      expect(child.status, child.stderr).toBe(0);
+      expect(child.stderr).toMatch(expectedPhase);
+      expect(existsSync(exitMarkerPath)).toBe(true);
     },
   );
 

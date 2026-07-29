@@ -1452,7 +1452,10 @@ export function createDataAccessInternal(
           const { sidecar } = discovery;
           report.issues.push(...sidecar.issues);
           if (cutover.mode === "schema-one") {
-            let sidecarHasUnresolvedWork = false;
+            let sidecarHasUnresolvedWork = sidecar.issues.length > 0;
+            if (sidecarHasUnresolvedWork) {
+              schemaOneHasUnresolvedWork = true;
+            }
             for (const job of sidecar.jobs) {
               const archive = database
                 .select()
