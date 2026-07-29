@@ -46,6 +46,57 @@ describe("Linux Optical Drive hardware boundary", () => {
     ]);
   });
 
+  it("abandons a pending active media observation when shutdown is requested", async () => {
+    const controller = new AbortController();
+    const observer = createNodeMediaGenerationObserver({
+      openDevice: vi.fn(() => new Promise<never>(() => undefined)),
+    });
+
+    const observation = observer.observe("/dev/sr0", controller.signal);
+    controller.abort();
+
+    await expect(
+      Promise.race([
+        observation,
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(
+            () => reject(new Error("media observation remained pending")),
+            50,
+          ).unref();
+        }),
+      ]),
+    ).rejects.toThrow(/abort/i);
+  });
+
+  it("bounds a pending active media observation", async () => {
+    const observer = createNodeMediaGenerationObserver({
+      observationTimeoutMs: 10,
+      openDevice: vi.fn(() => new Promise<never>(() => undefined)),
+    });
+
+    await expect(
+      Promise.race([
+        observer.observe("/dev/sr0", new AbortController().signal),
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(
+            () => reject(new Error("media observation exceeded its bound")),
+            100,
+          ).unref();
+        }),
+      ]),
+    ).rejects.toThrow("media observation timed out");
+  });
+
+  it("runs the production active observation in its worker boundary", async () => {
+    const observer = createNodeMediaGenerationObserver({
+      observationTimeoutMs: 2_000,
+    });
+
+    await expect(
+      observer.observe("/dev/null", new AbortController().signal),
+    ).rejects.toThrow("media observation failed");
+  });
+
   it("fails closed before scanning when active media generation is unavailable", async () => {
     const runner: CommandRunner = { run: vi.fn() };
     const hardware = createLinuxOpticalDriveHardware({
@@ -270,6 +321,46 @@ describe("Linux Optical Drive hardware boundary", () => {
       "/dev/sr0",
       signal,
     );
+  });
+
+  it("retries a transient not-ready drive without caching stable absence", async () => {
+    const summary = [
+      "Disc Title: SPUN_UP_DISC",
+      "Title: 01, Length: 00:01:00.000 Chapters: 1, Cells: 1, Audio streams: 0, Subpictures: 0",
+    ].join("\n");
+    const runner: CommandRunner = {
+      run: vi.fn()
+        .mockResolvedValueOnce({
+          exitCode: 1,
+          stdout: "",
+          stderr: "Device not ready",
+        })
+        .mockResolvedValueOnce({ exitCode: 0, stdout: summary, stderr: "" })
+        .mockResolvedValueOnce({ exitCode: 0, stdout: "1024\n", stderr: "" }),
+    };
+    const contentReader: DiscContentReader = {
+      hash: vi.fn().mockResolvedValue(`sha256:${"a".repeat(64)}`),
+    };
+    const mediaGenerationObserver: MediaGenerationObserver = {
+      observe: vi.fn().mockResolvedValue("17"),
+    };
+    const hardware = createLinuxOpticalDriveHardware({
+      platform: "linux",
+      runner,
+      contentReader,
+      mediaGenerationObserver,
+    });
+    const signal = new AbortController().signal;
+
+    await expect(hardware.scanDvd("/dev/sr0", signal)).rejects.toThrow(
+      "temporarily not ready",
+    );
+    await expect(hardware.scanDvd("/dev/sr0", signal)).resolves.toMatchObject({
+      volumeLabel: "SPUN_UP_DISC",
+      fingerprint: `sha256:${"a".repeat(64)}`,
+    });
+    expect(runner.run).toHaveBeenCalledTimes(3);
+    expect(contentReader.hash).toHaveBeenCalledOnce();
   });
 
   it("detects empty-to-disc and A-to-B changes without an external poller or rediscovery", async () => {
