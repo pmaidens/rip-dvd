@@ -89,25 +89,38 @@ def _scavenge_owner_artifacts(queue_root):
             _scavenge_orphan(path)
 
 
+def _acquire_exclusive_or_abort(descriptor, state_root):
+    while not (state_root / "supervisor-abort").exists():
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            select.select([], [], [], 0.05)
+    return False
+
+
 def hold_cutover(originals_library, state_directory):
     queue_root = Path(originals_library)
     state_root = Path(state_directory)
     queue_root.mkdir(parents=True, exist_ok=True)
     intent_descriptor = _open_lock(queue_root / CUTOVER_INTENT_LOCK)
     gate_descriptor = _open_lock(queue_root / QUEUE_GATE_LOCK)
+    intent_acquired = False
+    gate_acquired = False
     try:
-        fcntl.flock(intent_descriptor, fcntl.LOCK_EX)
+        intent_acquired = _acquire_exclusive_or_abort(intent_descriptor, state_root)
+        if not intent_acquired:
+            return
         _write_state(state_root, "intent-ready")
-        fcntl.flock(gate_descriptor, fcntl.LOCK_EX)
+        gate_acquired = _acquire_exclusive_or_abort(gate_descriptor, state_root)
+        if not gate_acquired:
+            return
         _scavenge_owner_artifacts(queue_root)
         _write_state(state_root, "ready")
         while not (state_root / "release").exists():
             readable, _, _ = select.select([sys.stdin], [], [], 0.05)
             if readable and not sys.stdin.buffer.read(1):
                 break
-        fcntl.flock(gate_descriptor, fcntl.LOCK_UN)
-        fcntl.flock(intent_descriptor, fcntl.LOCK_UN)
-        _write_state(state_root, "released")
     except BaseException as error:
         try:
             _write_state(state_root, "error", str(error))
@@ -115,8 +128,16 @@ def hold_cutover(originals_library, state_directory):
             pass
         raise
     finally:
+        if gate_acquired:
+            fcntl.flock(gate_descriptor, fcntl.LOCK_UN)
+        if intent_acquired:
+            fcntl.flock(intent_descriptor, fcntl.LOCK_UN)
         os.close(gate_descriptor)
         os.close(intent_descriptor)
+        try:
+            _write_state(state_root, "released")
+        except FileExistsError:
+            pass
 
 
 def main(argv=None):

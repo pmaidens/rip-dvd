@@ -228,6 +228,201 @@ if (!failedAsExpected || !existsSync(exitMarkerPath)) {
     },
   );
 
+  it("releases real cutover intent when the supervising Worker fails during queue drain", async () => {
+    const root = temporaryDirectories.create(
+      "rip-dvd-worker-crash-real-drain-",
+    );
+    const originalsLibraryPath = join(root, "originals");
+    const databasePath = join(root, "catalog.sqlite");
+    const intentPath = join(
+      originalsLibraryPath,
+      ".rip-dvd-legacy-queue.intent.lock",
+    );
+    const gatePath = join(
+      originalsLibraryPath,
+      ".rip-dvd-legacy-queue.lock",
+    );
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    const helperPath = join(root, "real-drain-worker-crash.py");
+    writeFileSync(
+      helperPath,
+      `#!/usr/bin/env python3
+import fcntl
+import os
+from pathlib import Path
+import sys
+import threading
+
+if len(sys.argv) > 1 and sys.argv[1] == "--version":
+    raise SystemExit(0)
+
+originals = Path(sys.argv[3])
+state = Path(sys.argv[4])
+intent = open(originals / ".rip-dvd-legacy-queue.intent.lock", "a+")
+gate = open(originals / ".rip-dvd-legacy-queue.lock", "a+")
+fcntl.flock(intent, fcntl.LOCK_EX)
+(state / "intent-ready").touch()
+threading.Timer(0.1, lambda: os.mkdir(state / "error")).start()
+fcntl.flock(gate, fcntl.LOCK_EX)
+`,
+    );
+    chmodSync(helperPath, 0o755);
+    const holder = spawn("python3", [
+      "-c",
+      `import fcntl, sys, time
+gate = open(sys.argv[1], "a+")
+fcntl.flock(gate, fcntl.LOCK_SH)
+print("ready", flush=True)
+time.sleep(8)`,
+      gatePath,
+    ], { stdio: ["ignore", "pipe", "inherit"] });
+    if (!holder.stdout) {
+      throw new Error("Expected the gate-holder readiness pipe");
+    }
+    await once(holder.stdout, "data");
+    holder.stdout.destroy();
+    try {
+      const legacySidecarsModuleUrl = new URL(
+        "../dist/legacy-sidecars.js",
+        import.meta.url,
+      ).href;
+      const child = spawnSync(
+        process.execPath,
+        [
+          "--eval",
+          `(async () => {
+const { createLegacySidecarDataAccess } = await import(${JSON.stringify(legacySidecarsModuleUrl)});
+const [, databasePath, originalsLibraryPath] = process.argv;
+const access = createLegacySidecarDataAccess({ databasePath });
+try {
+  access.legacySidecars.importLibrary({ originalsLibraryPath });
+  process.exitCode = 1;
+} catch (error) {
+  console.error(error instanceof Error ? error.message : String(error));
+} finally {
+  access.close();
+}
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});`,
+          databasePath,
+          originalsLibraryPath,
+        ],
+        {
+          encoding: "utf8",
+          env: { ...process.env, RIP_DVD_PYTHON: helperPath },
+          timeout: 7_000,
+        },
+      );
+      expect(child.error).toBeUndefined();
+      expect(child.status, child.stderr).toBe(0);
+      expect(child.stderr).toMatch(/queue drain/i);
+
+      const contender = spawnSync(
+        "python3",
+        [
+          "-c",
+          `import fcntl, sys
+intent = open(sys.argv[1], "a+")
+gate = open(sys.argv[2], "a+")
+fcntl.flock(intent, fcntl.LOCK_EX | fcntl.LOCK_NB)
+fcntl.flock(gate, fcntl.LOCK_SH | fcntl.LOCK_NB)`,
+          intentPath,
+          gatePath,
+        ],
+        { encoding: "utf8", timeout: 1_000 },
+      );
+      expect(contender.error).toBeUndefined();
+      expect(contender.status, contender.stderr).toBe(0);
+    } finally {
+      holder.kill("SIGTERM");
+    }
+  });
+
+  it("bounds release acknowledgement and reaps a helper that ignores release", () => {
+    const root = temporaryDirectories.create(
+      "rip-dvd-helper-ignore-release-",
+    );
+    const originalsLibraryPath = join(root, "originals");
+    const databasePath = join(root, "catalog.sqlite");
+    const helperPidPath = join(root, "helper.pid");
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    const helperPath = join(root, "ignore-release.py");
+    writeFileSync(
+      helperPath,
+      `#!/usr/bin/env python3
+import fcntl
+import os
+from pathlib import Path
+import signal
+import sys
+import time
+
+if len(sys.argv) > 1 and sys.argv[1] == "--version":
+    raise SystemExit(0)
+
+originals = Path(sys.argv[3])
+state = Path(sys.argv[4])
+Path(${JSON.stringify(helperPidPath)}).write_text(str(os.getpid()))
+intent = open(originals / ".rip-dvd-legacy-queue.intent.lock", "a+")
+gate = open(originals / ".rip-dvd-legacy-queue.lock", "a+")
+fcntl.flock(intent, fcntl.LOCK_EX)
+(state / "intent-ready").touch()
+fcntl.flock(gate, fcntl.LOCK_EX)
+(state / "ready").touch()
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+while True:
+    time.sleep(0.05)
+`,
+    );
+    chmodSync(helperPath, 0o755);
+    const legacySidecarsModuleUrl = new URL(
+      "../dist/legacy-sidecars.js",
+      import.meta.url,
+    ).href;
+
+    const child = spawnSync(
+      process.execPath,
+      [
+        "--eval",
+        `(async () => {
+const { createLegacySidecarDataAccess } = await import(${JSON.stringify(legacySidecarsModuleUrl)});
+const [, databasePath, originalsLibraryPath] = process.argv;
+const access = createLegacySidecarDataAccess({ databasePath });
+try {
+  access.legacySidecars.importLibrary({ originalsLibraryPath });
+  process.exitCode = 1;
+} catch (error) {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(message);
+  if (!/release acknowledgement/i.test(message)) process.exitCode = 1;
+} finally {
+  access.close();
+}
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});`,
+        databasePath,
+        originalsLibraryPath,
+      ],
+      {
+        encoding: "utf8",
+        env: { ...process.env, RIP_DVD_PYTHON: helperPath },
+        timeout: 7_000,
+      },
+    );
+
+    expect(child.error).toBeUndefined();
+    expect(child.status, child.stderr).toBe(0);
+    expect(child.stderr).toMatch(/release acknowledgement/i);
+    const helperPid = Number(readFileSync(helperPidPath, "utf8"));
+    expect(() => process.kill(helperPid, 0)).toThrow(
+      expect.objectContaining({ code: "ESRCH" }),
+    );
+  });
+
   it("publishes no SQLite queue state until the marker is durable and retries after restart", () => {
     const root = temporaryDirectories.create("rip-dvd-cutover-fault-");
     const originalsLibraryPath = join(root, "originals");
