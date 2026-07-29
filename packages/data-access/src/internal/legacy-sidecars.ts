@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import {
   closeSync,
   existsSync,
@@ -18,6 +18,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { Worker } from "node:worker_threads";
 
 import type {
   LegacySidecarImportIssue,
@@ -31,6 +32,162 @@ import {
 const DEFAULT_HANDBRAKE_PRESET = "Fast 480p30";
 const LEGACY_QUEUE_CUTOVER_MARKER = ".rip-dvd-sqlite-catalog";
 const LEGACY_QUEUE_LOCK_POLL_MS = 10;
+const LEGACY_QUEUE_HELPER_STATE = {
+  starting: 0,
+  intentReady: 1,
+  ready: 2,
+  released: 3,
+  failed: 4,
+} as const;
+const LEGACY_QUEUE_HELPER_STATE_INDEX = 0;
+const LEGACY_QUEUE_HELPER_RELEASE_INDEX = 1;
+const LEGACY_QUEUE_CUTOVER_WORKER = String.raw`
+const { spawn } = require("node:child_process");
+const {
+  existsSync,
+  readFileSync,
+  writeFileSync,
+} = require("node:fs");
+const { join } = require("node:path");
+const { parentPort, workerData } = require("node:worker_threads");
+
+const STARTING = 0;
+const INTENT_READY = 1;
+const READY = 2;
+const RELEASED = 3;
+const FAILED = 4;
+const STATE_INDEX = 0;
+const RELEASE_INDEX = 1;
+const sharedState = new Int32Array(workerData.sharedState);
+const statePath = (name) => join(workerData.stateDirectory, name);
+let finished = false;
+let releaseSent = false;
+let timer;
+
+function publishState(state) {
+  if (finished && state !== FAILED) {
+    return;
+  }
+  Atomics.store(sharedState, STATE_INDEX, state);
+  Atomics.notify(sharedState, STATE_INDEX);
+}
+
+function finish() {
+  finished = true;
+  if (timer) {
+    clearInterval(timer);
+  }
+  parentPort.close();
+}
+
+function fail(message) {
+  if (finished) {
+    return;
+  }
+  try {
+    writeFileSync(statePath("worker-error"), message, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
+  } catch {}
+  publishState(FAILED);
+  finish();
+  if (helper.exitCode === null && helper.signalCode === null) {
+    helper.kill("SIGTERM");
+  }
+}
+
+function phase() {
+  const state = Atomics.load(sharedState, STATE_INDEX);
+  if (state < INTENT_READY) {
+    return "intent acquisition";
+  }
+  if (state < READY) {
+    return "queue drain";
+  }
+  return "release acknowledgement";
+}
+
+function observeSentinels() {
+  if (
+    Atomics.load(sharedState, STATE_INDEX) < INTENT_READY &&
+    existsSync(statePath("intent-ready"))
+  ) {
+    publishState(INTENT_READY);
+  }
+  if (
+    Atomics.load(sharedState, STATE_INDEX) < READY &&
+    existsSync(statePath("ready"))
+  ) {
+    publishState(READY);
+  }
+}
+
+const helper = spawn(
+  workerData.python,
+  [
+    workerData.helperPath,
+    "hold-cutover",
+    workerData.originalsLibraryPath,
+    workerData.stateDirectory,
+  ],
+  { stdio: ["pipe", "ignore", "inherit"] },
+);
+
+helper.once("error", (error) => {
+  fail("Legacy queue lease helper failed to start: " + error.message);
+});
+helper.once("exit", (code, signal) => {
+  if (existsSync(statePath("released"))) {
+    publishState(RELEASED);
+    finish();
+    return;
+  }
+  if (existsSync(statePath("error"))) {
+    fail(readFileSync(statePath("error"), "utf8"));
+    return;
+  }
+  observeSentinels();
+  fail(
+    "Legacy queue lease helper exited during " +
+      phase() +
+      " (code " +
+      String(code) +
+      ", signal " +
+      String(signal) +
+      ")",
+  );
+});
+
+timer = setInterval(() => {
+  if (existsSync(statePath("error"))) {
+    fail(readFileSync(statePath("error"), "utf8"));
+    return;
+  }
+  observeSentinels();
+  if (
+    !releaseSent &&
+    Atomics.load(sharedState, RELEASE_INDEX) === 1
+  ) {
+    releaseSent = true;
+    try {
+      writeFileSync(statePath("release"), "", {
+        flag: "wx",
+        mode: 0o600,
+      });
+      helper.stdin.end();
+    } catch (error) {
+      fail("Could not release the legacy queue lease: " + error.message);
+      return;
+    }
+  }
+  if (existsSync(statePath("released"))) {
+    publishState(RELEASED);
+    finish();
+  }
+}, ${LEGACY_QUEUE_LOCK_POLL_MS});
+`;
 
 export interface ParsedLegacyJob {
   completedAt: Date | null;
@@ -617,41 +774,70 @@ export function acquireLegacyQueueCutoverLock(
   }
   const stateDirectory = mkdtempSync(join(tmpdir(), "rip-dvd-cutover-"));
   const statePath = (name: string) => join(stateDirectory, name);
-  const helper = spawn(
-    python,
-    [helperPath, "hold-cutover", originalsLibraryPath, stateDirectory],
-    { stdio: ["pipe", "ignore", "inherit"] },
-  );
-  const sleepState = new Int32Array(new SharedArrayBuffer(4));
+  const helperState = new Int32Array(new SharedArrayBuffer(8));
+  const worker = new Worker(LEGACY_QUEUE_CUTOVER_WORKER, {
+    eval: true,
+    workerData: {
+      helperPath,
+      originalsLibraryPath,
+      python,
+      sharedState: helperState.buffer,
+      stateDirectory,
+    },
+  });
+  const helperFailure = () => {
+    for (const name of ["worker-error", "error"]) {
+      if (existsSync(statePath(name))) {
+        return readFileSync(statePath(name), "utf8");
+      }
+    }
+    return "Legacy queue lease helper terminated unexpectedly";
+  };
+  const waitForState = (expectedState: number): void => {
+    while (true) {
+      const state = Atomics.load(
+        helperState,
+        LEGACY_QUEUE_HELPER_STATE_INDEX,
+      );
+      if (state === LEGACY_QUEUE_HELPER_STATE.failed) {
+        throw new Error(helperFailure());
+      }
+      if (state >= expectedState) {
+        return;
+      }
+      Atomics.wait(
+        helperState,
+        LEGACY_QUEUE_HELPER_STATE_INDEX,
+        state,
+        LEGACY_QUEUE_LOCK_POLL_MS,
+      );
+    }
+  };
 
   try {
-    while (!existsSync(statePath("intent-ready"))) {
-      if (existsSync(statePath("error"))) {
-        throw new Error(readFileSync(statePath("error"), "utf8"));
-      }
-      Atomics.wait(sleepState, 0, 0, LEGACY_QUEUE_LOCK_POLL_MS);
-    }
-    while (!existsSync(statePath("ready"))) {
-      if (existsSync(statePath("error"))) {
-        throw new Error(readFileSync(statePath("error"), "utf8"));
-      }
-      Atomics.wait(sleepState, 0, 0, LEGACY_QUEUE_LOCK_POLL_MS);
-    }
+    waitForState(LEGACY_QUEUE_HELPER_STATE.intentReady);
+    waitForState(LEGACY_QUEUE_HELPER_STATE.ready);
     let released = false;
     return () => {
       if (released) {
         return;
       }
       released = true;
-      writeFileSync(statePath("release"), "", { flag: "wx", mode: 0o600 });
-      while (!existsSync(statePath("released"))) {
-        Atomics.wait(sleepState, 0, 0, LEGACY_QUEUE_LOCK_POLL_MS);
+      Atomics.store(
+        helperState,
+        LEGACY_QUEUE_HELPER_RELEASE_INDEX,
+        1,
+      );
+      Atomics.notify(helperState, LEGACY_QUEUE_HELPER_RELEASE_INDEX);
+      try {
+        waitForState(LEGACY_QUEUE_HELPER_STATE.released);
+      } finally {
+        void worker.terminate();
+        rmSync(stateDirectory, { force: true, recursive: true });
       }
-      helper.stdin.end();
-      rmSync(stateDirectory, { force: true, recursive: true });
     };
   } catch (error) {
-    helper.kill("SIGTERM");
+    void worker.terminate();
     rmSync(stateDirectory, { force: true, recursive: true });
     throw error;
   }
@@ -708,7 +894,7 @@ export function retireLegacySidecarQueue(
       .update(JSON.stringify(legacyJobs))
       .digest("hex");
     const markerContents = `${JSON.stringify({
-      schemaVersion: 2,
+      schemaVersion: 3,
       legacyQueueStatus: "retired",
       authoritativeStore: "sqlite",
       legacyJobs,
@@ -759,35 +945,53 @@ export function retireLegacySidecarQueue(
         upgradeSchemaOne: writeMarker,
         wasAlreadyPublished: true,
       };
-    } else if (value?.schemaVersion === 2 && hasCutoverDiscriminators) {
+    } else if (
+      (value?.schemaVersion === 2 || value?.schemaVersion === 3) &&
+      hasCutoverDiscriminators
+    ) {
       if (!Array.isArray(value.legacyJobs)) {
         throw new Error("Invalid SQLite cutover marker: legacyJobs must be an array");
       }
-      const entries: Array<{
-        jobIndex: number;
-        logicalKey: string;
-        sidecarPath: string;
-        signature: string;
-      }> = [];
+      const entries: Array<
+        | {
+            jobIndex: number;
+            logicalKey: string;
+            sidecarPath: string;
+            signature: string;
+          }
+        | { logicalKey: string; signature: string }
+      > = [];
       const jobSnapshots = new Map<string, LegacyQueueJobSnapshot>();
       for (const entry of value.legacyJobs) {
         const item = objectValue(entry);
         const logicalKey = nonEmptyString(item?.logicalKey);
         const signature = nonEmptyString(item?.signature);
-        const sidecarPath = nonEmptyString(item?.sidecarPath);
-        const jobIndex = nonNegativeInteger(item?.jobIndex);
+        const hasSnapshotLocation =
+          item !== null &&
+          ("sidecarPath" in item || "jobIndex" in item);
+        const sidecarPath = hasSnapshotLocation
+          ? nonEmptyString(item?.sidecarPath)
+          : markerPath;
+        const jobIndex = hasSnapshotLocation
+          ? nonNegativeInteger(item?.jobIndex)
+          : 0;
         if (
           !logicalKey ||
           !signature ||
           !sidecarPath ||
           jobIndex === null ||
+          (value.schemaVersion === 3 && !hasSnapshotLocation) ||
           !isValidPublishedJob(logicalKey, signature) ||
           jobSnapshots.has(logicalKey)
         ) {
           throw new Error("Invalid SQLite cutover marker: malformed or duplicate legacy job");
         }
         const snapshot = { jobIndex, sidecarPath, signature };
-        entries.push({ logicalKey, ...snapshot });
+        entries.push(
+          hasSnapshotLocation
+            ? { logicalKey, ...snapshot }
+            : { logicalKey, signature },
+        );
         jobSnapshots.set(logicalKey, snapshot);
       }
       const expectedDigest = createHash("sha256")

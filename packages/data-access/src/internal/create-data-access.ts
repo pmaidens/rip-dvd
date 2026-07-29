@@ -1436,9 +1436,14 @@ export function createDataAccessInternal(
           string,
           LegacyQueueJobSnapshot
         >();
+        let schemaOneHasUnresolvedWork =
+          cutover.mode === "schema-one" && discoveries.length === 0;
 
         for (const discovery of discoveries) {
           if (discovery.outcome === "skipped") {
+            if (cutover.mode === "schema-one") {
+              schemaOneHasUnresolvedWork = true;
+            }
             report.sidecarsSkipped += 1;
             report.issues.push(discovery.issue);
             continue;
@@ -1447,6 +1452,7 @@ export function createDataAccessInternal(
           const { sidecar } = discovery;
           report.issues.push(...sidecar.issues);
           if (cutover.mode === "schema-one") {
+            let sidecarHasUnresolvedWork = false;
             for (const job of sidecar.jobs) {
               const archive = database
                 .select()
@@ -1523,16 +1529,22 @@ export function createDataAccessInternal(
                 });
                 report.recordsUnchanged += 1;
               } else {
+                sidecarHasUnresolvedWork = true;
+                schemaOneHasUnresolvedWork = true;
                 report.issues.push({
                   code: "duplicate_record",
                   jobIndex: job.jobIndex,
                   message:
-                    "Schema-1 cutover is ambiguous because this legacy job cannot be distinguished from post-cutover drift; SQLite state was preserved",
+                    "Schema-1 cutover recovery is ambiguous and requires operator action because this legacy job cannot be distinguished from post-cutover drift; SQLite state and the schema-1 marker were preserved",
                   sidecarPath: sidecar.sidecarPath,
                 });
               }
             }
-            report.sidecarsImported += 1;
+            if (sidecarHasUnresolvedWork) {
+              report.sidecarsSkipped += 1;
+            } else {
+              report.sidecarsImported += 1;
+            }
             continue;
           }
           const acceptedJobs = sidecar.jobs.filter((job) => {
@@ -2091,7 +2103,9 @@ export function createDataAccessInternal(
         }
 
         if (cutover.mode === "schema-one") {
-          cutover.upgradeSchemaOne(trustedSchemaOneSnapshots);
+          if (!schemaOneHasUnresolvedWork) {
+            cutover.upgradeSchemaOne(trustedSchemaOneSnapshots);
+          }
         } else {
           for (const [logicalKey, snapshot] of cutover.jobSnapshots) {
             if (reconciledSnapshotKeys.has(logicalKey)) {

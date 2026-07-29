@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -53,12 +54,73 @@ vi.mock("node:fs", async (importOriginal) => {
 const temporaryDirectories = createTemporaryDirectoryFixture();
 
 afterEach(() => {
+  delete process.env.RIP_DVD_PYTHON;
   markerFault.directorySyncs = 0;
   markerFault.failure = "rename";
   temporaryDirectories.cleanup();
 });
 
 describe("legacy sidecar cutover", () => {
+  function failingLeaseHelper(
+    root: string,
+    phase: "before-intent" | "before-ready" | "before-released",
+  ): string {
+    const helperPath = join(root, `lease-helper-${phase}.sh`);
+    writeFileSync(
+      helperPath,
+      `#!/bin/sh
+if [ "$1" = "--version" ]; then
+  exit 0
+fi
+state_directory="$4"
+case "${phase}" in
+  before-intent)
+    exit 7
+    ;;
+  before-ready)
+    : > "$state_directory/intent-ready"
+    exit 8
+    ;;
+  before-released)
+    : > "$state_directory/intent-ready"
+    : > "$state_directory/ready"
+    while [ ! -e "$state_directory/release" ]; do sleep 0.01; done
+    exit 9
+    ;;
+esac
+`,
+    );
+    chmodSync(helperPath, 0o755);
+    return helperPath;
+  }
+
+  it.each([
+    ["before-intent", /intent acquisition/i],
+    ["before-ready", /queue drain/i],
+    ["before-released", /release acknowledgement/i],
+  ] as const)(
+    "fails cleanly when the lease helper exits %s",
+    (phase, expectedPhase) => {
+      const root = temporaryDirectories.create(
+        `rip-dvd-helper-${phase}-`,
+      );
+      const originalsLibraryPath = join(root, "originals");
+      mkdirSync(originalsLibraryPath, { recursive: true });
+      process.env.RIP_DVD_PYTHON = failingLeaseHelper(root, phase);
+      markerFault.failure = null;
+      const access = createLegacySidecarDataAccess({
+        databasePath: join(root, "catalog.sqlite"),
+      });
+
+      expect(() =>
+        access.legacySidecars.importLibrary({
+          originalsLibraryPath,
+        }),
+      ).toThrow(expectedPhase);
+      access.close();
+    },
+  );
+
   it("publishes no SQLite queue state until the marker is durable and retries after restart", () => {
     const root = temporaryDirectories.create("rip-dvd-cutover-fault-");
     const originalsLibraryPath = join(root, "originals");

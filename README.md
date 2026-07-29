@@ -211,15 +211,18 @@ are committed. If the process stops after publication, rerunning the command
 resumes the idempotent import while the legacy queue remains inactive. The
 marker also records the immutable legacy-job configuration captured at cutover,
 so a later retry reports sidecar conflicts without confusing them with an
-authoritative SQLite requeue. The importer and legacy archive/encode commands
-share kernel-held library-scoped locks: durable cutover intent prevents new
-legacy batches from starting, then waits without a batch-duration timeout for
-in-flight work to drain. Locks are released by the operating system after a
-process crash and do not rely on PIDs or mutable owner paths. The command never
-writes the sidecars themselves. The marker makes
-SQLite the enforceable queue authority: legacy `interactive`, `rip`, `title`,
-`extras`, `queue`, and `encode` commands refuse that library, so use the SQLite
-catalog and workers instead.
+authoritative SQLite requeue. A legacy schema-1 marker that lacks that snapshot
+is preserved, rather than upgraded, whenever SQLite cannot corroborate every
+job; the report then requires explicit operator recovery instead of guessing
+whether the sidecar changed after cutover. The importer and legacy
+archive/encode commands share kernel-held library-scoped locks: durable cutover
+intent prevents new legacy batches from starting, then waits without a
+batch-duration timeout for in-flight work to drain. Locks are released by the
+operating system after a process crash and do not rely on PIDs or mutable owner
+paths. The command never writes the sidecars themselves. The marker makes SQLite
+the enforceable queue authority: legacy `interactive`, `rip`, `title`, `extras`,
+`queue`, and `encode` commands refuse that library, so use the SQLite catalog
+and workers instead.
 
 ### Join Part Files
 
