@@ -159,6 +159,65 @@ while [ ! -e "$state_directory/supervisor-abort" ]; do sleep 0.01; done
     },
   );
 
+  it("preserves an import failure when queue-lock release also fails", () => {
+    const root = temporaryDirectories.create(
+      "rip-dvd-import-and-release-failure-",
+    );
+    const originalsLibraryPath = join(root, "originals");
+    const archivePath = join(originalsLibraryPath, "Double Failure.iso");
+    const sidecarPath = join(
+      originalsLibraryPath,
+      "Double Failure.rip-dvd.json",
+    );
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    writeFileSync(archivePath, "archive");
+    writeFileSync(
+      sidecarPath,
+      JSON.stringify({
+        schema_version: 2,
+        source: archivePath,
+        title: "Double Failure",
+        disc_fingerprint: "double-failure-fingerprint",
+        jobs: [{
+          label: "Movie: Double Failure",
+          source: archivePath,
+          output: join(root, "movies", "Double Failure.mkv"),
+          preset: "Fast 480p30",
+          selection: "main_feature",
+          title_number: null,
+        }],
+      }),
+    );
+    process.env.RIP_DVD_PYTHON = failingLeaseHelper(
+      root,
+      "before-released",
+    );
+    markerFault.failure = "rename";
+    const access = createLegacySidecarDataAccess({
+      databasePath: join(root, "catalog.sqlite"),
+    });
+
+    let thrown: unknown;
+    try {
+      access.legacySidecars.importLibrary({ originalsLibraryPath });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(AggregateError);
+    expect((thrown as Error).message).toMatch(/injected marker write failure/i);
+    expect((thrown as Error).message).toMatch(/release acknowledgement/i);
+    expect((thrown as AggregateError).errors).toEqual([
+      expect.objectContaining({
+        message: expect.stringMatching(/injected marker write failure/i),
+      }),
+      expect.objectContaining({
+        message: expect.stringMatching(/release acknowledgement/i),
+      }),
+    ]);
+    access.close();
+  });
+
   it.each([
     ["before-intent", /intent acquisition/i],
     ["before-ready", /queue drain/i],
