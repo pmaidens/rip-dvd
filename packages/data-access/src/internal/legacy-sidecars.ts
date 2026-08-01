@@ -35,6 +35,15 @@ import {
 const DEFAULT_HANDBRAKE_PRESET = "Fast 480p30";
 const MAX_LEGACY_SIDECAR_BYTES = 1_048_576;
 const MAX_LEGACY_SIDECAR_JOBS = 100;
+const MAX_LEGACY_IMPORT_BYTES = 8_388_608;
+const MAX_LEGACY_IMPORT_JOBS = 1_000;
+const MAX_LEGACY_MARKER_BYTES = 8_388_608;
+const LEGACY_MARKER_PREFIX =
+  '{"schemaVersion":3,"legacyQueueStatus":"retired","authoritativeStore":"sqlite","legacyJobs":';
+const LEGACY_MARKER_FIXED_BYTES = Buffer.byteLength(
+  `${LEGACY_MARKER_PREFIX}[],"snapshotDigest":"${"0".repeat(64)}"}\n`,
+  "utf8",
+);
 const MAX_LEGACY_LIBRARY_DEPTH = 32;
 const MAX_LEGACY_LIBRARY_ENTRIES = 10_000;
 const LEGACY_QUEUE_CUTOVER_MARKER = ".rip-dvd-sqlite-catalog";
@@ -319,6 +328,11 @@ export interface ParsedLegacySidecar {
 export type LegacySidecarDiscovery =
   | { outcome: "parsed"; sidecar: ParsedLegacySidecar }
   | { outcome: "skipped"; issue: LegacySidecarImportIssue };
+
+export interface LegacySidecarDiscoveryBatch {
+  complete: boolean;
+  discoveries: LegacySidecarDiscovery[];
+}
 
 export interface LegacyQueueCutover {
   jobSnapshots: ReadonlyMap<string, LegacyQueueJobSnapshot>;
@@ -905,6 +919,7 @@ function parseSidecar(sidecarPath: string): LegacySidecarDiscovery {
 }
 
 interface LegacySidecarSearchState {
+  complete: boolean;
   entriesVisited: number;
   issues: LegacySidecarDiscovery[];
   limitReached: boolean;
@@ -916,22 +931,21 @@ function findSidecars(
   directory: string,
   depth = 0,
   state: LegacySidecarSearchState = {
+    complete: true,
     entriesVisited: 0,
     issues: [],
     limitReached: false,
     paths: [],
     rootPath: directory,
   },
-): {
-  issues: LegacySidecarDiscovery[];
-  paths: string[];
-} {
+): LegacySidecarSearchState {
   const directoryHandle = opendirSync(directory);
   try {
     let entry;
     while (!state.limitReached && (entry = directoryHandle.readSync())) {
       state.entriesVisited += 1;
       if (state.entriesVisited > MAX_LEGACY_LIBRARY_ENTRIES) {
+        state.complete = false;
         state.limitReached = true;
         state.issues.push({
           outcome: "skipped",
@@ -946,6 +960,7 @@ function findSidecars(
       const path = join(directory, entry.name);
       if (entry.isDirectory()) {
         if (depth >= MAX_LEGACY_LIBRARY_DEPTH) {
+          state.complete = false;
           state.issues.push({
             outcome: "skipped",
             issue: {
@@ -969,12 +984,89 @@ function findSidecars(
 
 export function discoverLegacySidecars(
   originalsLibraryPath: string,
-): LegacySidecarDiscovery[] {
+): LegacySidecarDiscoveryBatch {
   const found = findSidecars(originalsLibraryPath);
-  return [
-    ...found.paths.sort().map(parseSidecar),
-    ...found.issues,
-  ];
+  const discoveries: LegacySidecarDiscovery[] = [];
+  let totalBytes = 0;
+  let totalJobs = 0;
+  let totalMarkerBytes = LEGACY_MARKER_FIXED_BYTES;
+  let totalMarkerJobs = 0;
+  for (const path of found.paths.sort()) {
+    try {
+      totalBytes += statSync(path).size;
+    } catch {
+      // parseSidecar reports sidecars that disappear during discovery.
+    }
+    if (totalBytes > MAX_LEGACY_IMPORT_BYTES) {
+      found.complete = false;
+      found.issues.push({
+        outcome: "skipped",
+        issue: {
+          code: "invalid_sidecar",
+          message: `Aggregate sidecar bytes exceed the ${MAX_LEGACY_IMPORT_BYTES}-byte import limit`,
+          sidecarPath: originalsLibraryPath,
+        },
+      });
+      break;
+    }
+    const discovery = parseSidecar(path);
+    discoveries.push(discovery);
+    if (discovery.outcome === "parsed") {
+      totalJobs += discovery.sidecar.jobs.length;
+    }
+    if (totalJobs > MAX_LEGACY_IMPORT_JOBS) {
+      found.complete = false;
+      found.issues.push({
+        outcome: "skipped",
+        issue: {
+          code: "invalid_sidecar",
+          message: `Aggregate legacy jobs exceed the ${MAX_LEGACY_IMPORT_JOBS}-job import limit`,
+          sidecarPath: originalsLibraryPath,
+        },
+      });
+      break;
+    }
+    if (discovery.outcome === "parsed") {
+      for (const job of discovery.sidecar.jobs) {
+        totalMarkerBytes +=
+          Buffer.byteLength(
+            JSON.stringify({
+              logicalKey: legacyJobLogicalKey(
+                discovery.sidecar.fingerprint,
+                job,
+              ),
+              jobIndex: job.jobIndex,
+              sidecarPath: discovery.sidecar.sidecarPath,
+              signature: legacyJobSignature(job),
+            }),
+            "utf8",
+          ) + (totalMarkerJobs === 0 ? 0 : 1);
+        totalMarkerJobs += 1;
+        if (totalMarkerBytes > MAX_LEGACY_MARKER_BYTES) {
+          found.complete = false;
+          found.issues.push({
+            outcome: "skipped",
+            issue: {
+              code: "invalid_sidecar",
+              message: `Aggregate cutover marker bytes exceed the ${MAX_LEGACY_MARKER_BYTES}-byte import limit`,
+              sidecarPath: originalsLibraryPath,
+            },
+          });
+          break;
+        }
+      }
+      if (!found.complete) {
+        break;
+      }
+    }
+  }
+  return {
+    complete: found.complete,
+    discoveries: [
+      ...discoveries,
+      ...found.issues,
+    ],
+  };
 }
 
 export function acquireLegacyQueueCutoverLock(
@@ -1197,6 +1289,50 @@ function synchronizeDirectory(path: string): void {
   }
 }
 
+function readBoundedUtf8File(
+  path: string,
+  maximumBytes: number,
+  label: string,
+): string {
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(path, "r");
+    if (fstatSync(descriptor).size > maximumBytes) {
+      throw new Error(`${label} exceeds the ${maximumBytes}-byte limit`);
+    }
+    const buffer = Buffer.alloc(maximumBytes + 1);
+    let bytesRead = 0;
+    while (bytesRead < buffer.length) {
+      const count = readSync(
+        descriptor,
+        buffer,
+        bytesRead,
+        buffer.length - bytesRead,
+        null,
+      );
+      if (count === 0) {
+        break;
+      }
+      bytesRead += count;
+    }
+    if (bytesRead > maximumBytes) {
+      throw new Error(`${label} exceeds the ${maximumBytes}-byte limit`);
+    }
+    closeSync(descriptor);
+    descriptor = undefined;
+    return buffer.toString("utf8", 0, bytesRead);
+  } catch (error) {
+    if (descriptor !== undefined) {
+      try {
+        closeSync(descriptor);
+      } catch {
+        // Preserve the primary read or size-limit failure.
+      }
+    }
+    throw error;
+  }
+}
+
 export function retireLegacySidecarQueue(
   originalsLibraryPath: string,
   discoveries: readonly LegacySidecarDiscovery[],
@@ -1231,20 +1367,30 @@ export function retireLegacySidecarQueue(
   const writeMarker = (
     snapshots: ReadonlyMap<string, LegacyQueueJobSnapshot>,
   ): void => {
-    const legacyJobs = [...snapshots].map(([logicalKey, snapshot]) => ({
-      logicalKey,
-      ...snapshot,
-    }));
+    if (snapshots.size > MAX_LEGACY_IMPORT_JOBS) {
+      throw new Error(
+        `SQLite cutover marker legacyJobs exceed the ${MAX_LEGACY_IMPORT_JOBS}-entry limit`,
+      );
+    }
+    const serializedLegacyJobs: string[] = [];
+    let markerBytes = LEGACY_MARKER_FIXED_BYTES;
+    for (const [logicalKey, snapshot] of snapshots) {
+      const serializedEntry = JSON.stringify({ logicalKey, ...snapshot });
+      markerBytes +=
+        Buffer.byteLength(serializedEntry, "utf8") +
+        (serializedLegacyJobs.length === 0 ? 0 : 1);
+      if (markerBytes > MAX_LEGACY_MARKER_BYTES) {
+        throw new Error(
+          `SQLite cutover marker exceeds the ${MAX_LEGACY_MARKER_BYTES}-byte limit`,
+        );
+      }
+      serializedLegacyJobs.push(serializedEntry);
+    }
+    const legacyJobsJson = `[${serializedLegacyJobs.join(",")}]`;
     const snapshotDigest = createHash("sha256")
-      .update(JSON.stringify(legacyJobs))
+      .update(legacyJobsJson)
       .digest("hex");
-    const markerContents = `${JSON.stringify({
-      schemaVersion: 3,
-      legacyQueueStatus: "retired",
-      authoritativeStore: "sqlite",
-      legacyJobs,
-      snapshotDigest,
-    })}\n`;
+    const markerContents = `${LEGACY_MARKER_PREFIX}${legacyJobsJson},"snapshotDigest":"${snapshotDigest}"}\n`;
     const temporaryMarkerPath = `${markerPath}.${process.pid}.${randomUUID()}.tmp`;
     let markerDescriptor: number | undefined;
     try {
@@ -1273,7 +1419,13 @@ export function retireLegacySidecarQueue(
     }
     let marker: unknown;
     try {
-      marker = JSON.parse(readFileSync(markerPath, "utf8"));
+      marker = JSON.parse(
+        readBoundedUtf8File(
+          markerPath,
+          MAX_LEGACY_MARKER_BYTES,
+          "SQLite cutover marker",
+        ),
+      );
     } catch (error) {
       throw new Error(
         `Invalid SQLite cutover marker: ${error instanceof Error ? error.message : String(error)}`,
@@ -1296,6 +1448,11 @@ export function retireLegacySidecarQueue(
     ) {
       if (!Array.isArray(value.legacyJobs)) {
         throw new Error("Invalid SQLite cutover marker: legacyJobs must be an array");
+      }
+      if (value.legacyJobs.length > MAX_LEGACY_IMPORT_JOBS) {
+        throw new Error(
+          `Invalid SQLite cutover marker: legacyJobs exceed the ${MAX_LEGACY_IMPORT_JOBS}-entry limit`,
+        );
       }
       const entries: Array<
         | {

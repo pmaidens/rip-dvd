@@ -44,6 +44,7 @@ import {
 import type {
   LegacyQueueCutover,
   LegacyQueueJobSnapshot,
+  LegacySidecarDiscoveryBatch,
   LegacySidecarDiscovery,
   ParsedLegacyJob,
 } from "./legacy-sidecars.js";
@@ -226,7 +227,7 @@ export interface CreateDataAccessOptions {
 }
 
 export interface LegacySidecarMigrationAdapter {
-  discover(originalsLibraryPath: string): LegacySidecarDiscovery[];
+  discover(originalsLibraryPath: string): LegacySidecarDiscoveryBatch;
   resolveOriginalsLibrary(path: string): string;
   retireQueue(
     originalsLibraryPath: string,
@@ -1422,12 +1423,9 @@ export function createDataAccessInternal(
               "originalsLibraryPath",
             ),
           );
-        const discoveries =
+        const discoveryBatch =
           legacySidecarMigration.discover(originalsLibraryPath);
-        const cutover = legacySidecarMigration.retireQueue(
-          originalsLibraryPath,
-          discoveries,
-        );
+        const { discoveries } = discoveryBatch;
         const report: LegacySidecarImportReport = {
           originalsLibraryPath,
           sidecarsFound: discoveries.length,
@@ -1438,6 +1436,21 @@ export function createDataAccessInternal(
           recordsUnchanged: 0,
           issues: [],
         };
+        if (!discoveryBatch.complete) {
+          for (const discovery of discoveries) {
+            report.sidecarsSkipped += 1;
+            if (discovery.outcome === "skipped") {
+              report.issues.push(discovery.issue);
+            } else {
+              report.issues.push(...discovery.sidecar.issues);
+            }
+          }
+          return report;
+        }
+        const cutover = legacySidecarMigration.retireQueue(
+          originalsLibraryPath,
+          discoveries,
+        );
         const persistedLegacyJobs = new Map<
           string,
           { job: ParsedLegacyJob; sidecarPath: string }
@@ -2128,7 +2141,7 @@ export function createDataAccessInternal(
         }
 
         if (cutover.mode === "schema-one") {
-          const libraryJobCandidates = database
+          const catalogJobCandidates = database
             .select({
               archivePath: originalDiscArchives.archivePath,
               fingerprint: originalDiscArchives.fingerprint,
@@ -2151,24 +2164,34 @@ export function createDataAccessInternal(
               encodingProfiles,
               eq(encodingProfiles.id, encodeJobs.encodingProfileId),
             )
-            .all()
-            .filter((job) => {
-              let canonicalArchivePath: string;
-              try {
-                canonicalArchivePath = realpathSync(job.archivePath);
-              } catch {
-                canonicalArchivePath = resolve(job.archivePath);
-              }
-              const relativeArchivePath = relative(
-                originalsLibraryPath,
-                canonicalArchivePath,
-              );
-              return (
-                relativeArchivePath !== "" &&
-                !isAbsolute(relativeArchivePath) &&
-                relativeArchivePath.split(sep)[0] !== ".."
-              );
-            });
+            .all();
+          const libraryJobCandidates = [] as typeof catalogJobCandidates;
+          for (const job of catalogJobCandidates) {
+            let canonicalArchivePath: string;
+            try {
+              canonicalArchivePath = realpathSync(job.archivePath);
+            } catch {
+              schemaOneHasUnresolvedWork = true;
+              report.issues.push({
+                code: "invalid_job",
+                message:
+                  "Schema-1 cutover recovery is missing a legacy sidecar recovery input for an Encode Job whose archive path can no longer be canonicalized; SQLite state and the schema-1 marker were preserved",
+                sidecarPath: job.archivePath,
+              });
+              continue;
+            }
+            const relativeArchivePath = relative(
+              originalsLibraryPath,
+              canonicalArchivePath,
+            );
+            if (
+              relativeArchivePath !== "" &&
+              !isAbsolute(relativeArchivePath) &&
+              relativeArchivePath.split(sep)[0] !== ".."
+            ) {
+              libraryJobCandidates.push(job);
+            }
+          }
           for (const importedJob of libraryJobCandidates) {
             const logicalKey = [
               importedJob.fingerprint,

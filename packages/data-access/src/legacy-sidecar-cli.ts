@@ -19,16 +19,54 @@ Options:
   --help                    Show this help
 `;
 
-function argumentValue(argv: readonly string[], name: string): string | null {
-  const index = argv.indexOf(name);
-  if (index < 0) {
-    return null;
+interface ParsedArguments {
+  databasePath?: string;
+  help: boolean;
+  json: boolean;
+  originalsLibraryPath?: string;
+}
+
+function parseArguments(argv: readonly string[]): ParsedArguments {
+  const parsed: ParsedArguments = { help: false, json: false };
+  const seen = new Set<string>();
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index];
+    if (
+      argument !== "--database" &&
+      argument !== "--originals-library" &&
+      argument !== "--json" &&
+      argument !== "--help"
+    ) {
+      throw new Error(
+        argument.startsWith("-")
+          ? `Unknown option: ${argument}`
+          : `Unexpected argument: ${argument}`,
+      );
+    }
+    if (seen.has(argument)) {
+      throw new Error(`Duplicate option: ${argument}`);
+    }
+    seen.add(argument);
+    if (argument === "--json") {
+      parsed.json = true;
+      continue;
+    }
+    if (argument === "--help") {
+      parsed.help = true;
+      continue;
+    }
+    const value = argv[index + 1];
+    if (!value || value.startsWith("--")) {
+      throw new Error(`${argument} requires a path`);
+    }
+    if (argument === "--database") {
+      parsed.databasePath = value;
+    } else {
+      parsed.originalsLibraryPath = value;
+    }
+    index += 1;
   }
-  const value = argv[index + 1];
-  if (!value || value.startsWith("--")) {
-    throw new Error(`${name} requires a path`);
-  }
-  return value;
+  return parsed;
 }
 
 export function runLegacySidecarImportCli({
@@ -37,20 +75,17 @@ export function runLegacySidecarImportCli({
   writeError,
   writeOutput,
 }: LegacySidecarImportCliOptions): number {
-  if (argv.includes("--help")) {
-    writeOutput(usage);
-    return 0;
-  }
-
+  let parsedArguments: ParsedArguments;
   let databasePath: string;
   let originalsLibraryPath: string;
   try {
+    parsedArguments = parseArguments(argv);
     databasePath =
-      argumentValue(argv, "--database") ??
+      parsedArguments.databasePath ??
       environment.RIP_DVD_DATABASE_PATH?.trim() ??
       "";
     originalsLibraryPath =
-      argumentValue(argv, "--originals-library") ??
+      parsedArguments.originalsLibraryPath ??
       environment.RIP_DVD_ORIGINALS_LIBRARY_PATH?.trim() ??
       "";
   } catch (error) {
@@ -58,6 +93,10 @@ export function runLegacySidecarImportCli({
       `${error instanceof Error ? error.message : String(error)}\n${usage}`,
     );
     return 2;
+  }
+  if (parsedArguments.help) {
+    writeOutput(usage);
+    return 0;
   }
   if (!databasePath || !originalsLibraryPath) {
     writeError(
@@ -80,7 +119,7 @@ export function runLegacySidecarImportCli({
     const report = access.legacySidecars.importLibrary({
       originalsLibraryPath,
     });
-    if (argv.includes("--json")) {
+    if (parsedArguments.json) {
       writeOutput(`${JSON.stringify(report, null, 2)}\n`);
     } else {
       writeOutput(
