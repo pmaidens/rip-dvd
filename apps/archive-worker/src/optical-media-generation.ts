@@ -7,6 +7,7 @@ import {
   type ActiveBoundedChildProcess,
   type BoundedChildProcessLauncher,
 } from "./bounded-child-process.js";
+import { optionalBoundedText } from "./bounded-text.js";
 
 const DEFAULT_OBSERVATION_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_ACTIVE_PROBES = 32;
@@ -48,18 +49,8 @@ interface TrackedMediaProbe {
   cancellationRequested: boolean;
 }
 
-function optionalText(value: unknown, maximumLength: number) {
-  if (typeof value !== "string") {
-    return undefined;
-  }
-  const trimmed = value.trim();
-  return trimmed.length > 0 && trimmed.length <= maximumLength
-    ? trimmed
-    : undefined;
-}
-
 export function requireSafeOpticalDevicePath(value: unknown): string {
-  const path = optionalText(value, MAX_DEVICE_PATH_LENGTH);
+  const path = optionalBoundedText(value, MAX_DEVICE_PATH_LENGTH);
   if (
     path === undefined ||
     path.includes("\0") ||
@@ -76,7 +67,7 @@ function requireMediaGeneration(value: unknown): string {
   const generation =
     typeof value === "number" && Number.isSafeInteger(value)
       ? String(value)
-      : optionalText(value, 32);
+      : optionalBoundedText(value, 32);
   if (generation === undefined || !/^\d+$/.test(generation)) {
     throw new Error("Optical Drive media generation is unavailable");
   }

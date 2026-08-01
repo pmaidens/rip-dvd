@@ -2,6 +2,7 @@ import type {
   DashboardDetectedDiscDetails,
   DashboardSnapshot,
 } from "./dashboard";
+import { DASHBOARD_ACTIVITY_DETECTED_DISC_LIMIT } from "./dashboard-bounds";
 
 export interface DashboardEventSource {
   onerror: (() => void) | null;
@@ -144,7 +145,7 @@ export function watchDashboardActivity({
   const failedDetailVersions = new Map<string, number>();
   let detailRefresh: Promise<void> | undefined;
   const maximumQueuedDetails = 20;
-  const maximumRememberedVersions = 100;
+  const maximumRememberedVersions = DASHBOARD_ACTIVITY_DETECTED_DISC_LIMIT;
   const detailRetryDelayMs = 1_000;
 
   const rememberAttempt = (key: string) => {
@@ -207,6 +208,26 @@ export function watchDashboardActivity({
   const queueMissingDetails = (snapshot: DashboardSnapshot) => {
     if (snapshot.detectedDiscs.status !== "loaded") {
       return;
+    }
+    const currentVersions = new Set(
+      snapshot.detectedDiscs.items.map(
+        (disc) => `${disc.id}\0${disc.detectedAt}`,
+      ),
+    );
+    for (const key of attemptedDetailVersions) {
+      if (!currentVersions.has(key)) {
+        attemptedDetailVersions.delete(key);
+      }
+    }
+    for (const key of failedDetailVersions.keys()) {
+      if (!currentVersions.has(key)) {
+        failedDetailVersions.delete(key);
+      }
+    }
+    for (let index = detailQueue.length - 1; index >= 0; index -= 1) {
+      if (!currentVersions.has(detailQueue[index]!.key)) {
+        detailQueue.splice(index, 1);
+      }
     }
     for (const disc of snapshot.detectedDiscs.items) {
       const key = `${disc.id}\0${disc.detectedAt}`;

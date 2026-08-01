@@ -1,5 +1,5 @@
 import type { DataAccess } from "@rip-dvd/data-access";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { readDashboardSnapshot } from "./dashboard";
 import {
@@ -360,6 +360,59 @@ describe("readDashboardSnapshot", () => {
     expect(dashboard.archiveJobs).toEqual({ status: "loaded", items: [] });
     expect(dashboard.encodeJobs).toEqual({ status: "error" });
     expect(dashboard.catalogReview).toEqual({ status: "loaded", items: [] });
+  });
+
+  it("keeps activity relationship reads bounded when Encode Jobs fail", () => {
+    const access = dataAccessFixture.create();
+    const listDiscSelections = vi.fn((options) =>
+      access.catalog.listDiscSelections(options),
+    );
+    const listMediaItems = vi.fn((options) =>
+      access.catalog.listMediaItems(options),
+    );
+    const listEncodingProfiles = vi.fn((options) =>
+      access.encodingProfiles.list(options),
+    );
+    const dashboard = readDashboardSnapshot(
+      withSnapshotOverrides(access, {
+        catalog: { listDiscSelections, listMediaItems },
+        encodingProfiles: { list: listEncodingProfiles },
+        encodeJobs: {
+          list() {
+            throw new Error("encode queue unavailable");
+          },
+        },
+      }),
+      { activityLimit: 20 },
+    );
+
+    expect(listDiscSelections).toHaveBeenCalledWith({ ids: [] });
+    expect(listMediaItems).toHaveBeenCalledWith({ ids: [] });
+    expect(listEncodingProfiles).toHaveBeenCalledWith({ ids: [] });
+    expect(dashboard.encodeJobs).toEqual({ status: "error" });
+  });
+
+  it("keeps activity media reads bounded when Disc Selections fail", () => {
+    const access = dataAccessFixture.create();
+    seedEncodeJob(access);
+    const listMediaItems = vi.fn((options) =>
+      access.catalog.listMediaItems(options),
+    );
+    const dashboard = readDashboardSnapshot(
+      withSnapshotOverrides(access, {
+        catalog: {
+          listDiscSelections() {
+            throw new Error("disc selections unavailable");
+          },
+          listMediaItems,
+        },
+      }),
+      { activityLimit: 20 },
+    );
+
+    expect(listMediaItems).toHaveBeenCalledWith({ ids: [] });
+    expect(dashboard.encodeJobs).toEqual({ status: "error" });
+    expect(dashboard.catalogReview).toEqual({ status: "error" });
   });
 
   it("marks drive-dependent sections unavailable when the drive read fails", () => {

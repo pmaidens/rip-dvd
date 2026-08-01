@@ -162,7 +162,7 @@ describe("data-access facade", () => {
     for (let index = 32; index < 92; index += 1) {
       access.catalog.upsertOpticalDrive({
         devicePath: `/dev/sr${index}`,
-        isEnabled: true,
+        isEnabled: false,
         isPresent: false,
       });
     }
@@ -175,15 +175,17 @@ describe("data-access facade", () => {
     access.close();
   });
 
-  it("keeps configured missing drives ahead of bounded disabled history", () => {
+  it("keeps every configured missing drive plus bounded disabled history", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
     const access = openTestDatabase();
-    const configuredDrive = access.catalog.upsertOpticalDrive({
-      devicePath: "/dev/configured",
-      isEnabled: true,
-      isPresent: false,
-    });
+    const configuredDrives = Array.from({ length: 25 }, (_, index) =>
+      access.catalog.upsertOpticalDrive({
+        devicePath: `/dev/configured-${index}`,
+        isEnabled: true,
+        isPresent: false,
+      }),
+    );
     vi.setSystemTime(new Date("2026-01-02T00:00:00.000Z"));
     for (let index = 0; index < 25; index += 1) {
       access.catalog.upsertOpticalDrive({
@@ -195,10 +197,19 @@ describe("data-access facade", () => {
 
     const activity = access.catalog.listOpticalDrives({ historicalLimit: 20 });
 
-    expect(activity).toContainEqual(
-      expect.objectContaining({ id: configuredDrive.id, isEnabled: true }),
+    expect(
+      activity.filter((drive) => drive.isEnabled && !drive.isPresent),
+    ).toEqual(
+      expect.arrayContaining(
+        configuredDrives.map((drive) =>
+          expect.objectContaining({ id: drive.id }),
+        ),
+      ),
     );
-    expect(activity.filter((drive) => !drive.isPresent)).toHaveLength(20);
+    expect(
+      activity.filter((drive) => !drive.isEnabled && !drive.isPresent),
+    ).toHaveLength(20);
+    expect(activity).toHaveLength(45);
     access.close();
   });
 

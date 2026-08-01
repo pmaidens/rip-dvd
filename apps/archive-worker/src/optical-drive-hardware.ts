@@ -1,4 +1,3 @@
-import { execFile } from "node:child_process";
 import { platform as operatingSystem } from "node:os";
 
 import {
@@ -20,6 +19,12 @@ import type {
   OpticalDriveHardware,
   ScannedDvd,
 } from "./archive-worker.js";
+import {
+  createNodeBoundedCommandProcessLauncher,
+  type ActiveBoundedCommandProcess,
+  type BoundedCommandProcessLauncher,
+} from "./bounded-child-process.js";
+import { optionalBoundedText } from "./bounded-text.js";
 import {
   nodeDiscContentReader,
   type DiscContentReader,
@@ -48,6 +53,7 @@ export {
 } from "./optical-media-generation.js";
 
 const COMMAND_TIMEOUT_MS = 90_000;
+const DEFAULT_MAX_ACTIVE_COMMANDS = 32;
 const MAX_COMMAND_OUTPUT_BYTES = 1_048_576;
 const MAX_DISCOVERED_DEVICES = 32;
 const MAX_BLOCK_DEVICE_NODES = 256;
@@ -75,38 +81,118 @@ export interface CommandRunner {
   ): Promise<CommandResult>;
 }
 
-export const nodeCommandRunner: CommandRunner = {
-  run(executable, arguments_, options) {
-    return new Promise((resolve, reject) => {
-      execFile(
-        executable,
-        [...arguments_],
-        {
-          encoding: "utf8",
-          maxBuffer: options.maxBufferBytes,
-          shell: false,
-          signal: options.signal,
-          timeout: options.timeoutMs,
-        },
-        (error, stdout, stderr) => {
-          if (!error) {
-            resolve({ exitCode: 0, stdout, stderr });
-            return;
+interface NodeCommandRunnerOptions {
+  maxActiveCommands?: number;
+  processLauncher?: BoundedCommandProcessLauncher;
+}
+
+interface TrackedCommandProcess {
+  cancellationRequested: boolean;
+  maxOutputBytes: number;
+  process: ActiveBoundedCommandProcess;
+}
+
+export function createNodeCommandRunner(
+  options: NodeCommandRunnerOptions = {},
+): CommandRunner {
+  const maxActiveCommands =
+    options.maxActiveCommands ?? DEFAULT_MAX_ACTIVE_COMMANDS;
+  const processLauncher =
+    options.processLauncher ?? createNodeBoundedCommandProcessLauncher();
+  if (!Number.isSafeInteger(maxActiveCommands) || maxActiveCommands <= 0) {
+    throw new Error("device command capacity is invalid");
+  }
+
+  const activeCommands = new Map<string, TrackedCommandProcess>();
+  return {
+    async run(executable, arguments_, commandOptions) {
+      if (
+        !Number.isSafeInteger(commandOptions.timeoutMs) ||
+        commandOptions.timeoutMs <= 0
+      ) {
+        throw new Error("device command timeout is invalid");
+      }
+      if (
+        !Number.isSafeInteger(commandOptions.maxBufferBytes) ||
+        commandOptions.maxBufferBytes <= 0
+      ) {
+        throw new Error("device command output bound is invalid");
+      }
+      commandOptions.signal.throwIfAborted();
+      const commandKey = JSON.stringify([executable, ...arguments_]);
+      let trackedCommand = activeCommands.get(commandKey);
+      if (trackedCommand === undefined) {
+        if (activeCommands.size >= maxActiveCommands) {
+          throw new Error("device command capacity is exhausted");
+        }
+        const process = processLauncher.start(
+          executable,
+          arguments_,
+          commandOptions.maxBufferBytes,
+        );
+        trackedCommand = {
+          cancellationRequested: false,
+          maxOutputBytes: commandOptions.maxBufferBytes,
+          process,
+        };
+        activeCommands.set(commandKey, trackedCommand);
+        const startedCommand = trackedCommand;
+        void process.closed.then(() => {
+          if (activeCommands.get(commandKey) === startedCommand) {
+            activeCommands.delete(commandKey);
           }
-          if (options.signal.aborted || error.name === "AbortError") {
+        });
+      } else if (
+        trackedCommand.maxOutputBytes !== commandOptions.maxBufferBytes
+      ) {
+        throw new Error("device command output bound changed while active");
+      }
+
+      let removeAbortListener = () => {};
+      const aborted = new Promise<never>((_resolve, reject) => {
+        const onAbort = () => {
+          try {
+            commandOptions.signal.throwIfAborted();
+          } catch (error) {
             reject(error);
-            return;
           }
-          if (typeof error.code === "number") {
-            resolve({ exitCode: error.code, stdout, stderr });
-            return;
-          }
-          reject(error);
-        },
-      );
-    });
-  },
-};
+        };
+        commandOptions.signal.addEventListener("abort", onAbort, { once: true });
+        removeAbortListener = () =>
+          commandOptions.signal.removeEventListener("abort", onAbort);
+      });
+      let commandTimeout: NodeJS.Timeout | undefined;
+      const timedOut = new Promise<never>((_resolve, reject) => {
+        commandTimeout = setTimeout(
+          () => reject(new Error("device command timed out")),
+          commandOptions.timeoutMs,
+        );
+        commandTimeout.unref();
+      });
+      try {
+        const completion = await Promise.race([
+          trackedCommand.process.result,
+          aborted,
+          timedOut,
+        ]);
+        return {
+          exitCode: completion.exitCode ?? 1,
+          stderr: completion.stderr,
+          stdout: completion.stdout,
+        };
+      } finally {
+        clearTimeout(commandTimeout);
+        removeAbortListener();
+        if (!trackedCommand.cancellationRequested) {
+          trackedCommand.cancellationRequested = true;
+          trackedCommand.process.cancel();
+        }
+      }
+    },
+  };
+}
+
+export const nodeCommandRunner = createNodeCommandRunner();
 
 interface LinuxOpticalDriveHardwareOptions {
   platform?: NodeJS.Platform;
@@ -119,16 +205,6 @@ type UnknownRecord = Record<string, unknown>;
 
 function isRecord(value: unknown): value is UnknownRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function optionalText(value: unknown, maximumLength = MAX_LABEL_LENGTH) {
-  if (typeof value !== "string") {
-    return undefined;
-  }
-  const trimmed = value.trim();
-  return trimmed.length > 0 && trimmed.length <= maximumLength
-    ? trimmed
-    : undefined;
 }
 
 function flattenBlockDevices(value: unknown): UnknownRecord[] {
@@ -174,9 +250,9 @@ function parseDiscoveredDrives(output: string): DiscoveredOpticalDrive[] {
   const drives = flattenBlockDevices(parsed.blockdevices)
     .filter((record) => record.type === "rom")
     .map((record): DiscoveredOpticalDrive => {
-      const vendor = optionalText(record.vendor);
-      const product = optionalText(record.model);
-      const serialNumber = optionalText(record.serial);
+      const vendor = optionalBoundedText(record.vendor, MAX_LABEL_LENGTH);
+      const product = optionalBoundedText(record.model, MAX_LABEL_LENGTH);
+      const serialNumber = optionalBoundedText(record.serial, MAX_LABEL_LENGTH);
       const displayName = [vendor, product].filter(Boolean).join(" ");
       return {
         devicePath: requireSafeDevicePath(record.path),
@@ -229,7 +305,7 @@ function parseStreamId(value: string): number {
 }
 
 function boundedStreamText(value: string, field: string): string {
-  const text = optionalText(value, MAX_DVD_STREAM_TEXT_LENGTH);
+  const text = optionalBoundedText(value, MAX_DVD_STREAM_TEXT_LENGTH);
   if (text === undefined) {
     throw new Error(`lsdvd returned invalid ${field}`);
   }
@@ -244,7 +320,7 @@ function parseDvdMetadata(output: string): {
     throw new Error("lsdvd output exceeds the scan size limit");
   }
   const volumeMatch = output.match(/^Disc Title:\s*(.+)$/im);
-  const volumeLabel = optionalText(volumeMatch?.[1]);
+  const volumeLabel = optionalBoundedText(volumeMatch?.[1], MAX_LABEL_LENGTH);
   const titles: ParsedDvdTitle[] = [];
   const titlePattern =
     /^\s*Title:\s*(\d+),\s*Length:\s*(\d+):(\d{2}):(\d{2})(?:\.\d+)?\s*Chapters:\s*(\d+),\s*Cells:\s*\d+,\s*Audio streams:\s*(\d+),\s*Subpictures:\s*(\d+)\s*$/i;
@@ -300,7 +376,7 @@ function parseDvdMetadata(output: string): {
       if (!currentTitle || !match) {
         throw new Error("lsdvd returned malformed DVD audio metadata");
       }
-      const languageCode = optionalText(
+      const languageCode = optionalBoundedText(
         match[1],
         MAX_DVD_STREAM_TEXT_LENGTH,
       );
@@ -323,7 +399,7 @@ function parseDvdMetadata(output: string): {
       if (!currentTitle || !match) {
         throw new Error("lsdvd returned malformed DVD subtitle metadata");
       }
-      const languageCode = optionalText(
+      const languageCode = optionalBoundedText(
         match[1],
         MAX_DVD_STREAM_TEXT_LENGTH,
       );

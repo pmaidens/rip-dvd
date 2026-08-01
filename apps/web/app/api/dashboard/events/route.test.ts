@@ -157,7 +157,7 @@ describe("GET /api/dashboard/events", () => {
     };
 
     expect(snapshot.detectedDiscs.status).toBe("loaded");
-    expect(snapshot.opticalDrives.items).toHaveLength(52);
+    expect(snapshot.opticalDrives.items).toHaveLength(92);
     expect(snapshot.detectedDiscs.items).toHaveLength(45);
     expect(
       snapshot.detectedDiscs.items.some(
