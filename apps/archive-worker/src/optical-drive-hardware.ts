@@ -1,9 +1,7 @@
 import { createHash } from "node:crypto";
-import { execFile, spawn } from "node:child_process";
-import { constants as fsConstants, createReadStream } from "node:fs";
+import { execFile } from "node:child_process";
+import { createReadStream } from "node:fs";
 import { platform as operatingSystem } from "node:os";
-import { basename, isAbsolute, normalize } from "node:path";
-import { fileURLToPath } from "node:url";
 
 import {
   decodeDvdTitleMap,
@@ -24,6 +22,19 @@ import type {
   OpticalDriveHardware,
   ScannedDvd,
 } from "./archive-worker.js";
+import {
+  nodeMediaGenerationObserver,
+  requireSafeOpticalDevicePath as requireSafeDevicePath,
+  type MediaGenerationObserver,
+} from "./optical-media-generation.js";
+
+export {
+  createNodeMediaGenerationObserver,
+  createNodeMediaGenerationProbeLauncher,
+  nodeMediaGenerationProbeLauncher,
+  type MediaGenerationObserver,
+  type MediaGenerationProbeLauncher,
+} from "./optical-media-generation.js";
 
 const COMMAND_TIMEOUT_MS = 90_000;
 const MAX_COMMAND_OUTPUT_BYTES = 1_048_576;
@@ -34,7 +45,6 @@ const MAX_LABEL_LENGTH = 256;
 const MAX_DVD_CONTENT_BYTES = 9_000_000_000;
 const DVD_CONTENT_READ_BUFFER_BYTES = 1_048_576;
 const DVD_CONTENT_HASH_TIMEOUT_MS = 30 * 60_000;
-const MEDIA_GENERATION_OBSERVATION_TIMEOUT_MS = 10_000;
 
 export interface CommandResult {
   exitCode: number;
@@ -149,210 +159,6 @@ interface LinuxOpticalDriveHardwareOptions {
   mediaGenerationObserver?: MediaGenerationObserver;
 }
 
-export interface MediaGenerationObserver {
-  observe(devicePath: string, signal: AbortSignal): Promise<string>;
-}
-
-interface NodeMediaGenerationObserverOptions {
-  observationTimeoutMs?: number;
-  probeLauncher?: MediaGenerationProbeLauncher;
-}
-
-interface ActiveMediaProbe {
-  result: Promise<string>;
-  cancel(): void;
-}
-
-interface TrackedMediaProbe {
-  probe: ActiveMediaProbe;
-  cancellationRequested: boolean;
-}
-
-export interface MediaGenerationProbeLauncher {
-  start(
-    devicePath: string,
-    flags: number,
-    generationPath: string,
-  ): ActiveMediaProbe;
-}
-
-interface NodeMediaGenerationProbeLauncherOptions {
-  scriptPath?: string;
-  terminateProcess?: (child: { kill(signal: NodeJS.Signals): boolean }) => void;
-}
-
-const MAX_MEDIA_PROBE_OUTPUT_BYTES = 4_096;
-
-export function createNodeMediaGenerationProbeLauncher(
-  options: NodeMediaGenerationProbeLauncherOptions = {},
-): MediaGenerationProbeLauncher {
-  const scriptPath =
-    options.scriptPath ??
-    fileURLToPath(new URL("./optical-media-probe.js", import.meta.url));
-  const terminateProcess =
-    options.terminateProcess ?? ((child) => void child.kill("SIGKILL"));
-  return {
-    start(devicePath, flags, generationPath) {
-      const child = spawn(
-        process.execPath,
-        [scriptPath, devicePath, String(flags), generationPath],
-        { shell: false, stdio: ["ignore", "pipe", "pipe"] },
-      );
-      let stdout = "";
-      let stderr = "";
-      let settled = false;
-      let cancellationRequested = false;
-      const result = new Promise<string>((resolve, reject) => {
-        child.stdout.setEncoding("utf8");
-        child.stderr.setEncoding("utf8");
-        const capture = (current: string, chunk: string) =>
-          `${current}${chunk}`.slice(0, MAX_MEDIA_PROBE_OUTPUT_BYTES + 1);
-        child.stdout.on("data", (chunk: string) => {
-          stdout = capture(stdout, chunk);
-          if (stdout.length > MAX_MEDIA_PROBE_OUTPUT_BYTES) {
-            child.kill("SIGKILL");
-          }
-        });
-        child.stderr.on("data", (chunk: string) => {
-          stderr = capture(stderr, chunk);
-          if (stderr.length > MAX_MEDIA_PROBE_OUTPUT_BYTES) {
-            child.kill("SIGKILL");
-          }
-        });
-        child.once("error", (error) => {
-          settled = true;
-          reject(error);
-        });
-        child.once("close", (code, signal) => {
-          settled = true;
-          if (cancellationRequested) {
-            reject(new Error("Optical Drive media observation was cancelled"));
-            return;
-          }
-          if (stdout.length > MAX_MEDIA_PROBE_OUTPUT_BYTES) {
-            reject(
-              new Error(
-                "Optical Drive media observation output exceeded its bound",
-              ),
-            );
-            return;
-          }
-          if (code === 0) {
-            resolve(stdout);
-            return;
-          }
-          const detail = optionalText(stderr, 500);
-          reject(
-            new Error(
-              `Optical Drive media observation failed${detail ? `: ${detail}` : ` with ${signal ?? `status ${code}`}`}`,
-            ),
-          );
-        });
-      });
-      return {
-        result,
-        cancel() {
-          if (cancellationRequested || settled) {
-            return;
-          }
-          cancellationRequested = true;
-          child.stdout.destroy();
-          child.stderr.destroy();
-          terminateProcess(child);
-          // A helper stuck in an uninterruptible kernel open can survive until
-          // Linux error recovery completes. It must not retain parent handles.
-          child.unref();
-        },
-      };
-    },
-  };
-}
-
-export const nodeMediaGenerationProbeLauncher =
-  createNodeMediaGenerationProbeLauncher();
-
-export function createNodeMediaGenerationObserver(
-  options: NodeMediaGenerationObserverOptions = {},
-): MediaGenerationObserver {
-  const probeLauncher = options.probeLauncher ?? nodeMediaGenerationProbeLauncher;
-  const observationTimeoutMs =
-    options.observationTimeoutMs ?? MEDIA_GENERATION_OBSERVATION_TIMEOUT_MS;
-  if (!Number.isSafeInteger(observationTimeoutMs) || observationTimeoutMs <= 0) {
-    throw new Error("Optical Drive media observation timeout is invalid");
-  }
-  const activeProbes = new Map<string, TrackedMediaProbe>();
-  return {
-    async observe(devicePath, signal) {
-      const safeDevicePath = requireSafeDevicePath(devicePath);
-      signal.throwIfAborted();
-      const generationPath = `/sys/class/block/${basename(safeDevicePath)}/diskseq`;
-      // Opening the block device makes Linux run the optical driver's media
-      // event check. Keep the handle open until the resulting disk sequence is
-      // read so a passive sysfs value is never used as the cache authority.
-      let trackedProbe = activeProbes.get(safeDevicePath);
-      if (trackedProbe === undefined) {
-        const probe = probeLauncher.start(
-          safeDevicePath,
-          fsConstants.O_RDONLY | fsConstants.O_NONBLOCK,
-          generationPath,
-        );
-        trackedProbe = { cancellationRequested: false, probe };
-        activeProbes.set(safeDevicePath, trackedProbe);
-        const startedProbe = trackedProbe;
-        void probe.result
-          .finally(() => {
-            if (activeProbes.get(safeDevicePath) === startedProbe) {
-              activeProbes.delete(safeDevicePath);
-            }
-          })
-          .catch(() => undefined);
-      }
-      let removeAbortListener = () => {};
-      const aborted = new Promise<never>((_resolve, reject) => {
-        const onAbort = () => {
-          try {
-            signal.throwIfAborted();
-          } catch (error) {
-            reject(error);
-          }
-        };
-        signal.addEventListener("abort", onAbort, { once: true });
-        removeAbortListener = () => signal.removeEventListener("abort", onAbort);
-      });
-      let observationTimeout: NodeJS.Timeout | undefined;
-      const timedOut = new Promise<never>((_resolve, reject) => {
-        observationTimeout = setTimeout(
-          () => reject(new Error("Optical Drive media observation timed out")),
-          observationTimeoutMs,
-        );
-        observationTimeout.unref();
-      });
-      try {
-        const value = await Promise.race([
-          trackedProbe.probe.result,
-          aborted,
-          timedOut,
-        ]);
-        return requireMediaGeneration(value);
-      } finally {
-        clearTimeout(observationTimeout);
-        removeAbortListener();
-        // Cancellation can be delayed indefinitely while the helper is in
-        // uninterruptible kernel/SCSI I/O. Keep that helper as this device's
-        // single-flight tombstone until its result settles on actual close;
-        // otherwise every worker poll can abandon another live process.
-        if (!trackedProbe.cancellationRequested) {
-          trackedProbe.cancellationRequested = true;
-          trackedProbe.probe.cancel();
-        }
-      }
-    },
-  };
-}
-
-export const nodeMediaGenerationObserver =
-  createNodeMediaGenerationObserver();
-
 type UnknownRecord = Record<string, unknown>;
 
 function isRecord(value: unknown): value is UnknownRecord {
@@ -367,31 +173,6 @@ function optionalText(value: unknown, maximumLength = MAX_LABEL_LENGTH) {
   return trimmed.length > 0 && trimmed.length <= maximumLength
     ? trimmed
     : undefined;
-}
-
-function requireSafeDevicePath(value: unknown): string {
-  const path = optionalText(value, MAX_DEVICE_PATH_LENGTH);
-  if (
-    path === undefined ||
-    path.includes("\0") ||
-    !isAbsolute(path) ||
-    !path.startsWith("/dev/") ||
-    normalize(path) !== path
-  ) {
-    throw new Error("Optical Drive discovery returned an unsafe device path");
-  }
-  return path;
-}
-
-function requireMediaGeneration(value: unknown): string {
-  const generation =
-    typeof value === "number" && Number.isSafeInteger(value)
-      ? String(value)
-      : optionalText(value, 32);
-  if (generation === undefined || !/^\d+$/.test(generation)) {
-    throw new Error("Optical Drive media generation is unavailable");
-  }
-  return generation;
 }
 
 function flattenBlockDevices(value: unknown): UnknownRecord[] {
