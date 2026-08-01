@@ -559,6 +559,84 @@ describe("watchDashboardActivity", () => {
     stop();
   });
 
+  it("times out a hung detail request and continues hydrating later discs", async () => {
+    vi.useFakeTimers();
+    const initial = emptySnapshot("2026-07-26T16:00:00.000Z");
+    const activity = emptySnapshot("2026-07-26T16:00:01.000Z");
+    activity.detectedDiscs = {
+      status: "loaded",
+      items: ["disc-hung", "disc-next"].map((id) => ({
+        id,
+        volumeLabel: id,
+        discKind: "dvd" as const,
+        status: "scanned" as const,
+        opticalDriveName: "Drive",
+        fingerprint: `sha256:${id}`,
+        titles: [],
+        detectedAt: "2026-07-26T16:00:01.000Z",
+      })),
+    };
+    let hungSignal: AbortSignal | undefined;
+    const loadDiscDetails = vi.fn(
+      (id: string, detectedAt: string, signal: AbortSignal) => {
+        if (id === "disc-hung") {
+          hungSignal = signal;
+          return new Promise<DashboardDetectedDiscDetails>(() => undefined);
+        }
+        return Promise.resolve({
+          id,
+          detectedAt,
+          titles: [{
+            number: 1,
+            durationSeconds: 90,
+            chapters: 2,
+            audioStreams: [],
+            subtitles: [],
+          }],
+        });
+      },
+    );
+    let dashboardListener: ((event: MessageEvent<string>) => void) | undefined;
+    const onSnapshot = vi.fn();
+    const stop = watchDashboardActivity({
+      loadSnapshot: async () => initial,
+      loadDiscDetails,
+      openEventSource: () => ({
+        onerror: null,
+        onopen: null,
+        addEventListener(_type, listener) {
+          dashboardListener = listener;
+        },
+        close: vi.fn(),
+      }),
+      onSnapshot,
+      onInitialLoadError: vi.fn(),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    dashboardListener?.({ data: JSON.stringify(activity) } as MessageEvent<string>);
+
+    expect(loadDiscDetails).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(10_000);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(hungSignal?.aborted).toBe(true);
+    expect(loadDiscDetails).toHaveBeenCalledTimes(2);
+    expect(
+      (onSnapshot.mock.calls.at(-1)?.[0] as DashboardSnapshot).detectedDiscs,
+    ).toEqual({
+      status: "loaded",
+      items: expect.arrayContaining([
+        expect.objectContaining({
+          id: "disc-next",
+          titles: [expect.objectContaining({ number: 1 })],
+        }),
+      ]),
+    });
+    stop();
+  });
+
   it("keeps the normal HTTP snapshot when SSE is unavailable", async () => {
     const snapshot = emptySnapshot("2026-07-26T16:00:00.000Z");
     const onSnapshot = vi.fn();

@@ -3,14 +3,15 @@ import { fileURLToPath } from "node:url";
 import { isDvdContentId } from "@rip-dvd/data-access/dvd-scan";
 
 import {
+  createBoundedSingleFlightCoordinator,
   createNodeBoundedChildProcessLauncher,
   type ActiveBoundedChildProcess,
   type BoundedChildProcessLauncher,
 } from "./bounded-child-process.js";
+import { requireDvdContentSize } from "./dvd-content-policy.js";
 
 const DEFAULT_CONTENT_HASH_TIMEOUT_MS = 30 * 60_000;
 const DEFAULT_MAX_ACTIVE_HASHES = 32;
-const MAX_DVD_CONTENT_BYTES = 9_000_000_000;
 const MAX_CONTENT_HASH_OUTPUT_BYTES = 128;
 
 export interface DiscContentReader {
@@ -38,21 +39,9 @@ interface NodeDiscContentReaderOptions {
   probeLauncher?: DiscContentProbeLauncher;
 }
 
-interface TrackedDiscContentProbe {
-  probe: ActiveDiscContentProbe;
-  cancellationRequested: boolean;
+interface DiscContentProcessRequest {
+  devicePath: string;
   sizeBytes: number;
-}
-
-function requireContentSize(value: number): number {
-  if (
-    !Number.isSafeInteger(value) ||
-    value <= 0 ||
-    value > MAX_DVD_CONTENT_BYTES
-  ) {
-    throw new Error("DVD content size is invalid");
-  }
-  return value;
 }
 
 export function createNodeDiscContentProbeLauncher(
@@ -91,75 +80,35 @@ export function createNodeDiscContentReader(
   if (!Number.isSafeInteger(hashTimeoutMs) || hashTimeoutMs <= 0) {
     throw new Error("DVD content hashing timeout is invalid");
   }
-  if (!Number.isSafeInteger(maxActiveHashes) || maxActiveHashes <= 0) {
-    throw new Error("DVD content hashing capacity is invalid");
-  }
-
-  const activeHashes = new Map<string, TrackedDiscContentProbe>();
-  return {
-    async hash(devicePath, sizeBytes, signal) {
-      const safeSize = requireContentSize(sizeBytes);
-      signal.throwIfAborted();
-      let trackedProbe = activeHashes.get(devicePath);
-      if (trackedProbe === undefined) {
-        if (activeHashes.size >= maxActiveHashes) {
-          throw new Error("DVD content hashing capacity is exhausted");
-        }
-        const probe = probeLauncher.start(devicePath, safeSize);
-        trackedProbe = {
-          cancellationRequested: false,
-          probe,
-          sizeBytes: safeSize,
-        };
-        activeHashes.set(devicePath, trackedProbe);
-        const startedProbe = trackedProbe;
-        void probe.closed.then(() => {
-          if (activeHashes.get(devicePath) === startedProbe) {
-            activeHashes.delete(devicePath);
-          }
-        });
-      } else if (trackedProbe.sizeBytes !== safeSize) {
+  const activeHashes = createBoundedSingleFlightCoordinator({
+    maxActiveProcesses: maxActiveHashes,
+    invalidCapacityError: "DVD content hashing capacity is invalid",
+    exhaustedCapacityError: "DVD content hashing capacity is exhausted",
+    start(request: DiscContentProcessRequest) {
+      return probeLauncher.start(request.devicePath, request.sizeBytes);
+    },
+    validateReuse(activeRequest, requested) {
+      if (activeRequest.sizeBytes !== requested.sizeBytes) {
         throw new Error("DVD content size changed while hashing was active");
       }
-
-      let removeAbortListener = () => {};
-      const aborted = new Promise<never>((_resolve, reject) => {
-        const onAbort = () => {
-          try {
-            signal.throwIfAborted();
-          } catch (error) {
-            reject(error);
-          }
-        };
-        signal.addEventListener("abort", onAbort, { once: true });
-        removeAbortListener = () => signal.removeEventListener("abort", onAbort);
-      });
-      let hashTimeout: NodeJS.Timeout | undefined;
-      const timedOut = new Promise<never>((_resolve, reject) => {
-        hashTimeout = setTimeout(
-          () => reject(new Error("DVD content hashing timed out")),
-          hashTimeoutMs,
-        );
-        hashTimeout.unref();
-      });
-      try {
-        const contentId = await Promise.race([
-          trackedProbe.probe.result,
-          aborted,
-          timedOut,
-        ]);
-        if (!isDvdContentId(contentId)) {
-          throw new Error("DVD content probe returned an invalid content identity");
-        }
-        return contentId;
-      } finally {
-        clearTimeout(hashTimeout);
-        removeAbortListener();
-        if (!trackedProbe.cancellationRequested) {
-          trackedProbe.cancellationRequested = true;
-          trackedProbe.probe.cancel();
-        }
+    },
+  });
+  return {
+    async hash(devicePath, sizeBytes, signal) {
+      const safeSize = requireDvdContentSize(sizeBytes);
+      const contentId = await activeHashes.run(
+        devicePath,
+        { devicePath, sizeBytes: safeSize },
+        {
+          signal,
+          timeoutError: "DVD content hashing timed out",
+          timeoutMs: hashTimeoutMs,
+        },
+      );
+      if (!isDvdContentId(contentId)) {
+        throw new Error("DVD content probe returned an invalid content identity");
       }
+      return contentId;
     },
   };
 }

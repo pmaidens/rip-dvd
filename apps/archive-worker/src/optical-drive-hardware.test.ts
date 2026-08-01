@@ -185,6 +185,25 @@ describe("Linux Optical Drive hardware boundary", () => {
     }
   });
 
+  it.each(["stdout", "stderr"])(
+    "enforces device-command %s limits in UTF-8 bytes",
+    async (stream) => {
+      const runner = createNodeCommandRunner();
+
+      await expect(
+        runner.run(
+          process.execPath,
+          ["-e", `process.${stream}.write("€".repeat(400))`],
+          {
+            maxBufferBytes: 1_024,
+            signal: new AbortController().signal,
+            timeoutMs: 5_000,
+          },
+        ),
+      ).rejects.toThrow("device command output exceeded its bound");
+    },
+  );
+
   it("retains device-command admission until the cancelled process closes", async () => {
     const processes: Array<{
       cancel: ReturnType<typeof vi.fn>;
@@ -768,6 +787,124 @@ describe("Linux Optical Drive hardware boundary", () => {
         ],
       },
     });
+  });
+
+  it.each([
+    {
+      name: "repeated audio ordinal",
+      title:
+        "Title: 01, Length: 00:10:00.000 Chapters: 2, Cells: 2, Audio streams: 2, Subpictures: 0",
+      rows: [
+        "  Audio: 1, Language: en - English, Format: ac3, Frequency: 48000, Quantization: drc, Channels: 2, AP: 0, Content: Normal, Stream id: 0x80",
+        "  Audio: 1, Language: fr - Francais, Format: ac3, Frequency: 48000, Quantization: drc, Channels: 2, AP: 0, Content: Normal, Stream id: 0x81",
+      ],
+    },
+    {
+      name: "missing audio ordinal",
+      title:
+        "Title: 01, Length: 00:10:00.000 Chapters: 2, Cells: 2, Audio streams: 2, Subpictures: 0",
+      rows: [
+        "  Audio: 1, Language: en - English, Format: ac3, Frequency: 48000, Quantization: drc, Channels: 2, AP: 0, Content: Normal, Stream id: 0x80",
+      ],
+    },
+    {
+      name: "out-of-range audio ordinal",
+      title:
+        "Title: 01, Length: 00:10:00.000 Chapters: 2, Cells: 2, Audio streams: 2, Subpictures: 0",
+      rows: [
+        "  Audio: 1, Language: en - English, Format: ac3, Frequency: 48000, Quantization: drc, Channels: 2, AP: 0, Content: Normal, Stream id: 0x80",
+        "  Audio: 3, Language: fr - Francais, Format: ac3, Frequency: 48000, Quantization: drc, Channels: 2, AP: 0, Content: Normal, Stream id: 0x81",
+      ],
+    },
+    {
+      name: "repeated subtitle ordinal",
+      title:
+        "Title: 01, Length: 00:10:00.000 Chapters: 2, Cells: 2, Audio streams: 0, Subpictures: 2",
+      rows: [
+        "  Subtitle: 1, Language: en - English, Content: Normal, Stream id: 0x20,",
+        "  Subtitle: 1, Language: fr - Francais, Content: Normal, Stream id: 0x21,",
+      ],
+    },
+    {
+      name: "missing subtitle ordinal",
+      title:
+        "Title: 01, Length: 00:10:00.000 Chapters: 2, Cells: 2, Audio streams: 0, Subpictures: 2",
+      rows: [
+        "  Subtitle: 1, Language: en - English, Content: Normal, Stream id: 0x20,",
+      ],
+    },
+    {
+      name: "out-of-range subtitle ordinal",
+      title:
+        "Title: 01, Length: 00:10:00.000 Chapters: 2, Cells: 2, Audio streams: 0, Subpictures: 2",
+      rows: [
+        "  Subtitle: 1, Language: en - English, Content: Normal, Stream id: 0x20,",
+        "  Subtitle: 3, Language: fr - Francais, Content: Normal, Stream id: 0x21,",
+      ],
+    },
+  ])("rejects $name rows", async ({ title, rows }) => {
+    const runner: CommandRunner = {
+      run: vi.fn().mockResolvedValue({
+        exitCode: 0,
+        stdout: ["Disc Title: INVALID_STREAMS", title, ...rows].join("\n"),
+        stderr: "",
+      }),
+    };
+    const hardware = createLinuxOpticalDriveHardware({
+      platform: "linux",
+      runner,
+      contentReader: {
+        hash: vi.fn().mockResolvedValue(`sha256:${"d".repeat(64)}`),
+      },
+      mediaGenerationObserver: stableMediaGenerationObserver(),
+    });
+
+    await expect(
+      hardware.scanDvd("/dev/sr0", new AbortController().signal),
+    ).rejects.toThrow("lsdvd returned invalid stream ordinals");
+    expect(runner.run).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    {
+      name: "audio",
+      title:
+        "Title: 01, Length: 00:10:00.000 Chapters: 2, Cells: 2, Audio streams: 2, Subpictures: 0",
+      rows: [
+        "  Audio: 1, Language: en - English, Format: ac3, Frequency: 48000, Quantization: drc, Channels: 2, AP: 0, Content: Normal, Stream id: 0x80",
+        "  Audio: 2, Language: fr - Francais, Format: ac3, Frequency: 48000, Quantization: drc, Channels: 2, AP: 0, Content: Normal, Stream id: 0x80",
+      ],
+    },
+    {
+      name: "subtitle",
+      title:
+        "Title: 01, Length: 00:10:00.000 Chapters: 2, Cells: 2, Audio streams: 0, Subpictures: 2",
+      rows: [
+        "  Subtitle: 1, Language: en - English, Content: Normal, Stream id: 0x20,",
+        "  Subtitle: 2, Language: fr - Francais, Content: Normal, Stream id: 0x20,",
+      ],
+    },
+  ])("rejects duplicate $name source IDs", async ({ title, rows }) => {
+    const runner: CommandRunner = {
+      run: vi.fn().mockResolvedValue({
+        exitCode: 0,
+        stdout: ["Disc Title: DUPLICATE_IDS", title, ...rows].join("\n"),
+        stderr: "",
+      }),
+    };
+    const hardware = createLinuxOpticalDriveHardware({
+      platform: "linux",
+      runner,
+      contentReader: {
+        hash: vi.fn().mockResolvedValue(`sha256:${"d".repeat(64)}`),
+      },
+      mediaGenerationObserver: stableMediaGenerationObserver(),
+    });
+
+    await expect(
+      hardware.scanDvd("/dev/sr0", new AbortController().signal),
+    ).rejects.toThrow("lsdvd returned an invalid DVD title map");
+    expect(runner.run).toHaveBeenCalledOnce();
   });
 
   it("actively observes media generation before reusing a successful scan", async () => {

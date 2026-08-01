@@ -4,7 +4,8 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { pathToFileURL } from "node:url";
 
-const MAX_DVD_CONTENT_BYTES = 9_000_000_000;
+import { requireDvdContentSize } from "./dvd-content-policy.js";
+
 const DVD_CONTENT_READ_BUFFER_BYTES = 1_048_576;
 
 /**
@@ -16,28 +17,22 @@ const DVD_CONTENT_READ_BUFFER_BYTES = 1_048_576;
  * @param {typeof fs} [fileSystem]
  */
 export function hashDiscContent(devicePath, sizeBytes, fileSystem = fs) {
-  if (
-    !Number.isSafeInteger(sizeBytes) ||
-    sizeBytes <= 0 ||
-    sizeBytes > MAX_DVD_CONTENT_BYTES
-  ) {
-    throw new Error("DVD content size is invalid");
-  }
+  const safeSizeBytes = requireDvdContentSize(sizeBytes);
   const descriptor = fileSystem.openSync(devicePath, fileSystem.constants.O_RDONLY);
   const buffer = Buffer.allocUnsafe(
-    Math.min(DVD_CONTENT_READ_BUFFER_BYTES, sizeBytes),
+    Math.min(DVD_CONTENT_READ_BUFFER_BYTES, safeSizeBytes),
   );
   const hash = createHash("sha256");
   hash.update("rip-dvd-content-v2\0");
-  hash.update(String(sizeBytes));
+  hash.update(String(safeSizeBytes));
   let bytesRead = 0;
   try {
-    while (bytesRead < sizeBytes) {
+    while (bytesRead < safeSizeBytes) {
       const count = fileSystem.readSync(
         descriptor,
         buffer,
         0,
-        Math.min(buffer.length, sizeBytes - bytesRead),
+        Math.min(buffer.length, safeSizeBytes - bytesRead),
         null,
       );
       if (count === 0) {

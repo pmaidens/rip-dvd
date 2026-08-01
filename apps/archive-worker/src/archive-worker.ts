@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
 
 import type {
@@ -37,6 +38,16 @@ export interface RunArchiveWorkerOptions extends PollArchiveWorkerOptions {
   ) => Promise<void>;
 }
 
+function resolveConfiguredDevicePath(devicePath: string): string {
+  try {
+    return realpathSync(devicePath);
+  } catch {
+    // Preserve the configured path while its device is absent. A later poll
+    // resolves an alias as soon as its target becomes available.
+    return devicePath;
+  }
+}
+
 export async function pollArchiveWorker({
   access,
   configuredDevicePath,
@@ -47,10 +58,12 @@ export async function pollArchiveWorker({
   signal.throwIfAborted();
   const discovered = await hardware.discover(signal);
   signal.throwIfAborted();
+  const configuredCanonicalPath =
+    resolveConfiguredDevicePath(configuredDevicePath);
   const drives = access.catalog.reconcileOpticalDrives(
     discovered.map((drive) => ({
       ...drive,
-      isEnabledWhenNew: drive.devicePath === configuredDevicePath,
+      isEnabledWhenNew: drive.devicePath === configuredCanonicalPath,
     })),
   );
 

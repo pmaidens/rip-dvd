@@ -89,4 +89,31 @@ describe("versioned DVD title-map contract", () => {
       expect(decodeDvdTitleMap(value)).toBeNull();
     }
   });
+
+  it("rejects duplicate source IDs within each title stream kind", () => {
+    const contentId =
+      "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const title = {
+      number: 1,
+      durationSeconds: 60,
+      chapters: 1,
+      audioStreams: [{ id: 128 }, { id: 128 }],
+      subtitles: [],
+    };
+
+    expect(
+      decodeDvdTitleMap({ schemaVersion: 2, contentId, titles: [title] }),
+    ).toBeNull();
+    expect(
+      decodeDvdTitleMap({
+        schemaVersion: 2,
+        contentId,
+        titles: [{
+          ...title,
+          audioStreams: [],
+          subtitles: [{ id: 32 }, { id: 32 }],
+        }],
+      }),
+    ).toBeNull();
+  });
 });

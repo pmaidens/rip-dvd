@@ -118,7 +118,7 @@ function decodeSubtitleStream(value: unknown): DvdSubtitleStream | null {
   };
 }
 
-function decodeStreamList<T>(
+function decodeStreamList<T extends { id: number }>(
   value: unknown,
   maximumLength: number,
   decode: (item: unknown) => T | null,
@@ -127,11 +127,13 @@ function decodeStreamList<T>(
     return null;
   }
   const decoded: T[] = [];
+  const sourceIds = new Set<number>();
   for (const item of value) {
     const stream = decode(item);
-    if (stream === null) {
+    if (stream === null || sourceIds.has(stream.id)) {
       return null;
     }
+    sourceIds.add(stream.id);
     decoded.push(stream);
   }
   return decoded;

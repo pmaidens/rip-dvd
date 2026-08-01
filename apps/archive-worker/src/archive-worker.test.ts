@@ -1,4 +1,10 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import {
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -117,6 +123,43 @@ describe("archive worker polling", () => {
       }),
     ]);
     expect(access.archiveJobs.list()).toEqual([]);
+    access.close();
+  });
+
+  it("enables a newly discovered Optical Drive configured through a device alias", async () => {
+    const deviceDirectory = mkdtempSync(join(tmpdir(), "rip-dvd-device-alias-"));
+    temporaryDirectories.push(deviceDirectory);
+    const canonicalDevicePath = join(deviceDirectory, "sr0");
+    const configuredAliasPath = join(deviceDirectory, "dvd");
+    writeFileSync(canonicalDevicePath, "");
+    symlinkSync(canonicalDevicePath, configuredAliasPath);
+    const discoveredDevicePath = realpathSync(canonicalDevicePath);
+    const access = openTestDataAccess();
+    const scanDvd = vi.fn().mockResolvedValue(null);
+
+    await pollArchiveWorker({
+      access,
+      configuredDevicePath: configuredAliasPath,
+      hardware: {
+        discover: vi.fn().mockResolvedValue([
+          { devicePath: discoveredDevicePath, displayName: "Aliased drive" },
+        ]),
+        scanDvd,
+      },
+      log: vi.fn(),
+      signal: new AbortController().signal,
+    });
+
+    expect(access.catalog.listOpticalDrives()).toEqual([
+      expect.objectContaining({
+        devicePath: discoveredDevicePath,
+        isEnabled: true,
+      }),
+    ]);
+    expect(scanDvd).toHaveBeenCalledWith(
+      discoveredDevicePath,
+      expect.any(AbortSignal),
+    );
     access.close();
   });
 

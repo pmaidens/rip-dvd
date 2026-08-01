@@ -3,6 +3,7 @@ import { basename, isAbsolute, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  createBoundedSingleFlightCoordinator,
   createNodeBoundedChildProcessLauncher,
   type ActiveBoundedChildProcess,
   type BoundedChildProcessLauncher,
@@ -42,11 +43,6 @@ interface NodeMediaGenerationObserverOptions {
   maxActiveProbes?: number;
   observationTimeoutMs?: number;
   probeLauncher?: MediaGenerationProbeLauncher;
-}
-
-interface TrackedMediaProbe {
-  probe: ActiveMediaProbe;
-  cancellationRequested: boolean;
 }
 
 export function requireSafeOpticalDevicePath(value: unknown): string {
@@ -114,74 +110,32 @@ export function createNodeMediaGenerationObserver(
   if (!Number.isSafeInteger(observationTimeoutMs) || observationTimeoutMs <= 0) {
     throw new Error("Optical Drive media observation timeout is invalid");
   }
-  if (!Number.isSafeInteger(maxActiveProbes) || maxActiveProbes <= 0) {
-    throw new Error("Optical Drive media observation capacity is invalid");
-  }
-
-  const activeProbes = new Map<string, TrackedMediaProbe>();
+  const activeProbes = createBoundedSingleFlightCoordinator({
+    maxActiveProcesses: maxActiveProbes,
+    invalidCapacityError: "Optical Drive media observation capacity is invalid",
+    exhaustedCapacityError:
+      "Optical Drive media observation capacity is exhausted",
+    start(devicePath: string) {
+      const generationPath = `/sys/class/block/${basename(devicePath)}/diskseq`;
+      return probeLauncher.start(
+        devicePath,
+        fsConstants.O_RDONLY | fsConstants.O_NONBLOCK,
+        generationPath,
+      );
+    },
+  });
   return {
     async observe(devicePath, signal) {
       const safeDevicePath = requireSafeOpticalDevicePath(devicePath);
-      signal.throwIfAborted();
-      const generationPath = `/sys/class/block/${basename(safeDevicePath)}/diskseq`;
       // Opening the block device makes Linux run the optical driver's media
       // event check. Keep the handle open until the resulting disk sequence is
       // read so a passive sysfs value is never used as the cache authority.
-      let trackedProbe = activeProbes.get(safeDevicePath);
-      if (trackedProbe === undefined) {
-        if (activeProbes.size >= maxActiveProbes) {
-          throw new Error("Optical Drive media observation capacity is exhausted");
-        }
-        const probe = probeLauncher.start(
-          safeDevicePath,
-          fsConstants.O_RDONLY | fsConstants.O_NONBLOCK,
-          generationPath,
-        );
-        trackedProbe = { cancellationRequested: false, probe };
-        activeProbes.set(safeDevicePath, trackedProbe);
-        const startedProbe = trackedProbe;
-        void probe.closed.then(() => {
-          if (activeProbes.get(safeDevicePath) === startedProbe) {
-            activeProbes.delete(safeDevicePath);
-          }
-        });
-      }
-
-      let removeAbortListener = () => {};
-      const aborted = new Promise<never>((_resolve, reject) => {
-        const onAbort = () => {
-          try {
-            signal.throwIfAborted();
-          } catch (error) {
-            reject(error);
-          }
-        };
-        signal.addEventListener("abort", onAbort, { once: true });
-        removeAbortListener = () => signal.removeEventListener("abort", onAbort);
+      const value = await activeProbes.run(safeDevicePath, safeDevicePath, {
+        signal,
+        timeoutError: "Optical Drive media observation timed out",
+        timeoutMs: observationTimeoutMs,
       });
-      let observationTimeout: NodeJS.Timeout | undefined;
-      const timedOut = new Promise<never>((_resolve, reject) => {
-        observationTimeout = setTimeout(
-          () => reject(new Error("Optical Drive media observation timed out")),
-          observationTimeoutMs,
-        );
-        observationTimeout.unref();
-      });
-      try {
-        const value = await Promise.race([
-          trackedProbe.probe.result,
-          aborted,
-          timedOut,
-        ]);
-        return requireMediaGeneration(value);
-      } finally {
-        clearTimeout(observationTimeout);
-        removeAbortListener();
-        if (!trackedProbe.cancellationRequested) {
-          trackedProbe.cancellationRequested = true;
-          trackedProbe.probe.cancel();
-        }
-      }
+      return requireMediaGeneration(value);
     },
   };
 }

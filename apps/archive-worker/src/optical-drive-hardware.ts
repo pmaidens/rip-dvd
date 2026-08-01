@@ -20,11 +20,12 @@ import type {
   ScannedDvd,
 } from "./archive-worker.js";
 import {
+  createBoundedSingleFlightCoordinator,
   createNodeBoundedCommandProcessLauncher,
-  type ActiveBoundedCommandProcess,
   type BoundedCommandProcessLauncher,
 } from "./bounded-child-process.js";
 import { optionalBoundedText } from "./bounded-text.js";
+import { requireDvdContentSize } from "./dvd-content-policy.js";
 import {
   nodeDiscContentReader,
   type DiscContentReader,
@@ -59,7 +60,6 @@ const MAX_DISCOVERED_DEVICES = 32;
 const MAX_BLOCK_DEVICE_NODES = 256;
 const MAX_DEVICE_PATH_LENGTH = 4_096;
 const MAX_LABEL_LENGTH = 256;
-const MAX_DVD_CONTENT_BYTES = 9_000_000_000;
 
 export interface CommandResult {
   exitCode: number;
@@ -86,10 +86,10 @@ interface NodeCommandRunnerOptions {
   processLauncher?: BoundedCommandProcessLauncher;
 }
 
-interface TrackedCommandProcess {
-  cancellationRequested: boolean;
+interface CommandProcessRequest {
+  arguments_: readonly string[];
+  executable: string;
   maxOutputBytes: number;
-  process: ActiveBoundedCommandProcess;
 }
 
 export function createNodeCommandRunner(
@@ -99,11 +99,23 @@ export function createNodeCommandRunner(
     options.maxActiveCommands ?? DEFAULT_MAX_ACTIVE_COMMANDS;
   const processLauncher =
     options.processLauncher ?? createNodeBoundedCommandProcessLauncher();
-  if (!Number.isSafeInteger(maxActiveCommands) || maxActiveCommands <= 0) {
-    throw new Error("device command capacity is invalid");
-  }
-
-  const activeCommands = new Map<string, TrackedCommandProcess>();
+  const activeCommands = createBoundedSingleFlightCoordinator({
+    maxActiveProcesses: maxActiveCommands,
+    invalidCapacityError: "device command capacity is invalid",
+    exhaustedCapacityError: "device command capacity is exhausted",
+    start(request: CommandProcessRequest) {
+      return processLauncher.start(
+        request.executable,
+        request.arguments_,
+        request.maxOutputBytes,
+      );
+    },
+    validateReuse(activeRequest, requested) {
+      if (activeRequest.maxOutputBytes !== requested.maxOutputBytes) {
+        throw new Error("device command output bound changed while active");
+      }
+    },
+  });
   return {
     async run(executable, arguments_, commandOptions) {
       if (
@@ -118,76 +130,25 @@ export function createNodeCommandRunner(
       ) {
         throw new Error("device command output bound is invalid");
       }
-      commandOptions.signal.throwIfAborted();
       const commandKey = JSON.stringify([executable, ...arguments_]);
-      let trackedCommand = activeCommands.get(commandKey);
-      if (trackedCommand === undefined) {
-        if (activeCommands.size >= maxActiveCommands) {
-          throw new Error("device command capacity is exhausted");
-        }
-        const process = processLauncher.start(
+      const completion = await activeCommands.run(
+        commandKey,
+        {
           executable,
           arguments_,
-          commandOptions.maxBufferBytes,
-        );
-        trackedCommand = {
-          cancellationRequested: false,
           maxOutputBytes: commandOptions.maxBufferBytes,
-          process,
-        };
-        activeCommands.set(commandKey, trackedCommand);
-        const startedCommand = trackedCommand;
-        void process.closed.then(() => {
-          if (activeCommands.get(commandKey) === startedCommand) {
-            activeCommands.delete(commandKey);
-          }
-        });
-      } else if (
-        trackedCommand.maxOutputBytes !== commandOptions.maxBufferBytes
-      ) {
-        throw new Error("device command output bound changed while active");
-      }
-
-      let removeAbortListener = () => {};
-      const aborted = new Promise<never>((_resolve, reject) => {
-        const onAbort = () => {
-          try {
-            commandOptions.signal.throwIfAborted();
-          } catch (error) {
-            reject(error);
-          }
-        };
-        commandOptions.signal.addEventListener("abort", onAbort, { once: true });
-        removeAbortListener = () =>
-          commandOptions.signal.removeEventListener("abort", onAbort);
-      });
-      let commandTimeout: NodeJS.Timeout | undefined;
-      const timedOut = new Promise<never>((_resolve, reject) => {
-        commandTimeout = setTimeout(
-          () => reject(new Error("device command timed out")),
-          commandOptions.timeoutMs,
-        );
-        commandTimeout.unref();
-      });
-      try {
-        const completion = await Promise.race([
-          trackedCommand.process.result,
-          aborted,
-          timedOut,
-        ]);
-        return {
-          exitCode: completion.exitCode ?? 1,
-          stderr: completion.stderr,
-          stdout: completion.stdout,
-        };
-      } finally {
-        clearTimeout(commandTimeout);
-        removeAbortListener();
-        if (!trackedCommand.cancellationRequested) {
-          trackedCommand.cancellationRequested = true;
-          trackedCommand.process.cancel();
-        }
-      }
+        },
+        {
+          signal: commandOptions.signal,
+          timeoutError: "device command timed out",
+          timeoutMs: commandOptions.timeoutMs,
+        },
+      );
+      return {
+        exitCode: completion.exitCode ?? 1,
+        stderr: completion.stderr,
+        stdout: completion.stdout,
+      };
     },
   };
 }
@@ -288,7 +249,11 @@ function boundedNonNegativeInteger(value: string, field: string): number {
 }
 
 interface ParsedDvdTitle extends DvdTitle {
+  audioOrdinals: Set<number>;
+  audioSourceIds: Set<number>;
   audioStreams: DvdAudioStream[];
+  subtitleOrdinals: Set<number>;
+  subtitleSourceIds: Set<number>;
   subtitles: DvdSubtitleStream[];
   expectedAudioStreams: number;
   expectedSubtitles: number;
@@ -312,6 +277,18 @@ function boundedStreamText(value: string, field: string): string {
   return text;
 }
 
+function recordStreamOrdinal(
+  value: string,
+  expectedCount: number,
+  seen: Set<number>,
+): void {
+  const ordinal = boundedNonNegativeInteger(value, "stream ordinal");
+  if (ordinal === 0 || ordinal > expectedCount || seen.has(ordinal)) {
+    throw new Error("lsdvd returned invalid stream ordinals");
+  }
+  seen.add(ordinal);
+}
+
 function parseDvdMetadata(output: string): {
   volumeLabel?: string;
   titles: DvdTitle[];
@@ -325,9 +302,9 @@ function parseDvdMetadata(output: string): {
   const titlePattern =
     /^\s*Title:\s*(\d+),\s*Length:\s*(\d+):(\d{2}):(\d{2})(?:\.\d+)?\s*Chapters:\s*(\d+),\s*Cells:\s*\d+,\s*Audio streams:\s*(\d+),\s*Subpictures:\s*(\d+)\s*$/i;
   const audioPattern =
-    /^\s*Audio:\s*\d+,\s*Language:\s*(.*?)\s*-\s*(.*?),\s*Format:\s*([^,]+),.*?\sChannels:\s*(\d+),.*?\sStream id:\s*(0x[0-9a-f]+|\d+)\s*$/i;
+    /^\s*Audio:\s*(\d+),\s*Language:\s*(.*?)\s*-\s*(.*?),\s*Format:\s*([^,]+),.*?\sChannels:\s*(\d+),.*?\sStream id:\s*(0x[0-9a-f]+|\d+)\s*$/i;
   const subtitlePattern =
-    /^\s*(?:Subtitle|Subpicture):\s*\d+,\s*Language:\s*(.*?)\s*-\s*(.*?),\s*Content:\s*(.*?),\s*Stream id:\s*(0x[0-9a-f]+|\d+),?\s*$/i;
+    /^\s*(?:Subtitle|Subpicture):\s*(\d+),\s*Language:\s*(.*?)\s*-\s*(.*?),\s*Content:\s*(.*?),\s*Stream id:\s*(0x[0-9a-f]+|\d+),?\s*$/i;
   let currentTitle: ParsedDvdTitle | undefined;
   for (const line of output.split(/\r?\n/)) {
     if (/^\s*Title:/i.test(line)) {
@@ -351,7 +328,11 @@ function parseDvdMetadata(output: string): {
         number,
         durationSeconds: hours * 3_600 + minutes * 60 + seconds,
         chapters: boundedNonNegativeInteger(match[5], "chapter count"),
+        audioOrdinals: new Set(),
+        audioSourceIds: new Set(),
         audioStreams: [],
+        subtitleOrdinals: new Set(),
+        subtitleSourceIds: new Set(),
         subtitles: [],
         expectedAudioStreams: boundedNonNegativeInteger(
           match[6],
@@ -376,16 +357,26 @@ function parseDvdMetadata(output: string): {
       if (!currentTitle || !match) {
         throw new Error("lsdvd returned malformed DVD audio metadata");
       }
-      const languageCode = optionalBoundedText(
+      recordStreamOrdinal(
         match[1],
+        currentTitle.expectedAudioStreams,
+        currentTitle.audioOrdinals,
+      );
+      const languageCode = optionalBoundedText(
+        match[2],
         MAX_DVD_STREAM_TEXT_LENGTH,
       );
+      const sourceId = parseStreamId(match[6]);
+      if (currentTitle.audioSourceIds.has(sourceId)) {
+        throw new Error("lsdvd returned an invalid DVD title map");
+      }
+      currentTitle.audioSourceIds.add(sourceId);
       currentTitle.audioStreams.push({
-        id: parseStreamId(match[5]),
+        id: sourceId,
         ...(languageCode ? { languageCode } : {}),
-        language: boundedStreamText(match[2], "audio language"),
-        format: boundedStreamText(match[3], "audio format"),
-        channels: boundedNonNegativeInteger(match[4], "channel count"),
+        language: boundedStreamText(match[3], "audio language"),
+        format: boundedStreamText(match[4], "audio format"),
+        channels: boundedNonNegativeInteger(match[5], "channel count"),
       });
       if (
         currentTitle.audioStreams.length > MAX_DVD_AUDIO_STREAMS_PER_TITLE
@@ -399,15 +390,25 @@ function parseDvdMetadata(output: string): {
       if (!currentTitle || !match) {
         throw new Error("lsdvd returned malformed DVD subtitle metadata");
       }
-      const languageCode = optionalBoundedText(
+      recordStreamOrdinal(
         match[1],
+        currentTitle.expectedSubtitles,
+        currentTitle.subtitleOrdinals,
+      );
+      const languageCode = optionalBoundedText(
+        match[2],
         MAX_DVD_STREAM_TEXT_LENGTH,
       );
+      const sourceId = parseStreamId(match[5]);
+      if (currentTitle.subtitleSourceIds.has(sourceId)) {
+        throw new Error("lsdvd returned an invalid DVD title map");
+      }
+      currentTitle.subtitleSourceIds.add(sourceId);
       currentTitle.subtitles.push({
-        id: parseStreamId(match[4]),
+        id: sourceId,
         ...(languageCode ? { languageCode } : {}),
-        language: boundedStreamText(match[2], "subtitle language"),
-        content: boundedStreamText(match[3], "subtitle content"),
+        language: boundedStreamText(match[3], "subtitle language"),
+        content: boundedStreamText(match[4], "subtitle content"),
       });
       if (currentTitle.subtitles.length > MAX_DVD_SUBTITLES_PER_TITLE) {
         throw new Error("lsdvd returned too many DVD subtitles");
@@ -423,6 +424,12 @@ function parseDvdMetadata(output: string): {
   }
   for (const title of titles) {
     if (
+      title.audioOrdinals.size !== title.expectedAudioStreams ||
+      title.subtitleOrdinals.size !== title.expectedSubtitles
+    ) {
+      throw new Error("lsdvd returned invalid stream ordinals");
+    }
+    if (
       title.audioStreams.length !== title.expectedAudioStreams ||
       title.subtitles.length !== title.expectedSubtitles
     ) {
@@ -432,8 +439,15 @@ function parseDvdMetadata(output: string): {
   return {
     ...(volumeLabel ? { volumeLabel } : {}),
     titles: titles.map(
-      ({ expectedAudioStreams: _audio, expectedSubtitles: _subtitles, ...title }) =>
-        title,
+      ({
+        audioOrdinals: _audioOrdinals,
+        audioSourceIds: _audioSourceIds,
+        expectedAudioStreams: _audio,
+        expectedSubtitles: _subtitles,
+        subtitleOrdinals: _subtitleOrdinals,
+        subtitleSourceIds: _subtitleSourceIds,
+        ...title
+      }) => title,
     ),
   };
 }
@@ -452,12 +466,10 @@ async function readDvdContentId(
   if (sizeResult.exitCode !== 0) {
     throw commandFailure("blockdev", sizeResult);
   }
-  const sizeBytes = Number(sizeResult.stdout.trim());
-  if (
-    !Number.isSafeInteger(sizeBytes) ||
-    sizeBytes <= 0 ||
-    sizeBytes > MAX_DVD_CONTENT_BYTES
-  ) {
+  let sizeBytes: number;
+  try {
+    sizeBytes = requireDvdContentSize(Number(sizeResult.stdout.trim()));
+  } catch {
     throw new Error("blockdev returned an invalid DVD size");
   }
   const contentId = await contentReader.hash(devicePath, sizeBytes, signal);
