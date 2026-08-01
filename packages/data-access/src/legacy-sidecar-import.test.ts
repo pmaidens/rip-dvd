@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
 import {
+  existsSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   symlinkSync,
   unlinkSync,
   utimesSync,
@@ -872,7 +874,7 @@ describe("legacy sidecar import", () => {
     },
   );
 
-  it("preserves schema-1 recovery through a symlinked library when an imported sidecar disappears", () => {
+  it("preserves schema-1 recovery when an imported symlink-alias archive and sidecar disappear", () => {
     const fixture = createFixture();
     const originalsLibraryAlias = join(
       dirname(fixture.originalsLibraryPath),
@@ -881,6 +883,10 @@ describe("legacy sidecar import", () => {
     symlinkSync(fixture.originalsLibraryPath, originalsLibraryAlias, "dir");
     const secondArchivePath = join(
       fixture.originalsLibraryPath,
+      "Second Movie.iso",
+    );
+    const secondArchiveAliasPath = join(
+      originalsLibraryAlias,
       "Second Movie.iso",
     );
     const secondSidecarPath = join(
@@ -908,19 +914,19 @@ describe("legacy sidecar import", () => {
       detectedDiscId: existingDisc.id,
       discKind: "dvd",
       archiveFormat: "iso",
-      archivePath: secondArchivePath,
+      archivePath: secondArchiveAliasPath,
       fingerprint: "second-disc-fingerprint",
     });
     writeFileSync(
       secondSidecarPath,
       JSON.stringify({
         schema_version: 2,
-        source: secondArchivePath,
+        source: secondArchiveAliasPath,
         title: "Second Movie",
         disc_fingerprint: "second-disc-fingerprint",
         jobs: [{
           label: "Movie: Second Movie",
-          source: secondArchivePath,
+          source: secondArchiveAliasPath,
           output: secondOutputPath,
           preset: "Fast 480p30",
           selection: "main_feature",
@@ -942,6 +948,7 @@ describe("legacy sidecar import", () => {
     };
     writeFileSync(markerPath, JSON.stringify(schemaOneMarker));
     unlinkSync(secondSidecarPath);
+    unlinkSync(secondArchivePath);
 
     const report = fixture.access.legacySidecars.importLibrary({
       originalsLibraryPath: originalsLibraryAlias,
@@ -951,7 +958,7 @@ describe("legacy sidecar import", () => {
       expect.objectContaining({
         code: "invalid_job",
         message: expect.stringMatching(/schema-1.*missing.*recovery input/i),
-        sidecarPath: secondArchivePath,
+        sidecarPath: secondArchiveAliasPath,
       }),
     ]);
     expect(fixture.access.encodeJobs.list()).toEqual(
@@ -1020,6 +1027,63 @@ describe("legacy sidecar import", () => {
     expect(() => fixture.access.legacySidecars.importLibrary({
       originalsLibraryPath: fixture.originalsLibraryPath,
     })).toThrow(/cutover marker/i);
+    expect(fixture.access.encodeJobs.list()).toEqual([]);
+    fixture.access.close();
+  });
+
+  it("rejects an oversized cutover marker before parsing or importing", () => {
+    const fixture = createFixture();
+    const markerPath = join(
+      fixture.originalsLibraryPath,
+      ".rip-dvd-sqlite-catalog",
+    );
+    writeFileSync(markerPath, Buffer.alloc(8_388_609, 0x20));
+
+    expect(() => fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    })).toThrow(/cutover marker.*8,?388,?608.*byte limit/i);
+    expect(fixture.access.encodeJobs.list()).toEqual([]);
+    expect(readFileSync(markerPath).byteLength).toBe(8_388_609);
+    fixture.access.close();
+  });
+
+  it("rejects a cutover marker whose legacy job snapshot exceeds the entry limit", () => {
+    const fixture = createFixture();
+    const markerPath = join(
+      fixture.originalsLibraryPath,
+      ".rip-dvd-sqlite-catalog",
+    );
+    const profileKey = "legacy-handbrake-entry-limit";
+    const signature = JSON.stringify({
+      kind: "main_feature",
+      label: "Movie: Marker Entry",
+      mediaItemKind: "movie",
+      mediaTitle: "Marker Entry",
+      outputPath: join(dirname(fixture.movieOutputPath), "marker-entry.mkv"),
+      preset: "Marker Entry Preset",
+      profileKey,
+      sourceKey: "dvd:main-feature",
+      titleNumber: null,
+    });
+    const legacyJobs = Array.from({ length: 1_001 }, (_, index) => ({
+      logicalKey: `marker-entry-${index}\0dvd:main-feature\0${profileKey}`,
+      jobIndex: 0,
+      sidecarPath: fixture.sidecarPath,
+      signature,
+    }));
+    writeFileSync(markerPath, JSON.stringify({
+      schemaVersion: 3,
+      legacyQueueStatus: "retired",
+      authoritativeStore: "sqlite",
+      legacyJobs,
+      snapshotDigest: createHash("sha256")
+        .update(JSON.stringify(legacyJobs))
+        .digest("hex"),
+    }));
+
+    expect(() => fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    })).toThrow(/legacyJobs.*1,?000.*entry limit/i);
     expect(fixture.access.encodeJobs.list()).toEqual([]);
     fixture.access.close();
   });
@@ -1342,7 +1406,163 @@ describe("legacy sidecar import", () => {
     fixture.access.close();
   });
 
-  it("reports a library subtree beyond the traversal depth limit without descending into it", () => {
+  it("leaves the legacy queue active when cumulative sidecar bytes exceed the import budget", () => {
+    const fixture = createFixture();
+    for (let index = 1; index <= 9; index += 1) {
+      const archivePath = join(
+        fixture.originalsLibraryPath,
+        `Aggregate Bytes ${index}.iso`,
+      );
+      writeFileSync(archivePath, "archive");
+      writeFileSync(
+        join(
+          fixture.originalsLibraryPath,
+          `Aggregate Bytes ${index}.rip-dvd.json`,
+        ),
+        JSON.stringify({
+          schema_version: 2,
+          source: archivePath,
+          title: `Aggregate Bytes ${index}`,
+          disc_fingerprint: `aggregate-bytes-${index}`,
+          jobs: [],
+          padding: "x".repeat(950_000),
+        }),
+      );
+    }
+
+    const report = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+
+    expect(report.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "invalid_sidecar",
+          message: expect.stringMatching(/aggregate.*bytes.*8,?388,?608.*limit/i),
+          sidecarPath: fixture.originalsLibraryPath,
+        }),
+      ]),
+    );
+    expect(fixture.access.encodeJobs.list()).toEqual([]);
+    expect(
+      existsSync(
+        join(fixture.originalsLibraryPath, ".rip-dvd-sqlite-catalog"),
+      ),
+    ).toBe(false);
+    fixture.access.close();
+  });
+
+  it("leaves the legacy queue active when cumulative jobs exceed the import budget", () => {
+    const fixture = createFixture();
+    for (let sidecarIndex = 1; sidecarIndex <= 10; sidecarIndex += 1) {
+      const archivePath = join(
+        fixture.originalsLibraryPath,
+        `Aggregate Jobs ${sidecarIndex}.iso`,
+      );
+      writeFileSync(archivePath, "archive");
+      writeFileSync(
+        join(
+          fixture.originalsLibraryPath,
+          `Aggregate Jobs ${sidecarIndex}.rip-dvd.json`,
+        ),
+        JSON.stringify({
+          schema_version: 2,
+          source: archivePath,
+          title: `Aggregate Jobs ${sidecarIndex}`,
+          disc_fingerprint: `aggregate-jobs-${sidecarIndex}`,
+          jobs: Array.from({ length: 100 }, (_, jobIndex) => ({
+            label: `Extra ${jobIndex + 1}: Aggregate ${sidecarIndex}`,
+            source: archivePath,
+            output: join(
+              dirname(fixture.movieOutputPath),
+              `aggregate-${sidecarIndex}-${jobIndex + 1}.mkv`,
+            ),
+            preset: "Fast 480p30",
+            selection: "title",
+            title_number: jobIndex + 1,
+          })),
+        }),
+      );
+    }
+
+    const report = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+
+    expect(report.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "invalid_sidecar",
+          message: expect.stringMatching(/aggregate.*jobs.*1,?000.*limit/i),
+          sidecarPath: fixture.originalsLibraryPath,
+        }),
+      ]),
+    );
+    expect(fixture.access.encodeJobs.list()).toEqual([]);
+    expect(
+      existsSync(
+        join(fixture.originalsLibraryPath, ".rip-dvd-sqlite-catalog"),
+      ),
+    ).toBe(false);
+    fixture.access.close();
+  });
+
+  it("reports bounded input that would expand past the marker budget", () => {
+    const fixture = createFixture();
+    const archivePath = join(
+      fixture.originalsLibraryPath,
+      "Marker Budget.iso",
+    );
+    writeFileSync(archivePath, "archive");
+    writeFileSync(
+      join(
+        fixture.originalsLibraryPath,
+        "Marker Budget.rip-dvd.json",
+      ),
+      JSON.stringify({
+        schema_version: 2,
+        source: archivePath,
+        title: "Marker Budget",
+        disc_fingerprint: "f".repeat(90_000),
+        jobs: Array.from({ length: 100 }, (_, jobIndex) => ({
+          label: `Extra ${jobIndex + 1}: Marker Budget`,
+          source: archivePath,
+          output: join(
+            dirname(fixture.movieOutputPath),
+            `marker-budget-${jobIndex + 1}.mkv`,
+          ),
+          preset: "Fast 480p30",
+          selection: "title",
+          title_number: jobIndex + 1,
+        })),
+      }),
+    );
+
+    const report = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+
+    expect(report.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "invalid_sidecar",
+          message: expect.stringMatching(
+            /aggregate.*marker.*8,?388,?608.*limit/i,
+          ),
+          sidecarPath: fixture.originalsLibraryPath,
+        }),
+      ]),
+    );
+    expect(fixture.access.encodeJobs.list()).toEqual([]);
+    expect(
+      existsSync(
+        join(fixture.originalsLibraryPath, ".rip-dvd-sqlite-catalog"),
+      ),
+    ).toBe(false);
+    fixture.access.close();
+  });
+
+  it("leaves the legacy queue active after a truncated traversal and imports every job on retry", () => {
     const fixture = createFixture();
     let deepDirectory = fixture.originalsLibraryPath;
     for (let depth = 1; depth <= 33; depth += 1) {
@@ -1357,12 +1577,12 @@ describe("legacy sidecar import", () => {
       sidecarPath,
       JSON.stringify({
         schema_version: 2,
-        source: archivePath,
+        source: "Too Deep.iso",
         title: "Too Deep",
         disc_fingerprint: "too-deep-fingerprint",
         jobs: [{
           label: "Movie: Too Deep",
-          source: archivePath,
+          source: "Too Deep.iso",
           output: outputPath,
           preset: "Fast 480p30",
           selection: "main_feature",
@@ -1389,6 +1609,41 @@ describe("legacy sidecar import", () => {
         expect.objectContaining({ outputPath }),
       ]),
     );
+    expect(fixture.access.encodeJobs.list()).toEqual([]);
+    const markerPath = join(
+      fixture.originalsLibraryPath,
+      ".rip-dvd-sqlite-catalog",
+    );
+    expect(existsSync(markerPath)).toBe(false);
+
+    const retriedArchivePath = join(
+      fixture.originalsLibraryPath,
+      "Too Deep.iso",
+    );
+    const retriedSidecarPath = join(
+      fixture.originalsLibraryPath,
+      "Too Deep.rip-dvd.json",
+    );
+    renameSync(archivePath, retriedArchivePath);
+    renameSync(sidecarPath, retriedSidecarPath);
+    renameSync(
+      join(fixture.originalsLibraryPath, "depth-1"),
+      join(dirname(fixture.originalsLibraryPath), "retired-depth-tree"),
+    );
+
+    const retry = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+
+    expect(retry.issues).toEqual([]);
+    expect(fixture.access.encodeJobs.list()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ outputPath: fixture.movieOutputPath }),
+        expect.objectContaining({ outputPath: fixture.trailerOutputPath }),
+        expect.objectContaining({ outputPath }),
+      ]),
+    );
+    expect(existsSync(markerPath)).toBe(true);
     fixture.access.close();
   });
 
@@ -1417,7 +1672,12 @@ describe("legacy sidecar import", () => {
         }),
       ]),
     );
-    expect(fixture.access.encodeJobs.list()).toHaveLength(2);
+    expect(fixture.access.encodeJobs.list()).toEqual([]);
+    expect(
+      existsSync(
+        join(fixture.originalsLibraryPath, ".rip-dvd-sqlite-catalog"),
+      ),
+    ).toBe(false);
     fixture.access.close();
   });
 
