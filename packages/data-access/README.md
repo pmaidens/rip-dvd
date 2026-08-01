@@ -29,11 +29,10 @@ The package exports the versioned, bounded DVD title-map contract through
 rendering share its schema-v2 decoder, stream limits, metadata types, and
 content-ID validation instead of maintaining separate scan shapes.
 
-Bounded dashboard reads keep current state ahead of history: every present
-Optical Drive is returned before a capped missing-drive history (including
-configured drives that remain enabled while absent). Detected Discs awaiting
-review and the shared Archive/Encode Job policy each have an explicit active
-cap before recent terminal history is added.
+Bounded dashboard reads keep current state ahead of history: every present or
+enabled Optical Drive is returned before a capped history of disabled missing
+drives. Detected Discs awaiting review and the shared Archive/Encode Job policy
+each have an explicit active cap before recent terminal history is added.
 
 ## Queue attempts and progress
 

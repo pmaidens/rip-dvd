@@ -33,6 +33,8 @@ export type DashboardStreamStatus =
   | "reconnecting"
   | "unavailable";
 
+const DETAIL_REQUEST_TIMEOUT_MS = 10_000;
+
 function mergeActivitySnapshot(
   detailed: DashboardSnapshot,
   activity: DashboardSnapshot,
@@ -139,7 +141,7 @@ export function watchDashboardActivity({
   let active = true;
   let eventSource: DashboardEventSource | undefined;
   let latestSnapshot: DashboardSnapshot | undefined;
-  const detailAbortController = new AbortController();
+  let activeDetailAbortController: AbortController | undefined;
   const detailQueue: Array<{ id: string; detectedAt: string; key: string }> = [];
   const attemptedDetailVersions = new Set<string>();
   const failedDetailVersions = new Map<string, number>();
@@ -180,11 +182,34 @@ export function watchDashboardActivity({
     if (!next) {
       return;
     }
-    detailRefresh = loadDiscDetails(
-      next.id,
-      next.detectedAt,
-      detailAbortController.signal,
-    )
+    const requestAbortController = new AbortController();
+    activeDetailAbortController = requestAbortController;
+    let detailTimeout: ReturnType<typeof setTimeout> | undefined;
+    let removeAbortListener = () => {};
+    const aborted = new Promise<never>((_resolve, reject) => {
+      const onAbort = () => reject(requestAbortController.signal.reason);
+      requestAbortController.signal.addEventListener("abort", onAbort, {
+        once: true,
+      });
+      removeAbortListener = () =>
+        requestAbortController.signal.removeEventListener("abort", onAbort);
+    });
+    const timedOut = new Promise<never>((_resolve, reject) => {
+      detailTimeout = setTimeout(() => {
+        const error = new Error("Detected Disc detail request timed out");
+        requestAbortController.abort(error);
+        reject(error);
+      }, DETAIL_REQUEST_TIMEOUT_MS);
+    });
+    detailRefresh = Promise.race([
+      loadDiscDetails(
+        next.id,
+        next.detectedAt,
+        requestAbortController.signal,
+      ),
+      aborted,
+      timedOut,
+    ])
       .then((details) => {
         failedDetailVersions.delete(next.key);
         if (!active || latestSnapshot === undefined) {
@@ -200,6 +225,11 @@ export function watchDashboardActivity({
         }
       })
       .finally(() => {
+        clearTimeout(detailTimeout);
+        removeAbortListener();
+        if (activeDetailAbortController === requestAbortController) {
+          activeDetailAbortController = undefined;
+        }
         detailRefresh = undefined;
         startNextDetailRefresh();
       });
@@ -302,7 +332,7 @@ export function watchDashboardActivity({
 
   return () => {
     active = false;
-    detailAbortController.abort();
+    activeDetailAbortController?.abort();
     eventSource?.close();
   };
 }

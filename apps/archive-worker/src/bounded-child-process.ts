@@ -2,13 +2,16 @@ import { spawn } from "node:child_process";
 
 import { optionalBoundedText } from "./bounded-text.js";
 
-export interface ActiveBoundedChildProcess {
+export interface ActiveBoundedProcess<Result> {
   /** Operation outcome; it may settle before the operating system reaps the child. */
-  result: Promise<string>;
+  result: Promise<Result>;
   /** Process-reaping authority and the only safe tombstone-release signal. */
   closed: Promise<void>;
   cancel(): void;
 }
+
+export interface ActiveBoundedChildProcess
+  extends ActiveBoundedProcess<string> {}
 
 export interface BoundedChildProcessLauncher {
   start(arguments_: readonly string[]): ActiveBoundedChildProcess;
@@ -21,11 +24,8 @@ export interface BoundedCommandProcessCompletion {
   stdout: string;
 }
 
-export interface ActiveBoundedCommandProcess {
-  result: Promise<BoundedCommandProcessCompletion>;
-  closed: Promise<void>;
-  cancel(): void;
-}
+export interface ActiveBoundedCommandProcess
+  extends ActiveBoundedProcess<BoundedCommandProcessCompletion> {}
 
 export interface BoundedCommandProcessLauncher {
   start(
@@ -54,6 +54,117 @@ interface NodeBoundedCommandProcessLauncherOptions {
   terminateProcess?: (child: { kill(signal: NodeJS.Signals): boolean }) => void;
 }
 
+interface TrackedBoundedProcess<Request, Result> {
+  cancellationRequested: boolean;
+  process: ActiveBoundedProcess<Result>;
+  request: Request;
+}
+
+interface BoundedSingleFlightCoordinatorOptions<Request, Result> {
+  exhaustedCapacityError: string;
+  invalidCapacityError: string;
+  maxActiveProcesses: number;
+  start(request: Request): ActiveBoundedProcess<Result>;
+  validateReuse?(activeRequest: Request, requested: Request): void;
+}
+
+interface BoundedProcessWaitOptions {
+  signal: AbortSignal;
+  timeoutError: string;
+  timeoutMs: number;
+}
+
+export interface BoundedSingleFlightCoordinator<Request, Result> {
+  run(
+    key: string,
+    request: Request,
+    waitOptions: BoundedProcessWaitOptions,
+  ): Promise<Result>;
+}
+
+/**
+ * Owns the safety-critical lifecycle shared by bounded helper processes. A
+ * key remains admitted until the OS-level `closed` signal confirms that its
+ * child has been reaped, even when the operation result settles first.
+ */
+export function createBoundedSingleFlightCoordinator<Request, Result>({
+  exhaustedCapacityError,
+  invalidCapacityError,
+  maxActiveProcesses,
+  start,
+  validateReuse,
+}: BoundedSingleFlightCoordinatorOptions<
+  Request,
+  Result
+>): BoundedSingleFlightCoordinator<Request, Result> {
+  if (!Number.isSafeInteger(maxActiveProcesses) || maxActiveProcesses <= 0) {
+    throw new Error(invalidCapacityError);
+  }
+  const activeProcesses = new Map<
+    string,
+    TrackedBoundedProcess<Request, Result>
+  >();
+
+  return {
+    async run(key, request, { signal, timeoutError, timeoutMs }) {
+      signal.throwIfAborted();
+      let trackedProcess = activeProcesses.get(key);
+      if (trackedProcess === undefined) {
+        if (activeProcesses.size >= maxActiveProcesses) {
+          throw new Error(exhaustedCapacityError);
+        }
+        const process = start(request);
+        trackedProcess = {
+          cancellationRequested: false,
+          process,
+          request,
+        };
+        activeProcesses.set(key, trackedProcess);
+        const startedProcess = trackedProcess;
+        void process.closed.then(() => {
+          if (activeProcesses.get(key) === startedProcess) {
+            activeProcesses.delete(key);
+          }
+        });
+      } else {
+        validateReuse?.(trackedProcess.request, request);
+      }
+
+      let removeAbortListener = () => {};
+      const aborted = new Promise<never>((_resolve, reject) => {
+        const onAbort = () => {
+          try {
+            signal.throwIfAborted();
+          } catch (error) {
+            reject(error);
+          }
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+        removeAbortListener = () => signal.removeEventListener("abort", onAbort);
+      });
+      let timeout: NodeJS.Timeout | undefined;
+      const timedOut = new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => reject(new Error(timeoutError)), timeoutMs);
+        timeout.unref();
+      });
+      try {
+        return await Promise.race([
+          trackedProcess.process.result,
+          aborted,
+          timedOut,
+        ]);
+      } finally {
+        clearTimeout(timeout);
+        removeAbortListener();
+        if (!trackedProcess.cancellationRequested) {
+          trackedProcess.cancellationRequested = true;
+          trackedProcess.process.cancel();
+        }
+      }
+    },
+  };
+}
+
 function startNodeBoundedChildProcess({
   arguments_,
   executable,
@@ -68,8 +179,10 @@ function startNodeBoundedChildProcess({
     shell: false,
     stdio: ["ignore", "pipe", "pipe"],
   });
-  let stdout = "";
-  let stderr = "";
+  const stdoutChunks: Buffer[] = [];
+  const stderrChunks: Buffer[] = [];
+  let stdoutBytes = 0;
+  let stderrBytes = 0;
   let operationSettled = false;
   let processClosed = false;
   let cancellationRequested = false;
@@ -102,19 +215,26 @@ function startNodeBoundedChildProcess({
     }
   };
 
-  child.stdout.setEncoding("utf8");
-  child.stderr.setEncoding("utf8");
-  const capture = (current: string, chunk: string) =>
-    `${current}${chunk}`.slice(0, maxOutputBytes + 1);
-  child.stdout.on("data", (chunk: string) => {
-    stdout = capture(stdout, chunk);
-    if (stdout.length > maxOutputBytes) {
+  const capture = (
+    chunks: Buffer[],
+    currentBytes: number,
+    chunk: Buffer,
+  ): number => {
+    const remainingBytes = maxOutputBytes + 1 - currentBytes;
+    if (remainingBytes > 0) {
+      chunks.push(Buffer.from(chunk.subarray(0, remainingBytes)));
+    }
+    return Math.min(maxOutputBytes + 1, currentBytes + chunk.byteLength);
+  };
+  child.stdout.on("data", (chunk: Buffer) => {
+    stdoutBytes = capture(stdoutChunks, stdoutBytes, chunk);
+    if (stdoutBytes > maxOutputBytes) {
       child.kill("SIGKILL");
     }
   });
-  child.stderr.on("data", (chunk: string) => {
-    stderr = capture(stderr, chunk);
-    if (stderr.length > maxOutputBytes) {
+  child.stderr.on("data", (chunk: Buffer) => {
+    stderrBytes = capture(stderrChunks, stderrBytes, chunk);
+    if (stderrBytes > maxOutputBytes) {
       child.kill("SIGKILL");
     }
   });
@@ -132,11 +252,16 @@ function startNodeBoundedChildProcess({
       rejectOperation(new Error(`${operationName} was cancelled`));
       return;
     }
-    if (stdout.length > maxOutputBytes || stderr.length > maxOutputBytes) {
+    if (stdoutBytes > maxOutputBytes || stderrBytes > maxOutputBytes) {
       rejectOperation(new Error(`${operationName} output exceeded its bound`));
       return;
     }
-    resolveOperation({ exitCode: code, signal, stderr, stdout });
+    resolveOperation({
+      exitCode: code,
+      signal,
+      stderr: Buffer.concat(stderrChunks, stderrBytes).toString("utf8"),
+      stdout: Buffer.concat(stdoutChunks, stdoutBytes).toString("utf8"),
+    });
   });
 
   return {
