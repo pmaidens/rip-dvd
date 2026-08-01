@@ -3,11 +3,14 @@ import { spawnSync } from "node:child_process";
 import {
   closeSync,
   existsSync,
+  fstatSync,
   fsyncSync,
   lstatSync,
   mkdtempSync,
+  opendirSync,
   openSync,
-  readdirSync,
+  realpathSync,
+  readSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -30,6 +33,10 @@ import {
 } from "./legacy-sidecar-identity.js";
 
 const DEFAULT_HANDBRAKE_PRESET = "Fast 480p30";
+const MAX_LEGACY_SIDECAR_BYTES = 1_048_576;
+const MAX_LEGACY_SIDECAR_JOBS = 100;
+const MAX_LEGACY_LIBRARY_DEPTH = 32;
+const MAX_LEGACY_LIBRARY_ENTRIES = 10_000;
 const LEGACY_QUEUE_CUTOVER_MARKER = ".rip-dvd-sqlite-catalog";
 const LEGACY_QUEUE_LOCK_POLL_MS = 10;
 const LEGACY_QUEUE_WORKER_STALL_MS = 2_000;
@@ -332,10 +339,12 @@ export function resolveLegacyOriginalsLibrary(path: string): string {
   const resolvedPath = isAbsolute(path)
     ? normalize(path)
     : resolve(path);
+  let canonicalPath;
   let libraryStat;
   try {
-    libraryStat = statSync(resolvedPath);
-    readdirSync(resolvedPath);
+    canonicalPath = realpathSync(resolvedPath);
+    libraryStat = statSync(canonicalPath);
+    opendirSync(canonicalPath).closeSync();
   } catch (error) {
     throw new Error(
       `Originals library does not exist or is not readable: ${resolvedPath}: ${
@@ -346,7 +355,7 @@ export function resolveLegacyOriginalsLibrary(path: string): string {
   if (!libraryStat.isDirectory()) {
     throw new Error(`Originals library is not a directory: ${resolvedPath}`);
   }
-  return resolvedPath;
+  return canonicalPath;
 }
 
 function objectValue(value: unknown): Record<string, unknown> | null {
@@ -623,9 +632,80 @@ function parseJob(
 }
 
 function parseSidecar(sidecarPath: string): LegacySidecarDiscovery {
+  let contents = "";
+  let descriptor: number | undefined;
+  let readIssue: LegacySidecarDiscovery | undefined;
+  try {
+    descriptor = openSync(sidecarPath, "r");
+    if (fstatSync(descriptor).size > MAX_LEGACY_SIDECAR_BYTES) {
+      readIssue = {
+        outcome: "skipped",
+        issue: {
+          code: "invalid_sidecar",
+          message: `Sidecar exceeds the ${MAX_LEGACY_SIDECAR_BYTES}-byte limit`,
+          sidecarPath,
+        },
+      };
+    } else {
+      const buffer = Buffer.alloc(MAX_LEGACY_SIDECAR_BYTES + 1);
+      let bytesRead = 0;
+      while (bytesRead < buffer.length) {
+        const count = readSync(
+          descriptor,
+          buffer,
+          bytesRead,
+          buffer.length - bytesRead,
+          null,
+        );
+        if (count === 0) {
+          break;
+        }
+        bytesRead += count;
+      }
+      if (bytesRead > MAX_LEGACY_SIDECAR_BYTES) {
+        readIssue = {
+          outcome: "skipped",
+          issue: {
+            code: "invalid_sidecar",
+            message: `Sidecar exceeds the ${MAX_LEGACY_SIDECAR_BYTES}-byte limit`,
+            sidecarPath,
+          },
+        };
+      } else {
+        contents = buffer.toString("utf8", 0, bytesRead);
+      }
+    }
+  } catch (error) {
+    readIssue = {
+      outcome: "skipped",
+      issue: {
+        code: "corrupt_sidecar",
+        message: `Could not read JSON: ${error instanceof Error ? error.message : String(error)}`,
+        sidecarPath,
+      },
+    };
+  } finally {
+    if (descriptor !== undefined) {
+      try {
+        closeSync(descriptor);
+      } catch (error) {
+        readIssue ??= {
+          outcome: "skipped",
+          issue: {
+            code: "corrupt_sidecar",
+            message: `Could not close JSON: ${error instanceof Error ? error.message : String(error)}`,
+            sidecarPath,
+          },
+        };
+      }
+    }
+  }
+  if (readIssue) {
+    return readIssue;
+  }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(readFileSync(sidecarPath, "utf8"));
+    parsed = JSON.parse(contents);
   } catch (error) {
     return {
       outcome: "skipped",
@@ -763,6 +843,11 @@ function parseSidecar(sidecarPath: string): LegacySidecarDiscovery {
   if (!Array.isArray(data.jobs)) {
     return invalid("Sidecar jobs must be an array");
   }
+  if (data.jobs.length > MAX_LEGACY_SIDECAR_JOBS) {
+    return invalid(
+      `Sidecar jobs exceed the ${MAX_LEGACY_SIDECAR_JOBS}-job limit`,
+    );
+  }
   const movieTitle =
     nonEmptyString(data.title) ??
     archivePath.split("/").at(-1)?.replace(/\.iso$/i, "") ??
@@ -819,23 +904,77 @@ function parseSidecar(sidecarPath: string): LegacySidecarDiscovery {
   };
 }
 
-function findSidecars(directory: string): string[] {
-  const paths: string[] = [];
-  for (const entry of readdirSync(directory, { withFileTypes: true })) {
-    const path = join(directory, entry.name);
-    if (entry.isDirectory()) {
-      paths.push(...findSidecars(path));
-    } else if (entry.isFile() && entry.name.endsWith(".rip-dvd.json")) {
-      paths.push(path);
+interface LegacySidecarSearchState {
+  entriesVisited: number;
+  issues: LegacySidecarDiscovery[];
+  limitReached: boolean;
+  paths: string[];
+  rootPath: string;
+}
+
+function findSidecars(
+  directory: string,
+  depth = 0,
+  state: LegacySidecarSearchState = {
+    entriesVisited: 0,
+    issues: [],
+    limitReached: false,
+    paths: [],
+    rootPath: directory,
+  },
+): {
+  issues: LegacySidecarDiscovery[];
+  paths: string[];
+} {
+  const directoryHandle = opendirSync(directory);
+  try {
+    let entry;
+    while (!state.limitReached && (entry = directoryHandle.readSync())) {
+      state.entriesVisited += 1;
+      if (state.entriesVisited > MAX_LEGACY_LIBRARY_ENTRIES) {
+        state.limitReached = true;
+        state.issues.push({
+          outcome: "skipped",
+          issue: {
+            code: "invalid_sidecar",
+            message: `Library traversal entries exceed the ${MAX_LEGACY_LIBRARY_ENTRIES}-entry limit`,
+            sidecarPath: state.rootPath,
+          },
+        });
+        break;
+      }
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        if (depth >= MAX_LEGACY_LIBRARY_DEPTH) {
+          state.issues.push({
+            outcome: "skipped",
+            issue: {
+              code: "invalid_sidecar",
+              message: `Library traversal depth exceeds the ${MAX_LEGACY_LIBRARY_DEPTH}-level limit`,
+              sidecarPath: path,
+            },
+          });
+        } else {
+          findSidecars(path, depth + 1, state);
+        }
+      } else if (entry.isFile() && entry.name.endsWith(".rip-dvd.json")) {
+        state.paths.push(path);
+      }
     }
+  } finally {
+    directoryHandle.closeSync();
   }
-  return paths.sort();
+  return state;
 }
 
 export function discoverLegacySidecars(
   originalsLibraryPath: string,
 ): LegacySidecarDiscovery[] {
-  return findSidecars(originalsLibraryPath).map(parseSidecar);
+  const found = findSidecars(originalsLibraryPath);
+  return [
+    ...found.paths.sort().map(parseSidecar),
+    ...found.issues,
+  ];
 }
 
 export function acquireLegacyQueueCutoverLock(
