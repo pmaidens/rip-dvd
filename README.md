@@ -357,10 +357,14 @@ the worker reads the resulting sysfs generation. A generation change fails the
 scan closed so one disc's title map cannot be bound to another disc's
 fingerprint. If active generation observation is unavailable, that drive's scan
 also fails closed and retries on a later poll. The potentially blocking open is
-isolated in a bounded helper process. Timeout or shutdown kills and detaches the
-helper, retires its per-drive single-flight entry, and lets a later poll retry
-without keeping the archive worker alive.
-Reads are shell-free, size-capped, streaming, timed out, and cancellation-aware.
+isolated in a bounded helper process. Timeout or shutdown requests cancellation,
+kills and detaches the helper, and retains its per-drive single-flight tombstone
+until the child process is confirmed closed. Later polls reuse that tombstone;
+capacity is recovered and a fresh retry is admitted only after confirmed close.
+Raw-disc open/read/hash work uses the same bounded helper-process lifecycle, so
+a kernel-blocked device operation cannot keep the archive worker alive.
+Reads are shell-free, size-capped, incremental, timed out, and
+cancellation-aware.
 Repeated polls update the same Detected Disc. A fingerprint
 already present in Original Disc Archives is shown as **Already archived**, and
 any obsolete queued Archive Job for that fingerprint is removed by the

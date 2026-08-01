@@ -139,11 +139,13 @@ export function watchDashboardActivity({
   let eventSource: DashboardEventSource | undefined;
   let latestSnapshot: DashboardSnapshot | undefined;
   const detailAbortController = new AbortController();
-  const detailQueue: Array<{ id: string; detectedAt: string }> = [];
+  const detailQueue: Array<{ id: string; detectedAt: string; key: string }> = [];
   const attemptedDetailVersions = new Set<string>();
+  const failedDetailVersions = new Map<string, number>();
   let detailRefresh: Promise<void> | undefined;
   const maximumQueuedDetails = 20;
   const maximumRememberedVersions = 100;
+  const detailRetryDelayMs = 1_000;
 
   const rememberAttempt = (key: string) => {
     attemptedDetailVersions.delete(key);
@@ -154,6 +156,18 @@ export function watchDashboardActivity({
         break;
       }
       attemptedDetailVersions.delete(oldest);
+    }
+  };
+
+  const rememberFailure = (key: string) => {
+    failedDetailVersions.delete(key);
+    failedDetailVersions.set(key, Date.now() + detailRetryDelayMs);
+    while (failedDetailVersions.size > maximumRememberedVersions) {
+      const oldest = failedDetailVersions.keys().next().value;
+      if (oldest === undefined) {
+        break;
+      }
+      failedDetailVersions.delete(oldest);
     }
   };
 
@@ -171,6 +185,7 @@ export function watchDashboardActivity({
       detailAbortController.signal,
     )
       .then((details) => {
+        failedDetailVersions.delete(next.key);
         if (!active || latestSnapshot === undefined) {
           return;
         }
@@ -178,7 +193,10 @@ export function watchDashboardActivity({
         onSnapshot(latestSnapshot);
       })
       .catch(() => {
-        // Retain the live snapshot. A new Detected Disc version may retry.
+        attemptedDetailVersions.delete(next.key);
+        if (active) {
+          rememberFailure(next.key);
+        }
       })
       .finally(() => {
         detailRefresh = undefined;
@@ -195,9 +213,16 @@ export function watchDashboardActivity({
       if (attemptedDetailVersions.has(key)) {
         continue;
       }
+      const retryAfter = failedDetailVersions.get(key);
+      if (retryAfter !== undefined) {
+        if (retryAfter > Date.now()) {
+          continue;
+        }
+        failedDetailVersions.delete(key);
+      }
       if (detailQueue.length < maximumQueuedDetails) {
         rememberAttempt(key);
-        detailQueue.push({ id: disc.id, detectedAt: disc.detectedAt });
+        detailQueue.push({ id: disc.id, detectedAt: disc.detectedAt, key });
       }
     }
     startNextDetailRefresh();

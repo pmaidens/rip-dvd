@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
   DashboardDetectedDiscDetails,
@@ -16,6 +16,10 @@ function emptySnapshot(generatedAt: string): DashboardSnapshot {
     catalogReview: { status: "loaded", items: [] },
   };
 }
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("watchDashboardActivity", () => {
   it("retains HTTP title details when activity events carry disc summaries", async () => {
@@ -168,6 +172,82 @@ describe("watchDashboardActivity", () => {
           titles: details.titles,
         }),
       ],
+    });
+    stop();
+  });
+
+  it("retries a transient detail failure after bounded backoff", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-26T16:00:00.000Z"));
+    const initial = emptySnapshot("2026-07-26T16:00:00.000Z");
+    const activity = emptySnapshot("2026-07-26T16:00:01.000Z");
+    activity.detectedDiscs = {
+      status: "loaded",
+      items: [
+        {
+          id: "disc-retry",
+          volumeLabel: "RETRY_DISC",
+          discKind: "dvd",
+          status: "scanned",
+          opticalDriveName: "Upper drive",
+          fingerprint: "sha256:retry-disc",
+          titles: [],
+          detectedAt: "2026-07-26T16:00:01.000Z",
+        },
+      ],
+    };
+    const details: DashboardDetectedDiscDetails = {
+      id: "disc-retry",
+      detectedAt: "2026-07-26T16:00:01.000Z",
+      titles: [
+        {
+          number: 1,
+          durationSeconds: 90,
+          chapters: 2,
+          audioStreams: [],
+          subtitles: [],
+        },
+      ],
+    };
+    const loadDiscDetails = vi.fn()
+      .mockRejectedValueOnce(new Error("temporary detail failure"))
+      .mockResolvedValueOnce(details);
+    let dashboardListener: ((event: MessageEvent<string>) => void) | undefined;
+    const onSnapshot = vi.fn();
+    const stop = watchDashboardActivity({
+      loadSnapshot: async () => initial,
+      loadDiscDetails,
+      openEventSource: () => ({
+        onerror: null,
+        onopen: null,
+        addEventListener(_type, listener) {
+          dashboardListener = listener;
+        },
+        close: vi.fn(),
+      }),
+      onSnapshot,
+      onInitialLoadError: vi.fn(),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    dashboardListener?.({ data: JSON.stringify(activity) } as MessageEvent<string>);
+    await Promise.resolve();
+    await Promise.resolve();
+    dashboardListener?.({ data: JSON.stringify(activity) } as MessageEvent<string>);
+    expect(loadDiscDetails).toHaveBeenCalledOnce();
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    dashboardListener?.({ data: JSON.stringify(activity) } as MessageEvent<string>);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(loadDiscDetails).toHaveBeenCalledTimes(2);
+    expect(
+      (onSnapshot.mock.calls.at(-1)?.[0] as DashboardSnapshot).detectedDiscs,
+    ).toEqual({
+      status: "loaded",
+      items: [expect.objectContaining({ id: "disc-retry", titles: details.titles })],
     });
     stop();
   });

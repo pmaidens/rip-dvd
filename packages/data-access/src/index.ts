@@ -900,7 +900,11 @@ export function createDataAccess({
                 eq(opticalDrives.isPresent, false),
               ),
             )
-            .orderBy(desc(opticalDrives.lastSeenAt), desc(opticalDrives.id))
+            .orderBy(
+              desc(opticalDrives.isEnabled),
+              desc(opticalDrives.lastSeenAt),
+              desc(opticalDrives.id),
+            )
             .limit(
               requirePositiveSafeInteger(
                 options.historicalLimit,
@@ -979,6 +983,7 @@ export function createDataAccess({
             .get();
           const observationChanged =
             existing === undefined ||
+            input.isNewMediumObservation === true ||
             existing.discKind !== input.discKind ||
             existing.volumeLabel !== (input.volumeLabel ?? null) ||
             !isDeepStrictEqual(existing.scanData, input.scanData ?? null);

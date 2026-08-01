@@ -1,7 +1,12 @@
-import { spawn } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
 import { basename, isAbsolute, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import {
+  createNodeBoundedChildProcessLauncher,
+  type ActiveBoundedChildProcess,
+  type BoundedChildProcessLauncher,
+} from "./bounded-child-process.js";
 
 const DEFAULT_OBSERVATION_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_ACTIVE_PROBES = 32;
@@ -17,11 +22,7 @@ export interface MediaGenerationObserver {
  * operation outcome. `closed` is the process-reaping authority and is the only
  * signal that permits its single-flight tombstone to be released.
  */
-export interface ActiveMediaProbe {
-  result: Promise<string>;
-  closed: Promise<void>;
-  cancel(): void;
-}
+export interface ActiveMediaProbe extends ActiveBoundedChildProcess {}
 
 export interface MediaGenerationProbeLauncher {
   start(
@@ -88,120 +89,22 @@ export function createNodeMediaGenerationProbeLauncher(
   const scriptPath =
     options.scriptPath ??
     fileURLToPath(new URL("./optical-media-probe.js", import.meta.url));
-  const terminateProcess =
-    options.terminateProcess ?? ((child) => void child.kill("SIGKILL"));
+  const childLauncher: BoundedChildProcessLauncher =
+    createNodeBoundedChildProcessLauncher({
+      scriptPath,
+      operationName: "Optical Drive media observation",
+      maxOutputBytes: MAX_MEDIA_PROBE_OUTPUT_BYTES,
+      ...(options.terminateProcess
+        ? { terminateProcess: options.terminateProcess }
+        : {}),
+    });
   return {
     start(devicePath, flags, generationPath) {
-      const child = spawn(
-        process.execPath,
-        [scriptPath, devicePath, String(flags), generationPath],
-        { shell: false, stdio: ["ignore", "pipe", "pipe"] },
-      );
-      let stdout = "";
-      let stderr = "";
-      let operationSettled = false;
-      let processClosed = false;
-      let cancellationRequested = false;
-      let resolveResult!: (value: string) => void;
-      let rejectResult!: (reason: unknown) => void;
-      let resolveClosed!: () => void;
-      const result = new Promise<string>((resolve, reject) => {
-        resolveResult = resolve;
-        rejectResult = reject;
-      });
-      const closed = new Promise<void>((resolve) => {
-        resolveClosed = resolve;
-      });
-      const rejectOperation = (error: unknown) => {
-        if (!operationSettled) {
-          operationSettled = true;
-          rejectResult(error);
-        }
-      };
-      const resolveOperation = (value: string) => {
-        if (!operationSettled) {
-          operationSettled = true;
-          resolveResult(value);
-        }
-      };
-      const confirmClosed = () => {
-        if (!processClosed) {
-          processClosed = true;
-          resolveClosed();
-        }
-      };
-
-      child.stdout.setEncoding("utf8");
-      child.stderr.setEncoding("utf8");
-      const capture = (current: string, chunk: string) =>
-        `${current}${chunk}`.slice(0, MAX_MEDIA_PROBE_OUTPUT_BYTES + 1);
-      child.stdout.on("data", (chunk: string) => {
-        stdout = capture(stdout, chunk);
-        if (stdout.length > MAX_MEDIA_PROBE_OUTPUT_BYTES) {
-          child.kill("SIGKILL");
-        }
-      });
-      child.stderr.on("data", (chunk: string) => {
-        stderr = capture(stderr, chunk);
-        if (stderr.length > MAX_MEDIA_PROBE_OUTPUT_BYTES) {
-          child.kill("SIGKILL");
-        }
-      });
-      child.once("error", (error) => {
-        rejectOperation(error);
-        // A spawn failure has no child process to reap. Errors after a PID was
-        // assigned (including failed signal delivery) are operation failures,
-        // not proof that the live child exited.
-        if (child.pid === undefined) {
-          confirmClosed();
-        }
-      });
-      child.once("close", (code, signal) => {
-        confirmClosed();
-        if (cancellationRequested) {
-          rejectOperation(
-            new Error("Optical Drive media observation was cancelled"),
-          );
-          return;
-        }
-        if (stdout.length > MAX_MEDIA_PROBE_OUTPUT_BYTES) {
-          rejectOperation(
-            new Error("Optical Drive media observation output exceeded its bound"),
-          );
-          return;
-        }
-        if (code === 0) {
-          resolveOperation(stdout);
-          return;
-        }
-        const detail = optionalText(stderr, 500);
-        rejectOperation(
-          new Error(
-            `Optical Drive media observation failed${detail ? `: ${detail}` : ` with ${signal ?? `status ${code}`}`}`,
-          ),
-        );
-      });
-
-      return {
-        result,
-        closed,
-        cancel() {
-          if (cancellationRequested || processClosed) {
-            return;
-          }
-          cancellationRequested = true;
-          child.stdout.destroy();
-          child.stderr.destroy();
-          try {
-            terminateProcess(child);
-          } finally {
-            // A helper stuck in an uninterruptible kernel open can survive
-            // until Linux error recovery completes. It must not retain parent
-            // event-loop handles while its tombstone remains authoritative.
-            child.unref();
-          }
-        },
-      };
+      return childLauncher.start([
+        devicePath,
+        String(flags),
+        generationPath,
+      ]);
     },
   };
 }

@@ -1,6 +1,4 @@
-import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { createReadStream } from "node:fs";
 import { platform as operatingSystem } from "node:os";
 
 import {
@@ -23,10 +21,23 @@ import type {
   ScannedDvd,
 } from "./archive-worker.js";
 import {
+  nodeDiscContentReader,
+  type DiscContentReader,
+} from "./optical-disc-content.js";
+import {
   nodeMediaGenerationObserver,
   requireSafeOpticalDevicePath as requireSafeDevicePath,
   type MediaGenerationObserver,
 } from "./optical-media-generation.js";
+
+export {
+  createNodeDiscContentProbeLauncher,
+  createNodeDiscContentReader,
+  nodeDiscContentProbeLauncher,
+  nodeDiscContentReader,
+  type DiscContentProbeLauncher,
+  type DiscContentReader,
+} from "./optical-disc-content.js";
 
 export {
   createNodeMediaGenerationObserver,
@@ -43,8 +54,6 @@ const MAX_BLOCK_DEVICE_NODES = 256;
 const MAX_DEVICE_PATH_LENGTH = 4_096;
 const MAX_LABEL_LENGTH = 256;
 const MAX_DVD_CONTENT_BYTES = 9_000_000_000;
-const DVD_CONTENT_READ_BUFFER_BYTES = 1_048_576;
-const DVD_CONTENT_HASH_TIMEOUT_MS = 30 * 60_000;
 
 export interface CommandResult {
   exitCode: number;
@@ -96,59 +105,6 @@ export const nodeCommandRunner: CommandRunner = {
         },
       );
     });
-  },
-};
-
-export interface DiscContentReader {
-  hash(
-    devicePath: string,
-    sizeBytes: number,
-    signal: AbortSignal,
-  ): Promise<string>;
-}
-
-export const nodeDiscContentReader: DiscContentReader = {
-  async hash(devicePath, sizeBytes, signal) {
-    const timeoutController = new AbortController();
-    const timeout = setTimeout(
-      () => timeoutController.abort(),
-      DVD_CONTENT_HASH_TIMEOUT_MS,
-    );
-    timeout.unref();
-    const readSignal = AbortSignal.any([signal, timeoutController.signal]);
-    const hash = createHash("sha256");
-    hash.update("rip-dvd-content-v2\0");
-    hash.update(String(sizeBytes));
-    let bytesRead = 0;
-    try {
-      const stream = createReadStream(devicePath, {
-        end: sizeBytes - 1,
-        highWaterMark: DVD_CONTENT_READ_BUFFER_BYTES,
-        signal: readSignal,
-        start: 0,
-      });
-      for await (const chunk of stream) {
-        bytesRead += chunk.length;
-        if (bytesRead > sizeBytes) {
-          throw new Error("DVD content read exceeded the declared media size");
-        }
-        hash.update(chunk);
-      }
-    } catch (error) {
-      if (signal.aborted) {
-        signal.throwIfAborted();
-      }
-      if (timeoutController.signal.aborted) {
-        throw new Error("DVD content hashing timed out");
-      }
-      throw error;
-    } finally {
-      clearTimeout(timeout);
-    }
-    if (bytesRead !== sizeBytes) {
-      throw new Error("DVD content read ended before the declared media size");
-    }
-    return `sha256:${hash.digest("hex")}`;
   },
 };
 
@@ -293,9 +249,9 @@ function parseDvdMetadata(output: string): {
   const titlePattern =
     /^\s*Title:\s*(\d+),\s*Length:\s*(\d+):(\d{2}):(\d{2})(?:\.\d+)?\s*Chapters:\s*(\d+),\s*Cells:\s*\d+,\s*Audio streams:\s*(\d+),\s*Subpictures:\s*(\d+)\s*$/i;
   const audioPattern =
-    /^\s*Audio:\s*\d+,\s*Language:\s*([^\s,]+)\s*-\s*([^,]+),\s*Format:\s*([^,]+),.*?\sChannels:\s*(\d+),.*?\sStream id:\s*(0x[0-9a-f]+|\d+)\s*$/i;
+    /^\s*Audio:\s*\d+,\s*Language:\s*(.*?)\s*-\s*(.*?),\s*Format:\s*([^,]+),.*?\sChannels:\s*(\d+),.*?\sStream id:\s*(0x[0-9a-f]+|\d+)\s*$/i;
   const subtitlePattern =
-    /^\s*(?:Subtitle|Subpicture):\s*\d+,\s*Language:\s*([^\s,]+)\s*-\s*([^,]+),\s*Content:\s*([^,]+),\s*Stream id:\s*(0x[0-9a-f]+|\d+),?\s*$/i;
+    /^\s*(?:Subtitle|Subpicture):\s*\d+,\s*Language:\s*(.*?)\s*-\s*(.*?),\s*Content:\s*(.*?),\s*Stream id:\s*(0x[0-9a-f]+|\d+),?\s*$/i;
   let currentTitle: ParsedDvdTitle | undefined;
   for (const line of output.split(/\r?\n/)) {
     if (/^\s*Title:/i.test(line)) {
@@ -344,9 +300,13 @@ function parseDvdMetadata(output: string): {
       if (!currentTitle || !match) {
         throw new Error("lsdvd returned malformed DVD audio metadata");
       }
+      const languageCode = optionalText(
+        match[1],
+        MAX_DVD_STREAM_TEXT_LENGTH,
+      );
       currentTitle.audioStreams.push({
         id: parseStreamId(match[5]),
-        languageCode: boundedStreamText(match[1], "audio language code"),
+        ...(languageCode ? { languageCode } : {}),
         language: boundedStreamText(match[2], "audio language"),
         format: boundedStreamText(match[3], "audio format"),
         channels: boundedNonNegativeInteger(match[4], "channel count"),
@@ -363,9 +323,13 @@ function parseDvdMetadata(output: string): {
       if (!currentTitle || !match) {
         throw new Error("lsdvd returned malformed DVD subtitle metadata");
       }
+      const languageCode = optionalText(
+        match[1],
+        MAX_DVD_STREAM_TEXT_LENGTH,
+      );
       currentTitle.subtitles.push({
         id: parseStreamId(match[4]),
-        languageCode: boundedStreamText(match[1], "subtitle language code"),
+        ...(languageCode ? { languageCode } : {}),
         language: boundedStreamText(match[2], "subtitle language"),
         content: boundedStreamText(match[3], "subtitle content"),
       });
@@ -511,7 +475,9 @@ export function createLinuxOpticalDriveHardware({
       );
       const cached = scanCache.get(safeDevicePath);
       if (cached?.generation === generationBefore) {
-        return cached.result;
+        return cached.result === null
+          ? null
+          : { ...cached.result, isNewMediumObservation: false };
       }
       const metadata = await inspectDvd(safeDevicePath, signal, runner);
       if (metadata === null) {
@@ -551,6 +517,7 @@ export function createLinuxOpticalDriveHardware({
       }
       const result = {
         fingerprint: contentId,
+        isNewMediumObservation: true,
         ...(metadata.volumeLabel ? { volumeLabel: metadata.volumeLabel } : {}),
         scanData,
       };

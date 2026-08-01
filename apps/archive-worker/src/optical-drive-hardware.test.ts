@@ -1,20 +1,26 @@
+import { execFile } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 
 import { describe, expect, it, vi } from "vitest";
 
 import {
   createLinuxOpticalDriveHardware,
+  createNodeDiscContentReader,
   createNodeMediaGenerationProbeLauncher,
   createNodeMediaGenerationObserver,
   nodeDiscContentReader,
   type CommandRunner,
+  type DiscContentProbeLauncher,
   type DiscContentReader,
   type MediaGenerationObserver,
 } from "./optical-drive-hardware.js";
 import { readActiveMediaGeneration } from "./optical-media-probe.js";
+
+const execFileAsync = promisify(execFile);
 
 async function createStuckThenSuccessfulProbeFixture() {
   const directory = await mkdtemp(join(tmpdir(), "rip-dvd-stuck-probe-"));
@@ -492,6 +498,7 @@ describe("Linux Optical Drive hardware boundary", () => {
     ]);
     await expect(hardware.scanDvd("/dev/sr0", signal)).resolves.toEqual({
       fingerprint: contentId,
+      isNewMediumObservation: true,
       volumeLabel: "EXAMPLE_DISC",
       scanData: {
         schemaVersion: 2,
@@ -584,6 +591,58 @@ describe("Linux Optical Drive hardware boundary", () => {
     );
   });
 
+  it("accepts Bookworm lsdvd blank and comma-containing language labels", async () => {
+    const runner: CommandRunner = {
+      run: vi.fn()
+        .mockResolvedValueOnce({
+          exitCode: 0,
+          stdout: [
+            "Disc Title: LANGUAGE_DISC",
+            "Title: 01, Length: 00:10:00.000 Chapters: 2, Cells: 2, Audio streams: 1, Subpictures: 1",
+            "  Audio: 1, Language:  - Not Specified, Format: ac3, Frequency: 48000, Quantization: drc, Channels: 2, AP: 0, Content: Normal, Stream id: 0x80",
+            "  Subtitle: 1, Language: lv - Latvian, Lettish, Content: Normal, Stream id: 0x20,",
+          ].join("\n"),
+          stderr: "",
+        })
+        .mockResolvedValueOnce({ exitCode: 0, stdout: "1024\n", stderr: "" }),
+    };
+    const hardware = createLinuxOpticalDriveHardware({
+      platform: "linux",
+      runner,
+      contentReader: {
+        hash: vi.fn().mockResolvedValue(`sha256:${"d".repeat(64)}`),
+      },
+      mediaGenerationObserver: stableMediaGenerationObserver(),
+    });
+
+    await expect(
+      hardware.scanDvd("/dev/sr0", new AbortController().signal),
+    ).resolves.toMatchObject({
+      scanData: {
+        titles: [
+          {
+            audioStreams: [
+              {
+                id: 128,
+                language: "Not Specified",
+                format: "ac3",
+                channels: 2,
+              },
+            ],
+            subtitles: [
+              {
+                id: 32,
+                languageCode: "lv",
+                language: "Latvian, Lettish",
+                content: "Normal",
+              },
+            ],
+          },
+        ],
+      },
+    });
+  });
+
   it("actively observes media generation before reusing a successful scan", async () => {
     const summary = [
       "Disc Title: CACHED_DISC",
@@ -620,7 +679,11 @@ describe("Linux Optical Drive hardware boundary", () => {
     await hardware.discover(signal);
     const repeated = await hardware.scanDvd("/dev/sr0", signal);
 
-    expect(repeated).toEqual(first);
+    expect(first).toMatchObject({ isNewMediumObservation: true });
+    expect(repeated).toEqual({
+      ...first,
+      isNewMediumObservation: false,
+    });
     expect(contentReader.hash).toHaveBeenCalledOnce();
     expect(mediaGenerationObserver.observe).toHaveBeenCalledTimes(3);
     expect(mediaGenerationObserver.observe).toHaveBeenLastCalledWith(
@@ -822,6 +885,113 @@ describe("Linux Optical Drive hardware boundary", () => {
 
       expect(first).toMatch(/^sha256:[0-9a-f]{64}$/);
       expect(first).not.toBe(second);
+    } finally {
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
+  it("cancels without waiting for a blocked raw-disc open", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "rip-dvd-blocked-open-"));
+    const devicePath = join(directory, "blocked-device");
+    await execFileAsync("mkfifo", [devicePath]);
+    const controller = new AbortController();
+    const reader = createNodeDiscContentReader({ hashTimeoutMs: 5_000 });
+    let shutdownWatchdog: NodeJS.Timeout | undefined;
+    try {
+      const hashing = reader.hash(devicePath, 1, controller.signal);
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
+      controller.abort(new Error("worker shutdown"));
+
+      await expect(
+        Promise.race([
+          hashing,
+          new Promise<never>((_resolve, reject) => {
+            shutdownWatchdog = setTimeout(
+              () => reject(new Error("blocked raw-disc open retained shutdown")),
+              2_000,
+            );
+          }),
+        ]),
+      ).rejects.toThrow("worker shutdown");
+    } finally {
+      clearTimeout(shutdownWatchdog);
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
+  it("retains bounded raw-disc tombstones until child close", async () => {
+    const probes = new Map<
+      string,
+      {
+        close(): void;
+        resolve(contentId: string): void;
+      }
+    >();
+    const launcher: DiscContentProbeLauncher = {
+      start: vi.fn((devicePath) => {
+        let resolveResult!: (contentId: string) => void;
+        let resolveClosed!: () => void;
+        const result = new Promise<string>((resolve) => {
+          resolveResult = resolve;
+        });
+        const closed = new Promise<void>((resolve) => {
+          resolveClosed = resolve;
+        });
+        probes.set(devicePath, {
+          close: resolveClosed,
+          resolve: resolveResult,
+        });
+        return { result, closed, cancel: vi.fn() };
+      }),
+    };
+    const reader = createNodeDiscContentReader({
+      hashTimeoutMs: 50,
+      maxActiveHashes: 2,
+      probeLauncher: launcher,
+    });
+    const abortHash = async (devicePath: string) => {
+      const controller = new AbortController();
+      const hashing = reader.hash(devicePath, 1, controller.signal);
+      controller.abort(new Error("worker shutdown"));
+      await expect(hashing).rejects.toThrow("worker shutdown");
+    };
+
+    await abortHash("/dev/sr0");
+    await expect(
+      reader.hash("/dev/sr0", 2, new AbortController().signal),
+    ).rejects.toThrow("DVD content size changed while hashing was active");
+    await abortHash("/dev/sr1");
+    await expect(
+      reader.hash("/dev/sr2", 1, new AbortController().signal),
+    ).rejects.toThrow("DVD content hashing capacity is exhausted");
+    expect(launcher.start).toHaveBeenCalledTimes(2);
+
+    probes.get("/dev/sr0")?.close();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const recovered = reader.hash(
+      "/dev/sr2",
+      1,
+      new AbortController().signal,
+    );
+    probes.get("/dev/sr2")?.resolve(`sha256:${"e".repeat(64)}`);
+    probes.get("/dev/sr2")?.close();
+
+    await expect(recovered).resolves.toBe(`sha256:${"e".repeat(64)}`);
+    expect(launcher.start).toHaveBeenCalledTimes(3);
+  });
+
+  it("rejects a raw-disc read shorter than its declared size", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "rip-dvd-short-disc-"));
+    const devicePath = join(directory, "short-disc.img");
+    await writeFile(devicePath, Buffer.from([1, 2, 3]));
+    try {
+      await expect(
+        nodeDiscContentReader.hash(
+          devicePath,
+          4,
+          new AbortController().signal,
+        ),
+      ).rejects.toThrow("read ended before the declared media size");
     } finally {
       await rm(directory, { force: true, recursive: true });
     }
