@@ -6,7 +6,7 @@ import {
   statSync,
   unlinkSync,
 } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { isDeepStrictEqual } from "node:util";
@@ -2106,53 +2106,42 @@ export function createDataAccessInternal(
         }
 
         if (cutover.mode === "schema-one") {
-          const legacyImportSource = database
-            .select()
-            .from(opticalDrives)
-            .where(
+          const libraryJobCandidates = database
+            .select({
+              archivePath: originalDiscArchives.archivePath,
+              fingerprint: originalDiscArchives.fingerprint,
+              profileKey: encodingProfiles.key,
+              sourceKey: discSelections.sourceKey,
+            })
+            .from(encodeJobs)
+            .innerJoin(
+              discSelections,
+              eq(discSelections.id, encodeJobs.discSelectionId),
+            )
+            .innerJoin(
+              originalDiscArchives,
               eq(
-                opticalDrives.devicePath,
-                `legacy-sidecar:${originalsLibraryPath}`,
+                originalDiscArchives.id,
+                discSelections.originalDiscArchiveId,
               ),
             )
-            .get();
-          const importedJobs = legacyImportSource
-            ? database
-                .select({
-                  archivePath: originalDiscArchives.archivePath,
-                  fingerprint: originalDiscArchives.fingerprint,
-                  profileKey: encodingProfiles.key,
-                  sourceKey: discSelections.sourceKey,
-                })
-                .from(encodeJobs)
-                .innerJoin(
-                  discSelections,
-                  eq(discSelections.id, encodeJobs.discSelectionId),
-                )
-                .innerJoin(
-                  originalDiscArchives,
-                  eq(
-                    originalDiscArchives.id,
-                    discSelections.originalDiscArchiveId,
-                  ),
-                )
-                .innerJoin(
-                  detectedDiscs,
-                  eq(
-                    detectedDiscs.id,
-                    originalDiscArchives.detectedDiscId,
-                  ),
-                )
-                .innerJoin(
-                  encodingProfiles,
-                  eq(encodingProfiles.id, encodeJobs.encodingProfileId),
-                )
-                .where(
-                  eq(detectedDiscs.opticalDriveId, legacyImportSource.id),
-                )
-                .all()
-            : [];
-          for (const importedJob of importedJobs) {
+            .innerJoin(
+              encodingProfiles,
+              eq(encodingProfiles.id, encodeJobs.encodingProfileId),
+            )
+            .all()
+            .filter((job) => {
+              const relativeArchivePath = relative(
+                originalsLibraryPath,
+                job.archivePath,
+              );
+              return (
+                relativeArchivePath !== "" &&
+                !isAbsolute(relativeArchivePath) &&
+                relativeArchivePath.split(sep)[0] !== ".."
+              );
+            });
+          for (const importedJob of libraryJobCandidates) {
             const logicalKey = [
               importedJob.fingerprint,
               importedJob.sourceKey,

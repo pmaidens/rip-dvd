@@ -846,6 +846,25 @@ describe("legacy sidecar import", () => {
       "Second Movie.mkv",
     );
     writeFileSync(secondArchivePath, "second DVD image");
+    const existingDrive = fixture.access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/existing-archive-drive",
+      isPresent: true,
+    });
+    const existingDisc = fixture.access.catalog.registerDetectedDisc({
+      opticalDriveId: existingDrive.id,
+      discKind: "dvd",
+      fingerprint: "second-disc-fingerprint",
+      volumeLabel: "SECOND_MOVIE",
+    });
+    fixture.access.catalog.updateDetectedDiscStatus(existingDisc.id, "scanned");
+    fixture.access.catalog.updateDetectedDiscStatus(existingDisc.id, "approved");
+    fixture.access.catalog.createOriginalDiscArchive({
+      detectedDiscId: existingDisc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: secondArchivePath,
+      fingerprint: "second-disc-fingerprint",
+    });
     writeFileSync(
       secondSidecarPath,
       JSON.stringify({

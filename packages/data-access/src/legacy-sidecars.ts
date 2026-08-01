@@ -10,6 +10,10 @@ import {
 } from "./internal/legacy-sidecars.js";
 import type { LegacySidecarDataAccess } from "./types.js";
 
+function failureMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 export function createLegacySidecarDataAccess(
   input: CreateDataAccessOptions,
 ): LegacySidecarDataAccess {
@@ -30,13 +34,33 @@ export function createLegacySidecarDataAccess(
         );
         const releaseQueueLock =
           acquireLegacyQueueCutoverLock(originalsLibraryPath);
+        const importOutcome = (() => {
+          try {
+            return {
+              outcome: "returned" as const,
+              report: access.legacySidecars.importLibrary({
+                originalsLibraryPath,
+              }),
+            };
+          } catch (error) {
+            return { outcome: "threw" as const, error };
+          }
+        })();
         try {
-          return access.legacySidecars.importLibrary({
-            originalsLibraryPath,
-          });
-        } finally {
           releaseQueueLock();
+        } catch (releaseError) {
+          if (importOutcome.outcome === "threw") {
+            throw new AggregateError(
+              [importOutcome.error, releaseError],
+              `Legacy sidecar import failed: ${failureMessage(importOutcome.error)}; queue-lock release also failed: ${failureMessage(releaseError)}`,
+            );
+          }
+          throw releaseError;
         }
+        if (importOutcome.outcome === "threw") {
+          throw importOutcome.error;
+        }
+        return importOutcome.report;
       },
     },
   };
