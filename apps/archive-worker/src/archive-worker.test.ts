@@ -183,6 +183,90 @@ describe("archive worker polling", () => {
     access.close();
   });
 
+  it("returns an identical archived disc to bounded history after reinsertion", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-26T18:00:00.000Z"));
+    const access = openTestDataAccess();
+    const attachedDrive = [{ devicePath: "/dev/sr0", serialNumber: "DRIVE-1" }];
+    const discover = vi.fn()
+      .mockResolvedValueOnce(attachedDrive)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(attachedDrive);
+    const scanDvd = vi.fn().mockResolvedValue({
+      fingerprint:
+        "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      isNewMediumObservation: true,
+      volumeLabel: "RETURNING_DISC",
+      scanData: {
+        schemaVersion: 2,
+        contentId:
+          "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+        titles: [
+          {
+            number: 1,
+            durationSeconds: 3_600,
+            chapters: 10,
+            audioStreams: [],
+            subtitles: [],
+          },
+        ],
+      },
+    });
+    const options = {
+      access,
+      configuredDevicePath: "/dev/sr0",
+      hardware: { discover, scanDvd },
+      log: vi.fn(),
+      signal: new AbortController().signal,
+    };
+
+    await pollArchiveWorker(options);
+    const returningDisc = access.catalog.listDetectedDiscs()[0];
+    access.catalog.updateDetectedDiscStatus(returningDisc.id, "approved");
+    access.catalog.createOriginalDiscArchive({
+      detectedDiscId: returningDisc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Returning Disc.iso",
+      fingerprint: returningDisc.fingerprint,
+    });
+    vi.setSystemTime(new Date("2026-07-27T18:00:00.000Z"));
+    for (let index = 0; index < 25; index += 1) {
+      const terminal = access.catalog.registerDetectedDisc({
+        opticalDriveId: returningDisc.opticalDriveId,
+        discKind: "dvd",
+        fingerprint: `newer-terminal-${index}`,
+      });
+      access.catalog.updateDetectedDiscStatus(terminal.id, "rejected");
+    }
+    expect(
+      access.catalog.listDetectedDiscs(undefined, {
+        activeLimit: 100,
+        historyLimit: 20,
+      }),
+    ).not.toContainEqual(expect.objectContaining({ id: returningDisc.id }));
+
+    vi.setSystemTime(new Date("2026-07-28T18:00:00.000Z"));
+    await pollArchiveWorker(options);
+    vi.setSystemTime(new Date("2026-07-29T18:00:00.000Z"));
+    await pollArchiveWorker(options);
+
+    expect(
+      access.catalog.listDetectedDiscs(undefined, {
+        activeLimit: 100,
+        historyLimit: 20,
+      }),
+    ).toContainEqual(
+      expect.objectContaining({
+        id: returningDisc.id,
+        status: "archived",
+        detectedAt: new Date("2026-07-29T18:00:00.000Z"),
+      }),
+    );
+    expect(access.archiveJobs.list()).toEqual([]);
+    access.close();
+  });
+
   it("tolerates empty drives and isolates scanner errors", async () => {
     const access = openTestDataAccess();
     const log = vi.fn();

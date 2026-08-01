@@ -257,6 +257,7 @@ export interface CatalogAccess {
     opticalDriveId: OpticalDriveId;
     discKind: DiscKind;
     fingerprint: string;
+    isNewMediumObservation?: boolean;
     volumeLabel?: string;
     scanData?: unknown;
   }): DetectedDisc;

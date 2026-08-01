@@ -175,6 +175,33 @@ describe("data-access facade", () => {
     access.close();
   });
 
+  it("keeps configured missing drives ahead of bounded disabled history", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    const access = openTestDatabase();
+    const configuredDrive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/configured",
+      isEnabled: true,
+      isPresent: false,
+    });
+    vi.setSystemTime(new Date("2026-01-02T00:00:00.000Z"));
+    for (let index = 0; index < 25; index += 1) {
+      access.catalog.upsertOpticalDrive({
+        devicePath: `/dev/missing-${index}`,
+        isEnabled: false,
+        isPresent: false,
+      });
+    }
+
+    const activity = access.catalog.listOpticalDrives({ historicalLimit: 20 });
+
+    expect(activity).toContainEqual(
+      expect.objectContaining({ id: configuredDrive.id, isEnabled: true }),
+    );
+    expect(activity.filter((drive) => !drive.isPresent)).toHaveLength(20);
+    access.close();
+  });
+
   it("keeps live Detected Disc review work ahead of bounded terminal history", () => {
     const access = openTestDatabase();
     const drive = access.catalog.upsertOpticalDrive({

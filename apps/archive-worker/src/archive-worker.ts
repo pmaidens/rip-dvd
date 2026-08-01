@@ -8,6 +8,7 @@ import type { DvdTitleMap } from "@rip-dvd/data-access/dvd-scan";
 
 export interface ScannedDvd {
   fingerprint: string;
+  isNewMediumObservation?: boolean;
   volumeLabel?: string;
   scanData: DvdTitleMap;
 }
@@ -68,6 +69,7 @@ export async function pollArchiveWorker({
         opticalDriveId: drive.id,
         discKind: "dvd",
         fingerprint: scan.fingerprint,
+        isNewMediumObservation: scan.isNewMediumObservation,
         volumeLabel: scan.volumeLabel,
         scanData: scan.scanData,
       });
