@@ -1,14 +1,16 @@
 import type { DataAccess } from "@rip-dvd/data-access";
 
 import { getDataAccess } from "../../../lib/data-access";
+import { DASHBOARD_ACTIVITY_HISTORY_LIMIT } from "../../../lib/dashboard-bounds";
 import { readDashboardSnapshot } from "../../../lib/dashboard";
 
 export const dynamic = "force-dynamic";
-const DASHBOARD_HISTORY_LIMIT = 20;
 
 export function createDashboardResponse(access: DataAccess): Response {
   return Response.json(
-    readDashboardSnapshot(access, { activityLimit: DASHBOARD_HISTORY_LIMIT }),
+    readDashboardSnapshot(access, {
+      activityLimit: DASHBOARD_ACTIVITY_HISTORY_LIMIT,
+    }),
     {
       headers: { "Cache-Control": "no-store" },
     },

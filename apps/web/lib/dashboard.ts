@@ -12,6 +12,11 @@ import {
   type DvdTitle,
 } from "@rip-dvd/data-access/dvd-scan";
 
+import {
+  DASHBOARD_ACTIVE_DISC_LIMIT,
+  DASHBOARD_ACTIVE_JOB_LIMIT,
+} from "./dashboard-bounds";
+
 export interface DashboardOpticalDrive {
   id: string;
   displayName: string;
@@ -84,9 +89,6 @@ export interface DashboardSnapshotOptions {
   activityLimit?: number;
   includeDetectedDiscDetails?: boolean;
 }
-
-const DASHBOARD_ACTIVE_JOB_LIMIT = 100;
-const DASHBOARD_ACTIVE_DISC_LIMIT = 100;
 
 type SourceResult<T> =
   | { status: "loaded"; value: T }
@@ -212,9 +214,11 @@ function readDashboardSnapshotRecords(
           }),
         );
   const relevantSelectionIds =
-    activityLimit === undefined || encodeJobSource.status === "error"
+    activityLimit === undefined
       ? undefined
-      : encodeJobSource.value.map((job) => job.discSelectionId);
+      : encodeJobSource.status === "error"
+        ? []
+        : encodeJobSource.value.map((job) => job.discSelectionId);
   const selectionSource = readSource(() =>
     access.catalog.listDiscSelections(
       relevantSelectionIds === undefined
@@ -223,9 +227,11 @@ function readDashboardSnapshotRecords(
     ),
   );
   const relevantMediaItemIds =
-    activityLimit === undefined || selectionSource.status === "error"
+    activityLimit === undefined
       ? undefined
-      : selectionSource.value.map((selection) => selection.mediaItemId);
+      : selectionSource.status === "error"
+        ? []
+        : selectionSource.value.map((selection) => selection.mediaItemId);
   const mediaItemSource = readSource(() =>
     access.catalog.listMediaItems(
       relevantMediaItemIds === undefined
@@ -234,9 +240,11 @@ function readDashboardSnapshotRecords(
     ),
   );
   const relevantProfileIds =
-    activityLimit === undefined || encodeJobSource.status === "error"
+    activityLimit === undefined
       ? undefined
-      : encodeJobSource.value.map((job) => job.encodingProfileId);
+      : encodeJobSource.status === "error"
+        ? []
+        : encodeJobSource.value.map((job) => job.encodingProfileId);
   const profileSource = readSource(() =>
     access.encodingProfiles.list(
       relevantProfileIds === undefined

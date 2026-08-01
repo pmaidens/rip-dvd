@@ -887,7 +887,10 @@ export function createDataAccess({
             .where(
               and(
                 condition,
-                eq(opticalDrives.isPresent, true),
+                or(
+                  eq(opticalDrives.isPresent, true),
+                  eq(opticalDrives.isEnabled, true),
+                ),
               ),
             )
             .all();
@@ -898,10 +901,10 @@ export function createDataAccess({
               and(
                 condition,
                 eq(opticalDrives.isPresent, false),
+                eq(opticalDrives.isEnabled, false),
               ),
             )
             .orderBy(
-              desc(opticalDrives.isEnabled),
               desc(opticalDrives.lastSeenAt),
               desc(opticalDrives.id),
             )

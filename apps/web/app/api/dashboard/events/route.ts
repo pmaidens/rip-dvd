@@ -1,6 +1,7 @@
 import type { DataAccess } from "@rip-dvd/data-access";
 
 import { getDataAccess } from "../../../../lib/data-access";
+import { DASHBOARD_ACTIVITY_HISTORY_LIMIT } from "../../../../lib/dashboard-bounds";
 import {
   readDashboardSnapshot,
   type DashboardSnapshot,
@@ -11,7 +12,6 @@ export const runtime = "nodejs";
 
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
 const RECONNECT_DELAY_MS = 3_000;
-const ACTIVITY_RECORD_LIMIT = 20;
 
 interface DashboardEventResponseOptions {
   signal: AbortSignal;
@@ -76,7 +76,7 @@ export function createDashboardEventResponse(
           return;
         }
         const snapshot = readDashboardSnapshot(access, {
-          activityLimit: ACTIVITY_RECORD_LIMIT,
+          activityLimit: DASHBOARD_ACTIVITY_HISTORY_LIMIT,
           includeDetectedDiscDetails: false,
         });
         controller.enqueue(

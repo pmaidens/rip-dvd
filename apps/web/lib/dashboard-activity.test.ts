@@ -91,6 +91,81 @@ describe("watchDashboardActivity", () => {
     stop();
   });
 
+  it("retains every detail version from a full bounded activity snapshot", async () => {
+    const detailed = emptySnapshot("2026-07-26T16:00:00.000Z");
+    detailed.detectedDiscs = {
+      status: "loaded",
+      items: Array.from({ length: 120 }, (_, index) => ({
+        id: `disc-${index}`,
+        volumeLabel: `DISC_${index}`,
+        discKind: "dvd" as const,
+        status: "scanned" as const,
+        opticalDriveName: "Upper drive",
+        fingerprint: `sha256:disc-${index}`,
+        titles: [{
+          number: 1,
+          durationSeconds: 60,
+          chapters: 1,
+          audioStreams: [],
+          subtitles: [],
+        }],
+        detectedAt: new Date(
+          Date.UTC(2026, 6, 26, 15, 0, index),
+        ).toISOString(),
+      })),
+    };
+    const activity = structuredClone(detailed);
+    activity.generatedAt = "2026-07-26T16:00:01.000Z";
+    if (activity.detectedDiscs.status === "loaded") {
+      for (const disc of activity.detectedDiscs.items) {
+        disc.titles = [];
+      }
+    }
+    let dashboardListener: ((event: MessageEvent<string>) => void) | undefined;
+    const loadDiscDetails = vi.fn(
+      async (id: string, detectedAt: string): Promise<DashboardDetectedDiscDetails> => ({
+        id,
+        detectedAt,
+        titles: [],
+      }),
+    );
+    const stop = watchDashboardActivity({
+      loadSnapshot: async () => detailed,
+      loadDiscDetails,
+      openEventSource: () => ({
+        onerror: null,
+        onopen: null,
+        addEventListener(_type, listener) {
+          dashboardListener = listener;
+        },
+        close: vi.fn(),
+      }),
+      onSnapshot: vi.fn(),
+      onInitialLoadError: vi.fn(),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    dashboardListener?.({ data: JSON.stringify(activity) } as MessageEvent<string>);
+    dashboardListener?.({ data: JSON.stringify(activity) } as MessageEvent<string>);
+
+    expect(loadDiscDetails).not.toHaveBeenCalled();
+
+    const changed = structuredClone(activity);
+    if (changed.detectedDiscs.status === "loaded") {
+      changed.detectedDiscs.items.at(-1)!.detectedAt =
+        "2026-07-26T16:00:02.000Z";
+    }
+    dashboardListener?.({ data: JSON.stringify(changed) } as MessageEvent<string>);
+    await vi.waitFor(() => expect(loadDiscDetails).toHaveBeenCalledOnce());
+    await Promise.resolve();
+    await Promise.resolve();
+    dashboardListener?.({ data: JSON.stringify(changed) } as MessageEvent<string>);
+
+    expect(loadDiscDetails).toHaveBeenCalledOnce();
+    stop();
+  });
+
   it("loads review details for a disc first observed through activity", async () => {
     const initial = emptySnapshot("2026-07-26T16:00:00.000Z");
     const activity = emptySnapshot("2026-07-26T16:00:01.000Z");

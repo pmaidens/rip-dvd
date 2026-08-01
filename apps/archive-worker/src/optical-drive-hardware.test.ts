@@ -9,6 +9,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   createLinuxOpticalDriveHardware,
+  createNodeCommandRunner,
   createNodeDiscContentReader,
   createNodeMediaGenerationProbeLauncher,
   createNodeMediaGenerationObserver,
@@ -112,6 +113,132 @@ describe("Linux Optical Drive hardware boundary", () => {
     } finally {
       await rm(directory, { force: true, recursive: true });
     }
+  });
+
+  it("bounds timeout and shutdown for SIGTERM-resistant device commands", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "rip-dvd-stuck-command-"));
+    const scriptPath = join(directory, "command.mjs");
+    const pidPath = join(directory, "pids");
+    await writeFile(
+      scriptPath,
+      [
+        'import { appendFileSync } from "node:fs";',
+        `const pidPath = ${JSON.stringify(pidPath)};`,
+        'appendFileSync(pidPath, `${process.pid}\\n`);',
+        'process.on("SIGTERM", () => {});',
+        "setTimeout(() => process.exit(0), 750);",
+      ].join("\n"),
+    );
+    const runner = createNodeCommandRunner();
+    const processHasExited = async (index: number) => {
+      await vi.waitFor(
+        async () => {
+          const pid = Number(
+            (await readFile(pidPath, "utf8")).trim().split("\n")[index],
+          );
+          expect(Number.isSafeInteger(pid)).toBe(true);
+          expect(() => process.kill(pid, 0)).toThrow();
+        },
+        { timeout: 250 },
+      );
+    };
+    try {
+      const timedOut = runner.run(process.execPath, [scriptPath], {
+        maxBufferBytes: 1_024,
+        signal: new AbortController().signal,
+        timeoutMs: 50,
+      });
+      let watchdog: NodeJS.Timeout | undefined;
+      try {
+        await expect(
+          Promise.race([
+            timedOut,
+            new Promise<never>((_resolve, reject) => {
+              watchdog = setTimeout(
+                () => reject(new Error("device command outlived its timeout")),
+                300,
+              );
+            }),
+          ]),
+        ).rejects.toThrow("device command timed out");
+      } finally {
+        clearTimeout(watchdog);
+      }
+      await processHasExited(0);
+
+      const controller = new AbortController();
+      const cancelled = runner.run(process.execPath, [scriptPath], {
+        maxBufferBytes: 1_024,
+        signal: controller.signal,
+        timeoutMs: 5_000,
+      });
+      await vi.waitFor(async () => {
+        const pids = (await readFile(pidPath, "utf8")).trim().split("\n");
+        expect(pids).toHaveLength(2);
+      });
+      controller.abort(new Error("worker shutdown"));
+
+      await expect(cancelled).rejects.toThrow("worker shutdown");
+      await processHasExited(1);
+    } finally {
+      await rm(directory, { force: true, recursive: true });
+    }
+  });
+
+  it("retains device-command admission until the cancelled process closes", async () => {
+    const processes: Array<{
+      cancel: ReturnType<typeof vi.fn>;
+      resolveClosed(): void;
+    }> = [];
+    const processLauncher = {
+      start: vi.fn(() => {
+        let resolveClosed!: () => void;
+        const cancel = vi.fn();
+        processes.push({ cancel, resolveClosed: () => resolveClosed() });
+        return {
+          result: new Promise<never>(() => undefined),
+          closed: new Promise<void>((resolve) => {
+            resolveClosed = resolve;
+          }),
+          cancel,
+        };
+      }),
+    };
+    const runner = createNodeCommandRunner({
+      maxActiveCommands: 1,
+      processLauncher,
+    });
+    const firstController = new AbortController();
+    const first = runner.run("lsdvd", ["/dev/mock0"], {
+      maxBufferBytes: 1_024,
+      signal: firstController.signal,
+      timeoutMs: 5_000,
+    });
+    firstController.abort(new Error("worker shutdown"));
+    await expect(first).rejects.toThrow("worker shutdown");
+    expect(processes[0]!.cancel).toHaveBeenCalledOnce();
+
+    await expect(
+      runner.run("lsblk", ["--json"], {
+        maxBufferBytes: 1_024,
+        signal: new AbortController().signal,
+        timeoutMs: 5_000,
+      }),
+    ).rejects.toThrow("device command capacity is exhausted");
+    expect(processLauncher.start).toHaveBeenCalledOnce();
+
+    processes[0]!.resolveClosed();
+    await Promise.resolve();
+    const nextController = new AbortController();
+    const next = runner.run("lsblk", ["--json"], {
+      maxBufferBytes: 1_024,
+      signal: nextController.signal,
+      timeoutMs: 5_000,
+    });
+    nextController.abort(new Error("worker shutdown"));
+    await expect(next).rejects.toThrow("worker shutdown");
+    expect(processLauncher.start).toHaveBeenCalledTimes(2);
+    processes[1]!.resolveClosed();
   });
 
   it("kills and retires a timed-out production probe before the next observation", async () => {
