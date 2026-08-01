@@ -162,6 +162,7 @@ describe("Linux Optical Drive hardware boundary", () => {
   it("keeps a timed-out probe single-flight until the helper actually closes", async () => {
     const pendingProbes: Array<{
       cancel: ReturnType<typeof vi.fn>;
+      close(): void;
       reject(error: Error): void;
       resolve(value: string): void;
     }> = [];
@@ -169,17 +170,22 @@ describe("Linux Optical Drive hardware boundary", () => {
       start: vi.fn(() => {
         let rejectResult!: (error: Error) => void;
         let resolveResult!: (value: string) => void;
+        let resolveClosed!: () => void;
         const result = new Promise<string>((resolve, reject) => {
           rejectResult = reject;
           resolveResult = resolve;
         });
+        const closed = new Promise<void>((resolve) => {
+          resolveClosed = resolve;
+        });
         const probe = {
           cancel: vi.fn(),
+          close: resolveClosed,
           reject: rejectResult,
           resolve: resolveResult,
         };
         pendingProbes.push(probe);
-        return { cancel: probe.cancel, result };
+        return { cancel: probe.cancel, closed, result };
       }),
     };
     const observer = createNodeMediaGenerationObserver({
@@ -198,6 +204,7 @@ describe("Linux Optical Drive hardware boundary", () => {
     expect(pendingProbes[0]?.cancel).toHaveBeenCalledTimes(1);
 
     pendingProbes[0]?.reject(new Error("probe closed after cancellation"));
+    pendingProbes[0]?.close();
     await Promise.resolve();
     await Promise.resolve();
 
@@ -208,6 +215,140 @@ describe("Linux Optical Drive hardware boundary", () => {
     expect(launcher.start).toHaveBeenCalledTimes(2);
     pendingProbes[1]?.resolve("31\n");
     await expect(recoveredObservation).resolves.toBe("31");
+  });
+
+  it("bounds never-closing helpers across distinct historical device paths", async () => {
+    const launcher = {
+      start: vi.fn(() => ({
+        cancel: vi.fn(),
+        closed: new Promise<void>(() => undefined),
+        result: new Promise<string>(() => undefined),
+      })),
+    };
+    const observer = createNodeMediaGenerationObserver({
+      observationTimeoutMs: 1,
+      probeLauncher: launcher,
+    });
+
+    for (let device = 0; device < 40; device += 1) {
+      await expect(
+        observer.observe(`/dev/sr${device}`, new AbortController().signal),
+      ).rejects.toThrow(/media observation (?:timed out|capacity is exhausted)/);
+    }
+
+    expect(launcher.start).toHaveBeenCalledTimes(32);
+    await expect(
+      observer.observe("/dev/sr0", new AbortController().signal),
+    ).rejects.toThrow("media observation timed out");
+    expect(launcher.start).toHaveBeenCalledTimes(32);
+  });
+
+  it("reuses globally bounded capacity after a historical path actually closes", async () => {
+    const probes = new Map<
+      string,
+      {
+        close(): void;
+        resolve(value: string): void;
+      }
+    >();
+    const launcher = {
+      start: vi.fn((devicePath: string) => {
+        let resolveResult!: (value: string) => void;
+        let resolveClosed!: () => void;
+        const result = new Promise<string>((resolve) => {
+          resolveResult = resolve;
+        });
+        const closed = new Promise<void>((resolve) => {
+          resolveClosed = resolve;
+        });
+        probes.set(devicePath, {
+          close: resolveClosed,
+          resolve: resolveResult,
+        });
+        return { cancel: vi.fn(), closed, result };
+      }),
+    };
+    const observer = createNodeMediaGenerationObserver({
+      maxActiveProbes: 2,
+      observationTimeoutMs: 5,
+      probeLauncher: launcher,
+    });
+
+    await expect(
+      observer.observe("/dev/sr0", new AbortController().signal),
+    ).rejects.toThrow("media observation timed out");
+    await expect(
+      observer.observe("/dev/sr1", new AbortController().signal),
+    ).rejects.toThrow("media observation timed out");
+    await expect(
+      observer.observe("/dev/sr2", new AbortController().signal),
+    ).rejects.toThrow("media observation capacity is exhausted");
+
+    probes.get("/dev/sr0")?.close();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    const healthyObservation = observer.observe(
+      "/dev/sr2",
+      new AbortController().signal,
+    );
+    probes.get("/dev/sr2")?.resolve("41\n");
+    probes.get("/dev/sr2")?.close();
+    await expect(healthyObservation).resolves.toBe("41");
+    expect(launcher.start).toHaveBeenCalledTimes(3);
+  });
+
+  it("retains a production probe tombstone after post-spawn kill errors", async () => {
+    const fixture = await createStuckThenSuccessfulProbeFixture();
+    const launcher = createNodeMediaGenerationProbeLauncher({
+      scriptPath: fixture.scriptPath,
+      terminateProcess(child) {
+        (
+          child as unknown as {
+            emit(event: "error", error: Error): void;
+          }
+        ).emit("error", new Error("kill delivery failed"));
+      },
+    });
+    const observer = createNodeMediaGenerationObserver({
+      observationTimeoutMs: 100,
+      probeLauncher: launcher,
+    });
+    let stuckPid: number | undefined;
+    try {
+      await expect(
+        observer.observe("/dev/sr0", new AbortController().signal),
+      ).rejects.toThrow("media observation timed out");
+      await expect(
+        observer.observe("/dev/sr0", new AbortController().signal),
+      ).rejects.toThrow("kill delivery failed");
+
+      const pids = (await readFile(fixture.pidPath, "utf8"))
+        .trim()
+        .split("\n")
+        .map(Number);
+      expect(pids).toHaveLength(1);
+      stuckPid = pids[0];
+      if (stuckPid === undefined) {
+        throw new Error("stuck production probe did not report its pid");
+      }
+      process.kill(stuckPid, "SIGKILL");
+      await expectProbeProcessesExited(fixture.pidPath, 1);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      await expect(
+        observer.observe("/dev/sr0", new AbortController().signal),
+      ).resolves.toBe("29");
+      await expectProbeProcessesExited(fixture.pidPath);
+    } finally {
+      if (stuckPid !== undefined) {
+        try {
+          process.kill(stuckPid, "SIGKILL");
+        } catch {
+          // Already reaped.
+        }
+      }
+      await fixture.cleanup();
+    }
   });
 
   it("bounds repeated polls while a production child-process probe stays stuck", async () => {
