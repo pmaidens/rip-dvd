@@ -3,6 +3,7 @@ import {
   closeSync,
   mkdirSync,
   openSync,
+  realpathSync,
   statSync,
   unlinkSync,
 } from "node:fs";
@@ -122,6 +123,16 @@ function emptyLegacyImportRecordCounts():
     encodingProfiles: 0,
     encodeJobs: 0,
   };
+}
+
+function isCompatibleLegacyEncodingProfile(
+  profile: typeof encodingProfiles.$inferSelect | undefined,
+  job: ParsedLegacyJob,
+): boolean {
+  return (
+    profile?.displayName === job.preset &&
+    isDeepStrictEqual(profile.settings, { preset: job.preset })
+  );
 }
 
 function asRunningArchiveJob(job: ArchiveJob): RunningArchiveJob {
@@ -1516,8 +1527,7 @@ export function createDataAccessInternal(
                 selection.label === job.label &&
                 mediaItem?.kind === job.mediaItemKind &&
                 mediaItem.title === job.mediaTitle &&
-                profile?.displayName === job.preset &&
-                isDeepStrictEqual(profile.settings, { preset: job.preset }) &&
+                isCompatibleLegacyEncodingProfile(profile, job) &&
                 logicalJobs.length === 1 &&
                 logicalJobs[0]?.outputPath === job.outputPath;
               const logicalKey = legacyJobLogicalKey(
@@ -1846,6 +1856,18 @@ export function createDataAccessInternal(
                     ),
                   )
                   .get();
+                if (
+                  profile &&
+                  !isCompatibleLegacyEncodingProfile(profile, job)
+                ) {
+                  persistenceIssues.push({
+                    code: "duplicate_record",
+                    jobIndex: job.jobIndex,
+                    message: `Encoding Profile ${job.profileKey} is incompatible with legacy preset ${job.preset}`,
+                    sidecarPath: sidecar.sidecarPath,
+                  });
+                  continue;
+                }
                 const outputJob = transaction
                   .select()
                   .from(encodeJobs)
@@ -2131,9 +2153,15 @@ export function createDataAccessInternal(
             )
             .all()
             .filter((job) => {
+              let canonicalArchivePath: string;
+              try {
+                canonicalArchivePath = realpathSync(job.archivePath);
+              } catch {
+                canonicalArchivePath = resolve(job.archivePath);
+              }
               const relativeArchivePath = relative(
                 originalsLibraryPath,
-                job.archivePath,
+                canonicalArchivePath,
               );
               return (
                 relativeArchivePath !== "" &&

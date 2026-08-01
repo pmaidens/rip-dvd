@@ -185,6 +185,47 @@ describe("legacy sidecar import", () => {
     fixture.access.close();
   });
 
+  it("reports an incompatible existing Encoding Profile without assigning it to an imported job", () => {
+    const fixture = createFixture();
+    const incompatibleProfile = fixture.access.encodingProfiles.create({
+      key: "legacy-handbrake-fast-480p30-19c1d39008de",
+      displayName: "Incompatible Fast 480p30",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Very Slow 1080p" },
+    });
+
+    const report = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+
+    expect(report.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "duplicate_record",
+          jobIndex: 0,
+          message: expect.stringMatching(/encoding profile.*incompatible/i),
+          sidecarPath: fixture.sidecarPath,
+        }),
+      ]),
+    );
+    expect(fixture.access.encodeJobs.list()).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          encodingProfileId: incompatibleProfile.id,
+          outputPath: fixture.movieOutputPath,
+        }),
+      ]),
+    );
+    expect(
+      fixture.access.encodingProfiles.find({
+        key: incompatibleProfile.key,
+        mediaDomain: "dvd_video",
+        version: 1,
+      }),
+    ).toEqual(incompatibleProfile);
+    fixture.access.close();
+  });
+
   it("coerces schema-one integer strings consistently while deriving identity", () => {
     const root = temporaryDirectories.create("rip-dvd-schema-one-import-");
     const originalsLibraryPath = join(root, "originals");
@@ -831,8 +872,13 @@ describe("legacy sidecar import", () => {
     },
   );
 
-  it("preserves schema-1 recovery when a previously imported sidecar disappears", () => {
+  it("preserves schema-1 recovery through a symlinked library when an imported sidecar disappears", () => {
     const fixture = createFixture();
+    const originalsLibraryAlias = join(
+      dirname(fixture.originalsLibraryPath),
+      "originals-alias",
+    );
+    symlinkSync(fixture.originalsLibraryPath, originalsLibraryAlias, "dir");
     const secondArchivePath = join(
       fixture.originalsLibraryPath,
       "Second Movie.iso",
@@ -898,7 +944,7 @@ describe("legacy sidecar import", () => {
     unlinkSync(secondSidecarPath);
 
     const report = fixture.access.legacySidecars.importLibrary({
-      originalsLibraryPath: fixture.originalsLibraryPath,
+      originalsLibraryPath: originalsLibraryAlias,
     });
 
     expect(report.issues).toEqual([
@@ -1213,6 +1259,166 @@ describe("legacy sidecar import", () => {
     expect(access.encodeJobs.list()).toHaveLength(2);
 
     access.close();
+  });
+
+  it("reports an oversized sidecar without reading or importing it", () => {
+    const fixture = createFixture();
+    const oversizedSidecarPath = join(
+      fixture.originalsLibraryPath,
+      "Oversized.rip-dvd.json",
+    );
+    writeFileSync(oversizedSidecarPath, Buffer.alloc(1_048_577, 0x20));
+
+    const report = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+
+    expect(report).toMatchObject({
+      sidecarsFound: 2,
+      sidecarsImported: 1,
+      sidecarsSkipped: 1,
+    });
+    expect(report.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "invalid_sidecar",
+          message: expect.stringMatching(/exceeds.*byte limit/i),
+          sidecarPath: oversizedSidecarPath,
+        }),
+      ]),
+    );
+    expect(fixture.access.encodeJobs.list()).toHaveLength(2);
+    fixture.access.close();
+  });
+
+  it("reports a sidecar whose job count would make one import transaction unbounded", () => {
+    const fixture = createFixture();
+    const archivePath = join(
+      fixture.originalsLibraryPath,
+      "Too Many Jobs.iso",
+    );
+    const sidecarPath = join(
+      fixture.originalsLibraryPath,
+      "Too Many Jobs.rip-dvd.json",
+    );
+    writeFileSync(archivePath, "archive");
+    writeFileSync(
+      sidecarPath,
+      JSON.stringify({
+        schema_version: 2,
+        source: archivePath,
+        title: "Too Many Jobs",
+        disc_fingerprint: "too-many-jobs-fingerprint",
+        jobs: Array.from({ length: 101 }, (_, index) => ({
+          label: `Extra ${index + 1}: Bounded import`,
+          source: archivePath,
+          output: join(dirname(fixture.movieOutputPath), `extra-${index + 1}.mkv`),
+          preset: `Bounded preset ${index + 1}`,
+          selection: "title",
+          title_number: index + 1,
+        })),
+      }),
+    );
+
+    const report = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+
+    expect(report).toMatchObject({
+      sidecarsFound: 2,
+      sidecarsImported: 1,
+      sidecarsSkipped: 1,
+    });
+    expect(report.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "invalid_sidecar",
+          message: expect.stringMatching(/jobs.*100.*limit/i),
+          sidecarPath,
+        }),
+      ]),
+    );
+    expect(fixture.access.encodeJobs.list()).toHaveLength(2);
+    fixture.access.close();
+  });
+
+  it("reports a library subtree beyond the traversal depth limit without descending into it", () => {
+    const fixture = createFixture();
+    let deepDirectory = fixture.originalsLibraryPath;
+    for (let depth = 1; depth <= 33; depth += 1) {
+      deepDirectory = join(deepDirectory, `depth-${depth}`);
+      mkdirSync(deepDirectory);
+    }
+    const archivePath = join(deepDirectory, "Too Deep.iso");
+    const sidecarPath = join(deepDirectory, "Too Deep.rip-dvd.json");
+    const outputPath = join(dirname(fixture.movieOutputPath), "Too Deep.mkv");
+    writeFileSync(archivePath, "archive");
+    writeFileSync(
+      sidecarPath,
+      JSON.stringify({
+        schema_version: 2,
+        source: archivePath,
+        title: "Too Deep",
+        disc_fingerprint: "too-deep-fingerprint",
+        jobs: [{
+          label: "Movie: Too Deep",
+          source: archivePath,
+          output: outputPath,
+          preset: "Fast 480p30",
+          selection: "main_feature",
+          title_number: null,
+        }],
+      }),
+    );
+
+    const report = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+
+    expect(report.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "invalid_sidecar",
+          message: expect.stringMatching(/depth.*32.*limit/i),
+          sidecarPath: deepDirectory,
+        }),
+      ]),
+    );
+    expect(fixture.access.encodeJobs.list()).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ outputPath }),
+      ]),
+    );
+    fixture.access.close();
+  });
+
+  it("reports a library that exceeds the total traversal entry limit", () => {
+    const fixture = createFixture();
+    for (let index = 0; index <= 10_000; index += 1) {
+      writeFileSync(
+        join(
+          fixture.originalsLibraryPath,
+          `zz-padding-${String(index).padStart(5, "0")}`,
+        ),
+        "",
+      );
+    }
+
+    const report = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+
+    expect(report.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "invalid_sidecar",
+          message: expect.stringMatching(/entries.*10,?000.*limit/i),
+          sidecarPath: fixture.originalsLibraryPath,
+        }),
+      ]),
+    );
+    expect(fixture.access.encodeJobs.list()).toHaveLength(2);
+    fixture.access.close();
   });
 
   it("rejects malformed present metadata without aborting valid sidecars", () => {
