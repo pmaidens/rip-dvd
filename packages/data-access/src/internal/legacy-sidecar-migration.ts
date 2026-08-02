@@ -1,10 +1,9 @@
-import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 
 import { and, eq } from "drizzle-orm";
 
-import { DomainInvariantError, RecordNotFoundError } from "../errors.js";
+import { DomainInvariantError } from "../errors.js";
 import type {
   LegacySidecarAccess,
   LegacySidecarImportReport,
@@ -21,16 +20,21 @@ import type {
 import type { LegacySidecarCatalogAdapter } from "./legacy-sidecar-catalog-adapter.js";
 import {
   discoverLegacySidecars,
+  legacySourceArchiveMatchesSnapshot,
   resolveLegacyOriginalsLibrary,
   retireLegacySidecarQueue,
   type LegacyQueueJobSnapshot,
   type ParsedLegacyJob,
 } from "./legacy-sidecars.js";
 import {
+  createLegacyJobLogicalKey,
   legacyJobLogicalKey,
   legacyJobSignature,
+  parseLegacyJobLogicalKey,
+  type LegacyJobLogicalKey,
 } from "./legacy-sidecar-identity.js";
 import { isPathWithinDirectory } from "./path-containment.js";
+import { newId, requireRow } from "./persistence.js";
 import {
   detectedDiscs,
   discSelections,
@@ -41,17 +45,6 @@ import {
   originalDiscArchives,
 } from "./schema.js";
 import { requireNonEmpty } from "./validation.js";
-
-function requireRow<T>(row: T | undefined, recordType: string, id: string): T {
-  if (!row) {
-    throw new RecordNotFoundError(recordType, id);
-  }
-  return row;
-}
-
-function newId<Id extends string>(): Id {
-  return randomUUID() as Id;
-}
 
 function emptyLegacyImportRecordCounts():
   LegacySidecarImportReport["recordsCreated"] {
@@ -149,12 +142,12 @@ export function createLegacySidecarImportAccess(
         }
       }
       const persistedLegacyJobs = new Map<
-        string,
+        LegacyJobLogicalKey,
         { job: ParsedLegacyJob; sidecarPath: string }
       >();
-      const reconciledSnapshotKeys = new Set<string>();
+      const reconciledSnapshotKeys = new Set<LegacyJobLogicalKey>();
       const trustedSchemaOneSnapshots = new Map<
-        string,
+        LegacyJobLogicalKey,
         LegacyQueueJobSnapshot
       >();
       let schemaOneHasUnresolvedWork =
@@ -172,6 +165,31 @@ export function createLegacySidecarImportAccess(
 
         const { sidecar } = discovery;
         report.issues.push(...sidecar.issues);
+        if (cutover.mode === "historical-snapshot") {
+          const corroboratingArchive = database
+            .select()
+            .from(originalDiscArchives)
+            .where(
+              and(
+                eq(originalDiscArchives.fingerprint, sidecar.fingerprint),
+                eq(originalDiscArchives.archivePath, sidecar.archivePath),
+              ),
+            )
+            .get();
+          if (
+            !corroboratingArchive ||
+            corroboratingArchive.sizeBytes !== sidecar.archiveSizeBytes
+          ) {
+            report.sidecarsSkipped += 1;
+            report.issues.push({
+              code: "invalid_sidecar",
+              message:
+                "Schema-2/3 cutover recovery cannot prove source archive provenance without a matching authoritative SQLite archive; SQLite state and the historical marker were preserved",
+              sidecarPath: sidecar.sidecarPath,
+            });
+            continue;
+          }
+        }
         if (cutover.mode === "schema-one") {
           const corroboratingArchive = database
             .select()
@@ -329,6 +347,22 @@ export function createLegacySidecarImportAccess(
         let unchanged = 0;
         const persistenceIssues: LegacySidecarImportReport["issues"] = [];
         const persistedJobs: ParsedLegacyJob[] = [];
+
+        if (
+          !legacySourceArchiveMatchesSnapshot(
+            originalsLibraryPath,
+            sidecar,
+          )
+        ) {
+          report.sidecarsSkipped += 1;
+          report.issues.push({
+            code: "duplicate_record",
+            message:
+              "Legacy source archive conflicts with the object captured at SQLite cutover",
+            sidecarPath: sidecar.sidecarPath,
+          });
+          continue;
+        }
 
         try {
           database.transaction((transaction) => {
@@ -898,11 +932,11 @@ export function createLegacySidecarImportAccess(
           }
         }
         for (const importedJob of libraryJobCandidates) {
-          const logicalKey = [
-            importedJob.fingerprint,
-            importedJob.sourceKey,
-            importedJob.profileKey,
-          ].join("\0");
+          const logicalKey = createLegacyJobLogicalKey({
+            fingerprint: importedJob.fingerprint,
+            profileKey: importedJob.profileKey,
+            sourceKey: importedJob.sourceKey,
+          });
           if (trustedSchemaOneSnapshots.has(logicalKey)) {
             continue;
           }
@@ -932,17 +966,13 @@ export function createLegacySidecarImportAccess(
           if (reconciledSnapshotKeys.has(logicalKey)) {
             continue;
           }
-          const profileSeparator = logicalKey.lastIndexOf("\0");
-          const sourceSeparator = logicalKey.lastIndexOf(
-            "\0",
-            profileSeparator - 1,
-          );
-          const fingerprint = logicalKey.slice(0, sourceSeparator);
-          const sourceKey = logicalKey.slice(
-            sourceSeparator + 1,
-            profileSeparator,
-          );
-          const profileKey = logicalKey.slice(profileSeparator + 1);
+          const identity = parseLegacyJobLogicalKey(logicalKey);
+          if (!identity) {
+            throw new DomainInvariantError(
+              "Published legacy job has an invalid logical identity",
+            );
+          }
+          const { fingerprint, profileKey, sourceKey } = identity;
           const archive = database
             .select()
             .from(originalDiscArchives)

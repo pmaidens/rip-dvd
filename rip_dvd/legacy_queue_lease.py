@@ -89,8 +89,8 @@ def _scavenge_owner_artifacts(queue_root):
             _scavenge_orphan(path)
 
 
-def _acquire_exclusive_or_abort(descriptor, state_root):
-    while not (state_root / "supervisor-abort").exists():
+def _acquire_exclusive_or_abort(descriptor, state_root, abort_sentinel):
+    while not (state_root / abort_sentinel).exists():
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
             return True
@@ -99,7 +99,34 @@ def _acquire_exclusive_or_abort(descriptor, state_root):
     return False
 
 
-def hold_cutover(originals_library, state_directory):
+def _validate_protocol(raw_protocol):
+    fields = raw_protocol.split("|")
+    if not fields or fields[0] != "1":
+        raise ValueError("Unsupported legacy queue cutover protocol version")
+    sentinels = {}
+    for field in fields[1:]:
+        name, separator, value = field.partition("=")
+        if not separator or name in sentinels:
+            raise ValueError("Malformed legacy queue cutover protocol manifest")
+        sentinels[name] = value
+    if (
+        set(sentinels) != {
+            "abort",
+            "error",
+            "intentReady",
+            "ready",
+            "release",
+            "released",
+            "workerError",
+        }
+        or not all(value and Path(value).name == value for value in sentinels.values())
+        or len(set(sentinels.values())) != len(sentinels)
+    ):
+        raise ValueError("Malformed legacy queue cutover protocol manifest")
+    return sentinels
+
+
+def hold_cutover(originals_library, state_directory, sentinels):
     queue_root = Path(originals_library)
     state_root = Path(state_directory)
     queue_root.mkdir(parents=True, exist_ok=True)
@@ -108,22 +135,30 @@ def hold_cutover(originals_library, state_directory):
     intent_acquired = False
     gate_acquired = False
     try:
-        intent_acquired = _acquire_exclusive_or_abort(intent_descriptor, state_root)
+        intent_acquired = _acquire_exclusive_or_abort(
+            intent_descriptor,
+            state_root,
+            sentinels["abort"],
+        )
         if not intent_acquired:
             return
-        _write_state(state_root, "intent-ready")
-        gate_acquired = _acquire_exclusive_or_abort(gate_descriptor, state_root)
+        _write_state(state_root, sentinels["intentReady"])
+        gate_acquired = _acquire_exclusive_or_abort(
+            gate_descriptor,
+            state_root,
+            sentinels["abort"],
+        )
         if not gate_acquired:
             return
         _scavenge_owner_artifacts(queue_root)
-        _write_state(state_root, "ready")
-        while not (state_root / "release").exists():
+        _write_state(state_root, sentinels["ready"])
+        while not (state_root / sentinels["release"]).exists():
             readable, _, _ = select.select([sys.stdin], [], [], 0.05)
             if readable and not sys.stdin.buffer.read(1):
                 break
     except BaseException as error:
         try:
-            _write_state(state_root, "error", str(error))
+            _write_state(state_root, sentinels["error"], str(error))
         except OSError:
             pass
         raise
@@ -135,7 +170,7 @@ def hold_cutover(originals_library, state_directory):
         os.close(gate_descriptor)
         os.close(intent_descriptor)
         try:
-            _write_state(state_root, "released")
+            _write_state(state_root, sentinels["released"])
         except FileExistsError:
             pass
 
@@ -145,9 +180,14 @@ def main(argv=None):
     parser.add_argument("command", choices=("hold-cutover",))
     parser.add_argument("originals_library")
     parser.add_argument("state_directory")
+    parser.add_argument("--protocol", required=True)
     arguments = parser.parse_args(argv)
     if arguments.command == "hold-cutover":
-        hold_cutover(arguments.originals_library, arguments.state_directory)
+        hold_cutover(
+            arguments.originals_library,
+            arguments.state_directory,
+            _validate_protocol(arguments.protocol),
+        )
     return 0
 
 

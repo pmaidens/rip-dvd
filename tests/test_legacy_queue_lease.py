@@ -17,6 +17,31 @@ from rip_dvd.legacy_queue_lease import (
 
 
 class LegacyQueueLeaseTests(unittest.TestCase):
+    def test_cutover_helper_rejects_an_incompatible_protocol_manifest(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            state_root = root / "state"
+            state_root.mkdir()
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "rip_dvd.legacy_queue_lease",
+                    "hold-cutover",
+                    str(root),
+                    str(state_root),
+                    "--protocol",
+                    "2|abort=supervisor-abort",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Unsupported legacy queue cutover protocol", result.stderr)
+
     def test_kernel_releases_a_crashed_command_lease(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

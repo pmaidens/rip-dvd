@@ -33,16 +33,25 @@ import { Worker } from "node:worker_threads";
 import type { LegacySidecarImportIssue } from "../legacy-sidecar-types.js";
 import type { MediaItemKind } from "../types.js";
 import {
+  createLegacyJobLogicalKey,
   legacyJobLogicalKey,
   legacyJobSignature,
+  parseLegacyJobLogicalKey,
+  type LegacyJobLogicalKey,
 } from "./legacy-sidecar-identity.js";
 import { isPathWithinDirectory } from "./path-containment.js";
+import {
+  LEGACY_QUEUE_CUTOVER_PROTOCOL_ARGUMENT,
+  LEGACY_QUEUE_CUTOVER_PROTOCOL,
+  LEGACY_QUEUE_CUTOVER_WORKER,
+} from "./legacy-queue-cutover-protocol.js";
 
 const DEFAULT_HANDBRAKE_PRESET = "Fast 480p30";
 const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
 const MAX_LEGACY_SIDECAR_BYTES = 1_048_576;
 const MAX_LEGACY_SIDECAR_JOBS = 100;
 const MAX_LEGACY_IMPORT_BYTES = 8_388_608;
+const MAX_LEGACY_SCAN_BYTES = 67_108_864;
 const MAX_LEGACY_IMPORT_JOBS = 1_000;
 const MAX_LEGACY_MARKER_BYTES = 8_388_608;
 const LEGACY_MARKER_PREFIX =
@@ -58,250 +67,15 @@ const LEGACY_QUEUE_LOCK_POLL_MS = 10;
 const LEGACY_QUEUE_WORKER_STALL_MS = 2_000;
 const LEGACY_QUEUE_RELEASE_ACKNOWLEDGEMENT_MS = 1_000;
 const LEGACY_QUEUE_HELPER_TERMINATION_GRACE_MS = 250;
-const LEGACY_QUEUE_HELPER_STATE = {
-  starting: 0,
-  intentReady: 1,
-  ready: 2,
-  released: 3,
-  failed: 4,
-} as const;
-const LEGACY_QUEUE_HELPER_STATE_INDEX = 0;
-const LEGACY_QUEUE_HELPER_RELEASE_INDEX = 1;
-const LEGACY_QUEUE_HELPER_HEARTBEAT_INDEX = 2;
-const LEGACY_QUEUE_SUPERVISOR_ABORT = "supervisor-abort";
-const LEGACY_QUEUE_CUTOVER_WORKER = String.raw`
-const { spawn } = require("node:child_process");
-const {
-  existsSync,
-  readFileSync,
-  writeFileSync,
-} = require("node:fs");
-const { join } = require("node:path");
-const { parentPort, workerData } = require("node:worker_threads");
-
-const STARTING = 0;
-const INTENT_READY = 1;
-const READY = 2;
-const RELEASED = 3;
-const FAILED = 4;
-const STATE_INDEX = 0;
-const RELEASE_INDEX = 1;
-const HEARTBEAT_INDEX = 2;
-const sharedState = new Int32Array(workerData.sharedState);
-const statePath = (name) => join(workerData.stateDirectory, name);
-let finished = false;
-let releaseSent = false;
-let failurePublished = false;
-let terminationRequestedAt;
-let terminationSignalSentAt;
-let timer;
-
-function publishHeartbeat() {
-  Atomics.add(sharedState, HEARTBEAT_INDEX, 1);
-  Atomics.notify(sharedState, HEARTBEAT_INDEX);
-}
-
-function publishState(state) {
-  if (finished && state !== FAILED) {
-    return;
-  }
-  Atomics.store(sharedState, STATE_INDEX, state);
-  Atomics.notify(sharedState, STATE_INDEX);
-}
-
-function finish() {
-  finished = true;
-  if (timer) {
-    clearInterval(timer);
-  }
-  parentPort.close();
-}
-
-function publishFailure(message) {
-  if (failurePublished) {
-    return;
-  }
-  failurePublished = true;
-  try {
-    writeFileSync(statePath("worker-error"), message, {
-      encoding: "utf8",
-      flag: "wx",
-      mode: 0o600,
-    });
-  } catch {}
-  publishState(FAILED);
-}
-
-function requestHelperTermination() {
-  if (helper.exitCode === null && helper.signalCode === null) {
-    if (terminationRequestedAt === undefined) {
-      terminationRequestedAt = Date.now();
-      return;
-    }
-    if (
-      terminationSignalSentAt === undefined &&
-      Date.now() - terminationRequestedAt >=
-        ${LEGACY_QUEUE_HELPER_TERMINATION_GRACE_MS}
-    ) {
-      terminationSignalSentAt = Date.now();
-      helper.kill("SIGTERM");
-    } else if (
-      terminationSignalSentAt !== undefined &&
-      Date.now() - terminationSignalSentAt >=
-      ${LEGACY_QUEUE_HELPER_TERMINATION_GRACE_MS}
-    ) {
-      helper.kill("SIGKILL");
-    }
-  }
-}
-
-function stateExists(name) {
-  try {
-    return existsSync(statePath(name));
-  } catch (error) {
-    publishFailure(
-      "Legacy queue lease worker failed during " +
-        phase() +
-        ": could not inspect state " +
-        name +
-        ": " +
-        error.message,
-    );
-    return false;
-  }
-}
-
-function readState(name) {
-  if (!stateExists(name)) {
-    return null;
-  }
-  try {
-    return readFileSync(statePath(name), "utf8");
-  } catch (error) {
-    publishFailure(
-      "Legacy queue lease worker failed during " +
-        phase() +
-        ": could not read state " +
-        name +
-        ": " +
-        error.message,
-    );
-    return null;
-  }
-}
-
-function markReleased() {
-  try {
-    writeFileSync(statePath("released"), "", {
-      flag: "wx",
-      mode: 0o600,
-    });
-  } catch (error) {
-    if (error.code !== "EEXIST") {
-      publishFailure(
-        "Could not publish legacy queue lease release: " + error.message,
-      );
-    }
-  }
-}
-
-function phase() {
-  const state = Atomics.load(sharedState, STATE_INDEX);
-  if (state < INTENT_READY) {
-    return "intent acquisition";
-  }
-  if (state < READY) {
-    return "queue drain";
-  }
-  return "release acknowledgement";
-}
-
-function observeSentinels() {
-  if (
-    Atomics.load(sharedState, STATE_INDEX) < INTENT_READY &&
-    stateExists("intent-ready")
-  ) {
-    publishState(INTENT_READY);
-  }
-  if (
-    Atomics.load(sharedState, STATE_INDEX) < READY &&
-    stateExists("ready")
-  ) {
-    publishState(READY);
-  }
-}
-
-const helper = spawn(
-  workerData.python,
-  [
-    workerData.helperPath,
-    "hold-cutover",
-    workerData.originalsLibraryPath,
-    workerData.stateDirectory,
-  ],
-  { stdio: ["pipe", "ignore", "inherit"] },
-);
-publishHeartbeat();
-
-helper.once("error", (error) => {
-  publishFailure("Legacy queue lease helper failed to start: " + error.message);
-});
-helper.once("exit", (code, signal) => {
-  const helperError = readState("error");
-  const released = stateExists("released");
-  const aborted = stateExists("supervisor-abort");
-  if (helperError !== null) {
-    publishFailure(helperError);
-  } else if (!released && !aborted && !failurePublished) {
-    observeSentinels();
-    publishFailure(
-      "Legacy queue lease helper exited during " +
-        phase() +
-        " (code " +
-        String(code) +
-        ", signal " +
-        String(signal) +
-        ")",
-    );
-  }
-  markReleased();
-  if (!failurePublished) {
-    publishState(RELEASED);
-  }
-  finish();
-});
-
-timer = setInterval(() => {
-  publishHeartbeat();
-  const helperError = readState("error");
-  if (helperError !== null) {
-    publishFailure(helperError);
-    return;
-  }
-  observeSentinels();
-  if (stateExists("supervisor-abort")) {
-    requestHelperTermination();
-  }
-  if (
-    !releaseSent &&
-    Atomics.load(sharedState, RELEASE_INDEX) === 1
-  ) {
-    releaseSent = true;
-    try {
-      writeFileSync(statePath("release"), "", {
-        flag: "wx",
-        mode: 0o600,
-      });
-      helper.stdin.end();
-    } catch (error) {
-      publishFailure(
-        "Could not release the legacy queue lease: " + error.message,
-      );
-      return;
-    }
-  }
-}, ${LEGACY_QUEUE_LOCK_POLL_MS});
-`;
+const LEGACY_QUEUE_HELPER_STATE = LEGACY_QUEUE_CUTOVER_PROTOCOL.states;
+const LEGACY_QUEUE_HELPER_STATE_INDEX =
+  LEGACY_QUEUE_CUTOVER_PROTOCOL.indexes.state;
+const LEGACY_QUEUE_HELPER_RELEASE_INDEX =
+  LEGACY_QUEUE_CUTOVER_PROTOCOL.indexes.release;
+const LEGACY_QUEUE_HELPER_HEARTBEAT_INDEX =
+  LEGACY_QUEUE_CUTOVER_PROTOCOL.indexes.heartbeat;
+const LEGACY_QUEUE_SUPERVISOR_ABORT =
+  LEGACY_QUEUE_CUTOVER_PROTOCOL.sentinels.abort;
 
 export interface ParsedLegacyJob {
   completedAt: Date | null;
@@ -351,17 +125,27 @@ export interface LegacySidecarDiscoveryBatch {
   sidecarPaths: string[];
 }
 
-export interface LegacyQueueCutover {
-  jobSnapshots: ReadonlyMap<string, LegacyQueueJobSnapshot>;
-  mode: "schema-one" | "snapshot";
+interface LegacyQueueCutoverBase {
+  jobSnapshots: ReadonlyMap<LegacyJobLogicalKey, LegacyQueueJobSnapshot>;
   recoveryDiscoveries: LegacySidecarDiscovery[] | null;
   recoveryIssues: LegacySidecarImportIssue[];
   sidecarSnapshots: readonly LegacyQueueSidecarSnapshot[];
-  upgradeSchemaOne(
-    jobSnapshots: ReadonlyMap<string, LegacyQueueJobSnapshot>,
-  ): void;
   wasAlreadyPublished: boolean;
 }
+
+export type LegacyQueueCutover = LegacyQueueCutoverBase &
+  (
+    | {
+        mode: "schema-one";
+        upgradeSchemaOne(
+          jobSnapshots: ReadonlyMap<
+            LegacyJobLogicalKey,
+            LegacyQueueJobSnapshot
+          >,
+        ): void;
+      }
+    | { mode: "historical-snapshot" | "snapshot" }
+  );
 
 export interface LegacyQueueJobSnapshot {
   jobIndex: number;
@@ -374,7 +158,23 @@ export interface LegacyQueueSidecarSnapshot {
   archiveSnapshot: LegacySourceArchiveSnapshot;
   fingerprint: string;
   pathBase: string;
+  payload: LegacyQueueSidecarPayloadSnapshot;
   sidecarPath: string;
+}
+
+interface LegacyQueueSidecarPayloadSnapshot {
+  archivedAt: string;
+  archiveSizeBytes: number;
+  createdAt: string;
+  issues: LegacySidecarImportIssue[];
+  jobs: Array<Omit<ParsedLegacyJob, "completedAt"> & {
+    completedAt: string | null;
+  }>;
+  movieTitle: string;
+  movieYear: number | null;
+  scanData: unknown;
+  sourceBytes: number;
+  updatedAt: string;
 }
 
 export interface LegacySourceArchiveSnapshot {
@@ -393,6 +193,21 @@ function snapshotLegacySidecar(
     archiveSnapshot: sidecar.archiveSnapshot,
     fingerprint: sidecar.fingerprint,
     pathBase: sidecar.pathBase,
+    payload: {
+      archivedAt: sidecar.archivedAt.toISOString(),
+      archiveSizeBytes: sidecar.archiveSizeBytes,
+      createdAt: sidecar.createdAt.toISOString(),
+      issues: sidecar.issues,
+      jobs: sidecar.jobs.map((job) => ({
+        ...job,
+        completedAt: job.completedAt?.toISOString() ?? null,
+      })),
+      movieTitle: sidecar.movieTitle,
+      movieYear: sidecar.movieYear,
+      scanData: sidecar.scanData,
+      sourceBytes: sidecar.sourceBytes,
+      updatedAt: sidecar.updatedAt.toISOString(),
+    },
     sidecarPath: sidecar.sidecarPath,
   };
 }
@@ -456,6 +271,35 @@ function sourceArchiveSnapshotsMatch(
     left.modifiedAtNanoseconds === right.modifiedAtNanoseconds &&
     left.sizeBytes === right.sizeBytes
   );
+}
+
+export function legacySourceArchiveMatchesSnapshot(
+  originalsLibraryPath: string,
+  sidecar: Pick<
+    ParsedLegacySidecar,
+    "archivePath" | "archiveSnapshot" | "archiveSizeBytes"
+  >,
+): boolean {
+  try {
+    const canonicalArchivePath = realpathSync(sidecar.archivePath);
+    if (
+      canonicalArchivePath !== normalize(sidecar.archivePath) ||
+      !isPathWithinDirectory(originalsLibraryPath, canonicalArchivePath)
+    ) {
+      return false;
+    }
+    const current = snapshotSourceArchive(canonicalArchivePath);
+    return (
+      current.isFile &&
+      current.archiveSizeBytes === sidecar.archiveSizeBytes &&
+      sourceArchiveSnapshotsMatch(
+        current.archiveSnapshot,
+        sidecar.archiveSnapshot,
+      )
+    );
+  } catch {
+    return false;
+  }
 }
 
 export function resolveLegacyOriginalsLibrary(path: string): string {
@@ -615,14 +459,181 @@ function isValidPublishedJob(
   ) {
     return false;
   }
-  const profileSeparator = logicalKey.lastIndexOf("\0");
-  const sourceSeparator = logicalKey.lastIndexOf("\0", profileSeparator - 1);
+  const identity = parseLegacyJobLogicalKey(logicalKey);
   return (
-    sourceSeparator > 0 &&
-    profileSeparator > sourceSeparator + 1 &&
-    logicalKey.slice(sourceSeparator + 1, profileSeparator) === sourceKey &&
-    logicalKey.slice(profileSeparator + 1) === profile
+    identity !== null &&
+    identity.sourceKey === sourceKey &&
+    identity.profileKey === profile
   );
+}
+
+function canonicalRecordedDate(value: unknown): string | null {
+  const date = recordedDate(value);
+  return date && date.toISOString() === value ? value : null;
+}
+
+function parseSnapshotIssue(
+  value: unknown,
+  sidecarPath: string,
+): LegacySidecarImportIssue | null {
+  const issue = objectValue(value);
+  const code = issue?.code;
+  const jobIndex = issue?.jobIndex;
+  if (
+    !issue ||
+    (code !== "corrupt_sidecar" &&
+      code !== "invalid_sidecar" &&
+      code !== "missing_archive" &&
+      code !== "invalid_job" &&
+      code !== "duplicate_record") ||
+    issue.sidecarPath !== sidecarPath ||
+    !nonEmptyString(issue.message) ||
+    (jobIndex !== undefined && nonNegativeInteger(jobIndex) === null)
+  ) {
+    return null;
+  }
+  return {
+    code,
+    ...(jobIndex === undefined ? {} : { jobIndex: Number(jobIndex) }),
+    message: issue.message as string,
+    sidecarPath,
+  };
+}
+
+function parseSnapshotJob(
+  value: unknown,
+  fingerprint: string,
+): LegacyQueueSidecarPayloadSnapshot["jobs"][number] | null {
+  const job = objectValue(value);
+  if (!job) {
+    return null;
+  }
+  const completedAt =
+    job.completedAt === null ? null : canonicalRecordedDate(job.completedAt);
+  const jobIndex = nonNegativeInteger(job.jobIndex);
+  const titleNumber =
+    job.titleNumber === null ? null : positiveInteger(job.titleNumber);
+  if (
+    (job.completedAt !== null && !completedAt) ||
+    jobIndex === null ||
+    (job.kind !== "main_feature" && job.kind !== "dvd_title") ||
+    !nonEmptyString(job.label) ||
+    (job.mediaItemKind !== "movie" &&
+      job.mediaItemKind !== "bonus_feature") ||
+    !nonEmptyString(job.mediaTitle) ||
+    !nonEmptyString(job.outputPath) ||
+    !isAbsolute(job.outputPath as string) ||
+    !nonEmptyString(job.preset) ||
+    !nonEmptyString(job.profileKey) ||
+    !nonEmptyString(job.sourceKey) ||
+    (job.titleNumber !== null && titleNumber === null)
+  ) {
+    return null;
+  }
+  const parsedJob: ParsedLegacyJob = {
+    completedAt: completedAt ? new Date(completedAt) : null,
+    jobIndex,
+    kind: job.kind,
+    label: job.label as string,
+    mediaItemKind: job.mediaItemKind,
+    mediaTitle: job.mediaTitle as string,
+    outputPath: job.outputPath as string,
+    preset: job.preset as string,
+    profileKey: job.profileKey as string,
+    sourceKey: job.sourceKey as string,
+    titleNumber,
+  };
+  let logicalKey: LegacyJobLogicalKey;
+  try {
+    logicalKey = legacyJobLogicalKey(fingerprint, parsedJob);
+  } catch {
+    return null;
+  }
+  if (!isValidPublishedJob(logicalKey, legacyJobSignature(parsedJob))) {
+    return null;
+  }
+  return {
+    ...parsedJob,
+    completedAt,
+  };
+}
+
+function parseSidecarPayloadSnapshot(
+  value: unknown,
+  fingerprint: string,
+  sidecarPath: string,
+): LegacyQueueSidecarPayloadSnapshot | null {
+  const payload = objectValue(value);
+  if (!payload || !Array.isArray(payload.jobs) || !Array.isArray(payload.issues)) {
+    return null;
+  }
+  const archivedAt = canonicalRecordedDate(payload.archivedAt);
+  const archiveSizeBytes = nonNegativeInteger(payload.archiveSizeBytes);
+  const createdAt = canonicalRecordedDate(payload.createdAt);
+  const movieTitle = nonEmptyString(payload.movieTitle);
+  const movieYear =
+    payload.movieYear === null ? null : optionalYear(payload.movieYear);
+  const sourceBytes = nonNegativeInteger(payload.sourceBytes);
+  const updatedAt = canonicalRecordedDate(payload.updatedAt);
+  const jobs = payload.jobs.map((job) =>
+    parseSnapshotJob(job, fingerprint),
+  );
+  const issues = payload.issues.map((issue) =>
+    parseSnapshotIssue(issue, sidecarPath),
+  );
+  if (
+    !archivedAt ||
+    archiveSizeBytes === null ||
+    !createdAt ||
+    !movieTitle ||
+    (payload.movieYear !== null && movieYear === null) ||
+    sourceBytes === null ||
+    sourceBytes > MAX_LEGACY_SIDECAR_BYTES ||
+    !updatedAt ||
+    payload.jobs.length > MAX_LEGACY_SIDECAR_JOBS ||
+    jobs.some((job) => job === null) ||
+    issues.some((issue) => issue === null) ||
+    new Date(updatedAt) < new Date(createdAt)
+  ) {
+    return null;
+  }
+  return {
+    archivedAt,
+    archiveSizeBytes,
+    createdAt,
+    issues: issues as LegacySidecarImportIssue[],
+    jobs: jobs as LegacyQueueSidecarPayloadSnapshot["jobs"],
+    movieTitle,
+    movieYear,
+    scanData: payload.scanData,
+    sourceBytes,
+    updatedAt,
+  };
+}
+
+function restorePublishedSidecar(
+  snapshot: LegacyQueueSidecarSnapshot,
+): ParsedLegacySidecar {
+  return {
+    archivePath: snapshot.archivePath,
+    archiveSnapshot: snapshot.archiveSnapshot,
+    archiveSizeBytes: snapshot.payload.archiveSizeBytes,
+    archivedAt: new Date(snapshot.payload.archivedAt),
+    createdAt: new Date(snapshot.payload.createdAt),
+    fingerprint: snapshot.fingerprint,
+    issues: snapshot.payload.issues,
+    jobs: snapshot.payload.jobs.map((job) => ({
+      ...job,
+      completedAt: job.completedAt ? new Date(job.completedAt) : null,
+    })),
+    movieTitle: snapshot.payload.movieTitle,
+    movieYear: snapshot.payload.movieYear,
+    pathBase: snapshot.pathBase,
+    scanData: snapshot.payload.scanData,
+    sidecarPath: snapshot.sidecarPath,
+    sourceBytes: snapshot.payload.sourceBytes,
+    updatedAt: new Date(snapshot.payload.updatedAt),
+  };
 }
 
 type RecordedPathResolution =
@@ -797,14 +808,14 @@ function parseJob(
   };
 }
 
-interface SidecarRecoveryExpectation {
+interface SidecarParseContext {
   originalsLibraryPath: string;
   snapshot?: LegacyQueueSidecarSnapshot;
 }
 
 function parseSidecar(
   sidecarPath: string,
-  recovery?: SidecarRecoveryExpectation,
+  context: SidecarParseContext,
 ): LegacySidecarDiscovery {
   let contents = "";
   let sourceBytes = 0;
@@ -812,13 +823,13 @@ function parseSidecar(
   let readIssue: LegacySidecarDiscovery | undefined;
   try {
     descriptor = openSync(sidecarPath, "r");
-    if (recovery) {
+    if (context.snapshot) {
       const openedStat = fstatSync(descriptor);
       const openedPath = realpathSync(sidecarPath);
       const namedStat = statSync(openedPath);
       if (
         openedPath !== normalize(sidecarPath) ||
-        !isPathWithinDirectory(recovery.originalsLibraryPath, openedPath) ||
+        !isPathWithinDirectory(context.originalsLibraryPath, openedPath) ||
         openedStat.dev !== namedStat.dev ||
         openedStat.ino !== namedStat.ino
       ) {
@@ -1019,7 +1030,7 @@ function parseSidecar(
   if (!source) {
     return invalid("Sidecar source must be a non-empty archive path");
   }
-  const pathBase = recovery?.snapshot?.pathBase ?? process.cwd();
+  const pathBase = context.snapshot?.pathBase ?? process.cwd();
   const archiveResolution = resolveRecordedPath(
     source,
     sidecarPath,
@@ -1028,7 +1039,29 @@ function parseSidecar(
   if (archiveResolution.outcome === "ambiguous") {
     return invalid(archiveResolution.message);
   }
-  const archivePath = archiveResolution.path;
+  const recordedArchivePath = archiveResolution.path;
+  let archivePath: string;
+  try {
+    archivePath = realpathSync(recordedArchivePath);
+  } catch {
+    return {
+      outcome: "skipped",
+      sourceBytes,
+      issue: {
+        code: "missing_archive",
+        message: `Original Disc Archive is missing: ${recordedArchivePath}`,
+        sidecarPath,
+      },
+    };
+  }
+  if (
+    archivePath !== normalize(recordedArchivePath) ||
+    !isPathWithinDirectory(context.originalsLibraryPath, archivePath)
+  ) {
+    return invalid(
+      "Source archive is outside the originals library or reached through an ancestor symlink",
+    );
+  }
   let archiveMetadata;
   try {
     archiveMetadata = snapshotSourceArchive(archivePath);
@@ -1052,6 +1085,9 @@ function parseSidecar(
     return invalid(
       "Sidecar has neither a fingerprint nor a valid DVD title map",
     );
+  }
+  if (fingerprint.includes("\0")) {
+    return invalid("Sidecar disc_fingerprint contains an invalid delimiter");
   }
   if (!Array.isArray(data.jobs)) {
     return invalid("Sidecar jobs must be an array");
@@ -1086,7 +1122,7 @@ function parseSidecar(
   const outputPaths = new Set<string>();
   const logicalJobs = new Set<string>();
   for (const job of parsedJobs) {
-    const logicalKey = `${job.sourceKey}\0${job.profileKey}`;
+    const logicalKey = JSON.stringify([job.sourceKey, job.profileKey]);
     if (outputPaths.has(job.outputPath) || logicalJobs.has(logicalKey)) {
       issues.push({
         code: "duplicate_record",
@@ -1123,12 +1159,12 @@ function parseSidecar(
     updatedAt: updatedAt ?? archiveMetadata.archivedAt,
   };
   if (
-    recovery?.snapshot &&
-    (archivePath !== recovery.snapshot.archivePath ||
-      fingerprint !== recovery.snapshot.fingerprint ||
+    context.snapshot &&
+    (archivePath !== context.snapshot.archivePath ||
+      fingerprint !== context.snapshot.fingerprint ||
       !sourceArchiveSnapshotsMatch(
         archiveMetadata.archiveSnapshot,
-        recovery.snapshot.archiveSnapshot,
+        context.snapshot.archiveSnapshot,
       ))
   ) {
     return {
@@ -1211,21 +1247,33 @@ export function discoverLegacySidecars(
 ): LegacySidecarDiscoveryBatch {
   const found = findSidecars(originalsLibraryPath);
   const discoveries: LegacySidecarDiscovery[] = [];
-  let totalBytes = 0;
+  let retainedBytes = 0;
+  let scanBytes = 0;
   let totalJobs = 0;
   let totalMarkerBytes = LEGACY_MARKER_FIXED_BYTES;
   let totalMarkerJobs = 0;
   let totalMarkerSidecars = 0;
   for (const path of found.paths.sort()) {
-    const discovery = parseSidecar(path);
+    const discovery = parseSidecar(path, { originalsLibraryPath });
     discoveries.push(discovery);
+    scanBytes +=
+      discovery.outcome === "parsed"
+        ? discovery.sidecar.sourceBytes
+        : discovery.sourceBytes;
     if (discovery.outcome === "parsed") {
-      totalBytes += discovery.sidecar.sourceBytes;
+      retainedBytes += discovery.sidecar.sourceBytes;
       totalJobs += discovery.sidecar.jobs.length;
-    } else {
-      totalBytes += discovery.sourceBytes;
     }
-    if (totalBytes > MAX_LEGACY_IMPORT_BYTES) {
+    if (scanBytes > MAX_LEGACY_SCAN_BYTES) {
+      found.complete = false;
+      found.issues.push({
+        code: "invalid_sidecar",
+        message: `Aggregate sidecar scan work exceeds the ${MAX_LEGACY_SCAN_BYTES}-byte limit`,
+        sidecarPath: originalsLibraryPath,
+      });
+      break;
+    }
+    if (retainedBytes > MAX_LEGACY_IMPORT_BYTES) {
       found.complete = false;
       found.issues.push({
         code: "invalid_sidecar",
@@ -1341,9 +1389,13 @@ export function acquireLegacyQueueCutoverLock(
     workerData: {
       helperPath,
       originalsLibraryPath,
+      pollMs: LEGACY_QUEUE_LOCK_POLL_MS,
+      protocol: LEGACY_QUEUE_CUTOVER_PROTOCOL,
+      protocolArgument: LEGACY_QUEUE_CUTOVER_PROTOCOL_ARGUMENT,
       python,
       sharedState: helperState.buffer,
       stateDirectory,
+      terminationGraceMs: LEGACY_QUEUE_HELPER_TERMINATION_GRACE_MS,
     },
   });
   let workerFailure: string | undefined;
@@ -1650,13 +1702,35 @@ function recoverPublishedSidecars(
   discoveries: LegacySidecarDiscovery[];
   issues: LegacySidecarImportIssue[];
 } {
-  return recoverCapturedSidecars(
-    originalsLibraryPath,
-    sidecarSnapshots.map((snapshot) => ({
-      sidecarPath: snapshot.sidecarPath,
-      snapshot,
-    })),
-  );
+  const discoveries = [...sidecarSnapshots]
+    .sort((left, right) => left.sidecarPath.localeCompare(right.sidecarPath))
+    .map((snapshot): LegacySidecarDiscovery => {
+      if (
+        !isPathWithinDirectory(
+          originalsLibraryPath,
+          resolve(snapshot.sidecarPath),
+        )
+      ) {
+        throw new Error(
+          "Invalid SQLite cutover marker: sidecar path is outside the originals library",
+        );
+      }
+      const sidecar = restorePublishedSidecar(snapshot);
+      if (!legacySourceArchiveMatchesSnapshot(originalsLibraryPath, sidecar)) {
+        return {
+          outcome: "skipped",
+          sourceBytes: sidecar.sourceBytes,
+          issue: {
+            code: "duplicate_record",
+            message:
+              "Legacy source archive conflicts with the object captured at SQLite cutover",
+            sidecarPath: sidecar.sidecarPath,
+          },
+        };
+      }
+      return { outcome: "parsed", sidecar };
+    });
+  return { discoveries, issues: [] };
 }
 
 function recoverPublishedJobSidecars(
@@ -1688,7 +1762,10 @@ export function retireLegacySidecarQueue(
   if (!discoveryBatch.complete && !existsSync(markerPath)) {
     return null;
   }
-  const discoveredSnapshots = new Map<string, LegacyQueueJobSnapshot>();
+  const discoveredSnapshots = new Map<
+    LegacyJobLogicalKey,
+    LegacyQueueJobSnapshot
+  >();
   const discoveredSidecars: LegacyQueueSidecarSnapshot[] = [];
   let hasParsedSidecar = false;
   for (const discovery of discoveries) {
@@ -1714,7 +1791,7 @@ export function retireLegacySidecarQueue(
   }
 
   const writeMarker = (
-    snapshots: ReadonlyMap<string, LegacyQueueJobSnapshot>,
+    snapshots: ReadonlyMap<LegacyJobLogicalKey, LegacyQueueJobSnapshot>,
   ): void => {
     if (snapshots.size > MAX_LEGACY_IMPORT_JOBS) {
       throw new Error(
@@ -1818,7 +1895,10 @@ export function retireLegacySidecarQueue(
           }
         | { logicalKey: string; signature: string }
       > = [];
-      const jobSnapshots = new Map<string, LegacyQueueJobSnapshot>();
+      const jobSnapshots = new Map<
+        LegacyJobLogicalKey,
+        LegacyQueueJobSnapshot
+      >();
       const sidecarSnapshots: LegacyQueueSidecarSnapshot[] = [];
       const sidecarSnapshotPaths = new Set<string>();
       if (value.schemaVersion === 4) {
@@ -1841,6 +1921,14 @@ export function retireLegacySidecarQueue(
           );
           const fingerprint = nonEmptyString(item?.fingerprint);
           const pathBase = nonEmptyString(item?.pathBase);
+          const payload =
+            fingerprint && sidecarPath
+              ? parseSidecarPayloadSnapshot(
+                  item?.payload,
+                  fingerprint,
+                  sidecarPath,
+                )
+              : null;
           if (
             !sidecarPath ||
             !isAbsolute(sidecarPath) ||
@@ -1850,6 +1938,7 @@ export function retireLegacySidecarQueue(
             !fingerprint ||
             !pathBase ||
             !isAbsolute(pathBase) ||
+            !payload ||
             sidecarSnapshotPaths.has(sidecarPath)
           ) {
             throw new Error(
@@ -1862,6 +1951,7 @@ export function retireLegacySidecarQueue(
             archiveSnapshot,
             fingerprint,
             pathBase,
+            payload,
             sidecarPath,
           });
         }
@@ -1879,8 +1969,15 @@ export function retireLegacySidecarQueue(
         const jobIndex = hasSnapshotLocation
           ? nonNegativeInteger(item?.jobIndex)
           : 0;
+        const logicalIdentity = logicalKey
+          ? parseLegacyJobLogicalKey(logicalKey)
+          : null;
+        const canonicalLogicalKey = logicalIdentity
+          ? createLegacyJobLogicalKey(logicalIdentity)
+          : null;
         if (
           !logicalKey ||
+          canonicalLogicalKey !== logicalKey ||
           !signature ||
           !sidecarPath ||
           jobIndex === null ||
@@ -1889,7 +1986,7 @@ export function retireLegacySidecarQueue(
           (value.schemaVersion === 4 &&
             !sidecarSnapshotPaths.has(sidecarPath)) ||
           !isValidPublishedJob(logicalKey, signature) ||
-          jobSnapshots.has(logicalKey)
+          jobSnapshots.has(canonicalLogicalKey)
         ) {
           throw new Error("Invalid SQLite cutover marker: malformed or duplicate legacy job");
         }
@@ -1899,7 +1996,7 @@ export function retireLegacySidecarQueue(
             ? { logicalKey, ...snapshot }
             : { logicalKey, signature },
         );
-        jobSnapshots.set(logicalKey, snapshot);
+        jobSnapshots.set(canonicalLogicalKey, snapshot);
       }
       const digestPayload =
         value.schemaVersion === 4
@@ -1922,13 +2019,15 @@ export function retireLegacySidecarQueue(
             : null;
       return {
         jobSnapshots,
-        mode: "snapshot",
+        mode:
+          value.schemaVersion === 4
+            ? "snapshot"
+            : "historical-snapshot",
         recoveryDiscoveries:
           recovery?.discoveries ??
           (discoveryBatch.complete ? null : []),
         recoveryIssues: recovery?.issues ?? [],
         sidecarSnapshots,
-        upgradeSchemaOne() {},
         wasAlreadyPublished: true,
       };
     } else {
@@ -1942,7 +2041,6 @@ export function retireLegacySidecarQueue(
       recoveryDiscoveries: null,
       recoveryIssues: [],
       sidecarSnapshots: [],
-      upgradeSchemaOne() {},
       wasAlreadyPublished: false,
     };
   }
@@ -1953,7 +2051,6 @@ export function retireLegacySidecarQueue(
     recoveryDiscoveries: null,
     recoveryIssues: [],
     sidecarSnapshots: discoveredSidecars,
-    upgradeSchemaOne() {},
     wasAlreadyPublished: false,
   };
 }
