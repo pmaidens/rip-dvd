@@ -57,6 +57,9 @@ export const opticalDrives = sqliteTable(
     })
       .notNull()
       .default(true),
+    isConfiguredTarget: integer("is_configured_target", { mode: "boolean" })
+      .notNull()
+      .default(false),
     isPresent: integer("is_present", { mode: "boolean" })
       .notNull()
       .default(true),

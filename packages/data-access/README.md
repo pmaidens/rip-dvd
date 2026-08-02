@@ -18,12 +18,15 @@ short transaction. Seen drives become present and advance `lastSeenAt`; drives
 absent from a successful snapshot become missing without changing their last
 seen time. A configured-device proof applies the enabled default once to a new
 or stable known drive, including when a device alias becomes resolvable later;
-subsequent enabled/disabled choices are preserved. A changed stable
-serial, a loss or appearance of serial evidence, or a changed model identity at
-the same device path is replacement hardware and is atomically reset to
-disabled. After a disappearance, authorization is preserved only when a
-matching serial proves physical-drive continuity; uncertain same-path hardware
-is disabled.
+subsequent enabled/disabled choices are preserved. A matching nonempty serial
+is authoritative continuity evidence even when vendor or model text changes.
+A changed stable serial, a loss or appearance of serial evidence, or a changed
+model identity without matching serial proof is replacement hardware and is
+atomically reset to disabled. After a disappearance, authorization is
+preserved only when a matching serial proves physical-drive continuity;
+uncertain same-path hardware is disabled. Retargeting a configured alias to a
+different canonical device path also consumes the configured default with the
+new target disabled.
 
 The package exports the versioned, bounded DVD title-map contract through
 `@rip-dvd/data-access/dvd-scan`. Hardware parsing, worker persistence, and web
