@@ -44,6 +44,7 @@ import {
   requireNonEmpty,
   requirePositiveSafeInteger,
 } from "./internal/validation.js";
+import { decodeDvdTitleMap } from "./dvd-scan.js";
 import {
   DomainInvariantError,
   InvalidStatusTransitionError,
@@ -790,28 +791,22 @@ export function createDataAccess({
             const existingSerial = existing?.serialNumber ?? undefined;
             const serialChanged =
               existing !== undefined && existingSerial !== drive.serialNumber;
-            const existingModel = [existing?.vendor, existing?.product]
-              .filter(Boolean)
-              .join("\u0000");
-            const discoveredModel = [drive.vendor, drive.product]
-              .filter(Boolean)
-              .join("\u0000");
-            const modelChanged =
-              existingModel.length > 0 &&
-              discoveredModel.length > 0 &&
-              existingModel !== discoveredModel;
             const stableIdentityMatches =
               existing?.serialNumber !== null &&
               existing?.serialNumber !== undefined &&
               drive.serialNumber !== undefined &&
               existing.serialNumber === drive.serialNumber;
+            const modelEvidenceChanged =
+              existing !== undefined &&
+              ((existing.vendor ?? undefined) !== drive.vendor ||
+                (existing.product ?? undefined) !== drive.product);
             const continuityUnprovenAfterDisappearance =
               existing !== undefined &&
               !existing.isPresent &&
               !stableIdentityMatches;
             const isReplacement =
               serialChanged ||
-              modelChanged ||
+              (modelEvidenceChanged && !stableIdentityMatches) ||
               continuityUnprovenAfterDisappearance;
             const applyConfiguredDefault =
               drive.isConfiguredDevice === true &&
@@ -825,9 +820,7 @@ export function createDataAccess({
                 vendor: drive.vendor,
                 product: drive.product,
                 serialNumber: drive.serialNumber,
-                isEnabled:
-                  drive.isConfiguredDevice === true ||
-                  (drive.isEnabledWhenNew ?? false),
+                isEnabled: drive.isConfiguredDevice === true,
                 configurationDefaultApplied:
                   drive.isConfiguredDevice === true,
                 isPresent: true,
@@ -839,8 +832,8 @@ export function createDataAccess({
                 target: opticalDrives.devicePath,
                 set: {
                   displayName: drive.displayName,
-                  vendor: drive.vendor,
-                  product: drive.product,
+                  vendor: drive.vendor ?? null,
+                  product: drive.product ?? null,
                   serialNumber: drive.serialNumber ?? null,
                   ...(isReplacement
                     ? {
@@ -884,6 +877,7 @@ export function createDataAccess({
             product: input.product,
             serialNumber: input.serialNumber,
             isEnabled: input.isEnabled ?? false,
+            configurationDefaultApplied: true,
             isPresent: input.isPresent,
             lastSeenAt: timestamp,
             createdAt: timestamp,
@@ -897,6 +891,9 @@ export function createDataAccess({
               product: input.product,
               serialNumber: input.serialNumber,
               isEnabled: input.isEnabled,
+              ...(input.isEnabled !== undefined
+                ? { configurationDefaultApplied: true }
+                : {}),
               isPresent: input.isPresent,
               lastSeenAt: timestamp,
               updatedAt: timestamp,
@@ -974,6 +971,21 @@ export function createDataAccess({
       registerDetectedDisc(input) {
         const timestamp = now();
         const fingerprint = requireNonEmpty(input.fingerprint, "fingerprint");
+        let scanData = input.scanData;
+        if (input.discKind === "dvd" && scanData !== undefined) {
+          const decoded = decodeDvdTitleMap(scanData);
+          if (decoded === null) {
+            throw new DomainInvariantError(
+              "DVD scan data must match the versioned title-map contract",
+            );
+          }
+          if (decoded.contentId !== fingerprint) {
+            throw new DomainInvariantError(
+              "DVD scan content ID must match its Detected Disc fingerprint",
+            );
+          }
+          scanData = decoded;
+        }
         return database.transaction((transaction) => {
           const matchingArchive = transaction
             .select({ discKind: originalDiscArchives.discKind })
@@ -1023,15 +1035,15 @@ export function createDataAccess({
             input.isNewMediumObservation === true ||
             existing.discKind !== input.discKind ||
             existing.volumeLabel !== (input.volumeLabel ?? null) ||
-            !isDeepStrictEqual(existing.scanData, input.scanData ?? null);
+            !isDeepStrictEqual(existing.scanData, scanData ?? null);
           const statusChanged =
             matchingArchive !== undefined && existing?.status !== "archived";
           if (
             !matchingArchive &&
             existing?.status === "approved" &&
             (existing.discKind !== input.discKind ||
-              (input.scanData !== undefined &&
-                !isDeepStrictEqual(existing.scanData, input.scanData)))
+              (scanData !== undefined &&
+                !isDeepStrictEqual(existing.scanData, scanData)))
           ) {
             throw new DomainInvariantError(
               "Rediscovery cannot change reviewed data for an approved Detected Disc",
@@ -1046,7 +1058,7 @@ export function createDataAccess({
               discKind: input.discKind,
               fingerprint,
               volumeLabel: input.volumeLabel,
-              scanData: input.scanData,
+              scanData,
               status: matchingArchive ? "archived" : "detected",
               detectedAt: timestamp,
               createdAt: timestamp,
@@ -1062,7 +1074,7 @@ export function createDataAccess({
             .set({
               discKind: input.discKind,
               volumeLabel: input.volumeLabel,
-              scanData: input.scanData,
+              scanData,
               ...(matchingArchive ? { status: "archived" as const } : {}),
               ...(observationChanged
                 ? { detectedAt: timestamp, updatedAt: timestamp }

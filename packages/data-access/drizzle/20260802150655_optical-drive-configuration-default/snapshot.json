@@ -792,7 +792,7 @@
       "type": "integer",
       "notNull": true,
       "autoincrement": false,
-      "default": "false",
+      "default": "true",
       "generated": null,
       "name": "configuration_default_applied",
       "entityType": "columns",
