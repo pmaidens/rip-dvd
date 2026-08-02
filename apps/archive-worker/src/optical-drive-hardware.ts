@@ -555,8 +555,8 @@ export function createLinuxOpticalDriveHardware({
       return discovered;
     },
 
-    async scanDvd(devicePath, signal) {
-      const safeDevicePath = requireSafeDevicePath(devicePath);
+    async scanDvd(drive, signal) {
+      const safeDevicePath = requireSafeDevicePath(drive.devicePath);
       const generationBefore = await mediaGenerationObserver.observe(
         safeDevicePath,
         signal,

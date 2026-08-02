@@ -9,7 +9,10 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createDataAccess } from "@rip-dvd/data-access";
+import {
+  createDataAccess,
+  type DiscoveredOpticalDrive,
+} from "@rip-dvd/data-access";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -17,6 +20,10 @@ import {
   runArchiveWorker,
   type OpticalDriveHardware,
 } from "./archive-worker.js";
+import {
+  createLinuxOpticalDriveHardware,
+  type CommandRunner,
+} from "./optical-drive-hardware.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -127,6 +134,89 @@ describe("archive worker polling", () => {
     access.close();
   });
 
+  it("does not persist a disc when authorized hardware is replaced during scanning", async () => {
+    const access = openTestDataAccess();
+    const log = vi.fn();
+    let discoveryCount = 0;
+    const runner: CommandRunner = {
+      run: vi.fn(async (executable) => {
+        if (executable === "lsblk") {
+          discoveryCount += 1;
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              blockdevices: [
+                {
+                  path: "/dev/sr0",
+                  type: "rom",
+                  vendor: "Pioneer",
+                  model: "DVD-RW",
+                  serial:
+                    discoveryCount <= 2 ? "OLD-DRIVE" : "NEW-DRIVE",
+                },
+              ],
+            }),
+            stderr: "",
+          };
+        }
+        if (executable === "lsdvd") {
+          return {
+            exitCode: 0,
+            stdout: [
+              "Disc Title: REPLACEMENT_DISC",
+              "Title: 01, Length: 00:01:00.000 Chapters: 1, Cells: 1, Audio streams: 0, Subpictures: 0",
+            ].join("\n"),
+            stderr: "",
+          };
+        }
+        if (executable === "blockdev") {
+          return { exitCode: 0, stdout: "1024\n", stderr: "" };
+        }
+        throw new Error(`Unexpected command: ${executable}`);
+      }),
+    };
+    const hardware = createLinuxOpticalDriveHardware({
+      platform: "linux",
+      runner,
+      contentReader: {
+        hash: vi
+          .fn()
+          .mockResolvedValue(
+            "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          ),
+      },
+      mediaGenerationObserver: {
+        observe: vi.fn().mockResolvedValue("1"),
+      },
+    });
+
+    await pollArchiveWorker({
+      access,
+      configuredDevicePath: "/dev/sr0",
+      hardware,
+      log,
+      signal: new AbortController().signal,
+    });
+
+    expect(access.catalog.listOpticalDrives()).toEqual([
+      expect.objectContaining({
+        devicePath: "/dev/sr0",
+        isEnabled: false,
+        serialNumber: "NEW-DRIVE",
+      }),
+    ]);
+    expect(access.catalog.listDetectedDiscs()).toEqual([]);
+    expect(runner.run).toHaveBeenCalledWith(
+      "lsdvd",
+      ["-Oh", "-a", "-c", "-s", "/dev/sr0"],
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(log).toHaveBeenCalledWith(
+      "DVD scan failed for /dev/sr0: Optical Drive identity changed before DVD persistence",
+    );
+    access.close();
+  });
+
   it("enables a newly discovered Optical Drive configured through a device alias", async () => {
     const deviceDirectory = mkdtempSync(join(tmpdir(), "rip-dvd-device-alias-"));
     temporaryDirectories.push(deviceDirectory);
@@ -158,7 +248,7 @@ describe("archive worker polling", () => {
       }),
     ]);
     expect(scanDvd).toHaveBeenCalledWith(
-      discoveredDevicePath,
+      expect.objectContaining({ devicePath: discoveredDevicePath }),
       expect.any(AbortSignal),
     );
     access.close();
@@ -214,7 +304,7 @@ describe("archive worker polling", () => {
     ]);
     expect(scanDvd).toHaveBeenCalledTimes(2);
     expect(scanDvd).toHaveBeenLastCalledWith(
-      discoveredDevicePath,
+      expect.objectContaining({ devicePath: discoveredDevicePath }),
       expect.any(AbortSignal),
     );
     access.close();
@@ -238,6 +328,10 @@ describe("archive worker polling", () => {
       const access = openTestDataAccess();
       const discover = vi
         .fn()
+        .mockResolvedValueOnce([
+          { devicePath: originalDevicePath, serialNumber: "OLD-001" },
+          { devicePath: replacementDevicePath, serialNumber: "NEW-002" },
+        ])
         .mockResolvedValueOnce([
           { devicePath: originalDevicePath, serialNumber: "OLD-001" },
           { devicePath: replacementDevicePath, serialNumber: "NEW-002" },
@@ -274,7 +368,7 @@ describe("archive worker polling", () => {
       ]);
       expect(scanDvd).toHaveBeenCalledTimes(1);
       expect(scanDvd).toHaveBeenCalledWith(
-        originalDevicePath,
+        expect.objectContaining({ devicePath: originalDevicePath }),
         expect.any(AbortSignal),
       );
       access.close();
@@ -352,8 +446,10 @@ describe("archive worker polling", () => {
     const attachedDrive = [{ devicePath: "/dev/sr0", serialNumber: "DRIVE-1" }];
     const discover = vi.fn()
       .mockResolvedValueOnce(attachedDrive)
+      .mockResolvedValueOnce(attachedDrive)
+      .mockResolvedValueOnce(attachedDrive)
       .mockResolvedValueOnce([])
-      .mockResolvedValueOnce(attachedDrive);
+      .mockResolvedValue(attachedDrive);
     const scanDvd = vi.fn().mockResolvedValue({
       fingerprint:
         "sha256:4444444444444444444444444444444444444444444444444444444444444444",
@@ -643,11 +739,13 @@ describe("archive worker polling", () => {
   it("cancels an in-flight scan and stops polling during shutdown", async () => {
     const access = openTestDataAccess();
     const controller = new AbortController();
-    const scanDvd = vi.fn(async (_devicePath: string, signal: AbortSignal) => {
-      controller.abort(new Error("worker shutdown"));
-      signal.throwIfAborted();
-      return null;
-    });
+    const scanDvd = vi.fn(
+      async (_drive: DiscoveredOpticalDrive, signal: AbortSignal) => {
+        controller.abort(new Error("worker shutdown"));
+        signal.throwIfAborted();
+        return null;
+      },
+    );
     const waitForNextPoll = vi.fn();
 
     await expect(
