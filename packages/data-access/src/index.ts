@@ -910,8 +910,7 @@ export function createDataAccess({
             const isReplacement =
               serialChanged ||
               (modelEvidenceChanged && !stableIdentityMatches) ||
-              continuityUnprovenAfterDisappearance ||
-              (drive.isConfiguredDevice && configuredTargetChanged);
+              continuityUnprovenAfterDisappearance;
             const applyConfiguredDefault =
               drive.isConfiguredDevice === true &&
               !configuredTargetChanged &&

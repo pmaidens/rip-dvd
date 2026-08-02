@@ -607,6 +607,84 @@ describe("data-access facade", () => {
     access.close();
   });
 
+  it.each<{
+    caseName: string;
+    existingEnabled?: boolean;
+    existingSerial?: string;
+    observedSerial: string;
+    expectedEnabled: boolean;
+  }>([
+    {
+      caseName: "preserves an independently enabled stable target",
+      existingEnabled: true,
+      existingSerial: "STABLE-002",
+      observedSerial: "STABLE-002",
+      expectedEnabled: true,
+    },
+    {
+      caseName: "preserves an independently disabled stable target",
+      existingEnabled: false,
+      existingSerial: "STABLE-002",
+      observedSerial: "STABLE-002",
+      expectedEnabled: false,
+    },
+    {
+      caseName: "leaves a new target disabled",
+      observedSerial: "NEW-002",
+      expectedEnabled: false,
+    },
+    {
+      caseName: "disables an existing target whose identity changed",
+      existingEnabled: true,
+      existingSerial: "ORIGINAL-002",
+      observedSerial: "REPLACEMENT-002",
+      expectedEnabled: false,
+    },
+  ])("$caseName when a configured alias retargets", (testCase) => {
+    const access = openTestDatabase();
+    access.catalog.reconcileOpticalDrives([
+      {
+        devicePath: "/dev/sr0",
+        serialNumber: "CONFIGURED-001",
+        isConfiguredDevice: true,
+      },
+    ]);
+    if (testCase.existingEnabled !== undefined) {
+      access.catalog.upsertOpticalDrive({
+        devicePath: "/dev/sr1",
+        serialNumber: testCase.existingSerial,
+        isEnabled: testCase.existingEnabled,
+        isPresent: true,
+      });
+    }
+
+    access.catalog.reconcileOpticalDrives([
+      {
+        devicePath: "/dev/sr0",
+        serialNumber: "CONFIGURED-001",
+        isConfiguredDevice: false,
+      },
+      {
+        devicePath: "/dev/sr1",
+        serialNumber: testCase.observedSerial,
+        isConfiguredDevice: true,
+      },
+    ]);
+
+    expect(
+      access.catalog
+        .listOpticalDrives()
+        .find((drive) => drive.devicePath === "/dev/sr1"),
+    ).toEqual(
+      expect.objectContaining({
+        isEnabled: testCase.expectedEnabled,
+        serialNumber: testCase.observedSerial,
+      }),
+    );
+
+    access.close();
+  });
+
   it("disables uncertain same-path hardware after a disappearance", () => {
     const access = openTestDatabase();
     const original = access.catalog.upsertOpticalDrive({
