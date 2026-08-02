@@ -13,6 +13,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass, replace
+from typing import Dict, List, Optional
 
 from .core import (
     EncodeQueueItem,
@@ -54,13 +55,13 @@ class ArchiveCommandOptions:
     originals_library: str
     preset: str
     command: str
-    selected_title_number: int | None
-    extra_title_numbers: list[int] | None
-    name: str | None
-    year: int | None
+    selected_title_number: Optional[int]
+    extra_title_numbers: Optional[List[int]]
+    name: Optional[str]
+    year: Optional[int]
     dry_run: bool
     verbose: bool
-    extra_names: dict[int, str] | None
+    extra_names: Optional[Dict[int, str]]
 
 
 class EtaTracker:

@@ -45,6 +45,8 @@ export function createLegacySidecarDataAccess(
               outcome: "returned" as const,
               report: access.legacySidecars.importLibrary({
                 originalsLibraryPath,
+                recoverHistoricalCutover:
+                  importInput.recoverHistoricalCutover,
               }),
             };
           } catch (error) {

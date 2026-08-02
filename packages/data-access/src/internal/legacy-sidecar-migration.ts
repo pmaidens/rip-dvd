@@ -165,30 +165,30 @@ export function createLegacySidecarImportAccess(
 
         const { sidecar } = discovery;
         report.issues.push(...sidecar.issues);
-        if (cutover.mode === "historical-snapshot") {
-          const corroboratingArchive = database
-            .select()
-            .from(originalDiscArchives)
-            .where(
-              and(
-                eq(originalDiscArchives.fingerprint, sidecar.fingerprint),
-                eq(originalDiscArchives.archivePath, sidecar.archivePath),
-              ),
-            )
-            .get();
-          if (
-            !corroboratingArchive ||
-            corroboratingArchive.sizeBytes !== sidecar.archiveSizeBytes
-          ) {
-            report.sidecarsSkipped += 1;
-            report.issues.push({
-              code: "invalid_sidecar",
-              message:
-                "Schema-2/3 cutover recovery cannot prove source archive provenance without a matching authoritative SQLite archive; SQLite state and the historical marker were preserved",
-              sidecarPath: sidecar.sidecarPath,
-            });
-            continue;
+        if (
+          cutover.mode === "historical-snapshot" &&
+          input.recoverHistoricalCutover !== true
+        ) {
+          for (const job of sidecar.jobs) {
+            const logicalKey = legacyJobLogicalKey(
+              sidecar.fingerprint,
+              job,
+            );
+            if (
+              cutover.jobSnapshots.get(logicalKey)?.signature ===
+              legacyJobSignature(job)
+            ) {
+              reconciledSnapshotKeys.add(logicalKey);
+            }
           }
+          report.sidecarsSkipped += 1;
+          report.issues.push({
+            code: "invalid_sidecar",
+            message:
+              "Schema-2/3 cutover state cannot be reinterpreted automatically; rerun with explicit historical cutover recovery after verifying the bounded surviving sidecars and archives",
+            sidecarPath: sidecar.sidecarPath,
+          });
+          continue;
         }
         if (cutover.mode === "schema-one") {
           const corroboratingArchive = database
@@ -268,11 +268,17 @@ export function createLegacySidecarImportAccess(
                     .all()
                 : [];
             const exactMatch =
+              corroboratingArchive?.sizeBytes ===
+                sidecar.archiveSizeBytes &&
               selection?.kind === job.kind &&
               selection.titleNumber === job.titleNumber &&
               selection.label === job.label &&
               mediaItem?.kind === job.mediaItemKind &&
               mediaItem.title === job.mediaTitle &&
+              mediaItem.year ===
+                (job.mediaItemKind === "movie"
+                  ? sidecar.movieYear
+                  : null) &&
               isCompatibleLegacyEncodingProfile(profile, job) &&
               logicalJobs.length === 1 &&
               logicalJobs[0]?.outputPath === job.outputPath;
@@ -348,24 +354,19 @@ export function createLegacySidecarImportAccess(
         const persistenceIssues: LegacySidecarImportReport["issues"] = [];
         const persistedJobs: ParsedLegacyJob[] = [];
 
-        if (
-          !legacySourceArchiveMatchesSnapshot(
-            originalsLibraryPath,
-            sidecar,
-          )
-        ) {
-          report.sidecarsSkipped += 1;
-          report.issues.push({
-            code: "duplicate_record",
-            message:
-              "Legacy source archive conflicts with the object captured at SQLite cutover",
-            sidecarPath: sidecar.sidecarPath,
-          });
-          continue;
-        }
-
         try {
           database.transaction((transaction) => {
+            const requireCapturedSourceArchive = () => {
+              if (!legacySourceArchiveMatchesSnapshot(
+                originalsLibraryPath,
+                sidecar,
+              )) {
+                throw new DomainInvariantError(
+                  "Legacy source archive conflicts with the object captured at SQLite cutover",
+                );
+              }
+            };
+            requireCapturedSourceArchive();
             const existingByFingerprint = transaction
               .select()
               .from(originalDiscArchives)
@@ -845,7 +846,8 @@ export function createLegacySidecarImportAccess(
               }
               persistedJobs.push(job);
             }
-          });
+            requireCapturedSourceArchive();
+          }, { behavior: "immediate" });
         } catch (error) {
           report.sidecarsSkipped += 1;
           report.issues.push({

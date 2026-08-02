@@ -34,6 +34,7 @@ export interface LegacySidecarImportReport {
 export interface LegacySidecarAccess {
   importLibrary(input: {
     originalsLibraryPath: string;
+    recoverHistoricalCutover?: boolean;
   }): LegacySidecarImportReport;
 }
 

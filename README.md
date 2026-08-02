@@ -195,6 +195,13 @@ pnpm import:legacy-sidecars -- \
   --originals-library "/srv/media/DVD Originals"
 ```
 
+Historical schema-2/3 cutover markers do not contain immutable archive and
+queue-state snapshots. Their ordinary retry path therefore fails closed. After
+verifying that the bounded surviving sidecars, output files, and ISO objects
+still describe the intended cutover state, an operator can explicitly recover
+them with `--recover-historical-cutover`; without that flag the importer never
+reinterprets their mutable filesystem state.
+
 The command also accepts `RIP_DVD_DATABASE_PATH` and
 `RIP_DVD_ORIGINALS_LIBRARY_PATH`, and `--json` emits a machine-readable report.
 It recursively reads `.rip-dvd.json` files, imports valid Original Disc
