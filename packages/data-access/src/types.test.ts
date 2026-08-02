@@ -13,8 +13,33 @@ import type {
   OriginalDiscArchiveId,
   RunningArchiveJob,
 } from "./types.js";
+import type {
+  LegacySidecarAccess,
+  LegacySidecarDataAccess,
+  LegacySidecarImportIssue,
+  LegacySidecarImportIssueCode,
+  LegacySidecarImportReport,
+} from "./legacy-sidecars.js";
+// @ts-expect-error Legacy sidecar types are migration-entrypoint only.
+import type { LegacySidecarAccess as RootLegacySidecarAccess } from "./index.js";
+// @ts-expect-error Legacy sidecar types are migration-entrypoint only.
+import type { LegacySidecarDataAccess as RootLegacySidecarDataAccess } from "./index.js";
+// @ts-expect-error Legacy sidecar types are migration-entrypoint only.
+import type { LegacySidecarImportIssue as RootLegacySidecarImportIssue } from "./index.js";
+// @ts-expect-error Legacy sidecar types are migration-entrypoint only.
+import type { LegacySidecarImportIssueCode as RootLegacySidecarImportIssueCode } from "./index.js";
+// @ts-expect-error Legacy sidecar types are migration-entrypoint only.
+import type { LegacySidecarImportReport as RootLegacySidecarImportReport } from "./index.js";
 
 describe("data-access domain identifiers", () => {
+  it("exposes legacy sidecar contracts only from the migration entrypoint", () => {
+    expectTypeOf<LegacySidecarImportIssueCode>().toMatchTypeOf<string>();
+    expectTypeOf<LegacySidecarImportIssue>().toHaveProperty("code");
+    expectTypeOf<LegacySidecarImportReport>().toHaveProperty("issues");
+    expectTypeOf<LegacySidecarAccess>().toHaveProperty("importLibrary");
+    expectTypeOf<LegacySidecarDataAccess>().toHaveProperty("legacySidecars");
+  });
+
   it("keeps aggregate and foreign-key identifiers opaque", () => {
     expectTypeOf<OpticalDriveId>().not.toEqualTypeOf<DetectedDiscId>();
     expectTypeOf<DetectedDiscId>().not.toEqualTypeOf<OriginalDiscArchiveId>();

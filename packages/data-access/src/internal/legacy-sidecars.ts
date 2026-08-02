@@ -19,14 +19,20 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, normalize, resolve } from "node:path";
+import {
+  dirname,
+  isAbsolute,
+  join,
+  normalize,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
 
-import type {
-  LegacySidecarImportIssue,
-  MediaItemKind,
-} from "../types.js";
+import type { LegacySidecarImportIssue } from "../legacy-sidecar-types.js";
+import type { MediaItemKind } from "../types.js";
 import {
   legacyJobLogicalKey,
   legacyJobSignature,
@@ -322,6 +328,7 @@ export interface ParsedLegacySidecar {
   movieYear: number | null;
   scanData: unknown;
   sidecarPath: string;
+  sourceBytes: number;
   updatedAt: Date;
 }
 
@@ -332,11 +339,15 @@ export type LegacySidecarDiscovery =
 export interface LegacySidecarDiscoveryBatch {
   complete: boolean;
   discoveries: LegacySidecarDiscovery[];
+  scanIssues: LegacySidecarImportIssue[];
+  sidecarsFound: number;
+  sidecarPaths: string[];
 }
 
 export interface LegacyQueueCutover {
   jobSnapshots: ReadonlyMap<string, LegacyQueueJobSnapshot>;
   mode: "schema-one" | "snapshot";
+  recoveryDiscoveries: LegacySidecarDiscovery[] | null;
   upgradeSchemaOne(
     jobSnapshots: ReadonlyMap<string, LegacyQueueJobSnapshot>,
   ): void;
@@ -647,6 +658,7 @@ function parseJob(
 
 function parseSidecar(sidecarPath: string): LegacySidecarDiscovery {
   let contents = "";
+  let sourceBytes = 0;
   let descriptor: number | undefined;
   let readIssue: LegacySidecarDiscovery | undefined;
   try {
@@ -686,6 +698,7 @@ function parseSidecar(sidecarPath: string): LegacySidecarDiscovery {
           },
         };
       } else {
+        sourceBytes = bytesRead;
         contents = buffer.toString("utf8", 0, bytesRead);
       }
     }
@@ -913,6 +926,7 @@ function parseSidecar(sidecarPath: string): LegacySidecarDiscovery {
         titles: data.titles ?? [],
       },
       sidecarPath,
+      sourceBytes,
       updatedAt: updatedAt ?? archiveStat.mtime,
     },
   };
@@ -921,7 +935,7 @@ function parseSidecar(sidecarPath: string): LegacySidecarDiscovery {
 interface LegacySidecarSearchState {
   complete: boolean;
   entriesVisited: number;
-  issues: LegacySidecarDiscovery[];
+  issues: LegacySidecarImportIssue[];
   limitReached: boolean;
   paths: string[];
   rootPath: string;
@@ -948,12 +962,9 @@ function findSidecars(
         state.complete = false;
         state.limitReached = true;
         state.issues.push({
-          outcome: "skipped",
-          issue: {
-            code: "invalid_sidecar",
-            message: `Library traversal entries exceed the ${MAX_LEGACY_LIBRARY_ENTRIES}-entry limit`,
-            sidecarPath: state.rootPath,
-          },
+          code: "invalid_sidecar",
+          message: `Library traversal entries exceed the ${MAX_LEGACY_LIBRARY_ENTRIES}-entry limit`,
+          sidecarPath: state.rootPath,
         });
         break;
       }
@@ -962,12 +973,9 @@ function findSidecars(
         if (depth >= MAX_LEGACY_LIBRARY_DEPTH) {
           state.complete = false;
           state.issues.push({
-            outcome: "skipped",
-            issue: {
-              code: "invalid_sidecar",
-              message: `Library traversal depth exceeds the ${MAX_LEGACY_LIBRARY_DEPTH}-level limit`,
-              sidecarPath: path,
-            },
+            code: "invalid_sidecar",
+            message: `Library traversal depth exceeds the ${MAX_LEGACY_LIBRARY_DEPTH}-level limit`,
+            sidecarPath: path,
           });
         } else {
           findSidecars(path, depth + 1, state);
@@ -992,37 +1000,27 @@ export function discoverLegacySidecars(
   let totalMarkerBytes = LEGACY_MARKER_FIXED_BYTES;
   let totalMarkerJobs = 0;
   for (const path of found.paths.sort()) {
-    try {
-      totalBytes += statSync(path).size;
-    } catch {
-      // parseSidecar reports sidecars that disappear during discovery.
+    const discovery = parseSidecar(path);
+    discoveries.push(discovery);
+    if (discovery.outcome === "parsed") {
+      totalBytes += discovery.sidecar.sourceBytes;
+      totalJobs += discovery.sidecar.jobs.length;
     }
     if (totalBytes > MAX_LEGACY_IMPORT_BYTES) {
       found.complete = false;
       found.issues.push({
-        outcome: "skipped",
-        issue: {
-          code: "invalid_sidecar",
-          message: `Aggregate sidecar bytes exceed the ${MAX_LEGACY_IMPORT_BYTES}-byte import limit`,
-          sidecarPath: originalsLibraryPath,
-        },
+        code: "invalid_sidecar",
+        message: `Aggregate sidecar bytes exceed the ${MAX_LEGACY_IMPORT_BYTES}-byte import limit`,
+        sidecarPath: originalsLibraryPath,
       });
       break;
-    }
-    const discovery = parseSidecar(path);
-    discoveries.push(discovery);
-    if (discovery.outcome === "parsed") {
-      totalJobs += discovery.sidecar.jobs.length;
     }
     if (totalJobs > MAX_LEGACY_IMPORT_JOBS) {
       found.complete = false;
       found.issues.push({
-        outcome: "skipped",
-        issue: {
-          code: "invalid_sidecar",
-          message: `Aggregate legacy jobs exceed the ${MAX_LEGACY_IMPORT_JOBS}-job import limit`,
-          sidecarPath: originalsLibraryPath,
-        },
+        code: "invalid_sidecar",
+        message: `Aggregate legacy jobs exceed the ${MAX_LEGACY_IMPORT_JOBS}-job import limit`,
+        sidecarPath: originalsLibraryPath,
       });
       break;
     }
@@ -1045,12 +1043,9 @@ export function discoverLegacySidecars(
         if (totalMarkerBytes > MAX_LEGACY_MARKER_BYTES) {
           found.complete = false;
           found.issues.push({
-            outcome: "skipped",
-            issue: {
-              code: "invalid_sidecar",
-              message: `Aggregate cutover marker bytes exceed the ${MAX_LEGACY_MARKER_BYTES}-byte import limit`,
-              sidecarPath: originalsLibraryPath,
-            },
+            code: "invalid_sidecar",
+            message: `Aggregate cutover marker bytes exceed the ${MAX_LEGACY_MARKER_BYTES}-byte import limit`,
+            sidecarPath: originalsLibraryPath,
           });
           break;
         }
@@ -1062,32 +1057,42 @@ export function discoverLegacySidecars(
   }
   return {
     complete: found.complete,
-    discoveries: [
-      ...discoveries,
-      ...found.issues,
-    ],
+    discoveries,
+    scanIssues: found.issues,
+    sidecarsFound: found.paths.length,
+    sidecarPaths: found.paths,
   };
 }
 
 export function acquireLegacyQueueCutoverLock(
   originalsLibraryPath: string,
 ): () => void {
-  const helperCandidates = [
-    resolve(process.cwd(), "rip_dvd", "legacy_queue_lease.py"),
-    resolve(process.cwd(), "..", "..", "rip_dvd", "legacy_queue_lease.py"),
-    resolve(
-      dirname(fileURLToPath(import.meta.url)),
-      "..",
-      "..",
-      "..",
-      "..",
-      "rip_dvd",
-      "legacy_queue_lease.py",
-    ),
-  ];
-  const helperPath = helperCandidates.find((path) => existsSync(path));
-  if (!helperPath) {
-    throw new Error("Could not locate the legacy queue lease helper");
+  const modulePath = realpathSync(fileURLToPath(import.meta.url));
+  const repositoryRoot = realpathSync(
+    resolve(dirname(modulePath), "..", "..", "..", ".."),
+  );
+  const expectedHelperPath = resolve(
+    repositoryRoot,
+    "rip_dvd",
+    "legacy_queue_lease.py",
+  );
+  let helperPath: string;
+  try {
+    const expectedHelperStat = lstatSync(expectedHelperPath);
+    helperPath = realpathSync(expectedHelperPath);
+    if (
+      !expectedHelperStat.isFile() ||
+      expectedHelperStat.isSymbolicLink() ||
+      !isPathWithinLibrary(repositoryRoot, helperPath)
+    ) {
+      throw new Error("helper is not a trusted regular file");
+    }
+  } catch (error) {
+    throw new Error(
+      `Could not locate the trusted legacy queue lease helper: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
   }
   const python = process.env.RIP_DVD_PYTHON?.trim() || "python3";
   const pythonProbe = spawnSync(python, ["--version"], { stdio: "ignore" });
@@ -1333,14 +1338,69 @@ function readBoundedUtf8File(
   }
 }
 
+function isPathWithinLibrary(
+  originalsLibraryPath: string,
+  candidatePath: string,
+): boolean {
+  const pathFromLibrary = relative(originalsLibraryPath, candidatePath);
+  return (
+    pathFromLibrary !== "" &&
+    pathFromLibrary !== ".." &&
+    !pathFromLibrary.startsWith(`..${sep}`) &&
+    !isAbsolute(pathFromLibrary)
+  );
+}
+
+function recoverPublishedSidecars(
+  originalsLibraryPath: string,
+  jobSnapshots: ReadonlyMap<string, LegacyQueueJobSnapshot>,
+): LegacySidecarDiscovery[] {
+  const sidecarPaths = new Set(
+    [...jobSnapshots.values()].map((snapshot) => snapshot.sidecarPath),
+  );
+  const discoveries: LegacySidecarDiscovery[] = [];
+  for (const recordedPath of [...sidecarPaths].sort()) {
+    const sidecarPath = resolve(recordedPath);
+    if (!isPathWithinLibrary(originalsLibraryPath, sidecarPath)) {
+      throw new Error(
+        "Invalid SQLite cutover marker: sidecar path is outside the originals library",
+      );
+    }
+    let sidecarStat;
+    try {
+      sidecarStat = lstatSync(sidecarPath);
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        "code" in error &&
+        error.code === "ENOENT"
+      ) {
+        continue;
+      }
+      throw error;
+    }
+    if (!sidecarStat.isFile() || sidecarStat.isSymbolicLink()) {
+      throw new Error(
+        "Invalid SQLite cutover marker: sidecar path must name a regular file",
+      );
+    }
+    discoveries.push(parseSidecar(sidecarPath));
+  }
+  return discoveries;
+}
+
 export function retireLegacySidecarQueue(
   originalsLibraryPath: string,
-  discoveries: readonly LegacySidecarDiscovery[],
-): LegacyQueueCutover {
+  discoveryBatch: LegacySidecarDiscoveryBatch,
+): LegacyQueueCutover | null {
+  const { discoveries } = discoveryBatch;
   const markerPath = join(
     originalsLibraryPath,
     LEGACY_QUEUE_CUTOVER_MARKER,
   );
+  if (!discoveryBatch.complete && !existsSync(markerPath)) {
+    return null;
+  }
   const discoveredSnapshots = new Map<string, LegacyQueueJobSnapshot>();
   let hasParsedSidecar = false;
   for (const discovery of discoveries) {
@@ -1439,6 +1499,7 @@ export function retireLegacySidecarQueue(
       return {
         jobSnapshots: new Map(),
         mode: "schema-one",
+        recoveryDiscoveries: null,
         upgradeSchemaOne: writeMarker,
         wasAlreadyPublished: true,
       };
@@ -1464,6 +1525,7 @@ export function retireLegacySidecarQueue(
         | { logicalKey: string; signature: string }
       > = [];
       const jobSnapshots = new Map<string, LegacyQueueJobSnapshot>();
+      let hasCompleteSnapshotLocations = true;
       for (const entry of value.legacyJobs) {
         const item = objectValue(entry);
         const logicalKey = nonEmptyString(item?.logicalKey);
@@ -1471,6 +1533,7 @@ export function retireLegacySidecarQueue(
         const hasSnapshotLocation =
           item !== null &&
           ("sidecarPath" in item || "jobIndex" in item);
+        hasCompleteSnapshotLocations &&= hasSnapshotLocation;
         const sidecarPath = hasSnapshotLocation
           ? nonEmptyString(item?.sidecarPath)
           : markerPath;
@@ -1505,6 +1568,13 @@ export function retireLegacySidecarQueue(
       return {
         jobSnapshots,
         mode: "snapshot",
+        recoveryDiscoveries:
+          !discoveryBatch.complete && hasCompleteSnapshotLocations
+            ? recoverPublishedSidecars(
+                originalsLibraryPath,
+                jobSnapshots,
+              )
+            : null,
         upgradeSchemaOne() {},
         wasAlreadyPublished: true,
       };
@@ -1516,6 +1586,7 @@ export function retireLegacySidecarQueue(
     return {
       jobSnapshots: new Map(),
       mode: "snapshot",
+      recoveryDiscoveries: null,
       upgradeSchemaOne() {},
       wasAlreadyPublished: false,
     };
@@ -1524,6 +1595,7 @@ export function retireLegacySidecarQueue(
   return {
     jobSnapshots: discoveredSnapshots,
     mode: "snapshot",
+    recoveryDiscoveries: null,
     upgradeSchemaOne() {},
     wasAlreadyPublished: false,
   };

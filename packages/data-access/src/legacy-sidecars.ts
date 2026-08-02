@@ -8,7 +8,15 @@ import {
   resolveLegacyOriginalsLibrary,
   retireLegacySidecarQueue,
 } from "./internal/legacy-sidecars.js";
-import type { LegacySidecarDataAccess } from "./types.js";
+import type { LegacySidecarDataAccess } from "./legacy-sidecar-types.js";
+
+export type {
+  LegacySidecarAccess,
+  LegacySidecarDataAccess,
+  LegacySidecarImportIssue,
+  LegacySidecarImportIssueCode,
+  LegacySidecarImportReport,
+} from "./legacy-sidecar-types.js";
 
 function failureMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);

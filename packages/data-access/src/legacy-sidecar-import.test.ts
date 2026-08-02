@@ -1434,6 +1434,11 @@ describe("legacy sidecar import", () => {
       originalsLibraryPath: fixture.originalsLibraryPath,
     });
 
+    expect(report).toMatchObject({
+      sidecarsFound: 10,
+      sidecarsImported: 0,
+      sidecarsSkipped: 10,
+    });
     expect(report.issues).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -1449,6 +1454,50 @@ describe("legacy sidecar import", () => {
         join(fixture.originalsLibraryPath, ".rip-dvd-sqlite-catalog"),
       ),
     ).toBe(false);
+    fixture.access.close();
+  });
+
+  it("does not let corrupt payload bytes suppress a valid sidecar import", () => {
+    const fixture = createFixture();
+    for (let index = 1; index <= 9; index += 1) {
+      writeFileSync(
+        join(
+          fixture.originalsLibraryPath,
+          `Corrupt Payload ${index}.rip-dvd.json`,
+        ),
+        `{"padding":"${"x".repeat(950_000)}`,
+      );
+    }
+
+    const report = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+
+    expect(report).toMatchObject({
+      sidecarsFound: 10,
+      sidecarsImported: 1,
+      sidecarsSkipped: 9,
+    });
+    expect(report.issues).toHaveLength(9);
+    expect(report.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "corrupt_sidecar",
+          sidecarPath: join(
+            fixture.originalsLibraryPath,
+            "Corrupt Payload 1.rip-dvd.json",
+          ),
+        }),
+      ]),
+    );
+    expect(report.issues).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          message: expect.stringMatching(/aggregate.*bytes/i),
+        }),
+      ]),
+    );
+    expect(fixture.access.encodeJobs.list()).toHaveLength(2);
     fixture.access.close();
   });
 
@@ -1489,6 +1538,11 @@ describe("legacy sidecar import", () => {
       originalsLibraryPath: fixture.originalsLibraryPath,
     });
 
+    expect(report).toMatchObject({
+      sidecarsFound: 11,
+      sidecarsImported: 0,
+      sidecarsSkipped: 11,
+    });
     expect(report.issues).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -1542,6 +1596,11 @@ describe("legacy sidecar import", () => {
       originalsLibraryPath: fixture.originalsLibraryPath,
     });
 
+    expect(report).toMatchObject({
+      sidecarsFound: 2,
+      sidecarsImported: 0,
+      sidecarsSkipped: 2,
+    });
     expect(report.issues).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -1679,6 +1738,37 @@ describe("legacy sidecar import", () => {
       ),
     ).toBe(false);
     fixture.access.close();
+  });
+
+  it("does not count a depth-limit scan issue as a sidecar", () => {
+    const root = temporaryDirectories.create("rip-dvd-depth-report-");
+    const originalsLibraryPath = join(root, "originals");
+    mkdirSync(originalsLibraryPath);
+    let deepDirectory = originalsLibraryPath;
+    for (let depth = 1; depth <= 33; depth += 1) {
+      deepDirectory = join(deepDirectory, `depth-${depth}`);
+      mkdirSync(deepDirectory);
+    }
+    const access = createLegacySidecarDataAccess({
+      databasePath: join(root, "catalog.sqlite"),
+    });
+
+    const report = access.legacySidecars.importLibrary({
+      originalsLibraryPath,
+    });
+
+    expect(report).toMatchObject({
+      sidecarsFound: 0,
+      sidecarsImported: 0,
+      sidecarsSkipped: 0,
+    });
+    expect(report.issues).toEqual([
+      expect.objectContaining({
+        code: "invalid_sidecar",
+        message: expect.stringMatching(/depth.*32.*limit/i),
+      }),
+    ]);
+    access.close();
   });
 
   it("rejects malformed present metadata without aborting valid sidecars", () => {
