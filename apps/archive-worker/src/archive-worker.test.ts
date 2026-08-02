@@ -33,6 +33,22 @@ function openTestDataAccess() {
   return createDataAccess({ databasePath: join(directory, "rip-dvd.sqlite") });
 }
 
+function stableDeviceBinding() {
+  return {
+    bindOpticalDrive: vi.fn(
+      async (drive: DiscoveredOpticalDrive, signal: AbortSignal) => {
+        signal.throwIfAborted();
+        return { deviceInstanceToken: "test-device-instance", drive };
+      },
+    ),
+    confirmOpticalDrive: vi.fn(
+      async (_binding: unknown, signal: AbortSignal) => {
+        signal.throwIfAborted();
+      },
+    ),
+  };
+}
+
 afterEach(() => {
   vi.useRealTimers();
   for (const directory of temporaryDirectories.splice(0)) {
@@ -46,6 +62,7 @@ describe("archive worker polling", () => {
     vi.setSystemTime(new Date("2026-07-26T18:00:00.000Z"));
     const access = openTestDataAccess();
     const hardware: OpticalDriveHardware = {
+      ...stableDeviceBinding(),
       discover: vi.fn().mockResolvedValue([
         {
           devicePath: "/dev/sr0",
@@ -152,7 +169,7 @@ describe("archive worker polling", () => {
                   vendor: "Pioneer",
                   model: "DVD-RW",
                   serial:
-                    discoveryCount <= 2 ? "OLD-DRIVE" : "NEW-DRIVE",
+                    discoveryCount <= 3 ? "OLD-DRIVE" : "NEW-DRIVE",
                 },
               ],
             }),
@@ -217,6 +234,227 @@ describe("archive worker polling", () => {
     access.close();
   });
 
+  it("fails closed when same-path hardware has no serial continuity evidence", async () => {
+    const access = openTestDataAccess();
+    const log = vi.fn();
+    const scanDvd = vi.fn().mockResolvedValue({
+      fingerprint:
+        "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      volumeLabel: "UNPROVEN_DISC",
+      scanData: {
+        schemaVersion: 2,
+        contentId:
+          "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        titles: [
+          {
+            number: 1,
+            durationSeconds: 60,
+            chapters: 1,
+            audioStreams: [],
+            subtitles: [],
+          },
+        ],
+      },
+    });
+
+    await pollArchiveWorker({
+      access,
+      configuredDevicePath: "/dev/sr0",
+      hardware: {
+        ...stableDeviceBinding(),
+        discover: vi.fn().mockResolvedValue([
+          {
+            devicePath: "/dev/sr0",
+            vendor: "Pioneer",
+            product: "DVD-RW",
+          },
+        ]),
+        scanDvd,
+      },
+      log,
+      signal: new AbortController().signal,
+    });
+
+    expect(access.catalog.listOpticalDrives()).toEqual([
+      expect.objectContaining({
+        devicePath: "/dev/sr0",
+        isEnabled: false,
+        serialNumber: null,
+      }),
+    ]);
+    expect(access.catalog.listDetectedDiscs()).toEqual([]);
+    expect(scanDvd).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(
+      "DVD scan failed for /dev/sr0: Optical Drive identity changed before DVD scanning",
+    );
+    access.close();
+  });
+
+  it("does not open replacement hardware that takes the authorized path before scanning", async () => {
+    const access = openTestDataAccess();
+    const log = vi.fn();
+    let discoveryCount = 0;
+    const runner: CommandRunner = {
+      run: vi.fn(async (executable) => {
+        if (executable === "lsblk") {
+          discoveryCount += 1;
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              blockdevices: [
+                {
+                  path: "/dev/sr0",
+                  type: "rom",
+                  vendor: "Pioneer",
+                  model: "DVD-RW",
+                  serial:
+                    discoveryCount <= 2 ? "DRIVE-001" : "REPLACEMENT-002",
+                },
+              ],
+            }),
+            stderr: "",
+          };
+        }
+        if (executable === "lsdvd") {
+          return {
+            exitCode: 0,
+            stdout: [
+              "Disc Title: REPLACEMENT_DISC",
+              "Title: 01, Length: 00:01:00.000 Chapters: 1, Cells: 1, Audio streams: 0, Subpictures: 0",
+            ].join("\n"),
+            stderr: "",
+          };
+        }
+        if (executable === "blockdev") {
+          return { exitCode: 0, stdout: "1024\n", stderr: "" };
+        }
+        throw new Error(`Unexpected command: ${executable}`);
+      }),
+    };
+    const hardwareOptions = {
+      platform: "linux" as NodeJS.Platform,
+      runner,
+      contentReader: {
+        hash: vi
+          .fn()
+          .mockResolvedValue(
+            "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          ),
+      },
+      mediaGenerationObserver: {
+        observe: vi.fn().mockResolvedValue("7"),
+      },
+      deviceInstanceObserver: {
+        observe: vi.fn().mockResolvedValue("42"),
+      },
+    };
+
+    await pollArchiveWorker({
+      access,
+      configuredDevicePath: "/dev/sr0",
+      hardware: createLinuxOpticalDriveHardware(hardwareOptions),
+      log,
+      signal: new AbortController().signal,
+    });
+
+    expect(access.catalog.listDetectedDiscs()).toEqual([]);
+    expect(access.catalog.listOpticalDrives()).toEqual([
+      expect.objectContaining({
+        isEnabled: false,
+        serialNumber: "REPLACEMENT-002",
+      }),
+    ]);
+    expect(runner.run).not.toHaveBeenCalledWith(
+      "lsdvd",
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(log).toHaveBeenCalledWith(
+      "DVD scan failed for /dev/sr0: Optical Drive identity changed before DVD scanning",
+    );
+    access.close();
+  });
+
+  it("does not persist a replacement scan across an A-to-B-to-A device swap", async () => {
+    const access = openTestDataAccess();
+    const log = vi.fn();
+    const runner: CommandRunner = {
+      run: vi.fn(async (executable) => {
+        if (executable === "lsblk") {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              blockdevices: [
+                {
+                  path: "/dev/sr0",
+                  type: "rom",
+                  vendor: "Pioneer",
+                  model: "DVD-RW",
+                  serial: "DRIVE-001",
+                },
+              ],
+            }),
+            stderr: "",
+          };
+        }
+        if (executable === "lsdvd") {
+          return {
+            exitCode: 0,
+            stdout: [
+              "Disc Title: TRANSIENT_REPLACEMENT",
+              "Title: 01, Length: 00:01:00.000 Chapters: 1, Cells: 1, Audio streams: 0, Subpictures: 0",
+            ].join("\n"),
+            stderr: "",
+          };
+        }
+        if (executable === "blockdev") {
+          return { exitCode: 0, stdout: "1024\n", stderr: "" };
+        }
+        throw new Error(`Unexpected command: ${executable}`);
+      }),
+    };
+    const hardware = createLinuxOpticalDriveHardware({
+      platform: "linux",
+      runner,
+      contentReader: {
+        hash: vi
+          .fn()
+          .mockResolvedValue(
+            "sha256:abababababababababababababababababababababababababababababababab",
+          ),
+      },
+      mediaGenerationObserver: {
+        observe: vi.fn().mockResolvedValue("7"),
+      },
+      deviceInstanceObserver: {
+        observe: vi
+          .fn()
+          .mockResolvedValueOnce("41")
+          .mockResolvedValueOnce("41")
+          .mockResolvedValue("43"),
+      },
+    });
+
+    await pollArchiveWorker({
+      access,
+      configuredDevicePath: "/dev/sr0",
+      hardware,
+      log,
+      signal: new AbortController().signal,
+    });
+
+    expect(access.catalog.listDetectedDiscs()).toEqual([]);
+    expect(runner.run).toHaveBeenCalledWith(
+      "lsdvd",
+      ["-Oh", "-a", "-c", "-s", "/dev/sr0"],
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(log).toHaveBeenCalledWith(
+      "DVD scan failed for /dev/sr0: Optical Drive instance changed during DVD scanning",
+    );
+    access.close();
+  });
+
   it("enables a newly discovered Optical Drive configured through a device alias", async () => {
     const deviceDirectory = mkdtempSync(join(tmpdir(), "rip-dvd-device-alias-"));
     temporaryDirectories.push(deviceDirectory);
@@ -232,8 +470,13 @@ describe("archive worker polling", () => {
       access,
       configuredDevicePath: configuredAliasPath,
       hardware: {
+        ...stableDeviceBinding(),
         discover: vi.fn().mockResolvedValue([
-          { devicePath: discoveredDevicePath, displayName: "Aliased drive" },
+          {
+            devicePath: discoveredDevicePath,
+            displayName: "Aliased drive",
+            serialNumber: "ALIAS-001",
+          },
         ]),
         scanDvd,
       },
@@ -248,7 +491,9 @@ describe("archive worker polling", () => {
       }),
     ]);
     expect(scanDvd).toHaveBeenCalledWith(
-      expect.objectContaining({ devicePath: discoveredDevicePath }),
+      expect.objectContaining({
+        drive: expect.objectContaining({ devicePath: discoveredDevicePath }),
+      }),
       expect.any(AbortSignal),
     );
     access.close();
@@ -267,6 +512,7 @@ describe("archive worker polling", () => {
       access,
       configuredDevicePath: configuredAliasPath,
       hardware: {
+        ...stableDeviceBinding(),
         discover: vi.fn().mockResolvedValue([
           {
             devicePath: discoveredDevicePath,
@@ -304,7 +550,9 @@ describe("archive worker polling", () => {
     ]);
     expect(scanDvd).toHaveBeenCalledTimes(2);
     expect(scanDvd).toHaveBeenLastCalledWith(
-      expect.objectContaining({ devicePath: discoveredDevicePath }),
+      expect.objectContaining({
+        drive: expect.objectContaining({ devicePath: discoveredDevicePath }),
+      }),
       expect.any(AbortSignal),
     );
     access.close();
@@ -336,6 +584,10 @@ describe("archive worker polling", () => {
           { devicePath: originalDevicePath, serialNumber: "OLD-001" },
           { devicePath: replacementDevicePath, serialNumber: "NEW-002" },
         ])
+        .mockResolvedValueOnce([
+          { devicePath: originalDevicePath, serialNumber: "OLD-001" },
+          { devicePath: replacementDevicePath, serialNumber: "NEW-002" },
+        ])
         .mockResolvedValue([
           { devicePath: replacementDevicePath, serialNumber: "NEW-002" },
         ]);
@@ -343,7 +595,7 @@ describe("archive worker polling", () => {
       const options = {
         access,
         configuredDevicePath: configuredAliasPath,
-        hardware: { discover, scanDvd },
+        hardware: { ...stableDeviceBinding(), discover, scanDvd },
         log: vi.fn(),
         signal: new AbortController().signal,
       };
@@ -368,7 +620,9 @@ describe("archive worker polling", () => {
       ]);
       expect(scanDvd).toHaveBeenCalledTimes(1);
       expect(scanDvd).toHaveBeenCalledWith(
-        expect.objectContaining({ devicePath: originalDevicePath }),
+        expect.objectContaining({
+          drive: expect.objectContaining({ devicePath: originalDevicePath }),
+        }),
         expect.any(AbortSignal),
       );
       access.close();
@@ -380,7 +634,11 @@ describe("archive worker polling", () => {
     vi.setSystemTime(new Date("2026-07-26T18:00:00.000Z"));
     const access = openTestDataAccess();
     const discover = vi.fn().mockResolvedValue([
-      { devicePath: "/dev/sr0", displayName: "Archive drive" },
+      {
+        devicePath: "/dev/sr0",
+        displayName: "Archive drive",
+        serialNumber: "ARCHIVE-001",
+      },
     ]);
     const scanDvd = vi.fn().mockResolvedValue({
       fingerprint:
@@ -404,7 +662,7 @@ describe("archive worker polling", () => {
     const options = {
       access,
       configuredDevicePath: "/dev/sr0",
-      hardware: { discover, scanDvd },
+      hardware: { ...stableDeviceBinding(), discover, scanDvd },
       log: vi.fn(),
       signal: new AbortController().signal,
     };
@@ -448,6 +706,7 @@ describe("archive worker polling", () => {
       .mockResolvedValueOnce(attachedDrive)
       .mockResolvedValueOnce(attachedDrive)
       .mockResolvedValueOnce(attachedDrive)
+      .mockResolvedValueOnce(attachedDrive)
       .mockResolvedValueOnce([])
       .mockResolvedValue(attachedDrive);
     const scanDvd = vi.fn().mockResolvedValue({
@@ -473,7 +732,7 @@ describe("archive worker polling", () => {
     const options = {
       access,
       configuredDevicePath: "/dev/sr0",
-      hardware: { discover, scanDvd },
+      hardware: { ...stableDeviceBinding(), discover, scanDvd },
       log: vi.fn(),
       signal: new AbortController().signal,
     };
@@ -535,14 +794,22 @@ describe("archive worker polling", () => {
     const access = openTestDataAccess();
     const log = vi.fn();
     const discover = vi.fn().mockResolvedValue([
-      { devicePath: "/dev/sr0", displayName: "Enabled drive" },
-      { devicePath: "/dev/sr1", displayName: "Disabled drive" },
+      {
+        devicePath: "/dev/sr0",
+        displayName: "Enabled drive",
+        serialNumber: "ENABLED-001",
+      },
+      {
+        devicePath: "/dev/sr1",
+        displayName: "Disabled drive",
+        serialNumber: "DISABLED-002",
+      },
     ]);
     const scanDvd = vi.fn().mockResolvedValueOnce(null);
     const options = {
       access,
       configuredDevicePath: "/dev/sr0",
-      hardware: { discover, scanDvd },
+      hardware: { ...stableDeviceBinding(), discover, scanDvd },
       log,
       signal: new AbortController().signal,
     };
@@ -573,6 +840,7 @@ describe("archive worker polling", () => {
         access,
         configuredDevicePath: "/dev/sr0",
         hardware: {
+          ...stableDeviceBinding(),
           discover: vi.fn().mockRejectedValue(new Error("malformed lsblk")),
           scanDvd: vi.fn(),
         },
@@ -630,8 +898,13 @@ describe("archive worker polling", () => {
       access,
       configuredDevicePath: "/dev/sr1",
       hardware: {
+        ...stableDeviceBinding(),
         discover: vi.fn().mockResolvedValue([
-          { devicePath: "/dev/sr1", displayName: "Second drive" },
+          {
+            devicePath: "/dev/sr1",
+            displayName: "Second drive",
+            serialNumber: "SECOND-001",
+          },
         ]),
         scanDvd: vi.fn().mockResolvedValue({
           fingerprint:
@@ -699,7 +972,12 @@ describe("archive worker polling", () => {
       access,
       configuredDevicePath: "/dev/sr1",
       hardware: {
-        discover: vi.fn().mockResolvedValue([{ devicePath: "/dev/sr1" }]),
+        ...stableDeviceBinding(),
+        discover: vi
+          .fn()
+          .mockResolvedValue([
+            { devicePath: "/dev/sr1", serialNumber: "SECOND-001" },
+          ]),
         scanDvd: vi.fn().mockResolvedValue({
           fingerprint:
             "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -740,7 +1018,7 @@ describe("archive worker polling", () => {
     const access = openTestDataAccess();
     const controller = new AbortController();
     const scanDvd = vi.fn(
-      async (_drive: DiscoveredOpticalDrive, signal: AbortSignal) => {
+      async (_binding: unknown, signal: AbortSignal) => {
         controller.abort(new Error("worker shutdown"));
         signal.throwIfAborted();
         return null;
@@ -753,7 +1031,12 @@ describe("archive worker polling", () => {
         access,
         configuredDevicePath: "/dev/sr0",
         hardware: {
-          discover: vi.fn().mockResolvedValue([{ devicePath: "/dev/sr0" }]),
+          ...stableDeviceBinding(),
+          discover: vi
+            .fn()
+            .mockResolvedValue([
+              { devicePath: "/dev/sr0", serialNumber: "CANCEL-001" },
+            ]),
           scanDvd,
         },
         log: vi.fn(),

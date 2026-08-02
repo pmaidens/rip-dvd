@@ -14,12 +14,25 @@ export interface ScannedDvd {
   scanData: DvdTitleMap;
 }
 
+export interface BoundOpticalDrive {
+  readonly deviceInstanceToken: string;
+  readonly drive: DiscoveredOpticalDrive;
+}
+
 export interface OpticalDriveHardware {
   discover(signal: AbortSignal): Promise<readonly DiscoveredOpticalDrive[]>;
-  scanDvd(
+  bindOpticalDrive(
     drive: DiscoveredOpticalDrive,
     signal: AbortSignal,
+  ): Promise<BoundOpticalDrive>;
+  scanDvd(
+    binding: BoundOpticalDrive,
+    signal: AbortSignal,
   ): Promise<ScannedDvd | null>;
+  confirmOpticalDrive(
+    binding: BoundOpticalDrive,
+    signal: AbortSignal,
+  ): Promise<void>;
 }
 
 export interface PollArchiveWorkerOptions {
@@ -58,9 +71,11 @@ function hasSameHardwareIdentity(
   expected: DiscoveredOpticalDrive,
   observed: DiscoveredOpticalDrive,
 ): boolean {
+  const expectedSerial = normalizeHardwareEvidence(expected.serialNumber);
   return (
     expected.devicePath === observed.devicePath &&
-    normalizeHardwareEvidence(expected.serialNumber) ===
+    expectedSerial !== undefined &&
+    expectedSerial ===
       normalizeHardwareEvidence(observed.serialNumber) &&
     normalizeHardwareEvidence(expected.vendor) ===
       normalizeHardwareEvidence(observed.vendor) &&
@@ -108,6 +123,13 @@ async function confirmAuthorizedDrive({
     (drive) => drive.devicePath === expected.devicePath,
   );
   if (observed === undefined || !hasSameHardwareIdentity(expected, observed)) {
+    if (observed !== undefined) {
+      access.catalog.upsertOpticalDrive({
+        ...observed,
+        isEnabled: false,
+        isPresent: true,
+      });
+    }
     throw new Error(`Optical Drive identity changed before ${phase}`);
   }
   const confirmed = drives.find(
@@ -158,10 +180,19 @@ export async function pollArchiveWorker({
         phase: "DVD scanning",
         signal,
       });
-      const scan = await hardware.scanDvd(
+      const binding = await hardware.bindOpticalDrive(
         confirmedBeforeScan.discovered,
         signal,
       );
+      await confirmAuthorizedDrive({
+        access,
+        configuredCanonicalPath,
+        expected: binding.drive,
+        hardware,
+        phase: "DVD scanning",
+        signal,
+      });
+      const scan = await hardware.scanDvd(binding, signal);
       signal.throwIfAborted();
       if (scan === null) {
         continue;
@@ -174,6 +205,7 @@ export async function pollArchiveWorker({
         phase: "DVD persistence",
         signal,
       });
+      await hardware.confirmOpticalDrive(binding, signal);
       const disc = access.catalog.registerDetectedDisc({
         opticalDriveId: confirmedBeforePersistence.persisted.id,
         discKind: "dvd",

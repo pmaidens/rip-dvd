@@ -20,6 +20,13 @@ describe("database-backed dashboard over HTTP", () => {
   it("renders persisted discovery and scan results including an already archived match", async () => {
     const access = dataAccessFixture.create();
     const hardware: OpticalDriveHardware = {
+      bindOpticalDrive: vi.fn(async (drive, signal) => {
+        signal.throwIfAborted();
+        return { deviceInstanceToken: "mock-device-instance", drive };
+      }),
+      confirmOpticalDrive: vi.fn(async (_binding, signal) => {
+        signal.throwIfAborted();
+      }),
       discover: vi.fn().mockResolvedValue([
         {
           devicePath: "/dev/sr0",
@@ -102,7 +109,7 @@ describe("database-backed dashboard over HTTP", () => {
     expect(html).toContain(
       "sha256:2222222222222222222222222222222222222222222222222222222222222222",
     );
-    expect(hardware.discover).toHaveBeenCalledTimes(3);
+    expect(hardware.discover).toHaveBeenCalledTimes(4);
     expect(hardware.scanDvd).toHaveBeenCalledOnce();
   });
 
