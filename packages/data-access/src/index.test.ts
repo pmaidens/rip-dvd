@@ -1,4 +1,10 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -138,6 +144,12 @@ function createTestDatabasePath(): string {
   const directory = mkdtempSync(join(tmpdir(), "rip-dvd-data-access-"));
   temporaryDirectories.push(directory);
   return join(directory, "rip-dvd.sqlite");
+}
+
+function createTestMigrationsFolder(): string {
+  const directory = mkdtempSync(join(tmpdir(), "rip-dvd-migrations-"));
+  temporaryDirectories.push(directory);
+  return directory;
 }
 
 function openTestDatabase(databasePath = createTestDatabasePath()) {
@@ -1069,6 +1081,104 @@ describe("data-access facade", () => {
       }),
     ]);
     access.close();
+  });
+
+  it("migrates a database that applied the preceding optical-drive migration", () => {
+    const databasePath = createTestDatabasePath();
+    const precedingMigrationsFolder = createTestMigrationsFolder();
+    for (const migrationName of [
+      "20260722045326_core-catalog-and-queues",
+      "20260726160810_encoding-profile-active-state",
+    ]) {
+      const targetDirectory = join(precedingMigrationsFolder, migrationName);
+      mkdirSync(targetDirectory);
+      writeFileSync(
+        join(targetDirectory, "migration.sql"),
+        readFileSync(
+          new URL(`../drizzle/${migrationName}/migration.sql`, import.meta.url),
+        ),
+      );
+    }
+    const precedingMigrationName =
+      "20260802150655_optical-drive-configuration-default";
+    const precedingMigrationDirectory = join(
+      precedingMigrationsFolder,
+      precedingMigrationName,
+    );
+    mkdirSync(precedingMigrationDirectory);
+    writeFileSync(
+      join(precedingMigrationDirectory, "migration.sql"),
+      `ALTER TABLE \`optical_drives\` ADD \`configuration_default_applied\` integer DEFAULT true NOT NULL;
+--> statement-breakpoint
+ALTER TABLE \`optical_drives\` ADD \`is_configured_target\` integer DEFAULT false NOT NULL;`,
+    );
+
+    createDataAccess({
+      databasePath,
+      migrationsFolder: precedingMigrationsFolder,
+    }).close();
+    const precedingSqlite = new DatabaseSync(databasePath);
+    precedingSqlite.exec(`
+      insert into optical_drives (
+        id, device_path, is_enabled, configuration_default_applied,
+        is_configured_target, is_present, last_seen_at, created_at, updated_at
+      ) values (
+        'preceding-drive', '/dev/sr0', 0, 1, 1, 1, 0, 0, 0
+      );
+    `);
+    precedingSqlite.close();
+
+    const migrated = openTestDatabase(databasePath);
+    expect(
+      migrated.catalog.reconcileOpticalDrives([
+        { devicePath: "/dev/sr0", isConfiguredDevice: true },
+      ]),
+    ).toEqual([
+      expect.objectContaining({
+        id: "preceding-drive",
+        devicePath: "/dev/sr0",
+        isEnabled: false,
+      }),
+    ]);
+    migrated.close();
+
+    const sqlite = new DatabaseSync(databasePath);
+    expect(
+      sqlite
+        .prepare("select name from pragma_table_info('optical_drives')")
+        .all()
+        .map(({ name }) => name),
+    ).toEqual(
+      expect.arrayContaining([
+        "configuration_default_resolved",
+        "is_configured_target",
+      ]),
+    );
+    expect(
+      sqlite
+        .prepare("select name from pragma_table_info('optical_drives')")
+        .all(),
+    ).not.toContainEqual({ name: "configuration_default_applied" });
+    expect(
+      sqlite
+        .prepare(
+          "select name from __drizzle_migrations order by id desc limit 2",
+        )
+        .all(),
+    ).toEqual([
+      {
+        name: "20260802190921_optical-drive-configuration-default-resolved",
+      },
+      { name: precedingMigrationName },
+    ]);
+    expect(
+      sqlite
+        .prepare(
+          "select configuration_default_resolved as resolved from optical_drives where id = 'preceding-drive'",
+        )
+        .get(),
+    ).toEqual({ resolved: 1 });
+    sqlite.close();
   });
 
   it("rejects malformed and resource-unbounded DVD scans at the catalog facade", () => {
