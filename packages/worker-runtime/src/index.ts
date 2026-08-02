@@ -9,6 +9,12 @@ export interface WorkerLifecycleHost<TimerHandle> {
   setInterval(callback: () => void, intervalMs: number): TimerHandle;
 }
 
+export interface AsyncWorkerLifecycleHost {
+  log(message: string): void;
+  once(signal: WorkerSignal, listener: () => void): void;
+  removeListener(signal: WorkerSignal, listener: () => void): void;
+}
+
 export interface WorkerLifecycleOptions {
   pollIntervalMs: number;
   readyMessage: string;
@@ -25,6 +31,17 @@ export interface ConfiguredWorkerDependencies<TimerHandle> {
   lifecycleHost: WorkerLifecycleHost<TimerHandle>;
 }
 
+export interface ConfiguredAsyncWorkerDependencies {
+  environment: Readonly<Record<string, string | undefined>>;
+  lifecycleHost: AsyncWorkerLifecycleHost;
+}
+
+export interface AsyncWorkerContext {
+  config: RuntimeConfig;
+  log(message: string): void;
+  signal: AbortSignal;
+}
+
 export const nodeWorkerLifecycleHost: WorkerLifecycleHost<
   ReturnType<typeof setInterval>
 > = {
@@ -32,6 +49,13 @@ export const nodeWorkerLifecycleHost: WorkerLifecycleHost<
   log: (message) => console.log(message),
   once: (signal, listener) => process.once(signal, listener),
   setInterval,
+};
+
+export const nodeAsyncWorkerLifecycleHost: AsyncWorkerLifecycleHost = {
+  log: (message) => console.log(message),
+  once: (signal, listener) => process.once(signal, listener),
+  removeListener: (signal, listener) =>
+    process.removeListener(signal, listener),
 };
 
 export function startWorkerLifecycle<TimerHandle>(
@@ -71,4 +95,39 @@ export function startConfiguredWorker<TimerHandle>(
   }
 
   startWorkerLifecycle(lifecycleOptions, nodeWorkerLifecycleHost);
+}
+
+export async function runConfiguredAsyncWorker(
+  descriptor: ConfiguredWorkerDescriptor,
+  run: (context: AsyncWorkerContext) => Promise<void>,
+  dependencies?: ConfiguredAsyncWorkerDependencies,
+): Promise<void> {
+  const config = loadConfig(dependencies?.environment);
+  const host = dependencies?.lifecycleHost ?? nodeAsyncWorkerLifecycleHost;
+  const controller = new AbortController();
+  const stop = (signal: WorkerSignal): void => {
+    if (controller.signal.aborted) {
+      return;
+    }
+    host.log(`${descriptor.workerName} worker received ${signal}; stopping`);
+    controller.abort(
+      new Error(`${descriptor.workerName} worker received ${signal}`),
+    );
+  };
+  const stopForSigint = () => stop("SIGINT");
+  const stopForSigterm = () => stop("SIGTERM");
+
+  host.once("SIGINT", stopForSigint);
+  host.once("SIGTERM", stopForSigterm);
+  host.log(descriptor.readyMessage(config));
+  try {
+    await run({
+      config,
+      log: (message) => host.log(message),
+      signal: controller.signal,
+    });
+  } finally {
+    host.removeListener("SIGINT", stopForSigint);
+    host.removeListener("SIGTERM", stopForSigterm);
+  }
 }

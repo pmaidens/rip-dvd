@@ -316,7 +316,74 @@ The smoke command removes only its short-lived write-probe containers and
 deliberately retains the worker containers, uniquely named volumes, and
 temporary bind directories for non-destructive inspection.
 
-The archive worker image includes DVD discovery tools and the encode worker image includes HandBrake and ffmpeg. Optical-device passthrough is intentionally not enabled by the scaffold; add the appropriate Linux device mapping when the archive workflow is implemented.
+The archive worker image includes `lsblk` and `lsdvd`; the encode worker image
+includes HandBrake and ffmpeg. The archive worker discovers Linux block devices
+reported as optical drives, records attached/missing and last-seen state in
+SQLite, and scans DVDs only in enabled drives. The configured
+`RIP_DVD_ARCHIVE_DEVICE_PATH` receives the enabled default when its physical
+drive is first proven, including when a configured device alias appears after
+the canonical drive. Other new drives are recorded disabled so attaching
+temporary hardware does not silently change scanning behavior. A matching
+nonempty serial is authoritative continuity evidence even when vendor or model
+text changes. Without matching serial proof, a stable hardware identity change
+at an existing device path resets the replacement to disabled rather than
+inheriting the previous drive's authorization. Retargeting a configured alias
+to a different canonical device path consumes the configured default. A new or
+identity-changed target is disabled, while an existing identity-stable target
+keeps its current enabled/disabled authorization. A drive that disappears may
+keep authorization only when the same serial proves continuity when it returns;
+uncertain same-path hardware fails closed.
+
+Docker cannot see host optical devices unless they are passed through. Add only
+the devices the archive worker should inspect in a local Compose override, for
+example:
+
+```yaml
+services:
+  archive-worker:
+    devices:
+      - /dev/sr0:/dev/sr0:r
+    group_add:
+      - "${RIP_DVD_OPTICAL_DEVICE_GID:-24}"
+```
+
+Set `RIP_DVD_OPTICAL_DEVICE_GID` to the host group that can read the device
+(often the `cdrom` group). The read-only device permission is sufficient for
+discovery and scanning; this worker does not eject media.
+
+The worker runs discovery on each configured poll interval. An empty drive is a
+normal state. Scanner failures are logged per drive without hiding other drives,
+and a failed discovery does not mark every known drive missing. Successful DVD
+scans store title numbers, durations, chapter counts, bounded per-stream
+language/format/channel/source-ID metadata, and a deterministic SHA-256 content
+identity over every declared raw-disc byte. Before trusting a cached scan and
+again after a new scan, the worker opens the device read-only and nonblocking.
+That open actively asks Linux's optical driver to observe media events before
+the worker reads the resulting sysfs generation. A generation change fails the
+scan closed so one disc's title map cannot be bound to another disc's
+fingerprint. If active generation observation is unavailable, that drive's scan
+also fails closed and retries on a later poll. The potentially blocking open is
+isolated in a bounded helper process. Timeout or shutdown requests cancellation,
+kills and detaches the helper, and retains its per-drive single-flight tombstone
+until the child process is confirmed closed. Later polls reuse that tombstone;
+capacity is recovered and a fresh retry is admitted only after confirmed close.
+Raw-disc open/read/hash work uses the same bounded helper-process lifecycle, so
+a kernel-blocked device operation cannot keep the archive worker alive.
+Reads are shell-free, size-capped, incremental, timed out, and
+cancellation-aware.
+Repeated polls update the same Detected Disc. A fingerprint
+already present in Original Disc Archives is shown as **Already archived**, and
+any obsolete queued Archive Job for that fingerprint is removed by the
+data-access facade. Discovery never approves or queues new archive work; those
+actions remain explicit later workflows.
+
+The dashboard's HTTP snapshot carries review details. One-second SSE activity
+events retain up to 100 live Detected Discs and jobs ahead of 20 terminal-history
+records, include every present or enabled Optical Drive plus at most 20 disabled
+missing-history drives, and carry no title maps. Bounded relationship rows
+preserve labels. The browser
+merges unchanged summaries into its cache and reloads HTTP details when a disc
+is first observed or rescanned.
 
 ## SQLite Catalog and Queues
 

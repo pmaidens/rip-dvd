@@ -44,6 +44,7 @@ import {
   requireNonEmpty,
   requirePositiveSafeInteger,
 } from "./internal/validation.js";
+import { decodeDvdTitleMap } from "./dvd-scan.js";
 import {
   DomainInvariantError,
   InvalidStatusTransitionError,
@@ -53,9 +54,11 @@ import type {
   ArchiveJobClaimToken,
   ArchiveJobId,
   ArchiveJob,
+  ChronologicalListOptions,
   ConsistentReadAccess,
   DataAccess,
   DetectedDiscId,
+  DetectedDiscListOptions,
   DetectedDiscStatus,
   DiscSelection,
   DiscSelectionId,
@@ -63,6 +66,7 @@ import type {
   EncodeJobId,
   EncodeJob,
   EncodingProfileId,
+  JobStatus,
   MediaDomain,
   MediaItemId,
   OpticalDriveId,
@@ -72,6 +76,7 @@ import type {
 } from "./types.js";
 
 export type * from "./types.js";
+export * from "./dvd-scan.js";
 export * from "./errors.js";
 
 const BUSY_TIMEOUT_MS = 5_000;
@@ -82,6 +87,19 @@ const DEFAULT_MIGRATIONS_FOLDER = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../drizzle",
 );
+const opticalDriveSelection = {
+  id: opticalDrives.id,
+  devicePath: opticalDrives.devicePath,
+  displayName: opticalDrives.displayName,
+  vendor: opticalDrives.vendor,
+  product: opticalDrives.product,
+  serialNumber: opticalDrives.serialNumber,
+  isEnabled: opticalDrives.isEnabled,
+  isPresent: opticalDrives.isPresent,
+  lastSeenAt: opticalDrives.lastSeenAt,
+  createdAt: opticalDrives.createdAt,
+  updatedAt: opticalDrives.updatedAt,
+};
 
 const detectedDiscTransitions: Readonly<
   Record<DetectedDiscStatus, readonly DetectedDiscStatus[]>
@@ -92,6 +110,94 @@ const detectedDiscTransitions: Readonly<
   archived: [],
   rejected: ["detected"],
 };
+
+interface ChronologicalRecord {
+  id: string;
+}
+
+function createBoundedChronologicalList<
+  RecordType extends ChronologicalRecord,
+  Status extends string,
+  Options extends ChronologicalListOptions,
+>({
+  activeStatuses,
+  historyStatuses,
+  chronologicalAt,
+  readAll,
+  readNewest,
+}: {
+  activeStatuses: Status[];
+  historyStatuses: Status[];
+  chronologicalAt(record: RecordType): Date;
+  readAll(
+    statuses: Status[] | undefined,
+    options: Options | undefined,
+  ): RecordType[];
+  readNewest(
+    statuses: Status[] | undefined,
+    limit: number,
+    options: Options | undefined,
+  ): RecordType[];
+}) {
+  const chronological = (rows: RecordType[]) =>
+    rows.sort(
+      (left, right) =>
+        chronologicalAt(left).getTime() - chronologicalAt(right).getTime() ||
+        left.id.localeCompare(right.id),
+    );
+
+  return (statuses?: Status[], options?: Options): RecordType[] => {
+    const policy = options?.policy;
+    if (policy?.mode === "active-and-history") {
+      if (statuses !== undefined) {
+        throw new DomainInvariantError(
+          "active-and-history list policy cannot be combined with explicit statuses",
+        );
+      }
+      const active = readNewest(
+        activeStatuses,
+        requirePositiveSafeInteger(policy.activeLimit, "activeLimit"),
+        options,
+      );
+      const history = readNewest(
+        historyStatuses,
+        requirePositiveSafeInteger(policy.historyLimit, "historyLimit"),
+        options,
+      );
+      return chronological([...active, ...history]);
+    }
+    if (policy?.mode === "newest") {
+      return chronological(
+        readNewest(
+          statuses,
+          requirePositiveSafeInteger(policy.limit, "limit"),
+          options,
+        ),
+      );
+    }
+    return readAll(statuses, options);
+  };
+}
+
+function createJobList<Job extends ChronologicalRecord & { updatedAt: Date }>({
+  readQueue,
+  readNewest,
+}: {
+  readQueue(statuses?: JobStatus[]): Job[];
+  readNewest(statuses: JobStatus[] | undefined, limit: number): Job[];
+}) {
+  return createBoundedChronologicalList<
+    Job,
+    JobStatus,
+    ChronologicalListOptions
+  >({
+    activeStatuses: ["queued", "running"],
+    historyStatuses: ["completed", "failed"],
+    chronologicalAt: (job) => job.updatedAt,
+    readAll: (statuses) => readQueue(statuses),
+    readNewest: (statuses, limit) => readNewest(statuses, limit),
+  });
+}
 
 function requireRow<T>(row: T | undefined, recordType: string, id: string): T {
   if (!row) {
@@ -343,19 +449,39 @@ export function createDataAccess({
     on conflict (detected_disc_id) do nothing
   `);
 
+  const listArchiveJobs = createJobList<ArchiveJob>({
+    readQueue(statuses) {
+      return database
+        .select()
+        .from(archiveJobs)
+        .where(
+          statuses?.length
+            ? inArray(archiveJobs.status, statuses)
+            : undefined,
+        )
+        .orderBy(desc(archiveJobs.priority), asc(archiveJobs.createdAt))
+        .all();
+    },
+    readNewest(statuses, limit) {
+      return database
+        .select()
+        .from(archiveJobs)
+        .where(
+          statuses?.length
+            ? inArray(archiveJobs.status, statuses)
+            : undefined,
+        )
+        .orderBy(desc(archiveJobs.updatedAt), desc(archiveJobs.id))
+        .limit(limit)
+        .all();
+    },
+  });
+
   const archiveJobAdapter = {
     recordType: "archive job",
     find: (id) =>
       database.select().from(archiveJobs).where(eq(archiveJobs.id, id)).get(),
-    list: (statuses) =>
-      database
-        .select()
-        .from(archiveJobs)
-        .where(
-          statuses?.length ? inArray(archiveJobs.status, statuses) : undefined,
-        )
-        .orderBy(desc(archiveJobs.priority), asc(archiveJobs.createdAt))
-        .all(),
+    list: listArchiveJobs,
     claim: (workerId, token, timestamp) => {
       const nextApprovedJobId = sql<ArchiveJobId>`(
         select ${archiveJobs.id}
@@ -506,19 +632,35 @@ export function createDataAccess({
     priority?: number;
   };
 
-  const encodeJobAdapter = {
-    recordType: "encode job",
-    find: (id) =>
-      database.select().from(encodeJobs).where(eq(encodeJobs.id, id)).get(),
-    list: (statuses) =>
-      database
+  const listEncodeJobs = createJobList<EncodeJob>({
+    readQueue(statuses) {
+      return database
         .select()
         .from(encodeJobs)
         .where(
           statuses?.length ? inArray(encodeJobs.status, statuses) : undefined,
         )
         .orderBy(desc(encodeJobs.priority), asc(encodeJobs.createdAt))
-        .all(),
+        .all();
+    },
+    readNewest(statuses, limit) {
+      return database
+        .select()
+        .from(encodeJobs)
+        .where(
+          statuses?.length ? inArray(encodeJobs.status, statuses) : undefined,
+        )
+        .orderBy(desc(encodeJobs.updatedAt), desc(encodeJobs.id))
+        .limit(limit)
+        .all();
+    },
+  });
+
+  const encodeJobAdapter = {
+    recordType: "encode job",
+    find: (id) =>
+      database.select().from(encodeJobs).where(eq(encodeJobs.id, id)).get(),
+    list: listEncodeJobs,
     claim: (workerId, token, timestamp) => {
       const claimed = database
         .update(encodeJobs)
@@ -592,26 +734,65 @@ export function createDataAccess({
     requeueFrom: ["failed", "completed"],
   });
 
+  const detectedDiscConditionFor = (
+    statuses: DetectedDiscStatus[] | undefined,
+    options: DetectedDiscListOptions | undefined,
+  ) => {
+    const conditions = [
+      statuses?.length ? inArray(detectedDiscs.status, statuses) : undefined,
+      options?.ids ? inArray(detectedDiscs.id, [...options.ids]) : undefined,
+    ].filter((condition) => condition !== undefined);
+    return conditions.length > 0 ? and(...conditions) : undefined;
+  };
+  const listDetectedDiscRecords = createBoundedChronologicalList<
+    typeof detectedDiscs.$inferSelect,
+    DetectedDiscStatus,
+    DetectedDiscListOptions
+  >({
+    activeStatuses: ["detected", "scanned", "approved"],
+    historyStatuses: ["archived", "rejected"],
+    chronologicalAt: (disc) => disc.detectedAt,
+    readAll(statuses, options) {
+      return database
+        .select()
+        .from(detectedDiscs)
+        .where(detectedDiscConditionFor(statuses, options))
+        .orderBy(asc(detectedDiscs.detectedAt), asc(detectedDiscs.id))
+        .all();
+    },
+    readNewest(statuses, limit, options) {
+      return database
+        .select()
+        .from(detectedDiscs)
+        .where(detectedDiscConditionFor(statuses, options))
+        .orderBy(desc(detectedDiscs.detectedAt), desc(detectedDiscs.id))
+        .limit(limit)
+        .all();
+    },
+  });
+
   const access: DataAccess = {
     readConsistentSnapshot(read) {
       const snapshotAccess: ConsistentReadAccess = {
         catalog: {
-          listOpticalDrives: () => access.catalog.listOpticalDrives(),
-          listDetectedDiscs: (statuses) =>
-            access.catalog.listDetectedDiscs(statuses),
-          listOriginalDiscArchives: () =>
-            access.catalog.listOriginalDiscArchives(),
-          listMediaItems: () => access.catalog.listMediaItems(),
-          listDiscSelections: () => access.catalog.listDiscSelections(),
+          listOpticalDrives: (options) =>
+            access.catalog.listOpticalDrives(options),
+          listDetectedDiscs: (statuses, options) =>
+            access.catalog.listDetectedDiscs(statuses, options),
+          listOriginalDiscArchives: (options) =>
+            access.catalog.listOriginalDiscArchives(options),
+          listMediaItems: (options) => access.catalog.listMediaItems(options),
+          listDiscSelections: (options) =>
+            access.catalog.listDiscSelections(options),
         },
         encodingProfiles: {
           list: (input) => access.encodingProfiles.list(input),
         },
         archiveJobs: {
-          list: (statuses) => access.archiveJobs.list(statuses),
+          list: (statuses, options) => access.archiveJobs.list(statuses, options),
         },
         encodeJobs: {
-          list: (statuses) => access.encodeJobs.list(statuses),
+          list: (statuses, options) => access.encodeJobs.list(statuses, options),
         },
       };
       sqlite.exec("BEGIN");
@@ -650,6 +831,152 @@ export function createDataAccess({
     },
 
     catalog: {
+      reconcileOpticalDrives(discovered) {
+        const timestamp = now();
+        const normalized = discovered.map((drive) => ({
+          ...drive,
+          devicePath: requireNonEmpty(drive.devicePath, "devicePath"),
+        }));
+        const uniquePaths = new Set(normalized.map((drive) => drive.devicePath));
+        if (uniquePaths.size !== normalized.length) {
+          throw new DomainInvariantError(
+            "Discovered Optical Drive paths must be unique",
+          );
+        }
+        const configuredTargets = normalized.filter(
+          (drive) => drive.isConfiguredDevice,
+        );
+        if (configuredTargets.length > 1) {
+          throw new DomainInvariantError(
+            "A discovery snapshot can prove only one configured Optical Drive",
+          );
+        }
+        const configuredTargetPath = configuredTargets[0]?.devicePath;
+
+        return database.transaction((transaction) => {
+          const existingDrives = transaction
+            .select({
+              devicePath: opticalDrives.devicePath,
+              configurationDefaultResolved:
+                opticalDrives.configurationDefaultResolved,
+              isConfiguredTarget: opticalDrives.isConfiguredTarget,
+              isPresent: opticalDrives.isPresent,
+              serialNumber: opticalDrives.serialNumber,
+              vendor: opticalDrives.vendor,
+              product: opticalDrives.product,
+            })
+            .from(opticalDrives)
+            .all();
+          const existingByPath = new Map(
+            existingDrives.map((drive) => [drive.devicePath, drive]),
+          );
+          const previousConfiguredTargetPath = existingDrives.find(
+            (drive) => drive.isConfiguredTarget,
+          )?.devicePath;
+          const configuredTargetChanged =
+            configuredTargetPath !== undefined &&
+            previousConfiguredTargetPath !== undefined &&
+            configuredTargetPath !== previousConfiguredTargetPath;
+          if (configuredTargetPath !== undefined) {
+            transaction
+              .update(opticalDrives)
+              .set({ isConfiguredTarget: false })
+              .where(eq(opticalDrives.isConfiguredTarget, true))
+              .run();
+          }
+          transaction
+            .update(opticalDrives)
+            .set({ isPresent: false, updatedAt: timestamp })
+            .where(eq(opticalDrives.isPresent, true))
+            .run();
+
+          for (const drive of normalized) {
+            const existing = existingByPath.get(drive.devicePath);
+            const existingSerial = existing?.serialNumber?.trim() || undefined;
+            const discoveredSerial = drive.serialNumber?.trim() || undefined;
+            const serialChanged =
+              existing !== undefined && existingSerial !== discoveredSerial;
+            const stableIdentityMatches =
+              existingSerial !== undefined &&
+              discoveredSerial !== undefined &&
+              existingSerial === discoveredSerial;
+            const modelEvidenceChanged =
+              existing !== undefined &&
+              ((existing.vendor ?? undefined) !== drive.vendor ||
+                (existing.product ?? undefined) !== drive.product);
+            const continuityUnprovenAfterDisappearance =
+              existing !== undefined &&
+              !existing.isPresent &&
+              !stableIdentityMatches;
+            const isReplacement =
+              serialChanged ||
+              (modelEvidenceChanged && !stableIdentityMatches) ||
+              continuityUnprovenAfterDisappearance;
+            const applyConfiguredDefault =
+              drive.isConfiguredDevice === true &&
+              !configuredTargetChanged &&
+              existing?.configurationDefaultResolved !== true;
+            transaction
+              .insert(opticalDrives)
+              .values({
+                id: newId<OpticalDriveId>(),
+                devicePath: drive.devicePath,
+                displayName: drive.displayName,
+                vendor: drive.vendor,
+                product: drive.product,
+                serialNumber: drive.serialNumber,
+                isEnabled:
+                  drive.isConfiguredDevice === true &&
+                  !configuredTargetChanged,
+                configurationDefaultResolved:
+                  drive.isConfiguredDevice === true,
+                isConfiguredTarget: drive.isConfiguredDevice === true,
+                isPresent: true,
+                lastSeenAt: timestamp,
+                createdAt: timestamp,
+                updatedAt: timestamp,
+              })
+              .onConflictDoUpdate({
+                target: opticalDrives.devicePath,
+                set: {
+                  displayName: drive.displayName,
+                  vendor: drive.vendor ?? null,
+                  product: drive.product ?? null,
+                  serialNumber: drive.serialNumber ?? null,
+                  ...(drive.isConfiguredDevice
+                    ? { isConfiguredTarget: true }
+                    : {}),
+                  ...(isReplacement
+                    ? {
+                        configurationDefaultResolved:
+                          existing?.configurationDefaultResolved === true ||
+                          drive.isConfiguredDevice === true,
+                        isEnabled: false,
+                      }
+                    : drive.isConfiguredDevice && configuredTargetChanged
+                      ? { configurationDefaultResolved: true }
+                      : applyConfiguredDefault
+                        ? {
+                            configurationDefaultResolved: true,
+                            isEnabled: true,
+                          }
+                        : {}),
+                  isPresent: true,
+                  lastSeenAt: timestamp,
+                  updatedAt: timestamp,
+                },
+              })
+              .run();
+          }
+
+          return transaction
+            .select(opticalDriveSelection)
+            .from(opticalDrives)
+            .orderBy(asc(opticalDrives.devicePath))
+            .all();
+        }, { behavior: "immediate" });
+      },
+
       upsertOpticalDrive(input) {
         const timestamp = now();
         const devicePath = requireNonEmpty(input.devicePath, "devicePath");
@@ -663,6 +990,7 @@ export function createDataAccess({
             product: input.product,
             serialNumber: input.serialNumber,
             isEnabled: input.isEnabled ?? false,
+            configurationDefaultResolved: true,
             isPresent: input.isPresent,
             lastSeenAt: timestamp,
             createdAt: timestamp,
@@ -676,20 +1004,79 @@ export function createDataAccess({
               product: input.product,
               serialNumber: input.serialNumber,
               isEnabled: input.isEnabled,
+              ...(input.isEnabled !== undefined
+                ? { configurationDefaultResolved: true }
+                : {}),
               isPresent: input.isPresent,
               lastSeenAt: timestamp,
               updatedAt: timestamp,
             },
           })
-          .returning()
+          .returning(opticalDriveSelection)
           .get();
         return requireRow(inserted, "optical drive", devicePath);
       },
 
-      listOpticalDrives() {
+      listOpticalDrives(options) {
+        if (options?.ids !== undefined && options.ids.length === 0) {
+          return [];
+        }
+        const condition = options?.ids
+          ? inArray(opticalDrives.id, [...options.ids])
+          : undefined;
+        if (options?.historicalLimit !== undefined) {
+          const current = database
+            .select(opticalDriveSelection)
+            .from(opticalDrives)
+            .where(
+              and(
+                condition,
+                or(
+                  eq(opticalDrives.isPresent, true),
+                  eq(opticalDrives.isEnabled, true),
+                ),
+              ),
+            )
+            .all();
+          const history = database
+            .select(opticalDriveSelection)
+            .from(opticalDrives)
+            .where(
+              and(
+                condition,
+                eq(opticalDrives.isPresent, false),
+                eq(opticalDrives.isEnabled, false),
+              ),
+            )
+            .orderBy(
+              desc(opticalDrives.lastSeenAt),
+              desc(opticalDrives.id),
+            )
+            .limit(
+              requirePositiveSafeInteger(
+                options.historicalLimit,
+                "historicalLimit",
+              ),
+            )
+            .all();
+          return [...current, ...history].sort((left, right) =>
+            left.devicePath.localeCompare(right.devicePath),
+          );
+        }
+        if (options?.limit !== undefined) {
+          return database
+            .select(opticalDriveSelection)
+            .from(opticalDrives)
+            .where(condition)
+            .orderBy(desc(opticalDrives.lastSeenAt), desc(opticalDrives.id))
+            .limit(requirePositiveSafeInteger(options.limit, "limit"))
+            .all()
+            .reverse();
+        }
         return database
-          .select()
+          .select(opticalDriveSelection)
           .from(opticalDrives)
+          .where(condition)
           .orderBy(asc(opticalDrives.devicePath))
           .all();
       },
@@ -697,6 +1084,21 @@ export function createDataAccess({
       registerDetectedDisc(input) {
         const timestamp = now();
         const fingerprint = requireNonEmpty(input.fingerprint, "fingerprint");
+        let scanData = input.scanData;
+        if (input.discKind === "dvd" && scanData !== undefined) {
+          const decoded = decodeDvdTitleMap(scanData);
+          if (decoded === null) {
+            throw new DomainInvariantError(
+              "DVD scan data must match the versioned title-map contract",
+            );
+          }
+          if (decoded.contentId !== fingerprint) {
+            throw new DomainInvariantError(
+              "DVD scan content ID must match its Detected Disc fingerprint",
+            );
+          }
+          scanData = decoded;
+        }
         return database.transaction((transaction) => {
           const matchingArchive = transaction
             .select({ discKind: originalDiscArchives.discKind })
@@ -729,6 +1131,9 @@ export function createDataAccess({
               discKind: detectedDiscs.discKind,
               scanData: detectedDiscs.scanData,
               status: detectedDiscs.status,
+              volumeLabel: detectedDiscs.volumeLabel,
+              detectedAt: detectedDiscs.detectedAt,
+              updatedAt: detectedDiscs.updatedAt,
             })
             .from(detectedDiscs)
             .where(
@@ -738,12 +1143,20 @@ export function createDataAccess({
               ),
             )
             .get();
+          const observationChanged =
+            existing === undefined ||
+            input.isNewMediumObservation === true ||
+            existing.discKind !== input.discKind ||
+            existing.volumeLabel !== (input.volumeLabel ?? null) ||
+            !isDeepStrictEqual(existing.scanData, scanData ?? null);
+          const statusChanged =
+            matchingArchive !== undefined && existing?.status !== "archived";
           if (
             !matchingArchive &&
             existing?.status === "approved" &&
             (existing.discKind !== input.discKind ||
-              (input.scanData !== undefined &&
-                !isDeepStrictEqual(existing.scanData, input.scanData)))
+              (scanData !== undefined &&
+                !isDeepStrictEqual(existing.scanData, scanData)))
           ) {
             throw new DomainInvariantError(
               "Rediscovery cannot change reviewed data for an approved Detected Disc",
@@ -758,7 +1171,7 @@ export function createDataAccess({
               discKind: input.discKind,
               fingerprint,
               volumeLabel: input.volumeLabel,
-              scanData: input.scanData,
+              scanData,
               status: matchingArchive ? "archived" : "detected",
               detectedAt: timestamp,
               createdAt: timestamp,
@@ -774,10 +1187,13 @@ export function createDataAccess({
             .set({
               discKind: input.discKind,
               volumeLabel: input.volumeLabel,
-              scanData: input.scanData,
+              scanData,
               ...(matchingArchive ? { status: "archived" as const } : {}),
-              detectedAt: timestamp,
-              updatedAt: timestamp,
+              ...(observationChanged
+                ? { detectedAt: timestamp, updatedAt: timestamp }
+                : statusChanged
+                  ? { updatedAt: timestamp }
+                  : {}),
             })
             .where(
               and(
@@ -821,17 +1237,11 @@ export function createDataAccess({
         }, { behavior: "immediate" });
       },
 
-      listDetectedDiscs(statuses) {
-        return database
-          .select()
-          .from(detectedDiscs)
-          .where(
-            statuses?.length
-              ? inArray(detectedDiscs.status, statuses)
-              : undefined,
-          )
-          .orderBy(asc(detectedDiscs.detectedAt), asc(detectedDiscs.id))
-          .all();
+      listDetectedDiscs(statuses, options) {
+        if (options?.ids !== undefined && options.ids.length === 0) {
+          return [];
+        }
+        return listDetectedDiscRecords(statuses, options);
       },
 
       updateDetectedDiscStatus(id, status) {
@@ -966,10 +1376,47 @@ export function createDataAccess({
         });
       },
 
-      listOriginalDiscArchives() {
+      listOriginalDiscArchives(options) {
+        if (options?.ids !== undefined && options.ids.length === 0) {
+          return [];
+        }
+        const conditions = [
+          options?.ids
+            ? inArray(originalDiscArchives.id, [...options.ids])
+            : undefined,
+          options?.uncatalogedOnly
+            ? notExists(
+                database
+                  .select({ id: discSelections.id })
+                  .from(discSelections)
+                  .where(
+                    eq(
+                      discSelections.originalDiscArchiveId,
+                      originalDiscArchives.id,
+                    ),
+                  ),
+              )
+            : undefined,
+        ].filter((condition) => condition !== undefined);
+        const condition =
+          conditions.length > 0 ? and(...conditions) : undefined;
+        if (options?.limit !== undefined) {
+          return database
+            .select()
+            .from(originalDiscArchives)
+            .where(condition)
+            .orderBy(
+              desc(originalDiscArchives.archivedAt),
+              desc(originalDiscArchives.id),
+            )
+            .limit(requirePositiveSafeInteger(options.limit, "limit"))
+            .all()
+            .reverse();
+        }
         return database
           .select()
           .from(originalDiscArchives)
+          .where(condition)
           .orderBy(asc(originalDiscArchives.archivedAt))
           .all();
       },
@@ -998,10 +1445,18 @@ export function createDataAccess({
         );
       },
 
-      listMediaItems() {
+      listMediaItems(options) {
+        if (options?.ids !== undefined && options.ids.length === 0) {
+          return [];
+        }
         return database
           .select()
           .from(mediaItems)
+          .where(
+            options?.ids
+              ? inArray(mediaItems.id, [...options.ids])
+              : undefined,
+          )
           .orderBy(
             asc(mediaItems.parentId),
             asc(mediaItems.createdAt),
@@ -1071,10 +1526,18 @@ export function createDataAccess({
         );
       },
 
-      listDiscSelections() {
+      listDiscSelections(options) {
+        if (options?.ids !== undefined && options.ids.length === 0) {
+          return [];
+        }
         return database
           .select()
           .from(discSelections)
+          .where(
+            options?.ids
+              ? inArray(discSelections.id, [...options.ids])
+              : undefined,
+          )
           .orderBy(asc(discSelections.createdAt), asc(discSelections.id))
           .all()
           .map(toDiscSelection);
@@ -1237,7 +1700,13 @@ export function createDataAccess({
       },
 
       list(input = {}) {
+        if (input.ids !== undefined && input.ids.length === 0) {
+          return [];
+        }
         const conditions = [
+          input.ids
+            ? inArray(encodingProfiles.id, [...input.ids])
+            : undefined,
           input.mediaDomain
             ? eq(encodingProfiles.mediaDomain, input.mediaDomain)
             : undefined,

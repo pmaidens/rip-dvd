@@ -1,6 +1,7 @@
 import type { DataAccess } from "@rip-dvd/data-access";
 
 import { getDataAccess } from "../../../../lib/data-access";
+import { DASHBOARD_ACTIVITY_HISTORY_LIMIT } from "../../../../lib/dashboard-bounds";
 import {
   readDashboardSnapshot,
   type DashboardSnapshot,
@@ -74,7 +75,10 @@ export function createDashboardEventResponse(
         ) {
           return;
         }
-        const snapshot = readDashboardSnapshot(access);
+        const snapshot = readDashboardSnapshot(access, {
+          activityLimit: DASHBOARD_ACTIVITY_HISTORY_LIMIT,
+          includeDetectedDiscDetails: false,
+        });
         controller.enqueue(
           encoder.encode(`${prefix}${formatDashboardEvent(snapshot)}`),
         );
