@@ -54,6 +54,7 @@ import type {
   ArchiveJobClaimToken,
   ArchiveJobId,
   ArchiveJob,
+  ChronologicalListOptions,
   ConsistentReadAccess,
   DataAccess,
   DetectedDiscId,
@@ -65,7 +66,6 @@ import type {
   EncodeJobId,
   EncodeJob,
   EncodingProfileId,
-  JobListOptions,
   JobStatus,
   MediaDomain,
   MediaItemId,
@@ -115,16 +115,10 @@ interface ChronologicalRecord {
   id: string;
 }
 
-interface BoundedChronologicalListOptions {
-  limit?: number;
-  activeLimit?: number;
-  historyLimit?: number;
-}
-
 function createBoundedChronologicalList<
   RecordType extends ChronologicalRecord,
   Status extends string,
-  Options extends BoundedChronologicalListOptions,
+  Options extends ChronologicalListOptions,
 >({
   activeStatuses,
   historyStatuses,
@@ -153,27 +147,30 @@ function createBoundedChronologicalList<
     );
 
   return (statuses?: Status[], options?: Options): RecordType[] => {
-    if (options?.activeLimit !== undefined && statuses === undefined) {
+    const policy = options?.policy;
+    if (policy?.mode === "active-and-history") {
+      if (statuses !== undefined) {
+        throw new DomainInvariantError(
+          "active-and-history list policy cannot be combined with explicit statuses",
+        );
+      }
       const active = readNewest(
         activeStatuses,
-        requirePositiveSafeInteger(options.activeLimit, "activeLimit"),
+        requirePositiveSafeInteger(policy.activeLimit, "activeLimit"),
         options,
       );
-      const history =
-        options.historyLimit === undefined
-          ? []
-          : readNewest(
-              historyStatuses,
-              requirePositiveSafeInteger(options.historyLimit, "historyLimit"),
-              options,
-            );
+      const history = readNewest(
+        historyStatuses,
+        requirePositiveSafeInteger(policy.historyLimit, "historyLimit"),
+        options,
+      );
       return chronological([...active, ...history]);
     }
-    if (options?.limit !== undefined) {
+    if (policy?.mode === "newest") {
       return chronological(
         readNewest(
           statuses,
-          requirePositiveSafeInteger(options.limit, "limit"),
+          requirePositiveSafeInteger(policy.limit, "limit"),
           options,
         ),
       );
@@ -189,7 +186,11 @@ function createJobList<Job extends ChronologicalRecord & { updatedAt: Date }>({
   readQueue(statuses?: JobStatus[]): Job[];
   readNewest(statuses: JobStatus[] | undefined, limit: number): Job[];
 }) {
-  return createBoundedChronologicalList<Job, JobStatus, JobListOptions>({
+  return createBoundedChronologicalList<
+    Job,
+    JobStatus,
+    ChronologicalListOptions
+  >({
     activeStatuses: ["queued", "running"],
     historyStatuses: ["completed", "failed"],
     chronologicalAt: (job) => job.updatedAt,
@@ -856,8 +857,8 @@ export function createDataAccess({
           const existingDrives = transaction
             .select({
               devicePath: opticalDrives.devicePath,
-              configurationDefaultApplied:
-                opticalDrives.configurationDefaultApplied,
+              configurationDefaultResolved:
+                opticalDrives.configurationDefaultResolved,
               isConfiguredTarget: opticalDrives.isConfiguredTarget,
               isPresent: opticalDrives.isPresent,
               serialNumber: opticalDrives.serialNumber,
@@ -914,7 +915,7 @@ export function createDataAccess({
             const applyConfiguredDefault =
               drive.isConfiguredDevice === true &&
               !configuredTargetChanged &&
-              existing?.configurationDefaultApplied !== true;
+              existing?.configurationDefaultResolved !== true;
             transaction
               .insert(opticalDrives)
               .values({
@@ -927,7 +928,7 @@ export function createDataAccess({
                 isEnabled:
                   drive.isConfiguredDevice === true &&
                   !configuredTargetChanged,
-                configurationDefaultApplied:
+                configurationDefaultResolved:
                   drive.isConfiguredDevice === true,
                 isConfiguredTarget: drive.isConfiguredDevice === true,
                 isPresent: true,
@@ -947,16 +948,16 @@ export function createDataAccess({
                     : {}),
                   ...(isReplacement
                     ? {
-                        configurationDefaultApplied:
-                          existing?.configurationDefaultApplied === true ||
+                        configurationDefaultResolved:
+                          existing?.configurationDefaultResolved === true ||
                           drive.isConfiguredDevice === true,
                         isEnabled: false,
                       }
                     : drive.isConfiguredDevice && configuredTargetChanged
-                      ? { configurationDefaultApplied: true }
+                      ? { configurationDefaultResolved: true }
                       : applyConfiguredDefault
                         ? {
-                            configurationDefaultApplied: true,
+                            configurationDefaultResolved: true,
                             isEnabled: true,
                           }
                         : {}),
@@ -989,7 +990,7 @@ export function createDataAccess({
             product: input.product,
             serialNumber: input.serialNumber,
             isEnabled: input.isEnabled ?? false,
-            configurationDefaultApplied: true,
+            configurationDefaultResolved: true,
             isPresent: input.isPresent,
             lastSeenAt: timestamp,
             createdAt: timestamp,
@@ -1004,7 +1005,7 @@ export function createDataAccess({
               serialNumber: input.serialNumber,
               isEnabled: input.isEnabled,
               ...(input.isEnabled !== undefined
-                ? { configurationDefaultApplied: true }
+                ? { configurationDefaultResolved: true }
                 : {}),
               isPresent: input.isPresent,
               lastSeenAt: timestamp,

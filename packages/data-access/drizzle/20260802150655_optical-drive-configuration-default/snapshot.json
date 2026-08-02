@@ -794,7 +794,7 @@
       "autoincrement": false,
       "default": "true",
       "generated": null,
-      "name": "configuration_default_applied",
+      "name": "configuration_default_resolved",
       "entityType": "columns",
       "table": "optical_drives"
     },

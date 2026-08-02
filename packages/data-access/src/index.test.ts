@@ -239,8 +239,11 @@ describe("data-access facade", () => {
     }
 
     const activity = access.catalog.listDetectedDiscs(undefined, {
-      activeLimit: 100,
-      historyLimit: 20,
+      policy: {
+        mode: "active-and-history",
+        activeLimit: 100,
+        historyLimit: 20,
+      },
     });
 
     expect(activity).toHaveLength(21);
@@ -276,8 +279,11 @@ describe("data-access facade", () => {
     }
 
     const activity = access.catalog.listDetectedDiscs(undefined, {
-      activeLimit: 100,
-      historyLimit: 20,
+      policy: {
+        mode: "active-and-history",
+        activeLimit: 100,
+        historyLimit: 20,
+      },
     });
 
     expect(
@@ -288,6 +294,54 @@ describe("data-access facade", () => {
     expect(
       activity.filter((disc) => ["archived", "rejected"].includes(disc.status)),
     ).toHaveLength(20);
+    access.close();
+  });
+
+  it("returns the newest records through the bounded list policy", () => {
+    vi.useFakeTimers();
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const discs = Array.from({ length: 3 }, (_, index) => {
+      vi.setSystemTime(new Date(`2026-01-0${index + 1}T00:00:00.000Z`));
+      return access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint: `newest-${index}`,
+      });
+    });
+
+    expect(
+      access.catalog.listDetectedDiscs(undefined, {
+        policy: { mode: "newest", limit: 2 },
+      }),
+    ).toEqual([
+      expect.objectContaining({ id: discs[1]?.id }),
+      expect.objectContaining({ id: discs[2]?.id }),
+    ]);
+
+    access.close();
+  });
+
+  it("rejects activity policy combined with explicit status filters", () => {
+    const access = openTestDatabase();
+
+    expect(() =>
+      access.catalog.listDetectedDiscs(["detected"], {
+        policy: {
+          mode: "active-and-history",
+          activeLimit: 100,
+          historyLimit: 20,
+        },
+      }),
+    ).toThrowError(
+      new DomainInvariantError(
+        "active-and-history list policy cannot be combined with explicit statuses",
+      ),
+    );
+
     access.close();
   });
 
