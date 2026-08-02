@@ -67,7 +67,6 @@ export async function pollArchiveWorker({
       return {
         ...drive,
         isConfiguredDevice,
-        isEnabledWhenNew: isConfiguredDevice,
       };
     }),
   );

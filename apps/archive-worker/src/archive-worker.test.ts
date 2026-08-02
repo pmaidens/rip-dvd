@@ -227,7 +227,8 @@ describe("archive worker polling", () => {
       { devicePath: "/dev/sr0", displayName: "Archive drive" },
     ]);
     const scanDvd = vi.fn().mockResolvedValue({
-      fingerprint: "sha256:repeat-disc",
+      fingerprint:
+        "sha256:3333333333333333333333333333333333333333333333333333333333333333",
       volumeLabel: "REPEAT_DISC",
       scanData: {
         schemaVersion: 2,
@@ -432,7 +433,8 @@ describe("archive worker polling", () => {
     const sourceDisc = access.catalog.registerDetectedDisc({
       opticalDriveId: sourceDrive.id,
       discKind: "dvd",
-      fingerprint: "sha256:archived-disc",
+      fingerprint:
+        "sha256:4444444444444444444444444444444444444444444444444444444444444444",
       volumeLabel: "ARCHIVED_DISC",
       scanData: {
         schemaVersion: 2,
@@ -456,7 +458,8 @@ describe("archive worker polling", () => {
       discKind: "dvd",
       archiveFormat: "iso",
       archivePath: "/media/originals/Archived Disc.iso",
-      fingerprint: "sha256:archived-disc",
+      fingerprint:
+        "sha256:4444444444444444444444444444444444444444444444444444444444444444",
     });
 
     await pollArchiveWorker({
@@ -467,7 +470,8 @@ describe("archive worker polling", () => {
           { devicePath: "/dev/sr1", displayName: "Second drive" },
         ]),
         scanDvd: vi.fn().mockResolvedValue({
-          fingerprint: "sha256:archived-disc",
+          fingerprint:
+            "sha256:4444444444444444444444444444444444444444444444444444444444444444",
           volumeLabel: "ARCHIVED_DISC",
           scanData: {
             schemaVersion: 2,
@@ -495,7 +499,8 @@ describe("archive worker polling", () => {
         opticalDriveId: access.catalog
           .listOpticalDrives()
           .find((drive) => drive.devicePath === "/dev/sr1")?.id,
-        fingerprint: "sha256:archived-disc",
+        fingerprint:
+          "sha256:4444444444444444444444444444444444444444444444444444444444444444",
       }),
     ]);
     expect(access.archiveJobs.list()).toEqual([]);

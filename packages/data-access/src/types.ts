@@ -232,8 +232,7 @@ export interface DetectedDiscListOptions {
 
 export interface OpticalDriveReconciliationInput
   extends DiscoveredOpticalDrive {
-  isConfiguredDevice?: boolean;
-  isEnabledWhenNew?: boolean;
+  isConfiguredDevice: boolean;
 }
 
 export interface CatalogAccess {

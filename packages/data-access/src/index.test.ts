@@ -8,8 +8,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   createDataAccess,
+  DVD_TITLE_MAP_SCHEMA_VERSION,
   DomainInvariantError,
   InvalidStatusTransitionError,
+  MAX_DVD_TITLES,
 } from "./index.js";
 import type { DetectedDiscId, DiscKind } from "./index.js";
 import type { EncodingProfileId } from "./index.js";
@@ -514,7 +516,7 @@ describe("data-access facade", () => {
         {
           devicePath: "/dev/sr1",
           displayName: "USB drive",
-          isEnabledWhenNew: false,
+          isConfiguredDevice: false,
         },
       ]),
     ).toEqual([
@@ -539,7 +541,7 @@ describe("data-access facade", () => {
         {
           devicePath: "/dev/sr0",
           displayName: "Internal drive rediscovered",
-          isEnabledWhenNew: false,
+          isConfiguredDevice: false,
         },
       ]),
     ).toEqual([
@@ -580,14 +582,12 @@ describe("data-access facade", () => {
       product: "DVD-RW",
       serialNumber: "REPLACEMENT-002",
       isConfiguredDevice: true,
-      isEnabledWhenNew: true,
     };
     expect(
       access.catalog.reconcileOpticalDrives([
         {
           ...configuredReplacement,
           isConfiguredDevice: false,
-          isEnabledWhenNew: false,
         },
       ]),
     ).toEqual([
@@ -627,6 +627,7 @@ describe("data-access facade", () => {
           vendor: "Pioneer",
           product: "DVD-RW",
           serialNumber: "NEW-SERIAL",
+          isConfiguredDevice: false,
         },
       ]),
     ).toEqual([
@@ -653,7 +654,11 @@ describe("data-access facade", () => {
     access.catalog.reconcileOpticalDrives([]);
     expect(
       access.catalog.reconcileOpticalDrives([
-        { devicePath: "/dev/sr0", serialNumber: "STABLE-SERIAL" },
+        {
+          devicePath: "/dev/sr0",
+          serialNumber: "STABLE-SERIAL",
+          isConfiguredDevice: false,
+        },
       ]),
     ).toEqual([
       expect.objectContaining({
@@ -687,6 +692,7 @@ describe("data-access facade", () => {
           vendor: "Pioneer",
           product: "DVD-RW",
           ...(nextSerial === undefined ? {} : { serialNumber: nextSerial }),
+          isConfiguredDevice: false,
         },
       ]),
     ).toEqual([
@@ -697,6 +703,203 @@ describe("data-access facade", () => {
       }),
     ]);
 
+    access.close();
+  });
+
+  it.each([
+    ["gains", undefined, undefined, "Pioneer", "DVD-RW"],
+    ["loses", "Pioneer", "DVD-RW", undefined, undefined],
+  ])(
+    "disables present same-path hardware when model identity evidence %s without serial proof",
+    (_case, initialVendor, initialProduct, nextVendor, nextProduct) => {
+      const access = openTestDatabase();
+      const original = access.catalog.upsertOpticalDrive({
+        devicePath: "/dev/sr0",
+        vendor: initialVendor,
+        product: initialProduct,
+        isEnabled: true,
+        isPresent: true,
+      });
+
+      expect(
+        access.catalog.reconcileOpticalDrives([
+          {
+            devicePath: "/dev/sr0",
+            vendor: nextVendor,
+            product: nextProduct,
+            isConfiguredDevice: false,
+          },
+        ]),
+      ).toEqual([
+        expect.objectContaining({
+          id: original.id,
+          isEnabled: false,
+          vendor: nextVendor ?? null,
+          product: nextProduct ?? null,
+        }),
+      ]);
+
+      access.close();
+    },
+  );
+
+  it("does not apply a late configured-device default after an explicit disable", () => {
+    const access = openTestDatabase();
+    access.catalog.reconcileOpticalDrives([
+      { devicePath: "/dev/sr0", isConfiguredDevice: false },
+    ]);
+    access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isEnabled: false,
+      isPresent: true,
+    });
+
+    expect(
+      access.catalog.reconcileOpticalDrives([
+        { devicePath: "/dev/sr0", isConfiguredDevice: true },
+      ]),
+    ).toEqual([
+      expect.objectContaining({ devicePath: "/dev/sr0", isEnabled: false }),
+    ]);
+
+    access.close();
+  });
+
+  it("does not reinterpret a manually created disabled drive as pending configuration", () => {
+    const access = openTestDatabase();
+    access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+
+    expect(
+      access.catalog.reconcileOpticalDrives([
+        { devicePath: "/dev/sr0", isConfiguredDevice: true },
+      ]),
+    ).toEqual([
+      expect.objectContaining({ devicePath: "/dev/sr0", isEnabled: false }),
+    ]);
+
+    access.close();
+  });
+
+  it("preserves a legacy disabled choice through migration and configured reconciliation", () => {
+    const databasePath = createTestDatabasePath();
+    const sqlite = new DatabaseSync(databasePath);
+    for (const migrationName of [
+      "20260722045326_core-catalog-and-queues",
+      "20260726160810_encoding-profile-active-state",
+    ]) {
+      const migration = readFileSync(
+        new URL(`../drizzle/${migrationName}/migration.sql`, import.meta.url),
+        "utf8",
+      );
+      for (const statement of migration.split("--> statement-breakpoint")) {
+        if (statement.trim()) {
+          sqlite.exec(statement);
+        }
+      }
+    }
+    sqlite.exec(`
+      create table __drizzle_migrations (
+        id integer primary key,
+        hash text not null,
+        created_at numeric,
+        name text,
+        applied_at text
+      );
+      insert into __drizzle_migrations (hash, created_at, name) values
+        ('legacy-core', 0, '20260722045326_core-catalog-and-queues'),
+        ('legacy-profiles', 0, '20260726160810_encoding-profile-active-state');
+      insert into optical_drives (
+        id, device_path, is_enabled, is_present, last_seen_at, created_at,
+        updated_at
+      ) values ('legacy-drive', '/dev/sr0', 0, 1, 0, 0, 0);
+    `);
+    sqlite.close();
+
+    const access = openTestDatabase(databasePath);
+    expect(
+      access.catalog.reconcileOpticalDrives([
+        { devicePath: "/dev/sr0", isConfiguredDevice: true },
+      ]),
+    ).toEqual([
+      expect.objectContaining({
+        id: "legacy-drive",
+        devicePath: "/dev/sr0",
+        isEnabled: false,
+      }),
+    ]);
+    access.close();
+  });
+
+  it("rejects malformed and resource-unbounded DVD scans at the catalog facade", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const contentId = `sha256:${"a".repeat(64)}`;
+    const baseTitle = {
+      number: 1,
+      durationSeconds: 1,
+      chapters: 1,
+      audioStreams: [],
+      subtitles: [],
+    };
+
+    for (const scanData of [
+      { schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION, contentId, titles: [{}] },
+      {
+        schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+        contentId,
+        titles: Array.from({ length: MAX_DVD_TITLES + 1 }, (_, index) => ({
+          ...baseTitle,
+          number: index + 1,
+        })),
+      },
+    ]) {
+      expect(() =>
+        access.catalog.registerDetectedDisc({
+          opticalDriveId: drive.id,
+          discKind: "dvd",
+          fingerprint: contentId,
+          scanData,
+        }),
+      ).toThrow(DomainInvariantError);
+    }
+    expect(access.catalog.listDetectedDiscs()).toEqual([]);
+    access.close();
+  });
+
+  it("rejects a DVD scan whose content identity differs from its fingerprint", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+
+    expect(() =>
+      access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint: `sha256:${"a".repeat(64)}`,
+        scanData: {
+          schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+          contentId: `sha256:${"b".repeat(64)}`,
+          titles: [
+            {
+              number: 1,
+              durationSeconds: 1,
+              chapters: 1,
+              audioStreams: [],
+              subtitles: [],
+            },
+          ],
+        },
+      }),
+    ).toThrow(DomainInvariantError);
+    expect(access.catalog.listDetectedDiscs()).toEqual([]);
     access.close();
   });
 
@@ -717,7 +920,15 @@ describe("data-access facade", () => {
       scanData: {
         schemaVersion: 2,
         contentId: `sha256:${"a".repeat(64)}`,
-        titles: [],
+        titles: [
+          {
+            number: 1,
+            durationSeconds: 1,
+            chapters: 1,
+            audioStreams: [],
+            subtitles: [],
+          },
+        ],
       },
     };
     const first = access.catalog.registerDetectedDisc(input);
@@ -1215,11 +1426,24 @@ describe("data-access facade", () => {
       devicePath: "/dev/sr0",
       isPresent: true,
     });
-    const scanData = { titles: [{ number: 1, chapters: 12 }] };
+    const fingerprint = `sha256:${"c".repeat(64)}`;
+    const scanData = {
+      schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+      contentId: fingerprint,
+      titles: [
+        {
+          number: 1,
+          durationSeconds: 3600,
+          chapters: 12,
+          audioStreams: [],
+          subtitles: [],
+        },
+      ],
+    };
     const disc = access.catalog.registerDetectedDisc({
       opticalDriveId: drive.id,
       discKind: "dvd",
-      fingerprint: "approved-rediscovery-disc",
+      fingerprint,
       scanData,
     });
     access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
@@ -1230,7 +1454,7 @@ describe("data-access facade", () => {
       access.catalog.registerDetectedDisc({
         opticalDriveId: drive.id,
         discKind: "blu_ray",
-        fingerprint: "approved-rediscovery-disc",
+        fingerprint,
         scanData,
       }),
     ).toThrow(DomainInvariantError);
@@ -1238,8 +1462,11 @@ describe("data-access facade", () => {
       access.catalog.registerDetectedDisc({
         opticalDriveId: drive.id,
         discKind: "dvd",
-        fingerprint: "approved-rediscovery-disc",
-        scanData: { titles: [{ number: 2, chapters: 4 }] },
+        fingerprint,
+        scanData: {
+          ...scanData,
+          titles: [{ ...scanData.titles[0]!, number: 2, chapters: 4 }],
+        },
       }),
     ).toThrow(DomainInvariantError);
 
@@ -1247,9 +1474,9 @@ describe("data-access facade", () => {
       access.catalog.registerDetectedDisc({
         opticalDriveId: drive.id,
         discKind: "dvd",
-        fingerprint: "approved-rediscovery-disc",
+        fingerprint,
         volumeLabel: "REFRESHED_LABEL",
-        scanData: { titles: [{ chapters: 12, number: 1 }] },
+        scanData,
       }),
     ).toMatchObject({
       id: disc.id,

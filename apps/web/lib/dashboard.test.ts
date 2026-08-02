@@ -68,7 +68,8 @@ describe("readDashboardSnapshot", () => {
     const waitingDisc = access.catalog.registerDetectedDisc({
       opticalDriveId: drive.id,
       discKind: "dvd",
-      fingerprint: "waiting-disc",
+      fingerprint:
+        "sha256:1111111111111111111111111111111111111111111111111111111111111111",
       volumeLabel: "WAITING_DISC",
       scanData: {
         schemaVersion: 2,
@@ -192,7 +193,8 @@ describe("readDashboardSnapshot", () => {
           volumeLabel: "WAITING_DISC",
           status: "approved",
           opticalDriveName: "Upper drive",
-          fingerprint: "waiting-disc",
+          fingerprint:
+            "sha256:1111111111111111111111111111111111111111111111111111111111111111",
           titles: [
             {
               number: 1,
