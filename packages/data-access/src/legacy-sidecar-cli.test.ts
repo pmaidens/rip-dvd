@@ -52,6 +52,39 @@ function createImportableLibrary(root: string, title: string) {
 }
 
 describe("legacy sidecar import command", () => {
+  it("accepts the leading separator forwarded by the documented pnpm command", () => {
+    const root = temporaryDirectories.create(
+      "rip-dvd-legacy-cli-forwarded-separator-",
+    );
+    const databasePath = join(root, "catalog.sqlite");
+    const { originalsLibraryPath, outputPath } = createImportableLibrary(
+      root,
+      "Forwarded Separator Movie",
+    );
+    const errors: string[] = [];
+
+    const exitCode = runLegacySidecarImportCli({
+      argv: [
+        "--",
+        "--database",
+        databasePath,
+        "--originals-library",
+        originalsLibraryPath,
+      ],
+      environment: {},
+      writeError: (message) => errors.push(message),
+      writeOutput: () => undefined,
+    });
+
+    expect(exitCode).toBe(0);
+    expect(errors).toEqual([]);
+    const access = createDataAccess({ databasePath });
+    expect(access.encodeJobs.list()).toEqual([
+      expect.objectContaining({ outputPath, status: "queued" }),
+    ]);
+    access.close();
+  });
+
   it("rejects an unknown option before opening SQLite or publishing cutover", () => {
     const root = temporaryDirectories.create("rip-dvd-legacy-cli-typo-");
     const { originalsLibraryPath } = createImportableLibrary(

@@ -759,7 +759,13 @@ function parseJob(
     if (sourceResolution.outcome === "ambiguous") {
       return invalid(sourceResolution.message);
     }
-    if (sourceResolution.path !== archivePath) {
+    let canonicalJobSource: string;
+    try {
+      canonicalJobSource = realpathSync(sourceResolution.path);
+    } catch {
+      return invalid("Encode job source does not match the sidecar archive");
+    }
+    if (canonicalJobSource !== archivePath) {
       return invalid("Encode job source does not match the sidecar archive");
     }
   }
