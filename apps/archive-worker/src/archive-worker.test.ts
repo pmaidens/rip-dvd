@@ -163,6 +163,62 @@ describe("archive worker polling", () => {
     access.close();
   });
 
+  it("enables a known Optical Drive when its configured alias appears later", async () => {
+    const deviceDirectory = mkdtempSync(join(tmpdir(), "rip-dvd-late-alias-"));
+    temporaryDirectories.push(deviceDirectory);
+    const canonicalDevicePath = join(deviceDirectory, "sr0");
+    const configuredAliasPath = join(deviceDirectory, "dvd");
+    writeFileSync(canonicalDevicePath, "");
+    const discoveredDevicePath = realpathSync(canonicalDevicePath);
+    const access = openTestDataAccess();
+    const scanDvd = vi.fn().mockResolvedValue(null);
+    const options = {
+      access,
+      configuredDevicePath: configuredAliasPath,
+      hardware: {
+        discover: vi.fn().mockResolvedValue([
+          {
+            devicePath: discoveredDevicePath,
+            displayName: "Late aliased drive",
+            serialNumber: "STABLE-ALIAS-DRIVE",
+          },
+        ]),
+        scanDvd,
+      },
+      log: vi.fn(),
+      signal: new AbortController().signal,
+    };
+
+    await pollArchiveWorker(options);
+    const initialDrive = access.catalog.listOpticalDrives()[0]!;
+    expect(initialDrive).toMatchObject({
+      devicePath: discoveredDevicePath,
+      isEnabled: false,
+      isPresent: true,
+    });
+    expect(initialDrive).not.toHaveProperty("configurationDefaultApplied");
+    expect(scanDvd).not.toHaveBeenCalled();
+
+    symlinkSync(canonicalDevicePath, configuredAliasPath);
+    await pollArchiveWorker(options);
+    await pollArchiveWorker(options);
+
+    expect(access.catalog.listOpticalDrives()).toEqual([
+      expect.objectContaining({
+        id: initialDrive.id,
+        devicePath: discoveredDevicePath,
+        isEnabled: true,
+        isPresent: true,
+      }),
+    ]);
+    expect(scanDvd).toHaveBeenCalledTimes(2);
+    expect(scanDvd).toHaveBeenLastCalledWith(
+      discoveredDevicePath,
+      expect.any(AbortSignal),
+    );
+    access.close();
+  });
+
   it("keeps repeated polls idempotent and marks disappeared drives missing", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-26T18:00:00.000Z"));

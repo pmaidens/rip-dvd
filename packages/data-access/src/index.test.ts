@@ -562,25 +562,32 @@ describe("data-access facade", () => {
 
   it("defaults replacement hardware at an enabled device path to disabled", () => {
     const access = openTestDatabase();
-    const original = access.catalog.upsertOpticalDrive({
+    const original = access.catalog.reconcileOpticalDrives([
+      {
+        devicePath: "/dev/sr0",
+        displayName: "Original drive",
+        vendor: "Pioneer",
+        product: "DVD-RW",
+        serialNumber: "ORIGINAL-001",
+        isConfiguredDevice: true,
+      },
+    ])[0]!;
+
+    const configuredReplacement = {
       devicePath: "/dev/sr0",
-      displayName: "Original drive",
+      displayName: "Replacement drive",
       vendor: "Pioneer",
       product: "DVD-RW",
-      serialNumber: "ORIGINAL-001",
-      isEnabled: true,
-      isPresent: true,
-    });
-
+      serialNumber: "REPLACEMENT-002",
+      isConfiguredDevice: true,
+      isEnabledWhenNew: true,
+    };
     expect(
       access.catalog.reconcileOpticalDrives([
         {
-          devicePath: "/dev/sr0",
-          displayName: "Replacement drive",
-          vendor: "Pioneer",
-          product: "DVD-RW",
-          serialNumber: "REPLACEMENT-002",
-          isEnabledWhenNew: true,
+          ...configuredReplacement,
+          isConfiguredDevice: false,
+          isEnabledWhenNew: false,
         },
       ]),
     ).toEqual([
@@ -590,6 +597,11 @@ describe("data-access facade", () => {
         isEnabled: false,
         isPresent: true,
       }),
+    ]);
+    expect(
+      access.catalog.reconcileOpticalDrives([configuredReplacement]),
+    ).toEqual([
+      expect.objectContaining({ id: original.id, isEnabled: false }),
     ]);
 
     access.close();

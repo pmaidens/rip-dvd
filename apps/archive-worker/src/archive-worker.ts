@@ -61,10 +61,15 @@ export async function pollArchiveWorker({
   const configuredCanonicalPath =
     resolveConfiguredDevicePath(configuredDevicePath);
   const drives = access.catalog.reconcileOpticalDrives(
-    discovered.map((drive) => ({
-      ...drive,
-      isEnabledWhenNew: drive.devicePath === configuredCanonicalPath,
-    })),
+    discovered.map((drive) => {
+      const isConfiguredDevice =
+        drive.devicePath === configuredCanonicalPath;
+      return {
+        ...drive,
+        isConfiguredDevice,
+        isEnabledWhenNew: isConfiguredDevice,
+      };
+    }),
   );
 
   for (const drive of drives) {
