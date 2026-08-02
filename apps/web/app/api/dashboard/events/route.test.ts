@@ -14,6 +14,185 @@ afterEach(() => {
 });
 
 describe("GET /api/dashboard/events", () => {
+  it("bounds activity events to recent disc summaries without title maps", async () => {
+    vi.useFakeTimers();
+    const access = dataAccessFixture.create();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      displayName: "Archive drive",
+      isEnabled: true,
+      isPresent: true,
+    });
+    for (let index = 1; index < 32; index += 1) {
+      access.catalog.upsertOpticalDrive({
+        devicePath: `/dev/sr${index}`,
+        displayName: `Attached drive ${index}`,
+        isEnabled: index % 2 === 0,
+        isPresent: true,
+      });
+    }
+    for (let index = 32; index < 92; index += 1) {
+      access.catalog.upsertOpticalDrive({
+        devicePath: `/dev/sr${index}`,
+        displayName: `Missing configured drive ${index}`,
+        isEnabled: true,
+        isPresent: false,
+      });
+    }
+    const profile = access.encodingProfiles.create({
+      key: "activity-profile",
+      displayName: "Activity profile",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    for (let index = 0; index < 25; index += 1) {
+      vi.setSystemTime(new Date(Date.UTC(2026, 6, 26, 18, 0, index)));
+      const contentId = `sha256:${index.toString(16).padStart(64, "0")}`;
+      const disc = access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint: contentId,
+        volumeLabel: `DISC_${index.toString().padStart(2, "0")}`,
+        scanData: {
+          schemaVersion: 2,
+          contentId,
+          titles: Array.from({ length: 64 }, (_, titleIndex) => ({
+            number: titleIndex + 1,
+            durationSeconds: 60,
+            chapters: 1,
+            audioStreams: [
+              {
+                id: 128,
+                language: "English",
+                format: "ac3",
+                channels: 6,
+              },
+            ],
+            subtitles: [{ id: 32, language: "English", content: "Normal" }],
+          })),
+        },
+      });
+      access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+      access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+      access.archiveJobs.enqueue({ detectedDiscId: disc.id });
+
+      const encodeDisc = access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint: `encode-${index}`,
+        volumeLabel: `ENCODE_DISC_${index}`,
+      });
+      access.catalog.updateDetectedDiscStatus(encodeDisc.id, "scanned");
+      access.catalog.updateDetectedDiscStatus(encodeDisc.id, "approved");
+      const encodeArchive = access.catalog.createOriginalDiscArchive({
+        detectedDiscId: encodeDisc.id,
+        discKind: "dvd",
+        archiveFormat: "iso",
+        archivePath: `/media/originals/encode-${index}.iso`,
+        fingerprint: `encode-${index}`,
+      });
+      const mediaItem = access.catalog.createMediaItem({
+        kind: "movie",
+        title: `Encode Movie ${index}`,
+      });
+      const selection = access.catalog.createDiscSelection({
+        originalDiscArchiveId: encodeArchive.id,
+        mediaItemId: mediaItem.id,
+        sourceKey: "main-feature",
+        kind: "main_feature",
+      });
+      access.encodeJobs.enqueue({
+        discSelectionId: selection.id,
+        encodingProfileId: profile.id,
+        outputPath: `/media/movies/encode-${index}.mkv`,
+      });
+
+      const reviewDisc = access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint: `review-${index}`,
+        volumeLabel: `REVIEW_DISC_${index}`,
+      });
+      access.catalog.updateDetectedDiscStatus(reviewDisc.id, "scanned");
+      access.catalog.updateDetectedDiscStatus(reviewDisc.id, "approved");
+      access.catalog.createOriginalDiscArchive({
+        detectedDiscId: reviewDisc.id,
+        discKind: "dvd",
+        archiveFormat: "iso",
+        archivePath: `/media/originals/review-${index}.iso`,
+        fingerprint: `review-${index}`,
+      });
+    }
+    const abortController = new AbortController();
+    const response = createDashboardEventResponse(access, {
+      signal: abortController.signal,
+      pollIntervalMs: 60_000,
+    });
+
+    const event = new TextDecoder().decode(
+      (await response.body!.getReader().read()).value,
+    );
+    abortController.abort();
+    const dataLine = event
+      .split("\n")
+      .find((line) => line.startsWith("data: "))!;
+    const snapshot = JSON.parse(dataLine.slice("data: ".length)) as {
+      opticalDrives: { status: string; items: unknown[] };
+      detectedDiscs: {
+        status: string;
+        items: { volumeLabel: string; titles: unknown[] }[];
+      };
+      archiveJobs: {
+        status: string;
+        items: { discLabel: string }[];
+      };
+      encodeJobs: {
+        status: string;
+        items: { mediaTitle: string; encodingProfileName: string }[];
+      };
+      catalogReview: {
+        status: string;
+        items: { discLabel: string }[];
+      };
+    };
+
+    expect(snapshot.detectedDiscs.status).toBe("loaded");
+    expect(snapshot.opticalDrives.items).toHaveLength(92);
+    expect(snapshot.detectedDiscs.items).toHaveLength(45);
+    expect(
+      snapshot.detectedDiscs.items.some(
+        (disc) => disc.volumeLabel === "DISC_00",
+      ),
+    ).toBe(true);
+    expect(
+      snapshot.detectedDiscs.items.some((disc) => disc.volumeLabel.endsWith("24")),
+    ).toBe(true);
+    expect(
+      snapshot.detectedDiscs.items.every((disc) => disc.titles.length === 0),
+    ).toBe(true);
+    expect(snapshot.archiveJobs.items).toHaveLength(25);
+    expect(
+      snapshot.archiveJobs.items.every(
+        (job) => job.discLabel !== "Unlabeled disc",
+      ),
+    ).toBe(true);
+    expect(snapshot.encodeJobs.items).toHaveLength(25);
+    expect(
+      snapshot.encodeJobs.items.every(
+        (job) =>
+          job.mediaTitle !== "Unknown Media Item" &&
+          job.encodingProfileName === "Activity profile",
+      ),
+    ).toBe(true);
+    expect(snapshot.catalogReview.items).toHaveLength(20);
+    expect(
+      snapshot.catalogReview.items.every(
+        (item) => item.discLabel !== "Unlabeled disc",
+      ),
+    ).toBe(true);
+    expect(Buffer.byteLength(event)).toBeLessThan(50_000);
+  });
+
   it("frames the current database snapshot as a reconnectable dashboard event", async () => {
     const access = dataAccessFixture.create();
     access.catalog.upsertOpticalDrive({

@@ -116,6 +116,8 @@ describe("dashboard 320px fallback", () => {
             discKind: "dvd",
             status: "scanned",
             opticalDriveName: longDriveName,
+            fingerprint: `sha256:${"e".repeat(64)}`,
+            titles: [],
             detectedAt: "2026-07-22T07:58:00.000Z",
           },
         ],

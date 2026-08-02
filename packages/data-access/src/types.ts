@@ -209,7 +209,39 @@ export type RunningEncodeJob = EncodeJob & {
   claimToken: EncodeJobClaimToken;
 };
 
+export interface DiscoveredOpticalDrive {
+  devicePath: string;
+  displayName?: string;
+  vendor?: string;
+  product?: string;
+  serialNumber?: string;
+}
+
+export type BoundedListPolicy =
+  | { mode: "newest"; limit: number }
+  | {
+      mode: "active-and-history";
+      activeLimit: number;
+      historyLimit: number;
+    };
+
+export interface ChronologicalListOptions {
+  policy?: BoundedListPolicy;
+}
+
+export interface DetectedDiscListOptions extends ChronologicalListOptions {
+  ids?: readonly DetectedDiscId[];
+}
+
+export interface OpticalDriveReconciliationInput
+  extends DiscoveredOpticalDrive {
+  isConfiguredDevice: boolean;
+}
+
 export interface CatalogAccess {
+  reconcileOpticalDrives(
+    discovered: readonly OpticalDriveReconciliationInput[],
+  ): OpticalDrive[];
   upsertOpticalDrive(input: {
     devicePath: string;
     displayName?: string;
@@ -219,15 +251,23 @@ export interface CatalogAccess {
     isEnabled?: boolean;
     isPresent: boolean;
   }): OpticalDrive;
-  listOpticalDrives(): OpticalDrive[];
+  listOpticalDrives(options?: {
+    ids?: readonly OpticalDriveId[];
+    limit?: number;
+    historicalLimit?: number;
+  }): OpticalDrive[];
   registerDetectedDisc(input: {
     opticalDriveId: OpticalDriveId;
     discKind: DiscKind;
     fingerprint: string;
+    isNewMediumObservation?: boolean;
     volumeLabel?: string;
     scanData?: unknown;
   }): DetectedDisc;
-  listDetectedDiscs(statuses?: DetectedDiscStatus[]): DetectedDisc[];
+  listDetectedDiscs(
+    statuses?: DetectedDiscStatus[],
+    options?: DetectedDiscListOptions,
+  ): DetectedDisc[];
   updateDetectedDiscStatus(
     id: DetectedDiscId,
     status: DetectedDiscStatus,
@@ -240,7 +280,11 @@ export interface CatalogAccess {
     fingerprint: string;
     sizeBytes?: number;
   }): OriginalDiscArchive;
-  listOriginalDiscArchives(): OriginalDiscArchive[];
+  listOriginalDiscArchives(options?: {
+    ids?: readonly OriginalDiscArchiveId[];
+    limit?: number;
+    uncatalogedOnly?: boolean;
+  }): OriginalDiscArchive[];
   createMediaItem(input: {
     parentId?: MediaItemId;
     kind: MediaItemKind;
@@ -249,9 +293,11 @@ export interface CatalogAccess {
     seasonNumber?: number;
     episodeNumber?: number;
   }): MediaItem;
-  listMediaItems(): MediaItem[];
+  listMediaItems(options?: { ids?: readonly MediaItemId[] }): MediaItem[];
   createDiscSelection(input: CreateDiscSelectionInput): DiscSelection;
-  listDiscSelections(): DiscSelection[];
+  listDiscSelections(options?: {
+    ids?: readonly DiscSelectionId[];
+  }): DiscSelection[];
 }
 
 export interface EncodingProfileAccess {
@@ -277,6 +323,7 @@ export interface EncodingProfileAccess {
     isActive: boolean;
   }): EncodingProfile;
   list(input?: {
+    ids?: readonly EncodingProfileId[];
     mediaDomain?: MediaDomain;
     activeOnly?: boolean;
   }): EncodingProfile[];
@@ -285,7 +332,10 @@ export interface EncodingProfileAccess {
 export interface ArchiveJobAccess {
   enqueue(input: { detectedDiscId: DetectedDiscId; priority?: number }): ArchiveJob;
   claimNext(workerId: string): RunningArchiveJob | null;
-  list(statuses?: JobStatus[]): ArchiveJob[];
+  list(
+    statuses?: JobStatus[],
+    options?: ChronologicalListOptions,
+  ): ArchiveJob[];
   updateProgress(
     claim: RunningArchiveJob,
     progressPercent: number,
@@ -306,7 +356,10 @@ export interface EncodeJobAccess {
     priority?: number;
   }): EncodeJob;
   claimNext(workerId: string): RunningEncodeJob | null;
-  list(statuses?: JobStatus[]): EncodeJob[];
+  list(
+    statuses?: JobStatus[],
+    options?: ChronologicalListOptions,
+  ): EncodeJob[];
   updateProgress(claim: RunningEncodeJob, progressPercent: number): EncodeJob;
   complete(claim: RunningEncodeJob): EncodeJob;
   fail(claim: RunningEncodeJob, errorMessage: string): EncodeJob;

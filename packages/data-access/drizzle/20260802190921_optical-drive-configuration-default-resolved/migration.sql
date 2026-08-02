@@ -1,0 +1,1 @@
+ALTER TABLE `optical_drives` RENAME COLUMN `configuration_default_applied` TO `configuration_default_resolved`;

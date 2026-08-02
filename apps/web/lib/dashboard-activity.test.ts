@@ -1,6 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { DashboardSnapshot } from "./dashboard";
+import type {
+  DashboardDetectedDiscDetails,
+  DashboardSnapshot,
+} from "./dashboard";
 import { watchDashboardActivity } from "./dashboard-activity";
 
 function emptySnapshot(generatedAt: string): DashboardSnapshot {
@@ -14,7 +17,626 @@ function emptySnapshot(generatedAt: string): DashboardSnapshot {
   };
 }
 
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 describe("watchDashboardActivity", () => {
+  it("retains HTTP title details when activity events carry disc summaries", async () => {
+    const detailed = emptySnapshot("2026-07-26T16:00:00.000Z");
+    detailed.detectedDiscs = {
+      status: "loaded",
+      items: [
+        {
+          id: "disc-new",
+          volumeLabel: "DETAILED_DISC",
+          discKind: "dvd",
+          status: "scanned",
+          opticalDriveName: "Upper drive",
+          fingerprint: "sha256:disc-1",
+          titles: [
+            {
+              number: 1,
+              durationSeconds: 60,
+              chapters: 1,
+              audioStreams: [
+                { id: 128, language: "English", format: "ac3", channels: 6 },
+              ],
+              subtitles: [],
+            },
+          ],
+          detectedAt: "2026-07-26T15:58:00.000Z",
+        },
+      ],
+    };
+    const activity: DashboardSnapshot = {
+      ...detailed,
+      generatedAt: "2026-07-26T16:00:01.000Z",
+      detectedDiscs: {
+        status: "loaded",
+        items: [{ ...detailed.detectedDiscs.items[0]!, titles: [] }],
+      },
+    };
+    let dashboardListener: ((event: MessageEvent<string>) => void) | undefined;
+    const eventSource = {
+      onerror: null as (() => void) | null,
+      onopen: null as (() => void) | null,
+      addEventListener(
+        type: string,
+        listener: (event: MessageEvent<string>) => void,
+      ) {
+        if (type === "dashboard") {
+          dashboardListener = listener;
+        }
+      },
+      close: vi.fn(),
+    };
+    const onSnapshot = vi.fn();
+
+    const stop = watchDashboardActivity({
+      loadSnapshot: async () => detailed,
+      openEventSource: () => eventSource,
+      onSnapshot,
+      onInitialLoadError: vi.fn(),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    dashboardListener?.({
+      data: JSON.stringify(activity),
+    } as MessageEvent<string>);
+
+    expect(
+      (onSnapshot.mock.calls.at(-1)?.[0] as DashboardSnapshot).detectedDiscs,
+    ).toEqual(detailed.detectedDiscs);
+    stop();
+  });
+
+  it("retains every detail version from a full bounded activity snapshot", async () => {
+    const detailed = emptySnapshot("2026-07-26T16:00:00.000Z");
+    detailed.detectedDiscs = {
+      status: "loaded",
+      items: Array.from({ length: 120 }, (_, index) => ({
+        id: `disc-${index}`,
+        volumeLabel: `DISC_${index}`,
+        discKind: "dvd" as const,
+        status: "scanned" as const,
+        opticalDriveName: "Upper drive",
+        fingerprint: `sha256:disc-${index}`,
+        titles: [{
+          number: 1,
+          durationSeconds: 60,
+          chapters: 1,
+          audioStreams: [],
+          subtitles: [],
+        }],
+        detectedAt: new Date(
+          Date.UTC(2026, 6, 26, 15, 0, index),
+        ).toISOString(),
+      })),
+    };
+    const activity = structuredClone(detailed);
+    activity.generatedAt = "2026-07-26T16:00:01.000Z";
+    if (activity.detectedDiscs.status === "loaded") {
+      for (const disc of activity.detectedDiscs.items) {
+        disc.titles = [];
+      }
+    }
+    let dashboardListener: ((event: MessageEvent<string>) => void) | undefined;
+    const loadDiscDetails = vi.fn(
+      async (id: string, detectedAt: string): Promise<DashboardDetectedDiscDetails> => ({
+        id,
+        detectedAt,
+        titles: [],
+      }),
+    );
+    const stop = watchDashboardActivity({
+      loadSnapshot: async () => detailed,
+      loadDiscDetails,
+      openEventSource: () => ({
+        onerror: null,
+        onopen: null,
+        addEventListener(_type, listener) {
+          dashboardListener = listener;
+        },
+        close: vi.fn(),
+      }),
+      onSnapshot: vi.fn(),
+      onInitialLoadError: vi.fn(),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    dashboardListener?.({ data: JSON.stringify(activity) } as MessageEvent<string>);
+    dashboardListener?.({ data: JSON.stringify(activity) } as MessageEvent<string>);
+
+    expect(loadDiscDetails).not.toHaveBeenCalled();
+
+    const changed = structuredClone(activity);
+    if (changed.detectedDiscs.status === "loaded") {
+      changed.detectedDiscs.items.at(-1)!.detectedAt =
+        "2026-07-26T16:00:02.000Z";
+    }
+    dashboardListener?.({ data: JSON.stringify(changed) } as MessageEvent<string>);
+    await vi.waitFor(() => expect(loadDiscDetails).toHaveBeenCalledOnce());
+    await Promise.resolve();
+    await Promise.resolve();
+    dashboardListener?.({ data: JSON.stringify(changed) } as MessageEvent<string>);
+
+    expect(loadDiscDetails).toHaveBeenCalledOnce();
+    stop();
+  });
+
+  it("loads review details for a disc first observed through activity", async () => {
+    const initial = emptySnapshot("2026-07-26T16:00:00.000Z");
+    const activity = emptySnapshot("2026-07-26T16:00:01.000Z");
+    activity.detectedDiscs = {
+      status: "loaded",
+      items: [
+        {
+          id: "disc-new",
+          volumeLabel: "NEW_DISC",
+          discKind: "dvd",
+          status: "scanned",
+          opticalDriveName: "Upper drive",
+          fingerprint: "sha256:new-disc",
+          titles: [],
+          detectedAt: "2026-07-26T16:00:01.000Z",
+        },
+      ],
+    };
+    const details: DashboardDetectedDiscDetails = {
+      id: "disc-new",
+      detectedAt: "2026-07-26T16:00:01.000Z",
+      titles: [
+        {
+          number: 1,
+          durationSeconds: 90,
+          chapters: 2,
+          audioStreams: [],
+          subtitles: [],
+        },
+      ],
+    };
+    const loadSnapshot = vi.fn().mockResolvedValue(initial);
+    const loadDiscDetails = vi.fn().mockResolvedValue(details);
+    let dashboardListener: ((event: MessageEvent<string>) => void) | undefined;
+    const eventSource = {
+      onerror: null as (() => void) | null,
+      onopen: null as (() => void) | null,
+      addEventListener(
+        type: string,
+        listener: (event: MessageEvent<string>) => void,
+      ) {
+        if (type === "dashboard") {
+          dashboardListener = listener;
+        }
+      },
+      close: vi.fn(),
+    };
+    const onSnapshot = vi.fn();
+
+    const stop = watchDashboardActivity({
+      loadSnapshot,
+      loadDiscDetails,
+      openEventSource: () => eventSource,
+      onSnapshot,
+      onInitialLoadError: vi.fn(),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    dashboardListener?.({
+      data: JSON.stringify(activity),
+    } as MessageEvent<string>);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(loadSnapshot).toHaveBeenCalledOnce();
+    expect(loadDiscDetails).toHaveBeenCalledWith(
+      "disc-new",
+      "2026-07-26T16:00:01.000Z",
+      expect.any(AbortSignal),
+    );
+    expect(
+      (onSnapshot.mock.calls.at(-1)?.[0] as DashboardSnapshot).detectedDiscs,
+    ).toEqual({
+      status: "loaded",
+      items: [
+        expect.objectContaining({
+          id: "disc-new",
+          detectedAt: details.detectedAt,
+          titles: details.titles,
+        }),
+      ],
+    });
+    stop();
+  });
+
+  it("retries a transient detail failure after bounded backoff", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-26T16:00:00.000Z"));
+    const initial = emptySnapshot("2026-07-26T16:00:00.000Z");
+    const activity = emptySnapshot("2026-07-26T16:00:01.000Z");
+    activity.detectedDiscs = {
+      status: "loaded",
+      items: [
+        {
+          id: "disc-retry",
+          volumeLabel: "RETRY_DISC",
+          discKind: "dvd",
+          status: "scanned",
+          opticalDriveName: "Upper drive",
+          fingerprint: "sha256:retry-disc",
+          titles: [],
+          detectedAt: "2026-07-26T16:00:01.000Z",
+        },
+      ],
+    };
+    const details: DashboardDetectedDiscDetails = {
+      id: "disc-retry",
+      detectedAt: "2026-07-26T16:00:01.000Z",
+      titles: [
+        {
+          number: 1,
+          durationSeconds: 90,
+          chapters: 2,
+          audioStreams: [],
+          subtitles: [],
+        },
+      ],
+    };
+    const loadDiscDetails = vi.fn()
+      .mockRejectedValueOnce(new Error("temporary detail failure"))
+      .mockResolvedValueOnce(details);
+    let dashboardListener: ((event: MessageEvent<string>) => void) | undefined;
+    const onSnapshot = vi.fn();
+    const stop = watchDashboardActivity({
+      loadSnapshot: async () => initial,
+      loadDiscDetails,
+      openEventSource: () => ({
+        onerror: null,
+        onopen: null,
+        addEventListener(_type, listener) {
+          dashboardListener = listener;
+        },
+        close: vi.fn(),
+      }),
+      onSnapshot,
+      onInitialLoadError: vi.fn(),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    dashboardListener?.({ data: JSON.stringify(activity) } as MessageEvent<string>);
+    await Promise.resolve();
+    await Promise.resolve();
+    dashboardListener?.({ data: JSON.stringify(activity) } as MessageEvent<string>);
+    expect(loadDiscDetails).toHaveBeenCalledOnce();
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    dashboardListener?.({ data: JSON.stringify(activity) } as MessageEvent<string>);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(loadDiscDetails).toHaveBeenCalledTimes(2);
+    expect(
+      (onSnapshot.mock.calls.at(-1)?.[0] as DashboardSnapshot).detectedDiscs,
+    ).toEqual({
+      status: "loaded",
+      items: [expect.objectContaining({ id: "disc-retry", titles: details.titles })],
+    });
+    stop();
+  });
+
+  it("reloads review details when a known disc is rescanned", async () => {
+    const initial = emptySnapshot("2026-07-26T16:00:00.000Z");
+    initial.detectedDiscs = {
+      status: "loaded",
+      items: [
+        {
+          id: "disc-1",
+          volumeLabel: "DISC",
+          discKind: "dvd",
+          status: "detected",
+          opticalDriveName: "Upper drive",
+          fingerprint: "sha256:disc",
+          titles: [],
+          detectedAt: "2026-07-26T15:59:00.000Z",
+        },
+      ],
+    };
+    const activity = structuredClone(initial);
+    activity.generatedAt = "2026-07-26T16:00:01.000Z";
+    if (activity.detectedDiscs.status === "loaded") {
+      activity.detectedDiscs.items[0]!.status = "scanned";
+      activity.detectedDiscs.items[0]!.detectedAt =
+        "2026-07-26T16:00:01.000Z";
+    }
+    const details: DashboardDetectedDiscDetails = {
+      id: "disc-1",
+      detectedAt: "2026-07-26T16:00:01.000Z",
+      titles: [
+        {
+          number: 1,
+          durationSeconds: 120,
+          chapters: 3,
+          audioStreams: [],
+          subtitles: [],
+        },
+      ],
+    };
+    const loadSnapshot = vi.fn().mockResolvedValue(initial);
+    const loadDiscDetails = vi.fn().mockResolvedValue(details);
+    let dashboardListener: ((event: MessageEvent<string>) => void) | undefined;
+    const eventSource = {
+      onerror: null as (() => void) | null,
+      onopen: null as (() => void) | null,
+      addEventListener(
+        type: string,
+        listener: (event: MessageEvent<string>) => void,
+      ) {
+        if (type === "dashboard") {
+          dashboardListener = listener;
+        }
+      },
+      close: vi.fn(),
+    };
+    const onSnapshot = vi.fn();
+
+    const stop = watchDashboardActivity({
+      loadSnapshot,
+      loadDiscDetails,
+      openEventSource: () => eventSource,
+      onSnapshot,
+      onInitialLoadError: vi.fn(),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    dashboardListener?.({
+      data: JSON.stringify(activity),
+    } as MessageEvent<string>);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(loadSnapshot).toHaveBeenCalledOnce();
+    expect(loadDiscDetails).toHaveBeenCalledOnce();
+    expect(
+      (onSnapshot.mock.calls.at(-1)?.[0] as DashboardSnapshot).detectedDiscs,
+    ).toEqual({
+      status: "loaded",
+      items: [
+        expect.objectContaining({
+          id: "disc-1",
+          detectedAt: details.detectedAt,
+          titles: details.titles,
+        }),
+      ],
+    });
+    stop();
+  });
+
+  it("merges a delayed detail response without rolling newer live state backward", async () => {
+    const initial = emptySnapshot("2026-07-26T16:00:00.000Z");
+    let resolveDetails!: (details: DashboardDetectedDiscDetails) => void;
+    const loadDiscDetails = vi.fn(
+      () =>
+        new Promise<DashboardDetectedDiscDetails>((resolve) => {
+          resolveDetails = resolve;
+        }),
+    );
+    let dashboardListener: ((event: MessageEvent<string>) => void) | undefined;
+    const eventSource = {
+      onerror: null as (() => void) | null,
+      onopen: null as (() => void) | null,
+      addEventListener(_type: string, listener: (event: MessageEvent<string>) => void) {
+        dashboardListener = listener;
+      },
+      close: vi.fn(),
+    };
+    const onSnapshot = vi.fn();
+    const first = emptySnapshot("2026-07-26T16:00:01.000Z");
+    first.detectedDiscs = {
+      status: "loaded",
+      items: [{
+        id: "disc-1",
+        volumeLabel: "DISC",
+        discKind: "dvd",
+        status: "scanned",
+        opticalDriveName: "Drive",
+        fingerprint: "sha256:disc",
+        titles: [],
+        detectedAt: "2026-07-26T16:00:01.000Z",
+      }],
+    };
+    first.archiveJobs = {
+      status: "loaded",
+      items: [{
+        id: "job-1",
+        discLabel: "DISC",
+        opticalDriveName: "Drive",
+        status: "running",
+        progressPercent: 10,
+      }],
+    };
+    const newer = structuredClone(first);
+    newer.generatedAt = "2026-07-26T16:00:02.000Z";
+    if (newer.archiveJobs.status === "loaded") {
+      newer.archiveJobs.items[0]!.progressPercent = 50;
+    }
+
+    const stop = watchDashboardActivity({
+      loadSnapshot: async () => initial,
+      loadDiscDetails,
+      openEventSource: () => eventSource,
+      onSnapshot,
+      onInitialLoadError: vi.fn(),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    dashboardListener?.({ data: JSON.stringify(first) } as MessageEvent<string>);
+    dashboardListener?.({ data: JSON.stringify(newer) } as MessageEvent<string>);
+    resolveDetails({
+      id: "disc-1",
+      detectedAt: "2026-07-26T16:00:01.000Z",
+      titles: [{
+        number: 1,
+        durationSeconds: 60,
+        chapters: 1,
+        audioStreams: [],
+        subtitles: [],
+      }],
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const latest = onSnapshot.mock.calls.at(-1)?.[0] as DashboardSnapshot;
+    expect(latest.archiveJobs).toEqual(newer.archiveJobs);
+    expect(latest.generatedAt).toBe(newer.generatedAt);
+    expect(loadDiscDetails).toHaveBeenCalledOnce();
+    stop();
+  });
+
+  it("hydrates changed disc details sequentially and only once per version", async () => {
+    const initial = emptySnapshot("2026-07-26T16:00:00.000Z");
+    const pending: Array<() => void> = [];
+    let inFlight = 0;
+    let maximumInFlight = 0;
+    const loadDiscDetails = vi.fn(
+      (id: string, detectedAt: string) =>
+        new Promise<DashboardDetectedDiscDetails>((resolve) => {
+          inFlight += 1;
+          maximumInFlight = Math.max(maximumInFlight, inFlight);
+          pending.push(() => {
+            inFlight -= 1;
+            resolve({ id, detectedAt, titles: [] });
+          });
+        }),
+    );
+    const activity = emptySnapshot("2026-07-26T16:00:01.000Z");
+    activity.detectedDiscs = {
+      status: "loaded",
+      items: ["disc-1", "disc-2"].map((id) => ({
+        id,
+        volumeLabel: id,
+        discKind: "dvd" as const,
+        status: "scanned" as const,
+        opticalDriveName: "Drive",
+        fingerprint: `sha256:${id}`,
+        titles: [],
+        detectedAt: "2026-07-26T16:00:01.000Z",
+      })),
+    };
+    let dashboardListener: ((event: MessageEvent<string>) => void) | undefined;
+    const stop = watchDashboardActivity({
+      loadSnapshot: async () => initial,
+      loadDiscDetails,
+      openEventSource: () => ({
+        onerror: null,
+        onopen: null,
+        addEventListener(_type, listener) {
+          dashboardListener = listener;
+        },
+        close: vi.fn(),
+      }),
+      onSnapshot: vi.fn(),
+      onInitialLoadError: vi.fn(),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    dashboardListener?.({ data: JSON.stringify(activity) } as MessageEvent<string>);
+    dashboardListener?.({ data: JSON.stringify(activity) } as MessageEvent<string>);
+    expect(loadDiscDetails).toHaveBeenCalledOnce();
+    pending.shift()?.();
+    await vi.waitFor(() => {
+      expect(loadDiscDetails).toHaveBeenCalledTimes(2);
+    });
+    pending.shift()?.();
+    await Promise.resolve();
+    await Promise.resolve();
+    dashboardListener?.({ data: JSON.stringify(activity) } as MessageEvent<string>);
+
+    expect(maximumInFlight).toBe(1);
+    expect(loadDiscDetails).toHaveBeenCalledTimes(2);
+    stop();
+  });
+
+  it("times out a hung detail request and continues hydrating later discs", async () => {
+    vi.useFakeTimers();
+    const initial = emptySnapshot("2026-07-26T16:00:00.000Z");
+    const activity = emptySnapshot("2026-07-26T16:00:01.000Z");
+    activity.detectedDiscs = {
+      status: "loaded",
+      items: ["disc-hung", "disc-next"].map((id) => ({
+        id,
+        volumeLabel: id,
+        discKind: "dvd" as const,
+        status: "scanned" as const,
+        opticalDriveName: "Drive",
+        fingerprint: `sha256:${id}`,
+        titles: [],
+        detectedAt: "2026-07-26T16:00:01.000Z",
+      })),
+    };
+    let hungSignal: AbortSignal | undefined;
+    const loadDiscDetails = vi.fn(
+      (id: string, detectedAt: string, signal: AbortSignal) => {
+        if (id === "disc-hung") {
+          hungSignal = signal;
+          return new Promise<DashboardDetectedDiscDetails>(() => undefined);
+        }
+        return Promise.resolve({
+          id,
+          detectedAt,
+          titles: [{
+            number: 1,
+            durationSeconds: 90,
+            chapters: 2,
+            audioStreams: [],
+            subtitles: [],
+          }],
+        });
+      },
+    );
+    let dashboardListener: ((event: MessageEvent<string>) => void) | undefined;
+    const onSnapshot = vi.fn();
+    const stop = watchDashboardActivity({
+      loadSnapshot: async () => initial,
+      loadDiscDetails,
+      openEventSource: () => ({
+        onerror: null,
+        onopen: null,
+        addEventListener(_type, listener) {
+          dashboardListener = listener;
+        },
+        close: vi.fn(),
+      }),
+      onSnapshot,
+      onInitialLoadError: vi.fn(),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    dashboardListener?.({ data: JSON.stringify(activity) } as MessageEvent<string>);
+
+    expect(loadDiscDetails).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(10_000);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(hungSignal?.aborted).toBe(true);
+    expect(loadDiscDetails).toHaveBeenCalledTimes(2);
+    expect(
+      (onSnapshot.mock.calls.at(-1)?.[0] as DashboardSnapshot).detectedDiscs,
+    ).toEqual({
+      status: "loaded",
+      items: expect.arrayContaining([
+        expect.objectContaining({
+          id: "disc-next",
+          titles: [expect.objectContaining({ number: 1 })],
+        }),
+      ]),
+    });
+    stop();
+  });
+
   it("keeps the normal HTTP snapshot when SSE is unavailable", async () => {
     const snapshot = emptySnapshot("2026-07-26T16:00:00.000Z");
     const onSnapshot = vi.fn();
@@ -63,6 +685,8 @@ describe("watchDashboardActivity", () => {
             discKind: "dvd",
             status: "approved",
             opticalDriveName: "Upper drive",
+            fingerprint: "sha256:live-disc",
+            titles: [],
             detectedAt: "2026-07-26T15:58:00.000Z",
           },
         ],

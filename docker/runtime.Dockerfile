@@ -50,7 +50,8 @@ RUN for source in node_modules/.pnpm/@img+sharp-libvips-linux-*/node_modules/@im
 
 FROM shared-builder AS archive-worker-builder
 COPY apps/archive-worker apps/archive-worker
-RUN pnpm --filter @rip-dvd/archive-worker build
+RUN pnpm --filter @rip-dvd/archive-worker build \
+  && pnpm --filter @rip-dvd/archive-worker --prod deploy --legacy /archive-worker
 
 FROM shared-builder AS encode-worker-builder
 COPY apps/encode-worker apps/encode-worker
@@ -91,13 +92,12 @@ RUN mkdir --parents packages/worker-runtime/node_modules/@rip-dvd \
 FROM worker-runtime-base AS archive-worker
 RUN apt-get update \
   && apt-get install --yes --no-install-recommends lsdvd util-linux \
-  && rm -rf /var/lib/apt/lists/*
+  && rm -rf /var/lib/apt/lists/* \
+  && lsblk --json --output PATH,TYPE,TRAN,VENDOR,MODEL,SERIAL >/dev/null \
+  && node -e "const { constants } = require('node:fs'); if (!Number.isInteger(constants.O_NONBLOCK)) process.exit(1)"
 RUN mkdir --parents /media/originals \
   && chown node:node /media/originals
-COPY --from=archive-worker-builder --chown=node:node /app/apps/archive-worker/package.json ./apps/archive-worker/package.json
-COPY --from=archive-worker-builder --chown=node:node /app/apps/archive-worker/dist ./apps/archive-worker/dist
-RUN mkdir --parents apps/archive-worker/node_modules/@rip-dvd \
-  && ln --symbolic ../../../../packages/worker-runtime apps/archive-worker/node_modules/@rip-dvd/worker-runtime
+COPY --from=archive-worker-builder --chown=node:node /archive-worker ./apps/archive-worker
 USER node
 CMD ["node", "apps/archive-worker/dist/index.js"]
 

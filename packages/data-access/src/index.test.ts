@@ -1,4 +1,10 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -8,8 +14,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   createDataAccess,
+  DVD_TITLE_MAP_SCHEMA_VERSION,
   DomainInvariantError,
   InvalidStatusTransitionError,
+  MAX_DVD_TITLES,
 } from "./index.js";
 import type { DetectedDiscId, DiscKind } from "./index.js";
 import type { EncodingProfileId } from "./index.js";
@@ -138,6 +146,12 @@ function createTestDatabasePath(): string {
   return join(directory, "rip-dvd.sqlite");
 }
 
+function createTestMigrationsFolder(): string {
+  const directory = mkdtempSync(join(tmpdir(), "rip-dvd-migrations-"));
+  temporaryDirectories.push(directory);
+  return directory;
+}
+
 function openTestDatabase(databasePath = createTestDatabasePath()) {
   return createDataAccess({ databasePath });
 }
@@ -150,6 +164,199 @@ afterEach(() => {
 });
 
 describe("data-access facade", () => {
+  it("keeps every attached drive lane while bounding all missing-drive history", () => {
+    const access = openTestDatabase();
+    for (let index = 0; index < 32; index += 1) {
+      access.catalog.upsertOpticalDrive({
+        devicePath: `/dev/sr${index}`,
+        isEnabled: index % 2 === 0,
+        isPresent: true,
+      });
+    }
+    for (let index = 32; index < 92; index += 1) {
+      access.catalog.upsertOpticalDrive({
+        devicePath: `/dev/sr${index}`,
+        isEnabled: false,
+        isPresent: false,
+      });
+    }
+
+    const activity = access.catalog.listOpticalDrives({ historicalLimit: 20 });
+
+    expect(activity.filter((drive) => drive.isPresent)).toHaveLength(32);
+    expect(activity.filter((drive) => !drive.isPresent)).toHaveLength(20);
+    expect(activity).toHaveLength(52);
+    access.close();
+  });
+
+  it("keeps every configured missing drive plus bounded disabled history", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    const access = openTestDatabase();
+    const configuredDrives = Array.from({ length: 25 }, (_, index) =>
+      access.catalog.upsertOpticalDrive({
+        devicePath: `/dev/configured-${index}`,
+        isEnabled: true,
+        isPresent: false,
+      }),
+    );
+    vi.setSystemTime(new Date("2026-01-02T00:00:00.000Z"));
+    for (let index = 0; index < 25; index += 1) {
+      access.catalog.upsertOpticalDrive({
+        devicePath: `/dev/missing-${index}`,
+        isEnabled: false,
+        isPresent: false,
+      });
+    }
+
+    const activity = access.catalog.listOpticalDrives({ historicalLimit: 20 });
+
+    expect(
+      activity.filter((drive) => drive.isEnabled && !drive.isPresent),
+    ).toEqual(
+      expect.arrayContaining(
+        configuredDrives.map((drive) =>
+          expect.objectContaining({ id: drive.id }),
+        ),
+      ),
+    );
+    expect(
+      activity.filter((drive) => !drive.isEnabled && !drive.isPresent),
+    ).toHaveLength(20);
+    expect(activity).toHaveLength(45);
+    access.close();
+  });
+
+  it("keeps live Detected Disc review work ahead of bounded terminal history", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const reviewDisc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "older-live-review",
+      volumeLabel: "OLDER_LIVE_REVIEW",
+    });
+    access.catalog.updateDetectedDiscStatus(reviewDisc.id, "scanned");
+    for (let index = 0; index < 30; index += 1) {
+      const terminal = access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint: `terminal-${index}`,
+        volumeLabel: `TERMINAL_${index}`,
+      });
+      access.catalog.updateDetectedDiscStatus(terminal.id, "rejected");
+    }
+
+    const activity = access.catalog.listDetectedDiscs(undefined, {
+      policy: {
+        mode: "active-and-history",
+        activeLimit: 100,
+        historyLimit: 20,
+      },
+    });
+
+    expect(activity).toHaveLength(21);
+    expect(activity).toContainEqual(
+      expect.objectContaining({ id: reviewDisc.id, status: "scanned" }),
+    );
+    expect(activity.filter((disc) => disc.status === "rejected")).toHaveLength(
+      20,
+    );
+    access.close();
+  });
+
+  it("applies explicit independent bounds to live and terminal Detected Discs", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    for (let index = 0; index < 105; index += 1) {
+      access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint: `live-${index}`,
+      });
+    }
+    for (let index = 0; index < 30; index += 1) {
+      const terminal = access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint: `history-${index}`,
+      });
+      access.catalog.updateDetectedDiscStatus(terminal.id, "rejected");
+    }
+
+    const activity = access.catalog.listDetectedDiscs(undefined, {
+      policy: {
+        mode: "active-and-history",
+        activeLimit: 100,
+        historyLimit: 20,
+      },
+    });
+
+    expect(
+      activity.filter((disc) =>
+        ["detected", "scanned", "approved"].includes(disc.status),
+      ),
+    ).toHaveLength(100);
+    expect(
+      activity.filter((disc) => ["archived", "rejected"].includes(disc.status)),
+    ).toHaveLength(20);
+    access.close();
+  });
+
+  it("returns the newest records through the bounded list policy", () => {
+    vi.useFakeTimers();
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const discs = Array.from({ length: 3 }, (_, index) => {
+      vi.setSystemTime(new Date(`2026-01-0${index + 1}T00:00:00.000Z`));
+      return access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint: `newest-${index}`,
+      });
+    });
+
+    expect(
+      access.catalog.listDetectedDiscs(undefined, {
+        policy: { mode: "newest", limit: 2 },
+      }),
+    ).toEqual([
+      expect.objectContaining({ id: discs[1]?.id }),
+      expect.objectContaining({ id: discs[2]?.id }),
+    ]);
+
+    access.close();
+  });
+
+  it("rejects activity policy combined with explicit status filters", () => {
+    const access = openTestDatabase();
+
+    expect(() =>
+      access.catalog.listDetectedDiscs(["detected"], {
+        policy: {
+          mode: "active-and-history",
+          activeLimit: 100,
+          historyLimit: 20,
+        },
+      }),
+    ).toThrowError(
+      new DomainInvariantError(
+        "active-and-history list policy cannot be combined with explicit statuses",
+      ),
+    );
+
+    access.close();
+  });
+
   it("migrates a persistent database and reports its SQLite configuration", () => {
     const databasePath = createTestDatabasePath();
     const access = openTestDatabase(databasePath);
@@ -355,6 +562,730 @@ describe("data-access facade", () => {
       expect.objectContaining({ id: archive.id, fingerprint: "disc-fingerprint" }),
     ]);
     expect(selection.mediaItemId).toBe(movie.id);
+    access.close();
+  });
+
+  it("reconciles discovered Optical Drives without changing missing drives' last-seen time", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-26T18:00:00.000Z"));
+    const access = openTestDatabase();
+    const internalDrive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      displayName: "Internal drive",
+      isEnabled: true,
+      isPresent: true,
+    });
+
+    vi.setSystemTime(new Date("2026-07-26T18:05:00.000Z"));
+    expect(
+      access.catalog.reconcileOpticalDrives([
+        {
+          devicePath: "/dev/sr1",
+          displayName: "USB drive",
+          isConfiguredDevice: false,
+        },
+      ]),
+    ).toEqual([
+      expect.objectContaining({
+        id: internalDrive.id,
+        devicePath: "/dev/sr0",
+        isEnabled: true,
+        isPresent: false,
+        lastSeenAt: new Date("2026-07-26T18:00:00.000Z"),
+      }),
+      expect.objectContaining({
+        devicePath: "/dev/sr1",
+        isEnabled: false,
+        isPresent: true,
+        lastSeenAt: new Date("2026-07-26T18:05:00.000Z"),
+      }),
+    ]);
+
+    vi.setSystemTime(new Date("2026-07-26T18:10:00.000Z"));
+    expect(
+      access.catalog.reconcileOpticalDrives([
+        {
+          devicePath: "/dev/sr0",
+          displayName: "Internal drive rediscovered",
+          isConfiguredDevice: false,
+        },
+      ]),
+    ).toEqual([
+      expect.objectContaining({
+        id: internalDrive.id,
+        displayName: "Internal drive rediscovered",
+        isEnabled: false,
+        isPresent: true,
+        lastSeenAt: new Date("2026-07-26T18:10:00.000Z"),
+      }),
+      expect.objectContaining({
+        devicePath: "/dev/sr1",
+        isPresent: false,
+        lastSeenAt: new Date("2026-07-26T18:05:00.000Z"),
+      }),
+    ]);
+
+    access.close();
+  });
+
+  it("defaults replacement hardware at an enabled device path to disabled", () => {
+    const access = openTestDatabase();
+    const original = access.catalog.reconcileOpticalDrives([
+      {
+        devicePath: "/dev/sr0",
+        displayName: "Original drive",
+        vendor: "Pioneer",
+        product: "DVD-RW",
+        serialNumber: "ORIGINAL-001",
+        isConfiguredDevice: true,
+      },
+    ])[0]!;
+
+    const configuredReplacement = {
+      devicePath: "/dev/sr0",
+      displayName: "Replacement drive",
+      vendor: "Pioneer",
+      product: "DVD-RW",
+      serialNumber: "REPLACEMENT-002",
+      isConfiguredDevice: true,
+    };
+    expect(
+      access.catalog.reconcileOpticalDrives([
+        {
+          ...configuredReplacement,
+          isConfiguredDevice: false,
+        },
+      ]),
+    ).toEqual([
+      expect.objectContaining({
+        id: original.id,
+        serialNumber: "REPLACEMENT-002",
+        isEnabled: false,
+        isPresent: true,
+      }),
+    ]);
+    expect(
+      access.catalog.reconcileOpticalDrives([configuredReplacement]),
+    ).toEqual([
+      expect.objectContaining({ id: original.id, isEnabled: false }),
+    ]);
+
+    access.close();
+  });
+
+  it.each<{
+    caseName: string;
+    existingEnabled?: boolean;
+    existingSerial?: string;
+    observedSerial: string;
+    expectedEnabled: boolean;
+  }>([
+    {
+      caseName: "preserves an independently enabled stable target",
+      existingEnabled: true,
+      existingSerial: "STABLE-002",
+      observedSerial: "STABLE-002",
+      expectedEnabled: true,
+    },
+    {
+      caseName: "preserves an independently disabled stable target",
+      existingEnabled: false,
+      existingSerial: "STABLE-002",
+      observedSerial: "STABLE-002",
+      expectedEnabled: false,
+    },
+    {
+      caseName: "leaves a new target disabled",
+      observedSerial: "NEW-002",
+      expectedEnabled: false,
+    },
+    {
+      caseName: "disables an existing target whose identity changed",
+      existingEnabled: true,
+      existingSerial: "ORIGINAL-002",
+      observedSerial: "REPLACEMENT-002",
+      expectedEnabled: false,
+    },
+  ])("$caseName when a configured alias retargets", (testCase) => {
+    const access = openTestDatabase();
+    access.catalog.reconcileOpticalDrives([
+      {
+        devicePath: "/dev/sr0",
+        serialNumber: "CONFIGURED-001",
+        isConfiguredDevice: true,
+      },
+    ]);
+    if (testCase.existingEnabled !== undefined) {
+      access.catalog.upsertOpticalDrive({
+        devicePath: "/dev/sr1",
+        serialNumber: testCase.existingSerial,
+        isEnabled: testCase.existingEnabled,
+        isPresent: true,
+      });
+    }
+
+    access.catalog.reconcileOpticalDrives([
+      {
+        devicePath: "/dev/sr0",
+        serialNumber: "CONFIGURED-001",
+        isConfiguredDevice: false,
+      },
+      {
+        devicePath: "/dev/sr1",
+        serialNumber: testCase.observedSerial,
+        isConfiguredDevice: true,
+      },
+    ]);
+
+    expect(
+      access.catalog
+        .listOpticalDrives()
+        .find((drive) => drive.devicePath === "/dev/sr1"),
+    ).toEqual(
+      expect.objectContaining({
+        isEnabled: testCase.expectedEnabled,
+        serialNumber: testCase.observedSerial,
+      }),
+    );
+
+    access.close();
+  });
+
+  it("keeps a pre-discovered disabled alias target disabled on later polls", () => {
+    const access = openTestDatabase();
+    access.catalog.reconcileOpticalDrives([
+      {
+        devicePath: "/dev/sr0",
+        serialNumber: "CONFIGURED-001",
+        isConfiguredDevice: true,
+      },
+      {
+        devicePath: "/dev/sr1",
+        serialNumber: "STABLE-002",
+        isConfiguredDevice: false,
+      },
+    ]);
+    const retargetedSnapshot = [
+      {
+        devicePath: "/dev/sr0",
+        serialNumber: "CONFIGURED-001",
+        isConfiguredDevice: false,
+      },
+      {
+        devicePath: "/dev/sr1",
+        serialNumber: "STABLE-002",
+        isConfiguredDevice: true,
+      },
+    ];
+
+    const enabledAfterEachPoll = [retargetedSnapshot, retargetedSnapshot].map(
+      (snapshot) => {
+        access.catalog.reconcileOpticalDrives(snapshot);
+        return access.catalog
+          .listOpticalDrives()
+          .find((drive) => drive.devicePath === "/dev/sr1")?.isEnabled;
+      },
+    );
+
+    expect(enabledAfterEachPoll).toEqual([false, false]);
+
+    access.close();
+  });
+
+  it("disables uncertain same-path hardware after a disappearance", () => {
+    const access = openTestDatabase();
+    const original = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      displayName: "Original drive",
+      vendor: "Pioneer",
+      product: "DVD-RW",
+      isEnabled: true,
+      isPresent: true,
+    });
+
+    access.catalog.reconcileOpticalDrives([]);
+    expect(
+      access.catalog.reconcileOpticalDrives([
+        {
+          devicePath: "/dev/sr0",
+          displayName: "Replacement drive",
+          vendor: "Pioneer",
+          product: "DVD-RW",
+          serialNumber: "NEW-SERIAL",
+          isConfiguredDevice: false,
+        },
+      ]),
+    ).toEqual([
+      expect.objectContaining({
+        id: original.id,
+        isEnabled: false,
+        isPresent: true,
+        serialNumber: "NEW-SERIAL",
+      }),
+    ]);
+
+    access.close();
+  });
+
+  it("preserves authorization when a matching serial proves continuity", () => {
+    const access = openTestDatabase();
+    const original = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      serialNumber: "STABLE-SERIAL",
+      isEnabled: true,
+      isPresent: true,
+    });
+
+    access.catalog.reconcileOpticalDrives([]);
+    expect(
+      access.catalog.reconcileOpticalDrives([
+        {
+          devicePath: "/dev/sr0",
+          serialNumber: "STABLE-SERIAL",
+          isConfiguredDevice: false,
+        },
+      ]),
+    ).toEqual([
+      expect.objectContaining({
+        id: original.id,
+        isEnabled: true,
+        isPresent: true,
+      }),
+    ]);
+
+    access.close();
+  });
+
+  it("treats a matching serial as authoritative when model text changes", () => {
+    const access = openTestDatabase();
+    const original = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      vendor: "Pioneer",
+      product: "DVD-RW",
+      serialNumber: "STABLE-SERIAL",
+      isEnabled: true,
+      isPresent: true,
+    });
+
+    expect(
+      access.catalog.reconcileOpticalDrives([
+        {
+          devicePath: "/dev/sr0",
+          vendor: "HL-DT-ST",
+          product: "DVDRAM",
+          serialNumber: "STABLE-SERIAL",
+          isConfiguredDevice: false,
+        },
+      ]),
+    ).toEqual([
+      expect.objectContaining({
+        id: original.id,
+        vendor: "HL-DT-ST",
+        product: "DVDRAM",
+        serialNumber: "STABLE-SERIAL",
+        isEnabled: true,
+      }),
+    ]);
+
+    access.close();
+  });
+
+  it("does not treat an empty serial as identity proof", () => {
+    const access = openTestDatabase();
+    const original = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      vendor: "Pioneer",
+      product: "DVD-RW",
+      serialNumber: "",
+      isEnabled: true,
+      isPresent: true,
+    });
+
+    expect(
+      access.catalog.reconcileOpticalDrives([
+        {
+          devicePath: "/dev/sr0",
+          vendor: "HL-DT-ST",
+          product: "DVDRAM",
+          serialNumber: "",
+          isConfiguredDevice: false,
+        },
+      ]),
+    ).toEqual([
+      expect.objectContaining({
+        id: original.id,
+        isEnabled: false,
+      }),
+    ]);
+
+    access.close();
+  });
+
+  it.each([
+    ["loses serial evidence", undefined],
+    ["gains serial evidence", "NEW-SERIAL"],
+  ])("disables a present same-model drive when it %s", (_case, nextSerial) => {
+    const access = openTestDatabase();
+    const original = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      vendor: "Pioneer",
+      product: "DVD-RW",
+      ...(nextSerial === undefined ? { serialNumber: "KNOWN-SERIAL" } : {}),
+      isEnabled: true,
+      isPresent: true,
+    });
+
+    expect(
+      access.catalog.reconcileOpticalDrives([
+        {
+          devicePath: "/dev/sr0",
+          vendor: "Pioneer",
+          product: "DVD-RW",
+          ...(nextSerial === undefined ? {} : { serialNumber: nextSerial }),
+          isConfiguredDevice: false,
+        },
+      ]),
+    ).toEqual([
+      expect.objectContaining({
+        id: original.id,
+        isEnabled: false,
+        serialNumber: nextSerial ?? null,
+      }),
+    ]);
+
+    access.close();
+  });
+
+  it.each([
+    ["gains", undefined, undefined, "Pioneer", "DVD-RW"],
+    ["loses", "Pioneer", "DVD-RW", undefined, undefined],
+  ])(
+    "disables present same-path hardware when model identity evidence %s without serial proof",
+    (_case, initialVendor, initialProduct, nextVendor, nextProduct) => {
+      const access = openTestDatabase();
+      const original = access.catalog.upsertOpticalDrive({
+        devicePath: "/dev/sr0",
+        vendor: initialVendor,
+        product: initialProduct,
+        isEnabled: true,
+        isPresent: true,
+      });
+
+      expect(
+        access.catalog.reconcileOpticalDrives([
+          {
+            devicePath: "/dev/sr0",
+            vendor: nextVendor,
+            product: nextProduct,
+            isConfiguredDevice: false,
+          },
+        ]),
+      ).toEqual([
+        expect.objectContaining({
+          id: original.id,
+          isEnabled: false,
+          vendor: nextVendor ?? null,
+          product: nextProduct ?? null,
+        }),
+      ]);
+
+      access.close();
+    },
+  );
+
+  it("does not apply a late configured-device default after an explicit disable", () => {
+    const access = openTestDatabase();
+    access.catalog.reconcileOpticalDrives([
+      { devicePath: "/dev/sr0", isConfiguredDevice: false },
+    ]);
+    access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isEnabled: false,
+      isPresent: true,
+    });
+
+    expect(
+      access.catalog.reconcileOpticalDrives([
+        { devicePath: "/dev/sr0", isConfiguredDevice: true },
+      ]),
+    ).toEqual([
+      expect.objectContaining({ devicePath: "/dev/sr0", isEnabled: false }),
+    ]);
+
+    access.close();
+  });
+
+  it("does not reinterpret a manually created disabled drive as pending configuration", () => {
+    const access = openTestDatabase();
+    access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+
+    expect(
+      access.catalog.reconcileOpticalDrives([
+        { devicePath: "/dev/sr0", isConfiguredDevice: true },
+      ]),
+    ).toEqual([
+      expect.objectContaining({ devicePath: "/dev/sr0", isEnabled: false }),
+    ]);
+
+    access.close();
+  });
+
+  it("preserves a legacy disabled choice through migration and configured reconciliation", () => {
+    const databasePath = createTestDatabasePath();
+    const sqlite = new DatabaseSync(databasePath);
+    for (const migrationName of [
+      "20260722045326_core-catalog-and-queues",
+      "20260726160810_encoding-profile-active-state",
+    ]) {
+      const migration = readFileSync(
+        new URL(`../drizzle/${migrationName}/migration.sql`, import.meta.url),
+        "utf8",
+      );
+      for (const statement of migration.split("--> statement-breakpoint")) {
+        if (statement.trim()) {
+          sqlite.exec(statement);
+        }
+      }
+    }
+    sqlite.exec(`
+      create table __drizzle_migrations (
+        id integer primary key,
+        hash text not null,
+        created_at numeric,
+        name text,
+        applied_at text
+      );
+      insert into __drizzle_migrations (hash, created_at, name) values
+        ('legacy-core', 0, '20260722045326_core-catalog-and-queues'),
+        ('legacy-profiles', 0, '20260726160810_encoding-profile-active-state');
+      insert into optical_drives (
+        id, device_path, is_enabled, is_present, last_seen_at, created_at,
+        updated_at
+      ) values ('legacy-drive', '/dev/sr0', 0, 1, 0, 0, 0);
+    `);
+    sqlite.close();
+
+    const access = openTestDatabase(databasePath);
+    expect(
+      access.catalog.reconcileOpticalDrives([
+        { devicePath: "/dev/sr0", isConfiguredDevice: true },
+      ]),
+    ).toEqual([
+      expect.objectContaining({
+        id: "legacy-drive",
+        devicePath: "/dev/sr0",
+        isEnabled: false,
+      }),
+    ]);
+    access.close();
+  });
+
+  it("migrates a database that applied the preceding optical-drive migration", () => {
+    const databasePath = createTestDatabasePath();
+    const precedingMigrationsFolder = createTestMigrationsFolder();
+    for (const migrationName of [
+      "20260722045326_core-catalog-and-queues",
+      "20260726160810_encoding-profile-active-state",
+    ]) {
+      const targetDirectory = join(precedingMigrationsFolder, migrationName);
+      mkdirSync(targetDirectory);
+      writeFileSync(
+        join(targetDirectory, "migration.sql"),
+        readFileSync(
+          new URL(`../drizzle/${migrationName}/migration.sql`, import.meta.url),
+        ),
+      );
+    }
+    const precedingMigrationName =
+      "20260802150655_optical-drive-configuration-default";
+    const precedingMigrationDirectory = join(
+      precedingMigrationsFolder,
+      precedingMigrationName,
+    );
+    mkdirSync(precedingMigrationDirectory);
+    writeFileSync(
+      join(precedingMigrationDirectory, "migration.sql"),
+      `ALTER TABLE \`optical_drives\` ADD \`configuration_default_applied\` integer DEFAULT true NOT NULL;
+--> statement-breakpoint
+ALTER TABLE \`optical_drives\` ADD \`is_configured_target\` integer DEFAULT false NOT NULL;`,
+    );
+
+    createDataAccess({
+      databasePath,
+      migrationsFolder: precedingMigrationsFolder,
+    }).close();
+    const precedingSqlite = new DatabaseSync(databasePath);
+    precedingSqlite.exec(`
+      insert into optical_drives (
+        id, device_path, is_enabled, configuration_default_applied,
+        is_configured_target, is_present, last_seen_at, created_at, updated_at
+      ) values (
+        'preceding-drive', '/dev/sr0', 0, 1, 1, 1, 0, 0, 0
+      );
+    `);
+    precedingSqlite.close();
+
+    const migrated = openTestDatabase(databasePath);
+    expect(
+      migrated.catalog.reconcileOpticalDrives([
+        { devicePath: "/dev/sr0", isConfiguredDevice: true },
+      ]),
+    ).toEqual([
+      expect.objectContaining({
+        id: "preceding-drive",
+        devicePath: "/dev/sr0",
+        isEnabled: false,
+      }),
+    ]);
+    migrated.close();
+
+    const sqlite = new DatabaseSync(databasePath);
+    expect(
+      sqlite
+        .prepare("select name from pragma_table_info('optical_drives')")
+        .all()
+        .map(({ name }) => name),
+    ).toEqual(
+      expect.arrayContaining([
+        "configuration_default_resolved",
+        "is_configured_target",
+      ]),
+    );
+    expect(
+      sqlite
+        .prepare("select name from pragma_table_info('optical_drives')")
+        .all(),
+    ).not.toContainEqual({ name: "configuration_default_applied" });
+    expect(
+      sqlite
+        .prepare(
+          "select name from __drizzle_migrations order by id desc limit 2",
+        )
+        .all(),
+    ).toEqual([
+      {
+        name: "20260802190921_optical-drive-configuration-default-resolved",
+      },
+      { name: precedingMigrationName },
+    ]);
+    expect(
+      sqlite
+        .prepare(
+          "select configuration_default_resolved as resolved from optical_drives where id = 'preceding-drive'",
+        )
+        .get(),
+    ).toEqual({ resolved: 1 });
+    sqlite.close();
+  });
+
+  it("rejects malformed and resource-unbounded DVD scans at the catalog facade", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const contentId = `sha256:${"a".repeat(64)}`;
+    const baseTitle = {
+      number: 1,
+      durationSeconds: 1,
+      chapters: 1,
+      audioStreams: [],
+      subtitles: [],
+    };
+
+    for (const scanData of [
+      { schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION, contentId, titles: [{}] },
+      {
+        schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+        contentId,
+        titles: Array.from({ length: MAX_DVD_TITLES + 1 }, (_, index) => ({
+          ...baseTitle,
+          number: index + 1,
+        })),
+      },
+    ]) {
+      expect(() =>
+        access.catalog.registerDetectedDisc({
+          opticalDriveId: drive.id,
+          discKind: "dvd",
+          fingerprint: contentId,
+          scanData,
+        }),
+      ).toThrow(DomainInvariantError);
+    }
+    expect(access.catalog.listDetectedDiscs()).toEqual([]);
+    access.close();
+  });
+
+  it("rejects a DVD scan whose content identity differs from its fingerprint", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+
+    expect(() =>
+      access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint: `sha256:${"a".repeat(64)}`,
+        scanData: {
+          schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+          contentId: `sha256:${"b".repeat(64)}`,
+          titles: [
+            {
+              number: 1,
+              durationSeconds: 1,
+              chapters: 1,
+              audioStreams: [],
+              subtitles: [],
+            },
+          ],
+        },
+      }),
+    ).toThrow(DomainInvariantError);
+    expect(access.catalog.listDetectedDiscs()).toEqual([]);
+    access.close();
+  });
+
+  it("does not advance a Detected Disc version for identical scan data", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-26T18:00:00.000Z"));
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const input = {
+      opticalDriveId: drive.id,
+      discKind: "dvd" as const,
+      fingerprint: `sha256:${"a".repeat(64)}`,
+      volumeLabel: "UNCHANGED_DISC",
+      scanData: {
+        schemaVersion: 2,
+        contentId: `sha256:${"a".repeat(64)}`,
+        titles: [
+          {
+            number: 1,
+            durationSeconds: 1,
+            chapters: 1,
+            audioStreams: [],
+            subtitles: [],
+          },
+        ],
+      },
+    };
+    const first = access.catalog.registerDetectedDisc(input);
+
+    vi.setSystemTime(new Date("2026-07-26T18:05:00.000Z"));
+    const repeated = access.catalog.registerDetectedDisc(input);
+
+    expect(repeated.detectedAt).toEqual(first.detectedAt);
+    expect(repeated.updatedAt).toEqual(first.updatedAt);
     access.close();
   });
 
@@ -843,11 +1774,24 @@ describe("data-access facade", () => {
       devicePath: "/dev/sr0",
       isPresent: true,
     });
-    const scanData = { titles: [{ number: 1, chapters: 12 }] };
+    const fingerprint = `sha256:${"c".repeat(64)}`;
+    const scanData = {
+      schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+      contentId: fingerprint,
+      titles: [
+        {
+          number: 1,
+          durationSeconds: 3600,
+          chapters: 12,
+          audioStreams: [],
+          subtitles: [],
+        },
+      ],
+    };
     const disc = access.catalog.registerDetectedDisc({
       opticalDriveId: drive.id,
       discKind: "dvd",
-      fingerprint: "approved-rediscovery-disc",
+      fingerprint,
       scanData,
     });
     access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
@@ -858,7 +1802,7 @@ describe("data-access facade", () => {
       access.catalog.registerDetectedDisc({
         opticalDriveId: drive.id,
         discKind: "blu_ray",
-        fingerprint: "approved-rediscovery-disc",
+        fingerprint,
         scanData,
       }),
     ).toThrow(DomainInvariantError);
@@ -866,8 +1810,11 @@ describe("data-access facade", () => {
       access.catalog.registerDetectedDisc({
         opticalDriveId: drive.id,
         discKind: "dvd",
-        fingerprint: "approved-rediscovery-disc",
-        scanData: { titles: [{ number: 2, chapters: 4 }] },
+        fingerprint,
+        scanData: {
+          ...scanData,
+          titles: [{ ...scanData.titles[0]!, number: 2, chapters: 4 }],
+        },
       }),
     ).toThrow(DomainInvariantError);
 
@@ -875,9 +1822,9 @@ describe("data-access facade", () => {
       access.catalog.registerDetectedDisc({
         opticalDriveId: drive.id,
         discKind: "dvd",
-        fingerprint: "approved-rediscovery-disc",
+        fingerprint,
         volumeLabel: "REFRESHED_LABEL",
-        scanData: { titles: [{ chapters: 12, number: 1 }] },
+        scanData,
       }),
     ).toMatchObject({
       id: disc.id,

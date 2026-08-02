@@ -13,6 +13,32 @@ the checked-in Drizzle migrations. A short-lived lock file beside the database
 serializes first-run migrations across web and worker processes; stale locks
 expire after five minutes. Opening an already-migrated file is safe.
 
+`catalog.reconcileOpticalDrives()` applies one complete discovery snapshot in a
+short transaction. Seen drives become present and advance `lastSeenAt`; drives
+absent from a successful snapshot become missing without changing their last
+seen time. A configured-device proof applies the enabled default once to a new
+or stable known drive, including when a device alias becomes resolvable later;
+subsequent enabled/disabled choices are preserved. A matching nonempty serial
+is authoritative continuity evidence even when vendor or model text changes.
+A changed stable serial, a loss or appearance of serial evidence, or a changed
+model identity without matching serial proof is replacement hardware and is
+atomically reset to disabled. After a disappearance, authorization is
+preserved only when a matching serial proves physical-drive continuity;
+uncertain same-path hardware is disabled. Retargeting a configured alias to a
+different canonical device path consumes the configured default. A new or
+identity-changed target is disabled, while an existing identity-stable target
+keeps its current enabled/disabled authorization.
+
+The package exports the versioned, bounded DVD title-map contract through
+`@rip-dvd/data-access/dvd-scan`. Hardware parsing, worker persistence, and web
+rendering share its schema-v2 decoder, stream limits, metadata types, and
+content-ID validation instead of maintaining separate scan shapes.
+
+Bounded dashboard reads keep current state ahead of history: every present or
+enabled Optical Drive is returned before a capped history of disabled missing
+drives. Detected Discs awaiting review and the shared Archive/Encode Job policy
+each have an explicit active cap before recent terminal history is added.
+
 ## Queue attempts and progress
 
 Every claim returns a unique, queue-specific claim token. Progress, completion,
