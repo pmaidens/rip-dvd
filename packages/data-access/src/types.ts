@@ -217,17 +217,20 @@ export interface DiscoveredOpticalDrive {
   serialNumber?: string;
 }
 
-export interface JobListOptions {
-  limit?: number;
-  activeLimit?: number;
-  historyLimit?: number;
+export type BoundedListPolicy =
+  | { mode: "newest"; limit: number }
+  | {
+      mode: "active-and-history";
+      activeLimit: number;
+      historyLimit: number;
+    };
+
+export interface ChronologicalListOptions {
+  policy?: BoundedListPolicy;
 }
 
-export interface DetectedDiscListOptions {
+export interface DetectedDiscListOptions extends ChronologicalListOptions {
   ids?: readonly DetectedDiscId[];
-  limit?: number;
-  activeLimit?: number;
-  historyLimit?: number;
 }
 
 export interface OpticalDriveReconciliationInput
@@ -329,7 +332,10 @@ export interface EncodingProfileAccess {
 export interface ArchiveJobAccess {
   enqueue(input: { detectedDiscId: DetectedDiscId; priority?: number }): ArchiveJob;
   claimNext(workerId: string): RunningArchiveJob | null;
-  list(statuses?: JobStatus[], options?: JobListOptions): ArchiveJob[];
+  list(
+    statuses?: JobStatus[],
+    options?: ChronologicalListOptions,
+  ): ArchiveJob[];
   updateProgress(
     claim: RunningArchiveJob,
     progressPercent: number,
@@ -350,7 +356,10 @@ export interface EncodeJobAccess {
     priority?: number;
   }): EncodeJob;
   claimNext(workerId: string): RunningEncodeJob | null;
-  list(statuses?: JobStatus[], options?: JobListOptions): EncodeJob[];
+  list(
+    statuses?: JobStatus[],
+    options?: ChronologicalListOptions,
+  ): EncodeJob[];
   updateProgress(claim: RunningEncodeJob, progressPercent: number): EncodeJob;
   complete(claim: RunningEncodeJob): EncodeJob;
   fail(claim: RunningEncodeJob, errorMessage: string): EncodeJob;

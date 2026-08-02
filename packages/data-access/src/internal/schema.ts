@@ -52,7 +52,7 @@ export const opticalDrives = sqliteTable(
     isEnabled: integer("is_enabled", { mode: "boolean" })
       .notNull()
       .default(false),
-    configurationDefaultApplied: integer("configuration_default_applied", {
+    configurationDefaultResolved: integer("configuration_default_resolved", {
       mode: "boolean",
     })
       .notNull()

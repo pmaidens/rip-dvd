@@ -4,7 +4,7 @@ import {
   RecordNotFoundError,
   StaleJobAttemptError,
 } from "../errors.js";
-import type { JobListOptions, JobStatus } from "../types.js";
+import type { ChronologicalListOptions, JobStatus } from "../types.js";
 import { requireNonEmpty } from "./validation.js";
 
 const PROGRESS_WRITE_INTERVAL_MS = 1_000;
@@ -54,7 +54,7 @@ export interface JobQueueAdapter<
 > {
   readonly recordType: string;
   find(id: Id): Job | undefined;
-  list(statuses?: JobStatus[], options?: JobListOptions): Job[];
+  list(statuses?: JobStatus[], options?: ChronologicalListOptions): Job[];
   claim(workerId: string, token: Token, timestamp: Date): Running | undefined;
   updateAttempt(
     claim: Running,
@@ -78,7 +78,7 @@ export interface JobQueueController<
   RequeueOptions,
 > {
   claimNext(workerId: string): Running | null;
-  list(statuses?: JobStatus[], options?: JobListOptions): Job[];
+  list(statuses?: JobStatus[], options?: ChronologicalListOptions): Job[];
   updateProgress(claim: Running, progressPercent: number): Job;
   complete(claim: Running, completion: Completion): Job;
   fail(claim: Running, errorMessage: string): Job;

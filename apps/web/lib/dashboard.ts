@@ -138,8 +138,11 @@ function readDashboardSnapshotRecords(
       activityLimit === undefined
         ? undefined
         : {
-            activeLimit: DASHBOARD_ACTIVE_DISC_LIMIT,
-            historyLimit: activityLimit,
+            policy: {
+              mode: "active-and-history",
+              activeLimit: DASHBOARD_ACTIVE_DISC_LIMIT,
+              historyLimit: activityLimit,
+            },
           },
     ),
   );
@@ -149,8 +152,11 @@ function readDashboardSnapshotRecords(
       activityLimit === undefined
         ? undefined
         : {
-            activeLimit: DASHBOARD_ACTIVE_JOB_LIMIT,
-            historyLimit: activityLimit,
+            policy: {
+              mode: "active-and-history",
+              activeLimit: DASHBOARD_ACTIVE_JOB_LIMIT,
+              historyLimit: activityLimit,
+            },
           },
     ),
   );
@@ -160,8 +166,11 @@ function readDashboardSnapshotRecords(
       activityLimit === undefined
         ? undefined
         : {
-            activeLimit: DASHBOARD_ACTIVE_JOB_LIMIT,
-            historyLimit: activityLimit,
+            policy: {
+              mode: "active-and-history",
+              activeLimit: DASHBOARD_ACTIVE_JOB_LIMIT,
+              historyLimit: activityLimit,
+            },
           },
     ),
   );

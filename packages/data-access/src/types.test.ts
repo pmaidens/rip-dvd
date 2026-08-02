@@ -2,6 +2,7 @@ import { describe, expectTypeOf, it } from "vitest";
 
 import type {
   ArchiveJobId,
+  BoundedListPolicy,
   DataAccess,
   DetectedDiscId,
   DiscSelectionId,
@@ -50,6 +51,38 @@ describe("data-access domain identifiers", () => {
       });
       // @ts-expect-error Archive completion always requires its resulting archive.
       access.archiveJobs.complete(archiveClaim);
+    }
+  });
+
+  it("makes bounded list policies mutually exclusive", () => {
+    const newest = {
+      mode: "newest",
+      limit: 20,
+    } satisfies BoundedListPolicy;
+    const activity = {
+      mode: "active-and-history",
+      activeLimit: 100,
+      historyLimit: 20,
+    } satisfies BoundedListPolicy;
+
+    expectTypeOf(newest).toMatchTypeOf<BoundedListPolicy>();
+    expectTypeOf(activity).toMatchTypeOf<BoundedListPolicy>();
+
+    if (false) {
+      const mixed: BoundedListPolicy = {
+        mode: "newest",
+        limit: 20,
+        // @ts-expect-error A newest policy cannot specify activity bounds.
+        activeLimit: 100,
+        historyLimit: 20,
+      };
+      // @ts-expect-error Both activity bounds are required together.
+      const incomplete: BoundedListPolicy = {
+        mode: "active-and-history",
+        historyLimit: 20,
+      };
+      void mixed;
+      void incomplete;
     }
   });
 });

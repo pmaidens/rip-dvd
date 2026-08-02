@@ -197,7 +197,7 @@ describe("archive worker polling", () => {
       isEnabled: false,
       isPresent: true,
     });
-    expect(initialDrive).not.toHaveProperty("configurationDefaultApplied");
+    expect(initialDrive).not.toHaveProperty("configurationDefaultResolved");
     expect(scanDvd).not.toHaveBeenCalled();
 
     symlinkSync(canonicalDevicePath, configuredAliasPath);
@@ -403,8 +403,11 @@ describe("archive worker polling", () => {
     }
     expect(
       access.catalog.listDetectedDiscs(undefined, {
-        activeLimit: 100,
-        historyLimit: 20,
+        policy: {
+          mode: "active-and-history",
+          activeLimit: 100,
+          historyLimit: 20,
+        },
       }),
     ).not.toContainEqual(expect.objectContaining({ id: returningDisc.id }));
 
@@ -415,8 +418,11 @@ describe("archive worker polling", () => {
 
     expect(
       access.catalog.listDetectedDiscs(undefined, {
-        activeLimit: 100,
-        historyLimit: 20,
+        policy: {
+          mode: "active-and-history",
+          activeLimit: 100,
+          historyLimit: 20,
+        },
       }),
     ).toContainEqual(
       expect.objectContaining({
