@@ -1,9 +1,9 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "ea34af2d-138a-426a-8e88-c00458b35ba3",
+  "id": "46a57a3b-bcca-4dbe-b1e4-129e4e850b49",
   "prevIds": [
-    "4ea4b79c-4720-48c8-a5e5-b138d77414f1"
+    "ea34af2d-138a-426a-8e88-c00458b35ba3"
   ],
   "ddl": [
     {
@@ -794,7 +794,7 @@
       "autoincrement": false,
       "default": "true",
       "generated": null,
-      "name": "configuration_default_applied",
+      "name": "configuration_default_resolved",
       "entityType": "columns",
       "table": "optical_drives"
     },
@@ -1570,5 +1570,7 @@
       "table": "original_disc_archives"
     }
   ],
-  "renames": []
+  "renames": [
+    "optical_drives.configuration_default_applied->optical_drives.configuration_default_resolved"
+  ]
 }
