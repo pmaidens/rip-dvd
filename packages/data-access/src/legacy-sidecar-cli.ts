@@ -15,6 +15,8 @@ const usage = `Usage: pnpm import:legacy-sidecars -- [options]
 Options:
   --database PATH           SQLite catalog path (or RIP_DVD_DATABASE_PATH)
   --originals-library PATH  Originals library root (or RIP_DVD_ORIGINALS_LIBRARY_PATH)
+  --recover-historical-cutover
+                            Explicitly recover a schema-2/3 cutover from bounded surviving legacy files
   --json                    Print the complete machine-readable report
   --help                    Show this help
 `;
@@ -24,16 +26,22 @@ interface ParsedArguments {
   help: boolean;
   json: boolean;
   originalsLibraryPath?: string;
+  recoverHistoricalCutover: boolean;
 }
 
 function parseArguments(argv: readonly string[]): ParsedArguments {
-  const parsed: ParsedArguments = { help: false, json: false };
+  const parsed: ParsedArguments = {
+    help: false,
+    json: false,
+    recoverHistoricalCutover: false,
+  };
   const seen = new Set<string>();
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (
       argument !== "--database" &&
       argument !== "--originals-library" &&
+      argument !== "--recover-historical-cutover" &&
       argument !== "--json" &&
       argument !== "--help"
     ) {
@@ -53,6 +61,10 @@ function parseArguments(argv: readonly string[]): ParsedArguments {
     }
     if (argument === "--help") {
       parsed.help = true;
+      continue;
+    }
+    if (argument === "--recover-historical-cutover") {
+      parsed.recoverHistoricalCutover = true;
       continue;
     }
     const value = argv[index + 1];
@@ -118,6 +130,8 @@ export function runLegacySidecarImportCli({
     access = createLegacySidecarDataAccess({ databasePath });
     const report = access.legacySidecars.importLibrary({
       originalsLibraryPath,
+      recoverHistoricalCutover:
+        parsedArguments.recoverHistoricalCutover,
     });
     if (parsedArguments.json) {
       writeOutput(`${JSON.stringify(report, null, 2)}\n`);

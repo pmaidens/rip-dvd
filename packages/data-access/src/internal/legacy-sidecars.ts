@@ -1055,7 +1055,6 @@ function parseSidecar(
     };
   }
   if (
-    archivePath !== normalize(recordedArchivePath) ||
     !isPathWithinDirectory(context.originalsLibraryPath, archivePath)
   ) {
     return invalid(
@@ -1638,7 +1637,9 @@ function recoverCapturedSidecars(
     capturedSidecars.map((captured) => [captured.sidecarPath, captured]),
   );
   const discoveries: LegacySidecarDiscovery[] = [];
-  let totalBytes = 0;
+  const issues: LegacySidecarImportIssue[] = [];
+  let retainedBytes = 0;
+  let scanBytes = 0;
   let totalJobs = 0;
   for (const recordedPath of [...capturedByPath.keys()].sort()) {
     const captured = capturedByPath.get(recordedPath)!;
@@ -1664,13 +1665,23 @@ function recoverCapturedSidecars(
       originalsLibraryPath,
       snapshot: captured.snapshot,
     });
-    totalBytes +=
-      discovery.outcome === "parsed"
-        ? discovery.sidecar.sourceBytes
-        : discovery.sourceBytes;
+    scanBytes += discovery.outcome === "parsed"
+      ? discovery.sidecar.sourceBytes
+      : discovery.sourceBytes;
+    retainedBytes += discovery.outcome === "parsed"
+      ? discovery.sidecar.sourceBytes
+      : 0;
     totalJobs +=
       discovery.outcome === "parsed" ? discovery.sidecar.jobs.length : 0;
-    if (totalBytes > MAX_LEGACY_IMPORT_BYTES) {
+    if (scanBytes > MAX_LEGACY_SCAN_BYTES) {
+      issues.push({
+        code: "invalid_sidecar",
+        message: `Aggregate recovery sidecar scan work exceeds the ${MAX_LEGACY_SCAN_BYTES}-byte limit`,
+        sidecarPath: originalsLibraryPath,
+      });
+      break;
+    }
+    if (retainedBytes > MAX_LEGACY_IMPORT_BYTES) {
       return {
         discoveries: [],
         issues: [{
@@ -1692,7 +1703,7 @@ function recoverCapturedSidecars(
     }
     discoveries.push(discovery);
   }
-  return { discoveries, issues: [] };
+  return { discoveries, issues };
 }
 
 function recoverPublishedSidecars(

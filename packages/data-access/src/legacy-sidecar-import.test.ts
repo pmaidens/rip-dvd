@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   symlinkSync,
   unlinkSync,
@@ -181,6 +182,47 @@ describe("legacy sidecar import", () => {
       access.close();
     },
   );
+
+  it("accepts an archive recorded through the explicitly selected library alias", () => {
+    const root = temporaryDirectories.create(
+      "rip-dvd-legacy-selected-library-alias-",
+    );
+    const originalsLibraryPath = join(root, "originals");
+    const originalsLibraryAlias = join(root, "originals-alias");
+    const archivePath = join(originalsLibraryPath, "Aliased.iso");
+    const recordedArchivePath = join(originalsLibraryAlias, "Aliased.iso");
+    const sidecarPath = join(
+      originalsLibraryPath,
+      "Aliased.rip-dvd.json",
+    );
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    symlinkSync(originalsLibraryPath, originalsLibraryAlias, "dir");
+    writeFileSync(archivePath, "archive");
+    writeFileSync(sidecarPath, JSON.stringify({
+      schema_version: 2,
+      source: recordedArchivePath,
+      title: "Aliased",
+      disc_fingerprint: "selected-library-alias-fingerprint",
+      jobs: [],
+    }));
+    const access = createLegacySidecarDataAccess({
+      databasePath: join(root, "catalog.sqlite"),
+    });
+
+    const report = access.legacySidecars.importLibrary({
+      originalsLibraryPath: originalsLibraryAlias,
+    });
+
+    expect(report.issues).toEqual([]);
+    expect(report.sidecarsImported).toBe(1);
+    expect(report.originalsLibraryPath).toBe(
+      realpathSync(originalsLibraryPath),
+    );
+    expect(access.catalog.listOriginalDiscArchives()).toEqual([
+      expect.objectContaining({ archivePath: realpathSync(archivePath) }),
+    ]);
+    access.close();
+  });
 
   it("imports a valid sidecar as catalog records and preserves legacy job state", () => {
     const fixture = createFixture();
@@ -821,6 +863,57 @@ describe("legacy sidecar import", () => {
     fixture.access.close();
   });
 
+  it("does not freeze schema-1 movie metadata drift into a later upgrade", () => {
+    const fixture = createFixture();
+    const markerPath = join(
+      fixture.originalsLibraryPath,
+      ".rip-dvd-sqlite-catalog",
+    );
+    fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+    const schemaOneMarker = {
+      schemaVersion: 1,
+      legacyQueueStatus: "retired",
+      authoritativeStore: "sqlite",
+    };
+    writeFileSync(markerPath, JSON.stringify(schemaOneMarker));
+    const sidecar = JSON.parse(
+      readFileSync(fixture.sidecarPath, "utf8"),
+    ) as Record<string, unknown>;
+    sidecar.year = 2026;
+    writeFileSync(fixture.sidecarPath, JSON.stringify(sidecar));
+
+    const firstRetry = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+    const secondRetry = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+
+    expect(firstRetry.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "duplicate_record",
+        message: expect.stringMatching(/schema-1.*ambiguous/i),
+      }),
+    ]));
+    expect(secondRetry.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "duplicate_record",
+        message: expect.stringMatching(/schema-1.*ambiguous/i),
+      }),
+    ]));
+    expect(JSON.parse(readFileSync(markerPath, "utf8"))).toEqual(
+      schemaOneMarker,
+    );
+    expect(fixture.access.catalog.listMediaItems()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ title: "Example Movie", year: 2001 }),
+      ]),
+    );
+    fixture.access.close();
+  });
+
   it("preserves an unresolved schema-1 marker after a crash before the first import transaction", () => {
     const fixture = createFixture();
     const markerPath = join(
@@ -1058,7 +1151,7 @@ describe("legacy sidecar import", () => {
     fixture.access.close();
   });
 
-  it("resumes from the prior durable schema-2 marker layout", () => {
+  it("requires explicit recovery before interpreting a schema-2 marker", () => {
     const fixture = createFixture();
     const markerPath = join(
       fixture.originalsLibraryPath,
@@ -1087,7 +1180,12 @@ describe("legacy sidecar import", () => {
       originalsLibraryPath: fixture.originalsLibraryPath,
     });
 
-    expect(report.issues).toEqual([]);
+    expect(report.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "invalid_sidecar",
+        message: expect.stringMatching(/schema-2\/3.*explicit.*recovery/i),
+      }),
+    ]));
     expect(fixture.access.encodeJobs.list()).toHaveLength(2);
     fixture.access.close();
   });

@@ -197,4 +197,32 @@ describe("legacy sidecar import command", () => {
     expect(readFileSync(sidecarPath, "utf8")).toBe(sidecarContents);
     access.close();
   });
+
+  it("exposes explicit bounded recovery for a historical cutover marker", () => {
+    const root = temporaryDirectories.create(
+      "rip-dvd-legacy-cli-historical-recovery-",
+    );
+    const databasePath = join(root, "catalog.sqlite");
+    const { originalsLibraryPath } = createImportableLibrary(
+      root,
+      "Historical Movie",
+    );
+    const errors: string[] = [];
+
+    const exitCode = runLegacySidecarImportCli({
+      argv: [
+        "--database",
+        databasePath,
+        "--originals-library",
+        originalsLibraryPath,
+        "--recover-historical-cutover",
+      ],
+      environment: {},
+      writeError: (message) => errors.push(message),
+      writeOutput: () => undefined,
+    });
+
+    expect(exitCode).toBe(0);
+    expect(errors).toEqual([]);
+  });
 });
