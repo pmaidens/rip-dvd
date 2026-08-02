@@ -203,15 +203,14 @@ export function createLegacySidecarImportAccess(
             .get();
           if (
             sidecar.jobs.length === 0 &&
-            sidecar.issues.length === 0 &&
-            !corroboratingArchive
+            sidecar.issues.length === 0
           ) {
             schemaOneHasUnresolvedWork = true;
             report.sidecarsSkipped += 1;
             report.issues.push({
               code: "invalid_job",
               message:
-                "Schema-1 archive recovery requires matching authoritative SQLite archive provenance before a jobless sidecar can be trusted; SQLite state and the schema-1 marker were preserved",
+                "Schema-1 archive-only recovery lacks immutable source-object provenance and requires operator action; SQLite state and the schema-1 marker were preserved",
               sidecarPath: sidecar.sidecarPath,
             });
             continue;

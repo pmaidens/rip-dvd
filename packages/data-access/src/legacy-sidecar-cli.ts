@@ -35,9 +35,10 @@ function parseArguments(argv: readonly string[]): ParsedArguments {
     json: false,
     recoverHistoricalCutover: false,
   };
+  const argumentsToParse = argv[0] === "--" ? argv.slice(1) : argv;
   const seen = new Set<string>();
-  for (let index = 0; index < argv.length; index += 1) {
-    const argument = argv[index];
+  for (let index = 0; index < argumentsToParse.length; index += 1) {
+    const argument = argumentsToParse[index];
     if (
       argument !== "--database" &&
       argument !== "--originals-library" &&
@@ -67,7 +68,7 @@ function parseArguments(argv: readonly string[]): ParsedArguments {
       parsed.recoverHistoricalCutover = true;
       continue;
     }
-    const value = argv[index + 1];
+    const value = argumentsToParse[index + 1];
     if (!value || value.startsWith("--")) {
       throw new Error(`${argument} requires a path`);
     }

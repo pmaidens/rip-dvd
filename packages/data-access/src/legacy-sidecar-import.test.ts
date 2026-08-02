@@ -191,6 +191,7 @@ describe("legacy sidecar import", () => {
     const originalsLibraryAlias = join(root, "originals-alias");
     const archivePath = join(originalsLibraryPath, "Aliased.iso");
     const recordedArchivePath = join(originalsLibraryAlias, "Aliased.iso");
+    const outputPath = join(root, "movies", "Aliased.mkv");
     const sidecarPath = join(
       originalsLibraryPath,
       "Aliased.rip-dvd.json",
@@ -203,7 +204,14 @@ describe("legacy sidecar import", () => {
       source: recordedArchivePath,
       title: "Aliased",
       disc_fingerprint: "selected-library-alias-fingerprint",
-      jobs: [],
+      jobs: [{
+        label: "Movie: Aliased",
+        source: recordedArchivePath,
+        output: outputPath,
+        preset: "Fast 480p30",
+        selection: "main_feature",
+        title_number: null,
+      }],
     }));
     const access = createLegacySidecarDataAccess({
       databasePath: join(root, "catalog.sqlite"),
@@ -220,6 +228,9 @@ describe("legacy sidecar import", () => {
     );
     expect(access.catalog.listOriginalDiscArchives()).toEqual([
       expect.objectContaining({ archivePath: realpathSync(archivePath) }),
+    ]);
+    expect(access.encodeJobs.list()).toEqual([
+      expect.objectContaining({ outputPath, status: "queued" }),
     ]);
     access.close();
   });
@@ -957,6 +968,71 @@ describe("legacy sidecar import", () => {
     expect(fixture.access.encodeJobs.list()).toEqual([]);
     expect(JSON.parse(readFileSync(markerPath, "utf8"))).toEqual(marker);
     fixture.access.close();
+  });
+
+  it("preserves schema-1 recovery when an archive-only ISO has been replaced", () => {
+    const root = temporaryDirectories.create(
+      "rip-dvd-schema-one-archive-only-replacement-",
+    );
+    const originalsLibraryPath = join(root, "originals");
+    const archivePath = join(originalsLibraryPath, "Archive Only.iso");
+    const sidecarPath = join(
+      originalsLibraryPath,
+      "Archive Only.rip-dvd.json",
+    );
+    const markerPath = join(
+      originalsLibraryPath,
+      ".rip-dvd-sqlite-catalog",
+    );
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    writeFileSync(archivePath, "12345678");
+    writeFileSync(sidecarPath, JSON.stringify({
+      schema_version: 2,
+      source: archivePath,
+      title: "Archive Only",
+      disc_fingerprint: "schema-one-archive-only-replacement",
+      jobs: [],
+    }));
+    const access = createLegacySidecarDataAccess({
+      databasePath: join(root, "catalog.sqlite"),
+    });
+    access.legacySidecars.importLibrary({ originalsLibraryPath });
+    const schemaOneMarker = {
+      schemaVersion: 1,
+      legacyQueueStatus: "retired",
+      authoritativeStore: "sqlite",
+    };
+    writeFileSync(markerPath, JSON.stringify(schemaOneMarker));
+    unlinkSync(archivePath);
+    writeFileSync(archivePath, "87654321");
+
+    const firstRetry = access.legacySidecars.importLibrary({
+      originalsLibraryPath,
+    });
+    const secondRetry = access.legacySidecars.importLibrary({
+      originalsLibraryPath,
+    });
+
+    for (const report of [firstRetry, secondRetry]) {
+      expect(report).toMatchObject({
+        sidecarsImported: 0,
+        sidecarsSkipped: 1,
+        issues: expect.arrayContaining([
+          expect.objectContaining({
+            code: "invalid_job",
+            message: expect.stringMatching(/schema-1.*archive.*recovery/i),
+            sidecarPath,
+          }),
+        ]),
+      });
+    }
+    expect(JSON.parse(readFileSync(markerPath, "utf8"))).toEqual(
+      schemaOneMarker,
+    );
+    expect(access.catalog.listOriginalDiscArchives()).toEqual([
+      expect.objectContaining({ archivePath, sizeBytes: 8 }),
+    ]);
+    access.close();
   });
 
   it("preserves schema-1 recovery for an archive-only sidecar absent from SQLite", () => {
