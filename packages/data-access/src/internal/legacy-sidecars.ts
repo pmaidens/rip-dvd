@@ -24,9 +24,7 @@ import {
   isAbsolute,
   join,
   normalize,
-  relative,
   resolve,
-  sep,
 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { TextDecoder } from "node:util";
@@ -38,6 +36,7 @@ import {
   legacyJobLogicalKey,
   legacyJobSignature,
 } from "./legacy-sidecar-identity.js";
+import { isPathWithinDirectory } from "./path-containment.js";
 
 const DEFAULT_HANDBRAKE_PRESET = "Fast 480p30";
 const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
@@ -320,6 +319,7 @@ export interface ParsedLegacyJob {
 
 export interface ParsedLegacySidecar {
   archivePath: string;
+  archiveSnapshot: LegacySourceArchiveSnapshot;
   archiveSizeBytes: number;
   archivedAt: Date;
   createdAt: Date;
@@ -371,9 +371,18 @@ export interface LegacyQueueJobSnapshot {
 
 export interface LegacyQueueSidecarSnapshot {
   archivePath: string;
+  archiveSnapshot: LegacySourceArchiveSnapshot;
   fingerprint: string;
   pathBase: string;
   sidecarPath: string;
+}
+
+export interface LegacySourceArchiveSnapshot {
+  changedAtNanoseconds: string;
+  deviceId: string;
+  inode: string;
+  modifiedAtNanoseconds: string;
+  sizeBytes: string;
 }
 
 function snapshotLegacySidecar(
@@ -381,10 +390,72 @@ function snapshotLegacySidecar(
 ): LegacyQueueSidecarSnapshot {
   return {
     archivePath: sidecar.archivePath,
+    archiveSnapshot: sidecar.archiveSnapshot,
     fingerprint: sidecar.fingerprint,
     pathBase: sidecar.pathBase,
     sidecarPath: sidecar.sidecarPath,
   };
+}
+
+function snapshotSourceArchive(
+  archivePath: string,
+): {
+  archivedAt: Date;
+  archiveSizeBytes: number;
+  archiveSnapshot: LegacySourceArchiveSnapshot;
+  isFile: boolean;
+} {
+  let descriptor: number | undefined;
+  let primaryError: unknown;
+  try {
+    descriptor = openSync(archivePath, "r");
+    const openedStat = fstatSync(descriptor, { bigint: true });
+    const namedStat = statSync(archivePath, { bigint: true });
+    if (
+      openedStat.dev !== namedStat.dev ||
+      openedStat.ino !== namedStat.ino
+    ) {
+      throw new Error("Source archive changed while it was being captured");
+    }
+    return {
+      archivedAt: new Date(Number(openedStat.mtimeNs / 1_000_000n)),
+      archiveSizeBytes: Number(openedStat.size),
+      archiveSnapshot: {
+        changedAtNanoseconds: openedStat.ctimeNs.toString(),
+        deviceId: openedStat.dev.toString(),
+        inode: openedStat.ino.toString(),
+        modifiedAtNanoseconds: openedStat.mtimeNs.toString(),
+        sizeBytes: openedStat.size.toString(),
+      },
+      isFile: openedStat.isFile(),
+    };
+  } catch (error) {
+    primaryError = error;
+    throw error;
+  } finally {
+    if (descriptor !== undefined) {
+      try {
+        closeSync(descriptor);
+      } catch (error) {
+        if (primaryError === undefined) {
+          throw error;
+        }
+      }
+    }
+  }
+}
+
+function sourceArchiveSnapshotsMatch(
+  left: LegacySourceArchiveSnapshot,
+  right: LegacySourceArchiveSnapshot,
+): boolean {
+  return (
+    left.changedAtNanoseconds === right.changedAtNanoseconds &&
+    left.deviceId === right.deviceId &&
+    left.inode === right.inode &&
+    left.modifiedAtNanoseconds === right.modifiedAtNanoseconds &&
+    left.sizeBytes === right.sizeBytes
+  );
 }
 
 export function resolveLegacyOriginalsLibrary(path: string): string {
@@ -418,6 +489,43 @@ function objectValue(value: unknown): Record<string, unknown> | null {
 
 function nonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null;
+}
+
+function nonNegativeDecimalString(value: unknown): string | null {
+  return typeof value === "string" && /^(?:0|[1-9]\d*)$/.test(value)
+    ? value
+    : null;
+}
+
+function parseSourceArchiveSnapshot(
+  value: unknown,
+): LegacySourceArchiveSnapshot | null {
+  const snapshot = objectValue(value);
+  if (!snapshot) {
+    return null;
+  }
+  const changedAtNanoseconds = nonNegativeDecimalString(
+    snapshot.changedAtNanoseconds,
+  );
+  const deviceId = nonNegativeDecimalString(snapshot.deviceId);
+  const inode = nonNegativeDecimalString(snapshot.inode);
+  const modifiedAtNanoseconds = nonNegativeDecimalString(
+    snapshot.modifiedAtNanoseconds,
+  );
+  const sizeBytes = nonNegativeDecimalString(snapshot.sizeBytes);
+  return changedAtNanoseconds &&
+    deviceId &&
+    inode &&
+    modifiedAtNanoseconds &&
+    sizeBytes
+    ? {
+        changedAtNanoseconds,
+        deviceId,
+        inode,
+        modifiedAtNanoseconds,
+        sizeBytes,
+      }
+    : null;
 }
 
 function legacyInteger(value: unknown, defaultValue?: number): number | null {
@@ -691,21 +799,7 @@ function parseJob(
 
 interface SidecarRecoveryExpectation {
   originalsLibraryPath: string;
-  snapshot: LegacyQueueSidecarSnapshot;
-}
-
-function openDescriptorRealPath(descriptor: number): string {
-  for (const descriptorPath of [
-    `/proc/self/fd/${descriptor}`,
-    `/dev/fd/${descriptor}`,
-  ]) {
-    try {
-      return realpathSync(descriptorPath);
-    } catch {
-      // Try the platform's other descriptor filesystem.
-    }
-  }
-  throw new Error("Could not validate the opened sidecar filesystem object");
+  snapshot?: LegacyQueueSidecarSnapshot;
 }
 
 function parseSidecar(
@@ -719,10 +813,14 @@ function parseSidecar(
   try {
     descriptor = openSync(sidecarPath, "r");
     if (recovery) {
-      const openedPath = openDescriptorRealPath(descriptor);
+      const openedStat = fstatSync(descriptor);
+      const openedPath = realpathSync(sidecarPath);
+      const namedStat = statSync(openedPath);
       if (
         openedPath !== normalize(sidecarPath) ||
-        !isPathWithinLibrary(recovery.originalsLibraryPath, openedPath)
+        !isPathWithinDirectory(recovery.originalsLibraryPath, openedPath) ||
+        openedStat.dev !== namedStat.dev ||
+        openedStat.ino !== namedStat.ino
       ) {
         readIssue = {
           outcome: "skipped",
@@ -921,7 +1019,7 @@ function parseSidecar(
   if (!source) {
     return invalid("Sidecar source must be a non-empty archive path");
   }
-  const pathBase = recovery?.snapshot.pathBase ?? process.cwd();
+  const pathBase = recovery?.snapshot?.pathBase ?? process.cwd();
   const archiveResolution = resolveRecordedPath(
     source,
     sidecarPath,
@@ -931,9 +1029,9 @@ function parseSidecar(
     return invalid(archiveResolution.message);
   }
   const archivePath = archiveResolution.path;
-  let archiveStat;
+  let archiveMetadata;
   try {
-    archiveStat = statSync(archivePath);
+    archiveMetadata = snapshotSourceArchive(archivePath);
   } catch {
     return {
       outcome: "skipped",
@@ -945,7 +1043,7 @@ function parseSidecar(
       },
     };
   }
-  if (!archiveStat.isFile()) {
+  if (!archiveMetadata.isFile) {
     return invalid(`Original Disc Archive is not a file: ${archivePath}`);
   }
   const fingerprint =
@@ -1005,9 +1103,10 @@ function parseSidecar(
   }
   const parsedSidecar: ParsedLegacySidecar = {
     archivePath,
-    archiveSizeBytes: archiveStat.size,
-    archivedAt: updatedAt ?? archiveStat.mtime,
-    createdAt: createdAt ?? archiveStat.mtime,
+    archiveSnapshot: archiveMetadata.archiveSnapshot,
+    archiveSizeBytes: archiveMetadata.archiveSizeBytes,
+    archivedAt: updatedAt ?? archiveMetadata.archivedAt,
+    createdAt: createdAt ?? archiveMetadata.archivedAt,
     fingerprint,
     issues,
     jobs,
@@ -1021,12 +1120,16 @@ function parseSidecar(
     },
     sidecarPath,
     sourceBytes,
-    updatedAt: updatedAt ?? archiveStat.mtime,
+    updatedAt: updatedAt ?? archiveMetadata.archivedAt,
   };
   if (
-    recovery &&
+    recovery?.snapshot &&
     (archivePath !== recovery.snapshot.archivePath ||
-      fingerprint !== recovery.snapshot.fingerprint)
+      fingerprint !== recovery.snapshot.fingerprint ||
+      !sourceArchiveSnapshotsMatch(
+        archiveMetadata.archiveSnapshot,
+        recovery.snapshot.archiveSnapshot,
+      ))
   ) {
     return {
       outcome: "skipped",
@@ -1214,7 +1317,7 @@ export function acquireLegacyQueueCutoverLock(
     if (
       !expectedHelperStat.isFile() ||
       expectedHelperStat.isSymbolicLink() ||
-      !isPathWithinLibrary(repositoryRoot, helperPath)
+      !isPathWithinDirectory(repositoryRoot, helperPath)
     ) {
       throw new Error("helper is not a trusted regular file");
     }
@@ -1469,36 +1572,26 @@ function readBoundedUtf8File(
   }
 }
 
-function isPathWithinLibrary(
+function recoverCapturedSidecars(
   originalsLibraryPath: string,
-  candidatePath: string,
-): boolean {
-  const pathFromLibrary = relative(originalsLibraryPath, candidatePath);
-  return (
-    pathFromLibrary !== "" &&
-    pathFromLibrary !== ".." &&
-    !pathFromLibrary.startsWith(`..${sep}`) &&
-    !isAbsolute(pathFromLibrary)
-  );
-}
-
-function recoverPublishedSidecars(
-  originalsLibraryPath: string,
-  sidecarSnapshots: readonly LegacyQueueSidecarSnapshot[],
+  capturedSidecars: readonly {
+    sidecarPath: string;
+    snapshot?: LegacyQueueSidecarSnapshot;
+  }[],
 ): {
   discoveries: LegacySidecarDiscovery[];
   issues: LegacySidecarImportIssue[];
 } {
-  const snapshotsByPath = new Map(
-    sidecarSnapshots.map((snapshot) => [snapshot.sidecarPath, snapshot]),
+  const capturedByPath = new Map(
+    capturedSidecars.map((captured) => [captured.sidecarPath, captured]),
   );
   const discoveries: LegacySidecarDiscovery[] = [];
   let totalBytes = 0;
   let totalJobs = 0;
-  for (const recordedPath of [...snapshotsByPath.keys()].sort()) {
-    const snapshot = snapshotsByPath.get(recordedPath)!;
+  for (const recordedPath of [...capturedByPath.keys()].sort()) {
+    const captured = capturedByPath.get(recordedPath)!;
     const sidecarPath = resolve(recordedPath);
-    if (!isPathWithinLibrary(originalsLibraryPath, sidecarPath)) {
+    if (!isPathWithinDirectory(originalsLibraryPath, sidecarPath)) {
       throw new Error(
         "Invalid SQLite cutover marker: sidecar path is outside the originals library",
       );
@@ -1517,7 +1610,7 @@ function recoverPublishedSidecars(
     }
     const discovery = parseSidecar(sidecarPath, {
       originalsLibraryPath,
-      snapshot,
+      snapshot: captured.snapshot,
     });
     totalBytes +=
       discovery.outcome === "parsed"
@@ -1548,6 +1641,39 @@ function recoverPublishedSidecars(
     discoveries.push(discovery);
   }
   return { discoveries, issues: [] };
+}
+
+function recoverPublishedSidecars(
+  originalsLibraryPath: string,
+  sidecarSnapshots: readonly LegacyQueueSidecarSnapshot[],
+): {
+  discoveries: LegacySidecarDiscovery[];
+  issues: LegacySidecarImportIssue[];
+} {
+  return recoverCapturedSidecars(
+    originalsLibraryPath,
+    sidecarSnapshots.map((snapshot) => ({
+      sidecarPath: snapshot.sidecarPath,
+      snapshot,
+    })),
+  );
+}
+
+function recoverPublishedJobSidecars(
+  originalsLibraryPath: string,
+  jobSnapshots: ReadonlyMap<string, LegacyQueueJobSnapshot>,
+): {
+  discoveries: LegacySidecarDiscovery[];
+  issues: LegacySidecarImportIssue[];
+} {
+  const sidecarPaths = new Set<string>();
+  for (const snapshot of jobSnapshots.values()) {
+    sidecarPaths.add(snapshot.sidecarPath);
+  }
+  return recoverCapturedSidecars(
+    originalsLibraryPath,
+    [...sidecarPaths].map((sidecarPath) => ({ sidecarPath })),
+  );
 }
 
 export function retireLegacySidecarQueue(
@@ -1710,6 +1836,9 @@ export function retireLegacySidecarQueue(
           const item = objectValue(entry);
           const sidecarPath = nonEmptyString(item?.sidecarPath);
           const archivePath = nonEmptyString(item?.archivePath);
+          const archiveSnapshot = parseSourceArchiveSnapshot(
+            item?.archiveSnapshot,
+          );
           const fingerprint = nonEmptyString(item?.fingerprint);
           const pathBase = nonEmptyString(item?.pathBase);
           if (
@@ -1717,6 +1846,7 @@ export function retireLegacySidecarQueue(
             !isAbsolute(sidecarPath) ||
             !archivePath ||
             !isAbsolute(archivePath) ||
+            !archiveSnapshot ||
             !fingerprint ||
             !pathBase ||
             !isAbsolute(pathBase) ||
@@ -1729,6 +1859,7 @@ export function retireLegacySidecarQueue(
           sidecarSnapshotPaths.add(sidecarPath);
           sidecarSnapshots.push({
             archivePath,
+            archiveSnapshot,
             fingerprint,
             pathBase,
             sidecarPath,
@@ -1783,12 +1914,18 @@ export function retireLegacySidecarQueue(
       const recovery =
         value.schemaVersion === 4
           ? recoverPublishedSidecars(originalsLibraryPath, sidecarSnapshots)
-          : null;
+          : value.schemaVersion === 3 && !discoveryBatch.complete
+            ? recoverPublishedJobSidecars(
+                originalsLibraryPath,
+                jobSnapshots,
+              )
+            : null;
       return {
         jobSnapshots,
         mode: "snapshot",
         recoveryDiscoveries:
-          recovery?.discoveries ?? [],
+          recovery?.discoveries ??
+          (discoveryBatch.complete ? null : []),
         recoveryIssues: recovery?.issues ?? [],
         sidecarSnapshots,
         upgradeSchemaOne() {},

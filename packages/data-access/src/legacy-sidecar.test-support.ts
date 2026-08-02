@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -12,7 +12,7 @@ export function createTemporaryDirectoryFixture() {
       }
     },
     create(prefix: string) {
-      const directory = mkdtempSync(join(tmpdir(), prefix));
+      const directory = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
       directories.push(directory);
       return directory;
     },

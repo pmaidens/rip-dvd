@@ -4,10 +4,9 @@ import {
 } from "./internal/create-data-access.js";
 import {
   acquireLegacyQueueCutoverLock,
-  discoverLegacySidecars,
   resolveLegacyOriginalsLibrary,
-  retireLegacySidecarQueue,
 } from "./internal/legacy-sidecars.js";
+import { createLegacySidecarImportAccess } from "./internal/legacy-sidecar-migration.js";
 import type { LegacySidecarDataAccess } from "./legacy-sidecar-types.js";
 
 export type {
@@ -26,9 +25,7 @@ export function createLegacySidecarDataAccess(
   input: CreateDataAccessOptions,
 ): LegacySidecarDataAccess {
   const access = createDataAccessInternal(input, {
-    discover: discoverLegacySidecars,
-    resolveOriginalsLibrary: resolveLegacyOriginalsLibrary,
-    retireQueue: retireLegacySidecarQueue,
+    createAccess: createLegacySidecarImportAccess,
   });
   return {
     ...access,
