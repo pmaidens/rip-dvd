@@ -221,7 +221,7 @@ describe("archive worker polling", () => {
   });
 
   it(
-    "does not authorize replacement hardware when a configured alias retargets",
+    "does not authorize a pre-discovered disabled drive when a configured alias retargets",
     async () => {
       const deviceDirectory = mkdtempSync(
         join(tmpdir(), "rip-dvd-retargeted-alias-"),
@@ -240,6 +240,7 @@ describe("archive worker polling", () => {
         .fn()
         .mockResolvedValueOnce([
           { devicePath: originalDevicePath, serialNumber: "OLD-001" },
+          { devicePath: replacementDevicePath, serialNumber: "NEW-002" },
         ])
         .mockResolvedValue([
           { devicePath: replacementDevicePath, serialNumber: "NEW-002" },
