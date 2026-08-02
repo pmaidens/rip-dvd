@@ -127,6 +127,61 @@ describe("legacy sidecar import", () => {
     access.close();
   });
 
+  it.each(["direct", "symlink"] as const)(
+    "refuses a %s source archive outside the selected originals library",
+    (sourceKind) => {
+      const root = temporaryDirectories.create(
+        `rip-dvd-legacy-external-source-${sourceKind}-`,
+      );
+      const originalsLibraryPath = join(root, "originals");
+      const externalArchivePath = join(root, "External.iso");
+      const recordedArchivePath =
+        sourceKind === "direct"
+          ? externalArchivePath
+          : join(originalsLibraryPath, "Linked.iso");
+      const sidecarPath = join(
+        originalsLibraryPath,
+        "External.rip-dvd.json",
+      );
+      mkdirSync(originalsLibraryPath, { recursive: true });
+      writeFileSync(externalArchivePath, "external archive");
+      if (sourceKind === "symlink") {
+        symlinkSync(externalArchivePath, recordedArchivePath);
+      }
+      writeFileSync(sidecarPath, JSON.stringify({
+        schema_version: 2,
+        source: recordedArchivePath,
+        title: "External",
+        disc_fingerprint: `external-source-${sourceKind}`,
+        jobs: [],
+      }));
+      const sidecarBytes = readFileSync(sidecarPath);
+      const access = createLegacySidecarDataAccess({
+        databasePath: join(root, "catalog.sqlite"),
+      });
+
+      const report = access.legacySidecars.importLibrary({
+        originalsLibraryPath,
+      });
+
+      expect(report).toMatchObject({
+        sidecarsFound: 1,
+        sidecarsImported: 0,
+        sidecarsSkipped: 1,
+        issues: [expect.objectContaining({
+          code: "invalid_sidecar",
+          message: expect.stringMatching(
+            /source archive.*originals library|ancestor symlink/i,
+          ),
+          sidecarPath,
+        })],
+      });
+      expect(access.catalog.listOriginalDiscArchives()).toEqual([]);
+      expect(readFileSync(sidecarPath)).toEqual(sidecarBytes);
+      access.close();
+    },
+  );
+
   it("imports a valid sidecar as catalog records and preserves legacy job state", () => {
     const fixture = createFixture();
 
@@ -522,7 +577,7 @@ describe("legacy sidecar import", () => {
     access.close();
   });
 
-  it("rejects new and changed legacy jobs after cutover", () => {
+  it("ignores new and changed legacy jobs after cutover", () => {
     const fixture = createFixture();
     fixture.access.legacySidecars.importLibrary({
       originalsLibraryPath: fixture.originalsLibraryPath,
@@ -568,20 +623,7 @@ describe("legacy sidecar import", () => {
       sidecarsImported: 1,
       sidecarsSkipped: 0,
       recordsCreated: { encodeJobs: 0 },
-      issues: [
-        expect.objectContaining({
-          code: "duplicate_record",
-          jobIndex: 0,
-          sidecarPath: fixture.sidecarPath,
-          message: expect.stringMatching(/logical Encode Job conflicts/i),
-        }),
-        expect.objectContaining({
-          code: "duplicate_record",
-          jobIndex: 2,
-          sidecarPath: fixture.sidecarPath,
-          message: expect.stringMatching(/cutover/i),
-        }),
-      ],
+      issues: [],
     });
     expect(retry.encodeJobs.list()).toEqual(
       expect.arrayContaining([
@@ -642,7 +684,7 @@ describe("legacy sidecar import", () => {
       expect.objectContaining({
         code: "duplicate_record",
         sidecarPath: rejectedPath,
-        message: expect.stringMatching(/cutover/i),
+        message: expect.stringMatching(/earlier record/i),
       }),
     ]);
     expect(retry.encodeJobs.list()).toEqual([
@@ -920,7 +962,7 @@ describe("legacy sidecar import", () => {
     },
   );
 
-  it("preserves schema-1 recovery when an imported symlink-alias archive and sidecar disappear", () => {
+  it("preserves schema-1 recovery through a symlink-alias library root", () => {
     const fixture = createFixture();
     const originalsLibraryAlias = join(
       dirname(fixture.originalsLibraryPath),
@@ -929,10 +971,6 @@ describe("legacy sidecar import", () => {
     symlinkSync(fixture.originalsLibraryPath, originalsLibraryAlias, "dir");
     const secondArchivePath = join(
       fixture.originalsLibraryPath,
-      "Second Movie.iso",
-    );
-    const secondArchiveAliasPath = join(
-      originalsLibraryAlias,
       "Second Movie.iso",
     );
     const secondSidecarPath = join(
@@ -960,19 +998,19 @@ describe("legacy sidecar import", () => {
       detectedDiscId: existingDisc.id,
       discKind: "dvd",
       archiveFormat: "iso",
-      archivePath: secondArchiveAliasPath,
+      archivePath: secondArchivePath,
       fingerprint: "second-disc-fingerprint",
     });
     writeFileSync(
       secondSidecarPath,
       JSON.stringify({
         schema_version: 2,
-        source: secondArchiveAliasPath,
+        source: secondArchivePath,
         title: "Second Movie",
         disc_fingerprint: "second-disc-fingerprint",
         jobs: [{
           label: "Movie: Second Movie",
-          source: secondArchiveAliasPath,
+          source: secondArchivePath,
           output: secondOutputPath,
           preset: "Fast 480p30",
           selection: "main_feature",
@@ -1004,7 +1042,7 @@ describe("legacy sidecar import", () => {
       expect.objectContaining({
         code: "invalid_job",
         message: expect.stringMatching(/schema-1.*missing.*recovery input/i),
-        sidecarPath: secondArchiveAliasPath,
+        sidecarPath: secondArchivePath,
       }),
     ]);
     expect(fixture.access.encodeJobs.list()).toEqual(
@@ -1590,7 +1628,7 @@ describe("legacy sidecar import", () => {
     fixture.access.close();
   });
 
-  it("fails the first cutover closed when rejected payloads exceed the scan budget", () => {
+  it("keeps rejected scan work separate from the importable-state budget", () => {
     const fixture = createFixture();
     for (let index = 1; index <= 9; index += 1) {
       writeFileSync(
@@ -1608,24 +1646,22 @@ describe("legacy sidecar import", () => {
 
     expect(report).toMatchObject({
       sidecarsFound: 10,
-      sidecarsImported: 0,
-      sidecarsSkipped: 10,
+      sidecarsImported: 1,
+      sidecarsSkipped: 9,
     });
-    expect(report.issues).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          code: "invalid_sidecar",
-          message: expect.stringMatching(/aggregate.*bytes.*8,?388,?608/i),
-          sidecarPath: fixture.originalsLibraryPath,
-        }),
-      ]),
-    );
-    expect(fixture.access.catalog.listOriginalDiscArchives()).toEqual([]);
+    expect(report.issues).toHaveLength(9);
+    expect(report.issues).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        message: expect.stringMatching(/aggregate.*bytes/i),
+      }),
+    ]));
+    expect(fixture.access.catalog.listOriginalDiscArchives()).toHaveLength(1);
+    expect(fixture.access.encodeJobs.list()).toHaveLength(2);
     expect(
       existsSync(
         join(fixture.originalsLibraryPath, ".rip-dvd-sqlite-catalog"),
       ),
-    ).toBe(false);
+    ).toBe(true);
     fixture.access.close();
   });
 
@@ -1912,6 +1948,7 @@ describe("legacy sidecar import", () => {
       ["null-titles", { titles: null }],
       ["created-at", { created_at: "not a date" }],
       ["updated-at", { updated_at: { value: "not a date" } }],
+      ["fingerprint-delimiter", { disc_fingerprint: "bad\0fingerprint" }],
       [
         "fingerprint",
         {

@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import {
   closeSync,
   mkdirSync,
@@ -73,6 +72,7 @@ import type {
   RunningArchiveJob,
   RunningEncodeJob,
 } from "../types.js";
+import { newId, requireRow } from "./persistence.js";
 
 const BUSY_TIMEOUT_MS = 5_000;
 const MIGRATION_LOCK_TIMEOUT_MS = 15_000;
@@ -92,18 +92,6 @@ const detectedDiscTransitions: Readonly<
   archived: [],
   rejected: ["detected"],
 };
-
-function requireRow<T>(row: T | undefined, recordType: string, id: string): T {
-  if (!row) {
-    throw new RecordNotFoundError(recordType, id);
-  }
-
-  return row;
-}
-
-function newId<Id extends string>(): Id {
-  return randomUUID() as Id;
-}
 
 function asRunningArchiveJob(job: ArchiveJob): RunningArchiveJob {
   if (job.status !== "running" || job.claimToken === null) {

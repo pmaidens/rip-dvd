@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from .core import (
     EncodeQueueItem,
@@ -45,6 +45,22 @@ LEGACY_QUEUE_CUTOVER_MARKER = ".rip-dvd-sqlite-catalog"
 LEGACY_QUEUE_COMMANDS = frozenset(
     {"interactive", "rip", "title", "extras", "queue", "encode"}
 )
+
+
+@dataclass(frozen=True)
+class ArchiveCommandOptions:
+    device: str
+    library: str
+    originals_library: str
+    preset: str
+    command: str
+    selected_title_number: int | None
+    extra_title_numbers: list[int] | None
+    name: str | None
+    year: int | None
+    dry_run: bool
+    verbose: bool
+    extra_names: dict[int, str] | None
 
 
 class EtaTracker:
@@ -722,48 +738,46 @@ def archive_mode(
     if not Path(device).exists():
         log_error(f"DVD device not found: {device}")
         return 2
+    options = ArchiveCommandOptions(
+        device=device,
+        library=library,
+        originals_library=originals_library,
+        preset=preset,
+        command=command,
+        selected_title_number=selected_title_number,
+        extra_title_numbers=extra_title_numbers,
+        name=name,
+        year=year,
+        dry_run=dry_run,
+        verbose=verbose,
+        extra_names=extra_names,
+    )
     try:
         with legacy_queue_command_lease(originals_library):
             if refuse_retired_legacy_queue(originals_library):
                 return 2
-            return _archive_mode_locked(
-                device,
-                library,
-                originals_library,
-                preset,
-                command=command,
-                selected_title_number=selected_title_number,
-                extra_title_numbers=extra_title_numbers,
-                name=name,
-                year=year,
-                dry_run=dry_run,
-                verbose=verbose,
+            return _run_archive_command(
+                options,
                 scan=scan,
-                extra_names=extra_names,
             )
     except TimeoutError as exc:
         log_error(str(exc))
         return 2
 
 
-def _archive_mode_locked(
-    device,
-    library,
-    originals_library,
-    preset,
-    command="rip",
-    selected_title_number=None,
-    extra_title_numbers=None,
-    name=None,
-    year=None,
-    dry_run=False,
-    verbose=False,
-    scan=None,
-    extra_names=None,
-):
-    if not Path(device).exists():
-        log_error(f"DVD device not found: {device}")
-        return 2
+def _run_archive_command(options, scan=None):
+    device = options.device
+    library = options.library
+    originals_library = options.originals_library
+    preset = options.preset
+    command = options.command
+    selected_title_number = options.selected_title_number
+    extra_title_numbers = options.extra_title_numbers
+    name = options.name
+    year = options.year
+    dry_run = options.dry_run
+    verbose = options.verbose
+    extra_names = options.extra_names
 
     scan, code = scan_for_archive(device, scan=scan)
     if code != 0:
@@ -886,18 +900,6 @@ def _archive_mode_locked(
 
 
 def encode_mode(originals_library, dry_run=False, verbose=False, watch=False, interval=300, limit=None, idle=True):
-    return _encode_mode_locked(
-        originals_library,
-        dry_run=dry_run,
-        verbose=verbose,
-        watch=watch,
-        interval=interval,
-        limit=limit,
-        idle=idle,
-    )
-
-
-def _encode_mode_locked(originals_library, dry_run=False, verbose=False, watch=False, interval=300, limit=None, idle=True):
     if idle:
         try:
             os.nice(10)
