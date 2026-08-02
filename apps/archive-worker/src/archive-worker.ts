@@ -17,7 +17,7 @@ export interface ScannedDvd {
 export interface OpticalDriveHardware {
   discover(signal: AbortSignal): Promise<readonly DiscoveredOpticalDrive[]>;
   scanDvd(
-    devicePath: string,
+    drive: DiscoveredOpticalDrive,
     signal: AbortSignal,
   ): Promise<ScannedDvd | null>;
 }
@@ -48,6 +48,77 @@ function resolveConfiguredDevicePath(devicePath: string): string {
   }
 }
 
+function normalizeHardwareEvidence(
+  value: string | undefined,
+): string | undefined {
+  return value?.trim() || undefined;
+}
+
+function hasSameHardwareIdentity(
+  expected: DiscoveredOpticalDrive,
+  observed: DiscoveredOpticalDrive,
+): boolean {
+  return (
+    expected.devicePath === observed.devicePath &&
+    normalizeHardwareEvidence(expected.serialNumber) ===
+      normalizeHardwareEvidence(observed.serialNumber) &&
+    normalizeHardwareEvidence(expected.vendor) ===
+      normalizeHardwareEvidence(observed.vendor) &&
+    normalizeHardwareEvidence(expected.product) ===
+      normalizeHardwareEvidence(observed.product)
+  );
+}
+
+function reconcileDiscoveredDrives(
+  access: DataAccess,
+  discovered: readonly DiscoveredOpticalDrive[],
+  configuredCanonicalPath: string,
+) {
+  return access.catalog.reconcileOpticalDrives(
+    discovered.map((drive) => ({
+      ...drive,
+      isConfiguredDevice: drive.devicePath === configuredCanonicalPath,
+    })),
+  );
+}
+
+async function confirmAuthorizedDrive({
+  access,
+  configuredCanonicalPath,
+  expected,
+  hardware,
+  phase,
+  signal,
+}: {
+  access: DataAccess;
+  configuredCanonicalPath: string;
+  expected: DiscoveredOpticalDrive;
+  hardware: OpticalDriveHardware;
+  phase: "DVD persistence" | "DVD scanning";
+  signal: AbortSignal;
+}) {
+  const discovered = await hardware.discover(signal);
+  signal.throwIfAborted();
+  const drives = reconcileDiscoveredDrives(
+    access,
+    discovered,
+    configuredCanonicalPath,
+  );
+  const observed = discovered.find(
+    (drive) => drive.devicePath === expected.devicePath,
+  );
+  if (observed === undefined || !hasSameHardwareIdentity(expected, observed)) {
+    throw new Error(`Optical Drive identity changed before ${phase}`);
+  }
+  const confirmed = drives.find(
+    (drive) => drive.devicePath === expected.devicePath,
+  );
+  if (confirmed === undefined || !confirmed.isPresent || !confirmed.isEnabled) {
+    throw new Error(`Optical Drive is not enabled before ${phase}`);
+  }
+  return { discovered: observed, persisted: confirmed };
+}
+
 export async function pollArchiveWorker({
   access,
   configuredDevicePath,
@@ -60,15 +131,13 @@ export async function pollArchiveWorker({
   signal.throwIfAborted();
   const configuredCanonicalPath =
     resolveConfiguredDevicePath(configuredDevicePath);
-  const drives = access.catalog.reconcileOpticalDrives(
-    discovered.map((drive) => {
-      const isConfiguredDevice =
-        drive.devicePath === configuredCanonicalPath;
-      return {
-        ...drive,
-        isConfiguredDevice,
-      };
-    }),
+  const drives = reconcileDiscoveredDrives(
+    access,
+    discovered,
+    configuredCanonicalPath,
+  );
+  const discoveredByPath = new Map(
+    discovered.map((drive) => [drive.devicePath, drive]),
   );
 
   for (const drive of drives) {
@@ -77,13 +146,36 @@ export async function pollArchiveWorker({
     }
 
     try {
-      const scan = await hardware.scanDvd(drive.devicePath, signal);
+      const expected = discoveredByPath.get(drive.devicePath);
+      if (expected === undefined) {
+        throw new Error("Optical Drive identity is unavailable for scanning");
+      }
+      const confirmedBeforeScan = await confirmAuthorizedDrive({
+        access,
+        configuredCanonicalPath,
+        expected,
+        hardware,
+        phase: "DVD scanning",
+        signal,
+      });
+      const scan = await hardware.scanDvd(
+        confirmedBeforeScan.discovered,
+        signal,
+      );
       signal.throwIfAborted();
       if (scan === null) {
         continue;
       }
+      const confirmedBeforePersistence = await confirmAuthorizedDrive({
+        access,
+        configuredCanonicalPath,
+        expected: confirmedBeforeScan.discovered,
+        hardware,
+        phase: "DVD persistence",
+        signal,
+      });
       const disc = access.catalog.registerDetectedDisc({
-        opticalDriveId: drive.id,
+        opticalDriveId: confirmedBeforePersistence.persisted.id,
         discKind: "dvd",
         fingerprint: scan.fingerprint,
         isNewMediumObservation: scan.isNewMediumObservation,

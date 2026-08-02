@@ -102,7 +102,7 @@ describe("database-backed dashboard over HTTP", () => {
     expect(html).toContain(
       "sha256:2222222222222222222222222222222222222222222222222222222222222222",
     );
-    expect(hardware.discover).toHaveBeenCalledOnce();
+    expect(hardware.discover).toHaveBeenCalledTimes(3);
     expect(hardware.scanDvd).toHaveBeenCalledOnce();
   });
 
