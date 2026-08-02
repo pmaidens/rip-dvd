@@ -25,8 +25,9 @@ model identity without matching serial proof is replacement hardware and is
 atomically reset to disabled. After a disappearance, authorization is
 preserved only when a matching serial proves physical-drive continuity;
 uncertain same-path hardware is disabled. Retargeting a configured alias to a
-different canonical device path also consumes the configured default with the
-new target disabled.
+different canonical device path consumes the configured default. A new or
+identity-changed target is disabled, while an existing identity-stable target
+keeps its current enabled/disabled authorization.
 
 The package exports the versioned, bounded DVD title-map contract through
 `@rip-dvd/data-access/dvd-scan`. Hardware parsing, worker persistence, and web

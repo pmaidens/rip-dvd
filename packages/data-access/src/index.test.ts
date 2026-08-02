@@ -685,6 +685,47 @@ describe("data-access facade", () => {
     access.close();
   });
 
+  it("keeps a pre-discovered disabled alias target disabled on later polls", () => {
+    const access = openTestDatabase();
+    access.catalog.reconcileOpticalDrives([
+      {
+        devicePath: "/dev/sr0",
+        serialNumber: "CONFIGURED-001",
+        isConfiguredDevice: true,
+      },
+      {
+        devicePath: "/dev/sr1",
+        serialNumber: "STABLE-002",
+        isConfiguredDevice: false,
+      },
+    ]);
+    const retargetedSnapshot = [
+      {
+        devicePath: "/dev/sr0",
+        serialNumber: "CONFIGURED-001",
+        isConfiguredDevice: false,
+      },
+      {
+        devicePath: "/dev/sr1",
+        serialNumber: "STABLE-002",
+        isConfiguredDevice: true,
+      },
+    ];
+
+    const enabledAfterEachPoll = [retargetedSnapshot, retargetedSnapshot].map(
+      (snapshot) => {
+        access.catalog.reconcileOpticalDrives(snapshot);
+        return access.catalog
+          .listOpticalDrives()
+          .find((drive) => drive.devicePath === "/dev/sr1")?.isEnabled;
+      },
+    );
+
+    expect(enabledAfterEachPoll).toEqual([false, false]);
+
+    access.close();
+  });
+
   it("disables uncertain same-path hardware after a disappearance", () => {
     const access = openTestDatabase();
     const original = access.catalog.upsertOpticalDrive({

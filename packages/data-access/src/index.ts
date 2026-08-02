@@ -952,12 +952,14 @@ export function createDataAccess({
                           drive.isConfiguredDevice === true,
                         isEnabled: false,
                       }
-                    : applyConfiguredDefault
-                      ? {
-                          configurationDefaultApplied: true,
-                          isEnabled: true,
-                        }
-                      : {}),
+                    : drive.isConfiguredDevice && configuredTargetChanged
+                      ? { configurationDefaultApplied: true }
+                      : applyConfiguredDefault
+                        ? {
+                            configurationDefaultApplied: true,
+                            isEnabled: true,
+                          }
+                        : {}),
                   isPresent: true,
                   lastSeenAt: timestamp,
                   updatedAt: timestamp,

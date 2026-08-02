@@ -328,9 +328,11 @@ nonempty serial is authoritative continuity evidence even when vendor or model
 text changes. Without matching serial proof, a stable hardware identity change
 at an existing device path resets the replacement to disabled rather than
 inheriting the previous drive's authorization. Retargeting a configured alias
-to a different canonical device path likewise records the new target disabled.
-A drive that disappears may keep authorization only when the same serial proves
-continuity when it returns; uncertain same-path hardware fails closed.
+to a different canonical device path consumes the configured default. A new or
+identity-changed target is disabled, while an existing identity-stable target
+keeps its current enabled/disabled authorization. A drive that disappears may
+keep authorization only when the same serial proves continuity when it returns;
+uncertain same-path hardware fails closed.
 
 Docker cannot see host optical devices unless they are passed through. Add only
 the devices the archive worker should inspect in a local Compose override, for
