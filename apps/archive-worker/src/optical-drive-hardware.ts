@@ -16,6 +16,7 @@ import {
 import type { DiscoveredOpticalDrive } from "@rip-dvd/data-access";
 
 import type {
+  BoundOpticalDrive,
   OpticalDriveHardware,
   ScannedDvd,
 } from "./archive-worker.js";
@@ -156,6 +157,7 @@ export function createNodeCommandRunner(
 export const nodeCommandRunner = createNodeCommandRunner();
 
 interface LinuxOpticalDriveHardwareOptions {
+  deviceInstanceObserver?: MediaGenerationObserver;
   platform?: NodeJS.Platform;
   runner?: CommandRunner;
   contentReader?: DiscContentReader;
@@ -521,11 +523,29 @@ export function createLinuxOpticalDriveHardware({
   runner = nodeCommandRunner,
   contentReader = nodeDiscContentReader,
   mediaGenerationObserver = nodeMediaGenerationObserver,
+  deviceInstanceObserver = mediaGenerationObserver,
 }: LinuxOpticalDriveHardwareOptions = {}): OpticalDriveHardware {
   const scanCache = new Map<
     string,
     { generation: string; result: ScannedDvd | null }
   >();
+
+  async function requireBoundDeviceInstance(
+    binding: BoundOpticalDrive,
+    phase: "before DVD persistence" | "before DVD scanning" | "during DVD scanning",
+    signal: AbortSignal,
+  ): Promise<string> {
+    const safeDevicePath = requireSafeDevicePath(binding.drive.devicePath);
+    const observedToken = await deviceInstanceObserver.observe(
+      safeDevicePath,
+      signal,
+    );
+    if (observedToken !== binding.deviceInstanceToken) {
+      throw new Error(`Optical Drive instance changed ${phase}`);
+    }
+    return safeDevicePath;
+  }
+
   return {
     async discover(signal) {
       if (platform !== "linux") {
@@ -555,14 +575,35 @@ export function createLinuxOpticalDriveHardware({
       return discovered;
     },
 
-    async scanDvd(drive, signal) {
+    async bindOpticalDrive(drive, signal) {
       const safeDevicePath = requireSafeDevicePath(drive.devicePath);
+      const deviceInstanceToken = await deviceInstanceObserver.observe(
+        safeDevicePath,
+        signal,
+      );
+      return {
+        deviceInstanceToken,
+        drive: { ...drive, devicePath: safeDevicePath },
+      };
+    },
+
+    async scanDvd(binding, signal) {
+      const safeDevicePath = await requireBoundDeviceInstance(
+        binding,
+        "before DVD scanning",
+        signal,
+      );
       const generationBefore = await mediaGenerationObserver.observe(
         safeDevicePath,
         signal,
       );
       const cached = scanCache.get(safeDevicePath);
       if (cached?.generation === generationBefore) {
+        await requireBoundDeviceInstance(
+          binding,
+          "during DVD scanning",
+          signal,
+        );
         return cached.result === null
           ? null
           : { ...cached.result, isNewMediumObservation: false };
@@ -576,6 +617,11 @@ export function createLinuxOpticalDriveHardware({
         if (generationBefore !== generationAfter) {
           throw new Error("DVD medium changed during scanning");
         }
+        await requireBoundDeviceInstance(
+          binding,
+          "during DVD scanning",
+          signal,
+        );
         scanCache.set(safeDevicePath, {
           generation: generationAfter,
           result: null,
@@ -595,6 +641,11 @@ export function createLinuxOpticalDriveHardware({
       if (generationBefore !== generationAfter) {
         throw new Error("DVD medium changed during scanning");
       }
+      await requireBoundDeviceInstance(
+        binding,
+        "during DVD scanning",
+        signal,
+      );
       const scanData = decodeDvdTitleMap({
         schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
         contentId,
@@ -614,6 +665,14 @@ export function createLinuxOpticalDriveHardware({
         result,
       });
       return result;
+    },
+
+    async confirmOpticalDrive(binding, signal) {
+      await requireBoundDeviceInstance(
+        binding,
+        "before DVD persistence",
+        signal,
+      );
     },
   };
 }
