@@ -3,6 +3,7 @@ import {
   realpathSync,
   rmSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -218,6 +219,66 @@ describe("archive worker polling", () => {
     );
     access.close();
   });
+
+  it(
+    "does not authorize replacement hardware when a configured alias retargets",
+    async () => {
+      const deviceDirectory = mkdtempSync(
+        join(tmpdir(), "rip-dvd-retargeted-alias-"),
+      );
+      temporaryDirectories.push(deviceDirectory);
+      const originalPath = join(deviceDirectory, "sr0");
+      const replacementPath = join(deviceDirectory, "sr1");
+      const configuredAliasPath = join(deviceDirectory, "dvd");
+      writeFileSync(originalPath, "");
+      writeFileSync(replacementPath, "");
+      symlinkSync(originalPath, configuredAliasPath);
+      const originalDevicePath = realpathSync(originalPath);
+      const replacementDevicePath = realpathSync(replacementPath);
+      const access = openTestDataAccess();
+      const discover = vi
+        .fn()
+        .mockResolvedValueOnce([
+          { devicePath: originalDevicePath, serialNumber: "OLD-001" },
+        ])
+        .mockResolvedValue([
+          { devicePath: replacementDevicePath, serialNumber: "NEW-002" },
+        ]);
+      const scanDvd = vi.fn().mockResolvedValue(null);
+      const options = {
+        access,
+        configuredDevicePath: configuredAliasPath,
+        hardware: { discover, scanDvd },
+        log: vi.fn(),
+        signal: new AbortController().signal,
+      };
+
+      await pollArchiveWorker(options);
+      unlinkSync(configuredAliasPath);
+      symlinkSync(replacementPath, configuredAliasPath);
+      await pollArchiveWorker(options);
+      await pollArchiveWorker(options);
+
+      expect(access.catalog.listOpticalDrives()).toEqual([
+        expect.objectContaining({
+          devicePath: originalDevicePath,
+          isEnabled: true,
+          isPresent: false,
+        }),
+        expect.objectContaining({
+          devicePath: replacementDevicePath,
+          isEnabled: false,
+          isPresent: true,
+        }),
+      ]);
+      expect(scanDvd).toHaveBeenCalledTimes(1);
+      expect(scanDvd).toHaveBeenCalledWith(
+        originalDevicePath,
+        expect.any(AbortSignal),
+      );
+      access.close();
+    },
+  );
 
   it("keeps repeated polls idempotent and marks disappeared drives missing", async () => {
     vi.useFakeTimers();

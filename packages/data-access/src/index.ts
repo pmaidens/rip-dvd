@@ -57,6 +57,7 @@ import type {
   ConsistentReadAccess,
   DataAccess,
   DetectedDiscId,
+  DetectedDiscListOptions,
   DetectedDiscStatus,
   DiscSelection,
   DiscSelectionId,
@@ -110,37 +111,61 @@ const detectedDiscTransitions: Readonly<
   rejected: ["detected"],
 };
 
-interface ChronologicalJobRecord {
+interface ChronologicalRecord {
   id: string;
-  updatedAt: Date;
 }
 
-function createJobList<Job extends ChronologicalJobRecord>({
-  readQueue,
+interface BoundedChronologicalListOptions {
+  limit?: number;
+  activeLimit?: number;
+  historyLimit?: number;
+}
+
+function createBoundedChronologicalList<
+  RecordType extends ChronologicalRecord,
+  Status extends string,
+  Options extends BoundedChronologicalListOptions,
+>({
+  activeStatuses,
+  historyStatuses,
+  chronologicalAt,
+  readAll,
   readNewest,
 }: {
-  readQueue(statuses?: JobStatus[]): Job[];
-  readNewest(statuses: JobStatus[] | undefined, limit: number): Job[];
+  activeStatuses: Status[];
+  historyStatuses: Status[];
+  chronologicalAt(record: RecordType): Date;
+  readAll(
+    statuses: Status[] | undefined,
+    options: Options | undefined,
+  ): RecordType[];
+  readNewest(
+    statuses: Status[] | undefined,
+    limit: number,
+    options: Options | undefined,
+  ): RecordType[];
 }) {
-  const chronological = (rows: Job[]) =>
+  const chronological = (rows: RecordType[]) =>
     rows.sort(
       (left, right) =>
-        left.updatedAt.getTime() - right.updatedAt.getTime() ||
+        chronologicalAt(left).getTime() - chronologicalAt(right).getTime() ||
         left.id.localeCompare(right.id),
     );
 
-  return (statuses?: JobStatus[], options?: JobListOptions): Job[] => {
+  return (statuses?: Status[], options?: Options): RecordType[] => {
     if (options?.activeLimit !== undefined && statuses === undefined) {
       const active = readNewest(
-        ["queued", "running"],
+        activeStatuses,
         requirePositiveSafeInteger(options.activeLimit, "activeLimit"),
+        options,
       );
       const history =
         options.historyLimit === undefined
           ? []
           : readNewest(
-              ["completed", "failed"],
+              historyStatuses,
               requirePositiveSafeInteger(options.historyLimit, "historyLimit"),
+              options,
             );
       return chronological([...active, ...history]);
     }
@@ -149,11 +174,28 @@ function createJobList<Job extends ChronologicalJobRecord>({
         readNewest(
           statuses,
           requirePositiveSafeInteger(options.limit, "limit"),
+          options,
         ),
       );
     }
-    return readQueue(statuses);
+    return readAll(statuses, options);
   };
+}
+
+function createJobList<Job extends ChronologicalRecord & { updatedAt: Date }>({
+  readQueue,
+  readNewest,
+}: {
+  readQueue(statuses?: JobStatus[]): Job[];
+  readNewest(statuses: JobStatus[] | undefined, limit: number): Job[];
+}) {
+  return createBoundedChronologicalList<Job, JobStatus, JobListOptions>({
+    activeStatuses: ["queued", "running"],
+    historyStatuses: ["completed", "failed"],
+    chronologicalAt: (job) => job.updatedAt,
+    readAll: (statuses) => readQueue(statuses),
+    readNewest: (statuses, limit) => readNewest(statuses, limit),
+  });
 }
 
 function requireRow<T>(row: T | undefined, recordType: string, id: string): T {
@@ -691,6 +733,43 @@ export function createDataAccess({
     requeueFrom: ["failed", "completed"],
   });
 
+  const detectedDiscConditionFor = (
+    statuses: DetectedDiscStatus[] | undefined,
+    options: DetectedDiscListOptions | undefined,
+  ) => {
+    const conditions = [
+      statuses?.length ? inArray(detectedDiscs.status, statuses) : undefined,
+      options?.ids ? inArray(detectedDiscs.id, [...options.ids]) : undefined,
+    ].filter((condition) => condition !== undefined);
+    return conditions.length > 0 ? and(...conditions) : undefined;
+  };
+  const listDetectedDiscRecords = createBoundedChronologicalList<
+    typeof detectedDiscs.$inferSelect,
+    DetectedDiscStatus,
+    DetectedDiscListOptions
+  >({
+    activeStatuses: ["detected", "scanned", "approved"],
+    historyStatuses: ["archived", "rejected"],
+    chronologicalAt: (disc) => disc.detectedAt,
+    readAll(statuses, options) {
+      return database
+        .select()
+        .from(detectedDiscs)
+        .where(detectedDiscConditionFor(statuses, options))
+        .orderBy(asc(detectedDiscs.detectedAt), asc(detectedDiscs.id))
+        .all();
+    },
+    readNewest(statuses, limit, options) {
+      return database
+        .select()
+        .from(detectedDiscs)
+        .where(detectedDiscConditionFor(statuses, options))
+        .orderBy(desc(detectedDiscs.detectedAt), desc(detectedDiscs.id))
+        .limit(limit)
+        .all();
+    },
+  });
+
   const access: DataAccess = {
     readConsistentSnapshot(read) {
       const snapshotAccess: ConsistentReadAccess = {
@@ -763,23 +842,47 @@ export function createDataAccess({
             "Discovered Optical Drive paths must be unique",
           );
         }
+        const configuredTargets = normalized.filter(
+          (drive) => drive.isConfiguredDevice,
+        );
+        if (configuredTargets.length > 1) {
+          throw new DomainInvariantError(
+            "A discovery snapshot can prove only one configured Optical Drive",
+          );
+        }
+        const configuredTargetPath = configuredTargets[0]?.devicePath;
 
         return database.transaction((transaction) => {
+          const existingDrives = transaction
+            .select({
+              devicePath: opticalDrives.devicePath,
+              configurationDefaultApplied:
+                opticalDrives.configurationDefaultApplied,
+              isConfiguredTarget: opticalDrives.isConfiguredTarget,
+              isPresent: opticalDrives.isPresent,
+              serialNumber: opticalDrives.serialNumber,
+              vendor: opticalDrives.vendor,
+              product: opticalDrives.product,
+            })
+            .from(opticalDrives)
+            .all();
           const existingByPath = new Map(
-            transaction
-              .select({
-                devicePath: opticalDrives.devicePath,
-                configurationDefaultApplied:
-                  opticalDrives.configurationDefaultApplied,
-                isPresent: opticalDrives.isPresent,
-                serialNumber: opticalDrives.serialNumber,
-                vendor: opticalDrives.vendor,
-                product: opticalDrives.product,
-              })
-              .from(opticalDrives)
-              .all()
-              .map((drive) => [drive.devicePath, drive]),
+            existingDrives.map((drive) => [drive.devicePath, drive]),
           );
+          const previousConfiguredTargetPath = existingDrives.find(
+            (drive) => drive.isConfiguredTarget,
+          )?.devicePath;
+          const configuredTargetChanged =
+            configuredTargetPath !== undefined &&
+            previousConfiguredTargetPath !== undefined &&
+            configuredTargetPath !== previousConfiguredTargetPath;
+          if (configuredTargetPath !== undefined) {
+            transaction
+              .update(opticalDrives)
+              .set({ isConfiguredTarget: false })
+              .where(eq(opticalDrives.isConfiguredTarget, true))
+              .run();
+          }
           transaction
             .update(opticalDrives)
             .set({ isPresent: false, updatedAt: timestamp })
@@ -788,14 +891,14 @@ export function createDataAccess({
 
           for (const drive of normalized) {
             const existing = existingByPath.get(drive.devicePath);
-            const existingSerial = existing?.serialNumber ?? undefined;
+            const existingSerial = existing?.serialNumber?.trim() || undefined;
+            const discoveredSerial = drive.serialNumber?.trim() || undefined;
             const serialChanged =
-              existing !== undefined && existingSerial !== drive.serialNumber;
+              existing !== undefined && existingSerial !== discoveredSerial;
             const stableIdentityMatches =
-              existing?.serialNumber !== null &&
-              existing?.serialNumber !== undefined &&
-              drive.serialNumber !== undefined &&
-              existing.serialNumber === drive.serialNumber;
+              existingSerial !== undefined &&
+              discoveredSerial !== undefined &&
+              existingSerial === discoveredSerial;
             const modelEvidenceChanged =
               existing !== undefined &&
               ((existing.vendor ?? undefined) !== drive.vendor ||
@@ -807,9 +910,11 @@ export function createDataAccess({
             const isReplacement =
               serialChanged ||
               (modelEvidenceChanged && !stableIdentityMatches) ||
-              continuityUnprovenAfterDisappearance;
+              continuityUnprovenAfterDisappearance ||
+              (drive.isConfiguredDevice && configuredTargetChanged);
             const applyConfiguredDefault =
               drive.isConfiguredDevice === true &&
+              !configuredTargetChanged &&
               existing?.configurationDefaultApplied !== true;
             transaction
               .insert(opticalDrives)
@@ -820,9 +925,12 @@ export function createDataAccess({
                 vendor: drive.vendor,
                 product: drive.product,
                 serialNumber: drive.serialNumber,
-                isEnabled: drive.isConfiguredDevice === true,
+                isEnabled:
+                  drive.isConfiguredDevice === true &&
+                  !configuredTargetChanged,
                 configurationDefaultApplied:
                   drive.isConfiguredDevice === true,
+                isConfiguredTarget: drive.isConfiguredDevice === true,
                 isPresent: true,
                 lastSeenAt: timestamp,
                 createdAt: timestamp,
@@ -835,6 +943,9 @@ export function createDataAccess({
                   vendor: drive.vendor ?? null,
                   product: drive.product ?? null,
                   serialNumber: drive.serialNumber ?? null,
+                  ...(drive.isConfiguredDevice
+                    ? { isConfiguredTarget: true }
+                    : {}),
                   ...(isReplacement
                     ? {
                         configurationDefaultApplied:
@@ -1128,63 +1239,7 @@ export function createDataAccess({
         if (options?.ids !== undefined && options.ids.length === 0) {
           return [];
         }
-        const idCondition = options?.ids
-          ? inArray(detectedDiscs.id, [...options.ids])
-          : undefined;
-        const conditionFor = (selectedStatuses?: DetectedDiscStatus[]) => {
-          const conditions = [
-            selectedStatuses?.length
-              ? inArray(detectedDiscs.status, selectedStatuses)
-              : undefined,
-            idCondition,
-          ].filter((condition) => condition !== undefined);
-          return conditions.length > 0 ? and(...conditions) : undefined;
-        };
-        const chronological = (rows: typeof detectedDiscs.$inferSelect[]) =>
-          rows.sort(
-            (left, right) =>
-              left.detectedAt.getTime() - right.detectedAt.getTime() ||
-              left.id.localeCompare(right.id),
-          );
-        const readNewest = (
-          selectedStatuses: DetectedDiscStatus[] | undefined,
-          limit: number,
-        ) =>
-          database
-            .select()
-            .from(detectedDiscs)
-            .where(conditionFor(selectedStatuses))
-            .orderBy(desc(detectedDiscs.detectedAt), desc(detectedDiscs.id))
-            .limit(limit)
-            .all();
-        if (options?.activeLimit !== undefined && statuses === undefined) {
-          const active = readNewest(
-            ["detected", "scanned", "approved"],
-            requirePositiveSafeInteger(options.activeLimit, "activeLimit"),
-          );
-          const history =
-            options.historyLimit === undefined
-              ? []
-              : readNewest(
-                  ["archived", "rejected"],
-                  requirePositiveSafeInteger(
-                    options.historyLimit,
-                    "historyLimit",
-                  ),
-                );
-          return chronological([...active, ...history]);
-        }
-        const condition = conditionFor(statuses);
-        if (options?.limit !== undefined) {
-          const limit = requirePositiveSafeInteger(options.limit, "limit");
-          return chronological(readNewest(statuses, limit));
-        }
-        return database
-          .select()
-          .from(detectedDiscs)
-          .where(condition)
-          .orderBy(asc(detectedDiscs.detectedAt), asc(detectedDiscs.id))
-          .all();
+        return listDetectedDiscRecords(statuses, options);
       },
 
       updateDetectedDiscStatus(id, status) {

@@ -802,6 +802,16 @@
       "type": "integer",
       "notNull": true,
       "autoincrement": false,
+      "default": "false",
+      "generated": null,
+      "name": "is_configured_target",
+      "entityType": "columns",
+      "table": "optical_drives"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
       "default": "true",
       "generated": null,
       "name": "is_present",

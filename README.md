@@ -323,12 +323,14 @@ SQLite, and scans DVDs only in enabled drives. The configured
 `RIP_DVD_ARCHIVE_DEVICE_PATH` receives the enabled default when its physical
 drive is first proven, including when a configured device alias appears after
 the canonical drive. Other new drives are recorded disabled so attaching
-temporary hardware does not silently change scanning behavior. If stable
-hardware identity changes at an existing device path, the replacement is reset
-to disabled rather than inheriting the
-previous drive's authorization. A drive that disappears may keep authorization
-only when the same serial proves continuity when it returns; uncertain
-same-path hardware fails closed.
+temporary hardware does not silently change scanning behavior. A matching
+nonempty serial is authoritative continuity evidence even when vendor or model
+text changes. Without matching serial proof, a stable hardware identity change
+at an existing device path resets the replacement to disabled rather than
+inheriting the previous drive's authorization. Retargeting a configured alias
+to a different canonical device path likewise records the new target disabled.
+A drive that disappears may keep authorization only when the same serial proves
+continuity when it returns; uncertain same-path hardware fails closed.
 
 Docker cannot see host optical devices unless they are passed through. Add only
 the devices the archive worker should inspect in a local Compose override, for

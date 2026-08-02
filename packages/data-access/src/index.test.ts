@@ -671,6 +671,71 @@ describe("data-access facade", () => {
     access.close();
   });
 
+  it("treats a matching serial as authoritative when model text changes", () => {
+    const access = openTestDatabase();
+    const original = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      vendor: "Pioneer",
+      product: "DVD-RW",
+      serialNumber: "STABLE-SERIAL",
+      isEnabled: true,
+      isPresent: true,
+    });
+
+    expect(
+      access.catalog.reconcileOpticalDrives([
+        {
+          devicePath: "/dev/sr0",
+          vendor: "HL-DT-ST",
+          product: "DVDRAM",
+          serialNumber: "STABLE-SERIAL",
+          isConfiguredDevice: false,
+        },
+      ]),
+    ).toEqual([
+      expect.objectContaining({
+        id: original.id,
+        vendor: "HL-DT-ST",
+        product: "DVDRAM",
+        serialNumber: "STABLE-SERIAL",
+        isEnabled: true,
+      }),
+    ]);
+
+    access.close();
+  });
+
+  it("does not treat an empty serial as identity proof", () => {
+    const access = openTestDatabase();
+    const original = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      vendor: "Pioneer",
+      product: "DVD-RW",
+      serialNumber: "",
+      isEnabled: true,
+      isPresent: true,
+    });
+
+    expect(
+      access.catalog.reconcileOpticalDrives([
+        {
+          devicePath: "/dev/sr0",
+          vendor: "HL-DT-ST",
+          product: "DVDRAM",
+          serialNumber: "",
+          isConfiguredDevice: false,
+        },
+      ]),
+    ).toEqual([
+      expect.objectContaining({
+        id: original.id,
+        isEnabled: false,
+      }),
+    ]);
+
+    access.close();
+  });
+
   it.each([
     ["loses serial evidence", undefined],
     ["gains serial evidence", "NEW-SERIAL"],
