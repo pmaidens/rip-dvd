@@ -824,6 +824,52 @@ describe("legacy sidecar import", () => {
     fixture.access.close();
   });
 
+  it("preserves schema-1 recovery for an archive-only sidecar absent from SQLite", () => {
+    const fixture = createFixture();
+    const markerPath = join(
+      fixture.originalsLibraryPath,
+      ".rip-dvd-sqlite-catalog",
+    );
+    const marker = {
+      schemaVersion: 1,
+      legacyQueueStatus: "retired",
+      authoritativeStore: "sqlite",
+    };
+    const sidecar = JSON.parse(
+      readFileSync(fixture.sidecarPath, "utf8"),
+    ) as { jobs: unknown[] };
+    sidecar.jobs = [];
+    writeFileSync(fixture.sidecarPath, JSON.stringify(sidecar));
+    writeFileSync(markerPath, JSON.stringify(marker));
+
+    const report = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+
+    expect(report).toMatchObject({
+      sidecarsFound: 1,
+      sidecarsImported: 0,
+      sidecarsSkipped: 1,
+      recordsCreated: {
+        originalDiscArchives: 0,
+        discSelections: 0,
+        mediaItems: 0,
+        encodingProfiles: 0,
+        encodeJobs: 0,
+      },
+      issues: [
+        expect.objectContaining({
+          code: "invalid_job",
+          message: expect.stringMatching(/schema-1.*archive.*recovery/i),
+          sidecarPath: fixture.sidecarPath,
+        }),
+      ],
+    });
+    expect(fixture.access.catalog.listOriginalDiscArchives()).toEqual([]);
+    expect(JSON.parse(readFileSync(markerPath, "utf8"))).toEqual(marker);
+    fixture.access.close();
+  });
+
   it.each(["all-invalid", "mixed-valid-invalid"] as const)(
     "preserves schema-1 operator recovery state for %s jobs",
     (scenario) => {
@@ -1325,6 +1371,49 @@ describe("legacy sidecar import", () => {
     access.close();
   });
 
+  it("reports malformed UTF-8 without aborting valid sidecars", () => {
+    const fixture = createFixture();
+    const archivePath = join(
+      fixture.originalsLibraryPath,
+      "Malformed UTF-8.iso",
+    );
+    const sidecarPath = join(
+      fixture.originalsLibraryPath,
+      "Malformed UTF-8.rip-dvd.json",
+    );
+    writeFileSync(archivePath, "archive");
+    const malformedBytes = Buffer.concat([
+      Buffer.from(
+        `{"schema_version":2,"source":${JSON.stringify(archivePath)},"title":"`,
+      ),
+      Buffer.from([0xff]),
+      Buffer.from(
+        '","disc_fingerprint":"malformed-utf8-fingerprint","jobs":[]}',
+      ),
+    ]);
+    writeFileSync(sidecarPath, malformedBytes);
+
+    const report = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+
+    expect(report).toMatchObject({
+      sidecarsFound: 2,
+      sidecarsImported: 1,
+      sidecarsSkipped: 1,
+      issues: [
+        expect.objectContaining({
+          code: "corrupt_sidecar",
+          message: expect.stringMatching(/UTF-8/i),
+          sidecarPath,
+        }),
+      ],
+    });
+    expect(fixture.access.catalog.listOriginalDiscArchives()).toHaveLength(1);
+    expect(readFileSync(sidecarPath)).toEqual(malformedBytes);
+    fixture.access.close();
+  });
+
   it("reports an oversized sidecar without reading or importing it", () => {
     const fixture = createFixture();
     const oversizedSidecarPath = join(
@@ -1459,7 +1548,7 @@ describe("legacy sidecar import", () => {
 
   it("does not let corrupt payload bytes suppress a valid sidecar import", () => {
     const fixture = createFixture();
-    for (let index = 1; index <= 9; index += 1) {
+    for (let index = 1; index <= 8; index += 1) {
       writeFileSync(
         join(
           fixture.originalsLibraryPath,
@@ -1474,11 +1563,11 @@ describe("legacy sidecar import", () => {
     });
 
     expect(report).toMatchObject({
-      sidecarsFound: 10,
+      sidecarsFound: 9,
       sidecarsImported: 1,
-      sidecarsSkipped: 9,
+      sidecarsSkipped: 8,
     });
-    expect(report.issues).toHaveLength(9);
+    expect(report.issues).toHaveLength(8);
     expect(report.issues).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -1498,6 +1587,45 @@ describe("legacy sidecar import", () => {
       ]),
     );
     expect(fixture.access.encodeJobs.list()).toHaveLength(2);
+    fixture.access.close();
+  });
+
+  it("fails the first cutover closed when rejected payloads exceed the scan budget", () => {
+    const fixture = createFixture();
+    for (let index = 1; index <= 9; index += 1) {
+      writeFileSync(
+        join(
+          fixture.originalsLibraryPath,
+          `Rejected Payload ${index}.rip-dvd.json`,
+        ),
+        `{"padding":"${"x".repeat(950_000)}`,
+      );
+    }
+
+    const report = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+
+    expect(report).toMatchObject({
+      sidecarsFound: 10,
+      sidecarsImported: 0,
+      sidecarsSkipped: 10,
+    });
+    expect(report.issues).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "invalid_sidecar",
+          message: expect.stringMatching(/aggregate.*bytes.*8,?388,?608/i),
+          sidecarPath: fixture.originalsLibraryPath,
+        }),
+      ]),
+    );
+    expect(fixture.access.catalog.listOriginalDiscArchives()).toEqual([]);
+    expect(
+      existsSync(
+        join(fixture.originalsLibraryPath, ".rip-dvd-sqlite-catalog"),
+      ),
+    ).toBe(false);
     fixture.access.close();
   });
 
