@@ -85,6 +85,19 @@ const DEFAULT_MIGRATIONS_FOLDER = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../drizzle",
 );
+const opticalDriveSelection = {
+  id: opticalDrives.id,
+  devicePath: opticalDrives.devicePath,
+  displayName: opticalDrives.displayName,
+  vendor: opticalDrives.vendor,
+  product: opticalDrives.product,
+  serialNumber: opticalDrives.serialNumber,
+  isEnabled: opticalDrives.isEnabled,
+  isPresent: opticalDrives.isPresent,
+  lastSeenAt: opticalDrives.lastSeenAt,
+  createdAt: opticalDrives.createdAt,
+  updatedAt: opticalDrives.updatedAt,
+};
 
 const detectedDiscTransitions: Readonly<
   Record<DetectedDiscStatus, readonly DetectedDiscStatus[]>
@@ -755,6 +768,8 @@ export function createDataAccess({
             transaction
               .select({
                 devicePath: opticalDrives.devicePath,
+                configurationDefaultApplied:
+                  opticalDrives.configurationDefaultApplied,
                 isPresent: opticalDrives.isPresent,
                 serialNumber: opticalDrives.serialNumber,
                 vendor: opticalDrives.vendor,
@@ -798,6 +813,9 @@ export function createDataAccess({
               serialChanged ||
               modelChanged ||
               continuityUnprovenAfterDisappearance;
+            const applyConfiguredDefault =
+              drive.isConfiguredDevice === true &&
+              existing?.configurationDefaultApplied !== true;
             transaction
               .insert(opticalDrives)
               .values({
@@ -807,7 +825,11 @@ export function createDataAccess({
                 vendor: drive.vendor,
                 product: drive.product,
                 serialNumber: drive.serialNumber,
-                isEnabled: drive.isEnabledWhenNew ?? false,
+                isEnabled:
+                  drive.isConfiguredDevice === true ||
+                  (drive.isEnabledWhenNew ?? false),
+                configurationDefaultApplied:
+                  drive.isConfiguredDevice === true,
                 isPresent: true,
                 lastSeenAt: timestamp,
                 createdAt: timestamp,
@@ -820,7 +842,19 @@ export function createDataAccess({
                   vendor: drive.vendor,
                   product: drive.product,
                   serialNumber: drive.serialNumber ?? null,
-                  ...(isReplacement ? { isEnabled: false } : {}),
+                  ...(isReplacement
+                    ? {
+                        configurationDefaultApplied:
+                          existing?.configurationDefaultApplied === true ||
+                          drive.isConfiguredDevice === true,
+                        isEnabled: false,
+                      }
+                    : applyConfiguredDefault
+                      ? {
+                          configurationDefaultApplied: true,
+                          isEnabled: true,
+                        }
+                      : {}),
                   isPresent: true,
                   lastSeenAt: timestamp,
                   updatedAt: timestamp,
@@ -830,7 +864,7 @@ export function createDataAccess({
           }
 
           return transaction
-            .select()
+            .select(opticalDriveSelection)
             .from(opticalDrives)
             .orderBy(asc(opticalDrives.devicePath))
             .all();
@@ -868,7 +902,7 @@ export function createDataAccess({
               updatedAt: timestamp,
             },
           })
-          .returning()
+          .returning(opticalDriveSelection)
           .get();
         return requireRow(inserted, "optical drive", devicePath);
       },
@@ -882,7 +916,7 @@ export function createDataAccess({
           : undefined;
         if (options?.historicalLimit !== undefined) {
           const current = database
-            .select()
+            .select(opticalDriveSelection)
             .from(opticalDrives)
             .where(
               and(
@@ -895,7 +929,7 @@ export function createDataAccess({
             )
             .all();
           const history = database
-            .select()
+            .select(opticalDriveSelection)
             .from(opticalDrives)
             .where(
               and(
@@ -921,7 +955,7 @@ export function createDataAccess({
         }
         if (options?.limit !== undefined) {
           return database
-            .select()
+            .select(opticalDriveSelection)
             .from(opticalDrives)
             .where(condition)
             .orderBy(desc(opticalDrives.lastSeenAt), desc(opticalDrives.id))
@@ -930,7 +964,7 @@ export function createDataAccess({
             .reverse();
         }
         return database
-          .select()
+          .select(opticalDriveSelection)
           .from(opticalDrives)
           .where(condition)
           .orderBy(asc(opticalDrives.devicePath))

@@ -320,10 +320,12 @@ The archive worker image includes `lsblk` and `lsdvd`; the encode worker image
 includes HandBrake and ffmpeg. The archive worker discovers Linux block devices
 reported as optical drives, records attached/missing and last-seen state in
 SQLite, and scans DVDs only in enabled drives. The configured
-`RIP_DVD_ARCHIVE_DEVICE_PATH` is enabled when it is first discovered. Other new
-drives are recorded disabled so attaching temporary hardware does not silently
-change scanning behavior. If stable hardware identity changes at an existing
-device path, the replacement is reset to disabled rather than inheriting the
+`RIP_DVD_ARCHIVE_DEVICE_PATH` receives the enabled default when its physical
+drive is first proven, including when a configured device alias appears after
+the canonical drive. Other new drives are recorded disabled so attaching
+temporary hardware does not silently change scanning behavior. If stable
+hardware identity changes at an existing device path, the replacement is reset
+to disabled rather than inheriting the
 previous drive's authorization. A drive that disappears may keep authorization
 only when the same serial proves continuity when it returns; uncertain
 same-path hardware fails closed.

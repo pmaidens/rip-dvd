@@ -16,8 +16,9 @@ expire after five minutes. Opening an already-migrated file is safe.
 `catalog.reconcileOpticalDrives()` applies one complete discovery snapshot in a
 short transaction. Seen drives become present and advance `lastSeenAt`; drives
 absent from a successful snapshot become missing without changing their last
-seen time. Existing enabled/disabled choices are preserved, while a caller may
-choose the enabled default only for a newly discovered drive. A changed stable
+seen time. A configured-device proof applies the enabled default once to a new
+or stable known drive, including when a device alias becomes resolvable later;
+subsequent enabled/disabled choices are preserved. A changed stable
 serial, a loss or appearance of serial evidence, or a changed model identity at
 the same device path is replacement hardware and is atomically reset to
 disabled. After a disappearance, authorization is preserved only when a
