@@ -62,6 +62,10 @@ import {
   RecordNotFoundError,
 } from "../errors.js";
 import type {
+  LegacySidecarDataAccess,
+  LegacySidecarImportReport,
+} from "../legacy-sidecar-types.js";
+import type {
   ArchiveJobClaimToken,
   ArchiveJobId,
   ArchiveJob,
@@ -75,8 +79,6 @@ import type {
   EncodeJob,
   EncodingProfileId,
   MediaDomain,
-  LegacySidecarDataAccess,
-  LegacySidecarImportReport,
   MediaItemId,
   OpticalDriveId,
   OriginalDiscArchiveId,
@@ -231,8 +233,8 @@ export interface LegacySidecarMigrationAdapter {
   resolveOriginalsLibrary(path: string): string;
   retireQueue(
     originalsLibraryPath: string,
-    discoveries: readonly LegacySidecarDiscovery[],
-  ): LegacyQueueCutover;
+    discoveryBatch: LegacySidecarDiscoveryBatch,
+  ): LegacyQueueCutover | null;
 }
 
 function acquireMigrationLock(databasePath: string): () => void {
@@ -1425,20 +1427,24 @@ export function createDataAccessInternal(
           );
         const discoveryBatch =
           legacySidecarMigration.discover(originalsLibraryPath);
-        const { discoveries } = discoveryBatch;
+        let discoveries = discoveryBatch.discoveries;
         const report: LegacySidecarImportReport = {
           originalsLibraryPath,
-          sidecarsFound: discoveries.length,
+          sidecarsFound: discoveryBatch.sidecarsFound,
           sidecarsImported: 0,
           sidecarsSkipped: 0,
           recordsCreated: emptyLegacyImportRecordCounts(),
           recordsUpdated: 0,
           recordsUnchanged: 0,
-          issues: [],
+          issues: [...discoveryBatch.scanIssues],
         };
-        if (!discoveryBatch.complete) {
+        const cutover = legacySidecarMigration.retireQueue(
+          originalsLibraryPath,
+          discoveryBatch,
+        );
+        if (!cutover) {
+          report.sidecarsSkipped = discoveryBatch.sidecarsFound;
           for (const discovery of discoveries) {
-            report.sidecarsSkipped += 1;
             if (discovery.outcome === "skipped") {
               report.issues.push(discovery.issue);
             } else {
@@ -1447,10 +1453,23 @@ export function createDataAccessInternal(
           }
           return report;
         }
-        const cutover = legacySidecarMigration.retireQueue(
-          originalsLibraryPath,
-          discoveries,
-        );
+        if (cutover.recoveryDiscoveries) {
+          discoveries = cutover.recoveryDiscoveries;
+          const recoveryPaths = new Set(
+            discoveries.map((discovery) =>
+              discovery.outcome === "parsed"
+                ? discovery.sidecar.sidecarPath
+                : discovery.issue.sidecarPath,
+            ),
+          );
+          report.sidecarsFound = new Set([
+            ...discoveryBatch.sidecarPaths,
+            ...recoveryPaths,
+          ]).size;
+          report.sidecarsSkipped = discoveryBatch.sidecarPaths.filter(
+            (sidecarPath) => !recoveryPaths.has(sidecarPath),
+          ).length;
+        }
         const persistedLegacyJobs = new Map<
           string,
           { job: ParsedLegacyJob; sidecarPath: string }

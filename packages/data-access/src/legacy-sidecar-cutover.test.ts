@@ -132,6 +132,39 @@ while [ ! -e "$state_directory/supervisor-abort" ]; do sleep 0.01; done
     return { exitMarkerPath, helperPath };
   }
 
+  it("ignores a queue lease helper planted in the invocation directory", () => {
+    const root = temporaryDirectories.create("rip-dvd-helper-cwd-");
+    const originalsLibraryPath = join(root, "originals");
+    const plantedHelperDirectory = join(root, "rip_dvd");
+    const executionMarkerPath = join(root, "planted-helper-executed");
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    mkdirSync(plantedHelperDirectory);
+    writeFileSync(
+      join(plantedHelperDirectory, "legacy_queue_lease.py"),
+      `from pathlib import Path\nPath(${JSON.stringify(executionMarkerPath)}).write_text("executed")\nraise SystemExit(91)\n`,
+    );
+    const previousWorkingDirectory = process.cwd();
+    markerFault.failure = null;
+    const access = createLegacySidecarDataAccess({
+      databasePath: join(root, "catalog.sqlite"),
+    });
+
+    try {
+      process.chdir(root);
+      expect(
+        access.legacySidecars.importLibrary({ originalsLibraryPath }),
+      ).toMatchObject({
+        sidecarsFound: 0,
+        sidecarsImported: 0,
+        sidecarsSkipped: 0,
+      });
+      expect(existsSync(executionMarkerPath)).toBe(false);
+    } finally {
+      process.chdir(previousWorkingDirectory);
+      access.close();
+    }
+  });
+
   it.each([
     ["before-intent", /intent acquisition/i],
     ["before-ready", /queue drain/i],
@@ -614,6 +647,95 @@ try {
 
     expect(markerFault.directorySyncs).toBe(2);
     expect(report.issues).toEqual([]);
+    expect(retry.encodeJobs.list()).toEqual([
+      expect.objectContaining({ outputPath, status: "queued" }),
+    ]);
+    expect(readFileSync(sidecarPath)).toEqual(sidecarBytes);
+    retry.close();
+  });
+
+  it("resumes a published snapshot when restart discovery becomes incomplete", () => {
+    const root = temporaryDirectories.create(
+      "rip-dvd-cutover-incomplete-restart-",
+    );
+    const originalsLibraryPath = join(root, "originals");
+    const archivePath = join(originalsLibraryPath, "Recovery Movie.iso");
+    const sidecarPath = join(
+      originalsLibraryPath,
+      "Recovery Movie.rip-dvd.json",
+    );
+    const outputPath = join(root, "movies", "Recovery Movie.mkv");
+    const databasePath = join(root, "catalog.sqlite");
+    const markerPath = join(
+      originalsLibraryPath,
+      ".rip-dvd-sqlite-catalog",
+    );
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    writeFileSync(archivePath, "archive");
+    writeFileSync(
+      sidecarPath,
+      JSON.stringify({
+        schema_version: 2,
+        source: archivePath,
+        title: "Recovery Movie",
+        disc_fingerprint: "recovery-movie-fingerprint",
+        jobs: [{
+          label: "Movie: Recovery Movie",
+          source: archivePath,
+          output: outputPath,
+          preset: "Fast 480p30",
+          selection: "main_feature",
+          title_number: null,
+        }],
+      }),
+    );
+    const sidecarBytes = readFileSync(sidecarPath);
+    markerFault.failure = "directory-sync";
+    const interrupted = createLegacySidecarDataAccess({ databasePath });
+
+    expect(() =>
+      interrupted.legacySidecars.importLibrary({ originalsLibraryPath }),
+    ).toThrow(/injected directory sync failure/i);
+    expect(existsSync(markerPath)).toBe(true);
+    expect(interrupted.encodeJobs.list()).toEqual([]);
+    interrupted.close();
+
+    for (let index = 1; index <= 9; index += 1) {
+      const driftArchivePath = join(
+        originalsLibraryPath,
+        `A Drift ${index}.iso`,
+      );
+      writeFileSync(driftArchivePath, "archive");
+      writeFileSync(
+        join(originalsLibraryPath, `A Drift ${index}.rip-dvd.json`),
+        JSON.stringify({
+          schema_version: 2,
+          source: driftArchivePath,
+          title: `A Drift ${index}`,
+          disc_fingerprint: `recovery-drift-${index}`,
+          jobs: [],
+          padding: "x".repeat(950_000),
+        }),
+      );
+    }
+    markerFault.failure = null;
+    const retry = createLegacySidecarDataAccess({ databasePath });
+
+    const report = retry.legacySidecars.importLibrary({
+      originalsLibraryPath,
+    });
+
+    expect(report).toMatchObject({
+      sidecarsFound: 10,
+      sidecarsImported: 1,
+      sidecarsSkipped: 9,
+    });
+    expect(report.issues).toEqual([
+      expect.objectContaining({
+        code: "invalid_sidecar",
+        message: expect.stringMatching(/aggregate.*bytes.*8,?388,?608.*limit/i),
+      }),
+    ]);
     expect(retry.encodeJobs.list()).toEqual([
       expect.objectContaining({ outputPath, status: "queued" }),
     ]);
