@@ -70,6 +70,7 @@ import type {
   ArchiveJobId,
   ArchiveJob,
   ConsistentReadAccess,
+  DataAccess,
   DetectedDiscId,
   DetectedDiscStatus,
   DiscSelection,
@@ -320,12 +321,19 @@ function openMigratedDatabase(databasePath: string, migrationsFolder: string) {
 }
 
 export function createDataAccessInternal(
+  options: CreateDataAccessOptions,
+): DataAccess;
+export function createDataAccessInternal(
+  options: CreateDataAccessOptions,
+  legacySidecarMigration: LegacySidecarMigrationAdapter,
+): LegacySidecarDataAccess;
+export function createDataAccessInternal(
   {
     databasePath,
     migrationsFolder = DEFAULT_MIGRATIONS_FOLDER,
   }: CreateDataAccessOptions,
   legacySidecarMigration?: LegacySidecarMigrationAdapter,
-): LegacySidecarDataAccess {
+): DataAccess | LegacySidecarDataAccess {
   const normalizedDatabasePath = requireNonEmpty(databasePath, "databasePath");
   if (normalizedDatabasePath !== ":memory:") {
     mkdirSync(dirname(resolve(normalizedDatabasePath)), { recursive: true });
@@ -1453,6 +1461,7 @@ export function createDataAccessInternal(
           }
           return report;
         }
+        report.issues.push(...cutover.recoveryIssues);
         if (cutover.recoveryDiscoveries) {
           discoveries = cutover.recoveryDiscoveries;
           const recoveryPaths = new Set(
@@ -1469,6 +1478,21 @@ export function createDataAccessInternal(
           report.sidecarsSkipped = discoveryBatch.sidecarPaths.filter(
             (sidecarPath) => !recoveryPaths.has(sidecarPath),
           ).length;
+          if (
+            discoveryBatch.complete &&
+            cutover.sidecarSnapshots.length > 0
+          ) {
+            for (const sidecarPath of discoveryBatch.sidecarPaths) {
+              if (!recoveryPaths.has(sidecarPath)) {
+                report.issues.push({
+                  code: "duplicate_record",
+                  message:
+                    "Legacy sidecar was not captured at SQLite cutover and remains inactive",
+                  sidecarPath,
+                });
+              }
+            }
+          }
         }
         const persistedLegacyJobs = new Map<
           string,
@@ -1495,28 +1519,46 @@ export function createDataAccessInternal(
           const { sidecar } = discovery;
           report.issues.push(...sidecar.issues);
           if (cutover.mode === "schema-one") {
+            const corroboratingArchive = database
+              .select()
+              .from(originalDiscArchives)
+              .where(
+                and(
+                  eq(originalDiscArchives.fingerprint, sidecar.fingerprint),
+                  eq(originalDiscArchives.archivePath, sidecar.archivePath),
+                ),
+              )
+              .get();
+            if (
+              sidecar.jobs.length === 0 &&
+              sidecar.issues.length === 0 &&
+              !corroboratingArchive
+            ) {
+              schemaOneHasUnresolvedWork = true;
+              report.sidecarsSkipped += 1;
+              report.issues.push({
+                code: "invalid_job",
+                message:
+                  "Schema-1 archive recovery requires matching authoritative SQLite archive provenance before a jobless sidecar can be trusted; SQLite state and the schema-1 marker were preserved",
+                sidecarPath: sidecar.sidecarPath,
+              });
+              continue;
+            }
             let sidecarHasUnresolvedWork = sidecar.issues.length > 0;
             if (sidecarHasUnresolvedWork) {
               schemaOneHasUnresolvedWork = true;
             }
             for (const job of sidecar.jobs) {
-              const archive = database
-                .select()
-                .from(originalDiscArchives)
-                .where(
-                  and(
-                    eq(originalDiscArchives.fingerprint, sidecar.fingerprint),
-                    eq(originalDiscArchives.archivePath, sidecar.archivePath),
-                  ),
-                )
-                .get();
-              const selection = archive
+              const selection = corroboratingArchive
                 ? database
                     .select()
                     .from(discSelections)
                     .where(
                       and(
-                        eq(discSelections.originalDiscArchiveId, archive.id),
+                        eq(
+                          discSelections.originalDiscArchiveId,
+                          corroboratingArchive.id,
+                        ),
                         eq(discSelections.sourceKey, job.sourceKey),
                       ),
                     )
@@ -2308,6 +2350,32 @@ export function createDataAccessInternal(
               });
             }
           }
+          for (const snapshot of cutover.sidecarSnapshots) {
+            const reconciledArchive = database
+              .select({ id: originalDiscArchives.id })
+              .from(originalDiscArchives)
+              .where(
+                and(
+                  eq(
+                    originalDiscArchives.fingerprint,
+                    snapshot.fingerprint,
+                  ),
+                  eq(
+                    originalDiscArchives.archivePath,
+                    snapshot.archivePath,
+                  ),
+                ),
+              )
+              .get();
+            if (!reconciledArchive) {
+              report.issues.push({
+                code: "invalid_sidecar",
+                message:
+                  "The Original Disc Archive captured at SQLite cutover is missing from both the legacy sidecar inventory and SQLite catalog",
+                sidecarPath: snapshot.sidecarPath,
+              });
+            }
+          }
         }
 
         return report;
@@ -2319,5 +2387,9 @@ export function createDataAccessInternal(
     },
   };
 
+  if (!legacySidecarMigration) {
+    const { legacySidecars: _migrationOnlyAccess, ...standardAccess } = access;
+    return standardAccess;
+  }
   return access;
 }

@@ -5,6 +5,8 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  renameSync,
+  symlinkSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -654,7 +656,7 @@ try {
     retry.close();
   });
 
-  it("resumes a published snapshot when restart discovery becomes incomplete", () => {
+  it("resumes queued and archive-only sidecars when restart discovery becomes incomplete", () => {
     const root = temporaryDirectories.create(
       "rip-dvd-cutover-incomplete-restart-",
     );
@@ -665,6 +667,14 @@ try {
       "Recovery Movie.rip-dvd.json",
     );
     const outputPath = join(root, "movies", "Recovery Movie.mkv");
+    const archiveOnlyPath = join(
+      originalsLibraryPath,
+      "Archive Only.iso",
+    );
+    const archiveOnlySidecarPath = join(
+      originalsLibraryPath,
+      "Archive Only.rip-dvd.json",
+    );
     const databasePath = join(root, "catalog.sqlite");
     const markerPath = join(
       originalsLibraryPath,
@@ -672,6 +682,17 @@ try {
     );
     mkdirSync(originalsLibraryPath, { recursive: true });
     writeFileSync(archivePath, "archive");
+    writeFileSync(archiveOnlyPath, "archive only");
+    writeFileSync(
+      archiveOnlySidecarPath,
+      JSON.stringify({
+        schema_version: 2,
+        source: archiveOnlyPath,
+        title: "Archive Only",
+        disc_fingerprint: "archive-only-fingerprint",
+        jobs: [],
+      }),
+    );
     writeFileSync(
       sidecarPath,
       JSON.stringify({
@@ -726,8 +747,8 @@ try {
     });
 
     expect(report).toMatchObject({
-      sidecarsFound: 10,
-      sidecarsImported: 1,
+      sidecarsFound: 11,
+      sidecarsImported: 2,
       sidecarsSkipped: 9,
     });
     expect(report.issues).toEqual([
@@ -739,7 +760,256 @@ try {
     expect(retry.encodeJobs.list()).toEqual([
       expect.objectContaining({ outputPath, status: "queued" }),
     ]);
+    expect(retry.catalog.listOriginalDiscArchives()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ archivePath }),
+        expect.objectContaining({ archivePath: archiveOnlyPath }),
+      ]),
+    );
     expect(readFileSync(sidecarPath)).toEqual(sidecarBytes);
+    retry.close();
+  });
+
+  it("refuses source-archive drift after marker publication", () => {
+    const root = temporaryDirectories.create(
+      "rip-dvd-cutover-source-drift-",
+    );
+    const originalsLibraryPath = join(root, "originals");
+    const capturedArchivePath = join(originalsLibraryPath, "Captured.iso");
+    const competingArchivePath = join(originalsLibraryPath, "Competing.iso");
+    const sidecarPath = join(
+      originalsLibraryPath,
+      "Source Drift.rip-dvd.json",
+    );
+    const outputPath = join(root, "movies", "Source Drift.mkv");
+    const databasePath = join(root, "catalog.sqlite");
+    const markerPath = join(
+      originalsLibraryPath,
+      ".rip-dvd-sqlite-catalog",
+    );
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    writeFileSync(capturedArchivePath, "captured archive");
+    writeFileSync(competingArchivePath, "competing archive");
+    const sidecar = (archivePath: string) => JSON.stringify({
+      schema_version: 2,
+      source: archivePath,
+      title: "Source Drift",
+      disc_fingerprint: "source-drift-fingerprint",
+      jobs: [{
+        label: "Movie: Source Drift",
+        source: archivePath,
+        output: outputPath,
+        preset: "Fast 480p30",
+        selection: "main_feature",
+        title_number: null,
+      }],
+    });
+    writeFileSync(sidecarPath, sidecar(capturedArchivePath));
+    markerFault.failure = "directory-sync";
+    const interrupted = createLegacySidecarDataAccess({ databasePath });
+
+    expect(() => interrupted.legacySidecars.importLibrary({
+      originalsLibraryPath,
+    })).toThrow(/injected directory sync failure/i);
+    expect(interrupted.catalog.listOriginalDiscArchives()).toEqual([]);
+    const markerBytes = readFileSync(markerPath);
+    interrupted.close();
+
+    const driftedSidecarBytes = Buffer.from(sidecar(competingArchivePath));
+    writeFileSync(sidecarPath, driftedSidecarBytes);
+    markerFault.failure = null;
+    const retry = createLegacySidecarDataAccess({ databasePath });
+
+    const report = retry.legacySidecars.importLibrary({
+      originalsLibraryPath,
+    });
+
+    expect(report).toMatchObject({
+      sidecarsImported: 0,
+      sidecarsSkipped: 1,
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: "duplicate_record",
+          message: expect.stringMatching(/captured.*cutover|cutover.*captured/i),
+          sidecarPath,
+        }),
+      ]),
+    });
+    expect(retry.catalog.listOriginalDiscArchives()).toEqual([]);
+    expect(retry.encodeJobs.list()).toEqual([]);
+    expect(readFileSync(markerPath)).toEqual(markerBytes);
+    expect(readFileSync(sidecarPath)).toEqual(driftedSidecarBytes);
+    retry.close();
+  });
+
+  it("reuses the captured invocation base for relative paths after restart", () => {
+    const root = temporaryDirectories.create(
+      "rip-dvd-cutover-relative-restart-",
+    );
+    const competingRoot = temporaryDirectories.create(
+      "rip-dvd-cutover-relative-competing-",
+    );
+    const originalsLibraryPath = join(root, "originals");
+    const capturedArchivePath = join(root, "Relative.iso");
+    const competingArchivePath = join(competingRoot, "Relative.iso");
+    const sidecarPath = join(
+      originalsLibraryPath,
+      "Relative.rip-dvd.json",
+    );
+    const databasePath = join(root, "catalog.sqlite");
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    writeFileSync(capturedArchivePath, "captured archive");
+    writeFileSync(competingArchivePath, "competing archive");
+    writeFileSync(sidecarPath, JSON.stringify({
+      schema_version: 2,
+      source: "Relative.iso",
+      title: "Relative",
+      disc_fingerprint: "relative-restart-fingerprint",
+      jobs: [],
+    }));
+    const sidecarBytes = readFileSync(sidecarPath);
+    const previousWorkingDirectory = process.cwd();
+    try {
+      markerFault.failure = "directory-sync";
+      process.chdir(root);
+      const interrupted = createLegacySidecarDataAccess({ databasePath });
+      expect(() => interrupted.legacySidecars.importLibrary({
+        originalsLibraryPath,
+      })).toThrow(/injected directory sync failure/i);
+      interrupted.close();
+
+      markerFault.failure = null;
+      process.chdir(competingRoot);
+      const retry = createLegacySidecarDataAccess({ databasePath });
+      const report = retry.legacySidecars.importLibrary({
+        originalsLibraryPath,
+      });
+
+      expect(report.issues).toEqual([]);
+      expect(retry.catalog.listOriginalDiscArchives()).toEqual([
+        expect.objectContaining({ archivePath: capturedArchivePath }),
+      ]);
+      expect(retry.catalog.listOriginalDiscArchives()).not.toEqual([
+        expect.objectContaining({ archivePath: competingArchivePath }),
+      ]);
+      expect(readFileSync(sidecarPath)).toEqual(sidecarBytes);
+      retry.close();
+    } finally {
+      process.chdir(previousWorkingDirectory);
+    }
+  });
+
+  it("refuses a captured sidecar reached through an ancestor symlink", () => {
+    const root = temporaryDirectories.create(
+      "rip-dvd-cutover-ancestor-symlink-",
+    );
+    const originalsLibraryPath = join(root, "originals");
+    const discDirectory = join(originalsLibraryPath, "Disc");
+    const movedDiscDirectory = join(root, "moved-disc");
+    const archivePath = join(discDirectory, "Escaped.iso");
+    const sidecarPath = join(discDirectory, "Escaped.rip-dvd.json");
+    const databasePath = join(root, "catalog.sqlite");
+    mkdirSync(discDirectory, { recursive: true });
+    writeFileSync(archivePath, "archive");
+    writeFileSync(sidecarPath, JSON.stringify({
+      schema_version: 2,
+      source: archivePath,
+      title: "Escaped",
+      disc_fingerprint: "escaped-fingerprint",
+      jobs: [],
+    }));
+    const sidecarBytes = readFileSync(sidecarPath);
+    markerFault.failure = "directory-sync";
+    const interrupted = createLegacySidecarDataAccess({ databasePath });
+
+    expect(() => interrupted.legacySidecars.importLibrary({
+      originalsLibraryPath,
+    })).toThrow(/injected directory sync failure/i);
+    interrupted.close();
+
+    renameSync(discDirectory, movedDiscDirectory);
+    symlinkSync(movedDiscDirectory, discDirectory, "dir");
+    markerFault.failure = null;
+    const retry = createLegacySidecarDataAccess({ databasePath });
+
+    const report = retry.legacySidecars.importLibrary({
+      originalsLibraryPath,
+    });
+
+    expect(report).toMatchObject({
+      sidecarsImported: 0,
+      sidecarsSkipped: 1,
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: "invalid_sidecar",
+          message: expect.stringMatching(/outside.*originals library|ancestor.*symlink/i),
+          sidecarPath,
+        }),
+      ]),
+    });
+    expect(retry.catalog.listOriginalDiscArchives()).toEqual([]);
+    expect(readFileSync(join(movedDiscDirectory, "Escaped.rip-dvd.json")))
+      .toEqual(sidecarBytes);
+    retry.close();
+  });
+
+  it("charges corrupt captured payloads to the restart recovery budget", () => {
+    const root = temporaryDirectories.create(
+      "rip-dvd-cutover-corrupt-recovery-budget-",
+    );
+    const originalsLibraryPath = join(root, "originals");
+    const databasePath = join(root, "catalog.sqlite");
+    const sidecarPaths: string[] = [];
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    for (let index = 1; index <= 8; index += 1) {
+      const archivePath = join(originalsLibraryPath, `Budget ${index}.iso`);
+      const sidecarPath = join(
+        originalsLibraryPath,
+        `Budget ${index}.rip-dvd.json`,
+      );
+      writeFileSync(archivePath, `archive ${index}`);
+      writeFileSync(sidecarPath, JSON.stringify({
+        schema_version: 2,
+        source: archivePath,
+        title: `Budget ${index}`,
+        disc_fingerprint: `recovery-budget-${index}`,
+        jobs: [],
+      }));
+      sidecarPaths.push(sidecarPath);
+    }
+    markerFault.failure = "directory-sync";
+    const interrupted = createLegacySidecarDataAccess({ databasePath });
+
+    expect(() => interrupted.legacySidecars.importLibrary({
+      originalsLibraryPath,
+    })).toThrow(/injected directory sync failure/i);
+    interrupted.close();
+
+    const corruptBytes = Buffer.alloc(1_048_577, 0xff);
+    for (const sidecarPath of sidecarPaths) {
+      writeFileSync(sidecarPath, corruptBytes);
+    }
+    markerFault.failure = null;
+    const retry = createLegacySidecarDataAccess({ databasePath });
+
+    const report = retry.legacySidecars.importLibrary({
+      originalsLibraryPath,
+    });
+
+    expect(report).toMatchObject({
+      sidecarsImported: 0,
+      sidecarsSkipped: 8,
+    });
+    expect(report.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "invalid_sidecar",
+        message: expect.stringMatching(/aggregate.*recovery.*bytes.*limit/i),
+      }),
+    ]));
+    expect(retry.catalog.listOriginalDiscArchives()).toEqual([]);
+    for (const sidecarPath of sidecarPaths) {
+      expect(readFileSync(sidecarPath).equals(corruptBytes)).toBe(true);
+    }
     retry.close();
   });
 
@@ -889,14 +1159,19 @@ fcntl.flock(gate, fcntl.LOCK_UN)`,
 
     const report = retry.legacySidecars.importLibrary({ originalsLibraryPath });
 
-    expect(report.issues).toEqual([
+    expect(report.issues).toEqual(expect.arrayContaining([
       expect.objectContaining({
         code: "invalid_job",
         jobIndex: 0,
         sidecarPath,
         message: expect.stringMatching(/captured.*missing/i),
       }),
-    ]);
+      expect.objectContaining({
+        code: "invalid_sidecar",
+        sidecarPath,
+        message: expect.stringMatching(/archive.*captured.*missing/i),
+      }),
+    ]));
     expect(retry.encodeJobs.list()).toEqual([]);
     retry.close();
   });
