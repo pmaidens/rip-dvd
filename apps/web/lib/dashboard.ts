@@ -178,8 +178,8 @@ function readDashboardSnapshotRecords(
   const archiveSource = readSource(() =>
     access.catalog.listOriginalDiscArchives(
       activityLimit === undefined
-        ? undefined
-        : { limit: activityLimit, uncatalogedOnly: true },
+        ? { needsCatalogReviewOnly: true }
+        : { limit: activityLimit, needsCatalogReviewOnly: true },
     ),
   );
   const relevantDetectedDiscIds =
@@ -385,33 +385,19 @@ function readDashboardSnapshotRecords(
 
   const catalogReview =
     archiveSource.status === "error" ||
-    selectionSource.status === "error" ||
     discsById === null
       ? unavailable<DashboardCatalogReviewItem>()
-      : (() => {
-          const selectedArchiveIds = new Set(
-            selectionSource.value.map(
-              (selection) => selection.originalDiscArchiveId,
-            ),
-          );
-          return loaded(
-            archiveSource.value
-              .filter(
-                (archive) =>
-                  activityLimit !== undefined ||
-                  !selectedArchiveIds.has(archive.id),
-              )
-              .map((archive) => ({
-                id: archive.id,
-                discLabel:
-                  discsById.get(archive.detectedDiscId)?.volumeLabel ??
-                  "Unlabeled disc",
-                discKind: archive.discKind,
-                archiveFormat: archive.archiveFormat,
-                archivedAt: archive.archivedAt.toISOString(),
-              })),
-          );
-        })();
+      : loaded(
+          archiveSource.value.map((archive) => ({
+            id: archive.id,
+            discLabel:
+              discsById.get(archive.detectedDiscId)?.volumeLabel ??
+              "Unlabeled disc",
+            discKind: archive.discKind,
+            archiveFormat: archive.archiveFormat,
+            archivedAt: archive.archivedAt.toISOString(),
+          })),
+        );
 
   return {
     generatedAt: new Date().toISOString(),

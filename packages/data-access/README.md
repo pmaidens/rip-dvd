@@ -42,6 +42,16 @@ enabled Optical Drive is returned before a capped history of disabled missing
 drives. Detected Discs awaiting review and the shared Archive/Encode Job policy
 each have an explicit active cap before recent terminal history is added.
 
+Catalog review is explicit rather than inferred from the first Disc Selection.
+New Original Disc Archives remain in the review queue while a user builds a
+partial set of selections, and `catalog.completeCatalogReview()` records the
+review time only after at least one selection exists. Media Item parent changes
+are serialized and reject hierarchy cycles. DVD title selections must reference
+a title in the archived scan, and chapter ranges cannot exceed that title's
+recorded chapter count; main-feature selections remain a distinct DVD source
+kind. Existing databases backfill the explicit review time for archives that
+already had Disc Selections, preserving the pre-migration queue meaning.
+
 ## Queue attempts and progress
 
 Every claim returns a unique, queue-specific claim token. Progress, completion,

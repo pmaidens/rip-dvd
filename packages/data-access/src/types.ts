@@ -77,6 +77,7 @@ export interface OriginalDiscArchive {
   fingerprint: string;
   sizeBytes: number | null;
   archivedAt: Date;
+  catalogReviewedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -279,7 +280,9 @@ export interface CatalogAccess {
     ids?: readonly OriginalDiscArchiveId[];
     limit?: number;
     uncatalogedOnly?: boolean;
+    needsCatalogReviewOnly?: boolean;
   }): OriginalDiscArchive[];
+  completeCatalogReview(id: OriginalDiscArchiveId): OriginalDiscArchive;
   createMediaItem(input: {
     parentId?: MediaItemId;
     kind: MediaItemKind;
@@ -288,10 +291,26 @@ export interface CatalogAccess {
     seasonNumber?: number;
     episodeNumber?: number;
   }): MediaItem;
-  listMediaItems(options?: { ids?: readonly MediaItemId[] }): MediaItem[];
+  updateMediaItem(
+    id: MediaItemId,
+    input: {
+      parentId?: MediaItemId | null;
+      kind?: MediaItemKind;
+      title?: string;
+      year?: number | null;
+      seasonNumber?: number | null;
+      episodeNumber?: number | null;
+    },
+  ): MediaItem;
+  listMediaItems(options?: {
+    ids?: readonly MediaItemId[];
+    limit?: number;
+  }): MediaItem[];
   createDiscSelection(input: CreateDiscSelectionInput): DiscSelection;
   listDiscSelections(options?: {
     ids?: readonly DiscSelectionId[];
+    originalDiscArchiveId?: OriginalDiscArchiveId;
+    limit?: number;
   }): DiscSelection[];
 }
 
