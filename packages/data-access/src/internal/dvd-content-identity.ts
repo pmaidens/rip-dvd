@@ -52,6 +52,46 @@ function requireCanonicalArchivePath(path: string): string {
   return path;
 }
 
+export function readDvdArchiveFileSize(path: string): number {
+  const safePath = requireCanonicalArchivePath(path);
+  let descriptor: number | undefined;
+  let primaryError: unknown;
+
+  try {
+    descriptor = openSync(
+      safePath,
+      constants.O_RDONLY | constants.O_NOFOLLOW,
+    );
+    const opened = fstatSync(descriptor, { bigint: true });
+    const named = lstatSync(safePath, { bigint: true });
+    if (
+      !opened.isFile() ||
+      named.isSymbolicLink() ||
+      opened.dev !== named.dev ||
+      opened.ino !== named.ino ||
+      opened.size !== named.size
+    ) {
+      throw new DomainInvariantError(
+        "DVD archive changed before its content size was read",
+      );
+    }
+    return requireDvdContentSize(Number(opened.size));
+  } catch (error) {
+    primaryError = error;
+    throw error;
+  } finally {
+    if (descriptor !== undefined) {
+      try {
+        closeSync(descriptor);
+      } catch (error) {
+        if (primaryError === undefined) {
+          throw error;
+        }
+      }
+    }
+  }
+}
+
 function fileIdentity(
   metadata: BigIntStats,
 ): DvdArchiveFileIdentity {

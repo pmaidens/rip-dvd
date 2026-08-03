@@ -76,10 +76,12 @@ describe("GET /api/dashboard/events", () => {
       access.catalog.updateDetectedDiscStatus(disc.id, "approved");
       access.archiveJobs.enqueue({ detectedDiscId: disc.id });
 
+      const encodeFingerprint =
+        `sha256:${(index + 100).toString(16).padStart(64, "0")}`;
       const encodeDisc = access.catalog.registerDetectedDisc({
         opticalDriveId: drive.id,
         discKind: "dvd",
-        fingerprint: `encode-${index}`,
+        fingerprint: encodeFingerprint,
         volumeLabel: `ENCODE_DISC_${index}`,
       });
       access.catalog.updateDetectedDiscStatus(encodeDisc.id, "scanned");
@@ -89,7 +91,7 @@ describe("GET /api/dashboard/events", () => {
         discKind: "dvd",
         archiveFormat: "iso",
         archivePath: `/media/originals/encode-${index}.iso`,
-        fingerprint: `encode-${index}`,
+        fingerprint: encodeFingerprint,
       });
       const mediaItem = access.catalog.createMediaItem({
         kind: "movie",
@@ -107,10 +109,12 @@ describe("GET /api/dashboard/events", () => {
         outputPath: `/media/movies/encode-${index}.mkv`,
       });
 
+      const reviewFingerprint =
+        `sha256:${(index + 200).toString(16).padStart(64, "0")}`;
       const reviewDisc = access.catalog.registerDetectedDisc({
         opticalDriveId: drive.id,
         discKind: "dvd",
-        fingerprint: `review-${index}`,
+        fingerprint: reviewFingerprint,
         volumeLabel: `REVIEW_DISC_${index}`,
       });
       access.catalog.updateDetectedDiscStatus(reviewDisc.id, "scanned");
@@ -120,7 +124,7 @@ describe("GET /api/dashboard/events", () => {
         discKind: "dvd",
         archiveFormat: "iso",
         archivePath: `/media/originals/review-${index}.iso`,
-        fingerprint: `review-${index}`,
+        fingerprint: reviewFingerprint,
       });
     }
     const abortController = new AbortController();

@@ -492,10 +492,14 @@ fingerprints across Optical Drives, marks the new observation archived, and
 rejects a contradictory Disc Kind.
 Legacy DVD imports retain their historical fingerprints and record the current
 raw-disc content identity as a compatibility alias. An upgraded catalog whose
-alias table has not yet been populated fails current-identity approval and
-claim closed. A size-bearing detection or publication reconciles legacy archive
-files in bounded batches, prioritizing matching sizes; publication rechecks the
-barrier transactionally before it can create new provenance.
+alias table has not yet been populated fails current-identity approval, claim,
+and publication closed for every unaliased legacy DVD, including records whose
+stored size is unknown. A size-bearing detection or publication reconciles
+legacy archive files in bounded batches, prioritizing matching sizes. A safe
+regular archive with an unknown size is measured and backfilled before hashing;
+an archive whose identity cannot be proven requires operator remediation.
+Publication rechecks the barrier transactionally before it can create new
+provenance.
 A worker must let the claim commit and only then start `dd`, `lsdvd`,
 `HandBrakeCLI`, or any other external process. External process execution must
 never occur inside a database transaction.

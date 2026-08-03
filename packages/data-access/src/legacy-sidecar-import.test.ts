@@ -122,6 +122,7 @@ const SAME_DVD_CONTENT_ID =
 
 function createUnreconciledLegacyDvdFixture(
   fingerprint = SAME_DVD_CONTENT_ID,
+  { legacySizeBytes }: { legacySizeBytes?: number | null } = {},
 ) {
   const root = temporaryDirectories.create(
     "rip-dvd-unreconciled-legacy-identity-",
@@ -154,6 +155,11 @@ function createUnreconciledLegacyDvdFixture(
 
   const sqlite = new DatabaseSync(databasePath);
   sqlite.exec("delete from original_disc_archive_content_ids");
+  if (legacySizeBytes !== undefined) {
+    sqlite.prepare(
+      "update original_disc_archives set size_bytes = ?",
+    ).run(legacySizeBytes);
+  }
   sqlite.close();
 
   const access = createDataAccess({ databasePath });
@@ -192,9 +198,27 @@ describe("legacy sidecar import", () => {
     fixture.access.close();
   });
 
+  it("fails approval closed for an upgraded NULL-size legacy DVD identity", () => {
+    const fixture = createUnreconciledLegacyDvdFixture(
+      SAME_DVD_CONTENT_ID,
+      { legacySizeBytes: null },
+    );
+
+    expect(() =>
+      fixture.access.archiveJobs.approve({ detectedDiscId: fixture.disc.id }),
+    ).toThrow(DomainInvariantError);
+    expect(fixture.access.catalog.listDetectedDiscs(["scanned"]))
+      .toEqual([expect.objectContaining({ id: fixture.disc.id })]);
+    expect(fixture.access.catalog.listOriginalDiscArchives())
+      .toEqual([expect.objectContaining({ sizeBytes: null })]);
+    fixture.access.close();
+  });
+
   it("allows approval and claim after bounded legacy identity reconciliation", () => {
     const fingerprint = `sha256:${"0".repeat(64)}`;
-    const fixture = createUnreconciledLegacyDvdFixture(fingerprint);
+    const fixture = createUnreconciledLegacyDvdFixture(fingerprint, {
+      legacySizeBytes: null,
+    });
     const timestamp = Date.now();
     const sqlite = new DatabaseSync(fixture.databasePath);
     for (let index = 0; index < 4; index += 1) {
@@ -255,6 +279,13 @@ describe("legacy sidecar import", () => {
       fingerprint,
       sizeBytes: 15,
     })).toMatchObject({ id: fixture.disc.id, status: "scanned" });
+    expect(fixture.access.catalog.listOriginalDiscArchives())
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          archivePath: realpathSync(fixture.archivePath),
+          sizeBytes: 14,
+        }),
+      ]));
     const job = fixture.access.archiveJobs.approve({
       detectedDiscId: fixture.disc.id,
     });
@@ -265,75 +296,117 @@ describe("legacy sidecar import", () => {
     fixture.access.close();
   });
 
-  it("fails an upgraded queued Archive Job claim closed until identity reconciliation", () => {
-    const fixture = createUnreconciledLegacyDvdFixture();
-    const timestamp = Date.now();
-    const sqlite = new DatabaseSync(fixture.databasePath);
-    sqlite.prepare(
-      "update detected_discs set status = 'approved', updated_at = ? where id = ?",
-    ).run(timestamp, fixture.disc.id);
-    sqlite.prepare(`
-      insert into archive_jobs (
-        id, detected_disc_id, status, created_at, updated_at
-      ) values (?, ?, 'queued', ?, ?)
-    `).run("unreconciled-upgrade-job", fixture.disc.id, timestamp, timestamp);
-    sqlite.close();
-
-    expect(fixture.access.archiveJobs.claimNext("upgrade-worker")).toBeNull();
-    expect(fixture.access.archiveJobs.list(["queued"]))
-      .toEqual([expect.objectContaining({ id: "unreconciled-upgrade-job" })]);
-    fixture.access.close();
-  });
-
-  it("reconciles before publication and refuses duplicate upgraded provenance", () => {
-    const fixture = createUnreconciledLegacyDvdFixture();
-    const timestamp = Date.now();
-    const sqlite = new DatabaseSync(fixture.databasePath);
-    sqlite.prepare(
-      "update detected_discs set status = 'approved', updated_at = ? where id = ?",
-    ).run(timestamp, fixture.disc.id);
-    sqlite.prepare(`
-      insert into archive_jobs (
-        id, detected_disc_id, status, claimed_by, claim_token, claimed_at,
-        started_at, created_at, updated_at
-      ) values (?, ?, 'running', ?, ?, ?, ?, ?, ?)
-    `).run(
-      "unreconciled-publication-job",
-      fixture.disc.id,
-      "upgrade-worker",
-      "unreconciled-publication-claim",
-      timestamp,
-      timestamp,
-      timestamp,
-      timestamp,
+  it("requires operator remediation when a NULL-size legacy identity cannot be proven", () => {
+    const fixture = createUnreconciledLegacyDvdFixture(
+      SAME_DVD_CONTENT_ID,
+      { legacySizeBytes: null },
     );
-    sqlite.close();
-    const persistedClaim = fixture.access.archiveJobs.list(["running"])[0];
-    if (
-      persistedClaim?.status !== "running" ||
-      persistedClaim.claimToken === null
-    ) {
-      throw new Error("Expected the upgraded Archive Job to be running");
-    }
-    const claim = {
-      ...persistedClaim,
-      status: "running" as const,
-      claimToken: persistedClaim.claimToken,
-    };
+    truncateSync(fixture.archivePath, 0);
 
+    expect(() => fixture.access.catalog.registerDetectedDisc({
+      opticalDriveId: fixture.drive.id,
+      discKind: "dvd",
+      fingerprint: SAME_DVD_CONTENT_ID,
+      sizeBytes: 14,
+    })).toThrow(/operator remediation/i);
     expect(() =>
-      fixture.access.archiveJobs.publish(claim, {
-        archivePath: join(dirname(fixture.archivePath), "Duplicate.iso"),
-        sizeBytes: 14,
-      }),
+      fixture.access.archiveJobs.approve({ detectedDiscId: fixture.disc.id }),
     ).toThrow(DomainInvariantError);
-    expect(fixture.access.archiveJobs.list(["running"]))
-      .toEqual([expect.objectContaining({ id: claim.id })]);
-    expect(fixture.access.catalog.listOriginalDiscArchives()).toEqual([
-      expect.objectContaining({ archivePath: realpathSync(fixture.archivePath) }),
-    ]);
+    expect(fixture.access.catalog.listOriginalDiscArchives())
+      .toEqual([expect.objectContaining({ sizeBytes: null })]);
     fixture.access.close();
   });
+
+  it.each([
+    ["stored-size", undefined],
+    ["NULL-size", null],
+  ] as const)(
+    "fails an upgraded %s queued Archive Job claim closed until identity reconciliation",
+    (_sizeState, legacySizeBytes) => {
+      const fixture = createUnreconciledLegacyDvdFixture(
+        SAME_DVD_CONTENT_ID,
+        { legacySizeBytes },
+      );
+      const timestamp = Date.now();
+      const sqlite = new DatabaseSync(fixture.databasePath);
+      sqlite.prepare(
+        "update detected_discs set status = 'approved', updated_at = ? where id = ?",
+      ).run(timestamp, fixture.disc.id);
+      sqlite.prepare(`
+        insert into archive_jobs (
+          id, detected_disc_id, status, created_at, updated_at
+        ) values (?, ?, 'queued', ?, ?)
+      `).run("unreconciled-upgrade-job", fixture.disc.id, timestamp, timestamp);
+      sqlite.close();
+
+      expect(fixture.access.archiveJobs.claimNext("upgrade-worker")).toBeNull();
+      expect(fixture.access.archiveJobs.list(["queued"]))
+        .toEqual([expect.objectContaining({ id: "unreconciled-upgrade-job" })]);
+      fixture.access.close();
+    },
+  );
+
+  it.each([
+    ["stored-size", undefined],
+    ["NULL-size", null],
+  ] as const)(
+    "reconciles an upgraded %s identity before publication and refuses duplicate provenance",
+    (_sizeState, legacySizeBytes) => {
+      const fixture = createUnreconciledLegacyDvdFixture(
+        SAME_DVD_CONTENT_ID,
+        { legacySizeBytes },
+      );
+      const timestamp = Date.now();
+      const sqlite = new DatabaseSync(fixture.databasePath);
+      sqlite.prepare(
+        "update detected_discs set status = 'approved', updated_at = ? where id = ?",
+      ).run(timestamp, fixture.disc.id);
+      sqlite.prepare(`
+        insert into archive_jobs (
+          id, detected_disc_id, status, claimed_by, claim_token, claimed_at,
+          started_at, created_at, updated_at
+        ) values (?, ?, 'running', ?, ?, ?, ?, ?, ?)
+      `).run(
+        "unreconciled-publication-job",
+        fixture.disc.id,
+        "upgrade-worker",
+        "unreconciled-publication-claim",
+        timestamp,
+        timestamp,
+        timestamp,
+        timestamp,
+      );
+      sqlite.close();
+      const persistedClaim = fixture.access.archiveJobs.list(["running"])[0];
+      if (
+        persistedClaim?.status !== "running" ||
+        persistedClaim.claimToken === null
+      ) {
+        throw new Error("Expected the upgraded Archive Job to be running");
+      }
+      const claim = {
+        ...persistedClaim,
+        status: "running" as const,
+        claimToken: persistedClaim.claimToken,
+      };
+
+      expect(() =>
+        fixture.access.archiveJobs.publish(claim, {
+          archivePath: join(dirname(fixture.archivePath), "Duplicate.iso"),
+          sizeBytes: 14,
+        }),
+      ).toThrow(DomainInvariantError);
+      expect(fixture.access.archiveJobs.list(["running"]))
+        .toEqual([expect.objectContaining({ id: claim.id })]);
+      expect(fixture.access.catalog.listOriginalDiscArchives()).toEqual([
+        expect.objectContaining({
+          archivePath: realpathSync(fixture.archivePath),
+          sizeBytes: 14,
+        }),
+      ]);
+      fixture.access.close();
+    },
+  );
 
   it.each(["fresh import", "reviewed-schema reopen"] as const)(
     "suppresses a current Archive Job for the same DVD after %s",

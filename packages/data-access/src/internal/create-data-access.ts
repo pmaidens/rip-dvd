@@ -19,6 +19,7 @@ import {
   exists,
   gt,
   inArray,
+  isNull,
   lte,
   ne,
   notExists,
@@ -43,6 +44,7 @@ import {
   dvdArchiveFileMatchesIdentity,
   hashDvdArchiveFile,
   isCurrentDvdContentSize,
+  readDvdArchiveFileSize,
 } from "./dvd-content-identity.js";
 import {
   createJobQueueController,
@@ -248,11 +250,6 @@ const detectedDiscUsesCurrentDvdContentId = sql<boolean>`
 
 const unresolvedLegacyDvdArchiveIdentity = and(
   eq(originalDiscArchives.discKind, "dvd"),
-  gt(originalDiscArchives.sizeBytes, 0),
-  lte(
-    originalDiscArchives.sizeBytes,
-    LEGACY_ARCHIVE_RECONCILIATION_BYTES,
-  ),
   sql`not (${archiveUsesCurrentDvdContentId})`,
   sql<boolean>`not exists (
       select 1
@@ -519,48 +516,52 @@ export function createDataAccessInternal(
       .where(unresolvedLegacyDvdArchiveIdentity)
       .orderBy(
         desc(sql`${originalDiscArchives.sizeBytes} = ${sizeBytes}`),
+        desc(sql`${originalDiscArchives.sizeBytes} is null`),
         asc(originalDiscArchives.id),
       )
       .limit(LEGACY_ARCHIVE_RECONCILIATION_LIMIT + 1)
       .all();
-    const candidates: typeof unresolvedCandidates = [];
+    const candidates: Array<
+      (typeof unresolvedCandidates)[number] & { resolvedSizeBytes: number }
+    > = [];
     let candidateBytes = 0;
     for (const candidate of unresolvedCandidates) {
-      const candidateSizeBytes = candidate.sizeBytes;
+      if (candidates.length >= LEGACY_ARCHIVE_RECONCILIATION_LIMIT) {
+        break;
+      }
+      let candidateSizeBytes = candidate.sizeBytes;
       if (
         candidateSizeBytes === null ||
         !isCurrentDvdContentSize(candidateSizeBytes)
       ) {
-        throw new DomainInvariantError(
-          "Unresolved legacy DVD archive has an invalid content size",
-        );
+        try {
+          candidateSizeBytes = readDvdArchiveFileSize(candidate.archivePath);
+        } catch {
+          throw new DomainInvariantError(
+            "Legacy DVD archive content identity requires operator remediation because its size cannot be safely derived",
+          );
+        }
       }
       if (
-        candidates.length >= LEGACY_ARCHIVE_RECONCILIATION_LIMIT ||
         candidateBytes + candidateSizeBytes >
           LEGACY_ARCHIVE_RECONCILIATION_BYTES
       ) {
         break;
       }
-      candidates.push(candidate);
+      candidates.push({ ...candidate, resolvedSizeBytes: candidateSizeBytes });
       candidateBytes += candidateSizeBytes;
     }
 
     for (const candidate of candidates) {
-      const candidateSizeBytes = candidate.sizeBytes;
-      if (
-        candidateSizeBytes === null ||
-        !isCurrentDvdContentSize(candidateSizeBytes)
-      ) {
-        throw new DomainInvariantError(
-          "Unresolved legacy DVD archive has an invalid content size",
-        );
-      }
+      const candidateSizeBytes = candidate.resolvedSizeBytes;
       const hashed = hashDvdArchiveFile(
         candidate.archivePath,
         candidateSizeBytes,
       );
       database.transaction((transaction) => {
+        const candidateSizeCondition = candidate.sizeBytes === null
+          ? isNull(originalDiscArchives.sizeBytes)
+          : eq(originalDiscArchives.sizeBytes, candidate.sizeBytes);
         const current = transaction
           .select({ id: originalDiscArchives.id })
           .from(originalDiscArchives)
@@ -569,7 +570,7 @@ export function createDataAccessInternal(
               eq(originalDiscArchives.id, candidate.id),
               eq(originalDiscArchives.archivePath, candidate.archivePath),
               eq(originalDiscArchives.fingerprint, candidate.fingerprint),
-              eq(originalDiscArchives.sizeBytes, candidateSizeBytes),
+              candidateSizeCondition,
               eq(originalDiscArchives.discKind, "dvd"),
             ),
           )
@@ -584,6 +585,24 @@ export function createDataAccessInternal(
           throw new DomainInvariantError(
             "Legacy DVD archive changed during content identity reconciliation",
           );
+        }
+        if (candidate.sizeBytes !== candidateSizeBytes) {
+          const updated = transaction
+            .update(originalDiscArchives)
+            .set({ sizeBytes: candidateSizeBytes, updatedAt: now() })
+            .where(
+              and(
+                eq(originalDiscArchives.id, candidate.id),
+                candidateSizeCondition,
+              ),
+            )
+            .returning({ id: originalDiscArchives.id })
+            .get();
+          if (!updated) {
+            throw new DomainInvariantError(
+              "Legacy DVD archive changed during content identity reconciliation",
+            );
+          }
         }
         const archiveWithFingerprint = transaction
           .select({ id: originalDiscArchives.id })
@@ -696,8 +715,6 @@ export function createDataAccessInternal(
           select 1
           from original_disc_archives as unresolved_legacy_archives
           where unresolved_legacy_archives.disc_kind = 'dvd'
-            and unresolved_legacy_archives.size_bytes > 0
-            and unresolved_legacy_archives.size_bytes <= 9000000000
             and not (
               length(unresolved_legacy_archives.fingerprint) = 71
               and substr(unresolved_legacy_archives.fingerprint, 1, 7) = 'sha256:'
