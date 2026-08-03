@@ -601,14 +601,12 @@ describe("data-access facade", () => {
     const selection = access.catalog.createDiscSelection({
       originalDiscArchiveId: archive.id,
       mediaItemId: movie.id,
-      sourceKey: "dvd:main-feature",
       kind: "main_feature",
     });
     expect(() =>
       access.catalog.createDiscSelection({
         originalDiscArchiveId: archive.id,
         mediaItemId: trailer.id,
-        sourceKey: "dvd:main-feature",
         kind: "main_feature",
       }),
     ).toThrow();
@@ -617,6 +615,7 @@ describe("data-access facade", () => {
       expect.objectContaining({ id: archive.id, fingerprint: "disc-fingerprint" }),
     ]);
     expect(selection.mediaItemId).toBe(movie.id);
+    expect(selection.sourceKey).toBe("dvd:main-feature");
     access.close();
   });
 
@@ -655,7 +654,6 @@ describe("data-access facade", () => {
     access.catalog.createDiscSelection({
       originalDiscArchiveId: archive.id,
       mediaItemId: movie.id,
-      sourceKey: "dvd:main-feature",
       kind: "main_feature",
     });
     expect(
@@ -670,6 +668,92 @@ describe("data-access facade", () => {
     expect(
       access.catalog.listOriginalDiscArchives({ needsCatalogReviewOnly: true }),
     ).toEqual([]);
+    access.close();
+  });
+
+  it("reopens catalog review when a Disc Selection is added after completion", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const contentId = `sha256:${"a".repeat(64)}`;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: contentId,
+      scanData: {
+        schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+        contentId,
+        titles: [{
+          number: 1,
+          durationSeconds: 2_400,
+          chapters: 8,
+          audioStreams: [],
+          subtitles: [],
+        }],
+      },
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Reopened Review.iso",
+      fingerprint: contentId,
+    });
+    const movie = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Main Movie",
+    });
+    access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: movie.id,
+      kind: "main_feature",
+    });
+    access.catalog.completeCatalogReview(archive.id);
+
+    const episode = access.catalog.createMediaItem({
+      kind: "episode",
+      title: "Newly Found Episode",
+    });
+    const added = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: episode.id,
+      kind: "dvd_chapters",
+      titleNumber: 1,
+      chapterStart: 1,
+      chapterEnd: 4,
+    });
+    expect(
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0],
+    ).toMatchObject({ catalogReviewedAt: null });
+    expect(
+      access.catalog.listOriginalDiscArchives({ needsCatalogReviewOnly: true }),
+    ).toEqual([expect.objectContaining({ id: archive.id })]);
+
+    const profile = access.encodingProfiles.create({
+      key: "review-boundary",
+      displayName: "Review boundary",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    expect(() =>
+      access.encodeJobs.enqueue({
+        discSelectionId: added.id,
+        encodingProfileId: profile.id,
+        outputPath: "/media/movies/Newly Found Episode.mkv",
+      }),
+    ).toThrow(DomainInvariantError);
+    access.catalog.completeCatalogReview(archive.id);
+    expect(
+      access.encodeJobs.enqueue({
+        discSelectionId: added.id,
+        encodingProfileId: profile.id,
+        outputPath: "/media/movies/Newly Found Episode.mkv",
+      }),
+    ).toMatchObject({ status: "queued" });
     access.close();
   });
 
@@ -810,20 +894,17 @@ describe("data-access facade", () => {
       access.catalog.createDiscSelection({
         originalDiscArchiveId: archive.id,
         mediaItemId: mainFeature.id,
-        sourceKey: "dvd:main-feature",
         kind: "main_feature",
       }),
       access.catalog.createDiscSelection({
         originalDiscArchiveId: archive.id,
         mediaItemId: trailer.id,
-        sourceKey: "dvd:title:2",
         kind: "dvd_title",
         titleNumber: 2,
       }),
       access.catalog.createDiscSelection({
         originalDiscArchiveId: archive.id,
         mediaItemId: firstEpisode.id,
-        sourceKey: "dvd:title:1:chapters:1-4",
         kind: "dvd_chapters",
         titleNumber: 1,
         chapterStart: 1,
@@ -832,7 +913,6 @@ describe("data-access facade", () => {
       access.catalog.createDiscSelection({
         originalDiscArchiveId: archive.id,
         mediaItemId: secondEpisode.id,
-        sourceKey: "dvd:title:1:chapters:5-8",
         kind: "dvd_chapters",
         titleNumber: 1,
         chapterStart: 5,
@@ -846,11 +926,16 @@ describe("data-access facade", () => {
       firstEpisode.id,
       secondEpisode.id,
     ]);
+    expect(selections.map((selection) => selection.sourceKey)).toEqual([
+      "dvd:main-feature",
+      "dvd:title:2",
+      "dvd:title:1:chapters:1-4",
+      "dvd:title:1:chapters:5-8",
+    ]);
     expect(() =>
       access.catalog.createDiscSelection({
         originalDiscArchiveId: archive.id,
         mediaItemId: firstEpisode.id,
-        sourceKey: "dvd:title:1:chapters:8-9",
         kind: "dvd_chapters",
         titleNumber: 1,
         chapterStart: 8,
@@ -861,7 +946,6 @@ describe("data-access facade", () => {
       access.catalog.createDiscSelection({
         originalDiscArchiveId: archive.id,
         mediaItemId: trailer.id,
-        sourceKey: "dvd:title:3",
         kind: "dvd_title",
         titleNumber: 3,
       }),
@@ -2405,7 +2489,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         access.catalog.createDiscSelection({
           originalDiscArchiveId: archive.id,
           mediaItemId: item.id,
-          sourceKey: `invalid:title:${String(titleNumber)}`,
           kind: "dvd_title",
           titleNumber,
         }),
@@ -2415,7 +2498,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       access.catalog.createDiscSelection({
         originalDiscArchiveId: archive.id,
         mediaItemId: item.id,
-        sourceKey: "invalid:fractional-chapter-start",
         kind: "dvd_chapters",
         titleNumber: 1,
         chapterStart: 1.5,
@@ -2426,7 +2508,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       access.catalog.createDiscSelection({
         originalDiscArchiveId: archive.id,
         mediaItemId: item.id,
-        sourceKey: "invalid:fractional-chapter-end",
         kind: "dvd_chapters",
         titleNumber: 1,
         chapterStart: 1,
@@ -3407,7 +3488,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
           const selection = access.catalog.createDiscSelection({
             originalDiscArchiveId: archive.id,
             mediaItemId: item.id,
-            sourceKey: "dvd:main-feature",
             kind: "main_feature",
           });
           access.catalog.completeCatalogReview(archive.id);
@@ -3527,7 +3607,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     const selection = access.catalog.createDiscSelection({
       originalDiscArchiveId: archive.id,
       mediaItemId: item.id,
-      sourceKey: "dvd:main-feature",
       kind: "main_feature",
     });
     const profile = access.encodingProfiles.create({

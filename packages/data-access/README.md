@@ -45,14 +45,15 @@ each have an explicit active cap before recent terminal history is added.
 Catalog review is explicit rather than inferred from the first Disc Selection.
 New Original Disc Archives remain in the review queue while a user builds a
 partial set of selections, and `catalog.completeCatalogReview()` records the
-review time only after at least one selection exists. Media Item parent changes
-are serialized and reject hierarchy cycles. DVD title selections must reference
-a title in the archived scan, and chapter ranges cannot exceed that title's
-recorded chapter count; main-feature selections remain a distinct DVD source
-kind. Encode Job enqueueing rejects a Disc Selection until its archive review
-is explicitly complete. Existing databases backfill the explicit review time
-for archives that already had Disc Selections, preserving the pre-migration
-queue meaning.
+review time only after at least one selection exists. Creating another Disc
+Selection atomically clears that review time, so encoding remains blocked until
+the changed catalog is explicitly completed again. Media Item parent changes
+are serialized and reject hierarchy cycles. The facade derives canonical DVD
+source identities, rejects duplicate source slices, requires title selections
+to reference the archived scan, and keeps chapter ranges within the selected
+title; main-feature selections remain a distinct DVD source kind. Existing
+databases backfill the explicit review time for archives that already had Disc
+Selections, preserving the pre-migration queue meaning.
 
 ## Queue attempts and progress
 

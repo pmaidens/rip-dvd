@@ -191,12 +191,18 @@ export function DashboardView({
   onApproveDetectedDisc = () => undefined,
   approvingDetectedDiscId = null,
   onOpenCatalogReview = () => undefined,
+  onCatalogReviewPage = () => undefined,
 }: {
   state: DashboardLoadState;
   onApproveDetectedDisc?: (id: string) => void;
   approvingDetectedDiscId?: string | null;
   onOpenCatalogReview?: (id: string) => void;
+  onCatalogReviewPage?: (offset: number) => void;
 }) {
+  const catalogReviewPage =
+    state.catalogReview.status === "loaded"
+      ? state.catalogReview.page
+      : undefined;
   return (
     <div className="dashboard-grid">
       <DashboardSection
@@ -394,6 +400,33 @@ export function DashboardView({
           </article>
         )}
       />
+      {catalogReviewPage ? (
+        <nav
+          className="profile-actions wide-section"
+          aria-label="Catalog review pages"
+        >
+          <button
+            type="button"
+            disabled={!catalogReviewPage.hasPrevious}
+            onClick={() =>
+              onCatalogReviewPage(
+                Math.max(0, catalogReviewPage.offset - catalogReviewPage.limit),
+              )}
+          >
+            Previous pending reviews
+          </button>
+          <button
+            type="button"
+            disabled={!catalogReviewPage.hasNext}
+            onClick={() =>
+              onCatalogReviewPage(
+                catalogReviewPage.offset + catalogReviewPage.limit,
+              )}
+          >
+            Next pending reviews
+          </button>
+        </nav>
+      ) : null}
     </div>
   );
 }
@@ -464,16 +497,18 @@ export function OperationsDashboard() {
   const [catalogReviewArchiveId, setCatalogReviewArchiveId] = useState<
     string | null
   >(null);
+  const [catalogReviewOffset, setCatalogReviewOffset] = useState(0);
 
   useEffect(() => {
     setState(dashboardState("loading"));
     setStreamStatus("connecting");
     return watchDashboardActivity({
+      catalogReviewOffset,
       onSnapshot: setState,
       onInitialLoadError: () => setState(dashboardState("error")),
       onStreamStatus: setStreamStatus,
     });
-  }, [requestNumber]);
+  }, [requestNumber, catalogReviewOffset]);
 
   const sectionStates = [
     state.opticalDrives.status,
@@ -554,6 +589,7 @@ export function OperationsDashboard() {
         onApproveDetectedDisc={(id) => void approveDetectedDisc(id)}
         approvingDetectedDiscId={approvingDetectedDiscId}
         onOpenCatalogReview={setCatalogReviewArchiveId}
+        onCatalogReviewPage={setCatalogReviewOffset}
       />
 
       <footer className="dashboard-footer">

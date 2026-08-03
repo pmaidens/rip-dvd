@@ -101,7 +101,6 @@ describe("data-access domain identifiers", () => {
       access.catalog.createDiscSelection({
         originalDiscArchiveId: archiveId,
         mediaItemId,
-        sourceKey: "dvd:chapters",
         kind: "dvd_chapters",
         label: "missing coordinates",
       });

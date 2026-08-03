@@ -2035,6 +2035,11 @@ export function createDataAccessInternal(
         if (options?.ids !== undefined && options.ids.length === 0) {
           return [];
         }
+        if (options?.offset !== undefined && options.limit === undefined) {
+          throw new DomainInvariantError(
+            "Original Disc Archive offset requires a bounded limit",
+          );
+        }
         const conditions = [
           options?.ids
             ? inArray(originalDiscArchives.id, [...options.ids])
@@ -2059,7 +2064,7 @@ export function createDataAccessInternal(
         const condition =
           conditions.length > 0 ? and(...conditions) : undefined;
         if (options?.limit !== undefined) {
-          return database
+          const query = database
             .select()
             .from(originalDiscArchives)
             .where(condition)
@@ -2067,9 +2072,15 @@ export function createDataAccessInternal(
               desc(originalDiscArchives.archivedAt),
               desc(originalDiscArchives.id),
             )
-            .limit(requirePositiveSafeInteger(options.limit, "limit"))
-            .all()
-            .reverse();
+            .limit(requirePositiveSafeInteger(options.limit, "limit"));
+          if (options.offset === undefined) {
+            return query.all().reverse();
+          }
+          const offset = optionalSafeInteger(options.offset, "offset", 0);
+          if (offset === null || offset === undefined) {
+            throw new DomainInvariantError("offset must be a safe integer");
+          }
+          return query.offset(offset).all().reverse();
         }
         return database
           .select()
@@ -2251,121 +2262,143 @@ export function createDataAccessInternal(
       createDiscSelection(input) {
         const timestamp = now();
         const id = newId<DiscSelectionId>();
-        const source = requireRow(
-          database
-            .select({
-              discKind: originalDiscArchives.discKind,
-              scanData: detectedDiscs.scanData,
-            })
-            .from(originalDiscArchives)
-            .innerJoin(
-              detectedDiscs,
-              eq(detectedDiscs.id, originalDiscArchives.detectedDiscId),
-            )
-            .where(eq(originalDiscArchives.id, input.originalDiscArchiveId))
-            .get(),
-          "original disc archive",
-          input.originalDiscArchiveId,
-        );
-        requireRow(
-          database
-            .select({ id: mediaItems.id })
-            .from(mediaItems)
-            .where(eq(mediaItems.id, input.mediaItemId))
-            .get(),
-          "media item",
-          input.mediaItemId,
-        );
-        if (source.discKind !== "dvd") {
-          throw new DomainInvariantError(
-            "DVD Disc Selections require a DVD Original Disc Archive",
-          );
-        }
-        const coordinates =
-          input.kind === "main_feature"
-            ? { titleNumber: null, chapterStart: null, chapterEnd: null }
-            : input.kind === "dvd_title"
-              ? {
-                  titleNumber: requirePositiveSafeInteger(
-                    input.titleNumber,
-                    "titleNumber",
-                  ),
-                  chapterStart: null,
-                  chapterEnd: null,
-                }
-              : {
-                  titleNumber: requirePositiveSafeInteger(
-                    input.titleNumber,
-                    "titleNumber",
-                  ),
-                  chapterStart: requirePositiveSafeInteger(
-                    input.chapterStart,
-                    "chapterStart",
-                  ),
-                  chapterEnd: requirePositiveSafeInteger(
-                    input.chapterEnd,
-                    "chapterEnd",
-                  ),
-                };
-        if (
-          coordinates.chapterStart !== null &&
-          coordinates.chapterEnd !== null &&
-          coordinates.chapterEnd < coordinates.chapterStart
-        ) {
-          throw new DomainInvariantError(
-            "chapterEnd must be greater than or equal to chapterStart",
-          );
-        }
-        if (coordinates.titleNumber !== null) {
-          const titleMap = decodeDvdTitleMap(source.scanData);
-          if (!titleMap) {
-            throw new DomainInvariantError(
-              "DVD title selections require a reviewable DVD title map",
+        return database.transaction(
+          (transaction) => {
+            const source = requireRow(
+              transaction
+                .select({
+                  discKind: originalDiscArchives.discKind,
+                  scanData: detectedDiscs.scanData,
+                })
+                .from(originalDiscArchives)
+                .innerJoin(
+                  detectedDiscs,
+                  eq(detectedDiscs.id, originalDiscArchives.detectedDiscId),
+                )
+                .where(eq(originalDiscArchives.id, input.originalDiscArchiveId))
+                .get(),
+              "original disc archive",
+              input.originalDiscArchiveId,
             );
-          }
-          const title = titleMap.titles.find(
-            (candidate) => candidate.number === coordinates.titleNumber,
-          );
-          if (!title) {
-            throw new DomainInvariantError(
-              `DVD title ${coordinates.titleNumber} is not present in the archived scan`,
+            requireRow(
+              transaction
+                .select({ id: mediaItems.id })
+                .from(mediaItems)
+                .where(eq(mediaItems.id, input.mediaItemId))
+                .get(),
+              "media item",
+              input.mediaItemId,
             );
-          }
-          if (
-            coordinates.chapterEnd !== null &&
-            coordinates.chapterEnd > title.chapters
-          ) {
-            throw new DomainInvariantError(
-              `chapterEnd must not exceed DVD title ${title.number}'s ${title.chapters} chapters`,
-            );
-          }
-        }
-        return toDiscSelection(
-          requireRow(
-            database
-              .insert(discSelections)
-              .values({
+            if (source.discKind !== "dvd") {
+              throw new DomainInvariantError(
+                "DVD Disc Selections require a DVD Original Disc Archive",
+              );
+            }
+            const coordinates =
+              input.kind === "main_feature"
+                ? { titleNumber: null, chapterStart: null, chapterEnd: null }
+                : input.kind === "dvd_title"
+                  ? {
+                      titleNumber: requirePositiveSafeInteger(
+                        input.titleNumber,
+                        "titleNumber",
+                      ),
+                      chapterStart: null,
+                      chapterEnd: null,
+                    }
+                  : {
+                      titleNumber: requirePositiveSafeInteger(
+                        input.titleNumber,
+                        "titleNumber",
+                      ),
+                      chapterStart: requirePositiveSafeInteger(
+                        input.chapterStart,
+                        "chapterStart",
+                      ),
+                      chapterEnd: requirePositiveSafeInteger(
+                        input.chapterEnd,
+                        "chapterEnd",
+                      ),
+                    };
+            if (
+              coordinates.chapterStart !== null &&
+              coordinates.chapterEnd !== null &&
+              coordinates.chapterEnd < coordinates.chapterStart
+            ) {
+              throw new DomainInvariantError(
+                "chapterEnd must be greater than or equal to chapterStart",
+              );
+            }
+            if (coordinates.titleNumber !== null) {
+              const titleMap = decodeDvdTitleMap(source.scanData);
+              if (!titleMap) {
+                throw new DomainInvariantError(
+                  "DVD title selections require a reviewable DVD title map",
+                );
+              }
+              const title = titleMap.titles.find(
+                (candidate) => candidate.number === coordinates.titleNumber,
+              );
+              if (!title) {
+                throw new DomainInvariantError(
+                  `DVD title ${coordinates.titleNumber} is not present in the archived scan`,
+                );
+              }
+              if (
+                coordinates.chapterEnd !== null &&
+                coordinates.chapterEnd > title.chapters
+              ) {
+                throw new DomainInvariantError(
+                  `chapterEnd must not exceed DVD title ${title.number}'s ${title.chapters} chapters`,
+                );
+              }
+            }
+            const sourceKey =
+              input.kind === "main_feature"
+                ? "dvd:main-feature"
+                : input.kind === "dvd_title"
+                  ? `dvd:title:${coordinates.titleNumber}`
+                  : `dvd:title:${coordinates.titleNumber}:chapters:${coordinates.chapterStart}-${coordinates.chapterEnd}`;
+            const selection = toDiscSelection(
+              requireRow(
+                transaction
+                  .insert(discSelections)
+                  .values({
+                    id,
+                    originalDiscArchiveId: input.originalDiscArchiveId,
+                    mediaItemId: input.mediaItemId,
+                    sourceKey,
+                    kind: input.kind,
+                    ...coordinates,
+                    label: input.label,
+                    createdAt: timestamp,
+                    updatedAt: timestamp,
+                  })
+                  .returning()
+                  .get(),
+                "disc selection",
                 id,
-                originalDiscArchiveId: input.originalDiscArchiveId,
-                mediaItemId: input.mediaItemId,
-                sourceKey: requireNonEmpty(input.sourceKey, "sourceKey"),
-                kind: input.kind,
-                ...coordinates,
-                label: input.label,
-                createdAt: timestamp,
-                updatedAt: timestamp,
-              })
-              .returning()
-              .get(),
-            "disc selection",
-            id,
-          ),
+              ),
+            );
+            transaction
+              .update(originalDiscArchives)
+              .set({ catalogReviewedAt: null, updatedAt: timestamp })
+              .where(eq(originalDiscArchives.id, input.originalDiscArchiveId))
+              .run();
+            return selection;
+          },
+          { behavior: "immediate" },
         );
       },
 
       listDiscSelections(options) {
         if (options?.ids !== undefined && options.ids.length === 0) {
           return [];
+        }
+        if (options?.offset !== undefined && options.limit === undefined) {
+          throw new DomainInvariantError(
+            "Disc Selection offset requires a bounded limit",
+          );
         }
         const conditions = [
           options?.ids
@@ -2383,12 +2416,23 @@ export function createDataAccessInternal(
           .from(discSelections)
           .where(conditions.length > 0 ? and(...conditions) : undefined)
           .orderBy(asc(discSelections.createdAt), asc(discSelections.id));
-        const rows =
-          options?.limit === undefined
-            ? query.all()
-            : query
-                .limit(requirePositiveSafeInteger(options.limit, "limit"))
-                .all();
+        let rows;
+        if (options?.limit === undefined) {
+          rows = query.all();
+        } else {
+          const limited = query.limit(
+            requirePositiveSafeInteger(options.limit, "limit"),
+          );
+          if (options.offset === undefined) {
+            rows = limited.all();
+          } else {
+            const offset = optionalSafeInteger(options.offset, "offset", 0);
+            if (offset === null || offset === undefined) {
+              throw new DomainInvariantError("offset must be a safe integer");
+            }
+            rows = limited.offset(offset).all();
+          }
+        }
         return rows.map(toDiscSelection);
       },
     },

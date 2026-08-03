@@ -18,7 +18,7 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 const CATALOG_REVIEW_MEDIA_PAGE_SIZE = 100;
-const CATALOG_REVIEW_SELECTION_LIMIT = 500;
+const CATALOG_REVIEW_SELECTION_PAGE_SIZE = 100;
 
 function response(body: unknown, status = 200): Response {
   return Response.json(body, {
@@ -102,8 +102,8 @@ function optionalInteger(
     : undefined;
 }
 
-function mediaOffset(request: Request): number | null {
-  const value = new URL(request.url).searchParams.get("mediaOffset");
+function recordOffset(request: Request, parameter: string): number | null {
+  const value = new URL(request.url).searchParams.get(parameter);
   if (value === null) {
     return 0;
   }
@@ -143,6 +143,7 @@ function readCatalogReview(
   access: DataAccess,
   id: OriginalDiscArchiveId,
   mediaItemOffset: number,
+  discSelectionOffset: number,
 ) {
   return access.readConsistentSnapshot((snapshot) => {
     const archive = snapshot.catalog.listOriginalDiscArchives({ ids: [id] })[0];
@@ -163,18 +164,34 @@ function readCatalogReview(
     });
     const discSelections = snapshot.catalog.listDiscSelections({
       originalDiscArchiveId: id,
-      limit: CATALOG_REVIEW_SELECTION_LIMIT + 1,
+      limit: CATALOG_REVIEW_SELECTION_PAGE_SIZE + 1,
+      offset: discSelectionOffset,
     });
-    if (discSelections.length > CATALOG_REVIEW_SELECTION_LIMIT) {
-      throw new DomainInvariantError(
-        "Catalog review exceeds the supported Disc Selection limit",
-      );
-    }
     const hasNextMediaItems =
       mediaItems.length > CATALOG_REVIEW_MEDIA_PAGE_SIZE;
     const mediaItemsPage = mediaItems.slice(
       0,
       CATALOG_REVIEW_MEDIA_PAGE_SIZE,
+    );
+    const mediaItemPageIds = new Set(mediaItemsPage.map((item) => item.id));
+    const contextParentIds = [
+      ...new Set(
+        mediaItemsPage
+          .map((item) => item.parentId)
+          .filter(
+            (parentId): parentId is MediaItemId =>
+              parentId !== null && !mediaItemPageIds.has(parentId),
+          ),
+      ),
+    ];
+    const contextParents = snapshot.catalog.listMediaItems({
+      ids: contextParentIds,
+    });
+    const hasNextDiscSelections =
+      discSelections.length > CATALOG_REVIEW_SELECTION_PAGE_SIZE;
+    const discSelectionsPage = discSelections.slice(
+      0,
+      CATALOG_REVIEW_SELECTION_PAGE_SIZE,
     );
     return {
       archive: {
@@ -190,14 +207,23 @@ function readCatalogReview(
       rawScan: {
         titles: decodeDvdTitleMap(disc.scanData)?.titles ?? [],
       },
-      mediaItems: mediaItemsPage.map(serializeMediaItem),
+      mediaItems: [...contextParents, ...mediaItemsPage].map(
+        serializeMediaItem,
+      ),
       mediaItemsPage: {
         offset: mediaItemOffset,
         limit: CATALOG_REVIEW_MEDIA_PAGE_SIZE,
         hasPrevious: mediaItemOffset > 0,
         hasNext: hasNextMediaItems,
+        itemIds: mediaItemsPage.map((item) => item.id),
       },
-      discSelections: discSelections.map(serializeDiscSelection),
+      discSelections: discSelectionsPage.map(serializeDiscSelection),
+      discSelectionsPage: {
+        offset: discSelectionOffset,
+        limit: CATALOG_REVIEW_SELECTION_PAGE_SIZE,
+        hasPrevious: discSelectionOffset > 0,
+        hasNext: hasNextDiscSelections,
+      },
     };
   });
 }
@@ -217,11 +243,17 @@ export async function createCatalogReviewRoute(
   try {
     const archiveId = id as OriginalDiscArchiveId;
     if (request.method === "GET") {
-      const offset = mediaOffset(request);
-      if (offset === null) {
+      const mediaItemOffset = recordOffset(request, "mediaOffset");
+      const discSelectionOffset = recordOffset(request, "selectionOffset");
+      if (mediaItemOffset === null || discSelectionOffset === null) {
         return response({ error: "Invalid Media Item offset" }, 400);
       }
-      const review = readCatalogReview(getAccess(), archiveId, offset);
+      const review = readCatalogReview(
+        getAccess(),
+        archiveId,
+        mediaItemOffset,
+        discSelectionOffset,
+      );
       return review === null
         ? response({ error: "Original Disc Archive not found" }, 404)
         : response(review);
@@ -365,7 +397,6 @@ export async function createCatalogReviewRoute(
       if (kind === "main_feature") {
         selection = access.catalog.createDiscSelection({
           ...common,
-          sourceKey: "dvd:main-feature",
           kind,
         });
       } else {
@@ -376,7 +407,6 @@ export async function createCatalogReviewRoute(
         if (kind === "dvd_title") {
           selection = access.catalog.createDiscSelection({
             ...common,
-            sourceKey: `dvd:title:${titleNumber}`,
             kind: "dvd_title",
             titleNumber,
           });
@@ -393,8 +423,6 @@ export async function createCatalogReviewRoute(
           }
           selection = access.catalog.createDiscSelection({
             ...common,
-            sourceKey:
-              `dvd:title:${titleNumber}:chapters:${chapterStart}-${chapterEnd}`,
             kind: "dvd_chapters",
             titleNumber,
             chapterStart,
