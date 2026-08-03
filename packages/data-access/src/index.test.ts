@@ -13,11 +13,13 @@ import { Worker } from "node:worker_threads";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  ARCHIVE_JOB_LEASE_DURATION_MS,
   createDataAccess,
   DVD_TITLE_MAP_SCHEMA_VERSION,
   DomainInvariantError,
   InvalidStatusTransitionError,
   MAX_DVD_TITLES,
+  StaleJobAttemptError,
 } from "./index.js";
 import type { DetectedDiscId, DiscKind } from "./index.js";
 import type { EncodingProfileId } from "./index.js";
@@ -138,6 +140,47 @@ async function runBarrierWorkers(
   Atomics.store(new Int32Array(barrier), 0, 1);
   Atomics.notify(new Int32Array(barrier), 0, count);
   return Promise.all(results);
+}
+
+async function runAbandonedArchiveClaimWorker(databasePath: string): Promise<{
+  id: string;
+  claimToken: string;
+}> {
+  const worker = new Worker(
+    new URL("../test/abandon-archive-claim-worker.mjs", import.meta.url),
+    {
+      execArgv: ["--no-warnings"],
+      workerData: { databasePath, workerId: "lost-process-worker" },
+    },
+  );
+  return new Promise((resolve, reject) => {
+    let claim: { id: string; claimToken: string } | null | undefined;
+    const timeout = setTimeout(() => {
+      void worker.terminate();
+      reject(new Error("Abandoned Archive Job worker did not exit"));
+    }, 2_000);
+    timeout.unref();
+    worker.once(
+      "message",
+      (message: { id: string; claimToken: string } | null) => {
+        claim = message;
+      },
+    );
+    worker.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    worker.once("exit", (code) => {
+      clearTimeout(timeout);
+      if (code !== 0) {
+        reject(new Error(`Abandoned Archive Job worker exited with ${code}`));
+      } else if (!claim) {
+        reject(new Error("Abandoned Archive Job worker did not claim work"));
+      } else {
+        resolve(claim);
+      }
+    });
+  });
 }
 
 function createTestDatabasePath(): string {
@@ -2388,6 +2431,196 @@ ALTER TABLE \`optical_drives\` ADD \`is_configured_target\` integer DEFAULT fals
       })?.id,
     ).toBe(otherDrive.job.id);
 
+    access.close();
+  });
+
+  it("recovers an expired Archive Job claim as a bounded retryable failure", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-03T03:00:00.000Z"));
+    const databasePath = createTestDatabasePath();
+    const firstProcess = openTestDatabase(databasePath);
+    const drive = firstProcess.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const disc = firstProcess.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "expired-archive-claim",
+    });
+    firstProcess.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    const job = firstProcess.archiveJobs.approve({ detectedDiscId: disc.id });
+    const abandoned = firstProcess.archiveJobs.claimNext("lost-worker")!;
+    firstProcess.close();
+
+    vi.advanceTimersByTime(ARCHIVE_JOB_LEASE_DURATION_MS + 1);
+    const replacementProcess = openTestDatabase(databasePath);
+    expect(replacementProcess.archiveJobs.recoverExpiredClaims()).toEqual([
+      expect.objectContaining({
+        id: job.id,
+        status: "failed",
+        errorMessage: "Archive worker lease expired",
+      }),
+    ]);
+    expect(replacementProcess.archiveJobs.list(["failed"])).toEqual([
+      expect.objectContaining({ id: job.id, progressPercent: 0 }),
+    ]);
+    expect(
+      replacementProcess.archiveJobs.approve({ detectedDiscId: disc.id }),
+    ).toMatchObject({ id: job.id, status: "queued" });
+    const replacement = replacementProcess.archiveJobs.claimNext(
+      "replacement-worker",
+    );
+    expect(replacement?.id).toBe(job.id);
+    expect(() =>
+      replacementProcess.archiveJobs.updateProgress(abandoned, 50),
+    ).toThrow();
+    replacementProcess.close();
+  });
+
+  it("recovers and reclaims work after the owning process disappears", async () => {
+    const databasePath = createTestDatabasePath();
+    const setup = openTestDatabase(databasePath);
+    const drive = setup.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const disc = setup.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "process-loss-archive-claim",
+    });
+    setup.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    const job = setup.archiveJobs.approve({ detectedDiscId: disc.id });
+    setup.close();
+
+    const abandoned = await runAbandonedArchiveClaimWorker(databasePath);
+    expect(abandoned.id).toBe(job.id);
+    const sqlite = new DatabaseSync(databasePath);
+    sqlite
+      .prepare("update archive_jobs set updated_at = ? where id = ?")
+      .run(Date.now() - ARCHIVE_JOB_LEASE_DURATION_MS - 1, job.id);
+    sqlite.close();
+
+    const replacement = openTestDatabase(databasePath);
+    expect(replacement.archiveJobs.recoverExpiredClaims()).toEqual([
+      expect.objectContaining({ id: job.id, status: "failed" }),
+    ]);
+    replacement.archiveJobs.approve({ detectedDiscId: disc.id });
+    const reclaimed = replacement.archiveJobs.claimNext("replacement-process");
+    expect(reclaimed).toMatchObject({ id: job.id, status: "running" });
+    expect(reclaimed?.claimToken).not.toBe(abandoned.claimToken);
+    replacement.close();
+  });
+
+  it("bounds each expired Archive Job recovery transaction", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-03T03:00:00.000Z"));
+    const access = openTestDatabase();
+    for (let index = 0; index < 101; index += 1) {
+      const fingerprint = `bounded-recovery-${index}`;
+      const drive = access.catalog.upsertOpticalDrive({
+        devicePath: `/dev/bounded-recovery-${index}`,
+        isEnabled: true,
+        isPresent: true,
+      });
+      const disc = access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint,
+      });
+      access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+      access.archiveJobs.approve({ detectedDiscId: disc.id });
+      expect(
+        access.archiveJobs.claimNext(`bounded-worker-${index}`, {
+          opticalDriveId: drive.id,
+          fingerprint,
+        }),
+      ).not.toBeNull();
+    }
+
+    vi.advanceTimersByTime(ARCHIVE_JOB_LEASE_DURATION_MS + 1);
+    expect(access.archiveJobs.recoverExpiredClaims()).toHaveLength(100);
+    expect(access.archiveJobs.list(["running"])).toHaveLength(1);
+    expect(access.archiveJobs.recoverExpiredClaims()).toHaveLength(1);
+    expect(access.archiveJobs.list(["running"])).toEqual([]);
+    access.close();
+  });
+
+  it("renews only the current Archive Job owner before lease expiry", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-03T03:00:00.000Z"));
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "renewed-archive-claim",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.archiveJobs.approve({ detectedDiscId: disc.id });
+    const claim = access.archiveJobs.claimNext("live-worker")!;
+
+    vi.advanceTimersByTime(ARCHIVE_JOB_LEASE_DURATION_MS - 1);
+    const renewed = access.archiveJobs.renewClaim(claim);
+    expect(renewed.updatedAt).toEqual(new Date("2026-08-03T03:00:59.999Z"));
+    vi.advanceTimersByTime(2);
+    expect(access.archiveJobs.recoverExpiredClaims()).toEqual([]);
+
+    vi.advanceTimersByTime(ARCHIVE_JOB_LEASE_DURATION_MS);
+    expect(access.archiveJobs.recoverExpiredClaims()).toHaveLength(1);
+    expect(() => access.archiveJobs.renewClaim(claim)).toThrow();
+    access.close();
+  });
+
+  it("rejects every Archive Job mutation after its lease expires", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-03T03:00:00.000Z"));
+    const access = openTestDatabase();
+    const createClaim = (label: string, index: number) => {
+      const drive = access.catalog.upsertOpticalDrive({
+        devicePath: `/dev/sr${index}`,
+        isEnabled: true,
+        isPresent: true,
+      });
+      const disc = access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint: `expired-${label}-claim`,
+      });
+      access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+      access.archiveJobs.approve({ detectedDiscId: disc.id });
+      return access.archiveJobs.claimNext(`worker-${label}`, {
+        opticalDriveId: drive.id,
+        fingerprint: `expired-${label}-claim`,
+      })!;
+    };
+    const progressClaim = createClaim("progress", 0);
+    const failureClaim = createClaim("failure", 1);
+    const publishClaim = createClaim("publish", 2);
+
+    vi.advanceTimersByTime(ARCHIVE_JOB_LEASE_DURATION_MS);
+
+    expect(() => access.archiveJobs.updateProgress(progressClaim, 50)).toThrow(
+      StaleJobAttemptError,
+    );
+    expect(() => access.archiveJobs.fail(failureClaim, "copy failed")).toThrow(
+      StaleJobAttemptError,
+    );
+    expect(() =>
+      access.archiveJobs.publish(publishClaim, {
+        archivePath: "/media/originals/expired-publish.iso",
+        sizeBytes: 9,
+      }),
+    ).toThrow(StaleJobAttemptError);
+    expect(access.catalog.listOriginalDiscArchives()).toEqual([]);
+    expect(access.archiveJobs.recoverExpiredClaims()).toHaveLength(3);
     access.close();
   });
 

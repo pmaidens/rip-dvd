@@ -17,7 +17,9 @@ import {
   desc,
   eq,
   exists,
+  gt,
   inArray,
+  lte,
   ne,
   notExists,
   or,
@@ -50,6 +52,7 @@ import {
   DomainInvariantError,
   InvalidStatusTransitionError,
   RecordNotFoundError,
+  StaleJobAttemptError,
 } from "../errors.js";
 import type { LegacySidecarDataAccess } from "../legacy-sidecar-types.js";
 import type {
@@ -76,12 +79,14 @@ import type {
   RunningArchiveJob,
   RunningEncodeJob,
 } from "../types.js";
+import { ARCHIVE_JOB_LEASE_DURATION_MS } from "../types.js";
 import { newId, requireRow } from "./persistence.js";
 
 const BUSY_TIMEOUT_MS = 5_000;
 const MIGRATION_LOCK_TIMEOUT_MS = 15_000;
 const MIGRATION_LOCK_STALE_MS = 300_000;
 const MIGRATION_LOCK_POLL_MS = 10;
+const ARCHIVE_JOB_RECOVERY_LIMIT = 100;
 const DEFAULT_MIGRATIONS_FOLDER = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../drizzle",
@@ -549,11 +554,20 @@ export function createDataAccessInternal(
         .get();
       return claimed ? asRunningArchiveJob(claimed) : undefined;
     },
+    isAttemptCurrent: (current, _claim, timestamp) =>
+      current.updatedAt.getTime() >
+      timestamp.getTime() - ARCHIVE_JOB_LEASE_DURATION_MS,
     updateAttempt: (claim, update, completion) => {
       const attemptCondition = and(
         eq(archiveJobs.id, claim.id),
         eq(archiveJobs.status, "running"),
         eq(archiveJobs.claimToken, claim.claimToken),
+        gt(
+          archiveJobs.updatedAt,
+          new Date(
+            update.updatedAt.getTime() - ARCHIVE_JOB_LEASE_DURATION_MS,
+          ),
+        ),
       );
       if (update.status !== "completed") {
         return database
@@ -1984,6 +1998,69 @@ export function createDataAccessInternal(
       },
 
       claimNext: archiveJobQueue.claimNext,
+      renewClaim(claim) {
+        const timestamp = now();
+        const expiredBefore = new Date(
+          timestamp.getTime() - ARCHIVE_JOB_LEASE_DURATION_MS,
+        );
+        const renewed = database
+          .update(archiveJobs)
+          .set({ updatedAt: timestamp })
+          .where(
+            and(
+              eq(archiveJobs.id, claim.id),
+              eq(archiveJobs.status, "running"),
+              eq(archiveJobs.claimToken, claim.claimToken),
+              gt(archiveJobs.updatedAt, expiredBefore),
+            ),
+          )
+          .returning()
+          .get();
+        if (!renewed) {
+          throw new StaleJobAttemptError("archive job", claim.id);
+        }
+        return asRunningArchiveJob(renewed);
+      },
+      recoverExpiredClaims() {
+        const timestamp = now();
+        const expiredBefore = new Date(
+          timestamp.getTime() - ARCHIVE_JOB_LEASE_DURATION_MS,
+        );
+        return database.transaction((transaction) => {
+          const expiredIds = transaction
+            .select({ id: archiveJobs.id })
+            .from(archiveJobs)
+            .where(
+              and(
+                eq(archiveJobs.status, "running"),
+                lte(archiveJobs.updatedAt, expiredBefore),
+              ),
+            )
+            .orderBy(asc(archiveJobs.updatedAt), asc(archiveJobs.id))
+            .limit(ARCHIVE_JOB_RECOVERY_LIMIT)
+            .all()
+            .map(({ id }) => id);
+          if (expiredIds.length === 0) {
+            return [];
+          }
+          return transaction
+            .update(archiveJobs)
+            .set({
+              status: "failed",
+              errorMessage: "Archive worker lease expired",
+              updatedAt: timestamp,
+            })
+            .where(
+              and(
+                inArray(archiveJobs.id, expiredIds),
+                eq(archiveJobs.status, "running"),
+                lte(archiveJobs.updatedAt, expiredBefore),
+              ),
+            )
+            .returning()
+            .all();
+        }, { behavior: "immediate" });
+      },
       list: archiveJobQueue.list,
       updateProgress: archiveJobQueue.updateProgress,
       publish(claim, input) {

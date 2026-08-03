@@ -5,6 +5,7 @@ import type {
   DataAccess,
   DiscoveredOpticalDrive,
 } from "@rip-dvd/data-access";
+import { ARCHIVE_JOB_LEASE_DURATION_MS } from "@rip-dvd/data-access";
 import type { DvdTitleMap } from "@rip-dvd/data-access/dvd-scan";
 
 import {
@@ -162,6 +163,7 @@ export async function pollArchiveWorker({
   workerId = "archive-worker",
 }: PollArchiveWorkerOptions): Promise<void> {
   signal.throwIfAborted();
+  access.archiveJobs.recoverExpiredClaims();
   const discovered = await hardware.discover(signal);
   signal.throwIfAborted();
   const configuredCanonicalPath =
@@ -245,6 +247,19 @@ export async function pollArchiveWorker({
         continue;
       }
 
+      const claimController = new AbortController();
+      const archiveSignal = AbortSignal.any([
+        signal,
+        claimController.signal,
+      ]);
+      const heartbeat = setInterval(() => {
+        try {
+          access.archiveJobs.renewClaim(claim);
+        } catch (error) {
+          claimController.abort(error);
+        }
+      }, Math.floor(ARCHIVE_JOB_LEASE_DURATION_MS / 3));
+      heartbeat.unref();
       let publishedArchivePath: string | undefined;
       try {
         const preserved = await preserveDvdArchive({
@@ -252,7 +267,7 @@ export async function pollArchiveWorker({
           fingerprint: scan.fingerprint,
           originalsLibraryPath,
           runner: copyRunner,
-          signal,
+          signal: archiveSignal,
           sizeBytes: scan.sizeBytes,
           onProgress: (progressPercent) => {
             access.archiveJobs.updateProgress(claim, progressPercent);
@@ -264,10 +279,10 @@ export async function pollArchiveWorker({
               expected: binding.drive,
               hardware,
               phase: "DVD persistence",
-              signal,
+              signal: archiveSignal,
             });
-            await hardware.confirmOpticalDrive(binding, signal);
-            const verified = await hardware.scanDvd(binding, signal);
+            await hardware.confirmOpticalDrive(binding, archiveSignal);
+            const verified = await hardware.scanDvd(binding, archiveSignal);
             if (
               verified === null ||
               verified.fingerprint !== scan.fingerprint ||
@@ -310,6 +325,8 @@ export async function pollArchiveWorker({
           throw error;
         }
         log(`DVD archive failed for ${drive.devicePath}: ${message}`);
+      } finally {
+        clearInterval(heartbeat);
       }
     } catch (error) {
       if (signal.aborted) {

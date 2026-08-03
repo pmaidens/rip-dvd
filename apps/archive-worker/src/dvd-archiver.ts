@@ -17,6 +17,10 @@ import { isDvdContentId } from "@rip-dvd/data-access/dvd-scan";
 import { requireDvdContentSize } from "./dvd-content-policy.js";
 import { requireSafeOpticalDevicePath } from "./optical-media-generation.js";
 import { optionalBoundedText } from "./bounded-text.js";
+import {
+  createBoundedSingleFlightCoordinator,
+  type ActiveBoundedProcess,
+} from "./bounded-child-process.js";
 
 const MAX_ARCHIVE_PATH_BYTES = 4_096;
 const MAX_DD_DIAGNOSTIC_BYTES = 65_536;
@@ -32,16 +36,22 @@ export interface DvdCopyRequest {
 
 export interface DvdCopyRunner {
   copy(request: DvdCopyRequest): Promise<void>;
+  isActive(devicePath: string, outputPath: string): boolean;
 }
 
 interface DvdCopyChildProcess {
-  stderr: { on(event: "data", listener: (chunk: Buffer) => void): void };
+  pid?: number;
+  stderr: {
+    destroy(): void;
+    on(event: "data", listener: (chunk: Buffer) => void): void;
+  };
   kill(signal: NodeJS.Signals): boolean;
   once(event: "error", listener: (error: Error) => void): void;
   once(
     event: "close",
     listener: (code: number | null, signal: NodeJS.Signals | null) => void,
   ): void;
+  unref(): void;
 }
 
 type SpawnDvdCopyProcess = (
@@ -60,9 +70,19 @@ export function createNodeDvdCopyRunner({
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
     throw new Error("DVD archive copy timeout is invalid");
   }
-  return {
-    async copy(request) {
-      request.signal.throwIfAborted();
+  const copyKey = (devicePath: string, outputPath: string) =>
+    JSON.stringify([devicePath, outputPath]);
+  const coordinator = createBoundedSingleFlightCoordinator<
+    DvdCopyRequest,
+    void
+  >({
+    exhaustedCapacityError: "A DVD archive copy is already active",
+    invalidCapacityError: "DVD archive copy capacity is invalid",
+    maxActiveProcesses: 1,
+    validateReuse() {
+      throw new Error("DVD archive copy is still active");
+    },
+    start(request): ActiveBoundedProcess<void> {
       const child = spawnProcess(
         "dd",
         [
@@ -77,103 +97,132 @@ export function createNodeDvdCopyRunner({
         ],
         { shell: false, stdio: ["ignore", "ignore", "pipe"] },
       );
-
-      await new Promise<void>((resolveCopy, rejectCopy) => {
-        let settled = false;
-        let timedOut = false;
-        let progressError: unknown;
-        let progressBuffer = "";
-        let diagnostics = "";
-        const settle = (error?: unknown) => {
-          if (settled) {
-            return;
-          }
-          settled = true;
-          clearTimeout(timeout);
-          request.signal.removeEventListener("abort", abort);
-          if (error === undefined) {
-            resolveCopy();
-          } else {
-            rejectCopy(error);
-          }
-        };
-        const parseProgress = (text: string, flush = false) => {
-          progressBuffer += text;
-          if (progressBuffer.length > MAX_DD_DIAGNOSTIC_BYTES) {
-            progressBuffer = progressBuffer.slice(-MAX_DD_DIAGNOSTIC_BYTES);
-          }
-          const segments = progressBuffer.split(/[\r\n]/);
-          progressBuffer = flush ? "" : (segments.pop() ?? "");
-          for (const segment of segments) {
-            const match = /^\s*(\d+)\s+bytes\b/.exec(segment);
-            const bytes = match ? Number(match[1]) : Number.NaN;
-            if (Number.isSafeInteger(bytes) && bytes >= 0) {
-              request.onBytesCopied(bytes);
-            }
-          }
-        };
-        const abort = () => {
-          child.kill("SIGKILL");
-        };
-        const timeout = setTimeout(() => {
-          timedOut = true;
-          child.kill("SIGKILL");
-        }, timeoutMs);
-        timeout.unref();
-        request.signal.addEventListener("abort", abort, { once: true });
-        if (request.signal.aborted) {
-          abort();
-        }
-        child.stderr.on("data", (chunk) => {
-          const text = chunk.toString("utf8");
-          diagnostics = `${diagnostics}${text}`.slice(-MAX_DD_DIAGNOSTIC_BYTES);
-          if (progressError !== undefined) {
-            return;
-          }
-          try {
-            parseProgress(text);
-          } catch (error) {
-            progressError = error;
-            child.kill("SIGKILL");
-          }
-        });
-        child.once("error", (error) => settle(error));
-        child.once("close", (code, signal) => {
-          if (progressError === undefined) {
-            try {
-              parseProgress("", true);
-            } catch (error) {
-              progressError = error;
-            }
-          }
-          if (request.signal.aborted) {
-            try {
-              request.signal.throwIfAborted();
-            } catch (error) {
-              settle(error);
-              return;
-            }
-          }
-          if (timedOut) {
-            settle(new Error("DVD archive copy timed out"));
-            return;
-          }
-          if (progressError !== undefined) {
-            settle(progressError);
-            return;
-          }
-          if (code === 0) {
-            settle();
-            return;
-          }
-          const detail = optionalBoundedText(diagnostics, 500);
-          settle(
-            new Error(
-              `DVD archive copy failed${detail ? `: ${detail}` : ` with ${signal ?? `status ${code}`}`}`,
-            ),
-          );
-        });
+      let operationSettled = false;
+      let processClosed = false;
+      let cancellationRequested = false;
+      let progressBuffer = "";
+      let diagnostics = "";
+      let resolveResult!: () => void;
+      let rejectResult!: (reason: unknown) => void;
+      let resolveClosed!: () => void;
+      const result = new Promise<void>((resolve, reject) => {
+        resolveResult = resolve;
+        rejectResult = reject;
       });
+      const closed = new Promise<void>((resolve) => {
+        resolveClosed = resolve;
+      });
+      const rejectOperation = (error: unknown) => {
+        if (!operationSettled) {
+          operationSettled = true;
+          rejectResult(error);
+        }
+      };
+      const resolveOperation = () => {
+        if (!operationSettled) {
+          operationSettled = true;
+          resolveResult();
+        }
+      };
+      const confirmClosed = () => {
+        if (!processClosed) {
+          processClosed = true;
+          resolveClosed();
+        }
+      };
+      const cancel = () => {
+        if (cancellationRequested || processClosed) {
+          return;
+        }
+        cancellationRequested = true;
+        child.stderr.destroy();
+        try {
+          child.kill("SIGKILL");
+        } finally {
+          // A device read can remain blocked in the kernel after SIGKILL. It
+          // must not retain parent event-loop handles while its tombstone
+          // continues to protect the live output path.
+          child.unref();
+        }
+      };
+      const parseProgress = (text: string, flush = false) => {
+        progressBuffer += text;
+        if (progressBuffer.length > MAX_DD_DIAGNOSTIC_BYTES) {
+          progressBuffer = progressBuffer.slice(-MAX_DD_DIAGNOSTIC_BYTES);
+        }
+        const segments = progressBuffer.split(/[\r\n]/);
+        progressBuffer = flush ? "" : (segments.pop() ?? "");
+        for (const segment of segments) {
+          const match = /^\s*(\d+)\s+bytes\b/.exec(segment);
+          const bytes = match ? Number(match[1]) : Number.NaN;
+          if (Number.isSafeInteger(bytes) && bytes >= 0) {
+            request.onBytesCopied(bytes);
+          }
+        }
+      };
+
+      child.stderr.on("data", (chunk) => {
+        const text = chunk.toString("utf8");
+        diagnostics = `${diagnostics}${text}`.slice(-MAX_DD_DIAGNOSTIC_BYTES);
+        if (operationSettled || cancellationRequested) {
+          return;
+        }
+        try {
+          parseProgress(text);
+        } catch (error) {
+          rejectOperation(error);
+          cancel();
+        }
+      });
+      child.once("error", (error) => {
+        rejectOperation(error);
+        // A spawn failure proves that there is no child left to reap. Other
+        // process errors retain the tombstone until `close` is observed.
+        if (child.pid === undefined) {
+          confirmClosed();
+        }
+      });
+      child.once("close", (code, signal) => {
+        confirmClosed();
+        if (cancellationRequested) {
+          rejectOperation(new Error("DVD archive copy was cancelled"));
+          return;
+        }
+        try {
+          parseProgress("", true);
+        } catch (error) {
+          rejectOperation(error);
+          return;
+        }
+        if (code === 0) {
+          resolveOperation();
+          return;
+        }
+        const detail = optionalBoundedText(diagnostics, 500);
+        rejectOperation(
+          new Error(
+            `DVD archive copy failed${detail ? `: ${detail}` : ` with ${signal ?? `status ${code}`}`}`,
+          ),
+        );
+      });
+
+      return { result, closed, cancel };
+    },
+  });
+
+  return {
+    copy(request) {
+      const safeDevicePath = requireSafeOpticalDevicePath(request.devicePath);
+      return coordinator.run(copyKey(safeDevicePath, request.outputPath), request, {
+        signal: request.signal,
+        timeoutError: "DVD archive copy timed out",
+        timeoutMs,
+      });
+    },
+    isActive(devicePath, outputPath) {
+      return coordinator.isActive(
+        copyKey(requireSafeOpticalDevicePath(devicePath), outputPath),
+      );
     },
   };
 }
@@ -342,10 +391,17 @@ export async function preserveDvdArchive({
     }
     await verifySource();
     signal.throwIfAborted();
+    await sync(archivePath);
+    signal.throwIfAborted();
+    await sync(root);
+    signal.throwIfAborted();
     onProgress(99);
     return { archivePath, recovered: true, sizeBytes: safeSizeBytes };
   }
 
+  if (runner.isActive(safeDevicePath, partialPath)) {
+    throw new Error("DVD archive copy is still active");
+  }
   await movePartialAside(partialPath);
   let finalPublished = false;
   try {
@@ -389,7 +445,7 @@ export async function preserveDvdArchive({
     if (finalPublished) {
       await quarantinePublishedArchive(archivePath);
       await movePartialAside(partialPath);
-    } else {
+    } else if (!runner.isActive(safeDevicePath, partialPath)) {
       await movePartialAside(partialPath);
     }
     throw error;

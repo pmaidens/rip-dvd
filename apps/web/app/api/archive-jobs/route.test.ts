@@ -21,12 +21,17 @@ describe("Archive Jobs API", () => {
     access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
 
     const response = await createArchiveJobsRoute(
-      new Request("http://localhost/api/archive-jobs", {
+      new Request("http://localhost:3000/api/archive-jobs", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+        },
         body: JSON.stringify({ detectedDiscId: disc.id }),
       }),
       () => access,
+      () => "http://localhost:3000",
     );
 
     expect(response.status).toBe(201);
@@ -50,15 +55,59 @@ describe("Archive Jobs API", () => {
   it("rejects cross-origin approval before opening data access", async () => {
     const getAccess = vi.fn();
     const response = await createArchiveJobsRoute(
-      new Request("http://localhost/api/archive-jobs", {
+      new Request("http://localhost:3000/api/archive-jobs", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          Host: "localhost:3000",
           Origin: "https://example.com",
         },
         body: JSON.stringify({ detectedDiscId: "disc-id" }),
       }),
       getAccess,
+      () => "http://localhost:3000",
+    );
+
+    expect(response.status).toBe(403);
+    expect(getAccess).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["Origin", { Host: "localhost:3000" }],
+    ["Host", { Origin: "http://localhost:3000" }],
+  ])("rejects approval without a trusted %s header", async (_name, headers) => {
+    const getAccess = vi.fn();
+    const response = await createArchiveJobsRoute(
+      new Request("http://localhost:3000/api/archive-jobs", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...headers,
+        },
+        body: JSON.stringify({ detectedDiscId: "disc-id" }),
+      }),
+      getAccess,
+      () => "http://localhost:3000",
+    );
+
+    expect(response.status).toBe(403);
+    expect(getAccess).not.toHaveBeenCalled();
+  });
+
+  it("rejects a DNS-rebound Host and Origin even when they match the request URL", async () => {
+    const getAccess = vi.fn();
+    const response = await createArchiveJobsRoute(
+      new Request("http://attacker.example:3000/api/archive-jobs", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "attacker.example:3000",
+          Origin: "http://attacker.example:3000",
+        },
+        body: JSON.stringify({ detectedDiscId: "disc-id" }),
+      }),
+      getAccess,
+      () => "http://localhost:3000",
     );
 
     expect(response.status).toBe(403);

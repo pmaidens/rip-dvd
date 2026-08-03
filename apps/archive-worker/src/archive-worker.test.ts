@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  ARCHIVE_JOB_LEASE_DURATION_MS,
   createDataAccess,
   type DiscoveredOpticalDrive,
 } from "@rip-dvd/data-access";
@@ -115,6 +116,7 @@ describe("archive worker polling", () => {
         writeFileSync(outputPath, "dvd-image");
         onBytesCopied(9);
       }),
+      isActive: () => false,
     };
 
     await pollArchiveWorker({
@@ -201,6 +203,7 @@ describe("archive worker polling", () => {
         writeFileSync(outputPath, "partial");
         throw new Error("dd read failed");
       }),
+      isActive: () => false,
     };
 
     await pollArchiveWorker({
@@ -293,6 +296,7 @@ describe("archive worker polling", () => {
         onBytesCopied(4);
         controller.abort(interruption);
       }),
+      isActive: () => false,
     };
 
     await expect(
@@ -329,6 +333,102 @@ describe("archive worker polling", () => {
         "utf8",
       ),
     ).toBe("partial");
+  });
+
+  it("renews the owned Archive Job lease throughout a long copy", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-03T03:00:00.000Z"));
+    const access = openTestDataAccess();
+    const originalsLibraryPath = mkdtempSync(
+      join(tmpdir(), "rip-dvd-originals-heartbeat-"),
+    );
+    temporaryDirectories.push(originalsLibraryPath);
+    const digest = "d".repeat(64);
+    const fingerprint = `sha256:${digest}`;
+    const scanData = {
+      schemaVersion: 2 as const,
+      contentId: fingerprint,
+      titles: [
+        {
+          number: 1,
+          durationSeconds: 3_600,
+          chapters: 10,
+          audioStreams: [],
+          subtitles: [],
+        },
+      ],
+    };
+    const discoveredDrive = {
+      devicePath: "/dev/sr0",
+      vendor: "Pioneer",
+      product: "DVD-RW",
+      serialNumber: "ARCHIVE-HEARTBEAT-001",
+    };
+    const drive = access.catalog.reconcileOpticalDrives([
+      { ...discoveredDrive, isConfiguredDevice: true },
+    ])[0]!;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint,
+      scanData,
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    const job = access.archiveJobs.approve({ detectedDiscId: disc.id });
+    const controller = new AbortController();
+    const hardware: OpticalDriveHardware = {
+      ...stableDeviceBinding(),
+      discover: vi.fn().mockResolvedValue([discoveredDrive]),
+      scanDvd: vi.fn().mockResolvedValue({
+        fingerprint,
+        scanData,
+        sizeBytes: 9,
+      }),
+    };
+    let copyStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      copyStarted = resolve;
+    });
+    const copyRunner: DvdCopyRunner = {
+      copy: vi.fn(({ signal }) => {
+        copyStarted();
+        return new Promise<void>((_resolve, reject) => {
+          signal.addEventListener(
+            "abort",
+            () => {
+              try {
+                signal.throwIfAborted();
+              } catch (error) {
+                reject(error);
+              }
+            },
+            { once: true },
+          );
+        });
+      }),
+      isActive: () => false,
+    };
+    const polling = pollArchiveWorker({
+      access,
+      configuredDevicePath: "/dev/sr0",
+      copyRunner,
+      hardware,
+      log: vi.fn(),
+      originalsLibraryPath,
+      signal: controller.signal,
+      workerId: "archive-worker-heartbeat-test",
+    });
+    await started;
+
+    await vi.advanceTimersByTimeAsync(ARCHIVE_JOB_LEASE_DURATION_MS * 2);
+    expect(access.archiveJobs.recoverExpiredClaims()).toEqual([]);
+    expect(access.archiveJobs.list(["running"])).toEqual([
+      expect.objectContaining({ id: job.id }),
+    ]);
+
+    const interruption = new Error("worker shutdown");
+    controller.abort(interruption);
+    await expect(polling).rejects.toBe(interruption);
   });
 
   it("discovers an enabled Optical Drive and stores its scanned Detected Disc", async () => {

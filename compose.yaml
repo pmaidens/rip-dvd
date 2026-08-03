@@ -5,6 +5,7 @@ x-runtime-environment: &runtime-environment
   RIP_DVD_MEDIA_LIBRARY_PATH: /media/movies
   RIP_DVD_ORIGINALS_LIBRARY_PATH: /media/originals
   RIP_DVD_ARCHIVE_DEVICE_PATH: ${RIP_DVD_ARCHIVE_DEVICE_PATH:-/dev/sr0}
+  RIP_DVD_WEB_TRUSTED_ORIGIN: ${RIP_DVD_WEB_TRUSTED_ORIGIN:-http://localhost:${RIP_DVD_WEB_PORT:-3000}}
   RIP_DVD_WORKER_POLL_INTERVAL_MS: ${RIP_DVD_WORKER_POLL_INTERVAL_MS:-5000}
   RIP_DVD_ARCHIVE_WORKER_CONCURRENCY: ${RIP_DVD_ARCHIVE_WORKER_CONCURRENCY:-1}
   RIP_DVD_ENCODE_WORKER_CONCURRENCY: ${RIP_DVD_ENCODE_WORKER_CONCURRENCY:-1}
@@ -25,7 +26,7 @@ services:
       target: web
     environment: *runtime-environment
     ports:
-      - "${RIP_DVD_WEB_PORT:-3000}:3000"
+      - "${RIP_DVD_WEB_BIND_ADDRESS:-127.0.0.1}:${RIP_DVD_WEB_PORT:-3000}:3000"
     volumes:
       - rip-dvd-data:/data
       - ${RIP_DVD_MEDIA_LIBRARY_HOST_PATH:-rip-dvd-media}:/media/movies:ro

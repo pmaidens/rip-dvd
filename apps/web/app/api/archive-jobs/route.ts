@@ -1,4 +1,5 @@
 import type { DataAccess, DetectedDiscId } from "@rip-dvd/data-access";
+import { loadConfig } from "@rip-dvd/config";
 import {
   DomainInvariantError,
   InvalidStatusTransitionError,
@@ -16,7 +17,30 @@ function response(body: unknown, status = 200): Response {
   });
 }
 
-function mutationRequestProblem(request: Request): Response | null {
+function headerOrigin(value: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+  if (
+    (url.protocol !== "http:" && url.protocol !== "https:") ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.pathname !== "/" ||
+    url.search !== "" ||
+    url.hash !== ""
+  ) {
+    return null;
+  }
+  return url.origin;
+}
+
+function mutationRequestProblem(
+  request: Request,
+  trustedOrigin: string,
+): Response | null {
   const contentType = request.headers
     .get("Content-Type")
     ?.split(";", 1)[0]
@@ -26,11 +50,15 @@ function mutationRequestProblem(request: Request): Response | null {
     return response({ error: "JSON content type required" }, 415);
   }
 
-  const requestOrigin = new URL(request.url).origin;
   const origin = request.headers.get("Origin");
+  const host = request.headers.get("Host")?.trim().toLowerCase();
   const fetchSite = request.headers.get("Sec-Fetch-Site")?.toLowerCase();
+  const trustedUrl = new URL(trustedOrigin);
   if (
-    (origin !== null && origin !== requestOrigin) ||
+    origin === null ||
+    headerOrigin(origin) !== trustedUrl.origin ||
+    host === undefined ||
+    host !== trustedUrl.host.toLowerCase() ||
     (fetchSite !== undefined &&
       fetchSite !== "same-origin" &&
       fetchSite !== "none")
@@ -55,11 +83,18 @@ function requiredString(value: unknown): string | null {
 export async function createArchiveJobsRoute(
   request: Request,
   getAccess: () => DataAccess = getDataAccess,
+  getTrustedOrigin: () => string = () => loadConfig().webTrustedOrigin,
 ): Promise<Response> {
   if (request.method !== "POST") {
     return response({ error: "Method not allowed" }, 405);
   }
-  const problem = mutationRequestProblem(request);
+  let trustedOrigin: string;
+  try {
+    trustedOrigin = getTrustedOrigin();
+  } catch {
+    return response({ error: "Archive Job approval is unavailable" }, 503);
+  }
+  const problem = mutationRequestProblem(request, trustedOrigin);
   if (problem) {
     return problem;
   }

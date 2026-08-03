@@ -36,10 +36,11 @@ afterEach(() => {
 
 describe("DVD archive publication", () => {
   it("runs bounded GNU dd arguments and streams byte progress", async () => {
-    const stderr = new EventEmitter();
+    const stderr = Object.assign(new EventEmitter(), { destroy: vi.fn() });
     const child = Object.assign(new EventEmitter(), {
       stderr,
       kill: vi.fn(() => true),
+      unref: vi.fn(),
     });
     const spawnProcess = vi.fn(() => child);
     const runner = createNodeDvdCopyRunner({ spawnProcess });
@@ -73,42 +74,71 @@ describe("DVD archive publication", () => {
     expect(copied).toEqual([4, 9]);
   });
 
-  it("waits for a timed-out dd child to close before rejecting", async () => {
+  it("times out without close and blocks retry until the dd child closes", async () => {
     vi.useFakeTimers();
-    const stderr = new EventEmitter();
-    const child = Object.assign(new EventEmitter(), {
-      stderr,
-      kill: vi.fn(() => true),
-    });
+    const children = Array.from({ length: 2 }, () =>
+      Object.assign(new EventEmitter(), {
+        stderr: Object.assign(new EventEmitter(), { destroy: vi.fn() }),
+        kill: vi.fn(() => true),
+        unref: vi.fn(),
+      }),
+    );
+    const spawnProcess = vi
+      .fn()
+      .mockReturnValueOnce(children[0])
+      .mockReturnValueOnce(children[1]);
     const runner = createNodeDvdCopyRunner({
-      spawnProcess: vi.fn(() => child),
+      spawnProcess,
       timeoutMs: 10,
     });
-    let settled = false;
-    const completion = runner
-      .copy({
-        devicePath: "/dev/sr0",
-        outputPath: "/media/originals/.disc.iso.rip-dvd-partial",
-        sizeBytes: 9,
-        signal: new AbortController().signal,
-        onBytesCopied: () => undefined,
-      })
-      .finally(() => {
-        settled = true;
-      });
+    const request = {
+      devicePath: "/dev/sr0",
+      outputPath: "/media/originals/.disc.iso.rip-dvd-partial",
+      sizeBytes: 9,
+      signal: new AbortController().signal,
+      onBytesCopied: () => undefined,
+    };
+    let outcome: unknown;
+    void runner.copy(request).then(
+      () => {
+        outcome = "resolved";
+      },
+      (error: unknown) => {
+        outcome = error;
+      },
+    );
+    expect(
+      runner.isActive(request.devicePath, request.outputPath),
+    ).toBe(true);
 
     await vi.advanceTimersByTimeAsync(10);
-    expect(child.kill).toHaveBeenCalledWith("SIGKILL");
-    expect(settled).toBe(false);
-    child.emit("close", null, "SIGKILL");
-    await expect(completion).rejects.toThrow("DVD archive copy timed out");
+    expect(outcome).toEqual(new Error("DVD archive copy timed out"));
+    expect(children[0]!.kill).toHaveBeenCalledWith("SIGKILL");
+    expect(children[0]!.stderr.destroy).toHaveBeenCalledOnce();
+    expect(children[0]!.unref).toHaveBeenCalledOnce();
+    await expect(runner.copy(request)).rejects.toThrow(
+      "DVD archive copy is still active",
+    );
+    expect(spawnProcess).toHaveBeenCalledOnce();
+
+    children[0]!.emit("close", null, "SIGKILL");
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(
+      runner.isActive(request.devicePath, request.outputPath),
+    ).toBe(false);
+    const retry = runner.copy(request);
+    expect(spawnProcess).toHaveBeenCalledTimes(2);
+    children[1]!.emit("close", 0, null);
+    await expect(retry).resolves.toBeUndefined();
   });
 
   it("contains progress callback failures and waits for dd to close", async () => {
-    const stderr = new EventEmitter();
+    const stderr = Object.assign(new EventEmitter(), { destroy: vi.fn() });
     const child = Object.assign(new EventEmitter(), {
       stderr,
       kill: vi.fn(() => true),
+      unref: vi.fn(),
     });
     const runner = createNodeDvdCopyRunner({
       spawnProcess: vi.fn(() => child),
@@ -147,6 +177,7 @@ describe("DVD archive publication", () => {
         writeFileSync(outputPath, content);
         onBytesCopied(content.byteLength);
       }),
+      isActive: () => false,
     };
     const verifySource = vi.fn(async () => undefined);
 
@@ -182,6 +213,7 @@ describe("DVD archive publication", () => {
         writeFileSync(outputPath, "partial evidence");
         throw new Error("dd read failed");
       }),
+      isActive: () => false,
     };
 
     await expect(
@@ -205,6 +237,60 @@ describe("DVD archive publication", () => {
     ).toBe("partial evidence");
   });
 
+  it("does not quarantine or retry a partial while its dd child is active", async () => {
+    const originalsLibraryPath = createOriginalsLibrary();
+    const root = realpathSync(originalsLibraryPath);
+    const content = Buffer.from("dvd-image");
+    const digest =
+      "e5cbeaa2965a33da9559ec142f30f4046ff91d1788a8d2f6ba22490b095f1c61";
+    const partialPath = join(root, `.${digest}.iso.rip-dvd-partial`);
+    let active = false;
+    let copyAttempts = 0;
+    const runner: DvdCopyRunner = {
+      copy: vi.fn(async ({ outputPath }) => {
+        copyAttempts += 1;
+        if (copyAttempts === 1) {
+          active = true;
+          writeFileSync(outputPath, "live partial");
+          throw new Error("DVD archive copy timed out");
+        }
+        expect(readFileSync(`${outputPath}.failed`, "utf8")).toBe(
+          "live partial",
+        );
+        writeFileSync(outputPath, content);
+      }),
+      isActive: vi.fn(() => active),
+    };
+    const options = {
+      devicePath: "/dev/sr0",
+      fingerprint: `sha256:${digest}`,
+      originalsLibraryPath,
+      runner,
+      signal: new AbortController().signal,
+      sizeBytes: content.byteLength,
+      verifySource: async () => undefined,
+      onProgress: () => undefined,
+    };
+
+    await expect(preserveDvdArchive(options)).rejects.toThrow(
+      "DVD archive copy timed out",
+    );
+    expect(readFileSync(partialPath, "utf8")).toBe("live partial");
+    expect(existsSync(`${partialPath}.failed`)).toBe(false);
+
+    await expect(preserveDvdArchive(options)).rejects.toThrow(
+      "DVD archive copy is still active",
+    );
+    expect(runner.copy).toHaveBeenCalledOnce();
+    expect(readFileSync(partialPath, "utf8")).toBe("live partial");
+
+    active = false;
+    await expect(preserveDvdArchive(options)).resolves.toMatchObject({
+      recovered: false,
+    });
+    expect(runner.copy).toHaveBeenCalledTimes(2);
+  });
+
   it("quarantines a stale partial image before retrying the copy", async () => {
     const originalsLibraryPath = createOriginalsLibrary();
     const root = realpathSync(originalsLibraryPath);
@@ -218,6 +304,7 @@ describe("DVD archive publication", () => {
         expect(readFileSync(`${outputPath}.failed`, "utf8")).toBe("stale");
         writeFileSync(outputPath, content);
       }),
+      isActive: () => false,
     };
 
     const result = await preserveDvdArchive({
@@ -245,6 +332,7 @@ describe("DVD archive publication", () => {
       copy: vi.fn(async ({ outputPath }) => {
         symlinkSync(outsidePath, outputPath);
       }),
+      isActive: () => false,
     };
 
     await expect(
@@ -270,7 +358,8 @@ describe("DVD archive publication", () => {
     const digest = "e2cddf0cd7207e4492e0e3e66befe4b818247051391a48871d2d9a07eaa9524b";
     const archivePath = join(root, `${digest}.iso`);
     writeFileSync(archivePath, "complete");
-    const runner: DvdCopyRunner = { copy: vi.fn() };
+    const runner: DvdCopyRunner = { copy: vi.fn(), isActive: () => false };
+    const sync = vi.fn(async (_path: string) => undefined);
 
     await expect(
       preserveDvdArchive({
@@ -282,9 +371,11 @@ describe("DVD archive publication", () => {
         sizeBytes: 8,
         verifySource: async () => undefined,
         onProgress: () => undefined,
+        sync,
       }),
     ).resolves.toEqual({ archivePath, recovered: true, sizeBytes: 8 });
     expect(runner.copy).not.toHaveBeenCalled();
+    expect(sync.mock.calls).toEqual([[archivePath], [root]]);
     expect(readFileSync(archivePath, "utf8")).toBe("complete");
   });
 
@@ -300,6 +391,7 @@ describe("DVD archive publication", () => {
         writeFileSync(outputPath, content);
         writeFileSync(archivePath, "other publisher");
       }),
+      isActive: () => false,
     };
 
     await expect(
@@ -330,6 +422,7 @@ describe("DVD archive publication", () => {
     const content = Buffer.from("dvd-image");
     const runner: DvdCopyRunner = {
       copy: vi.fn(async ({ outputPath }) => writeFileSync(outputPath, content)),
+      isActive: () => false,
     };
     const sync = vi
       .fn<(_path: string) => Promise<void>>()

@@ -325,6 +325,16 @@ media, and original backups in the project-scoped `rip-dvd-data`,
 points are owned by the non-root runtime user (UID/GID 1000), so the archive
 and encode workers can write their outputs without running as root.
 
+The dashboard has no authentication and Compose binds it to `127.0.0.1` by
+default. Archive approval requires both the request `Origin` and `Host` to
+match `RIP_DVD_WEB_TRUSTED_ORIGIN`, which defaults to
+`http://localhost:<RIP_DVD_WEB_PORT>`; the request URL does not establish
+authority. To expose the dashboard on a trusted LAN, explicitly set
+`RIP_DVD_WEB_BIND_ADDRESS` to the intended interface address and set
+`RIP_DVD_WEB_TRUSTED_ORIGIN` to the exact HTTP(S) origin users open, including
+its non-default port. This origin check limits cross-site mutation but is not
+access control, so do not expose the service to an untrusted network.
+
 The web root is an operations dashboard for Optical Drives, Detected Discs,
 Archive Jobs, Encode Jobs, and Original Disc Archives needing catalog review.
 It reads the shared SQLite source of truth through the data-access facade and
@@ -491,6 +501,18 @@ five-point change, while completion always stores 100% and failure stores the
 latest pending value. First-run migrations are serialized with a short-lived
 lock beside the database so simultaneous service startup cannot apply the same
 migration twice.
+
+Archive claims also carry a bounded one-minute lease. The owning worker renews
+it with the same attempt-token compare-and-set guard while copying. Each poll
+recovers at most 100 expired claims, oldest first, into visible failed jobs that
+must be explicitly retried; a stale worker cannot renew, report, fail, or
+publish that recovered attempt. A timed-out or cancelled `dd` returns control
+at its deadline, kills and detaches the child, and retains a device/output
+tombstone until the operating system reports the child closed. While that
+tombstone remains, retries are rejected and the live partial path is neither
+renamed nor quarantined. Publication syncs the copied inode and parent
+directory; recovery of an already-complete verified ISO likewise syncs the
+final file and then its parent before SQLite can record completion.
 
 DVD title and chapter coordinates in Disc Selections must be positive safe
 integers. The facade validates that contract and the SQLite migration also

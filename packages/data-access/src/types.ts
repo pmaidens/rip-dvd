@@ -32,6 +32,8 @@ export type EncodeJobId = DomainId<"EncodeJob">;
 export type ArchiveJobClaimToken = DomainId<"ArchiveJobClaim">;
 export type EncodeJobClaimToken = DomainId<"EncodeJobClaim">;
 
+export const ARCHIVE_JOB_LEASE_DURATION_MS = 60_000;
+
 export interface ServiceHealth {
   status: "ok";
   sqliteVersion: string;
@@ -342,6 +344,8 @@ export interface ArchiveJobAccess {
       fingerprint: string;
     },
   ): RunningArchiveJob | null;
+  renewClaim(claim: RunningArchiveJob): RunningArchiveJob;
+  recoverExpiredClaims(): ArchiveJob[];
   list(
     statuses?: JobStatus[],
     options?: ChronologicalListOptions,

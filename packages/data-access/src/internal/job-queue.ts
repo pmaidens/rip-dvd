@@ -67,6 +67,7 @@ export interface JobQueueAdapter<
     update: AttemptUpdate,
     completion?: Completion,
   ): Job | undefined;
+  isAttemptCurrent?(current: Job, claim: Running, timestamp: Date): boolean;
   requeue(
     id: Id,
     expectedStatus: "failed" | "completed",
@@ -160,9 +161,11 @@ export function createJobQueueController<
 
   function requireActiveAttempt(claim: Running): Job {
     const current = requireRecord(claim.id);
+    const timestamp = now();
     if (
       current.status !== "running" ||
-      current.claimToken !== claim.claimToken
+      current.claimToken !== claim.claimToken ||
+      (adapter.isAttemptCurrent?.(current, claim, timestamp) ?? true) === false
     ) {
       throw new StaleJobAttemptError(adapter.recordType, claim.id);
     }

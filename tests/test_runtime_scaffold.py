@@ -1,5 +1,7 @@
+import json
 import os
 import pathlib
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -64,6 +66,46 @@ class RuntimeScaffoldTests(unittest.TestCase):
             "RIP_DVD_ORIGINALS_LIBRARY_PATH",
         ):
             self.assertNotIn(f"{variable}=", example)
+
+    def test_web_defaults_to_a_loopback_only_trusted_origin(self) -> None:
+        compose = (ROOT / "compose.yaml").read_text()
+        example = (ROOT / ".env.example").read_text()
+
+        self.assertIn(
+            '"${RIP_DVD_WEB_BIND_ADDRESS:-127.0.0.1}:${RIP_DVD_WEB_PORT:-3000}:3000"',
+            compose,
+        )
+        self.assertIn(
+            "RIP_DVD_WEB_TRUSTED_ORIGIN: ${RIP_DVD_WEB_TRUSTED_ORIGIN:-http://localhost:${RIP_DVD_WEB_PORT:-3000}}",
+            compose,
+        )
+        self.assertIn("RIP_DVD_WEB_BIND_ADDRESS=127.0.0.1", example)
+        self.assertIn(
+            "# RIP_DVD_WEB_TRUSTED_ORIGIN=http://dvd-host.example:3000",
+            example,
+        )
+
+    @unittest.skipUnless(shutil.which("docker"), "Docker Compose is unavailable")
+    def test_web_trusted_origin_follows_the_published_port(self) -> None:
+        environment = {**os.environ, "RIP_DVD_WEB_PORT": "4321"}
+        result = subprocess.run(
+            ["docker", "compose", "config", "--format", "json"],
+            cwd=ROOT,
+            capture_output=True,
+            check=False,
+            env=environment,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = json.loads(result.stdout)
+        web = config["services"]["web"]
+        self.assertEqual(
+            web["environment"]["RIP_DVD_WEB_TRUSTED_ORIGIN"],
+            "http://localhost:4321",
+        )
+        self.assertEqual(web["ports"][0]["host_ip"], "127.0.0.1")
+        self.assertEqual(web["ports"][0]["published"], "4321")
 
     def test_archive_worker_receives_only_the_configured_optical_device(self) -> None:
         compose = (ROOT / "compose.yaml").read_text()
