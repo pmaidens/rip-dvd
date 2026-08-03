@@ -40,6 +40,25 @@ describe("data-access domain identifiers", () => {
     expectTypeOf<LegacySidecarDataAccess>().toHaveProperty("legacySidecars");
   });
 
+  it("keeps direct archive provenance publication migration-only", () => {
+    expectTypeOf<LegacySidecarDataAccess["catalog"]>()
+      .toHaveProperty("createOriginalDiscArchive");
+
+    if (false) {
+      const access = undefined as unknown as DataAccess;
+      const discId = undefined as unknown as DetectedDiscId;
+      // @ts-expect-error Standard callers must publish through a claimed Archive Job.
+      access.catalog.createOriginalDiscArchive({
+        detectedDiscId: discId,
+        discKind: "dvd",
+        archiveFormat: "iso",
+        archivePath: "/media/originals/unverified.iso",
+        fingerprint: `sha256:${"a".repeat(64)}`,
+        sizeBytes: 1,
+      });
+    }
+  });
+
   it("keeps aggregate and foreign-key identifiers opaque", () => {
     expectTypeOf<OpticalDriveId>().not.toEqualTypeOf<DetectedDiscId>();
     expectTypeOf<DetectedDiscId>().not.toEqualTypeOf<OriginalDiscArchiveId>();

@@ -1,4 +1,11 @@
-import type { DataAccess } from "./types.js";
+import type {
+  ArchiveFormat,
+  CatalogAccess,
+  DataAccess,
+  DetectedDiscId,
+  DiscKind,
+  OriginalDiscArchive,
+} from "./types.js";
 
 export type LegacySidecarImportIssueCode =
   | "corrupt_sidecar"
@@ -38,6 +45,18 @@ export interface LegacySidecarAccess {
   }): LegacySidecarImportReport;
 }
 
-export interface LegacySidecarDataAccess extends DataAccess {
+export interface LegacySidecarCatalogAccess extends CatalogAccess {
+  createOriginalDiscArchive(input: {
+    detectedDiscId: DetectedDiscId;
+    discKind: DiscKind;
+    archiveFormat: ArchiveFormat;
+    archivePath: string;
+    fingerprint: string;
+    sizeBytes?: number;
+  }): OriginalDiscArchive;
+}
+
+export interface LegacySidecarDataAccess extends Omit<DataAccess, "catalog"> {
+  readonly catalog: LegacySidecarCatalogAccess;
   readonly legacySidecars: LegacySidecarAccess;
 }

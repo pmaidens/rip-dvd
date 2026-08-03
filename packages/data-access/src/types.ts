@@ -275,14 +275,6 @@ export interface CatalogAccess {
     id: DetectedDiscId,
     status: DetectedDiscStatus,
   ): DetectedDisc;
-  createOriginalDiscArchive(input: {
-    detectedDiscId: DetectedDiscId;
-    discKind: DiscKind;
-    archiveFormat: ArchiveFormat;
-    archivePath: string;
-    fingerprint: string;
-    sizeBytes?: number;
-  }): OriginalDiscArchive;
   listOriginalDiscArchives(options?: {
     ids?: readonly OriginalDiscArchiveId[];
     limit?: number;

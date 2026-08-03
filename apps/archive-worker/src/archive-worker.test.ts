@@ -13,9 +13,9 @@ import { join } from "node:path";
 
 import {
   ARCHIVE_JOB_LEASE_DURATION_MS,
-  createDataAccess,
   type DiscoveredOpticalDrive,
 } from "@rip-dvd/data-access";
+import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -34,7 +34,9 @@ const temporaryDirectories: string[] = [];
 function openTestDataAccess() {
   const directory = mkdtempSync(join(tmpdir(), "rip-dvd-archive-worker-"));
   temporaryDirectories.push(directory);
-  return createDataAccess({ databasePath: join(directory, "rip-dvd.sqlite") });
+  return createLegacySidecarDataAccess({
+    databasePath: join(directory, "rip-dvd.sqlite"),
+  });
 }
 
 function stableDeviceBinding() {

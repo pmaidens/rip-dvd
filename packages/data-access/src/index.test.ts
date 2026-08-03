@@ -23,6 +23,7 @@ import {
 } from "./index.js";
 import type { DetectedDiscId, DiscKind } from "./index.js";
 import type { EncodingProfileId } from "./index.js";
+import { createLegacySidecarDataAccess } from "./legacy-sidecars.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -196,7 +197,7 @@ function createTestMigrationsFolder(): string {
 }
 
 function openTestDatabase(databasePath = createTestDatabasePath()) {
-  return createDataAccess({ databasePath });
+  return createLegacySidecarDataAccess({ databasePath });
 }
 
 afterEach(() => {
@@ -401,7 +402,7 @@ describe("data-access facade", () => {
   });
 
   it("does not expose migration-only legacy sidecar state", () => {
-    const access = openTestDatabase();
+    const access = createDataAccess({ databasePath: createTestDatabasePath() });
 
     expect(Object.keys(access)).not.toContain("legacySidecars");
     expect("legacySidecars" in access).toBe(false);
@@ -2406,6 +2407,32 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(access.archiveJobs.list()).toHaveLength(1);
 
     sqlite.close();
+    access.close();
+  });
+
+  it("does not expose direct archive publication on the standard catalog facade", () => {
+    const access = createDataAccess({ databasePath: createTestDatabasePath() });
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: `sha256:${"a".repeat(64)}`,
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+
+    expect(
+      Reflect.has(access.catalog, "createOriginalDiscArchive"),
+    ).toBe(false);
+    expect(access.catalog.listDetectedDiscs(["approved"]))
+      .toEqual([expect.objectContaining({ id: disc.id })]);
+    expect(access.archiveJobs.list(["queued"]))
+      .toEqual([expect.objectContaining({ detectedDiscId: disc.id })]);
+    expect(access.catalog.listOriginalDiscArchives()).toEqual([]);
     access.close();
   });
 

@@ -11,6 +11,7 @@ import type { LegacySidecarDataAccess } from "./legacy-sidecar-types.js";
 
 export type {
   LegacySidecarAccess,
+  LegacySidecarCatalogAccess,
   LegacySidecarDataAccess,
   LegacySidecarImportIssue,
   LegacySidecarImportIssueCode,

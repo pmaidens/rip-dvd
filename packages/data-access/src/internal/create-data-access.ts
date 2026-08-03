@@ -2564,8 +2564,12 @@ export function createDataAccessInternal(
   };
 
   if (!legacySidecarMigration) {
+    const {
+      createOriginalDiscArchive: _migrationOnlyArchiveMutation,
+      ...standardCatalog
+    } = access.catalog;
     const { legacySidecars: _migrationOnlyAccess, ...standardAccess } = access;
-    return standardAccess;
+    return { ...standardAccess, catalog: standardCatalog };
   }
   return access;
 }

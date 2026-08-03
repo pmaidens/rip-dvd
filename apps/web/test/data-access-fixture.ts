@@ -3,10 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
-  createDataAccess,
   type ConsistentReadAccess,
   type DataAccess,
 } from "@rip-dvd/data-access";
+import {
+  createLegacySidecarDataAccess,
+  type LegacySidecarDataAccess,
+} from "@rip-dvd/data-access/legacy-sidecars";
 import { afterEach } from "vitest";
 
 type SnapshotOverrides = {
@@ -48,11 +51,11 @@ export function withSnapshotOverrides(
 }
 
 export function useDataAccessFixture(): {
-  create(): DataAccess;
-  createPair(): [DataAccess, DataAccess];
+  create(): LegacySidecarDataAccess;
+  createPair(): [LegacySidecarDataAccess, LegacySidecarDataAccess];
 } {
   const temporaryDirectories: string[] = [];
-  const openDataAccess: DataAccess[] = [];
+  const openDataAccess: LegacySidecarDataAccess[] = [];
 
   afterEach(() => {
     for (const access of openDataAccess.splice(0)) {
@@ -67,7 +70,7 @@ export function useDataAccessFixture(): {
     create() {
       const directory = mkdtempSync(join(tmpdir(), "rip-dvd-dashboard-"));
       temporaryDirectories.push(directory);
-      const access = createDataAccess({
+      const access = createLegacySidecarDataAccess({
         databasePath: join(directory, "test.sqlite"),
       });
       openDataAccess.push(access);
@@ -77,9 +80,9 @@ export function useDataAccessFixture(): {
       const directory = mkdtempSync(join(tmpdir(), "rip-dvd-dashboard-"));
       temporaryDirectories.push(directory);
       const databasePath = join(directory, "test.sqlite");
-      const pair: [DataAccess, DataAccess] = [
-        createDataAccess({ databasePath }),
-        createDataAccess({ databasePath }),
+      const pair: [LegacySidecarDataAccess, LegacySidecarDataAccess] = [
+        createLegacySidecarDataAccess({ databasePath }),
+        createLegacySidecarDataAccess({ databasePath }),
       ];
       openDataAccess.push(...pair);
       return pair;
