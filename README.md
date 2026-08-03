@@ -1,6 +1,10 @@
 # rip-dvd
 
-`rip-dvd` is a small command-line assistant for archiving DVDs and encoding DVD titles into a Jellyfin-style movie library. It first saves a full-disc ISO as the long-term original backup, records encode jobs in a JSON sidecar, and then encodes from that backup later with `rip-dvd encode`.
+`rip-dvd` is a small command-line assistant for archiving DVDs and encoding DVD
+titles into a Jellyfin-style movie library. The legacy workflow saves a
+full-disc ISO, records encode jobs in a JSON sidecar, and processes them with
+`rip-dvd encode` until the library is migrated to the SQLite catalog and
+workers.
 
 The project is intentionally plain Python with no third-party Python package dependencies. The heavy work is done by system tools such as HandBrake and ffmpeg.
 
@@ -143,7 +147,12 @@ Shows archived discs and whether each queued title is pending or already encoded
 rip-dvd encode
 ```
 
-Finds pending jobs from `.rip-dvd.json` sidecars under the originals library and encodes any job whose final output file does not exist yet. Encoding is written as Matroska to a hidden work file without a media extension, then atomically published at the final `.mkv` path only after HandBrake succeeds. Interrupted encodes therefore remain pending and are retried, and Jellyfin does not see an in-progress `.mkv` filename. The original ISO is never deleted.
+Before a library is migrated to SQLite, this finds pending jobs from
+`.rip-dvd.json` sidecars and encodes any job whose final output does not exist.
+Encoding is written as Matroska to a hidden work file without a media extension,
+then atomically published at the final `.mkv` path only after HandBrake succeeds.
+Interrupted encodes therefore remain pending and are retried, and Jellyfin does
+not see an in-progress `.mkv` filename. The original ISO is never deleted.
 
 By default, `encode` lowers CPU and I/O priority when `nice` and `ionice` are available:
 
@@ -167,9 +176,60 @@ The adjacent sidecar records the queued encode jobs:
 /srv/media/DVD Originals/Movie Title (2001)/Movie Title (2001).rip-dvd.json
 ```
 
-The sidecar is the durable queue. It is written atomically and records a fingerprint derived from the disc label and complete DVD title map. If an ISO already exists at the intended path, `rip-dvd` reuses it only when that fingerprint and the recorded source path match the inserted disc; otherwise it stops without changing the backup or queue.
+Before SQLite migration, the sidecar is the durable queue. It is written
+atomically and records a fingerprint derived from the disc label and complete
+DVD title map. If an ISO already exists at the intended path, `rip-dvd` reuses
+it only when that fingerprint and the recorded source path match the inserted
+disc; otherwise it stops without changing the backup or queue.
 
 A job is pending when its source ISO exists and its final output `.mkv` does not. A job is complete when the final output exists. Failed or interrupted partial files are moved aside with a `.failed` suffix before retrying. The ISO remains as the long-term original backup either way.
+
+### Import legacy sidecars into SQLite
+
+After configuring the TypeScript application, import an existing originals
+library once with:
+
+```bash
+pnpm import:legacy-sidecars -- \
+  --database /srv/rip-dvd/rip-dvd.sqlite \
+  --originals-library "/srv/media/DVD Originals"
+```
+
+Historical schema-2/3 cutover markers do not contain immutable archive and
+queue-state snapshots. Their ordinary retry path therefore fails closed. After
+verifying that the bounded surviving sidecars, output files, and ISO objects
+still describe the intended cutover state, an operator can explicitly recover
+them with `--recover-historical-cutover`; without that flag the importer never
+reinterprets their mutable filesystem state.
+
+The command also accepts `RIP_DVD_DATABASE_PATH` and
+`RIP_DVD_ORIGINALS_LIBRARY_PATH`, and `--json` emits a machine-readable report.
+It recursively reads `.rip-dvd.json` files, imports valid Original Disc
+Archives, Disc Selections, Media Items, Encoding Profiles, and Encode Jobs, and
+continues past corrupt sidecars, invalid jobs, missing archives, and duplicate
+records. Encode Job completion is inferred from the final output file only when
+the job is first imported. Re-running the command is safe and preserves every
+existing SQLite Encode Job status, output, priority, progress, and error.
+
+Before publishing records from any parseable sidecar, the command atomically
+writes and synchronizes a `.rip-dvd-sqlite-catalog` cutover marker at the
+originals-library root. If marker publication fails, no imported SQLite records
+are committed. If the process stops after publication, rerunning the command
+resumes the idempotent import while the legacy queue remains inactive. The
+marker also records the immutable legacy-job configuration captured at cutover,
+so a later retry reports sidecar conflicts without confusing them with an
+authoritative SQLite requeue. A legacy schema-1 marker that lacks that snapshot
+is preserved, rather than upgraded, whenever SQLite cannot corroborate every
+job; the report then requires explicit operator recovery instead of guessing
+whether the sidecar changed after cutover. The importer and legacy
+archive/encode commands share kernel-held library-scoped locks: durable cutover
+intent prevents new legacy batches from starting, then waits without a
+batch-duration timeout for in-flight work to drain. Locks are released by the
+operating system after a process crash and do not rely on PIDs or mutable owner
+paths. The command never writes the sidecars themselves. The marker makes SQLite
+the enforceable queue authority: legacy `interactive`, `rip`, `title`, `extras`,
+`queue`, and `encode` commands refuse that library, so use the SQLite catalog
+and workers instead.
 
 ### Join Part Files
 

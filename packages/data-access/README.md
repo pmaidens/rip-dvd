@@ -4,7 +4,10 @@ This package is the only runtime persistence boundary for rip-dvd. Its public
 interface speaks in Optical Drives, Detected Discs, Original Disc Archives,
 Media Items, Disc Selections, Encoding Profiles, Archive Jobs, and Encode Jobs.
 Drizzle tables, SQL, SQLite connections, and transaction objects remain
-private. Aggregate identifiers are opaque domain types, so callers cannot
+private. The migration-only `@rip-dvd/data-access/legacy-sidecars` entrypoint is
+the sole format-named exception; it converts legacy persistence into those
+domain records and does not expose Drizzle or SQLite. Aggregate identifiers are
+opaque domain types, so callers cannot
 cross-wire, for example, a Media Item ID into an Original Disc Archive field.
 
 `createDataAccess()` opens the configured local SQLite file, configures WAL,
@@ -93,6 +96,44 @@ use short internal transactions. Queue claims use one atomic
 `UPDATE ... RETURNING` statement and return only after that statement has
 committed. Workers must start external programs only after `claimNext()`
 returns; process execution never belongs in a database transaction.
+
+## Legacy sidecar import
+
+`legacySidecars.importLibrary()` is the idempotent migration boundary for
+existing `.rip-dvd.json` files. It scans an originals library once, validates
+schema-one and schema-two sidecars, and writes each valid sidecar to SQLite in
+a short transaction. Valid jobs in a partially invalid sidecar still import;
+corrupt sidecars, invalid jobs, missing archives, and duplicates are returned
+in a structured report. Completion is inferred from the final output file at
+import time. Relative recorded paths use the legacy CLI's invocation-directory
+semantics; an existing sidecar-relative path is accepted as a compatibility
+candidate, but two existing candidates are reported as ambiguous. A missing or
+unreadable originals library is an input error rather than an empty successful
+import.
+
+Schema-two `created_at` and `updated_at` values provide the historical record
+dates. When they are absent, the archive file modification time is the fallback;
+a completed Encode Job uses its output file modification time. Re-import never
+replaces an existing SQLite Encode Job's status, output, priority, progress, or
+error, including an intentional retry.
+
+Before committing any imported records, the migration-only entrypoint
+atomically writes and synchronizes a `.rip-dvd-sqlite-catalog` marker at the
+originals-library root. A marker failure exposes no imported SQLite state; a
+restart after marker publication safely resumes the idempotent import with the
+legacy queue already inactive. The marker records the immutable logical-job
+configuration captured at cutover, allowing restart/retry to report later
+sidecar conflicts while preserving authoritative SQLite requeues. A shared
+library-scoped lease serializes discovery, marker publication, and import with
+in-flight legacy archive/encode batches. It never writes the sidecars
+themselves. All legacy archive and queue commands refuse a marked library,
+making SQLite the enforceable catalog and queue authority. Recursive traversal,
+the lease, and the cutover writer live behind the
+`@rip-dvd/data-access/legacy-sidecars` entrypoint and are excluded from the web
+runtime graph.
+
+The repository-level `pnpm import:legacy-sidecars -- ...` command invokes this
+facade operation for users and automation.
 
 Generate and review schema changes with:
 
