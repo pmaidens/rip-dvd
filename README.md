@@ -490,6 +490,12 @@ marks every observation archived, and records terminal job success in one
 transaction. Later rediscovery matches archived
 fingerprints across Optical Drives, marks the new observation archived, and
 rejects a contradictory Disc Kind.
+Legacy DVD imports retain their historical fingerprints and record the current
+raw-disc content identity as a compatibility alias. An upgraded catalog whose
+alias table has not yet been populated fails current-identity approval and
+claim closed. A size-bearing detection or publication reconciles legacy archive
+files in bounded batches, prioritizing matching sizes; publication rechecks the
+barrier transactionally before it can create new provenance.
 A worker must let the claim commit and only then start `dd`, `lsdvd`,
 `HandBrakeCLI`, or any other external process. External process execution must
 never occur inside a database transaction.
@@ -510,7 +516,11 @@ publish that recovered attempt. A timed-out or cancelled `dd` returns control
 at its deadline, kills and detaches the child, and retains a device/output
 tombstone until the operating system reports the child closed. While that
 tombstone remains, retries are rejected and the live partial path is neither
-renamed nor quarantined. Publication syncs the copied inode and parent
+renamed nor quarantined. Across direct worker replacement, the worker also
+fails closed while a same-service-UID process still holds the configured device
+inode, and each new `dd` holds a nonblocking exclusive lock on that opened
+device inode. Device ownership therefore remains independent of the archive
+fingerprint and originals-library root. Publication syncs the copied inode and parent
 directory; recovery of an already-complete verified ISO likewise syncs the
 final file and then its parent before SQLite can record completion.
 

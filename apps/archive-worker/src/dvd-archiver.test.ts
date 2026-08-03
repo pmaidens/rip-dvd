@@ -68,13 +68,14 @@ async function startOrphanedWriter(
   lockPath: string,
   partialPath: string,
   readyPath: string,
+  devicePath?: string,
 ): Promise<number> {
   const fixturePath = fileURLToPath(
     new URL("../test/orphaned-dvd-writer.mjs", import.meta.url),
   );
   const child = spawn(
     process.execPath,
-    [fixturePath, lockPath, partialPath, readyPath],
+    [fixturePath, lockPath, partialPath, readyPath, devicePath ?? "-"],
     { stdio: ["ignore", "pipe", "pipe"] },
   );
   const stdout: Buffer[] = [];
@@ -111,6 +112,56 @@ async function stopOrphanedWriter(
 
 describe("DVD archive publication", () => {
   it.runIf(supportsLinuxWriterOwnership)(
+    "excludes a pre-fix writer for another fingerprint and originals root",
+    async () => {
+      const previousOriginalsLibraryPath = createOriginalsLibrary();
+      const replacementOriginalsLibraryPath = createOriginalsLibrary();
+      const previousRoot = realpathSync(previousOriginalsLibraryPath);
+      const replacementRoot = realpathSync(replacementOriginalsLibraryPath);
+      const devicePath = "/dev/zero";
+      const previousDigest = "a".repeat(64);
+      const replacementDigest =
+        "d0b8829a9f2a9c78882fb5d3aff464054e5a8a82978ecc2a922767782c739f7f";
+      const previousPartialPath = join(
+        previousRoot,
+        `.${previousDigest}.iso.rip-dvd-partial`,
+      );
+      const writerPid = await startOrphanedWriter(
+        "-",
+        previousPartialPath,
+        join(previousRoot, ".pre-fix-writer-ready"),
+        devicePath,
+      );
+      const options = {
+        devicePath,
+        fingerprint: `sha256:${replacementDigest}`,
+        originalsLibraryPath: replacementOriginalsLibraryPath,
+        runner: createNodeDvdCopyRunner({ timeoutMs: 1_000 }),
+        signal: new AbortController().signal,
+        sizeBytes: 9,
+        verifySource: async () => undefined,
+        onProgress: () => undefined,
+      };
+
+      await expect(preserveDvdArchive(options)).rejects.toThrow(
+        "DVD archive device is still active",
+      );
+      expect(readFileSync(previousPartialPath, "utf8")).toBe("live partial");
+      expect(readdirSync(replacementRoot)).toEqual([]);
+
+      await stopOrphanedWriter(writerPid, () => {
+        const descriptorPath = `/proc/${writerPid}/fd`;
+        return (
+          !existsSync(descriptorPath) || readdirSync(descriptorPath).length === 0
+        );
+      });
+      await expect(preserveDvdArchive(options)).resolves.toMatchObject({
+        recovered: false,
+      });
+    },
+  );
+
+  it.runIf(supportsLinuxWriterOwnership)(
     "keeps an orphaned writer excluded across a direct worker replacement",
     async () => {
       const originalsLibraryPath = createOriginalsLibrary();
@@ -131,6 +182,7 @@ describe("DVD archive publication", () => {
         lockPath,
         partialPath,
         readyPath,
+        devicePath,
       );
       const options = {
         devicePath,
@@ -144,7 +196,7 @@ describe("DVD archive publication", () => {
       };
 
       await expect(preserveDvdArchive(options)).rejects.toThrow(
-        "DVD archive copy is still active",
+        "DVD archive device is still active",
       );
       expect(readFileSync(partialPath, "utf8")).toBe("live partial");
       expect(existsSync(`${partialPath}.failed`)).toBe(false);
@@ -243,7 +295,7 @@ describe("DVD archive publication", () => {
     const copied: number[] = [];
 
     const completion = runner.copy({
-      devicePath: "/dev/sr0",
+      devicePath: "/dev/zero",
       outputPath,
       sizeBytes: 9,
       signal: new AbortController().signal,
@@ -263,7 +315,7 @@ describe("DVD archive publication", () => {
         "75",
         "/proc/self/fd/3",
         "dd",
-        "if=/dev/sr0",
+        "if=/dev/zero",
         `of=${outputPath}`,
         "bs=4M",
         "iflag=fullblock,count_bytes",
@@ -299,7 +351,7 @@ describe("DVD archive publication", () => {
       timeoutMs: 10,
     });
     const request = {
-      devicePath: "/dev/sr0",
+      devicePath: "/dev/zero",
       outputPath: join(originalsLibraryPath, ".disc.iso.rip-dvd-partial"),
       sizeBytes: 9,
       signal: new AbortController().signal,
@@ -354,7 +406,7 @@ describe("DVD archive publication", () => {
     let settled = false;
     const completion = runner
       .copy({
-        devicePath: "/dev/sr0",
+        devicePath: "/dev/zero",
         outputPath: join(originalsLibraryPath, ".disc.iso.rip-dvd-partial"),
         sizeBytes: 9,
         signal: new AbortController().signal,

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
+  type Stats,
   closeSync,
   constants as fsConstants,
   createReadStream,
@@ -75,35 +76,22 @@ type SpawnDvdCopyProcess = (
   },
 ) => DvdCopyChildProcess;
 
-function openDeviceLock(devicePath: string, outputPath: string): number {
-  const lockDigest = createHash("sha256").update(devicePath).digest("hex");
-  const lockPath = join(
-    dirname(outputPath),
-    `.rip-dvd-device-${lockDigest}.lock`,
-  );
-  if (
-    dirname(lockPath) !== dirname(outputPath) ||
-    Buffer.byteLength(lockPath) > MAX_ARCHIVE_PATH_BYTES
-  ) {
-    throw new Error("DVD archive device lock path is unsafe");
-  }
+function openDeviceLock(devicePath: string): number {
   const descriptor = openSync(
-    lockPath,
-    fsConstants.O_CREAT |
-      fsConstants.O_RDWR |
+    devicePath,
+    fsConstants.O_RDONLY |
+      fsConstants.O_NONBLOCK |
       fsConstants.O_NOFOLLOW,
-    0o600,
   );
   try {
     const opened = fstatSync(descriptor);
-    const linked = lstatSync(lockPath);
+    const linked = lstatSync(devicePath);
     if (
-      !opened.isFile() ||
-      !linked.isFile() ||
+      (!opened.isBlockDevice() && !opened.isCharacterDevice()) ||
+      (!linked.isBlockDevice() && !linked.isCharacterDevice()) ||
       linked.isSymbolicLink() ||
       opened.dev !== linked.dev ||
-      opened.ino !== linked.ino ||
-      linked.nlink !== 1
+      opened.ino !== linked.ino
     ) {
       throw new Error("DVD archive device lock is unsafe");
     }
@@ -137,10 +125,7 @@ export function createNodeDvdCopyRunner({
       throw new Error("DVD archive copy is still active");
     },
     start(request): ActiveBoundedProcess<void> {
-      const lockDescriptor = openDeviceLock(
-        request.devicePath,
-        request.outputPath,
-      );
+      const lockDescriptor = openDeviceLock(request.devicePath);
       let child: DvdCopyChildProcess;
       try {
         child = spawnProcess(
@@ -262,7 +247,7 @@ export function createNodeDvdCopyRunner({
           return;
         }
         if (code === FLOCK_CONFLICT_EXIT_CODE) {
-          rejectOperation(new Error("DVD archive copy is still active"));
+          rejectOperation(new Error("DVD archive device is still active"));
           return;
         }
         try {
@@ -290,6 +275,7 @@ export function createNodeDvdCopyRunner({
   return {
     copy(request) {
       const safeDevicePath = requireSafeOpticalDevicePath(request.devicePath);
+      requireDeviceInactive(safeDevicePath);
       return coordinator.run(copyKey(safeDevicePath, request.outputPath), request, {
         signal: request.signal,
         timeoutError: "DVD archive copy timed out",
@@ -308,6 +294,105 @@ function isVanishedProcEntry(error: unknown): boolean {
   return (error as NodeJS.ErrnoException).code === "ENOENT";
 }
 
+function requireSameOwnerInodeInactive(
+  target: Stats,
+  ownerUid: number,
+  activeError: string,
+  ambiguousError: string,
+): void {
+  let processDirectory;
+  try {
+    processDirectory = opendirSync("/proc");
+  } catch {
+    throw new Error(ambiguousError);
+  }
+
+  let processCount = 0;
+  let descriptorCount = 0;
+  try {
+    let processEntry;
+    while ((processEntry = processDirectory.readSync()) !== null) {
+      if (!processEntry.isDirectory() || !/^\d+$/.test(processEntry.name)) {
+        continue;
+      }
+      processCount += 1;
+      if (processCount > MAX_PROC_ENTRIES) {
+        throw new Error(ambiguousError);
+      }
+      let processMetadata;
+      try {
+        processMetadata = statSync(`/proc/${processEntry.name}`);
+      } catch (error) {
+        if (isVanishedProcEntry(error)) {
+          continue;
+        }
+        throw new Error(ambiguousError);
+      }
+      if (processMetadata.uid !== ownerUid) {
+        continue;
+      }
+      let descriptorDirectory;
+      try {
+        descriptorDirectory = opendirSync(`/proc/${processEntry.name}/fd`);
+      } catch (error) {
+        if (isVanishedProcEntry(error)) {
+          continue;
+        }
+        throw new Error(ambiguousError);
+      }
+      try {
+        let descriptorEntry;
+        while ((descriptorEntry = descriptorDirectory.readSync()) !== null) {
+          descriptorCount += 1;
+          if (descriptorCount > MAX_PROC_FILE_DESCRIPTORS) {
+            throw new Error(ambiguousError);
+          }
+          try {
+            const opened = statSync(
+              `/proc/${processEntry.name}/fd/${descriptorEntry.name}`,
+            );
+            if (opened.dev === target.dev && opened.ino === target.ino) {
+              throw new Error(activeError);
+            }
+          } catch (error) {
+            if (isVanishedProcEntry(error)) {
+              continue;
+            }
+            if (
+              error instanceof Error &&
+              error.message === activeError
+            ) {
+              throw error;
+            }
+            throw new Error(ambiguousError);
+          }
+        }
+      } finally {
+        descriptorDirectory.closeSync();
+      }
+    }
+  } finally {
+    processDirectory.closeSync();
+  }
+}
+
+function requireDeviceInactive(devicePath: string): void {
+  const device = lstatSync(devicePath);
+  if (
+    device.isSymbolicLink() ||
+    (!device.isBlockDevice() && !device.isCharacterDevice()) ||
+    process.geteuid === undefined
+  ) {
+    throw new Error("DVD archive device path is unsafe");
+  }
+  requireSameOwnerInodeInactive(
+    device,
+    process.geteuid(),
+    "DVD archive device is still active",
+    "Could not prove the DVD archive device is inactive",
+  );
+}
+
 function requireLegacyPartialInactive(partialPath: string): void {
   let partial;
   try {
@@ -321,93 +406,12 @@ function requireLegacyPartialInactive(partialPath: string): void {
   if (!partial.isFile() || partial.isSymbolicLink()) {
     throw new Error("Legacy DVD archive partial path is unsafe");
   }
-
-  let processDirectory;
-  try {
-    processDirectory = opendirSync("/proc");
-  } catch {
-    throw new Error(
-      "Could not prove the legacy DVD archive partial is inactive",
-    );
-  }
-
-  let processCount = 0;
-  let descriptorCount = 0;
-  try {
-    let processEntry;
-    while ((processEntry = processDirectory.readSync()) !== null) {
-      if (!processEntry.isDirectory() || !/^\d+$/.test(processEntry.name)) {
-        continue;
-      }
-      processCount += 1;
-      if (processCount > MAX_PROC_ENTRIES) {
-        throw new Error(
-          "Could not prove the legacy DVD archive partial is inactive",
-        );
-      }
-      let processMetadata;
-      try {
-        processMetadata = statSync(`/proc/${processEntry.name}`);
-      } catch (error) {
-        if (isVanishedProcEntry(error)) {
-          continue;
-        }
-        throw new Error(
-          "Could not prove the legacy DVD archive partial is inactive",
-        );
-      }
-      if (processMetadata.uid !== partial.uid) {
-        continue;
-      }
-      let descriptorDirectory;
-      try {
-        descriptorDirectory = opendirSync(`/proc/${processEntry.name}/fd`);
-      } catch (error) {
-        if (isVanishedProcEntry(error)) {
-          continue;
-        }
-        throw new Error(
-          "Could not prove the legacy DVD archive partial is inactive",
-        );
-      }
-      try {
-        let descriptorEntry;
-        while ((descriptorEntry = descriptorDirectory.readSync()) !== null) {
-          descriptorCount += 1;
-          if (descriptorCount > MAX_PROC_FILE_DESCRIPTORS) {
-            throw new Error(
-              "Could not prove the legacy DVD archive partial is inactive",
-            );
-          }
-          try {
-            const opened = statSync(
-              `/proc/${processEntry.name}/fd/${descriptorEntry.name}`,
-            );
-            if (opened.dev === partial.dev && opened.ino === partial.ino) {
-              throw new Error("DVD archive copy is still active");
-            }
-          } catch (error) {
-            if (isVanishedProcEntry(error)) {
-              continue;
-            }
-            if (
-              error instanceof Error &&
-              error.message === "DVD archive copy is still active"
-            ) {
-              throw error;
-            }
-            throw new Error(
-              "Could not prove the legacy DVD archive partial is inactive",
-            );
-          }
-        }
-      } finally {
-        descriptorDirectory.closeSync();
-      }
-    }
-  } finally {
-    processDirectory.closeSync();
-  }
+  requireSameOwnerInodeInactive(
+    partial,
+    partial.uid,
+    "DVD archive copy is still active",
+    "Could not prove the legacy DVD archive partial is inactive",
+  );
 }
 
 export const nodeDvdCopyRunner = createNodeDvdCopyRunner();

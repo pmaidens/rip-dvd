@@ -234,6 +234,33 @@ function queuedArchiveJobsForFingerprint(fingerprint: string) {
     )`;
 }
 
+const archiveUsesCurrentDvdContentId = sql<boolean>`
+  length(${originalDiscArchives.fingerprint}) = 71
+  and substr(${originalDiscArchives.fingerprint}, 1, 7) = 'sha256:'
+  and substr(${originalDiscArchives.fingerprint}, 8) not glob '*[^0-9a-f]*'
+`;
+
+const detectedDiscUsesCurrentDvdContentId = sql<boolean>`
+  length(${detectedDiscs.fingerprint}) = 71
+  and substr(${detectedDiscs.fingerprint}, 1, 7) = 'sha256:'
+  and substr(${detectedDiscs.fingerprint}, 8) not glob '*[^0-9a-f]*'
+`;
+
+const unresolvedLegacyDvdArchiveIdentity = and(
+  eq(originalDiscArchives.discKind, "dvd"),
+  gt(originalDiscArchives.sizeBytes, 0),
+  lte(
+    originalDiscArchives.sizeBytes,
+    LEGACY_ARCHIVE_RECONCILIATION_BYTES,
+  ),
+  sql`not (${archiveUsesCurrentDvdContentId})`,
+  sql<boolean>`not exists (
+      select 1
+      from ${originalDiscArchiveContentIds}
+      where ${originalDiscArchiveContentIds.originalDiscArchiveId} = ${originalDiscArchives.id}
+    )`,
+);
+
 function toDiscSelection(
   row: typeof discSelections.$inferSelect,
 ): DiscSelection {
@@ -439,6 +466,33 @@ export function createDataAccessInternal(
       .get();
   }
 
+  function hasUnresolvedLegacyDvdArchiveIdentity(
+    querySource: Pick<typeof database, "select"> = database,
+  ): boolean {
+    return querySource
+      .select({ id: originalDiscArchives.id })
+      .from(originalDiscArchives)
+      .where(unresolvedLegacyDvdArchiveIdentity)
+      .limit(1)
+      .get() !== undefined;
+  }
+
+  function requireLegacyDvdArchiveIdentitiesResolved(
+    discKind: (typeof detectedDiscs.$inferSelect)["discKind"],
+    fingerprint: string,
+    querySource: Pick<typeof database, "select"> = database,
+  ): void {
+    if (
+      discKind === "dvd" &&
+      isDvdContentId(fingerprint) &&
+      hasUnresolvedLegacyDvdArchiveIdentity(querySource)
+    ) {
+      throw new DomainInvariantError(
+        "Legacy DVD archive content identities must be reconciled before Archive Jobs can advance",
+      );
+    }
+  }
+
   function reconcileLegacyDvdArchiveContentId(
     fingerprint: string,
     sizeBytes: number | undefined,
@@ -454,13 +508,6 @@ export function createDataAccessInternal(
       throw new DomainInvariantError("DVD content size is invalid");
     }
 
-    const batchLimit = Math.min(
-      LEGACY_ARCHIVE_RECONCILIATION_LIMIT,
-      Math.max(
-        1,
-        Math.floor(LEGACY_ARCHIVE_RECONCILIATION_BYTES / sizeBytes),
-      ),
-    );
     const unresolvedCandidates = database
       .select({
         archivePath: originalDiscArchives.archivePath,
@@ -469,34 +516,50 @@ export function createDataAccessInternal(
         sizeBytes: originalDiscArchives.sizeBytes,
       })
       .from(originalDiscArchives)
-      .where(
-        and(
-          eq(originalDiscArchives.discKind, "dvd"),
-          eq(originalDiscArchives.sizeBytes, sizeBytes),
-          notExists(
-            database
-              .select({
-                originalDiscArchiveId:
-                  originalDiscArchiveContentIds.originalDiscArchiveId,
-              })
-              .from(originalDiscArchiveContentIds)
-              .where(
-                eq(
-                  originalDiscArchiveContentIds.originalDiscArchiveId,
-                  originalDiscArchives.id,
-                ),
-              ),
-          ),
-        ),
+      .where(unresolvedLegacyDvdArchiveIdentity)
+      .orderBy(
+        desc(sql`${originalDiscArchives.sizeBytes} = ${sizeBytes}`),
+        asc(originalDiscArchives.id),
       )
-      .orderBy(asc(originalDiscArchives.id))
-      .limit(batchLimit + 1)
+      .limit(LEGACY_ARCHIVE_RECONCILIATION_LIMIT + 1)
       .all();
-    const hasMoreCandidates = unresolvedCandidates.length > batchLimit;
-    const candidates = unresolvedCandidates.slice(0, batchLimit);
+    const candidates: typeof unresolvedCandidates = [];
+    let candidateBytes = 0;
+    for (const candidate of unresolvedCandidates) {
+      const candidateSizeBytes = candidate.sizeBytes;
+      if (
+        candidateSizeBytes === null ||
+        !isCurrentDvdContentSize(candidateSizeBytes)
+      ) {
+        throw new DomainInvariantError(
+          "Unresolved legacy DVD archive has an invalid content size",
+        );
+      }
+      if (
+        candidates.length >= LEGACY_ARCHIVE_RECONCILIATION_LIMIT ||
+        candidateBytes + candidateSizeBytes >
+          LEGACY_ARCHIVE_RECONCILIATION_BYTES
+      ) {
+        break;
+      }
+      candidates.push(candidate);
+      candidateBytes += candidateSizeBytes;
+    }
 
     for (const candidate of candidates) {
-      const hashed = hashDvdArchiveFile(candidate.archivePath, sizeBytes);
+      const candidateSizeBytes = candidate.sizeBytes;
+      if (
+        candidateSizeBytes === null ||
+        !isCurrentDvdContentSize(candidateSizeBytes)
+      ) {
+        throw new DomainInvariantError(
+          "Unresolved legacy DVD archive has an invalid content size",
+        );
+      }
+      const hashed = hashDvdArchiveFile(
+        candidate.archivePath,
+        candidateSizeBytes,
+      );
       database.transaction((transaction) => {
         const current = transaction
           .select({ id: originalDiscArchives.id })
@@ -506,7 +569,7 @@ export function createDataAccessInternal(
               eq(originalDiscArchives.id, candidate.id),
               eq(originalDiscArchives.archivePath, candidate.archivePath),
               eq(originalDiscArchives.fingerprint, candidate.fingerprint),
-              eq(originalDiscArchives.sizeBytes, sizeBytes),
+              eq(originalDiscArchives.sizeBytes, candidateSizeBytes),
               eq(originalDiscArchives.discKind, "dvd"),
             ),
           )
@@ -566,7 +629,7 @@ export function createDataAccessInternal(
         return;
       }
     }
-    if (hasMoreCandidates) {
+    if (hasUnresolvedLegacyDvdArchiveIdentity()) {
       throw new DomainInvariantError(
         "Legacy DVD archive reconciliation made bounded progress; retry detection to continue",
       );
@@ -623,6 +686,29 @@ export function createDataAccessInternal(
             where original_disc_archive_content_ids.original_disc_archive_id = original_disc_archives.id
               and original_disc_archive_content_ids.content_id = detected_discs.fingerprint
           )
+      )
+      and not (
+        detected_discs.disc_kind = 'dvd'
+        and length(detected_discs.fingerprint) = 71
+        and substr(detected_discs.fingerprint, 1, 7) = 'sha256:'
+        and substr(detected_discs.fingerprint, 8) not glob '*[^0-9a-f]*'
+        and exists (
+          select 1
+          from original_disc_archives as unresolved_legacy_archives
+          where unresolved_legacy_archives.disc_kind = 'dvd'
+            and unresolved_legacy_archives.size_bytes > 0
+            and unresolved_legacy_archives.size_bytes <= 9000000000
+            and not (
+              length(unresolved_legacy_archives.fingerprint) = 71
+              and substr(unresolved_legacy_archives.fingerprint, 1, 7) = 'sha256:'
+              and substr(unresolved_legacy_archives.fingerprint, 8) not glob '*[^0-9a-f]*'
+            )
+            and not exists (
+              select 1
+              from original_disc_archive_content_ids
+              where original_disc_archive_content_ids.original_disc_archive_id = unresolved_legacy_archives.id
+            )
+        )
       )
     on conflict (detected_disc_id) do nothing
   `);
@@ -686,6 +772,15 @@ export function createDataAccessInternal(
           and ${opticalDrives.isEnabled} = true
           and ${opticalDrives.isPresent} = true
           and ${eligibilityCondition}
+          and (
+            ${detectedDiscs.discKind} <> 'dvd'
+            or not (${detectedDiscUsesCurrentDvdContentId})
+            or not exists (
+              select 1
+              from ${originalDiscArchives}
+              where ${unresolvedLegacyDvdArchiveIdentity}
+            )
+          )
           and not exists (
             select 1
             from ${originalDiscArchives}
@@ -762,6 +857,26 @@ export function createDataAccessInternal(
           "Completing an Archive Job requires an Original Disc Archive",
         );
       }
+      if (typeof completion !== "string") {
+        const disc = requireRow(
+          database
+            .select({
+              discKind: detectedDiscs.discKind,
+              fingerprint: detectedDiscs.fingerprint,
+            })
+            .from(detectedDiscs)
+            .where(eq(detectedDiscs.id, claim.detectedDiscId))
+            .get(),
+          "detected disc",
+          claim.detectedDiscId,
+        );
+        if (disc.discKind === "dvd") {
+          reconcileLegacyDvdArchiveContentId(
+            disc.fingerprint,
+            completion.sizeBytes,
+          );
+        }
+      }
 
       return database.transaction((transaction) => {
         const current = transaction
@@ -794,6 +909,11 @@ export function createDataAccessInternal(
               "DVD content already has Original Disc Archive provenance",
             );
           }
+          requireLegacyDvdArchiveIdentitiesResolved(
+            disc.discKind,
+            disc.fingerprint,
+            transaction,
+          );
           const archive = requireRow(
             transaction
               .insert(originalDiscArchives)
@@ -1605,12 +1725,23 @@ export function createDataAccessInternal(
         const timestamp = now();
         const fingerprint = requireNonEmpty(input.fingerprint, "fingerprint");
         const archivePath = requireNonEmpty(input.archivePath, "archivePath");
+        if (input.discKind === "dvd") {
+          reconcileLegacyDvdArchiveContentId(
+            fingerprint,
+            input.sizeBytes,
+          );
+        }
         return database.transaction((transaction) => {
           if (findOriginalArchiveByContentId(fingerprint, transaction)) {
             throw new DomainInvariantError(
               "DVD content already has Original Disc Archive provenance",
             );
           }
+          requireLegacyDvdArchiveIdentitiesResolved(
+            input.discKind,
+            fingerprint,
+            transaction,
+          );
           const transitioned = transaction
             .update(detectedDiscs)
             .set({ status: "archived", updatedAt: timestamp })
@@ -2069,6 +2200,11 @@ export function createDataAccessInternal(
               "A Detected Disc with existing archive provenance cannot be approved",
             );
           }
+          requireLegacyDvdArchiveIdentitiesResolved(
+            disc.discKind,
+            disc.fingerprint,
+            transaction,
+          );
           if (disc.status === "scanned") {
             transaction
               .update(detectedDiscs)
@@ -2182,6 +2318,16 @@ export function createDataAccessInternal(
             and(
               eq(archiveJobs.detectedDiscId, input.detectedDiscId),
               eq(detectedDiscs.status, "approved"),
+              or(
+                ne(detectedDiscs.discKind, "dvd"),
+                sql`not (${detectedDiscUsesCurrentDvdContentId})`,
+                notExists(
+                  database
+                    .select({ id: originalDiscArchives.id })
+                    .from(originalDiscArchives)
+                    .where(unresolvedLegacyDvdArchiveIdentity),
+                ),
+              ),
               notExists(
                 database
                   .select({ id: originalDiscArchives.id })
