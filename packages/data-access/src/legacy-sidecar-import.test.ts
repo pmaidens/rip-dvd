@@ -6,14 +6,18 @@ import {
   realpathSync,
   renameSync,
   symlinkSync,
+  truncateSync,
   unlinkSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { InvalidStatusTransitionError } from "./errors.js";
+import { createDataAccess } from "./index.js";
 import { createLegacySidecarDataAccess } from "./legacy-sidecars.js";
 import { createTemporaryDirectoryFixture } from "./legacy-sidecar.test-support.js";
 
@@ -115,6 +119,113 @@ afterEach(() => {
 });
 
 describe("legacy sidecar import", () => {
+  it.each(["fresh import", "reviewed-schema reopen"] as const)(
+    "suppresses a current Archive Job for the same DVD after %s",
+    (mode) => {
+      const root = temporaryDirectories.create(
+        "rip-dvd-legacy-current-identity-",
+      );
+      const originalsLibraryPath = join(root, "originals");
+      const archivePath = join(originalsLibraryPath, "Same DVD.iso");
+      const sidecarPath = join(
+        originalsLibraryPath,
+        "Same DVD.rip-dvd.json",
+      );
+      const databasePath = join(root, "catalog.sqlite");
+      mkdirSync(originalsLibraryPath, { recursive: true });
+      writeFileSync(archivePath, "same dvd bytes");
+      writeFileSync(sidecarPath, JSON.stringify({
+        schema_version: 2,
+        archive_status: "ready",
+        source: archivePath,
+        title: "Same DVD",
+        disc_title: "SAME_DISC",
+        disc_fingerprint:
+          "f29f3d4248b6da5db282553aa8b2edba7c0e71631e23412919a37fc526879765",
+        titles: [{
+          number: 1,
+          seconds: 3_600,
+          chapters: 10,
+          audio_streams: 1,
+          subtitles: 0,
+        }],
+        jobs: [],
+      }));
+      const importer = createLegacySidecarDataAccess({ databasePath });
+      const report = importer.legacySidecars.importLibrary({
+        originalsLibraryPath,
+      });
+      expect(report.issues).toEqual([]);
+      expect(report.sidecarsImported).toBe(1);
+
+      let access = importer;
+      if (mode === "reviewed-schema reopen") {
+        importer.close();
+        const sqlite = new DatabaseSync(databasePath);
+        try {
+          sqlite.exec("delete from original_disc_archive_content_ids");
+        } catch (error) {
+          if (!String(error).includes("no such table")) {
+            throw error;
+          }
+        } finally {
+          sqlite.close();
+        }
+        access = createDataAccess({ databasePath }) as typeof importer;
+      }
+
+      const drive = access.catalog.reconcileOpticalDrives([
+        {
+          devicePath: "/dev/sr0",
+          displayName: "Current drive",
+          isConfiguredDevice: true,
+        },
+      ])[0]!;
+      const contentId =
+        "sha256:c173ea0693af01962a78a28bb2106b93920c0381b6dc06b9fb3f4c71a2e65cef";
+      const observation = access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint: contentId,
+        scanData: {
+          schemaVersion: 2,
+          contentId,
+          titles: [{
+            number: 1,
+            durationSeconds: 3_600,
+            chapters: 10,
+            audioStreams: [],
+            subtitles: [],
+          }],
+        },
+        sizeBytes: 14,
+      });
+      const reviewed =
+        observation.status === "detected"
+          ? access.catalog.updateDetectedDiscStatus(observation.id, "scanned")
+          : observation;
+      let approvalError: unknown;
+      try {
+        access.archiveJobs.approve({ detectedDiscId: reviewed.id });
+      } catch (error) {
+        approvalError = error;
+      }
+      const claim = access.archiveJobs.claimNext("replacement-worker");
+
+      expect(reviewed.status).toBe("archived");
+      expect(approvalError).toBeInstanceOf(InvalidStatusTransitionError);
+      expect(claim).toBeNull();
+      expect(access.catalog.listOriginalDiscArchives()).toEqual([
+        expect.objectContaining({
+          archivePath: realpathSync(archivePath),
+          fingerprint:
+            "f29f3d4248b6da5db282553aa8b2edba7c0e71631e23412919a37fc526879765",
+        }),
+      ]);
+      access.close();
+    },
+  );
+
   it("rejects a nonexistent originals library", () => {
     const root = temporaryDirectories.create("rip-dvd-missing-library-");
     const access = createLegacySidecarDataAccess({ databasePath: join(root, "catalog.sqlite") });
@@ -125,6 +236,99 @@ describe("legacy sidecar import", () => {
       }),
     ).toThrow(/originals library does not exist/i);
 
+    access.close();
+  });
+
+  it.each([0, 9_000_000_001])(
+    "imports a %i-byte legacy archive outside the current DVD hashing policy",
+    (sizeBytes) => {
+      const fixture = createFixture();
+      truncateSync(fixture.archivePath, sizeBytes);
+
+      const report = fixture.access.legacySidecars.importLibrary({
+        originalsLibraryPath: fixture.originalsLibraryPath,
+      });
+
+      expect(report.issues).toEqual([]);
+      expect(report.sidecarsImported).toBe(1);
+      expect(fixture.access.catalog.listOriginalDiscArchives()).toEqual([
+        expect.objectContaining({
+          archivePath: fixture.archivePath,
+          sizeBytes,
+        }),
+      ]);
+      fixture.access.close();
+    },
+  );
+
+  it("rejects a legacy archive whose bytes already have current archive provenance", () => {
+    const root = temporaryDirectories.create(
+      "rip-dvd-legacy-current-content-collision-",
+    );
+    const originalsLibraryPath = join(root, "originals");
+    const currentArchivePath = join(originalsLibraryPath, "Current.iso");
+    const legacyArchivePath = join(originalsLibraryPath, "Legacy.iso");
+    const sidecarPath = join(
+      originalsLibraryPath,
+      "Legacy.rip-dvd.json",
+    );
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    writeFileSync(currentArchivePath, "same dvd bytes");
+    writeFileSync(legacyArchivePath, "same dvd bytes");
+    writeFileSync(sidecarPath, JSON.stringify({
+      schema_version: 2,
+      archive_status: "ready",
+      source: legacyArchivePath,
+      title: "Legacy",
+      disc_fingerprint:
+        "f29f3d4248b6da5db282553aa8b2edba7c0e71631e23412919a37fc526879765",
+      titles: [],
+      jobs: [],
+    }));
+    const databasePath = join(root, "catalog.sqlite");
+    const access = createLegacySidecarDataAccess({ databasePath });
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/current-drive",
+      isPresent: true,
+    });
+    const contentId =
+      "sha256:c173ea0693af01962a78a28bb2106b93920c0381b6dc06b9fb3f4c71a2e65cef";
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: contentId,
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: currentArchivePath,
+      fingerprint: contentId,
+      sizeBytes: 14,
+    });
+    const sqlite = new DatabaseSync(databasePath);
+    sqlite.exec("delete from original_disc_archive_content_ids");
+    sqlite.close();
+
+    const report = access.legacySidecars.importLibrary({
+      originalsLibraryPath,
+    });
+
+    expect(report.sidecarsImported).toBe(0);
+    expect(report.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "duplicate_record",
+        message: expect.stringMatching(/contents.*different.*archive/i),
+      }),
+    ]));
+    expect(access.catalog.listOriginalDiscArchives()).toEqual([
+      expect.objectContaining({
+        archivePath: currentArchivePath,
+        fingerprint: contentId,
+      }),
+    ]);
     access.close();
   });
 

@@ -68,8 +68,8 @@ describe("readDashboardSnapshot", () => {
     try {
       const queuedArchivePath = join(originalsLibraryPath, "Queued Movie.iso");
       const reviewArchivePath = join(originalsLibraryPath, "Review Movie.iso");
-      writeFileSync(queuedArchivePath, "archive");
-      writeFileSync(reviewArchivePath, "archive");
+      writeFileSync(queuedArchivePath, "queued archive");
+      writeFileSync(reviewArchivePath, "review archive");
       writeFileSync(
         join(originalsLibraryPath, "Queued Movie.rip-dvd.json"),
         JSON.stringify({

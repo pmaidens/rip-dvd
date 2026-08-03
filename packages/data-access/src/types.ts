@@ -265,6 +265,7 @@ export interface CatalogAccess {
     isNewMediumObservation?: boolean;
     volumeLabel?: string;
     scanData?: unknown;
+    sizeBytes?: number;
   }): DetectedDisc;
   listDetectedDiscs(
     statuses?: DetectedDiscStatus[],

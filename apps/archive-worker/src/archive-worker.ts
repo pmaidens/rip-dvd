@@ -228,6 +228,7 @@ export async function pollArchiveWorker({
         isNewMediumObservation: scan.isNewMediumObservation,
         volumeLabel: scan.volumeLabel,
         scanData: scan.scanData,
+        sizeBytes: scan.sizeBytes,
       });
       if (disc.status === "detected") {
         access.catalog.updateDetectedDiscStatus(disc.id, "scanned");

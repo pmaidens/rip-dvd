@@ -1,7 +1,10 @@
+import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -9,7 +12,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import { EventEmitter } from "node:events";
+import { EventEmitter, once } from "node:events";
+import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -20,6 +24,10 @@ import {
 } from "./dvd-archiver.js";
 
 const temporaryDirectories: string[] = [];
+const orphanedWriterPids: number[] = [];
+const supportsLinuxWriterOwnership =
+  existsSync("/proc/self/fd") &&
+  spawnSync("flock", ["--version"], { stdio: "ignore" }).status === 0;
 
 function createOriginalsLibrary(): string {
   const directory = mkdtempSync(join(tmpdir(), "rip-dvd-archive-"));
@@ -29,13 +37,201 @@ function createOriginalsLibrary(): string {
 
 afterEach(() => {
   vi.useRealTimers();
+  for (const pid of orphanedWriterPids.splice(0)) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
+        throw error;
+      }
+    }
+  }
   for (const directory of temporaryDirectories.splice(0)) {
     rmSync(directory, { force: true, recursive: true });
   }
 });
 
+async function waitFor(
+  condition: () => boolean,
+  message: string,
+): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (!condition()) {
+    if (Date.now() >= deadline) {
+      throw new Error(message);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+async function startOrphanedWriter(
+  lockPath: string,
+  partialPath: string,
+  readyPath: string,
+): Promise<number> {
+  const fixturePath = fileURLToPath(
+    new URL("../test/orphaned-dvd-writer.mjs", import.meta.url),
+  );
+  const child = spawn(
+    process.execPath,
+    [fixturePath, lockPath, partialPath, readyPath],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
+  const stdout: Buffer[] = [];
+  const stderr: Buffer[] = [];
+  child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+  child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+  const [status] = await once(child, "close");
+  if (status !== 0) {
+    throw new Error(Buffer.concat(stderr).toString("utf8"));
+  }
+  const pid = Number(Buffer.concat(stdout).toString("utf8"));
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    throw new Error("orphaned writer fixture returned an invalid PID");
+  }
+  orphanedWriterPids.push(pid);
+  await waitFor(
+    () => existsSync(readyPath),
+    "orphaned writer fixture did not become ready",
+  );
+  return pid;
+}
+
+async function stopOrphanedWriter(
+  pid: number,
+  ownershipReleased: () => boolean,
+): Promise<void> {
+  process.kill(pid, "SIGKILL");
+  orphanedWriterPids.splice(orphanedWriterPids.indexOf(pid), 1);
+  await waitFor(
+    ownershipReleased,
+    "orphaned writer fixture did not release its OS ownership",
+  );
+}
+
 describe("DVD archive publication", () => {
+  it.runIf(supportsLinuxWriterOwnership)(
+    "keeps an orphaned writer excluded across a direct worker replacement",
+    async () => {
+      const originalsLibraryPath = createOriginalsLibrary();
+      const root = realpathSync(originalsLibraryPath);
+      const devicePath = "/dev/zero";
+      const digest =
+        "d0b8829a9f2a9c78882fb5d3aff464054e5a8a82978ecc2a922767782c739f7f";
+      const partialPath = join(
+        root,
+        `.${digest}.11111111-1111-4111-8111-111111111111.iso.rip-dvd-partial`,
+      );
+      const lockDigest = createHash("sha256")
+        .update(devicePath)
+        .digest("hex");
+      const lockPath = join(root, `.rip-dvd-device-${lockDigest}.lock`);
+      const readyPath = join(root, ".orphaned-writer-ready");
+      const writerPid = await startOrphanedWriter(
+        lockPath,
+        partialPath,
+        readyPath,
+      );
+      const options = {
+        devicePath,
+        fingerprint: `sha256:${digest}`,
+        originalsLibraryPath,
+        runner: createNodeDvdCopyRunner({ timeoutMs: 1_000 }),
+        signal: new AbortController().signal,
+        sizeBytes: 9,
+        verifySource: async () => undefined,
+        onProgress: () => undefined,
+      };
+
+      await expect(preserveDvdArchive(options)).rejects.toThrow(
+        "DVD archive copy is still active",
+      );
+      expect(readFileSync(partialPath, "utf8")).toBe("live partial");
+      expect(existsSync(`${partialPath}.failed`)).toBe(false);
+      expect(existsSync(join(root, `${digest}.iso`))).toBe(false);
+      expect(
+        readdirSync(root).filter((name) =>
+          name.endsWith(".iso.rip-dvd-partial"),
+        ),
+      ).toEqual([basename(partialPath)]);
+
+      await stopOrphanedWriter(
+        writerPid,
+        () =>
+          spawnSync(
+            "flock",
+            ["--exclusive", "--nonblock", lockPath, "true"],
+            { stdio: "ignore" },
+          ).status === 0,
+      );
+
+      await expect(
+        preserveDvdArchive({
+          ...options,
+          runner: createNodeDvdCopyRunner({ timeoutMs: 1_000 }),
+        }),
+      ).resolves.toMatchObject({ recovered: false });
+      expect(readFileSync(partialPath, "utf8")).toBe("live partial");
+      expect(existsSync(`${partialPath}.failed`)).toBe(false);
+    },
+  );
+
+  it.runIf(supportsLinuxWriterOwnership)(
+    "fails closed while a pre-upgrade deterministic partial is open",
+    async () => {
+      const originalsLibraryPath = createOriginalsLibrary();
+      const root = realpathSync(originalsLibraryPath);
+      const digest =
+        "d0b8829a9f2a9c78882fb5d3aff464054e5a8a82978ecc2a922767782c739f7f";
+      const partialPath = join(root, `.${digest}.iso.rip-dvd-partial`);
+      const readyPath = join(root, ".legacy-writer-ready");
+      const writerPid = await startOrphanedWriter(
+        "-",
+        partialPath,
+        readyPath,
+      );
+      const options = {
+        devicePath: "/dev/zero",
+        fingerprint: `sha256:${digest}`,
+        originalsLibraryPath,
+        runner: createNodeDvdCopyRunner({ timeoutMs: 1_000 }),
+        signal: new AbortController().signal,
+        sizeBytes: 9,
+        verifySource: async () => undefined,
+        onProgress: () => undefined,
+      };
+
+      await expect(preserveDvdArchive(options)).rejects.toThrow(
+        "DVD archive copy is still active",
+      );
+      expect(readFileSync(partialPath, "utf8")).toBe("live partial");
+      expect(existsSync(`${partialPath}.failed`)).toBe(false);
+
+      await stopOrphanedWriter(writerPid, () => {
+        const descriptorPath = `/proc/${writerPid}/fd`;
+        return (
+          !existsSync(descriptorPath) || readdirSync(descriptorPath).length === 0
+        );
+      });
+      await expect(
+        preserveDvdArchive({
+          ...options,
+          runner: createNodeDvdCopyRunner({ timeoutMs: 1_000 }),
+        }),
+      ).resolves.toMatchObject({ recovered: false });
+      expect(existsSync(partialPath)).toBe(false);
+      expect(readFileSync(`${partialPath}.failed`, "utf8")).toBe(
+        "live partial",
+      );
+    },
+  );
+
   it("runs bounded GNU dd arguments and streams byte progress", async () => {
+    const originalsLibraryPath = createOriginalsLibrary();
+    const outputPath = join(
+      originalsLibraryPath,
+      ".disc.iso.rip-dvd-partial",
+    );
     const stderr = Object.assign(new EventEmitter(), { destroy: vi.fn() });
     const child = Object.assign(new EventEmitter(), {
       stderr,
@@ -48,7 +244,7 @@ describe("DVD archive publication", () => {
 
     const completion = runner.copy({
       devicePath: "/dev/sr0",
-      outputPath: "/media/originals/.disc.iso.rip-dvd-partial",
+      outputPath,
       sizeBytes: 9,
       signal: new AbortController().signal,
       onBytesCopied: (bytes) => copied.push(bytes),
@@ -58,24 +254,35 @@ describe("DVD archive publication", () => {
     await completion;
 
     expect(spawnProcess).toHaveBeenCalledWith(
-      "dd",
+      "flock",
       [
+        "--exclusive",
+        "--nonblock",
+        "--no-fork",
+        "--conflict-exit-code",
+        "75",
+        "/proc/self/fd/3",
+        "dd",
         "if=/dev/sr0",
-        "of=/media/originals/.disc.iso.rip-dvd-partial",
+        `of=${outputPath}`,
         "bs=4M",
         "iflag=fullblock,count_bytes",
         "count=9",
-        "oflag=excl,nofollow",
-        "conv=fsync",
+        "oflag=nofollow",
+        "conv=excl,fsync",
         "status=progress",
       ],
-      { shell: false, stdio: ["ignore", "ignore", "pipe"] },
+      {
+        shell: false,
+        stdio: ["ignore", "ignore", "pipe", expect.any(Number)],
+      },
     );
     expect(copied).toEqual([4, 9]);
   });
 
   it("times out without close and blocks retry until the dd child closes", async () => {
     vi.useFakeTimers();
+    const originalsLibraryPath = createOriginalsLibrary();
     const children = Array.from({ length: 2 }, () =>
       Object.assign(new EventEmitter(), {
         stderr: Object.assign(new EventEmitter(), { destroy: vi.fn() }),
@@ -93,7 +300,7 @@ describe("DVD archive publication", () => {
     });
     const request = {
       devicePath: "/dev/sr0",
-      outputPath: "/media/originals/.disc.iso.rip-dvd-partial",
+      outputPath: join(originalsLibraryPath, ".disc.iso.rip-dvd-partial"),
       sizeBytes: 9,
       signal: new AbortController().signal,
       onBytesCopied: () => undefined,
@@ -134,6 +341,7 @@ describe("DVD archive publication", () => {
   });
 
   it("contains progress callback failures and waits for dd to close", async () => {
+    const originalsLibraryPath = createOriginalsLibrary();
     const stderr = Object.assign(new EventEmitter(), { destroy: vi.fn() });
     const child = Object.assign(new EventEmitter(), {
       stderr,
@@ -147,7 +355,7 @@ describe("DVD archive publication", () => {
     const completion = runner
       .copy({
         devicePath: "/dev/sr0",
-        outputPath: "/media/originals/.disc.iso.rip-dvd-partial",
+        outputPath: join(originalsLibraryPath, ".disc.iso.rip-dvd-partial"),
         sizeBytes: 9,
         signal: new AbortController().signal,
         onBytesCopied: () => {
@@ -208,8 +416,10 @@ describe("DVD archive publication", () => {
   it("moves a failed partial image aside without publishing an archive", async () => {
     const originalsLibraryPath = createOriginalsLibrary();
     const digest = "b".repeat(64);
+    let copiedPartialPath: string | undefined;
     const runner: DvdCopyRunner = {
       copy: vi.fn(async ({ outputPath }) => {
+        copiedPartialPath = outputPath;
         writeFileSync(outputPath, "partial evidence");
         throw new Error("dd read failed");
       }),
@@ -232,9 +442,9 @@ describe("DVD archive publication", () => {
     const root = realpathSync(originalsLibraryPath);
     expect(existsSync(join(root, `${digest}.iso`))).toBe(false);
     expect(existsSync(join(root, `.${digest}.iso.rip-dvd-partial`))).toBe(false);
-    expect(
-      readFileSync(join(root, `.${digest}.iso.rip-dvd-partial.failed`), "utf8"),
-    ).toBe("partial evidence");
+    expect(readFileSync(`${copiedPartialPath}.failed`, "utf8")).toBe(
+      "partial evidence",
+    );
   });
 
   it("does not quarantine or retry a partial while its dd child is active", async () => {
@@ -243,7 +453,7 @@ describe("DVD archive publication", () => {
     const content = Buffer.from("dvd-image");
     const digest =
       "e5cbeaa2965a33da9559ec142f30f4046ff91d1788a8d2f6ba22490b095f1c61";
-    const partialPath = join(root, `.${digest}.iso.rip-dvd-partial`);
+    let partialPath: string | undefined;
     let active = false;
     let copyAttempts = 0;
     const runner: DvdCopyRunner = {
@@ -251,12 +461,10 @@ describe("DVD archive publication", () => {
         copyAttempts += 1;
         if (copyAttempts === 1) {
           active = true;
+          partialPath = outputPath;
           writeFileSync(outputPath, "live partial");
           throw new Error("DVD archive copy timed out");
         }
-        expect(readFileSync(`${outputPath}.failed`, "utf8")).toBe(
-          "live partial",
-        );
         writeFileSync(outputPath, content);
       }),
       isActive: vi.fn(() => active),
@@ -275,52 +483,58 @@ describe("DVD archive publication", () => {
     await expect(preserveDvdArchive(options)).rejects.toThrow(
       "DVD archive copy timed out",
     );
-    expect(readFileSync(partialPath, "utf8")).toBe("live partial");
+    expect(readFileSync(partialPath!, "utf8")).toBe("live partial");
     expect(existsSync(`${partialPath}.failed`)).toBe(false);
 
     await expect(preserveDvdArchive(options)).rejects.toThrow(
       "DVD archive copy is still active",
     );
     expect(runner.copy).toHaveBeenCalledOnce();
-    expect(readFileSync(partialPath, "utf8")).toBe("live partial");
+    expect(readFileSync(partialPath!, "utf8")).toBe("live partial");
 
     active = false;
     await expect(preserveDvdArchive(options)).resolves.toMatchObject({
       recovered: false,
     });
     expect(runner.copy).toHaveBeenCalledTimes(2);
+    expect(readFileSync(partialPath!, "utf8")).toBe("live partial");
+    expect(existsSync(`${partialPath}.failed`)).toBe(false);
   });
 
-  it("quarantines a stale partial image before retrying the copy", async () => {
-    const originalsLibraryPath = createOriginalsLibrary();
-    const root = realpathSync(originalsLibraryPath);
-    const digest = "231552f40a93fbd25f6328825ddb49288b8076f1d42809b0852eaff66d9a4118";
-    const partialPath = join(root, `.${digest}.iso.rip-dvd-partial`);
-    writeFileSync(partialPath, "stale");
-    const content = Buffer.from("fresh");
-    const runner: DvdCopyRunner = {
-      copy: vi.fn(async ({ outputPath }) => {
-        expect(existsSync(outputPath)).toBe(false);
-        expect(readFileSync(`${outputPath}.failed`, "utf8")).toBe("stale");
-        writeFileSync(outputPath, content);
-      }),
-      isActive: () => false,
-    };
+  it.runIf(supportsLinuxWriterOwnership)(
+    "quarantines a stale partial image before retrying the copy",
+    async () => {
+      const originalsLibraryPath = createOriginalsLibrary();
+      const root = realpathSync(originalsLibraryPath);
+      const digest =
+        "231552f40a93fbd25f6328825ddb49288b8076f1d42809b0852eaff66d9a4118";
+      const partialPath = join(root, `.${digest}.iso.rip-dvd-partial`);
+      writeFileSync(partialPath, "stale");
+      const content = Buffer.from("fresh");
+      const runner: DvdCopyRunner = {
+        copy: vi.fn(async ({ outputPath }) => {
+          expect(existsSync(outputPath)).toBe(false);
+          expect(readFileSync(`${partialPath}.failed`, "utf8")).toBe("stale");
+          writeFileSync(outputPath, content);
+        }),
+        isActive: () => false,
+      };
 
-    const result = await preserveDvdArchive({
-      devicePath: "/dev/sr0",
-      fingerprint: `sha256:${digest}`,
-      originalsLibraryPath,
-      runner,
-      signal: new AbortController().signal,
-      sizeBytes: content.byteLength,
-      verifySource: async () => undefined,
-      onProgress: () => undefined,
-    });
+      const result = await preserveDvdArchive({
+        devicePath: "/dev/sr0",
+        fingerprint: `sha256:${digest}`,
+        originalsLibraryPath,
+        runner,
+        signal: new AbortController().signal,
+        sizeBytes: content.byteLength,
+        verifySource: async () => undefined,
+        onProgress: () => undefined,
+      });
 
-    expect(readFileSync(result.archivePath)).toEqual(content);
-    expect(readFileSync(`${partialPath}.failed`, "utf8")).toBe("stale");
-  });
+      expect(readFileSync(result.archivePath)).toEqual(content);
+      expect(readFileSync(`${partialPath}.failed`, "utf8")).toBe("stale");
+    },
+  );
 
   it("rejects a runner-created symbolic-link partial without publishing it", async () => {
     const originalsLibraryPath = createOriginalsLibrary();
@@ -386,8 +600,10 @@ describe("DVD archive publication", () => {
       "e5cbeaa2965a33da9559ec142f30f4046ff91d1788a8d2f6ba22490b095f1c61";
     const archivePath = join(root, `${digest}.iso`);
     const content = Buffer.from("dvd-image");
+    let copiedPartialPath: string | undefined;
     const runner: DvdCopyRunner = {
       copy: vi.fn(async ({ outputPath }) => {
+        copiedPartialPath = outputPath;
         writeFileSync(outputPath, content);
         writeFileSync(archivePath, "other publisher");
       }),
@@ -408,11 +624,7 @@ describe("DVD archive publication", () => {
     ).rejects.toMatchObject({ code: "EEXIST" });
 
     expect(readFileSync(archivePath, "utf8")).toBe("other publisher");
-    expect(
-      readFileSync(
-        join(root, `.${digest}.iso.rip-dvd-partial.failed`),
-      ),
-    ).toEqual(content);
+    expect(readFileSync(`${copiedPartialPath}.failed`)).toEqual(content);
   });
 
   it("quarantines a published image when durable directory publication fails", async () => {

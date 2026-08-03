@@ -430,7 +430,7 @@ describe("data-access facade", () => {
         order by name
       `)
       .all() as Array<{ name: string; sql: string }>;
-    expect(identifierTables).toHaveLength(8);
+    expect(identifierTables).toHaveLength(9);
     expect(
       identifierTables.every(({ name, sql }) =>
         sql.includes(`${name}_id_not_null`),
@@ -1137,39 +1137,37 @@ describe("data-access facade", () => {
 
   it("migrates a database that applied the preceding optical-drive migration", () => {
     const databasePath = createTestDatabasePath();
-    const precedingMigrationsFolder = createTestMigrationsFolder();
+    const precedingSqlite = new DatabaseSync(databasePath);
     for (const migrationName of [
       "20260722045326_core-catalog-and-queues",
       "20260726160810_encoding-profile-active-state",
     ]) {
-      const targetDirectory = join(precedingMigrationsFolder, migrationName);
-      mkdirSync(targetDirectory);
-      writeFileSync(
-        join(targetDirectory, "migration.sql"),
-        readFileSync(
-          new URL(`../drizzle/${migrationName}/migration.sql`, import.meta.url),
-        ),
+      const migration = readFileSync(
+        new URL(`../drizzle/${migrationName}/migration.sql`, import.meta.url),
+        "utf8",
       );
+      for (const statement of migration.split("--> statement-breakpoint")) {
+        if (statement.trim()) {
+          precedingSqlite.exec(statement);
+        }
+      }
     }
     const precedingMigrationName =
       "20260802150655_optical-drive-configuration-default";
-    const precedingMigrationDirectory = join(
-      precedingMigrationsFolder,
-      precedingMigrationName,
-    );
-    mkdirSync(precedingMigrationDirectory);
-    writeFileSync(
-      join(precedingMigrationDirectory, "migration.sql"),
-      `ALTER TABLE \`optical_drives\` ADD \`configuration_default_applied\` integer DEFAULT true NOT NULL;
+    precedingSqlite.exec(`ALTER TABLE \`optical_drives\` ADD \`configuration_default_applied\` integer DEFAULT true NOT NULL;
 --> statement-breakpoint
-ALTER TABLE \`optical_drives\` ADD \`is_configured_target\` integer DEFAULT false NOT NULL;`,
-    );
-
-    createDataAccess({
-      databasePath,
-      migrationsFolder: precedingMigrationsFolder,
-    }).close();
-    const precedingSqlite = new DatabaseSync(databasePath);
+ALTER TABLE \`optical_drives\` ADD \`is_configured_target\` integer DEFAULT false NOT NULL;
+CREATE TABLE __drizzle_migrations (
+  id integer primary key,
+  hash text not null,
+  created_at numeric,
+  name text,
+  applied_at text
+);
+INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
+  ('legacy-core', 0, '20260722045326_core-catalog-and-queues'),
+  ('legacy-profiles', 0, '20260726160810_encoding-profile-active-state'),
+  ('legacy-optical-default', 0, '${precedingMigrationName}');`);
     precedingSqlite.exec(`
       insert into optical_drives (
         id, device_path, is_enabled, configuration_default_applied,
@@ -1214,10 +1212,13 @@ ALTER TABLE \`optical_drives\` ADD \`is_configured_target\` integer DEFAULT fals
     expect(
       sqlite
         .prepare(
-          "select name from __drizzle_migrations order by id desc limit 2",
+          "select name from __drizzle_migrations order by id desc limit 3",
         )
         .all(),
     ).toEqual([
+      {
+        name: "20260803050348_pretty_living_mummy",
+      },
       {
         name: "20260802190921_optical-drive-configuration-default-resolved",
       },

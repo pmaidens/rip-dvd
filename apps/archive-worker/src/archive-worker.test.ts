@@ -197,8 +197,10 @@ describe("archive worker polling", () => {
         sizeBytes: 9,
       }),
     };
+    let failedPartialPath: string | undefined;
     const copyRunner: DvdCopyRunner = {
       copy: vi.fn(async ({ outputPath, onBytesCopied }) => {
+        failedPartialPath = outputPath;
         onBytesCopied(4);
         writeFileSync(outputPath, "partial");
         throw new Error("dd read failed");
@@ -232,12 +234,9 @@ describe("archive worker polling", () => {
     ]);
     const root = realpathSync(originalsLibraryPath);
     expect(existsSync(join(root, `${digest}.iso`))).toBe(false);
-    expect(
-      readFileSync(
-        join(root, `.${digest}.iso.rip-dvd-partial.failed`),
-        "utf8",
-      ),
-    ).toBe("partial");
+    expect(readFileSync(`${failedPartialPath}.failed`, "utf8")).toBe(
+      "partial",
+    );
   });
 
   it("persists an interrupted archive as a recoverable failure", async () => {
@@ -290,8 +289,10 @@ describe("archive worker polling", () => {
       }),
     };
     const interruption = new Error("worker shutdown");
+    let interruptedPartialPath: string | undefined;
     const copyRunner: DvdCopyRunner = {
       copy: vi.fn(async ({ outputPath, onBytesCopied }) => {
+        interruptedPartialPath = outputPath;
         writeFileSync(outputPath, "partial");
         onBytesCopied(4);
         controller.abort(interruption);
@@ -327,12 +328,9 @@ describe("archive worker polling", () => {
     expect(access.catalog.listOriginalDiscArchives()).toEqual([]);
     const root = realpathSync(originalsLibraryPath);
     expect(existsSync(join(root, `${digest}.iso`))).toBe(false);
-    expect(
-      readFileSync(
-        join(root, `.${digest}.iso.rip-dvd-partial.failed`),
-        "utf8",
-      ),
-    ).toBe("partial");
+    expect(readFileSync(`${interruptedPartialPath}.failed`, "utf8")).toBe(
+      "partial",
+    );
   });
 
   it("renews the owned Archive Job lease throughout a long copy", async () => {

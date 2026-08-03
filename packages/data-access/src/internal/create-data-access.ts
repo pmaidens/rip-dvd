@@ -36,8 +36,14 @@ import {
   encodingProfiles,
   mediaItems,
   opticalDrives,
+  originalDiscArchiveContentIds,
   originalDiscArchives,
 } from "./schema.js";
+import {
+  dvdArchiveFileMatchesIdentity,
+  hashDvdArchiveFile,
+  isCurrentDvdContentSize,
+} from "./dvd-content-identity.js";
 import {
   createJobQueueController,
   type JobQueueAdapter,
@@ -47,7 +53,7 @@ import {
   requireNonEmpty,
   requirePositiveSafeInteger,
 } from "./validation.js";
-import { decodeDvdTitleMap } from "../dvd-scan.js";
+import { decodeDvdTitleMap, isDvdContentId } from "../dvd-scan.js";
 import {
   DomainInvariantError,
   InvalidStatusTransitionError,
@@ -87,6 +93,8 @@ const MIGRATION_LOCK_TIMEOUT_MS = 15_000;
 const MIGRATION_LOCK_STALE_MS = 300_000;
 const MIGRATION_LOCK_POLL_MS = 10;
 const ARCHIVE_JOB_RECOVERY_LIMIT = 100;
+const LEGACY_ARCHIVE_RECONCILIATION_LIMIT = 4;
+const LEGACY_ARCHIVE_RECONCILIATION_BYTES = 9_000_000_000;
 const DEFAULT_MIGRATIONS_FOLDER = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../drizzle",
@@ -405,6 +413,166 @@ export function createDataAccessInternal(
     return new Date();
   }
 
+  function findOriginalArchiveByContentId(
+    fingerprint: string,
+    querySource: Pick<typeof database, "select"> = database,
+  ) {
+    return querySource
+      .select({
+        discKind: originalDiscArchives.discKind,
+        id: originalDiscArchives.id,
+      })
+      .from(originalDiscArchives)
+      .leftJoin(
+        originalDiscArchiveContentIds,
+        eq(
+          originalDiscArchiveContentIds.originalDiscArchiveId,
+          originalDiscArchives.id,
+        ),
+      )
+      .where(
+        or(
+          eq(originalDiscArchives.fingerprint, fingerprint),
+          eq(originalDiscArchiveContentIds.contentId, fingerprint),
+        ),
+      )
+      .get();
+  }
+
+  function reconcileLegacyDvdArchiveContentId(
+    fingerprint: string,
+    sizeBytes: number | undefined,
+  ): void {
+    if (
+      sizeBytes === undefined ||
+      !isDvdContentId(fingerprint) ||
+      findOriginalArchiveByContentId(fingerprint) !== undefined
+    ) {
+      return;
+    }
+    if (!isCurrentDvdContentSize(sizeBytes)) {
+      throw new DomainInvariantError("DVD content size is invalid");
+    }
+
+    const batchLimit = Math.min(
+      LEGACY_ARCHIVE_RECONCILIATION_LIMIT,
+      Math.max(
+        1,
+        Math.floor(LEGACY_ARCHIVE_RECONCILIATION_BYTES / sizeBytes),
+      ),
+    );
+    const unresolvedCandidates = database
+      .select({
+        archivePath: originalDiscArchives.archivePath,
+        fingerprint: originalDiscArchives.fingerprint,
+        id: originalDiscArchives.id,
+        sizeBytes: originalDiscArchives.sizeBytes,
+      })
+      .from(originalDiscArchives)
+      .where(
+        and(
+          eq(originalDiscArchives.discKind, "dvd"),
+          eq(originalDiscArchives.sizeBytes, sizeBytes),
+          notExists(
+            database
+              .select({
+                originalDiscArchiveId:
+                  originalDiscArchiveContentIds.originalDiscArchiveId,
+              })
+              .from(originalDiscArchiveContentIds)
+              .where(
+                eq(
+                  originalDiscArchiveContentIds.originalDiscArchiveId,
+                  originalDiscArchives.id,
+                ),
+              ),
+          ),
+        ),
+      )
+      .orderBy(asc(originalDiscArchives.id))
+      .limit(batchLimit + 1)
+      .all();
+    const hasMoreCandidates = unresolvedCandidates.length > batchLimit;
+    const candidates = unresolvedCandidates.slice(0, batchLimit);
+
+    for (const candidate of candidates) {
+      const hashed = hashDvdArchiveFile(candidate.archivePath, sizeBytes);
+      database.transaction((transaction) => {
+        const current = transaction
+          .select({ id: originalDiscArchives.id })
+          .from(originalDiscArchives)
+          .where(
+            and(
+              eq(originalDiscArchives.id, candidate.id),
+              eq(originalDiscArchives.archivePath, candidate.archivePath),
+              eq(originalDiscArchives.fingerprint, candidate.fingerprint),
+              eq(originalDiscArchives.sizeBytes, sizeBytes),
+              eq(originalDiscArchives.discKind, "dvd"),
+            ),
+          )
+          .get();
+        if (
+          !current ||
+          !dvdArchiveFileMatchesIdentity(
+            candidate.archivePath,
+            hashed.identity,
+          )
+        ) {
+          throw new DomainInvariantError(
+            "Legacy DVD archive changed during content identity reconciliation",
+          );
+        }
+        const archiveWithFingerprint = transaction
+          .select({ id: originalDiscArchives.id })
+          .from(originalDiscArchives)
+          .where(eq(originalDiscArchives.fingerprint, hashed.contentId))
+          .get();
+        if (
+          archiveWithFingerprint &&
+          archiveWithFingerprint.id !== candidate.id
+        ) {
+          throw new DomainInvariantError(
+            "DVD content identity is already stored as a different Original Disc Archive fingerprint",
+          );
+        }
+        transaction
+          .insert(originalDiscArchiveContentIds)
+          .values({
+            originalDiscArchiveId: candidate.id,
+            contentId: hashed.contentId,
+          })
+          .onConflictDoNothing()
+          .run();
+        const archiveForContentId = transaction
+          .select({
+            originalDiscArchiveId:
+              originalDiscArchiveContentIds.originalDiscArchiveId,
+          })
+          .from(originalDiscArchiveContentIds)
+          .where(
+            eq(
+              originalDiscArchiveContentIds.contentId,
+              hashed.contentId,
+            ),
+          )
+          .get();
+        if (archiveForContentId?.originalDiscArchiveId !== candidate.id) {
+          throw new DomainInvariantError(
+            "DVD content identity is already assigned to a different Original Disc Archive",
+          );
+        }
+      }, { behavior: "immediate" });
+      if (hashed.contentId === fingerprint) {
+        return;
+      }
+    }
+    if (hasMoreCandidates) {
+      throw new DomainInvariantError(
+        "Legacy DVD archive reconciliation made bounded progress; retry detection to continue",
+      );
+    }
+  }
+
   function requireEncodingProfileInDomain(
     querySource: Pick<typeof database, "select">,
     id: EncodingProfileId,
@@ -449,6 +617,12 @@ export function createDataAccessInternal(
         select 1
         from original_disc_archives
         where original_disc_archives.fingerprint = detected_discs.fingerprint
+          or exists (
+            select 1
+            from original_disc_archive_content_ids
+            where original_disc_archive_content_ids.original_disc_archive_id = original_disc_archives.id
+              and original_disc_archive_content_ids.content_id = detected_discs.fingerprint
+          )
       )
     on conflict (detected_disc_id) do nothing
   `);
@@ -516,6 +690,12 @@ export function createDataAccessInternal(
             select 1
             from ${originalDiscArchives}
             where ${originalDiscArchives.fingerprint} = ${detectedDiscs.fingerprint}
+              or exists (
+                select 1
+                from ${originalDiscArchiveContentIds}
+                where ${originalDiscArchiveContentIds.originalDiscArchiveId} = ${originalDiscArchives.id}
+                  and ${originalDiscArchiveContentIds.contentId} = ${detectedDiscs.fingerprint}
+              )
           )
           and not exists (
             select 1
@@ -609,6 +789,11 @@ export function createDataAccessInternal(
               "archived",
             );
           }
+          if (findOriginalArchiveByContentId(disc.fingerprint, transaction)) {
+            throw new DomainInvariantError(
+              "DVD content already has Original Disc Archive provenance",
+            );
+          }
           const archive = requireRow(
             transaction
               .insert(originalDiscArchives)
@@ -698,9 +883,31 @@ export function createDataAccessInternal(
                         .select({ id: originalDiscArchives.id })
                         .from(originalDiscArchives)
                         .where(
-                          eq(
-                            originalDiscArchives.fingerprint,
-                            detectedDiscs.fingerprint,
+                          or(
+                            eq(
+                              originalDiscArchives.fingerprint,
+                              detectedDiscs.fingerprint,
+                            ),
+                            exists(
+                              database
+                                .select({
+                                  originalDiscArchiveId:
+                                    originalDiscArchiveContentIds.originalDiscArchiveId,
+                                })
+                                .from(originalDiscArchiveContentIds)
+                                .where(
+                                  and(
+                                    eq(
+                                      originalDiscArchiveContentIds.originalDiscArchiveId,
+                                      originalDiscArchives.id,
+                                    ),
+                                    eq(
+                                      originalDiscArchiveContentIds.contentId,
+                                      detectedDiscs.fingerprint,
+                                    ),
+                                  ),
+                                ),
+                            ),
                           ),
                         ),
                     ),
@@ -1197,12 +1404,17 @@ export function createDataAccessInternal(
           }
           scanData = decoded;
         }
+        if (input.discKind === "dvd") {
+          reconcileLegacyDvdArchiveContentId(
+            fingerprint,
+            input.sizeBytes,
+          );
+        }
         return database.transaction((transaction) => {
-          const matchingArchive = transaction
-            .select({ discKind: originalDiscArchives.discKind })
-            .from(originalDiscArchives)
-            .where(eq(originalDiscArchives.fingerprint, fingerprint))
-            .get();
+          const matchingArchive = findOriginalArchiveByContentId(
+            fingerprint,
+            transaction,
+          );
           if (
             matchingArchive &&
             matchingArchive.discKind !== input.discKind
@@ -1394,6 +1606,11 @@ export function createDataAccessInternal(
         const fingerprint = requireNonEmpty(input.fingerprint, "fingerprint");
         const archivePath = requireNonEmpty(input.archivePath, "archivePath");
         return database.transaction((transaction) => {
+          if (findOriginalArchiveByContentId(fingerprint, transaction)) {
+            throw new DomainInvariantError(
+              "DVD content already has Original Disc Archive provenance",
+            );
+          }
           const transitioned = transaction
             .update(detectedDiscs)
             .set({ status: "archived", updatedAt: timestamp })
@@ -1843,11 +2060,10 @@ export function createDataAccessInternal(
               "approved",
             );
           }
-          const matchingArchive = transaction
-            .select({ id: originalDiscArchives.id })
-            .from(originalDiscArchives)
-            .where(eq(originalDiscArchives.fingerprint, disc.fingerprint))
-            .get();
+          const matchingArchive = findOriginalArchiveByContentId(
+            disc.fingerprint,
+            transaction,
+          );
           if (matchingArchive) {
             throw new DomainInvariantError(
               "A Detected Disc with existing archive provenance cannot be approved",
@@ -1971,9 +2187,31 @@ export function createDataAccessInternal(
                   .select({ id: originalDiscArchives.id })
                   .from(originalDiscArchives)
                   .where(
-                    eq(
-                      originalDiscArchives.fingerprint,
-                      detectedDiscs.fingerprint,
+                    or(
+                      eq(
+                        originalDiscArchives.fingerprint,
+                        detectedDiscs.fingerprint,
+                      ),
+                      exists(
+                        database
+                          .select({
+                            originalDiscArchiveId:
+                              originalDiscArchiveContentIds.originalDiscArchiveId,
+                          })
+                          .from(originalDiscArchiveContentIds)
+                          .where(
+                            and(
+                              eq(
+                                originalDiscArchiveContentIds.originalDiscArchiveId,
+                                originalDiscArchives.id,
+                              ),
+                              eq(
+                                originalDiscArchiveContentIds.contentId,
+                                detectedDiscs.fingerprint,
+                              ),
+                            ),
+                          ),
+                      ),
                     ),
                   ),
               ),
