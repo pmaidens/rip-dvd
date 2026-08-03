@@ -26,6 +26,7 @@ import type {
   DetectedDiscId,
   DiscKind,
   DiscSelectionId,
+  EncodeJobId,
   MediaItemId,
   OriginalDiscArchiveId,
 } from "./index.js";
@@ -1835,10 +1836,13 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(
       sqlite
         .prepare(
-          "select name from __drizzle_migrations order by id desc limit 3",
+          "select name from __drizzle_migrations order by id desc limit 4",
         )
         .all(),
     ).toEqual([
+      {
+        name: "20260803213207_catalog-review-upgrade-guard",
+      },
       {
         name: "20260803175923_gorgeous_wendell_rand",
       },
@@ -1857,6 +1861,203 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .get(),
     ).toEqual({ resolved: 1 });
     sqlite.close();
+  });
+
+  it("fails closed when upgrading caller-era unsafe Disc Selections", () => {
+    const databasePath = createTestDatabasePath();
+    const sqlite = new DatabaseSync(databasePath);
+    const precedingMigrations = [
+      "20260722045326_core-catalog-and-queues",
+      "20260726160810_encoding-profile-active-state",
+      "20260802150655_optical-drive-configuration-default",
+      "20260802190921_optical-drive-configuration-default-resolved",
+      "20260803050348_pretty_living_mummy",
+    ];
+    for (const migrationName of precedingMigrations) {
+      const migration = readFileSync(
+        new URL(`../drizzle/${migrationName}/migration.sql`, import.meta.url),
+        "utf8",
+      );
+      for (const statement of migration.split("--> statement-breakpoint")) {
+        if (statement.trim()) {
+          sqlite.exec(statement);
+        }
+      }
+    }
+    sqlite.exec(`
+      create table __drizzle_migrations (
+        id integer primary key,
+        hash text not null,
+        created_at numeric,
+        name text,
+        applied_at text
+      );
+    `);
+    const recordMigration = sqlite.prepare(`
+      insert into __drizzle_migrations (hash, created_at, name)
+      values (?, 0, ?)
+    `);
+    for (const migrationName of precedingMigrations) {
+      recordMigration.run(`legacy-${migrationName}`, migrationName);
+    }
+    const contentId = `sha256:${"a".repeat(64)}`;
+    sqlite.prepare(`
+      insert into optical_drives (
+        id, device_path, is_enabled, is_present, last_seen_at, created_at,
+        updated_at
+      ) values (?, ?, 1, 1, 0, 0, 0)
+    `).run("legacy-drive", "/dev/sr0");
+    const insertDetectedDisc = sqlite.prepare(`
+      insert into detected_discs (
+        id, optical_drive_id, disc_kind, fingerprint, status, scan_data,
+        detected_at, created_at, updated_at
+      ) values (?, ?, 'dvd', ?, 'archived', ?, 0, 0, 0)
+    `);
+    const titleMapFor = (fingerprint: string) => JSON.stringify({
+      schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+      contentId: fingerprint,
+      titles: [{
+        number: 1,
+        durationSeconds: 1_800,
+        chapters: 4,
+        audioStreams: [],
+        subtitles: [],
+      }],
+    });
+    insertDetectedDisc.run(
+      "duplicate-disc",
+      "legacy-drive",
+      contentId,
+      titleMapFor(contentId),
+    );
+    const noncanonicalContentId = `sha256:${"b".repeat(64)}`;
+    insertDetectedDisc.run(
+      "noncanonical-disc",
+      "legacy-drive",
+      noncanonicalContentId,
+      titleMapFor(noncanonicalContentId),
+    );
+    const scanInvalidContentId = `sha256:${"c".repeat(64)}`;
+    insertDetectedDisc.run(
+      "scan-invalid-disc",
+      "legacy-drive",
+      scanInvalidContentId,
+      titleMapFor(scanInvalidContentId),
+    );
+    sqlite.exec(`
+      insert into detected_discs (
+        id, optical_drive_id, disc_kind, fingerprint, status, detected_at,
+        created_at, updated_at
+      ) values (
+        'safe-disc', 'legacy-drive', 'dvd', 'safe-legacy', 'archived', 0, 0, 0
+      );
+    `);
+    sqlite.exec(`
+      insert into original_disc_archives (
+        id, detected_disc_id, disc_kind, archive_format, archive_path,
+        fingerprint, archived_at, created_at, updated_at
+      ) values
+        ('duplicate-archive', 'duplicate-disc', 'dvd', 'iso',
+          '/media/originals/Duplicate Legacy.iso', '${contentId}', 0, 0, 0),
+        ('noncanonical-archive', 'noncanonical-disc', 'dvd', 'iso',
+          '/media/originals/Noncanonical Legacy.iso', '${noncanonicalContentId}', 0, 0, 0),
+        ('scan-invalid-archive', 'scan-invalid-disc', 'dvd', 'iso',
+          '/media/originals/Scan Invalid Legacy.iso', '${scanInvalidContentId}', 0, 0, 0);
+      insert into media_items (id, kind, title, created_at, updated_at) values
+        ('legacy-episode-1', 'episode', 'Legacy Episode One', 0, 0),
+        ('legacy-episode-1-copy', 'episode', 'Legacy Episode One Copy', 0, 0),
+        ('legacy-noncanonical', 'bonus_feature', 'Noncanonical', 0, 0),
+        ('legacy-missing-title', 'bonus_feature', 'Missing Title', 0, 0),
+        ('safe-main-item', 'movie', 'Safe Main Feature', 0, 0);
+      insert into disc_selections (
+        id, original_disc_archive_id, media_item_id, source_key, kind,
+        title_number, chapter_start, chapter_end, created_at, updated_at
+      ) values
+        ('duplicate-a', 'duplicate-archive', 'legacy-episode-1',
+          'dvd:title:1', 'dvd_title', 1, null, null, 0, 100),
+        ('duplicate-b', 'duplicate-archive', 'legacy-episode-1-copy',
+          'caller:title-one-copy', 'dvd_title', 1, null, null, 0, 200),
+        ('noncanonical', 'noncanonical-archive', 'legacy-noncanonical',
+          'caller:title-one', 'dvd_title', 1, null, null, 0, 250),
+        ('missing-title', 'scan-invalid-archive', 'legacy-missing-title',
+          'dvd:title:999', 'dvd_title', 999, null, null, 0, 300);
+      insert into original_disc_archives (
+        id, detected_disc_id, disc_kind, archive_format, archive_path,
+        fingerprint, archived_at, created_at, updated_at
+      ) values
+        ('safe-archive', 'safe-disc', 'dvd', 'iso',
+          '/media/originals/Safe Legacy.iso', 'safe-legacy', 0, 0, 0);
+      insert into disc_selections (
+        id, original_disc_archive_id, media_item_id, source_key, kind,
+        created_at, updated_at
+      ) values
+        ('safe-main', 'safe-archive', 'safe-main-item',
+          'dvd:main-feature', 'main_feature', 0, 400);
+      insert into encoding_profiles (
+        id, key, display_name, media_domain, version, settings,
+        created_at, updated_at
+      ) values
+        ('legacy-profile', 'legacy', 'Legacy DVD', 'dvd_video', 1, '{}', 0, 0);
+      insert into encode_jobs (
+        id, disc_selection_id, encoding_profile_id, output_path, status,
+        created_at, updated_at
+      ) values
+        ('unsafe-job', 'missing-title', 'legacy-profile',
+          '/media/movies/Unsafe Legacy.mkv', 'queued', 0, 0);
+    `);
+    sqlite.close();
+
+    const access = openTestDatabase(databasePath);
+    for (const archiveId of [
+      "duplicate-archive",
+      "noncanonical-archive",
+      "scan-invalid-archive",
+    ]) {
+      expect(
+        access.catalog.listOriginalDiscArchives({
+          ids: [archiveId as OriginalDiscArchiveId],
+        })[0],
+      ).toMatchObject({ catalogReviewedAt: null });
+    }
+    expect(
+      access.catalog.listOriginalDiscArchives({
+        ids: ["safe-archive" as OriginalDiscArchiveId],
+      })[0],
+    ).toMatchObject({ catalogReviewedAt: new Date(400) });
+    expect(() =>
+      access.catalog.completeCatalogReview(
+        "duplicate-archive" as OriginalDiscArchiveId,
+      )
+    ).toThrow(/duplicate logical Disc Selections/);
+    expect(() =>
+      access.catalog.completeCatalogReview(
+        "noncanonical-archive" as OriginalDiscArchiveId,
+      )
+    ).toThrow(/canonical Disc Selection source keys/);
+    expect(() =>
+      access.catalog.completeCatalogReview(
+        "scan-invalid-archive" as OriginalDiscArchiveId,
+      )
+    ).toThrow(/DVD title 999 is not present/);
+    expect(() =>
+      access.encodeJobs.enqueue({
+        discSelectionId: "missing-title" as DiscSelectionId,
+        encodingProfileId: "legacy-profile" as EncodingProfileId,
+        outputPath: "/media/movies/Still Unsafe.mkv",
+      })
+    ).toThrow(DomainInvariantError);
+    expect(access.encodeJobs.claimNext("upgrade-worker")).toBeNull();
+    expect(access.encodeJobs.list(["failed"])).toEqual([
+      expect.objectContaining({
+        id: "unsafe-job",
+        errorMessage: expect.stringContaining("catalog review"),
+      }),
+    ]);
+    expect(() =>
+      access.encodeJobs.requeue("unsafe-job" as EncodeJobId)
+    ).toThrow(InvalidStatusTransitionError);
+    expect(access.encodeJobs.claimNext("requeued-upgrade-worker")).toBeNull();
+    access.close();
   });
 
   it("rejects malformed and resource-unbounded DVD scans at the catalog facade", () => {
@@ -2443,6 +2644,90 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(access.catalog.listOriginalDiscArchives()).toEqual([
       expect.objectContaining({ id: archive.id, discKind: "dvd" }),
     ]);
+    access.close();
+  });
+
+  it("freezes archived DVD scan evidence after catalog review", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const contentId = `sha256:${"b".repeat(64)}`;
+    const archivedScan = {
+      schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+      contentId,
+      titles: [{
+        number: 1,
+        durationSeconds: 2_400,
+        chapters: 8,
+        audioStreams: [],
+        subtitles: [],
+      }],
+    };
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: contentId,
+      scanData: archivedScan,
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Frozen Evidence.iso",
+      fingerprint: contentId,
+    });
+    const episode = access.catalog.createMediaItem({
+      kind: "episode",
+      title: "Episode Two",
+      episodeNumber: 2,
+    });
+    const selection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: episode.id,
+      kind: "dvd_chapters",
+      titleNumber: 1,
+      chapterStart: 5,
+      chapterEnd: 8,
+    });
+    const reviewed = access.catalog.completeCatalogReview(archive.id);
+    const profile = access.encodingProfiles.create({
+      key: "frozen-evidence",
+      displayName: "Frozen evidence",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const job = access.encodeJobs.enqueue({
+      discSelectionId: selection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Frozen Evidence.mkv",
+    });
+
+    expect(() =>
+      access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint: contentId,
+        scanData: {
+          ...archivedScan,
+          titles: [{ ...archivedScan.titles[0]!, chapters: 4 }],
+        },
+      })
+    ).toThrow(DomainInvariantError);
+    expect(
+      access.catalog.listDetectedDiscs(["archived"], { ids: [disc.id] })[0],
+    ).toMatchObject({ scanData: archivedScan });
+    expect(
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0],
+    ).toMatchObject({ catalogReviewedAt: reviewed.catalogReviewedAt });
+    expect(access.encodeJobs.claimNext("frozen-evidence-worker")).toMatchObject({
+      id: job.id,
+      discSelectionId: selection.id,
+      status: "running",
+    });
     access.close();
   });
 

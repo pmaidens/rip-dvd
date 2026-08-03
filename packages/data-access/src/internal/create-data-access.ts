@@ -19,6 +19,7 @@ import {
   exists,
   gt,
   inArray,
+  isNotNull,
   isNull,
   lte,
   ne,
@@ -55,7 +56,12 @@ import {
   requireNonEmpty,
   requirePositiveSafeInteger,
 } from "./validation.js";
-import { decodeDvdTitleMap, isDvdContentId } from "../dvd-scan.js";
+import {
+  decodeDvdTitleMap,
+  isDvdContentId,
+  MAX_DVD_SCAN_INTEGER,
+  MAX_DVD_TITLES,
+} from "../dvd-scan.js";
 import { MAX_MEDIA_ITEM_HIERARCHY_DEPTH } from "../domain-values.js";
 import {
   DomainInvariantError,
@@ -98,6 +104,7 @@ const MIGRATION_LOCK_POLL_MS = 10;
 const ARCHIVE_JOB_RECOVERY_LIMIT = 100;
 const LEGACY_ARCHIVE_RECONCILIATION_LIMIT = 4;
 const LEGACY_ARCHIVE_RECONCILIATION_BYTES = 9_000_000_000;
+const DISC_SELECTION_REVIEW_BATCH_SIZE = 100;
 const DEFAULT_MIGRATIONS_FOLDER = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../drizzle",
@@ -321,6 +328,73 @@ function toDiscSelection(
   }
 }
 
+function canonicalDvdSelectionSourceKey(
+  selection: Pick<
+    DiscSelection,
+    "chapterEnd" | "chapterStart" | "kind" | "titleNumber"
+  >,
+): string {
+  return selection.kind === "main_feature"
+    ? "dvd:main-feature"
+    : selection.kind === "dvd_title"
+      ? `dvd:title:${selection.titleNumber}`
+      : `dvd:title:${selection.titleNumber}:chapters:${selection.chapterStart}-${selection.chapterEnd}`;
+}
+
+function decodeArchivedDvdTitleBounds(
+  value: unknown,
+): ReadonlyMap<number, number | null> | null {
+  const currentTitleMap = decodeDvdTitleMap(value);
+  if (currentTitleMap) {
+    return new Map(
+      currentTitleMap.titles.map((title) => [title.number, title.chapters]),
+    );
+  }
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    Array.isArray(value) ||
+    !("legacySchemaVersion" in value) ||
+    (value.legacySchemaVersion !== 1 && value.legacySchemaVersion !== 2) ||
+    !("titles" in value) ||
+    !Array.isArray(value.titles) ||
+    value.titles.length > MAX_DVD_TITLES
+  ) {
+    return null;
+  }
+
+  const titleBounds = new Map<number, number | null>();
+  for (const valueTitle of value.titles) {
+    if (
+      typeof valueTitle !== "object" ||
+      valueTitle === null ||
+      Array.isArray(valueTitle) ||
+      !("number" in valueTitle) ||
+      typeof valueTitle.number !== "number" ||
+      !Number.isSafeInteger(valueTitle.number) ||
+      valueTitle.number < 1 ||
+      valueTitle.number > MAX_DVD_SCAN_INTEGER ||
+      titleBounds.has(valueTitle.number)
+    ) {
+      return null;
+    }
+    let chapters: number | null = null;
+    if ("chapters" in valueTitle) {
+      if (
+        typeof valueTitle.chapters !== "number" ||
+        !Number.isSafeInteger(valueTitle.chapters) ||
+        valueTitle.chapters < 0 ||
+        valueTitle.chapters > MAX_DVD_SCAN_INTEGER
+      ) {
+        return null;
+      }
+      chapters = valueTitle.chapters;
+    }
+    titleBounds.set(valueTitle.number, chapters);
+  }
+  return titleBounds;
+}
+
 export interface CreateDataAccessOptions {
   databasePath: string;
   migrationsFolder?: string;
@@ -524,12 +598,125 @@ export function createDataAccessInternal(
     }
   }
 
+  function requireReviewableDiscSelections(
+    archiveId: OriginalDiscArchiveId,
+    querySource: Pick<typeof database, "select"> = database,
+  ): typeof originalDiscArchives.$inferSelect {
+    const archive = requireRow(
+      querySource
+        .select()
+        .from(originalDiscArchives)
+        .where(eq(originalDiscArchives.id, archiveId))
+        .get(),
+      "original disc archive",
+      archiveId,
+    );
+    if (archive.discKind !== "dvd") {
+      throw new DomainInvariantError(
+        "Catalog review currently requires a DVD Original Disc Archive",
+      );
+    }
+    const scanData = requireRow(
+      querySource
+        .select({ scanData: detectedDiscs.scanData })
+        .from(detectedDiscs)
+        .where(eq(detectedDiscs.id, archive.detectedDiscId))
+        .get(),
+      "detected disc",
+      archive.detectedDiscId,
+    ).scanData;
+    const duplicateLogicalSelection = querySource
+      .select({ id: discSelections.id })
+      .from(discSelections)
+      .where(eq(discSelections.originalDiscArchiveId, archiveId))
+      .groupBy(
+        discSelections.kind,
+        discSelections.titleNumber,
+        discSelections.chapterStart,
+        discSelections.chapterEnd,
+      )
+      .having(sql`count(*) > 1`)
+      .limit(1)
+      .get();
+    if (duplicateLogicalSelection) {
+      throw new DomainInvariantError(
+        "Catalog review cannot contain duplicate logical Disc Selections",
+      );
+    }
+
+    const titleBounds = decodeArchivedDvdTitleBounds(scanData);
+    let lastSelectionId: DiscSelectionId | undefined;
+    let selectionCount = 0;
+    while (true) {
+      const rows = querySource
+        .select()
+        .from(discSelections)
+        .where(
+          and(
+            eq(discSelections.originalDiscArchiveId, archiveId),
+            lastSelectionId === undefined
+              ? undefined
+              : gt(discSelections.id, lastSelectionId),
+          ),
+        )
+        .orderBy(asc(discSelections.id))
+        .limit(DISC_SELECTION_REVIEW_BATCH_SIZE)
+        .all();
+      for (const row of rows) {
+        const selection = toDiscSelection(row);
+        const canonicalSourceKey = canonicalDvdSelectionSourceKey(selection);
+        if (selection.sourceKey !== canonicalSourceKey) {
+          throw new DomainInvariantError(
+            "Catalog review requires canonical Disc Selection source keys",
+          );
+        }
+        if (selection.titleNumber !== null) {
+          if (!titleBounds) {
+            throw new DomainInvariantError(
+              "DVD title selections require a reviewable DVD title map",
+            );
+          }
+          if (!titleBounds.has(selection.titleNumber)) {
+            throw new DomainInvariantError(
+              `DVD title ${selection.titleNumber} is not present in the archived scan`,
+            );
+          }
+          if (selection.chapterEnd !== null) {
+            const chapters = titleBounds.get(selection.titleNumber);
+            if (chapters === null || chapters === undefined) {
+              throw new DomainInvariantError(
+                `DVD title ${selection.titleNumber} lacks archived chapter counts`,
+              );
+            }
+            if (selection.chapterEnd > chapters) {
+              throw new DomainInvariantError(
+                `chapterEnd must not exceed DVD title ${selection.titleNumber}'s ${chapters} chapters`,
+              );
+            }
+          }
+        }
+        selectionCount += 1;
+      }
+      if (rows.length < DISC_SELECTION_REVIEW_BATCH_SIZE) {
+        break;
+      }
+      lastSelectionId = rows.at(-1)!.id;
+    }
+    if (selectionCount === 0) {
+      throw new DomainInvariantError(
+        "Catalog review requires at least one Disc Selection",
+      );
+    }
+    return archive;
+  }
+
   function findOriginalArchiveByContentId(
     fingerprint: string,
     querySource: Pick<typeof database, "select"> = database,
   ) {
     return querySource
       .select({
+        detectedDiscId: originalDiscArchives.detectedDiscId,
         discKind: originalDiscArchives.discKind,
         id: originalDiscArchives.id,
       })
@@ -1190,6 +1377,32 @@ export function createDataAccessInternal(
       database.select().from(encodeJobs).where(eq(encodeJobs.id, id)).get(),
     list: listEncodeJobs,
     claim: (workerId, token, timestamp) => {
+      const nextReviewedJob = database
+        .select({ id: encodeJobs.id })
+        .from(encodeJobs)
+        .innerJoin(
+          discSelections,
+          eq(discSelections.id, encodeJobs.discSelectionId),
+        )
+        .innerJoin(
+          originalDiscArchives,
+          eq(
+            originalDiscArchives.id,
+            discSelections.originalDiscArchiveId,
+          ),
+        )
+        .where(
+          and(
+            eq(encodeJobs.status, "queued"),
+            isNotNull(originalDiscArchives.catalogReviewedAt),
+          ),
+        )
+        .orderBy(
+          desc(encodeJobs.priority),
+          asc(encodeJobs.createdAt),
+          asc(encodeJobs.id),
+        )
+        .limit(1);
       const claimed = database
         .update(encodeJobs)
         .set({
@@ -1204,10 +1417,7 @@ export function createDataAccessInternal(
         .where(
           and(
             eq(encodeJobs.status, "queued"),
-            eq(
-              encodeJobs.id,
-              sql<EncodeJobId>`(select ${encodeJobs.id} from ${encodeJobs} where ${encodeJobs.status} = 'queued' order by ${encodeJobs.priority} desc, ${encodeJobs.createdAt} asc, ${encodeJobs.id} asc limit 1)`,
-            ),
+            eq(encodeJobs.id, nextReviewedJob),
           ),
         )
         .returning()
@@ -1236,7 +1446,28 @@ export function createDataAccessInternal(
           priority: options?.priority,
         })
         .where(
-          and(eq(encodeJobs.id, id), eq(encodeJobs.status, expectedStatus)),
+          and(
+            eq(encodeJobs.id, id),
+            eq(encodeJobs.status, expectedStatus),
+            exists(
+              database
+                .select({ id: discSelections.id })
+                .from(discSelections)
+                .innerJoin(
+                  originalDiscArchives,
+                  eq(
+                    originalDiscArchives.id,
+                    discSelections.originalDiscArchiveId,
+                  ),
+                )
+                .where(
+                  and(
+                    eq(discSelections.id, encodeJobs.discSelectionId),
+                    isNotNull(originalDiscArchives.catalogReviewedAt),
+                  ),
+                ),
+            ),
+          ),
         )
         .returning()
         .get(),
@@ -1803,6 +2034,7 @@ export function createDataAccessInternal(
           }
           const existing = transaction
             .select({
+              id: detectedDiscs.id,
               discKind: detectedDiscs.discKind,
               scanData: detectedDiscs.scanData,
               status: detectedDiscs.status,
@@ -1818,6 +2050,17 @@ export function createDataAccessInternal(
               ),
             )
             .get();
+          if (
+            matchingArchive !== undefined &&
+            existing !== undefined &&
+            matchingArchive.detectedDiscId === existing.id &&
+            scanData !== undefined &&
+            !isDeepStrictEqual(existing.scanData, scanData)
+          ) {
+            throw new DomainInvariantError(
+              "Rediscovery cannot change archived scan evidence",
+            );
+          }
           const observationChanged =
             existing === undefined ||
             input.isNewMediumObservation === true ||
@@ -2133,27 +2376,9 @@ export function createDataAccessInternal(
       completeCatalogReview(id) {
         const timestamp = now();
         return database.transaction((transaction) => {
-          const archive = requireRow(
-            transaction
-              .select()
-              .from(originalDiscArchives)
-              .where(eq(originalDiscArchives.id, id))
-              .get(),
-            "original disc archive",
-            id,
-          );
+          const archive = requireReviewableDiscSelections(id, transaction);
           if (archive.catalogReviewedAt !== null) {
             return archive;
-          }
-          const selection = transaction
-            .select({ id: discSelections.id })
-            .from(discSelections)
-            .where(eq(discSelections.originalDiscArchiveId, id))
-            .get();
-          if (!selection) {
-            throw new DomainInvariantError(
-              "Catalog review requires at least one Disc Selection",
-            );
           }
           return requireRow(
             transaction
@@ -2400,12 +2625,10 @@ export function createDataAccessInternal(
                 );
               }
             }
-            const sourceKey =
-              input.kind === "main_feature"
-                ? "dvd:main-feature"
-                : input.kind === "dvd_title"
-                  ? `dvd:title:${coordinates.titleNumber}`
-                  : `dvd:title:${coordinates.titleNumber}:chapters:${coordinates.chapterStart}-${coordinates.chapterEnd}`;
+            const sourceKey = canonicalDvdSelectionSourceKey({
+              kind: input.kind,
+              ...coordinates,
+            });
             const selection = toDiscSelection(
               requireRow(
                 transaction
@@ -2840,6 +3063,7 @@ export function createDataAccessInternal(
               transaction
                 .select({
                   catalogReviewedAt: originalDiscArchives.catalogReviewedAt,
+                  originalDiscArchiveId: originalDiscArchives.id,
                 })
                 .from(discSelections)
                 .innerJoin(
@@ -2859,6 +3083,10 @@ export function createDataAccessInternal(
                 "Encode Jobs require a completed catalog review",
               );
             }
+            requireReviewableDiscSelections(
+              selectionReview.originalDiscArchiveId,
+              transaction,
+            );
             transaction
               .insert(encodeJobs)
               .values({
