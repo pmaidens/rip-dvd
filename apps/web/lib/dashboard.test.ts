@@ -1,4 +1,8 @@
-import type { DataAccess } from "@rip-dvd/data-access";
+import { createDataAccess, type DataAccess } from "@rip-dvd/data-access";
+import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import { readDashboardSnapshot } from "./dashboard";
@@ -54,6 +58,74 @@ function seedEncodeJob(access: DataAccess): void {
 }
 
 describe("readDashboardSnapshot", () => {
+  it("shows imported legacy catalog review and Encode Job state", () => {
+    const libraryRoot = mkdtempSync(join(tmpdir(), "rip-dvd-dashboard-import-"));
+    const originalsLibraryPath = join(libraryRoot, "originals");
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    const databasePath = join(libraryRoot, "dashboard.sqlite");
+    const access = createDataAccess({ databasePath });
+    const importer = createLegacySidecarDataAccess({ databasePath });
+    try {
+      const queuedArchivePath = join(originalsLibraryPath, "Queued Movie.iso");
+      const reviewArchivePath = join(originalsLibraryPath, "Review Movie.iso");
+      writeFileSync(queuedArchivePath, "archive");
+      writeFileSync(reviewArchivePath, "archive");
+      writeFileSync(
+        join(originalsLibraryPath, "Queued Movie.rip-dvd.json"),
+        JSON.stringify({
+          schema_version: 2,
+          source: queuedArchivePath,
+          title: "Queued Movie",
+          year: "2004",
+          disc_fingerprint: "queued-movie-import",
+          jobs: [
+            {
+              label: "Movie: Queued Movie",
+              source: queuedArchivePath,
+              output: join(libraryRoot, "movies", "Queued Movie.mkv"),
+              preset: "Fast 480p30",
+              selection: "main_feature",
+              title_number: null,
+            },
+          ],
+        }),
+      );
+      writeFileSync(
+        join(originalsLibraryPath, "Review Movie.rip-dvd.json"),
+        JSON.stringify({
+          schema_version: 2,
+          source: reviewArchivePath,
+          title: "Review Movie",
+          disc_fingerprint: "review-movie-import",
+          jobs: [],
+        }),
+      );
+      importer.legacySidecars.importLibrary({ originalsLibraryPath });
+
+      const dashboard = readDashboardSnapshot(access);
+
+      expect(dashboard.encodeJobs).toEqual({
+        status: "loaded",
+        items: [
+          expect.objectContaining({
+            mediaTitle: "Queued Movie",
+            mediaYear: 2004,
+            encodingProfileName: "Fast 480p30",
+            status: "queued",
+          }),
+        ],
+      });
+      expect(dashboard.catalogReview).toEqual({
+        status: "loaded",
+        items: [expect.objectContaining({ discLabel: "Review Movie" })],
+      });
+    } finally {
+      importer.close();
+      access.close();
+      rmSync(libraryRoot, { force: true, recursive: true });
+    }
+  });
+
   it("returns the five operations sections from facade-backed SQLite state", () => {
     const access = dataAccessFixture.create();
     const drive = access.catalog.upsertOpticalDrive({

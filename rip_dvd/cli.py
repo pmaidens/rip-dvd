@@ -1,5 +1,6 @@
 import argparse
 from collections import deque
+from contextlib import nullcontext
 import datetime as dt
 import fcntl
 import hashlib
@@ -11,7 +12,8 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from typing import Dict, List, Optional
 
 from .core import (
     EncodeQueueItem,
@@ -32,6 +34,7 @@ from .core import (
     suggested_extra_titles,
 )
 from .external import ffmpeg_tool, resolve_movie_metadata, scan_dvd_titles
+from .legacy_queue_lease import legacy_queue_command_lease
 from .output import RipProgressDisplay, log, log_error, prompt, prompt_yes_no
 
 
@@ -39,6 +42,26 @@ DEFAULT_PRESET = "Fast 480p30"
 DEFAULT_DEVICE = "/dev/sr0"
 DEFAULT_LIBRARY = "/srv/media/Movies"
 DEFAULT_ORIGINALS_LIBRARY = "/srv/media/DVD Originals"
+LEGACY_QUEUE_CUTOVER_MARKER = ".rip-dvd-sqlite-catalog"
+LEGACY_QUEUE_COMMANDS = frozenset(
+    {"interactive", "rip", "title", "extras", "queue", "encode"}
+)
+
+
+@dataclass(frozen=True)
+class ArchiveCommandOptions:
+    device: str
+    library: str
+    originals_library: str
+    preset: str
+    command: str
+    selected_title_number: Optional[int]
+    extra_title_numbers: Optional[List[int]]
+    name: Optional[str]
+    year: Optional[int]
+    dry_run: bool
+    verbose: bool
+    extra_names: Optional[Dict[int, str]]
 
 
 class EtaTracker:
@@ -439,9 +462,25 @@ def read_queue_metadata(metadata_path):
         return None
 
 
+def legacy_queue_is_retired(originals_library):
+    return (Path(originals_library) / LEGACY_QUEUE_CUTOVER_MARKER).exists()
+
+
+def refuse_retired_legacy_queue(originals_library):
+    if not legacy_queue_is_retired(originals_library):
+        return False
+    log_error(
+        "Legacy sidecar queue commands are inactive for this library because its "
+        "SQLite catalog is authoritative. Use the SQLite catalog and workers instead."
+    )
+    return True
+
+
 def discover_encode_jobs(originals_library):
     queue_root = Path(originals_library)
     if not queue_root.exists():
+        return []
+    if legacy_queue_is_retired(queue_root):
         return []
 
     jobs = []
@@ -700,6 +739,46 @@ def archive_mode(
     if not Path(device).exists():
         log_error(f"DVD device not found: {device}")
         return 2
+    options = ArchiveCommandOptions(
+        device=device,
+        library=library,
+        originals_library=originals_library,
+        preset=preset,
+        command=command,
+        selected_title_number=selected_title_number,
+        extra_title_numbers=extra_title_numbers,
+        name=name,
+        year=year,
+        dry_run=dry_run,
+        verbose=verbose,
+        extra_names=extra_names,
+    )
+    try:
+        with legacy_queue_command_lease(originals_library):
+            if refuse_retired_legacy_queue(originals_library):
+                return 2
+            return _run_archive_command(
+                options,
+                scan=scan,
+            )
+    except TimeoutError as exc:
+        log_error(str(exc))
+        return 2
+
+
+def _run_archive_command(options, scan=None):
+    device = options.device
+    library = options.library
+    originals_library = options.originals_library
+    preset = options.preset
+    command = options.command
+    selected_title_number = options.selected_title_number
+    extra_title_numbers = options.extra_title_numbers
+    name = options.name
+    year = options.year
+    dry_run = options.dry_run
+    verbose = options.verbose
+    extra_names = options.extra_names
 
     scan, code = scan_for_archive(device, scan=scan)
     if code != 0:
@@ -830,11 +909,54 @@ def encode_mode(originals_library, dry_run=False, verbose=False, watch=False, in
 
     processed = 0
     while True:
-        if limit is not None and processed >= limit:
-            return 0
-        jobs = discover_encode_jobs(originals_library)
-        if limit is not None:
-            jobs = jobs[: max(0, limit - processed)]
+        lease = (
+            legacy_queue_command_lease(originals_library)
+            if Path(originals_library).exists()
+            else nullcontext(True)
+        )
+        try:
+            with lease:
+                if refuse_retired_legacy_queue(originals_library):
+                    return 2
+                if limit is not None and processed >= limit:
+                    return 0
+                jobs = discover_encode_jobs(originals_library)
+                if limit is not None:
+                    jobs = jobs[: max(0, limit - processed)]
+
+                labels = [job.label for job in jobs]
+                progress = None
+                if jobs and not dry_run and not verbose:
+                    progress = RipProgressDisplay(labels)
+                    progress.begin()
+
+                batch_processed = 0
+                for index, job in enumerate(jobs):
+                    log(f"Encoding from original backup: {job.source}")
+                    code = execute_encode_job(
+                        job,
+                        dry_run=dry_run,
+                        verbose=verbose,
+                        progress_display=progress,
+                        progress_index=index,
+                        idle=idle,
+                    )
+                    if code is None:
+                        continue
+                    if code != 0:
+                        return code
+                    processed += 1
+                    batch_processed += 1
+                    if limit is not None and processed >= limit:
+                        return 0
+
+                if progress is not None:
+                    progress.finish()
+                    if batch_processed:
+                        log("Pending encodes complete.")
+        except TimeoutError as exc:
+            log_error(str(exc))
+            return 2
 
         if not jobs:
             if watch:
@@ -844,37 +966,6 @@ def encode_mode(originals_library, dry_run=False, verbose=False, watch=False, in
             log("No pending encodes.")
             return 0
 
-        labels = [job.label for job in jobs]
-        progress = None
-        if not dry_run and not verbose:
-            progress = RipProgressDisplay(labels)
-            progress.begin()
-
-        batch_processed = 0
-        for index, job in enumerate(jobs):
-            log(f"Encoding from original backup: {job.source}")
-            code = execute_encode_job(
-                job,
-                dry_run=dry_run,
-                verbose=verbose,
-                progress_display=progress,
-                progress_index=index,
-                idle=idle,
-            )
-            if code is None:
-                continue
-            if code != 0:
-                return code
-            processed += 1
-            batch_processed += 1
-            if limit is not None and processed >= limit:
-                return 0
-
-        if progress is not None:
-            progress.finish()
-            if batch_processed:
-                log("Pending encodes complete.")
-
         if not watch:
             return 0
         if batch_processed == 0:
@@ -883,6 +974,8 @@ def encode_mode(originals_library, dry_run=False, verbose=False, watch=False, in
 
 
 def queue_mode(originals_library):
+    if refuse_retired_legacy_queue(originals_library):
+        return 2
     queue_root = Path(originals_library)
     if not queue_root.exists():
         log(f"No originals library found: {queue_root}")
@@ -1348,6 +1441,11 @@ def main():
     parser.add_argument("--normal-priority", action="store_true", help="With 'encode', do not lower CPU/I/O priority")
     parser.add_argument("--verbose", "--debug", action="store_true", help="Print full raw HandBrake output for debugging")
     args = parser.parse_args()
+
+    if args.command in LEGACY_QUEUE_COMMANDS and refuse_retired_legacy_queue(
+        args.originals_library
+    ):
+        return 2
 
     if args.command == "interactive":
         return interactive_mode(args.device, args.library, args.originals_library, args.preset, verbose=args.verbose)

@@ -357,6 +357,15 @@ describe("data-access facade", () => {
     access.close();
   });
 
+  it("does not expose migration-only legacy sidecar state", () => {
+    const access = openTestDatabase();
+
+    expect(Object.keys(access)).not.toContain("legacySidecars");
+    expect("legacySidecars" in access).toBe(false);
+
+    access.close();
+  });
+
   it("migrates a persistent database and reports its SQLite configuration", () => {
     const databasePath = createTestDatabasePath();
     const access = openTestDatabase(databasePath);
