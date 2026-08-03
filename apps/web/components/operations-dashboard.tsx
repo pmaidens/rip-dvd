@@ -102,6 +102,7 @@ interface DashboardJobItemProps {
   subtitle: string;
   status: DashboardArchiveJob["status"];
   progressPercent: number;
+  action?: React.ReactNode;
 }
 
 function DashboardJobItem({
@@ -109,6 +110,7 @@ function DashboardJobItem({
   subtitle,
   status,
   progressPercent,
+  action,
 }: DashboardJobItemProps) {
   return (
     <article className="operation-item">
@@ -126,6 +128,7 @@ function DashboardJobItem({
       {status === "failed" ? (
         <p className="job-error">Worker reported a failure.</p>
       ) : null}
+      {action}
     </article>
   );
 }
@@ -182,7 +185,15 @@ function DashboardSection<T>({
   );
 }
 
-export function DashboardView({ state }: { state: DashboardLoadState }) {
+export function DashboardView({
+  state,
+  onApproveDetectedDisc = () => undefined,
+  approvingDetectedDiscId = null,
+}: {
+  state: DashboardLoadState;
+  onApproveDetectedDisc?: (id: string) => void;
+  approvingDetectedDiscId?: string | null;
+}) {
   return (
     <div className="dashboard-grid">
       <DashboardSection
@@ -287,6 +298,17 @@ export function DashboardView({ state }: { state: DashboardLoadState }) {
                 </ol>
               ) : null}
             </div>
+            {disc.status === "scanned" ? (
+              <button
+                type="button"
+                disabled={approvingDetectedDiscId !== null}
+                onClick={() => onApproveDetectedDisc(disc.id)}
+              >
+                {approvingDetectedDiscId === disc.id
+                  ? "Approving…"
+                  : "Approve archive"}
+              </button>
+            ) : null}
           </article>
         )}
       />
@@ -303,6 +325,19 @@ export function DashboardView({ state }: { state: DashboardLoadState }) {
             subtitle={job.opticalDriveName}
             status={job.status}
             progressPercent={job.progressPercent}
+            action={
+              job.status === "failed" ? (
+                <button
+                  type="button"
+                  disabled={approvingDetectedDiscId !== null}
+                  onClick={() => onApproveDetectedDisc(job.detectedDiscId)}
+                >
+                  {approvingDetectedDiscId === job.detectedDiscId
+                    ? "Retrying…"
+                    : "Retry archive"}
+                </button>
+              ) : null
+            }
           />
         )}
       />
@@ -356,6 +391,25 @@ export function DashboardView({ state }: { state: DashboardLoadState }) {
 
 type DashboardConnection = "loading" | "error" | "loaded";
 
+type DashboardFetch = (
+  input: RequestInfo | URL,
+  init?: RequestInit,
+) => Promise<Response>;
+
+export async function requestArchiveApproval(
+  detectedDiscId: string,
+  fetcher: DashboardFetch = fetch,
+): Promise<void> {
+  const response = await fetcher("/api/archive-jobs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ detectedDiscId }),
+  });
+  if (!response.ok) {
+    throw new Error("Archive approval request failed");
+  }
+}
+
 export function DashboardConnectionStatus({
   connectionStatus,
   streamStatus,
@@ -394,6 +448,10 @@ export function OperationsDashboard() {
   const [requestNumber, setRequestNumber] = useState(0);
   const [streamStatus, setStreamStatus] =
     useState<DashboardStreamStatus>("connecting");
+  const [approvingDetectedDiscId, setApprovingDetectedDiscId] = useState<
+    string | null
+  >(null);
+  const [archiveApprovalFailed, setArchiveApprovalFailed] = useState(false);
 
   useEffect(() => {
     setState(dashboardState("loading"));
@@ -417,6 +475,22 @@ export function OperationsDashboard() {
     : sectionStates.includes("error")
       ? "error"
       : "loaded";
+
+  const approveDetectedDisc = async (detectedDiscId: string) => {
+    if (approvingDetectedDiscId !== null) {
+      return;
+    }
+    setApprovingDetectedDiscId(detectedDiscId);
+    setArchiveApprovalFailed(false);
+    try {
+      await requestArchiveApproval(detectedDiscId);
+      setRequestNumber((value) => value + 1);
+    } catch {
+      setArchiveApprovalFailed(true);
+    } finally {
+      setApprovingDetectedDiscId(null);
+    }
+  };
 
   return (
     <main className="dashboard-shell">
@@ -446,7 +520,17 @@ export function OperationsDashboard() {
 
       <EncodingProfilesManager />
 
-      <DashboardView state={state} />
+      {archiveApprovalFailed ? (
+        <p className="job-error" role="status">
+          Archive approval failed. Try again.
+        </p>
+      ) : null}
+
+      <DashboardView
+        state={state}
+        onApproveDetectedDisc={(id) => void approveDetectedDisc(id)}
+        approvingDetectedDiscId={approvingDetectedDiscId}
+      />
 
       <footer className="dashboard-footer">
         <span>Local control plane</span>

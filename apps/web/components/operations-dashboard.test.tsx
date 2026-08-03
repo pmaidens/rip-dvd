@@ -1,9 +1,10 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   DashboardConnectionStatus,
   DashboardView,
+  requestArchiveApproval,
   type DashboardLoadState,
 } from "./operations-dashboard";
 
@@ -138,6 +139,7 @@ describe("DashboardView", () => {
         items: [
           {
             id: "archive-job-1",
+            detectedDiscId: "disc-1",
             discLabel: "MY_MOVIE",
             opticalDriveName: "Upper drive",
             status: "failed",
@@ -188,9 +190,23 @@ describe("DashboardView", () => {
     expect(html).toContain("My Movie");
     expect(html).toContain("BONUS_DISC");
     expect(html).toContain("Worker reported a failure");
+    expect(html).toContain("Approve archive");
+    expect(html).toContain("Retry archive");
     expect(html).not.toContain("/dev/");
     expect(html).not.toContain("/media/");
     expect(html).not.toContain("HandBrake");
+  });
+
+  it("submits a same-origin JSON archive approval", async () => {
+    const fetcher = vi.fn(async () => new Response(null, { status: 201 }));
+
+    await requestArchiveApproval("disc-1", fetcher);
+
+    expect(fetcher).toHaveBeenCalledWith("/api/archive-jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ detectedDiscId: "disc-1" }),
+    });
   });
 
   it("renders mixed section states independently", () => {

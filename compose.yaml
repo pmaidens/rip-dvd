@@ -50,6 +50,8 @@ services:
       dockerfile: docker/runtime.Dockerfile
       target: archive-worker
     environment: *runtime-environment
+    devices:
+      - "${RIP_DVD_ARCHIVE_DEVICE_PATH:-/dev/sr0}:${RIP_DVD_ARCHIVE_DEVICE_PATH:-/dev/sr0}:r"
     volumes:
       - rip-dvd-data:/data
       - ${RIP_DVD_ORIGINALS_LIBRARY_HOST_PATH:-rip-dvd-originals}:/media/originals

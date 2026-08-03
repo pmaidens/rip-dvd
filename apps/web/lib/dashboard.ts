@@ -44,6 +44,7 @@ export interface DashboardDetectedDiscDetails {
 
 export interface DashboardArchiveJob {
   id: string;
+  detectedDiscId: string;
   discLabel: string;
   opticalDriveName: string;
   status: JobStatus;
@@ -331,6 +332,7 @@ function readDashboardSnapshotRecords(
                 : undefined;
               return {
                 id: job.id,
+                detectedDiscId: job.detectedDiscId,
                 discLabel: disc?.volumeLabel ?? "Unlabeled disc",
                 opticalDriveName: drive
                   ? driveDisplayName(drive)

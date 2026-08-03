@@ -330,8 +330,18 @@ export interface EncodingProfileAccess {
 }
 
 export interface ArchiveJobAccess {
+  approve(input: {
+    detectedDiscId: DetectedDiscId;
+    priority?: number;
+  }): ArchiveJob;
   enqueue(input: { detectedDiscId: DetectedDiscId; priority?: number }): ArchiveJob;
-  claimNext(workerId: string): RunningArchiveJob | null;
+  claimNext(
+    workerId: string,
+    eligibility?: {
+      opticalDriveId: OpticalDriveId;
+      fingerprint: string;
+    },
+  ): RunningArchiveJob | null;
   list(
     statuses?: JobStatus[],
     options?: ChronologicalListOptions,
@@ -339,6 +349,10 @@ export interface ArchiveJobAccess {
   updateProgress(
     claim: RunningArchiveJob,
     progressPercent: number,
+  ): ArchiveJob;
+  publish(
+    claim: RunningArchiveJob,
+    input: { archivePath: string; sizeBytes: number },
   ): ArchiveJob;
   complete(
     claim: RunningArchiveJob,

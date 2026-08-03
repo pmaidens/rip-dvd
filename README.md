@@ -394,22 +394,23 @@ keeps its current enabled/disabled authorization. A drive that disappears may
 keep authorization only when the same serial proves continuity when it returns;
 uncertain same-path hardware fails closed.
 
-Docker cannot see host optical devices unless they are passed through. Add only
-the devices the archive worker should inspect in a local Compose override, for
-example:
+Compose passes the single `RIP_DVD_ARCHIVE_DEVICE_PATH` device through to the
+archive worker at the same container path with read-only device permission. It
+defaults to `/dev/sr0`; set the variable to another `/dev/...` path when that is
+the one drive the worker should inspect. The non-root container user must also
+have host permission to read the device. If the host grants that access through
+a device group, add only that group in a local Compose override, for example:
 
 ```yaml
 services:
   archive-worker:
-    devices:
-      - /dev/sr0:/dev/sr0:r
     group_add:
       - "${RIP_DVD_OPTICAL_DEVICE_GID:-24}"
 ```
 
 Set `RIP_DVD_OPTICAL_DEVICE_GID` to the host group that can read the device
-(often the `cdrom` group). The read-only device permission is sufficient for
-discovery and scanning; this worker does not eject media.
+(often the `cdrom` group). The configured read-only mapping is sufficient for
+discovery, scanning, and copying the DVD image; this worker does not eject media.
 
 The worker runs discovery on each configured poll interval. An empty drive is a
 normal state. Scanner failures are logged per drive without hiding other drives,
@@ -431,11 +432,20 @@ Raw-disc open/read/hash work uses the same bounded helper-process lifecycle, so
 a kernel-blocked device operation cannot keep the archive worker alive.
 Reads are shell-free, size-capped, incremental, timed out, and
 cancellation-aware.
-Repeated polls update the same Detected Disc. A fingerprint
+Repeated polls update the same Detected Disc. Dashboard approval atomically
+marks a scanned disc approved and creates its queued Archive Job; discovery
+never approves or queues work by itself. The archive worker claims only work
+for the current disc in an enabled, present drive, copies through a bounded
+hidden partial path, and publishes the fingerprint-named ISO and its Original
+Disc Archive record only after the source and completed image are reverified.
+Progress and terminal state are written to SQLite and reach the dashboard over
+SSE. Failed or interrupted copies are moved to a `.failed` recovery path and
+remain explicitly retryable from the dashboard.
+
+A fingerprint
 already present in Original Disc Archives is shown as **Already archived**, and
 any obsolete queued Archive Job for that fingerprint is removed by the
-data-access facade. Discovery never approves or queues new archive work; those
-actions remain explicit later workflows.
+data-access facade.
 
 The dashboard's HTTP snapshot carries review details. One-second SSE activity
 events retain up to 100 live Detected Discs and jobs ahead of 20 terminal-history
@@ -455,16 +465,19 @@ persistent `rip-dvd-data` volume.
 
 The facade exposes catalog operations and separate Archive Job and Encode Job
 queues without exposing Drizzle or a general transaction API to callers.
-Archive Jobs are conditionally enqueued or requeued only while a Detected Disc
-is approved;
+Archive approval and job creation/retry share one immediate transaction.
+Archive Jobs are otherwise conditionally enqueued or requeued only while a
+Detected Disc is approved;
 approval revocation or archive publication removes obsolete queued work in the
 same short transaction. The atomic claim statement rechecks both current
-approval and the absence of an Original Disc Archive with the same fingerprint
-before returning preservation work, and permits only one running Archive Job
-for a fingerprint across all Optical Drives. Approval freezes the reviewed Disc
-Kind and scan data until approval is revoked. A fingerprint has one Disc Kind
-across Optical Drives. Archive publication marks every observation of the
-fingerprint archived. Later rediscovery matches archived
+approval, enabled/present drive state, and the absence of an Original Disc
+Archive with the same fingerprint before returning preservation work. It
+permits only one running Archive Job for a fingerprint across all Optical
+Drives and only one running job on each physical drive. Approval freezes the
+reviewed Disc Kind and scan data until approval is revoked. A fingerprint has
+one Disc Kind across Optical Drives. Archive publication creates provenance,
+marks every observation archived, and records terminal job success in one
+transaction. Later rediscovery matches archived
 fingerprints across Optical Drives, marks the new observation archived, and
 rejects a contradictory Disc Kind.
 A worker must let the claim commit and only then start `dd`, `lsdvd`,

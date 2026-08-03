@@ -451,6 +451,7 @@ describe("watchDashboardActivity", () => {
       status: "loaded",
       items: [{
         id: "job-1",
+        detectedDiscId: "disc-1",
         discLabel: "DISC",
         opticalDriveName: "Drive",
         status: "running",
@@ -696,6 +697,7 @@ describe("watchDashboardActivity", () => {
         items: [
           {
             id: "archive-1",
+            detectedDiscId: "disc-1",
             discLabel: "LIVE_DISC",
             opticalDriveName: "Upper drive",
             status: "running",

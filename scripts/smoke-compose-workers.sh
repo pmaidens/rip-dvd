@@ -34,6 +34,7 @@ load_worker_descriptor() {
 compose() {
   RIP_DVD_MEDIA_LIBRARY_HOST_PATH="$media_source" \
     RIP_DVD_ORIGINALS_LIBRARY_HOST_PATH="$originals_source" \
+    RIP_DVD_ARCHIVE_DEVICE_PATH=/dev/null \
     docker compose --project-name "$project_name" "$@"
 }
 

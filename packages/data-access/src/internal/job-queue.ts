@@ -51,11 +51,17 @@ export interface JobQueueAdapter<
   Token extends string,
   Completion,
   RequeueOptions,
+  ClaimOptions,
 > {
   readonly recordType: string;
   find(id: Id): Job | undefined;
   list(statuses?: JobStatus[], options?: ChronologicalListOptions): Job[];
-  claim(workerId: string, token: Token, timestamp: Date): Running | undefined;
+  claim(
+    workerId: string,
+    token: Token,
+    timestamp: Date,
+    options?: ClaimOptions,
+  ): Running | undefined;
   updateAttempt(
     claim: Running,
     update: AttemptUpdate,
@@ -76,8 +82,9 @@ export interface JobQueueController<
   Token extends string,
   Completion,
   RequeueOptions,
+  ClaimOptions,
 > {
-  claimNext(workerId: string): Running | null;
+  claimNext(workerId: string, options?: ClaimOptions): Running | null;
   list(statuses?: JobStatus[], options?: ChronologicalListOptions): Job[];
   updateProgress(claim: Running, progressPercent: number): Job;
   complete(claim: Running, completion: Completion): Job;
@@ -105,6 +112,7 @@ export function createJobQueueController<
   Token extends string,
   Completion,
   RequeueOptions,
+  ClaimOptions,
 >({
   adapter,
   createToken,
@@ -117,7 +125,8 @@ export function createJobQueueController<
     Id,
     Token,
     Completion,
-    RequeueOptions
+    RequeueOptions,
+    ClaimOptions
   >;
   createToken(): Token;
   now(): Date;
@@ -128,7 +137,8 @@ export function createJobQueueController<
   Id,
   Token,
   Completion,
-  RequeueOptions
+  RequeueOptions,
+  ClaimOptions
 > {
   const progress = new Map<
     Id,
@@ -172,11 +182,12 @@ export function createJobQueueController<
   }
 
   return {
-    claimNext(workerId) {
+    claimNext(workerId, options) {
       const claim = adapter.claim(
         requireNonEmpty(workerId, "workerId"),
         createToken(),
         now(),
+        options,
       );
       if (!claim) {
         return null;

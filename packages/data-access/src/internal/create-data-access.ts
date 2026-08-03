@@ -476,19 +476,37 @@ export function createDataAccessInternal(
     },
   });
 
+  type ArchiveJobCompletion =
+    | OriginalDiscArchiveId
+    | { archivePath: string; sizeBytes: number };
+
   const archiveJobAdapter = {
     recordType: "archive job",
     find: (id) =>
       database.select().from(archiveJobs).where(eq(archiveJobs.id, id)).get(),
     list: listArchiveJobs,
-    claim: (workerId, token, timestamp) => {
+    claim: (workerId, token, timestamp, eligibility) => {
+      const eligibilityCondition = eligibility
+        ? and(
+            eq(detectedDiscs.opticalDriveId, eligibility.opticalDriveId),
+            eq(
+              detectedDiscs.fingerprint,
+              requireNonEmpty(eligibility.fingerprint, "fingerprint"),
+            ),
+          )
+        : sql`1`;
       const nextApprovedJobId = sql<ArchiveJobId>`(
         select ${archiveJobs.id}
         from ${archiveJobs}
         inner join ${detectedDiscs}
           on ${detectedDiscs.id} = ${archiveJobs.detectedDiscId}
+        inner join ${opticalDrives}
+          on ${opticalDrives.id} = ${detectedDiscs.opticalDriveId}
         where ${archiveJobs.status} = 'queued'
           and ${detectedDiscs.status} = 'approved'
+          and ${opticalDrives.isEnabled} = true
+          and ${opticalDrives.isPresent} = true
+          and ${eligibilityCondition}
           and not exists (
             select 1
             from ${originalDiscArchives}
@@ -500,7 +518,10 @@ export function createDataAccessInternal(
             inner join detected_discs as running_detected_discs
               on running_detected_discs.id = running_archive_jobs.detected_disc_id
             where running_archive_jobs.status = 'running'
-              and running_detected_discs.fingerprint = ${detectedDiscs.fingerprint}
+              and (
+                running_detected_discs.fingerprint = ${detectedDiscs.fingerprint}
+                or running_detected_discs.optical_drive_id = ${detectedDiscs.opticalDriveId}
+              )
           )
         order by ${archiveJobs.priority} desc,
           ${archiveJobs.createdAt} asc,
@@ -528,7 +549,7 @@ export function createDataAccessInternal(
         .get();
       return claimed ? asRunningArchiveJob(claimed) : undefined;
     },
-    updateAttempt: (claim, update, originalDiscArchiveId) => {
+    updateAttempt: (claim, update, completion) => {
       const attemptCondition = and(
         eq(archiveJobs.id, claim.id),
         eq(archiveJobs.status, "running"),
@@ -542,7 +563,7 @@ export function createDataAccessInternal(
           .returning()
           .get();
       }
-      if (!originalDiscArchiveId) {
+      if (!completion) {
         throw new DomainInvariantError(
           "Completing an Archive Job requires an Original Disc Archive",
         );
@@ -557,12 +578,71 @@ export function createDataAccessInternal(
         if (!current) {
           return undefined;
         }
+        if (typeof completion !== "string") {
+          const disc = requireRow(
+            transaction
+              .select()
+              .from(detectedDiscs)
+              .where(eq(detectedDiscs.id, current.detectedDiscId))
+              .get(),
+            "detected disc",
+            current.detectedDiscId,
+          );
+          if (disc.status !== "approved") {
+            throw new InvalidStatusTransitionError(
+              "detected disc",
+              disc.status,
+              "archived",
+            );
+          }
+          const archive = requireRow(
+            transaction
+              .insert(originalDiscArchives)
+              .values({
+                id: newId<OriginalDiscArchiveId>(),
+                detectedDiscId: disc.id,
+                discKind: disc.discKind,
+                archiveFormat: "iso",
+                archivePath: requireNonEmpty(
+                  completion.archivePath,
+                  "archivePath",
+                ),
+                fingerprint: disc.fingerprint,
+                sizeBytes: requirePositiveSafeInteger(
+                  completion.sizeBytes,
+                  "sizeBytes",
+                ),
+                archivedAt: update.updatedAt,
+                createdAt: update.updatedAt,
+                updatedAt: update.updatedAt,
+              })
+              .returning()
+              .get(),
+            "original disc archive",
+            disc.id,
+          );
+          transaction
+            .update(detectedDiscs)
+            .set({ status: "archived", updatedAt: update.updatedAt })
+            .where(eq(detectedDiscs.fingerprint, disc.fingerprint))
+            .run();
+          transaction
+            .delete(archiveJobs)
+            .where(queuedArchiveJobsForFingerprint(disc.fingerprint))
+            .run();
+          return transaction
+            .update(archiveJobs)
+            .set({ ...update, originalDiscArchiveId: archive.id })
+            .where(attemptCondition)
+            .returning()
+            .get();
+        }
         const matchingArchive = transaction
           .select({ id: originalDiscArchives.id })
           .from(originalDiscArchives)
           .where(
             and(
-              eq(originalDiscArchives.id, originalDiscArchiveId),
+              eq(originalDiscArchives.id, completion),
               eq(
                 originalDiscArchives.detectedDiscId,
                 current.detectedDiscId,
@@ -577,11 +657,11 @@ export function createDataAccessInternal(
         }
         return transaction
           .update(archiveJobs)
-          .set({ ...update, originalDiscArchiveId })
+          .set({ ...update, originalDiscArchiveId: completion })
           .where(attemptCondition)
           .returning()
           .get();
-      });
+      }, { behavior: "immediate" });
     },
     requeue: (id, expectedStatus, update) =>
       database
@@ -622,8 +702,12 @@ export function createDataAccessInternal(
     RunningArchiveJob,
     ArchiveJobId,
     ArchiveJobClaimToken,
-    OriginalDiscArchiveId,
-    void
+    ArchiveJobCompletion,
+    void,
+    {
+      opticalDriveId: OpticalDriveId;
+      fingerprint: string;
+    }
   >;
 
   type EncodeRequeueOptions = {
@@ -717,7 +801,8 @@ export function createDataAccessInternal(
     EncodeJobId,
     EncodeJobClaimToken,
     void,
-    EncodeRequeueOptions
+    EncodeRequeueOptions,
+    void
   >;
 
   const archiveJobQueue = createJobQueueController({
@@ -1725,6 +1810,128 @@ export function createDataAccessInternal(
     },
 
     archiveJobs: {
+      approve(input) {
+        const timestamp = now();
+        return database.transaction((transaction) => {
+          const disc = requireRow(
+            transaction
+              .select()
+              .from(detectedDiscs)
+              .where(eq(detectedDiscs.id, input.detectedDiscId))
+              .get(),
+            "detected disc",
+            input.detectedDiscId,
+          );
+          if (disc.status !== "scanned" && disc.status !== "approved") {
+            throw new InvalidStatusTransitionError(
+              "detected disc",
+              disc.status,
+              "approved",
+            );
+          }
+          const matchingArchive = transaction
+            .select({ id: originalDiscArchives.id })
+            .from(originalDiscArchives)
+            .where(eq(originalDiscArchives.fingerprint, disc.fingerprint))
+            .get();
+          if (matchingArchive) {
+            throw new DomainInvariantError(
+              "A Detected Disc with existing archive provenance cannot be approved",
+            );
+          }
+          if (disc.status === "scanned") {
+            transaction
+              .update(detectedDiscs)
+              .set({ status: "approved", updatedAt: timestamp })
+              .where(
+                and(
+                  eq(detectedDiscs.id, disc.id),
+                  eq(detectedDiscs.status, "scanned"),
+                ),
+              )
+              .run();
+          }
+
+          const existing = transaction
+            .select()
+            .from(archiveJobs)
+            .where(eq(archiveJobs.detectedDiscId, disc.id))
+            .get();
+          if (!existing) {
+            return requireRow(
+              transaction
+                .insert(archiveJobs)
+                .values({
+                  id: newId<ArchiveJobId>(),
+                  detectedDiscId: disc.id,
+                  priority: input.priority ?? 0,
+                  createdAt: timestamp,
+                  updatedAt: timestamp,
+                })
+                .returning()
+                .get(),
+              "archive job",
+              disc.id,
+            );
+          }
+          if (existing.status === "failed") {
+            return requireRow(
+              transaction
+                .update(archiveJobs)
+                .set({
+                  status: "queued",
+                  priority: input.priority ?? existing.priority,
+                  progressPercent: 0,
+                  claimedBy: null,
+                  claimToken: null,
+                  claimedAt: null,
+                  startedAt: null,
+                  completedAt: null,
+                  errorMessage: null,
+                  updatedAt: timestamp,
+                })
+                .where(
+                  and(
+                    eq(archiveJobs.id, existing.id),
+                    eq(archiveJobs.status, "failed"),
+                  ),
+                )
+                .returning()
+                .get(),
+              "archive job",
+              existing.id,
+            );
+          }
+          if (existing.status === "completed") {
+            throw new DomainInvariantError(
+              "A completed Archive Job cannot be approved without archive provenance",
+            );
+          }
+          if (
+            input.priority !== undefined &&
+            existing.status === "queued" &&
+            input.priority !== existing.priority
+          ) {
+            return requireRow(
+              transaction
+                .update(archiveJobs)
+                .set({ priority: input.priority, updatedAt: timestamp })
+                .where(
+                  and(
+                    eq(archiveJobs.id, existing.id),
+                    eq(archiveJobs.status, "queued"),
+                  ),
+                )
+                .returning()
+                .get(),
+              "archive job",
+              existing.id,
+            );
+          }
+          return existing;
+        }, { behavior: "immediate" });
+      },
+
       enqueue(input) {
         const timestamp = now();
         insertApprovedArchiveJob.run(
@@ -1779,6 +1986,9 @@ export function createDataAccessInternal(
       claimNext: archiveJobQueue.claimNext,
       list: archiveJobQueue.list,
       updateProgress: archiveJobQueue.updateProgress,
+      publish(claim, input) {
+        return archiveJobQueue.complete(claim, input);
+      },
       complete: archiveJobQueue.complete,
       fail: archiveJobQueue.fail,
       requeue: archiveJobQueue.requeue,

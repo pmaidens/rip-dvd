@@ -65,6 +65,14 @@ class RuntimeScaffoldTests(unittest.TestCase):
         ):
             self.assertNotIn(f"{variable}=", example)
 
+    def test_archive_worker_receives_only_the_configured_optical_device(self) -> None:
+        compose = (ROOT / "compose.yaml").read_text()
+
+        self.assertIn(
+            '"${RIP_DVD_ARCHIVE_DEVICE_PATH:-/dev/sr0}:${RIP_DVD_ARCHIVE_DEVICE_PATH:-/dev/sr0}:r"',
+            compose,
+        )
+
     def test_worker_smoke_uses_configured_command_and_bounded_shutdown(self) -> None:
         smoke = (ROOT / "scripts" / "smoke-compose-workers.sh").read_text()
 
