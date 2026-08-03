@@ -351,17 +351,19 @@ database intentionally shows an empty state in each section until workers or
 another facade caller record operations; the web app does not infer catalog
 state from library files or process streams.
 
-The Catalog Review queue keeps every archived disc visible until review is
-explicitly completed; creating the first selection does not hide a partially
+The paged Catalog Review queue keeps every archived disc reachable until review
+is explicitly completed; creating the first selection does not hide a partially
 cataloged multi-episode disc. **Review catalog** opens the archived DVD's
 read-only title map beside editable Media Items and reviewed Disc Selections.
 Media Items support movie, TV show, season, episode, trailer, and bonus-feature
 hierarchies. A Disc Selection maps one Media Item to the DVD main feature, one
 DVD title, or an inclusive chapter range within a scanned title. Completing
-review requires at least one selection and records a separate reviewed time.
-Only reviewed selections can be enqueued for encoding. The same-origin,
-non-cacheable workflow pages large Media Item catalogs and is exposed at
-`GET`/`POST /api/catalog-reviews/:archiveId`.
+review requires at least one selection and records a separate reviewed time;
+adding another selection reopens review before any new encode can be enqueued.
+The facade derives canonical DVD source identities and rejects duplicate source
+slices. The same-origin, non-cacheable workflow pages large Media Item and Disc
+Selection catalogs while carrying cross-page parents as read-only context, and
+is exposed at `GET`/`POST /api/catalog-reviews/:archiveId`.
 
 To use host libraries instead, set `RIP_DVD_MEDIA_LIBRARY_HOST_PATH` and
 `RIP_DVD_ORIGINALS_LIBRARY_HOST_PATH`. On native Linux, create new bind-source

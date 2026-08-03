@@ -43,7 +43,6 @@ function seedEncodeJob(access: LegacySidecarDataAccess): void {
   const selection = access.catalog.createDiscSelection({
     originalDiscArchiveId: archive.id,
     mediaItemId: mediaItem.id,
-    sourceKey: "main-feature",
     kind: "main_feature",
     label: "Main feature",
   });
@@ -90,7 +89,6 @@ describe("readDashboardSnapshot", () => {
     access.catalog.createDiscSelection({
       originalDiscArchiveId: archive.id,
       mediaItemId: item.id,
-      sourceKey: "dvd:main-feature",
       kind: "main_feature",
     });
 
@@ -271,7 +269,6 @@ describe("readDashboardSnapshot", () => {
     const selection = access.catalog.createDiscSelection({
       originalDiscArchiveId: catalogedArchive.id,
       mediaItemId: mediaItem.id,
-      sourceKey: "main-feature",
       kind: "main_feature",
       label: "Main feature",
     });

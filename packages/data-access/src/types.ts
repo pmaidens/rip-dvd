@@ -129,7 +129,6 @@ export type DiscSelection = DiscSelectionBase &
 type CreateDiscSelectionBase = {
   originalDiscArchiveId: OriginalDiscArchiveId;
   mediaItemId: MediaItemId;
-  sourceKey: string;
   label?: string;
 };
 
@@ -279,6 +278,7 @@ export interface CatalogAccess {
   listOriginalDiscArchives(options?: {
     ids?: readonly OriginalDiscArchiveId[];
     limit?: number;
+    offset?: number;
     uncatalogedOnly?: boolean;
     needsCatalogReviewOnly?: boolean;
   }): OriginalDiscArchive[];
@@ -312,6 +312,7 @@ export interface CatalogAccess {
     ids?: readonly DiscSelectionId[];
     originalDiscArchiveId?: OriginalDiscArchiveId;
     limit?: number;
+    offset?: number;
   }): DiscSelection[];
 }
 
