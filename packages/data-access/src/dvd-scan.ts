@@ -195,3 +195,92 @@ export function decodeDvdTitleMap(value: unknown): DvdTitleMap | null {
     titles,
   };
 }
+
+function readLegacyInteger(
+  value: unknown,
+  {
+    defaultValue,
+    maximum = MAX_DVD_SCAN_INTEGER,
+    positive = false,
+  }: {
+    defaultValue?: number;
+    maximum?: number;
+    positive?: boolean;
+  } = {},
+): number | null {
+  if (value === undefined && defaultValue !== undefined) {
+    return defaultValue;
+  }
+  const numericValue =
+    typeof value === "string" && /^-?\d+$/.test(value.trim())
+      ? Number(value)
+      : value;
+  return typeof numericValue === "number" &&
+    Number.isSafeInteger(numericValue) &&
+    numericValue >= (positive ? 1 : 0) &&
+    numericValue <= maximum
+    ? numericValue
+    : null;
+}
+
+export function decodeArchivedDvdTitles(
+  value: unknown,
+): readonly DvdTitle[] | null {
+  const currentTitleMap = decodeDvdTitleMap(value);
+  if (currentTitleMap) {
+    return currentTitleMap.titles;
+  }
+  if (
+    !isRecord(value) ||
+    (value.legacySchemaVersion !== 1 && value.legacySchemaVersion !== 2) ||
+    !Array.isArray(value.titles) ||
+    value.titles.length > MAX_DVD_TITLES
+  ) {
+    return null;
+  }
+
+  const titles: DvdTitle[] = [];
+  const titleNumbers = new Set<number>();
+  for (const valueTitle of value.titles) {
+    if (!isRecord(valueTitle)) {
+      return null;
+    }
+    const number = readLegacyInteger(valueTitle.number, { positive: true });
+    const durationSeconds = readLegacyInteger(valueTitle.seconds, {
+      defaultValue: 0,
+    });
+    const chapters = readLegacyInteger(valueTitle.chapters, {
+      defaultValue: 0,
+    });
+    const audioStreamCount = readLegacyInteger(valueTitle.audio_streams, {
+      defaultValue: 0,
+      maximum: MAX_DVD_AUDIO_STREAMS_PER_TITLE,
+    });
+    const subtitleCount = readLegacyInteger(valueTitle.subtitles, {
+      defaultValue: 0,
+      maximum: MAX_DVD_SUBTITLES_PER_TITLE,
+    });
+    if (
+      number === null ||
+      durationSeconds === null ||
+      chapters === null ||
+      audioStreamCount === null ||
+      subtitleCount === null ||
+      titleNumbers.has(number)
+    ) {
+      return null;
+    }
+    titleNumbers.add(number);
+    titles.push({
+      number,
+      durationSeconds,
+      chapters,
+      audioStreams: Array.from(
+        { length: audioStreamCount },
+        (_, id) => ({ id }),
+      ),
+      subtitles: Array.from({ length: subtitleCount }, (_, id) => ({ id })),
+    });
+  }
+  return titles;
+}

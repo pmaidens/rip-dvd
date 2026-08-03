@@ -57,10 +57,9 @@ import {
   requirePositiveSafeInteger,
 } from "./validation.js";
 import {
+  decodeArchivedDvdTitles,
   decodeDvdTitleMap,
   isDvdContentId,
-  MAX_DVD_SCAN_INTEGER,
-  MAX_DVD_TITLES,
 } from "../dvd-scan.js";
 import { MAX_MEDIA_ITEM_HIERARCHY_DEPTH } from "../domain-values.js";
 import {
@@ -341,60 +340,6 @@ function canonicalDvdSelectionSourceKey(
       : `dvd:title:${selection.titleNumber}:chapters:${selection.chapterStart}-${selection.chapterEnd}`;
 }
 
-function decodeArchivedDvdTitleBounds(
-  value: unknown,
-): ReadonlyMap<number, number | null> | null {
-  const currentTitleMap = decodeDvdTitleMap(value);
-  if (currentTitleMap) {
-    return new Map(
-      currentTitleMap.titles.map((title) => [title.number, title.chapters]),
-    );
-  }
-  if (
-    typeof value !== "object" ||
-    value === null ||
-    Array.isArray(value) ||
-    !("legacySchemaVersion" in value) ||
-    (value.legacySchemaVersion !== 1 && value.legacySchemaVersion !== 2) ||
-    !("titles" in value) ||
-    !Array.isArray(value.titles) ||
-    value.titles.length > MAX_DVD_TITLES
-  ) {
-    return null;
-  }
-
-  const titleBounds = new Map<number, number | null>();
-  for (const valueTitle of value.titles) {
-    if (
-      typeof valueTitle !== "object" ||
-      valueTitle === null ||
-      Array.isArray(valueTitle) ||
-      !("number" in valueTitle) ||
-      typeof valueTitle.number !== "number" ||
-      !Number.isSafeInteger(valueTitle.number) ||
-      valueTitle.number < 1 ||
-      valueTitle.number > MAX_DVD_SCAN_INTEGER ||
-      titleBounds.has(valueTitle.number)
-    ) {
-      return null;
-    }
-    let chapters: number | null = null;
-    if ("chapters" in valueTitle) {
-      if (
-        typeof valueTitle.chapters !== "number" ||
-        !Number.isSafeInteger(valueTitle.chapters) ||
-        valueTitle.chapters < 0 ||
-        valueTitle.chapters > MAX_DVD_SCAN_INTEGER
-      ) {
-        return null;
-      }
-      chapters = valueTitle.chapters;
-    }
-    titleBounds.set(valueTitle.number, chapters);
-  }
-  return titleBounds;
-}
-
 export interface CreateDataAccessOptions {
   databasePath: string;
   migrationsFolder?: string;
@@ -644,7 +589,7 @@ export function createDataAccessInternal(
       );
     }
 
-    const titleBounds = decodeArchivedDvdTitleBounds(scanData);
+    const archivedTitles = decodeArchivedDvdTitles(scanData);
     let lastSelectionId: DiscSelectionId | undefined;
     let selectionCount = 0;
     while (true) {
@@ -671,26 +616,23 @@ export function createDataAccessInternal(
           );
         }
         if (selection.titleNumber !== null) {
-          if (!titleBounds) {
+          if (!archivedTitles) {
             throw new DomainInvariantError(
               "DVD title selections require a reviewable DVD title map",
             );
           }
-          if (!titleBounds.has(selection.titleNumber)) {
+          const title = archivedTitles.find(
+            (candidate) => candidate.number === selection.titleNumber,
+          );
+          if (!title) {
             throw new DomainInvariantError(
               `DVD title ${selection.titleNumber} is not present in the archived scan`,
             );
           }
           if (selection.chapterEnd !== null) {
-            const chapters = titleBounds.get(selection.titleNumber);
-            if (chapters === null || chapters === undefined) {
+            if (selection.chapterEnd > title.chapters) {
               throw new DomainInvariantError(
-                `DVD title ${selection.titleNumber} lacks archived chapter counts`,
-              );
-            }
-            if (selection.chapterEnd > chapters) {
-              throw new DomainInvariantError(
-                `chapterEnd must not exceed DVD title ${selection.titleNumber}'s ${chapters} chapters`,
+                `chapterEnd must not exceed DVD title ${selection.titleNumber}'s ${title.chapters} chapters`,
               );
             }
           }
@@ -2602,13 +2544,13 @@ export function createDataAccessInternal(
               );
             }
             if (coordinates.titleNumber !== null) {
-              const titleMap = decodeDvdTitleMap(source.scanData);
-              if (!titleMap) {
+              const archivedTitles = decodeArchivedDvdTitles(source.scanData);
+              if (!archivedTitles) {
                 throw new DomainInvariantError(
                   "DVD title selections require a reviewable DVD title map",
                 );
               }
-              const title = titleMap.titles.find(
+              const title = archivedTitles.find(
                 (candidate) => candidate.number === coordinates.titleNumber,
               );
               if (!title) {
@@ -3144,7 +3086,11 @@ export function createDataAccessInternal(
     },
 
     legacySidecars: legacySidecarMigration
-      ? legacySidecarMigration.createAccess(database, now)
+      ? legacySidecarMigration.createAccess(
+          database,
+          now,
+          requireReviewableDiscSelections,
+        )
       : {
           importLibrary() {
             throw new DomainInvariantError(

@@ -365,12 +365,14 @@ slices. Supported upgrades reopen caller-era scan-dependent or noncanonical
 catalogs and fail their active Encode Jobs until bounded validation completes
 again; unsafe jobs cannot be enqueued, requeued, or claimed. Archived scan
 evidence is immutable, while rediscovery may still refresh observation metadata
-such as the volume label. The same-origin, non-cacheable workflow pages large
-Media Item and Disc Selection catalogs while carrying mapped items and bounded
-ancestor chains as read-only context. Media Item mutations cap hierarchies at
-32 items, and reads fail closed instead of presenting a truncated chain. An
-active Media Item edit survives page changes, allowing a different bounded page
-to supply parent choices. The workflow is exposed at `GET`/`POST
+such as the volume label. Legacy sidecar import cannot restore review across an
+unsafe or newly added mapping, and bounded legacy title evidence remains usable
+for explicit title/chapter review. The same-origin, non-cacheable workflow pages
+large Media Item and Disc Selection catalogs while carrying mapped items and
+bounded ancestor chains as read-only context. Media Item mutations cap
+hierarchies at 32 items, and reads fail closed instead of presenting a truncated
+chain. An active Media Item edit survives page changes, allowing a different
+bounded page to supply parent choices. The workflow is exposed at `GET`/`POST
 /api/catalog-reviews/:archiveId`.
 
 To use host libraries instead, set `RIP_DVD_MEDIA_LIBRARY_HOST_PATH` and

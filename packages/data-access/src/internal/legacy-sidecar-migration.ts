@@ -17,7 +17,10 @@ import type {
   OpticalDriveId,
   OriginalDiscArchiveId,
 } from "../types.js";
-import type { LegacySidecarCatalogAdapter } from "./legacy-sidecar-catalog-adapter.js";
+import type {
+  LegacySidecarCatalogAdapter,
+  LegacySidecarCatalogReadAdapter,
+} from "./legacy-sidecar-catalog-adapter.js";
 import {
   discoverLegacySidecars,
   legacySourceArchiveMatchesSnapshot,
@@ -75,6 +78,10 @@ function isCompatibleLegacyEncodingProfile(
 export function createLegacySidecarImportAccess(
   database: LegacySidecarCatalogAdapter,
   now: () => Date,
+  requireReviewableDiscSelections: (
+    archiveId: OriginalDiscArchiveId,
+    catalog: LegacySidecarCatalogReadAdapter,
+  ) => unknown,
 ): LegacySidecarAccess {
   return {
     importLibrary(input) {
@@ -422,6 +429,7 @@ export function createLegacySidecarImportAccess(
             const importedCreatedAt = sidecar.createdAt;
             const importedUpdatedAt = sidecar.updatedAt;
             let archive = existingByFingerprint ?? existingByPath;
+            const archiveAlreadyExisted = archive !== undefined;
             if (
               existingByPath &&
               existingByPath.fingerprint !== sidecar.fingerprint
@@ -914,19 +922,39 @@ export function createLegacySidecarImportAccess(
               }
               persistedJobs.push(job);
             }
-            if (
-              archive.catalogReviewedAt === null &&
-              transaction
-                .select({ id: discSelections.id })
-                .from(discSelections)
-                .where(eq(discSelections.originalDiscArchiveId, archive.id))
-                .get()
-            ) {
-              transaction
-                .update(originalDiscArchives)
-                .set({ catalogReviewedAt: importedUpdatedAt })
-                .where(eq(originalDiscArchives.id, archive.id))
-                .run();
+            const hasDiscSelection = transaction
+              .select({ id: discSelections.id })
+              .from(discSelections)
+              .where(eq(discSelections.originalDiscArchiveId, archive.id))
+              .get() !== undefined;
+            if (archive.catalogReviewedAt !== null || hasDiscSelection) {
+              let catalogIsReviewable = true;
+              try {
+                requireReviewableDiscSelections(archive.id, transaction);
+              } catch (error) {
+                if (!(error instanceof DomainInvariantError)) {
+                  throw error;
+                }
+                catalogIsReviewable = false;
+              }
+              if (
+                !catalogIsReviewable ||
+                (archiveAlreadyExisted && created.discSelections > 0)
+              ) {
+                if (archive.catalogReviewedAt !== null) {
+                  transaction
+                    .update(originalDiscArchives)
+                    .set({ catalogReviewedAt: null })
+                    .where(eq(originalDiscArchives.id, archive.id))
+                    .run();
+                }
+              } else if (archive.catalogReviewedAt === null) {
+                transaction
+                  .update(originalDiscArchives)
+                  .set({ catalogReviewedAt: importedUpdatedAt })
+                  .where(eq(originalDiscArchives.id, archive.id))
+                  .run();
+              }
             }
             requireCapturedSourceArchive();
           }, { behavior: "immediate" });

@@ -1,5 +1,5 @@
 import {
-  decodeDvdTitleMap,
+  decodeArchivedDvdTitles,
   DISC_SELECTION_KINDS,
   DomainInvariantError,
   MAX_MEDIA_ITEM_HIERARCHY_DEPTH,
@@ -260,7 +260,7 @@ function readCatalogReview(
       reviewStatus:
         archive.catalogReviewedAt === null ? "needs_review" : "reviewed",
       rawScan: {
-        titles: decodeDvdTitleMap(disc.scanData)?.titles ?? [],
+        titles: decodeArchivedDvdTitles(disc.scanData) ?? [],
       },
       mediaItems: [...contextMediaItems, ...mediaItemsPage].map(
         serializeMediaItem,

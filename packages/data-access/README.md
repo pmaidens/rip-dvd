@@ -63,7 +63,12 @@ Jobs fail visibly, and bounded catalog validation is required before review can
 complete again. Duplicate logical slices, noncanonical source keys, missing DVD
 titles, and out-of-range chapters fail that validation. Scan evidence referenced
 by an Original Disc Archive is immutable across rediscovery, so reviewed
-selection bounds cannot drift after enqueue.
+selection bounds cannot drift after enqueue. Migration-only legacy sidecar
+imports use the same validator before publishing or retaining review state;
+unsafe or newly added mappings leave the archive awaiting explicit review and
+their queued jobs remain unclaimable. Bounded legacy title evidence is also
+normalized for the review response and for title/chapter selection validation,
+so archive-only imports can be reviewed without weakening current scan writes.
 
 ## Queue attempts and progress
 
