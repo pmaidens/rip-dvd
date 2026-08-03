@@ -1259,7 +1259,26 @@ export function discoverLegacySidecars(
   let totalMarkerJobs = 0;
   let totalMarkerSidecars = 0;
   for (const path of found.paths.sort()) {
-    const discovery = parseSidecar(path, { originalsLibraryPath });
+    let discovery = parseSidecar(path, { originalsLibraryPath });
+    let markerSnapshotBytes = 0;
+    if (discovery.outcome === "parsed") {
+      try {
+        markerSnapshotBytes = Buffer.byteLength(
+          JSON.stringify(snapshotLegacySidecar(discovery.sidecar)),
+          "utf8",
+        );
+      } catch (error) {
+        discovery = {
+          outcome: "skipped",
+          sourceBytes: discovery.sidecar.sourceBytes,
+          issue: {
+            code: "invalid_sidecar",
+            message: `Sidecar cannot be serialized safely for the SQLite cutover marker: ${error instanceof Error ? error.message : String(error)}`,
+            sidecarPath: discovery.sidecar.sidecarPath,
+          },
+        };
+      }
+    }
     discoveries.push(discovery);
     scanBytes +=
       discovery.outcome === "parsed"
@@ -1298,10 +1317,7 @@ export function discoverLegacySidecars(
     }
     if (discovery.outcome === "parsed") {
       totalMarkerBytes +=
-        Buffer.byteLength(
-          JSON.stringify(snapshotLegacySidecar(discovery.sidecar)),
-          "utf8",
-        ) + (totalMarkerSidecars === 0 ? 0 : 1);
+        markerSnapshotBytes + (totalMarkerSidecars === 0 ? 0 : 1);
       totalMarkerSidecars += 1;
       if (totalMarkerBytes > MAX_LEGACY_MARKER_BYTES) {
         found.complete = false;

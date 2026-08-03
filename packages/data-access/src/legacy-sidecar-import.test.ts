@@ -1626,6 +1626,53 @@ describe("legacy sidecar import", () => {
     fixture.access.close();
   });
 
+  it("isolates title metadata that cannot be serialized into the cutover marker", () => {
+    const fixture = createFixture();
+    const archivePath = join(
+      fixture.originalsLibraryPath,
+      "Unserializable Metadata.iso",
+    );
+    const sidecarPath = join(
+      fixture.originalsLibraryPath,
+      "Unserializable Metadata.rip-dvd.json",
+    );
+    writeFileSync(archivePath, "archive");
+    const nestedUnknownTitleValue =
+      "[".repeat(20_000) + "null" + "]".repeat(20_000);
+    const sidecarBytes = Buffer.from(
+      `{"schema_version":2,"archive_status":"ready","source":${JSON.stringify(archivePath)},"title":"Unserializable Metadata","disc_fingerprint":"unserializable-metadata-fingerprint","titles":[{"number":1,"unknown":${nestedUnknownTitleValue}}],"jobs":[]}`,
+    );
+    writeFileSync(sidecarPath, sidecarBytes);
+
+    const report = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+
+    expect(report).toMatchObject({
+      sidecarsFound: 2,
+      sidecarsImported: 1,
+      sidecarsSkipped: 1,
+      issues: [
+        expect.objectContaining({
+          code: "invalid_sidecar",
+          message: expect.stringMatching(/serializ.*cutover marker/i),
+          sidecarPath,
+        }),
+      ],
+    });
+    expect(fixture.access.catalog.listOriginalDiscArchives()).toEqual([
+      expect.objectContaining({ fingerprint: "example-disc-fingerprint" }),
+    ]);
+    expect(fixture.access.encodeJobs.list()).toHaveLength(2);
+    expect(
+      existsSync(
+        join(fixture.originalsLibraryPath, ".rip-dvd-sqlite-catalog"),
+      ),
+    ).toBe(true);
+    expect(readFileSync(sidecarPath)).toEqual(sidecarBytes);
+    fixture.access.close();
+  });
+
   it("reports an oversized sidecar without reading or importing it", () => {
     const fixture = createFixture();
     const oversizedSidecarPath = join(
