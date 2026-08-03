@@ -51,6 +51,12 @@ export interface CatalogReviewDto {
   reviewStatus: "needs_review" | "reviewed";
   rawScan: { titles: DvdTitle[] };
   mediaItems: CatalogReviewMediaItem[];
+  mediaItemsPage: {
+    offset: number;
+    limit: number;
+    hasPrevious: boolean;
+    hasNext: boolean;
+  };
   discSelections: CatalogReviewDiscSelection[];
 }
 
@@ -87,6 +93,7 @@ interface CatalogReviewViewProps {
   onRetry(): void;
   onEditMediaItem(id: string): void;
   onCancelEdit(): void;
+  onMediaItemsPage(offset: number): void;
   onSaveMediaItem(input: SaveMediaItemInput): void;
   onCreateDiscSelection(input: CreateSelectionInput): void;
   onCompleteReview(): void;
@@ -146,6 +153,7 @@ export function CatalogReviewView({
   onRetry,
   onEditMediaItem,
   onCancelEdit,
+  onMediaItemsPage,
   onSaveMediaItem,
   onCreateDiscSelection,
   onCompleteReview,
@@ -281,6 +289,36 @@ export function CatalogReviewView({
               ))}
             </ul>
           )}
+
+          {review.mediaItemsPage.hasPrevious ||
+          review.mediaItemsPage.hasNext ? (
+            <div className="profile-actions" aria-label="Media Item pages">
+              <button
+                type="button"
+                disabled={isSaving || !review.mediaItemsPage.hasPrevious}
+                onClick={() =>
+                  onMediaItemsPage(
+                    Math.max(
+                      0,
+                      review.mediaItemsPage.offset -
+                        review.mediaItemsPage.limit,
+                    ),
+                  )}
+              >
+                Previous Media Items
+              </button>
+              <button
+                type="button"
+                disabled={isSaving || !review.mediaItemsPage.hasNext}
+                onClick={() =>
+                  onMediaItemsPage(
+                    review.mediaItemsPage.offset + review.mediaItemsPage.limit,
+                  )}
+              >
+                Next Media Items
+              </button>
+            </div>
+          ) : null}
 
           <form
             className="catalog-form"
@@ -449,10 +487,13 @@ type CatalogReviewFetch = (
 
 export async function requestCatalogReview(
   archiveId: string,
+  mediaItemOffset: number,
   fetcher: CatalogReviewFetch = fetch,
 ): Promise<CatalogReviewDto> {
   const response = await fetcher(
-    `/api/catalog-reviews/${encodeURIComponent(archiveId)}`,
+    `/api/catalog-reviews/${encodeURIComponent(
+      archiveId,
+    )}?mediaOffset=${mediaItemOffset}`,
     { cache: "no-store", headers: { Accept: "application/json" } },
   );
   if (!response.ok) {
@@ -495,18 +536,19 @@ export function CatalogReviewEditor({
     status: "loading",
   });
   const [editingMediaItemId, setEditingMediaItemId] = useState<string | null>(null);
+  const [mediaItemOffset, setMediaItemOffset] = useState(0);
   const [isSaving, setIsSaving] = useState(false);
   const [hasRequestError, setHasRequestError] = useState(false);
 
   const load = useCallback(async () => {
     try {
-      const review = await requestCatalogReview(archiveId);
+      const review = await requestCatalogReview(archiveId, mediaItemOffset);
       setState({ status: "loaded", review });
       setHasRequestError(false);
     } catch {
       setState({ status: "error" });
     }
-  }, [archiveId]);
+  }, [archiveId, mediaItemOffset]);
 
   useEffect(() => {
     setState({ status: "loading" });
@@ -545,6 +587,10 @@ export function CatalogReviewEditor({
       onRetry={() => void load()}
       onEditMediaItem={setEditingMediaItemId}
       onCancelEdit={() => setEditingMediaItemId(null)}
+      onMediaItemsPage={(offset) => {
+        setEditingMediaItemId(null);
+        setMediaItemOffset(offset);
+      }}
       onSaveMediaItem={(input) => {
         const { id, ...values } = input;
         void mutate(

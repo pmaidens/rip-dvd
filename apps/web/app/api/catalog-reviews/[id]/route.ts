@@ -17,7 +17,8 @@ import { getDataAccess } from "../../../../lib/data-access";
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-const CATALOG_REVIEW_RECORD_LIMIT = 500;
+const CATALOG_REVIEW_MEDIA_PAGE_SIZE = 100;
+const CATALOG_REVIEW_SELECTION_LIMIT = 500;
 
 function response(body: unknown, status = 200): Response {
   return Response.json(body, {
@@ -101,6 +102,18 @@ function optionalInteger(
     : undefined;
 }
 
+function mediaOffset(request: Request): number | null {
+  const value = new URL(request.url).searchParams.get("mediaOffset");
+  if (value === null) {
+    return 0;
+  }
+  if (!/^(0|[1-9]\d*)$/.test(value) || value.length > 16) {
+    return null;
+  }
+  const offset = Number(value);
+  return Number.isSafeInteger(offset) ? offset : null;
+}
+
 function serializeMediaItem(item: MediaItem) {
   return {
     id: item.id,
@@ -126,7 +139,11 @@ function serializeDiscSelection(selection: DiscSelection) {
   };
 }
 
-function readCatalogReview(access: DataAccess, id: OriginalDiscArchiveId) {
+function readCatalogReview(
+  access: DataAccess,
+  id: OriginalDiscArchiveId,
+  mediaItemOffset: number,
+) {
   return access.readConsistentSnapshot((snapshot) => {
     const archive = snapshot.catalog.listOriginalDiscArchives({ ids: [id] })[0];
     if (!archive) {
@@ -141,20 +158,24 @@ function readCatalogReview(access: DataAccess, id: OriginalDiscArchiveId) {
       );
     }
     const mediaItems = snapshot.catalog.listMediaItems({
-      limit: CATALOG_REVIEW_RECORD_LIMIT + 1,
+      limit: CATALOG_REVIEW_MEDIA_PAGE_SIZE + 1,
+      offset: mediaItemOffset,
     });
     const discSelections = snapshot.catalog.listDiscSelections({
       originalDiscArchiveId: id,
-      limit: CATALOG_REVIEW_RECORD_LIMIT + 1,
+      limit: CATALOG_REVIEW_SELECTION_LIMIT + 1,
     });
-    if (
-      mediaItems.length > CATALOG_REVIEW_RECORD_LIMIT ||
-      discSelections.length > CATALOG_REVIEW_RECORD_LIMIT
-    ) {
+    if (discSelections.length > CATALOG_REVIEW_SELECTION_LIMIT) {
       throw new DomainInvariantError(
-        "Catalog review exceeds the supported local record limit",
+        "Catalog review exceeds the supported Disc Selection limit",
       );
     }
+    const hasNextMediaItems =
+      mediaItems.length > CATALOG_REVIEW_MEDIA_PAGE_SIZE;
+    const mediaItemsPage = mediaItems.slice(
+      0,
+      CATALOG_REVIEW_MEDIA_PAGE_SIZE,
+    );
     return {
       archive: {
         id: archive.id,
@@ -169,7 +190,13 @@ function readCatalogReview(access: DataAccess, id: OriginalDiscArchiveId) {
       rawScan: {
         titles: decodeDvdTitleMap(disc.scanData)?.titles ?? [],
       },
-      mediaItems: mediaItems.map(serializeMediaItem),
+      mediaItems: mediaItemsPage.map(serializeMediaItem),
+      mediaItemsPage: {
+        offset: mediaItemOffset,
+        limit: CATALOG_REVIEW_MEDIA_PAGE_SIZE,
+        hasPrevious: mediaItemOffset > 0,
+        hasNext: hasNextMediaItems,
+      },
       discSelections: discSelections.map(serializeDiscSelection),
     };
   });
@@ -190,7 +217,11 @@ export async function createCatalogReviewRoute(
   try {
     const archiveId = id as OriginalDiscArchiveId;
     if (request.method === "GET") {
-      const review = readCatalogReview(getAccess(), archiveId);
+      const offset = mediaOffset(request);
+      if (offset === null) {
+        return response({ error: "Invalid Media Item offset" }, 400);
+      }
+      const review = readCatalogReview(getAccess(), archiveId, offset);
       return review === null
         ? response({ error: "Original Disc Archive not found" }, 404)
         : response(review);

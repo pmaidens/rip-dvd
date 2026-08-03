@@ -2214,6 +2214,11 @@ export function createDataAccessInternal(
         if (options?.ids !== undefined && options.ids.length === 0) {
           return [];
         }
+        if (options?.offset !== undefined && options.limit === undefined) {
+          throw new DomainInvariantError(
+            "Media Item offset requires a bounded limit",
+          );
+        }
         const query = database
           .select()
           .from(mediaItems)
@@ -2227,11 +2232,20 @@ export function createDataAccessInternal(
             asc(mediaItems.createdAt),
             asc(mediaItems.id),
           );
-        return options?.limit === undefined
-          ? query.all()
-          : query
-              .limit(requirePositiveSafeInteger(options.limit, "limit"))
-              .all();
+        if (options?.limit === undefined) {
+          return query.all();
+        }
+        const limited = query.limit(
+          requirePositiveSafeInteger(options.limit, "limit"),
+        );
+        if (options.offset === undefined) {
+          return limited.all();
+        }
+        const offset = optionalSafeInteger(options.offset, "offset", 0);
+        if (offset === null || offset === undefined) {
+          throw new DomainInvariantError("offset must be a safe integer");
+        }
+        return limited.offset(offset).all();
       },
 
       createDiscSelection(input) {
@@ -2727,6 +2741,29 @@ export function createDataAccessInternal(
 
     encodeJobs: {
       enqueue(input) {
+        const selectionReview = requireRow(
+          database
+            .select({
+              catalogReviewedAt: originalDiscArchives.catalogReviewedAt,
+            })
+            .from(discSelections)
+            .innerJoin(
+              originalDiscArchives,
+              eq(
+                originalDiscArchives.id,
+                discSelections.originalDiscArchiveId,
+              ),
+            )
+            .where(eq(discSelections.id, input.discSelectionId))
+            .get(),
+          "disc selection",
+          input.discSelectionId,
+        );
+        if (selectionReview.catalogReviewedAt === null) {
+          throw new DomainInvariantError(
+            "Encode Jobs require a completed catalog review",
+          );
+        }
         const timestamp = now();
         database
           .insert(encodeJobs)

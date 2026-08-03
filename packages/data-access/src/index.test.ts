@@ -3410,6 +3410,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
             sourceKey: "dvd:main-feature",
             kind: "main_feature",
           });
+          access.catalog.completeCatalogReview(archive.id);
           queuedId = access.encodeJobs.enqueue({
             discSelectionId: selection.id,
             encodingProfileId: profile.id,
@@ -3536,6 +3537,16 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       settings: { preset: "Fast 480p30" },
     });
 
+    expect(() =>
+      access.encodeJobs.enqueue({
+        discSelectionId: selection.id,
+        encodingProfileId: profile.id,
+        outputPath: "/media/movies/Movie/Movie.mkv",
+      }),
+    ).toThrow(DomainInvariantError);
+    expect(access.encodeJobs.list()).toEqual([]);
+
+    access.catalog.completeCatalogReview(archive.id);
     const job = access.encodeJobs.enqueue({
       discSelectionId: selection.id,
       encodingProfileId: profile.id,

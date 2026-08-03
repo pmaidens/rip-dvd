@@ -103,6 +103,7 @@ describe("GET /api/dashboard/events", () => {
         sourceKey: "main-feature",
         kind: "main_feature",
       });
+      access.catalog.completeCatalogReview(encodeArchive.id);
       access.encodeJobs.enqueue({
         discSelectionId: selection.id,
         encodingProfileId: profile.id,
@@ -279,6 +280,7 @@ describe("GET /api/dashboard/events", () => {
       sourceKey: "main-feature",
       kind: "main_feature",
     });
+    access.catalog.completeCatalogReview(archive.id);
     const profile = access.encodingProfiles.create({
       key: "streamed-profile",
       displayName: "DVD library",
