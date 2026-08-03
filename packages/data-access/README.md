@@ -51,9 +51,12 @@ the changed catalog is explicitly completed again. Media Item parent changes
 are serialized and reject hierarchy cycles. The facade derives canonical DVD
 source identities, rejects duplicate source slices, requires title selections
 to reference the archived scan, and keeps chapter ranges within the selected
-title; main-feature selections remain a distinct DVD source kind. Existing
-databases backfill the explicit review time for archives that already had Disc
-Selections, preserving the pre-migration queue meaning.
+title; main-feature selections remain a distinct DVD source kind. Encode Job
+enqueueing checks that review boundary and writes in one short immediate
+transaction, so a concurrent Disc Selection cannot reopen review between the
+eligibility read and queue write. Existing databases backfill the explicit
+review time for archives that already had Disc Selections, preserving the
+pre-migration queue meaning.
 
 ## Queue attempts and progress
 

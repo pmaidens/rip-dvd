@@ -1,9 +1,32 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { CatalogReviewView } from "./catalog-review-editor";
+import {
+  CatalogReviewView,
+  requestCatalogReview,
+} from "./catalog-review-editor";
 
 describe("CatalogReviewView", () => {
+  it("requests the edited Media Item as context while paging parent choices", async () => {
+    let requestedUrl = "";
+    const fetcher = async (input: RequestInfo | URL) => {
+      requestedUrl = String(input);
+      return Response.json({});
+    };
+
+    await requestCatalogReview(
+      "archive-1",
+      100,
+      200,
+      "episode-1",
+      fetcher,
+    );
+
+    expect(requestedUrl).toBe(
+      "/api/catalog-reviews/archive-1?mediaOffset=100&selectionOffset=200&editingMediaItemId=episode-1",
+    );
+  });
+
   it("shows raw DVD coordinates separately from editable hierarchy and reviewed mappings", () => {
     const html = renderToStaticMarkup(
       <CatalogReviewView
@@ -126,7 +149,7 @@ describe("CatalogReviewView", () => {
     }
   });
 
-  it("preserves a context-only parent while editing a cross-page child", () => {
+  it("preserves full hierarchy and mapping context while reparenting across pages", () => {
     const html = renderToStaticMarkup(
       <CatalogReviewView
         state={{
@@ -153,12 +176,30 @@ describe("CatalogReviewView", () => {
                 episodeNumber: null,
               },
               {
-                id: "child-1",
+                id: "season-1",
                 parentId: "parent-1",
                 kind: "season",
-                title: "Child Season",
+                title: "Parent Season",
                 year: null,
                 seasonNumber: 1,
+                episodeNumber: null,
+              },
+              {
+                id: "episode-1",
+                parentId: "season-1",
+                kind: "episode",
+                title: "Mapped Episode",
+                year: null,
+                seasonNumber: null,
+                episodeNumber: 1,
+              },
+              {
+                id: "target-1",
+                parentId: null,
+                kind: "tv_show",
+                title: "Different-page target",
+                year: null,
+                seasonNumber: null,
                 episodeNumber: null,
               },
             ],
@@ -167,9 +208,18 @@ describe("CatalogReviewView", () => {
               limit: 100,
               hasPrevious: true,
               hasNext: false,
-              itemIds: ["child-1"],
+              itemIds: ["target-1"],
             },
-            discSelections: [],
+            discSelections: [{
+              id: "selection-1",
+              mediaItemId: "episode-1",
+              sourceKey: "dvd:title:1",
+              kind: "dvd_title",
+              titleNumber: 1,
+              chapterStart: null,
+              chapterEnd: null,
+              label: null,
+            }],
             discSelectionsPage: {
               offset: 0,
               limit: 100,
@@ -178,7 +228,7 @@ describe("CatalogReviewView", () => {
             },
           },
         }}
-        editingMediaItemId="child-1"
+        editingMediaItemId="episode-1"
         isSaving={false}
         hasRequestError={false}
         onClose={() => undefined}
@@ -194,7 +244,10 @@ describe("CatalogReviewView", () => {
     );
 
     expect(html).toContain("Parent context");
-    expect(html).toContain('value="parent-1" selected="">Parent Show');
+    expect(html).toContain('value="season-1" selected="">— Parent Season');
+    expect(html).toContain('value="target-1">Different-page target');
+    expect(html).toContain("Mapped Episode");
+    expect(html).not.toContain("Unknown Media Item");
     expect(html.match(/>Edit<\/button>/g)).toHaveLength(1);
   });
 });

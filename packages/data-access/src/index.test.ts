@@ -24,6 +24,7 @@ import {
 import type {
   DetectedDiscId,
   DiscKind,
+  DiscSelectionId,
   OriginalDiscArchiveId,
 } from "./index.js";
 import type { EncodingProfileId } from "./index.js";
@@ -64,6 +65,12 @@ type ConcurrentOperation =
   | {
       operation: "activate-profile-version";
       id: EncodingProfileId;
+    }
+  | {
+      operation: "enqueue-encode";
+      discSelectionId: DiscSelectionId;
+      encodingProfileId: EncodingProfileId;
+      outputPath: string;
     };
 
 type BarrierWorkerOptions = {
@@ -76,6 +83,10 @@ type BarrierWorkerOptions = {
 
 async function runBarrierWorkers(
   options: BarrierWorkerOptions,
+  hooks: {
+    beforeRelease?(): void;
+    afterRelease?(): Promise<void> | void;
+  } = {},
 ): Promise<ConcurrentWorkerResult[]> {
   const { databasePath, mode } = options;
   const count = mode === "operation" ? options.operations.length : options.count;
@@ -142,9 +153,12 @@ async function runBarrierWorkers(
   );
 
   await Promise.all(ready);
+  hooks.beforeRelease?.();
   Atomics.store(new Int32Array(barrier), 0, 1);
   Atomics.notify(new Int32Array(barrier), 0, count);
-  return Promise.all(results);
+  const workerResults = Promise.all(results);
+  await hooks.afterRelease?.();
+  return workerResults;
 }
 
 async function runAbandonedArchiveClaimWorker(databasePath: string): Promise<{
@@ -754,6 +768,123 @@ describe("data-access facade", () => {
         outputPath: "/media/movies/Newly Found Episode.mkv",
       }),
     ).toMatchObject({ status: "queued" });
+    access.close();
+  });
+
+  it("does not enqueue after a concurrent Disc Selection reopens review", async () => {
+    const databasePath = createTestDatabasePath();
+    const access = openTestDatabase(databasePath);
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const contentId = `sha256:${"c".repeat(64)}`;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: contentId,
+      scanData: {
+        schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+        contentId,
+        titles: [{
+          number: 1,
+          durationSeconds: 300,
+          chapters: 1,
+          audioStreams: [],
+          subtitles: [],
+        }],
+      },
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Concurrent Review.iso",
+      fingerprint: contentId,
+    });
+    const movie = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Concurrent Review",
+    });
+    const selection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: movie.id,
+      kind: "main_feature",
+    });
+    const extra = access.catalog.createMediaItem({
+      kind: "bonus_feature",
+      title: "Concurrent Extra",
+    });
+    const profile = access.encodingProfiles.create({
+      key: "concurrent-review",
+      displayName: "Concurrent review",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    access.catalog.completeCatalogReview(archive.id);
+
+    const concurrentSqlite = new DatabaseSync(databasePath);
+    concurrentSqlite.exec("pragma busy_timeout = 5000");
+    const timestamp = Date.now();
+    const results = await runBarrierWorkers(
+      {
+        databasePath,
+        mode: "operation",
+        operations: [{
+          operation: "enqueue-encode",
+          discSelectionId: selection.id,
+          encodingProfileId: profile.id,
+          outputPath: "/media/movies/Concurrent Review.mkv",
+        }],
+      },
+      {
+        beforeRelease() {
+          concurrentSqlite.exec("begin immediate");
+        },
+        async afterRelease() {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          concurrentSqlite.prepare(`
+            insert into disc_selections (
+              id,
+              original_disc_archive_id,
+              media_item_id,
+              source_key,
+              kind,
+              title_number,
+              chapter_start,
+              chapter_end,
+              label,
+              created_at,
+              updated_at
+            ) values (?, ?, ?, 'dvd:title:1', 'dvd_title', 1, null, null, null, ?, ?)
+          `).run(
+            "concurrent-extra-selection",
+            archive.id,
+            extra.id,
+            timestamp,
+            timestamp,
+          );
+          concurrentSqlite.prepare(`
+            update original_disc_archives
+            set catalog_reviewed_at = null, updated_at = ?
+            where id = ?
+          `).run(timestamp, archive.id);
+          concurrentSqlite.exec("commit");
+        },
+      },
+    );
+    concurrentSqlite.close();
+
+    expect(results).toEqual([{ outcome: "rejected" }]);
+    expect(access.encodeJobs.list()).toEqual([]);
+    expect(
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0],
+    ).toMatchObject({ catalogReviewedAt: null });
+    expect(access.catalog.listDiscSelections({
+      originalDiscArchiveId: archive.id,
+    })).toHaveLength(2);
     access.close();
   });
 

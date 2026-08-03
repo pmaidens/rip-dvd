@@ -2785,67 +2785,79 @@ export function createDataAccessInternal(
 
     encodeJobs: {
       enqueue(input) {
-        const selectionReview = requireRow(
-          database
-            .select({
-              catalogReviewedAt: originalDiscArchives.catalogReviewedAt,
-            })
-            .from(discSelections)
-            .innerJoin(
-              originalDiscArchives,
-              eq(
-                originalDiscArchives.id,
-                discSelections.originalDiscArchiveId,
-              ),
-            )
-            .where(eq(discSelections.id, input.discSelectionId))
-            .get(),
-          "disc selection",
-          input.discSelectionId,
-        );
-        if (selectionReview.catalogReviewedAt === null) {
-          throw new DomainInvariantError(
-            "Encode Jobs require a completed catalog review",
-          );
-        }
         const timestamp = now();
-        database
-          .insert(encodeJobs)
-          .values({
-            id: newId<EncodeJobId>(),
-            discSelectionId: input.discSelectionId,
-            encodingProfileId: input.encodingProfileId,
-            outputPath: requireNonEmpty(input.outputPath, "outputPath"),
-            priority: input.priority ?? 0,
-            createdAt: timestamp,
-            updatedAt: timestamp,
-          })
-          .onConflictDoNothing({
-            target: [encodeJobs.discSelectionId, encodeJobs.encodingProfileId],
-          })
-          .run();
+        const outputPath = requireNonEmpty(input.outputPath, "outputPath");
+        return database.transaction(
+          (transaction) => {
+            const selectionReview = requireRow(
+              transaction
+                .select({
+                  catalogReviewedAt: originalDiscArchives.catalogReviewedAt,
+                })
+                .from(discSelections)
+                .innerJoin(
+                  originalDiscArchives,
+                  eq(
+                    originalDiscArchives.id,
+                    discSelections.originalDiscArchiveId,
+                  ),
+                )
+                .where(eq(discSelections.id, input.discSelectionId))
+                .get(),
+              "disc selection",
+              input.discSelectionId,
+            );
+            if (selectionReview.catalogReviewedAt === null) {
+              throw new DomainInvariantError(
+                "Encode Jobs require a completed catalog review",
+              );
+            }
+            transaction
+              .insert(encodeJobs)
+              .values({
+                id: newId<EncodeJobId>(),
+                discSelectionId: input.discSelectionId,
+                encodingProfileId: input.encodingProfileId,
+                outputPath,
+                priority: input.priority ?? 0,
+                createdAt: timestamp,
+                updatedAt: timestamp,
+              })
+              .onConflictDoNothing({
+                target: [
+                  encodeJobs.discSelectionId,
+                  encodeJobs.encodingProfileId,
+                ],
+              })
+              .run();
 
-        const existing = requireRow(
-          database
-            .select()
-            .from(encodeJobs)
-            .where(
-              and(
-                eq(encodeJobs.discSelectionId, input.discSelectionId),
-                eq(encodeJobs.encodingProfileId, input.encodingProfileId),
-              ),
-            )
-            .get(),
-          "encode job",
-          `${input.discSelectionId}/${input.encodingProfileId}`,
+            const existing = requireRow(
+              transaction
+                .select()
+                .from(encodeJobs)
+                .where(
+                  and(
+                    eq(encodeJobs.discSelectionId, input.discSelectionId),
+                    eq(encodeJobs.encodingProfileId, input.encodingProfileId),
+                  ),
+                )
+                .get(),
+              "encode job",
+              `${input.discSelectionId}/${input.encodingProfileId}`,
+            );
+            if (
+              existing.status === "failed" ||
+              existing.status === "completed"
+            ) {
+              return encodeJobQueue.requeue(existing.id, {
+                outputPath,
+                priority: input.priority ?? 0,
+              });
+            }
+            return existing;
+          },
+          { behavior: "immediate" },
         );
-        if (existing.status === "failed" || existing.status === "completed") {
-          return encodeJobQueue.requeue(existing.id, {
-            outputPath: requireNonEmpty(input.outputPath, "outputPath"),
-            priority: input.priority ?? 0,
-          });
-        }
-        return existing;
       },
 
       claimNext: encodeJobQueue.claimNext,

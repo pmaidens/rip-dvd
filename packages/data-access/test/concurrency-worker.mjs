@@ -94,6 +94,26 @@ try {
       type: "result",
       value: { outcome: "activated", id: profile.id },
     });
+  } else if (workerData.operation === "enqueue-encode") {
+    try {
+      const job = access.encodeJobs.enqueue({
+        discSelectionId: workerData.discSelectionId,
+        encodingProfileId: workerData.encodingProfileId,
+        outputPath: workerData.outputPath,
+      });
+      parentPort.postMessage({
+        type: "result",
+        value: { outcome: "enqueued", id: job.id },
+      });
+    } catch (error) {
+      if (!(error instanceof DomainInvariantError)) {
+        throw error;
+      }
+      parentPort.postMessage({
+        type: "result",
+        value: { outcome: "rejected" },
+      });
+    }
   } else {
     throw new Error(`Unknown concurrency operation: ${workerData.operation}`);
   }
