@@ -48,10 +48,11 @@ partial set of selections, and `catalog.completeCatalogReview()` records the
 review time only after at least one selection exists. Creating another Disc
 Selection atomically clears that review time, so encoding remains blocked until
 the changed catalog is explicitly completed again. Media Item parent changes
-are serialized and reject hierarchy cycles. The facade derives canonical DVD
-source identities, rejects duplicate source slices, requires title selections
-to reference the archived scan, and keeps chapter ranges within the selected
-title; main-feature selections remain a distinct DVD source kind. Encode Job
+are serialized, reject hierarchy cycles, and cap each hierarchy at 32 items.
+The facade derives canonical DVD source identities, rejects duplicate source
+slices, requires title selections to reference the archived scan, and keeps
+chapter ranges within the selected title; main-feature selections remain a
+distinct DVD source kind. Encode Job
 enqueueing checks that review boundary and writes in one short immediate
 transaction, so a concurrent Disc Selection cannot reopen review between the
 eligibility read and queue write. Existing databases backfill the explicit

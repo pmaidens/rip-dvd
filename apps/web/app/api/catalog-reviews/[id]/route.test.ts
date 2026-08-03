@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
+import type { MediaItem, MediaItemId } from "@rip-dvd/data-access";
 
-import { useDataAccessFixture } from "../../../../test/data-access-fixture";
+import {
+  useDataAccessFixture,
+  withSnapshotOverrides,
+} from "../../../../test/data-access-fixture";
 import { createCatalogReviewRoute } from "./route";
 
 const dataAccessFixture = useDataAccessFixture();
@@ -306,6 +310,63 @@ describe("Catalog Review API", () => {
     ]);
   });
 
+  it("fails closed instead of presenting a silently truncated ancestor chain", async () => {
+    const access = dataAccessFixture.create();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "deep-hierarchy",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Deep Hierarchy.iso",
+      fingerprint: "deep-hierarchy",
+    });
+    const timestamp = new Date("2026-08-03T20:00:00.000Z");
+    const items: MediaItem[] = Array.from({ length: 34 }, (_, index) => ({
+      id: `deep-${index}` as MediaItemId,
+      parentId: index === 0 ? null : `deep-${index - 1}` as MediaItemId,
+      kind: "movie",
+      title: `Deep item ${index}`,
+      year: null,
+      seasonNumber: null,
+      episodeNumber: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    }));
+    const accessWithDeepHierarchy = withSnapshotOverrides(access, {
+      catalog: {
+        listMediaItems(options) {
+          if (options?.ids) {
+            const ids = new Set(options.ids);
+            return items.filter((item) => ids.has(item.id));
+          }
+          return [items.at(-1)!];
+        },
+      },
+    });
+
+    const response = await createCatalogReviewRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`),
+      archive.id,
+      () => accessWithDeepHierarchy,
+      () => "http://localhost:3000",
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "Media Item hierarchy exceeds the supported depth",
+    });
+  });
+
   it("pages more than 500 valid Disc Selections without blocking review", async () => {
     const access = dataAccessFixture.create();
     const drive = access.catalog.upsertOpticalDrive({
@@ -487,6 +548,11 @@ describe("Catalog Review API", () => {
         title: "Episode Two",
       }),
     });
+    expect((await mutate({
+      action: "update_media_item",
+      mediaItemId: secondEpisode.id,
+      changes: { unsupportedField: "ignored" },
+    })).status).toBe(400);
 
     expect((await mutate({
       action: "create_disc_selection",

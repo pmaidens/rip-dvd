@@ -363,9 +363,11 @@ adding another selection reopens review before any new encode can be enqueued.
 The facade derives canonical DVD source identities and rejects duplicate source
 slices. The same-origin, non-cacheable workflow pages large Media Item and Disc
 Selection catalogs while carrying mapped items and bounded ancestor chains as
-read-only context. An active Media Item edit survives page changes, allowing a
-different bounded page to supply parent choices. The workflow is exposed at
-`GET`/`POST /api/catalog-reviews/:archiveId`.
+read-only context. Media Item mutations cap hierarchies at 32 items, and reads
+fail closed instead of presenting a truncated chain. An active Media Item edit
+survives page changes, allowing a different bounded page to supply parent
+choices. The workflow is exposed at `GET`/`POST
+/api/catalog-reviews/:archiveId`.
 
 To use host libraries instead, set `RIP_DVD_MEDIA_LIBRARY_HOST_PATH` and
 `RIP_DVD_ORIGINALS_LIBRARY_HOST_PATH`. On native Linux, create new bind-source

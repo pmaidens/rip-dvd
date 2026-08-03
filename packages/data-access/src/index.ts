@@ -8,6 +8,7 @@ export * from "./errors.js";
 export * from "./dvd-scan.js";
 export {
   DISC_SELECTION_KINDS,
+  MAX_MEDIA_ITEM_HIERARCHY_DEPTH,
   MEDIA_ITEM_KINDS,
 } from "./domain-values.js";
 export type * from "./types.js";

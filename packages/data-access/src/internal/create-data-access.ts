@@ -56,6 +56,7 @@ import {
   requirePositiveSafeInteger,
 } from "./validation.js";
 import { decodeDvdTitleMap, isDvdContentId } from "../dvd-scan.js";
+import { MAX_MEDIA_ITEM_HIERARCHY_DEPTH } from "../domain-values.js";
 import {
   DomainInvariantError,
   InvalidStatusTransitionError,
@@ -468,6 +469,11 @@ export function createDataAccessInternal(
       if (visited.has(currentId)) {
         throw new DomainInvariantError(
           "Media Item hierarchy cannot contain a cycle",
+        );
+      }
+      if (visited.size >= MAX_MEDIA_ITEM_HIERARCHY_DEPTH) {
+        throw new DomainInvariantError(
+          "Media Item hierarchy exceeds the supported depth",
         );
       }
       visited.add(currentId);

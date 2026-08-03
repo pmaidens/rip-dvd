@@ -2,6 +2,7 @@ import {
   decodeDvdTitleMap,
   DISC_SELECTION_KINDS,
   DomainInvariantError,
+  MAX_MEDIA_ITEM_HIERARCHY_DEPTH,
   MEDIA_ITEM_KINDS,
   RecordNotFoundError,
   type DataAccess,
@@ -19,7 +20,14 @@ export const runtime = "nodejs";
 
 const CATALOG_REVIEW_MEDIA_PAGE_SIZE = 100;
 const CATALOG_REVIEW_SELECTION_PAGE_SIZE = 100;
-const CATALOG_REVIEW_ANCESTOR_DEPTH_LIMIT = 32;
+const MEDIA_ITEM_UPDATE_FIELDS: ReadonlySet<string> = new Set([
+  "parentId",
+  "kind",
+  "title",
+  "year",
+  "seasonNumber",
+  "episodeNumber",
+]);
 
 function response(body: unknown, status = 200): Response {
   return Response.json(body, {
@@ -205,7 +213,7 @@ function readCatalogReview(
     );
     for (
       let depth = 0;
-      contextIds.length > 0 && depth < CATALOG_REVIEW_ANCESTOR_DEPTH_LIMIT;
+      contextIds.length > 0 && depth < MAX_MEDIA_ITEM_HIERARCHY_DEPTH;
       depth += 1
     ) {
       const contextItems = snapshot.catalog.listMediaItems({
@@ -221,6 +229,11 @@ function readCatalogReview(
           contextIds.push(item.parentId);
         }
       }
+    }
+    if (contextIds.length > 0) {
+      throw new DomainInvariantError(
+        "Media Item hierarchy exceeds the supported depth",
+      );
     }
     const contextMediaItems = [...mediaItemsById.values()].filter(
       (item) => !mediaItemPageIds.has(item.id),
@@ -362,7 +375,13 @@ export async function createCatalogReviewRoute(
     if (action === "update_media_item") {
       const mediaItemId = boundedString(body.mediaItemId);
       const changes = asRecord(body.changes);
-      if (!mediaItemId || !changes || Object.keys(changes).length === 0) {
+      const changeFields = changes === null ? [] : Object.keys(changes);
+      if (
+        !mediaItemId ||
+        !changes ||
+        changeFields.length === 0 ||
+        changeFields.some((field) => !MEDIA_ITEM_UPDATE_FIELDS.has(field))
+      ) {
         return response({ error: "Invalid Media Item update" }, 400);
       }
       const update: Parameters<
