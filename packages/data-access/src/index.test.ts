@@ -353,6 +353,10 @@ describe("data-access facade", () => {
         "active-and-history list policy cannot be combined with explicit statuses",
       ),
     );
+
+    access.close();
+  });
+
   it("does not expose migration-only legacy sidecar state", () => {
     const access = openTestDatabase();
 
