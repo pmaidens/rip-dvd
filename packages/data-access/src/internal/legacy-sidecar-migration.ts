@@ -34,6 +34,10 @@ import {
   type LegacyJobLogicalKey,
 } from "./legacy-sidecar-identity.js";
 import { isPathWithinDirectory } from "./path-containment.js";
+import {
+  hashDvdArchiveFile,
+  isCurrentDvdContentSize,
+} from "./dvd-content-identity.js";
 import { newId, requireRow } from "./persistence.js";
 import {
   detectedDiscs,
@@ -42,6 +46,7 @@ import {
   encodingProfiles,
   mediaItems,
   opticalDrives,
+  originalDiscArchiveContentIds,
   originalDiscArchives,
 } from "./schema.js";
 import { requireNonEmpty } from "./validation.js";
@@ -354,17 +359,34 @@ export function createLegacySidecarImportAccess(
         const persistedJobs: ParsedLegacyJob[] = [];
 
         try {
+          const requireCapturedSourceArchive = () => {
+            if (!legacySourceArchiveMatchesSnapshot(
+              originalsLibraryPath,
+              sidecar,
+            )) {
+              throw new DomainInvariantError(
+                "Legacy source archive conflicts with the object captured at SQLite cutover",
+              );
+            }
+          };
+          requireCapturedSourceArchive();
+          let archiveContentIdentity;
+          try {
+            archiveContentIdentity = isCurrentDvdContentSize(
+              sidecar.archiveSizeBytes,
+            )
+              ? hashDvdArchiveFile(
+                sidecar.archivePath,
+                sidecar.archiveSizeBytes,
+              )
+              : undefined;
+          } catch (error) {
+            // Preserve the cutover provenance contract when the captured
+            // object changes while its new content identity is being read.
+            requireCapturedSourceArchive();
+            throw error;
+          }
           database.transaction((transaction) => {
-            const requireCapturedSourceArchive = () => {
-              if (!legacySourceArchiveMatchesSnapshot(
-                originalsLibraryPath,
-                sidecar,
-              )) {
-                throw new DomainInvariantError(
-                  "Legacy source archive conflicts with the object captured at SQLite cutover",
-                );
-              }
-            };
             requireCapturedSourceArchive();
             const existingByFingerprint = transaction
               .select()
@@ -511,6 +533,53 @@ export function createLegacySidecarImportAccess(
                 updated += 1;
               } else {
                 unchanged += 1;
+              }
+            }
+
+            if (archiveContentIdentity) {
+              const archiveWithFingerprint = transaction
+                .select({ id: originalDiscArchives.id })
+                .from(originalDiscArchives)
+                .where(
+                  eq(
+                    originalDiscArchives.fingerprint,
+                    archiveContentIdentity.contentId,
+                  ),
+                )
+                .get();
+              if (
+                archiveWithFingerprint &&
+                archiveWithFingerprint.id !== archive.id
+              ) {
+                throw new DomainInvariantError(
+                  "Archive contents are already assigned to a different Original Disc Archive fingerprint",
+                );
+              }
+              transaction
+                .insert(originalDiscArchiveContentIds)
+                .values({
+                  originalDiscArchiveId: archive.id,
+                  contentId: archiveContentIdentity.contentId,
+                })
+                .onConflictDoNothing()
+                .run();
+              const archiveForContentId = transaction
+                .select({
+                  originalDiscArchiveId:
+                    originalDiscArchiveContentIds.originalDiscArchiveId,
+                })
+                .from(originalDiscArchiveContentIds)
+                .where(
+                  eq(
+                    originalDiscArchiveContentIds.contentId,
+                    archiveContentIdentity.contentId,
+                  ),
+                )
+                .get();
+              if (archiveForContentId?.originalDiscArchiveId !== archive.id) {
+                throw new DomainInvariantError(
+                  "Archive contents are already assigned to a different Original Disc Archive",
+                );
               }
             }
 

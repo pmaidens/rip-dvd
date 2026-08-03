@@ -4,13 +4,16 @@ import {
   createDataAccess,
   DomainInvariantError,
 } from "../dist/index.js";
+import { createLegacySidecarDataAccess } from "../dist/legacy-sidecars.js";
 
 const barrier = new Int32Array(workerData.barrier);
 let access;
 
 try {
   if (workerData.mode !== "open") {
-    access = createDataAccess({ databasePath: workerData.databasePath });
+    access = createLegacySidecarDataAccess({
+      databasePath: workerData.databasePath,
+    });
   }
 
   parentPort.postMessage({ type: "ready" });

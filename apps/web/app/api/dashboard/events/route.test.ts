@@ -76,10 +76,12 @@ describe("GET /api/dashboard/events", () => {
       access.catalog.updateDetectedDiscStatus(disc.id, "approved");
       access.archiveJobs.enqueue({ detectedDiscId: disc.id });
 
+      const encodeFingerprint =
+        `sha256:${(index + 100).toString(16).padStart(64, "0")}`;
       const encodeDisc = access.catalog.registerDetectedDisc({
         opticalDriveId: drive.id,
         discKind: "dvd",
-        fingerprint: `encode-${index}`,
+        fingerprint: encodeFingerprint,
         volumeLabel: `ENCODE_DISC_${index}`,
       });
       access.catalog.updateDetectedDiscStatus(encodeDisc.id, "scanned");
@@ -89,7 +91,7 @@ describe("GET /api/dashboard/events", () => {
         discKind: "dvd",
         archiveFormat: "iso",
         archivePath: `/media/originals/encode-${index}.iso`,
-        fingerprint: `encode-${index}`,
+        fingerprint: encodeFingerprint,
       });
       const mediaItem = access.catalog.createMediaItem({
         kind: "movie",
@@ -107,10 +109,12 @@ describe("GET /api/dashboard/events", () => {
         outputPath: `/media/movies/encode-${index}.mkv`,
       });
 
+      const reviewFingerprint =
+        `sha256:${(index + 200).toString(16).padStart(64, "0")}`;
       const reviewDisc = access.catalog.registerDetectedDisc({
         opticalDriveId: drive.id,
         discKind: "dvd",
-        fingerprint: `review-${index}`,
+        fingerprint: reviewFingerprint,
         volumeLabel: `REVIEW_DISC_${index}`,
       });
       access.catalog.updateDetectedDiscStatus(reviewDisc.id, "scanned");
@@ -120,7 +124,7 @@ describe("GET /api/dashboard/events", () => {
         discKind: "dvd",
         archiveFormat: "iso",
         archivePath: `/media/originals/review-${index}.iso`,
-        fingerprint: `review-${index}`,
+        fingerprint: reviewFingerprint,
       });
     }
     const abortController = new AbortController();
@@ -307,6 +311,87 @@ describe("GET /api/dashboard/events", () => {
     expect(event).toContain('"progressPercent":42');
     expect(event).toContain('"progressPercent":18');
     expect(event).not.toContain("/media/");
+  });
+
+  it("streams Archive Job progress, failure, completion, and catalog review from SQLite", async () => {
+    vi.useFakeTimers();
+    const access = dataAccessFixture.create();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      displayName: "Archive drive",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "streamed-archive-lifecycle",
+      volumeLabel: "LIFECYCLE_DISC",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    const job = access.archiveJobs.approve({ detectedDiscId: disc.id });
+    const firstClaim = access.archiveJobs.claimNext("archive-worker-first")!;
+    access.archiveJobs.updateProgress(firstClaim, 37);
+
+    const abortController = new AbortController();
+    const response = createDashboardEventResponse(access, {
+      signal: abortController.signal,
+      pollIntervalMs: 1_000,
+    });
+    const reader = response.body!.getReader();
+    const parseSnapshot = async () => {
+      const event = new TextDecoder().decode((await reader.read()).value);
+      const dataLine = event
+        .split("\n")
+        .find((line) => line.startsWith("data: "))!;
+      return JSON.parse(dataLine.slice("data: ".length)) as {
+        archiveJobs: {
+          status: string;
+          items: { id: string; status: string; progressPercent: number }[];
+        };
+        catalogReview: {
+          status: string;
+          items: { discLabel: string }[];
+        };
+      };
+    };
+
+    const running = await parseSnapshot();
+    expect(running.archiveJobs).toMatchObject({
+      status: "loaded",
+      items: [
+        { id: job.id, status: "running", progressPercent: 37 },
+      ],
+    });
+    expect(running.catalogReview.items).toEqual([]);
+
+    access.archiveJobs.fail(firstClaim, "DVD read failed");
+    await vi.advanceTimersByTimeAsync(1_000);
+    const failed = await parseSnapshot();
+    expect(failed.archiveJobs).toMatchObject({
+      status: "loaded",
+      items: [{ id: job.id, status: "failed", progressPercent: 37 }],
+    });
+    expect(failed.catalogReview.items).toEqual([]);
+
+    access.archiveJobs.approve({ detectedDiscId: disc.id });
+    const retryClaim = access.archiveJobs.claimNext("archive-worker-retry")!;
+    access.archiveJobs.publish(retryClaim, {
+      archivePath: "/media/originals/lifecycle.iso",
+      sizeBytes: 9,
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    const completed = await parseSnapshot();
+    abortController.abort();
+
+    expect(completed.archiveJobs).toMatchObject({
+      status: "loaded",
+      items: [{ id: job.id, status: "completed", progressPercent: 100 }],
+    });
+    expect(completed.catalogReview).toMatchObject({
+      status: "loaded",
+      items: [{ discLabel: "LIFECYCLE_DISC" }],
+    });
   });
 
   it("coalesces updates while a slow client has not consumed its queued event", async () => {

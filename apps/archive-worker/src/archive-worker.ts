@@ -5,11 +5,19 @@ import type {
   DataAccess,
   DiscoveredOpticalDrive,
 } from "@rip-dvd/data-access";
+import { ARCHIVE_JOB_LEASE_DURATION_MS } from "@rip-dvd/data-access";
 import type { DvdTitleMap } from "@rip-dvd/data-access/dvd-scan";
+
+import {
+  preserveDvdArchive,
+  quarantinePublishedArchive,
+  type DvdCopyRunner,
+} from "./dvd-archiver.js";
 
 export interface ScannedDvd {
   fingerprint: string;
   isNewMediumObservation?: boolean;
+  sizeBytes?: number;
   volumeLabel?: string;
   scanData: DvdTitleMap;
 }
@@ -38,9 +46,12 @@ export interface OpticalDriveHardware {
 export interface PollArchiveWorkerOptions {
   access: DataAccess;
   configuredDevicePath: string;
+  copyRunner?: DvdCopyRunner;
   hardware: OpticalDriveHardware;
   log(message: string): void;
+  originalsLibraryPath?: string;
   signal: AbortSignal;
+  workerId?: string;
 }
 
 export interface RunArchiveWorkerOptions extends PollArchiveWorkerOptions {
@@ -144,11 +155,15 @@ async function confirmAuthorizedDrive({
 export async function pollArchiveWorker({
   access,
   configuredDevicePath,
+  copyRunner,
   hardware,
   log,
+  originalsLibraryPath,
   signal,
+  workerId = "archive-worker",
 }: PollArchiveWorkerOptions): Promise<void> {
   signal.throwIfAborted();
+  access.archiveJobs.recoverExpiredClaims();
   const discovered = await hardware.discover(signal);
   signal.throwIfAborted();
   const configuredCanonicalPath =
@@ -213,9 +228,106 @@ export async function pollArchiveWorker({
         isNewMediumObservation: scan.isNewMediumObservation,
         volumeLabel: scan.volumeLabel,
         scanData: scan.scanData,
+        sizeBytes: scan.sizeBytes,
       });
       if (disc.status === "detected") {
         access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+      }
+      if (
+        copyRunner === undefined ||
+        originalsLibraryPath === undefined ||
+        scan.sizeBytes === undefined
+      ) {
+        continue;
+      }
+      const claim = access.archiveJobs.claimNext(workerId, {
+        opticalDriveId: confirmedBeforePersistence.persisted.id,
+        fingerprint: scan.fingerprint,
+      });
+      if (!claim) {
+        continue;
+      }
+
+      const claimController = new AbortController();
+      const archiveSignal = AbortSignal.any([
+        signal,
+        claimController.signal,
+      ]);
+      const heartbeat = setInterval(() => {
+        try {
+          access.archiveJobs.renewClaim(claim);
+        } catch (error) {
+          claimController.abort(error);
+        }
+      }, Math.floor(ARCHIVE_JOB_LEASE_DURATION_MS / 3));
+      heartbeat.unref();
+      let publishedArchivePath: string | undefined;
+      try {
+        const preserved = await preserveDvdArchive({
+          devicePath: binding.drive.devicePath,
+          fingerprint: scan.fingerprint,
+          originalsLibraryPath,
+          runner: copyRunner,
+          signal: archiveSignal,
+          sizeBytes: scan.sizeBytes,
+          onProgress: (progressPercent) => {
+            access.archiveJobs.updateProgress(claim, progressPercent);
+          },
+          verifySource: async () => {
+            await confirmAuthorizedDrive({
+              access,
+              configuredCanonicalPath,
+              expected: binding.drive,
+              hardware,
+              phase: "DVD persistence",
+              signal: archiveSignal,
+            });
+            await hardware.confirmOpticalDrive(binding, archiveSignal);
+            const verified = await hardware.scanDvd(binding, archiveSignal);
+            if (
+              verified === null ||
+              verified.fingerprint !== scan.fingerprint ||
+              verified.sizeBytes !== scan.sizeBytes
+            ) {
+              throw new Error("DVD medium changed during archiving");
+            }
+          },
+        });
+        publishedArchivePath = preserved.archivePath;
+        try {
+          access.archiveJobs.publish(claim, {
+            archivePath: preserved.archivePath,
+            sizeBytes: preserved.sizeBytes,
+          });
+        } catch (error) {
+          await quarantinePublishedArchive(preserved.archivePath);
+          publishedArchivePath = undefined;
+          throw error;
+        }
+      } catch (error) {
+        const message = signal.aborted
+          ? "Archive interrupted"
+          : error instanceof Error
+            ? error.message.slice(0, 500)
+            : String(error).slice(0, 500);
+        try {
+          access.archiveJobs.fail(claim, message);
+        } catch (failureError) {
+          const failureMessage =
+            failureError instanceof Error
+              ? failureError.message
+              : String(failureError);
+          log(`Archive Job failure state could not be persisted: ${failureMessage}`);
+        }
+        if (publishedArchivePath !== undefined) {
+          await quarantinePublishedArchive(publishedArchivePath);
+        }
+        if (signal.aborted) {
+          throw error;
+        }
+        log(`DVD archive failed for ${drive.devicePath}: ${message}`);
+      } finally {
+        clearInterval(heartbeat);
       }
     } catch (error) {
       if (signal.aborted) {

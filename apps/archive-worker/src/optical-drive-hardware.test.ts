@@ -684,6 +684,7 @@ describe("Linux Optical Drive hardware boundary", () => {
     await expect(hardware.scanDvd(boundOpticalDrive(), signal)).resolves.toEqual({
       fingerprint: contentId,
       isNewMediumObservation: true,
+      sizeBytes: 4_700_000_000,
       volumeLabel: "EXAMPLE_DISC",
       scanData: {
         schemaVersion: 2,

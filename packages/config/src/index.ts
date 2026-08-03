@@ -3,6 +3,7 @@ export interface RuntimeConfig {
   mediaLibraryPath: string;
   originalsLibraryPath: string;
   archiveDevicePath: string;
+  webTrustedOrigin: string;
   workerPollIntervalMs: number;
   archiveWorkerConcurrency: number;
   encodeWorkerConcurrency: number;
@@ -11,6 +12,7 @@ export interface RuntimeConfig {
 type Environment = Readonly<Record<string, string | undefined>>;
 
 const DEFAULT_ARCHIVE_DEVICE_PATH = "/dev/sr0";
+const DEFAULT_WEB_TRUSTED_ORIGIN = "http://localhost:3000";
 const DEFAULT_WORKER_POLL_INTERVAL_MS = 5_000;
 const DEFAULT_ARCHIVE_WORKER_CONCURRENCY = 1;
 const DEFAULT_ENCODE_WORKER_CONCURRENCY = 1;
@@ -59,6 +61,31 @@ function timerDelayMilliseconds(
   return value;
 }
 
+function httpOrigin(
+  environment: Environment,
+  name: string,
+  defaultValue: string,
+): string {
+  const rawValue = environment[name]?.trim() || defaultValue;
+  let url: URL;
+  try {
+    url = new URL(rawValue);
+  } catch {
+    throw new Error(`${name} must be an HTTP(S) origin`);
+  }
+  if (
+    (url.protocol !== "http:" && url.protocol !== "https:") ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.pathname !== "/" ||
+    url.search !== "" ||
+    url.hash !== ""
+  ) {
+    throw new Error(`${name} must be an HTTP(S) origin`);
+  }
+  return url.origin;
+}
+
 export function loadConfig(environment: Environment = process.env): RuntimeConfig {
   return {
     databasePath: requiredValue(environment, "RIP_DVD_DATABASE_PATH"),
@@ -70,6 +97,11 @@ export function loadConfig(environment: Environment = process.env): RuntimeConfi
     archiveDevicePath:
       environment.RIP_DVD_ARCHIVE_DEVICE_PATH?.trim() ||
       DEFAULT_ARCHIVE_DEVICE_PATH,
+    webTrustedOrigin: httpOrigin(
+      environment,
+      "RIP_DVD_WEB_TRUSTED_ORIGIN",
+      DEFAULT_WEB_TRUSTED_ORIGIN,
+    ),
     workerPollIntervalMs: timerDelayMilliseconds(
       environment,
       "RIP_DVD_WORKER_POLL_INTERVAL_MS",

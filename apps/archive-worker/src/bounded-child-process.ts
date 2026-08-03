@@ -75,6 +75,7 @@ interface BoundedProcessWaitOptions {
 }
 
 export interface BoundedSingleFlightCoordinator<Request, Result> {
+  isActive(key: string): boolean;
   run(
     key: string,
     request: Request,
@@ -106,6 +107,9 @@ export function createBoundedSingleFlightCoordinator<Request, Result>({
   >();
 
   return {
+    isActive(key) {
+      return activeProcesses.has(key);
+    },
     async run(key, request, { signal, timeoutError, timeoutMs }) {
       signal.throwIfAborted();
       let trackedProcess = activeProcesses.get(key);

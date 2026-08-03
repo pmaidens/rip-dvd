@@ -149,6 +149,27 @@ export const originalDiscArchives = sqliteTable(
   ],
 );
 
+export const originalDiscArchiveContentIds = sqliteTable(
+  "original_disc_archive_content_ids",
+  {
+    originalDiscArchiveId: text("original_disc_archive_id")
+      .$type<OriginalDiscArchiveId>()
+      .notNull()
+      .primaryKey()
+      .references(() => originalDiscArchives.id, { onDelete: "cascade" }),
+    contentId: text("content_id").notNull(),
+  },
+  (table) => [
+    check(
+      "original_disc_archive_content_ids_id_not_null",
+      sql`${table.originalDiscArchiveId} is not null`,
+    ),
+    uniqueIndex("original_disc_archive_content_ids_content_id_unique").on(
+      table.contentId,
+    ),
+  ],
+);
+
 export const mediaItems = sqliteTable(
   "media_items",
   {

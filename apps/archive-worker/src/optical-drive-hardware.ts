@@ -459,7 +459,7 @@ async function readDvdContentId(
   signal: AbortSignal,
   runner: CommandRunner,
   contentReader: DiscContentReader,
-): Promise<string> {
+): Promise<{ contentId: string; sizeBytes: number }> {
   const sizeResult = await runner.run(
     "blockdev",
     ["--getsize64", devicePath],
@@ -478,7 +478,7 @@ async function readDvdContentId(
   if (!isDvdContentId(contentId)) {
     throw new Error("DVD content reader returned an invalid content identity");
   }
-  return contentId;
+  return { contentId, sizeBytes };
 }
 
 function commandFailure(tool: string, result: CommandResult): Error {
@@ -628,7 +628,7 @@ export function createLinuxOpticalDriveHardware({
         });
         return null;
       }
-      const contentId = await readDvdContentId(
+      const { contentId, sizeBytes } = await readDvdContentId(
         safeDevicePath,
         signal,
         runner,
@@ -657,6 +657,7 @@ export function createLinuxOpticalDriveHardware({
       const result = {
         fingerprint: contentId,
         isNewMediumObservation: true,
+        sizeBytes,
         ...(metadata.volumeLabel ? { volumeLabel: metadata.volumeLabel } : {}),
         scanData,
       };

@@ -49,15 +49,21 @@ and failure commands accept the claimed running job and compare its ID, running
 status, and token in the update. Output from a stale worker attempt therefore
 cannot mutate a retried job.
 
-Archive Jobs can be enqueued or requeued only while their Detected Disc is
-approved and no archive exists for its fingerprint. The
-single-statement claim also joins the current Detected Disc state and returns
-only approved work, so a revocation between enqueue and claim prevents an
-external preservation process from starting. It also excludes another running
-Archive Job for the same fingerprint across Optical Drives. Approval freezes
+`archiveJobs.approve()` atomically moves a scanned Detected Disc to approved and
+creates its queued job, or resets the same failed job for an explicit retry.
+Archive Jobs can otherwise be enqueued or requeued only while their Detected
+Disc is approved and no archive exists for its fingerprint. The single-statement
+claim also joins the current Detected Disc and Optical Drive state and returns
+only approved work for an enabled, present drive, so a revocation or drive-state
+change between enqueue and claim prevents an external preservation process from
+starting. It excludes another running Archive Job for either the same
+fingerprint across Optical Drives or the same physical drive. Approval freezes
 the reviewed Disc Kind and scan data until approval is revoked, and every
-observation of a fingerprint must have the same Disc Kind. Archive publication
-marks every observation of the fingerprint archived. Once archive
+observation of a fingerprint must have the same Disc Kind.
+
+`archiveJobs.publish()` inserts Original Disc Archive provenance, marks every
+observation of the fingerprint archived, removes duplicate queued work, and
+records 100% terminal job success in one immediate transaction. Once archive
 provenance exists, rediscovery may refresh metadata but cannot change the
 Detected Disc kind.
 

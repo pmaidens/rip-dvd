@@ -13,6 +13,15 @@ export default defineConfig({
         ),
       },
       {
+        find: "@rip-dvd/data-access/legacy-sidecars",
+        replacement: fileURLToPath(
+          new URL(
+            "../../packages/data-access/src/legacy-sidecars.ts",
+            import.meta.url,
+          ),
+        ),
+      },
+      {
         find: "@rip-dvd/data-access",
         replacement: fileURLToPath(
         new URL("../../packages/data-access/src/index.ts", import.meta.url),

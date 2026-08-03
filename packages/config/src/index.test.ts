@@ -15,6 +15,7 @@ describe("loadConfig", () => {
       mediaLibraryPath: "/media/movies",
       originalsLibraryPath: "/media/originals",
       archiveDevicePath: "/dev/sr0",
+      webTrustedOrigin: "http://localhost:3000",
       workerPollIntervalMs: 5_000,
       archiveWorkerConcurrency: 1,
       encodeWorkerConcurrency: 1,
@@ -29,13 +30,30 @@ describe("loadConfig", () => {
         RIP_DVD_WORKER_POLL_INTERVAL_MS: "10000",
         RIP_DVD_ARCHIVE_WORKER_CONCURRENCY: "2",
         RIP_DVD_ENCODE_WORKER_CONCURRENCY: "3",
+        RIP_DVD_WEB_TRUSTED_ORIGIN: "https://dvd.example.test:8443/",
       }),
     ).toMatchObject({
       archiveDevicePath: "/dev/dvd",
       workerPollIntervalMs: 10_000,
       archiveWorkerConcurrency: 2,
       encodeWorkerConcurrency: 3,
+      webTrustedOrigin: "https://dvd.example.test:8443",
     });
+  });
+
+  it.each([
+    "ftp://localhost:3000",
+    "http://user:secret@localhost:3000",
+    "http://localhost:3000/dashboard",
+    "http://localhost:3000?redirect=elsewhere",
+    "not an origin",
+  ])("rejects an invalid trusted web origin (%s)", (value) => {
+    expect(() =>
+      loadConfig({
+        ...requiredEnvironment,
+        RIP_DVD_WEB_TRUSTED_ORIGIN: value,
+      }),
+    ).toThrow("RIP_DVD_WEB_TRUSTED_ORIGIN must be an HTTP(S) origin");
   });
 
   it("accepts Node's maximum timer delay for worker polling", () => {

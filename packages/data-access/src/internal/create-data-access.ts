@@ -17,7 +17,10 @@ import {
   desc,
   eq,
   exists,
+  gt,
   inArray,
+  isNull,
+  lte,
   ne,
   notExists,
   or,
@@ -34,8 +37,15 @@ import {
   encodingProfiles,
   mediaItems,
   opticalDrives,
+  originalDiscArchiveContentIds,
   originalDiscArchives,
 } from "./schema.js";
+import {
+  dvdArchiveFileMatchesIdentity,
+  hashDvdArchiveFile,
+  isCurrentDvdContentSize,
+  readDvdArchiveFileSize,
+} from "./dvd-content-identity.js";
 import {
   createJobQueueController,
   type JobQueueAdapter,
@@ -45,11 +55,12 @@ import {
   requireNonEmpty,
   requirePositiveSafeInteger,
 } from "./validation.js";
-import { decodeDvdTitleMap } from "../dvd-scan.js";
+import { decodeDvdTitleMap, isDvdContentId } from "../dvd-scan.js";
 import {
   DomainInvariantError,
   InvalidStatusTransitionError,
   RecordNotFoundError,
+  StaleJobAttemptError,
 } from "../errors.js";
 import type { LegacySidecarDataAccess } from "../legacy-sidecar-types.js";
 import type {
@@ -76,12 +87,16 @@ import type {
   RunningArchiveJob,
   RunningEncodeJob,
 } from "../types.js";
+import { ARCHIVE_JOB_LEASE_DURATION_MS } from "../types.js";
 import { newId, requireRow } from "./persistence.js";
 
 const BUSY_TIMEOUT_MS = 5_000;
 const MIGRATION_LOCK_TIMEOUT_MS = 15_000;
 const MIGRATION_LOCK_STALE_MS = 300_000;
 const MIGRATION_LOCK_POLL_MS = 10;
+const ARCHIVE_JOB_RECOVERY_LIMIT = 100;
+const LEGACY_ARCHIVE_RECONCILIATION_LIMIT = 4;
+const LEGACY_ARCHIVE_RECONCILIATION_BYTES = 9_000_000_000;
 const DEFAULT_MIGRATIONS_FOLDER = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../drizzle",
@@ -220,6 +235,28 @@ function queuedArchiveJobsForFingerprint(fingerprint: string) {
       where ${detectedDiscs.fingerprint} = ${fingerprint}
     )`;
 }
+
+const archiveUsesCurrentDvdContentId = sql<boolean>`
+  length(${originalDiscArchives.fingerprint}) = 71
+  and substr(${originalDiscArchives.fingerprint}, 1, 7) = 'sha256:'
+  and substr(${originalDiscArchives.fingerprint}, 8) not glob '*[^0-9a-f]*'
+`;
+
+const detectedDiscUsesCurrentDvdContentId = sql<boolean>`
+  length(${detectedDiscs.fingerprint}) = 71
+  and substr(${detectedDiscs.fingerprint}, 1, 7) = 'sha256:'
+  and substr(${detectedDiscs.fingerprint}, 8) not glob '*[^0-9a-f]*'
+`;
+
+const unresolvedLegacyDvdArchiveIdentity = and(
+  eq(originalDiscArchives.discKind, "dvd"),
+  sql`not (${archiveUsesCurrentDvdContentId})`,
+  sql<boolean>`not exists (
+      select 1
+      from ${originalDiscArchiveContentIds}
+      where ${originalDiscArchiveContentIds.originalDiscArchiveId} = ${originalDiscArchives.id}
+    )`,
+);
 
 function toDiscSelection(
   row: typeof discSelections.$inferSelect,
@@ -400,6 +437,224 @@ export function createDataAccessInternal(
     return new Date();
   }
 
+  function findOriginalArchiveByContentId(
+    fingerprint: string,
+    querySource: Pick<typeof database, "select"> = database,
+  ) {
+    return querySource
+      .select({
+        discKind: originalDiscArchives.discKind,
+        id: originalDiscArchives.id,
+      })
+      .from(originalDiscArchives)
+      .leftJoin(
+        originalDiscArchiveContentIds,
+        eq(
+          originalDiscArchiveContentIds.originalDiscArchiveId,
+          originalDiscArchives.id,
+        ),
+      )
+      .where(
+        or(
+          eq(originalDiscArchives.fingerprint, fingerprint),
+          eq(originalDiscArchiveContentIds.contentId, fingerprint),
+        ),
+      )
+      .get();
+  }
+
+  function hasUnresolvedLegacyDvdArchiveIdentity(
+    querySource: Pick<typeof database, "select"> = database,
+  ): boolean {
+    return querySource
+      .select({ id: originalDiscArchives.id })
+      .from(originalDiscArchives)
+      .where(unresolvedLegacyDvdArchiveIdentity)
+      .limit(1)
+      .get() !== undefined;
+  }
+
+  function requireLegacyDvdArchiveIdentitiesResolved(
+    discKind: (typeof detectedDiscs.$inferSelect)["discKind"],
+    fingerprint: string,
+    querySource: Pick<typeof database, "select"> = database,
+  ): void {
+    if (
+      discKind === "dvd" &&
+      isDvdContentId(fingerprint) &&
+      hasUnresolvedLegacyDvdArchiveIdentity(querySource)
+    ) {
+      throw new DomainInvariantError(
+        "Legacy DVD archive content identities must be reconciled before Archive Jobs can advance",
+      );
+    }
+  }
+
+  function reconcileLegacyDvdArchiveContentId(
+    fingerprint: string,
+    sizeBytes: number | undefined,
+  ): void {
+    if (
+      sizeBytes === undefined ||
+      !isDvdContentId(fingerprint) ||
+      findOriginalArchiveByContentId(fingerprint) !== undefined
+    ) {
+      return;
+    }
+    if (!isCurrentDvdContentSize(sizeBytes)) {
+      throw new DomainInvariantError("DVD content size is invalid");
+    }
+
+    const unresolvedCandidates = database
+      .select({
+        archivePath: originalDiscArchives.archivePath,
+        fingerprint: originalDiscArchives.fingerprint,
+        id: originalDiscArchives.id,
+        sizeBytes: originalDiscArchives.sizeBytes,
+      })
+      .from(originalDiscArchives)
+      .where(unresolvedLegacyDvdArchiveIdentity)
+      .orderBy(
+        desc(sql`${originalDiscArchives.sizeBytes} = ${sizeBytes}`),
+        desc(sql`${originalDiscArchives.sizeBytes} is null`),
+        asc(originalDiscArchives.id),
+      )
+      .limit(LEGACY_ARCHIVE_RECONCILIATION_LIMIT + 1)
+      .all();
+    const candidates: Array<
+      (typeof unresolvedCandidates)[number] & { resolvedSizeBytes: number }
+    > = [];
+    let candidateBytes = 0;
+    for (const candidate of unresolvedCandidates) {
+      if (candidates.length >= LEGACY_ARCHIVE_RECONCILIATION_LIMIT) {
+        break;
+      }
+      let candidateSizeBytes = candidate.sizeBytes;
+      if (
+        candidateSizeBytes === null ||
+        !isCurrentDvdContentSize(candidateSizeBytes)
+      ) {
+        try {
+          candidateSizeBytes = readDvdArchiveFileSize(candidate.archivePath);
+        } catch {
+          throw new DomainInvariantError(
+            "Legacy DVD archive content identity requires operator remediation because its size cannot be safely derived",
+          );
+        }
+      }
+      if (
+        candidateBytes + candidateSizeBytes >
+          LEGACY_ARCHIVE_RECONCILIATION_BYTES
+      ) {
+        break;
+      }
+      candidates.push({ ...candidate, resolvedSizeBytes: candidateSizeBytes });
+      candidateBytes += candidateSizeBytes;
+    }
+
+    for (const candidate of candidates) {
+      const candidateSizeBytes = candidate.resolvedSizeBytes;
+      const hashed = hashDvdArchiveFile(
+        candidate.archivePath,
+        candidateSizeBytes,
+      );
+      database.transaction((transaction) => {
+        const candidateSizeCondition = candidate.sizeBytes === null
+          ? isNull(originalDiscArchives.sizeBytes)
+          : eq(originalDiscArchives.sizeBytes, candidate.sizeBytes);
+        const current = transaction
+          .select({ id: originalDiscArchives.id })
+          .from(originalDiscArchives)
+          .where(
+            and(
+              eq(originalDiscArchives.id, candidate.id),
+              eq(originalDiscArchives.archivePath, candidate.archivePath),
+              eq(originalDiscArchives.fingerprint, candidate.fingerprint),
+              candidateSizeCondition,
+              eq(originalDiscArchives.discKind, "dvd"),
+            ),
+          )
+          .get();
+        if (
+          !current ||
+          !dvdArchiveFileMatchesIdentity(
+            candidate.archivePath,
+            hashed.identity,
+          )
+        ) {
+          throw new DomainInvariantError(
+            "Legacy DVD archive changed during content identity reconciliation",
+          );
+        }
+        if (candidate.sizeBytes !== candidateSizeBytes) {
+          const updated = transaction
+            .update(originalDiscArchives)
+            .set({ sizeBytes: candidateSizeBytes, updatedAt: now() })
+            .where(
+              and(
+                eq(originalDiscArchives.id, candidate.id),
+                candidateSizeCondition,
+              ),
+            )
+            .returning({ id: originalDiscArchives.id })
+            .get();
+          if (!updated) {
+            throw new DomainInvariantError(
+              "Legacy DVD archive changed during content identity reconciliation",
+            );
+          }
+        }
+        const archiveWithFingerprint = transaction
+          .select({ id: originalDiscArchives.id })
+          .from(originalDiscArchives)
+          .where(eq(originalDiscArchives.fingerprint, hashed.contentId))
+          .get();
+        if (
+          archiveWithFingerprint &&
+          archiveWithFingerprint.id !== candidate.id
+        ) {
+          throw new DomainInvariantError(
+            "DVD content identity is already stored as a different Original Disc Archive fingerprint",
+          );
+        }
+        transaction
+          .insert(originalDiscArchiveContentIds)
+          .values({
+            originalDiscArchiveId: candidate.id,
+            contentId: hashed.contentId,
+          })
+          .onConflictDoNothing()
+          .run();
+        const archiveForContentId = transaction
+          .select({
+            originalDiscArchiveId:
+              originalDiscArchiveContentIds.originalDiscArchiveId,
+          })
+          .from(originalDiscArchiveContentIds)
+          .where(
+            eq(
+              originalDiscArchiveContentIds.contentId,
+              hashed.contentId,
+            ),
+          )
+          .get();
+        if (archiveForContentId?.originalDiscArchiveId !== candidate.id) {
+          throw new DomainInvariantError(
+            "DVD content identity is already assigned to a different Original Disc Archive",
+          );
+        }
+      }, { behavior: "immediate" });
+      if (hashed.contentId === fingerprint) {
+        return;
+      }
+    }
+    if (hasUnresolvedLegacyDvdArchiveIdentity()) {
+      throw new DomainInvariantError(
+        "Legacy DVD archive reconciliation made bounded progress; retry detection to continue",
+      );
+    }
+  }
+
   function requireEncodingProfileInDomain(
     querySource: Pick<typeof database, "select">,
     id: EncodingProfileId,
@@ -444,6 +699,33 @@ export function createDataAccessInternal(
         select 1
         from original_disc_archives
         where original_disc_archives.fingerprint = detected_discs.fingerprint
+          or exists (
+            select 1
+            from original_disc_archive_content_ids
+            where original_disc_archive_content_ids.original_disc_archive_id = original_disc_archives.id
+              and original_disc_archive_content_ids.content_id = detected_discs.fingerprint
+          )
+      )
+      and not (
+        detected_discs.disc_kind = 'dvd'
+        and length(detected_discs.fingerprint) = 71
+        and substr(detected_discs.fingerprint, 1, 7) = 'sha256:'
+        and substr(detected_discs.fingerprint, 8) not glob '*[^0-9a-f]*'
+        and exists (
+          select 1
+          from original_disc_archives as unresolved_legacy_archives
+          where unresolved_legacy_archives.disc_kind = 'dvd'
+            and not (
+              length(unresolved_legacy_archives.fingerprint) = 71
+              and substr(unresolved_legacy_archives.fingerprint, 1, 7) = 'sha256:'
+              and substr(unresolved_legacy_archives.fingerprint, 8) not glob '*[^0-9a-f]*'
+            )
+            and not exists (
+              select 1
+              from original_disc_archive_content_ids
+              where original_disc_archive_content_ids.original_disc_archive_id = unresolved_legacy_archives.id
+            )
+        )
       )
     on conflict (detected_disc_id) do nothing
   `);
@@ -476,23 +758,56 @@ export function createDataAccessInternal(
     },
   });
 
+  type ArchiveJobCompletion =
+    | OriginalDiscArchiveId
+    | { archivePath: string; sizeBytes: number };
+
   const archiveJobAdapter = {
     recordType: "archive job",
     find: (id) =>
       database.select().from(archiveJobs).where(eq(archiveJobs.id, id)).get(),
     list: listArchiveJobs,
-    claim: (workerId, token, timestamp) => {
+    claim: (workerId, token, timestamp, eligibility) => {
+      const eligibilityCondition = eligibility
+        ? and(
+            eq(detectedDiscs.opticalDriveId, eligibility.opticalDriveId),
+            eq(
+              detectedDiscs.fingerprint,
+              requireNonEmpty(eligibility.fingerprint, "fingerprint"),
+            ),
+          )
+        : sql`1`;
       const nextApprovedJobId = sql<ArchiveJobId>`(
         select ${archiveJobs.id}
         from ${archiveJobs}
         inner join ${detectedDiscs}
           on ${detectedDiscs.id} = ${archiveJobs.detectedDiscId}
+        inner join ${opticalDrives}
+          on ${opticalDrives.id} = ${detectedDiscs.opticalDriveId}
         where ${archiveJobs.status} = 'queued'
           and ${detectedDiscs.status} = 'approved'
+          and ${opticalDrives.isEnabled} = true
+          and ${opticalDrives.isPresent} = true
+          and ${eligibilityCondition}
+          and (
+            ${detectedDiscs.discKind} <> 'dvd'
+            or not (${detectedDiscUsesCurrentDvdContentId})
+            or not exists (
+              select 1
+              from ${originalDiscArchives}
+              where ${unresolvedLegacyDvdArchiveIdentity}
+            )
+          )
           and not exists (
             select 1
             from ${originalDiscArchives}
             where ${originalDiscArchives.fingerprint} = ${detectedDiscs.fingerprint}
+              or exists (
+                select 1
+                from ${originalDiscArchiveContentIds}
+                where ${originalDiscArchiveContentIds.originalDiscArchiveId} = ${originalDiscArchives.id}
+                  and ${originalDiscArchiveContentIds.contentId} = ${detectedDiscs.fingerprint}
+              )
           )
           and not exists (
             select 1
@@ -500,7 +815,10 @@ export function createDataAccessInternal(
             inner join detected_discs as running_detected_discs
               on running_detected_discs.id = running_archive_jobs.detected_disc_id
             where running_archive_jobs.status = 'running'
-              and running_detected_discs.fingerprint = ${detectedDiscs.fingerprint}
+              and (
+                running_detected_discs.fingerprint = ${detectedDiscs.fingerprint}
+                or running_detected_discs.optical_drive_id = ${detectedDiscs.opticalDriveId}
+              )
           )
         order by ${archiveJobs.priority} desc,
           ${archiveJobs.createdAt} asc,
@@ -528,11 +846,20 @@ export function createDataAccessInternal(
         .get();
       return claimed ? asRunningArchiveJob(claimed) : undefined;
     },
-    updateAttempt: (claim, update, originalDiscArchiveId) => {
+    isAttemptCurrent: (current, _claim, timestamp) =>
+      current.updatedAt.getTime() >
+      timestamp.getTime() - ARCHIVE_JOB_LEASE_DURATION_MS,
+    updateAttempt: (claim, update, completion) => {
       const attemptCondition = and(
         eq(archiveJobs.id, claim.id),
         eq(archiveJobs.status, "running"),
         eq(archiveJobs.claimToken, claim.claimToken),
+        gt(
+          archiveJobs.updatedAt,
+          new Date(
+            update.updatedAt.getTime() - ARCHIVE_JOB_LEASE_DURATION_MS,
+          ),
+        ),
       );
       if (update.status !== "completed") {
         return database
@@ -542,10 +869,30 @@ export function createDataAccessInternal(
           .returning()
           .get();
       }
-      if (!originalDiscArchiveId) {
+      if (!completion) {
         throw new DomainInvariantError(
           "Completing an Archive Job requires an Original Disc Archive",
         );
+      }
+      if (typeof completion !== "string") {
+        const disc = requireRow(
+          database
+            .select({
+              discKind: detectedDiscs.discKind,
+              fingerprint: detectedDiscs.fingerprint,
+            })
+            .from(detectedDiscs)
+            .where(eq(detectedDiscs.id, claim.detectedDiscId))
+            .get(),
+          "detected disc",
+          claim.detectedDiscId,
+        );
+        if (disc.discKind === "dvd") {
+          reconcileLegacyDvdArchiveContentId(
+            disc.fingerprint,
+            completion.sizeBytes,
+          );
+        }
       }
 
       return database.transaction((transaction) => {
@@ -557,12 +904,81 @@ export function createDataAccessInternal(
         if (!current) {
           return undefined;
         }
+        if (typeof completion !== "string") {
+          const disc = requireRow(
+            transaction
+              .select()
+              .from(detectedDiscs)
+              .where(eq(detectedDiscs.id, current.detectedDiscId))
+              .get(),
+            "detected disc",
+            current.detectedDiscId,
+          );
+          if (disc.status !== "approved") {
+            throw new InvalidStatusTransitionError(
+              "detected disc",
+              disc.status,
+              "archived",
+            );
+          }
+          if (findOriginalArchiveByContentId(disc.fingerprint, transaction)) {
+            throw new DomainInvariantError(
+              "DVD content already has Original Disc Archive provenance",
+            );
+          }
+          requireLegacyDvdArchiveIdentitiesResolved(
+            disc.discKind,
+            disc.fingerprint,
+            transaction,
+          );
+          const archive = requireRow(
+            transaction
+              .insert(originalDiscArchives)
+              .values({
+                id: newId<OriginalDiscArchiveId>(),
+                detectedDiscId: disc.id,
+                discKind: disc.discKind,
+                archiveFormat: "iso",
+                archivePath: requireNonEmpty(
+                  completion.archivePath,
+                  "archivePath",
+                ),
+                fingerprint: disc.fingerprint,
+                sizeBytes: requirePositiveSafeInteger(
+                  completion.sizeBytes,
+                  "sizeBytes",
+                ),
+                archivedAt: update.updatedAt,
+                createdAt: update.updatedAt,
+                updatedAt: update.updatedAt,
+              })
+              .returning()
+              .get(),
+            "original disc archive",
+            disc.id,
+          );
+          transaction
+            .update(detectedDiscs)
+            .set({ status: "archived", updatedAt: update.updatedAt })
+            .where(eq(detectedDiscs.fingerprint, disc.fingerprint))
+            .run();
+          transaction
+            .delete(archiveJobs)
+            .where(queuedArchiveJobsForFingerprint(disc.fingerprint))
+            .run();
+          return transaction
+            .update(archiveJobs)
+            .set({ ...update, originalDiscArchiveId: archive.id })
+            .where(attemptCondition)
+            .returning()
+            .get();
+        }
         const matchingArchive = transaction
           .select({ id: originalDiscArchives.id })
           .from(originalDiscArchives)
           .where(
             and(
-              eq(originalDiscArchives.id, originalDiscArchiveId),
+              eq(originalDiscArchives.id, completion),
               eq(
                 originalDiscArchives.detectedDiscId,
                 current.detectedDiscId,
@@ -577,11 +993,11 @@ export function createDataAccessInternal(
         }
         return transaction
           .update(archiveJobs)
-          .set({ ...update, originalDiscArchiveId })
+          .set({ ...update, originalDiscArchiveId: completion })
           .where(attemptCondition)
           .returning()
           .get();
-      });
+      }, { behavior: "immediate" });
     },
     requeue: (id, expectedStatus, update) =>
       database
@@ -604,9 +1020,31 @@ export function createDataAccessInternal(
                         .select({ id: originalDiscArchives.id })
                         .from(originalDiscArchives)
                         .where(
-                          eq(
-                            originalDiscArchives.fingerprint,
-                            detectedDiscs.fingerprint,
+                          or(
+                            eq(
+                              originalDiscArchives.fingerprint,
+                              detectedDiscs.fingerprint,
+                            ),
+                            exists(
+                              database
+                                .select({
+                                  originalDiscArchiveId:
+                                    originalDiscArchiveContentIds.originalDiscArchiveId,
+                                })
+                                .from(originalDiscArchiveContentIds)
+                                .where(
+                                  and(
+                                    eq(
+                                      originalDiscArchiveContentIds.originalDiscArchiveId,
+                                      originalDiscArchives.id,
+                                    ),
+                                    eq(
+                                      originalDiscArchiveContentIds.contentId,
+                                      detectedDiscs.fingerprint,
+                                    ),
+                                  ),
+                                ),
+                            ),
                           ),
                         ),
                     ),
@@ -622,8 +1060,12 @@ export function createDataAccessInternal(
     RunningArchiveJob,
     ArchiveJobId,
     ArchiveJobClaimToken,
-    OriginalDiscArchiveId,
-    void
+    ArchiveJobCompletion,
+    void,
+    {
+      opticalDriveId: OpticalDriveId;
+      fingerprint: string;
+    }
   >;
 
   type EncodeRequeueOptions = {
@@ -717,7 +1159,8 @@ export function createDataAccessInternal(
     EncodeJobId,
     EncodeJobClaimToken,
     void,
-    EncodeRequeueOptions
+    EncodeRequeueOptions,
+    void
   >;
 
   const archiveJobQueue = createJobQueueController({
@@ -769,6 +1212,147 @@ export function createDataAccessInternal(
         .all();
     },
   });
+
+  function approveDetectedDisc(input: {
+    detectedDiscId: DetectedDiscId;
+    priority?: number;
+    allowAlreadyApproved: boolean;
+  }) {
+    const timestamp = now();
+    return database.transaction((transaction) => {
+      const disc = requireRow(
+        transaction
+          .select()
+          .from(detectedDiscs)
+          .where(eq(detectedDiscs.id, input.detectedDiscId))
+          .get(),
+        "detected disc",
+        input.detectedDiscId,
+      );
+      if (
+        disc.status !== "scanned" &&
+        !(input.allowAlreadyApproved && disc.status === "approved")
+      ) {
+        throw new InvalidStatusTransitionError(
+          "detected disc",
+          disc.status,
+          "approved",
+        );
+      }
+      const matchingArchive = findOriginalArchiveByContentId(
+        disc.fingerprint,
+        transaction,
+      );
+      if (matchingArchive) {
+        throw new DomainInvariantError(
+          "A Detected Disc with existing archive provenance cannot be approved",
+        );
+      }
+      requireLegacyDvdArchiveIdentitiesResolved(
+        disc.discKind,
+        disc.fingerprint,
+        transaction,
+      );
+      const approvedDisc = disc.status === "scanned"
+        ? requireRow(
+            transaction
+              .update(detectedDiscs)
+              .set({ status: "approved", updatedAt: timestamp })
+              .where(
+                and(
+                  eq(detectedDiscs.id, disc.id),
+                  eq(detectedDiscs.status, "scanned"),
+                ),
+              )
+              .returning()
+              .get(),
+            "detected disc",
+            disc.id,
+          )
+        : disc;
+
+      const existing = transaction
+        .select()
+        .from(archiveJobs)
+        .where(eq(archiveJobs.detectedDiscId, disc.id))
+        .get();
+      if (!existing) {
+        const job = requireRow(
+          transaction
+            .insert(archiveJobs)
+            .values({
+              id: newId<ArchiveJobId>(),
+              detectedDiscId: disc.id,
+              priority: input.priority ?? 0,
+              createdAt: timestamp,
+              updatedAt: timestamp,
+            })
+            .returning()
+            .get(),
+          "archive job",
+          disc.id,
+        );
+        return { disc: approvedDisc, job };
+      }
+      if (existing.status === "failed") {
+        const job = requireRow(
+          transaction
+            .update(archiveJobs)
+            .set({
+              status: "queued",
+              priority: input.priority ?? existing.priority,
+              progressPercent: 0,
+              claimedBy: null,
+              claimToken: null,
+              claimedAt: null,
+              startedAt: null,
+              completedAt: null,
+              errorMessage: null,
+              updatedAt: timestamp,
+            })
+            .where(
+              and(
+                eq(archiveJobs.id, existing.id),
+                eq(archiveJobs.status, "failed"),
+              ),
+            )
+            .returning()
+            .get(),
+          "archive job",
+          existing.id,
+        );
+        return { disc: approvedDisc, job };
+      }
+      if (existing.status === "completed") {
+        throw new DomainInvariantError(
+          "A completed Archive Job cannot be approved without archive provenance",
+        );
+      }
+      if (
+        input.priority !== undefined &&
+        existing.status === "queued" &&
+        input.priority !== existing.priority
+      ) {
+        const job = requireRow(
+          transaction
+            .update(archiveJobs)
+            .set({ priority: input.priority, updatedAt: timestamp })
+            .where(
+              and(
+                eq(archiveJobs.id, existing.id),
+                eq(archiveJobs.status, "queued"),
+              ),
+            )
+            .returning()
+            .get(),
+          "archive job",
+          existing.id,
+        );
+        return { disc: approvedDisc, job };
+      }
+      return { disc: approvedDisc, job: existing };
+    }, { behavior: "immediate" });
+  }
 
   const access: LegacySidecarDataAccess = {
     readConsistentSnapshot(read) {
@@ -1098,12 +1682,17 @@ export function createDataAccessInternal(
           }
           scanData = decoded;
         }
+        if (input.discKind === "dvd") {
+          reconcileLegacyDvdArchiveContentId(
+            fingerprint,
+            input.sizeBytes,
+          );
+        }
         return database.transaction((transaction) => {
-          const matchingArchive = transaction
-            .select({ discKind: originalDiscArchives.discKind })
-            .from(originalDiscArchives)
-            .where(eq(originalDiscArchives.fingerprint, fingerprint))
-            .get();
+          const matchingArchive = findOriginalArchiveByContentId(
+            fingerprint,
+            transaction,
+          );
           if (
             matchingArchive &&
             matchingArchive.discKind !== input.discKind
@@ -1244,6 +1833,12 @@ export function createDataAccessInternal(
       },
 
       updateDetectedDiscStatus(id, status) {
+        if (status === "approved") {
+          return approveDetectedDisc({
+            detectedDiscId: id,
+            allowAlreadyApproved: false,
+          }).disc;
+        }
         const allowedFrom = Object.entries(detectedDiscTransitions)
           .filter(([, targets]) => targets.includes(status))
           .map(([source]) => source as DetectedDiscStatus);
@@ -1275,17 +1870,15 @@ export function createDataAccessInternal(
               status,
             );
           }
-          if (status !== "approved") {
-            transaction
-              .delete(archiveJobs)
-              .where(
-                and(
-                  eq(archiveJobs.detectedDiscId, id),
-                  eq(archiveJobs.status, "queued"),
-                ),
-              )
-              .run();
-          }
+          transaction
+            .delete(archiveJobs)
+            .where(
+              and(
+                eq(archiveJobs.detectedDiscId, id),
+                eq(archiveJobs.status, "queued"),
+              ),
+            )
+            .run();
           return updated;
         });
       },
@@ -1294,7 +1887,23 @@ export function createDataAccessInternal(
         const timestamp = now();
         const fingerprint = requireNonEmpty(input.fingerprint, "fingerprint");
         const archivePath = requireNonEmpty(input.archivePath, "archivePath");
+        if (input.discKind === "dvd") {
+          reconcileLegacyDvdArchiveContentId(
+            fingerprint,
+            input.sizeBytes,
+          );
+        }
         return database.transaction((transaction) => {
+          if (findOriginalArchiveByContentId(fingerprint, transaction)) {
+            throw new DomainInvariantError(
+              "DVD content already has Original Disc Archive provenance",
+            );
+          }
+          requireLegacyDvdArchiveIdentitiesResolved(
+            input.discKind,
+            fingerprint,
+            transaction,
+          );
           const transitioned = transaction
             .update(detectedDiscs)
             .set({ status: "archived", updatedAt: timestamp })
@@ -1725,6 +2334,13 @@ export function createDataAccessInternal(
     },
 
     archiveJobs: {
+      approve(input) {
+        return approveDetectedDisc({
+          ...input,
+          allowAlreadyApproved: true,
+        }).job;
+      },
+
       enqueue(input) {
         const timestamp = now();
         insertApprovedArchiveJob.run(
@@ -1745,14 +2361,46 @@ export function createDataAccessInternal(
             and(
               eq(archiveJobs.detectedDiscId, input.detectedDiscId),
               eq(detectedDiscs.status, "approved"),
+              or(
+                ne(detectedDiscs.discKind, "dvd"),
+                sql`not (${detectedDiscUsesCurrentDvdContentId})`,
+                notExists(
+                  database
+                    .select({ id: originalDiscArchives.id })
+                    .from(originalDiscArchives)
+                    .where(unresolvedLegacyDvdArchiveIdentity),
+                ),
+              ),
               notExists(
                 database
                   .select({ id: originalDiscArchives.id })
                   .from(originalDiscArchives)
                   .where(
-                    eq(
-                      originalDiscArchives.fingerprint,
-                      detectedDiscs.fingerprint,
+                    or(
+                      eq(
+                        originalDiscArchives.fingerprint,
+                        detectedDiscs.fingerprint,
+                      ),
+                      exists(
+                        database
+                          .select({
+                            originalDiscArchiveId:
+                              originalDiscArchiveContentIds.originalDiscArchiveId,
+                          })
+                          .from(originalDiscArchiveContentIds)
+                          .where(
+                            and(
+                              eq(
+                                originalDiscArchiveContentIds.originalDiscArchiveId,
+                                originalDiscArchives.id,
+                              ),
+                              eq(
+                                originalDiscArchiveContentIds.contentId,
+                                detectedDiscs.fingerprint,
+                              ),
+                            ),
+                          ),
+                      ),
                     ),
                   ),
               ),
@@ -1777,8 +2425,74 @@ export function createDataAccessInternal(
       },
 
       claimNext: archiveJobQueue.claimNext,
+      renewClaim(claim) {
+        const timestamp = now();
+        const expiredBefore = new Date(
+          timestamp.getTime() - ARCHIVE_JOB_LEASE_DURATION_MS,
+        );
+        const renewed = database
+          .update(archiveJobs)
+          .set({ updatedAt: timestamp })
+          .where(
+            and(
+              eq(archiveJobs.id, claim.id),
+              eq(archiveJobs.status, "running"),
+              eq(archiveJobs.claimToken, claim.claimToken),
+              gt(archiveJobs.updatedAt, expiredBefore),
+            ),
+          )
+          .returning()
+          .get();
+        if (!renewed) {
+          throw new StaleJobAttemptError("archive job", claim.id);
+        }
+        return asRunningArchiveJob(renewed);
+      },
+      recoverExpiredClaims() {
+        const timestamp = now();
+        const expiredBefore = new Date(
+          timestamp.getTime() - ARCHIVE_JOB_LEASE_DURATION_MS,
+        );
+        return database.transaction((transaction) => {
+          const expiredIds = transaction
+            .select({ id: archiveJobs.id })
+            .from(archiveJobs)
+            .where(
+              and(
+                eq(archiveJobs.status, "running"),
+                lte(archiveJobs.updatedAt, expiredBefore),
+              ),
+            )
+            .orderBy(asc(archiveJobs.updatedAt), asc(archiveJobs.id))
+            .limit(ARCHIVE_JOB_RECOVERY_LIMIT)
+            .all()
+            .map(({ id }) => id);
+          if (expiredIds.length === 0) {
+            return [];
+          }
+          return transaction
+            .update(archiveJobs)
+            .set({
+              status: "failed",
+              errorMessage: "Archive worker lease expired",
+              updatedAt: timestamp,
+            })
+            .where(
+              and(
+                inArray(archiveJobs.id, expiredIds),
+                eq(archiveJobs.status, "running"),
+                lte(archiveJobs.updatedAt, expiredBefore),
+              ),
+            )
+            .returning()
+            .all();
+        }, { behavior: "immediate" });
+      },
       list: archiveJobQueue.list,
       updateProgress: archiveJobQueue.updateProgress,
+      publish(claim, input) {
+        return archiveJobQueue.complete(claim, input);
+      },
       complete: archiveJobQueue.complete,
       fail: archiveJobQueue.fail,
       requeue: archiveJobQueue.requeue,
@@ -1850,8 +2564,20 @@ export function createDataAccessInternal(
   };
 
   if (!legacySidecarMigration) {
+    const {
+      createOriginalDiscArchive: _migrationOnlyArchiveMutation,
+      ...standardCatalog
+    } = access.catalog;
+    const {
+      complete: _migrationOnlyArchiveCompletion,
+      ...standardArchiveJobs
+    } = access.archiveJobs;
     const { legacySidecars: _migrationOnlyAccess, ...standardAccess } = access;
-    return standardAccess;
+    return {
+      ...standardAccess,
+      catalog: standardCatalog,
+      archiveJobs: standardArchiveJobs,
+    };
   }
   return access;
 }

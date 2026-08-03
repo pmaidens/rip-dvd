@@ -40,6 +40,38 @@ describe("data-access domain identifiers", () => {
     expectTypeOf<LegacySidecarDataAccess>().toHaveProperty("legacySidecars");
   });
 
+  it("keeps direct archive provenance publication migration-only", () => {
+    expectTypeOf<LegacySidecarDataAccess["catalog"]>()
+      .toHaveProperty("createOriginalDiscArchive");
+
+    if (false) {
+      const access = undefined as unknown as DataAccess;
+      const discId = undefined as unknown as DetectedDiscId;
+      // @ts-expect-error Standard callers must publish through a claimed Archive Job.
+      access.catalog.createOriginalDiscArchive({
+        detectedDiscId: discId,
+        discKind: "dvd",
+        archiveFormat: "iso",
+        archivePath: "/media/originals/unverified.iso",
+        fingerprint: `sha256:${"a".repeat(64)}`,
+        sizeBytes: 1,
+      });
+    }
+  });
+
+  it("keeps direct Archive Job completion migration-only", () => {
+    expectTypeOf<LegacySidecarDataAccess["archiveJobs"]>()
+      .toHaveProperty("complete");
+
+    if (false) {
+      const access = undefined as unknown as DataAccess;
+      const archiveId = undefined as unknown as OriginalDiscArchiveId;
+      const archiveClaim = undefined as unknown as RunningArchiveJob;
+      // @ts-expect-error Standard callers must complete by publishing verified archive output.
+      access.archiveJobs.complete(archiveClaim, archiveId);
+    }
+  });
+
   it("keeps aggregate and foreign-key identifiers opaque", () => {
     expectTypeOf<OpticalDriveId>().not.toEqualTypeOf<DetectedDiscId>();
     expectTypeOf<DetectedDiscId>().not.toEqualTypeOf<OriginalDiscArchiveId>();
@@ -54,7 +86,6 @@ describe("data-access domain identifiers", () => {
       const driveId = undefined as unknown as OpticalDriveId;
       const archiveId = undefined as unknown as OriginalDiscArchiveId;
       const mediaItemId = undefined as unknown as MediaItemId;
-      const archiveClaim = undefined as unknown as RunningArchiveJob;
 
       access.catalog.registerDetectedDisc({
         // @ts-expect-error Media Item IDs cannot identify Optical Drives.
@@ -74,8 +105,6 @@ describe("data-access domain identifiers", () => {
         kind: "dvd_chapters",
         label: "missing coordinates",
       });
-      // @ts-expect-error Archive completion always requires its resulting archive.
-      access.archiveJobs.complete(archiveClaim);
     }
   });
 

@@ -325,6 +325,16 @@ media, and original backups in the project-scoped `rip-dvd-data`,
 points are owned by the non-root runtime user (UID/GID 1000), so the archive
 and encode workers can write their outputs without running as root.
 
+The dashboard has no authentication and Compose binds it to `127.0.0.1` by
+default. Archive approval requires both the request `Origin` and `Host` to
+match `RIP_DVD_WEB_TRUSTED_ORIGIN`, which defaults to
+`http://localhost:<RIP_DVD_WEB_PORT>`; the request URL does not establish
+authority. To expose the dashboard on a trusted LAN, explicitly set
+`RIP_DVD_WEB_BIND_ADDRESS` to the intended interface address and set
+`RIP_DVD_WEB_TRUSTED_ORIGIN` to the exact HTTP(S) origin users open, including
+its non-default port. This origin check limits cross-site mutation but is not
+access control, so do not expose the service to an untrusted network.
+
 The web root is an operations dashboard for Optical Drives, Detected Discs,
 Archive Jobs, Encode Jobs, and Original Disc Archives needing catalog review.
 It reads the shared SQLite source of truth through the data-access facade and
@@ -394,22 +404,23 @@ keeps its current enabled/disabled authorization. A drive that disappears may
 keep authorization only when the same serial proves continuity when it returns;
 uncertain same-path hardware fails closed.
 
-Docker cannot see host optical devices unless they are passed through. Add only
-the devices the archive worker should inspect in a local Compose override, for
-example:
+Compose passes the single `RIP_DVD_ARCHIVE_DEVICE_PATH` device through to the
+archive worker at the same container path with read-only device permission. It
+defaults to `/dev/sr0`; set the variable to another `/dev/...` path when that is
+the one drive the worker should inspect. The non-root container user must also
+have host permission to read the device. If the host grants that access through
+a device group, add only that group in a local Compose override, for example:
 
 ```yaml
 services:
   archive-worker:
-    devices:
-      - /dev/sr0:/dev/sr0:r
     group_add:
       - "${RIP_DVD_OPTICAL_DEVICE_GID:-24}"
 ```
 
 Set `RIP_DVD_OPTICAL_DEVICE_GID` to the host group that can read the device
-(often the `cdrom` group). The read-only device permission is sufficient for
-discovery and scanning; this worker does not eject media.
+(often the `cdrom` group). The configured read-only mapping is sufficient for
+discovery, scanning, and copying the DVD image; this worker does not eject media.
 
 The worker runs discovery on each configured poll interval. An empty drive is a
 normal state. Scanner failures are logged per drive without hiding other drives,
@@ -431,11 +442,20 @@ Raw-disc open/read/hash work uses the same bounded helper-process lifecycle, so
 a kernel-blocked device operation cannot keep the archive worker alive.
 Reads are shell-free, size-capped, incremental, timed out, and
 cancellation-aware.
-Repeated polls update the same Detected Disc. A fingerprint
+Repeated polls update the same Detected Disc. Dashboard approval atomically
+marks a scanned disc approved and creates its queued Archive Job; discovery
+never approves or queues work by itself. The archive worker claims only work
+for the current disc in an enabled, present drive, copies through a bounded
+hidden partial path, and publishes the fingerprint-named ISO and its Original
+Disc Archive record only after the source and completed image are reverified.
+Progress and terminal state are written to SQLite and reach the dashboard over
+SSE. Failed or interrupted copies are moved to a `.failed` recovery path and
+remain explicitly retryable from the dashboard.
+
+A fingerprint
 already present in Original Disc Archives is shown as **Already archived**, and
 any obsolete queued Archive Job for that fingerprint is removed by the
-data-access facade. Discovery never approves or queues new archive work; those
-actions remain explicit later workflows.
+data-access facade.
 
 The dashboard's HTTP snapshot carries review details. One-second SSE activity
 events retain up to 100 live Detected Discs and jobs ahead of 20 terminal-history
@@ -455,18 +475,31 @@ persistent `rip-dvd-data` volume.
 
 The facade exposes catalog operations and separate Archive Job and Encode Job
 queues without exposing Drizzle or a general transaction API to callers.
-Archive Jobs are conditionally enqueued or requeued only while a Detected Disc
-is approved;
+Archive approval and job creation/retry share one immediate transaction.
+Archive Jobs are otherwise conditionally enqueued or requeued only while a
+Detected Disc is approved;
 approval revocation or archive publication removes obsolete queued work in the
 same short transaction. The atomic claim statement rechecks both current
-approval and the absence of an Original Disc Archive with the same fingerprint
-before returning preservation work, and permits only one running Archive Job
-for a fingerprint across all Optical Drives. Approval freezes the reviewed Disc
-Kind and scan data until approval is revoked. A fingerprint has one Disc Kind
-across Optical Drives. Archive publication marks every observation of the
-fingerprint archived. Later rediscovery matches archived
+approval, enabled/present drive state, and the absence of an Original Disc
+Archive with the same fingerprint before returning preservation work. It
+permits only one running Archive Job for a fingerprint across all Optical
+Drives and only one running job on each physical drive. Approval freezes the
+reviewed Disc Kind and scan data until approval is revoked. A fingerprint has
+one Disc Kind across Optical Drives. Archive publication creates provenance,
+marks every observation archived, and records terminal job success in one
+transaction. Later rediscovery matches archived
 fingerprints across Optical Drives, marks the new observation archived, and
 rejects a contradictory Disc Kind.
+Legacy DVD imports retain their historical fingerprints and record the current
+raw-disc content identity as a compatibility alias. An upgraded catalog whose
+alias table has not yet been populated fails current-identity approval, claim,
+and publication closed for every unaliased legacy DVD, including records whose
+stored size is unknown. A size-bearing detection or publication reconciles
+legacy archive files in bounded batches, prioritizing matching sizes. A safe
+regular archive with an unknown size is measured and backfilled before hashing;
+an archive whose identity cannot be proven requires operator remediation.
+Publication rechecks the barrier transactionally before it can create new
+provenance.
 A worker must let the claim commit and only then start `dd`, `lsdvd`,
 `HandBrakeCLI`, or any other external process. External process execution must
 never occur inside a database transaction.
@@ -478,6 +511,22 @@ five-point change, while completion always stores 100% and failure stores the
 latest pending value. First-run migrations are serialized with a short-lived
 lock beside the database so simultaneous service startup cannot apply the same
 migration twice.
+
+Archive claims also carry a bounded one-minute lease. The owning worker renews
+it with the same attempt-token compare-and-set guard while copying. Each poll
+recovers at most 100 expired claims, oldest first, into visible failed jobs that
+must be explicitly retried; a stale worker cannot renew, report, fail, or
+publish that recovered attempt. A timed-out or cancelled `dd` returns control
+at its deadline, kills and detaches the child, and retains a device/output
+tombstone until the operating system reports the child closed. While that
+tombstone remains, retries are rejected and the live partial path is neither
+renamed nor quarantined. Across direct worker replacement, the worker also
+fails closed while a same-service-UID process still holds the configured device
+inode, and each new `dd` holds a nonblocking exclusive lock on that opened
+device inode. Device ownership therefore remains independent of the archive
+fingerprint and originals-library root. Publication syncs the copied inode and parent
+directory; recovery of an already-complete verified ISO likewise syncs the
+final file and then its parent before SQLite can record completion.
 
 DVD title and chapter coordinates in Disc Selections must be positive safe
 integers. The facade validates that contract and the SQLite migration also
