@@ -201,39 +201,49 @@ function readCatalogReview(
     const mediaItemsById = new Map(
       mediaItemsPage.map((item) => [item.id, item]),
     );
-    let contextIds = [
-      ...mediaItemsPage.map((item) => item.parentId),
+    const seedIds = [
+      ...mediaItemsPage.map((item) => item.id),
       ...discSelectionsPage.map((selection) => selection.mediaItemId),
       editingMediaItemId,
     ].filter(
       (itemId): itemId is MediaItemId =>
-        itemId !== null &&
-        itemId !== undefined &&
-        !mediaItemsById.has(itemId),
+        itemId !== null && itemId !== undefined,
     );
-    for (
-      let depth = 0;
-      contextIds.length > 0 && depth < MAX_MEDIA_ITEM_HIERARCHY_DEPTH;
-      depth += 1
-    ) {
-      const contextItems = snapshot.catalog.listMediaItems({
-        ids: [...new Set(contextIds)],
-      });
-      contextIds = [];
+    const processedDepths = new Map<MediaItemId, number>();
+    let pendingDepths = new Map(seedIds.map((itemId) => [itemId, 1]));
+    while (pendingDepths.size > 0) {
+      const currentDepths = pendingDepths;
+      pendingDepths = new Map();
+      const missingIds = [...currentDepths.keys()].filter(
+        (itemId) => !mediaItemsById.has(itemId),
+      );
+      const contextItems = missingIds.length === 0
+        ? []
+        : snapshot.catalog.listMediaItems({ ids: missingIds });
       for (const item of contextItems) {
-        if (mediaItemsById.has(item.id)) {
+        mediaItemsById.set(item.id, item);
+      }
+      for (const [itemId, depth] of currentDepths) {
+        if ((processedDepths.get(itemId) ?? 0) >= depth) {
           continue;
         }
-        mediaItemsById.set(item.id, item);
-        if (item.parentId !== null && !mediaItemsById.has(item.parentId)) {
-          contextIds.push(item.parentId);
+        processedDepths.set(itemId, depth);
+        const item = mediaItemsById.get(itemId);
+        if (item?.parentId !== null && item?.parentId !== undefined) {
+          const parentDepth = depth + 1;
+          if (parentDepth > MAX_MEDIA_ITEM_HIERARCHY_DEPTH) {
+            throw new DomainInvariantError(
+              "Media Item hierarchy exceeds the supported depth",
+            );
+          }
+          if (
+            (processedDepths.get(item.parentId) ?? 0) < parentDepth &&
+            (pendingDepths.get(item.parentId) ?? 0) < parentDepth
+          ) {
+            pendingDepths.set(item.parentId, parentDepth);
+          }
         }
       }
-    }
-    if (contextIds.length > 0) {
-      throw new DomainInvariantError(
-        "Media Item hierarchy exceeds the supported depth",
-      );
     }
     const contextMediaItems = [...mediaItemsById.values()].filter(
       (item) => !mediaItemPageIds.has(item.id),

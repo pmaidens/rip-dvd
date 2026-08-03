@@ -459,9 +459,9 @@ export function createDataAccessInternal(
     itemId: MediaItemId,
     parentId: MediaItemId | null | undefined,
     querySource: Pick<typeof database, "select"> = database,
-  ): void {
+  ): number {
     if (parentId === null || parentId === undefined) {
-      return;
+      return 1;
     }
     const visited = new Set<MediaItemId>([itemId]);
     let currentId: MediaItemId | null = parentId;
@@ -487,6 +487,40 @@ export function createDataAccessInternal(
         currentId,
       );
       currentId = current.parentId;
+    }
+    return visited.size;
+  }
+
+  function requireMediaItemHierarchyWithinDepth(
+    itemId: MediaItemId,
+    parentId: MediaItemId | null | undefined,
+    querySource: Pick<typeof database, "get" | "select"> = database,
+  ): void {
+    const ancestorDepth = requireAcyclicMediaItemParent(
+      itemId,
+      parentId,
+      querySource,
+    );
+    const descendantDepth = querySource.get<{ maximumDepth: number }>(sql`
+      with recursive media_item_descendants(id, depth) as (
+        select ${itemId}, 1
+        union all
+        select ${mediaItems.id}, media_item_descendants.depth + 1
+        from ${mediaItems}
+        inner join media_item_descendants
+          on ${mediaItems.parentId} = media_item_descendants.id
+        where media_item_descendants.depth <= ${MAX_MEDIA_ITEM_HIERARCHY_DEPTH}
+      )
+      select max(depth) as maximumDepth
+      from media_item_descendants
+    `).maximumDepth;
+    if (
+      ancestorDepth + descendantDepth - 1 >
+        MAX_MEDIA_ITEM_HIERARCHY_DEPTH
+    ) {
+      throw new DomainInvariantError(
+        "Media Item hierarchy exceeds the supported depth",
+      );
     }
   }
 
@@ -2142,34 +2176,41 @@ export function createDataAccessInternal(
       createMediaItem(input) {
         const timestamp = now();
         const id = newId<MediaItemId>();
-        requireAcyclicMediaItemParent(id, input.parentId);
-        return requireRow(
-          database
-            .insert(mediaItems)
-            .values({
-              id,
-              parentId: input.parentId,
-              kind: input.kind,
-              title: requireNonEmpty(input.title, "title"),
-              year: optionalSafeInteger(input.year, "year", 1800, 9999),
-              seasonNumber: optionalSafeInteger(
-                input.seasonNumber,
-                "seasonNumber",
-                0,
-              ),
-              episodeNumber: optionalSafeInteger(
-                input.episodeNumber,
-                "episodeNumber",
-                1,
-              ),
-              createdAt: timestamp,
-              updatedAt: timestamp,
-            })
-            .returning()
-            .get(),
-          "media item",
+        const values = {
           id,
-        );
+          parentId: input.parentId,
+          kind: input.kind,
+          title: requireNonEmpty(input.title, "title"),
+          year: optionalSafeInteger(input.year, "year", 1800, 9999),
+          seasonNumber: optionalSafeInteger(
+            input.seasonNumber,
+            "seasonNumber",
+            0,
+          ),
+          episodeNumber: optionalSafeInteger(
+            input.episodeNumber,
+            "episodeNumber",
+            1,
+          ),
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        };
+        return database.transaction((transaction) => {
+          requireMediaItemHierarchyWithinDepth(
+            id,
+            input.parentId,
+            transaction,
+          );
+          return requireRow(
+            transaction
+              .insert(mediaItems)
+              .values(values)
+              .returning()
+              .get(),
+            "media item",
+            id,
+          );
+        }, { behavior: "immediate" });
       },
 
       updateMediaItem(id, input) {
@@ -2185,7 +2226,7 @@ export function createDataAccessInternal(
           );
           const parentId =
             input.parentId === undefined ? current.parentId : input.parentId;
-          requireAcyclicMediaItemParent(id, parentId, transaction);
+          requireMediaItemHierarchyWithinDepth(id, parentId, transaction);
           return requireRow(
             transaction
               .update(mediaItems)

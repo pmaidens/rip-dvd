@@ -47,8 +47,8 @@ New Original Disc Archives remain in the review queue while a user builds a
 partial set of selections, and `catalog.completeCatalogReview()` records the
 review time only after at least one selection exists. Creating another Disc
 Selection atomically clears that review time, so encoding remains blocked until
-the changed catalog is explicitly completed again. Media Item parent changes
-are serialized, reject hierarchy cycles, and cap each hierarchy at 32 items.
+the changed catalog is explicitly completed again. Media Item hierarchy
+mutations are serialized, reject cycles, and cap each hierarchy at 32 items.
 The facade derives canonical DVD source identities, rejects duplicate source
 slices, requires title selections to reference the archived scan, and keeps
 chapter ranges within the selected title; main-feature selections remain a

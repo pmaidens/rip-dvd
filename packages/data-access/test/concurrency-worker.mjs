@@ -114,6 +114,26 @@ try {
         value: { outcome: "rejected" },
       });
     }
+  } else if (workerData.operation === "create-media-item") {
+    try {
+      const item = access.catalog.createMediaItem({
+        parentId: workerData.parentId,
+        kind: "bonus_feature",
+        title: workerData.title,
+      });
+      parentPort.postMessage({
+        type: "result",
+        value: { outcome: "created", id: item.id },
+      });
+    } catch (error) {
+      if (!(error instanceof DomainInvariantError)) {
+        throw error;
+      }
+      parentPort.postMessage({
+        type: "result",
+        value: { outcome: "rejected" },
+      });
+    }
   } else {
     throw new Error(`Unknown concurrency operation: ${workerData.operation}`);
   }

@@ -19,12 +19,14 @@ import {
   DomainInvariantError,
   InvalidStatusTransitionError,
   MAX_DVD_TITLES,
+  MAX_MEDIA_ITEM_HIERARCHY_DEPTH,
   StaleJobAttemptError,
 } from "./index.js";
 import type {
   DetectedDiscId,
   DiscKind,
   DiscSelectionId,
+  MediaItemId,
   OriginalDiscArchiveId,
 } from "./index.js";
 import type { EncodingProfileId } from "./index.js";
@@ -38,6 +40,7 @@ type ConcurrentWorkerResult =
       outcome:
         | "activated"
         | "archived"
+        | "created"
         | "enqueued"
         | "rejected"
         | "versioned";
@@ -71,6 +74,11 @@ type ConcurrentOperation =
       discSelectionId: DiscSelectionId;
       encodingProfileId: EncodingProfileId;
       outputPath: string;
+    }
+  | {
+      operation: "create-media-item";
+      parentId: MediaItemId;
+      title: string;
     };
 
 type BarrierWorkerOptions = {
@@ -954,7 +962,7 @@ describe("data-access facade", () => {
       kind: "tv_show",
       title: "Hierarchy root",
     });
-    for (let depth = 1; depth < 32; depth += 1) {
+    for (let depth = 1; depth < MAX_MEDIA_ITEM_HIERARCHY_DEPTH; depth += 1) {
       parent = access.catalog.createMediaItem({
         parentId: parent.id,
         kind: "bonus_feature",
@@ -966,9 +974,99 @@ describe("data-access facade", () => {
       access.catalog.createMediaItem({
         parentId: parent.id,
         kind: "bonus_feature",
-        title: "Hierarchy level 32",
+        title: `Hierarchy level ${MAX_MEDIA_ITEM_HIERARCHY_DEPTH}`,
       }),
     ).toThrow(DomainInvariantError);
+    access.close();
+  });
+
+  it("rejects reparenting a maximum-depth Media Item subtree", () => {
+    const access = openTestDatabase();
+    const root = access.catalog.createMediaItem({
+      kind: "tv_show",
+      title: "Hierarchy root",
+    });
+    let parent = root;
+    for (let depth = 1; depth < MAX_MEDIA_ITEM_HIERARCHY_DEPTH; depth += 1) {
+      parent = access.catalog.createMediaItem({
+        parentId: parent.id,
+        kind: "bonus_feature",
+        title: `Hierarchy level ${depth}`,
+      });
+    }
+    const newRoot = access.catalog.createMediaItem({
+      kind: "tv_show",
+      title: "New hierarchy root",
+    });
+
+    expect(() =>
+      access.catalog.updateMediaItem(root.id, { parentId: newRoot.id })
+    ).toThrow(DomainInvariantError);
+    expect(access.catalog.listMediaItems({ ids: [root.id] })[0]).toMatchObject({
+      id: root.id,
+      parentId: null,
+    });
+    access.close();
+  });
+
+  it("serializes Media Item hierarchy validation with concurrent reparenting", async () => {
+    const databasePath = createTestDatabasePath();
+    const access = openTestDatabase(databasePath);
+    const root = access.catalog.createMediaItem({
+      kind: "tv_show",
+      title: "Concurrent hierarchy root",
+    });
+    let parent = root;
+    for (
+      let depth = 1;
+      depth < MAX_MEDIA_ITEM_HIERARCHY_DEPTH - 1;
+      depth += 1
+    ) {
+      parent = access.catalog.createMediaItem({
+        parentId: parent.id,
+        kind: "bonus_feature",
+        title: `Concurrent hierarchy level ${depth}`,
+      });
+    }
+    const newRoot = access.catalog.createMediaItem({
+      kind: "tv_show",
+      title: "Concurrent new root",
+    });
+    const concurrentSqlite = new DatabaseSync(databasePath);
+    concurrentSqlite.exec("pragma busy_timeout = 5000");
+    concurrentSqlite.exec("pragma foreign_keys = on");
+
+    const results = await runBarrierWorkers(
+      {
+        databasePath,
+        mode: "operation",
+        operations: [{
+          operation: "create-media-item",
+          parentId: parent.id,
+          title: "Concurrent over-depth item",
+        }],
+      },
+      {
+        beforeRelease() {
+          concurrentSqlite.exec("begin immediate");
+        },
+        async afterRelease() {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          concurrentSqlite.prepare(`
+            update media_items
+            set parent_id = ?
+            where id = ?
+          `).run(newRoot.id, root.id);
+          concurrentSqlite.exec("commit");
+        },
+      },
+    );
+
+    expect(results).toEqual([{ outcome: "rejected" }]);
+    expect(access.catalog.listMediaItems()).toHaveLength(
+      MAX_MEDIA_ITEM_HIERARCHY_DEPTH,
+    );
+    concurrentSqlite.close();
     access.close();
   });
 

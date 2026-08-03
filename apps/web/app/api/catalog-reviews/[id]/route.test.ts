@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import type { MediaItem, MediaItemId } from "@rip-dvd/data-access";
+import {
+  MAX_MEDIA_ITEM_HIERARCHY_DEPTH,
+  type MediaItem,
+  type MediaItemId,
+} from "@rip-dvd/data-access";
 
 import {
   useDataAccessFixture,
@@ -310,7 +314,7 @@ describe("Catalog Review API", () => {
     ]);
   });
 
-  it("fails closed instead of presenting a silently truncated ancestor chain", async () => {
+  it("fails closed for over-depth page and edit-context ancestor chains", async () => {
     const access = dataAccessFixture.create();
     const drive = access.catalog.upsertOpticalDrive({
       devicePath: "/dev/sr0",
@@ -331,7 +335,9 @@ describe("Catalog Review API", () => {
       fingerprint: "deep-hierarchy",
     });
     const timestamp = new Date("2026-08-03T20:00:00.000Z");
-    const items: MediaItem[] = Array.from({ length: 34 }, (_, index) => ({
+    const items: MediaItem[] = Array.from({
+      length: MAX_MEDIA_ITEM_HIERARCHY_DEPTH + 1,
+    }, (_, index) => ({
       id: `deep-${index}` as MediaItemId,
       parentId: index === 0 ? null : `deep-${index - 1}` as MediaItemId,
       kind: "movie",
@@ -342,29 +348,42 @@ describe("Catalog Review API", () => {
       createdAt: timestamp,
       updatedAt: timestamp,
     }));
-    const accessWithDeepHierarchy = withSnapshotOverrides(access, {
-      catalog: {
-        listMediaItems(options) {
-          if (options?.ids) {
-            const ids = new Set(options.ids);
-            return items.filter((item) => ids.has(item.id));
-          }
-          return [items.at(-1)!];
+    const withDeepHierarchy = (includeLeafOnPage: boolean) =>
+      withSnapshotOverrides(access, {
+        catalog: {
+          listMediaItems(options) {
+            if (options?.ids) {
+              const ids = new Set(options.ids);
+              return items.filter((item) => ids.has(item.id));
+            }
+            return includeLeafOnPage ? [items.at(-1)!] : [];
+          },
         },
-      },
-    });
+      });
 
-    const response = await createCatalogReviewRoute(
-      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`),
-      archive.id,
-      () => accessWithDeepHierarchy,
-      () => "http://localhost:3000",
-    );
+    const responses = await Promise.all([
+      createCatalogReviewRoute(
+        new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`),
+        archive.id,
+        () => withDeepHierarchy(true),
+        () => "http://localhost:3000",
+      ),
+      createCatalogReviewRoute(
+        new Request(
+          `http://localhost:3000/api/catalog-reviews/${archive.id}?editingMediaItemId=${items.at(-1)!.id}`,
+        ),
+        archive.id,
+        () => withDeepHierarchy(false),
+        () => "http://localhost:3000",
+      ),
+    ]);
 
-    expect(response.status).toBe(409);
-    await expect(response.json()).resolves.toEqual({
-      error: "Media Item hierarchy exceeds the supported depth",
-    });
+    for (const response of responses) {
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toEqual({
+        error: "Media Item hierarchy exceeds the supported depth",
+      });
+    }
   });
 
   it("pages more than 500 valid Disc Selections without blocking review", async () => {
