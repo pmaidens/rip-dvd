@@ -59,6 +59,19 @@ describe("data-access domain identifiers", () => {
     }
   });
 
+  it("keeps direct Archive Job completion migration-only", () => {
+    expectTypeOf<LegacySidecarDataAccess["archiveJobs"]>()
+      .toHaveProperty("complete");
+
+    if (false) {
+      const access = undefined as unknown as DataAccess;
+      const archiveId = undefined as unknown as OriginalDiscArchiveId;
+      const archiveClaim = undefined as unknown as RunningArchiveJob;
+      // @ts-expect-error Standard callers must complete by publishing verified archive output.
+      access.archiveJobs.complete(archiveClaim, archiveId);
+    }
+  });
+
   it("keeps aggregate and foreign-key identifiers opaque", () => {
     expectTypeOf<OpticalDriveId>().not.toEqualTypeOf<DetectedDiscId>();
     expectTypeOf<DetectedDiscId>().not.toEqualTypeOf<OriginalDiscArchiveId>();
@@ -73,7 +86,6 @@ describe("data-access domain identifiers", () => {
       const driveId = undefined as unknown as OpticalDriveId;
       const archiveId = undefined as unknown as OriginalDiscArchiveId;
       const mediaItemId = undefined as unknown as MediaItemId;
-      const archiveClaim = undefined as unknown as RunningArchiveJob;
 
       access.catalog.registerDetectedDisc({
         // @ts-expect-error Media Item IDs cannot identify Optical Drives.
@@ -93,8 +105,6 @@ describe("data-access domain identifiers", () => {
         kind: "dvd_chapters",
         label: "missing coordinates",
       });
-      // @ts-expect-error Archive completion always requires its resulting archive.
-      access.archiveJobs.complete(archiveClaim);
     }
   });
 

@@ -1,10 +1,14 @@
 import type {
+  ArchiveJob,
+  ArchiveJobAccess,
   ArchiveFormat,
   CatalogAccess,
   DataAccess,
   DetectedDiscId,
   DiscKind,
   OriginalDiscArchive,
+  OriginalDiscArchiveId,
+  RunningArchiveJob,
 } from "./types.js";
 
 export type LegacySidecarImportIssueCode =
@@ -56,7 +60,16 @@ export interface LegacySidecarCatalogAccess extends CatalogAccess {
   }): OriginalDiscArchive;
 }
 
-export interface LegacySidecarDataAccess extends Omit<DataAccess, "catalog"> {
+export interface LegacySidecarArchiveJobAccess extends ArchiveJobAccess {
+  complete(
+    claim: RunningArchiveJob,
+    originalDiscArchiveId: OriginalDiscArchiveId,
+  ): ArchiveJob;
+}
+
+export interface LegacySidecarDataAccess
+  extends Omit<DataAccess, "archiveJobs" | "catalog"> {
+  readonly archiveJobs: LegacySidecarArchiveJobAccess;
   readonly catalog: LegacySidecarCatalogAccess;
   readonly legacySidecars: LegacySidecarAccess;
 }

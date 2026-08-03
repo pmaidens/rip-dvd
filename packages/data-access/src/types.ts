@@ -351,10 +351,6 @@ export interface ArchiveJobAccess {
     claim: RunningArchiveJob,
     input: { archivePath: string; sizeBytes: number },
   ): ArchiveJob;
-  complete(
-    claim: RunningArchiveJob,
-    originalDiscArchiveId: OriginalDiscArchiveId,
-  ): ArchiveJob;
   fail(claim: RunningArchiveJob, errorMessage: string): ArchiveJob;
   requeue(id: ArchiveJobId): ArchiveJob;
 }

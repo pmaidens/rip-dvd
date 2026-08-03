@@ -2436,6 +2436,44 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     access.close();
   });
 
+  it("does not expose direct Archive Job completion on the standard facade", () => {
+    const databasePath = createTestDatabasePath();
+    const access = createDataAccess({ databasePath });
+    const migrationAccess = createLegacySidecarDataAccess({ databasePath });
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "direct-completion-bypass",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.archiveJobs.approve({ detectedDiscId: disc.id });
+    const claim = access.archiveJobs.claimNext("standard-caller");
+    if (!claim) {
+      throw new Error("Expected the approved Archive Job to be claimed");
+    }
+    migrationAccess.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/migration-seeded.iso",
+      fingerprint: disc.fingerprint,
+    });
+
+    expect(Reflect.has(access.archiveJobs, "complete")).toBe(false);
+    expect(access.archiveJobs.list(["running"]))
+      .toEqual([expect.objectContaining({
+        id: claim.id,
+        originalDiscArchiveId: null,
+      })]);
+    migrationAccess.close();
+    access.close();
+  });
+
   it("atomically claims only the current disc in an enabled present drive", () => {
     const access = openTestDatabase();
     const disabledDrive = access.catalog.upsertOpticalDrive({

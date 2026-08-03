@@ -2568,8 +2568,16 @@ export function createDataAccessInternal(
       createOriginalDiscArchive: _migrationOnlyArchiveMutation,
       ...standardCatalog
     } = access.catalog;
+    const {
+      complete: _migrationOnlyArchiveCompletion,
+      ...standardArchiveJobs
+    } = access.archiveJobs;
     const { legacySidecars: _migrationOnlyAccess, ...standardAccess } = access;
-    return { ...standardAccess, catalog: standardCatalog };
+    return {
+      ...standardAccess,
+      catalog: standardCatalog,
+      archiveJobs: standardArchiveJobs,
+    };
   }
   return access;
 }
