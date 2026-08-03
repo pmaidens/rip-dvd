@@ -94,6 +94,65 @@ describe("Catalog Review API", () => {
     });
   });
 
+  it("returns bounded archived legacy title evidence for catalog review", async () => {
+    const access = dataAccessFixture.create();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "legacy-review-disc",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Legacy Review.iso",
+      fingerprint: "legacy-review-disc",
+    });
+    const legacyAccess = withSnapshotOverrides(access, {
+      catalog: {
+        listDetectedDiscs: () => [{
+          ...disc,
+          status: "archived",
+          scanData: {
+            legacySchemaVersion: 2,
+            titles: [{
+              number: 1,
+              seconds: 5_400,
+              chapters: 8,
+              audio_streams: 2,
+              subtitles: 1,
+            }],
+          },
+        }],
+      },
+    });
+
+    const response = await createCatalogReviewRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`),
+      archive.id,
+      () => legacyAccess,
+      () => "http://localhost:3000",
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.rawScan.titles).toEqual([
+      expect.objectContaining({
+        number: 1,
+        durationSeconds: 5_400,
+        chapters: 8,
+        audioStreams: [{ id: 0 }, { id: 1 }],
+        subtitles: [{ id: 0 }],
+      }),
+    ]);
+  });
+
   it("pages a large Media Item catalog without blocking review", async () => {
     const access = dataAccessFixture.create();
     const drive = access.catalog.upsertOpticalDrive({

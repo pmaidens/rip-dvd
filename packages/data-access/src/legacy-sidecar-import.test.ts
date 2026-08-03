@@ -913,6 +913,90 @@ describe("legacy sidecar import", () => {
     access.close();
   });
 
+  it("creates reviewed title and chapter selections from archived legacy scan evidence", () => {
+    const root = temporaryDirectories.create("rip-dvd-legacy-review-");
+    const originalsLibraryPath = join(root, "originals");
+    const archivePath = join(originalsLibraryPath, "Legacy Review.iso");
+    const sidecarPath = join(
+      originalsLibraryPath,
+      "Legacy Review.rip-dvd.json",
+    );
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    writeFileSync(archivePath, "legacy review archive");
+    writeFileSync(sidecarPath, JSON.stringify({
+      schema_version: 2,
+      archive_status: "ready",
+      source: archivePath,
+      title: "Legacy Review",
+      disc_fingerprint: "legacy-review-fingerprint",
+      titles: [{
+        number: 1,
+        seconds: 5_400,
+        chapters: 8,
+        audio_streams: 2,
+        subtitles: 1,
+      }],
+      jobs: [],
+    }));
+    const access = createLegacySidecarDataAccess({
+      databasePath: join(root, "catalog.sqlite"),
+    });
+    expect(
+      access.legacySidecars.importLibrary({ originalsLibraryPath }),
+    ).toMatchObject({ sidecarsImported: 1, issues: [] });
+    const archive = access.catalog.listOriginalDiscArchives()[0]!;
+    const wholeTitleItem = access.catalog.createMediaItem({
+      kind: "bonus_feature",
+      title: "Whole title",
+    });
+    const episode = access.catalog.createMediaItem({
+      kind: "episode",
+      title: "Chapter-bounded episode",
+      episodeNumber: 1,
+    });
+
+    expect(
+      access.catalog.createDiscSelection({
+        originalDiscArchiveId: archive.id,
+        mediaItemId: wholeTitleItem.id,
+        kind: "dvd_title",
+        titleNumber: 1,
+      }),
+    ).toMatchObject({ sourceKey: "dvd:title:1", titleNumber: 1 });
+    expect(
+      access.catalog.createDiscSelection({
+        originalDiscArchiveId: archive.id,
+        mediaItemId: episode.id,
+        kind: "dvd_chapters",
+        titleNumber: 1,
+        chapterStart: 5,
+        chapterEnd: 8,
+      }),
+    ).toMatchObject({
+      sourceKey: "dvd:title:1:chapters:5-8",
+      chapterStart: 5,
+      chapterEnd: 8,
+    });
+    expect(() =>
+      access.catalog.createDiscSelection({
+        originalDiscArchiveId: archive.id,
+        mediaItemId: access.catalog.createMediaItem({
+          kind: "episode",
+          title: "Out of bounds",
+          episodeNumber: 2,
+        }).id,
+        kind: "dvd_chapters",
+        titleNumber: 1,
+        chapterStart: 8,
+        chapterEnd: 9,
+      })
+    ).toThrow(/8 chapters/);
+    expect(access.catalog.completeCatalogReview(archive.id)).toMatchObject({
+      catalogReviewedAt: expect.any(Date),
+    });
+    access.close();
+  });
+
   it("resolves relative schema-one paths from the legacy invocation directory", () => {
     const root = temporaryDirectories.create("rip-dvd-relative-import-");
     const archiveDirectory = join(root, "Originals", "Relative Movie");
@@ -1066,6 +1150,138 @@ describe("legacy sidecar import", () => {
     expect(fixture.access.catalog.listMediaItems()).toHaveLength(2);
 
     fixture.access.close();
+  });
+
+  it("reopens a reviewed archive when legacy import finds an unsafe selection", () => {
+    const fixture = createFixture();
+    expect(
+      fixture.access.legacySidecars.importLibrary({
+        originalsLibraryPath: fixture.originalsLibraryPath,
+      }),
+    ).toMatchObject({ sidecarsImported: 1, issues: [] });
+    fixture.access.close();
+
+    const sqlite = new DatabaseSync(fixture.databasePath);
+    const archive = sqlite.prepare(
+      "select id from original_disc_archives limit 1",
+    ).get() as { id: string };
+    sqlite.prepare(`
+      insert into media_items (id, kind, title, created_at, updated_at)
+      values ('unsafe-import-item', 'bonus_feature', 'Unsafe import item', 0, 0)
+    `).run();
+    sqlite.prepare(`
+      insert into disc_selections (
+        id, original_disc_archive_id, media_item_id, source_key, kind,
+        title_number, created_at, updated_at
+      ) values (
+        'unsafe-import-selection', ?, 'unsafe-import-item',
+        'caller:title:999', 'dvd_title', 999, 0, 0
+      )
+    `).run(archive.id);
+    sqlite.close();
+
+    const retry = createLegacySidecarDataAccess({
+      databasePath: fixture.databasePath,
+    });
+    const report = retry.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+    retry.close();
+
+    expect(report).toMatchObject({
+      sidecarsImported: 1,
+      sidecarsSkipped: 0,
+      issues: [],
+    });
+    const access = createDataAccess({ databasePath: fixture.databasePath });
+    expect(access.catalog.listOriginalDiscArchives()).toEqual([
+      expect.objectContaining({ catalogReviewedAt: null }),
+    ]);
+    expect(access.encodeJobs.list(["queued"])).toHaveLength(1);
+    expect(access.encodeJobs.claimNext("unsafe-import-worker")).toBeNull();
+    access.close();
+  });
+
+  it("reopens explicit review when legacy import adds a valid selection", () => {
+    const root = temporaryDirectories.create("rip-dvd-legacy-review-reopen-");
+    const originalsLibraryPath = join(root, "originals");
+    const archivePath = join(originalsLibraryPath, "Reviewed Import.iso");
+    const outputPath = join(root, "movies", "Imported Extra.mkv");
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    writeFileSync(archivePath, "reviewed import archive");
+    const databasePath = join(root, "catalog.sqlite");
+    const access = createLegacySidecarDataAccess({ databasePath });
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const contentId = `sha256:${"d".repeat(64)}`;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: contentId,
+      scanData: {
+        schemaVersion: 2,
+        contentId,
+        titles: [{
+          number: 1,
+          durationSeconds: 1_800,
+          chapters: 4,
+          audioStreams: [],
+          subtitles: [],
+        }],
+      },
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath,
+      fingerprint: contentId,
+    });
+    const movie = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Reviewed Import",
+    });
+    access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: movie.id,
+      kind: "main_feature",
+    });
+    expect(access.catalog.completeCatalogReview(archive.id)).toMatchObject({
+      catalogReviewedAt: expect.any(Date),
+    });
+    writeFileSync(
+      join(originalsLibraryPath, "Reviewed Import.rip-dvd.json"),
+      JSON.stringify({
+        schema_version: 2,
+        archive_status: "ready",
+        source: archivePath,
+        title: "Reviewed Import",
+        disc_fingerprint: contentId,
+        titles: [{ number: 1, seconds: 1_800, chapters: 4 }],
+        jobs: [{
+          label: "Extra 1: Imported extra",
+          source: archivePath,
+          output: outputPath,
+          preset: "Fast 480p30",
+          selection: "title",
+          title_number: 1,
+        }],
+      }),
+    );
+
+    expect(
+      access.legacySidecars.importLibrary({ originalsLibraryPath }),
+    ).toMatchObject({ sidecarsImported: 1, issues: [] });
+    expect(
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0],
+    ).toMatchObject({ catalogReviewedAt: null });
+    expect(access.encodeJobs.list(["queued"])).toHaveLength(1);
+    expect(access.encodeJobs.claimNext("new-import-worker")).toBeNull();
+    access.close();
   });
 
   it("distinguishes identical and conflicting logical jobs across sidecars", () => {
