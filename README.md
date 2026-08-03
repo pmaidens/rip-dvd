@@ -359,7 +359,8 @@ Media Items support movie, TV show, season, episode, trailer, and bonus-feature
 hierarchies. A Disc Selection maps one Media Item to the DVD main feature, one
 DVD title, or an inclusive chapter range within a scanned title. Completing
 review requires at least one selection and records a separate reviewed time.
-The same-origin, non-cacheable workflow is exposed at
+Only reviewed selections can be enqueued for encoding. The same-origin,
+non-cacheable workflow pages large Media Item catalogs and is exposed at
 `GET`/`POST /api/catalog-reviews/:archiveId`.
 
 To use host libraries instead, set `RIP_DVD_MEDIA_LIBRARY_HOST_PATH` and

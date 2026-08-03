@@ -69,7 +69,77 @@ describe("Catalog Review API", () => {
         }],
       },
       mediaItems: [],
+      mediaItemsPage: {
+        offset: 0,
+        limit: 100,
+        hasPrevious: false,
+        hasNext: false,
+      },
       discSelections: [],
+    });
+  });
+
+  it("pages a large Media Item catalog without blocking review", async () => {
+    const access = dataAccessFixture.create();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "large-media-catalog",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Large Catalog.iso",
+      fingerprint: "large-media-catalog",
+    });
+    for (let index = 0; index < 501; index += 1) {
+      access.catalog.createMediaItem({
+        kind: "movie",
+        title: `Catalog Movie ${index}`,
+      });
+    }
+
+    const firstResponse = await createCatalogReviewRoute(
+      new Request(
+        `http://localhost:3000/api/catalog-reviews/${archive.id}`,
+      ),
+      archive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+    expect(firstResponse.status).toBe(200);
+    const firstPage = await firstResponse.json();
+    expect(firstPage.mediaItems).toHaveLength(100);
+    expect(firstPage.mediaItemsPage).toEqual({
+      offset: 0,
+      limit: 100,
+      hasPrevious: false,
+      hasNext: true,
+    });
+
+    const lastResponse = await createCatalogReviewRoute(
+      new Request(
+        `http://localhost:3000/api/catalog-reviews/${archive.id}?mediaOffset=500`,
+      ),
+      archive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+    expect(lastResponse.status).toBe(200);
+    const lastPage = await lastResponse.json();
+    expect(lastPage.mediaItems).toHaveLength(1);
+    expect(lastPage.mediaItemsPage).toEqual({
+      offset: 500,
+      limit: 100,
+      hasPrevious: true,
+      hasNext: false,
     });
   });
 

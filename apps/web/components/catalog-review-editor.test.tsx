@@ -57,6 +57,12 @@ describe("CatalogReviewView", () => {
                 episodeNumber: 1,
               },
             ],
+            mediaItemsPage: {
+              offset: 0,
+              limit: 100,
+              hasPrevious: false,
+              hasNext: true,
+            },
             discSelections: [{
               id: "selection-1",
               mediaItemId: "episode-1",
@@ -76,6 +82,7 @@ describe("CatalogReviewView", () => {
         onRetry={() => undefined}
         onEditMediaItem={() => undefined}
         onCancelEdit={() => undefined}
+        onMediaItemsPage={() => undefined}
         onSaveMediaItem={() => undefined}
         onCreateDiscSelection={() => undefined}
         onCompleteReview={() => undefined}
@@ -93,6 +100,7 @@ describe("CatalogReviewView", () => {
     expect(html).toContain("Reviewed Disc Selections");
     expect(html).toContain("Title 1, chapters 1–4");
     expect(html).toContain("Create Media Item");
+    expect(html).toContain("Next Media Items");
     expect(html).toContain("Add Disc Selection");
     expect(html).toContain("Complete review");
     for (const kind of [

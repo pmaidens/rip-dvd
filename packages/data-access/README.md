@@ -49,8 +49,10 @@ review time only after at least one selection exists. Media Item parent changes
 are serialized and reject hierarchy cycles. DVD title selections must reference
 a title in the archived scan, and chapter ranges cannot exceed that title's
 recorded chapter count; main-feature selections remain a distinct DVD source
-kind. Existing databases backfill the explicit review time for archives that
-already had Disc Selections, preserving the pre-migration queue meaning.
+kind. Encode Job enqueueing rejects a Disc Selection until its archive review
+is explicitly complete. Existing databases backfill the explicit review time
+for archives that already had Disc Selections, preserving the pre-migration
+queue meaning.
 
 ## Queue attempts and progress
 

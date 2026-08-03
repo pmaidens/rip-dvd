@@ -305,6 +305,7 @@ export interface CatalogAccess {
   listMediaItems(options?: {
     ids?: readonly MediaItemId[];
     limit?: number;
+    offset?: number;
   }): MediaItem[];
   createDiscSelection(input: CreateDiscSelectionInput): DiscSelection;
   listDiscSelections(options?: {
