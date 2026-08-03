@@ -124,6 +124,9 @@ export const originalDiscArchives = sqliteTable(
     fingerprint: text("fingerprint").notNull(),
     sizeBytes: integer("size_bytes"),
     archivedAt: integer("archived_at", { mode: "timestamp_ms" }).notNull(),
+    catalogReviewedAt: integer("catalog_reviewed_at", {
+      mode: "timestamp_ms",
+    }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },

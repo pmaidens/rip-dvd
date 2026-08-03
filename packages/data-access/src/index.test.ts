@@ -21,7 +21,11 @@ import {
   MAX_DVD_TITLES,
   StaleJobAttemptError,
 } from "./index.js";
-import type { DetectedDiscId, DiscKind } from "./index.js";
+import type {
+  DetectedDiscId,
+  DiscKind,
+  OriginalDiscArchiveId,
+} from "./index.js";
 import type { EncodingProfileId } from "./index.js";
 import { createLegacySidecarDataAccess } from "./legacy-sidecars.js";
 
@@ -597,17 +601,15 @@ describe("data-access facade", () => {
     const selection = access.catalog.createDiscSelection({
       originalDiscArchiveId: archive.id,
       mediaItemId: movie.id,
-      sourceKey: "dvd:title:1",
-      kind: "dvd_title",
-      titleNumber: 1,
+      sourceKey: "dvd:main-feature",
+      kind: "main_feature",
     });
     expect(() =>
       access.catalog.createDiscSelection({
         originalDiscArchiveId: archive.id,
         mediaItemId: trailer.id,
-        sourceKey: "dvd:title:1",
-        kind: "dvd_title",
-        titleNumber: 1,
+        sourceKey: "dvd:main-feature",
+        kind: "main_feature",
       }),
     ).toThrow();
 
@@ -615,6 +617,255 @@ describe("data-access facade", () => {
       expect.objectContaining({ id: archive.id, fingerprint: "disc-fingerprint" }),
     ]);
     expect(selection.mediaItemId).toBe(movie.id);
+    access.close();
+  });
+
+  it("keeps partially cataloged archives in review until review is explicitly completed", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-03T18:00:00.000Z"));
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "catalog-review-disc",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Catalog Review.iso",
+      fingerprint: "catalog-review-disc",
+    });
+
+    expect(archive.catalogReviewedAt).toBeNull();
+    expect(
+      access.catalog.listOriginalDiscArchives({ needsCatalogReviewOnly: true }),
+    ).toEqual([expect.objectContaining({ id: archive.id })]);
+
+    const movie = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Catalog Review",
+    });
+    access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: movie.id,
+      sourceKey: "dvd:main-feature",
+      kind: "main_feature",
+    });
+    expect(
+      access.catalog.listOriginalDiscArchives({ needsCatalogReviewOnly: true }),
+    ).toEqual([expect.objectContaining({ id: archive.id })]);
+
+    vi.setSystemTime(new Date("2026-08-03T18:05:00.000Z"));
+    expect(access.catalog.completeCatalogReview(archive.id)).toMatchObject({
+      id: archive.id,
+      catalogReviewedAt: new Date("2026-08-03T18:05:00.000Z"),
+    });
+    expect(
+      access.catalog.listOriginalDiscArchives({ needsCatalogReviewOnly: true }),
+    ).toEqual([]);
+    access.close();
+  });
+
+  it("creates and edits an acyclic Media Item hierarchy with every catalog kind", () => {
+    const access = openTestDatabase();
+    const show = access.catalog.createMediaItem({
+      kind: "tv_show",
+      title: "The Show",
+    });
+    const season = access.catalog.createMediaItem({
+      parentId: show.id,
+      kind: "season",
+      title: "Season One",
+      seasonNumber: 1,
+    });
+    const episode = access.catalog.createMediaItem({
+      parentId: season.id,
+      kind: "episode",
+      title: "Pilot",
+      episodeNumber: 1,
+    });
+    const movie = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "The Movie",
+    });
+    const trailer = access.catalog.createMediaItem({
+      parentId: movie.id,
+      kind: "trailer",
+      title: "Trailer",
+    });
+    const bonus = access.catalog.createMediaItem({
+      parentId: movie.id,
+      kind: "bonus_feature",
+      title: "Behind the Scenes",
+    });
+    expect(
+      access.catalog.updateMediaItem(episode.id, {
+        parentId: show.id,
+        title: "The Pilot",
+        episodeNumber: 2,
+      }),
+    ).toMatchObject({
+      id: episode.id,
+      parentId: show.id,
+      title: "The Pilot",
+      episodeNumber: 2,
+    });
+    expect(() =>
+      access.catalog.updateMediaItem(show.id, { parentId: episode.id }),
+    ).toThrow(DomainInvariantError);
+    expect(access.catalog.listMediaItems()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: show.id, kind: "tv_show" }),
+        expect.objectContaining({ id: season.id, kind: "season" }),
+        expect.objectContaining({ id: episode.id, kind: "episode" }),
+        expect.objectContaining({ id: movie.id, kind: "movie" }),
+        expect.objectContaining({ id: trailer.id, kind: "trailer" }),
+        expect.objectContaining({ id: bonus.id, kind: "bonus_feature" }),
+      ]),
+    );
+    access.close();
+  });
+
+  it("maps main-feature, title, and bounded multi-episode selections to one Media Item each", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const contentId = `sha256:${"d".repeat(64)}`;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: contentId,
+      scanData: {
+        schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+        contentId,
+        titles: [
+          {
+            number: 1,
+            durationSeconds: 2_400,
+            chapters: 8,
+            audioStreams: [],
+            subtitles: [],
+          },
+          {
+            number: 2,
+            durationSeconds: 180,
+            chapters: 2,
+            audioStreams: [],
+            subtitles: [],
+          },
+        ],
+      },
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Episode Disc.iso",
+      fingerprint: contentId,
+    });
+    const show = access.catalog.createMediaItem({
+      kind: "tv_show",
+      title: "Chapter Show",
+    });
+    const season = access.catalog.createMediaItem({
+      parentId: show.id,
+      kind: "season",
+      title: "Season 1",
+      seasonNumber: 1,
+    });
+    const firstEpisode = access.catalog.createMediaItem({
+      parentId: season.id,
+      kind: "episode",
+      title: "Episode 1",
+      episodeNumber: 1,
+    });
+    const secondEpisode = access.catalog.createMediaItem({
+      parentId: season.id,
+      kind: "episode",
+      title: "Episode 2",
+      episodeNumber: 2,
+    });
+    const trailer = access.catalog.createMediaItem({
+      parentId: show.id,
+      kind: "trailer",
+      title: "Trailer",
+    });
+    const mainFeature = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Main Feature",
+    });
+
+    const selections = [
+      access.catalog.createDiscSelection({
+        originalDiscArchiveId: archive.id,
+        mediaItemId: mainFeature.id,
+        sourceKey: "dvd:main-feature",
+        kind: "main_feature",
+      }),
+      access.catalog.createDiscSelection({
+        originalDiscArchiveId: archive.id,
+        mediaItemId: trailer.id,
+        sourceKey: "dvd:title:2",
+        kind: "dvd_title",
+        titleNumber: 2,
+      }),
+      access.catalog.createDiscSelection({
+        originalDiscArchiveId: archive.id,
+        mediaItemId: firstEpisode.id,
+        sourceKey: "dvd:title:1:chapters:1-4",
+        kind: "dvd_chapters",
+        titleNumber: 1,
+        chapterStart: 1,
+        chapterEnd: 4,
+      }),
+      access.catalog.createDiscSelection({
+        originalDiscArchiveId: archive.id,
+        mediaItemId: secondEpisode.id,
+        sourceKey: "dvd:title:1:chapters:5-8",
+        kind: "dvd_chapters",
+        titleNumber: 1,
+        chapterStart: 5,
+        chapterEnd: 8,
+      }),
+    ];
+
+    expect(selections.map((selection) => selection.mediaItemId)).toEqual([
+      mainFeature.id,
+      trailer.id,
+      firstEpisode.id,
+      secondEpisode.id,
+    ]);
+    expect(() =>
+      access.catalog.createDiscSelection({
+        originalDiscArchiveId: archive.id,
+        mediaItemId: firstEpisode.id,
+        sourceKey: "dvd:title:1:chapters:8-9",
+        kind: "dvd_chapters",
+        titleNumber: 1,
+        chapterStart: 8,
+        chapterEnd: 9,
+      }),
+    ).toThrow(DomainInvariantError);
+    expect(() =>
+      access.catalog.createDiscSelection({
+        originalDiscArchiveId: archive.id,
+        mediaItemId: trailer.id,
+        sourceKey: "dvd:title:3",
+        kind: "dvd_title",
+        titleNumber: 3,
+      }),
+    ).toThrow(DomainInvariantError);
     access.close();
   });
 
@@ -1176,6 +1427,30 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       ) values (
         'preceding-drive', '/dev/sr0', 0, 1, 1, 1, 0, 0, 0
       );
+      insert into detected_discs (
+        id, optical_drive_id, disc_kind, fingerprint, status, detected_at,
+        created_at, updated_at
+      ) values (
+        'preceding-disc', 'preceding-drive', 'dvd', 'preceding-fingerprint',
+        'archived', 100, 100, 100
+      );
+      insert into original_disc_archives (
+        id, detected_disc_id, disc_kind, archive_format, archive_path,
+        fingerprint, archived_at, created_at, updated_at
+      ) values (
+        'preceding-archive', 'preceding-disc', 'dvd', 'iso',
+        '/media/originals/preceding.iso', 'preceding-fingerprint', 200, 200, 200
+      );
+      insert into media_items (
+        id, kind, title, created_at, updated_at
+      ) values ('preceding-movie', 'movie', 'Preceding Movie', 300, 300);
+      insert into disc_selections (
+        id, original_disc_archive_id, media_item_id, source_key, kind,
+        created_at, updated_at
+      ) values (
+        'preceding-selection', 'preceding-archive', 'preceding-movie',
+        'dvd:main-feature', 'main_feature', 400, 456
+      );
     `);
     precedingSqlite.close();
 
@@ -1189,6 +1464,16 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         id: "preceding-drive",
         devicePath: "/dev/sr0",
         isEnabled: false,
+      }),
+    ]);
+    expect(
+      migrated.catalog.listOriginalDiscArchives({
+        ids: ["preceding-archive" as OriginalDiscArchiveId],
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        id: "preceding-archive",
+        catalogReviewedAt: new Date(456),
       }),
     ]);
     migrated.close();
@@ -1218,12 +1503,14 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
+        name: "20260803175923_gorgeous_wendell_rand",
+      },
+      {
         name: "20260803050348_pretty_living_mummy",
       },
       {
         name: "20260802190921_optical-drive-configuration-default-resolved",
       },
-      { name: precedingMigrationName },
     ]);
     expect(
       sqlite

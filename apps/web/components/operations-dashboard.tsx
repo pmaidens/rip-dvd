@@ -16,6 +16,7 @@ import {
   type DashboardStreamStatus,
 } from "../lib/dashboard-activity";
 import { displayTerm } from "../lib/display-term";
+import { CatalogReviewEditor } from "./catalog-review-editor";
 import { EncodingProfilesManager } from "./encoding-profiles";
 
 export type DashboardSectionLoadState<T> =
@@ -189,10 +190,12 @@ export function DashboardView({
   state,
   onApproveDetectedDisc = () => undefined,
   approvingDetectedDiscId = null,
+  onOpenCatalogReview = () => undefined,
 }: {
   state: DashboardLoadState;
   onApproveDetectedDisc?: (id: string) => void;
   approvingDetectedDiscId?: string | null;
+  onOpenCatalogReview?: (id: string) => void;
 }) {
   return (
     <div className="dashboard-grid">
@@ -382,6 +385,12 @@ export function DashboardView({
             <p className="item-time">
               Archived {formatTimestamp(archive.archivedAt)}
             </p>
+            <button
+              type="button"
+              onClick={() => onOpenCatalogReview(archive.id)}
+            >
+              Review catalog
+            </button>
           </article>
         )}
       />
@@ -452,6 +461,9 @@ export function OperationsDashboard() {
     string | null
   >(null);
   const [archiveApprovalFailed, setArchiveApprovalFailed] = useState(false);
+  const [catalogReviewArchiveId, setCatalogReviewArchiveId] = useState<
+    string | null
+  >(null);
 
   useEffect(() => {
     setState(dashboardState("loading"));
@@ -520,6 +532,17 @@ export function OperationsDashboard() {
 
       <EncodingProfilesManager />
 
+      {catalogReviewArchiveId ? (
+        <CatalogReviewEditor
+          archiveId={catalogReviewArchiveId}
+          onClose={() => setCatalogReviewArchiveId(null)}
+          onCompleted={() => {
+            setCatalogReviewArchiveId(null);
+            setRequestNumber((value) => value + 1);
+          }}
+        />
+      ) : null}
+
       {archiveApprovalFailed ? (
         <p className="job-error" role="status">
           Archive approval failed. Try again.
@@ -530,6 +553,7 @@ export function OperationsDashboard() {
         state={state}
         onApproveDetectedDisc={(id) => void approveDetectedDisc(id)}
         approvingDetectedDiscId={approvingDetectedDiscId}
+        onOpenCatalogReview={setCatalogReviewArchiveId}
       />
 
       <footer className="dashboard-footer">

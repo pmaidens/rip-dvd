@@ -189,6 +189,7 @@ describe("DashboardView", () => {
     expect(html).toContain("42%");
     expect(html).toContain("My Movie");
     expect(html).toContain("BONUS_DISC");
+    expect(html).toContain("Review catalog");
     expect(html).toContain("Worker reported a failure");
     expect(html).toContain("Approve archive");
     expect(html).toContain("Retry archive");

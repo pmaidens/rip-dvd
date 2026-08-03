@@ -914,6 +914,20 @@ export function createLegacySidecarImportAccess(
               }
               persistedJobs.push(job);
             }
+            if (
+              archive.catalogReviewedAt === null &&
+              transaction
+                .select({ id: discSelections.id })
+                .from(discSelections)
+                .where(eq(discSelections.originalDiscArchiveId, archive.id))
+                .get()
+            ) {
+              transaction
+                .update(originalDiscArchives)
+                .set({ catalogReviewedAt: importedUpdatedAt })
+                .where(eq(originalDiscArchives.id, archive.id))
+                .run();
+            }
             requireCapturedSourceArchive();
           }, { behavior: "immediate" });
         } catch (error) {
