@@ -948,6 +948,30 @@ describe("data-access facade", () => {
     access.close();
   });
 
+  it("bounds Media Item hierarchy depth at the catalog mutation boundary", () => {
+    const access = openTestDatabase();
+    let parent = access.catalog.createMediaItem({
+      kind: "tv_show",
+      title: "Hierarchy root",
+    });
+    for (let depth = 1; depth < 32; depth += 1) {
+      parent = access.catalog.createMediaItem({
+        parentId: parent.id,
+        kind: "bonus_feature",
+        title: `Hierarchy level ${depth}`,
+      });
+    }
+
+    expect(() =>
+      access.catalog.createMediaItem({
+        parentId: parent.id,
+        kind: "bonus_feature",
+        title: "Hierarchy level 32",
+      }),
+    ).toThrow(DomainInvariantError);
+    access.close();
+  });
+
   it("maps main-feature, title, and bounded multi-episode selections to one Media Item each", () => {
     const access = openTestDatabase();
     const drive = access.catalog.upsertOpticalDrive({

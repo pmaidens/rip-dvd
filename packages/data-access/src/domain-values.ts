@@ -19,6 +19,8 @@ export const MEDIA_ITEM_KINDS = [
   "bonus_feature",
 ] as const;
 
+export const MAX_MEDIA_ITEM_HIERARCHY_DEPTH = 32;
+
 export const DISC_SELECTION_KINDS = [
   "main_feature",
   "dvd_title",
