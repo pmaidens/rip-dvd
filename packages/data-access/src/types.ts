@@ -32,6 +32,8 @@ export type EncodeJobId = DomainId<"EncodeJob">;
 export type ArchiveJobClaimToken = DomainId<"ArchiveJobClaim">;
 export type EncodeJobClaimToken = DomainId<"EncodeJobClaim">;
 
+export const ARCHIVE_JOB_LEASE_DURATION_MS = 60_000;
+
 export interface ServiceHealth {
   status: "ok";
   sqliteVersion: string;
@@ -263,6 +265,7 @@ export interface CatalogAccess {
     isNewMediumObservation?: boolean;
     volumeLabel?: string;
     scanData?: unknown;
+    sizeBytes?: number;
   }): DetectedDisc;
   listDetectedDiscs(
     statuses?: DetectedDiscStatus[],
@@ -272,14 +275,6 @@ export interface CatalogAccess {
     id: DetectedDiscId,
     status: DetectedDiscStatus,
   ): DetectedDisc;
-  createOriginalDiscArchive(input: {
-    detectedDiscId: DetectedDiscId;
-    discKind: DiscKind;
-    archiveFormat: ArchiveFormat;
-    archivePath: string;
-    fingerprint: string;
-    sizeBytes?: number;
-  }): OriginalDiscArchive;
   listOriginalDiscArchives(options?: {
     ids?: readonly OriginalDiscArchiveId[];
     limit?: number;
@@ -330,8 +325,20 @@ export interface EncodingProfileAccess {
 }
 
 export interface ArchiveJobAccess {
+  approve(input: {
+    detectedDiscId: DetectedDiscId;
+    priority?: number;
+  }): ArchiveJob;
   enqueue(input: { detectedDiscId: DetectedDiscId; priority?: number }): ArchiveJob;
-  claimNext(workerId: string): RunningArchiveJob | null;
+  claimNext(
+    workerId: string,
+    eligibility?: {
+      opticalDriveId: OpticalDriveId;
+      fingerprint: string;
+    },
+  ): RunningArchiveJob | null;
+  renewClaim(claim: RunningArchiveJob): RunningArchiveJob;
+  recoverExpiredClaims(): ArchiveJob[];
   list(
     statuses?: JobStatus[],
     options?: ChronologicalListOptions,
@@ -340,9 +347,9 @@ export interface ArchiveJobAccess {
     claim: RunningArchiveJob,
     progressPercent: number,
   ): ArchiveJob;
-  complete(
+  publish(
     claim: RunningArchiveJob,
-    originalDiscArchiveId: OriginalDiscArchiveId,
+    input: { archivePath: string; sizeBytes: number },
   ): ArchiveJob;
   fail(claim: RunningArchiveJob, errorMessage: string): ArchiveJob;
   requeue(id: ArchiveJobId): ArchiveJob;

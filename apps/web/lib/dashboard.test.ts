@@ -1,5 +1,8 @@
 import { createDataAccess, type DataAccess } from "@rip-dvd/data-access";
-import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
+import {
+  createLegacySidecarDataAccess,
+  type LegacySidecarDataAccess,
+} from "@rip-dvd/data-access/legacy-sidecars";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,7 +16,7 @@ import {
 
 const dataAccessFixture = useDataAccessFixture();
 
-function seedEncodeJob(access: DataAccess): void {
+function seedEncodeJob(access: LegacySidecarDataAccess): void {
   const drive = access.catalog.upsertOpticalDrive({
     devicePath: "/dev/sr0",
     isEnabled: true,
@@ -68,8 +71,8 @@ describe("readDashboardSnapshot", () => {
     try {
       const queuedArchivePath = join(originalsLibraryPath, "Queued Movie.iso");
       const reviewArchivePath = join(originalsLibraryPath, "Review Movie.iso");
-      writeFileSync(queuedArchivePath, "archive");
-      writeFileSync(reviewArchivePath, "archive");
+      writeFileSync(queuedArchivePath, "queued archive");
+      writeFileSync(reviewArchivePath, "review archive");
       writeFileSync(
         join(originalsLibraryPath, "Queued Movie.rip-dvd.json"),
         JSON.stringify({
