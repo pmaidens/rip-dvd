@@ -535,12 +535,18 @@ export async function requestCatalogReview(
   archiveId: string,
   mediaItemOffset: number,
   discSelectionOffset: number,
+  editingMediaItemId: string | null,
   fetcher: CatalogReviewFetch = fetch,
 ): Promise<CatalogReviewDto> {
+  const query = new URLSearchParams({
+    mediaOffset: String(mediaItemOffset),
+    selectionOffset: String(discSelectionOffset),
+  });
+  if (editingMediaItemId !== null) {
+    query.set("editingMediaItemId", editingMediaItemId);
+  }
   const response = await fetcher(
-    `/api/catalog-reviews/${encodeURIComponent(
-      archiveId,
-    )}?mediaOffset=${mediaItemOffset}&selectionOffset=${discSelectionOffset}`,
+    `/api/catalog-reviews/${encodeURIComponent(archiveId)}?${query.toString()}`,
     { cache: "no-store", headers: { Accept: "application/json" } },
   );
   if (!response.ok) {
@@ -594,17 +600,22 @@ export function CatalogReviewEditor({
         archiveId,
         mediaItemOffset,
         discSelectionOffset,
+        editingMediaItemId,
       );
       setState({ status: "loaded", review });
       setHasRequestError(false);
     } catch {
       setState({ status: "error" });
     }
-  }, [archiveId, discSelectionOffset, mediaItemOffset]);
+  }, [
+    archiveId,
+    discSelectionOffset,
+    editingMediaItemId,
+    mediaItemOffset,
+  ]);
 
   useEffect(() => {
     setState({ status: "loading" });
-    setEditingMediaItemId(null);
     void load();
   }, [load]);
 
@@ -639,10 +650,7 @@ export function CatalogReviewEditor({
       onRetry={() => void load()}
       onEditMediaItem={setEditingMediaItemId}
       onCancelEdit={() => setEditingMediaItemId(null)}
-      onMediaItemsPage={(offset) => {
-        setEditingMediaItemId(null);
-        setMediaItemOffset(offset);
-      }}
+      onMediaItemsPage={setMediaItemOffset}
       onDiscSelectionsPage={(offset) => setDiscSelectionOffset(offset)}
       onSaveMediaItem={(input) => {
         const { id, ...values } = input;
