@@ -1213,6 +1213,147 @@ export function createDataAccessInternal(
     },
   });
 
+  function approveDetectedDisc(input: {
+    detectedDiscId: DetectedDiscId;
+    priority?: number;
+    allowAlreadyApproved: boolean;
+  }) {
+    const timestamp = now();
+    return database.transaction((transaction) => {
+      const disc = requireRow(
+        transaction
+          .select()
+          .from(detectedDiscs)
+          .where(eq(detectedDiscs.id, input.detectedDiscId))
+          .get(),
+        "detected disc",
+        input.detectedDiscId,
+      );
+      if (
+        disc.status !== "scanned" &&
+        !(input.allowAlreadyApproved && disc.status === "approved")
+      ) {
+        throw new InvalidStatusTransitionError(
+          "detected disc",
+          disc.status,
+          "approved",
+        );
+      }
+      const matchingArchive = findOriginalArchiveByContentId(
+        disc.fingerprint,
+        transaction,
+      );
+      if (matchingArchive) {
+        throw new DomainInvariantError(
+          "A Detected Disc with existing archive provenance cannot be approved",
+        );
+      }
+      requireLegacyDvdArchiveIdentitiesResolved(
+        disc.discKind,
+        disc.fingerprint,
+        transaction,
+      );
+      const approvedDisc = disc.status === "scanned"
+        ? requireRow(
+            transaction
+              .update(detectedDiscs)
+              .set({ status: "approved", updatedAt: timestamp })
+              .where(
+                and(
+                  eq(detectedDiscs.id, disc.id),
+                  eq(detectedDiscs.status, "scanned"),
+                ),
+              )
+              .returning()
+              .get(),
+            "detected disc",
+            disc.id,
+          )
+        : disc;
+
+      const existing = transaction
+        .select()
+        .from(archiveJobs)
+        .where(eq(archiveJobs.detectedDiscId, disc.id))
+        .get();
+      if (!existing) {
+        const job = requireRow(
+          transaction
+            .insert(archiveJobs)
+            .values({
+              id: newId<ArchiveJobId>(),
+              detectedDiscId: disc.id,
+              priority: input.priority ?? 0,
+              createdAt: timestamp,
+              updatedAt: timestamp,
+            })
+            .returning()
+            .get(),
+          "archive job",
+          disc.id,
+        );
+        return { disc: approvedDisc, job };
+      }
+      if (existing.status === "failed") {
+        const job = requireRow(
+          transaction
+            .update(archiveJobs)
+            .set({
+              status: "queued",
+              priority: input.priority ?? existing.priority,
+              progressPercent: 0,
+              claimedBy: null,
+              claimToken: null,
+              claimedAt: null,
+              startedAt: null,
+              completedAt: null,
+              errorMessage: null,
+              updatedAt: timestamp,
+            })
+            .where(
+              and(
+                eq(archiveJobs.id, existing.id),
+                eq(archiveJobs.status, "failed"),
+              ),
+            )
+            .returning()
+            .get(),
+          "archive job",
+          existing.id,
+        );
+        return { disc: approvedDisc, job };
+      }
+      if (existing.status === "completed") {
+        throw new DomainInvariantError(
+          "A completed Archive Job cannot be approved without archive provenance",
+        );
+      }
+      if (
+        input.priority !== undefined &&
+        existing.status === "queued" &&
+        input.priority !== existing.priority
+      ) {
+        const job = requireRow(
+          transaction
+            .update(archiveJobs)
+            .set({ priority: input.priority, updatedAt: timestamp })
+            .where(
+              and(
+                eq(archiveJobs.id, existing.id),
+                eq(archiveJobs.status, "queued"),
+              ),
+            )
+            .returning()
+            .get(),
+          "archive job",
+          existing.id,
+        );
+        return { disc: approvedDisc, job };
+      }
+      return { disc: approvedDisc, job: existing };
+    }, { behavior: "immediate" });
+  }
+
   const access: LegacySidecarDataAccess = {
     readConsistentSnapshot(read) {
       const snapshotAccess: ConsistentReadAccess = {
@@ -1692,6 +1833,12 @@ export function createDataAccessInternal(
       },
 
       updateDetectedDiscStatus(id, status) {
+        if (status === "approved") {
+          return approveDetectedDisc({
+            detectedDiscId: id,
+            allowAlreadyApproved: false,
+          }).disc;
+        }
         const allowedFrom = Object.entries(detectedDiscTransitions)
           .filter(([, targets]) => targets.includes(status))
           .map(([source]) => source as DetectedDiscStatus);
@@ -1723,17 +1870,15 @@ export function createDataAccessInternal(
               status,
             );
           }
-          if (status !== "approved") {
-            transaction
-              .delete(archiveJobs)
-              .where(
-                and(
-                  eq(archiveJobs.detectedDiscId, id),
-                  eq(archiveJobs.status, "queued"),
-                ),
-              )
-              .run();
-          }
+          transaction
+            .delete(archiveJobs)
+            .where(
+              and(
+                eq(archiveJobs.detectedDiscId, id),
+                eq(archiveJobs.status, "queued"),
+              ),
+            )
+            .run();
           return updated;
         });
       },
@@ -2190,129 +2335,10 @@ export function createDataAccessInternal(
 
     archiveJobs: {
       approve(input) {
-        const timestamp = now();
-        return database.transaction((transaction) => {
-          const disc = requireRow(
-            transaction
-              .select()
-              .from(detectedDiscs)
-              .where(eq(detectedDiscs.id, input.detectedDiscId))
-              .get(),
-            "detected disc",
-            input.detectedDiscId,
-          );
-          if (disc.status !== "scanned" && disc.status !== "approved") {
-            throw new InvalidStatusTransitionError(
-              "detected disc",
-              disc.status,
-              "approved",
-            );
-          }
-          const matchingArchive = findOriginalArchiveByContentId(
-            disc.fingerprint,
-            transaction,
-          );
-          if (matchingArchive) {
-            throw new DomainInvariantError(
-              "A Detected Disc with existing archive provenance cannot be approved",
-            );
-          }
-          requireLegacyDvdArchiveIdentitiesResolved(
-            disc.discKind,
-            disc.fingerprint,
-            transaction,
-          );
-          if (disc.status === "scanned") {
-            transaction
-              .update(detectedDiscs)
-              .set({ status: "approved", updatedAt: timestamp })
-              .where(
-                and(
-                  eq(detectedDiscs.id, disc.id),
-                  eq(detectedDiscs.status, "scanned"),
-                ),
-              )
-              .run();
-          }
-
-          const existing = transaction
-            .select()
-            .from(archiveJobs)
-            .where(eq(archiveJobs.detectedDiscId, disc.id))
-            .get();
-          if (!existing) {
-            return requireRow(
-              transaction
-                .insert(archiveJobs)
-                .values({
-                  id: newId<ArchiveJobId>(),
-                  detectedDiscId: disc.id,
-                  priority: input.priority ?? 0,
-                  createdAt: timestamp,
-                  updatedAt: timestamp,
-                })
-                .returning()
-                .get(),
-              "archive job",
-              disc.id,
-            );
-          }
-          if (existing.status === "failed") {
-            return requireRow(
-              transaction
-                .update(archiveJobs)
-                .set({
-                  status: "queued",
-                  priority: input.priority ?? existing.priority,
-                  progressPercent: 0,
-                  claimedBy: null,
-                  claimToken: null,
-                  claimedAt: null,
-                  startedAt: null,
-                  completedAt: null,
-                  errorMessage: null,
-                  updatedAt: timestamp,
-                })
-                .where(
-                  and(
-                    eq(archiveJobs.id, existing.id),
-                    eq(archiveJobs.status, "failed"),
-                  ),
-                )
-                .returning()
-                .get(),
-              "archive job",
-              existing.id,
-            );
-          }
-          if (existing.status === "completed") {
-            throw new DomainInvariantError(
-              "A completed Archive Job cannot be approved without archive provenance",
-            );
-          }
-          if (
-            input.priority !== undefined &&
-            existing.status === "queued" &&
-            input.priority !== existing.priority
-          ) {
-            return requireRow(
-              transaction
-                .update(archiveJobs)
-                .set({ priority: input.priority, updatedAt: timestamp })
-                .where(
-                  and(
-                    eq(archiveJobs.id, existing.id),
-                    eq(archiveJobs.status, "queued"),
-                  ),
-                )
-                .returning()
-                .get(),
-              "archive job",
-              existing.id,
-            );
-          }
-          return existing;
-        }, { behavior: "immediate" });
+        return approveDetectedDisc({
+          ...input,
+          allowAlreadyApproved: true,
+        }).job;
       },
 
       enqueue(input) {

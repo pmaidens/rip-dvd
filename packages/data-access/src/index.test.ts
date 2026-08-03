@@ -2043,13 +2043,10 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       discKind: "dvd",
       fingerprint: "claim-global-archive-check",
     });
-    for (const disc of [firstDisc, secondDisc]) {
-      access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
-      access.catalog.updateDetectedDiscStatus(disc.id, "approved");
-    }
-    const duplicateJob = access.archiveJobs.enqueue({
-      detectedDiscId: secondDisc.id,
-    });
+    access.catalog.updateDetectedDiscStatus(firstDisc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(secondDisc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(secondDisc.id, "approved");
+    const duplicateJob = access.archiveJobs.list()[0]!;
     const concurrentSqlite = new DatabaseSync(databasePath);
     concurrentSqlite.exec("PRAGMA foreign_keys = ON");
     concurrentSqlite.exec("BEGIN IMMEDIATE");
@@ -2238,14 +2235,12 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       fingerprint: "second-disc",
     });
     access.catalog.updateDetectedDiscStatus(firstDisc.id, "scanned");
-    access.catalog.updateDetectedDiscStatus(firstDisc.id, "approved");
     access.catalog.updateDetectedDiscStatus(secondDisc.id, "scanned");
-    access.catalog.updateDetectedDiscStatus(secondDisc.id, "approved");
-    const firstJob = access.archiveJobs.enqueue({
+    const firstJob = access.archiveJobs.approve({
       detectedDiscId: firstDisc.id,
       priority: 1,
     });
-    const secondJob = access.archiveJobs.enqueue({
+    const secondJob = access.archiveJobs.approve({
       detectedDiscId: secondDisc.id,
       priority: 10,
     });
@@ -2358,6 +2353,57 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(access.catalog.listDetectedDiscs(["scanned"])).toEqual([
       expect.objectContaining({ id: secondDisc.id }),
     ]);
+
+    sqlite.close();
+    access.close();
+  });
+
+  it("routes the generic approved transition through the Archive Job transaction", () => {
+    const databasePath = createTestDatabasePath();
+    const access = openTestDatabase(databasePath);
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const firstDisc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "generic-approval-creates-work",
+    });
+    access.catalog.updateDetectedDiscStatus(firstDisc.id, "scanned");
+
+    expect(
+      access.catalog.updateDetectedDiscStatus(firstDisc.id, "approved"),
+    ).toMatchObject({ id: firstDisc.id, status: "approved" });
+    expect(access.archiveJobs.list()).toEqual([
+      expect.objectContaining({
+        detectedDiscId: firstDisc.id,
+        status: "queued",
+      }),
+    ]);
+
+    const sqlite = new DatabaseSync(databasePath);
+    sqlite.exec(`
+      create trigger abort_generic_approval_archive_job_insert
+      before insert on archive_jobs
+      begin
+        select raise(abort, 'simulated generic approval queue failure');
+      end
+    `);
+    const secondDisc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "generic-approval-rolls-back",
+    });
+    access.catalog.updateDetectedDiscStatus(secondDisc.id, "scanned");
+
+    expect(() =>
+      access.catalog.updateDetectedDiscStatus(secondDisc.id, "approved"),
+    ).toThrow();
+    expect(access.catalog.listDetectedDiscs(["scanned"]))
+      .toEqual([expect.objectContaining({ id: secondDisc.id })]);
+    expect(access.archiveJobs.list()).toHaveLength(1);
 
     sqlite.close();
     access.close();

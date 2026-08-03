@@ -214,6 +214,26 @@ describe("legacy sidecar import", () => {
     fixture.access.close();
   });
 
+  it("fails the generic approved transition closed for an upgraded NULL-size legacy DVD identity", () => {
+    const fixture = createUnreconciledLegacyDvdFixture(
+      SAME_DVD_CONTENT_ID,
+      { legacySizeBytes: null },
+    );
+
+    expect(() =>
+      fixture.access.catalog.updateDetectedDiscStatus(
+        fixture.disc.id,
+        "approved",
+      ),
+    ).toThrow(DomainInvariantError);
+    expect(fixture.access.catalog.listDetectedDiscs(["scanned"]))
+      .toEqual([expect.objectContaining({ id: fixture.disc.id })]);
+    expect(fixture.access.archiveJobs.list()).toEqual([]);
+    expect(fixture.access.catalog.listOriginalDiscArchives())
+      .toEqual([expect.objectContaining({ sizeBytes: null })]);
+    fixture.access.close();
+  });
+
   it("allows approval and claim after bounded legacy identity reconciliation", () => {
     const fingerprint = `sha256:${"0".repeat(64)}`;
     const fixture = createUnreconciledLegacyDvdFixture(fingerprint, {
