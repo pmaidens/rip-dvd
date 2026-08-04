@@ -366,6 +366,9 @@ export const encodeJobs = sqliteTable(
       .notNull()
       .references(() => encodingProfiles.id, { onDelete: "restrict" }),
     outputPath: text("output_path").notNull(),
+    reservesOutputPath: integer("reserves_output_path", { mode: "boolean" })
+      .notNull()
+      .default(true),
     status: text("status", { enum: JOB_STATUSES }).notNull().default("queued"),
     priority: integer("priority").notNull().default(0),
     progressPercent: integer("progress_percent").notNull().default(0),
@@ -384,7 +387,9 @@ export const encodeJobs = sqliteTable(
       table.discSelectionId,
       table.encodingProfileId,
     ),
-    uniqueIndex("encode_jobs_output_path_unique").on(table.outputPath),
+    uniqueIndex("encode_jobs_output_path_unique")
+      .on(table.outputPath)
+      .where(sql`${table.reservesOutputPath} = 1`),
     index("encode_jobs_queue_idx").on(table.status, table.priority, table.createdAt),
     check(
       "encode_jobs_status_check",
@@ -393,6 +398,10 @@ export const encodeJobs = sqliteTable(
     check(
       "encode_jobs_progress_check",
       sql`${table.progressPercent} between 0 and 100`,
+    ),
+    check(
+      "encode_jobs_output_reservation_check",
+      sql`${table.reservesOutputPath} = 1 or ${table.status} = 'failed'`,
     ),
   ],
 );

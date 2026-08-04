@@ -1057,10 +1057,18 @@ export function createLegacySidecarImportAccess(
                 });
                 continue;
               }
+              const capturedSnapshotMatches =
+                cutover.wasAlreadyPublished &&
+                cutover.jobSnapshots
+                  .get(legacyJobLogicalKey(sidecar.fingerprint, job))
+                  ?.signature === legacyJobSignature(job);
               const outputJob = transaction
                 .select()
                 .from(encodeJobs)
-                .where(eq(encodeJobs.outputPath, job.outputPath))
+                .where(and(
+                  eq(encodeJobs.outputPath, job.outputPath),
+                  eq(encodeJobs.reservesOutputPath, true),
+                ))
                 .get();
               const logicalJob =
                 selection && profile
@@ -1075,17 +1083,37 @@ export function createLegacySidecarImportAccess(
                       )
                       .get()
                   : undefined;
+              const retiredHistoricalJob =
+                capturedSnapshotMatches && profile
+                  ? transaction
+                      .select({ id: encodeJobs.id })
+                      .from(encodeJobs)
+                      .innerJoin(
+                        discSelections,
+                        eq(discSelections.id, encodeJobs.discSelectionId),
+                      )
+                      .where(and(
+                        eq(encodeJobs.outputPath, job.outputPath),
+                        eq(encodeJobs.encodingProfileId, profile.id),
+                        eq(
+                          discSelections.originalDiscArchiveId,
+                          archive.id,
+                        ),
+                        eq(discSelections.sourceKey, job.sourceKey),
+                        eq(discSelections.isCatalogActive, false),
+                      ))
+                      .limit(1)
+                      .get()
+                  : undefined;
+              if (retiredHistoricalJob) {
+                unchanged += 1;
+                persistedJobs.push(job);
+                continue;
+              }
               if (
                 logicalJob &&
                 logicalJob.outputPath !== job.outputPath &&
-                !(
-                  cutover.wasAlreadyPublished &&
-                  cutover.jobSnapshots
-                    .get(
-                      legacyJobLogicalKey(sidecar.fingerprint, job),
-                    )
-                    ?.signature === legacyJobSignature(job)
-                )
+                !capturedSnapshotMatches
               ) {
                 persistenceIssues.push({
                   code: "duplicate_record",
@@ -1457,19 +1485,6 @@ export function createLegacySidecarImportAccess(
             .from(originalDiscArchives)
             .where(eq(originalDiscArchives.fingerprint, fingerprint))
             .get();
-          const selection = archive
-            ? database
-                .select()
-                .from(discSelections)
-                .where(
-                  and(
-                    eq(discSelections.originalDiscArchiveId, archive.id),
-                    eq(discSelections.sourceKey, sourceKey),
-                    eq(discSelections.isCatalogActive, true),
-                  ),
-                )
-                .get()
-            : undefined;
           const profile = database
             .select()
             .from(encodingProfiles)
@@ -1482,13 +1497,21 @@ export function createLegacySidecarImportAccess(
             )
             .get();
           const reconciledJob =
-            selection && profile
+            archive && profile
               ? database
                   .select({ id: encodeJobs.id })
                   .from(encodeJobs)
+                  .innerJoin(
+                    discSelections,
+                    eq(discSelections.id, encodeJobs.discSelectionId),
+                  )
                   .where(
                     and(
-                      eq(encodeJobs.discSelectionId, selection.id),
+                      eq(
+                        discSelections.originalDiscArchiveId,
+                        archive.id,
+                      ),
+                      eq(discSelections.sourceKey, sourceKey),
                       eq(encodeJobs.encodingProfileId, profile.id),
                     ),
                   )

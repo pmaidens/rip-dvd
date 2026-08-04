@@ -1907,10 +1907,13 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(
       sqlite
         .prepare(
-          "select name from __drizzle_migrations order by id desc limit 5",
+          "select name from __drizzle_migrations order by id desc limit 6",
         )
         .all(),
     ).toEqual([
+      {
+        name: "20260804184603_tense_zzzax",
+      },
       {
         name: "20260804182121_dizzy_wither",
       },
@@ -2281,7 +2284,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     const repairedJob = access.encodeJobs.enqueue({
       discSelectionId: repairedMissingTitle.id,
       encodingProfileId: "legacy-profile" as EncodingProfileId,
-      outputPath: "/media/movies/Repaired Legacy.mkv",
+      outputPath: "/media/movies/Unsafe Legacy.mkv",
     });
     expect(repairedJob).toMatchObject({
       discSelectionId: repairedMissingTitle.id,
