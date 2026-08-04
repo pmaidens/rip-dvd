@@ -1791,6 +1791,7 @@ export function retireLegacySidecarQueue(
   discoveryBatch: LegacySidecarDiscoveryBatch,
   stageCatalogReviewBoundary: (
     discoveries: readonly LegacySidecarDiscovery[],
+    options?: { allowStagedIdentityReplacement?: boolean },
   ) => boolean,
 ): LegacyQueueCutover | null {
   const { discoveries } = discoveryBatch;
@@ -2097,12 +2098,14 @@ export function retireLegacySidecarQueue(
       if (value.snapshotDigest !== expectedDigest) {
         throw new Error("Invalid SQLite cutover marker: snapshot digest mismatch");
       }
+      let markerBoundaryIsComplete = true;
       if (value.schemaVersion === 4) {
-        stageCatalogReviewBoundary(
+        markerBoundaryIsComplete = stageCatalogReviewBoundary(
           sidecarSnapshots.map((snapshot) => ({
             outcome: "parsed" as const,
             sidecar: restorePublishedSidecar(snapshot),
           })),
+          { allowStagedIdentityReplacement: true },
         );
       }
       if (hasRepairCutoverDiscriminators) {
@@ -2137,6 +2140,9 @@ export function retireLegacySidecarQueue(
           withdrawPublication: markMarkerForRepair,
           wasAlreadyPublished: true,
         };
+      }
+      if (!markerBoundaryIsComplete) {
+        return null;
       }
       const recovery =
         value.schemaVersion === 4
