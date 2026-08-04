@@ -84,6 +84,7 @@ interface SaveMediaItemInput {
 }
 
 interface CreateSelectionInput {
+  replacesDiscSelectionId?: string;
   mediaItemId: string;
   kind: DiscSelectionKind;
   titleNumber?: number;
@@ -96,7 +97,7 @@ interface CatalogReviewViewProps {
   state: CatalogReviewLoadState;
   editingMediaItemId: string | null;
   isSaving: boolean;
-  hasRequestError: boolean;
+  requestError: string | null;
   onClose(): void;
   onRetry(): void;
   onEditMediaItem(id: string): void;
@@ -158,7 +159,7 @@ export function CatalogReviewView({
   state,
   editingMediaItemId,
   isSaving,
-  hasRequestError,
+  requestError,
   onClose,
   onRetry,
   onEditMediaItem,
@@ -219,7 +220,13 @@ export function CatalogReviewView({
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const label = String(form.get("label") ?? "").trim();
+    const replacesDiscSelectionId = String(
+      form.get("replacesDiscSelectionId") ?? "",
+    ).trim();
     onCreateDiscSelection({
+      ...(replacesDiscSelectionId
+        ? { replacesDiscSelectionId }
+        : {}),
       mediaItemId: String(form.get("mediaItemId")),
       kind: selectionKind,
       ...(selectionKind === "main_feature"
@@ -253,9 +260,9 @@ export function CatalogReviewView({
         </div>
       </header>
 
-      {hasRequestError ? (
+      {requestError ? (
         <div className="section-message section-error" role="alert">
-          The catalog change failed. Review the fields and try again.
+          {requestError}
         </div>
       ) : null}
 
@@ -453,6 +460,19 @@ export function CatalogReviewView({
             <h3>Add Disc Selection</h3>
             <div className="catalog-fields">
               <label>
+                Catalog action
+                <select name="replacesDiscSelectionId" defaultValue="">
+                  <option value="">Add a new Disc Selection</option>
+                  {review.discSelections.map((selection) => (
+                    <option key={selection.id} value={selection.id}>
+                      Repair an existing Disc Selection: {
+                        selectionDescription(selection)
+                      }
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
                 Media Item
                 <select name="mediaItemId" required defaultValue="">
                   <option value="" disabled>Select a Media Item</option>
@@ -618,7 +638,22 @@ export async function mutateCatalogReview(
     },
   );
   if (!response.ok) {
-    throw new Error("Catalog review mutation failed");
+    let message = "Catalog review mutation failed";
+    try {
+      const body: unknown = await response.json();
+      if (
+        typeof body === "object" &&
+        body !== null &&
+        "error" in body &&
+        typeof body.error === "string" &&
+        body.error.trim() !== ""
+      ) {
+        message = body.error.trim().slice(0, 512);
+      }
+    } catch {
+      // Keep the bounded generic message for non-JSON error responses.
+    }
+    throw new Error(message);
   }
 }
 
@@ -638,7 +673,7 @@ export function CatalogReviewEditor({
   const [mediaItemOffset, setMediaItemOffset] = useState(0);
   const [discSelectionOffset, setDiscSelectionOffset] = useState(0);
   const [isSaving, setIsSaving] = useState(false);
-  const [hasRequestError, setHasRequestError] = useState(false);
+  const [requestError, setRequestError] = useState<string | null>(null);
   const requestScope = useRef<
     ReturnType<typeof createCatalogReviewRequestScope> | null
   >(null);
@@ -661,7 +696,7 @@ export function CatalogReviewEditor({
         return;
       }
       setState({ status: "loaded", review });
-      setHasRequestError(false);
+      setRequestError(null);
     } catch {
       if (!requestScope.current?.isCurrent(archiveId, request)) {
         return;
@@ -690,7 +725,7 @@ export function CatalogReviewEditor({
       return;
     }
     setIsSaving(true);
-    setHasRequestError(false);
+    setRequestError(null);
     try {
       await mutateCatalogReview(archiveId, body);
       setEditingMediaItemId(null);
@@ -699,8 +734,12 @@ export function CatalogReviewEditor({
       } else {
         await load();
       }
-    } catch {
-      setHasRequestError(true);
+    } catch (error) {
+      setRequestError(
+        error instanceof Error
+          ? error.message
+          : "Catalog review mutation failed",
+      );
     } finally {
       setIsSaving(false);
     }
@@ -735,7 +774,7 @@ export function CatalogReviewEditor({
       state={state}
       editingMediaItemId={editingMediaItemId}
       isSaving={isSaving}
-      hasRequestError={hasRequestError}
+      requestError={requestError}
       onClose={onClose}
       onRetry={() => void load()}
       onEditMediaItem={(id) => changeEditingMediaItem(id)}
@@ -751,8 +790,18 @@ export function CatalogReviewEditor({
             : { action: "create_media_item", mediaItem: values },
         );
       }}
-      onCreateDiscSelection={(selection) =>
-        void mutate({ action: "create_disc_selection", selection })}
+      onCreateDiscSelection={(selection) => {
+        const { replacesDiscSelectionId, ...values } = selection;
+        void mutate(
+          replacesDiscSelectionId
+            ? {
+                action: "repair_disc_selection",
+                discSelectionId: replacesDiscSelectionId,
+                selection: values,
+              }
+            : { action: "create_disc_selection", selection: values },
+        );
+      }}
       onDeleteDiscSelection={(discSelectionId) =>
         void mutate({ action: "delete_disc_selection", discSelectionId })}
       onCompleteReview={() => void mutate({ action: "complete_review" }, true)}

@@ -6,6 +6,7 @@ import {
   MEDIA_ITEM_KINDS,
   RecordNotFoundError,
   type DataAccess,
+  type CreateDiscSelectionInput,
   type DiscSelection,
   type DiscSelectionId,
   type MediaItem,
@@ -443,8 +444,26 @@ export async function createCatalogReviewRoute(
       return response({ mediaItem: serializeMediaItem(item) });
     }
 
-    if (action === "create_disc_selection") {
+    if (
+      action === "create_disc_selection" ||
+      action === "repair_disc_selection"
+    ) {
       const input = asRecord(body.selection);
+      let repairSelectionId: DiscSelectionId | null = null;
+      if (action === "repair_disc_selection") {
+        const discSelectionId = boundedString(body.discSelectionId);
+        if (!discSelectionId) {
+          return response({ error: "Invalid Disc Selection" }, 400);
+        }
+        repairSelectionId = discSelectionId as DiscSelectionId;
+        const existing = access.catalog.listDiscSelections({
+          ids: [repairSelectionId],
+          originalDiscArchiveId: archiveId,
+        })[0];
+        if (!existing) {
+          return response({ error: "Disc Selection not found" }, 404);
+        }
+      }
       const mediaItemId = boundedString(input?.mediaItemId);
       const kind = boundedString(input?.kind, 32);
       const label = input?.label === undefined
@@ -464,9 +483,16 @@ export async function createCatalogReviewRoute(
         mediaItemId: mediaItemId as MediaItemId,
         ...(label ? { label } : {}),
       };
+      const saveSelection = (selectionInput: CreateDiscSelectionInput) =>
+        repairSelectionId === null
+          ? access.catalog.createDiscSelection(selectionInput)
+          : access.catalog.repairDiscSelection(
+              repairSelectionId,
+              selectionInput,
+            );
       let selection: DiscSelection;
       if (kind === "main_feature") {
-        selection = access.catalog.createDiscSelection({
+        selection = saveSelection({
           ...common,
           kind,
         });
@@ -476,7 +502,7 @@ export async function createCatalogReviewRoute(
           return response({ error: "Invalid DVD title number" }, 400);
         }
         if (kind === "dvd_title") {
-          selection = access.catalog.createDiscSelection({
+          selection = saveSelection({
             ...common,
             kind: "dvd_title",
             titleNumber,
@@ -492,7 +518,7 @@ export async function createCatalogReviewRoute(
           ) {
             return response({ error: "Invalid DVD chapter range" }, 400);
           }
-          selection = access.catalog.createDiscSelection({
+          selection = saveSelection({
             ...common,
             kind: "dvd_chapters",
             titleNumber,
@@ -501,7 +527,10 @@ export async function createCatalogReviewRoute(
           });
         }
       }
-      return response({ discSelection: serializeDiscSelection(selection) }, 201);
+      return response(
+        { discSelection: serializeDiscSelection(selection) },
+        repairSelectionId === null ? 201 : 200,
+      );
     }
 
     if (action === "delete_disc_selection") {

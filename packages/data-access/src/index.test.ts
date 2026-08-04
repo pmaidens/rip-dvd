@@ -784,7 +784,7 @@ describe("data-access facade", () => {
     access.close();
   });
 
-  it("removes a Disc Selection's dependent jobs in bounded resumable batches", () => {
+  it("preserves dependent Encode Job history when removing a Disc Selection", () => {
     const access = openTestDatabase();
     const drive = access.catalog.upsertOpticalDrive({
       devicePath: "/dev/sr0",
@@ -814,54 +814,28 @@ describe("data-access facade", () => {
       kind: "main_feature",
     });
     access.catalog.completeCatalogReview(archive.id);
-    for (let index = 0; index < 101; index += 1) {
-      const profile = access.encodingProfiles.create({
-        key: `bounded-removal-${index}`,
-        displayName: `Bounded removal ${index}`,
-        mediaDomain: "dvd_video",
-        settings: {},
-      });
-      access.encodeJobs.enqueue({
-        discSelectionId: selection.id,
-        encodingProfileId: profile.id,
-        outputPath: `/media/movies/Bounded Removal ${index}.mkv`,
-      });
-    }
+    const profile = access.encodingProfiles.create({
+      key: "preserved-removal-history",
+      displayName: "Preserved removal history",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const job = access.encodeJobs.enqueue({
+      discSelectionId: selection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Bounded Removal.mkv",
+    });
 
-    const running = access.encodeJobs.claimNext("bounded-running-worker");
-    expect(running).not.toBeNull();
     expect(() => access.catalog.deleteDiscSelection(selection.id))
-      .toThrow(/while Encode Job .* is running/);
+      .toThrow(/cannot be deleted.*Encode Job history/i);
+    expect(access.catalog.listDiscSelections({ ids: [selection.id] }))
+      .toEqual([expect.objectContaining({ id: selection.id })]);
+    expect(access.encodeJobs.list()).toEqual([
+      expect.objectContaining({ id: job.id, status: "queued" }),
+    ]);
     expect(
       access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0],
     ).toMatchObject({ catalogReviewedAt: expect.any(Date) });
-    access.encodeJobs.fail(running!, "resolved before catalog repair");
-
-    expect(
-      access.catalog.deleteDiscSelection(selection.id),
-    ).toMatchObject({
-      id: selection.id,
-      deletedEncodeJobs: 100,
-      deletionComplete: false,
-    });
-    expect(access.catalog.listDiscSelections({ ids: [selection.id] }))
-      .toHaveLength(1);
-    expect(access.encodeJobs.list()).toHaveLength(1);
-    expect(
-      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0],
-    ).toMatchObject({ catalogReviewedAt: null });
-    expect(access.encodeJobs.claimNext("bounded-removal-worker")).toBeNull();
-
-    expect(
-      access.catalog.deleteDiscSelection(selection.id),
-    ).toMatchObject({
-      id: selection.id,
-      deletedEncodeJobs: 1,
-      deletionComplete: true,
-    });
-    expect(access.catalog.listDiscSelections({ ids: [selection.id] }))
-      .toEqual([]);
-    expect(access.encodeJobs.list()).toEqual([]);
     access.close();
   });
 
@@ -2161,20 +2135,31 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(
       access.catalog.deleteDiscSelection("noncanonical" as DiscSelectionId),
     ).toMatchObject({ id: "noncanonical" });
-    expect(
-      access.catalog.deleteDiscSelection("missing-title" as DiscSelectionId),
-    ).toMatchObject({ id: "missing-title" });
-    expect(access.encodeJobs.list(["failed"])).toEqual([]);
+    expect(access.catalog.repairDiscSelection(
+      "missing-title" as DiscSelectionId,
+      {
+        originalDiscArchiveId:
+          "scan-invalid-archive" as OriginalDiscArchiveId,
+        mediaItemId: "legacy-missing-title" as MediaItemId,
+        kind: "dvd_title",
+        titleNumber: 1,
+      },
+    )).toMatchObject({
+      id: "missing-title",
+      sourceKey: "dvd:title:1",
+      titleNumber: 1,
+    });
+    expect(access.encodeJobs.list(["failed"])).toEqual([
+      expect.objectContaining({
+        id: "unsafe-job",
+        discSelectionId: "missing-title",
+        errorMessage: expect.stringContaining("catalog review"),
+      }),
+    ]);
 
     access.catalog.createDiscSelection({
       originalDiscArchiveId: "noncanonical-archive" as OriginalDiscArchiveId,
       mediaItemId: "legacy-noncanonical" as MediaItemId,
-      kind: "dvd_title",
-      titleNumber: 1,
-    });
-    access.catalog.createDiscSelection({
-      originalDiscArchiveId: "scan-invalid-archive" as OriginalDiscArchiveId,
-      mediaItemId: "legacy-missing-title" as MediaItemId,
       kind: "dvd_title",
       titleNumber: 1,
     });
@@ -2189,6 +2174,10 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         ),
       ).toMatchObject({ catalogReviewedAt: expect.any(Date) });
     }
+    expect(() =>
+      access.encodeJobs.requeue("unsafe-job" as EncodeJobId)
+    ).toThrow(InvalidStatusTransitionError);
+    expect(access.encodeJobs.claimNext("repaired-upgrade-worker")).toBeNull();
     access.close();
   });
 

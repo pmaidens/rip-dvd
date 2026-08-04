@@ -69,9 +69,11 @@ unsafe or newly added mappings leave the archive awaiting explicit review and
 their queued jobs remain unclaimable. Bounded legacy title evidence is also
 normalized for the review response and for title/chapter selection validation,
 so archive-only imports can be reviewed without weakening current scan writes.
-Quarantined selections can be removed through the catalog facade in resumable
-100-job batches; review is reopened on the first batch, and a running dependent
-job blocks removal until that work is resolved.
+Disc Selection removal is rejected whenever any dependent Encode Job history
+exists, including completed and imported provenance. The bounded repair facade
+can correct a caller-era selection only when its dependent jobs are the failed,
+permanently ineligible records created by the upgrade guard; it preserves those
+records and reopens review. Job-free selections can still be removed normally.
 
 ## Queue attempts and progress
 

@@ -527,6 +527,98 @@ describe("Catalog Review API", () => {
     });
   });
 
+  it("reports preserved completed Encode Job history when selection removal is refused", async () => {
+    const access = dataAccessFixture.create();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const contentId = `sha256:${"c".repeat(64)}`;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: contentId,
+      scanData: {
+        schemaVersion: 2,
+        contentId,
+        titles: [{
+          number: 1,
+          durationSeconds: 2_400,
+          chapters: 8,
+          audioStreams: [],
+          subtitles: [],
+        }],
+      },
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Preserved History.iso",
+      fingerprint: contentId,
+    });
+    const movie = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Preserved History",
+    });
+    const selection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: movie.id,
+      kind: "main_feature",
+    });
+    access.catalog.completeCatalogReview(archive.id);
+    const profile = access.encodingProfiles.create({
+      key: "preserved-history",
+      displayName: "Preserved history",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const job = access.encodeJobs.enqueue({
+      discSelectionId: selection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Preserved History.mkv",
+    });
+    const claim = access.encodeJobs.claimNext("preserved-history-worker");
+    if (!claim) {
+      throw new Error("Expected Encode Job claim");
+    }
+    access.encodeJobs.complete(claim);
+
+    const response = await createCatalogReviewRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+        },
+        body: JSON.stringify({
+          action: "delete_disc_selection",
+          discSelectionId: selection.id,
+        }),
+      }),
+      archive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error:
+        `Disc Selection ${selection.id} cannot be deleted because Encode Job history must be preserved (job ${job.id})`,
+    });
+    expect(access.catalog.listDiscSelections({ ids: [selection.id] }))
+      .toHaveLength(1);
+    expect(access.encodeJobs.list(["completed"])).toEqual([
+      expect.objectContaining({
+        id: job.id,
+        discSelectionId: selection.id,
+      }),
+    ]);
+  });
+
   it("creates and edits nested Media Items, maps episode ranges, and completes review", async () => {
     const access = dataAccessFixture.create();
     const drive = access.catalog.upsertOpticalDrive({
@@ -655,6 +747,25 @@ describe("Catalog Review API", () => {
     });
     expect(firstSelectionResponse.status).toBe(201);
     const firstSelection = (await firstSelectionResponse.json()).discSelection;
+    const repairSelectionResponse = await mutate({
+      action: "repair_disc_selection",
+      discSelectionId: firstSelection.id,
+      selection: {
+        mediaItemId: firstEpisode.id,
+        kind: "dvd_chapters",
+        titleNumber: 1,
+        chapterStart: 1,
+        chapterEnd: 4,
+      },
+    });
+    expect(repairSelectionResponse.status).toBe(200);
+    await expect(repairSelectionResponse.json()).resolves.toEqual({
+      discSelection: expect.objectContaining({
+        id: firstSelection.id,
+        mediaItemId: firstEpisode.id,
+        sourceKey: "dvd:title:1:chapters:1-4",
+      }),
+    });
     expect((await mutate({
       action: "create_disc_selection",
       selection: {
