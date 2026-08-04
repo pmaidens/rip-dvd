@@ -216,22 +216,28 @@ Re-running the command is safe and preserves every existing SQLite Encode Job
 status, output, priority, progress, and error.
 
 Before publishing records from any parseable sidecar, the command atomically
-writes and synchronizes a `.rip-dvd-sqlite-catalog` cutover marker at the
-originals-library root. If marker publication fails, no imported SQLite records
-are committed. If the process stops after publication, rerunning the command
-resumes the idempotent import while the legacy queue remains inactive. The
-marker remains provisional while the exclusive cutover lease is held: a
-sidecar transaction conflict withdraws a newly published marker before legacy
-commands can resume. Imported catalog review boundaries are published only
-after the complete captured batch validates, so no earlier job can be claimed
-while a later related sidecar is still being persisted. The
-marker also records the immutable legacy-job configuration captured at cutover,
-so a later retry reports sidecar conflicts without confusing them with an
-authoritative SQLite requeue. A legacy schema-1 marker that lacks that snapshot
-is preserved, rather than upgraded, whenever SQLite cannot corroborate every
-job; the report then requires explicit operator recovery instead of guessing
-whether the sidecar changed after cutover. The importer and legacy
-archive/encode commands share kernel-held library-scoped locks: durable cutover
+clears catalog review for every related existing archive, then writes and
+synchronizes a `.rip-dvd-sqlite-catalog` cutover marker at the originals-library
+root. This makes affected SQLite jobs ineligible before the marker becomes
+durable. If marker publication fails, no imported SQLite records are committed
+and the staged archives remain pending review. If the process stops after
+publication, rerunning the command resumes the idempotent import while the
+legacy queue remains inactive. A transaction or captured-source conflict
+withdraws a newly published marker; if the marker survived an earlier crash,
+it is durably changed to `repair` instead. The repair marker still disables
+legacy commands, but a later complete, parseable live inventory can replace its
+failed snapshot after the sidecar or archive is repaired. Imported catalog
+review boundaries are published only after the complete captured batch
+validates and only when the archive has not changed since review was staged, so
+neither an earlier job nor a concurrent human selection can cross the review
+boundary. The marker also records the immutable legacy-job configuration
+captured at cutover, so a later retry reports sidecar conflicts without
+confusing them with an authoritative SQLite requeue. A legacy schema-1 marker
+that lacks that snapshot is preserved, rather than upgraded, whenever SQLite
+cannot corroborate every job; the report then requires explicit operator
+recovery instead of guessing whether the sidecar changed after cutover. The
+importer and legacy archive/encode commands share kernel-held library-scoped
+locks: durable cutover
 intent prevents new legacy batches from starting, then waits without a
 batch-duration timeout for in-flight work to drain. Locks are released by the
 operating system after a process crash and do not rely on PIDs or mutable owner

@@ -1440,6 +1440,11 @@ try {
     const originalsLibraryPath = join(root, "originals");
     const fingerprintArchivePath = join(originalsLibraryPath, "Fingerprint.iso");
     const pathOwnerArchivePath = join(originalsLibraryPath, "Path Owner.iso");
+    const repairedArchivePath = join(originalsLibraryPath, "Repaired.iso");
+    const conflictingSidecarPath = join(
+      originalsLibraryPath,
+      "b-path-owner.rip-dvd.json",
+    );
     const importedOutputPath = join(root, "movies", "Imported.mkv");
     const pathOwnerOutputPath = join(root, "movies", "Path Owner.mkv");
     const databasePath = join(root, "catalog.sqlite");
@@ -1523,7 +1528,7 @@ try {
       }),
     );
     writeFileSync(
-      join(originalsLibraryPath, "b-path-owner.rip-dvd.json"),
+      conflictingSidecarPath,
       JSON.stringify({
         schema_version: 2,
         source: pathOwnerArchivePath,
@@ -1535,8 +1540,23 @@ try {
     let observedClaim: ReturnType<
       ReturnType<typeof createDataAccess>["encodeJobs"]["claimNext"]
     > | undefined;
+    let claimAtMarkerPublication: ReturnType<
+      ReturnType<typeof createDataAccess>["encodeJobs"]["claimNext"]
+    > | undefined;
     markerFault.failure = null;
     markerFault.afterDirectorySync = () => {
+      const observer = createDataAccess({ databasePath });
+      claimAtMarkerPublication = observer.encodeJobs.claimNext(
+        "reviewed-split-marker-observer",
+      );
+      if (claimAtMarkerPublication) {
+        observer.encodeJobs.fail(
+          claimAtMarkerPublication,
+          "test-only marker publication observation",
+        );
+        observer.encodeJobs.requeue(claimAtMarkerPublication.id);
+      }
+      observer.close();
       throw new Error("injected post-marker crash");
     };
     const interrupted = createLegacySidecarDataAccess({ databasePath });
@@ -1545,6 +1565,7 @@ try {
     ).toThrow(/injected post-marker crash/);
     interrupted.close();
     expect(existsSync(markerPath)).toBe(true);
+    expect(claimAtMarkerPublication).toBeNull();
 
     const observeAfterFirstRecoveredSidecar = () => {
       const observer = createDataAccess({ databasePath });
@@ -1594,6 +1615,124 @@ try {
       }),
     ]));
     expect(access.encodeJobs.claimNext("reviewed-split-after-import")).toBeNull();
+
+    expect(JSON.parse(readFileSync(markerPath, "utf8"))).toMatchObject({
+      legacyQueueStatus: "repair",
+    });
+    writeFileSync(conflictingSidecarPath, "{ still needs repair");
+    expect(
+      access.legacySidecars.importLibrary({ originalsLibraryPath }),
+    ).toMatchObject({
+      sidecarsFound: 2,
+      sidecarsImported: 0,
+      sidecarsSkipped: 2,
+      issues: [
+        expect.objectContaining({
+          code: "corrupt_sidecar",
+          sidecarPath: conflictingSidecarPath,
+        }),
+      ],
+    });
+    expect(JSON.parse(readFileSync(markerPath, "utf8"))).toMatchObject({
+      legacyQueueStatus: "repair",
+    });
+
+    writeFileSync(repairedArchivePath, "repaired archive");
+    writeFileSync(
+      conflictingSidecarPath,
+      JSON.stringify({
+        schema_version: 2,
+        source: repairedArchivePath,
+        title: "Repaired",
+        disc_fingerprint: "reviewed-split-repaired",
+        jobs: [],
+      }),
+    );
+
+    expect(
+      access.legacySidecars.importLibrary({ originalsLibraryPath }),
+    ).toMatchObject({
+      sidecarsImported: 2,
+      sidecarsSkipped: 0,
+      issues: [],
+    });
+    expect(JSON.parse(readFileSync(markerPath, "utf8"))).toMatchObject({
+      legacyQueueStatus: "retired",
+    });
+    expect(access.catalog.listOriginalDiscArchives()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          archivePath: repairedArchivePath,
+          fingerprint: "reviewed-split-repaired",
+        }),
+      ]),
+    );
+    expect(access.encodeJobs.claimNext("reviewed-split-after-repair")).toBeNull();
+    access.close();
+  });
+
+  it("preserves a concurrent human review boundary after staging", () => {
+    const root = temporaryDirectories.create(
+      "rip-dvd-cutover-concurrent-human-review-",
+    );
+    const originalsLibraryPath = join(root, "originals");
+    const archivePath = join(originalsLibraryPath, "Concurrent.iso");
+    const sidecarPath = join(
+      originalsLibraryPath,
+      "Concurrent.rip-dvd.json",
+    );
+    const outputPath = join(root, "movies", "Concurrent.mkv");
+    const databasePath = join(root, "catalog.sqlite");
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    writeFileSync(archivePath, "concurrent archive");
+    writeFileSync(sidecarPath, JSON.stringify({
+      schema_version: 2,
+      source: archivePath,
+      title: "Concurrent",
+      disc_fingerprint: "concurrent-human-review-fingerprint",
+      titles: [{ number: 1, seconds: 600, chapters: 4 }],
+      jobs: [{
+        label: "Movie: Concurrent",
+        source: archivePath,
+        output: outputPath,
+        preset: "Fast 480p30",
+        selection: "main_feature",
+        title_number: null,
+      }],
+    }));
+    markerFault.failure = null;
+    const access = createLegacySidecarDataAccess({ databasePath });
+    expect(
+      access.legacySidecars.importLibrary({ originalsLibraryPath }),
+    ).toMatchObject({ sidecarsImported: 1, issues: [] });
+    const archive = access.catalog.listOriginalDiscArchives()[0]!;
+    expect(archive.catalogReviewedAt).not.toBeNull();
+
+    markerFault.archivePath = archivePath;
+    markerFault.afterArchiveSnapshot = () => {
+      const human = createDataAccess({ databasePath });
+      const item = human.catalog.createMediaItem({
+        kind: "bonus_feature",
+        title: "Human feature",
+      });
+      human.catalog.createDiscSelection({
+        originalDiscArchiveId: archive.id,
+        mediaItemId: item.id,
+        kind: "dvd_title",
+        titleNumber: 1,
+      });
+      human.close();
+    };
+
+    expect(
+      access.legacySidecars.importLibrary({ originalsLibraryPath }),
+    ).toMatchObject({ sidecarsImported: 1, issues: [] });
+    expect(
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0],
+    ).toMatchObject({ catalogReviewedAt: null });
+    expect(access.catalog.listDiscSelections()).toHaveLength(2);
+    expect(access.encodeJobs.claimNext("concurrent-human-review-worker"))
+      .toBeNull();
     access.close();
   });
 
@@ -1770,7 +1909,7 @@ try {
     expect(() => interrupted.legacySidecars.importLibrary({
       originalsLibraryPath,
     })).toThrow(/injected directory sync failure/i);
-    const markerBytes = readFileSync(markerPath);
+    expect(existsSync(markerPath)).toBe(true);
     interrupted.close();
 
     unlinkSync(archivePath);
@@ -1798,9 +1937,77 @@ try {
     });
     expect(retry.catalog.listOriginalDiscArchives()).toEqual([]);
     expect(retry.encodeJobs.list()).toEqual([]);
-    expect(readFileSync(markerPath)).toEqual(markerBytes);
+    expect(JSON.parse(readFileSync(markerPath, "utf8"))).toMatchObject({
+      legacyQueueStatus: "repair",
+    });
     expect(readFileSync(sidecarPath)).toEqual(sidecarBytes);
     retry.close();
+  });
+
+  it("reopens reviewed work when archived source evidence changes", () => {
+    const root = temporaryDirectories.create(
+      "rip-dvd-cutover-reviewed-source-drift-",
+    );
+    const originalsLibraryPath = join(root, "originals");
+    const archivePath = join(originalsLibraryPath, "Reviewed.iso");
+    const sidecarPath = join(
+      originalsLibraryPath,
+      "Reviewed.rip-dvd.json",
+    );
+    const outputPath = join(root, "movies", "Reviewed.mkv");
+    const databasePath = join(root, "catalog.sqlite");
+    const markerPath = join(
+      originalsLibraryPath,
+      ".rip-dvd-sqlite-catalog",
+    );
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    writeFileSync(archivePath, "reviewed archive bytes");
+    writeFileSync(sidecarPath, JSON.stringify({
+      schema_version: 2,
+      source: archivePath,
+      title: "Reviewed",
+      disc_fingerprint: "reviewed-source-drift-fingerprint",
+      jobs: [{
+        label: "Movie: Reviewed",
+        source: archivePath,
+        output: outputPath,
+        preset: "Fast 480p30",
+        selection: "main_feature",
+        title_number: null,
+      }],
+    }));
+    markerFault.failure = null;
+    const access = createLegacySidecarDataAccess({ databasePath });
+    expect(
+      access.legacySidecars.importLibrary({ originalsLibraryPath }),
+    ).toMatchObject({ sidecarsImported: 1, issues: [] });
+    const archive = access.catalog.listOriginalDiscArchives()[0]!;
+    expect(archive.catalogReviewedAt).not.toBeNull();
+
+    unlinkSync(archivePath);
+    writeFileSync(archivePath, "replacement archive bytes");
+
+    expect(
+      access.legacySidecars.importLibrary({ originalsLibraryPath }),
+    ).toMatchObject({
+      sidecarsImported: 0,
+      sidecarsSkipped: 1,
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: "duplicate_record",
+          message: expect.stringMatching(/source archive.*captured.*cutover/i),
+        }),
+      ]),
+    });
+    expect(
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0],
+    ).toMatchObject({ catalogReviewedAt: null });
+    expect(access.encodeJobs.claimNext("reviewed-source-drift-worker"))
+      .toBeNull();
+    expect(JSON.parse(readFileSync(markerPath, "utf8"))).toMatchObject({
+      legacyQueueStatus: "repair",
+    });
+    access.close();
   });
 
   it("imports the captured archive and job despite later sidecar drift", () => {
