@@ -106,7 +106,9 @@ const ARCHIVE_JOB_RECOVERY_LIMIT = 100;
 const LEGACY_ARCHIVE_RECONCILIATION_LIMIT = 4;
 const LEGACY_ARCHIVE_RECONCILIATION_BYTES = 9_000_000_000;
 const DISC_SELECTION_REVIEW_BATCH_SIZE = 100;
-const DISC_SELECTION_DELETE_JOB_BATCH_SIZE = 100;
+// Must match the fail-closed upgrade marker written by the review guard migration.
+const LEGACY_SELECTION_REVIEW_ERROR =
+  "Encode Job requires catalog review after legacy Disc Selection validation";
 const DEFAULT_MIGRATIONS_FOLDER = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../drizzle",
@@ -1474,6 +1476,10 @@ export function createDataAccessInternal(
           and(
             eq(encodeJobs.id, id),
             eq(encodeJobs.status, expectedStatus),
+            or(
+              isNull(encodeJobs.errorMessage),
+              ne(encodeJobs.errorMessage, LEGACY_SELECTION_REVIEW_ERROR),
+            ),
             exists(
               database
                 .select({ id: discSelections.id })
@@ -2708,6 +2714,175 @@ export function createDataAccessInternal(
         );
       },
 
+      repairDiscSelection(id, input) {
+        const timestamp = now();
+        return database.transaction(
+          (transaction) => {
+            const current = requireRow(
+              transaction
+                .select()
+                .from(discSelections)
+                .where(eq(discSelections.id, id))
+                .get(),
+              "disc selection",
+              id,
+            );
+            if (
+              current.originalDiscArchiveId !== input.originalDiscArchiveId
+            ) {
+              throw new DomainInvariantError(
+                "A Disc Selection repair cannot move between Original Disc Archives",
+              );
+            }
+            const protectedJob = transaction
+              .select({ id: encodeJobs.id })
+              .from(encodeJobs)
+              .where(
+                and(
+                  eq(encodeJobs.discSelectionId, id),
+                  or(
+                    ne(encodeJobs.status, "failed"),
+                    isNull(encodeJobs.errorMessage),
+                    ne(
+                      encodeJobs.errorMessage,
+                      LEGACY_SELECTION_REVIEW_ERROR,
+                    ),
+                  ),
+                ),
+              )
+              .limit(1)
+              .get();
+            if (protectedJob) {
+              throw new DomainInvariantError(
+                `Disc Selection ${id} cannot be repaired because Encode Job history must be preserved (job ${protectedJob.id})`,
+              );
+            }
+            const source = requireRow(
+              transaction
+                .select({
+                  discKind: originalDiscArchives.discKind,
+                  scanData: detectedDiscs.scanData,
+                })
+                .from(originalDiscArchives)
+                .innerJoin(
+                  detectedDiscs,
+                  eq(detectedDiscs.id, originalDiscArchives.detectedDiscId),
+                )
+                .where(eq(originalDiscArchives.id, input.originalDiscArchiveId))
+                .get(),
+              "original disc archive",
+              input.originalDiscArchiveId,
+            );
+            requireRow(
+              transaction
+                .select({ id: mediaItems.id })
+                .from(mediaItems)
+                .where(eq(mediaItems.id, input.mediaItemId))
+                .get(),
+              "media item",
+              input.mediaItemId,
+            );
+            if (source.discKind !== "dvd") {
+              throw new DomainInvariantError(
+                "DVD Disc Selections require a DVD Original Disc Archive",
+              );
+            }
+            const coordinates =
+              input.kind === "main_feature"
+                ? { titleNumber: null, chapterStart: null, chapterEnd: null }
+                : input.kind === "dvd_title"
+                  ? {
+                      titleNumber: requirePositiveSafeInteger(
+                        input.titleNumber,
+                        "titleNumber",
+                      ),
+                      chapterStart: null,
+                      chapterEnd: null,
+                    }
+                  : {
+                      titleNumber: requirePositiveSafeInteger(
+                        input.titleNumber,
+                        "titleNumber",
+                      ),
+                      chapterStart: requirePositiveSafeInteger(
+                        input.chapterStart,
+                        "chapterStart",
+                      ),
+                      chapterEnd: requirePositiveSafeInteger(
+                        input.chapterEnd,
+                        "chapterEnd",
+                      ),
+                    };
+            if (
+              coordinates.chapterStart !== null &&
+              coordinates.chapterEnd !== null &&
+              coordinates.chapterEnd < coordinates.chapterStart
+            ) {
+              throw new DomainInvariantError(
+                "chapterEnd must be greater than or equal to chapterStart",
+              );
+            }
+            if (coordinates.titleNumber !== null) {
+              const archivedTitles = decodeArchivedDvdTitles(source.scanData);
+              if (!archivedTitles) {
+                throw new DomainInvariantError(
+                  "DVD title selections require a reviewable DVD title map",
+                );
+              }
+              const title = archivedTitles.find(
+                (candidate) => candidate.number === coordinates.titleNumber,
+              );
+              if (!title) {
+                throw new DomainInvariantError(
+                  `DVD title ${coordinates.titleNumber} is not present in the archived scan`,
+                );
+              }
+              if (
+                coordinates.chapterEnd !== null &&
+                coordinates.chapterEnd > title.chapters
+              ) {
+                throw new DomainInvariantError(
+                  `chapterEnd must not exceed DVD title ${title.number}'s ${title.chapters} chapters`,
+                );
+              }
+            }
+            const sourceKey = canonicalDvdSelectionSourceKey({
+              kind: input.kind,
+              ...coordinates,
+            });
+            const selection = toDiscSelection(
+              requireRow(
+                transaction
+                  .update(discSelections)
+                  .set({
+                    mediaItemId: input.mediaItemId,
+                    sourceKey,
+                    kind: input.kind,
+                    ...coordinates,
+                    label: input.label ?? null,
+                    updatedAt: timestamp,
+                  })
+                  .where(eq(discSelections.id, id))
+                  .returning()
+                  .get(),
+                "disc selection",
+                id,
+              ),
+            );
+            transaction
+              .update(originalDiscArchives)
+              .set({
+                catalogReviewedAt: null,
+                updatedAt: nextCatalogMutationTimestamp(timestamp),
+              })
+              .where(eq(originalDiscArchives.id, input.originalDiscArchiveId))
+              .run();
+            return selection;
+          },
+          { behavior: "immediate" },
+        );
+      },
+
       deleteDiscSelection(id) {
         const timestamp = now();
         return database.transaction(
@@ -2721,51 +2896,26 @@ export function createDataAccessInternal(
               "disc selection",
               id,
             );
-            const runningJob = transaction
+            const dependentJob = transaction
               .select({ id: encodeJobs.id })
               .from(encodeJobs)
-              .where(
-                and(
-                  eq(encodeJobs.discSelectionId, id),
-                  eq(encodeJobs.status, "running"),
-                ),
-              )
+              .where(eq(encodeJobs.discSelectionId, id))
+              .limit(1)
               .get();
-            if (runningJob) {
+            if (dependentJob) {
               throw new DomainInvariantError(
-                `Disc Selection ${id} cannot be deleted while Encode Job ${runningJob.id} is running`,
+                `Disc Selection ${id} cannot be deleted because Encode Job history must be preserved (job ${dependentJob.id})`,
               );
             }
-            const dependentJobIds = transaction
-              .select({ id: encodeJobs.id })
-              .from(encodeJobs)
-              .where(eq(encodeJobs.discSelectionId, id))
-              .orderBy(asc(encodeJobs.createdAt), asc(encodeJobs.id))
-              .limit(DISC_SELECTION_DELETE_JOB_BATCH_SIZE)
-              .all()
-              .map((job) => job.id);
-            if (dependentJobIds.length > 0) {
+            requireRow(
               transaction
-                .delete(encodeJobs)
-                .where(inArray(encodeJobs.id, dependentJobIds))
-                .run();
-            }
-            const hasRemainingJob = transaction
-              .select({ id: encodeJobs.id })
-              .from(encodeJobs)
-              .where(eq(encodeJobs.discSelectionId, id))
-              .get() !== undefined;
-            if (!hasRemainingJob) {
-              requireRow(
-                transaction
-                  .delete(discSelections)
-                  .where(eq(discSelections.id, id))
-                  .returning({ id: discSelections.id })
-                  .get(),
-                "disc selection",
-                id,
-              );
-            }
+                .delete(discSelections)
+                .where(eq(discSelections.id, id))
+                .returning({ id: discSelections.id })
+                .get(),
+              "disc selection",
+              id,
+            );
             transaction
               .update(originalDiscArchives)
               .set({
@@ -2781,8 +2931,8 @@ export function createDataAccessInternal(
               .run();
             return {
               ...toDiscSelection(selection),
-              deletedEncodeJobs: dependentJobIds.length,
-              deletionComplete: !hasRemainingJob,
+              deletedEncodeJobs: 0,
+              deletionComplete: true,
             };
           },
           { behavior: "immediate" },

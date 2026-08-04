@@ -808,6 +808,49 @@ describe("legacy sidecar import", () => {
     fixture.access.close();
   });
 
+  it("preserves imported completed Encode Job provenance when removing its Disc Selection", () => {
+    const fixture = createFixture();
+    fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+    const completedJob = fixture.access.encodeJobs.list(["completed"])[0];
+    if (!completedJob) {
+      throw new Error("Expected an imported completed Encode Job");
+    }
+
+    expect(() =>
+      fixture.access.catalog.deleteDiscSelection(
+        completedJob.discSelectionId,
+      )
+    ).toThrow(/cannot be deleted.*Encode Job history/i);
+    expect(fixture.access.encodeJobs.list(["completed"])).toEqual([
+      expect.objectContaining({
+        id: completedJob.id,
+        discSelectionId: completedJob.discSelectionId,
+        outputPath: fixture.movieOutputPath,
+      }),
+    ]);
+    expect(fixture.access.catalog.listDiscSelections({
+      ids: [completedJob.discSelectionId],
+    })).toHaveLength(1);
+    const completedSelection = fixture.access.catalog.listDiscSelections({
+      ids: [completedJob.discSelectionId],
+    })[0];
+    if (!completedSelection) {
+      throw new Error("Expected imported completed Disc Selection");
+    }
+    expect(() => fixture.access.catalog.repairDiscSelection(
+      completedSelection.id,
+      {
+        originalDiscArchiveId: completedSelection.originalDiscArchiveId,
+        mediaItemId: completedSelection.mediaItemId,
+        kind: "main_feature",
+      },
+    )).toThrow(/cannot be repaired.*Encode Job history/i);
+
+    fixture.access.close();
+  });
+
   it("reports an incompatible existing Encoding Profile without assigning it to an imported job", () => {
     const fixture = createFixture();
     const incompatibleProfile = fixture.access.encodingProfiles.create({

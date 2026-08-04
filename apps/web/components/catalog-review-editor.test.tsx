@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   CatalogReviewView,
   createCatalogReviewRequestScope,
+  mutateCatalogReview,
   requestCatalogReview,
 } from "./catalog-review-editor";
 
@@ -67,6 +68,24 @@ describe("CatalogReviewView", () => {
 
     expect(requestedUrl).toBe(
       "/api/catalog-reviews/archive-1?mediaOffset=100&selectionOffset=200&editingMediaItemId=episode-1",
+    );
+  });
+
+  it("reports when Disc Selection removal is blocked to preserve Encode Job history", async () => {
+    const fetcher = async () => Response.json({
+      error:
+        "Disc Selection selection-1 cannot be deleted because Encode Job history must be preserved",
+    }, { status: 409 });
+
+    await expect(mutateCatalogReview(
+      "archive-1",
+      {
+        action: "delete_disc_selection",
+        discSelectionId: "selection-1",
+      },
+      fetcher,
+    )).rejects.toThrow(
+      "Disc Selection selection-1 cannot be deleted because Encode Job history must be preserved",
     );
   });
 
@@ -150,7 +169,9 @@ describe("CatalogReviewView", () => {
         }}
         editingMediaItemId={null}
         isSaving={false}
-        hasRequestError={false}
+        requestError={
+          "Disc Selection selection-1 cannot be deleted because Encode Job history must be preserved"
+        }
         onClose={() => undefined}
         onRetry={() => undefined}
         onEditMediaItem={() => undefined}
@@ -165,6 +186,9 @@ describe("CatalogReviewView", () => {
     );
 
     expect(html).toContain("Catalog EPISODE_DISC");
+    expect(html).toContain(
+      "Disc Selection selection-1 cannot be deleted because Encode Job history must be preserved",
+    );
     expect(html).toContain("Raw DVD title map");
     expect(html).toContain("Title 1");
     expect(html).toContain("8 chapters");
@@ -179,6 +203,8 @@ describe("CatalogReviewView", () => {
     expect(html).toContain("Create Media Item");
     expect(html).toContain("Next Media Items");
     expect(html).toContain("Add Disc Selection");
+    expect(html).toContain("Repair an existing Disc Selection");
+    expect(html).toContain('name="replacesDiscSelectionId"');
     expect(html).toContain("Remove Disc Selection");
     expect(html).toContain("Next Disc Selections");
     expect(html).toContain("Complete review");
@@ -276,7 +302,7 @@ describe("CatalogReviewView", () => {
         }}
         editingMediaItemId="episode-1"
         isSaving={false}
-        hasRequestError={false}
+        requestError={null}
         onClose={() => undefined}
         onRetry={() => undefined}
         onEditMediaItem={() => undefined}

@@ -387,11 +387,12 @@ The facade derives canonical DVD source identities and rejects duplicate source
 slices. Supported upgrades reopen caller-era scan-dependent or noncanonical
 catalogs and fail their active Encode Jobs until bounded validation completes
 again; unsafe jobs cannot be enqueued, requeued, or claimed. The review editor
-can remove a quarantined Disc Selection and its non-running dependent Encode
-Jobs, after which a canonical replacement can be created and review explicitly
-completed. Each request removes at most 100 dependent jobs and leaves the
-selection visible for the next bounded request when more remain; running work
-must be resolved before removal. Archived scan
+rejects Disc Selection removal whenever any dependent Encode Job history
+exists, including completed or imported provenance. A separate repair action
+can correct a quarantined caller-era mapping against archived scan evidence
+without deleting its failed job record; that migration job remains permanently
+ineligible. Job-free mappings can still be removed normally, and every catalog
+change reopens explicit review. Archived scan
 evidence is immutable, while rediscovery may still refresh observation metadata
 such as the volume label. Legacy sidecar import cannot restore review across an
 unsafe or newly added mapping, and bounded legacy title evidence remains usable
