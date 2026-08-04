@@ -321,6 +321,7 @@ export interface CatalogAccess {
   listDiscSelections(options?: {
     ids?: readonly DiscSelectionId[];
     originalDiscArchiveId?: OriginalDiscArchiveId;
+    encodeEligibleOnly?: boolean;
     limit?: number;
     offset?: number;
   }): DiscSelection[];

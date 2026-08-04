@@ -617,6 +617,25 @@ workflow at `GET`, `POST`, and `PATCH /api/encoding-profiles`; it is fixed to
 the `dvd_video` media domain while the shared facade requires explicit domain
 scope for version and activation commands.
 
+### Queue Encode Jobs
+
+The operations dashboard's Queue Encode Jobs workspace lists only active Disc
+Selections from completed catalog reviews and active DVD video Encoding Profile
+versions. Choose one of each and an absolute final `.mkv` path inside
+`RIP_DVD_MEDIA_LIBRARY_PATH`. Queueing the same Disc Selection and profile
+version again returns the existing logical Encode Job. If that job is failed or
+completed, the same request resets its row to queued instead of creating new
+history; the Encode Jobs dashboard also exposes Retry encode and Re-encode
+actions for those terminal states. Queued and running rows are left unchanged.
+
+The queue reserves each final output path for one logical job and keeps the
+database uniqueness constraint on Disc Selection plus Encoding Profile version.
+The dashboard shows the referenced profile version with queued, running,
+completed, and failed state. `GET /api/encode-jobs` provides bounded eligible
+options, `POST /api/encode-jobs` queues or updates the logical job, and
+`PATCH /api/encode-jobs` retries a terminal job. Mutations require the same
+trusted Origin and Host checks as archive approval.
+
 Visit `/health` for the visible service/database status or `/api/health` for
 the machine-readable health response. Validate schema history with
 `pnpm db:check`; the normal `pnpm check` command runs the facade integration

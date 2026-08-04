@@ -3105,8 +3105,25 @@ export function createDataAccessInternal(
                 options.originalDiscArchiveId,
               )
             : undefined,
-          options?.ids === undefined
+          options?.ids === undefined || options.encodeEligibleOnly
             ? eq(discSelections.isCatalogActive, true)
+            : undefined,
+          options?.encodeEligibleOnly
+            ? exists(
+                database
+                  .select({ id: originalDiscArchives.id })
+                  .from(originalDiscArchives)
+                  .where(
+                    and(
+                      eq(
+                        originalDiscArchives.id,
+                        discSelections.originalDiscArchiveId,
+                      ),
+                      isNotNull(originalDiscArchives.catalogReviewedAt),
+                      eq(originalDiscArchives.legacyCutoverPending, false),
+                    ),
+                  ),
+              )
             : undefined,
         ].filter((condition) => condition !== undefined);
         const query = database
@@ -3523,6 +3540,67 @@ export function createDataAccessInternal(
               selectionReview.originalDiscArchiveId,
               transaction,
             );
+            const existing = transaction
+              .select()
+              .from(encodeJobs)
+              .where(
+                and(
+                  eq(encodeJobs.discSelectionId, input.discSelectionId),
+                  eq(encodeJobs.encodingProfileId, input.encodingProfileId),
+                ),
+              )
+              .get();
+            if (
+              existing &&
+              existing.status !== "failed" &&
+              existing.status !== "completed"
+            ) {
+              return existing;
+            }
+            const outputOwner = transaction
+              .select({ id: encodeJobs.id })
+              .from(encodeJobs)
+              .where(
+                and(
+                  eq(encodeJobs.outputPath, outputPath),
+                  eq(encodeJobs.reservesOutputPath, true),
+                  or(
+                    ne(encodeJobs.discSelectionId, input.discSelectionId),
+                    ne(encodeJobs.encodingProfileId, input.encodingProfileId),
+                  ),
+                ),
+              )
+              .limit(1)
+              .get();
+            if (outputOwner) {
+              throw new DomainInvariantError(
+                `Encode Job output is already assigned: ${outputPath}`,
+              );
+            }
+            if (existing) {
+              return encodeJobQueue.requeue(existing.id, {
+                outputPath,
+                priority: input.priority ?? 0,
+              });
+            }
+            const profile = requireRow(
+              transaction
+                .select({
+                  id: encodingProfiles.id,
+                  isActive: encodingProfiles.isActive,
+                  mediaDomain: encodingProfiles.mediaDomain,
+                })
+                .from(encodingProfiles)
+                .where(eq(encodingProfiles.id, input.encodingProfileId))
+                .get(),
+              "encoding profile",
+              input.encodingProfileId,
+            );
+            if (!profile.isActive || profile.mediaDomain !== "dvd_video") {
+              throw new DomainInvariantError(
+                "Encode Jobs require an active DVD video Encoding Profile",
+              );
+            }
             transaction
               .insert(encodeJobs)
               .values({
@@ -3542,7 +3620,7 @@ export function createDataAccessInternal(
               })
               .run();
 
-            const existing = requireRow(
+            return requireRow(
               transaction
                 .select()
                 .from(encodeJobs)
@@ -3556,16 +3634,6 @@ export function createDataAccessInternal(
               "encode job",
               `${input.discSelectionId}/${input.encodingProfileId}`,
             );
-            if (
-              existing.status === "failed" ||
-              existing.status === "completed"
-            ) {
-              return encodeJobQueue.requeue(existing.id, {
-                outputPath,
-                priority: input.priority ?? 0,
-              });
-            }
-            return existing;
           },
           { behavior: "immediate" },
         );

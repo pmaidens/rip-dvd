@@ -185,7 +185,7 @@ describe("GET /api/dashboard/events", () => {
       snapshot.encodeJobs.items.every(
         (job) =>
           job.mediaTitle !== "Unknown Media Item" &&
-          job.encodingProfileName === "Activity profile",
+          job.encodingProfileName === "Activity profile · Version 1",
       ),
     ).toBe(true);
     expect(snapshot.catalogReview.items).toHaveLength(20);
