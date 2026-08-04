@@ -672,11 +672,15 @@ try {
       kind: "main_feature",
     });
     access.catalog.completeCatalogReview(archive.id);
+    const preset = "Fast 480p30";
     const profile = access.encodingProfiles.create({
-      key: "cutover-attempt",
-      displayName: "Cutover attempt",
+      key: `legacy-handbrake-fast-480p30-${createHash("sha256")
+        .update(preset)
+        .digest("hex")
+        .slice(0, 12)}`,
+      displayName: preset,
       mediaDomain: "dvd_video",
-      settings: {},
+      settings: { preset },
     });
     access.encodeJobs.enqueue({
       discSelectionId: selection.id,
@@ -696,7 +700,7 @@ try {
         label: "Movie: Attempt",
         source: archivePath,
         output: outputPath,
-        preset: "Fast 480p30",
+        preset,
         selection: "main_feature",
         title_number: null,
       }],
@@ -709,7 +713,23 @@ try {
       StaleJobAttemptError,
     );
     expect(access.encodeJobs.list()).toEqual([
-      expect.objectContaining({ id: running.id, status: "running" }),
+      expect.objectContaining({
+        id: running.id,
+        status: "failed",
+        completedAt: null,
+        errorMessage:
+          "Encode Job invalidated by legacy catalog cutover repair",
+      }),
+    ]);
+    markerFault.failure = null;
+    expect(
+      access.legacySidecars.importLibrary({ originalsLibraryPath }),
+    ).toMatchObject({ sidecarsImported: 1, sidecarsSkipped: 0, issues: [] });
+    expect(() => access.encodeJobs.complete(running)).toThrow(
+      StaleJobAttemptError,
+    );
+    expect(access.encodeJobs.list()).toEqual([
+      expect.objectContaining({ id: running.id, status: "failed" }),
     ]);
     access.close();
   });
@@ -1045,6 +1065,8 @@ try {
     const initial = createLegacySidecarDataAccess({ databasePath });
     expect(initial.legacySidecars.importLibrary({ originalsLibraryPath }))
       .toMatchObject({ sidecarsImported: 1, issues: [] });
+    const originalArchiveId = initial.catalog
+      .listOriginalDiscArchives()[0]!.id;
     initial.close();
     const retiredMarker = JSON.parse(readFileSync(markerPath, "utf8")) as {
       legacyQueueStatus: string;
@@ -1066,13 +1088,25 @@ try {
       "anchored-correction-b-fingerprint",
       "B",
     );
-    markerFault.failure = "rename";
+    markerFault.failure = null;
+    markerFault.afterDirectorySync = () => {
+      markerFault.failure = "directory-sync";
+    };
     const failedReplacement = createLegacySidecarDataAccess({ databasePath });
     expect(() =>
       failedReplacement.legacySidecars.importLibrary({
         originalsLibraryPath,
       }),
-    ).toThrow(/injected marker write failure/);
+    ).toThrow(/injected directory sync failure/);
+    expect(JSON.parse(readFileSync(markerPath, "utf8"))).toMatchObject({
+      legacyQueueStatus: "retired",
+      legacySidecars: expect.arrayContaining([
+        expect.objectContaining({
+          archivePath: join(originalsLibraryPath, "A-repaired.iso"),
+          fingerprint: "anchored-correction-a-repaired-fingerprint",
+        }),
+      ]),
+    });
     failedReplacement.close();
 
     markerFault.failure = null;
@@ -1088,18 +1122,29 @@ try {
     expect(JSON.parse(readFileSync(markerPath, "utf8"))).toMatchObject({
       legacyQueueStatus: "retired",
     });
-    expect(retry.catalog.listOriginalDiscArchives()).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          archivePath: join(originalsLibraryPath, "A-repaired.iso"),
-          fingerprint: "anchored-correction-a-repaired-fingerprint",
-        }),
-        expect.objectContaining({
-          archivePath: join(originalsLibraryPath, "B.iso"),
-          fingerprint: "anchored-correction-b-fingerprint",
-        }),
-      ]),
+    const archives = retry.catalog.listOriginalDiscArchives();
+    expect(archives).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        archivePath: join(originalsLibraryPath, "A-repaired.iso"),
+        fingerprint: "anchored-correction-a-repaired-fingerprint",
+      }),
+      expect.objectContaining({
+        archivePath: join(originalsLibraryPath, "B.iso"),
+        fingerprint: "anchored-correction-b-fingerprint",
+      }),
+    ]));
+    expect(archives).toEqual(
+      archives.map((archive) => expect.objectContaining({
+        id: archive.id,
+        legacyCutoverPending: false,
+      })),
     );
+    expect(archives).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: originalArchiveId,
+        legacyCutoverPending: false,
+      }),
+    ]));
     retry.close();
   });
 

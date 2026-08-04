@@ -1,7 +1,15 @@
 import { realpathSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 
-import { and, eq, inArray, isNull, or } from "drizzle-orm";
+import {
+  and,
+  eq,
+  exists,
+  inArray,
+  isNotNull,
+  isNull,
+  or,
+} from "drizzle-orm";
 
 import { DomainInvariantError } from "../errors.js";
 import type {
@@ -131,6 +139,7 @@ export function createLegacySidecarImportAccess(
       ]);
       const stageCatalogReviewBoundary = (
         publicationDiscoveries: readonly LegacySidecarDiscovery[],
+        options: { allowStagedIdentityReplacement?: boolean } = {},
       ) => {
         return database.transaction((transaction) => {
           const representedSidecars = publicationDiscoveries.flatMap(
@@ -201,11 +210,24 @@ export function createLegacySidecarImportAccess(
               })
               .run();
           }
-          for (const discovery of publicationDiscoveries) {
-            if (discovery.outcome !== "parsed") {
-              continue;
-            }
-            const { sidecar } = discovery;
+          const markerAnchoredStagedIdentities =
+            options.allowStagedIdentityReplacement
+              ? existingStagedSidecars.filter((staged) => {
+                  const represented = representedSidecarsByPath.get(
+                    staged.sidecarPath,
+                  );
+                  return (
+                    represented !== undefined &&
+                    (represented.archivePath !== staged.archivePath ||
+                      represented.fingerprint !== staged.fingerprint)
+                  );
+                })
+              : [];
+          const newlyFencedArchiveIds = new Set<OriginalDiscArchiveId>();
+          for (const sidecar of [
+            ...representedSidecars,
+            ...markerAnchoredStagedIdentities,
+          ]) {
             const relatedArchives = transaction
               .select()
               .from(originalDiscArchives)
@@ -224,6 +246,7 @@ export function createLegacySidecarImportAccess(
               .all();
             for (const archive of relatedArchives) {
               cutoverFenceArchiveIds.add(archive.id);
+              newlyFencedArchiveIds.add(archive.id);
               if (archive.catalogReviewedAt !== null) {
                 if (!reviewCandidates.has(archive.fingerprint)) {
                   reviewCandidates.set(archive.fingerprint, {
@@ -243,6 +266,46 @@ export function createLegacySidecarImportAccess(
                 .where(eq(originalDiscArchives.id, archive.id))
                 .run();
             }
+          }
+          if (newlyFencedArchiveIds.size > 0) {
+            transaction
+              .update(encodeJobs)
+              .set({
+                status: "failed",
+                completedAt: null,
+                errorMessage:
+                  "Encode Job invalidated by legacy catalog cutover repair",
+                updatedAt: now(),
+              })
+              .where(and(
+                or(
+                  eq(encodeJobs.status, "running"),
+                  and(
+                    eq(encodeJobs.status, "completed"),
+                    isNotNull(encodeJobs.claimToken),
+                  ),
+                ),
+                exists(
+                  transaction
+                    .select({ id: discSelections.id })
+                    .from(discSelections)
+                    .innerJoin(
+                      originalDiscArchives,
+                      eq(
+                        originalDiscArchives.id,
+                        discSelections.originalDiscArchiveId,
+                      ),
+                    )
+                    .where(and(
+                      eq(discSelections.id, encodeJobs.discSelectionId),
+                      inArray(
+                        originalDiscArchives.id,
+                        [...newlyFencedArchiveIds],
+                      ),
+                    )),
+                ),
+              ))
+              .run();
           }
 
           const stagedSidecars = transaction
@@ -270,6 +333,8 @@ export function createLegacySidecarImportAccess(
             return (
               (represented?.archivePath === staged.archivePath &&
                 represented.fingerprint === staged.fingerprint) ||
+              (options.allowStagedIdentityReplacement === true &&
+                represented !== undefined) ||
               previouslyConfirmedStagedIdentities.has(
                 stagedIdentityKey(staged),
               )
@@ -324,8 +389,10 @@ export function createLegacySidecarImportAccess(
               staged.sidecarPath,
             );
             if (
-              represented?.archivePath === staged.archivePath &&
-              represented.fingerprint === staged.fingerprint
+              (represented?.archivePath === staged.archivePath &&
+                represented.fingerprint === staged.fingerprint) ||
+              (options.allowStagedIdentityReplacement === true &&
+                represented !== undefined)
             ) {
               previouslyConfirmedStagedIdentities.add(
                 stagedIdentityKey(staged),
