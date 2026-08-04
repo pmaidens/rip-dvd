@@ -156,16 +156,22 @@ a completed Encode Job uses its output file modification time. Re-import never
 replaces an existing SQLite Encode Job's status, output, priority, progress, or
 error, including an intentional retry.
 
-Before committing any imported records, the migration-only entrypoint
-atomically writes and synchronizes a `.rip-dvd-sqlite-catalog` marker at the
-originals-library root. A marker failure exposes no imported SQLite state; a
-restart after marker publication safely resumes the idempotent import with the
-legacy queue already inactive. The marker records the immutable logical-job
-configuration captured at cutover, allowing restart/retry to report later
-sidecar conflicts while preserving authoritative SQLite requeues. While the
-exclusive lease is still held, the first marker is provisional: a transaction
-conflict withdraws it, and catalog review timestamps are committed together
-only after the complete captured batch validates. A shared
+Before committing any imported records, the migration-only entrypoint clears
+catalog review for related existing archives in one immediate transaction,
+then atomically writes and synchronizes a `.rip-dvd-sqlite-catalog` marker at
+the originals-library root. A marker failure exposes no imported SQLite state
+and leaves those archives pending review; a restart after marker publication
+safely resumes the idempotent import with the legacy queue already inactive.
+The marker records the immutable logical-job configuration captured at
+cutover, allowing restart/retry to report later sidecar conflicts while
+preserving authoritative SQLite requeues. While the exclusive lease is still
+held, a transaction or captured-source conflict withdraws a newly published
+marker. A marker retained across an earlier crash is instead changed to a
+`repair` state: its presence continues to block legacy workers, while a later
+complete and parseable live inventory can replace the failed snapshot after
+repair. Catalog review timestamps are committed together only after the
+complete captured batch validates and only for archives unchanged since the
+review boundary was staged. A shared
 library-scoped lease serializes discovery, marker publication, and import with
 in-flight legacy archive/encode batches. It never writes the sidecars
 themselves. All legacy archive and queue commands refuse a marked library,

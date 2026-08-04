@@ -1,7 +1,7 @@
 import { realpathSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 
-import { and, eq, or } from "drizzle-orm";
+import { and, eq, isNull, or } from "drizzle-orm";
 
 import { DomainInvariantError } from "../errors.js";
 import type {
@@ -27,6 +27,7 @@ import {
   resolveLegacyOriginalsLibrary,
   retireLegacySidecarQueue,
   type LegacyQueueJobSnapshot,
+  type LegacySidecarDiscovery,
   type ParsedLegacyJob,
 } from "./legacy-sidecars.js";
 import {
@@ -105,9 +106,65 @@ export function createLegacySidecarImportAccess(
         recordsUnchanged: 0,
         issues: [...discoveryBatch.scanIssues],
       };
+      const reviewCandidates = new Map<
+        string,
+        {
+          archiveId: OriginalDiscArchiveId;
+          archiveUpdatedAt: Date;
+          reviewedAt: Date;
+        }
+      >();
+      const stagedReviewArchiveIds = new Set<OriginalDiscArchiveId>();
+      const stageCatalogReviewBoundary = (
+        publicationDiscoveries: readonly LegacySidecarDiscovery[],
+      ) => {
+        database.transaction((transaction) => {
+          for (const discovery of publicationDiscoveries) {
+            if (discovery.outcome !== "parsed") {
+              continue;
+            }
+            const { sidecar } = discovery;
+            const relatedArchives = transaction
+              .select()
+              .from(originalDiscArchives)
+              .where(
+                or(
+                  eq(
+                    originalDiscArchives.fingerprint,
+                    sidecar.fingerprint,
+                  ),
+                  eq(
+                    originalDiscArchives.archivePath,
+                    sidecar.archivePath,
+                  ),
+                ),
+              )
+              .all();
+            for (const archive of relatedArchives) {
+              if (archive.catalogReviewedAt === null) {
+                continue;
+              }
+              if (!reviewCandidates.has(archive.fingerprint)) {
+                reviewCandidates.set(archive.fingerprint, {
+                  archiveId: archive.id,
+                  archiveUpdatedAt: archive.updatedAt,
+                  reviewedAt: archive.catalogReviewedAt,
+                });
+              }
+              stagedReviewArchiveIds.add(archive.id);
+              transaction
+                .update(originalDiscArchives)
+                .set({ catalogReviewedAt: null })
+                .where(eq(originalDiscArchives.id, archive.id))
+                .run();
+            }
+          }
+        }, { behavior: "immediate" });
+      };
       const cutover = retireLegacySidecarQueue(
         originalsLibraryPath,
         discoveryBatch,
+        stageCatalogReviewBoundary,
       );
       if (!cutover) {
         report.sidecarsSkipped = discoveryBatch.sidecarsFound;
@@ -159,16 +216,9 @@ export function createLegacySidecarImportAccess(
       >();
       const fingerprintsRequiringHumanReview = new Set<string>();
       const fingerprintsCreatedDuringImport = new Set<string>();
-      const reviewCandidates = new Map<
-        string,
-        { archiveId: OriginalDiscArchiveId; reviewedAt: Date }
-      >();
-      const stagedReviewArchiveIds = new Set<OriginalDiscArchiveId>();
       let hasIncompleteCapturedWork = false;
       const withdrawIncompletePublication = () => {
-        if (!cutover.wasAlreadyPublished) {
-          cutover.withdrawPublication();
-        }
+        cutover.withdrawPublication();
       };
       const reconciledSnapshotKeys = new Set<LegacyJobLogicalKey>();
       const trustedSchemaOneSnapshots = new Map<
@@ -178,54 +228,13 @@ export function createLegacySidecarImportAccess(
       let schemaOneHasUnresolvedWork =
         cutover.mode === "schema-one" && discoveries.length === 0;
 
-      if (cutover.mode === "snapshot") {
-        database.transaction((transaction) => {
-          for (const discovery of discoveries) {
-            if (discovery.outcome !== "parsed") {
-              continue;
-            }
-            const { sidecar } = discovery;
-            const relatedArchives = transaction
-              .select()
-              .from(originalDiscArchives)
-              .where(
-                or(
-                  eq(
-                    originalDiscArchives.fingerprint,
-                    sidecar.fingerprint,
-                  ),
-                  eq(
-                    originalDiscArchives.archivePath,
-                    sidecar.archivePath,
-                  ),
-                ),
-              )
-              .all();
-            for (const archive of relatedArchives) {
-              if (archive.catalogReviewedAt === null) {
-                continue;
-              }
-              if (!reviewCandidates.has(archive.fingerprint)) {
-                reviewCandidates.set(archive.fingerprint, {
-                  archiveId: archive.id,
-                  reviewedAt: archive.catalogReviewedAt,
-                });
-              }
-              stagedReviewArchiveIds.add(archive.id);
-              transaction
-                .update(originalDiscArchives)
-                .set({ catalogReviewedAt: null })
-                .where(eq(originalDiscArchives.id, archive.id))
-                .run();
-            }
-          }
-        }, { behavior: "immediate" });
-      }
-
       for (const discovery of discoveries) {
         if (discovery.outcome === "skipped") {
           if (cutover.mode === "schema-one") {
             schemaOneHasUnresolvedWork = true;
+          } else if (cutover.mode === "snapshot") {
+            hasIncompleteCapturedWork = true;
+            withdrawIncompletePublication();
           }
           report.sidecarsSkipped += 1;
           report.issues.push(discovery.issue);
@@ -428,7 +437,11 @@ export function createLegacySidecarImportAccess(
         const persistedJobs: ParsedLegacyJob[] = [];
         let createdArchiveInTransaction = false;
         let reviewCandidate:
-          | { archiveId: OriginalDiscArchiveId; reviewedAt: Date }
+          | {
+              archiveId: OriginalDiscArchiveId;
+              archiveUpdatedAt: Date;
+              reviewedAt: Date;
+            }
           | undefined;
         if (
           sidecar.issues.length > 0 ||
@@ -1056,6 +1069,7 @@ export function createLegacySidecarImportAccess(
               ) {
                 reviewCandidate = {
                   archiveId: archive.id,
+                  archiveUpdatedAt: archive.updatedAt,
                   reviewedAt: importedUpdatedAt,
                 };
               }
@@ -1314,8 +1328,6 @@ export function createLegacySidecarImportAccess(
           }
         }
       }
-
-
       if (hasIncompleteCapturedWork) {
         withdrawIncompletePublication();
       } else if (reviewCandidates.size > 0) {
@@ -1333,7 +1345,16 @@ export function createLegacySidecarImportAccess(
             transaction
               .update(originalDiscArchives)
               .set({ catalogReviewedAt: candidate.reviewedAt })
-              .where(eq(originalDiscArchives.id, candidate.archiveId))
+              .where(
+                and(
+                  eq(originalDiscArchives.id, candidate.archiveId),
+                  eq(
+                    originalDiscArchives.updatedAt,
+                    candidate.archiveUpdatedAt,
+                  ),
+                  isNull(originalDiscArchives.catalogReviewedAt),
+                ),
+              )
               .run();
           }
         }, { behavior: "immediate" });
