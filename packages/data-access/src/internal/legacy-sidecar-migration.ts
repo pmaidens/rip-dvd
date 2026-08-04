@@ -163,7 +163,13 @@ export function createLegacySidecarImportAccess(
         string,
         { archiveId: OriginalDiscArchiveId; reviewedAt: Date }
       >();
+      const stagedReviewArchiveIds = new Set<OriginalDiscArchiveId>();
       let hasIncompleteCapturedWork = false;
+      const withdrawIncompletePublication = () => {
+        if (!cutover.wasAlreadyPublished) {
+          cutover.withdrawPublication();
+        }
+      };
       const reconciledSnapshotKeys = new Set<LegacyJobLogicalKey>();
       const trustedSchemaOneSnapshots = new Map<
         LegacyJobLogicalKey,
@@ -172,7 +178,7 @@ export function createLegacySidecarImportAccess(
       let schemaOneHasUnresolvedWork =
         cutover.mode === "schema-one" && discoveries.length === 0;
 
-      if (!cutover.wasAlreadyPublished) {
+      if (cutover.mode === "snapshot") {
         database.transaction((transaction) => {
           for (const discovery of discoveries) {
             if (discovery.outcome !== "parsed") {
@@ -205,6 +211,7 @@ export function createLegacySidecarImportAccess(
                   reviewedAt: archive.catalogReviewedAt,
                 });
               }
+              stagedReviewArchiveIds.add(archive.id);
               transaction
                 .update(originalDiscArchives)
                 .set({ catalogReviewedAt: null })
@@ -1012,7 +1019,8 @@ export function createLegacySidecarImportAccess(
             if (archive.catalogReviewedAt !== null || hasDiscSelection) {
               if (
                 cutover.wasAlreadyPublished &&
-                archive.catalogReviewedAt === null
+                archive.catalogReviewedAt === null &&
+                !stagedReviewArchiveIds.has(archive.id)
               ) {
                 fingerprintsRequiringHumanReview.add(sidecar.fingerprint);
               }
@@ -1063,10 +1071,20 @@ export function createLegacySidecarImportAccess(
               .update(originalDiscArchives)
               .set({ catalogReviewedAt: null })
               .where(
-                eq(originalDiscArchives.fingerprint, sidecar.fingerprint),
+                or(
+                  eq(
+                    originalDiscArchives.fingerprint,
+                    sidecar.fingerprint,
+                  ),
+                  eq(
+                    originalDiscArchives.archivePath,
+                    sidecar.archivePath,
+                  ),
+                ),
               )
               .run();
           }, { behavior: "immediate" });
+          withdrawIncompletePublication();
           report.sidecarsSkipped += 1;
           report.issues.push({
             code:
@@ -1255,6 +1273,7 @@ export function createLegacySidecarImportAccess(
                 .where(eq(originalDiscArchives.fingerprint, fingerprint))
                 .run();
             }, { behavior: "immediate" });
+            withdrawIncompletePublication();
             report.issues.push({
               code: "invalid_job",
               jobIndex: snapshot.jobIndex,
@@ -1285,6 +1304,7 @@ export function createLegacySidecarImportAccess(
             hasIncompleteCapturedWork = true;
             fingerprintsRequiringHumanReview.add(snapshot.fingerprint);
             reviewCandidates.delete(snapshot.fingerprint);
+            withdrawIncompletePublication();
             report.issues.push({
               code: "invalid_sidecar",
               message:
@@ -1297,10 +1317,8 @@ export function createLegacySidecarImportAccess(
 
 
       if (hasIncompleteCapturedWork) {
-        if (!cutover.wasAlreadyPublished) {
-          cutover.withdrawPublication();
-        }
-      } else if (!cutover.wasAlreadyPublished && reviewCandidates.size > 0) {
+        withdrawIncompletePublication();
+      } else if (reviewCandidates.size > 0) {
         database.transaction((transaction) => {
           for (const [fingerprint, candidate] of reviewCandidates) {
             if (fingerprintsRequiringHumanReview.has(fingerprint)) {
