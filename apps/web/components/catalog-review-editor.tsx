@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 
 import type { DvdTitle } from "@rip-dvd/data-access/dvd-scan";
 
@@ -541,6 +541,37 @@ type CatalogReviewFetch = (
   init?: RequestInit,
 ) => Promise<Response>;
 
+export function createCatalogReviewRequestScope(initialArchiveId: string) {
+  let activeArchiveId: string | null = initialArchiveId;
+  let currentRequest = Symbol("catalog-review-request");
+  return {
+    activate(archiveId: string) {
+      if (activeArchiveId !== archiveId) {
+        activeArchiveId = archiveId;
+        currentRequest = Symbol("catalog-review-request");
+      }
+    },
+    begin(archiveId: string): symbol | null {
+      if (activeArchiveId !== archiveId) {
+        return null;
+      }
+      currentRequest = Symbol("catalog-review-request");
+      return currentRequest;
+    },
+    deactivate(archiveId: string) {
+      if (activeArchiveId === archiveId) {
+        activeArchiveId = null;
+        currentRequest = Symbol("catalog-review-request");
+      }
+    },
+    isCurrent(archiveId: string, request: symbol): boolean {
+      return (
+        activeArchiveId === archiveId && currentRequest === request
+      );
+    },
+  };
+}
+
 export async function requestCatalogReview(
   archiveId: string,
   mediaItemOffset: number,
@@ -603,8 +634,17 @@ export function CatalogReviewEditor({
   const [discSelectionOffset, setDiscSelectionOffset] = useState(0);
   const [isSaving, setIsSaving] = useState(false);
   const [hasRequestError, setHasRequestError] = useState(false);
+  const requestScope = useRef<
+    ReturnType<typeof createCatalogReviewRequestScope> | null
+  >(null);
+  requestScope.current ??= createCatalogReviewRequestScope(archiveId);
+  requestScope.current.activate(archiveId);
 
   const load = useCallback(async () => {
+    const request = requestScope.current?.begin(archiveId);
+    if (request === null || request === undefined) {
+      return;
+    }
     try {
       const review = await requestCatalogReview(
         archiveId,
@@ -612,9 +652,15 @@ export function CatalogReviewEditor({
         discSelectionOffset,
         editingMediaItemId,
       );
+      if (!requestScope.current?.isCurrent(archiveId, request)) {
+        return;
+      }
       setState({ status: "loaded", review });
       setHasRequestError(false);
     } catch {
+      if (!requestScope.current?.isCurrent(archiveId, request)) {
+        return;
+      }
       setState({ status: "error" });
     }
   }, [
@@ -628,6 +674,11 @@ export function CatalogReviewEditor({
     setState({ status: "loading" });
     void load();
   }, [load]);
+
+  useEffect(
+    () => () => requestScope.current?.deactivate(archiveId),
+    [archiveId],
+  );
 
   async function mutate(body: unknown, complete = false) {
     if (isSaving) {

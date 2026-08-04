@@ -569,6 +569,7 @@ export function OperationsDashboard() {
 
       {catalogReviewArchiveId ? (
         <CatalogReviewEditor
+          key={catalogReviewArchiveId}
           archiveId={catalogReviewArchiveId}
           onClose={() => setCatalogReviewArchiveId(null)}
           onCompleted={() => {
