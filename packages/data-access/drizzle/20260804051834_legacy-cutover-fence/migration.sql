@@ -1,0 +1,1 @@
+ALTER TABLE `original_disc_archives` ADD `legacy_cutover_pending` integer DEFAULT false NOT NULL;

@@ -43,10 +43,10 @@ function seedEncodeJob(access: LegacySidecarDataAccess): void {
   const selection = access.catalog.createDiscSelection({
     originalDiscArchiveId: archive.id,
     mediaItemId: mediaItem.id,
-    sourceKey: "main-feature",
     kind: "main_feature",
     label: "Main feature",
   });
+  access.catalog.completeCatalogReview(archive.id);
   const profile = access.encodingProfiles.create({
     key: "enrichment-profile",
     displayName: "Enriched profile",
@@ -61,6 +61,48 @@ function seedEncodeJob(access: LegacySidecarDataAccess): void {
 }
 
 describe("readDashboardSnapshot", () => {
+  it("keeps a partially mapped archive visible until catalog review completes", () => {
+    const access = dataAccessFixture.create();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "partial-review-disc",
+      volumeLabel: "PARTIAL_REVIEW",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Partial Review.iso",
+      fingerprint: "partial-review-disc",
+    });
+    const item = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Partial Review",
+    });
+    access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: item.id,
+      kind: "main_feature",
+    });
+
+    expect(readDashboardSnapshot(access, { activityLimit: 20 }).catalogReview)
+      .toEqual({
+        status: "loaded",
+        items: [expect.objectContaining({ id: archive.id })],
+      });
+
+    access.catalog.completeCatalogReview(archive.id);
+    expect(readDashboardSnapshot(access, { activityLimit: 20 }).catalogReview)
+      .toEqual({ status: "loaded", items: [] });
+  });
+
   it("shows imported legacy catalog review and Encode Job state", () => {
     const libraryRoot = mkdtempSync(join(tmpdir(), "rip-dvd-dashboard-import-"));
     const originalsLibraryPath = join(libraryRoot, "originals");
@@ -227,10 +269,10 @@ describe("readDashboardSnapshot", () => {
     const selection = access.catalog.createDiscSelection({
       originalDiscArchiveId: catalogedArchive.id,
       mediaItemId: mediaItem.id,
-      sourceKey: "main-feature",
       kind: "main_feature",
       label: "Main feature",
     });
+    access.catalog.completeCatalogReview(catalogedArchive.id);
     const profile = access.encodingProfiles.create({
       key: "dvd-library",
       displayName: "DVD library",
@@ -489,7 +531,7 @@ describe("readDashboardSnapshot", () => {
 
     expect(listMediaItems).toHaveBeenCalledWith({ ids: [] });
     expect(dashboard.encodeJobs).toEqual({ status: "error" });
-    expect(dashboard.catalogReview).toEqual({ status: "error" });
+    expect(dashboard.catalogReview).toEqual({ status: "loaded", items: [] });
   });
 
   it("marks drive-dependent sections unavailable when the drive read fails", () => {
@@ -616,7 +658,7 @@ describe("readDashboardSnapshot", () => {
     expect(dashboard.catalogReview.status).toBe("loaded");
   });
 
-  it("marks both selection-dependent sections unavailable when selections fail", () => {
+  it("keeps Catalog Review available when Encode Job selection enrichment fails", () => {
     const access = dataAccessFixture.create();
     seedEncodeJob(access);
 
@@ -629,7 +671,7 @@ describe("readDashboardSnapshot", () => {
     }));
 
     expect(dashboard.encodeJobs).toEqual({ status: "error" });
-    expect(dashboard.catalogReview).toEqual({ status: "error" });
+    expect(dashboard.catalogReview).toEqual({ status: "loaded", items: [] });
     expect(dashboard.opticalDrives.status).toBe("loaded");
     expect(dashboard.detectedDiscs.status).toBe("loaded");
     expect(dashboard.archiveJobs.status).toBe("loaded");

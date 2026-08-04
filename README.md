@@ -206,23 +206,46 @@ The command also accepts `RIP_DVD_DATABASE_PATH` and
 `RIP_DVD_ORIGINALS_LIBRARY_PATH`, and `--json` emits a machine-readable report.
 It recursively reads `.rip-dvd.json` files, imports valid Original Disc
 Archives, Disc Selections, Media Items, Encoding Profiles, and Encode Jobs, and
-continues past corrupt sidecars, invalid jobs, missing archives, and duplicate
-records. Encode Job completion is inferred from the final output file only when
-the job is first imported. Re-running the command is safe and preserves every
-existing SQLite Encode Job status, output, priority, progress, and error.
+reports invalid jobs and duplicate records without making their imported jobs
+eligible. Partially invalid sidecars leave a repair marker whose next run reads
+the live sidecar again, so repaired jobs omitted from the first snapshot can be
+captured. If any sidecar is wholly corrupt, oversized, missing its archive, or
+otherwise cannot be represented in the cutover snapshot, the command leaves
+the entire legacy queue active; after that sidecar is repaired, re-running the
+command imports the complete bounded inventory. Encode Job completion is
+inferred from the final output file only when the job is first imported.
+Re-running the command is safe and preserves every existing SQLite Encode Job
+status, output, priority, progress, and error.
 
 Before publishing records from any parseable sidecar, the command atomically
-writes and synchronizes a `.rip-dvd-sqlite-catalog` cutover marker at the
-originals-library root. If marker publication fails, no imported SQLite records
-are committed. If the process stops after publication, rerunning the command
-resumes the idempotent import while the legacy queue remains inactive. The
-marker also records the immutable legacy-job configuration captured at cutover,
-so a later retry reports sidecar conflicts without confusing them with an
-authoritative SQLite requeue. A legacy schema-1 marker that lacks that snapshot
-is preserved, rather than upgraded, whenever SQLite cannot corroborate every
-job; the report then requires explicit operator recovery instead of guessing
-whether the sidecar changed after cutover. The importer and legacy
-archive/encode commands share kernel-held library-scoped locks: durable cutover
+clears catalog review and sets a persistent cutover fence for every related
+existing archive, then writes and
+synchronizes a `.rip-dvd-sqlite-catalog` cutover marker at the originals-library
+root. This makes affected SQLite jobs ineligible before the marker becomes
+durable. If marker publication fails, no imported SQLite records are committed
+and the staged archives remain pending review. If the process stops after
+publication, rerunning the command resumes the idempotent import while the
+legacy queue remains inactive. A parser, persistence, transaction, or
+captured-source conflict durably changes the marker to `repair`. The repair
+marker still disables legacy commands, but a later complete, parseable live
+inventory can replace its failed snapshot after the sidecar or archive is
+repaired. Every previously captured sidecar must still be present before repair
+can retire the marker. Every retry re-fences those captured archives before an
+incomplete live inventory can return. The SQLite fence blocks review completion and Encode Job
+enqueue, requeue, and claim until the entire captured batch succeeds. Existing
+Media Item fields and Disc Selection labels remain SQLite-authoritative even
+during initial cutover. Imported catalog
+review boundaries are published only after the complete captured batch
+validates and only when the archive has not changed since review was staged, so
+neither an earlier job nor a concurrent human selection can cross the review
+boundary. The marker also records the immutable legacy-job configuration
+captured at cutover, so a later retry reports sidecar conflicts without
+confusing them with an authoritative SQLite requeue. A legacy schema-1 marker
+that lacks that snapshot is preserved, rather than upgraded, whenever SQLite
+cannot corroborate every job; the report then requires explicit operator
+recovery instead of guessing whether the sidecar changed after cutover. The
+importer and legacy archive/encode commands share kernel-held library-scoped
+locks: durable cutover
 intent prevents new legacy batches from starting, then waits without a
 batch-duration timeout for in-flight work to drain. Locks are released by the
 operating system after a process crash and do not rely on PIDs or mutable owner
@@ -350,6 +373,36 @@ the HTTP-loaded dashboard and manual Refresh control continue to work. A fresh
 database intentionally shows an empty state in each section until workers or
 another facade caller record operations; the web app does not infer catalog
 state from library files or process streams.
+
+The paged Catalog Review queue keeps every archived disc reachable until review
+is explicitly completed; creating the first selection does not hide a partially
+cataloged multi-episode disc. **Review catalog** opens the archived DVD's
+read-only title map beside editable Media Items and reviewed Disc Selections.
+Media Items support movie, TV show, season, episode, trailer, and bonus-feature
+hierarchies. A Disc Selection maps one Media Item to the DVD main feature, one
+DVD title, or an inclusive chapter range within a scanned title. Completing
+review requires at least one selection and records a separate reviewed time;
+adding another selection reopens review before any new encode can be enqueued.
+The facade derives canonical DVD source identities and rejects duplicate source
+slices. Supported upgrades reopen caller-era scan-dependent or noncanonical
+catalogs and fail their active Encode Jobs until bounded validation completes
+again; unsafe jobs cannot be enqueued, requeued, or claimed. The review editor
+rejects Disc Selection removal whenever any dependent Encode Job history
+exists, including completed or imported provenance. A separate repair action
+can correct a quarantined caller-era mapping against archived scan evidence
+without deleting its failed job record; that migration job remains permanently
+ineligible. Job-free mappings can still be removed normally, and every catalog
+change reopens explicit review. Archived scan
+evidence is immutable, while rediscovery may still refresh observation metadata
+such as the volume label. Legacy sidecar import cannot restore review across an
+unsafe or newly added mapping, and bounded legacy title evidence remains usable
+for explicit title/chapter review. The same-origin, non-cacheable workflow pages
+large Media Item and Disc Selection catalogs while carrying mapped items and
+bounded ancestor chains as read-only context. Media Item mutations cap
+hierarchies at 32 items, and reads fail closed instead of presenting a truncated
+chain. An active Media Item edit survives page changes, allowing a different
+bounded page to supply parent choices. The workflow is exposed at `GET`/`POST
+/api/catalog-reviews/:archiveId`.
 
 To use host libraries instead, set `RIP_DVD_MEDIA_LIBRARY_HOST_PATH` and
 `RIP_DVD_ORIGINALS_LIBRARY_HOST_PATH`. On native Linux, create new bind-source

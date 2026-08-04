@@ -16,6 +16,7 @@ import {
   type DashboardStreamStatus,
 } from "../lib/dashboard-activity";
 import { displayTerm } from "../lib/display-term";
+import { CatalogReviewEditor } from "./catalog-review-editor";
 import { EncodingProfilesManager } from "./encoding-profiles";
 
 export type DashboardSectionLoadState<T> =
@@ -189,11 +190,19 @@ export function DashboardView({
   state,
   onApproveDetectedDisc = () => undefined,
   approvingDetectedDiscId = null,
+  onOpenCatalogReview = () => undefined,
+  onCatalogReviewPage = () => undefined,
 }: {
   state: DashboardLoadState;
   onApproveDetectedDisc?: (id: string) => void;
   approvingDetectedDiscId?: string | null;
+  onOpenCatalogReview?: (id: string) => void;
+  onCatalogReviewPage?: (offset: number) => void;
 }) {
+  const catalogReviewPage =
+    state.catalogReview.status === "loaded"
+      ? state.catalogReview.page
+      : undefined;
   return (
     <div className="dashboard-grid">
       <DashboardSection
@@ -382,9 +391,42 @@ export function DashboardView({
             <p className="item-time">
               Archived {formatTimestamp(archive.archivedAt)}
             </p>
+            <button
+              type="button"
+              onClick={() => onOpenCatalogReview(archive.id)}
+            >
+              Review catalog
+            </button>
           </article>
         )}
       />
+      {catalogReviewPage ? (
+        <nav
+          className="profile-actions wide-section"
+          aria-label="Catalog review pages"
+        >
+          <button
+            type="button"
+            disabled={!catalogReviewPage.hasPrevious}
+            onClick={() =>
+              onCatalogReviewPage(
+                Math.max(0, catalogReviewPage.offset - catalogReviewPage.limit),
+              )}
+          >
+            Previous pending reviews
+          </button>
+          <button
+            type="button"
+            disabled={!catalogReviewPage.hasNext}
+            onClick={() =>
+              onCatalogReviewPage(
+                catalogReviewPage.offset + catalogReviewPage.limit,
+              )}
+          >
+            Next pending reviews
+          </button>
+        </nav>
+      ) : null}
     </div>
   );
 }
@@ -452,16 +494,21 @@ export function OperationsDashboard() {
     string | null
   >(null);
   const [archiveApprovalFailed, setArchiveApprovalFailed] = useState(false);
+  const [catalogReviewArchiveId, setCatalogReviewArchiveId] = useState<
+    string | null
+  >(null);
+  const [catalogReviewOffset, setCatalogReviewOffset] = useState(0);
 
   useEffect(() => {
     setState(dashboardState("loading"));
     setStreamStatus("connecting");
     return watchDashboardActivity({
+      catalogReviewOffset,
       onSnapshot: setState,
       onInitialLoadError: () => setState(dashboardState("error")),
       onStreamStatus: setStreamStatus,
     });
-  }, [requestNumber]);
+  }, [requestNumber, catalogReviewOffset]);
 
   const sectionStates = [
     state.opticalDrives.status,
@@ -520,6 +567,18 @@ export function OperationsDashboard() {
 
       <EncodingProfilesManager />
 
+      {catalogReviewArchiveId ? (
+        <CatalogReviewEditor
+          key={catalogReviewArchiveId}
+          archiveId={catalogReviewArchiveId}
+          onClose={() => setCatalogReviewArchiveId(null)}
+          onCompleted={() => {
+            setCatalogReviewArchiveId(null);
+            setRequestNumber((value) => value + 1);
+          }}
+        />
+      ) : null}
+
       {archiveApprovalFailed ? (
         <p className="job-error" role="status">
           Archive approval failed. Try again.
@@ -530,6 +589,8 @@ export function OperationsDashboard() {
         state={state}
         onApproveDetectedDisc={(id) => void approveDetectedDisc(id)}
         approvingDetectedDiscId={approvingDetectedDiscId}
+        onOpenCatalogReview={setCatalogReviewArchiveId}
+        onCatalogReviewPage={setCatalogReviewOffset}
       />
 
       <footer className="dashboard-footer">

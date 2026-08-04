@@ -19,6 +19,7 @@ import {
   exists,
   gt,
   inArray,
+  isNotNull,
   isNull,
   lte,
   ne,
@@ -35,11 +36,13 @@ import {
   discSelections,
   encodeJobs,
   encodingProfiles,
+  legacyCutoverStagedSidecars,
   mediaItems,
   opticalDrives,
   originalDiscArchiveContentIds,
   originalDiscArchives,
 } from "./schema.js";
+import { reconcileLegacyRepairCutover } from "./legacy-cutover-reconciliation.js";
 import {
   dvdArchiveFileMatchesIdentity,
   hashDvdArchiveFile,
@@ -55,7 +58,12 @@ import {
   requireNonEmpty,
   requirePositiveSafeInteger,
 } from "./validation.js";
-import { decodeDvdTitleMap, isDvdContentId } from "../dvd-scan.js";
+import {
+  decodeArchivedDvdTitles,
+  decodeDvdTitleMap,
+  isDvdContentId,
+} from "../dvd-scan.js";
+import { MAX_MEDIA_ITEM_HIERARCHY_DEPTH } from "../domain-values.js";
 import {
   DomainInvariantError,
   InvalidStatusTransitionError,
@@ -97,6 +105,7 @@ const MIGRATION_LOCK_POLL_MS = 10;
 const ARCHIVE_JOB_RECOVERY_LIMIT = 100;
 const LEGACY_ARCHIVE_RECONCILIATION_LIMIT = 4;
 const LEGACY_ARCHIVE_RECONCILIATION_BYTES = 9_000_000_000;
+const DISC_SELECTION_REVIEW_BATCH_SIZE = 100;
 const DEFAULT_MIGRATIONS_FOLDER = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../drizzle",
@@ -320,9 +329,49 @@ function toDiscSelection(
   }
 }
 
+function canonicalDvdSelectionSourceKey(
+  selection: Pick<
+    DiscSelection,
+    "chapterEnd" | "chapterStart" | "kind" | "titleNumber"
+  >,
+): string {
+  return selection.kind === "main_feature"
+    ? "dvd:main-feature"
+    : selection.kind === "dvd_title"
+      ? `dvd:title:${selection.titleNumber}`
+      : `dvd:title:${selection.titleNumber}:chapters:${selection.chapterStart}-${selection.chapterEnd}`;
+}
+
+function requiresLegacyDiscSelectionRepair(
+  row: typeof discSelections.$inferSelect,
+  archivedTitles: ReturnType<typeof decodeArchivedDvdTitles>,
+): boolean {
+  const selection = toDiscSelection(row);
+  const title = selection.titleNumber === null
+    ? null
+    : archivedTitles?.find(
+        (candidate) => candidate.number === selection.titleNumber,
+      );
+  return (
+    row.sourceKey !== canonicalDvdSelectionSourceKey(selection) ||
+    (selection.titleNumber !== null &&
+      (title === null ||
+        title === undefined ||
+        (selection.chapterEnd !== null &&
+          selection.chapterEnd > title.chapters)))
+  );
+}
+
+function nextCatalogMutationTimestamp(timestamp: Date) {
+  // Review restoration uses updatedAt as a compare-and-set version. Advance it
+  // even when the wall clock is frozen or moves backward.
+  return sql`max(${originalDiscArchives.updatedAt} + 1, ${timestamp.getTime()})`;
+}
+
 export interface CreateDataAccessOptions {
   databasePath: string;
   migrationsFolder?: string;
+  originalsLibraryPath?: string;
 }
 
 export type LegacySidecarMigrationAdapter = LegacySidecarImportAccessFactory;
@@ -377,7 +426,11 @@ function acquireMigrationLock(databasePath: string): () => void {
   }
 }
 
-function openMigratedDatabase(databasePath: string, migrationsFolder: string) {
+function openMigratedDatabase(
+  databasePath: string,
+  migrationsFolder: string,
+  originalsLibraryPath?: string,
+) {
   const releaseMigrationLock =
     databasePath === ":memory:"
       ? () => undefined
@@ -388,6 +441,11 @@ function openMigratedDatabase(databasePath: string, migrationsFolder: string) {
     sqlite = new DatabaseSync(databasePath);
     sqlite.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
     sqlite.exec("PRAGMA foreign_keys = ON");
+    if (sqlite.prepare("PRAGMA foreign_key_check").get() !== undefined) {
+      throw new Error(
+        "SQLite foreign key integrity check failed before migration",
+      );
+    }
     const journal = sqlite.prepare("PRAGMA journal_mode = WAL").get() as {
       journal_mode: string;
     };
@@ -399,7 +457,17 @@ function openMigratedDatabase(databasePath: string, migrationsFolder: string) {
     sqlite.exec("PRAGMA synchronous = NORMAL");
 
     const database = drizzle({ client: sqlite });
+    sqlite.exec("PRAGMA foreign_keys = OFF");
     migrate(database, { migrationsFolder });
+    if (sqlite.prepare("PRAGMA foreign_key_check").get() !== undefined) {
+      throw new Error(
+        "SQLite foreign key integrity check failed after migration",
+      );
+    }
+    sqlite.exec("PRAGMA foreign_keys = ON");
+    if (originalsLibraryPath !== undefined) {
+      reconcileLegacyRepairCutover(sqlite, originalsLibraryPath);
+    }
     releaseMigrationLock();
     return { database, sqlite };
   } catch (error) {
@@ -420,10 +488,15 @@ export function createDataAccessInternal(
   {
     databasePath,
     migrationsFolder = DEFAULT_MIGRATIONS_FOLDER,
+    originalsLibraryPath,
   }: CreateDataAccessOptions,
   legacySidecarMigration?: LegacySidecarMigrationAdapter,
 ): DataAccess | LegacySidecarDataAccess {
   const normalizedDatabasePath = requireNonEmpty(databasePath, "databasePath");
+  const normalizedOriginalsLibraryPath =
+    originalsLibraryPath === undefined
+      ? undefined
+      : realpathSync(originalsLibraryPath);
   if (normalizedDatabasePath !== ":memory:") {
     mkdirSync(dirname(resolve(normalizedDatabasePath)), { recursive: true });
   }
@@ -431,10 +504,225 @@ export function createDataAccessInternal(
   const { database, sqlite } = openMigratedDatabase(
     normalizedDatabasePath,
     migrationsFolder,
+    normalizedOriginalsLibraryPath,
   );
 
   function now(): Date {
     return new Date();
+  }
+
+  function legacyCutoverFenceCondition(
+    fingerprint: string,
+    archivePath: string,
+  ) {
+    return normalizedOriginalsLibraryPath === undefined
+      ? or(
+          eq(legacyCutoverStagedSidecars.fingerprint, fingerprint),
+          eq(legacyCutoverStagedSidecars.archivePath, archivePath),
+        )
+      : eq(
+          legacyCutoverStagedSidecars.originalsLibraryPath,
+          normalizedOriginalsLibraryPath,
+        );
+  }
+
+  function optionalSafeInteger(
+    value: number | null | undefined,
+    field: string,
+    minimum: number,
+    maximum = Number.MAX_SAFE_INTEGER,
+  ): number | null | undefined {
+    if (value === null || value === undefined) {
+      return value;
+    }
+    if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+      throw new DomainInvariantError(
+        `${field} must be a safe integer between ${minimum} and ${maximum}`,
+      );
+    }
+    return value;
+  }
+
+  function requireAcyclicMediaItemParent(
+    itemId: MediaItemId,
+    parentId: MediaItemId | null | undefined,
+    querySource: Pick<typeof database, "select"> = database,
+  ): number {
+    if (parentId === null || parentId === undefined) {
+      return 1;
+    }
+    const visited = new Set<MediaItemId>([itemId]);
+    let currentId: MediaItemId | null = parentId;
+    while (currentId !== null) {
+      if (visited.has(currentId)) {
+        throw new DomainInvariantError(
+          "Media Item hierarchy cannot contain a cycle",
+        );
+      }
+      if (visited.size >= MAX_MEDIA_ITEM_HIERARCHY_DEPTH) {
+        throw new DomainInvariantError(
+          "Media Item hierarchy exceeds the supported depth",
+        );
+      }
+      visited.add(currentId);
+      const current: { id: MediaItemId; parentId: MediaItemId | null } = requireRow(
+        querySource
+          .select({ id: mediaItems.id, parentId: mediaItems.parentId })
+          .from(mediaItems)
+          .where(eq(mediaItems.id, currentId))
+          .get(),
+        "media item",
+        currentId,
+      );
+      currentId = current.parentId;
+    }
+    return visited.size;
+  }
+
+  function requireMediaItemHierarchyWithinDepth(
+    itemId: MediaItemId,
+    parentId: MediaItemId | null | undefined,
+    querySource: Pick<typeof database, "get" | "select"> = database,
+  ): void {
+    const ancestorDepth = requireAcyclicMediaItemParent(
+      itemId,
+      parentId,
+      querySource,
+    );
+    const descendantDepth = querySource.get<{ maximumDepth: number }>(sql`
+      with recursive media_item_descendants(id, depth) as (
+        select ${itemId}, 1
+        union all
+        select ${mediaItems.id}, media_item_descendants.depth + 1
+        from ${mediaItems}
+        inner join media_item_descendants
+          on ${mediaItems.parentId} = media_item_descendants.id
+        where media_item_descendants.depth <= ${MAX_MEDIA_ITEM_HIERARCHY_DEPTH}
+      )
+      select max(depth) as maximumDepth
+      from media_item_descendants
+    `).maximumDepth;
+    if (
+      ancestorDepth + descendantDepth - 1 >
+        MAX_MEDIA_ITEM_HIERARCHY_DEPTH
+    ) {
+      throw new DomainInvariantError(
+        "Media Item hierarchy exceeds the supported depth",
+      );
+    }
+  }
+
+  function requireReviewableDiscSelections(
+    archiveId: OriginalDiscArchiveId,
+    querySource: Pick<typeof database, "select"> = database,
+  ): typeof originalDiscArchives.$inferSelect {
+    const archive = requireRow(
+      querySource
+        .select()
+        .from(originalDiscArchives)
+        .where(eq(originalDiscArchives.id, archiveId))
+        .get(),
+      "original disc archive",
+      archiveId,
+    );
+    if (archive.discKind !== "dvd") {
+      throw new DomainInvariantError(
+        "Catalog review currently requires a DVD Original Disc Archive",
+      );
+    }
+    const scanData = requireRow(
+      querySource
+        .select({ scanData: detectedDiscs.scanData })
+        .from(detectedDiscs)
+        .where(eq(detectedDiscs.id, archive.detectedDiscId))
+        .get(),
+      "detected disc",
+      archive.detectedDiscId,
+    ).scanData;
+    const duplicateLogicalSelection = querySource
+      .select({ id: discSelections.id })
+      .from(discSelections)
+      .where(and(
+        eq(discSelections.originalDiscArchiveId, archiveId),
+        eq(discSelections.isCatalogActive, true),
+      ))
+      .groupBy(
+        discSelections.kind,
+        discSelections.titleNumber,
+        discSelections.chapterStart,
+        discSelections.chapterEnd,
+      )
+      .having(sql`count(*) > 1`)
+      .limit(1)
+      .get();
+    if (duplicateLogicalSelection) {
+      throw new DomainInvariantError(
+        "Catalog review cannot contain duplicate logical Disc Selections",
+      );
+    }
+
+    const archivedTitles = decodeArchivedDvdTitles(scanData);
+    let lastSelectionId: DiscSelectionId | undefined;
+    let selectionCount = 0;
+    while (true) {
+      const rows = querySource
+        .select()
+        .from(discSelections)
+        .where(
+          and(
+            eq(discSelections.originalDiscArchiveId, archiveId),
+            eq(discSelections.isCatalogActive, true),
+            lastSelectionId === undefined
+              ? undefined
+              : gt(discSelections.id, lastSelectionId),
+          ),
+        )
+        .orderBy(asc(discSelections.id))
+        .limit(DISC_SELECTION_REVIEW_BATCH_SIZE)
+        .all();
+      for (const row of rows) {
+        const selection = toDiscSelection(row);
+        const canonicalSourceKey = canonicalDvdSelectionSourceKey(selection);
+        if (selection.sourceKey !== canonicalSourceKey) {
+          throw new DomainInvariantError(
+            "Catalog review requires canonical Disc Selection source keys",
+          );
+        }
+        if (selection.titleNumber !== null) {
+          if (!archivedTitles) {
+            throw new DomainInvariantError(
+              "DVD title selections require a reviewable DVD title map",
+            );
+          }
+          const title = archivedTitles.find(
+            (candidate) => candidate.number === selection.titleNumber,
+          );
+          if (!title) {
+            throw new DomainInvariantError(
+              `DVD title ${selection.titleNumber} is not present in the archived scan`,
+            );
+          }
+          if (selection.chapterEnd !== null) {
+            if (selection.chapterEnd > title.chapters) {
+              throw new DomainInvariantError(
+                `chapterEnd must not exceed DVD title ${selection.titleNumber}'s ${title.chapters} chapters`,
+              );
+            }
+          }
+        }
+        selectionCount += 1;
+      }
+      if (rows.length < DISC_SELECTION_REVIEW_BATCH_SIZE) {
+        break;
+      }
+      lastSelectionId = rows.at(-1)!.id;
+    }
+    if (selectionCount === 0) {
+      throw new DomainInvariantError(
+        "Catalog review requires at least one Disc Selection",
+      );
+    }
+    return archive;
   }
 
   function findOriginalArchiveByContentId(
@@ -443,6 +731,7 @@ export function createDataAccessInternal(
   ) {
     return querySource
       .select({
+        detectedDiscId: originalDiscArchives.detectedDiscId,
         discKind: originalDiscArchives.discKind,
         id: originalDiscArchives.id,
       })
@@ -931,6 +1220,10 @@ export function createDataAccessInternal(
             disc.fingerprint,
             transaction,
           );
+          const archivePath = requireNonEmpty(
+            completion.archivePath,
+            "archivePath",
+          );
           const archive = requireRow(
             transaction
               .insert(originalDiscArchives)
@@ -939,11 +1232,21 @@ export function createDataAccessInternal(
                 detectedDiscId: disc.id,
                 discKind: disc.discKind,
                 archiveFormat: "iso",
-                archivePath: requireNonEmpty(
-                  completion.archivePath,
-                  "archivePath",
-                ),
+                archivePath,
                 fingerprint: disc.fingerprint,
+                legacyCutoverPending:
+                  transaction
+                    .select({
+                      sidecarPath:
+                        legacyCutoverStagedSidecars.sidecarPath,
+                    })
+                    .from(legacyCutoverStagedSidecars)
+                    .where(legacyCutoverFenceCondition(
+                      disc.fingerprint,
+                      archivePath,
+                    ))
+                    .limit(1)
+                    .get() !== undefined,
                 sizeBytes: requirePositiveSafeInteger(
                   completion.sizeBytes,
                   "sizeBytes",
@@ -1103,6 +1406,34 @@ export function createDataAccessInternal(
       database.select().from(encodeJobs).where(eq(encodeJobs.id, id)).get(),
     list: listEncodeJobs,
     claim: (workerId, token, timestamp) => {
+      const nextReviewedJob = database
+        .select({ id: encodeJobs.id })
+        .from(encodeJobs)
+        .innerJoin(
+          discSelections,
+          eq(discSelections.id, encodeJobs.discSelectionId),
+        )
+        .innerJoin(
+          originalDiscArchives,
+          eq(
+            originalDiscArchives.id,
+            discSelections.originalDiscArchiveId,
+          ),
+        )
+        .where(
+          and(
+            eq(encodeJobs.status, "queued"),
+            eq(discSelections.isCatalogActive, true),
+            isNotNull(originalDiscArchives.catalogReviewedAt),
+            eq(originalDiscArchives.legacyCutoverPending, false),
+          ),
+        )
+        .orderBy(
+          desc(encodeJobs.priority),
+          asc(encodeJobs.createdAt),
+          asc(encodeJobs.id),
+        )
+        .limit(1);
       const claimed = database
         .update(encodeJobs)
         .set({
@@ -1117,10 +1448,7 @@ export function createDataAccessInternal(
         .where(
           and(
             eq(encodeJobs.status, "queued"),
-            eq(
-              encodeJobs.id,
-              sql<EncodeJobId>`(select ${encodeJobs.id} from ${encodeJobs} where ${encodeJobs.status} = 'queued' order by ${encodeJobs.priority} desc, ${encodeJobs.createdAt} asc, ${encodeJobs.id} asc limit 1)`,
-            ),
+            eq(encodeJobs.id, nextReviewedJob),
           ),
         )
         .returning()
@@ -1136,6 +1464,25 @@ export function createDataAccessInternal(
             eq(encodeJobs.id, claim.id),
             eq(encodeJobs.status, "running"),
             eq(encodeJobs.claimToken, claim.claimToken),
+            exists(
+              database
+                .select({ id: discSelections.id })
+                .from(discSelections)
+                .innerJoin(
+                  originalDiscArchives,
+                  eq(
+                    originalDiscArchives.id,
+                    discSelections.originalDiscArchiveId,
+                  ),
+                )
+                .where(
+                  and(
+                    eq(discSelections.id, encodeJobs.discSelectionId),
+                    eq(discSelections.isCatalogActive, true),
+                    eq(originalDiscArchives.legacyCutoverPending, false),
+                  ),
+                ),
+            ),
           ),
         )
         .returning()
@@ -1149,7 +1496,30 @@ export function createDataAccessInternal(
           priority: options?.priority,
         })
         .where(
-          and(eq(encodeJobs.id, id), eq(encodeJobs.status, expectedStatus)),
+          and(
+            eq(encodeJobs.id, id),
+            eq(encodeJobs.status, expectedStatus),
+            exists(
+              database
+                .select({ id: discSelections.id })
+                .from(discSelections)
+                .innerJoin(
+                  originalDiscArchives,
+                  eq(
+                    originalDiscArchives.id,
+                    discSelections.originalDiscArchiveId,
+                  ),
+                )
+                .where(
+                  and(
+                    eq(discSelections.id, encodeJobs.discSelectionId),
+                    eq(discSelections.isCatalogActive, true),
+                    isNotNull(originalDiscArchives.catalogReviewedAt),
+                    eq(originalDiscArchives.legacyCutoverPending, false),
+                  ),
+                ),
+            ),
+          ),
         )
         .returning()
         .get(),
@@ -1716,6 +2086,7 @@ export function createDataAccessInternal(
           }
           const existing = transaction
             .select({
+              id: detectedDiscs.id,
               discKind: detectedDiscs.discKind,
               scanData: detectedDiscs.scanData,
               status: detectedDiscs.status,
@@ -1731,6 +2102,17 @@ export function createDataAccessInternal(
               ),
             )
             .get();
+          if (
+            matchingArchive !== undefined &&
+            existing !== undefined &&
+            matchingArchive.detectedDiscId === existing.id &&
+            scanData !== undefined &&
+            !isDeepStrictEqual(existing.scanData, scanData)
+          ) {
+            throw new DomainInvariantError(
+              "Rediscovery cannot change archived scan evidence",
+            );
+          }
           const observationChanged =
             existing === undefined ||
             input.isNewMediumObservation === true ||
@@ -1961,6 +2343,19 @@ export function createDataAccessInternal(
                 archiveFormat: input.archiveFormat,
                 archivePath,
                 fingerprint,
+                legacyCutoverPending:
+                  transaction
+                    .select({
+                      sidecarPath:
+                        legacyCutoverStagedSidecars.sidecarPath,
+                    })
+                    .from(legacyCutoverStagedSidecars)
+                    .where(legacyCutoverFenceCondition(
+                      fingerprint,
+                      archivePath,
+                    ))
+                    .limit(1)
+                    .get() !== undefined,
                 sizeBytes: input.sizeBytes,
                 archivedAt: timestamp,
                 createdAt: timestamp,
@@ -1988,6 +2383,11 @@ export function createDataAccessInternal(
         if (options?.ids !== undefined && options.ids.length === 0) {
           return [];
         }
+        if (options?.offset !== undefined && options.limit === undefined) {
+          throw new DomainInvariantError(
+            "Original Disc Archive offset requires a bounded limit",
+          );
+        }
         const conditions = [
           options?.ids
             ? inArray(originalDiscArchives.id, [...options.ids])
@@ -1998,18 +2398,24 @@ export function createDataAccessInternal(
                   .select({ id: discSelections.id })
                   .from(discSelections)
                   .where(
-                    eq(
-                      discSelections.originalDiscArchiveId,
-                      originalDiscArchives.id,
+                    and(
+                      eq(
+                        discSelections.originalDiscArchiveId,
+                        originalDiscArchives.id,
+                      ),
+                      eq(discSelections.isCatalogActive, true),
                     ),
                   ),
               )
+            : undefined,
+          options?.needsCatalogReviewOnly
+            ? isNull(originalDiscArchives.catalogReviewedAt)
             : undefined,
         ].filter((condition) => condition !== undefined);
         const condition =
           conditions.length > 0 ? and(...conditions) : undefined;
         if (options?.limit !== undefined) {
-          return database
+          const query = database
             .select()
             .from(originalDiscArchives)
             .where(condition)
@@ -2017,9 +2423,15 @@ export function createDataAccessInternal(
               desc(originalDiscArchives.archivedAt),
               desc(originalDiscArchives.id),
             )
-            .limit(requirePositiveSafeInteger(options.limit, "limit"))
-            .all()
-            .reverse();
+            .limit(requirePositiveSafeInteger(options.limit, "limit"));
+          if (options.offset === undefined) {
+            return query.all().reverse();
+          }
+          const offset = optionalSafeInteger(options.offset, "offset", 0);
+          if (offset === null || offset === undefined) {
+            throw new DomainInvariantError("offset must be a safe integer");
+          }
+          return query.offset(offset).all().reverse();
         }
         return database
           .select()
@@ -2029,35 +2441,141 @@ export function createDataAccessInternal(
           .all();
       },
 
+      completeCatalogReview(id) {
+        const timestamp = now();
+        return database.transaction((transaction) => {
+          const archive = requireReviewableDiscSelections(id, transaction);
+          if (archive.legacyCutoverPending) {
+            throw new DomainInvariantError(
+              "Catalog review cannot be completed while legacy cutover repair is pending",
+            );
+          }
+          if (archive.catalogReviewedAt !== null) {
+            return archive;
+          }
+          return requireRow(
+            transaction
+              .update(originalDiscArchives)
+              .set({ catalogReviewedAt: timestamp, updatedAt: timestamp })
+              .where(
+                and(
+                  eq(originalDiscArchives.id, id),
+                  isNull(originalDiscArchives.catalogReviewedAt),
+                ),
+              )
+              .returning()
+              .get(),
+            "original disc archive",
+            id,
+          );
+        }, { behavior: "immediate" });
+      },
+
       createMediaItem(input) {
         const timestamp = now();
         const id = newId<MediaItemId>();
-        return requireRow(
-          database
-            .insert(mediaItems)
-            .values({
-              id,
-              parentId: input.parentId,
-              kind: input.kind,
-              title: requireNonEmpty(input.title, "title"),
-              year: input.year,
-              seasonNumber: input.seasonNumber,
-              episodeNumber: input.episodeNumber,
-              createdAt: timestamp,
-              updatedAt: timestamp,
-            })
-            .returning()
-            .get(),
-          "media item",
+        const values = {
           id,
-        );
+          parentId: input.parentId,
+          kind: input.kind,
+          title: requireNonEmpty(input.title, "title"),
+          year: optionalSafeInteger(input.year, "year", 1800, 9999),
+          seasonNumber: optionalSafeInteger(
+            input.seasonNumber,
+            "seasonNumber",
+            0,
+          ),
+          episodeNumber: optionalSafeInteger(
+            input.episodeNumber,
+            "episodeNumber",
+            1,
+          ),
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        };
+        return database.transaction((transaction) => {
+          requireMediaItemHierarchyWithinDepth(
+            id,
+            input.parentId,
+            transaction,
+          );
+          return requireRow(
+            transaction
+              .insert(mediaItems)
+              .values(values)
+              .returning()
+              .get(),
+            "media item",
+            id,
+          );
+        }, { behavior: "immediate" });
+      },
+
+      updateMediaItem(id, input) {
+        return database.transaction((transaction) => {
+          const current = requireRow(
+            transaction
+              .select()
+              .from(mediaItems)
+              .where(eq(mediaItems.id, id))
+              .get(),
+            "media item",
+            id,
+          );
+          const parentId =
+            input.parentId === undefined ? current.parentId : input.parentId;
+          requireMediaItemHierarchyWithinDepth(id, parentId, transaction);
+          return requireRow(
+            transaction
+              .update(mediaItems)
+              .set({
+                parentId,
+                kind: input.kind ?? current.kind,
+                title:
+                  input.title === undefined
+                    ? current.title
+                    : requireNonEmpty(input.title, "title"),
+                year:
+                  input.year === undefined
+                    ? current.year
+                    : optionalSafeInteger(input.year, "year", 1800, 9999),
+                seasonNumber:
+                  input.seasonNumber === undefined
+                    ? current.seasonNumber
+                    : optionalSafeInteger(
+                        input.seasonNumber,
+                        "seasonNumber",
+                        0,
+                      ),
+                episodeNumber:
+                  input.episodeNumber === undefined
+                    ? current.episodeNumber
+                    : optionalSafeInteger(
+                        input.episodeNumber,
+                        "episodeNumber",
+                        1,
+                      ),
+                updatedAt: now(),
+              })
+              .where(eq(mediaItems.id, id))
+              .returning()
+              .get(),
+            "media item",
+            id,
+          );
+        }, { behavior: "immediate" });
       },
 
       listMediaItems(options) {
         if (options?.ids !== undefined && options.ids.length === 0) {
           return [];
         }
-        return database
+        if (options?.offset !== undefined && options.limit === undefined) {
+          throw new DomainInvariantError(
+            "Media Item offset requires a bounded limit",
+          );
+        }
+        const query = database
           .select()
           .from(mediaItems)
           .where(
@@ -2069,68 +2587,502 @@ export function createDataAccessInternal(
             asc(mediaItems.parentId),
             asc(mediaItems.createdAt),
             asc(mediaItems.id),
-          )
-          .all();
+          );
+        if (options?.limit === undefined) {
+          return query.all();
+        }
+        const limited = query.limit(
+          requirePositiveSafeInteger(options.limit, "limit"),
+        );
+        if (options.offset === undefined) {
+          return limited.all();
+        }
+        const offset = optionalSafeInteger(options.offset, "offset", 0);
+        if (offset === null || offset === undefined) {
+          throw new DomainInvariantError("offset must be a safe integer");
+        }
+        return limited.offset(offset).all();
       },
 
       createDiscSelection(input) {
         const timestamp = now();
         const id = newId<DiscSelectionId>();
-        const coordinates =
-          input.kind === "main_feature"
-            ? { titleNumber: null, chapterStart: null, chapterEnd: null }
-            : input.kind === "dvd_title"
-              ? {
-                  titleNumber: requirePositiveSafeInteger(
-                    input.titleNumber,
-                    "titleNumber",
-                  ),
-                  chapterStart: null,
-                  chapterEnd: null,
-                }
-              : {
-                  titleNumber: requirePositiveSafeInteger(
-                    input.titleNumber,
-                    "titleNumber",
-                  ),
-                  chapterStart: requirePositiveSafeInteger(
-                    input.chapterStart,
-                    "chapterStart",
-                  ),
-                  chapterEnd: requirePositiveSafeInteger(
-                    input.chapterEnd,
-                    "chapterEnd",
-                  ),
-                };
-        if (
-          coordinates.chapterStart !== null &&
-          coordinates.chapterEnd !== null &&
-          coordinates.chapterEnd < coordinates.chapterStart
-        ) {
-          throw new DomainInvariantError(
-            "chapterEnd must be greater than or equal to chapterStart",
-          );
-        }
-        return toDiscSelection(
-          requireRow(
-            database
-              .insert(discSelections)
-              .values({
+        return database.transaction(
+          (transaction) => {
+            const source = requireRow(
+              transaction
+                .select({
+                  discKind: originalDiscArchives.discKind,
+                  scanData: detectedDiscs.scanData,
+                })
+                .from(originalDiscArchives)
+                .innerJoin(
+                  detectedDiscs,
+                  eq(detectedDiscs.id, originalDiscArchives.detectedDiscId),
+                )
+                .where(eq(originalDiscArchives.id, input.originalDiscArchiveId))
+                .get(),
+              "original disc archive",
+              input.originalDiscArchiveId,
+            );
+            requireRow(
+              transaction
+                .select({ id: mediaItems.id })
+                .from(mediaItems)
+                .where(eq(mediaItems.id, input.mediaItemId))
+                .get(),
+              "media item",
+              input.mediaItemId,
+            );
+            if (source.discKind !== "dvd") {
+              throw new DomainInvariantError(
+                "DVD Disc Selections require a DVD Original Disc Archive",
+              );
+            }
+            const coordinates =
+              input.kind === "main_feature"
+                ? { titleNumber: null, chapterStart: null, chapterEnd: null }
+                : input.kind === "dvd_title"
+                  ? {
+                      titleNumber: requirePositiveSafeInteger(
+                        input.titleNumber,
+                        "titleNumber",
+                      ),
+                      chapterStart: null,
+                      chapterEnd: null,
+                    }
+                  : {
+                      titleNumber: requirePositiveSafeInteger(
+                        input.titleNumber,
+                        "titleNumber",
+                      ),
+                      chapterStart: requirePositiveSafeInteger(
+                        input.chapterStart,
+                        "chapterStart",
+                      ),
+                      chapterEnd: requirePositiveSafeInteger(
+                        input.chapterEnd,
+                        "chapterEnd",
+                      ),
+                    };
+            if (
+              coordinates.chapterStart !== null &&
+              coordinates.chapterEnd !== null &&
+              coordinates.chapterEnd < coordinates.chapterStart
+            ) {
+              throw new DomainInvariantError(
+                "chapterEnd must be greater than or equal to chapterStart",
+              );
+            }
+            if (coordinates.titleNumber !== null) {
+              const archivedTitles = decodeArchivedDvdTitles(source.scanData);
+              if (!archivedTitles) {
+                throw new DomainInvariantError(
+                  "DVD title selections require a reviewable DVD title map",
+                );
+              }
+              const title = archivedTitles.find(
+                (candidate) => candidate.number === coordinates.titleNumber,
+              );
+              if (!title) {
+                throw new DomainInvariantError(
+                  `DVD title ${coordinates.titleNumber} is not present in the archived scan`,
+                );
+              }
+              if (
+                coordinates.chapterEnd !== null &&
+                coordinates.chapterEnd > title.chapters
+              ) {
+                throw new DomainInvariantError(
+                  `chapterEnd must not exceed DVD title ${title.number}'s ${title.chapters} chapters`,
+                );
+              }
+            }
+            const sourceKey = canonicalDvdSelectionSourceKey({
+              kind: input.kind,
+              ...coordinates,
+            });
+            const selection = toDiscSelection(
+              requireRow(
+                transaction
+                  .insert(discSelections)
+                  .values({
+                    id,
+                    originalDiscArchiveId: input.originalDiscArchiveId,
+                    mediaItemId: input.mediaItemId,
+                    sourceKey,
+                    kind: input.kind,
+                    ...coordinates,
+                    label: input.label,
+                    createdAt: timestamp,
+                    updatedAt: timestamp,
+                  })
+                  .returning()
+                  .get(),
+                "disc selection",
                 id,
-                originalDiscArchiveId: input.originalDiscArchiveId,
-                mediaItemId: input.mediaItemId,
-                sourceKey: requireNonEmpty(input.sourceKey, "sourceKey"),
-                kind: input.kind,
-                ...coordinates,
-                label: input.label,
-                createdAt: timestamp,
-                updatedAt: timestamp,
+              ),
+            );
+            transaction
+              .update(originalDiscArchives)
+              .set({
+                catalogReviewedAt: null,
+                updatedAt: nextCatalogMutationTimestamp(timestamp),
               })
-              .returning()
-              .get(),
-            "disc selection",
-            id,
-          ),
+              .where(eq(originalDiscArchives.id, input.originalDiscArchiveId))
+              .run();
+            return selection;
+          },
+          { behavior: "immediate" },
+        );
+      },
+
+      repairDiscSelection(id, input) {
+        const timestamp = now();
+        return database.transaction(
+          (transaction) => {
+            const current = requireRow(
+              transaction
+                .select()
+                .from(discSelections)
+                .where(and(
+                  eq(discSelections.id, id),
+                  eq(discSelections.isCatalogActive, true),
+                ))
+                .get(),
+              "disc selection",
+              id,
+            );
+            if (
+              current.originalDiscArchiveId !== input.originalDiscArchiveId
+            ) {
+              throw new DomainInvariantError(
+                "A Disc Selection repair cannot move between Original Disc Archives",
+              );
+            }
+            const activeJob = transaction
+              .select({ id: encodeJobs.id, status: encodeJobs.status })
+              .from(encodeJobs)
+              .where(
+                and(
+                  eq(encodeJobs.discSelectionId, id),
+                  inArray(encodeJobs.status, ["queued", "running"]),
+                ),
+              )
+              .limit(1)
+              .get();
+            if (activeJob) {
+              throw new DomainInvariantError(
+                `Disc Selection ${id} cannot be repaired while Encode Job ${activeJob.id} is ${activeJob.status}`,
+              );
+            }
+            const historicalJob = transaction
+              .select({ id: encodeJobs.id })
+              .from(encodeJobs)
+              .where(eq(encodeJobs.discSelectionId, id))
+              .limit(1)
+              .get();
+            const source = requireRow(
+              transaction
+                .select({
+                  discKind: originalDiscArchives.discKind,
+                  legacyCutoverPending:
+                    originalDiscArchives.legacyCutoverPending,
+                  scanData: detectedDiscs.scanData,
+                })
+                .from(originalDiscArchives)
+                .innerJoin(
+                  detectedDiscs,
+                  eq(detectedDiscs.id, originalDiscArchives.detectedDiscId),
+                )
+                .where(eq(originalDiscArchives.id, input.originalDiscArchiveId))
+                .get(),
+              "original disc archive",
+              input.originalDiscArchiveId,
+            );
+            if (source.legacyCutoverPending) {
+              throw new DomainInvariantError(
+                "Disc Selections cannot be changed while legacy cutover repair is pending",
+              );
+            }
+            requireRow(
+              transaction
+                .select({ id: mediaItems.id })
+                .from(mediaItems)
+                .where(eq(mediaItems.id, input.mediaItemId))
+                .get(),
+              "media item",
+              input.mediaItemId,
+            );
+            if (source.discKind !== "dvd") {
+              throw new DomainInvariantError(
+                "DVD Disc Selections require a DVD Original Disc Archive",
+              );
+            }
+            const coordinates =
+              input.kind === "main_feature"
+                ? { titleNumber: null, chapterStart: null, chapterEnd: null }
+                : input.kind === "dvd_title"
+                  ? {
+                      titleNumber: requirePositiveSafeInteger(
+                        input.titleNumber,
+                        "titleNumber",
+                      ),
+                      chapterStart: null,
+                      chapterEnd: null,
+                    }
+                  : {
+                      titleNumber: requirePositiveSafeInteger(
+                        input.titleNumber,
+                        "titleNumber",
+                      ),
+                      chapterStart: requirePositiveSafeInteger(
+                        input.chapterStart,
+                        "chapterStart",
+                      ),
+                      chapterEnd: requirePositiveSafeInteger(
+                        input.chapterEnd,
+                        "chapterEnd",
+                      ),
+                    };
+            if (
+              coordinates.chapterStart !== null &&
+              coordinates.chapterEnd !== null &&
+              coordinates.chapterEnd < coordinates.chapterStart
+            ) {
+              throw new DomainInvariantError(
+                "chapterEnd must be greater than or equal to chapterStart",
+              );
+            }
+            const archivedTitles = decodeArchivedDvdTitles(source.scanData);
+            if (coordinates.titleNumber !== null) {
+              if (!archivedTitles) {
+                throw new DomainInvariantError(
+                  "DVD title selections require a reviewable DVD title map",
+                );
+              }
+              const title = archivedTitles.find(
+                (candidate) => candidate.number === coordinates.titleNumber,
+              );
+              if (!title) {
+                throw new DomainInvariantError(
+                  `DVD title ${coordinates.titleNumber} is not present in the archived scan`,
+                );
+              }
+              if (
+                coordinates.chapterEnd !== null &&
+                coordinates.chapterEnd > title.chapters
+              ) {
+                throw new DomainInvariantError(
+                  `chapterEnd must not exceed DVD title ${title.number}'s ${title.chapters} chapters`,
+                );
+              }
+            }
+            const sourceKey = canonicalDvdSelectionSourceKey({
+              kind: input.kind,
+              ...coordinates,
+            });
+            if (historicalJob) {
+              if (!requiresLegacyDiscSelectionRepair(
+                current,
+                archivedTitles,
+              )) {
+                throw new DomainInvariantError(
+                  `Disc Selection ${id} cannot be repaired because ordinary Encode Job history must keep its retry identity (job ${historicalJob.id})`,
+                );
+              }
+            }
+            let selectionRow: typeof discSelections.$inferSelect;
+            if (historicalJob) {
+              requireRow(
+                transaction
+                  .update(discSelections)
+                  .set({
+                    isCatalogActive: false,
+                  })
+                  .where(and(
+                    eq(discSelections.id, id),
+                    eq(discSelections.isCatalogActive, true),
+                  ))
+                  .returning({ id: discSelections.id })
+                  .get(),
+                "disc selection",
+                id,
+              );
+              transaction
+                .update(encodeJobs)
+                .set({ reservesOutputPath: false })
+                .where(and(
+                  eq(encodeJobs.discSelectionId, id),
+                  eq(encodeJobs.status, "failed"),
+                ))
+                .run();
+              const replacementId = newId<DiscSelectionId>();
+              selectionRow = requireRow(
+                transaction
+                  .insert(discSelections)
+                  .values({
+                    id: replacementId,
+                    originalDiscArchiveId: input.originalDiscArchiveId,
+                    mediaItemId: input.mediaItemId,
+                    sourceKey,
+                    kind: input.kind,
+                    ...coordinates,
+                    label: input.label ?? null,
+                    isCatalogActive: true,
+                    createdAt: timestamp,
+                    updatedAt: timestamp,
+                  })
+                  .returning()
+                  .get(),
+                "disc selection",
+                replacementId,
+              );
+            } else {
+              selectionRow = requireRow(
+                transaction
+                  .update(discSelections)
+                  .set({
+                    mediaItemId: input.mediaItemId,
+                    sourceKey,
+                    kind: input.kind,
+                    ...coordinates,
+                    label: input.label ?? null,
+                    updatedAt: timestamp,
+                  })
+                  .where(and(
+                    eq(discSelections.id, id),
+                    eq(discSelections.isCatalogActive, true),
+                  ))
+                  .returning()
+                  .get(),
+                "disc selection",
+                id,
+              );
+            }
+            const selection = toDiscSelection(selectionRow);
+            transaction
+              .update(originalDiscArchives)
+              .set({
+                catalogReviewedAt: null,
+                updatedAt: nextCatalogMutationTimestamp(timestamp),
+              })
+              .where(eq(originalDiscArchives.id, input.originalDiscArchiveId))
+              .run();
+            return selection;
+          },
+          { behavior: "immediate" },
+        );
+      },
+
+      deleteDiscSelection(id) {
+        const timestamp = now();
+        return database.transaction(
+          (transaction) => {
+            const selection = requireRow(
+              transaction
+                .select()
+                .from(discSelections)
+                .where(and(
+                  eq(discSelections.id, id),
+                  eq(discSelections.isCatalogActive, true),
+                ))
+                .get(),
+              "disc selection",
+              id,
+            );
+            const archiveState = requireRow(
+              transaction
+                .select({
+                  legacyCutoverPending:
+                    originalDiscArchives.legacyCutoverPending,
+                  scanData: detectedDiscs.scanData,
+                })
+                .from(originalDiscArchives)
+                .innerJoin(
+                  detectedDiscs,
+                  eq(detectedDiscs.id, originalDiscArchives.detectedDiscId),
+                )
+                .where(eq(
+                  originalDiscArchives.id,
+                  selection.originalDiscArchiveId,
+                ))
+                .get(),
+              "original disc archive",
+              selection.originalDiscArchiveId,
+            );
+            if (archiveState.legacyCutoverPending) {
+              throw new DomainInvariantError(
+                "Disc Selections cannot be changed while legacy cutover repair is pending",
+              );
+            }
+            const dependentJob = transaction
+              .select({ id: encodeJobs.id })
+              .from(encodeJobs)
+              .where(eq(encodeJobs.discSelectionId, id))
+              .limit(1)
+              .get();
+            if (dependentJob) {
+              if (!requiresLegacyDiscSelectionRepair(
+                selection,
+                decodeArchivedDvdTitles(archiveState.scanData),
+              )) {
+                throw new DomainInvariantError(
+                  `Disc Selection ${id} cannot be deleted because Encode Job history must be preserved (job ${dependentJob.id})`,
+                );
+              }
+              requireRow(
+                transaction
+                  .update(discSelections)
+                  .set({ isCatalogActive: false })
+                  .where(and(
+                    eq(discSelections.id, id),
+                    eq(discSelections.isCatalogActive, true),
+                  ))
+                  .returning({ id: discSelections.id })
+                  .get(),
+                "disc selection",
+                id,
+              );
+              transaction
+                .update(encodeJobs)
+                .set({ reservesOutputPath: false })
+                .where(and(
+                  eq(encodeJobs.discSelectionId, id),
+                  eq(encodeJobs.status, "failed"),
+                ))
+                .run();
+            } else {
+              requireRow(
+                transaction
+                  .delete(discSelections)
+                  .where(eq(discSelections.id, id))
+                  .returning({ id: discSelections.id })
+                  .get(),
+                "disc selection",
+                id,
+              );
+            }
+            transaction
+              .update(originalDiscArchives)
+              .set({
+                catalogReviewedAt: null,
+                updatedAt: nextCatalogMutationTimestamp(timestamp),
+              })
+              .where(
+                eq(
+                  originalDiscArchives.id,
+                  selection.originalDiscArchiveId,
+                ),
+              )
+              .run();
+            return {
+              ...toDiscSelection(selection),
+              deletedEncodeJobs: 0,
+              deletionComplete: true,
+            };
+          },
+          { behavior: "immediate" },
         );
       },
 
@@ -2138,17 +3090,48 @@ export function createDataAccessInternal(
         if (options?.ids !== undefined && options.ids.length === 0) {
           return [];
         }
-        return database
+        if (options?.offset !== undefined && options.limit === undefined) {
+          throw new DomainInvariantError(
+            "Disc Selection offset requires a bounded limit",
+          );
+        }
+        const conditions = [
+          options?.ids
+            ? inArray(discSelections.id, [...options.ids])
+            : undefined,
+          options?.originalDiscArchiveId
+            ? eq(
+                discSelections.originalDiscArchiveId,
+                options.originalDiscArchiveId,
+              )
+            : undefined,
+          options?.ids === undefined
+            ? eq(discSelections.isCatalogActive, true)
+            : undefined,
+        ].filter((condition) => condition !== undefined);
+        const query = database
           .select()
           .from(discSelections)
-          .where(
-            options?.ids
-              ? inArray(discSelections.id, [...options.ids])
-              : undefined,
-          )
-          .orderBy(asc(discSelections.createdAt), asc(discSelections.id))
-          .all()
-          .map(toDiscSelection);
+          .where(conditions.length > 0 ? and(...conditions) : undefined)
+          .orderBy(asc(discSelections.createdAt), asc(discSelections.id));
+        let rows;
+        if (options?.limit === undefined) {
+          rows = query.all();
+        } else {
+          const limited = query.limit(
+            requirePositiveSafeInteger(options.limit, "limit"),
+          );
+          if (options.offset === undefined) {
+            rows = limited.all();
+          } else {
+            const offset = optionalSafeInteger(options.offset, "offset", 0);
+            if (offset === null || offset === undefined) {
+              throw new DomainInvariantError("offset must be a safe integer");
+            }
+            rows = limited.offset(offset).all();
+          }
+        }
+        return rows.map(toDiscSelection);
       },
     },
 
@@ -2501,43 +3484,91 @@ export function createDataAccessInternal(
     encodeJobs: {
       enqueue(input) {
         const timestamp = now();
-        database
-          .insert(encodeJobs)
-          .values({
-            id: newId<EncodeJobId>(),
-            discSelectionId: input.discSelectionId,
-            encodingProfileId: input.encodingProfileId,
-            outputPath: requireNonEmpty(input.outputPath, "outputPath"),
-            priority: input.priority ?? 0,
-            createdAt: timestamp,
-            updatedAt: timestamp,
-          })
-          .onConflictDoNothing({
-            target: [encodeJobs.discSelectionId, encodeJobs.encodingProfileId],
-          })
-          .run();
+        const outputPath = requireNonEmpty(input.outputPath, "outputPath");
+        return database.transaction(
+          (transaction) => {
+            const selectionReview = requireRow(
+              transaction
+                .select({
+                  catalogReviewedAt: originalDiscArchives.catalogReviewedAt,
+                  legacyCutoverPending:
+                    originalDiscArchives.legacyCutoverPending,
+                  originalDiscArchiveId: originalDiscArchives.id,
+                })
+                .from(discSelections)
+                .innerJoin(
+                  originalDiscArchives,
+                  eq(
+                    originalDiscArchives.id,
+                    discSelections.originalDiscArchiveId,
+                  ),
+                )
+                .where(and(
+                  eq(discSelections.id, input.discSelectionId),
+                  eq(discSelections.isCatalogActive, true),
+                ))
+                .get(),
+              "disc selection",
+              input.discSelectionId,
+            );
+            if (
+              selectionReview.catalogReviewedAt === null ||
+              selectionReview.legacyCutoverPending
+            ) {
+              throw new DomainInvariantError(
+                "Encode Jobs require a completed catalog review",
+              );
+            }
+            requireReviewableDiscSelections(
+              selectionReview.originalDiscArchiveId,
+              transaction,
+            );
+            transaction
+              .insert(encodeJobs)
+              .values({
+                id: newId<EncodeJobId>(),
+                discSelectionId: input.discSelectionId,
+                encodingProfileId: input.encodingProfileId,
+                outputPath,
+                priority: input.priority ?? 0,
+                createdAt: timestamp,
+                updatedAt: timestamp,
+              })
+              .onConflictDoNothing({
+                target: [
+                  encodeJobs.discSelectionId,
+                  encodeJobs.encodingProfileId,
+                ],
+              })
+              .run();
 
-        const existing = requireRow(
-          database
-            .select()
-            .from(encodeJobs)
-            .where(
-              and(
-                eq(encodeJobs.discSelectionId, input.discSelectionId),
-                eq(encodeJobs.encodingProfileId, input.encodingProfileId),
-              ),
-            )
-            .get(),
-          "encode job",
-          `${input.discSelectionId}/${input.encodingProfileId}`,
+            const existing = requireRow(
+              transaction
+                .select()
+                .from(encodeJobs)
+                .where(
+                  and(
+                    eq(encodeJobs.discSelectionId, input.discSelectionId),
+                    eq(encodeJobs.encodingProfileId, input.encodingProfileId),
+                  ),
+                )
+                .get(),
+              "encode job",
+              `${input.discSelectionId}/${input.encodingProfileId}`,
+            );
+            if (
+              existing.status === "failed" ||
+              existing.status === "completed"
+            ) {
+              return encodeJobQueue.requeue(existing.id, {
+                outputPath,
+                priority: input.priority ?? 0,
+              });
+            }
+            return existing;
+          },
+          { behavior: "immediate" },
         );
-        if (existing.status === "failed" || existing.status === "completed") {
-          return encodeJobQueue.requeue(existing.id, {
-            outputPath: requireNonEmpty(input.outputPath, "outputPath"),
-            priority: input.priority ?? 0,
-          });
-        }
-        return existing;
       },
 
       claimNext: encodeJobQueue.claimNext,
@@ -2549,7 +3580,11 @@ export function createDataAccessInternal(
     },
 
     legacySidecars: legacySidecarMigration
-      ? legacySidecarMigration.createAccess(database, now)
+      ? legacySidecarMigration.createAccess(
+          database,
+          now,
+          requireReviewableDiscSelections,
+        )
       : {
           importLibrary() {
             throw new DomainInvariantError(

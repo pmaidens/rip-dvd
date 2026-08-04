@@ -4,6 +4,7 @@ import {
   check,
   index,
   integer,
+  primaryKey,
   sqliteTable,
   text,
   uniqueIndex,
@@ -124,6 +125,14 @@ export const originalDiscArchives = sqliteTable(
     fingerprint: text("fingerprint").notNull(),
     sizeBytes: integer("size_bytes"),
     archivedAt: integer("archived_at", { mode: "timestamp_ms" }).notNull(),
+    catalogReviewedAt: integer("catalog_reviewed_at", {
+      mode: "timestamp_ms",
+    }),
+    legacyCutoverPending: integer("legacy_cutover_pending", {
+      mode: "boolean",
+    })
+      .notNull()
+      .default(false),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -145,6 +154,24 @@ export const originalDiscArchives = sqliteTable(
     check(
       "original_disc_archives_size_check",
       sql`${table.sizeBytes} is null or ${table.sizeBytes} >= 0`,
+    ),
+  ],
+);
+
+export const legacyCutoverStagedSidecars = sqliteTable(
+  "legacy_cutover_staged_sidecars",
+  {
+    originalsLibraryPath: text("originals_library_path").notNull(),
+    sidecarPath: text("sidecar_path").notNull(),
+    archivePath: text("archive_path").notNull(),
+    fingerprint: text("fingerprint").notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.originalsLibraryPath, table.sidecarPath],
+    }),
+    index("legacy_cutover_staged_sidecars_library_idx").on(
+      table.originalsLibraryPath,
     ),
   ],
 );
@@ -227,15 +254,17 @@ export const discSelections = sqliteTable(
     chapterStart: integer("chapter_start"),
     chapterEnd: integer("chapter_end"),
     label: text("label"),
+    isCatalogActive: integer("is_catalog_active", { mode: "boolean" })
+      .notNull()
+      .default(true),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
   (table) => [
     check("disc_selections_id_not_null", sql`${table.id} is not null`),
-    uniqueIndex("disc_selections_archive_source_unique").on(
-      table.originalDiscArchiveId,
-      table.sourceKey,
-    ),
+    uniqueIndex("disc_selections_archive_active_source_unique")
+      .on(table.originalDiscArchiveId, table.sourceKey)
+      .where(sql`${table.isCatalogActive} = 1`),
     index("disc_selections_media_item_idx").on(table.mediaItemId),
     check(
       "disc_selections_kind_check",
@@ -337,6 +366,9 @@ export const encodeJobs = sqliteTable(
       .notNull()
       .references(() => encodingProfiles.id, { onDelete: "restrict" }),
     outputPath: text("output_path").notNull(),
+    reservesOutputPath: integer("reserves_output_path", { mode: "boolean" })
+      .notNull()
+      .default(true),
     status: text("status", { enum: JOB_STATUSES }).notNull().default("queued"),
     priority: integer("priority").notNull().default(0),
     progressPercent: integer("progress_percent").notNull().default(0),
@@ -355,7 +387,9 @@ export const encodeJobs = sqliteTable(
       table.discSelectionId,
       table.encodingProfileId,
     ),
-    uniqueIndex("encode_jobs_output_path_unique").on(table.outputPath),
+    uniqueIndex("encode_jobs_output_path_unique")
+      .on(table.outputPath)
+      .where(sql`${table.reservesOutputPath} = 1`),
     index("encode_jobs_queue_idx").on(table.status, table.priority, table.createdAt),
     check(
       "encode_jobs_status_check",
@@ -364,6 +398,10 @@ export const encodeJobs = sqliteTable(
     check(
       "encode_jobs_progress_check",
       sql`${table.progressPercent} between 0 and 100`,
+    ),
+    check(
+      "encode_jobs_output_reservation_check",
+      sql`${table.reservesOutputPath} = 1 or ${table.status} = 'failed'`,
     ),
   ],
 );

@@ -68,13 +68,20 @@ export interface DashboardCatalogReviewItem {
   archivedAt: string;
 }
 
+export interface DashboardPage {
+  offset: number;
+  limit: number;
+  hasPrevious: boolean;
+  hasNext: boolean;
+}
+
 export type DashboardStatus =
   | DashboardOpticalDrive["state"]
   | DetectedDiscStatus
   | JobStatus;
 
 export type DashboardSectionResult<T> =
-  | { status: "loaded"; items: T[] }
+  | { status: "loaded"; items: T[]; page?: DashboardPage }
   | { status: "error" };
 
 export interface DashboardSnapshot {
@@ -88,7 +95,22 @@ export interface DashboardSnapshot {
 
 export interface DashboardSnapshotOptions {
   activityLimit?: number;
+  catalogReviewOffset?: number;
   includeDetectedDiscDetails?: boolean;
+}
+
+export function parseDashboardCatalogReviewOffset(
+  request: Request,
+): number | null {
+  const value = new URL(request.url).searchParams.get("catalogReviewOffset");
+  if (value === null) {
+    return 0;
+  }
+  if (!/^(0|[1-9]\d*)$/.test(value) || value.length > 16) {
+    return null;
+  }
+  const offset = Number(value);
+  return Number.isSafeInteger(offset) ? offset : null;
 }
 
 type SourceResult<T> =
@@ -123,6 +145,7 @@ function readDashboardSnapshotRecords(
   access: ConsistentReadAccess,
   {
     activityLimit,
+    catalogReviewOffset = 0,
     includeDetectedDiscDetails = true,
   }: DashboardSnapshotOptions = {},
 ): DashboardSnapshot {
@@ -178,10 +201,20 @@ function readDashboardSnapshotRecords(
   const archiveSource = readSource(() =>
     access.catalog.listOriginalDiscArchives(
       activityLimit === undefined
-        ? undefined
-        : { limit: activityLimit, uncatalogedOnly: true },
+        ? { needsCatalogReviewOnly: true }
+        : {
+            limit: activityLimit + 1,
+            offset: catalogReviewOffset,
+            needsCatalogReviewOnly: true,
+          },
     ),
   );
+  const catalogReviewArchives =
+    archiveSource.status === "loaded" && activityLimit !== undefined
+      ? archiveSource.value.slice(-activityLimit)
+      : archiveSource.status === "loaded"
+        ? archiveSource.value
+        : [];
   const relevantDetectedDiscIds =
     activityLimit === undefined
       ? undefined
@@ -192,9 +225,7 @@ function readDashboardSnapshotRecords(
           ...(archiveJobSource.status === "loaded"
             ? archiveJobSource.value.map((job) => job.detectedDiscId)
             : []),
-          ...(archiveSource.status === "loaded"
-            ? archiveSource.value.map((archive) => archive.detectedDiscId)
-            : []),
+          ...catalogReviewArchives.map((archive) => archive.detectedDiscId),
         ];
   const linkedDetectedDiscSource =
     activityLimit === undefined
@@ -385,33 +416,31 @@ function readDashboardSnapshotRecords(
 
   const catalogReview =
     archiveSource.status === "error" ||
-    selectionSource.status === "error" ||
     discsById === null
       ? unavailable<DashboardCatalogReviewItem>()
-      : (() => {
-          const selectedArchiveIds = new Set(
-            selectionSource.value.map(
-              (selection) => selection.originalDiscArchiveId,
-            ),
-          );
-          return loaded(
-            archiveSource.value
-              .filter(
-                (archive) =>
-                  activityLimit !== undefined ||
-                  !selectedArchiveIds.has(archive.id),
-              )
-              .map((archive) => ({
-                id: archive.id,
-                discLabel:
-                  discsById.get(archive.detectedDiscId)?.volumeLabel ??
-                  "Unlabeled disc",
-                discKind: archive.discKind,
-                archiveFormat: archive.archiveFormat,
-                archivedAt: archive.archivedAt.toISOString(),
-              })),
-          );
-        })();
+      : {
+          status: "loaded" as const,
+          items: catalogReviewArchives.map((archive) => ({
+            id: archive.id,
+            discLabel:
+              discsById.get(archive.detectedDiscId)?.volumeLabel ??
+              "Unlabeled disc",
+            discKind: archive.discKind,
+            archiveFormat: archive.archiveFormat,
+            archivedAt: archive.archivedAt.toISOString(),
+          })),
+          ...(activityLimit !== undefined &&
+          (catalogReviewOffset > 0 || archiveSource.value.length > activityLimit)
+            ? {
+                page: {
+                  offset: catalogReviewOffset,
+                  limit: activityLimit,
+                  hasPrevious: catalogReviewOffset > 0,
+                  hasNext: archiveSource.value.length > activityLimit,
+                },
+              }
+            : {}),
+        };
 
   return {
     generatedAt: new Date().toISOString(),

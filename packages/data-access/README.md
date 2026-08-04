@@ -42,6 +42,39 @@ enabled Optical Drive is returned before a capped history of disabled missing
 drives. Detected Discs awaiting review and the shared Archive/Encode Job policy
 each have an explicit active cap before recent terminal history is added.
 
+Catalog review is explicit rather than inferred from the first Disc Selection.
+New Original Disc Archives remain in the review queue while a user builds a
+partial set of selections, and `catalog.completeCatalogReview()` records the
+review time only after at least one selection exists. Creating another Disc
+Selection atomically clears that review time, so encoding remains blocked until
+the changed catalog is explicitly completed again. Media Item hierarchy
+mutations are serialized, reject cycles, and cap each hierarchy at 32 items.
+The facade derives canonical DVD source identities, rejects duplicate source
+slices, requires title selections to reference the archived scan, and keeps
+chapter ranges within the selected title; main-feature selections remain a
+distinct DVD source kind. Encode Job
+enqueueing checks that review boundary and writes in one short immediate
+transaction, so a concurrent Disc Selection cannot reopen review between the
+eligibility read and queue write. Encode Job requeue and claim operations also
+require that review boundary. Existing databases preserve the review time for
+canonical main-feature-only catalogs. Caller-era scan-dependent, noncanonical,
+or otherwise unsafe catalogs are reopened conservatively, their active Encode
+Jobs fail visibly, and bounded catalog validation is required before review can
+complete again. Duplicate logical slices, noncanonical source keys, missing DVD
+titles, and out-of-range chapters fail that validation. Scan evidence referenced
+by an Original Disc Archive is immutable across rediscovery, so reviewed
+selection bounds cannot drift after enqueue. Migration-only legacy sidecar
+imports use the same validator before publishing or retaining review state;
+unsafe or newly added mappings leave the archive awaiting explicit review and
+their queued jobs remain unclaimable. Bounded legacy title evidence is also
+normalized for the review response and for title/chapter selection validation,
+so archive-only imports can be reviewed without weakening current scan writes.
+Disc Selection removal is rejected whenever any dependent Encode Job history
+exists, including completed and imported provenance. The bounded repair facade
+can correct a caller-era selection only when its dependent jobs are the failed,
+permanently ineligible records created by the upgrade guard; it preserves those
+records and reopens review. Job-free selections can still be removed normally.
+
 ## Queue attempts and progress
 
 Every claim returns a unique, queue-specific claim token. Progress, completion,
@@ -109,13 +142,16 @@ returns; process execution never belongs in a database transaction.
 existing `.rip-dvd.json` files. It scans an originals library once, validates
 schema-one and schema-two sidecars, and writes each valid sidecar to SQLite in
 a short transaction. Valid jobs in a partially invalid sidecar still import;
-corrupt sidecars, invalid jobs, missing archives, and duplicates are returned
-in a structured report. Completion is inferred from the final output file at
-import time. Relative recorded paths use the legacy CLI's invocation-directory
-semantics; an existing sidecar-relative path is accepted as a compatibility
-candidate, but two existing candidates are reported as ambiguous. A missing or
-unreadable originals library is an input error rather than an empty successful
-import.
+invalid jobs and duplicates are returned in a structured report and keep their
+archive pending review behind a durable repair marker, so a corrected live
+sidecar can be recaptured on the next import. A wholly corrupt, oversized, missing-archive, or
+otherwise unrepresentable sidecar prevents first cutover publication, leaving
+every sidecar active for a supported repair-and-retry. Completion is inferred
+from the final output file at import time. Relative recorded paths use the
+legacy CLI's invocation-directory semantics; an existing sidecar-relative path
+is accepted as a compatibility candidate, but two existing candidates are
+reported as ambiguous. A missing or unreadable originals library is an input
+error rather than an empty successful import.
 
 Schema-two `created_at` and `updated_at` values provide the historical record
 dates. When they are absent, the archive file modification time is the fallback;
@@ -123,13 +159,28 @@ a completed Encode Job uses its output file modification time. Re-import never
 replaces an existing SQLite Encode Job's status, output, priority, progress, or
 error, including an intentional retry.
 
-Before committing any imported records, the migration-only entrypoint
-atomically writes and synchronizes a `.rip-dvd-sqlite-catalog` marker at the
-originals-library root. A marker failure exposes no imported SQLite state; a
-restart after marker publication safely resumes the idempotent import with the
-legacy queue already inactive. The marker records the immutable logical-job
-configuration captured at cutover, allowing restart/retry to report later
-sidecar conflicts while preserving authoritative SQLite requeues. A shared
+Before committing any imported records, the migration-only entrypoint clears
+catalog review and sets a persistent cutover fence for related existing
+archives in one immediate transaction,
+then atomically writes and synchronizes a `.rip-dvd-sqlite-catalog` marker at
+the originals-library root. A marker failure exposes no imported SQLite state
+and leaves those archives pending review; a restart after marker publication
+safely resumes the idempotent import with the legacy queue already inactive.
+The marker records the immutable logical-job configuration captured at
+cutover, allowing restart/retry to report later sidecar conflicts while
+preserving authoritative SQLite requeues. A parser, persistence, transaction,
+or captured-source conflict changes the marker to a `repair` state: its
+presence continues to block legacy workers, while a later complete and
+parseable live inventory can replace the failed snapshot after repair. Repair
+cannot retire the marker unless every previously captured sidecar is present.
+Every schema-four retry re-fences the marker's captured archives before it can
+return for incomplete live inventory, including after a database upgrade.
+The SQLite fence independently blocks catalog completion and Encode Job
+enqueue, requeue, and claim until the whole captured batch succeeds. Catalog
+review timestamps are committed together only after that validation and only
+for archives unchanged since the review boundary was staged. Existing Media
+Items and Disc Selections remain SQLite-authoritative throughout initial and
+recovery imports. A shared
 library-scoped lease serializes discovery, marker publication, and import with
 in-flight legacy archive/encode batches. It never writes the sidecars
 themselves. All legacy archive and queue commands refuse a marked library,

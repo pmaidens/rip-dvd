@@ -54,6 +54,8 @@ const MAX_LEGACY_IMPORT_BYTES = 8_388_608;
 const MAX_LEGACY_SCAN_BYTES = 67_108_864;
 const MAX_LEGACY_IMPORT_JOBS = 1_000;
 const MAX_LEGACY_MARKER_BYTES = 8_388_608;
+const LEGACY_QUEUE_STATUS_REPAIR = "repair";
+const LEGACY_QUEUE_STATUS_RETIRED = "retired";
 const LEGACY_MARKER_PREFIX =
   '{"schemaVersion":4,"legacyQueueStatus":"retired","authoritativeStore":"sqlite","legacySidecars":';
 const LEGACY_MARKER_FIXED_BYTES = Buffer.byteLength(
@@ -130,6 +132,7 @@ interface LegacyQueueCutoverBase {
   recoveryDiscoveries: LegacySidecarDiscovery[] | null;
   recoveryIssues: LegacySidecarImportIssue[];
   sidecarSnapshots: readonly LegacyQueueSidecarSnapshot[];
+  withdrawPublication(): void;
   wasAlreadyPublished: boolean;
 }
 
@@ -1786,13 +1789,21 @@ function recoverPublishedJobSidecars(
 export function retireLegacySidecarQueue(
   originalsLibraryPath: string,
   discoveryBatch: LegacySidecarDiscoveryBatch,
+  stageCatalogReviewBoundary: (
+    discoveries: readonly LegacySidecarDiscovery[],
+    options?: { allowStagedIdentityReplacement?: boolean },
+  ) => boolean,
 ): LegacyQueueCutover | null {
   const { discoveries } = discoveryBatch;
   const markerPath = join(
     originalsLibraryPath,
     LEGACY_QUEUE_CUTOVER_MARKER,
   );
-  if (!discoveryBatch.complete && !existsSync(markerPath)) {
+  if (
+    !existsSync(markerPath) &&
+    (!discoveryBatch.complete ||
+      discoveries.some((discovery) => discovery.outcome === "skipped"))
+  ) {
     return null;
   }
   const discoveredSnapshots = new Map<
@@ -1823,29 +1834,7 @@ export function retireLegacySidecarQueue(
     }
   }
 
-  const writeMarker = (
-    snapshots: ReadonlyMap<LegacyJobLogicalKey, LegacyQueueJobSnapshot>,
-  ): void => {
-    if (snapshots.size > MAX_LEGACY_IMPORT_JOBS) {
-      throw new Error(
-        `SQLite cutover marker legacyJobs exceed the ${MAX_LEGACY_IMPORT_JOBS}-entry limit`,
-      );
-    }
-    const serializedLegacySidecars = discoveredSidecars.map((snapshot) =>
-      JSON.stringify(snapshot),
-    );
-    const serializedLegacyJobs: string[] = [];
-    for (const [logicalKey, snapshot] of snapshots) {
-      const serializedEntry = JSON.stringify({ logicalKey, ...snapshot });
-      serializedLegacyJobs.push(serializedEntry);
-    }
-    const legacySidecarsJson = `[${serializedLegacySidecars.join(",")}]`;
-    const legacyJobsJson = `[${serializedLegacyJobs.join(",")}]`;
-    const snapshotPayload = `${legacySidecarsJson}\n${legacyJobsJson}`;
-    const snapshotDigest = createHash("sha256")
-      .update(snapshotPayload)
-      .digest("hex");
-    const markerContents = `${LEGACY_MARKER_PREFIX}${legacySidecarsJson},"legacyJobs":${legacyJobsJson},"snapshotDigest":"${snapshotDigest}"}\n`;
+  const publishMarkerContents = (markerContents: string): void => {
     if (Buffer.byteLength(markerContents, "utf8") > MAX_LEGACY_MARKER_BYTES) {
       throw new Error(
         `SQLite cutover marker exceeds the ${MAX_LEGACY_MARKER_BYTES}-byte limit`,
@@ -1870,6 +1859,69 @@ export function retireLegacySidecarQueue(
       }
     }
   };
+  const writeMarker = (
+    snapshots: ReadonlyMap<LegacyJobLogicalKey, LegacyQueueJobSnapshot>,
+  ): void => {
+    if (snapshots.size > MAX_LEGACY_IMPORT_JOBS) {
+      throw new Error(
+        `SQLite cutover marker legacyJobs exceed the ${MAX_LEGACY_IMPORT_JOBS}-entry limit`,
+      );
+    }
+    const serializedLegacySidecars = discoveredSidecars.map((snapshot) =>
+      JSON.stringify(snapshot),
+    );
+    const serializedLegacyJobs: string[] = [];
+    for (const [logicalKey, snapshot] of snapshots) {
+      const serializedEntry = JSON.stringify({ logicalKey, ...snapshot });
+      serializedLegacyJobs.push(serializedEntry);
+    }
+    const legacySidecarsJson = `[${serializedLegacySidecars.join(",")}]`;
+    const legacyJobsJson = `[${serializedLegacyJobs.join(",")}]`;
+    const snapshotPayload = `${legacySidecarsJson}\n${legacyJobsJson}`;
+    const snapshotDigest = createHash("sha256")
+      .update(snapshotPayload)
+      .digest("hex");
+    publishMarkerContents(
+      `${LEGACY_MARKER_PREFIX}${legacySidecarsJson},"legacyJobs":${legacyJobsJson},"snapshotDigest":"${snapshotDigest}"}\n`,
+    );
+  };
+  const markMarkerForRepair = (): void => {
+    if (!existsSync(markerPath)) {
+      return;
+    }
+    let currentMarker: unknown;
+    try {
+      currentMarker = JSON.parse(
+        readBoundedUtf8File(
+          markerPath,
+          MAX_LEGACY_MARKER_BYTES,
+          "SQLite cutover marker",
+        ),
+      );
+    } catch (error) {
+      throw new Error(
+        `Invalid SQLite cutover marker: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    const currentValue = objectValue(currentMarker);
+    if (
+      currentValue?.schemaVersion !== 4 ||
+      currentValue.authoritativeStore !== "sqlite" ||
+      (currentValue.legacyQueueStatus !== LEGACY_QUEUE_STATUS_RETIRED &&
+        currentValue.legacyQueueStatus !== LEGACY_QUEUE_STATUS_REPAIR)
+    ) {
+      throw new Error(
+        "Only a schema-4 SQLite cutover marker can be marked for repair",
+      );
+    }
+    if (currentValue.legacyQueueStatus === LEGACY_QUEUE_STATUS_REPAIR) {
+      return;
+    }
+    publishMarkerContents(`${JSON.stringify({
+      ...currentValue,
+      legacyQueueStatus: LEGACY_QUEUE_STATUS_REPAIR,
+    })}\n`);
+  };
 
   if (existsSync(markerPath)) {
     synchronizeDirectory(originalsLibraryPath);
@@ -1892,10 +1944,13 @@ export function retireLegacySidecarQueue(
       );
     }
     const value = objectValue(marker);
-    const hasCutoverDiscriminators =
-      value?.legacyQueueStatus === "retired" &&
+    const hasRetiredCutoverDiscriminators =
+      value?.legacyQueueStatus === LEGACY_QUEUE_STATUS_RETIRED &&
       value.authoritativeStore === "sqlite";
-    if (value?.schemaVersion === 1 && hasCutoverDiscriminators) {
+    const hasRepairCutoverDiscriminators =
+      value?.legacyQueueStatus === LEGACY_QUEUE_STATUS_REPAIR &&
+      value.authoritativeStore === "sqlite";
+    if (value?.schemaVersion === 1 && hasRetiredCutoverDiscriminators) {
       return {
         jobSnapshots: new Map(),
         mode: "schema-one",
@@ -1903,13 +1958,15 @@ export function retireLegacySidecarQueue(
         recoveryIssues: [],
         sidecarSnapshots: [],
         upgradeSchemaOne: writeMarker,
+        withdrawPublication() {},
         wasAlreadyPublished: true,
       };
     } else if (
       (value?.schemaVersion === 2 ||
         value?.schemaVersion === 3 ||
         value?.schemaVersion === 4) &&
-      hasCutoverDiscriminators
+      (hasRetiredCutoverDiscriminators ||
+        (value.schemaVersion === 4 && hasRepairCutoverDiscriminators))
     ) {
       if (!Array.isArray(value.legacyJobs)) {
         throw new Error("Invalid SQLite cutover marker: legacyJobs must be an array");
@@ -2041,6 +2098,52 @@ export function retireLegacySidecarQueue(
       if (value.snapshotDigest !== expectedDigest) {
         throw new Error("Invalid SQLite cutover marker: snapshot digest mismatch");
       }
+      let markerBoundaryIsComplete = true;
+      if (value.schemaVersion === 4) {
+        markerBoundaryIsComplete = stageCatalogReviewBoundary(
+          sidecarSnapshots.map((snapshot) => ({
+            outcome: "parsed" as const,
+            sidecar: restorePublishedSidecar(snapshot),
+          })),
+          { allowStagedIdentityReplacement: true },
+        );
+      }
+      if (hasRepairCutoverDiscriminators) {
+        const currentParsedSidecarPaths = new Set(
+          discoveries.flatMap((discovery) =>
+            discovery.outcome === "parsed"
+              ? [discovery.sidecar.sidecarPath]
+              : [],
+          ),
+        );
+        if (
+          !discoveryBatch.complete ||
+          !hasParsedSidecar ||
+          discoveries.some((discovery) => discovery.outcome === "skipped") ||
+          sidecarSnapshots.some(
+            (snapshot) =>
+              !currentParsedSidecarPaths.has(snapshot.sidecarPath),
+          )
+        ) {
+          return null;
+        }
+        if (!stageCatalogReviewBoundary(discoveries)) {
+          return null;
+        }
+        writeMarker(discoveredSnapshots);
+        return {
+          jobSnapshots: discoveredSnapshots,
+          mode: "snapshot",
+          recoveryDiscoveries: null,
+          recoveryIssues: [],
+          sidecarSnapshots: discoveredSidecars,
+          withdrawPublication: markMarkerForRepair,
+          wasAlreadyPublished: true,
+        };
+      }
+      if (!markerBoundaryIsComplete) {
+        return null;
+      }
       const recovery =
         value.schemaVersion === 4
           ? recoverPublishedSidecars(originalsLibraryPath, sidecarSnapshots)
@@ -2061,6 +2164,10 @@ export function retireLegacySidecarQueue(
           (discoveryBatch.complete ? null : []),
         recoveryIssues: recovery?.issues ?? [],
         sidecarSnapshots,
+        withdrawPublication:
+          value.schemaVersion === 4
+            ? markMarkerForRepair
+            : () => {},
         wasAlreadyPublished: true,
       };
     } else {
@@ -2068,14 +2175,21 @@ export function retireLegacySidecarQueue(
     }
   }
   if (!hasParsedSidecar) {
+    if (!stageCatalogReviewBoundary(discoveries)) {
+      return null;
+    }
     return {
       jobSnapshots: new Map(),
       mode: "snapshot",
       recoveryDiscoveries: null,
       recoveryIssues: [],
       sidecarSnapshots: [],
+      withdrawPublication() {},
       wasAlreadyPublished: false,
     };
+  }
+  if (!stageCatalogReviewBoundary(discoveries)) {
+    return null;
   }
   writeMarker(discoveredSnapshots);
   return {
@@ -2084,6 +2198,7 @@ export function retireLegacySidecarQueue(
     recoveryDiscoveries: null,
     recoveryIssues: [],
     sidecarSnapshots: discoveredSidecars,
+    withdrawPublication: markMarkerForRepair,
     wasAlreadyPublished: false,
   };
 }

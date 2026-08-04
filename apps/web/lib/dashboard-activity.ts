@@ -15,13 +15,14 @@ export interface DashboardEventSource {
 }
 
 interface WatchDashboardActivityOptions {
-  loadSnapshot?: () => Promise<DashboardSnapshot>;
+  catalogReviewOffset?: number;
+  loadSnapshot?: (catalogReviewOffset: number) => Promise<DashboardSnapshot>;
   loadDiscDetails?: (
     id: string,
     detectedAt: string,
     signal: AbortSignal,
   ) => Promise<DashboardDetectedDiscDetails>;
-  openEventSource?: () => DashboardEventSource;
+  openEventSource?: (catalogReviewOffset: number) => DashboardEventSource;
   onSnapshot(snapshot: DashboardSnapshot): void;
   onInitialLoadError(): void;
   onStreamStatus?(status: DashboardStreamStatus): void;
@@ -83,11 +84,16 @@ function mergeDiscDetails(
   };
 }
 
-async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
-  const response = await fetch("/api/dashboard", {
-    cache: "no-store",
-    headers: { Accept: "application/json" },
-  });
+async function loadDashboardSnapshot(
+  catalogReviewOffset: number,
+): Promise<DashboardSnapshot> {
+  const response = await fetch(
+    `/api/dashboard?catalogReviewOffset=${catalogReviewOffset}`,
+    {
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+    },
+  );
   if (!response.ok) {
     throw new Error("Dashboard request failed");
   }
@@ -113,8 +119,12 @@ async function loadDashboardDiscDetails(
   return (await response.json()) as DashboardDetectedDiscDetails;
 }
 
-function openDashboardEventSource(): DashboardEventSource {
-  const source = new EventSource("/api/dashboard/events");
+function openDashboardEventSource(
+  catalogReviewOffset: number,
+): DashboardEventSource {
+  const source = new EventSource(
+    `/api/dashboard/events?catalogReviewOffset=${catalogReviewOffset}`,
+  );
   const adapter: DashboardEventSource = {
     onerror: null,
     onopen: null,
@@ -131,6 +141,7 @@ function openDashboardEventSource(): DashboardEventSource {
 }
 
 export function watchDashboardActivity({
+  catalogReviewOffset = 0,
   loadSnapshot = loadDashboardSnapshot,
   loadDiscDetails = loadDashboardDiscDetails,
   openEventSource = openDashboardEventSource,
@@ -279,7 +290,7 @@ export function watchDashboardActivity({
     startNextDetailRefresh();
   };
 
-  void loadSnapshot()
+  void loadSnapshot(catalogReviewOffset)
     .then((snapshot) => {
       if (!active) {
         return;
@@ -293,7 +304,7 @@ export function watchDashboardActivity({
       onSnapshot(snapshot);
       try {
         onStreamStatus("connecting");
-        eventSource = openEventSource();
+        eventSource = openEventSource(catalogReviewOffset);
         eventSource.onopen = () => {
           if (active) {
             onStreamStatus("live");
