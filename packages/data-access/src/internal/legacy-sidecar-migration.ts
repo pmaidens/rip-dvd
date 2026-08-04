@@ -3,8 +3,10 @@ import { isDeepStrictEqual } from "node:util";
 
 import {
   and,
+  asc,
   eq,
   exists,
+  gt,
   inArray,
   isNotNull,
   isNull,
@@ -65,6 +67,7 @@ import {
 import { requireNonEmpty } from "./validation.js";
 
 const LEGACY_CUTOVER_INVENTORY_LIMIT = 10_000;
+const LEGACY_CUTOVER_RELEASE_PAGE_SIZE = 500;
 
 function emptyLegacyImportRecordCounts():
   LegacySidecarImportReport["recordsCreated"] {
@@ -361,6 +364,7 @@ export function createLegacySidecarImportAccess(
             .select({
               archivePath: originalDiscArchives.archivePath,
               fingerprint: originalDiscArchives.fingerprint,
+              id: originalDiscArchives.id,
             })
             .from(originalDiscArchives)
             .where(eq(originalDiscArchives.legacyCutoverPending, true))
@@ -369,12 +373,23 @@ export function createLegacySidecarImportAccess(
           if (pendingArchives.length > LEGACY_CUTOVER_INVENTORY_LIMIT) {
             return false;
           }
+          for (const archive of pendingArchives) {
+            if (
+              isPathWithinDirectory(
+                originalsLibraryPath,
+                archive.archivePath,
+              )
+            ) {
+              cutoverFenceArchiveIds.add(archive.id);
+            }
+          }
           const pendingArchivesAreRepresented = pendingArchives.every(
             (archive) =>
               !isPathWithinDirectory(
                 originalsLibraryPath,
                 archive.archivePath,
               ) ||
+              stagedSidecars.length > 0 ||
               representedFingerprints.has(archive.fingerprint) ||
               representedArchivePaths.has(archive.archivePath) ||
               representedStagedFingerprints.has(archive.fingerprint) ||
@@ -1563,14 +1578,48 @@ export function createLegacySidecarImportAccess(
                 )
                 .run();
             }
-            transaction
-              .update(originalDiscArchives)
-              .set({ legacyCutoverPending: false })
-              .where(inArray(
-                originalDiscArchives.id,
-                [...cutoverFenceArchiveIds],
+          }
+          let lastPendingArchiveId: OriginalDiscArchiveId | undefined;
+          for (;;) {
+            const pendingArchives = transaction
+              .select({
+                archivePath: originalDiscArchives.archivePath,
+                id: originalDiscArchives.id,
+              })
+              .from(originalDiscArchives)
+              .where(and(
+                eq(originalDiscArchives.legacyCutoverPending, true),
+                lastPendingArchiveId === undefined
+                  ? undefined
+                  : gt(originalDiscArchives.id, lastPendingArchiveId),
               ))
-              .run();
+              .orderBy(asc(originalDiscArchives.id))
+              .limit(LEGACY_CUTOVER_RELEASE_PAGE_SIZE)
+              .all();
+            const libraryArchiveIds = pendingArchives
+              .filter((archive) =>
+                isPathWithinDirectory(
+                  originalsLibraryPath,
+                  archive.archivePath,
+                ),
+              )
+              .map((archive) => archive.id);
+            if (libraryArchiveIds.length > 0) {
+              transaction
+                .update(originalDiscArchives)
+                .set({ legacyCutoverPending: false })
+                .where(inArray(
+                  originalDiscArchives.id,
+                  libraryArchiveIds,
+                ))
+                .run();
+            }
+            if (
+              pendingArchives.length < LEGACY_CUTOVER_RELEASE_PAGE_SIZE
+            ) {
+              break;
+            }
+            lastPendingArchiveId = pendingArchives.at(-1)!.id;
           }
           transaction
             .delete(legacyCutoverStagedSidecars)

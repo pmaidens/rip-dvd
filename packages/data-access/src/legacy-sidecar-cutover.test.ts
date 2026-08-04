@@ -784,6 +784,50 @@ try {
     expect(failedPublication.encodeJobs.list()).toEqual([]);
     failedPublication.close();
 
+    const service = createDataAccess({
+      databasePath,
+      originalsLibraryPath,
+    });
+    const drive = service.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const concurrentFingerprint = "concurrent-cutover-archive-fingerprint";
+    const concurrentArchivePath = join(
+      originalsLibraryPath,
+      "Concurrent.iso",
+    );
+    writeFileSync(concurrentArchivePath, "concurrent archive");
+    const concurrentDisc = service.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: concurrentFingerprint,
+    });
+    service.catalog.updateDetectedDiscStatus(concurrentDisc.id, "scanned");
+    service.archiveJobs.approve({ detectedDiscId: concurrentDisc.id });
+    const concurrentClaim = service.archiveJobs.claimNext(
+      "concurrent-worker",
+      {
+        opticalDriveId: drive.id,
+        fingerprint: concurrentFingerprint,
+      },
+    );
+    if (!concurrentClaim) {
+      throw new Error("Expected the concurrent Archive Job to be claimed");
+    }
+    service.archiveJobs.publish(concurrentClaim, {
+      archivePath: concurrentArchivePath,
+      sizeBytes: 4_700_000_000,
+    });
+    const concurrentArchive = service.catalog
+      .listOriginalDiscArchives()
+      .find((archive) => archive.fingerprint === concurrentFingerprint);
+    expect(concurrentArchive).toMatchObject({
+      legacyCutoverPending: true,
+    });
+    service.close();
+
     markerFault.failure = null;
     const incompleteRetry = createLegacySidecarDataAccess({ databasePath });
     const replacementArchivePath = join(originalsLibraryPath, "C.iso");
@@ -813,7 +857,12 @@ try {
       issues: [],
     });
     expect(existsSync(markerPath)).toBe(false);
-    expect(incompleteRetry.catalog.listOriginalDiscArchives()).toEqual([]);
+    expect(incompleteRetry.catalog.listOriginalDiscArchives()).toEqual([
+      expect.objectContaining({
+        id: concurrentArchive!.id,
+        legacyCutoverPending: true,
+      }),
+    ]);
     expect(incompleteRetry.encodeJobs.list()).toEqual([]);
 
     writeFileSync(second.sidecarPath, second.sidecarBytes);
@@ -834,6 +883,10 @@ try {
         expect.objectContaining({ outputPath: second.outputPath }),
       ]),
     );
+    expect(
+      incompleteRetry.catalog.listOriginalDiscArchives()
+        .find((archive) => archive.id === concurrentArchive!.id),
+    ).toMatchObject({ legacyCutoverPending: false });
     incompleteRetry.close();
   });
 
@@ -1025,7 +1078,7 @@ try {
     incompleteRetry.close();
   });
 
-  it("retries an anchored identity correction after replacement publication fails", () => {
+  it("fences and retries an anchored identity correction after publication fails", () => {
     const root = temporaryDirectories.create(
       "rip-dvd-cutover-anchored-correction-retry-",
     );
@@ -1109,6 +1162,46 @@ try {
     });
     failedReplacement.close();
 
+    const service = createDataAccess({
+      databasePath,
+      originalsLibraryPath,
+    });
+    const drive = service.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const repairedFingerprint = "anchored-correction-a-repaired-fingerprint";
+    const repairedArchivePath = join(
+      originalsLibraryPath,
+      "A-repaired.iso",
+    );
+    const disc = service.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: repairedFingerprint,
+    });
+    service.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    service.archiveJobs.approve({ detectedDiscId: disc.id });
+    const claim = service.archiveJobs.claimNext("replacement-worker", {
+      opticalDriveId: drive.id,
+      fingerprint: repairedFingerprint,
+    });
+    if (!claim) {
+      throw new Error("Expected the repaired Archive Job to be claimed");
+    }
+    service.archiveJobs.publish(claim, {
+      archivePath: repairedArchivePath,
+      sizeBytes: 4_700_000_000,
+    });
+    const replacementArchive = service.catalog
+      .listOriginalDiscArchives()
+      .find((archive) => archive.fingerprint === repairedFingerprint);
+    expect(replacementArchive).toMatchObject({
+      legacyCutoverPending: true,
+    });
+    service.close();
+
     markerFault.failure = null;
     const retry = createLegacySidecarDataAccess({ databasePath });
     expect(
@@ -1125,8 +1218,10 @@ try {
     const archives = retry.catalog.listOriginalDiscArchives();
     expect(archives).toEqual(expect.arrayContaining([
       expect.objectContaining({
-        archivePath: join(originalsLibraryPath, "A-repaired.iso"),
-        fingerprint: "anchored-correction-a-repaired-fingerprint",
+        id: replacementArchive!.id,
+        archivePath: repairedArchivePath,
+        fingerprint: repairedFingerprint,
+        legacyCutoverPending: false,
       }),
       expect.objectContaining({
         archivePath: join(originalsLibraryPath, "B.iso"),
@@ -2563,12 +2658,18 @@ try {
     service.close();
   });
 
-  it("fences an archive created after repair-marker service bootstrap", () => {
+  it("fences a current-identity archive published after repair bootstrap", () => {
     const root = temporaryDirectories.create(
       "rip-dvd-cutover-late-archive-bootstrap-",
     );
     const originalsLibraryPath = join(root, "originals");
-    const archivePath = join(originalsLibraryPath, "Late.iso");
+    const databasePath = join(root, "service.sqlite");
+    const legacyArchivePath = join(originalsLibraryPath, "Late.iso");
+    const currentFingerprint = `sha256:${"a".repeat(64)}`;
+    const publishedArchivePath = join(
+      originalsLibraryPath,
+      `${"a".repeat(64)}.iso`,
+    );
     const sidecarPath = join(
       originalsLibraryPath,
       "Late.rip-dvd.json",
@@ -2578,12 +2679,12 @@ try {
       ".rip-dvd-sqlite-catalog",
     );
     mkdirSync(originalsLibraryPath, { recursive: true });
-    writeFileSync(archivePath, "late archive");
+    writeFileSync(legacyArchivePath, "late archive");
     writeFileSync(sidecarPath, JSON.stringify({
       schema_version: 2,
-      source: archivePath,
+      source: legacyArchivePath,
       title: "Late",
-      disc_fingerprint: "late-bootstrap-repair-fingerprint",
+      disc_fingerprint: "late-bootstrap-legacy-fingerprint",
       jobs: [],
     }));
     markerFault.failure = null;
@@ -2603,7 +2704,7 @@ try {
     })}\n`);
 
     const service = createDataAccess({
-      databasePath: join(root, "service.sqlite"),
+      databasePath,
       originalsLibraryPath,
     });
     const drive = service.catalog.upsertOpticalDrive({
@@ -2614,19 +2715,19 @@ try {
     const disc = service.catalog.registerDetectedDisc({
       opticalDriveId: drive.id,
       discKind: "dvd",
-      fingerprint: "late-bootstrap-repair-fingerprint",
+      fingerprint: currentFingerprint,
     });
     service.catalog.updateDetectedDiscStatus(disc.id, "scanned");
     service.archiveJobs.approve({ detectedDiscId: disc.id });
     const claim = service.archiveJobs.claimNext("late-bootstrap-worker", {
       opticalDriveId: drive.id,
-      fingerprint: "late-bootstrap-repair-fingerprint",
+      fingerprint: currentFingerprint,
     });
     if (!claim) {
       throw new Error("Expected the late Archive Job to be claimed");
     }
     service.archiveJobs.publish(claim, {
-      archivePath,
+      archivePath: publishedArchivePath,
       sizeBytes: 4_700_000_000,
     });
     const archive = service.catalog.listOriginalDiscArchives()[0]!;
