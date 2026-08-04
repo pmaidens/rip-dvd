@@ -458,10 +458,14 @@ describe("data-access facade", () => {
         order by name
       `)
       .all() as Array<{ name: string; sql: string }>;
-    expect(identifierTables).toHaveLength(9);
+    expect(identifierTables).toHaveLength(10);
     expect(
       identifierTables.every(({ name, sql }) =>
-        sql.includes(`${name}_id_not_null`),
+        name === "legacy_cutover_staged_sidecars"
+          ? sql.includes(
+              "PRIMARY KEY(`originals_library_path`, `sidecar_path`)",
+            )
+          : sql.includes(`${name}_id_not_null`),
       ),
     ).toBe(true);
     expect(() =>
@@ -1934,6 +1938,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
+        name: "20260804143147_durable-legacy-cutover-staging",
+      },
+      {
         name: "20260804051834_legacy-cutover-fence",
       },
       {
@@ -1941,9 +1948,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260803213207_catalog-review-upgrade-guard",
-      },
-      {
-        name: "20260803175923_gorgeous_wendell_rand",
       },
     ]);
     expect(

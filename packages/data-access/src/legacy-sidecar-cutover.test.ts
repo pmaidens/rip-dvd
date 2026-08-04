@@ -714,6 +714,194 @@ try {
     access.close();
   });
 
+  it("retains first-migration A+B inventory when marker publication fails", () => {
+    const root = temporaryDirectories.create(
+      "rip-dvd-cutover-new-durable-staging-",
+    );
+    const originalsLibraryPath = join(root, "originals");
+    const databasePath = join(root, "catalog.sqlite");
+    const markerPath = join(
+      originalsLibraryPath,
+      ".rip-dvd-sqlite-catalog",
+    );
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    const createSidecar = (name: string) => {
+      const archivePath = join(originalsLibraryPath, `${name}.iso`);
+      const sidecarPath = join(
+        originalsLibraryPath,
+        `${name}.rip-dvd.json`,
+      );
+      const outputPath = join(root, "movies", `${name}.mkv`);
+      writeFileSync(archivePath, `${name} archive`);
+      const sidecarBytes = Buffer.from(JSON.stringify({
+        schema_version: 2,
+        source: archivePath,
+        title: name,
+        disc_fingerprint: `new-durable-${name.toLowerCase()}-fingerprint`,
+        jobs: [{
+          label: `Movie: ${name}`,
+          source: archivePath,
+          output: outputPath,
+          preset: "Fast 480p30",
+          selection: "main_feature",
+          title_number: null,
+        }],
+      }));
+      writeFileSync(sidecarPath, sidecarBytes);
+      return { outputPath, sidecarBytes, sidecarPath };
+    };
+    const first = createSidecar("A");
+    const second = createSidecar("B");
+
+    const failedPublication = createLegacySidecarDataAccess({ databasePath });
+    expect(() =>
+      failedPublication.legacySidecars.importLibrary({
+        originalsLibraryPath,
+      }),
+    ).toThrow(/injected marker write failure/);
+    expect(existsSync(markerPath)).toBe(false);
+    expect(failedPublication.catalog.listOriginalDiscArchives()).toEqual([]);
+    expect(failedPublication.encodeJobs.list()).toEqual([]);
+    failedPublication.close();
+
+    unlinkSync(second.sidecarPath);
+    markerFault.failure = null;
+    const incompleteRetry = createLegacySidecarDataAccess({ databasePath });
+    expect(
+      incompleteRetry.legacySidecars.importLibrary({
+        originalsLibraryPath,
+      }),
+    ).toMatchObject({
+      sidecarsFound: 1,
+      sidecarsImported: 0,
+      sidecarsSkipped: 1,
+      issues: [],
+    });
+    expect(existsSync(markerPath)).toBe(false);
+    expect(incompleteRetry.catalog.listOriginalDiscArchives()).toEqual([]);
+    expect(incompleteRetry.encodeJobs.list()).toEqual([]);
+
+    writeFileSync(second.sidecarPath, second.sidecarBytes);
+    expect(
+      incompleteRetry.legacySidecars.importLibrary({
+        originalsLibraryPath,
+      }),
+    ).toMatchObject({
+      sidecarsFound: 2,
+      sidecarsImported: 2,
+      sidecarsSkipped: 0,
+      issues: [],
+    });
+    expect(existsSync(markerPath)).toBe(true);
+    expect(incompleteRetry.encodeJobs.list()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ outputPath: first.outputPath }),
+        expect.objectContaining({ outputPath: second.outputPath }),
+      ]),
+    );
+    incompleteRetry.close();
+  });
+
+  it("refuses incomplete replacement after a repair-marker write failure", () => {
+    const root = temporaryDirectories.create(
+      "rip-dvd-cutover-repair-replacement-staging-",
+    );
+    const originalsLibraryPath = join(root, "originals");
+    const databasePath = join(root, "catalog.sqlite");
+    const markerPath = join(
+      originalsLibraryPath,
+      ".rip-dvd-sqlite-catalog",
+    );
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    const createSidecar = (name: string) => {
+      const archivePath = join(originalsLibraryPath, `${name}.iso`);
+      const sidecarPath = join(
+        originalsLibraryPath,
+        `${name}.rip-dvd.json`,
+      );
+      const outputPath = join(root, "movies", `${name}.mkv`);
+      writeFileSync(archivePath, `${name} archive`);
+      const sidecarBytes = Buffer.from(JSON.stringify({
+        schema_version: 2,
+        source: archivePath,
+        title: name,
+        disc_fingerprint: `repair-replacement-${name.toLowerCase()}-fingerprint`,
+        jobs: [{
+          label: `Movie: ${name}`,
+          source: archivePath,
+          output: outputPath,
+          preset: "Fast 480p30",
+          selection: "main_feature",
+          title_number: null,
+        }],
+      }));
+      writeFileSync(sidecarPath, sidecarBytes);
+      return { outputPath, sidecarBytes, sidecarPath };
+    };
+    const first = createSidecar("A");
+    markerFault.failure = null;
+    const initial = createLegacySidecarDataAccess({ databasePath });
+    expect(initial.legacySidecars.importLibrary({ originalsLibraryPath }))
+      .toMatchObject({ sidecarsImported: 1, issues: [] });
+    initial.close();
+    const retiredMarker = JSON.parse(readFileSync(markerPath, "utf8")) as {
+      legacyQueueStatus: string;
+    };
+    writeFileSync(markerPath, `${JSON.stringify({
+      ...retiredMarker,
+      legacyQueueStatus: "repair",
+    })}\n`);
+    const second = createSidecar("B");
+
+    markerFault.failure = "rename";
+    const failedReplacement = createLegacySidecarDataAccess({ databasePath });
+    expect(() =>
+      failedReplacement.legacySidecars.importLibrary({
+        originalsLibraryPath,
+      }),
+    ).toThrow(/injected marker write failure/);
+    failedReplacement.close();
+
+    unlinkSync(second.sidecarPath);
+    markerFault.failure = null;
+    const incompleteRetry = createLegacySidecarDataAccess({ databasePath });
+    expect(
+      incompleteRetry.legacySidecars.importLibrary({
+        originalsLibraryPath,
+      }),
+    ).toMatchObject({
+      sidecarsFound: 1,
+      sidecarsImported: 0,
+      sidecarsSkipped: 1,
+      issues: [],
+    });
+    expect(JSON.parse(readFileSync(markerPath, "utf8"))).toMatchObject({
+      legacyQueueStatus: "repair",
+    });
+    expect(() =>
+      incompleteRetry.catalog.completeCatalogReview(
+        incompleteRetry.catalog.listOriginalDiscArchives()[0]!.id,
+      ),
+    ).toThrow(DomainInvariantError);
+
+    writeFileSync(second.sidecarPath, second.sidecarBytes);
+    expect(
+      incompleteRetry.legacySidecars.importLibrary({
+        originalsLibraryPath,
+      }).issues,
+    ).toEqual([]);
+    expect(JSON.parse(readFileSync(markerPath, "utf8"))).toMatchObject({
+      legacyQueueStatus: "retired",
+    });
+    expect(incompleteRetry.encodeJobs.list()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ outputPath: first.outputPath }),
+        expect.objectContaining({ outputPath: second.outputPath }),
+      ]),
+    );
+    incompleteRetry.close();
+  });
+
   it("refuses to replace a failed A+B publication with an incomplete A-only inventory", () => {
     const root = temporaryDirectories.create(
       "rip-dvd-cutover-durable-staging-",

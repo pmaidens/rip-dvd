@@ -4,6 +4,7 @@ import {
   check,
   index,
   integer,
+  primaryKey,
   sqliteTable,
   text,
   uniqueIndex,
@@ -153,6 +154,24 @@ export const originalDiscArchives = sqliteTable(
     check(
       "original_disc_archives_size_check",
       sql`${table.sizeBytes} is null or ${table.sizeBytes} >= 0`,
+    ),
+  ],
+);
+
+export const legacyCutoverStagedSidecars = sqliteTable(
+  "legacy_cutover_staged_sidecars",
+  {
+    originalsLibraryPath: text("originals_library_path").notNull(),
+    sidecarPath: text("sidecar_path").notNull(),
+    archivePath: text("archive_path").notNull(),
+    fingerprint: text("fingerprint").notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.originalsLibraryPath, table.sidecarPath],
+    }),
+    index("legacy_cutover_staged_sidecars_library_idx").on(
+      table.originalsLibraryPath,
     ),
   ],
 );
