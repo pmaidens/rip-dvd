@@ -55,12 +55,16 @@ chapter ranges within the selected title; main-feature selections remain a
 distinct DVD source kind. Encode Job
 enqueueing checks that review boundary and writes in one short immediate
 transaction, so a concurrent Disc Selection cannot reopen review between the
-eligibility read and queue write. Encode Job requeue and claim operations also
-require that review boundary. Existing databases preserve the review time for
-canonical main-feature-only catalogs. Caller-era scan-dependent, noncanonical,
-or otherwise unsafe catalogs are reopened conservatively, their active Encode
-Jobs fail visibly, and bounded catalog validation is required before review can
-complete again. Duplicate logical slices, noncanonical source keys, missing DVD
+eligibility read and queue write. It also requires the referenced Encoding
+Profile version to be active in the DVD video domain and rejects a final output
+path already reserved by another logical job. Encode Job requeue and claim
+operations also require the review boundary. Requeue preserves the referenced
+historical profile version even when it is no longer active. Existing databases
+preserve the review time for canonical main-feature-only catalogs. Caller-era
+scan-dependent, noncanonical, or otherwise unsafe catalogs are reopened
+conservatively, their active Encode Jobs fail visibly, and bounded catalog
+validation is required before review can complete again. Duplicate logical
+slices, noncanonical source keys, missing DVD
 titles, and out-of-range chapters fail that validation. Scan evidence referenced
 by an Original Disc Archive is immutable across rediscovery, so reviewed
 selection bounds cannot drift after enqueue. Migration-only legacy sidecar

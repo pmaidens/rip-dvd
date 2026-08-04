@@ -1,0 +1,366 @@
+import { describe, expect, it, vi } from "vitest";
+
+import { useDataAccessFixture } from "../../../test/data-access-fixture";
+import { createEncodeJobsRoute } from "./route";
+
+const dataAccessFixture = useDataAccessFixture();
+
+function createSelection(
+  access: ReturnType<typeof dataAccessFixture.create>,
+  suffix: string,
+) {
+  const drive = access.catalog.upsertOpticalDrive({
+    devicePath: `/dev/${suffix}`,
+    isPresent: true,
+  });
+  const disc = access.catalog.registerDetectedDisc({
+    opticalDriveId: drive.id,
+    discKind: "dvd",
+    fingerprint: `encode-api-${suffix}`,
+  });
+  access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+  access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+  const archive = access.catalog.createOriginalDiscArchive({
+    detectedDiscId: disc.id,
+    discKind: "dvd",
+    archiveFormat: "iso",
+    archivePath: `/media/originals/Encode API ${suffix}.iso`,
+    fingerprint: `encode-api-${suffix}`,
+  });
+  const item = access.catalog.createMediaItem({
+    kind: "movie",
+    title: `Encode API ${suffix}`,
+    year: 2026,
+  });
+  const selection = access.catalog.createDiscSelection({
+    originalDiscArchiveId: archive.id,
+    mediaItemId: item.id,
+    kind: "main_feature",
+  });
+  return { archive, item, selection };
+}
+
+describe("Encode Jobs API", () => {
+  it("lists reviewed mapped selections and active DVD video profile versions", async () => {
+    const access = dataAccessFixture.create();
+    createSelection(access, "unreviewed");
+    const reviewed = createSelection(access, "reviewed");
+    access.catalog.completeCatalogReview(reviewed.archive.id);
+    const activeProfile = access.encodingProfiles.create({
+      key: "dvd-library",
+      displayName: "DVD library",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30", container: "mkv" },
+    });
+    access.encodingProfiles.createVersion({
+      sourceProfileId: activeProfile.id,
+      mediaDomain: "dvd_video",
+      settings: { preset: "HQ 480p30", container: "mkv" },
+    });
+    access.encodingProfiles.create({
+      key: "audio-library",
+      displayName: "Audio library",
+      mediaDomain: "audio",
+      settings: {},
+    });
+
+    const response = await createEncodeJobsRoute(
+      new Request("http://localhost:3000/api/encode-jobs"),
+      () => access,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      selections: [{
+        id: reviewed.selection.id,
+        mediaItemId: reviewed.item.id,
+        mediaTitle: "Encode API reviewed",
+        mediaYear: 2026,
+        sourceDescription: "DVD main feature",
+      }],
+      profiles: [{
+        id: activeProfile.id,
+        displayName: "DVD library",
+        version: 1,
+      }],
+      page: {
+        offset: 0,
+        limit: 100,
+        hasPrevious: false,
+        hasNext: false,
+      },
+    });
+  });
+
+  it("queues each selection and profile version once and requeues the existing completed row", async () => {
+    const access = dataAccessFixture.create();
+    const reviewed = createSelection(access, "queue");
+    access.catalog.completeCatalogReview(reviewed.archive.id);
+    const profile = access.encodingProfiles.create({
+      key: "queue-profile",
+      displayName: "Queue profile",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30", container: "mkv" },
+    });
+    const request = (outputPath: string) =>
+      new Request("http://localhost:3000/api/encode-jobs", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+        },
+        body: JSON.stringify({
+          discSelectionId: reviewed.selection.id,
+          encodingProfileId: profile.id,
+          outputPath,
+        }),
+      });
+    const config = () => ({
+      mediaLibraryPath: "/media/movies",
+      webTrustedOrigin: "http://localhost:3000",
+    });
+
+    const queuedResponse = await createEncodeJobsRoute(
+      request("/media/movies/Encode API queue.mkv"),
+      () => access,
+      config,
+    );
+    expect(queuedResponse.status).toBe(200);
+    const queued = (await queuedResponse.json()).job;
+    expect(queued).toMatchObject({
+      discSelectionId: reviewed.selection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Encode API queue.mkv",
+      status: "queued",
+      progressPercent: 0,
+    });
+
+    const repeated = await createEncodeJobsRoute(
+      request("/media/movies/ignored-while-queued.mkv"),
+      () => access,
+      config,
+    );
+    expect((await repeated.json()).job.id).toBe(queued.id);
+    expect(access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: queued.id,
+        outputPath: "/media/movies/Encode API queue.mkv",
+      }),
+    ]);
+
+    const claim = access.encodeJobs.claimNext("completed-api-job");
+    if (!claim) {
+      throw new Error("Expected queued Encode Job");
+    }
+    access.encodeJobs.complete(claim);
+
+    const requeuedResponse = await createEncodeJobsRoute(
+      request("/media/movies/Encode API queue remastered.mkv"),
+      () => access,
+      config,
+    );
+    expect(requeuedResponse.status).toBe(200);
+    expect((await requeuedResponse.json()).job).toMatchObject({
+      id: queued.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Encode API queue remastered.mkv",
+      status: "queued",
+      progressPercent: 0,
+      completedAt: null,
+    });
+    expect(access.encodeJobs.list()).toHaveLength(1);
+  });
+
+  it("requeues failed and completed Encode Jobs in place", async () => {
+    const access = dataAccessFixture.create();
+    const reviewed = createSelection(access, "retry");
+    access.catalog.completeCatalogReview(reviewed.archive.id);
+    const profile = access.encodingProfiles.create({
+      key: "retry-profile",
+      displayName: "Retry profile",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30", container: "mkv" },
+    });
+    const original = access.encodeJobs.enqueue({
+      discSelectionId: reviewed.selection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Encode API retry.mkv",
+    });
+    const config = () => ({
+      mediaLibraryPath: "/media/movies",
+      webTrustedOrigin: "http://localhost:3000",
+    });
+    const retry = () =>
+      createEncodeJobsRoute(
+        new Request("http://localhost:3000/api/encode-jobs", {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            Host: "localhost:3000",
+            Origin: "http://localhost:3000",
+          },
+          body: JSON.stringify({ encodeJobId: original.id }),
+        }),
+        () => access,
+        config,
+      );
+
+    const firstClaim = access.encodeJobs.claimNext("failed-api-job");
+    if (!firstClaim) {
+      throw new Error("Expected first Encode Job claim");
+    }
+    access.encodeJobs.updateProgress(firstClaim, 37);
+    access.encodeJobs.fail(firstClaim, "HandBrake failed");
+    expect((await (await retry()).json()).job).toMatchObject({
+      id: original.id,
+      status: "queued",
+      progressPercent: 0,
+      errorMessage: null,
+    });
+
+    const secondClaim = access.encodeJobs.claimNext("completed-api-job");
+    if (!secondClaim) {
+      throw new Error("Expected second Encode Job claim");
+    }
+    access.encodeJobs.complete(secondClaim);
+    expect((await (await retry()).json()).job).toMatchObject({
+      id: original.id,
+      status: "queued",
+      progressPercent: 0,
+      completedAt: null,
+    });
+    expect(access.encodeJobs.list()).toHaveLength(1);
+  });
+
+  it("rejects unreviewed selections and inactive profile versions without queueing", async () => {
+    const access = dataAccessFixture.create();
+    const unreviewed = createSelection(access, "blocked");
+    const activeProfile = access.encodingProfiles.create({
+      key: "blocked-profile",
+      displayName: "Blocked profile",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30", container: "mkv" },
+    });
+    const inactiveProfile = access.encodingProfiles.createVersion({
+      sourceProfileId: activeProfile.id,
+      mediaDomain: "dvd_video",
+      settings: { preset: "HQ 480p30", container: "mkv" },
+    });
+    const config = () => ({
+      mediaLibraryPath: "/media/movies",
+      webTrustedOrigin: "http://localhost:3000",
+    });
+    const queue = (encodingProfileId: string) =>
+      createEncodeJobsRoute(
+        new Request("http://localhost:3000/api/encode-jobs", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Host: "localhost:3000",
+            Origin: "http://localhost:3000",
+          },
+          body: JSON.stringify({
+            discSelectionId: unreviewed.selection.id,
+            encodingProfileId,
+            outputPath: "/media/movies/Blocked.mkv",
+          }),
+        }),
+        () => access,
+        config,
+      );
+
+    expect((await queue(activeProfile.id)).status).toBe(409);
+    access.catalog.completeCatalogReview(unreviewed.archive.id);
+    expect((await queue(inactiveProfile.id)).status).toBe(409);
+    expect(access.encodeJobs.list()).toEqual([]);
+  });
+
+  it("rejects unsafe output paths and cross-origin mutations before opening data access", async () => {
+    const getAccess = vi.fn();
+    const config = () => ({
+      mediaLibraryPath: "/media/movies",
+      webTrustedOrigin: "http://localhost:3000",
+    });
+    const body = JSON.stringify({
+      discSelectionId: "selection-1",
+      encodingProfileId: "profile-1",
+      outputPath: "/media/originals/not-a-media-output.mkv",
+    });
+
+    const unsafePath = await createEncodeJobsRoute(
+      new Request("http://localhost:3000/api/encode-jobs", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+        },
+        body,
+      }),
+      getAccess,
+      config,
+    );
+    expect(unsafePath.status).toBe(400);
+
+    const crossOrigin = await createEncodeJobsRoute(
+      new Request("http://localhost:3000/api/encode-jobs", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: "https://attacker.example",
+        },
+        body,
+      }),
+      getAccess,
+      config,
+    );
+    expect(crossOrigin.status).toBe(403);
+    expect(getAccess).not.toHaveBeenCalled();
+  });
+
+  it("reports a final output reserved by another logical job as a conflict", async () => {
+    const access = dataAccessFixture.create();
+    const reviewed = createSelection(access, "output-owner");
+    access.catalog.completeCatalogReview(reviewed.archive.id);
+    const createProfile = (key: string) => access.encodingProfiles.create({
+      key,
+      displayName: key,
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30", container: "mkv" },
+    });
+    const firstProfile = createProfile("first-output-owner");
+    const secondProfile = createProfile("second-output-owner");
+    const config = () => ({
+      mediaLibraryPath: "/media/movies",
+      webTrustedOrigin: "http://localhost:3000",
+    });
+    const queue = (encodingProfileId: string) =>
+      createEncodeJobsRoute(
+        new Request("http://localhost:3000/api/encode-jobs", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Host: "localhost:3000",
+            Origin: "http://localhost:3000",
+          },
+          body: JSON.stringify({
+            discSelectionId: reviewed.selection.id,
+            encodingProfileId,
+            outputPath: "/media/movies/One owner.mkv",
+          }),
+        }),
+        () => access,
+        config,
+      );
+
+    expect((await queue(firstProfile.id)).status).toBe(200);
+    const conflict = await queue(secondProfile.id);
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toEqual({
+      error: "Encode Job output is already assigned: /media/movies/One owner.mkv",
+    });
+    expect(access.encodeJobs.list()).toHaveLength(1);
+  });
+});

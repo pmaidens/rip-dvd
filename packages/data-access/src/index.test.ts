@@ -784,6 +784,51 @@ describe("data-access facade", () => {
     access.close();
   });
 
+  it("lists only Disc Selections currently eligible for encoding", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const createSelection = (suffix: string) => {
+      const disc = access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint: `encode-eligibility-${suffix}`,
+      });
+      access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+      access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+      const archive = access.catalog.createOriginalDiscArchive({
+        detectedDiscId: disc.id,
+        discKind: "dvd",
+        archiveFormat: "iso",
+        archivePath: `/media/originals/Encode Eligibility ${suffix}.iso`,
+        fingerprint: `encode-eligibility-${suffix}`,
+      });
+      const item = access.catalog.createMediaItem({
+        kind: "movie",
+        title: `Encode Eligibility ${suffix}`,
+      });
+      const selection = access.catalog.createDiscSelection({
+        originalDiscArchiveId: archive.id,
+        mediaItemId: item.id,
+        kind: "main_feature",
+      });
+      return { archive, selection };
+    };
+    const unreviewed = createSelection("unreviewed");
+    const reviewed = createSelection("reviewed");
+    access.catalog.completeCatalogReview(reviewed.archive.id);
+
+    expect(access.catalog.listDiscSelections({ encodeEligibleOnly: true }))
+      .toEqual([expect.objectContaining({ id: reviewed.selection.id })]);
+    expect(access.catalog.listDiscSelections()).toEqual([
+      expect.objectContaining({ id: unreviewed.selection.id }),
+      expect.objectContaining({ id: reviewed.selection.id }),
+    ]);
+    access.close();
+  });
+
   it("preserves dependent Encode Job history when removing a Disc Selection", () => {
     const access = openTestDatabase();
     const drive = access.catalog.upsertOpticalDrive({
@@ -2362,6 +2407,11 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         ),
       ).toMatchObject({ catalogReviewedAt: expect.any(Date) });
     }
+    access.encodingProfiles.setActive({
+      id: "legacy-profile" as EncodingProfileId,
+      mediaDomain: "dvd_video",
+      isActive: true,
+    });
     const repairedJob = access.encodeJobs.enqueue({
       discSelectionId: repairedMissingTitle.id,
       encodingProfileId: "legacy-profile" as EncodingProfileId,
@@ -4522,6 +4572,98 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
           .filter((job) => jobIds.includes(job.id)),
       ).toHaveLength(1);
     }
+    access.close();
+  });
+
+  it("queues only active DVD video Encoding Profile versions", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "active-encode-profile-disc",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Active Encode Profile.iso",
+      fingerprint: "active-encode-profile-disc",
+    });
+    const item = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Active Encode Profile",
+    });
+    const selection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: item.id,
+      kind: "main_feature",
+    });
+    access.catalog.completeCatalogReview(archive.id);
+    const activeDvdProfile = access.encodingProfiles.create({
+      key: "active-dvd",
+      displayName: "Active DVD",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30" },
+    });
+    const inactiveDvdProfile = access.encodingProfiles.createVersion({
+      sourceProfileId: activeDvdProfile.id,
+      mediaDomain: "dvd_video",
+      settings: { preset: "HQ 480p30" },
+    });
+    const activeAudioProfile = access.encodingProfiles.create({
+      key: "active-audio",
+      displayName: "Active audio",
+      mediaDomain: "audio",
+      settings: {},
+    });
+
+    for (const encodingProfileId of [
+      inactiveDvdProfile.id,
+      activeAudioProfile.id,
+    ]) {
+      expect(() =>
+        access.encodeJobs.enqueue({
+          discSelectionId: selection.id,
+          encodingProfileId,
+          outputPath: `/media/movies/${encodingProfileId}.mkv`,
+        })
+      ).toThrow(/active DVD video Encoding Profile/);
+    }
+    expect(access.encodeJobs.list()).toEqual([]);
+
+    const job = access.encodeJobs.enqueue({
+      discSelectionId: selection.id,
+      encodingProfileId: activeDvdProfile.id,
+      outputPath: "/media/movies/Active Encode Profile.mkv",
+    });
+    expect(job).toMatchObject({
+      encodingProfileId: activeDvdProfile.id,
+      status: "queued",
+    });
+    const claim = access.encodeJobs.claimNext("inactive-profile-retry");
+    if (!claim) {
+      throw new Error("Expected Encode Job claim");
+    }
+    access.encodingProfiles.setActive({
+      id: activeDvdProfile.id,
+      mediaDomain: "dvd_video",
+      isActive: false,
+    });
+    expect(access.encodeJobs.fail(claim, "Encode failed")).toMatchObject({
+      id: job.id,
+      status: "failed",
+    });
+    expect(access.encodeJobs.requeue(job.id)).toMatchObject({
+      id: job.id,
+      encodingProfileId: activeDvdProfile.id,
+      status: "queued",
+    });
     access.close();
   });
 
