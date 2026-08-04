@@ -41,6 +41,7 @@ import {
   originalDiscArchiveContentIds,
   originalDiscArchives,
 } from "./schema.js";
+import { reconcileLegacyRepairCutover } from "./legacy-cutover-reconciliation.js";
 import {
   dvdArchiveFileMatchesIdentity,
   hashDvdArchiveFile,
@@ -350,6 +351,7 @@ function nextCatalogMutationTimestamp(timestamp: Date) {
 export interface CreateDataAccessOptions {
   databasePath: string;
   migrationsFolder?: string;
+  originalsLibraryPath?: string;
 }
 
 export type LegacySidecarMigrationAdapter = LegacySidecarImportAccessFactory;
@@ -404,7 +406,11 @@ function acquireMigrationLock(databasePath: string): () => void {
   }
 }
 
-function openMigratedDatabase(databasePath: string, migrationsFolder: string) {
+function openMigratedDatabase(
+  databasePath: string,
+  migrationsFolder: string,
+  originalsLibraryPath?: string,
+) {
   const releaseMigrationLock =
     databasePath === ":memory:"
       ? () => undefined
@@ -439,6 +445,9 @@ function openMigratedDatabase(databasePath: string, migrationsFolder: string) {
       );
     }
     sqlite.exec("PRAGMA foreign_keys = ON");
+    if (originalsLibraryPath !== undefined) {
+      reconcileLegacyRepairCutover(sqlite, originalsLibraryPath);
+    }
     releaseMigrationLock();
     return { database, sqlite };
   } catch (error) {
@@ -459,6 +468,7 @@ export function createDataAccessInternal(
   {
     databasePath,
     migrationsFolder = DEFAULT_MIGRATIONS_FOLDER,
+    originalsLibraryPath,
   }: CreateDataAccessOptions,
   legacySidecarMigration?: LegacySidecarMigrationAdapter,
 ): DataAccess | LegacySidecarDataAccess {
@@ -470,6 +480,7 @@ export function createDataAccessInternal(
   const { database, sqlite } = openMigratedDatabase(
     normalizedDatabasePath,
     migrationsFolder,
+    originalsLibraryPath,
   );
 
   function now(): Date {
@@ -1395,6 +1406,24 @@ export function createDataAccessInternal(
             eq(encodeJobs.id, claim.id),
             eq(encodeJobs.status, "running"),
             eq(encodeJobs.claimToken, claim.claimToken),
+            exists(
+              database
+                .select({ id: discSelections.id })
+                .from(discSelections)
+                .innerJoin(
+                  originalDiscArchives,
+                  eq(
+                    originalDiscArchives.id,
+                    discSelections.originalDiscArchiveId,
+                  ),
+                )
+                .where(
+                  and(
+                    eq(discSelections.id, encodeJobs.discSelectionId),
+                    eq(originalDiscArchives.legacyCutoverPending, false),
+                  ),
+                ),
+            ),
           ),
         )
         .returning()

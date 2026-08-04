@@ -14,7 +14,10 @@ await runConfiguredAsyncWorker(
     workerName: "Archive",
   },
   async ({ config, log, signal }) => {
-    const access = createDataAccess({ databasePath: config.databasePath });
+    const access = createDataAccess({
+      databasePath: config.databasePath,
+      originalsLibraryPath: config.originalsLibraryPath,
+    });
     try {
       await runArchiveWorker({
         access,

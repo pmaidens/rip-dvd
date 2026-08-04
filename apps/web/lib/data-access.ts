@@ -22,10 +22,13 @@ const ownerRegistry = globalThis as unknown as {
 const owner =
   ownerRegistry[dataAccessOwnerKey] ??
   createDataAccessOwner(
-    () =>
-      createDataAccess({
-        databasePath: loadConfig().databasePath,
-      }),
+    () => {
+      const config = loadConfig();
+      return createDataAccess({
+        databasePath: config.databasePath,
+        originalsLibraryPath: config.originalsLibraryPath,
+      });
+    },
     {
       once: (signal, listener) => process.once(signal, listener),
       off: (signal, listener) => process.off(signal, listener),

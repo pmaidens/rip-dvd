@@ -55,6 +55,8 @@ import {
 } from "./schema.js";
 import { requireNonEmpty } from "./validation.js";
 
+const LEGACY_CUTOVER_PENDING_ARCHIVE_LIMIT = 10_000;
+
 function emptyLegacyImportRecordCounts():
   LegacySidecarImportReport["recordsCreated"] {
   return {
@@ -119,7 +121,11 @@ export function createLegacySidecarImportAccess(
       const stageCatalogReviewBoundary = (
         publicationDiscoveries: readonly LegacySidecarDiscovery[],
       ) => {
-        database.transaction((transaction) => {
+        return database.transaction((transaction) => {
+          const representedSidecars = publicationDiscoveries.flatMap(
+            (discovery) =>
+              discovery.outcome === "parsed" ? [discovery.sidecar] : [],
+          );
           for (const discovery of publicationDiscoveries) {
             if (discovery.outcome !== "parsed") {
               continue;
@@ -163,6 +169,31 @@ export function createLegacySidecarImportAccess(
                 .run();
             }
           }
+
+          const pendingArchives = transaction
+            .select({
+              archivePath: originalDiscArchives.archivePath,
+              fingerprint: originalDiscArchives.fingerprint,
+            })
+            .from(originalDiscArchives)
+            .where(eq(originalDiscArchives.legacyCutoverPending, true))
+            .limit(LEGACY_CUTOVER_PENDING_ARCHIVE_LIMIT + 1)
+            .all();
+          if (pendingArchives.length > LEGACY_CUTOVER_PENDING_ARCHIVE_LIMIT) {
+            return false;
+          }
+          return pendingArchives.every(
+            (archive) =>
+              !isPathWithinDirectory(
+                originalsLibraryPath,
+                archive.archivePath,
+              ) ||
+              representedSidecars.some(
+                (sidecar) =>
+                  sidecar.fingerprint === archive.fingerprint ||
+                  sidecar.archivePath === archive.archivePath,
+              ),
+          );
         }, { behavior: "immediate" });
       };
       const cutover = retireLegacySidecarQueue(
