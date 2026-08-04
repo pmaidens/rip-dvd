@@ -104,6 +104,7 @@ const ARCHIVE_JOB_RECOVERY_LIMIT = 100;
 const LEGACY_ARCHIVE_RECONCILIATION_LIMIT = 4;
 const LEGACY_ARCHIVE_RECONCILIATION_BYTES = 9_000_000_000;
 const DISC_SELECTION_REVIEW_BATCH_SIZE = 100;
+const DISC_SELECTION_DELETE_JOB_BATCH_SIZE = 100;
 const DEFAULT_MIGRATIONS_FOLDER = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../drizzle",
@@ -2643,19 +2644,36 @@ export function createDataAccessInternal(
                 `Disc Selection ${id} cannot be deleted while Encode Job ${runningJob.id} is running`,
               );
             }
-            transaction
-              .delete(encodeJobs)
+            const dependentJobIds = transaction
+              .select({ id: encodeJobs.id })
+              .from(encodeJobs)
               .where(eq(encodeJobs.discSelectionId, id))
-              .run();
-            requireRow(
+              .orderBy(asc(encodeJobs.createdAt), asc(encodeJobs.id))
+              .limit(DISC_SELECTION_DELETE_JOB_BATCH_SIZE)
+              .all()
+              .map((job) => job.id);
+            if (dependentJobIds.length > 0) {
               transaction
-                .delete(discSelections)
-                .where(eq(discSelections.id, id))
-                .returning({ id: discSelections.id })
-                .get(),
-              "disc selection",
-              id,
-            );
+                .delete(encodeJobs)
+                .where(inArray(encodeJobs.id, dependentJobIds))
+                .run();
+            }
+            const hasRemainingJob = transaction
+              .select({ id: encodeJobs.id })
+              .from(encodeJobs)
+              .where(eq(encodeJobs.discSelectionId, id))
+              .get() !== undefined;
+            if (!hasRemainingJob) {
+              requireRow(
+                transaction
+                  .delete(discSelections)
+                  .where(eq(discSelections.id, id))
+                  .returning({ id: discSelections.id })
+                  .get(),
+                "disc selection",
+                id,
+              );
+            }
             transaction
               .update(originalDiscArchives)
               .set({ catalogReviewedAt: null, updatedAt: timestamp })
@@ -2666,7 +2684,11 @@ export function createDataAccessInternal(
                 ),
               )
               .run();
-            return toDiscSelection(selection);
+            return {
+              ...toDiscSelection(selection),
+              deletedEncodeJobs: dependentJobIds.length,
+              deletionComplete: !hasRemainingJob,
+            };
           },
           { behavior: "immediate" },
         );

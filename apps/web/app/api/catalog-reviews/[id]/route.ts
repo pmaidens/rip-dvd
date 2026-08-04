@@ -517,8 +517,12 @@ export async function createCatalogReviewRoute(
       if (!selection) {
         return response({ error: "Disc Selection not found" }, 404);
       }
-      access.catalog.deleteDiscSelection(selectionId);
-      return response({ discSelection: serializeDiscSelection(selection) });
+      const deletion = access.catalog.deleteDiscSelection(selectionId);
+      return response({
+        discSelection: serializeDiscSelection(selection),
+        deletedEncodeJobs: deletion.deletedEncodeJobs,
+        deletionComplete: deletion.deletionComplete,
+      });
     }
 
     if (action === "complete_review") {

@@ -1405,6 +1405,146 @@ try {
     access.close();
   });
 
+  it("stages both reviewed sides of a fingerprint and path conflict before import", () => {
+    const root = temporaryDirectories.create(
+      "rip-dvd-cutover-reviewed-split-",
+    );
+    const originalsLibraryPath = join(root, "originals");
+    const fingerprintArchivePath = join(originalsLibraryPath, "Fingerprint.iso");
+    const pathOwnerArchivePath = join(originalsLibraryPath, "Path Owner.iso");
+    const importedOutputPath = join(root, "movies", "Imported.mkv");
+    const pathOwnerOutputPath = join(root, "movies", "Path Owner.mkv");
+    const databasePath = join(root, "catalog.sqlite");
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    writeFileSync(fingerprintArchivePath, "fingerprint archive");
+    writeFileSync(pathOwnerArchivePath, "path owner archive");
+    const setup = createLegacySidecarDataAccess({ databasePath });
+    const drive = setup.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const createReviewedArchive = (
+      fingerprint: string,
+      archivePath: string,
+      title: string,
+    ) => {
+      const disc = setup.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint,
+      });
+      setup.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+      setup.catalog.updateDetectedDiscStatus(disc.id, "approved");
+      const archive = setup.catalog.createOriginalDiscArchive({
+        detectedDiscId: disc.id,
+        discKind: "dvd",
+        archiveFormat: "iso",
+        archivePath,
+        fingerprint,
+      });
+      const item = setup.catalog.createMediaItem({ kind: "movie", title });
+      const selection = setup.catalog.createDiscSelection({
+        originalDiscArchiveId: archive.id,
+        mediaItemId: item.id,
+        kind: "main_feature",
+      });
+      setup.catalog.completeCatalogReview(archive.id);
+      return { archive, selection };
+    };
+    const fingerprintOwner = createReviewedArchive(
+      "reviewed-split-fingerprint",
+      fingerprintArchivePath,
+      "Fingerprint owner",
+    );
+    const pathOwner = createReviewedArchive(
+      "reviewed-split-path-owner",
+      pathOwnerArchivePath,
+      "Path Owner",
+    );
+    const pathOwnerProfile = setup.encodingProfiles.create({
+      key: "reviewed-split-path-owner",
+      displayName: "Path owner",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    setup.encodeJobs.enqueue({
+      discSelectionId: pathOwner.selection.id,
+      encodingProfileId: pathOwnerProfile.id,
+      outputPath: pathOwnerOutputPath,
+    });
+    setup.close();
+    writeFileSync(
+      join(originalsLibraryPath, "a-fingerprint.rip-dvd.json"),
+      JSON.stringify({
+        schema_version: 2,
+        source: fingerprintArchivePath,
+        title: "Fingerprint owner",
+        disc_fingerprint: "reviewed-split-fingerprint",
+        jobs: [{
+          label: "Movie: Fingerprint owner",
+          source: fingerprintArchivePath,
+          output: importedOutputPath,
+          preset: "Fast 480p30",
+          selection: "main_feature",
+          title_number: null,
+        }],
+      }),
+    );
+    writeFileSync(
+      join(originalsLibraryPath, "b-path-owner.rip-dvd.json"),
+      JSON.stringify({
+        schema_version: 2,
+        source: pathOwnerArchivePath,
+        title: "Fingerprint owner",
+        disc_fingerprint: "reviewed-split-fingerprint",
+        jobs: [],
+      }),
+    );
+    let observedClaim: ReturnType<
+      ReturnType<typeof createDataAccess>["encodeJobs"]["claimNext"]
+    > | undefined;
+    markerFault.failure = null;
+    markerFault.afterDirectorySync = () => {
+      markerFault.archivePath = pathOwnerArchivePath;
+      markerFault.afterArchiveSnapshot = () => {
+        const observer = createDataAccess({ databasePath });
+        observedClaim = observer.encodeJobs.claimNext("reviewed-split-observer");
+        observer.close();
+      };
+    };
+    const access = createLegacySidecarDataAccess({ databasePath });
+
+    const report = access.legacySidecars.importLibrary({ originalsLibraryPath });
+
+    expect(report).toMatchObject({
+      sidecarsImported: 1,
+      sidecarsSkipped: 1,
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: "duplicate_record",
+          message: expect.stringMatching(/fingerprint and path/i),
+        }),
+      ]),
+    });
+    expect(observedClaim).toBeNull();
+    const relatedArchives = access.catalog.listOriginalDiscArchives({
+      ids: [fingerprintOwner.archive.id, pathOwner.archive.id],
+    });
+    expect(relatedArchives).toHaveLength(2);
+    expect(relatedArchives).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: fingerprintOwner.archive.id,
+        catalogReviewedAt: null,
+      }),
+      expect.objectContaining({
+        id: pathOwner.archive.id,
+        catalogReviewedAt: null,
+      }),
+    ]));
+    expect(access.encodeJobs.claimNext("reviewed-split-after-import")).toBeNull();
+    access.close();
+  });
+
   it("recovers the normalized catalog and queue state captured at cutover", () => {
     const root = temporaryDirectories.create(
       "rip-dvd-cutover-frozen-state-",

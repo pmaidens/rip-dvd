@@ -673,6 +673,8 @@ describe("Catalog Review API", () => {
     expect(deleteResponse.status).toBe(200);
     await expect(deleteResponse.json()).resolves.toEqual({
       discSelection: expect.objectContaining({ id: firstSelection.id }),
+      deletedEncodeJobs: 0,
+      deletionComplete: true,
     });
     expect(
       access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0],

@@ -780,6 +780,87 @@ describe("data-access facade", () => {
     access.close();
   });
 
+  it("removes a Disc Selection's dependent jobs in bounded resumable batches", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "bounded-selection-removal",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Bounded Removal.iso",
+      fingerprint: "bounded-selection-removal",
+    });
+    const movie = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Bounded Removal",
+    });
+    const selection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: movie.id,
+      kind: "main_feature",
+    });
+    access.catalog.completeCatalogReview(archive.id);
+    for (let index = 0; index < 101; index += 1) {
+      const profile = access.encodingProfiles.create({
+        key: `bounded-removal-${index}`,
+        displayName: `Bounded removal ${index}`,
+        mediaDomain: "dvd_video",
+        settings: {},
+      });
+      access.encodeJobs.enqueue({
+        discSelectionId: selection.id,
+        encodingProfileId: profile.id,
+        outputPath: `/media/movies/Bounded Removal ${index}.mkv`,
+      });
+    }
+
+    const running = access.encodeJobs.claimNext("bounded-running-worker");
+    expect(running).not.toBeNull();
+    expect(() => access.catalog.deleteDiscSelection(selection.id))
+      .toThrow(/while Encode Job .* is running/);
+    expect(
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0],
+    ).toMatchObject({ catalogReviewedAt: expect.any(Date) });
+    access.encodeJobs.fail(running!, "resolved before catalog repair");
+
+    expect(
+      access.catalog.deleteDiscSelection(selection.id),
+    ).toMatchObject({
+      id: selection.id,
+      deletedEncodeJobs: 100,
+      deletionComplete: false,
+    });
+    expect(access.catalog.listDiscSelections({ ids: [selection.id] }))
+      .toHaveLength(1);
+    expect(access.encodeJobs.list()).toHaveLength(1);
+    expect(
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0],
+    ).toMatchObject({ catalogReviewedAt: null });
+    expect(access.encodeJobs.claimNext("bounded-removal-worker")).toBeNull();
+
+    expect(
+      access.catalog.deleteDiscSelection(selection.id),
+    ).toMatchObject({
+      id: selection.id,
+      deletedEncodeJobs: 1,
+      deletionComplete: true,
+    });
+    expect(access.catalog.listDiscSelections({ ids: [selection.id] }))
+      .toEqual([]);
+    expect(access.encodeJobs.list()).toEqual([]);
+    access.close();
+  });
+
   it("does not enqueue after a concurrent Disc Selection reopens review", async () => {
     const databasePath = createTestDatabasePath();
     const access = openTestDatabase(databasePath);
