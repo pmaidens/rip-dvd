@@ -808,7 +808,7 @@ describe("legacy sidecar import", () => {
     fixture.access.close();
   });
 
-  it("preserves imported completed Encode Job provenance when removing its Disc Selection", () => {
+  it("preserves imported completed Encode Job provenance when removing or repairing its Disc Selection", () => {
     const fixture = createFixture();
     fixture.access.legacySidecars.importLibrary({
       originalsLibraryPath: fixture.originalsLibraryPath,
@@ -839,14 +839,35 @@ describe("legacy sidecar import", () => {
     if (!completedSelection) {
       throw new Error("Expected imported completed Disc Selection");
     }
-    expect(() => fixture.access.catalog.repairDiscSelection(
+    const replacement = fixture.access.catalog.repairDiscSelection(
       completedSelection.id,
       {
         originalDiscArchiveId: completedSelection.originalDiscArchiveId,
         mediaItemId: completedSelection.mediaItemId,
         kind: "main_feature",
       },
-    )).toThrow(/cannot be repaired.*Encode Job history/i);
+    );
+    expect(replacement).toMatchObject({
+      originalDiscArchiveId: completedSelection.originalDiscArchiveId,
+      mediaItemId: completedSelection.mediaItemId,
+      sourceKey: "dvd:main-feature",
+    });
+    expect(replacement.id).not.toBe(completedSelection.id);
+    expect(fixture.access.catalog.listDiscSelections({
+      ids: [completedSelection.id],
+    })).toEqual([completedSelection]);
+    const activeSelections = fixture.access.catalog.listDiscSelections({
+      originalDiscArchiveId: completedSelection.originalDiscArchiveId,
+    });
+    expect(activeSelections).toEqual(expect.arrayContaining([replacement]));
+    expect(activeSelections).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: completedSelection.id }),
+      ]),
+    );
+    expect(
+      fixture.access.encodeJobs.list().find((job) => job.id === completedJob.id),
+    ).toEqual(completedJob);
 
     fixture.access.close();
   });
@@ -2581,6 +2602,35 @@ describe("legacy sidecar import", () => {
         errorMessage: "transcode failed",
       }),
     ]);
+
+    fixture.access.close();
+  });
+
+  it("preserves authoritative completed Encode Job provenance on re-import", () => {
+    const fixture = createFixture();
+    fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+    const claim = fixture.access.encodeJobs.claimNext("encode-worker-complete");
+    if (!claim) {
+      throw new Error("Expected the imported queued Encode Job to be claimable");
+    }
+    fixture.access.encodeJobs.updateProgress(claim, 73);
+    const completed = fixture.access.encodeJobs.complete(claim);
+
+    const report = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+
+    expect(report).toMatchObject({
+      sidecarsImported: 1,
+      sidecarsSkipped: 0,
+      recordsUpdated: 0,
+      issues: [],
+    });
+    expect(
+      fixture.access.encodeJobs.list().find((job) => job.id === completed.id),
+    ).toEqual(completed);
 
     fixture.access.close();
   });

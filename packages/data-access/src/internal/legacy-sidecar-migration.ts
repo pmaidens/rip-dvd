@@ -8,7 +8,6 @@ import {
   exists,
   gt,
   inArray,
-  isNotNull,
   isNull,
   or,
 } from "drizzle-orm";
@@ -281,13 +280,7 @@ export function createLegacySidecarImportAccess(
                 updatedAt: now(),
               })
               .where(and(
-                or(
-                  eq(encodeJobs.status, "running"),
-                  and(
-                    eq(encodeJobs.status, "completed"),
-                    isNotNull(encodeJobs.claimToken),
-                  ),
-                ),
+                eq(encodeJobs.status, "running"),
                 exists(
                   transaction
                     .select({ id: discSelections.id })
@@ -565,6 +558,7 @@ export function createLegacySidecarImportAccess(
                         corroboratingArchive.id,
                       ),
                       eq(discSelections.sourceKey, job.sourceKey),
+                      eq(discSelections.isCatalogActive, true),
                     ),
                   )
                   .get()
@@ -954,7 +948,10 @@ export function createLegacySidecarImportAccess(
               .select()
               .from(discSelections)
               .where(
-                eq(discSelections.originalDiscArchiveId, archive.id),
+                and(
+                  eq(discSelections.originalDiscArchiveId, archive.id),
+                  eq(discSelections.isCatalogActive, true),
+                ),
               )
               .all();
             const selectionsBySourceKey = new Map(
@@ -1240,7 +1237,10 @@ export function createLegacySidecarImportAccess(
             const hasDiscSelection = transaction
               .select({ id: discSelections.id })
               .from(discSelections)
-              .where(eq(discSelections.originalDiscArchiveId, archive.id))
+              .where(and(
+                eq(discSelections.originalDiscArchiveId, archive.id),
+                eq(discSelections.isCatalogActive, true),
+              ))
               .get() !== undefined;
             if (archive.catalogReviewedAt !== null || hasDiscSelection) {
               if (
@@ -1465,6 +1465,7 @@ export function createLegacySidecarImportAccess(
                   and(
                     eq(discSelections.originalDiscArchiveId, archive.id),
                     eq(discSelections.sourceKey, sourceKey),
+                    eq(discSelections.isCatalogActive, true),
                   ),
                 )
                 .get()

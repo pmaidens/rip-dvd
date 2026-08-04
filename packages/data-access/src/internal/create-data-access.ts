@@ -106,9 +106,6 @@ const ARCHIVE_JOB_RECOVERY_LIMIT = 100;
 const LEGACY_ARCHIVE_RECONCILIATION_LIMIT = 4;
 const LEGACY_ARCHIVE_RECONCILIATION_BYTES = 9_000_000_000;
 const DISC_SELECTION_REVIEW_BATCH_SIZE = 100;
-// Must match the fail-closed upgrade marker written by the review guard migration.
-const LEGACY_SELECTION_REVIEW_ERROR =
-  "Encode Job requires catalog review after legacy Disc Selection validation";
 const DEFAULT_MIGRATIONS_FOLDER = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../drizzle",
@@ -625,7 +622,10 @@ export function createDataAccessInternal(
     const duplicateLogicalSelection = querySource
       .select({ id: discSelections.id })
       .from(discSelections)
-      .where(eq(discSelections.originalDiscArchiveId, archiveId))
+      .where(and(
+        eq(discSelections.originalDiscArchiveId, archiveId),
+        eq(discSelections.isCatalogActive, true),
+      ))
       .groupBy(
         discSelections.kind,
         discSelections.titleNumber,
@@ -651,6 +651,7 @@ export function createDataAccessInternal(
         .where(
           and(
             eq(discSelections.originalDiscArchiveId, archiveId),
+            eq(discSelections.isCatalogActive, true),
             lastSelectionId === undefined
               ? undefined
               : gt(discSelections.id, lastSelectionId),
@@ -1402,6 +1403,7 @@ export function createDataAccessInternal(
         .where(
           and(
             eq(encodeJobs.status, "queued"),
+            eq(discSelections.isCatalogActive, true),
             isNotNull(originalDiscArchives.catalogReviewedAt),
             eq(originalDiscArchives.legacyCutoverPending, false),
           ),
@@ -1456,6 +1458,7 @@ export function createDataAccessInternal(
                 .where(
                   and(
                     eq(discSelections.id, encodeJobs.discSelectionId),
+                    eq(discSelections.isCatalogActive, true),
                     eq(originalDiscArchives.legacyCutoverPending, false),
                   ),
                 ),
@@ -1476,10 +1479,6 @@ export function createDataAccessInternal(
           and(
             eq(encodeJobs.id, id),
             eq(encodeJobs.status, expectedStatus),
-            or(
-              isNull(encodeJobs.errorMessage),
-              ne(encodeJobs.errorMessage, LEGACY_SELECTION_REVIEW_ERROR),
-            ),
             exists(
               database
                 .select({ id: discSelections.id })
@@ -1494,6 +1493,7 @@ export function createDataAccessInternal(
                 .where(
                   and(
                     eq(discSelections.id, encodeJobs.discSelectionId),
+                    eq(discSelections.isCatalogActive, true),
                     isNotNull(originalDiscArchives.catalogReviewedAt),
                     eq(originalDiscArchives.legacyCutoverPending, false),
                   ),
@@ -2378,9 +2378,12 @@ export function createDataAccessInternal(
                   .select({ id: discSelections.id })
                   .from(discSelections)
                   .where(
-                    eq(
-                      discSelections.originalDiscArchiveId,
-                      originalDiscArchives.id,
+                    and(
+                      eq(
+                        discSelections.originalDiscArchiveId,
+                        originalDiscArchives.id,
+                      ),
+                      eq(discSelections.isCatalogActive, true),
                     ),
                   ),
               )
@@ -2722,7 +2725,10 @@ export function createDataAccessInternal(
               transaction
                 .select()
                 .from(discSelections)
-                .where(eq(discSelections.id, id))
+                .where(and(
+                  eq(discSelections.id, id),
+                  eq(discSelections.isCatalogActive, true),
+                ))
                 .get(),
               "disc selection",
               id,
@@ -2734,29 +2740,28 @@ export function createDataAccessInternal(
                 "A Disc Selection repair cannot move between Original Disc Archives",
               );
             }
-            const protectedJob = transaction
-              .select({ id: encodeJobs.id })
+            const activeJob = transaction
+              .select({ id: encodeJobs.id, status: encodeJobs.status })
               .from(encodeJobs)
               .where(
                 and(
                   eq(encodeJobs.discSelectionId, id),
-                  or(
-                    ne(encodeJobs.status, "failed"),
-                    isNull(encodeJobs.errorMessage),
-                    ne(
-                      encodeJobs.errorMessage,
-                      LEGACY_SELECTION_REVIEW_ERROR,
-                    ),
-                  ),
+                  inArray(encodeJobs.status, ["queued", "running"]),
                 ),
               )
               .limit(1)
               .get();
-            if (protectedJob) {
+            if (activeJob) {
               throw new DomainInvariantError(
-                `Disc Selection ${id} cannot be repaired because Encode Job history must be preserved (job ${protectedJob.id})`,
+                `Disc Selection ${id} cannot be repaired while Encode Job ${activeJob.id} is ${activeJob.status}`,
               );
             }
+            const historicalJob = transaction
+              .select({ id: encodeJobs.id })
+              .from(encodeJobs)
+              .where(eq(encodeJobs.discSelectionId, id))
+              .limit(1)
+              .get();
             const source = requireRow(
               transaction
                 .select({
@@ -2850,8 +2855,46 @@ export function createDataAccessInternal(
               kind: input.kind,
               ...coordinates,
             });
-            const selection = toDiscSelection(
+            let selectionRow: typeof discSelections.$inferSelect;
+            if (historicalJob) {
               requireRow(
+                transaction
+                  .update(discSelections)
+                  .set({
+                    isCatalogActive: false,
+                  })
+                  .where(and(
+                    eq(discSelections.id, id),
+                    eq(discSelections.isCatalogActive, true),
+                  ))
+                  .returning({ id: discSelections.id })
+                  .get(),
+                "disc selection",
+                id,
+              );
+              const replacementId = newId<DiscSelectionId>();
+              selectionRow = requireRow(
+                transaction
+                  .insert(discSelections)
+                  .values({
+                    id: replacementId,
+                    originalDiscArchiveId: input.originalDiscArchiveId,
+                    mediaItemId: input.mediaItemId,
+                    sourceKey,
+                    kind: input.kind,
+                    ...coordinates,
+                    label: input.label ?? null,
+                    isCatalogActive: true,
+                    createdAt: timestamp,
+                    updatedAt: timestamp,
+                  })
+                  .returning()
+                  .get(),
+                "disc selection",
+                replacementId,
+              );
+            } else {
+              selectionRow = requireRow(
                 transaction
                   .update(discSelections)
                   .set({
@@ -2862,13 +2905,17 @@ export function createDataAccessInternal(
                     label: input.label ?? null,
                     updatedAt: timestamp,
                   })
-                  .where(eq(discSelections.id, id))
+                  .where(and(
+                    eq(discSelections.id, id),
+                    eq(discSelections.isCatalogActive, true),
+                  ))
                   .returning()
                   .get(),
                 "disc selection",
                 id,
-              ),
-            );
+              );
+            }
+            const selection = toDiscSelection(selectionRow);
             transaction
               .update(originalDiscArchives)
               .set({
@@ -2891,7 +2938,10 @@ export function createDataAccessInternal(
               transaction
                 .select()
                 .from(discSelections)
-                .where(eq(discSelections.id, id))
+                .where(and(
+                  eq(discSelections.id, id),
+                  eq(discSelections.isCatalogActive, true),
+                ))
                 .get(),
               "disc selection",
               id,
@@ -2957,6 +3007,9 @@ export function createDataAccessInternal(
                 discSelections.originalDiscArchiveId,
                 options.originalDiscArchiveId,
               )
+            : undefined,
+          options?.ids === undefined
+            ? eq(discSelections.isCatalogActive, true)
             : undefined,
         ].filter((condition) => condition !== undefined);
         const query = database
@@ -3353,7 +3406,10 @@ export function createDataAccessInternal(
                     discSelections.originalDiscArchiveId,
                   ),
                 )
-                .where(eq(discSelections.id, input.discSelectionId))
+                .where(and(
+                  eq(discSelections.id, input.discSelectionId),
+                  eq(discSelections.isCatalogActive, true),
+                ))
                 .get(),
               "disc selection",
               input.discSelectionId,
