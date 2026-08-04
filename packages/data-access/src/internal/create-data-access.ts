@@ -2872,6 +2872,14 @@ export function createDataAccessInternal(
                 "disc selection",
                 id,
               );
+              transaction
+                .update(encodeJobs)
+                .set({ reservesOutputPath: false })
+                .where(and(
+                  eq(encodeJobs.discSelectionId, id),
+                  eq(encodeJobs.status, "failed"),
+                ))
+                .run();
               const replacementId = newId<DiscSelectionId>();
               selectionRow = requireRow(
                 transaction

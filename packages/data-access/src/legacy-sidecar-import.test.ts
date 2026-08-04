@@ -869,6 +869,30 @@ describe("legacy sidecar import", () => {
       fixture.access.encodeJobs.list().find((job) => job.id === completedJob.id),
     ).toEqual(completedJob);
 
+    const reviewed = fixture.access.catalog.completeCatalogReview(
+      completedSelection.originalDiscArchiveId,
+    );
+    const report = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+    expect(report).toMatchObject({
+      sidecarsImported: 1,
+      sidecarsSkipped: 0,
+      recordsUpdated: 0,
+      issues: [],
+    });
+    expect(fixture.access.catalog.listOriginalDiscArchives({
+      ids: [completedSelection.originalDiscArchiveId],
+    })).toEqual([
+      expect.objectContaining({
+        catalogReviewedAt: reviewed.catalogReviewedAt,
+        legacyCutoverPending: false,
+      }),
+    ]);
+    expect(
+      fixture.access.encodeJobs.list().find((job) => job.id === completedJob.id),
+    ).toEqual(completedJob);
+
     fixture.access.close();
   });
 
