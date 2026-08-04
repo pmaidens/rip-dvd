@@ -130,6 +130,7 @@ interface LegacyQueueCutoverBase {
   recoveryDiscoveries: LegacySidecarDiscovery[] | null;
   recoveryIssues: LegacySidecarImportIssue[];
   sidecarSnapshots: readonly LegacyQueueSidecarSnapshot[];
+  withdrawPublication(): void;
   wasAlreadyPublished: boolean;
 }
 
@@ -1792,7 +1793,11 @@ export function retireLegacySidecarQueue(
     originalsLibraryPath,
     LEGACY_QUEUE_CUTOVER_MARKER,
   );
-  if (!discoveryBatch.complete && !existsSync(markerPath)) {
+  if (
+    !existsSync(markerPath) &&
+    (!discoveryBatch.complete ||
+      discoveries.some((discovery) => discovery.outcome === "skipped"))
+  ) {
     return null;
   }
   const discoveredSnapshots = new Map<
@@ -1903,6 +1908,7 @@ export function retireLegacySidecarQueue(
         recoveryIssues: [],
         sidecarSnapshots: [],
         upgradeSchemaOne: writeMarker,
+        withdrawPublication() {},
         wasAlreadyPublished: true,
       };
     } else if (
@@ -2061,6 +2067,7 @@ export function retireLegacySidecarQueue(
           (discoveryBatch.complete ? null : []),
         recoveryIssues: recovery?.issues ?? [],
         sidecarSnapshots,
+        withdrawPublication() {},
         wasAlreadyPublished: true,
       };
     } else {
@@ -2074,6 +2081,7 @@ export function retireLegacySidecarQueue(
       recoveryDiscoveries: null,
       recoveryIssues: [],
       sidecarSnapshots: [],
+      withdrawPublication() {},
       wasAlreadyPublished: false,
     };
   }
@@ -2084,6 +2092,13 @@ export function retireLegacySidecarQueue(
     recoveryDiscoveries: null,
     recoveryIssues: [],
     sidecarSnapshots: discoveredSidecars,
+    withdrawPublication() {
+      if (!existsSync(markerPath)) {
+        return;
+      }
+      unlinkSync(markerPath);
+      synchronizeDirectory(originalsLibraryPath);
+    },
     wasAlreadyPublished: false,
   };
 }

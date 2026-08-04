@@ -206,16 +206,25 @@ The command also accepts `RIP_DVD_DATABASE_PATH` and
 `RIP_DVD_ORIGINALS_LIBRARY_PATH`, and `--json` emits a machine-readable report.
 It recursively reads `.rip-dvd.json` files, imports valid Original Disc
 Archives, Disc Selections, Media Items, Encoding Profiles, and Encode Jobs, and
-continues past corrupt sidecars, invalid jobs, missing archives, and duplicate
-records. Encode Job completion is inferred from the final output file only when
-the job is first imported. Re-running the command is safe and preserves every
-existing SQLite Encode Job status, output, priority, progress, and error.
+reports invalid jobs and duplicate records without making their imported jobs
+eligible. If any sidecar is wholly corrupt, oversized, missing its archive, or
+otherwise cannot be represented in the cutover snapshot, the command leaves
+the entire legacy queue active; after that sidecar is repaired, re-running the
+command imports the complete bounded inventory. Encode Job completion is
+inferred from the final output file only when the job is first imported.
+Re-running the command is safe and preserves every existing SQLite Encode Job
+status, output, priority, progress, and error.
 
 Before publishing records from any parseable sidecar, the command atomically
 writes and synchronizes a `.rip-dvd-sqlite-catalog` cutover marker at the
 originals-library root. If marker publication fails, no imported SQLite records
 are committed. If the process stops after publication, rerunning the command
 resumes the idempotent import while the legacy queue remains inactive. The
+marker remains provisional while the exclusive cutover lease is held: a
+sidecar transaction conflict withdraws a newly published marker before legacy
+commands can resume. Imported catalog review boundaries are published only
+after the complete captured batch validates, so no earlier job can be claimed
+while a later related sidecar is still being persisted. The
 marker also records the immutable legacy-job configuration captured at cutover,
 so a later retry reports sidecar conflicts without confusing them with an
 authoritative SQLite requeue. A legacy schema-1 marker that lacks that snapshot
@@ -363,7 +372,10 @@ adding another selection reopens review before any new encode can be enqueued.
 The facade derives canonical DVD source identities and rejects duplicate source
 slices. Supported upgrades reopen caller-era scan-dependent or noncanonical
 catalogs and fail their active Encode Jobs until bounded validation completes
-again; unsafe jobs cannot be enqueued, requeued, or claimed. Archived scan
+again; unsafe jobs cannot be enqueued, requeued, or claimed. The review editor
+can remove a quarantined Disc Selection and its non-running dependent Encode
+Jobs, after which a canonical replacement can be created and review explicitly
+completed; running work must be resolved before removal. Archived scan
 evidence is immutable, while rediscovery may still refresh observation metadata
 such as the volume label. Legacy sidecar import cannot restore review across an
 unsafe or newly added mapping, and bounded legacy title evidence remains usable

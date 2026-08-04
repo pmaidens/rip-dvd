@@ -308,6 +308,7 @@ export interface CatalogAccess {
     offset?: number;
   }): MediaItem[];
   createDiscSelection(input: CreateDiscSelectionInput): DiscSelection;
+  deleteDiscSelection(id: DiscSelectionId): DiscSelection;
   listDiscSelections(options?: {
     ids?: readonly DiscSelectionId[];
     originalDiscArchiveId?: OriginalDiscArchiveId;

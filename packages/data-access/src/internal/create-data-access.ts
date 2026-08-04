@@ -2615,6 +2615,63 @@ export function createDataAccessInternal(
         );
       },
 
+      deleteDiscSelection(id) {
+        const timestamp = now();
+        return database.transaction(
+          (transaction) => {
+            const selection = requireRow(
+              transaction
+                .select()
+                .from(discSelections)
+                .where(eq(discSelections.id, id))
+                .get(),
+              "disc selection",
+              id,
+            );
+            const runningJob = transaction
+              .select({ id: encodeJobs.id })
+              .from(encodeJobs)
+              .where(
+                and(
+                  eq(encodeJobs.discSelectionId, id),
+                  eq(encodeJobs.status, "running"),
+                ),
+              )
+              .get();
+            if (runningJob) {
+              throw new DomainInvariantError(
+                `Disc Selection ${id} cannot be deleted while Encode Job ${runningJob.id} is running`,
+              );
+            }
+            transaction
+              .delete(encodeJobs)
+              .where(eq(encodeJobs.discSelectionId, id))
+              .run();
+            requireRow(
+              transaction
+                .delete(discSelections)
+                .where(eq(discSelections.id, id))
+                .returning({ id: discSelections.id })
+                .get(),
+              "disc selection",
+              id,
+            );
+            transaction
+              .update(originalDiscArchives)
+              .set({ catalogReviewedAt: null, updatedAt: timestamp })
+              .where(
+                eq(
+                  originalDiscArchives.id,
+                  selection.originalDiscArchiveId,
+                ),
+              )
+              .run();
+            return toDiscSelection(selection);
+          },
+          { behavior: "immediate" },
+        );
+      },
+
       listDiscSelections(options) {
         if (options?.ids !== undefined && options.ids.length === 0) {
           return [];

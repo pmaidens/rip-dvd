@@ -105,6 +105,7 @@ interface CatalogReviewViewProps {
   onDiscSelectionsPage(offset: number): void;
   onSaveMediaItem(input: SaveMediaItemInput): void;
   onCreateDiscSelection(input: CreateSelectionInput): void;
+  onDeleteDiscSelection(id: string): void;
   onCompleteReview(): void;
 }
 
@@ -166,6 +167,7 @@ export function CatalogReviewView({
   onDiscSelectionsPage,
   onSaveMediaItem,
   onCreateDiscSelection,
+  onDeleteDiscSelection,
   onCompleteReview,
 }: CatalogReviewViewProps) {
   const [selectionKind, setSelectionKind] =
@@ -404,6 +406,13 @@ export function CatalogReviewView({
                     {itemsById.get(selection.mediaItemId)?.title ?? "Unknown Media Item"}
                   </strong>
                   <span>{selectionDescription(selection)}</span>
+                  <button
+                    type="button"
+                    disabled={isSaving}
+                    onClick={() => onDeleteDiscSelection(selection.id)}
+                  >
+                    Remove Disc Selection
+                  </button>
                 </li>
               ))}
             </ul>
@@ -663,6 +672,8 @@ export function CatalogReviewEditor({
       }}
       onCreateDiscSelection={(selection) =>
         void mutate({ action: "create_disc_selection", selection })}
+      onDeleteDiscSelection={(discSelectionId) =>
+        void mutate({ action: "delete_disc_selection", discSelectionId })}
       onCompleteReview={() => void mutate({ action: "complete_review" }, true)}
     />
   );

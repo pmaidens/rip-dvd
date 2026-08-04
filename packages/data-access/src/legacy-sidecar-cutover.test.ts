@@ -1330,6 +1330,81 @@ try {
     access.close();
   });
 
+  it("does not publish an earlier same-fingerprint job before a later sidecar fails", () => {
+    const root = temporaryDirectories.create(
+      "rip-dvd-cutover-fingerprint-batch-",
+    );
+    const originalsLibraryPath = join(root, "originals");
+    const firstArchivePath = join(originalsLibraryPath, "First.iso");
+    const conflictingArchivePath = join(originalsLibraryPath, "Conflict.iso");
+    const outputPath = join(root, "movies", "First.mkv");
+    const databasePath = join(root, "catalog.sqlite");
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    writeFileSync(firstArchivePath, "first archive");
+    writeFileSync(conflictingArchivePath, "conflicting archive");
+    writeFileSync(
+      join(originalsLibraryPath, "a-first.rip-dvd.json"),
+      JSON.stringify({
+        schema_version: 2,
+        source: firstArchivePath,
+        title: "Shared identity",
+        disc_fingerprint: "batch-publication-fingerprint",
+        jobs: [{
+          label: "Movie: Shared identity",
+          source: firstArchivePath,
+          output: outputPath,
+          preset: "Fast 480p30",
+          selection: "main_feature",
+          title_number: null,
+        }],
+      }),
+    );
+    writeFileSync(
+      join(originalsLibraryPath, "b-conflict.rip-dvd.json"),
+      JSON.stringify({
+        schema_version: 2,
+        source: conflictingArchivePath,
+        title: "Shared identity",
+        disc_fingerprint: "batch-publication-fingerprint",
+        jobs: [],
+      }),
+    );
+    let observedClaim: ReturnType<
+      ReturnType<typeof createDataAccess>["encodeJobs"]["claimNext"]
+    > | undefined;
+    markerFault.failure = null;
+    markerFault.afterDirectorySync = () => {
+      markerFault.archivePath = conflictingArchivePath;
+      markerFault.afterArchiveSnapshot = () => {
+        const observer = createDataAccess({ databasePath });
+        observedClaim = observer.encodeJobs.claimNext("batch-observer");
+        observer.close();
+      };
+    };
+    const access = createLegacySidecarDataAccess({ databasePath });
+
+    const report = access.legacySidecars.importLibrary({ originalsLibraryPath });
+
+    expect(report).toMatchObject({
+      sidecarsImported: 1,
+      sidecarsSkipped: 1,
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: "duplicate_record",
+          message: expect.stringMatching(/fingerprint.*different path/i),
+        }),
+      ]),
+    });
+    expect(observedClaim).toBeNull();
+    expect(access.encodeJobs.list()).toEqual([
+      expect.objectContaining({ outputPath, status: "queued" }),
+    ]);
+    expect(access.catalog.listOriginalDiscArchives()).toEqual([
+      expect.objectContaining({ catalogReviewedAt: null }),
+    ]);
+    access.close();
+  });
+
   it("recovers the normalized catalog and queue state captured at cutover", () => {
     const root = temporaryDirectories.create(
       "rip-dvd-cutover-frozen-state-",

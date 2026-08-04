@@ -158,6 +158,12 @@ export function createLegacySidecarImportAccess(
         { job: ParsedLegacyJob; sidecarPath: string }
       >();
       const fingerprintsRequiringHumanReview = new Set<string>();
+      const fingerprintsCreatedDuringImport = new Set<string>();
+      const reviewCandidates = new Map<
+        string,
+        { archiveId: OriginalDiscArchiveId; reviewedAt: Date }
+      >();
+      let hasIncompleteCapturedWork = false;
       const reconciledSnapshotKeys = new Set<LegacyJobLogicalKey>();
       const trustedSchemaOneSnapshots = new Map<
         LegacyJobLogicalKey,
@@ -370,6 +376,10 @@ export function createLegacySidecarImportAccess(
         let unchanged = 0;
         const persistenceIssues: LegacySidecarImportReport["issues"] = [];
         const persistedJobs: ParsedLegacyJob[] = [];
+        let createdArchiveInTransaction = false;
+        let reviewCandidate:
+          | { archiveId: OriginalDiscArchiveId; reviewedAt: Date }
+          | undefined;
         if (
           sidecar.issues.length > 0 ||
           prePersistenceIssues.length > 0
@@ -442,6 +452,9 @@ export function createLegacySidecarImportAccess(
             const importedUpdatedAt = sidecar.updatedAt;
             let archive = existingByFingerprint ?? existingByPath;
             const archiveAlreadyExisted = archive !== undefined;
+            const archiveExistedBeforeImport =
+              archiveAlreadyExisted &&
+              !fingerprintsCreatedDuringImport.has(sidecar.fingerprint);
             if (
               existingByPath &&
               existingByPath.fingerprint !== sidecar.fingerprint
@@ -531,6 +544,7 @@ export function createLegacySidecarImportAccess(
                 sidecar.archivePath,
               );
               created.originalDiscArchives += 1;
+              createdArchiveInTransaction = true;
             } else {
               const archiveChanged =
                 archive.archivePath !== sidecar.archivePath ||
@@ -944,6 +958,12 @@ export function createLegacySidecarImportAccess(
               .where(eq(discSelections.originalDiscArchiveId, archive.id))
               .get() !== undefined;
             if (archive.catalogReviewedAt !== null || hasDiscSelection) {
+              if (
+                cutover.wasAlreadyPublished &&
+                archive.catalogReviewedAt === null
+              ) {
+                fingerprintsRequiringHumanReview.add(sidecar.fingerprint);
+              }
               let catalogIsReviewable = true;
               try {
                 requireReviewableDiscSelections(archive.id, transaction);
@@ -956,7 +976,7 @@ export function createLegacySidecarImportAccess(
               const requiresHumanReview =
                 !catalogIsReviewable ||
                 persistenceIssues.length > 0 ||
-                (archiveAlreadyExisted && created.discSelections > 0);
+                (archiveExistedBeforeImport && created.discSelections > 0);
               if (requiresHumanReview) {
                 fingerprintsRequiringHumanReview.add(sidecar.fingerprint);
               }
@@ -970,17 +990,31 @@ export function createLegacySidecarImportAccess(
                     .where(eq(originalDiscArchives.id, archive.id))
                     .run();
                 }
-              } else if (archive.catalogReviewedAt === null) {
-                transaction
-                  .update(originalDiscArchives)
-                  .set({ catalogReviewedAt: importedUpdatedAt })
-                  .where(eq(originalDiscArchives.id, archive.id))
-                  .run();
+              } else if (
+                !cutover.wasAlreadyPublished &&
+                archive.catalogReviewedAt === null
+              ) {
+                reviewCandidate = {
+                  archiveId: archive.id,
+                  reviewedAt: importedUpdatedAt,
+                };
               }
             }
             requireCapturedSourceArchive();
           }, { behavior: "immediate" });
         } catch (error) {
+          hasIncompleteCapturedWork = true;
+          fingerprintsRequiringHumanReview.add(sidecar.fingerprint);
+          reviewCandidates.delete(sidecar.fingerprint);
+          database.transaction((transaction) => {
+            transaction
+              .update(originalDiscArchives)
+              .set({ catalogReviewedAt: null })
+              .where(
+                eq(originalDiscArchives.fingerprint, sidecar.fingerprint),
+              )
+              .run();
+          }, { behavior: "immediate" });
           report.sidecarsSkipped += 1;
           report.issues.push({
             code:
@@ -992,6 +1026,13 @@ export function createLegacySidecarImportAccess(
             sidecarPath: sidecar.sidecarPath,
           });
           continue;
+        }
+
+        if (createdArchiveInTransaction) {
+          fingerprintsCreatedDuringImport.add(sidecar.fingerprint);
+        }
+        if (reviewCandidate) {
+          reviewCandidates.set(sidecar.fingerprint, reviewCandidate);
         }
 
         for (const job of persistedJobs) {
@@ -1149,6 +1190,16 @@ export function createLegacySidecarImportAccess(
                   .get()
               : undefined;
           if (!reconciledJob) {
+            hasIncompleteCapturedWork = true;
+            fingerprintsRequiringHumanReview.add(fingerprint);
+            reviewCandidates.delete(fingerprint);
+            database.transaction((transaction) => {
+              transaction
+                .update(originalDiscArchives)
+                .set({ catalogReviewedAt: null })
+                .where(eq(originalDiscArchives.fingerprint, fingerprint))
+                .run();
+            }, { behavior: "immediate" });
             report.issues.push({
               code: "invalid_job",
               jobIndex: snapshot.jobIndex,
@@ -1176,6 +1227,9 @@ export function createLegacySidecarImportAccess(
             )
             .get();
           if (!reconciledArchive) {
+            hasIncompleteCapturedWork = true;
+            fingerprintsRequiringHumanReview.add(snapshot.fingerprint);
+            reviewCandidates.delete(snapshot.fingerprint);
             report.issues.push({
               code: "invalid_sidecar",
               message:
@@ -1184,6 +1238,32 @@ export function createLegacySidecarImportAccess(
             });
           }
         }
+      }
+
+
+      if (hasIncompleteCapturedWork) {
+        if (!cutover.wasAlreadyPublished) {
+          cutover.withdrawPublication();
+        }
+      } else if (!cutover.wasAlreadyPublished && reviewCandidates.size > 0) {
+        database.transaction((transaction) => {
+          for (const [fingerprint, candidate] of reviewCandidates) {
+            if (fingerprintsRequiringHumanReview.has(fingerprint)) {
+              continue;
+            }
+            requireReviewableDiscSelections(candidate.archiveId, transaction);
+          }
+          for (const [fingerprint, candidate] of reviewCandidates) {
+            if (fingerprintsRequiringHumanReview.has(fingerprint)) {
+              continue;
+            }
+            transaction
+              .update(originalDiscArchives)
+              .set({ catalogReviewedAt: candidate.reviewedAt })
+              .where(eq(originalDiscArchives.id, candidate.archiveId))
+              .run();
+          }
+        }, { behavior: "immediate" });
       }
 
       return report;
