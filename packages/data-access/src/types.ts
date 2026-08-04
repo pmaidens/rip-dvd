@@ -77,6 +77,7 @@ export interface OriginalDiscArchive {
   fingerprint: string;
   sizeBytes: number | null;
   archivedAt: Date;
+  catalogReviewedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -125,10 +126,14 @@ export type DiscSelection = DiscSelectionBase &
       }
   );
 
+export type DeleteDiscSelectionResult = DiscSelection & {
+  deletedEncodeJobs: number;
+  deletionComplete: boolean;
+};
+
 type CreateDiscSelectionBase = {
   originalDiscArchiveId: OriginalDiscArchiveId;
   mediaItemId: MediaItemId;
-  sourceKey: string;
   label?: string;
 };
 
@@ -278,8 +283,11 @@ export interface CatalogAccess {
   listOriginalDiscArchives(options?: {
     ids?: readonly OriginalDiscArchiveId[];
     limit?: number;
+    offset?: number;
     uncatalogedOnly?: boolean;
+    needsCatalogReviewOnly?: boolean;
   }): OriginalDiscArchive[];
+  completeCatalogReview(id: OriginalDiscArchiveId): OriginalDiscArchive;
   createMediaItem(input: {
     parentId?: MediaItemId;
     kind: MediaItemKind;
@@ -288,10 +296,33 @@ export interface CatalogAccess {
     seasonNumber?: number;
     episodeNumber?: number;
   }): MediaItem;
-  listMediaItems(options?: { ids?: readonly MediaItemId[] }): MediaItem[];
+  updateMediaItem(
+    id: MediaItemId,
+    input: {
+      parentId?: MediaItemId | null;
+      kind?: MediaItemKind;
+      title?: string;
+      year?: number | null;
+      seasonNumber?: number | null;
+      episodeNumber?: number | null;
+    },
+  ): MediaItem;
+  listMediaItems(options?: {
+    ids?: readonly MediaItemId[];
+    limit?: number;
+    offset?: number;
+  }): MediaItem[];
   createDiscSelection(input: CreateDiscSelectionInput): DiscSelection;
+  repairDiscSelection(
+    id: DiscSelectionId,
+    input: CreateDiscSelectionInput,
+  ): DiscSelection;
+  deleteDiscSelection(id: DiscSelectionId): DeleteDiscSelectionResult;
   listDiscSelections(options?: {
     ids?: readonly DiscSelectionId[];
+    originalDiscArchiveId?: OriginalDiscArchiveId;
+    limit?: number;
+    offset?: number;
   }): DiscSelection[];
 }
 

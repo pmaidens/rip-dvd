@@ -162,6 +162,12 @@ describe("DashboardView", () => {
       },
       catalogReview: {
         status: "loaded",
+        page: {
+          offset: 20,
+          limit: 20,
+          hasPrevious: true,
+          hasNext: true,
+        },
         items: [
           {
             id: "archive-1",
@@ -189,6 +195,9 @@ describe("DashboardView", () => {
     expect(html).toContain("42%");
     expect(html).toContain("My Movie");
     expect(html).toContain("BONUS_DISC");
+    expect(html).toContain("Review catalog");
+    expect(html).toContain("Previous pending reviews");
+    expect(html).toContain("Next pending reviews");
     expect(html).toContain("Worker reported a failure");
     expect(html).toContain("Approve archive");
     expect(html).toContain("Retry archive");

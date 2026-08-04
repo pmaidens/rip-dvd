@@ -100,9 +100,9 @@ describe("GET /api/dashboard/events", () => {
       const selection = access.catalog.createDiscSelection({
         originalDiscArchiveId: encodeArchive.id,
         mediaItemId: mediaItem.id,
-        sourceKey: "main-feature",
         kind: "main_feature",
       });
+      access.catalog.completeCatalogReview(encodeArchive.id);
       access.encodeJobs.enqueue({
         discSelectionId: selection.id,
         encodingProfileId: profile.id,
@@ -276,9 +276,9 @@ describe("GET /api/dashboard/events", () => {
     const selection = access.catalog.createDiscSelection({
       originalDiscArchiveId: archive.id,
       mediaItemId: mediaItem.id,
-      sourceKey: "main-feature",
       kind: "main_feature",
     });
+    access.catalog.completeCatalogReview(archive.id);
     const profile = access.encodingProfiles.create({
       key: "streamed-profile",
       displayName: "DVD library",

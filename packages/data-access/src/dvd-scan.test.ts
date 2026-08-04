@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  decodeArchivedDvdTitles,
   decodeDvdTitleMap,
   isDvdContentId,
   MAX_DVD_AUDIO_STREAMS_PER_TITLE,
+  MAX_DVD_SCAN_INTEGER,
   MAX_DVD_TITLES,
 } from "./dvd-scan.js";
 
@@ -115,5 +117,39 @@ describe("versioned DVD title-map contract", () => {
         }],
       }),
     ).toBeNull();
+  });
+
+  it("decodes only bounded legacy archived title evidence", () => {
+    expect(decodeArchivedDvdTitles({
+      legacySchemaVersion: 1,
+      titles: [{
+        number: " 1 ",
+        seconds: " 5400 ",
+        chapters: " 8 ",
+        audio_streams: " 2 ",
+        subtitles: " 1 ",
+      }],
+    })).toEqual([{
+      number: 1,
+      durationSeconds: 5_400,
+      chapters: 8,
+      audioStreams: [{ id: 0 }, { id: 1 }],
+      subtitles: [{ id: 0 }],
+    }]);
+    expect(decodeArchivedDvdTitles({
+      legacySchemaVersion: 2,
+      titles: [{ number: 1 }, { number: 1 }],
+    })).toBeNull();
+    expect(decodeArchivedDvdTitles({
+      legacySchemaVersion: 2,
+      titles: Array.from(
+        { length: MAX_DVD_TITLES + 1 },
+        (_, index) => ({ number: index + 1 }),
+      ),
+    })).toBeNull();
+    expect(decodeArchivedDvdTitles({
+      legacySchemaVersion: 2,
+      titles: [{ number: 1, chapters: MAX_DVD_SCAN_INTEGER + 1 }],
+    })).toBeNull();
   });
 });

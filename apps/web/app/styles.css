@@ -166,6 +166,160 @@ h1 {
   box-shadow: 0 1.4rem 4rem rgba(0, 0, 0, 0.16);
 }
 
+.catalog-editor {
+  margin-bottom: 1rem;
+  overflow: hidden;
+  border: 1px solid #5f4d28;
+  border-radius: 1rem;
+  background: rgba(12, 27, 24, 0.97);
+  box-shadow: 0 1.4rem 4rem rgba(0, 0, 0, 0.2);
+}
+
+.catalog-editor-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1.35rem 1.4rem;
+  border-bottom: 1px solid #29483f;
+}
+
+.catalog-editor-header p:last-child,
+.catalog-help,
+.catalog-empty,
+.catalog-complete p {
+  margin: 0.45rem 0 0;
+  color: #9fb0ab;
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.catalog-editor-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.catalog-pane {
+  min-width: 0;
+  padding: 1.35rem 1.4rem;
+  border-right: 1px solid #203b34;
+  border-bottom: 1px solid #203b34;
+}
+
+.catalog-pane:nth-child(2) {
+  border-right: 0;
+}
+
+.catalog-selections {
+  grid-column: 1 / -1;
+  border-right: 0;
+  border-bottom: 0;
+}
+
+.catalog-coordinate-list,
+.media-hierarchy-list,
+.selection-list {
+  display: grid;
+  gap: 0.5rem;
+  margin: 1rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.catalog-coordinate-list li,
+.selection-list li,
+.media-hierarchy-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  min-width: 0;
+  padding: 0.7rem 0.8rem;
+  border-radius: 0.55rem;
+  background: #10231e;
+  color: #dbe6e2;
+  font-size: 0.76rem;
+}
+
+.media-hierarchy-list li > div,
+.selection-list li {
+  min-width: 0;
+}
+
+.media-hierarchy-list strong,
+.selection-list strong {
+  overflow-wrap: anywhere;
+}
+
+.media-hierarchy-list span,
+.selection-list span,
+.catalog-coordinate-list span {
+  display: block;
+  margin-top: 0.2rem;
+  color: #9fb0ab;
+  font-size: 0.68rem;
+}
+
+.media-hierarchy-list button {
+  min-height: 2.1rem;
+  padding: 0.35rem 0.55rem;
+  font-size: 0.7rem;
+}
+
+.catalog-form {
+  margin-top: 1.25rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid #29483f;
+}
+
+.catalog-fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.8rem;
+  margin: 1rem 0;
+}
+
+.catalog-fields label {
+  display: grid;
+  gap: 0.4rem;
+  min-width: 0;
+  color: #b8c8c3;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.catalog-fields input,
+.catalog-fields select {
+  width: 100%;
+  min-width: 0;
+  min-height: 2.75rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid #365149;
+  border-radius: 0.55rem;
+  background: #091713;
+  color: #eef4f1;
+}
+
+.catalog-fields input:focus-visible,
+.catalog-fields select:focus-visible {
+  outline: 3px solid #d2a14b;
+  outline-offset: 2px;
+}
+
+.catalog-complete {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 1.25rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid #29483f;
+}
+
+.review-item > button {
+  margin-top: 1rem;
+}
+
 .profiles-header,
 .profile-form {
   padding: 1.35rem 1.4rem;
@@ -618,12 +772,28 @@ h3 {
   }
 
   .profile-list,
-  .profile-fields {
+  .profile-fields,
+  .catalog-editor-grid,
+  .catalog-fields {
     display: block;
   }
 
   .profile-fields label + label {
     margin-top: 0.8rem;
+  }
+
+  .catalog-fields label + label {
+    margin-top: 0.8rem;
+  }
+
+  .catalog-editor-header,
+  .catalog-complete {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .catalog-pane {
+    border-right: 0;
   }
 
   .profile-card,

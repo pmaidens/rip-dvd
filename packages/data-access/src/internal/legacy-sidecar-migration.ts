@@ -1,7 +1,16 @@
 import { realpathSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 
-import { and, eq } from "drizzle-orm";
+import {
+  and,
+  asc,
+  eq,
+  exists,
+  gt,
+  inArray,
+  isNull,
+  or,
+} from "drizzle-orm";
 
 import { DomainInvariantError } from "../errors.js";
 import type {
@@ -17,13 +26,17 @@ import type {
   OpticalDriveId,
   OriginalDiscArchiveId,
 } from "../types.js";
-import type { LegacySidecarCatalogAdapter } from "./legacy-sidecar-catalog-adapter.js";
+import type {
+  LegacySidecarCatalogAdapter,
+  LegacySidecarCatalogReadAdapter,
+} from "./legacy-sidecar-catalog-adapter.js";
 import {
   discoverLegacySidecars,
   legacySourceArchiveMatchesSnapshot,
   resolveLegacyOriginalsLibrary,
   retireLegacySidecarQueue,
   type LegacyQueueJobSnapshot,
+  type LegacySidecarDiscovery,
   type ParsedLegacyJob,
 } from "./legacy-sidecars.js";
 import {
@@ -44,12 +57,16 @@ import {
   discSelections,
   encodeJobs,
   encodingProfiles,
+  legacyCutoverStagedSidecars,
   mediaItems,
   opticalDrives,
   originalDiscArchiveContentIds,
   originalDiscArchives,
 } from "./schema.js";
 import { requireNonEmpty } from "./validation.js";
+
+const LEGACY_CUTOVER_INVENTORY_LIMIT = 10_000;
+const LEGACY_CUTOVER_RELEASE_PAGE_SIZE = 500;
 
 function emptyLegacyImportRecordCounts():
   LegacySidecarImportReport["recordsCreated"] {
@@ -75,6 +92,10 @@ function isCompatibleLegacyEncodingProfile(
 export function createLegacySidecarImportAccess(
   database: LegacySidecarCatalogAdapter,
   now: () => Date,
+  requireReviewableDiscSelections: (
+    archiveId: OriginalDiscArchiveId,
+    catalog: LegacySidecarCatalogReadAdapter,
+  ) => unknown,
 ): LegacySidecarAccess {
   return {
     importLibrary(input) {
@@ -98,9 +119,301 @@ export function createLegacySidecarImportAccess(
         recordsUnchanged: 0,
         issues: [...discoveryBatch.scanIssues],
       };
+      const reviewCandidates = new Map<
+        string,
+        {
+          archiveId: OriginalDiscArchiveId;
+          archiveUpdatedAt: Date;
+          reviewedAt: Date;
+        }
+      >();
+      const stagedReviewArchiveIds = new Set<OriginalDiscArchiveId>();
+      const cutoverFenceArchiveIds = new Set<OriginalDiscArchiveId>();
+      const previouslyConfirmedStagedIdentities = new Set<string>();
+      const stagedIdentityKey = (input: {
+        archivePath: string;
+        fingerprint: string;
+        sidecarPath: string;
+      }) => JSON.stringify([
+        input.sidecarPath,
+        input.archivePath,
+        input.fingerprint,
+      ]);
+      const stageCatalogReviewBoundary = (
+        publicationDiscoveries: readonly LegacySidecarDiscovery[],
+        options: { allowStagedIdentityReplacement?: boolean } = {},
+      ) => {
+        return database.transaction((transaction) => {
+          const representedSidecars = publicationDiscoveries.flatMap(
+            (discovery) =>
+              discovery.outcome === "parsed" ? [discovery.sidecar] : [],
+          );
+          const representedArchivePaths = new Set(
+            representedSidecars.map((sidecar) => sidecar.archivePath),
+          );
+          const representedFingerprints = new Set(
+            representedSidecars.map((sidecar) => sidecar.fingerprint),
+          );
+          const representedSidecarsByPath = new Map(
+            representedSidecars.map((sidecar) => [
+              sidecar.sidecarPath,
+              sidecar,
+            ]),
+          );
+          const existingStagedSidecars = transaction
+            .select({
+              archivePath: legacyCutoverStagedSidecars.archivePath,
+              fingerprint: legacyCutoverStagedSidecars.fingerprint,
+              sidecarPath: legacyCutoverStagedSidecars.sidecarPath,
+            })
+            .from(legacyCutoverStagedSidecars)
+            .where(eq(
+              legacyCutoverStagedSidecars.originalsLibraryPath,
+              originalsLibraryPath,
+            ))
+            .limit(LEGACY_CUTOVER_INVENTORY_LIMIT + 1)
+            .all();
+          if (
+            existingStagedSidecars.length >
+            LEGACY_CUTOVER_INVENTORY_LIMIT
+          ) {
+            return false;
+          }
+          const existingStagedSidecarPaths = new Set(
+            existingStagedSidecars.map((sidecar) => sidecar.sidecarPath),
+          );
+          const newlyStagedSidecarPaths = new Set(
+            representedSidecars.flatMap((sidecar) =>
+              existingStagedSidecarPaths.has(sidecar.sidecarPath)
+                ? []
+                : [sidecar.sidecarPath],
+            ),
+          );
+          if (
+            existingStagedSidecars.length + newlyStagedSidecarPaths.size >
+            LEGACY_CUTOVER_INVENTORY_LIMIT
+          ) {
+            return false;
+          }
+          for (const sidecar of representedSidecars) {
+            transaction
+              .insert(legacyCutoverStagedSidecars)
+              .values({
+                originalsLibraryPath,
+                sidecarPath: sidecar.sidecarPath,
+                archivePath: sidecar.archivePath,
+                fingerprint: sidecar.fingerprint,
+              })
+              .onConflictDoNothing({
+                target: [
+                  legacyCutoverStagedSidecars.originalsLibraryPath,
+                  legacyCutoverStagedSidecars.sidecarPath,
+                ],
+              })
+              .run();
+          }
+          const markerAnchoredStagedIdentities =
+            options.allowStagedIdentityReplacement
+              ? existingStagedSidecars.filter((staged) => {
+                  const represented = representedSidecarsByPath.get(
+                    staged.sidecarPath,
+                  );
+                  return (
+                    represented !== undefined &&
+                    (represented.archivePath !== staged.archivePath ||
+                      represented.fingerprint !== staged.fingerprint)
+                  );
+                })
+              : [];
+          const newlyFencedArchiveIds = new Set<OriginalDiscArchiveId>();
+          for (const sidecar of [
+            ...representedSidecars,
+            ...markerAnchoredStagedIdentities,
+          ]) {
+            const relatedArchives = transaction
+              .select()
+              .from(originalDiscArchives)
+              .where(
+                or(
+                  eq(
+                    originalDiscArchives.fingerprint,
+                    sidecar.fingerprint,
+                  ),
+                  eq(
+                    originalDiscArchives.archivePath,
+                    sidecar.archivePath,
+                  ),
+                ),
+              )
+              .all();
+            for (const archive of relatedArchives) {
+              cutoverFenceArchiveIds.add(archive.id);
+              newlyFencedArchiveIds.add(archive.id);
+              if (archive.catalogReviewedAt !== null) {
+                if (!reviewCandidates.has(archive.fingerprint)) {
+                  reviewCandidates.set(archive.fingerprint, {
+                    archiveId: archive.id,
+                    archiveUpdatedAt: archive.updatedAt,
+                    reviewedAt: archive.catalogReviewedAt,
+                  });
+                }
+                stagedReviewArchiveIds.add(archive.id);
+              }
+              transaction
+                .update(originalDiscArchives)
+                .set({
+                  catalogReviewedAt: null,
+                  legacyCutoverPending: true,
+                })
+                .where(eq(originalDiscArchives.id, archive.id))
+                .run();
+            }
+          }
+          if (newlyFencedArchiveIds.size > 0) {
+            transaction
+              .update(encodeJobs)
+              .set({
+                status: "failed",
+                completedAt: null,
+                errorMessage:
+                  "Encode Job invalidated by legacy catalog cutover repair",
+                updatedAt: now(),
+              })
+              .where(and(
+                eq(encodeJobs.status, "running"),
+                exists(
+                  transaction
+                    .select({ id: discSelections.id })
+                    .from(discSelections)
+                    .innerJoin(
+                      originalDiscArchives,
+                      eq(
+                        originalDiscArchives.id,
+                        discSelections.originalDiscArchiveId,
+                      ),
+                    )
+                    .where(and(
+                      eq(discSelections.id, encodeJobs.discSelectionId),
+                      inArray(
+                        originalDiscArchives.id,
+                        [...newlyFencedArchiveIds],
+                      ),
+                    )),
+                ),
+              ))
+              .run();
+          }
+
+          const stagedSidecars = transaction
+            .select({
+              archivePath: legacyCutoverStagedSidecars.archivePath,
+              fingerprint: legacyCutoverStagedSidecars.fingerprint,
+              sidecarPath: legacyCutoverStagedSidecars.sidecarPath,
+            })
+            .from(legacyCutoverStagedSidecars)
+            .where(eq(
+              legacyCutoverStagedSidecars.originalsLibraryPath,
+              originalsLibraryPath,
+            ))
+            .limit(LEGACY_CUTOVER_INVENTORY_LIMIT + 1)
+            .all();
+          if (stagedSidecars.length > LEGACY_CUTOVER_INVENTORY_LIMIT) {
+            return false;
+          }
+          const stagedIdentityIsRepresented = (
+            staged: (typeof stagedSidecars)[number],
+          ) => {
+            const represented = representedSidecarsByPath.get(
+              staged.sidecarPath,
+            );
+            return (
+              (represented?.archivePath === staged.archivePath &&
+                represented.fingerprint === staged.fingerprint) ||
+              (options.allowStagedIdentityReplacement === true &&
+                represented !== undefined) ||
+              previouslyConfirmedStagedIdentities.has(
+                stagedIdentityKey(staged),
+              )
+            );
+          };
+          const stagedSidecarsAreRepresented = stagedSidecars.every(
+            stagedIdentityIsRepresented,
+          );
+          const representedStagedArchivePaths = new Set(
+            stagedSidecars.flatMap((staged) =>
+              stagedIdentityIsRepresented(staged)
+                ? [staged.archivePath]
+                : [],
+            ),
+          );
+          const representedStagedFingerprints = new Set(
+            stagedSidecars.flatMap((staged) =>
+              stagedIdentityIsRepresented(staged)
+                ? [staged.fingerprint]
+                : [],
+            ),
+          );
+          const pendingArchives = transaction
+            .select({
+              archivePath: originalDiscArchives.archivePath,
+              fingerprint: originalDiscArchives.fingerprint,
+              id: originalDiscArchives.id,
+            })
+            .from(originalDiscArchives)
+            .where(eq(originalDiscArchives.legacyCutoverPending, true))
+            .limit(LEGACY_CUTOVER_INVENTORY_LIMIT + 1)
+            .all();
+          if (pendingArchives.length > LEGACY_CUTOVER_INVENTORY_LIMIT) {
+            return false;
+          }
+          for (const archive of pendingArchives) {
+            if (
+              isPathWithinDirectory(
+                originalsLibraryPath,
+                archive.archivePath,
+              )
+            ) {
+              cutoverFenceArchiveIds.add(archive.id);
+            }
+          }
+          const pendingArchivesAreRepresented = pendingArchives.every(
+            (archive) =>
+              !isPathWithinDirectory(
+                originalsLibraryPath,
+                archive.archivePath,
+              ) ||
+              stagedSidecars.length > 0 ||
+              representedFingerprints.has(archive.fingerprint) ||
+              representedArchivePaths.has(archive.archivePath) ||
+              representedStagedFingerprints.has(archive.fingerprint) ||
+              representedStagedArchivePaths.has(archive.archivePath),
+          );
+          const publicationIsComplete = (
+            pendingArchivesAreRepresented &&
+            stagedSidecarsAreRepresented
+          );
+          for (const staged of stagedSidecars) {
+            const represented = representedSidecarsByPath.get(
+              staged.sidecarPath,
+            );
+            if (
+              (represented?.archivePath === staged.archivePath &&
+                represented.fingerprint === staged.fingerprint) ||
+              (options.allowStagedIdentityReplacement === true &&
+                represented !== undefined)
+            ) {
+              previouslyConfirmedStagedIdentities.add(
+                stagedIdentityKey(staged),
+              );
+            }
+          }
+          return publicationIsComplete;
+        }, { behavior: "immediate" });
+      };
       const cutover = retireLegacySidecarQueue(
         originalsLibraryPath,
         discoveryBatch,
+        stageCatalogReviewBoundary,
       );
       if (!cutover) {
         report.sidecarsSkipped = discoveryBatch.sidecarsFound;
@@ -150,6 +463,12 @@ export function createLegacySidecarImportAccess(
         LegacyJobLogicalKey,
         { job: ParsedLegacyJob; sidecarPath: string }
       >();
+      const fingerprintsRequiringHumanReview = new Set<string>();
+      const fingerprintsCreatedDuringImport = new Set<string>();
+      let hasIncompleteCapturedWork = false;
+      const withdrawIncompletePublication = () => {
+        cutover.withdrawPublication();
+      };
       const reconciledSnapshotKeys = new Set<LegacyJobLogicalKey>();
       const trustedSchemaOneSnapshots = new Map<
         LegacyJobLogicalKey,
@@ -162,6 +481,9 @@ export function createLegacySidecarImportAccess(
         if (discovery.outcome === "skipped") {
           if (cutover.mode === "schema-one") {
             schemaOneHasUnresolvedWork = true;
+          } else if (cutover.mode === "snapshot") {
+            hasIncompleteCapturedWork = true;
+            withdrawIncompletePublication();
           }
           report.sidecarsSkipped += 1;
           report.issues.push(discovery.issue);
@@ -236,6 +558,7 @@ export function createLegacySidecarImportAccess(
                         corroboratingArchive.id,
                       ),
                       eq(discSelections.sourceKey, job.sourceKey),
+                      eq(discSelections.isCatalogActive, true),
                     ),
                   )
                   .get()
@@ -316,6 +639,7 @@ export function createLegacySidecarImportAccess(
           }
           continue;
         }
+        const prePersistenceIssues: LegacySidecarImportReport["issues"] = [];
         const acceptedJobs = sidecar.jobs.filter((job) => {
           const logicalKey = legacyJobLogicalKey(
             sidecar.fingerprint,
@@ -329,13 +653,15 @@ export function createLegacySidecarImportAccess(
             if (
               publishedSnapshot?.signature !== signature
             ) {
-              report.issues.push({
+              const issue = {
                 code: "duplicate_record",
                 jobIndex: job.jobIndex,
                 message:
                   "Logical Encode Job conflicts with the record captured at SQLite cutover",
                 sidecarPath: sidecar.sidecarPath,
-              });
+              } as const;
+              prePersistenceIssues.push(issue);
+              report.issues.push(issue);
               return false;
             }
             reconciledSnapshotKeys.add(logicalKey);
@@ -344,12 +670,14 @@ export function createLegacySidecarImportAccess(
           if (legacyJobSignature(persisted.job) === signature) {
             return true;
           }
-          report.issues.push({
+          const issue = {
             code: "duplicate_record",
             jobIndex: job.jobIndex,
             message: `Logical Encode Job conflicts with an earlier record in ${persisted.sidecarPath}`,
             sidecarPath: sidecar.sidecarPath,
-          });
+          } as const;
+          prePersistenceIssues.push(issue);
+          report.issues.push(issue);
           return false;
         });
         const created = emptyLegacyImportRecordCounts();
@@ -357,6 +685,22 @@ export function createLegacySidecarImportAccess(
         let unchanged = 0;
         const persistenceIssues: LegacySidecarImportReport["issues"] = [];
         const persistedJobs: ParsedLegacyJob[] = [];
+        let createdArchiveInTransaction = false;
+        let reviewCandidate:
+          | {
+              archiveId: OriginalDiscArchiveId;
+              archiveUpdatedAt: Date;
+              reviewedAt: Date;
+            }
+          | undefined;
+        if (
+          sidecar.issues.length > 0 ||
+          prePersistenceIssues.length > 0
+        ) {
+          fingerprintsRequiringHumanReview.add(sidecar.fingerprint);
+          hasIncompleteCapturedWork = true;
+          withdrawIncompletePublication();
+        }
 
         try {
           const requireCapturedSourceArchive = () => {
@@ -392,7 +736,16 @@ export function createLegacySidecarImportAccess(
               .select()
               .from(originalDiscArchives)
               .where(
-                eq(originalDiscArchives.fingerprint, sidecar.fingerprint),
+                or(
+                  eq(
+                    originalDiscArchives.fingerprint,
+                    sidecar.fingerprint,
+                  ),
+                  eq(
+                    originalDiscArchives.archivePath,
+                    sidecar.archivePath,
+                  ),
+                ),
               )
               .get();
             const existingByPath = transaction
@@ -422,6 +775,10 @@ export function createLegacySidecarImportAccess(
             const importedCreatedAt = sidecar.createdAt;
             const importedUpdatedAt = sidecar.updatedAt;
             let archive = existingByFingerprint ?? existingByPath;
+            const archiveAlreadyExisted = archive !== undefined;
+            const archiveExistedBeforeImport =
+              archiveAlreadyExisted &&
+              !fingerprintsCreatedDuringImport.has(sidecar.fingerprint);
             if (
               existingByPath &&
               existingByPath.fingerprint !== sidecar.fingerprint
@@ -502,6 +859,7 @@ export function createLegacySidecarImportAccess(
                     fingerprint: sidecar.fingerprint,
                     sizeBytes: sidecar.archiveSizeBytes,
                     archivedAt: sidecar.archivedAt,
+                    legacyCutoverPending: true,
                     createdAt: importedCreatedAt,
                     updatedAt: importedUpdatedAt,
                   })
@@ -511,6 +869,8 @@ export function createLegacySidecarImportAccess(
                 sidecar.archivePath,
               );
               created.originalDiscArchives += 1;
+              createdArchiveInTransaction = true;
+              cutoverFenceArchiveIds.add(archive.id);
             } else {
               const archiveChanged =
                 archive.archivePath !== sidecar.archivePath ||
@@ -588,7 +948,10 @@ export function createLegacySidecarImportAccess(
               .select()
               .from(discSelections)
               .where(
-                eq(discSelections.originalDiscArchiveId, archive.id),
+                and(
+                  eq(discSelections.originalDiscArchiveId, archive.id),
+                  eq(discSelections.isCatalogActive, true),
+                ),
               )
               .all();
             const selectionsBySourceKey = new Map(
@@ -694,10 +1057,18 @@ export function createLegacySidecarImportAccess(
                 });
                 continue;
               }
+              const capturedSnapshotMatches =
+                cutover.wasAlreadyPublished &&
+                cutover.jobSnapshots
+                  .get(legacyJobLogicalKey(sidecar.fingerprint, job))
+                  ?.signature === legacyJobSignature(job);
               const outputJob = transaction
                 .select()
                 .from(encodeJobs)
-                .where(eq(encodeJobs.outputPath, job.outputPath))
+                .where(and(
+                  eq(encodeJobs.outputPath, job.outputPath),
+                  eq(encodeJobs.reservesOutputPath, true),
+                ))
                 .get();
               const logicalJob =
                 selection && profile
@@ -712,17 +1083,37 @@ export function createLegacySidecarImportAccess(
                       )
                       .get()
                   : undefined;
+              const retiredHistoricalJob =
+                capturedSnapshotMatches && profile
+                  ? transaction
+                      .select({ id: encodeJobs.id })
+                      .from(encodeJobs)
+                      .innerJoin(
+                        discSelections,
+                        eq(discSelections.id, encodeJobs.discSelectionId),
+                      )
+                      .where(and(
+                        eq(encodeJobs.outputPath, job.outputPath),
+                        eq(encodeJobs.encodingProfileId, profile.id),
+                        eq(
+                          discSelections.originalDiscArchiveId,
+                          archive.id,
+                        ),
+                        eq(discSelections.sourceKey, job.sourceKey),
+                        eq(discSelections.isCatalogActive, false),
+                      ))
+                      .limit(1)
+                      .get()
+                  : undefined;
+              if (retiredHistoricalJob) {
+                unchanged += 1;
+                persistedJobs.push(job);
+                continue;
+              }
               if (
                 logicalJob &&
                 logicalJob.outputPath !== job.outputPath &&
-                !(
-                  cutover.wasAlreadyPublished &&
-                  cutover.jobSnapshots
-                    .get(
-                      legacyJobLogicalKey(sidecar.fingerprint, job),
-                    )
-                    ?.signature === legacyJobSignature(job)
-                )
+                !capturedSnapshotMatches
               ) {
                 persistenceIssues.push({
                   code: "duplicate_record",
@@ -774,53 +1165,10 @@ export function createLegacySidecarImportAccess(
                     `Movie Disc Selection ${job.sourceKey} maps to a duplicate Media Item`,
                   );
                 }
-                const parentId =
-                  job.mediaItemKind === "movie"
-                    ? null
-                    : requireMovieItem().id;
-                const year =
-                  job.mediaItemKind === "movie" ? sidecar.movieYear : null;
-                const mediaChanged =
-                  mediaItem.kind !== job.mediaItemKind ||
-                  mediaItem.title !== job.mediaTitle ||
-                  mediaItem.year !== year ||
-                  mediaItem.parentId !== parentId;
-                if (mediaChanged) {
-                  mediaItem = requireRow(
-                    transaction
-                      .update(mediaItems)
-                      .set({
-                        kind: job.mediaItemKind,
-                        title: job.mediaTitle,
-                        year,
-                        parentId,
-                        updatedAt: timestamp,
-                      })
-                      .where(eq(mediaItems.id, mediaItem.id))
-                      .returning()
-                      .get(),
-                    "legacy media item",
-                    mediaItem.id,
-                  );
-                  updated += 1;
-                } else {
-                  unchanged += 1;
-                }
-                if (selection.label !== job.label) {
-                  selection = requireRow(
-                    transaction
-                      .update(discSelections)
-                      .set({ label: job.label, updatedAt: timestamp })
-                      .where(eq(discSelections.id, selection.id))
-                      .returning()
-                      .get(),
-                    "legacy disc selection",
-                    selection.id,
-                  );
-                  updated += 1;
-                } else {
-                  unchanged += 1;
-                }
+                // Existing SQLite catalog rows may have been edited after the
+                // durable marker was published. SQLite is authoritative once
+                // those rows exist, including during the initial cutover.
+                unchanged += 2;
               } else {
                 mediaItem =
                   job.mediaItemKind === "movie"
@@ -914,9 +1262,84 @@ export function createLegacySidecarImportAccess(
               }
               persistedJobs.push(job);
             }
+            const hasDiscSelection = transaction
+              .select({ id: discSelections.id })
+              .from(discSelections)
+              .where(and(
+                eq(discSelections.originalDiscArchiveId, archive.id),
+                eq(discSelections.isCatalogActive, true),
+              ))
+              .get() !== undefined;
+            if (archive.catalogReviewedAt !== null || hasDiscSelection) {
+              if (
+                cutover.wasAlreadyPublished &&
+                archive.catalogReviewedAt === null &&
+                !stagedReviewArchiveIds.has(archive.id)
+              ) {
+                fingerprintsRequiringHumanReview.add(sidecar.fingerprint);
+              }
+              let catalogIsReviewable = true;
+              try {
+                requireReviewableDiscSelections(archive.id, transaction);
+              } catch (error) {
+                if (!(error instanceof DomainInvariantError)) {
+                  throw error;
+                }
+                catalogIsReviewable = false;
+              }
+              const requiresHumanReview =
+                !catalogIsReviewable ||
+                persistenceIssues.length > 0 ||
+                (archiveExistedBeforeImport && created.discSelections > 0);
+              if (requiresHumanReview) {
+                fingerprintsRequiringHumanReview.add(sidecar.fingerprint);
+              }
+              if (
+                fingerprintsRequiringHumanReview.has(sidecar.fingerprint)
+              ) {
+                if (archive.catalogReviewedAt !== null) {
+                  transaction
+                    .update(originalDiscArchives)
+                    .set({ catalogReviewedAt: null })
+                    .where(eq(originalDiscArchives.id, archive.id))
+                    .run();
+                }
+              } else if (
+                !cutover.wasAlreadyPublished &&
+                archive.catalogReviewedAt === null
+              ) {
+                reviewCandidate = {
+                  archiveId: archive.id,
+                  archiveUpdatedAt: archive.updatedAt,
+                  reviewedAt: importedUpdatedAt,
+                };
+              }
+            }
             requireCapturedSourceArchive();
           }, { behavior: "immediate" });
         } catch (error) {
+          hasIncompleteCapturedWork = true;
+          fingerprintsRequiringHumanReview.add(sidecar.fingerprint);
+          reviewCandidates.delete(sidecar.fingerprint);
+          database.transaction((transaction) => {
+            transaction
+              .update(originalDiscArchives)
+              .set({ catalogReviewedAt: null })
+              .where(
+                or(
+                  eq(
+                    originalDiscArchives.fingerprint,
+                    sidecar.fingerprint,
+                  ),
+                  eq(
+                    originalDiscArchives.archivePath,
+                    sidecar.archivePath,
+                  ),
+                ),
+              )
+              .run();
+          }, { behavior: "immediate" });
+          withdrawIncompletePublication();
           report.sidecarsSkipped += 1;
           report.issues.push({
             code:
@@ -928,6 +1351,16 @@ export function createLegacySidecarImportAccess(
             sidecarPath: sidecar.sidecarPath,
           });
           continue;
+        }
+
+        if (createdArchiveInTransaction) {
+          fingerprintsCreatedDuringImport.add(sidecar.fingerprint);
+        }
+        if (
+          reviewCandidate &&
+          !reviewCandidates.has(sidecar.fingerprint)
+        ) {
+          reviewCandidates.set(sidecar.fingerprint, reviewCandidate);
         }
 
         for (const job of persistedJobs) {
@@ -952,6 +1385,10 @@ export function createLegacySidecarImportAccess(
         report.recordsUpdated += updated;
         report.recordsUnchanged += unchanged;
         report.issues.push(...persistenceIssues);
+        if (persistenceIssues.length > 0) {
+          hasIncompleteCapturedWork = true;
+          withdrawIncompletePublication();
+        }
       }
 
       if (cutover.mode === "schema-one") {
@@ -1048,18 +1485,6 @@ export function createLegacySidecarImportAccess(
             .from(originalDiscArchives)
             .where(eq(originalDiscArchives.fingerprint, fingerprint))
             .get();
-          const selection = archive
-            ? database
-                .select()
-                .from(discSelections)
-                .where(
-                  and(
-                    eq(discSelections.originalDiscArchiveId, archive.id),
-                    eq(discSelections.sourceKey, sourceKey),
-                  ),
-                )
-                .get()
-            : undefined;
           const profile = database
             .select()
             .from(encodingProfiles)
@@ -1072,19 +1497,38 @@ export function createLegacySidecarImportAccess(
             )
             .get();
           const reconciledJob =
-            selection && profile
+            archive && profile
               ? database
                   .select({ id: encodeJobs.id })
                   .from(encodeJobs)
+                  .innerJoin(
+                    discSelections,
+                    eq(discSelections.id, encodeJobs.discSelectionId),
+                  )
                   .where(
                     and(
-                      eq(encodeJobs.discSelectionId, selection.id),
+                      eq(
+                        discSelections.originalDiscArchiveId,
+                        archive.id,
+                      ),
+                      eq(discSelections.sourceKey, sourceKey),
                       eq(encodeJobs.encodingProfileId, profile.id),
                     ),
                   )
                   .get()
               : undefined;
           if (!reconciledJob) {
+            hasIncompleteCapturedWork = true;
+            fingerprintsRequiringHumanReview.add(fingerprint);
+            reviewCandidates.delete(fingerprint);
+            database.transaction((transaction) => {
+              transaction
+                .update(originalDiscArchives)
+                .set({ catalogReviewedAt: null })
+                .where(eq(originalDiscArchives.fingerprint, fingerprint))
+                .run();
+            }, { behavior: "immediate" });
+            withdrawIncompletePublication();
             report.issues.push({
               code: "invalid_job",
               jobIndex: snapshot.jobIndex,
@@ -1112,6 +1556,10 @@ export function createLegacySidecarImportAccess(
             )
             .get();
           if (!reconciledArchive) {
+            hasIncompleteCapturedWork = true;
+            fingerprintsRequiringHumanReview.add(snapshot.fingerprint);
+            reviewCandidates.delete(snapshot.fingerprint);
+            withdrawIncompletePublication();
             report.issues.push({
               code: "invalid_sidecar",
               message:
@@ -1120,6 +1568,91 @@ export function createLegacySidecarImportAccess(
             });
           }
         }
+      }
+      if (hasIncompleteCapturedWork) {
+        withdrawIncompletePublication();
+      } else {
+        database.transaction((transaction) => {
+          if (cutoverFenceArchiveIds.size > 0) {
+            for (const [fingerprint, candidate] of reviewCandidates) {
+              if (fingerprintsRequiringHumanReview.has(fingerprint)) {
+                continue;
+              }
+              requireReviewableDiscSelections(
+                candidate.archiveId,
+                transaction,
+              );
+            }
+            for (const [fingerprint, candidate] of reviewCandidates) {
+              if (fingerprintsRequiringHumanReview.has(fingerprint)) {
+                continue;
+              }
+              transaction
+                .update(originalDiscArchives)
+                .set({ catalogReviewedAt: candidate.reviewedAt })
+                .where(
+                  and(
+                    eq(originalDiscArchives.id, candidate.archiveId),
+                    eq(
+                      originalDiscArchives.updatedAt,
+                      candidate.archiveUpdatedAt,
+                    ),
+                    isNull(originalDiscArchives.catalogReviewedAt),
+                  ),
+                )
+                .run();
+            }
+          }
+          let lastPendingArchiveId: OriginalDiscArchiveId | undefined;
+          for (;;) {
+            const pendingArchives = transaction
+              .select({
+                archivePath: originalDiscArchives.archivePath,
+                id: originalDiscArchives.id,
+              })
+              .from(originalDiscArchives)
+              .where(and(
+                eq(originalDiscArchives.legacyCutoverPending, true),
+                lastPendingArchiveId === undefined
+                  ? undefined
+                  : gt(originalDiscArchives.id, lastPendingArchiveId),
+              ))
+              .orderBy(asc(originalDiscArchives.id))
+              .limit(LEGACY_CUTOVER_RELEASE_PAGE_SIZE)
+              .all();
+            const libraryArchiveIds = pendingArchives
+              .filter((archive) =>
+                isPathWithinDirectory(
+                  originalsLibraryPath,
+                  archive.archivePath,
+                ),
+              )
+              .map((archive) => archive.id);
+            if (libraryArchiveIds.length > 0) {
+              transaction
+                .update(originalDiscArchives)
+                .set({ legacyCutoverPending: false })
+                .where(inArray(
+                  originalDiscArchives.id,
+                  libraryArchiveIds,
+                ))
+                .run();
+            }
+            if (
+              pendingArchives.length < LEGACY_CUTOVER_RELEASE_PAGE_SIZE
+            ) {
+              break;
+            }
+            lastPendingArchiveId = pendingArchives.at(-1)!.id;
+          }
+          transaction
+            .delete(legacyCutoverStagedSidecars)
+            .where(eq(
+              legacyCutoverStagedSidecars.originalsLibraryPath,
+              originalsLibraryPath,
+            ))
+            .run();
+        }, { behavior: "immediate" });
       }
 
       return report;

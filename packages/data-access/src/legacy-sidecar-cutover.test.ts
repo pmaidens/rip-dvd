@@ -13,10 +13,15 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { createDataAccess } from "./index.js";
+import {
+  createDataAccess,
+  DomainInvariantError,
+  StaleJobAttemptError,
+} from "./index.js";
 import { createLegacySidecarDataAccess } from "./legacy-sidecars.js";
 import { createTemporaryDirectoryFixture } from "./legacy-sidecar.test-support.js";
 
@@ -83,6 +88,7 @@ vi.mock("node:fs", async (importOriginal) => {
 const temporaryDirectories = createTemporaryDirectoryFixture();
 
 afterEach(() => {
+  vi.useRealTimers();
   delete process.env.RIP_DVD_PYTHON;
   markerFault.afterArchiveSnapshot = null;
   markerFault.afterDirectorySync = null;
@@ -620,6 +626,756 @@ try {
     const completedRestart = createDataAccess({ databasePath });
     expect(completedRestart.encodeJobs.list()).toHaveLength(1);
     completedRestart.close();
+  });
+
+  it("makes an active attempt stale as soon as cutover staging persists its fence", () => {
+    const root = temporaryDirectories.create(
+      "rip-dvd-cutover-attempt-fence-",
+    );
+    const originalsLibraryPath = join(root, "originals");
+    const archivePath = join(originalsLibraryPath, "Attempt.iso");
+    const sidecarPath = join(
+      originalsLibraryPath,
+      "Attempt.rip-dvd.json",
+    );
+    const outputPath = join(root, "movies", "Attempt.mkv");
+    const databasePath = join(root, "catalog.sqlite");
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    writeFileSync(archivePath, "attempt archive");
+
+    const access = createLegacySidecarDataAccess({ databasePath });
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "cutover-attempt-fingerprint",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath,
+      fingerprint: "cutover-attempt-fingerprint",
+    });
+    const item = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Attempt",
+    });
+    const selection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: item.id,
+      kind: "main_feature",
+    });
+    access.catalog.completeCatalogReview(archive.id);
+    const preset = "Fast 480p30";
+    const profile = access.encodingProfiles.create({
+      key: `legacy-handbrake-fast-480p30-${createHash("sha256")
+        .update(preset)
+        .digest("hex")
+        .slice(0, 12)}`,
+      displayName: preset,
+      mediaDomain: "dvd_video",
+      settings: { preset },
+    });
+    access.encodeJobs.enqueue({
+      discSelectionId: selection.id,
+      encodingProfileId: profile.id,
+      outputPath,
+    });
+    const running = access.encodeJobs.claimNext("cutover-attempt-worker");
+    if (!running) {
+      throw new Error("Expected Encode Job to be running");
+    }
+    writeFileSync(sidecarPath, JSON.stringify({
+      schema_version: 2,
+      source: archivePath,
+      title: "Attempt",
+      disc_fingerprint: "cutover-attempt-fingerprint",
+      jobs: [{
+        label: "Movie: Attempt",
+        source: archivePath,
+        output: outputPath,
+        preset,
+        selection: "main_feature",
+        title_number: null,
+      }],
+    }));
+
+    expect(() =>
+      access.legacySidecars.importLibrary({ originalsLibraryPath }),
+    ).toThrow(/injected marker write failure/);
+    expect(() => access.encodeJobs.complete(running)).toThrow(
+      StaleJobAttemptError,
+    );
+    expect(access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: running.id,
+        status: "failed",
+        completedAt: null,
+        errorMessage:
+          "Encode Job invalidated by legacy catalog cutover repair",
+      }),
+    ]);
+    markerFault.failure = null;
+    expect(
+      access.legacySidecars.importLibrary({ originalsLibraryPath }),
+    ).toMatchObject({ sidecarsImported: 1, sidecarsSkipped: 0, issues: [] });
+    expect(() => access.encodeJobs.complete(running)).toThrow(
+      StaleJobAttemptError,
+    );
+    expect(access.encodeJobs.list()).toEqual([
+      expect.objectContaining({ id: running.id, status: "failed" }),
+    ]);
+    access.close();
+  });
+
+  it("retains first-migration A+B inventory when marker publication fails", () => {
+    const root = temporaryDirectories.create(
+      "rip-dvd-cutover-new-durable-staging-",
+    );
+    const originalsLibraryPath = join(root, "originals");
+    const databasePath = join(root, "catalog.sqlite");
+    const markerPath = join(
+      originalsLibraryPath,
+      ".rip-dvd-sqlite-catalog",
+    );
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    const createSidecar = (name: string) => {
+      const archivePath = join(originalsLibraryPath, `${name}.iso`);
+      const sidecarPath = join(
+        originalsLibraryPath,
+        `${name}.rip-dvd.json`,
+      );
+      const outputPath = join(root, "movies", `${name}.mkv`);
+      writeFileSync(archivePath, `${name} archive`);
+      const sidecarBytes = Buffer.from(JSON.stringify({
+        schema_version: 2,
+        source: archivePath,
+        title: name,
+        disc_fingerprint: `new-durable-${name.toLowerCase()}-fingerprint`,
+        jobs: [{
+          label: `Movie: ${name}`,
+          source: archivePath,
+          output: outputPath,
+          preset: "Fast 480p30",
+          selection: "main_feature",
+          title_number: null,
+        }],
+      }));
+      writeFileSync(sidecarPath, sidecarBytes);
+      return { outputPath, sidecarBytes, sidecarPath };
+    };
+    const first = createSidecar("A");
+    const second = createSidecar("B");
+
+    const failedPublication = createLegacySidecarDataAccess({ databasePath });
+    expect(() =>
+      failedPublication.legacySidecars.importLibrary({
+        originalsLibraryPath,
+      }),
+    ).toThrow(/injected marker write failure/);
+    expect(existsSync(markerPath)).toBe(false);
+    expect(failedPublication.catalog.listOriginalDiscArchives()).toEqual([]);
+    expect(failedPublication.encodeJobs.list()).toEqual([]);
+    failedPublication.close();
+
+    const service = createDataAccess({
+      databasePath,
+      originalsLibraryPath,
+    });
+    const drive = service.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const concurrentFingerprint = "concurrent-cutover-archive-fingerprint";
+    const concurrentArchivePath = join(
+      originalsLibraryPath,
+      "Concurrent.iso",
+    );
+    writeFileSync(concurrentArchivePath, "concurrent archive");
+    const concurrentDisc = service.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: concurrentFingerprint,
+    });
+    service.catalog.updateDetectedDiscStatus(concurrentDisc.id, "scanned");
+    service.archiveJobs.approve({ detectedDiscId: concurrentDisc.id });
+    const concurrentClaim = service.archiveJobs.claimNext(
+      "concurrent-worker",
+      {
+        opticalDriveId: drive.id,
+        fingerprint: concurrentFingerprint,
+      },
+    );
+    if (!concurrentClaim) {
+      throw new Error("Expected the concurrent Archive Job to be claimed");
+    }
+    service.archiveJobs.publish(concurrentClaim, {
+      archivePath: concurrentArchivePath,
+      sizeBytes: 4_700_000_000,
+    });
+    const concurrentArchive = service.catalog
+      .listOriginalDiscArchives()
+      .find((archive) => archive.fingerprint === concurrentFingerprint);
+    expect(concurrentArchive).toMatchObject({
+      legacyCutoverPending: true,
+    });
+    service.close();
+
+    markerFault.failure = null;
+    const incompleteRetry = createLegacySidecarDataAccess({ databasePath });
+    const replacementArchivePath = join(originalsLibraryPath, "C.iso");
+    writeFileSync(replacementArchivePath, "C archive");
+    writeFileSync(second.sidecarPath, JSON.stringify({
+      schema_version: 2,
+      source: replacementArchivePath,
+      title: "C",
+      disc_fingerprint: "new-durable-c-fingerprint",
+      jobs: [{
+        label: "Movie: C",
+        source: replacementArchivePath,
+        output: join(root, "movies", "C.mkv"),
+        preset: "Fast 480p30",
+        selection: "main_feature",
+        title_number: null,
+      }],
+    }));
+    expect(
+      incompleteRetry.legacySidecars.importLibrary({
+        originalsLibraryPath,
+      }),
+    ).toMatchObject({
+      sidecarsFound: 2,
+      sidecarsImported: 0,
+      sidecarsSkipped: 2,
+      issues: [],
+    });
+    expect(existsSync(markerPath)).toBe(false);
+    expect(incompleteRetry.catalog.listOriginalDiscArchives()).toEqual([
+      expect.objectContaining({
+        id: concurrentArchive!.id,
+        legacyCutoverPending: true,
+      }),
+    ]);
+    expect(incompleteRetry.encodeJobs.list()).toEqual([]);
+
+    writeFileSync(second.sidecarPath, second.sidecarBytes);
+    expect(
+      incompleteRetry.legacySidecars.importLibrary({
+        originalsLibraryPath,
+      }),
+    ).toMatchObject({
+      sidecarsFound: 2,
+      sidecarsImported: 2,
+      sidecarsSkipped: 0,
+      issues: [],
+    });
+    expect(existsSync(markerPath)).toBe(true);
+    expect(incompleteRetry.encodeJobs.list()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ outputPath: first.outputPath }),
+        expect.objectContaining({ outputPath: second.outputPath }),
+      ]),
+    );
+    expect(
+      incompleteRetry.catalog.listOriginalDiscArchives()
+        .find((archive) => archive.id === concurrentArchive!.id),
+    ).toMatchObject({ legacyCutoverPending: false });
+    incompleteRetry.close();
+  });
+
+  it("does not grow durable staging beyond its bounded inventory", () => {
+    const root = temporaryDirectories.create(
+      "rip-dvd-cutover-bounded-durable-staging-",
+    );
+    const originalsLibraryPath = join(root, "originals");
+    const databasePath = join(root, "catalog.sqlite");
+    const archivePath = join(originalsLibraryPath, "Current.iso");
+    const sidecarPath = join(
+      originalsLibraryPath,
+      "Current.rip-dvd.json",
+    );
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    writeFileSync(archivePath, "current archive");
+    writeFileSync(sidecarPath, JSON.stringify({
+      schema_version: 2,
+      source: archivePath,
+      title: "Current",
+      disc_fingerprint: "bounded-current-fingerprint",
+      jobs: [{
+        label: "Movie: Current",
+        source: archivePath,
+        output: join(root, "movies", "Current.mkv"),
+        preset: "Fast 480p30",
+        selection: "main_feature",
+        title_number: null,
+      }],
+    }));
+
+    const migrated = createLegacySidecarDataAccess({ databasePath });
+    migrated.close();
+    const sqlite = new DatabaseSync(databasePath);
+    const insert = sqlite.prepare(`
+      insert into legacy_cutover_staged_sidecars (
+        originals_library_path,
+        sidecar_path,
+        archive_path,
+        fingerprint
+      ) values (?, ?, ?, ?)
+    `);
+    sqlite.exec("begin immediate");
+    for (let index = 0; index < 10_000; index += 1) {
+      insert.run(
+        originalsLibraryPath,
+        join(originalsLibraryPath, `missing-${index}.rip-dvd.json`),
+        join(originalsLibraryPath, `missing-${index}.iso`),
+        `missing-${index}-fingerprint`,
+      );
+    }
+    sqlite.exec("commit");
+    sqlite.close();
+
+    markerFault.failure = null;
+    const retry = createLegacySidecarDataAccess({ databasePath });
+    expect(
+      retry.legacySidecars.importLibrary({ originalsLibraryPath }),
+    ).toMatchObject({
+      sidecarsFound: 1,
+      sidecarsImported: 0,
+      sidecarsSkipped: 1,
+    });
+    retry.close();
+
+    const inspected = new DatabaseSync(databasePath);
+    expect(
+      inspected.prepare(`
+        select count(*) as count
+        from legacy_cutover_staged_sidecars
+        where originals_library_path = ?
+      `).get(originalsLibraryPath),
+    ).toEqual({ count: 10_000 });
+    inspected.close();
+  });
+
+  it("refuses incomplete replacement after a repair-marker write failure", () => {
+    const root = temporaryDirectories.create(
+      "rip-dvd-cutover-repair-replacement-staging-",
+    );
+    const originalsLibraryPath = join(root, "originals");
+    const databasePath = join(root, "catalog.sqlite");
+    const markerPath = join(
+      originalsLibraryPath,
+      ".rip-dvd-sqlite-catalog",
+    );
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    const createSidecar = (name: string) => {
+      const archivePath = join(originalsLibraryPath, `${name}.iso`);
+      const sidecarPath = join(
+        originalsLibraryPath,
+        `${name}.rip-dvd.json`,
+      );
+      const outputPath = join(root, "movies", `${name}.mkv`);
+      writeFileSync(archivePath, `${name} archive`);
+      const sidecarBytes = Buffer.from(JSON.stringify({
+        schema_version: 2,
+        source: archivePath,
+        title: name,
+        disc_fingerprint: `repair-replacement-${name.toLowerCase()}-fingerprint`,
+        jobs: [{
+          label: `Movie: ${name}`,
+          source: archivePath,
+          output: outputPath,
+          preset: "Fast 480p30",
+          selection: "main_feature",
+          title_number: null,
+        }],
+      }));
+      writeFileSync(sidecarPath, sidecarBytes);
+      return { outputPath, sidecarBytes, sidecarPath };
+    };
+    const first = createSidecar("A");
+    markerFault.failure = null;
+    const initial = createLegacySidecarDataAccess({ databasePath });
+    expect(initial.legacySidecars.importLibrary({ originalsLibraryPath }))
+      .toMatchObject({ sidecarsImported: 1, issues: [] });
+    initial.close();
+    const retiredMarker = JSON.parse(readFileSync(markerPath, "utf8")) as {
+      legacyQueueStatus: string;
+    };
+    writeFileSync(markerPath, `${JSON.stringify({
+      ...retiredMarker,
+      legacyQueueStatus: "repair",
+    })}\n`);
+    const second = createSidecar("B");
+
+    markerFault.failure = "rename";
+    const failedReplacement = createLegacySidecarDataAccess({ databasePath });
+    expect(() =>
+      failedReplacement.legacySidecars.importLibrary({
+        originalsLibraryPath,
+      }),
+    ).toThrow(/injected marker write failure/);
+    failedReplacement.close();
+
+    markerFault.failure = null;
+    const incompleteRetry = createLegacySidecarDataAccess({ databasePath });
+    const replacementArchivePath = join(originalsLibraryPath, "C.iso");
+    writeFileSync(replacementArchivePath, "C archive");
+    writeFileSync(second.sidecarPath, JSON.stringify({
+      schema_version: 2,
+      source: replacementArchivePath,
+      title: "C",
+      disc_fingerprint: "repair-replacement-c-fingerprint",
+      jobs: [{
+        label: "Movie: C",
+        source: replacementArchivePath,
+        output: join(root, "movies", "C.mkv"),
+        preset: "Fast 480p30",
+        selection: "main_feature",
+        title_number: null,
+      }],
+    }));
+    expect(
+      incompleteRetry.legacySidecars.importLibrary({
+        originalsLibraryPath,
+      }),
+    ).toMatchObject({
+      sidecarsFound: 2,
+      sidecarsImported: 0,
+      sidecarsSkipped: 2,
+      issues: [],
+    });
+    expect(JSON.parse(readFileSync(markerPath, "utf8"))).toMatchObject({
+      legacyQueueStatus: "repair",
+    });
+    expect(() =>
+      incompleteRetry.catalog.completeCatalogReview(
+        incompleteRetry.catalog.listOriginalDiscArchives()[0]!.id,
+      ),
+    ).toThrow(DomainInvariantError);
+
+    writeFileSync(second.sidecarPath, second.sidecarBytes);
+    expect(
+      incompleteRetry.legacySidecars.importLibrary({
+        originalsLibraryPath,
+      }).issues,
+    ).toEqual([]);
+    expect(JSON.parse(readFileSync(markerPath, "utf8"))).toMatchObject({
+      legacyQueueStatus: "retired",
+    });
+    expect(incompleteRetry.encodeJobs.list()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ outputPath: first.outputPath }),
+        expect.objectContaining({ outputPath: second.outputPath }),
+      ]),
+    );
+    incompleteRetry.close();
+  });
+
+  it("fences and retries an anchored identity correction after publication fails", () => {
+    const root = temporaryDirectories.create(
+      "rip-dvd-cutover-anchored-correction-retry-",
+    );
+    const originalsLibraryPath = join(root, "originals");
+    const databasePath = join(root, "catalog.sqlite");
+    const markerPath = join(
+      originalsLibraryPath,
+      ".rip-dvd-sqlite-catalog",
+    );
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    const writeArchiveOnlySidecar = (
+      sidecarPath: string,
+      archivePath: string,
+      fingerprint: string,
+      title: string,
+    ) => {
+      writeFileSync(archivePath, `${title} archive`);
+      writeFileSync(sidecarPath, JSON.stringify({
+        schema_version: 2,
+        source: archivePath,
+        title,
+        disc_fingerprint: fingerprint,
+        jobs: [],
+      }));
+    };
+    const firstSidecarPath = join(
+      originalsLibraryPath,
+      "A.rip-dvd.json",
+    );
+    writeArchiveOnlySidecar(
+      firstSidecarPath,
+      join(originalsLibraryPath, "A.iso"),
+      "anchored-correction-a-fingerprint",
+      "A",
+    );
+    markerFault.failure = null;
+    const initial = createLegacySidecarDataAccess({ databasePath });
+    expect(initial.legacySidecars.importLibrary({ originalsLibraryPath }))
+      .toMatchObject({ sidecarsImported: 1, issues: [] });
+    const originalArchiveId = initial.catalog
+      .listOriginalDiscArchives()[0]!.id;
+    initial.close();
+    const retiredMarker = JSON.parse(readFileSync(markerPath, "utf8")) as {
+      legacyQueueStatus: string;
+    };
+    writeFileSync(markerPath, `${JSON.stringify({
+      ...retiredMarker,
+      legacyQueueStatus: "repair",
+    })}\n`);
+
+    writeArchiveOnlySidecar(
+      firstSidecarPath,
+      join(originalsLibraryPath, "A-repaired.iso"),
+      "anchored-correction-a-repaired-fingerprint",
+      "A repaired",
+    );
+    writeArchiveOnlySidecar(
+      join(originalsLibraryPath, "B.rip-dvd.json"),
+      join(originalsLibraryPath, "B.iso"),
+      "anchored-correction-b-fingerprint",
+      "B",
+    );
+    markerFault.failure = null;
+    markerFault.afterDirectorySync = () => {
+      markerFault.failure = "directory-sync";
+    };
+    const failedReplacement = createLegacySidecarDataAccess({ databasePath });
+    expect(() =>
+      failedReplacement.legacySidecars.importLibrary({
+        originalsLibraryPath,
+      }),
+    ).toThrow(/injected directory sync failure/);
+    expect(JSON.parse(readFileSync(markerPath, "utf8"))).toMatchObject({
+      legacyQueueStatus: "retired",
+      legacySidecars: expect.arrayContaining([
+        expect.objectContaining({
+          archivePath: join(originalsLibraryPath, "A-repaired.iso"),
+          fingerprint: "anchored-correction-a-repaired-fingerprint",
+        }),
+      ]),
+    });
+    failedReplacement.close();
+
+    const service = createDataAccess({
+      databasePath,
+      originalsLibraryPath,
+    });
+    const drive = service.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const repairedFingerprint = "anchored-correction-a-repaired-fingerprint";
+    const repairedArchivePath = join(
+      originalsLibraryPath,
+      "A-repaired.iso",
+    );
+    const disc = service.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: repairedFingerprint,
+    });
+    service.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    service.archiveJobs.approve({ detectedDiscId: disc.id });
+    const claim = service.archiveJobs.claimNext("replacement-worker", {
+      opticalDriveId: drive.id,
+      fingerprint: repairedFingerprint,
+    });
+    if (!claim) {
+      throw new Error("Expected the repaired Archive Job to be claimed");
+    }
+    service.archiveJobs.publish(claim, {
+      archivePath: repairedArchivePath,
+      sizeBytes: 4_700_000_000,
+    });
+    const replacementArchive = service.catalog
+      .listOriginalDiscArchives()
+      .find((archive) => archive.fingerprint === repairedFingerprint);
+    expect(replacementArchive).toMatchObject({
+      legacyCutoverPending: true,
+    });
+    service.close();
+
+    markerFault.failure = null;
+    const retry = createLegacySidecarDataAccess({ databasePath });
+    expect(
+      retry.legacySidecars.importLibrary({ originalsLibraryPath }),
+    ).toMatchObject({
+      sidecarsFound: 2,
+      sidecarsImported: 2,
+      sidecarsSkipped: 0,
+      issues: [],
+    });
+    expect(JSON.parse(readFileSync(markerPath, "utf8"))).toMatchObject({
+      legacyQueueStatus: "retired",
+    });
+    const archives = retry.catalog.listOriginalDiscArchives();
+    expect(archives).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: replacementArchive!.id,
+        archivePath: repairedArchivePath,
+        fingerprint: repairedFingerprint,
+        legacyCutoverPending: false,
+      }),
+      expect.objectContaining({
+        archivePath: join(originalsLibraryPath, "B.iso"),
+        fingerprint: "anchored-correction-b-fingerprint",
+      }),
+    ]));
+    expect(archives).toEqual(
+      archives.map((archive) => expect.objectContaining({
+        id: archive.id,
+        legacyCutoverPending: false,
+      })),
+    );
+    expect(archives).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: originalArchiveId,
+        legacyCutoverPending: false,
+      }),
+    ]));
+    retry.close();
+  });
+
+  it("refuses to replace a failed A+B publication with an incomplete A-only inventory", () => {
+    const root = temporaryDirectories.create(
+      "rip-dvd-cutover-durable-staging-",
+    );
+    const originalsLibraryPath = join(root, "originals");
+    const databasePath = join(root, "catalog.sqlite");
+    const markerPath = join(
+      originalsLibraryPath,
+      ".rip-dvd-sqlite-catalog",
+    );
+    mkdirSync(originalsLibraryPath, { recursive: true });
+
+    const setup = createLegacySidecarDataAccess({ databasePath });
+    const drive = setup.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const createReviewedArchive = (name: string) => {
+      const fingerprint = `durable-${name.toLowerCase()}-fingerprint`;
+      const archivePath = join(originalsLibraryPath, `${name}.iso`);
+      const sidecarPath = join(
+        originalsLibraryPath,
+        `${name}.rip-dvd.json`,
+      );
+      const outputPath = join(root, "movies", `${name}.mkv`);
+      writeFileSync(archivePath, `${name} archive`);
+      const disc = setup.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint,
+      });
+      setup.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+      setup.catalog.updateDetectedDiscStatus(disc.id, "approved");
+      const archive = setup.catalog.createOriginalDiscArchive({
+        detectedDiscId: disc.id,
+        discKind: "dvd",
+        archiveFormat: "iso",
+        archivePath,
+        fingerprint,
+      });
+      const item = setup.catalog.createMediaItem({
+        kind: "movie",
+        title: name,
+      });
+      setup.catalog.createDiscSelection({
+        originalDiscArchiveId: archive.id,
+        mediaItemId: item.id,
+        kind: "main_feature",
+      });
+      setup.catalog.completeCatalogReview(archive.id);
+      const sidecarBytes = Buffer.from(JSON.stringify({
+        schema_version: 2,
+        source: archivePath,
+        title: name,
+        disc_fingerprint: fingerprint,
+        jobs: [{
+          label: `Movie: ${name}`,
+          source: archivePath,
+          output: outputPath,
+          preset: "Fast 480p30",
+          selection: "main_feature",
+          title_number: null,
+        }],
+      }));
+      writeFileSync(sidecarPath, sidecarBytes);
+      return { archive, outputPath, sidecarBytes, sidecarPath };
+    };
+    const first = createReviewedArchive("A");
+    const second = createReviewedArchive("B");
+    setup.close();
+
+    const failedPublication = createLegacySidecarDataAccess({ databasePath });
+    expect(() =>
+      failedPublication.legacySidecars.importLibrary({
+        originalsLibraryPath,
+      }),
+    ).toThrow(/injected marker write failure/);
+    expect(existsSync(markerPath)).toBe(false);
+    for (const archive of [first.archive, second.archive]) {
+      expect(() =>
+        failedPublication.catalog.completeCatalogReview(archive.id),
+      ).toThrow(DomainInvariantError);
+    }
+    failedPublication.close();
+
+    unlinkSync(second.sidecarPath);
+    markerFault.failure = null;
+    const incompleteRetry = createLegacySidecarDataAccess({ databasePath });
+    expect(
+      incompleteRetry.legacySidecars.importLibrary({
+        originalsLibraryPath,
+      }),
+    ).toMatchObject({
+      sidecarsFound: 1,
+      sidecarsImported: 0,
+      sidecarsSkipped: 1,
+      issues: [],
+    });
+    expect(existsSync(markerPath)).toBe(false);
+    expect(incompleteRetry.encodeJobs.list()).toEqual([]);
+    for (const archive of [first.archive, second.archive]) {
+      expect(() =>
+        incompleteRetry.catalog.completeCatalogReview(archive.id),
+      ).toThrow(DomainInvariantError);
+    }
+
+    writeFileSync(second.sidecarPath, second.sidecarBytes);
+    expect(
+      incompleteRetry.legacySidecars.importLibrary({
+        originalsLibraryPath,
+      }),
+    ).toMatchObject({
+      sidecarsFound: 2,
+      sidecarsImported: 2,
+      sidecarsSkipped: 0,
+      issues: [],
+    });
+    expect(existsSync(markerPath)).toBe(true);
+    expect(incompleteRetry.encodeJobs.list()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          outputPath: first.outputPath,
+          status: "queued",
+        }),
+        expect.objectContaining({
+          outputPath: second.outputPath,
+          status: "queued",
+        }),
+      ]),
+    );
+    expect(incompleteRetry.encodeJobs.claimNext("durable-retry-worker"))
+      .not.toBeNull();
+    incompleteRetry.close();
   });
 
   it("re-synchronizes a visible marker before importing after restart", () => {
@@ -1330,6 +2086,760 @@ try {
     access.close();
   });
 
+  it("does not publish an earlier same-fingerprint job before a later sidecar fails", () => {
+    const root = temporaryDirectories.create(
+      "rip-dvd-cutover-fingerprint-batch-",
+    );
+    const originalsLibraryPath = join(root, "originals");
+    const firstArchivePath = join(originalsLibraryPath, "First.iso");
+    const conflictingArchivePath = join(originalsLibraryPath, "Conflict.iso");
+    const continuationArchivePath = join(
+      originalsLibraryPath,
+      "Continuation.iso",
+    );
+    const outputPath = join(root, "movies", "First.mkv");
+    const databasePath = join(root, "catalog.sqlite");
+    const markerPath = join(
+      originalsLibraryPath,
+      ".rip-dvd-sqlite-catalog",
+    );
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    writeFileSync(firstArchivePath, "first archive");
+    writeFileSync(conflictingArchivePath, "conflicting archive");
+    writeFileSync(continuationArchivePath, "continuation archive");
+    writeFileSync(
+      join(originalsLibraryPath, "a-first.rip-dvd.json"),
+      JSON.stringify({
+        schema_version: 2,
+        source: firstArchivePath,
+        title: "Shared identity",
+        disc_fingerprint: "batch-publication-fingerprint",
+        jobs: [{
+          label: "Movie: Shared identity",
+          source: firstArchivePath,
+          output: outputPath,
+          preset: "Fast 480p30",
+          selection: "main_feature",
+          title_number: null,
+        }],
+      }),
+    );
+    writeFileSync(
+      join(originalsLibraryPath, "b-conflict.rip-dvd.json"),
+      JSON.stringify({
+        schema_version: 2,
+        source: conflictingArchivePath,
+        title: "Shared identity",
+        disc_fingerprint: "batch-publication-fingerprint",
+        jobs: [],
+      }),
+    );
+    writeFileSync(
+      join(originalsLibraryPath, "c-continuation.rip-dvd.json"),
+      JSON.stringify({
+        schema_version: 2,
+        source: continuationArchivePath,
+        title: "Continuation",
+        disc_fingerprint: "batch-continuation-fingerprint",
+        jobs: [],
+      }),
+    );
+    let observedClaim: ReturnType<
+      ReturnType<typeof createDataAccess>["encodeJobs"]["claimNext"]
+    > | undefined;
+    let markerObservedAfterConflict: boolean | undefined;
+    markerFault.failure = null;
+    markerFault.afterDirectorySync = () => {
+      markerFault.archivePath = conflictingArchivePath;
+      markerFault.afterArchiveSnapshot = () => {
+        const observer = createDataAccess({ databasePath });
+        observedClaim = observer.encodeJobs.claimNext("batch-observer");
+        observer.close();
+        markerFault.archivePath = continuationArchivePath;
+        markerFault.afterArchiveSnapshot = () => {
+          markerObservedAfterConflict = existsSync(markerPath);
+        };
+      };
+    };
+    const access = createLegacySidecarDataAccess({ databasePath });
+
+    const report = access.legacySidecars.importLibrary({ originalsLibraryPath });
+
+    expect(report).toMatchObject({
+      sidecarsImported: 2,
+      sidecarsSkipped: 1,
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: "duplicate_record",
+          message: expect.stringMatching(/fingerprint.*different path/i),
+        }),
+      ]),
+    });
+    expect(observedClaim).toBeNull();
+    expect(markerObservedAfterConflict).toBe(true);
+    expect(JSON.parse(readFileSync(markerPath, "utf8"))).toMatchObject({
+      legacyQueueStatus: "repair",
+    });
+    expect(access.encodeJobs.list()).toEqual([
+      expect.objectContaining({ outputPath, status: "queued" }),
+    ]);
+    expect(access.catalog.listOriginalDiscArchives()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ catalogReviewedAt: null }),
+      ]),
+    );
+    access.close();
+  });
+
+  it("stages both reviewed sides of a fingerprint and path conflict before import", () => {
+    const root = temporaryDirectories.create(
+      "rip-dvd-cutover-reviewed-split-",
+    );
+    const originalsLibraryPath = join(root, "originals");
+    const fingerprintArchivePath = join(originalsLibraryPath, "Fingerprint.iso");
+    const pathOwnerArchivePath = join(originalsLibraryPath, "Path Owner.iso");
+    const repairedArchivePath = join(originalsLibraryPath, "Repaired.iso");
+    const conflictingSidecarPath = join(
+      originalsLibraryPath,
+      "b-path-owner.rip-dvd.json",
+    );
+    const importedOutputPath = join(root, "movies", "Imported.mkv");
+    const pathOwnerOutputPath = join(root, "movies", "Path Owner.mkv");
+    const databasePath = join(root, "catalog.sqlite");
+    const markerPath = join(
+      originalsLibraryPath,
+      ".rip-dvd-sqlite-catalog",
+    );
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    writeFileSync(fingerprintArchivePath, "fingerprint archive");
+    writeFileSync(pathOwnerArchivePath, "path owner archive");
+    const setup = createLegacySidecarDataAccess({ databasePath });
+    const drive = setup.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const createReviewedArchive = (
+      fingerprint: string,
+      archivePath: string,
+      title: string,
+    ) => {
+      const disc = setup.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint,
+      });
+      setup.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+      setup.catalog.updateDetectedDiscStatus(disc.id, "approved");
+      const archive = setup.catalog.createOriginalDiscArchive({
+        detectedDiscId: disc.id,
+        discKind: "dvd",
+        archiveFormat: "iso",
+        archivePath,
+        fingerprint,
+      });
+      const item = setup.catalog.createMediaItem({ kind: "movie", title });
+      const selection = setup.catalog.createDiscSelection({
+        originalDiscArchiveId: archive.id,
+        mediaItemId: item.id,
+        kind: "main_feature",
+      });
+      setup.catalog.completeCatalogReview(archive.id);
+      return { archive, selection };
+    };
+    const fingerprintOwner = createReviewedArchive(
+      "reviewed-split-fingerprint",
+      fingerprintArchivePath,
+      "Fingerprint owner",
+    );
+    const pathOwner = createReviewedArchive(
+      "reviewed-split-path-owner",
+      pathOwnerArchivePath,
+      "Path Owner",
+    );
+    const pathOwnerProfile = setup.encodingProfiles.create({
+      key: "reviewed-split-path-owner",
+      displayName: "Path owner",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    setup.encodeJobs.enqueue({
+      discSelectionId: pathOwner.selection.id,
+      encodingProfileId: pathOwnerProfile.id,
+      outputPath: pathOwnerOutputPath,
+    });
+    setup.close();
+    writeFileSync(
+      join(originalsLibraryPath, "a-fingerprint.rip-dvd.json"),
+      JSON.stringify({
+        schema_version: 2,
+        source: fingerprintArchivePath,
+        title: "Fingerprint owner",
+        disc_fingerprint: "reviewed-split-fingerprint",
+        jobs: [{
+          label: "Movie: Fingerprint owner",
+          source: fingerprintArchivePath,
+          output: importedOutputPath,
+          preset: "Fast 480p30",
+          selection: "main_feature",
+          title_number: null,
+        }],
+      }),
+    );
+    writeFileSync(
+      conflictingSidecarPath,
+      JSON.stringify({
+        schema_version: 2,
+        source: pathOwnerArchivePath,
+        title: "Fingerprint owner",
+        disc_fingerprint: "reviewed-split-fingerprint",
+        jobs: [],
+      }),
+    );
+    let observedClaim: ReturnType<
+      ReturnType<typeof createDataAccess>["encodeJobs"]["claimNext"]
+    > | undefined;
+    let claimAtMarkerPublication: ReturnType<
+      ReturnType<typeof createDataAccess>["encodeJobs"]["claimNext"]
+    > | undefined;
+    let reviewCompletionAtMarkerPublication: unknown;
+    markerFault.failure = null;
+    markerFault.afterDirectorySync = () => {
+      const observer = createDataAccess({ databasePath });
+      try {
+        observer.catalog.completeCatalogReview(fingerprintOwner.archive.id);
+      } catch (error) {
+        reviewCompletionAtMarkerPublication = error;
+      }
+      claimAtMarkerPublication = observer.encodeJobs.claimNext(
+        "reviewed-split-marker-observer",
+      );
+      if (claimAtMarkerPublication) {
+        observer.encodeJobs.fail(
+          claimAtMarkerPublication,
+          "test-only marker publication observation",
+        );
+        observer.encodeJobs.requeue(claimAtMarkerPublication.id);
+      }
+      observer.close();
+      throw new Error("injected post-marker crash");
+    };
+    const interrupted = createLegacySidecarDataAccess({ databasePath });
+    expect(() =>
+      interrupted.legacySidecars.importLibrary({ originalsLibraryPath })
+    ).toThrow(/injected post-marker crash/);
+    interrupted.close();
+    expect(existsSync(markerPath)).toBe(true);
+    expect(reviewCompletionAtMarkerPublication).toBeInstanceOf(
+      DomainInvariantError,
+    );
+    expect(claimAtMarkerPublication).toBeNull();
+
+    const observeAfterFirstRecoveredSidecar = () => {
+      const observer = createDataAccess({ databasePath });
+      const importedJobExists = observer.encodeJobs.list().some(
+        (job) => job.outputPath === importedOutputPath,
+      );
+      if (importedJobExists) {
+        observedClaim = observer.encodeJobs.claimNext(
+          "reviewed-split-observer",
+        );
+      } else {
+        markerFault.afterArchiveSnapshot = observeAfterFirstRecoveredSidecar;
+      }
+      observer.close();
+    };
+    markerFault.afterDirectorySync = () => {
+      markerFault.archivePath = pathOwnerArchivePath;
+      markerFault.afterArchiveSnapshot = observeAfterFirstRecoveredSidecar;
+    };
+    const access = createLegacySidecarDataAccess({ databasePath });
+
+    const report = access.legacySidecars.importLibrary({ originalsLibraryPath });
+
+    expect(report).toMatchObject({
+      sidecarsImported: 1,
+      sidecarsSkipped: 1,
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: "duplicate_record",
+          message: expect.stringMatching(/fingerprint and path/i),
+        }),
+      ]),
+    });
+    expect(observedClaim).toBeNull();
+    const relatedArchives = access.catalog.listOriginalDiscArchives({
+      ids: [fingerprintOwner.archive.id, pathOwner.archive.id],
+    });
+    expect(relatedArchives).toHaveLength(2);
+    expect(relatedArchives).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: fingerprintOwner.archive.id,
+        catalogReviewedAt: null,
+      }),
+      expect.objectContaining({
+        id: pathOwner.archive.id,
+        catalogReviewedAt: null,
+      }),
+    ]));
+    expect(access.encodeJobs.claimNext("reviewed-split-after-import")).toBeNull();
+
+    expect(JSON.parse(readFileSync(markerPath, "utf8"))).toMatchObject({
+      legacyQueueStatus: "repair",
+    });
+    writeFileSync(conflictingSidecarPath, "{ still needs repair");
+    expect(
+      access.legacySidecars.importLibrary({ originalsLibraryPath }),
+    ).toMatchObject({
+      sidecarsFound: 2,
+      sidecarsImported: 0,
+      sidecarsSkipped: 2,
+      issues: [
+        expect.objectContaining({
+          code: "corrupt_sidecar",
+          sidecarPath: conflictingSidecarPath,
+        }),
+      ],
+    });
+    expect(JSON.parse(readFileSync(markerPath, "utf8"))).toMatchObject({
+      legacyQueueStatus: "repair",
+    });
+
+    unlinkSync(conflictingSidecarPath);
+    const upgradedDatabase = new DatabaseSync(databasePath);
+    upgradedDatabase.exec(
+      "update original_disc_archives set legacy_cutover_pending = false",
+    );
+    upgradedDatabase.close();
+    expect(
+      access.legacySidecars.importLibrary({ originalsLibraryPath }),
+    ).toMatchObject({
+      sidecarsFound: 1,
+      sidecarsImported: 0,
+      sidecarsSkipped: 1,
+      issues: [],
+    });
+    expect(JSON.parse(readFileSync(markerPath, "utf8"))).toMatchObject({
+      legacyQueueStatus: "repair",
+      legacySidecars: expect.arrayContaining([
+        expect.objectContaining({ sidecarPath: conflictingSidecarPath }),
+      ]),
+    });
+    expect(() =>
+      access.catalog.completeCatalogReview(fingerprintOwner.archive.id)
+    ).toThrow(DomainInvariantError);
+    expect(() =>
+      access.catalog.completeCatalogReview(pathOwner.archive.id)
+    ).toThrow(DomainInvariantError);
+
+    writeFileSync(repairedArchivePath, "repaired archive");
+    writeFileSync(
+      conflictingSidecarPath,
+      JSON.stringify({
+        schema_version: 2,
+        source: repairedArchivePath,
+        title: "Repaired",
+        disc_fingerprint: "reviewed-split-repaired",
+        jobs: [],
+      }),
+    );
+
+    expect(
+      access.legacySidecars.importLibrary({ originalsLibraryPath }),
+    ).toMatchObject({
+      sidecarsImported: 2,
+      sidecarsSkipped: 0,
+      issues: [],
+    });
+    expect(JSON.parse(readFileSync(markerPath, "utf8"))).toMatchObject({
+      legacyQueueStatus: "retired",
+    });
+    expect(access.catalog.listOriginalDiscArchives()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          archivePath: repairedArchivePath,
+          fingerprint: "reviewed-split-repaired",
+        }),
+      ]),
+    );
+    expect(access.encodeJobs.claimNext("reviewed-split-after-repair")).toBeNull();
+    access.close();
+  });
+
+  it("preserves SQLite catalog authority after initial marker publication", () => {
+    const root = temporaryDirectories.create(
+      "rip-dvd-cutover-initial-human-catalog-edit-",
+    );
+    const originalsLibraryPath = join(root, "originals");
+    const archivePath = join(originalsLibraryPath, "Authoritative.iso");
+    const sidecarPath = join(
+      originalsLibraryPath,
+      "Authoritative.rip-dvd.json",
+    );
+    const databasePath = join(root, "catalog.sqlite");
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    writeFileSync(archivePath, "authoritative archive");
+
+    const setup = createLegacySidecarDataAccess({ databasePath });
+    const drive = setup.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const disc = setup.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "authoritative-catalog-fingerprint",
+    });
+    setup.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    setup.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = setup.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath,
+      fingerprint: "authoritative-catalog-fingerprint",
+    });
+    const item = setup.catalog.createMediaItem({
+      kind: "movie",
+      title: "Pre-cutover local title",
+      year: 1999,
+    });
+    const selection = setup.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: item.id,
+      kind: "main_feature",
+      label: "Pre-cutover local selection",
+    });
+    setup.catalog.completeCatalogReview(archive.id);
+    setup.close();
+
+    writeFileSync(sidecarPath, JSON.stringify({
+      schema_version: 2,
+      source: archivePath,
+      title: "Legacy sidecar title",
+      year: 1988,
+      disc_fingerprint: "authoritative-catalog-fingerprint",
+      jobs: [{
+        label: "Legacy sidecar selection",
+        source: archivePath,
+        output: join(root, "movies", "Authoritative.mkv"),
+        preset: "Fast 480p30",
+        selection: "main_feature",
+        title_number: null,
+      }],
+    }));
+
+    markerFault.failure = null;
+    markerFault.afterDirectorySync = () => {
+      const human = createDataAccess({ databasePath });
+      expect(human.catalog.listOriginalDiscArchives({
+        ids: [archive.id],
+      })[0]).toMatchObject({ legacyCutoverPending: true });
+      human.catalog.updateMediaItem(item.id, {
+        kind: "other",
+        title: "Post-marker human correction",
+        year: 2002,
+      });
+      expect(() =>
+        human.catalog.deleteDiscSelection(selection.id)
+      ).toThrow(/legacy cutover.*pending/i);
+      expect(() =>
+        human.catalog.repairDiscSelection(selection.id, {
+          originalDiscArchiveId: archive.id,
+          mediaItemId: item.id,
+          kind: "main_feature",
+          label: "Post-marker source correction",
+        })
+      ).toThrow(/legacy cutover.*pending/i);
+      human.close();
+    };
+    const access = createLegacySidecarDataAccess({ databasePath });
+
+    expect(
+      access.legacySidecars.importLibrary({ originalsLibraryPath }),
+    ).toMatchObject({ sidecarsImported: 1, sidecarsSkipped: 0, issues: [] });
+
+    expect(access.catalog.listMediaItems({ ids: [item.id] })).toEqual([
+      expect.objectContaining({
+        kind: "other",
+        title: "Post-marker human correction",
+        year: 2002,
+      }),
+    ]);
+    expect(access.catalog.listDiscSelections({ ids: [selection.id] })).toEqual([
+      expect.objectContaining({ label: "Pre-cutover local selection" }),
+    ]);
+    access.close();
+  });
+
+  it("reconciles an existing repair marker before ordinary service access", () => {
+    const root = temporaryDirectories.create(
+      "rip-dvd-cutover-service-bootstrap-",
+    );
+    const originalsLibraryPath = join(root, "originals");
+    const archivePath = join(originalsLibraryPath, "Bootstrap.iso");
+    const sidecarPath = join(
+      originalsLibraryPath,
+      "Bootstrap.rip-dvd.json",
+    );
+    const markerPath = join(
+      originalsLibraryPath,
+      ".rip-dvd-sqlite-catalog",
+    );
+    const outputPath = join(root, "movies", "Bootstrap.mkv");
+    const databasePath = join(root, "catalog.sqlite");
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    writeFileSync(archivePath, "bootstrap archive");
+    writeFileSync(sidecarPath, JSON.stringify({
+      schema_version: 2,
+      source: archivePath,
+      title: "Bootstrap",
+      disc_fingerprint: "bootstrap-repair-fingerprint",
+      jobs: [{
+        label: "Movie: Bootstrap",
+        source: archivePath,
+        output: outputPath,
+        preset: "Fast 480p30",
+        selection: "main_feature",
+        title_number: null,
+      }],
+    }));
+    markerFault.failure = null;
+    const importer = createLegacySidecarDataAccess({ databasePath });
+    expect(importer.legacySidecars.importLibrary({ originalsLibraryPath }))
+      .toMatchObject({ sidecarsImported: 1, issues: [] });
+    const archive = importer.catalog.listOriginalDiscArchives()[0]!;
+    const selection = importer.catalog.listDiscSelections({
+      originalDiscArchiveId: archive.id,
+    })[0]!;
+    const competingProfile = importer.encodingProfiles.create({
+      key: "bootstrap-race",
+      displayName: "Bootstrap race",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    importer.encodeJobs.enqueue({
+      discSelectionId: selection.id,
+      encodingProfileId: competingProfile.id,
+      outputPath: join(root, "movies", "Bootstrap race.mkv"),
+    });
+    const completed = importer.encodeJobs.claimNext("pre-upgrade-completed");
+    if (!completed) {
+      throw new Error("Expected imported Encode Job to be claimed");
+    }
+    const completedJob = importer.encodeJobs.complete(completed);
+    const running = importer.encodeJobs.claimNext("pre-upgrade-running");
+    if (!running) {
+      throw new Error("Expected imported Encode Job to be running");
+    }
+    const marker = JSON.parse(readFileSync(markerPath, "utf8")) as {
+      legacyQueueStatus: string;
+    };
+    writeFileSync(markerPath, `${JSON.stringify({
+      ...marker,
+      legacyQueueStatus: "repair",
+    })}\n`);
+    importer.close();
+
+    const service = createDataAccess({
+      databasePath,
+      originalsLibraryPath,
+    });
+
+    expect(
+      service.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0],
+    ).toMatchObject({ catalogReviewedAt: null });
+    expect(() => service.catalog.completeCatalogReview(archive.id)).toThrow(
+      DomainInvariantError,
+    );
+    expect(service.encodeJobs.claimNext("post-upgrade-worker")).toBeNull();
+    expect(service.encodeJobs.list()).toEqual(
+      expect.arrayContaining([
+        completedJob,
+        expect.objectContaining({
+          id: running.id,
+          status: "failed",
+          errorMessage: expect.stringMatching(/cutover.*repair/i),
+        }),
+      ]),
+    );
+    expect(() => service.encodeJobs.complete(running)).toThrow(
+      StaleJobAttemptError,
+    );
+    service.close();
+  });
+
+  it("fences a current-identity archive published after repair bootstrap", () => {
+    const root = temporaryDirectories.create(
+      "rip-dvd-cutover-late-archive-bootstrap-",
+    );
+    const originalsLibraryPath = join(root, "originals");
+    const databasePath = join(root, "service.sqlite");
+    const legacyArchivePath = join(originalsLibraryPath, "Late.iso");
+    const currentFingerprint = `sha256:${"a".repeat(64)}`;
+    const publishedArchivePath = join(
+      originalsLibraryPath,
+      `${"a".repeat(64)}.iso`,
+    );
+    const sidecarPath = join(
+      originalsLibraryPath,
+      "Late.rip-dvd.json",
+    );
+    const markerPath = join(
+      originalsLibraryPath,
+      ".rip-dvd-sqlite-catalog",
+    );
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    writeFileSync(legacyArchivePath, "late archive");
+    writeFileSync(sidecarPath, JSON.stringify({
+      schema_version: 2,
+      source: legacyArchivePath,
+      title: "Late",
+      disc_fingerprint: "late-bootstrap-legacy-fingerprint",
+      jobs: [],
+    }));
+    markerFault.failure = null;
+    const markerPublisher = createLegacySidecarDataAccess({
+      databasePath: join(root, "marker-source.sqlite"),
+    });
+    expect(
+      markerPublisher.legacySidecars.importLibrary({ originalsLibraryPath }),
+    ).toMatchObject({ sidecarsImported: 1, issues: [] });
+    markerPublisher.close();
+    const retiredMarker = JSON.parse(readFileSync(markerPath, "utf8")) as {
+      legacyQueueStatus: string;
+    };
+    writeFileSync(markerPath, `${JSON.stringify({
+      ...retiredMarker,
+      legacyQueueStatus: "repair",
+    })}\n`);
+
+    const service = createDataAccess({
+      databasePath,
+      originalsLibraryPath,
+    });
+    const drive = service.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const disc = service.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: currentFingerprint,
+    });
+    service.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    service.archiveJobs.approve({ detectedDiscId: disc.id });
+    const claim = service.archiveJobs.claimNext("late-bootstrap-worker", {
+      opticalDriveId: drive.id,
+      fingerprint: currentFingerprint,
+    });
+    if (!claim) {
+      throw new Error("Expected the late Archive Job to be claimed");
+    }
+    service.archiveJobs.publish(claim, {
+      archivePath: publishedArchivePath,
+      sizeBytes: 4_700_000_000,
+    });
+    const archive = service.catalog.listOriginalDiscArchives()[0]!;
+    expect(archive).toMatchObject({
+      catalogReviewedAt: null,
+      legacyCutoverPending: true,
+    });
+    const item = service.catalog.createMediaItem({
+      kind: "movie",
+      title: "Late",
+    });
+    service.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: item.id,
+      kind: "main_feature",
+    });
+    expect(() => service.catalog.completeCatalogReview(archive.id)).toThrow(
+      DomainInvariantError,
+    );
+    service.close();
+  });
+
+  it("preserves a concurrent human review boundary after staging", () => {
+    const frozenNow = new Date("2026-08-04T04:00:00.000Z");
+    vi.useFakeTimers();
+    vi.setSystemTime(frozenNow);
+    const root = temporaryDirectories.create(
+      "rip-dvd-cutover-concurrent-human-review-",
+    );
+    const originalsLibraryPath = join(root, "originals");
+    const archivePath = join(originalsLibraryPath, "Concurrent.iso");
+    const sidecarPath = join(
+      originalsLibraryPath,
+      "Concurrent.rip-dvd.json",
+    );
+    const outputPath = join(root, "movies", "Concurrent.mkv");
+    const databasePath = join(root, "catalog.sqlite");
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    writeFileSync(archivePath, "concurrent archive");
+    writeFileSync(sidecarPath, JSON.stringify({
+      schema_version: 2,
+      source: archivePath,
+      title: "Concurrent",
+      disc_fingerprint: "concurrent-human-review-fingerprint",
+      created_at: frozenNow.toISOString(),
+      updated_at: frozenNow.toISOString(),
+      titles: [{ number: 1, seconds: 600, chapters: 4 }],
+      jobs: [{
+        label: "Movie: Concurrent",
+        source: archivePath,
+        output: outputPath,
+        preset: "Fast 480p30",
+        selection: "main_feature",
+        title_number: null,
+      }],
+    }));
+    markerFault.failure = null;
+    const access = createLegacySidecarDataAccess({ databasePath });
+    expect(
+      access.legacySidecars.importLibrary({ originalsLibraryPath }),
+    ).toMatchObject({ sidecarsImported: 1, issues: [] });
+    const archive = access.catalog.listOriginalDiscArchives()[0]!;
+    expect(archive.catalogReviewedAt).not.toBeNull();
+    expect(archive.updatedAt).toEqual(frozenNow);
+
+    markerFault.archivePath = archivePath;
+    const addSelectionAfterReviewStaging = () => {
+      const human = createDataAccess({ databasePath });
+      const currentArchive = human.catalog.listOriginalDiscArchives({
+        ids: [archive.id],
+      })[0]!;
+      if (currentArchive.catalogReviewedAt !== null) {
+        markerFault.afterArchiveSnapshot = addSelectionAfterReviewStaging;
+        human.close();
+        return;
+      }
+      const item = human.catalog.createMediaItem({
+        kind: "bonus_feature",
+        title: "Human feature",
+      });
+      human.catalog.createDiscSelection({
+        originalDiscArchiveId: archive.id,
+        mediaItemId: item.id,
+        kind: "dvd_title",
+        titleNumber: 1,
+      });
+      human.close();
+    };
+    markerFault.afterArchiveSnapshot = addSelectionAfterReviewStaging;
+
+    expect(
+      access.legacySidecars.importLibrary({ originalsLibraryPath }),
+    ).toMatchObject({ sidecarsImported: 1, issues: [] });
+    expect(
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0],
+    ).toMatchObject({ catalogReviewedAt: null });
+    expect(access.catalog.listDiscSelections()).toHaveLength(2);
+    expect(access.encodeJobs.claimNext("concurrent-human-review-worker"))
+      .toBeNull();
+    access.close();
+  });
+
   it("recovers the normalized catalog and queue state captured at cutover", () => {
     const root = temporaryDirectories.create(
       "rip-dvd-cutover-frozen-state-",
@@ -1503,7 +3013,7 @@ try {
     expect(() => interrupted.legacySidecars.importLibrary({
       originalsLibraryPath,
     })).toThrow(/injected directory sync failure/i);
-    const markerBytes = readFileSync(markerPath);
+    expect(existsSync(markerPath)).toBe(true);
     interrupted.close();
 
     unlinkSync(archivePath);
@@ -1531,9 +3041,77 @@ try {
     });
     expect(retry.catalog.listOriginalDiscArchives()).toEqual([]);
     expect(retry.encodeJobs.list()).toEqual([]);
-    expect(readFileSync(markerPath)).toEqual(markerBytes);
+    expect(JSON.parse(readFileSync(markerPath, "utf8"))).toMatchObject({
+      legacyQueueStatus: "repair",
+    });
     expect(readFileSync(sidecarPath)).toEqual(sidecarBytes);
     retry.close();
+  });
+
+  it("reopens reviewed work when archived source evidence changes", () => {
+    const root = temporaryDirectories.create(
+      "rip-dvd-cutover-reviewed-source-drift-",
+    );
+    const originalsLibraryPath = join(root, "originals");
+    const archivePath = join(originalsLibraryPath, "Reviewed.iso");
+    const sidecarPath = join(
+      originalsLibraryPath,
+      "Reviewed.rip-dvd.json",
+    );
+    const outputPath = join(root, "movies", "Reviewed.mkv");
+    const databasePath = join(root, "catalog.sqlite");
+    const markerPath = join(
+      originalsLibraryPath,
+      ".rip-dvd-sqlite-catalog",
+    );
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    writeFileSync(archivePath, "reviewed archive bytes");
+    writeFileSync(sidecarPath, JSON.stringify({
+      schema_version: 2,
+      source: archivePath,
+      title: "Reviewed",
+      disc_fingerprint: "reviewed-source-drift-fingerprint",
+      jobs: [{
+        label: "Movie: Reviewed",
+        source: archivePath,
+        output: outputPath,
+        preset: "Fast 480p30",
+        selection: "main_feature",
+        title_number: null,
+      }],
+    }));
+    markerFault.failure = null;
+    const access = createLegacySidecarDataAccess({ databasePath });
+    expect(
+      access.legacySidecars.importLibrary({ originalsLibraryPath }),
+    ).toMatchObject({ sidecarsImported: 1, issues: [] });
+    const archive = access.catalog.listOriginalDiscArchives()[0]!;
+    expect(archive.catalogReviewedAt).not.toBeNull();
+
+    unlinkSync(archivePath);
+    writeFileSync(archivePath, "replacement archive bytes");
+
+    expect(
+      access.legacySidecars.importLibrary({ originalsLibraryPath }),
+    ).toMatchObject({
+      sidecarsImported: 0,
+      sidecarsSkipped: 1,
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: "duplicate_record",
+          message: expect.stringMatching(/source archive.*captured.*cutover/i),
+        }),
+      ]),
+    });
+    expect(
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0],
+    ).toMatchObject({ catalogReviewedAt: null });
+    expect(access.encodeJobs.claimNext("reviewed-source-drift-worker"))
+      .toBeNull();
+    expect(JSON.parse(readFileSync(markerPath, "utf8"))).toMatchObject({
+      legacyQueueStatus: "repair",
+    });
+    access.close();
   });
 
   it("imports the captured archive and job despite later sidecar drift", () => {
