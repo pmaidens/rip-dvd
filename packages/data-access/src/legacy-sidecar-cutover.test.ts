@@ -1005,6 +1005,104 @@ try {
     incompleteRetry.close();
   });
 
+  it("retries an anchored identity correction after replacement publication fails", () => {
+    const root = temporaryDirectories.create(
+      "rip-dvd-cutover-anchored-correction-retry-",
+    );
+    const originalsLibraryPath = join(root, "originals");
+    const databasePath = join(root, "catalog.sqlite");
+    const markerPath = join(
+      originalsLibraryPath,
+      ".rip-dvd-sqlite-catalog",
+    );
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    const writeArchiveOnlySidecar = (
+      sidecarPath: string,
+      archivePath: string,
+      fingerprint: string,
+      title: string,
+    ) => {
+      writeFileSync(archivePath, `${title} archive`);
+      writeFileSync(sidecarPath, JSON.stringify({
+        schema_version: 2,
+        source: archivePath,
+        title,
+        disc_fingerprint: fingerprint,
+        jobs: [],
+      }));
+    };
+    const firstSidecarPath = join(
+      originalsLibraryPath,
+      "A.rip-dvd.json",
+    );
+    writeArchiveOnlySidecar(
+      firstSidecarPath,
+      join(originalsLibraryPath, "A.iso"),
+      "anchored-correction-a-fingerprint",
+      "A",
+    );
+    markerFault.failure = null;
+    const initial = createLegacySidecarDataAccess({ databasePath });
+    expect(initial.legacySidecars.importLibrary({ originalsLibraryPath }))
+      .toMatchObject({ sidecarsImported: 1, issues: [] });
+    initial.close();
+    const retiredMarker = JSON.parse(readFileSync(markerPath, "utf8")) as {
+      legacyQueueStatus: string;
+    };
+    writeFileSync(markerPath, `${JSON.stringify({
+      ...retiredMarker,
+      legacyQueueStatus: "repair",
+    })}\n`);
+
+    writeArchiveOnlySidecar(
+      firstSidecarPath,
+      join(originalsLibraryPath, "A-repaired.iso"),
+      "anchored-correction-a-repaired-fingerprint",
+      "A repaired",
+    );
+    writeArchiveOnlySidecar(
+      join(originalsLibraryPath, "B.rip-dvd.json"),
+      join(originalsLibraryPath, "B.iso"),
+      "anchored-correction-b-fingerprint",
+      "B",
+    );
+    markerFault.failure = "rename";
+    const failedReplacement = createLegacySidecarDataAccess({ databasePath });
+    expect(() =>
+      failedReplacement.legacySidecars.importLibrary({
+        originalsLibraryPath,
+      }),
+    ).toThrow(/injected marker write failure/);
+    failedReplacement.close();
+
+    markerFault.failure = null;
+    const retry = createLegacySidecarDataAccess({ databasePath });
+    expect(
+      retry.legacySidecars.importLibrary({ originalsLibraryPath }),
+    ).toMatchObject({
+      sidecarsFound: 2,
+      sidecarsImported: 2,
+      sidecarsSkipped: 0,
+      issues: [],
+    });
+    expect(JSON.parse(readFileSync(markerPath, "utf8"))).toMatchObject({
+      legacyQueueStatus: "retired",
+    });
+    expect(retry.catalog.listOriginalDiscArchives()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          archivePath: join(originalsLibraryPath, "A-repaired.iso"),
+          fingerprint: "anchored-correction-a-repaired-fingerprint",
+        }),
+        expect.objectContaining({
+          archivePath: join(originalsLibraryPath, "B.iso"),
+          fingerprint: "anchored-correction-b-fingerprint",
+        }),
+      ]),
+    );
+    retry.close();
+  });
+
   it("refuses to replace a failed A+B publication with an incomplete A-only inventory", () => {
     const root = temporaryDirectories.create(
       "rip-dvd-cutover-durable-staging-",
