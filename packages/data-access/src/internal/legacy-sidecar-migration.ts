@@ -319,19 +319,17 @@ export function createLegacySidecarImportAccess(
             pendingArchivesAreRepresented &&
             stagedSidecarsAreRepresented
           );
-          if (publicationIsComplete) {
-            for (const staged of stagedSidecars) {
-              const represented = representedSidecarsByPath.get(
-                staged.sidecarPath,
+          for (const staged of stagedSidecars) {
+            const represented = representedSidecarsByPath.get(
+              staged.sidecarPath,
+            );
+            if (
+              represented?.archivePath === staged.archivePath &&
+              represented.fingerprint === staged.fingerprint
+            ) {
+              previouslyConfirmedStagedIdentities.add(
+                stagedIdentityKey(staged),
               );
-              if (
-                represented?.archivePath === staged.archivePath &&
-                represented.fingerprint === staged.fingerprint
-              ) {
-                previouslyConfirmedStagedIdentities.add(
-                  stagedIdentityKey(staged),
-                );
-              }
             }
           }
           return publicationIsComplete;
