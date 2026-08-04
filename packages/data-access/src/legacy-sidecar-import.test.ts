@@ -1152,8 +1152,16 @@ describe("legacy sidecar import", () => {
     fixture.access.close();
   });
 
-  it("keeps surviving jobs ineligible when their sidecar has a parser issue", () => {
+  it("recaptures a repaired job omitted by a partial parser failure", () => {
     const fixture = createFixture();
+    const markerPath = join(
+      fixture.originalsLibraryPath,
+      ".rip-dvd-sqlite-catalog",
+    );
+    const repairedOutputPath = join(
+      fixture.originalsLibraryPath,
+      "Repaired Feature.mkv",
+    );
     const sidecar = JSON.parse(readFileSync(fixture.sidecarPath, "utf8")) as {
       jobs: Array<Record<string, unknown>>;
     };
@@ -1174,6 +1182,45 @@ describe("legacy sidecar import", () => {
     ]);
     expect(fixture.access.encodeJobs.claimNext("partial-import-worker"))
       .toBeNull();
+    expect(JSON.parse(readFileSync(markerPath, "utf8"))).toMatchObject({
+      legacyQueueStatus: "repair",
+      legacyJobs: expect.any(Array),
+    });
+
+    sidecar.jobs[2] = {
+      label: "Extra 2: Repaired Feature",
+      source: fixture.archivePath,
+      output: repairedOutputPath,
+      preset: "Fast 480p30",
+      selection: "title",
+      title_number: 1,
+    };
+    writeFileSync(fixture.sidecarPath, JSON.stringify(sidecar));
+
+    expect(
+      fixture.access.legacySidecars.importLibrary({
+        originalsLibraryPath: fixture.originalsLibraryPath,
+      }),
+    ).toMatchObject({
+      sidecarsFound: 1,
+      sidecarsImported: 1,
+      sidecarsSkipped: 0,
+      issues: [],
+    });
+    expect(JSON.parse(readFileSync(markerPath, "utf8"))).toMatchObject({
+      legacyQueueStatus: "retired",
+      legacyJobs: expect.arrayContaining([
+        expect.objectContaining({ jobIndex: 2 }),
+      ]),
+    });
+    expect(fixture.access.encodeJobs.list()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ outputPath: repairedOutputPath }),
+      ]),
+    );
+    expect(fixture.access.catalog.listOriginalDiscArchives()).toEqual([
+      expect.objectContaining({ catalogReviewedAt: null }),
+    ]);
 
     fixture.access.close();
   });
@@ -1693,7 +1740,9 @@ describe("legacy sidecar import", () => {
         }),
       ]),
     });
-    expect(existsSync(markerPath)).toBe(false);
+    expect(JSON.parse(readFileSync(markerPath, "utf8"))).toMatchObject({
+      legacyQueueStatus: "repair",
+    });
     expect(access.catalog.listOriginalDiscArchives()).toEqual([
       expect.objectContaining({ catalogReviewedAt: null }),
     ]);
@@ -1712,6 +1761,9 @@ describe("legacy sidecar import", () => {
       issues: [],
     });
     expect(existsSync(markerPath)).toBe(true);
+    expect(access.encodeJobs.claimNext("repaired-import-worker")).toBeNull();
+    const repairedArchive = access.catalog.listOriginalDiscArchives()[0]!;
+    access.catalog.completeCatalogReview(repairedArchive.id);
     expect(access.encodeJobs.claimNext("repaired-import-worker"))
       .toMatchObject({ outputPath });
     access.close();
@@ -1820,13 +1872,16 @@ describe("legacy sidecar import", () => {
     const retry = createLegacySidecarDataAccess({ databasePath });
     const report = retry.legacySidecars.importLibrary({ originalsLibraryPath });
 
-    expect(report.issues).toEqual([
-      expect.objectContaining({
-        code: "duplicate_record",
-        sidecarPath: rejectedPath,
-        message: expect.stringMatching(/earlier record/i),
-      }),
-    ]);
+    expect(report.issues).toEqual([]);
+    expect(JSON.parse(readFileSync(
+      join(originalsLibraryPath, ".rip-dvd-sqlite-catalog"),
+      "utf8",
+    ))).toMatchObject({
+      legacyQueueStatus: "repair",
+      legacySidecars: expect.arrayContaining([
+        expect.objectContaining({ sidecarPath: winnerPath }),
+      ]),
+    });
     expect(retry.encodeJobs.list()).toEqual([
       expect.objectContaining({ outputPath: winnerOutput }),
     ]);

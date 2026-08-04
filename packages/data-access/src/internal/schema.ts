@@ -127,6 +127,11 @@ export const originalDiscArchives = sqliteTable(
     catalogReviewedAt: integer("catalog_reviewed_at", {
       mode: "timestamp_ms",
     }),
+    legacyCutoverPending: integer("legacy_cutover_pending", {
+      mode: "boolean",
+    })
+      .notNull()
+      .default(false),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },

@@ -207,7 +207,9 @@ The command also accepts `RIP_DVD_DATABASE_PATH` and
 It recursively reads `.rip-dvd.json` files, imports valid Original Disc
 Archives, Disc Selections, Media Items, Encoding Profiles, and Encode Jobs, and
 reports invalid jobs and duplicate records without making their imported jobs
-eligible. If any sidecar is wholly corrupt, oversized, missing its archive, or
+eligible. Partially invalid sidecars leave a repair marker whose next run reads
+the live sidecar again, so repaired jobs omitted from the first snapshot can be
+captured. If any sidecar is wholly corrupt, oversized, missing its archive, or
 otherwise cannot be represented in the cutover snapshot, the command leaves
 the entire legacy queue active; after that sidecar is repaired, re-running the
 command imports the complete bounded inventory. Encode Job completion is
@@ -216,17 +218,22 @@ Re-running the command is safe and preserves every existing SQLite Encode Job
 status, output, priority, progress, and error.
 
 Before publishing records from any parseable sidecar, the command atomically
-clears catalog review for every related existing archive, then writes and
+clears catalog review and sets a persistent cutover fence for every related
+existing archive, then writes and
 synchronizes a `.rip-dvd-sqlite-catalog` cutover marker at the originals-library
 root. This makes affected SQLite jobs ineligible before the marker becomes
 durable. If marker publication fails, no imported SQLite records are committed
 and the staged archives remain pending review. If the process stops after
 publication, rerunning the command resumes the idempotent import while the
-legacy queue remains inactive. A transaction or captured-source conflict
-withdraws a newly published marker; if the marker survived an earlier crash,
-it is durably changed to `repair` instead. The repair marker still disables
-legacy commands, but a later complete, parseable live inventory can replace its
-failed snapshot after the sidecar or archive is repaired. Imported catalog
+legacy queue remains inactive. A parser, persistence, transaction, or
+captured-source conflict durably changes the marker to `repair`. The repair
+marker still disables legacy commands, but a later complete, parseable live
+inventory can replace its failed snapshot after the sidecar or archive is
+repaired. Every previously captured sidecar must still be present before repair
+can retire the marker. The SQLite fence blocks review completion and Encode Job
+enqueue, requeue, and claim until the entire captured batch succeeds. Existing
+Media Item fields and Disc Selection labels remain SQLite-authoritative even
+during initial cutover. Imported catalog
 review boundaries are published only after the complete captured batch
 validates and only when the archive has not changed since review was staged, so
 neither an earlier job nor a concurrent human selection can cross the review

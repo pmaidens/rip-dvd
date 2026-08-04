@@ -141,7 +141,8 @@ existing `.rip-dvd.json` files. It scans an originals library once, validates
 schema-one and schema-two sidecars, and writes each valid sidecar to SQLite in
 a short transaction. Valid jobs in a partially invalid sidecar still import;
 invalid jobs and duplicates are returned in a structured report and keep their
-archive pending review. A wholly corrupt, oversized, missing-archive, or
+archive pending review behind a durable repair marker, so a corrected live
+sidecar can be recaptured on the next import. A wholly corrupt, oversized, missing-archive, or
 otherwise unrepresentable sidecar prevents first cutover publication, leaving
 every sidecar active for a supported repair-and-retry. Completion is inferred
 from the final output file at import time. Relative recorded paths use the
@@ -157,21 +158,25 @@ replaces an existing SQLite Encode Job's status, output, priority, progress, or
 error, including an intentional retry.
 
 Before committing any imported records, the migration-only entrypoint clears
-catalog review for related existing archives in one immediate transaction,
+catalog review and sets a persistent cutover fence for related existing
+archives in one immediate transaction,
 then atomically writes and synchronizes a `.rip-dvd-sqlite-catalog` marker at
 the originals-library root. A marker failure exposes no imported SQLite state
 and leaves those archives pending review; a restart after marker publication
 safely resumes the idempotent import with the legacy queue already inactive.
 The marker records the immutable logical-job configuration captured at
 cutover, allowing restart/retry to report later sidecar conflicts while
-preserving authoritative SQLite requeues. While the exclusive lease is still
-held, a transaction or captured-source conflict withdraws a newly published
-marker. A marker retained across an earlier crash is instead changed to a
-`repair` state: its presence continues to block legacy workers, while a later
-complete and parseable live inventory can replace the failed snapshot after
-repair. Catalog review timestamps are committed together only after the
-complete captured batch validates and only for archives unchanged since the
-review boundary was staged. A shared
+preserving authoritative SQLite requeues. A parser, persistence, transaction,
+or captured-source conflict changes the marker to a `repair` state: its
+presence continues to block legacy workers, while a later complete and
+parseable live inventory can replace the failed snapshot after repair. Repair
+cannot retire the marker unless every previously captured sidecar is present.
+The SQLite fence independently blocks catalog completion and Encode Job
+enqueue, requeue, and claim until the whole captured batch succeeds. Catalog
+review timestamps are committed together only after that validation and only
+for archives unchanged since the review boundary was staged. Existing Media
+Items and Disc Selections remain SQLite-authoritative throughout initial and
+recovery imports. A shared
 library-scoped lease serializes discovery, marker publication, and import with
 in-flight legacy archive/encode batches. It never writes the sidecars
 themselves. All legacy archive and queue commands refuse a marked library,

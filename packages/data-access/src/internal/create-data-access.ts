@@ -1356,6 +1356,7 @@ export function createDataAccessInternal(
           and(
             eq(encodeJobs.status, "queued"),
             isNotNull(originalDiscArchives.catalogReviewedAt),
+            eq(originalDiscArchives.legacyCutoverPending, false),
           ),
         )
         .orderBy(
@@ -1425,6 +1426,7 @@ export function createDataAccessInternal(
                   and(
                     eq(discSelections.id, encodeJobs.discSelectionId),
                     isNotNull(originalDiscArchives.catalogReviewedAt),
+                    eq(originalDiscArchives.legacyCutoverPending, false),
                   ),
                 ),
             ),
@@ -2338,6 +2340,11 @@ export function createDataAccessInternal(
         const timestamp = now();
         return database.transaction((transaction) => {
           const archive = requireReviewableDiscSelections(id, transaction);
+          if (archive.legacyCutoverPending) {
+            throw new DomainInvariantError(
+              "Catalog review cannot be completed while legacy cutover repair is pending",
+            );
+          }
           if (archive.catalogReviewedAt !== null) {
             return archive;
           }
@@ -3108,6 +3115,8 @@ export function createDataAccessInternal(
               transaction
                 .select({
                   catalogReviewedAt: originalDiscArchives.catalogReviewedAt,
+                  legacyCutoverPending:
+                    originalDiscArchives.legacyCutoverPending,
                   originalDiscArchiveId: originalDiscArchives.id,
                 })
                 .from(discSelections)
@@ -3123,7 +3132,10 @@ export function createDataAccessInternal(
               "disc selection",
               input.discSelectionId,
             );
-            if (selectionReview.catalogReviewedAt === null) {
+            if (
+              selectionReview.catalogReviewedAt === null ||
+              selectionReview.legacyCutoverPending
+            ) {
               throw new DomainInvariantError(
                 "Encode Jobs require a completed catalog review",
               );
