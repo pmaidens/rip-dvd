@@ -3,10 +3,36 @@ import { describe, expect, it } from "vitest";
 
 import {
   CatalogReviewView,
+  createCatalogReviewRequestScope,
   requestCatalogReview,
 } from "./catalog-review-editor";
 
 describe("CatalogReviewView", () => {
+  it("rejects superseded archive loads and old archive continuations", () => {
+    const scope = createCatalogReviewRequestScope("archive-a");
+    const archiveALoad = scope.begin("archive-a");
+    if (archiveALoad === null) {
+      throw new Error("Expected archive A load to begin");
+    }
+
+    scope.activate("archive-b");
+    const archiveBLoad = scope.begin("archive-b");
+    if (archiveBLoad === null) {
+      throw new Error("Expected archive B load to begin");
+    }
+
+    expect(scope.isCurrent("archive-a", archiveALoad)).toBe(false);
+    expect(scope.begin("archive-a")).toBeNull();
+    expect(scope.isCurrent("archive-b", archiveBLoad)).toBe(true);
+
+    const newerArchiveBLoad = scope.begin("archive-b");
+    if (newerArchiveBLoad === null) {
+      throw new Error("Expected newer archive B load to begin");
+    }
+    expect(scope.isCurrent("archive-b", archiveBLoad)).toBe(false);
+    expect(scope.isCurrent("archive-b", newerArchiveBLoad)).toBe(true);
+  });
+
   it("requests the edited Media Item as context while paging parent choices", async () => {
     let requestedUrl = "";
     const fetcher = async (input: RequestInfo | URL) => {
