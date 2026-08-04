@@ -1337,11 +1337,20 @@ try {
     const originalsLibraryPath = join(root, "originals");
     const firstArchivePath = join(originalsLibraryPath, "First.iso");
     const conflictingArchivePath = join(originalsLibraryPath, "Conflict.iso");
+    const continuationArchivePath = join(
+      originalsLibraryPath,
+      "Continuation.iso",
+    );
     const outputPath = join(root, "movies", "First.mkv");
     const databasePath = join(root, "catalog.sqlite");
+    const markerPath = join(
+      originalsLibraryPath,
+      ".rip-dvd-sqlite-catalog",
+    );
     mkdirSync(originalsLibraryPath, { recursive: true });
     writeFileSync(firstArchivePath, "first archive");
     writeFileSync(conflictingArchivePath, "conflicting archive");
+    writeFileSync(continuationArchivePath, "continuation archive");
     writeFileSync(
       join(originalsLibraryPath, "a-first.rip-dvd.json"),
       JSON.stringify({
@@ -1369,9 +1378,20 @@ try {
         jobs: [],
       }),
     );
+    writeFileSync(
+      join(originalsLibraryPath, "c-continuation.rip-dvd.json"),
+      JSON.stringify({
+        schema_version: 2,
+        source: continuationArchivePath,
+        title: "Continuation",
+        disc_fingerprint: "batch-continuation-fingerprint",
+        jobs: [],
+      }),
+    );
     let observedClaim: ReturnType<
       ReturnType<typeof createDataAccess>["encodeJobs"]["claimNext"]
     > | undefined;
+    let markerObservedAfterConflict: boolean | undefined;
     markerFault.failure = null;
     markerFault.afterDirectorySync = () => {
       markerFault.archivePath = conflictingArchivePath;
@@ -1379,6 +1399,10 @@ try {
         const observer = createDataAccess({ databasePath });
         observedClaim = observer.encodeJobs.claimNext("batch-observer");
         observer.close();
+        markerFault.archivePath = continuationArchivePath;
+        markerFault.afterArchiveSnapshot = () => {
+          markerObservedAfterConflict = existsSync(markerPath);
+        };
       };
     };
     const access = createLegacySidecarDataAccess({ databasePath });
@@ -1386,7 +1410,7 @@ try {
     const report = access.legacySidecars.importLibrary({ originalsLibraryPath });
 
     expect(report).toMatchObject({
-      sidecarsImported: 1,
+      sidecarsImported: 2,
       sidecarsSkipped: 1,
       issues: expect.arrayContaining([
         expect.objectContaining({
@@ -1396,12 +1420,16 @@ try {
       ]),
     });
     expect(observedClaim).toBeNull();
+    expect(markerObservedAfterConflict).toBe(false);
+    expect(existsSync(markerPath)).toBe(false);
     expect(access.encodeJobs.list()).toEqual([
       expect.objectContaining({ outputPath, status: "queued" }),
     ]);
-    expect(access.catalog.listOriginalDiscArchives()).toEqual([
-      expect.objectContaining({ catalogReviewedAt: null }),
-    ]);
+    expect(access.catalog.listOriginalDiscArchives()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ catalogReviewedAt: null }),
+      ]),
+    );
     access.close();
   });
 
@@ -1415,6 +1443,10 @@ try {
     const importedOutputPath = join(root, "movies", "Imported.mkv");
     const pathOwnerOutputPath = join(root, "movies", "Path Owner.mkv");
     const databasePath = join(root, "catalog.sqlite");
+    const markerPath = join(
+      originalsLibraryPath,
+      ".rip-dvd-sqlite-catalog",
+    );
     mkdirSync(originalsLibraryPath, { recursive: true });
     writeFileSync(fingerprintArchivePath, "fingerprint archive");
     writeFileSync(pathOwnerArchivePath, "path owner archive");
@@ -1505,12 +1537,32 @@ try {
     > | undefined;
     markerFault.failure = null;
     markerFault.afterDirectorySync = () => {
+      throw new Error("injected post-marker crash");
+    };
+    const interrupted = createLegacySidecarDataAccess({ databasePath });
+    expect(() =>
+      interrupted.legacySidecars.importLibrary({ originalsLibraryPath })
+    ).toThrow(/injected post-marker crash/);
+    interrupted.close();
+    expect(existsSync(markerPath)).toBe(true);
+
+    const observeAfterFirstRecoveredSidecar = () => {
+      const observer = createDataAccess({ databasePath });
+      const importedJobExists = observer.encodeJobs.list().some(
+        (job) => job.outputPath === importedOutputPath,
+      );
+      if (importedJobExists) {
+        observedClaim = observer.encodeJobs.claimNext(
+          "reviewed-split-observer",
+        );
+      } else {
+        markerFault.afterArchiveSnapshot = observeAfterFirstRecoveredSidecar;
+      }
+      observer.close();
+    };
+    markerFault.afterDirectorySync = () => {
       markerFault.archivePath = pathOwnerArchivePath;
-      markerFault.afterArchiveSnapshot = () => {
-        const observer = createDataAccess({ databasePath });
-        observedClaim = observer.encodeJobs.claimNext("reviewed-split-observer");
-        observer.close();
-      };
+      markerFault.afterArchiveSnapshot = observeAfterFirstRecoveredSidecar;
     };
     const access = createLegacySidecarDataAccess({ databasePath });
 
