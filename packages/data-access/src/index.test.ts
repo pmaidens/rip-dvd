@@ -1922,10 +1922,20 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(
       sqlite
         .prepare(
+          "select name from pragma_table_info('original_disc_archives')",
+        )
+        .all(),
+    ).toContainEqual({ name: "legacy_cutover_pending" });
+    expect(
+      sqlite
+        .prepare(
           "select name from __drizzle_migrations order by id desc limit 4",
         )
         .all(),
     ).toEqual([
+      {
+        name: "20260804051834_legacy-cutover-fence",
+      },
       {
         name: "20260804011718_catalog-item-other-kind",
       },
@@ -1934,9 +1944,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260803175923_gorgeous_wendell_rand",
-      },
-      {
-        name: "20260803050348_pretty_living_mummy",
       },
     ]);
     expect(

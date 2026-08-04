@@ -1,7 +1,7 @@
 import { realpathSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 
-import { and, eq, isNull, or } from "drizzle-orm";
+import { and, eq, inArray, isNull, or } from "drizzle-orm";
 
 import { DomainInvariantError } from "../errors.js";
 import type {
@@ -115,6 +115,7 @@ export function createLegacySidecarImportAccess(
         }
       >();
       const stagedReviewArchiveIds = new Set<OriginalDiscArchiveId>();
+      const cutoverFenceArchiveIds = new Set<OriginalDiscArchiveId>();
       const stageCatalogReviewBoundary = (
         publicationDiscoveries: readonly LegacySidecarDiscovery[],
       ) => {
@@ -141,20 +142,23 @@ export function createLegacySidecarImportAccess(
               )
               .all();
             for (const archive of relatedArchives) {
-              if (archive.catalogReviewedAt === null) {
-                continue;
+              cutoverFenceArchiveIds.add(archive.id);
+              if (archive.catalogReviewedAt !== null) {
+                if (!reviewCandidates.has(archive.fingerprint)) {
+                  reviewCandidates.set(archive.fingerprint, {
+                    archiveId: archive.id,
+                    archiveUpdatedAt: archive.updatedAt,
+                    reviewedAt: archive.catalogReviewedAt,
+                  });
+                }
+                stagedReviewArchiveIds.add(archive.id);
               }
-              if (!reviewCandidates.has(archive.fingerprint)) {
-                reviewCandidates.set(archive.fingerprint, {
-                  archiveId: archive.id,
-                  archiveUpdatedAt: archive.updatedAt,
-                  reviewedAt: archive.catalogReviewedAt,
-                });
-              }
-              stagedReviewArchiveIds.add(archive.id);
               transaction
                 .update(originalDiscArchives)
-                .set({ catalogReviewedAt: null })
+                .set({
+                  catalogReviewedAt: null,
+                  legacyCutoverPending: true,
+                })
                 .where(eq(originalDiscArchives.id, archive.id))
                 .run();
             }
@@ -448,6 +452,8 @@ export function createLegacySidecarImportAccess(
           prePersistenceIssues.length > 0
         ) {
           fingerprintsRequiringHumanReview.add(sidecar.fingerprint);
+          hasIncompleteCapturedWork = true;
+          withdrawIncompletePublication();
         }
 
         try {
@@ -607,6 +613,7 @@ export function createLegacySidecarImportAccess(
                     fingerprint: sidecar.fingerprint,
                     sizeBytes: sidecar.archiveSizeBytes,
                     archivedAt: sidecar.archivedAt,
+                    legacyCutoverPending: true,
                     createdAt: importedCreatedAt,
                     updatedAt: importedUpdatedAt,
                   })
@@ -617,6 +624,7 @@ export function createLegacySidecarImportAccess(
               );
               created.originalDiscArchives += 1;
               createdArchiveInTransaction = true;
+              cutoverFenceArchiveIds.add(archive.id);
             } else {
               const archiveChanged =
                 archive.archivePath !== sidecar.archivePath ||
@@ -880,57 +888,10 @@ export function createLegacySidecarImportAccess(
                     `Movie Disc Selection ${job.sourceKey} maps to a duplicate Media Item`,
                   );
                 }
-                if (cutover.wasAlreadyPublished) {
-                  unchanged += 2;
-                } else {
-                  const parentId =
-                    job.mediaItemKind === "movie"
-                      ? null
-                      : requireMovieItem().id;
-                  const year =
-                    job.mediaItemKind === "movie" ? sidecar.movieYear : null;
-                  const mediaChanged =
-                    mediaItem.kind !== job.mediaItemKind ||
-                    mediaItem.title !== job.mediaTitle ||
-                    mediaItem.year !== year ||
-                    mediaItem.parentId !== parentId;
-                  if (mediaChanged) {
-                    mediaItem = requireRow(
-                      transaction
-                        .update(mediaItems)
-                        .set({
-                          kind: job.mediaItemKind,
-                          title: job.mediaTitle,
-                          year,
-                          parentId,
-                          updatedAt: timestamp,
-                        })
-                        .where(eq(mediaItems.id, mediaItem.id))
-                        .returning()
-                        .get(),
-                      "legacy media item",
-                      mediaItem.id,
-                    );
-                    updated += 1;
-                  } else {
-                    unchanged += 1;
-                  }
-                  if (selection.label !== job.label) {
-                    selection = requireRow(
-                      transaction
-                        .update(discSelections)
-                        .set({ label: job.label, updatedAt: timestamp })
-                        .where(eq(discSelections.id, selection.id))
-                        .returning()
-                        .get(),
-                      "legacy disc selection",
-                      selection.id,
-                    );
-                    updated += 1;
-                  } else {
-                    unchanged += 1;
-                  }
-                }
+                // Existing SQLite catalog rows may have been edited after the
+                // durable marker was published. SQLite is authoritative once
+                // those rows exist, including during the initial cutover.
+                unchanged += 2;
               } else {
                 mediaItem =
                   job.mediaItemKind === "movie"
@@ -1144,6 +1105,10 @@ export function createLegacySidecarImportAccess(
         report.recordsUpdated += updated;
         report.recordsUnchanged += unchanged;
         report.issues.push(...persistenceIssues);
+        if (persistenceIssues.length > 0) {
+          hasIncompleteCapturedWork = true;
+          withdrawIncompletePublication();
+        }
       }
 
       if (cutover.mode === "schema-one") {
@@ -1330,7 +1295,7 @@ export function createLegacySidecarImportAccess(
       }
       if (hasIncompleteCapturedWork) {
         withdrawIncompletePublication();
-      } else if (reviewCandidates.size > 0) {
+      } else if (cutoverFenceArchiveIds.size > 0) {
         database.transaction((transaction) => {
           for (const [fingerprint, candidate] of reviewCandidates) {
             if (fingerprintsRequiringHumanReview.has(fingerprint)) {
@@ -1357,6 +1322,14 @@ export function createLegacySidecarImportAccess(
               )
               .run();
           }
+          transaction
+            .update(originalDiscArchives)
+            .set({ legacyCutoverPending: false })
+            .where(inArray(
+              originalDiscArchives.id,
+              [...cutoverFenceArchiveIds],
+            ))
+            .run();
         }, { behavior: "immediate" });
       }
 

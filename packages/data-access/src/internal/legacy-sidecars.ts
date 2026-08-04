@@ -2098,10 +2098,21 @@ export function retireLegacySidecarQueue(
         throw new Error("Invalid SQLite cutover marker: snapshot digest mismatch");
       }
       if (hasRepairCutoverDiscriminators) {
+        const currentParsedSidecarPaths = new Set(
+          discoveries.flatMap((discovery) =>
+            discovery.outcome === "parsed"
+              ? [discovery.sidecar.sidecarPath]
+              : [],
+          ),
+        );
         if (
           !discoveryBatch.complete ||
           !hasParsedSidecar ||
-          discoveries.some((discovery) => discovery.outcome === "skipped")
+          discoveries.some((discovery) => discovery.outcome === "skipped") ||
+          sidecarSnapshots.some(
+            (snapshot) =>
+              !currentParsedSidecarPaths.has(snapshot.sidecarPath),
+          )
         ) {
           return null;
         }
@@ -2174,13 +2185,7 @@ export function retireLegacySidecarQueue(
     recoveryDiscoveries: null,
     recoveryIssues: [],
     sidecarSnapshots: discoveredSidecars,
-    withdrawPublication() {
-      if (!existsSync(markerPath)) {
-        return;
-      }
-      unlinkSync(markerPath);
-      synchronizeDirectory(originalsLibraryPath);
-    },
+    withdrawPublication: markMarkerForRepair,
     wasAlreadyPublished: false,
   };
 }
