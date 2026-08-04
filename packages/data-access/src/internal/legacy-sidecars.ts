@@ -2124,7 +2124,9 @@ export function retireLegacySidecarQueue(
         ) {
           return null;
         }
-        stageCatalogReviewBoundary(discoveries);
+        if (!stageCatalogReviewBoundary(discoveries)) {
+          return null;
+        }
         writeMarker(discoveredSnapshots);
         return {
           jobSnapshots: discoveredSnapshots,
@@ -2167,6 +2169,9 @@ export function retireLegacySidecarQueue(
     }
   }
   if (!hasParsedSidecar) {
+    if (!stageCatalogReviewBoundary(discoveries)) {
+      return null;
+    }
     return {
       jobSnapshots: new Map(),
       mode: "snapshot",
