@@ -1468,10 +1468,10 @@ describe("legacy sidecar import", () => {
       );
     };
     writeSidecar("a-first", firstOutputPath);
-    writeSidecar("b-identical", firstOutputPath);
-    writeSidecar("c-conflicting", conflictingOutputPath);
+    writeSidecar("b-conflicting", conflictingOutputPath);
+    writeSidecar("c-identical", firstOutputPath);
     const sidecarBytes = new Map(
-      ["a-first", "b-identical", "c-conflicting"].map((name) => [
+      ["a-first", "b-conflicting", "c-identical"].map((name) => [
         sidecarPath(name),
         readFileSync(sidecarPath(name)),
       ]),
@@ -1492,7 +1492,7 @@ describe("legacy sidecar import", () => {
         expect.objectContaining({
           code: "duplicate_record",
           jobIndex: 0,
-          sidecarPath: sidecarPath("c-conflicting"),
+          sidecarPath: sidecarPath("b-conflicting"),
           message: expect.stringMatching(/logical Encode Job conflicts/i),
         }),
       ],

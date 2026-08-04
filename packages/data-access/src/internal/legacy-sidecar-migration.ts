@@ -157,6 +157,7 @@ export function createLegacySidecarImportAccess(
         LegacyJobLogicalKey,
         { job: ParsedLegacyJob; sidecarPath: string }
       >();
+      const fingerprintsRequiringHumanReview = new Set<string>();
       const reconciledSnapshotKeys = new Set<LegacyJobLogicalKey>();
       const trustedSchemaOneSnapshots = new Map<
         LegacyJobLogicalKey,
@@ -369,6 +370,12 @@ export function createLegacySidecarImportAccess(
         let unchanged = 0;
         const persistenceIssues: LegacySidecarImportReport["issues"] = [];
         const persistedJobs: ParsedLegacyJob[] = [];
+        if (
+          sidecar.issues.length > 0 ||
+          prePersistenceIssues.length > 0
+        ) {
+          fingerprintsRequiringHumanReview.add(sidecar.fingerprint);
+        }
 
         try {
           const requireCapturedSourceArchive = () => {
@@ -946,12 +953,15 @@ export function createLegacySidecarImportAccess(
                 }
                 catalogIsReviewable = false;
               }
-              if (
+              const requiresHumanReview =
                 !catalogIsReviewable ||
-                sidecar.issues.length > 0 ||
-                prePersistenceIssues.length > 0 ||
                 persistenceIssues.length > 0 ||
-                (archiveAlreadyExisted && created.discSelections > 0)
+                (archiveAlreadyExisted && created.discSelections > 0);
+              if (requiresHumanReview) {
+                fingerprintsRequiringHumanReview.add(sidecar.fingerprint);
+              }
+              if (
+                fingerprintsRequiringHumanReview.has(sidecar.fingerprint)
               ) {
                 if (archive.catalogReviewedAt !== null) {
                   transaction
