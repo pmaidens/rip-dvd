@@ -558,6 +558,11 @@ export function createCatalogReviewRequestScope(initialArchiveId: string) {
       currentRequest = Symbol("catalog-review-request");
       return currentRequest;
     },
+    invalidate(archiveId: string) {
+      if (activeArchiveId === archiveId) {
+        currentRequest = Symbol("catalog-review-request");
+      }
+    },
     deactivate(archiveId: string) {
       if (activeArchiveId === archiveId) {
         activeArchiveId = null;
@@ -701,6 +706,30 @@ export function CatalogReviewEditor({
     }
   }
 
+  function changeEditingMediaItem(id: string | null) {
+    if (editingMediaItemId === id) {
+      return;
+    }
+    requestScope.current?.invalidate(archiveId);
+    setEditingMediaItemId(id);
+  }
+
+  function changeMediaItemOffset(offset: number) {
+    if (mediaItemOffset === offset) {
+      return;
+    }
+    requestScope.current?.invalidate(archiveId);
+    setMediaItemOffset(offset);
+  }
+
+  function changeDiscSelectionOffset(offset: number) {
+    if (discSelectionOffset === offset) {
+      return;
+    }
+    requestScope.current?.invalidate(archiveId);
+    setDiscSelectionOffset(offset);
+  }
+
   return (
     <CatalogReviewView
       state={state}
@@ -709,10 +738,11 @@ export function CatalogReviewEditor({
       hasRequestError={hasRequestError}
       onClose={onClose}
       onRetry={() => void load()}
-      onEditMediaItem={setEditingMediaItemId}
-      onCancelEdit={() => setEditingMediaItemId(null)}
-      onMediaItemsPage={setMediaItemOffset}
-      onDiscSelectionsPage={(offset) => setDiscSelectionOffset(offset)}
+      onEditMediaItem={(id) => changeEditingMediaItem(id)}
+      onCancelEdit={() => changeEditingMediaItem(null)}
+      onMediaItemsPage={(offset) => changeMediaItemOffset(offset)}
+      onDiscSelectionsPage={(offset) =>
+        changeDiscSelectionOffset(offset)}
       onSaveMediaItem={(input) => {
         const { id, ...values } = input;
         void mutate(
