@@ -2766,6 +2766,8 @@ export function createDataAccessInternal(
               transaction
                 .select({
                   discKind: originalDiscArchives.discKind,
+                  legacyCutoverPending:
+                    originalDiscArchives.legacyCutoverPending,
                   scanData: detectedDiscs.scanData,
                 })
                 .from(originalDiscArchives)
@@ -2778,6 +2780,11 @@ export function createDataAccessInternal(
               "original disc archive",
               input.originalDiscArchiveId,
             );
+            if (source.legacyCutoverPending) {
+              throw new DomainInvariantError(
+                "Disc Selections cannot be changed while legacy cutover repair is pending",
+              );
+            }
             requireRow(
               transaction
                 .select({ id: mediaItems.id })
@@ -2827,8 +2834,8 @@ export function createDataAccessInternal(
                 "chapterEnd must be greater than or equal to chapterStart",
               );
             }
+            const archivedTitles = decodeArchivedDvdTitles(source.scanData);
             if (coordinates.titleNumber !== null) {
-              const archivedTitles = decodeArchivedDvdTitles(source.scanData);
               if (!archivedTitles) {
                 throw new DomainInvariantError(
                   "DVD title selections require a reviewable DVD title map",
@@ -2855,6 +2862,28 @@ export function createDataAccessInternal(
               kind: input.kind,
               ...coordinates,
             });
+            if (historicalJob) {
+              const currentSelection = toDiscSelection(current);
+              const currentTitle = currentSelection.titleNumber === null
+                ? null
+                : archivedTitles?.find(
+                    (candidate) =>
+                      candidate.number === currentSelection.titleNumber,
+                  );
+              const requiresLegacyRepair =
+                current.sourceKey !==
+                  canonicalDvdSelectionSourceKey(currentSelection) ||
+                (currentSelection.titleNumber !== null &&
+                  (currentTitle === null ||
+                    currentTitle === undefined ||
+                    (currentSelection.chapterEnd !== null &&
+                      currentSelection.chapterEnd > currentTitle.chapters)));
+              if (!requiresLegacyRepair) {
+                throw new DomainInvariantError(
+                  `Disc Selection ${id} cannot be repaired because ordinary Encode Job history must keep its retry identity (job ${historicalJob.id})`,
+                );
+              }
+            }
             let selectionRow: typeof discSelections.$inferSelect;
             if (historicalJob) {
               requireRow(
@@ -2954,6 +2983,26 @@ export function createDataAccessInternal(
               "disc selection",
               id,
             );
+            const archiveState = requireRow(
+              transaction
+                .select({
+                  legacyCutoverPending:
+                    originalDiscArchives.legacyCutoverPending,
+                })
+                .from(originalDiscArchives)
+                .where(eq(
+                  originalDiscArchives.id,
+                  selection.originalDiscArchiveId,
+                ))
+                .get(),
+              "original disc archive",
+              selection.originalDiscArchiveId,
+            );
+            if (archiveState.legacyCutoverPending) {
+              throw new DomainInvariantError(
+                "Disc Selections cannot be changed while legacy cutover repair is pending",
+              );
+            }
             const dependentJob = transaction
               .select({ id: encodeJobs.id })
               .from(encodeJobs)

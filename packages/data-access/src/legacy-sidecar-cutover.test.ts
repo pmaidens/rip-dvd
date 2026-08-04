@@ -2465,7 +2465,7 @@ try {
     access.close();
   });
 
-  it("preserves SQLite catalog edits made after initial marker publication", () => {
+  it("preserves SQLite catalog authority after initial marker publication", () => {
     const root = temporaryDirectories.create(
       "rip-dvd-cutover-initial-human-catalog-edit-",
     );
@@ -2531,11 +2531,25 @@ try {
     markerFault.failure = null;
     markerFault.afterDirectorySync = () => {
       const human = createDataAccess({ databasePath });
+      expect(human.catalog.listOriginalDiscArchives({
+        ids: [archive.id],
+      })[0]).toMatchObject({ legacyCutoverPending: true });
       human.catalog.updateMediaItem(item.id, {
         kind: "other",
         title: "Post-marker human correction",
         year: 2002,
       });
+      expect(() =>
+        human.catalog.deleteDiscSelection(selection.id)
+      ).toThrow(/legacy cutover.*pending/i);
+      expect(() =>
+        human.catalog.repairDiscSelection(selection.id, {
+          originalDiscArchiveId: archive.id,
+          mediaItemId: item.id,
+          kind: "main_feature",
+          label: "Post-marker source correction",
+        })
+      ).toThrow(/legacy cutover.*pending/i);
       human.close();
     };
     const access = createLegacySidecarDataAccess({ databasePath });
@@ -2612,7 +2626,7 @@ try {
     if (!completed) {
       throw new Error("Expected imported Encode Job to be claimed");
     }
-    importer.encodeJobs.complete(completed);
+    const completedJob = importer.encodeJobs.complete(completed);
     const running = importer.encodeJobs.claimNext("pre-upgrade-running");
     if (!running) {
       throw new Error("Expected imported Encode Job to be running");
@@ -2640,11 +2654,7 @@ try {
     expect(service.encodeJobs.claimNext("post-upgrade-worker")).toBeNull();
     expect(service.encodeJobs.list()).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({
-          id: completed.id,
-          status: "failed",
-          errorMessage: expect.stringMatching(/cutover.*repair/i),
-        }),
+        completedJob,
         expect.objectContaining({
           id: running.id,
           status: "failed",
