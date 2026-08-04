@@ -83,6 +83,7 @@ vi.mock("node:fs", async (importOriginal) => {
 const temporaryDirectories = createTemporaryDirectoryFixture();
 
 afterEach(() => {
+  vi.useRealTimers();
   delete process.env.RIP_DVD_PYTHON;
   markerFault.afterArchiveSnapshot = null;
   markerFault.afterDirectorySync = null;
@@ -1672,6 +1673,9 @@ try {
   });
 
   it("preserves a concurrent human review boundary after staging", () => {
+    const frozenNow = new Date("2026-08-04T04:00:00.000Z");
+    vi.useFakeTimers();
+    vi.setSystemTime(frozenNow);
     const root = temporaryDirectories.create(
       "rip-dvd-cutover-concurrent-human-review-",
     );
@@ -1690,6 +1694,8 @@ try {
       source: archivePath,
       title: "Concurrent",
       disc_fingerprint: "concurrent-human-review-fingerprint",
+      created_at: frozenNow.toISOString(),
+      updated_at: frozenNow.toISOString(),
       titles: [{ number: 1, seconds: 600, chapters: 4 }],
       jobs: [{
         label: "Movie: Concurrent",
@@ -1707,10 +1713,19 @@ try {
     ).toMatchObject({ sidecarsImported: 1, issues: [] });
     const archive = access.catalog.listOriginalDiscArchives()[0]!;
     expect(archive.catalogReviewedAt).not.toBeNull();
+    expect(archive.updatedAt).toEqual(frozenNow);
 
     markerFault.archivePath = archivePath;
-    markerFault.afterArchiveSnapshot = () => {
+    const addSelectionAfterReviewStaging = () => {
       const human = createDataAccess({ databasePath });
+      const currentArchive = human.catalog.listOriginalDiscArchives({
+        ids: [archive.id],
+      })[0]!;
+      if (currentArchive.catalogReviewedAt !== null) {
+        markerFault.afterArchiveSnapshot = addSelectionAfterReviewStaging;
+        human.close();
+        return;
+      }
       const item = human.catalog.createMediaItem({
         kind: "bonus_feature",
         title: "Human feature",
@@ -1723,6 +1738,7 @@ try {
       });
       human.close();
     };
+    markerFault.afterArchiveSnapshot = addSelectionAfterReviewStaging;
 
     expect(
       access.legacySidecars.importLibrary({ originalsLibraryPath }),

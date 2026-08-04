@@ -341,6 +341,12 @@ function canonicalDvdSelectionSourceKey(
       : `dvd:title:${selection.titleNumber}:chapters:${selection.chapterStart}-${selection.chapterEnd}`;
 }
 
+function nextCatalogMutationTimestamp(timestamp: Date) {
+  // Review restoration uses updatedAt as a compare-and-set version. Advance it
+  // even when the wall clock is frozen or moves backward.
+  return sql`max(${originalDiscArchives.updatedAt} + 1, ${timestamp.getTime()})`;
+}
+
 export interface CreateDataAccessOptions {
   databasePath: string;
   migrationsFolder?: string;
@@ -2607,7 +2613,10 @@ export function createDataAccessInternal(
             );
             transaction
               .update(originalDiscArchives)
-              .set({ catalogReviewedAt: null, updatedAt: timestamp })
+              .set({
+                catalogReviewedAt: null,
+                updatedAt: nextCatalogMutationTimestamp(timestamp),
+              })
               .where(eq(originalDiscArchives.id, input.originalDiscArchiveId))
               .run();
             return selection;
@@ -2676,7 +2685,10 @@ export function createDataAccessInternal(
             }
             transaction
               .update(originalDiscArchives)
-              .set({ catalogReviewedAt: null, updatedAt: timestamp })
+              .set({
+                catalogReviewedAt: null,
+                updatedAt: nextCatalogMutationTimestamp(timestamp),
+              })
               .where(
                 eq(
                   originalDiscArchives.id,
