@@ -69,6 +69,9 @@ unsafe or newly added mappings leave the archive awaiting explicit review and
 their queued jobs remain unclaimable. Bounded legacy title evidence is also
 normalized for the review response and for title/chapter selection validation,
 so archive-only imports can be reviewed without weakening current scan writes.
+Quarantined selections can be removed through the catalog facade in resumable
+100-job batches; review is reopened on the first batch, and a running dependent
+job blocks removal until that work is resolved.
 
 ## Queue attempts and progress
 

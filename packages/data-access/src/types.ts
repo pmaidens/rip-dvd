@@ -126,6 +126,11 @@ export type DiscSelection = DiscSelectionBase &
       }
   );
 
+export type DeleteDiscSelectionResult = DiscSelection & {
+  deletedEncodeJobs: number;
+  deletionComplete: boolean;
+};
+
 type CreateDiscSelectionBase = {
   originalDiscArchiveId: OriginalDiscArchiveId;
   mediaItemId: MediaItemId;
@@ -308,7 +313,7 @@ export interface CatalogAccess {
     offset?: number;
   }): MediaItem[];
   createDiscSelection(input: CreateDiscSelectionInput): DiscSelection;
-  deleteDiscSelection(id: DiscSelectionId): DiscSelection;
+  deleteDiscSelection(id: DiscSelectionId): DeleteDiscSelectionResult;
   listDiscSelections(options?: {
     ids?: readonly DiscSelectionId[];
     originalDiscArchiveId?: OriginalDiscArchiveId;

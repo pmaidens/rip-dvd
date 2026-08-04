@@ -1,7 +1,7 @@
 import { realpathSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, or } from "drizzle-orm";
 
 import { DomainInvariantError } from "../errors.js";
 import type {
@@ -171,6 +171,49 @@ export function createLegacySidecarImportAccess(
       >();
       let schemaOneHasUnresolvedWork =
         cutover.mode === "schema-one" && discoveries.length === 0;
+
+      if (!cutover.wasAlreadyPublished) {
+        database.transaction((transaction) => {
+          for (const discovery of discoveries) {
+            if (discovery.outcome !== "parsed") {
+              continue;
+            }
+            const { sidecar } = discovery;
+            const relatedArchives = transaction
+              .select()
+              .from(originalDiscArchives)
+              .where(
+                or(
+                  eq(
+                    originalDiscArchives.fingerprint,
+                    sidecar.fingerprint,
+                  ),
+                  eq(
+                    originalDiscArchives.archivePath,
+                    sidecar.archivePath,
+                  ),
+                ),
+              )
+              .all();
+            for (const archive of relatedArchives) {
+              if (archive.catalogReviewedAt === null) {
+                continue;
+              }
+              if (!reviewCandidates.has(archive.fingerprint)) {
+                reviewCandidates.set(archive.fingerprint, {
+                  archiveId: archive.id,
+                  reviewedAt: archive.catalogReviewedAt,
+                });
+              }
+              transaction
+                .update(originalDiscArchives)
+                .set({ catalogReviewedAt: null })
+                .where(eq(originalDiscArchives.id, archive.id))
+                .run();
+            }
+          }
+        }, { behavior: "immediate" });
+      }
 
       for (const discovery of discoveries) {
         if (discovery.outcome === "skipped") {
@@ -421,7 +464,16 @@ export function createLegacySidecarImportAccess(
               .select()
               .from(originalDiscArchives)
               .where(
-                eq(originalDiscArchives.fingerprint, sidecar.fingerprint),
+                or(
+                  eq(
+                    originalDiscArchives.fingerprint,
+                    sidecar.fingerprint,
+                  ),
+                  eq(
+                    originalDiscArchives.archivePath,
+                    sidecar.archivePath,
+                  ),
+                ),
               )
               .get();
             const existingByPath = transaction
@@ -1031,7 +1083,10 @@ export function createLegacySidecarImportAccess(
         if (createdArchiveInTransaction) {
           fingerprintsCreatedDuringImport.add(sidecar.fingerprint);
         }
-        if (reviewCandidate) {
+        if (
+          reviewCandidate &&
+          !reviewCandidates.has(sidecar.fingerprint)
+        ) {
           reviewCandidates.set(sidecar.fingerprint, reviewCandidate);
         }
 

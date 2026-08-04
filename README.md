@@ -375,7 +375,9 @@ catalogs and fail their active Encode Jobs until bounded validation completes
 again; unsafe jobs cannot be enqueued, requeued, or claimed. The review editor
 can remove a quarantined Disc Selection and its non-running dependent Encode
 Jobs, after which a canonical replacement can be created and review explicitly
-completed; running work must be resolved before removal. Archived scan
+completed. Each request removes at most 100 dependent jobs and leaves the
+selection visible for the next bounded request when more remain; running work
+must be resolved before removal. Archived scan
 evidence is immutable, while rediscovery may still refresh observation metadata
 such as the volume label. Legacy sidecar import cannot restore review across an
 unsafe or newly added mapping, and bounded legacy title evidence remains usable
