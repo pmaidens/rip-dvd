@@ -137,13 +137,15 @@ returns; process execution never belongs in a database transaction.
 existing `.rip-dvd.json` files. It scans an originals library once, validates
 schema-one and schema-two sidecars, and writes each valid sidecar to SQLite in
 a short transaction. Valid jobs in a partially invalid sidecar still import;
-corrupt sidecars, invalid jobs, missing archives, and duplicates are returned
-in a structured report. Completion is inferred from the final output file at
-import time. Relative recorded paths use the legacy CLI's invocation-directory
-semantics; an existing sidecar-relative path is accepted as a compatibility
-candidate, but two existing candidates are reported as ambiguous. A missing or
-unreadable originals library is an input error rather than an empty successful
-import.
+invalid jobs and duplicates are returned in a structured report and keep their
+archive pending review. A wholly corrupt, oversized, missing-archive, or
+otherwise unrepresentable sidecar prevents first cutover publication, leaving
+every sidecar active for a supported repair-and-retry. Completion is inferred
+from the final output file at import time. Relative recorded paths use the
+legacy CLI's invocation-directory semantics; an existing sidecar-relative path
+is accepted as a compatibility candidate, but two existing candidates are
+reported as ambiguous. A missing or unreadable originals library is an input
+error rather than an empty successful import.
 
 Schema-two `created_at` and `updated_at` values provide the historical record
 dates. When they are absent, the archive file modification time is the fallback;
@@ -157,7 +159,10 @@ originals-library root. A marker failure exposes no imported SQLite state; a
 restart after marker publication safely resumes the idempotent import with the
 legacy queue already inactive. The marker records the immutable logical-job
 configuration captured at cutover, allowing restart/retry to report later
-sidecar conflicts while preserving authoritative SQLite requeues. A shared
+sidecar conflicts while preserving authoritative SQLite requeues. While the
+exclusive lease is still held, the first marker is provisional: a transaction
+conflict withdraws it, and catalog review timestamps are committed together
+only after the complete captured batch validates. A shared
 library-scoped lease serializes discovery, marker publication, and import with
 in-flight legacy archive/encode batches. It never writes the sidecars
 themselves. All legacy archive and queue commands refuse a marked library,

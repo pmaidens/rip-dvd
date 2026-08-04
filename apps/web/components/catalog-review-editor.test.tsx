@@ -116,6 +116,7 @@ describe("CatalogReviewView", () => {
         onDiscSelectionsPage={() => undefined}
         onSaveMediaItem={() => undefined}
         onCreateDiscSelection={() => undefined}
+        onDeleteDiscSelection={() => undefined}
         onCompleteReview={() => undefined}
       />,
     );
@@ -135,6 +136,7 @@ describe("CatalogReviewView", () => {
     expect(html).toContain("Create Media Item");
     expect(html).toContain("Next Media Items");
     expect(html).toContain("Add Disc Selection");
+    expect(html).toContain("Remove Disc Selection");
     expect(html).toContain("Next Disc Selections");
     expect(html).toContain("Complete review");
     for (const kind of [
@@ -240,6 +242,7 @@ describe("CatalogReviewView", () => {
         onDiscSelectionsPage={() => undefined}
         onSaveMediaItem={() => undefined}
         onCreateDiscSelection={() => undefined}
+        onDeleteDiscSelection={() => undefined}
         onCompleteReview={() => undefined}
       />,
     );

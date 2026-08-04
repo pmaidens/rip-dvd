@@ -2062,6 +2062,41 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       access.encodeJobs.requeue("unsafe-job" as EncodeJobId)
     ).toThrow(InvalidStatusTransitionError);
     expect(access.encodeJobs.claimNext("requeued-upgrade-worker")).toBeNull();
+
+    expect(
+      access.catalog.deleteDiscSelection("duplicate-b" as DiscSelectionId),
+    ).toMatchObject({ id: "duplicate-b" });
+    expect(
+      access.catalog.deleteDiscSelection("noncanonical" as DiscSelectionId),
+    ).toMatchObject({ id: "noncanonical" });
+    expect(
+      access.catalog.deleteDiscSelection("missing-title" as DiscSelectionId),
+    ).toMatchObject({ id: "missing-title" });
+    expect(access.encodeJobs.list(["failed"])).toEqual([]);
+
+    access.catalog.createDiscSelection({
+      originalDiscArchiveId: "noncanonical-archive" as OriginalDiscArchiveId,
+      mediaItemId: "legacy-noncanonical" as MediaItemId,
+      kind: "dvd_title",
+      titleNumber: 1,
+    });
+    access.catalog.createDiscSelection({
+      originalDiscArchiveId: "scan-invalid-archive" as OriginalDiscArchiveId,
+      mediaItemId: "legacy-missing-title" as MediaItemId,
+      kind: "dvd_title",
+      titleNumber: 1,
+    });
+    for (const archiveId of [
+      "duplicate-archive",
+      "noncanonical-archive",
+      "scan-invalid-archive",
+    ]) {
+      expect(
+        access.catalog.completeCatalogReview(
+          archiveId as OriginalDiscArchiveId,
+        ),
+      ).toMatchObject({ catalogReviewedAt: expect.any(Date) });
+    }
     access.close();
   });
 

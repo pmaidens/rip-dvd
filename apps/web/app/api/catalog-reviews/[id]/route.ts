@@ -7,6 +7,7 @@ import {
   RecordNotFoundError,
   type DataAccess,
   type DiscSelection,
+  type DiscSelectionId,
   type MediaItem,
   type MediaItemId,
   type OriginalDiscArchiveId,
@@ -501,6 +502,23 @@ export async function createCatalogReviewRoute(
         }
       }
       return response({ discSelection: serializeDiscSelection(selection) }, 201);
+    }
+
+    if (action === "delete_disc_selection") {
+      const discSelectionId = boundedString(body.discSelectionId);
+      if (!discSelectionId) {
+        return response({ error: "Invalid Disc Selection" }, 400);
+      }
+      const selectionId = discSelectionId as DiscSelectionId;
+      const selection = access.catalog.listDiscSelections({
+        ids: [selectionId],
+        originalDiscArchiveId: archiveId,
+      })[0];
+      if (!selection) {
+        return response({ error: "Disc Selection not found" }, 404);
+      }
+      access.catalog.deleteDiscSelection(selectionId);
+      return response({ discSelection: serializeDiscSelection(selection) });
     }
 
     if (action === "complete_review") {

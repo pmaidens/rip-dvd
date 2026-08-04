@@ -643,7 +643,7 @@ describe("Catalog Review API", () => {
       changes: { unsupportedField: "ignored" },
     })).status).toBe(400);
 
-    expect((await mutate({
+    const firstSelectionResponse = await mutate({
       action: "create_disc_selection",
       selection: {
         mediaItemId: firstEpisode.id,
@@ -652,7 +652,9 @@ describe("Catalog Review API", () => {
         chapterStart: 1,
         chapterEnd: 4,
       },
-    })).status).toBe(201);
+    });
+    expect(firstSelectionResponse.status).toBe(201);
+    const firstSelection = (await firstSelectionResponse.json()).discSelection;
     expect((await mutate({
       action: "create_disc_selection",
       selection: {
@@ -661,6 +663,28 @@ describe("Catalog Review API", () => {
         titleNumber: 1,
         chapterStart: 5,
         chapterEnd: 8,
+      },
+    })).status).toBe(201);
+    expect((await mutate({ action: "complete_review" })).status).toBe(200);
+    const deleteResponse = await mutate({
+      action: "delete_disc_selection",
+      discSelectionId: firstSelection.id,
+    });
+    expect(deleteResponse.status).toBe(200);
+    await expect(deleteResponse.json()).resolves.toEqual({
+      discSelection: expect.objectContaining({ id: firstSelection.id }),
+    });
+    expect(
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0],
+    ).toMatchObject({ catalogReviewedAt: null });
+    expect((await mutate({
+      action: "create_disc_selection",
+      selection: {
+        mediaItemId: firstEpisode.id,
+        kind: "dvd_chapters",
+        titleNumber: 1,
+        chapterStart: 1,
+        chapterEnd: 4,
       },
     })).status).toBe(201);
     expect((await mutate({ action: "complete_review" })).status).toBe(200);
