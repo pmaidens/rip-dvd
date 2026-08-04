@@ -1152,6 +1152,110 @@ describe("legacy sidecar import", () => {
     fixture.access.close();
   });
 
+  it("keeps surviving jobs ineligible when their sidecar has a parser issue", () => {
+    const fixture = createFixture();
+    const sidecar = JSON.parse(readFileSync(fixture.sidecarPath, "utf8")) as {
+      jobs: Array<Record<string, unknown>>;
+    };
+    sidecar.jobs.push({ label: "Broken job", title_number: 0 });
+    writeFileSync(fixture.sidecarPath, JSON.stringify(sidecar));
+
+    const report = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+
+    expect(report).toMatchObject({
+      sidecarsImported: 1,
+      issues: [expect.objectContaining({ code: "invalid_job", jobIndex: 2 })],
+    });
+    expect(fixture.access.encodeJobs.list()).toHaveLength(2);
+    expect(fixture.access.catalog.listOriginalDiscArchives()).toEqual([
+      expect.objectContaining({ catalogReviewedAt: null }),
+    ]);
+    expect(fixture.access.encodeJobs.claimNext("partial-import-worker"))
+      .toBeNull();
+
+    fixture.access.close();
+  });
+
+  it("preserves post-cutover human Media Item edits during normal re-import", () => {
+    const fixture = createFixture();
+    expect(
+      fixture.access.legacySidecars.importLibrary({
+        originalsLibraryPath: fixture.originalsLibraryPath,
+      }),
+    ).toMatchObject({ sidecarsImported: 1, issues: [] });
+    const importedItems = fixture.access.catalog.listMediaItems();
+    const movie = importedItems.find((item) => item.kind === "movie");
+    const extra = importedItems.find((item) => item.kind === "bonus_feature");
+    if (!movie || !extra) {
+      throw new Error("Expected imported movie and extra Media Items");
+    }
+    const correctedMovie = fixture.access.catalog.updateMediaItem(movie.id, {
+      kind: "other",
+      title: "Corrected Local Movie",
+      year: 2002,
+    });
+    const correctedExtra = fixture.access.catalog.updateMediaItem(extra.id, {
+      parentId: null,
+      kind: "other",
+      title: "Corrected Local Feature",
+      year: 2003,
+    });
+    const extraSelection = fixture.access.catalog.listDiscSelections().find(
+      (selection) => selection.mediaItemId === correctedExtra.id,
+    );
+    if (!extraSelection) {
+      throw new Error("Expected imported extra Disc Selection");
+    }
+    const sqlite = new DatabaseSync(fixture.databasePath);
+    sqlite.prepare(
+      "update disc_selections set label = ?, updated_at = ? where id = ?",
+    ).run("Corrected local selection", Date.now(), extraSelection.id);
+    sqlite.close();
+    const reviewCompletedAt = fixture.access.catalog
+      .listOriginalDiscArchives()[0]?.catalogReviewedAt;
+    expect(reviewCompletedAt).not.toBeNull();
+
+    expect(
+      fixture.access.legacySidecars.importLibrary({
+        originalsLibraryPath: fixture.originalsLibraryPath,
+      }),
+    ).toMatchObject({ sidecarsImported: 1, issues: [] });
+
+    expect(fixture.access.catalog.listMediaItems()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: correctedMovie.id,
+          parentId: correctedMovie.parentId,
+          kind: "other",
+          title: "Corrected Local Movie",
+          year: 2002,
+        }),
+        expect.objectContaining({
+          id: correctedExtra.id,
+          parentId: null,
+          kind: "other",
+          title: "Corrected Local Feature",
+          year: 2003,
+        }),
+      ]),
+    );
+    expect(fixture.access.catalog.listOriginalDiscArchives()).toEqual([
+      expect.objectContaining({ catalogReviewedAt: reviewCompletedAt }),
+    ]);
+    expect(fixture.access.catalog.listDiscSelections()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: extraSelection.id,
+          label: "Corrected local selection",
+        }),
+      ]),
+    );
+
+    fixture.access.close();
+  });
+
   it("reopens a reviewed archive when legacy import finds an unsafe selection", () => {
     const fixture = createFixture();
     expect(
@@ -2955,6 +3059,7 @@ describe("legacy sidecar import", () => {
 
   it("reports an output owned by another job and imports later jobs", () => {
     const fixture = createFixture();
+    writeFileSync(fixture.trailerOutputPath, "completed trailer encode");
     const secondArchivePath = join(
       fixture.originalsLibraryPath,
       "Second Movie.iso",
@@ -2971,6 +3076,10 @@ describe("legacy sidecar import", () => {
         source: secondArchivePath,
         title: "Second Movie",
         disc_fingerprint: "second-movie-fingerprint",
+        titles: [
+          { number: 1, seconds: 5_400, chapters: 10 },
+          { number: 2, seconds: 300, chapters: 1 },
+        ],
         jobs: [
           {
             label: "Movie: Second Movie",
@@ -3011,6 +3120,13 @@ describe("legacy sidecar import", () => {
         expect.objectContaining({ outputPath: uniqueOutputPath }),
       ]),
     );
+    expect(
+      fixture.access.catalog.listOriginalDiscArchives().find(
+        (archive) => archive.fingerprint === "second-movie-fingerprint",
+      ),
+    ).toMatchObject({ catalogReviewedAt: null });
+    expect(fixture.access.encodeJobs.claimNext("partial-persistence-worker"))
+      .toBeNull();
 
     fixture.access.close();
   });

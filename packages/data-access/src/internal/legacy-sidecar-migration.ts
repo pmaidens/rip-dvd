@@ -793,7 +793,7 @@ export function createLegacySidecarImportAccess(
                   mediaItem.title !== job.mediaTitle ||
                   mediaItem.year !== year ||
                   mediaItem.parentId !== parentId;
-                if (mediaChanged) {
+                if (mediaChanged && !cutover.wasAlreadyPublished) {
                   mediaItem = requireRow(
                     transaction
                       .update(mediaItems)
@@ -814,7 +814,10 @@ export function createLegacySidecarImportAccess(
                 } else {
                   unchanged += 1;
                 }
-                if (selection.label !== job.label) {
+                if (
+                  selection.label !== job.label &&
+                  !cutover.wasAlreadyPublished
+                ) {
                   selection = requireRow(
                     transaction
                       .update(discSelections)
@@ -939,6 +942,8 @@ export function createLegacySidecarImportAccess(
               }
               if (
                 !catalogIsReviewable ||
+                sidecar.issues.length > 0 ||
+                persistenceIssues.length > 0 ||
                 (archiveAlreadyExisted && created.discSelections > 0)
               ) {
                 if (archive.catalogReviewedAt !== null) {

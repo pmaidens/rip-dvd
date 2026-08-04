@@ -929,6 +929,10 @@ describe("data-access facade", () => {
       kind: "bonus_feature",
       title: "Behind the Scenes",
     });
+    const other = access.catalog.createMediaItem({
+      kind: "other",
+      title: "Local Recording",
+    });
     expect(
       access.catalog.updateMediaItem(episode.id, {
         parentId: show.id,
@@ -952,6 +956,7 @@ describe("data-access facade", () => {
         expect.objectContaining({ id: movie.id, kind: "movie" }),
         expect.objectContaining({ id: trailer.id, kind: "trailer" }),
         expect.objectContaining({ id: bonus.id, kind: "bonus_feature" }),
+        expect.objectContaining({ id: other.id, kind: "other" }),
       ]),
     );
     access.close();
@@ -1841,6 +1846,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
+        name: "20260804011718_catalog-item-other-kind",
+      },
+      {
         name: "20260803213207_catalog-review-upgrade-guard",
       },
       {
@@ -1848,9 +1856,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260803050348_pretty_living_mummy",
-      },
-      {
-        name: "20260802190921_optical-drive-configuration-default-resolved",
       },
     ]);
     expect(
@@ -2058,6 +2063,83 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     ).toThrow(InvalidStatusTransitionError);
     expect(access.encodeJobs.claimNext("requeued-upgrade-worker")).toBeNull();
     access.close();
+  });
+
+  it("upgrades existing Media Items to support the catch-all catalog kind", () => {
+    const databasePath = createTestDatabasePath();
+    const sqlite = new DatabaseSync(databasePath);
+    const precedingMigrations = [
+      "20260722045326_core-catalog-and-queues",
+      "20260726160810_encoding-profile-active-state",
+      "20260802150655_optical-drive-configuration-default",
+      "20260802190921_optical-drive-configuration-default-resolved",
+      "20260803050348_pretty_living_mummy",
+      "20260803175923_gorgeous_wendell_rand",
+      "20260803213207_catalog-review-upgrade-guard",
+    ];
+    for (const migrationName of precedingMigrations) {
+      const migration = readFileSync(
+        new URL(`../drizzle/${migrationName}/migration.sql`, import.meta.url),
+        "utf8",
+      );
+      for (const statement of migration.split("--> statement-breakpoint")) {
+        if (statement.trim()) {
+          sqlite.exec(statement);
+        }
+      }
+    }
+    sqlite.exec(`
+      create table __drizzle_migrations (
+        id integer primary key,
+        hash text not null,
+        created_at numeric,
+        name text,
+        applied_at text
+      );
+    `);
+    const recordMigration = sqlite.prepare(`
+      insert into __drizzle_migrations (hash, created_at, name)
+      values (?, 0, ?)
+    `);
+    for (const migrationName of precedingMigrations) {
+      recordMigration.run(`legacy-${migrationName}`, migrationName);
+    }
+    sqlite.exec(`
+      insert into media_items (
+        id, parent_id, kind, title, created_at, updated_at
+      ) values
+        ('legacy-movie', null, 'movie', 'Legacy Movie', 100, 100),
+        (
+          'legacy-extra', 'legacy-movie', 'bonus_feature', 'Legacy Extra',
+          100, 100
+        );
+    `);
+    sqlite.close();
+
+    const access = openTestDatabase(databasePath);
+    const other = access.catalog.createMediaItem({
+      kind: "other",
+      title: "Local Recording",
+    });
+
+    expect(access.catalog.listMediaItems()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "legacy-movie", kind: "movie" }),
+        expect.objectContaining({
+          id: "legacy-extra",
+          parentId: "legacy-movie",
+          kind: "bonus_feature",
+        }),
+        expect.objectContaining({ id: other.id, kind: "other" }),
+      ]),
+    );
+    access.close();
+
+    const upgradedSqlite = new DatabaseSync(databasePath);
+    expect(upgradedSqlite.prepare("pragma foreign_key_check").all()).toEqual(
+      [],
+    );
+    upgradedSqlite.close();
   });
 
   it("rejects malformed and resource-unbounded DVD scans at the catalog facade", () => {

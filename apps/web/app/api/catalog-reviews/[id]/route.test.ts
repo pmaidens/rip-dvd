@@ -582,6 +582,17 @@ describe("Catalog Review API", () => {
     });
     expect(showResponse.status).toBe(201);
     const show = (await showResponse.json()).mediaItem;
+    const localItemResponse = await mutate({
+      action: "create_media_item",
+      mediaItem: { parentId: null, kind: "other", title: "Local Recording" },
+    });
+    expect(localItemResponse.status).toBe(201);
+    await expect(localItemResponse.json()).resolves.toEqual({
+      mediaItem: expect.objectContaining({
+        kind: "other",
+        title: "Local Recording",
+      }),
+    });
     const seasonResponse = await mutate({
       action: "create_media_item",
       mediaItem: {
@@ -671,6 +682,7 @@ describe("Catalog Review API", () => {
         expect.objectContaining({ id: show.id, kind: "tv_show" }),
         expect.objectContaining({ id: season.id, parentId: show.id }),
         expect.objectContaining({ id: firstEpisode.id, parentId: season.id }),
+        expect.objectContaining({ kind: "other", title: "Local Recording" }),
         expect.objectContaining({
           id: secondEpisode.id,
           parentId: season.id,

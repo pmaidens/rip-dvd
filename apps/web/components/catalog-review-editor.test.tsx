@@ -144,6 +144,7 @@ describe("CatalogReviewView", () => {
       "episode",
       "trailer",
       "bonus_feature",
+      "other",
     ]) {
       expect(html).toContain(`value="${kind}"`);
     }
