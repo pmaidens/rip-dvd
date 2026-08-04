@@ -13,6 +13,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -1650,6 +1651,11 @@ try {
     });
 
     unlinkSync(conflictingSidecarPath);
+    const upgradedDatabase = new DatabaseSync(databasePath);
+    upgradedDatabase.exec(
+      "update original_disc_archives set legacy_cutover_pending = false",
+    );
+    upgradedDatabase.close();
     expect(
       access.legacySidecars.importLibrary({ originalsLibraryPath }),
     ).toMatchObject({
@@ -1664,6 +1670,12 @@ try {
         expect.objectContaining({ sidecarPath: conflictingSidecarPath }),
       ]),
     });
+    expect(() =>
+      access.catalog.completeCatalogReview(fingerprintOwner.archive.id)
+    ).toThrow(DomainInvariantError);
+    expect(() =>
+      access.catalog.completeCatalogReview(pathOwner.archive.id)
+    ).toThrow(DomainInvariantError);
 
     writeFileSync(repairedArchivePath, "repaired archive");
     writeFileSync(

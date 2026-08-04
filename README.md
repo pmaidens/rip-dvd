@@ -230,7 +230,8 @@ captured-source conflict durably changes the marker to `repair`. The repair
 marker still disables legacy commands, but a later complete, parseable live
 inventory can replace its failed snapshot after the sidecar or archive is
 repaired. Every previously captured sidecar must still be present before repair
-can retire the marker. The SQLite fence blocks review completion and Encode Job
+can retire the marker. Every retry re-fences those captured archives before an
+incomplete live inventory can return. The SQLite fence blocks review completion and Encode Job
 enqueue, requeue, and claim until the entire captured batch succeeds. Existing
 Media Item fields and Disc Selection labels remain SQLite-authoritative even
 during initial cutover. Imported catalog
