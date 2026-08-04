@@ -36,6 +36,7 @@ import {
   discSelections,
   encodeJobs,
   encodingProfiles,
+  legacyCutoverStagedSidecars,
   mediaItems,
   opticalDrives,
   originalDiscArchiveContentIds,
@@ -1177,6 +1178,10 @@ export function createDataAccessInternal(
             disc.fingerprint,
             transaction,
           );
+          const archivePath = requireNonEmpty(
+            completion.archivePath,
+            "archivePath",
+          );
           const archive = requireRow(
             transaction
               .insert(originalDiscArchives)
@@ -1185,11 +1190,27 @@ export function createDataAccessInternal(
                 detectedDiscId: disc.id,
                 discKind: disc.discKind,
                 archiveFormat: "iso",
-                archivePath: requireNonEmpty(
-                  completion.archivePath,
-                  "archivePath",
-                ),
+                archivePath,
                 fingerprint: disc.fingerprint,
+                legacyCutoverPending:
+                  transaction
+                    .select({
+                      sidecarPath:
+                        legacyCutoverStagedSidecars.sidecarPath,
+                    })
+                    .from(legacyCutoverStagedSidecars)
+                    .where(or(
+                      eq(
+                        legacyCutoverStagedSidecars.fingerprint,
+                        disc.fingerprint,
+                      ),
+                      eq(
+                        legacyCutoverStagedSidecars.archivePath,
+                        archivePath,
+                      ),
+                    ))
+                    .limit(1)
+                    .get() !== undefined,
                 sizeBytes: requirePositiveSafeInteger(
                   completion.sizeBytes,
                   "sizeBytes",
@@ -2283,6 +2304,25 @@ export function createDataAccessInternal(
                 archiveFormat: input.archiveFormat,
                 archivePath,
                 fingerprint,
+                legacyCutoverPending:
+                  transaction
+                    .select({
+                      sidecarPath:
+                        legacyCutoverStagedSidecars.sidecarPath,
+                    })
+                    .from(legacyCutoverStagedSidecars)
+                    .where(or(
+                      eq(
+                        legacyCutoverStagedSidecars.fingerprint,
+                        fingerprint,
+                      ),
+                      eq(
+                        legacyCutoverStagedSidecars.archivePath,
+                        archivePath,
+                      ),
+                    ))
+                    .limit(1)
+                    .get() !== undefined,
                 sizeBytes: input.sizeBytes,
                 archivedAt: timestamp,
                 createdAt: timestamp,

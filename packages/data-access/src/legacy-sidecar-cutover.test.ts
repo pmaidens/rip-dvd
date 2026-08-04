@@ -2563,6 +2563,92 @@ try {
     service.close();
   });
 
+  it("fences an archive created after repair-marker service bootstrap", () => {
+    const root = temporaryDirectories.create(
+      "rip-dvd-cutover-late-archive-bootstrap-",
+    );
+    const originalsLibraryPath = join(root, "originals");
+    const archivePath = join(originalsLibraryPath, "Late.iso");
+    const sidecarPath = join(
+      originalsLibraryPath,
+      "Late.rip-dvd.json",
+    );
+    const markerPath = join(
+      originalsLibraryPath,
+      ".rip-dvd-sqlite-catalog",
+    );
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    writeFileSync(archivePath, "late archive");
+    writeFileSync(sidecarPath, JSON.stringify({
+      schema_version: 2,
+      source: archivePath,
+      title: "Late",
+      disc_fingerprint: "late-bootstrap-repair-fingerprint",
+      jobs: [],
+    }));
+    markerFault.failure = null;
+    const markerPublisher = createLegacySidecarDataAccess({
+      databasePath: join(root, "marker-source.sqlite"),
+    });
+    expect(
+      markerPublisher.legacySidecars.importLibrary({ originalsLibraryPath }),
+    ).toMatchObject({ sidecarsImported: 1, issues: [] });
+    markerPublisher.close();
+    const retiredMarker = JSON.parse(readFileSync(markerPath, "utf8")) as {
+      legacyQueueStatus: string;
+    };
+    writeFileSync(markerPath, `${JSON.stringify({
+      ...retiredMarker,
+      legacyQueueStatus: "repair",
+    })}\n`);
+
+    const service = createDataAccess({
+      databasePath: join(root, "service.sqlite"),
+      originalsLibraryPath,
+    });
+    const drive = service.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const disc = service.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "late-bootstrap-repair-fingerprint",
+    });
+    service.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    service.archiveJobs.approve({ detectedDiscId: disc.id });
+    const claim = service.archiveJobs.claimNext("late-bootstrap-worker", {
+      opticalDriveId: drive.id,
+      fingerprint: "late-bootstrap-repair-fingerprint",
+    });
+    if (!claim) {
+      throw new Error("Expected the late Archive Job to be claimed");
+    }
+    service.archiveJobs.publish(claim, {
+      archivePath,
+      sizeBytes: 4_700_000_000,
+    });
+    const archive = service.catalog.listOriginalDiscArchives()[0]!;
+    expect(archive).toMatchObject({
+      catalogReviewedAt: null,
+      legacyCutoverPending: true,
+    });
+    const item = service.catalog.createMediaItem({
+      kind: "movie",
+      title: "Late",
+    });
+    service.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: item.id,
+      kind: "main_feature",
+    });
+    expect(() => service.catalog.completeCatalogReview(archive.id)).toThrow(
+      DomainInvariantError,
+    );
+    service.close();
+  });
+
   it("preserves a concurrent human review boundary after staging", () => {
     const frozenNow = new Date("2026-08-04T04:00:00.000Z");
     vi.useFakeTimers();

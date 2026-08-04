@@ -24,6 +24,7 @@ const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
 interface LegacyRepairArchiveIdentity {
   archivePath: string;
   fingerprint: string;
+  sidecarPath: string;
 }
 
 function objectValue(value: unknown): Record<string, unknown> | null {
@@ -139,7 +140,7 @@ function readLegacyRepairArchiveInventory(
         "Invalid SQLite cutover marker: malformed repair archive inventory",
       );
     }
-    return { archivePath, fingerprint };
+    return { archivePath, fingerprint, sidecarPath };
   });
 }
 
@@ -154,6 +155,61 @@ export function reconcileLegacyRepairCutover(
       sqlite.exec("COMMIT");
       return;
     }
+    const libraryPath = realpathSync(originalsLibraryPath);
+    const stagedSidecars = sqlite.prepare(`
+      SELECT sidecar_path AS sidecarPath,
+             archive_path AS archivePath,
+             fingerprint
+      FROM legacy_cutover_staged_sidecars
+      WHERE originals_library_path = ?
+      LIMIT ${MAX_LEGACY_LIBRARY_ENTRIES + 1}
+    `).all(libraryPath) as unknown as LegacyRepairArchiveIdentity[];
+    if (stagedSidecars.length > MAX_LEGACY_LIBRARY_ENTRIES) {
+      throw new Error(
+        `Legacy cutover staged inventory exceeds the ${MAX_LEGACY_LIBRARY_ENTRIES}-entry limit`,
+      );
+    }
+    const stagedSidecarsByPath = new Map(
+      stagedSidecars.map((entry) => [entry.sidecarPath, entry]),
+    );
+    const markerSidecarsByPath = new Map<string, LegacyRepairArchiveIdentity>();
+    for (const identity of inventory) {
+      const markerIdentity = markerSidecarsByPath.get(identity.sidecarPath);
+      const stagedIdentity = stagedSidecarsByPath.get(identity.sidecarPath);
+      if (
+        (markerIdentity !== undefined &&
+          (markerIdentity.archivePath !== identity.archivePath ||
+            markerIdentity.fingerprint !== identity.fingerprint)) ||
+        (stagedIdentity !== undefined &&
+          (stagedIdentity.archivePath !== identity.archivePath ||
+            stagedIdentity.fingerprint !== identity.fingerprint))
+      ) {
+        throw new Error(
+          "Legacy cutover repair inventory conflicts with durable staging",
+        );
+      }
+      markerSidecarsByPath.set(identity.sidecarPath, identity);
+    }
+    const newlyStagedSidecarPaths = [...markerSidecarsByPath.keys()].filter(
+      (sidecarPath) => !stagedSidecarsByPath.has(sidecarPath),
+    );
+    if (
+      stagedSidecarsByPath.size + newlyStagedSidecarPaths.length >
+      MAX_LEGACY_LIBRARY_ENTRIES
+    ) {
+      throw new Error(
+        `Legacy cutover staged inventory exceeds the ${MAX_LEGACY_LIBRARY_ENTRIES}-entry limit`,
+      );
+    }
+    const stageIdentity = sqlite.prepare(`
+      INSERT INTO legacy_cutover_staged_sidecars (
+        originals_library_path,
+        sidecar_path,
+        archive_path,
+        fingerprint
+      ) VALUES (?, ?, ?, ?)
+      ON CONFLICT (originals_library_path, sidecar_path) DO NOTHING
+    `);
     const timestamp = Date.now();
     const fenceArchive = sqlite.prepare(`
       UPDATE original_disc_archives
@@ -163,6 +219,12 @@ export function reconcileLegacyRepairCutover(
       WHERE fingerprint = ? OR archive_path = ?
     `);
     for (const identity of inventory) {
+      stageIdentity.run(
+        libraryPath,
+        identity.sidecarPath,
+        identity.archivePath,
+        identity.fingerprint,
+      );
       fenceArchive.run(
         timestamp,
         identity.fingerprint,
