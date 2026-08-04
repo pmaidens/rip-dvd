@@ -342,6 +342,26 @@ function canonicalDvdSelectionSourceKey(
       : `dvd:title:${selection.titleNumber}:chapters:${selection.chapterStart}-${selection.chapterEnd}`;
 }
 
+function requiresLegacyDiscSelectionRepair(
+  row: typeof discSelections.$inferSelect,
+  archivedTitles: ReturnType<typeof decodeArchivedDvdTitles>,
+): boolean {
+  const selection = toDiscSelection(row);
+  const title = selection.titleNumber === null
+    ? null
+    : archivedTitles?.find(
+        (candidate) => candidate.number === selection.titleNumber,
+      );
+  return (
+    row.sourceKey !== canonicalDvdSelectionSourceKey(selection) ||
+    (selection.titleNumber !== null &&
+      (title === null ||
+        title === undefined ||
+        (selection.chapterEnd !== null &&
+          selection.chapterEnd > title.chapters)))
+  );
+}
+
 function nextCatalogMutationTimestamp(timestamp: Date) {
   // Review restoration uses updatedAt as a compare-and-set version. Advance it
   // even when the wall clock is frozen or moves backward.
@@ -2863,22 +2883,10 @@ export function createDataAccessInternal(
               ...coordinates,
             });
             if (historicalJob) {
-              const currentSelection = toDiscSelection(current);
-              const currentTitle = currentSelection.titleNumber === null
-                ? null
-                : archivedTitles?.find(
-                    (candidate) =>
-                      candidate.number === currentSelection.titleNumber,
-                  );
-              const requiresLegacyRepair =
-                current.sourceKey !==
-                  canonicalDvdSelectionSourceKey(currentSelection) ||
-                (currentSelection.titleNumber !== null &&
-                  (currentTitle === null ||
-                    currentTitle === undefined ||
-                    (currentSelection.chapterEnd !== null &&
-                      currentSelection.chapterEnd > currentTitle.chapters)));
-              if (!requiresLegacyRepair) {
+              if (!requiresLegacyDiscSelectionRepair(
+                current,
+                archivedTitles,
+              )) {
                 throw new DomainInvariantError(
                   `Disc Selection ${id} cannot be repaired because ordinary Encode Job history must keep its retry identity (job ${historicalJob.id})`,
                 );
@@ -2988,8 +2996,13 @@ export function createDataAccessInternal(
                 .select({
                   legacyCutoverPending:
                     originalDiscArchives.legacyCutoverPending,
+                  scanData: detectedDiscs.scanData,
                 })
                 .from(originalDiscArchives)
+                .innerJoin(
+                  detectedDiscs,
+                  eq(detectedDiscs.id, originalDiscArchives.detectedDiscId),
+                )
                 .where(eq(
                   originalDiscArchives.id,
                   selection.originalDiscArchiveId,
@@ -3010,19 +3023,46 @@ export function createDataAccessInternal(
               .limit(1)
               .get();
             if (dependentJob) {
-              throw new DomainInvariantError(
-                `Disc Selection ${id} cannot be deleted because Encode Job history must be preserved (job ${dependentJob.id})`,
+              if (!requiresLegacyDiscSelectionRepair(
+                selection,
+                decodeArchivedDvdTitles(archiveState.scanData),
+              )) {
+                throw new DomainInvariantError(
+                  `Disc Selection ${id} cannot be deleted because Encode Job history must be preserved (job ${dependentJob.id})`,
+                );
+              }
+              requireRow(
+                transaction
+                  .update(discSelections)
+                  .set({ isCatalogActive: false })
+                  .where(and(
+                    eq(discSelections.id, id),
+                    eq(discSelections.isCatalogActive, true),
+                  ))
+                  .returning({ id: discSelections.id })
+                  .get(),
+                "disc selection",
+                id,
+              );
+              transaction
+                .update(encodeJobs)
+                .set({ reservesOutputPath: false })
+                .where(and(
+                  eq(encodeJobs.discSelectionId, id),
+                  eq(encodeJobs.status, "failed"),
+                ))
+                .run();
+            } else {
+              requireRow(
+                transaction
+                  .delete(discSelections)
+                  .where(eq(discSelections.id, id))
+                  .returning({ id: discSelections.id })
+                  .get(),
+                "disc selection",
+                id,
               );
             }
-            requireRow(
-              transaction
-                .delete(discSelections)
-                .where(eq(discSelections.id, id))
-                .returning({ id: discSelections.id })
-                .get(),
-              "disc selection",
-              id,
-            );
             transaction
               .update(originalDiscArchives)
               .set({

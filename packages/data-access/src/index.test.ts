@@ -2043,6 +2043,8 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       insert into media_items (id, kind, title, created_at, updated_at) values
         ('legacy-episode-1', 'episode', 'Legacy Episode One', 0, 0),
         ('legacy-episode-1-copy', 'episode', 'Legacy Episode One Copy', 0, 0),
+        ('legacy-main', 'movie', 'Legacy Main Feature', 0, 0),
+        ('legacy-main-alias', 'movie', 'Legacy Main Feature Alias', 0, 0),
         ('legacy-noncanonical', 'bonus_feature', 'Noncanonical', 0, 0),
         ('legacy-missing-title', 'bonus_feature', 'Missing Title', 0, 0),
         ('safe-main-item', 'movie', 'Safe Main Feature', 0, 0);
@@ -2054,6 +2056,10 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
           'dvd:title:1', 'dvd_title', 1, null, null, 0, 100),
         ('duplicate-b', 'duplicate-archive', 'legacy-episode-1-copy',
           'caller:title-one-copy', 'dvd_title', 1, null, null, 0, 200),
+        ('duplicate-main-a', 'duplicate-archive', 'legacy-main',
+          'dvd:main-feature', 'main_feature', null, null, null, 0, 210),
+        ('duplicate-main-b', 'duplicate-archive', 'legacy-main-alias',
+          'caller:main', 'main_feature', null, null, null, 0, 220),
         ('noncanonical', 'noncanonical-archive', 'legacy-noncanonical',
           'caller:title-one', 'dvd_title', 1, null, null, 0, 250),
         ('missing-title', 'scan-invalid-archive', 'legacy-missing-title',
@@ -2089,7 +2095,14 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         ('failed-history', 'duplicate-b', 'legacy-profile',
           '/media/movies/Failed Legacy.mkv', 'failed', 41,
           'legacy-worker', 'failed-claim', 300, 300, null,
-          'legacy transcode failed', 0, 400);
+          'legacy transcode failed', 0, 400),
+        ('completed-main-history', 'duplicate-main-a', 'legacy-profile',
+          '/media/movies/Completed Main Legacy.mkv', 'completed', 100,
+          'legacy-worker', 'completed-main-claim', 500, 500, 600, null, 0, 600),
+        ('failed-main-alias-history', 'duplicate-main-b', 'legacy-profile',
+          '/media/movies/Failed Main Alias Legacy.mkv', 'failed', 59,
+          'legacy-worker', 'failed-main-alias-claim', 700, 700, null,
+          'legacy main alias transcode failed', 0, 800);
     `);
     sqlite.close();
 
@@ -2144,16 +2157,29 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
           progressPercent: 41,
           errorMessage: "legacy transcode failed",
         }),
+        expect.objectContaining({
+          id: "failed-main-alias-history",
+          progressPercent: 59,
+          errorMessage: "legacy main alias transcode failed",
+        }),
       ]),
     );
-    expect(access.encodeJobs.list(["completed"])).toEqual([
-      expect.objectContaining({
-        id: "completed-history",
-        progressPercent: 100,
-        completedAt: new Date(200),
-        errorMessage: null,
-      }),
-    ]);
+    expect(access.encodeJobs.list(["completed"])).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "completed-history",
+          progressPercent: 100,
+          completedAt: new Date(200),
+          errorMessage: null,
+        }),
+        expect.objectContaining({
+          id: "completed-main-history",
+          progressPercent: 100,
+          completedAt: new Date(600),
+          errorMessage: null,
+        }),
+      ]),
+    );
     expect(() =>
       access.encodeJobs.requeue("unsafe-job" as EncodeJobId)
     ).toThrow(InvalidStatusTransitionError);
@@ -2164,12 +2190,15 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       {
         originalDiscArchiveId: "duplicate-archive" as OriginalDiscArchiveId,
         mediaItemId: "legacy-episode-1-copy" as MediaItemId,
-        kind: "main_feature",
+        kind: "dvd_chapters",
+        titleNumber: 1,
+        chapterStart: 1,
+        chapterEnd: 1,
       },
     );
     expect(repairedDuplicate).toMatchObject({
-      sourceKey: "dvd:main-feature",
-      kind: "main_feature",
+      sourceKey: "dvd:title:1:chapters:1-1",
+      kind: "dvd_chapters",
     });
     expect(repairedDuplicate.id).not.toBe("duplicate-b");
     expect(access.catalog.listDiscSelections({
@@ -2188,6 +2217,56 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
           discSelectionId: "duplicate-b",
           progressPercent: 41,
           errorMessage: "legacy transcode failed",
+        }),
+      ]),
+    );
+    expect(
+      access.catalog.deleteDiscSelection(
+        "duplicate-main-b" as DiscSelectionId,
+      ),
+    ).toMatchObject({
+      id: "duplicate-main-b",
+      deletedEncodeJobs: 0,
+      deletionComplete: true,
+    });
+    expect(access.catalog.listDiscSelections({
+      ids: ["duplicate-main-b" as DiscSelectionId],
+    })).toEqual([
+      expect.objectContaining({
+        id: "duplicate-main-b",
+        sourceKey: "caller:main",
+      }),
+    ]);
+    expect(access.catalog.listDiscSelections({
+      originalDiscArchiveId: "duplicate-archive" as OriginalDiscArchiveId,
+    })).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "duplicate-main-a" }),
+      ]),
+    );
+    expect(access.catalog.listDiscSelections({
+      originalDiscArchiveId: "duplicate-archive" as OriginalDiscArchiveId,
+    })).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "duplicate-main-b" }),
+      ]),
+    );
+    expect(access.encodeJobs.list(["failed"])).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "failed-main-alias-history",
+          discSelectionId: "duplicate-main-b",
+          progressPercent: 59,
+          errorMessage: "legacy main alias transcode failed",
+        }),
+      ]),
+    );
+    expect(access.encodeJobs.list(["completed"])).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "completed-main-history",
+          discSelectionId: "duplicate-main-a",
+          completedAt: new Date(600),
         }),
       ]),
     );
@@ -2216,15 +2295,17 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         titleNumber: 1,
       }),
     ]);
-    expect(access.encodeJobs.list(["completed"])).toEqual([
-      expect.objectContaining({
-        id: "completed-history",
-        discSelectionId: "noncanonical",
-        progressPercent: 100,
-        completedAt: new Date(200),
-        errorMessage: null,
-      }),
-    ]);
+    expect(access.encodeJobs.list(["completed"])).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "completed-history",
+          discSelectionId: "noncanonical",
+          progressPercent: 100,
+          completedAt: new Date(200),
+          errorMessage: null,
+        }),
+      ]),
+    );
 
     const repairedMissingTitle = access.catalog.repairDiscSelection(
       "missing-title" as DiscSelectionId,
