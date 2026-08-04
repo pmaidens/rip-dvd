@@ -237,7 +237,7 @@ export function reconcileLegacyRepairCutover(
           completed_at = NULL,
           error_message = 'Encode Job invalidated by legacy catalog cutover repair',
           updated_at = max(updated_at + 1, ?)
-      WHERE (status = 'running' OR (status = 'completed' AND claim_token IS NOT NULL))
+      WHERE status = 'running'
         AND EXISTS (
           SELECT 1
           FROM disc_selections

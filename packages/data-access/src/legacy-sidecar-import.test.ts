@@ -808,7 +808,7 @@ describe("legacy sidecar import", () => {
     fixture.access.close();
   });
 
-  it("preserves imported completed Encode Job provenance when removing or repairing its Disc Selection", () => {
+  it("preserves imported completed Encode Job provenance and rejects ordinary historical repair", () => {
     const fixture = createFixture();
     fixture.access.legacySidecars.importLibrary({
       originalsLibraryPath: fixture.originalsLibraryPath,
@@ -839,28 +839,20 @@ describe("legacy sidecar import", () => {
     if (!completedSelection) {
       throw new Error("Expected imported completed Disc Selection");
     }
-    const replacement = fixture.access.catalog.repairDiscSelection(
-      completedSelection.id,
-      {
+    expect(() =>
+      fixture.access.catalog.repairDiscSelection(completedSelection.id, {
         originalDiscArchiveId: completedSelection.originalDiscArchiveId,
         mediaItemId: completedSelection.mediaItemId,
         kind: "main_feature",
-      },
-    );
-    expect(replacement).toMatchObject({
-      originalDiscArchiveId: completedSelection.originalDiscArchiveId,
-      mediaItemId: completedSelection.mediaItemId,
-      sourceKey: "dvd:main-feature",
-    });
-    expect(replacement.id).not.toBe(completedSelection.id);
+      })
+    ).toThrow(/ordinary Encode Job history.*retry identity/i);
     expect(fixture.access.catalog.listDiscSelections({
       ids: [completedSelection.id],
     })).toEqual([completedSelection]);
     const activeSelections = fixture.access.catalog.listDiscSelections({
       originalDiscArchiveId: completedSelection.originalDiscArchiveId,
     });
-    expect(activeSelections).toEqual(expect.arrayContaining([replacement]));
-    expect(activeSelections).not.toEqual(
+    expect(activeSelections).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ id: completedSelection.id }),
       ]),
@@ -869,9 +861,12 @@ describe("legacy sidecar import", () => {
       fixture.access.encodeJobs.list().find((job) => job.id === completedJob.id),
     ).toEqual(completedJob);
 
-    const reviewed = fixture.access.catalog.completeCatalogReview(
-      completedSelection.originalDiscArchiveId,
-    );
+    const reviewed = fixture.access.catalog.listOriginalDiscArchives({
+      ids: [completedSelection.originalDiscArchiveId],
+    })[0];
+    if (!reviewed?.catalogReviewedAt) {
+      throw new Error("Expected imported catalog review completion");
+    }
     const report = fixture.access.legacySidecars.importLibrary({
       originalsLibraryPath: fixture.originalsLibraryPath,
     });
@@ -2626,6 +2621,25 @@ describe("legacy sidecar import", () => {
         errorMessage: "transcode failed",
       }),
     ]);
+    const failedSelection = fixture.access.catalog.listDiscSelections({
+      ids: [claim.discSelectionId],
+    })[0];
+    if (!failedSelection || failedSelection.kind !== "dvd_title") {
+      throw new Error("Expected the failed trailer's DVD title selection");
+    }
+    expect(() =>
+      fixture.access.catalog.repairDiscSelection(failedSelection.id, {
+        originalDiscArchiveId: failedSelection.originalDiscArchiveId,
+        mediaItemId: failedSelection.mediaItemId,
+        kind: "dvd_title",
+        titleNumber: failedSelection.titleNumber,
+      })
+    ).toThrow(/ordinary Encode Job history.*retry identity/i);
+    expect(fixture.access.encodeJobs.requeue(claim.id)).toMatchObject({
+      id: claim.id,
+      discSelectionId: failedSelection.id,
+      status: "queued",
+    });
 
     fixture.access.close();
   });
