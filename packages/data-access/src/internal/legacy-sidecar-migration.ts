@@ -323,6 +323,7 @@ export function createLegacySidecarImportAccess(
           }
           continue;
         }
+        const prePersistenceIssues: LegacySidecarImportReport["issues"] = [];
         const acceptedJobs = sidecar.jobs.filter((job) => {
           const logicalKey = legacyJobLogicalKey(
             sidecar.fingerprint,
@@ -336,13 +337,15 @@ export function createLegacySidecarImportAccess(
             if (
               publishedSnapshot?.signature !== signature
             ) {
-              report.issues.push({
+              const issue = {
                 code: "duplicate_record",
                 jobIndex: job.jobIndex,
                 message:
                   "Logical Encode Job conflicts with the record captured at SQLite cutover",
                 sidecarPath: sidecar.sidecarPath,
-              });
+              } as const;
+              prePersistenceIssues.push(issue);
+              report.issues.push(issue);
               return false;
             }
             reconciledSnapshotKeys.add(logicalKey);
@@ -351,12 +354,14 @@ export function createLegacySidecarImportAccess(
           if (legacyJobSignature(persisted.job) === signature) {
             return true;
           }
-          report.issues.push({
+          const issue = {
             code: "duplicate_record",
             jobIndex: job.jobIndex,
             message: `Logical Encode Job conflicts with an earlier record in ${persisted.sidecarPath}`,
             sidecarPath: sidecar.sidecarPath,
-          });
+          } as const;
+          prePersistenceIssues.push(issue);
+          report.issues.push(issue);
           return false;
         });
         const created = emptyLegacyImportRecordCounts();
@@ -782,55 +787,56 @@ export function createLegacySidecarImportAccess(
                     `Movie Disc Selection ${job.sourceKey} maps to a duplicate Media Item`,
                   );
                 }
-                const parentId =
-                  job.mediaItemKind === "movie"
-                    ? null
-                    : requireMovieItem().id;
-                const year =
-                  job.mediaItemKind === "movie" ? sidecar.movieYear : null;
-                const mediaChanged =
-                  mediaItem.kind !== job.mediaItemKind ||
-                  mediaItem.title !== job.mediaTitle ||
-                  mediaItem.year !== year ||
-                  mediaItem.parentId !== parentId;
-                if (mediaChanged && !cutover.wasAlreadyPublished) {
-                  mediaItem = requireRow(
-                    transaction
-                      .update(mediaItems)
-                      .set({
-                        kind: job.mediaItemKind,
-                        title: job.mediaTitle,
-                        year,
-                        parentId,
-                        updatedAt: timestamp,
-                      })
-                      .where(eq(mediaItems.id, mediaItem.id))
-                      .returning()
-                      .get(),
-                    "legacy media item",
-                    mediaItem.id,
-                  );
-                  updated += 1;
+                if (cutover.wasAlreadyPublished) {
+                  unchanged += 2;
                 } else {
-                  unchanged += 1;
-                }
-                if (
-                  selection.label !== job.label &&
-                  !cutover.wasAlreadyPublished
-                ) {
-                  selection = requireRow(
-                    transaction
-                      .update(discSelections)
-                      .set({ label: job.label, updatedAt: timestamp })
-                      .where(eq(discSelections.id, selection.id))
-                      .returning()
-                      .get(),
-                    "legacy disc selection",
-                    selection.id,
-                  );
-                  updated += 1;
-                } else {
-                  unchanged += 1;
+                  const parentId =
+                    job.mediaItemKind === "movie"
+                      ? null
+                      : requireMovieItem().id;
+                  const year =
+                    job.mediaItemKind === "movie" ? sidecar.movieYear : null;
+                  const mediaChanged =
+                    mediaItem.kind !== job.mediaItemKind ||
+                    mediaItem.title !== job.mediaTitle ||
+                    mediaItem.year !== year ||
+                    mediaItem.parentId !== parentId;
+                  if (mediaChanged) {
+                    mediaItem = requireRow(
+                      transaction
+                        .update(mediaItems)
+                        .set({
+                          kind: job.mediaItemKind,
+                          title: job.mediaTitle,
+                          year,
+                          parentId,
+                          updatedAt: timestamp,
+                        })
+                        .where(eq(mediaItems.id, mediaItem.id))
+                        .returning()
+                        .get(),
+                      "legacy media item",
+                      mediaItem.id,
+                    );
+                    updated += 1;
+                  } else {
+                    unchanged += 1;
+                  }
+                  if (selection.label !== job.label) {
+                    selection = requireRow(
+                      transaction
+                        .update(discSelections)
+                        .set({ label: job.label, updatedAt: timestamp })
+                        .where(eq(discSelections.id, selection.id))
+                        .returning()
+                        .get(),
+                      "legacy disc selection",
+                      selection.id,
+                    );
+                    updated += 1;
+                  } else {
+                    unchanged += 1;
+                  }
                 }
               } else {
                 mediaItem =
@@ -943,6 +949,7 @@ export function createLegacySidecarImportAccess(
               if (
                 !catalogIsReviewable ||
                 sidecar.issues.length > 0 ||
+                prePersistenceIssues.length > 0 ||
                 persistenceIssues.length > 0 ||
                 (archiveAlreadyExisted && created.discSelections > 0)
               ) {

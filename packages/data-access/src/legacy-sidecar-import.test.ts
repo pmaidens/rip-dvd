@@ -1256,6 +1256,50 @@ describe("legacy sidecar import", () => {
     fixture.access.close();
   });
 
+  it("does not synthesize parents while preserving a detached bonus-only item", () => {
+    const fixture = createFixture();
+    const sidecar = JSON.parse(readFileSync(fixture.sidecarPath, "utf8")) as {
+      jobs: Array<Record<string, unknown>>;
+    };
+    sidecar.jobs = [sidecar.jobs[1]!];
+    writeFileSync(fixture.sidecarPath, JSON.stringify(sidecar));
+    expect(
+      fixture.access.legacySidecars.importLibrary({
+        originalsLibraryPath: fixture.originalsLibraryPath,
+      }),
+    ).toMatchObject({ sidecarsImported: 1, issues: [] });
+    const importedItems = fixture.access.catalog.listMediaItems();
+    const bonus = importedItems.find((item) => item.kind === "bonus_feature");
+    if (!bonus) {
+      throw new Error("Expected imported bonus Media Item");
+    }
+    fixture.access.catalog.updateMediaItem(bonus.id, { parentId: null });
+
+    for (let retry = 0; retry < 2; retry += 1) {
+      expect(
+        fixture.access.legacySidecars.importLibrary({
+          originalsLibraryPath: fixture.originalsLibraryPath,
+        }),
+      ).toMatchObject({ sidecarsImported: 1, issues: [] });
+    }
+
+    expect(fixture.access.catalog.listMediaItems()).toEqual(
+      expect.arrayContaining(
+        importedItems.map((item) => expect.objectContaining({ id: item.id })),
+      ),
+    );
+    expect(fixture.access.catalog.listMediaItems()).toHaveLength(
+      importedItems.length,
+    );
+    expect(
+      fixture.access.catalog.listMediaItems().find(
+        (item) => item.id === bonus.id,
+      ),
+    ).toMatchObject({ parentId: null });
+
+    fixture.access.close();
+  });
+
   it("reopens a reviewed archive when legacy import finds an unsafe selection", () => {
     const fixture = createFixture();
     expect(
@@ -1456,6 +1500,11 @@ describe("legacy sidecar import", () => {
     expect(access.encodeJobs.list()).toEqual([
       expect.objectContaining({ outputPath: firstOutputPath }),
     ]);
+    expect(access.catalog.listOriginalDiscArchives()).toEqual([
+      expect.objectContaining({ catalogReviewedAt: null }),
+    ]);
+    expect(access.encodeJobs.claimNext("cross-sidecar-conflict-worker"))
+      .toBeNull();
     for (const [path, bytes] of sidecarBytes) {
       expect(readFileSync(path)).toEqual(bytes);
     }
