@@ -474,6 +474,10 @@ export function createDataAccessInternal(
   legacySidecarMigration?: LegacySidecarMigrationAdapter,
 ): DataAccess | LegacySidecarDataAccess {
   const normalizedDatabasePath = requireNonEmpty(databasePath, "databasePath");
+  const normalizedOriginalsLibraryPath =
+    originalsLibraryPath === undefined
+      ? undefined
+      : realpathSync(originalsLibraryPath);
   if (normalizedDatabasePath !== ":memory:") {
     mkdirSync(dirname(resolve(normalizedDatabasePath)), { recursive: true });
   }
@@ -481,11 +485,26 @@ export function createDataAccessInternal(
   const { database, sqlite } = openMigratedDatabase(
     normalizedDatabasePath,
     migrationsFolder,
-    originalsLibraryPath,
+    normalizedOriginalsLibraryPath,
   );
 
   function now(): Date {
     return new Date();
+  }
+
+  function legacyCutoverFenceCondition(
+    fingerprint: string,
+    archivePath: string,
+  ) {
+    return normalizedOriginalsLibraryPath === undefined
+      ? or(
+          eq(legacyCutoverStagedSidecars.fingerprint, fingerprint),
+          eq(legacyCutoverStagedSidecars.archivePath, archivePath),
+        )
+      : eq(
+          legacyCutoverStagedSidecars.originalsLibraryPath,
+          normalizedOriginalsLibraryPath,
+        );
   }
 
   function optionalSafeInteger(
@@ -1199,15 +1218,9 @@ export function createDataAccessInternal(
                         legacyCutoverStagedSidecars.sidecarPath,
                     })
                     .from(legacyCutoverStagedSidecars)
-                    .where(or(
-                      eq(
-                        legacyCutoverStagedSidecars.fingerprint,
-                        disc.fingerprint,
-                      ),
-                      eq(
-                        legacyCutoverStagedSidecars.archivePath,
-                        archivePath,
-                      ),
+                    .where(legacyCutoverFenceCondition(
+                      disc.fingerprint,
+                      archivePath,
                     ))
                     .limit(1)
                     .get() !== undefined,
@@ -2311,15 +2324,9 @@ export function createDataAccessInternal(
                         legacyCutoverStagedSidecars.sidecarPath,
                     })
                     .from(legacyCutoverStagedSidecars)
-                    .where(or(
-                      eq(
-                        legacyCutoverStagedSidecars.fingerprint,
-                        fingerprint,
-                      ),
-                      eq(
-                        legacyCutoverStagedSidecars.archivePath,
-                        archivePath,
-                      ),
+                    .where(legacyCutoverFenceCondition(
+                      fingerprint,
+                      archivePath,
                     ))
                     .limit(1)
                     .get() !== undefined,
