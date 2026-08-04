@@ -33,6 +33,23 @@ describe("CatalogReviewView", () => {
     expect(scope.isCurrent("archive-b", newerArchiveBLoad)).toBe(true);
   });
 
+  it("rejects the current page load as soon as a replacement page is requested", () => {
+    const scope = createCatalogReviewRequestScope("archive-a");
+    const firstPageLoad = scope.begin("archive-a");
+    if (firstPageLoad === null) {
+      throw new Error("Expected first page load to begin");
+    }
+
+    scope.invalidate("archive-a");
+
+    expect(scope.isCurrent("archive-a", firstPageLoad)).toBe(false);
+    const secondPageLoad = scope.begin("archive-a");
+    if (secondPageLoad === null) {
+      throw new Error("Expected second page load to begin");
+    }
+    expect(scope.isCurrent("archive-a", secondPageLoad)).toBe(true);
+  });
+
   it("requests the edited Media Item as context while paging parent choices", async () => {
     let requestedUrl = "";
     const fetcher = async (input: RequestInfo | URL) => {

@@ -119,6 +119,16 @@ export function createLegacySidecarImportAccess(
       >();
       const stagedReviewArchiveIds = new Set<OriginalDiscArchiveId>();
       const cutoverFenceArchiveIds = new Set<OriginalDiscArchiveId>();
+      const previouslyConfirmedStagedIdentities = new Set<string>();
+      const stagedIdentityKey = (input: {
+        archivePath: string;
+        fingerprint: string;
+        sidecarPath: string;
+      }) => JSON.stringify([
+        input.sidecarPath,
+        input.archivePath,
+        input.fingerprint,
+      ]);
       const stageCatalogReviewBoundary = (
         publicationDiscoveries: readonly LegacySidecarDiscovery[],
       ) => {
@@ -133,9 +143,47 @@ export function createLegacySidecarImportAccess(
           const representedFingerprints = new Set(
             representedSidecars.map((sidecar) => sidecar.fingerprint),
           );
-          const representedSidecarPaths = new Set(
-            representedSidecars.map((sidecar) => sidecar.sidecarPath),
+          const representedSidecarsByPath = new Map(
+            representedSidecars.map((sidecar) => [
+              sidecar.sidecarPath,
+              sidecar,
+            ]),
           );
+          const existingStagedSidecars = transaction
+            .select({
+              archivePath: legacyCutoverStagedSidecars.archivePath,
+              fingerprint: legacyCutoverStagedSidecars.fingerprint,
+              sidecarPath: legacyCutoverStagedSidecars.sidecarPath,
+            })
+            .from(legacyCutoverStagedSidecars)
+            .where(eq(
+              legacyCutoverStagedSidecars.originalsLibraryPath,
+              originalsLibraryPath,
+            ))
+            .limit(LEGACY_CUTOVER_INVENTORY_LIMIT + 1)
+            .all();
+          if (
+            existingStagedSidecars.length >
+            LEGACY_CUTOVER_INVENTORY_LIMIT
+          ) {
+            return false;
+          }
+          const existingStagedSidecarPaths = new Set(
+            existingStagedSidecars.map((sidecar) => sidecar.sidecarPath),
+          );
+          const newlyStagedSidecarPaths = new Set(
+            representedSidecars.flatMap((sidecar) =>
+              existingStagedSidecarPaths.has(sidecar.sidecarPath)
+                ? []
+                : [sidecar.sidecarPath],
+            ),
+          );
+          if (
+            existingStagedSidecars.length + newlyStagedSidecarPaths.size >
+            LEGACY_CUTOVER_INVENTORY_LIMIT
+          ) {
+            return false;
+          }
           for (const sidecar of representedSidecars) {
             transaction
               .insert(legacyCutoverStagedSidecars)
@@ -213,19 +261,33 @@ export function createLegacySidecarImportAccess(
           if (stagedSidecars.length > LEGACY_CUTOVER_INVENTORY_LIMIT) {
             return false;
           }
+          const stagedIdentityIsRepresented = (
+            staged: (typeof stagedSidecars)[number],
+          ) => {
+            const represented = representedSidecarsByPath.get(
+              staged.sidecarPath,
+            );
+            return (
+              (represented?.archivePath === staged.archivePath &&
+                represented.fingerprint === staged.fingerprint) ||
+              previouslyConfirmedStagedIdentities.has(
+                stagedIdentityKey(staged),
+              )
+            );
+          };
           const stagedSidecarsAreRepresented = stagedSidecars.every(
-            (staged) => representedSidecarPaths.has(staged.sidecarPath),
+            stagedIdentityIsRepresented,
           );
           const representedStagedArchivePaths = new Set(
             stagedSidecars.flatMap((staged) =>
-              representedSidecarPaths.has(staged.sidecarPath)
+              stagedIdentityIsRepresented(staged)
                 ? [staged.archivePath]
                 : [],
             ),
           );
           const representedStagedFingerprints = new Set(
             stagedSidecars.flatMap((staged) =>
-              representedSidecarPaths.has(staged.sidecarPath)
+              stagedIdentityIsRepresented(staged)
                 ? [staged.fingerprint]
                 : [],
             ),
@@ -253,10 +315,26 @@ export function createLegacySidecarImportAccess(
               representedStagedFingerprints.has(archive.fingerprint) ||
               representedStagedArchivePaths.has(archive.archivePath),
           );
-          return (
+          const publicationIsComplete = (
             pendingArchivesAreRepresented &&
             stagedSidecarsAreRepresented
           );
+          if (publicationIsComplete) {
+            for (const staged of stagedSidecars) {
+              const represented = representedSidecarsByPath.get(
+                staged.sidecarPath,
+              );
+              if (
+                represented?.archivePath === staged.archivePath &&
+                represented.fingerprint === staged.fingerprint
+              ) {
+                previouslyConfirmedStagedIdentities.add(
+                  stagedIdentityKey(staged),
+                );
+              }
+            }
+          }
+          return publicationIsComplete;
         }, { behavior: "immediate" });
       };
       const cutover = retireLegacySidecarQueue(
