@@ -13,6 +13,7 @@ const mediaItemKinds = [
   "episode",
   "trailer",
   "bonus_feature",
+  "other",
 ] as const;
 
 type MediaItemKind = (typeof mediaItemKinds)[number];

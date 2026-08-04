@@ -408,6 +408,11 @@ function openMigratedDatabase(databasePath: string, migrationsFolder: string) {
     sqlite = new DatabaseSync(databasePath);
     sqlite.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
     sqlite.exec("PRAGMA foreign_keys = ON");
+    if (sqlite.prepare("PRAGMA foreign_key_check").get() !== undefined) {
+      throw new Error(
+        "SQLite foreign key integrity check failed before migration",
+      );
+    }
     const journal = sqlite.prepare("PRAGMA journal_mode = WAL").get() as {
       journal_mode: string;
     };
@@ -419,7 +424,14 @@ function openMigratedDatabase(databasePath: string, migrationsFolder: string) {
     sqlite.exec("PRAGMA synchronous = NORMAL");
 
     const database = drizzle({ client: sqlite });
+    sqlite.exec("PRAGMA foreign_keys = OFF");
     migrate(database, { migrationsFolder });
+    if (sqlite.prepare("PRAGMA foreign_key_check").get() !== undefined) {
+      throw new Error(
+        "SQLite foreign key integrity check failed after migration",
+      );
+    }
+    sqlite.exec("PRAGMA foreign_keys = ON");
     releaseMigrationLock();
     return { database, sqlite };
   } catch (error) {
