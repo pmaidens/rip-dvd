@@ -1791,7 +1791,7 @@ export function retireLegacySidecarQueue(
   discoveryBatch: LegacySidecarDiscoveryBatch,
   stageCatalogReviewBoundary: (
     discoveries: readonly LegacySidecarDiscovery[],
-  ) => void,
+  ) => boolean,
 ): LegacyQueueCutover | null {
   const { discoveries } = discoveryBatch;
   const markerPath = join(
@@ -2177,7 +2177,9 @@ export function retireLegacySidecarQueue(
       wasAlreadyPublished: false,
     };
   }
-  stageCatalogReviewBoundary(discoveries);
+  if (!stageCatalogReviewBoundary(discoveries)) {
+    return null;
+  }
   writeMarker(discoveredSnapshots);
   return {
     jobSnapshots: discoveredSnapshots,
