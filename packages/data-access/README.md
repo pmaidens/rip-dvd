@@ -171,6 +171,8 @@ or captured-source conflict changes the marker to a `repair` state: its
 presence continues to block legacy workers, while a later complete and
 parseable live inventory can replace the failed snapshot after repair. Repair
 cannot retire the marker unless every previously captured sidecar is present.
+Every schema-four retry re-fences the marker's captured archives before it can
+return for incomplete live inventory, including after a database upgrade.
 The SQLite fence independently blocks catalog completion and Encode Job
 enqueue, requeue, and claim until the whole captured batch succeeds. Catalog
 review timestamps are committed together only after that validation and only
