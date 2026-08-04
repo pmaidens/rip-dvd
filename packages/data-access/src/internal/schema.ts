@@ -254,15 +254,17 @@ export const discSelections = sqliteTable(
     chapterStart: integer("chapter_start"),
     chapterEnd: integer("chapter_end"),
     label: text("label"),
+    isCatalogActive: integer("is_catalog_active", { mode: "boolean" })
+      .notNull()
+      .default(true),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
   (table) => [
     check("disc_selections_id_not_null", sql`${table.id} is not null`),
-    uniqueIndex("disc_selections_archive_source_unique").on(
-      table.originalDiscArchiveId,
-      table.sourceKey,
-    ),
+    uniqueIndex("disc_selections_archive_active_source_unique")
+      .on(table.originalDiscArchiveId, table.sourceKey)
+      .where(sql`${table.isCatalogActive} = 1`),
     index("disc_selections_media_item_idx").on(table.mediaItemId),
     check(
       "disc_selections_kind_check",

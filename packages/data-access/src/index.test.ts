@@ -1907,10 +1907,13 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(
       sqlite
         .prepare(
-          "select name from __drizzle_migrations order by id desc limit 4",
+          "select name from __drizzle_migrations order by id desc limit 5",
         )
         .all(),
     ).toEqual([
+      {
+        name: "20260804182121_dizzy_wither",
+      },
       {
         name: "20260804143147_durable-legacy-cutover-staging",
       },
@@ -2071,10 +2074,19 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         ('legacy-profile', 'legacy', 'Legacy DVD', 'dvd_video', 1, '{}', 0, 0);
       insert into encode_jobs (
         id, disc_selection_id, encoding_profile_id, output_path, status,
-        created_at, updated_at
+        progress_percent, claimed_by, claim_token, claimed_at, started_at,
+        completed_at, error_message, created_at, updated_at
       ) values
         ('unsafe-job', 'missing-title', 'legacy-profile',
-          '/media/movies/Unsafe Legacy.mkv', 'queued', 0, 0);
+          '/media/movies/Unsafe Legacy.mkv', 'queued', 0, null, null, null,
+          null, null, null, 0, 0),
+        ('completed-history', 'noncanonical', 'legacy-profile',
+          '/media/movies/Completed Legacy.mkv', 'completed', 100,
+          'legacy-worker', 'legacy-claim', 100, 100, 200, null, 0, 200),
+        ('failed-history', 'duplicate-b', 'legacy-profile',
+          '/media/movies/Failed Legacy.mkv', 'failed', 41,
+          'legacy-worker', 'failed-claim', 300, 300, null,
+          'legacy transcode failed', 0, 400);
     `);
     sqlite.close();
 
@@ -2118,10 +2130,25 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       })
     ).toThrow(DomainInvariantError);
     expect(access.encodeJobs.claimNext("upgrade-worker")).toBeNull();
-    expect(access.encodeJobs.list(["failed"])).toEqual([
+    expect(access.encodeJobs.list(["failed"])).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "unsafe-job",
+          errorMessage: expect.stringContaining("catalog review"),
+        }),
+        expect.objectContaining({
+          id: "failed-history",
+          progressPercent: 41,
+          errorMessage: "legacy transcode failed",
+        }),
+      ]),
+    );
+    expect(access.encodeJobs.list(["completed"])).toEqual([
       expect.objectContaining({
-        id: "unsafe-job",
-        errorMessage: expect.stringContaining("catalog review"),
+        id: "completed-history",
+        progressPercent: 100,
+        completedAt: new Date(200),
+        errorMessage: null,
       }),
     ]);
     expect(() =>
@@ -2129,13 +2156,74 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     ).toThrow(InvalidStatusTransitionError);
     expect(access.encodeJobs.claimNext("requeued-upgrade-worker")).toBeNull();
 
-    expect(
-      access.catalog.deleteDiscSelection("duplicate-b" as DiscSelectionId),
-    ).toMatchObject({ id: "duplicate-b" });
-    expect(
-      access.catalog.deleteDiscSelection("noncanonical" as DiscSelectionId),
-    ).toMatchObject({ id: "noncanonical" });
-    expect(access.catalog.repairDiscSelection(
+    const repairedDuplicate = access.catalog.repairDiscSelection(
+      "duplicate-b" as DiscSelectionId,
+      {
+        originalDiscArchiveId: "duplicate-archive" as OriginalDiscArchiveId,
+        mediaItemId: "legacy-episode-1-copy" as MediaItemId,
+        kind: "main_feature",
+      },
+    );
+    expect(repairedDuplicate).toMatchObject({
+      sourceKey: "dvd:main-feature",
+      kind: "main_feature",
+    });
+    expect(repairedDuplicate.id).not.toBe("duplicate-b");
+    expect(access.catalog.listDiscSelections({
+      ids: ["duplicate-b" as DiscSelectionId],
+    })).toEqual([
+      expect.objectContaining({
+        id: "duplicate-b",
+        sourceKey: "caller:title-one-copy",
+        titleNumber: 1,
+      }),
+    ]);
+    expect(access.encodeJobs.list(["failed"])).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "failed-history",
+          discSelectionId: "duplicate-b",
+          progressPercent: 41,
+          errorMessage: "legacy transcode failed",
+        }),
+      ]),
+    );
+
+    const repairedNoncanonical = access.catalog.repairDiscSelection(
+      "noncanonical" as DiscSelectionId,
+      {
+        originalDiscArchiveId:
+          "noncanonical-archive" as OriginalDiscArchiveId,
+        mediaItemId: "legacy-noncanonical" as MediaItemId,
+        kind: "dvd_title",
+        titleNumber: 1,
+      },
+    );
+    expect(repairedNoncanonical).toMatchObject({
+      sourceKey: "dvd:title:1",
+      titleNumber: 1,
+    });
+    expect(repairedNoncanonical.id).not.toBe("noncanonical");
+    expect(access.catalog.listDiscSelections({
+      ids: ["noncanonical" as DiscSelectionId],
+    })).toEqual([
+      expect.objectContaining({
+        id: "noncanonical",
+        sourceKey: "caller:title-one",
+        titleNumber: 1,
+      }),
+    ]);
+    expect(access.encodeJobs.list(["completed"])).toEqual([
+      expect.objectContaining({
+        id: "completed-history",
+        discSelectionId: "noncanonical",
+        progressPercent: 100,
+        completedAt: new Date(200),
+        errorMessage: null,
+      }),
+    ]);
+
+    const repairedMissingTitle = access.catalog.repairDiscSelection(
       "missing-title" as DiscSelectionId,
       {
         originalDiscArchiveId:
@@ -2144,25 +2232,41 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         kind: "dvd_title",
         titleNumber: 1,
       },
-    )).toMatchObject({
-      id: "missing-title",
+    );
+    expect(repairedMissingTitle).toMatchObject({
       sourceKey: "dvd:title:1",
       titleNumber: 1,
     });
-    expect(access.encodeJobs.list(["failed"])).toEqual([
+    expect(repairedMissingTitle.id).not.toBe("missing-title");
+    expect(access.catalog.listDiscSelections({
+      originalDiscArchiveId:
+        "scan-invalid-archive" as OriginalDiscArchiveId,
+    })).toEqual([
       expect.objectContaining({
-        id: "unsafe-job",
-        discSelectionId: "missing-title",
-        errorMessage: expect.stringContaining("catalog review"),
+        id: repairedMissingTitle.id,
+        sourceKey: "dvd:title:1",
+        titleNumber: 1,
       }),
     ]);
+    expect(access.catalog.listDiscSelections({
+      ids: ["missing-title" as DiscSelectionId],
+    })).toEqual([
+      expect.objectContaining({
+        id: "missing-title",
+        sourceKey: "dvd:title:999",
+        titleNumber: 999,
+      }),
+    ]);
+    expect(access.encodeJobs.list(["failed"])).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "unsafe-job",
+          discSelectionId: "missing-title",
+          errorMessage: expect.stringContaining("catalog review"),
+        }),
+      ]),
+    );
 
-    access.catalog.createDiscSelection({
-      originalDiscArchiveId: "noncanonical-archive" as OriginalDiscArchiveId,
-      mediaItemId: "legacy-noncanonical" as MediaItemId,
-      kind: "dvd_title",
-      titleNumber: 1,
-    });
     for (const archiveId of [
       "duplicate-archive",
       "noncanonical-archive",
@@ -2174,10 +2278,30 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         ),
       ).toMatchObject({ catalogReviewedAt: expect.any(Date) });
     }
-    expect(() =>
-      access.encodeJobs.requeue("unsafe-job" as EncodeJobId)
-    ).toThrow(InvalidStatusTransitionError);
-    expect(access.encodeJobs.claimNext("repaired-upgrade-worker")).toBeNull();
+    const repairedJob = access.encodeJobs.enqueue({
+      discSelectionId: repairedMissingTitle.id,
+      encodingProfileId: "legacy-profile" as EncodingProfileId,
+      outputPath: "/media/movies/Repaired Legacy.mkv",
+    });
+    expect(repairedJob).toMatchObject({
+      discSelectionId: repairedMissingTitle.id,
+      status: "queued",
+    });
+    expect(repairedJob.id).not.toBe("unsafe-job");
+    expect(access.encodeJobs.claimNext("repaired-upgrade-worker")).toMatchObject({
+      id: repairedJob.id,
+      discSelectionId: repairedMissingTitle.id,
+      status: "running",
+    });
+    expect(access.encodeJobs.list(["failed"])).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "unsafe-job",
+          discSelectionId: "missing-title",
+          errorMessage: expect.stringContaining("catalog review"),
+        }),
+      ]),
+    );
     access.close();
   });
 
