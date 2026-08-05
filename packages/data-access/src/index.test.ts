@@ -4879,11 +4879,13 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(() => access.encodeJobs.updateProgress(abandoned, 50)).toThrow();
 
     const recoveredOutputPath = "/media/movies/Movie/Movie-recovered.mkv";
-    access.encodeJobs.enqueue({
-      discSelectionId: job.discSelectionId,
-      encodingProfileId: job.encodingProfileId,
-      outputPath: recoveredOutputPath,
-    });
+    expect(() =>
+      access.encodeJobs.enqueue({
+        discSelectionId: job.discSelectionId,
+        encodingProfileId: job.encodingProfileId,
+        outputPath: recoveredOutputPath,
+      }),
+    ).toThrow(/failed.*queued/i);
     expect(access.encodeJobs.claimNext("cleanup-not-finished")).toBeNull();
     const [cleanup] = access.encodeJobs.listPendingPartialCleanups();
     expect(cleanup).toEqual({
@@ -4896,6 +4898,11 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       throw new Error("Expected pending Encode Job partial cleanup");
     }
     access.encodeJobs.completePartialCleanup(cleanup);
+    access.encodeJobs.enqueue({
+      discSelectionId: job.discSelectionId,
+      encodingProfileId: job.encodingProfileId,
+      outputPath: recoveredOutputPath,
+    });
     const renewed = access.encodeJobs.claimNext("encode-worker-renewed");
     if (!renewed) {
       throw new Error("Expected the renewed Encode Job to be claimed");

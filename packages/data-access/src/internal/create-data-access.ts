@@ -1576,6 +1576,9 @@ export function createDataAccessInternal(
           and(
             eq(encodeJobs.id, id),
             eq(encodeJobs.status, expectedStatus),
+            isNull(encodeJobs.partialCleanupOutputPath),
+            isNull(encodeJobs.partialCleanupClaimToken),
+            eq(encodeJobs.publicationPending, false),
             exists(
               database
                 .select({ id: discSelections.id })
@@ -3832,6 +3835,34 @@ export function createDataAccessInternal(
           publicationPending,
         };
       },
+      revokePublication(claim, cleanup) {
+        if (!cleanup.publicationPending) {
+          throw new DomainInvariantError(
+            "Encode Job cleanup is not publication provenance",
+          );
+        }
+        const timestamp = now();
+        const updated = database
+          .update(encodeJobs)
+          .set({ publicationPending: false, updatedAt: timestamp })
+          .where(
+            and(
+              encodeAttemptCondition(claim, timestamp),
+              eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
+              eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
+              eq(encodeJobs.publicationPending, true),
+            ),
+          )
+          .returning()
+          .get();
+        if (!updated) {
+          throw new StaleJobAttemptError(
+            "encode job publication",
+            cleanup.jobId,
+          );
+        }
+        return { ...cleanup, publicationPending: false };
+      },
       listPendingPartialCleanups() {
         return database
           .select({
@@ -3843,6 +3874,7 @@ export function createDataAccessInternal(
           .from(encodeJobs)
           .where(
             and(
+              inArray(encodeJobs.status, ["failed", "completed"]),
               isNotNull(encodeJobs.partialCleanupOutputPath),
               isNotNull(encodeJobs.partialCleanupClaimToken),
             ),

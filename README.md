@@ -655,15 +655,19 @@ The partial hard link remains until the directory and completed job are durable;
 only then is that link removed and its cleanup acknowledged. After a process
 crash, the next poll compares the retained final and partial inodes and completes
 the matching publication instead of stranding a visible final behind a failed
-job. Legacy deterministic partials and ordinary failed attempts are moved with
-one atomic rename to collision-resistant `.failed` paths. A timed-out child
-keeps ownership of its
-partial until this worker observes that HandBrake closed it. Expired claims
-persist their exact output path and claim token as cleanup work before becoming
-retryable; reclaim stays blocked until that partial is quarantined. A different
-worker cannot trust the expired process's in-memory child registry, so it uses
-the same atomic quarantine; any still-open writer remains attached to the
-quarantined inode while the next claim receives a distinct partial path.
+job. Reconciliation only exposes cleanup owned by failed or completed jobs, so
+a healthy running publisher's partial remains exclusively owned. A publisher
+must also atomically revoke its current SQLite publication authority before any
+failure rollback; an expired publisher leaves the final and durable provenance
+for reconciliation. Legacy deterministic partials and ordinary failed attempts
+are moved with one atomic rename to collision-resistant `.failed` paths. A
+timed-out child keeps ownership of its partial until this worker observes that
+HandBrake closed it. Expired claims persist their exact output path and claim
+token as cleanup work before becoming retryable; both requeue and reclaim stay
+blocked until that partial is reconciled or quarantined. A different worker
+cannot trust the expired process's in-memory child registry, so it uses the same
+atomic quarantine; any still-open writer remains attached to the quarantined
+inode while the next claim receives a distinct partial path.
 
 Re-encoding keeps the prior final visible until the replacement is complete,
 then preserves it at a collision-free `.failed` path before no-overwrite
@@ -672,7 +676,8 @@ prior final when publication did not complete, and any failure after replacement
 publication quarantines the replacement and restores that prior final. Only a
 completed job requeued to the same output path owns that
 replacement. Its filesystem identity is retained through a failed attempt and
-verified on retry; a changed final revokes replacement authority. Ordinary
+verified on retry, while remaining stable across the worker's own rename and
+hard-link restoration; a changed final revokes replacement authority. Ordinary
 failed retries and jobs moved to a new path leave any existing final untouched.
 If a new final path appears during an encode, it is also left untouched and the
 new partial is quarantined.

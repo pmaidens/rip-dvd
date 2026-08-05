@@ -137,21 +137,26 @@ and every mutation from the expired attempt is rejected. The same transaction
 records the expired claim's output path and token as durable partial-cleanup
 provenance. Queued work with pending cleanup cannot be claimed, and cleanup
 acknowledgement compares both retained values so a later path change cannot
-orphan or acknowledge the wrong partial. The encode worker also records this
-provenance before filesystem publication, marks that cleanup as
+orphan or acknowledge the wrong partial. Requeue is likewise rejected until
+that provenance is reconciled or acknowledged. The encode worker also records
+this provenance before filesystem publication, marks that cleanup as
 publication-pending, and retains the partial inode until SQLite completion. A
 failed or already-completed job with the exact flagged provenance can therefore
-be completed by crash reconciliation before cleanup is acknowledged. Timeout
-cleanup and legacy cutover invalidation never set that flag, so queued,
-cutover-invalidated, and unrelated attempts cannot use the transition.
+be completed by crash reconciliation before cleanup is acknowledged; cleanup
+enumeration excludes running owners. A current publisher must atomically revoke
+that flag before destructive rollback, so an expired attempt cannot undo a
+publication already accepted by another process. Timeout cleanup and legacy
+cutover invalidation never set that flag, so queued, cutover-invalidated, and
+unrelated attempts cannot use the transition.
 
 Requeue grants replacement authority only when a completed Encode Job keeps
 its output path. The worker records the owned final's filesystem identity;
 failure retains authority only when the same identity is still present, while
 recovery retains the stored identity for the next attempt to recheck before
-HandBrake starts. Changing the output path or observing a different final
-revokes authority rather than transferring ownership of an existing file at
-the destination.
+HandBrake starts. The identity excludes link-count ctime changes made by the
+worker's own rename and hard-link restoration. Changing the output path or
+observing a different final revokes authority rather than transferring
+ownership of an existing file at the destination.
 
 ## Transaction boundary
 
