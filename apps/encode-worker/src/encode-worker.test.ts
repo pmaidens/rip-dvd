@@ -17,6 +17,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 
@@ -85,6 +86,19 @@ const matchingCompletionRace = vi.hoisted(() => ({
   raced: false,
 }));
 
+const recoveryDirectorySyncFailure = vi.hoisted(() => ({
+  armed: false,
+  finalPath: "",
+  triggered: false,
+}));
+
+const postLinkCommitFailure = vi.hoisted(() => ({
+  armed: false,
+  finalPath: "",
+  linked: false,
+  triggered: false,
+}));
+
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
   return {
@@ -118,6 +132,12 @@ vi.mock("node:fs", async (importOriginal) => {
         });
       }
       actual.linkSync(sourcePath, destinationPath);
+      if (
+        postLinkCommitFailure.armed &&
+        destinationPath === postLinkCommitFailure.finalPath
+      ) {
+        postLinkCommitFailure.linked = true;
+      }
       if (
         publicationRace.armed &&
         destinationPath === publicationRace.finalPath
@@ -175,6 +195,22 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   return {
     ...actual,
     open: async (path: string, flags: number) => {
+      const recoveryFinalDirectory = recoveryDirectorySyncFailure.finalPath.slice(
+        0,
+        recoveryDirectorySyncFailure.finalPath.lastIndexOf("/"),
+      );
+      if (
+        recoveryDirectorySyncFailure.armed &&
+        !recoveryDirectorySyncFailure.triggered &&
+        path === recoveryFinalDirectory
+      ) {
+        await actual.unlink(recoveryDirectorySyncFailure.finalPath);
+        recoveryDirectorySyncFailure.triggered = true;
+        throw Object.assign(
+          new Error("simulated final directory sync failure"),
+          { code: "EIO" },
+        );
+      }
       const handle = await actual.open(path, flags);
       const finalDirectory = publicationRace.finalPath.slice(
         0,
@@ -275,6 +311,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 const temporaryDirectories: string[] = [];
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.useRealTimers();
   cleanupRollbackRace.resume?.();
   cleanupRollbackRace.armed = false;
@@ -289,6 +326,13 @@ afterEach(() => {
   matchingCompletionRace.competingPath = "";
   matchingCompletionRace.finalPath = "";
   matchingCompletionRace.raced = false;
+  recoveryDirectorySyncFailure.armed = false;
+  recoveryDirectorySyncFailure.finalPath = "";
+  recoveryDirectorySyncFailure.triggered = false;
+  postLinkCommitFailure.armed = false;
+  postLinkCommitFailure.finalPath = "";
+  postLinkCommitFailure.linked = false;
+  postLinkCommitFailure.triggered = false;
   publicationRace.resume?.();
   publicationRace.armed = false;
   publicationRace.finalPath = "";
@@ -438,6 +482,42 @@ function claimPartialPath(outputPath: string, claimToken: string): string {
 
 function priorFinalPath(outputPath: string, claimToken: string): string {
   return `${outputPath}.failed.${claimToken}`;
+}
+
+function failPublicationFenceCommit(finalPath: string): void {
+  postLinkCommitFailure.armed = true;
+  postLinkCommitFailure.finalPath = finalPath;
+  const prepare = DatabaseSync.prototype.prepare;
+  vi.spyOn(DatabaseSync.prototype, "prepare").mockImplementation(function (
+    this: DatabaseSync,
+    sql: string,
+  ) {
+    const statement = prepare.call(this, sql);
+    if (
+      postLinkCommitFailure.armed &&
+      postLinkCommitFailure.linked &&
+      !postLinkCommitFailure.triggered &&
+      sql.trim().toLowerCase() === "commit"
+    ) {
+      return new Proxy(statement, {
+        get(target, property) {
+          if (property === "run") {
+            return () => {
+              postLinkCommitFailure.triggered = true;
+              postLinkCommitFailure.armed = false;
+              throw Object.assign(
+                new Error("simulated publication fence COMMIT failure"),
+                { code: "SQLITE_IOERR" },
+              );
+            };
+          }
+          const value = Reflect.get(target, property, target) as unknown;
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      }) as StatementSync;
+    }
+    return statement;
+  });
 }
 
 async function waitForChildLine(
@@ -2115,6 +2195,144 @@ describe("encode worker polling", () => {
         id: fixture.job.id,
         partialCleanupClaimToken: null,
         publicationPending: false,
+        status: "failed",
+      }),
+    ]);
+    fixture.access.close();
+  });
+
+  it("does not complete matching recovery before the final directory is durable", async () => {
+    vi.useFakeTimers();
+    const fixture = createQueuedJob();
+    const claim = fixture.access.encodeJobs.claimNext("crashed-publisher");
+    if (!claim) {
+      throw new Error("Expected the Encode Job to be claimed");
+    }
+    mkdirSync(fixture.mediaLibraryPath, { recursive: true });
+    const canonicalFinalPath = join(
+      realpathSync(fixture.mediaLibraryPath),
+      basename(fixture.outputPath),
+    );
+    const partialPath = claimPartialPath(
+      canonicalFinalPath,
+      claim.claimToken,
+    );
+    writeFileSync(partialPath, "linked but not directory durable", {
+      flag: "wx",
+    });
+    fixture.access.encodeJobs.registerPartialCleanup(claim, {
+      publicationPending: true,
+    });
+    linkSync(partialPath, canonicalFinalPath);
+    vi.advanceTimersByTime(ENCODE_JOB_LEASE_DURATION_MS + 1);
+    fixture.access.encodeJobs.recoverExpiredClaims();
+    recoveryDirectorySyncFailure.armed = true;
+    recoveryDirectorySyncFailure.finalPath = canonicalFinalPath;
+    const options = {
+      access: fixture.access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      runner: { run: vi.fn() },
+      signal: new AbortController().signal,
+    };
+
+    await pollEncodeWorker(options);
+
+    expect(recoveryDirectorySyncFailure.triggered).toBe(true);
+    expect(existsSync(canonicalFinalPath)).toBe(false);
+    expect(readFileSync(partialPath, "utf8")).toBe(
+      "linked but not directory durable",
+    );
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        partialCleanupClaimToken: claim.claimToken,
+        publicationPending: true,
+        status: "failed",
+      }),
+    ]);
+
+    recoveryDirectorySyncFailure.armed = false;
+    await pollEncodeWorker(options);
+
+    expect(existsSync(partialPath)).toBe(false);
+    expect(quarantinedContents(partialPath)).toContain(
+      "linked but not directory durable",
+    );
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        partialCleanupClaimToken: null,
+        publicationPending: false,
+        status: "failed",
+      }),
+    ]);
+    fixture.access.close();
+  });
+
+  it.each([
+    { kind: "initial", reencode: false },
+    { kind: "re-encode", reencode: true },
+  ])("rolls back a $kind publication when its fence COMMIT fails", async ({
+    reencode,
+  }) => {
+    const fixture = createQueuedJob();
+    const options = {
+      access: fixture.access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      signal: new AbortController().signal,
+    };
+    if (reencode) {
+      await pollEncodeWorker({
+        ...options,
+        runner: {
+          run: vi.fn(async ({ outputPath }) => {
+            writeFileSync(outputPath, "known good encode", { flag: "wx" });
+          }),
+        },
+      });
+      fixture.access.encodeJobs.requeue(fixture.job.id);
+    }
+    mkdirSync(fixture.mediaLibraryPath, { recursive: true });
+    const canonicalFinalPath = join(
+      realpathSync(fixture.mediaLibraryPath),
+      basename(fixture.outputPath),
+    );
+    failPublicationFenceCommit(canonicalFinalPath);
+    const attemptedOutput = reencode
+      ? "unaccepted replacement"
+      : "unaccepted initial encode";
+
+    await pollEncodeWorker({
+      ...options,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, attemptedOutput, { flag: "wx" });
+        }),
+      },
+    });
+
+    expect(postLinkCommitFailure.triggered).toBe(true);
+    if (reencode) {
+      expect(readFileSync(canonicalFinalPath, "utf8")).toBe(
+        "known good encode",
+      );
+    } else {
+      expect(existsSync(canonicalFinalPath)).toBe(false);
+    }
+    expect(quarantinedContents(canonicalFinalPath)).toContain(attemptedOutput);
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        partialCleanupClaimToken: null,
+        partialCleanupOutputPath: null,
+        publicationPending: false,
+        replaceExistingOutput: reencode,
         status: "failed",
       }),
     ]);

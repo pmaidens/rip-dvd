@@ -554,6 +554,7 @@ async function reconcilePendingPublications(
         sameFile(finalMetadata, partialMetadata);
       if (finalMatchesPartial) {
         if (cleanup.publicationPending) {
+          await syncPath(dirname(finalPath));
           options.access.encodeJobs.completePublishedPartial(
             cleanup,
             () => publicationMatches(finalPath, partialPath),
@@ -845,9 +846,10 @@ async function executeClaim(
           );
         }
         linkSync(paths.partialPath, paths.finalPath);
+        published = true;
       });
     } catch (publishError) {
-      if (priorFinalFailedPath !== null) {
+      if (!published && priorFinalFailedPath !== null) {
         try {
           await restoreMovedAsideOutput(priorFinalFailedPath, finalPath);
           priorFinalRestored = true;
@@ -863,7 +865,6 @@ async function executeClaim(
       }
       throw publishError;
     }
-    published = true;
     await syncPath(dirname(finalPath));
     options.access.encodeJobs.complete(claim);
     try {
