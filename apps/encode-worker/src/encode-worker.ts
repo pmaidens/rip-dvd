@@ -2,6 +2,8 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   constants as fsConstants,
+  linkSync,
+  renameSync,
   type Stats,
 } from "node:fs";
 import {
@@ -334,11 +336,15 @@ async function optionalMetadata(path: string): Promise<Stats | null> {
 async function moveAside(
   path: string,
   reservedQuarantinePath?: string,
+  expectedMetadata?: Stats,
   authorizeRename?: () => void,
 ): Promise<string | null> {
   const metadata = await optionalMetadata(path);
   if (metadata === null) {
     return null;
+  }
+  if (expectedMetadata !== undefined && !sameFile(expectedMetadata, metadata)) {
+    throw new Error("Encode output changed before it could be quarantined");
   }
   if (!metadata.isFile() || metadata.isSymbolicLink()) {
     throw new Error("Encode output path is not a regular file");
@@ -351,8 +357,12 @@ async function moveAside(
   ) {
     throw new Error("Encode failure path is unsafe");
   }
-  authorizeRename?.();
-  await rename(path, failedPath);
+  if (authorizeRename) {
+    authorizeRename();
+    renameSync(path, failedPath);
+  } else {
+    await rename(path, failedPath);
+  }
   const quarantinedMetadata = await lstat(failedPath);
   if (!sameInode(metadata, quarantinedMetadata)) {
     try {
@@ -491,9 +501,13 @@ async function reconcilePendingPublications(
         if (cleanup.publicationPending) {
           options.access.encodeJobs.completePublishedPartial(cleanup);
         } else {
-          await moveAside(finalPath, undefined, () => {
+          await moveAside(finalPath, undefined, finalMetadata, () => {
             authorizedCleanup =
               options.access.encodeJobs.claimPartialCleanup(cleanup);
+            authorizedCleanup =
+              options.access.encodeJobs.renewPartialCleanup(
+                authorizedCleanup,
+              );
           });
           if (priorFinalMetadata !== null) {
             await restoreMovedAsideOutput(priorFinalPath, finalPath);
@@ -659,6 +673,7 @@ async function executeClaim(
   let partialPath: string | undefined;
   let replaceableFinal: Stats | undefined;
   let priorFinalFailedPath: string | null = null;
+  let priorFinalRestored = false;
   let publishedOutputMetadata: Stats | undefined;
   let pendingPartialCleanup: EncodeJobPartialCleanup | undefined;
   let published = false;
@@ -760,14 +775,22 @@ async function executeClaim(
       priorFinalFailedPath = await moveAside(
         finalPath,
         paths.priorFinalPath,
+        currentFinal,
+        () => {
+          options.access.encodeJobs.renewClaim(claim);
+          signal.throwIfAborted();
+        },
       );
     }
     try {
-      await link(partialPath, finalPath);
+      options.access.encodeJobs.renewClaim(claim);
+      signal.throwIfAborted();
+      linkSync(partialPath, finalPath);
     } catch (publishError) {
       if (priorFinalFailedPath !== null) {
         try {
           await restoreMovedAsideOutput(priorFinalFailedPath, finalPath);
+          priorFinalRestored = true;
         } catch (restoreError) {
           options.log(
             `Prior Encode Job output could not be restored: ${
@@ -798,7 +821,7 @@ async function executeClaim(
     }
   } catch (error) {
     const cleanupFailures: string[] = [];
-    let preserveReplacementAuthority = false;
+    let preserveReplacementAuthority = priorFinalRestored;
     if (published) {
       try {
         if (pendingPartialCleanup === undefined) {

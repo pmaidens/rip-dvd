@@ -447,6 +447,9 @@ export interface EncodeJobAccess {
   claimPartialCleanup(
     cleanup: EncodeJobPartialCleanup,
   ): EncodeJobPartialCleanup;
+  renewPartialCleanup(
+    cleanup: EncodeJobPartialCleanup,
+  ): EncodeJobPartialCleanup;
   completePublishedPartial(cleanup: EncodeJobPartialCleanup): EncodeJob;
   completePartialCleanup(cleanup: EncodeJobPartialCleanup): EncodeJob;
   list(

@@ -3945,6 +3945,43 @@ export function createDataAccessInternal(
         }
         return { ...cleanup, leaseToken };
       },
+      renewPartialCleanup(cleanup) {
+        if (cleanup.leaseToken === null) {
+          throw new DomainInvariantError(
+            "Encode Job cleanup renewal requires a cleanup lease",
+          );
+        }
+        const timestamp = now();
+        const expiredBefore = new Date(
+          timestamp.getTime() - ENCODE_JOB_LEASE_DURATION_MS,
+        );
+        const updated = database
+          .update(encodeJobs)
+          .set({ updatedAt: timestamp })
+          .where(
+            and(
+              eq(encodeJobs.id, cleanup.jobId),
+              inArray(encodeJobs.status, ["failed", "completed"]),
+              eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
+              eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
+              eq(
+                encodeJobs.partialCleanupLeaseToken,
+                cleanup.leaseToken,
+              ),
+              eq(encodeJobs.publicationPending, false),
+              gt(encodeJobs.updatedAt, expiredBefore),
+            ),
+          )
+          .returning()
+          .get();
+        if (!updated) {
+          throw new StaleJobAttemptError(
+            "encode job cleanup",
+            cleanup.jobId,
+          );
+        }
+        return cleanup;
+      },
       completePublishedPartial(cleanup) {
         if (!cleanup.publicationPending) {
           throw new DomainInvariantError(
