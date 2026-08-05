@@ -78,27 +78,33 @@ const staleCleanupRenameCrash = vi.hoisted(() => ({
   triggered: false,
 }));
 
-const publisherMovePause = vi.hoisted(() => ({
+const matchingCompletionRace = vi.hoisted(() => ({
   armed: false,
+  competingPath: "",
   finalPath: "",
-  finalReads: 0,
-  paused: false,
-  reached: undefined as (() => void) | undefined,
-  resume: undefined as (() => void) | undefined,
-}));
-
-const stalePublicationSnapshot = vi.hoisted(() => ({
-  armed: false,
-  partialPath: "",
-  paused: false,
-  reached: undefined as (() => void) | undefined,
-  resume: undefined as (() => void) | undefined,
+  raced: false,
 }));
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
   return {
     ...actual,
+    lstatSync: (path: string) => {
+      if (preQuarantineRace.armed && path === preQuarantineRace.finalPath) {
+        preQuarantineRace.finalReads += 1;
+        if (
+          !preQuarantineRace.raced &&
+          preQuarantineRace.finalReads === 2
+        ) {
+          actual.renameSync(
+            preQuarantineRace.competingPath,
+            preQuarantineRace.finalPath,
+          );
+          preQuarantineRace.raced = true;
+        }
+      }
+      return actual.lstatSync(path);
+    },
     linkSync: (sourcePath: string, destinationPath: string) => {
       if (
         replacementLinkFailure.armed &&
@@ -203,29 +209,16 @@ vi.mock("node:fs/promises", async (importOriginal) => {
         }
       }
       const metadata = await actual.lstat(path);
-      if (publisherMovePause.armed && path === publisherMovePause.finalPath) {
-        publisherMovePause.finalReads += 1;
-        if (
-          !publisherMovePause.paused &&
-          publisherMovePause.finalReads === 2
-        ) {
-          publisherMovePause.paused = true;
-          publisherMovePause.reached?.();
-          await new Promise<void>((resolve) => {
-            publisherMovePause.resume = resolve;
-          });
-        }
-      }
       if (
-        stalePublicationSnapshot.armed &&
-        !stalePublicationSnapshot.paused &&
-        path === stalePublicationSnapshot.partialPath
+        matchingCompletionRace.armed &&
+        !matchingCompletionRace.raced &&
+        path === matchingCompletionRace.finalPath
       ) {
-        stalePublicationSnapshot.paused = true;
-        stalePublicationSnapshot.reached?.();
-        await new Promise<void>((resolve) => {
-          stalePublicationSnapshot.resume = resolve;
-        });
+        await actual.rename(
+          matchingCompletionRace.competingPath,
+          matchingCompletionRace.finalPath,
+        );
+        matchingCompletionRace.raced = true;
       }
       if (
         cleanupRollbackRace.armed &&
@@ -292,19 +285,10 @@ afterEach(() => {
   staleCleanupRenameCrash.armed = false;
   staleCleanupRenameCrash.finalPath = "";
   staleCleanupRenameCrash.triggered = false;
-  publisherMovePause.resume?.();
-  publisherMovePause.armed = false;
-  publisherMovePause.finalPath = "";
-  publisherMovePause.finalReads = 0;
-  publisherMovePause.paused = false;
-  publisherMovePause.reached = undefined;
-  publisherMovePause.resume = undefined;
-  stalePublicationSnapshot.resume?.();
-  stalePublicationSnapshot.armed = false;
-  stalePublicationSnapshot.partialPath = "";
-  stalePublicationSnapshot.paused = false;
-  stalePublicationSnapshot.reached = undefined;
-  stalePublicationSnapshot.resume = undefined;
+  matchingCompletionRace.armed = false;
+  matchingCompletionRace.competingPath = "";
+  matchingCompletionRace.finalPath = "";
+  matchingCompletionRace.raced = false;
   publicationRace.resume?.();
   publicationRace.armed = false;
   publicationRace.finalPath = "";
@@ -463,16 +447,25 @@ async function waitForChildLine(
   child.stdout.setEncoding("utf8");
   let output = "";
   await new Promise<void>((resolve, reject) => {
+    const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+      reject(
+        new Error(
+          `Child exited before ${expected}: ${String(code)} ${String(signal)}`,
+        ),
+      );
+    };
     const onData = (chunk: string) => {
       output += chunk;
       if (output.split("\n").includes(expected)) {
         child.stdout.off("data", onData);
         child.off("error", reject);
+        child.off("exit", onExit);
         resolve();
       }
     };
     child.stdout.on("data", onData);
     child.once("error", reject);
+    child.once("exit", onExit);
   });
 }
 
@@ -1283,7 +1276,7 @@ describe("encode worker polling", () => {
     fixture.access.close();
   });
 
-  it("re-fences a renewed publisher before moving after expiry", async () => {
+  it("re-fences a renewed publisher invalidated before mutation", async () => {
     vi.useFakeTimers();
     const fixture = createQueuedJob();
     const reconcilingAccess = createLegacySidecarDataAccess({
@@ -1306,26 +1299,15 @@ describe("encode worker polling", () => {
       },
     });
     fixture.access.encodeJobs.requeue(fixture.job.id);
-    publisherMovePause.finalPath = join(
-      realpathSync(fixture.mediaLibraryPath),
-      basename(fixture.outputPath),
-    );
-    let publisherReachedMove!: () => void;
-    const publisherReachedMoveBoundary = new Promise<void>((resolve) => {
-      publisherReachedMove = resolve;
-    });
-    publisherMovePause.reached = publisherReachedMove;
-    let snapshotRead!: () => void;
-    const staleSnapshotWasRead = new Promise<void>((resolve) => {
-      snapshotRead = resolve;
-    });
-    stalePublicationSnapshot.reached = snapshotRead;
     const renewClaim = fixture.access.encodeJobs.renewClaim.bind(
       fixture.access.encodeJobs,
     );
+    const withClaimMutationFence =
+      fixture.access.encodeJobs.withClaimMutationFence.bind(
+        fixture.access.encodeJobs,
+      );
     let firstRenewalCompleted = false;
-    let allowBoundaryRenewal = false;
-    let replacementPartialPath = "";
+    let invalidatedBeforeFence = false;
     const stalePublisherAccess: DataAccess = {
       ...fixture.access,
       encodeJobs: {
@@ -1336,45 +1318,37 @@ describe("encode worker polling", () => {
             firstRenewalCompleted = true;
             return renewed;
           }
-          return allowBoundaryRenewal ? renewClaim(claim) : claim;
+          return claim;
+        },
+        withClaimMutationFence(claim, mutation) {
+          vi.advanceTimersByTime(ENCODE_JOB_LEASE_DURATION_MS + 1);
+          expect(reconcilingAccess.encodeJobs.recoverExpiredClaims()).toEqual([
+            expect.objectContaining({ id: claim.id, status: "failed" }),
+          ]);
+          invalidatedBeforeFence = true;
+          return withClaimMutationFence(claim, mutation);
         },
       },
     };
-    const publisherPoll = pollEncodeWorker({
+
+    await pollEncodeWorker({
       ...options,
       access: stalePublisherAccess,
       runner: {
         run: vi.fn(async ({ outputPath }) => {
-          replacementPartialPath = outputPath;
           writeFileSync(outputPath, "stale replacement", { flag: "wx" });
-          publisherMovePause.armed = true;
         }),
       },
       workerId: "renewed-stale-publisher",
     });
-    await publisherReachedMoveBoundary;
     expect(firstRenewalCompleted).toBe(true);
-    await vi.advanceTimersByTimeAsync(ENCODE_JOB_LEASE_DURATION_MS + 1);
-    expect(reconcilingAccess.encodeJobs.recoverExpiredClaims()).toEqual([
-      expect.objectContaining({ id: fixture.job.id, status: "failed" }),
-    ]);
-    stalePublicationSnapshot.partialPath = replacementPartialPath;
-    stalePublicationSnapshot.armed = true;
-    const reconciliationPoll = pollEncodeWorker({
+    expect(invalidatedBeforeFence).toBe(true);
+    await pollEncodeWorker({
       ...options,
       access: reconcilingAccess,
       runner: { run: vi.fn() },
-      workerId: "stale-snapshot-reconciler",
+      workerId: "reconciling-worker",
     });
-    await staleSnapshotWasRead;
-
-    allowBoundaryRenewal = true;
-    publisherMovePause.armed = false;
-    publisherMovePause.resume?.();
-    await publisherPoll;
-    stalePublicationSnapshot.armed = false;
-    stalePublicationSnapshot.resume?.();
-    await reconciliationPoll;
 
     expect(readFileSync(fixture.outputPath, "utf8")).toBe(
       "known good encode",
@@ -1556,8 +1530,8 @@ describe("encode worker polling", () => {
     const secondReconciler = createLegacySidecarDataAccess({
       databasePath: fixture.databasePath,
     });
-    const claimPartialCleanup =
-      firstReconciler.encodeJobs.claimPartialCleanup.bind(
+    const withPartialCleanupMutationFence =
+      firstReconciler.encodeJobs.withPartialCleanupMutationFence.bind(
         firstReconciler.encodeJobs,
       );
     let interleavingCompleted = false;
@@ -1565,9 +1539,7 @@ describe("encode worker polling", () => {
       ...firstReconciler,
       encodeJobs: {
         ...firstReconciler.encodeJobs,
-        claimPartialCleanup(cleanup) {
-          const staleCleanup = claimPartialCleanup(cleanup);
-          vi.advanceTimersByTime(ENCODE_JOB_LEASE_DURATION_MS + 1);
+        withPartialCleanupMutationFence(cleanup, mutation) {
           const currentCleanup =
             secondReconciler.encodeJobs.claimPartialCleanup(cleanup);
           renameSync(
@@ -1604,7 +1576,7 @@ describe("encode worker polling", () => {
           staleCleanupRenameCrash.armed = true;
           staleCleanupRenameCrash.finalPath = canonicalFinalPath;
           interleavingCompleted = true;
-          return staleCleanup;
+          return withPartialCleanupMutationFence(cleanup, mutation);
         },
       },
     };
@@ -2073,6 +2045,82 @@ describe("encode worker polling", () => {
     fixture.access.close();
   });
 
+  it("does not accept a matching publication replaced after its snapshot", async () => {
+    vi.useFakeTimers();
+    const fixture = createQueuedJob();
+    const claim = fixture.access.encodeJobs.claimNext("crashed-publisher");
+    if (!claim) {
+      throw new Error("Expected the Encode Job to be claimed");
+    }
+    mkdirSync(fixture.mediaLibraryPath, { recursive: true });
+    const canonicalFinalPath = join(
+      realpathSync(fixture.mediaLibraryPath),
+      basename(fixture.outputPath),
+    );
+    const partialPath = claimPartialPath(
+      canonicalFinalPath,
+      claim.claimToken,
+    );
+    writeFileSync(partialPath, "worker publication", { flag: "wx" });
+    fixture.access.encodeJobs.registerPartialCleanup(claim, {
+      publicationPending: true,
+    });
+    linkSync(partialPath, canonicalFinalPath);
+    matchingCompletionRace.competingPath = join(
+      fixture.mediaLibraryPath,
+      ".matching-completion-competitor.mkv",
+    );
+    matchingCompletionRace.finalPath = canonicalFinalPath;
+    writeFileSync(
+      matchingCompletionRace.competingPath,
+      "competing publication",
+      { flag: "wx" },
+    );
+    vi.advanceTimersByTime(ENCODE_JOB_LEASE_DURATION_MS + 1);
+    fixture.access.encodeJobs.recoverExpiredClaims();
+    matchingCompletionRace.armed = true;
+    const options = {
+      access: fixture.access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      runner: { run: vi.fn() },
+      signal: new AbortController().signal,
+    };
+
+    await pollEncodeWorker(options);
+
+    expect(matchingCompletionRace.raced).toBe(true);
+    expect(readFileSync(fixture.outputPath, "utf8")).toBe(
+      "competing publication",
+    );
+    expect(readFileSync(partialPath, "utf8")).toBe("worker publication");
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        partialCleanupClaimToken: claim.claimToken,
+        publicationPending: true,
+        status: "failed",
+      }),
+    ]);
+
+    matchingCompletionRace.armed = false;
+    await pollEncodeWorker(options);
+
+    expect(existsSync(partialPath)).toBe(false);
+    expect(quarantinedContents(partialPath)).toContain("worker publication");
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        partialCleanupClaimToken: null,
+        publicationPending: false,
+        status: "failed",
+      }),
+    ]);
+    fixture.access.close();
+  });
+
   it.each([
     {
       boundary: "final-linked",
@@ -2248,6 +2296,227 @@ describe("encode worker polling", () => {
           "known good encode",
         );
       }
+      vi.useRealTimers();
+      fixture.access.close();
+    },
+  );
+
+  it.each([
+    { boundary: "post-authority" },
+    { boundary: "post-rename" },
+  ] as const)(
+    "recovers a re-encode publication killed at its $boundary fence",
+    async ({ boundary }) => {
+      const fixture = createQueuedJob();
+      const options = {
+        access: fixture.access,
+        concurrency: 1,
+        log: vi.fn(),
+        mediaLibraryPath: fixture.mediaLibraryPath,
+        originalsLibraryPath: fixture.originalsLibraryPath,
+        signal: new AbortController().signal,
+      };
+      await pollEncodeWorker({
+        ...options,
+        runner: {
+          run: vi.fn(async ({ outputPath }) => {
+            writeFileSync(outputPath, "known good encode", { flag: "wx" });
+          }),
+        },
+      });
+      fixture.access.encodeJobs.requeue(fixture.job.id);
+      const claim = fixture.access.encodeJobs.claimNext("fenced-publisher");
+      if (!claim) {
+        throw new Error("Expected the fenced publication claim");
+      }
+      const canonicalFinalPath = join(
+        realpathSync(fixture.mediaLibraryPath),
+        basename(fixture.outputPath),
+      );
+      const partialPath = claimPartialPath(
+        canonicalFinalPath,
+        claim.claimToken,
+      );
+      const priorPath = priorFinalPath(
+        canonicalFinalPath,
+        claim.claimToken,
+      );
+      writeFileSync(partialPath, "fenced replacement", { flag: "wx" });
+      fixture.access.encodeJobs.registerPartialCleanup(claim, {
+        publicationPending: true,
+      });
+      const child = spawnProcess(
+        process.execPath,
+        [
+          fileURLToPath(
+            new URL(
+              "./test-fixtures/mutation-fence-kill-helper.mjs",
+              import.meta.url,
+            ),
+          ),
+          "publication",
+          boundary,
+          fixture.databasePath,
+          canonicalFinalPath,
+          partialPath,
+          priorPath,
+        ],
+        { stdio: ["pipe", "pipe", "pipe"] },
+      );
+
+      await waitForChildLine(child, boundary);
+      await killChild(child);
+      vi.useFakeTimers();
+      vi.setSystemTime(Date.now() + ENCODE_JOB_LEASE_DURATION_MS + 1);
+      await pollEncodeWorker({
+        ...options,
+        runner: { run: vi.fn() },
+        workerId: "publication-recovery",
+      });
+
+      expect(readFileSync(fixture.outputPath, "utf8")).toBe(
+        "known good encode",
+      );
+      expect(fixture.access.encodeJobs.list()).toEqual([
+        expect.objectContaining({
+          id: fixture.job.id,
+          partialCleanupClaimToken: null,
+          publicationPending: false,
+          status: "failed",
+        }),
+      ]);
+      fixture.access.encodeJobs.requeue(fixture.job.id);
+      await pollEncodeWorker({
+        ...options,
+        runner: {
+          run: vi.fn(async ({ outputPath }) => {
+            writeFileSync(outputPath, "accepted publication retry", {
+              flag: "wx",
+            });
+          }),
+        },
+        workerId: "accepted-publication-retry",
+      });
+      expect(readFileSync(fixture.outputPath, "utf8")).toBe(
+        "accepted publication retry",
+      );
+      expect(fixture.access.encodeJobs.list()).toEqual([
+        expect.objectContaining({ id: fixture.job.id, status: "completed" }),
+      ]);
+      vi.useRealTimers();
+      fixture.access.close();
+    },
+  );
+
+  it.each([
+    { boundary: "post-authority" },
+    { boundary: "post-rename" },
+  ] as const)(
+    "recovers revoked cleanup killed at its $boundary fence",
+    async ({ boundary }) => {
+      const fixture = createQueuedJob();
+      const options = {
+        access: fixture.access,
+        concurrency: 1,
+        log: vi.fn(),
+        mediaLibraryPath: fixture.mediaLibraryPath,
+        originalsLibraryPath: fixture.originalsLibraryPath,
+        signal: new AbortController().signal,
+      };
+      await pollEncodeWorker({
+        ...options,
+        runner: {
+          run: vi.fn(async ({ outputPath }) => {
+            writeFileSync(outputPath, "known good encode", { flag: "wx" });
+          }),
+        },
+      });
+      fixture.access.encodeJobs.requeue(fixture.job.id);
+      const claim = fixture.access.encodeJobs.claimNext("revoked-publisher");
+      if (!claim) {
+        throw new Error("Expected the revoked publication claim");
+      }
+      const canonicalFinalPath = join(
+        realpathSync(fixture.mediaLibraryPath),
+        basename(fixture.outputPath),
+      );
+      const partialPath = claimPartialPath(
+        canonicalFinalPath,
+        claim.claimToken,
+      );
+      const priorPath = priorFinalPath(
+        canonicalFinalPath,
+        claim.claimToken,
+      );
+      const quarantinePath = `${canonicalFinalPath}.failed.cleanup-kill-${boundary}`;
+      writeFileSync(partialPath, "revoked replacement", { flag: "wx" });
+      const publication = fixture.access.encodeJobs.registerPartialCleanup(
+        claim,
+        { publicationPending: true },
+      );
+      renameSync(canonicalFinalPath, priorPath);
+      linkSync(partialPath, canonicalFinalPath);
+      fixture.access.encodeJobs.revokePublication(claim, publication);
+      fixture.access.encodeJobs.fail(claim, "publication revoked", {
+        preserveReplacementAuthority: true,
+      });
+      const child = spawnProcess(
+        process.execPath,
+        [
+          fileURLToPath(
+            new URL(
+              "./test-fixtures/mutation-fence-kill-helper.mjs",
+              import.meta.url,
+            ),
+          ),
+          "cleanup",
+          boundary,
+          fixture.databasePath,
+          canonicalFinalPath,
+          partialPath,
+          priorPath,
+          quarantinePath,
+        ],
+        { stdio: ["pipe", "pipe", "pipe"] },
+      );
+
+      await waitForChildLine(child, boundary);
+      await killChild(child);
+      vi.useFakeTimers();
+      vi.setSystemTime(Date.now() + ENCODE_JOB_LEASE_DURATION_MS + 1);
+      await pollEncodeWorker({
+        ...options,
+        runner: { run: vi.fn() },
+        workerId: "cleanup-recovery",
+      });
+
+      expect(readFileSync(fixture.outputPath, "utf8")).toBe(
+        "known good encode",
+      );
+      expect(fixture.access.encodeJobs.list()).toEqual([
+        expect.objectContaining({
+          id: fixture.job.id,
+          partialCleanupClaimToken: null,
+          publicationPending: false,
+          status: "failed",
+        }),
+      ]);
+      fixture.access.encodeJobs.requeue(fixture.job.id);
+      await pollEncodeWorker({
+        ...options,
+        runner: {
+          run: vi.fn(async ({ outputPath }) => {
+            writeFileSync(outputPath, "accepted retry", { flag: "wx" });
+          }),
+        },
+        workerId: "accepted-retry",
+      });
+      expect(readFileSync(fixture.outputPath, "utf8")).toBe(
+        "accepted retry",
+      );
+      expect(fixture.access.encodeJobs.list()).toEqual([
+        expect.objectContaining({ id: fixture.job.id, status: "completed" }),
+      ]);
       vi.useRealTimers();
       fixture.access.close();
     },

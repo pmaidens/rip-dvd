@@ -746,7 +746,7 @@ try {
       throw new Error("Expected cutover partial cleanup provenance");
     }
     expect(() =>
-      access.encodeJobs.completePublishedPartial(cutoverCleanup),
+      access.encodeJobs.completePublishedPartial(cutoverCleanup, () => true),
     ).toThrow(/not publication provenance/);
     access.close();
   });
