@@ -137,7 +137,13 @@ and every mutation from the expired attempt is rejected. The same transaction
 records the expired claim's output path and token as durable partial-cleanup
 provenance. Queued work with pending cleanup cannot be claimed, and cleanup
 acknowledgement compares both retained values so a later path change cannot
-orphan or acknowledge the wrong partial.
+orphan or acknowledge the wrong partial. The encode worker also records this
+provenance before filesystem publication, marks that cleanup as
+publication-pending, and retains the partial inode until SQLite completion. A
+failed or already-completed job with the exact flagged provenance can therefore
+be completed by crash reconciliation before cleanup is acknowledged. Timeout
+cleanup and legacy cutover invalidation never set that flag, so queued,
+cutover-invalidated, and unrelated attempts cannot use the transition.
 
 Requeue grants replacement authority only when a completed Encode Job keeps
 its output path. The worker records the owned final's filesystem identity;

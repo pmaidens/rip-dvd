@@ -733,11 +733,20 @@ try {
     expect(access.encodeJobs.list()).toEqual([
       expect.objectContaining({ id: running.id, status: "failed" }),
     ]);
-    expect(access.encodeJobs.listPendingPartialCleanups()).toContainEqual({
+    const [cutoverCleanup] =
+      access.encodeJobs.listPendingPartialCleanups();
+    expect(cutoverCleanup).toEqual({
       claimToken: running.claimToken,
       jobId: running.id,
       outputPath: running.outputPath,
+      publicationPending: false,
     });
+    if (!cutoverCleanup) {
+      throw new Error("Expected cutover partial cleanup provenance");
+    }
+    expect(() =>
+      access.encodeJobs.completePublishedPartial(cutoverCleanup),
+    ).toThrow(/not publication provenance/);
     access.close();
   });
 
@@ -2678,6 +2687,7 @@ try {
       claimToken: running.claimToken,
       jobId: running.id,
       outputPath: running.outputPath,
+      publicationPending: false,
     });
     service.close();
   });

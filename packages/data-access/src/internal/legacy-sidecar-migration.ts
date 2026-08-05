@@ -276,6 +276,7 @@ export function createLegacySidecarImportAccess(
               .set({
                 partialCleanupOutputPath: sql`${encodeJobs.outputPath}`,
                 partialCleanupClaimToken: sql`${encodeJobs.claimToken}`,
+                publicationPending: false,
                 status: "failed",
                 completedAt: null,
                 errorMessage:

@@ -235,6 +235,7 @@ export function reconcileLegacyRepairCutover(
       UPDATE encode_jobs
       SET partial_cleanup_output_path = output_path,
           partial_cleanup_claim_token = claim_token,
+          publication_pending = 0,
           status = 'failed',
           completed_at = NULL,
           error_message = 'Encode Job invalidated by legacy catalog cutover repair',

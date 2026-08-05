@@ -202,6 +202,7 @@ export interface EncodeJob {
   replacementOutputIdentity: string | null;
   partialCleanupOutputPath: string | null;
   partialCleanupClaimToken: EncodeJobClaimToken | null;
+  publicationPending: boolean;
   progressPhase: EncodeProgressPhase | null;
   progressPercent: number;
   progressEtaSeconds: number | null;
@@ -235,6 +236,11 @@ export interface EncodeJobPartialCleanup {
   jobId: EncodeJobId;
   outputPath: string;
   claimToken: EncodeJobClaimToken;
+  publicationPending: boolean;
+}
+
+export interface EncodeJobPartialCleanupOptions {
+  publicationPending?: boolean;
 }
 
 export interface EncodeJobFailureOptions {
@@ -426,8 +432,12 @@ export interface EncodeJobAccess {
     claim: RunningEncodeJob,
     identity: string,
   ): RunningEncodeJob;
-  registerPartialCleanup(claim: RunningEncodeJob): EncodeJobPartialCleanup;
+  registerPartialCleanup(
+    claim: RunningEncodeJob,
+    options?: EncodeJobPartialCleanupOptions,
+  ): EncodeJobPartialCleanup;
   listPendingPartialCleanups(): EncodeJobPartialCleanup[];
+  completePublishedPartial(cleanup: EncodeJobPartialCleanup): EncodeJob;
   completePartialCleanup(cleanup: EncodeJobPartialCleanup): EncodeJob;
   list(
     statuses?: JobStatus[],

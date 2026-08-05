@@ -381,6 +381,9 @@ export const encodeJobs = sqliteTable(
     partialCleanupOutputPath: text("partial_cleanup_output_path"),
     partialCleanupClaimToken: text("partial_cleanup_claim_token")
       .$type<EncodeJobClaimToken>(),
+    publicationPending: integer("publication_pending", { mode: "boolean" })
+      .notNull()
+      .default(false),
     progressPhase: text("progress_phase", {
       enum: ENCODE_PROGRESS_PHASES,
     }),
@@ -432,6 +435,10 @@ export const encodeJobs = sqliteTable(
     check(
       "encode_jobs_partial_cleanup_pair_check",
       sql`(${table.partialCleanupOutputPath} is null) = (${table.partialCleanupClaimToken} is null)`,
+    ),
+    check(
+      "encode_jobs_publication_pending_cleanup_check",
+      sql`${table.publicationPending} = 0 or ${table.partialCleanupClaimToken} is not null`,
     ),
   ],
 );
