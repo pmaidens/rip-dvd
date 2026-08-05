@@ -1952,11 +1952,19 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     ).toContainEqual({ name: "legacy_cutover_pending" });
     expect(
       sqlite
+        .prepare("select name from pragma_table_info('encode_jobs')")
+        .all(),
+    ).toContainEqual({ name: "publication_pending" });
+    expect(
+      sqlite
         .prepare(
-          "select name from __drizzle_migrations order by id desc limit 6",
+          "select name from __drizzle_migrations order by id desc limit 7",
         )
         .all(),
     ).toEqual([
+      {
+        name: "20260805142313_glamorous_rage",
+      },
       {
         name: "20260805022523_far_archangel",
       },
@@ -4882,6 +4890,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       claimToken: abandoned.claimToken,
       jobId: job.id,
       outputPath: abandoned.outputPath,
+      publicationPending: false,
     });
     if (!cleanup) {
       throw new Error("Expected pending Encode Job partial cleanup");

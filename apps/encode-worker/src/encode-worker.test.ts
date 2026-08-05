@@ -1,4 +1,8 @@
-import { EventEmitter } from "node:events";
+import {
+  spawn as spawnProcess,
+  type ChildProcessWithoutNullStreams,
+} from "node:child_process";
+import { EventEmitter, once } from "node:events";
 import {
   existsSync,
   mkdirSync,
@@ -12,6 +16,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
+import { fileURLToPath } from "node:url";
 
 import {
   ENCODE_JOB_LEASE_DURATION_MS,
@@ -26,9 +31,56 @@ import {
   type HandBrakeRunner,
 } from "./encode-worker.js";
 
+const quarantineRace = vi.hoisted(() => ({
+  armed: false,
+  competingPath: "",
+  finalPath: "",
+  observed: [] as string[],
+  raced: false,
+}));
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  const publishCompetitorAfterQuarantine = async (
+    sourcePath: string,
+    quarantinePath: string,
+  ) => {
+    quarantineRace.observed.push(`${sourcePath} -> ${quarantinePath}`);
+    if (
+      quarantineRace.armed &&
+      !quarantineRace.raced &&
+      sourcePath === quarantineRace.finalPath &&
+      quarantinePath.startsWith(`${quarantineRace.finalPath}.failed`)
+    ) {
+      await actual.rename(
+        quarantineRace.competingPath,
+        quarantineRace.finalPath,
+      );
+      quarantineRace.raced = true;
+    }
+  };
+  return {
+    ...actual,
+    link: async (sourcePath: string, destinationPath: string) => {
+      await actual.link(sourcePath, destinationPath);
+      await publishCompetitorAfterQuarantine(sourcePath, destinationPath);
+    },
+    rename: async (sourcePath: string, destinationPath: string) => {
+      await actual.rename(sourcePath, destinationPath);
+      await publishCompetitorAfterQuarantine(sourcePath, destinationPath);
+    },
+  };
+});
+
 const temporaryDirectories: string[] = [];
 
 afterEach(() => {
+  vi.useRealTimers();
+  quarantineRace.armed = false;
+  quarantineRace.competingPath = "";
+  quarantineRace.finalPath = "";
+  quarantineRace.observed = [];
+  quarantineRace.raced = false;
   for (const directory of temporaryDirectories.splice(0)) {
     rmSync(directory, { force: true, recursive: true });
   }
@@ -140,6 +192,49 @@ function addQueuedJob(
     encodingProfileId: fixture.profile.id,
     outputPath: join(fixture.mediaLibraryPath, `${title}.mkv`),
   });
+}
+
+function quarantinedContents(path: string): string[] {
+  const prefix = `${basename(path)}.failed.`;
+  return readdirSync(dirname(path))
+    .filter((name) => name.startsWith(prefix))
+    .map((name) => readFileSync(join(dirname(path), name), "utf8"));
+}
+
+function claimPartialPath(outputPath: string, claimToken: string): string {
+  return join(
+    dirname(outputPath),
+    `.${basename(outputPath)}.${claimToken}.rip-dvd-partial`,
+  );
+}
+
+function priorFinalPath(outputPath: string, claimToken: string): string {
+  return `${outputPath}.failed.${claimToken}`;
+}
+
+async function waitForChildLine(
+  child: ChildProcessWithoutNullStreams,
+  expected: string,
+): Promise<void> {
+  child.stdout.setEncoding("utf8");
+  let output = "";
+  await new Promise<void>((resolve, reject) => {
+    const onData = (chunk: string) => {
+      output += chunk;
+      if (output.split("\n").includes(expected)) {
+        child.stdout.off("data", onData);
+        child.off("error", reject);
+        resolve();
+      }
+    };
+    child.stdout.on("data", onData);
+    child.once("error", reject);
+  });
+}
+
+async function killChild(child: ChildProcessWithoutNullStreams): Promise<void> {
+  child.kill("SIGKILL");
+  await once(child, "exit");
 }
 
 describe("encode worker polling", () => {
@@ -283,7 +378,7 @@ describe("encode worker polling", () => {
     const failingRunner: HandBrakeRunner = {
       run: vi.fn(async ({ arguments_, onOutput }) => {
         failedAttemptPath = arguments_[arguments_.indexOf("-o") + 1]!;
-        expect(readFileSync(`${legacyPartialPath}.failed.1`, "utf8")).toBe(
+        expect(quarantinedContents(legacyPartialPath)).toContain(
           "stale partial",
         );
         expect(readFileSync(`${legacyPartialPath}.failed`, "utf8")).toBe(
@@ -306,9 +401,7 @@ describe("encode worker polling", () => {
     });
 
     expect(existsSync(fixture.outputPath)).toBe(false);
-    expect(readFileSync(`${failedAttemptPath}.failed`, "utf8")).toBe(
-      "failed attempt",
-    );
+    expect(quarantinedContents(failedAttemptPath)).toContain("failed attempt");
     expect(fixture.access.encodeJobs.list()).toEqual([
       expect.objectContaining({
         id: fixture.job.id,
@@ -539,7 +632,7 @@ describe("encode worker polling", () => {
     });
 
     expect(readFileSync(fixture.outputPath, "utf8")).toBe("competing output");
-    expect(readFileSync(`${partialPath}.failed`, "utf8")).toBe("new encode");
+    expect(quarantinedContents(partialPath)).toContain("new encode");
     expect(fixture.access.encodeJobs.list()).toEqual([
       expect.objectContaining({
         id: fixture.job.id,
@@ -591,11 +684,112 @@ describe("encode worker polling", () => {
     await pollEncodeWorker({ ...options, runner: replacementRunner });
 
     expect(readFileSync(fixture.outputPath, "utf8")).toBe("new encode");
-    expect(readFileSync(`${fixture.outputPath}.failed`, "utf8")).toBe(
-      "old encode",
-    );
+    expect(quarantinedContents(fixture.outputPath)).toContain("old encode");
     expect(fixture.access.encodeJobs.list()).toEqual([
       expect.objectContaining({ id: fixture.job.id, status: "completed" }),
+    ]);
+    fixture.access.close();
+  });
+
+  it("restores the prior final when replacement publication cannot be completed in SQLite", async () => {
+    const fixture = createQueuedJob();
+    const options = {
+      access: fixture.access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      signal: new AbortController().signal,
+    };
+    await pollEncodeWorker({
+      ...options,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "known good encode", { flag: "wx" });
+        }),
+      },
+    });
+    fixture.access.encodeJobs.requeue(fixture.job.id);
+    vi.spyOn(fixture.access.encodeJobs, "complete").mockImplementationOnce(
+      () => {
+        throw new Error("database completion failed");
+      },
+    );
+
+    await pollEncodeWorker({
+      ...options,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "uncommitted replacement", { flag: "wx" });
+        }),
+      },
+    });
+
+    expect(readFileSync(fixture.outputPath, "utf8")).toBe("known good encode");
+    expect(quarantinedContents(fixture.outputPath)).toContain(
+      "uncommitted replacement",
+    );
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        replaceExistingOutput: true,
+        status: "failed",
+      }),
+    ]);
+    fixture.access.close();
+  });
+
+  it("never unlinks a competing atomic publisher while quarantining a prior final", async () => {
+    const fixture = createQueuedJob();
+    const options = {
+      access: fixture.access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      signal: new AbortController().signal,
+    };
+    await pollEncodeWorker({
+      ...options,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "known good encode", { flag: "wx" });
+        }),
+      },
+    });
+    fixture.access.encodeJobs.requeue(fixture.job.id);
+    quarantineRace.finalPath = join(
+      realpathSync(fixture.mediaLibraryPath),
+      basename(fixture.outputPath),
+    );
+    quarantineRace.competingPath = join(
+      fixture.mediaLibraryPath,
+      ".competing-publisher.mkv",
+    );
+
+    await pollEncodeWorker({
+      ...options,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "worker replacement", { flag: "wx" });
+          writeFileSync(
+            quarantineRace.competingPath,
+            "competing atomic publication",
+            { flag: "wx" },
+          );
+          quarantineRace.armed = true;
+        }),
+      },
+    });
+
+    expect(quarantineRace.raced, quarantineRace.observed.join("\n")).toBe(
+      true,
+    );
+    expect(readFileSync(fixture.outputPath, "utf8")).toBe(
+      "competing atomic publication",
+    );
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({ id: fixture.job.id, status: "failed" }),
     ]);
     fixture.access.close();
   });
@@ -654,7 +848,7 @@ describe("encode worker polling", () => {
     expect(readFileSync(fixture.outputPath, "utf8")).toBe(
       "successful replacement",
     );
-    expect(readFileSync(`${fixture.outputPath}.failed`, "utf8")).toBe(
+    expect(quarantinedContents(fixture.outputPath)).toContain(
       "known good encode",
     );
     fixture.access.close();
@@ -717,9 +911,7 @@ describe("encode worker polling", () => {
     writeFileSync(stalePartial, "crashed encode", { flag: "wx" });
     const runner: HandBrakeRunner = {
       run: vi.fn(async ({ outputPath }) => {
-        expect(readFileSync(`${stalePartial}.failed`, "utf8")).toBe(
-          "crashed encode",
-        );
+        expect(quarantinedContents(stalePartial)).toContain("crashed encode");
         writeFileSync(outputPath, "recovered encode", { flag: "wx" });
       }),
     };
@@ -767,7 +959,7 @@ describe("encode worker polling", () => {
     });
 
     expect(readFileSync(partialPath, "utf8")).toBe("still being written");
-    expect(existsSync(`${partialPath}.failed`)).toBe(false);
+    expect(quarantinedContents(partialPath)).toEqual([]);
     expect(fixture.access.encodeJobs.list()).toEqual([
       expect.objectContaining({
         id: fixture.job.id,
@@ -785,9 +977,7 @@ describe("encode worker polling", () => {
         [],
       ),
     );
-    expect(readFileSync(`${partialPath}.failed`, "utf8")).toBe(
-      "still being written",
-    );
+    expect(quarantinedContents(partialPath)).toContain("still being written");
     fixture.access.close();
   });
 
@@ -820,7 +1010,7 @@ describe("encode worker polling", () => {
     });
     const runner: HandBrakeRunner = {
       run: vi.fn(async ({ outputPath }) => {
-        expect(readFileSync(`${abandonedPartial}.failed`, "utf8")).toBe(
+        expect(quarantinedContents(abandonedPartial)).toContain(
           "abandoned process output",
         );
         writeFileSync(outputPath, "recovered encode", { flag: "wx" });
@@ -838,7 +1028,7 @@ describe("encode worker polling", () => {
     });
 
     expect(runner.run).toHaveBeenCalledOnce();
-    expect(readFileSync(`${abandonedPartial}.failed`, "utf8")).toBe(
+    expect(quarantinedContents(abandonedPartial)).toContain(
       "abandoned process output",
     );
     expect(readFileSync(replacementOutputPath, "utf8")).toBe(
@@ -855,6 +1045,186 @@ describe("encode worker polling", () => {
     vi.useRealTimers();
     fixture.access.close();
   });
+
+  it.each([
+    {
+      boundary: "final-linked",
+      kind: "initial",
+      publicationPending: true,
+      reencode: false,
+    },
+    {
+      boundary: "directory-synced",
+      kind: "initial",
+      publicationPending: true,
+      reencode: false,
+    },
+    {
+      boundary: "database-completed",
+      kind: "initial",
+      publicationPending: true,
+      reencode: false,
+    },
+    {
+      boundary: "partial-unlinked",
+      kind: "initial",
+      publicationPending: true,
+      reencode: false,
+    },
+    {
+      boundary: "final-linked",
+      kind: "re-encode",
+      publicationPending: true,
+      reencode: true,
+    },
+    {
+      boundary: "directory-synced",
+      kind: "re-encode",
+      publicationPending: true,
+      reencode: true,
+    },
+    {
+      boundary: "database-completed",
+      kind: "re-encode",
+      publicationPending: true,
+      reencode: true,
+    },
+    {
+      boundary: "partial-unlinked",
+      kind: "re-encode",
+      publicationPending: true,
+      reencode: true,
+    },
+    {
+      boundary: "final-linked",
+      kind: "revoked initial",
+      publicationPending: false,
+      reencode: false,
+    },
+    {
+      boundary: "final-linked",
+      kind: "revoked re-encode",
+      publicationPending: false,
+      reencode: true,
+    },
+  ])(
+    "reconciles a $kind publication after process kill at $boundary",
+    async ({ boundary, publicationPending, reencode }) => {
+      const fixture = createQueuedJob();
+      const options = {
+        access: fixture.access,
+        concurrency: 1,
+        log: vi.fn(),
+        mediaLibraryPath: fixture.mediaLibraryPath,
+        originalsLibraryPath: fixture.originalsLibraryPath,
+        signal: new AbortController().signal,
+      };
+      if (reencode) {
+        await pollEncodeWorker({
+          ...options,
+          runner: {
+            run: vi.fn(async ({ outputPath }) => {
+              writeFileSync(outputPath, "known good encode", { flag: "wx" });
+            }),
+          },
+        });
+        fixture.access.encodeJobs.requeue(fixture.job.id);
+      }
+      mkdirSync(fixture.mediaLibraryPath, { recursive: true });
+      const claim = fixture.access.encodeJobs.claimNext("crashed-publisher");
+      if (!claim) {
+        throw new Error("Expected a publication claim");
+      }
+      const canonicalFinalPath = join(
+        realpathSync(fixture.mediaLibraryPath),
+        basename(fixture.outputPath),
+      );
+      const partialPath = claimPartialPath(
+        canonicalFinalPath,
+        claim.claimToken,
+      );
+      const priorPath = reencode
+        ? priorFinalPath(canonicalFinalPath, claim.claimToken)
+        : "";
+      writeFileSync(partialPath, "published before crash", { flag: "wx" });
+      expect(
+        fixture.access.encodeJobs.registerPartialCleanup(claim, {
+          publicationPending,
+        }),
+      ).toMatchObject({ publicationPending });
+      const child = spawnProcess(
+        process.execPath,
+        [
+          fileURLToPath(
+            new URL(
+              "./test-fixtures/publication-kill-helper.mjs",
+              import.meta.url,
+            ),
+          ),
+          boundary,
+          partialPath,
+          canonicalFinalPath,
+          priorPath,
+        ],
+        { stdio: ["pipe", "pipe", "pipe"] },
+      );
+
+      if (boundary === "final-linked" || boundary === "directory-synced") {
+        await waitForChildLine(child, boundary);
+      } else {
+        await waitForChildLine(child, "ready-for-database");
+        fixture.access.encodeJobs.complete(claim);
+        if (boundary === "partial-unlinked") {
+          child.stdin.end();
+          await waitForChildLine(child, "partial-unlinked");
+        }
+      }
+      await killChild(child);
+      if (boundary === "final-linked" || boundary === "directory-synced") {
+        vi.useFakeTimers();
+        vi.setSystemTime(Date.now() + ENCODE_JOB_LEASE_DURATION_MS + 1);
+      }
+      const recoveryRunner: HandBrakeRunner = { run: vi.fn() };
+
+      await pollEncodeWorker({ ...options, runner: recoveryRunner });
+
+      expect(recoveryRunner.run).not.toHaveBeenCalled();
+      expect(existsSync(partialPath)).toBe(false);
+      expect(fixture.access.encodeJobs.list()).toEqual([
+        expect.objectContaining({
+          id: fixture.job.id,
+          partialCleanupClaimToken: null,
+          partialCleanupOutputPath: null,
+          publicationPending: false,
+          status: publicationPending ? "completed" : "failed",
+        }),
+      ]);
+      if (publicationPending) {
+        expect(readFileSync(fixture.outputPath, "utf8")).toBe(
+          "published before crash",
+        );
+      } else if (reencode) {
+        expect(readFileSync(fixture.outputPath, "utf8")).toBe(
+          "known good encode",
+        );
+        expect(quarantinedContents(fixture.outputPath)).toContain(
+          "published before crash",
+        );
+      } else {
+        expect(existsSync(fixture.outputPath)).toBe(false);
+        expect(quarantinedContents(fixture.outputPath)).toContain(
+          "published before crash",
+        );
+      }
+      if (reencode && publicationPending) {
+        expect(quarantinedContents(fixture.outputPath)).toContain(
+          "known good encode",
+        );
+      }
+      vi.useRealTimers();
+      fixture.access.close();
+    },
+  );
 
   it("renews the claim while HandBrake is still running", async () => {
     vi.useFakeTimers();

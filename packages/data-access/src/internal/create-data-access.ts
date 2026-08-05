@@ -3808,13 +3808,15 @@ export function createDataAccessInternal(
         }
         return asRunningEncodeJob(updated);
       },
-      registerPartialCleanup(claim) {
+      registerPartialCleanup(claim, options) {
         const timestamp = now();
+        const publicationPending = options?.publicationPending === true;
         const updated = database
           .update(encodeJobs)
           .set({
             partialCleanupOutputPath: claim.outputPath,
             partialCleanupClaimToken: claim.claimToken,
+            publicationPending,
             updatedAt: timestamp,
           })
           .where(encodeAttemptCondition(claim, timestamp))
@@ -3827,6 +3829,7 @@ export function createDataAccessInternal(
           jobId: updated.id,
           outputPath: claim.outputPath,
           claimToken: claim.claimToken,
+          publicationPending,
         };
       },
       listPendingPartialCleanups() {
@@ -3835,6 +3838,7 @@ export function createDataAccessInternal(
             jobId: encodeJobs.id,
             outputPath: encodeJobs.partialCleanupOutputPath,
             claimToken: encodeJobs.partialCleanupClaimToken,
+            publicationPending: encodeJobs.publicationPending,
           })
           .from(encodeJobs)
           .where(
@@ -3856,8 +3860,47 @@ export function createDataAccessInternal(
               jobId: cleanup.jobId,
               outputPath: cleanup.outputPath,
               claimToken: cleanup.claimToken,
+              publicationPending: cleanup.publicationPending,
             };
           });
+      },
+      completePublishedPartial(cleanup) {
+        if (!cleanup.publicationPending) {
+          throw new DomainInvariantError(
+            "Encode Job cleanup is not publication provenance",
+          );
+        }
+        const timestamp = now();
+        const updated = database
+          .update(encodeJobs)
+          .set({
+            status: "completed",
+            progressPercent: 100,
+            progressEtaSeconds: null,
+            completedAt: sql`coalesce(${encodeJobs.completedAt}, ${timestamp.getTime()})`,
+            errorMessage: null,
+            replaceExistingOutput: false,
+            replacementOutputIdentity: null,
+            updatedAt: timestamp,
+          })
+          .where(
+            and(
+              eq(encodeJobs.id, cleanup.jobId),
+              inArray(encodeJobs.status, ["failed", "completed"]),
+              eq(encodeJobs.publicationPending, true),
+              eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
+              eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
+            ),
+          )
+          .returning()
+          .get();
+        if (!updated) {
+          throw new StaleJobAttemptError(
+            "encode job publication",
+            cleanup.jobId,
+          );
+        }
+        return updated;
       },
       completePartialCleanup(cleanup) {
         const updated = database
@@ -3865,6 +3908,7 @@ export function createDataAccessInternal(
           .set({
             partialCleanupOutputPath: null,
             partialCleanupClaimToken: null,
+            publicationPending: false,
           })
           .where(
             and(
@@ -3885,7 +3929,8 @@ export function createDataAccessInternal(
           .get();
         if (
           current?.partialCleanupOutputPath === null &&
-          current.partialCleanupClaimToken === null
+          current.partialCleanupClaimToken === null &&
+          !current.publicationPending
         ) {
           return current;
         }

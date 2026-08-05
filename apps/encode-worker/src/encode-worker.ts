@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
   constants as fsConstants,
   type Stats,
@@ -10,6 +11,7 @@ import {
   open,
   readdir,
   realpath,
+  rename,
   unlink,
 } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
@@ -301,7 +303,13 @@ async function requireOutputPaths(
     canonicalOutputDirectory,
     `.${basename(finalPath)}.rip-dvd-partial`,
   );
-  for (const path of [finalPath, partialPath, legacyPartialPath]) {
+  const priorFinalPath = `${finalPath}.failed.${safeToken}`;
+  for (const path of [
+    finalPath,
+    partialPath,
+    legacyPartialPath,
+    priorFinalPath,
+  ]) {
     if (
       Buffer.byteLength(path) > MAX_PATH_BYTES ||
       dirname(path) !== canonicalOutputDirectory
@@ -309,7 +317,7 @@ async function requireOutputPaths(
       throw new Error("Encode Job output path is unsafe");
     }
   }
-  return { finalPath, legacyPartialPath, partialPath };
+  return { finalPath, legacyPartialPath, partialPath, priorFinalPath };
 }
 
 async function optionalMetadata(path: string): Promise<Stats | null> {
@@ -323,7 +331,10 @@ async function optionalMetadata(path: string): Promise<Stats | null> {
   }
 }
 
-async function moveAside(path: string): Promise<string | null> {
+async function moveAside(
+  path: string,
+  reservedQuarantinePath?: string,
+): Promise<string | null> {
   const metadata = await optionalMetadata(path);
   if (metadata === null) {
     return null;
@@ -331,27 +342,26 @@ async function moveAside(path: string): Promise<string | null> {
   if (!metadata.isFile() || metadata.isSymbolicLink()) {
     throw new Error("Encode output path is not a regular file");
   }
-  for (let index = 0; index < 1_000; index += 1) {
-    const failedPath = `${path}.failed${index === 0 ? "" : `.${index}`}`;
-    if (
-      Buffer.byteLength(failedPath) > MAX_PATH_BYTES ||
-      dirname(failedPath) !== dirname(path)
-    ) {
-      throw new Error("Encode failure path is unsafe");
-    }
-    try {
-      await link(path, failedPath);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-        continue;
-      }
-      throw error;
-    }
-    await unlink(path);
-    await syncPath(dirname(path));
-    return failedPath;
+  const failedPath =
+    reservedQuarantinePath ?? `${path}.failed.${randomUUID()}`;
+  if (
+    Buffer.byteLength(failedPath) > MAX_PATH_BYTES ||
+    dirname(failedPath) !== dirname(path)
+  ) {
+    throw new Error("Encode failure path is unsafe");
   }
-  throw new Error("Encode failure path limit reached");
+  await rename(path, failedPath);
+  const quarantinedMetadata = await lstat(failedPath);
+  if (!sameInode(metadata, quarantinedMetadata)) {
+    try {
+      await restoreMovedAsideOutput(failedPath, path);
+    } catch {
+      // The quarantined file remains recoverable if another final now exists.
+    }
+    throw new Error("Encode output changed while it was being quarantined");
+  }
+  await syncPath(dirname(path));
+  return failedPath;
 }
 
 async function moveStalePartials(
@@ -378,7 +388,6 @@ async function restoreMovedAsideOutput(
   finalPath: string,
 ): Promise<void> {
   await link(failedPath, finalPath);
-  await unlink(failedPath);
   await syncPath(dirname(finalPath));
 }
 
@@ -390,6 +399,10 @@ function sameFile(first: Stats, second: Stats): boolean {
     first.mtimeMs === second.mtimeMs &&
     first.ctimeMs === second.ctimeMs
   );
+}
+
+function sameInode(first: Stats, second: Stats): boolean {
+  return first.dev === second.dev && first.ino === second.ino;
 }
 
 function fileIdentity(metadata: Stats): string {
@@ -432,7 +445,7 @@ async function quarantinePartial(
   return null;
 }
 
-async function quarantinePendingPartials(
+async function reconcilePendingPublications(
   cleanups: readonly EncodeJobPartialCleanup[],
   options: PollEncodeWorkerOptions & { runner: HandBrakeRunner },
 ): Promise<void> {
@@ -444,11 +457,51 @@ async function quarantinePendingPartials(
   });
   for (const cleanup of cleanups) {
     try {
-      const { partialPath } = await requireOutputPaths(
+      const { finalPath, partialPath, priorFinalPath } = await requireOutputPaths(
         mediaRoot,
         cleanup.outputPath,
         cleanup.claimToken,
       );
+      const [finalMetadata, partialMetadata, priorFinalMetadata] =
+        await Promise.all([
+          optionalMetadata(finalPath),
+          optionalMetadata(partialPath),
+          optionalMetadata(priorFinalPath),
+        ]);
+      for (const metadata of [
+        finalMetadata,
+        partialMetadata,
+        priorFinalMetadata,
+      ]) {
+        if (
+          metadata !== null &&
+          (!metadata.isFile() || metadata.isSymbolicLink())
+        ) {
+          throw new Error("Pending Encode publication is not a regular file");
+        }
+      }
+      const finalMatchesPartial =
+        finalMetadata !== null &&
+        partialMetadata !== null &&
+        partialMetadata.size > 0 &&
+        sameFile(finalMetadata, partialMetadata);
+      if (finalMatchesPartial) {
+        if (cleanup.publicationPending) {
+          options.access.encodeJobs.completePublishedPartial(cleanup);
+        } else {
+          await moveAside(finalPath);
+          if (priorFinalMetadata !== null) {
+            await restoreMovedAsideOutput(priorFinalPath, finalPath);
+          }
+        }
+        await unlink(partialPath);
+        await syncPath(dirname(finalPath));
+        options.access.encodeJobs.completePartialCleanup(cleanup);
+        continue;
+      }
+      if (finalMetadata === null && priorFinalMetadata !== null) {
+        await restoreMovedAsideOutput(priorFinalPath, finalPath);
+      }
       await quarantinePartial(
         partialPath,
         options.runner,
@@ -457,7 +510,7 @@ async function quarantinePendingPartials(
       );
     } catch (error) {
       options.log(
-        `Pending Encode Job partial could not be quarantined: ${
+        `Pending Encode publication could not be reconciled: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
@@ -600,6 +653,9 @@ async function executeClaim(
   let finalPath: string | undefined;
   let partialPath: string | undefined;
   let replaceableFinal: Stats | undefined;
+  let priorFinalFailedPath: string | null = null;
+  let publishedOutputMetadata: Stats | undefined;
+  let pendingPartialCleanup: EncodeJobPartialCleanup | undefined;
   let published = false;
   try {
     const input = resolveClaimInput(options.access, claim);
@@ -677,14 +733,21 @@ async function executeClaim(
       throw new Error("HandBrake did not produce a complete regular output file");
     }
     await syncPath(partialPath);
-    let priorFinalFailedPath: string | null = null;
+    publishedOutputMetadata = partialMetadata;
+    pendingPartialCleanup =
+      options.access.encodeJobs.registerPartialCleanup(claim, {
+        publicationPending: true,
+      });
     if (replaceableFinal !== undefined) {
       const currentFinal = await optionalMetadata(finalPath);
       if (currentFinal !== null) {
         if (!sameFile(replaceableFinal, currentFinal)) {
           throw new Error("Encode Job final output changed during encoding");
         }
-        priorFinalFailedPath = await moveAside(finalPath);
+        priorFinalFailedPath = await moveAside(
+          finalPath,
+          paths.priorFinalPath,
+        );
       }
     }
     try {
@@ -706,13 +769,24 @@ async function executeClaim(
       throw publishError;
     }
     published = true;
-    await unlink(partialPath);
     await syncPath(dirname(finalPath));
     options.access.encodeJobs.complete(claim);
+    try {
+      await unlink(partialPath);
+      await syncPath(dirname(finalPath));
+      options.access.encodeJobs.completePartialCleanup(pendingPartialCleanup);
+    } catch (cleanupError) {
+      options.log(
+        `Completed Encode publication cleanup failed: ${
+          cleanupError instanceof Error
+            ? cleanupError.message
+            : String(cleanupError)
+        }`,
+      );
+    }
   } catch (error) {
     const cleanupFailures: string[] = [];
     let preserveReplacementAuthority = false;
-    let pendingPartialCleanup: EncodeJobPartialCleanup | undefined;
     if (
       !published &&
       finalPath !== undefined &&
@@ -736,7 +810,14 @@ async function executeClaim(
     }
     if (published && finalPath !== undefined) {
       try {
-        await moveAside(finalPath);
+        const currentFinal = await optionalMetadata(finalPath);
+        if (
+          currentFinal !== null &&
+          publishedOutputMetadata !== undefined &&
+          sameInode(publishedOutputMetadata, currentFinal)
+        ) {
+          await moveAside(finalPath);
+        }
       } catch (cleanupError) {
         cleanupFailures.push(
           cleanupError instanceof Error
@@ -744,9 +825,24 @@ async function executeClaim(
             : String(cleanupError),
         );
       }
+      if (priorFinalFailedPath !== null) {
+        try {
+          await restoreMovedAsideOutput(priorFinalFailedPath, finalPath);
+          preserveReplacementAuthority = true;
+        } catch (cleanupError) {
+          cleanupFailures.push(
+            cleanupError instanceof Error
+              ? cleanupError.message
+              : String(cleanupError),
+          );
+        }
+      }
     }
     if (partialPath !== undefined) {
-      if (options.runner.isActive?.(partialPath) ?? false) {
+      if (
+        pendingPartialCleanup === undefined &&
+        (options.runner.isActive?.(partialPath) ?? false)
+      ) {
         try {
           pendingPartialCleanup =
             options.access.encodeJobs.registerPartialCleanup(claim);
@@ -757,7 +853,7 @@ async function executeClaim(
               : String(cleanupError),
           );
         }
-      } else {
+      } else if (pendingPartialCleanup === undefined) {
         try {
           await quarantinePartial(partialPath, options.runner, options.log);
         } catch (cleanupError) {
@@ -785,21 +881,22 @@ async function executeClaim(
       });
     } catch (failureError) {
       const failureMessage =
-        failureError instanceof Error ? failureError.message : String(failureError);
+        failureError instanceof Error
+          ? failureError.message
+          : String(failureError);
       options.log(
         `Encode Job failure state could not be persisted: ${failureMessage}`,
       );
     }
     if (partialPath !== undefined && pendingPartialCleanup !== undefined) {
+      const cleanup = pendingPartialCleanup;
       try {
         await quarantinePartial(
           partialPath,
           options.runner,
           options.log,
           () =>
-            options.access.encodeJobs.completePartialCleanup(
-              pendingPartialCleanup,
-            ),
+            options.access.encodeJobs.completePartialCleanup(cleanup),
         );
       } catch (cleanupError) {
         options.log(
@@ -829,7 +926,7 @@ export async function pollEncodeWorker(
   }
   const runner = options.runner ?? nodeHandBrakeRunner;
   options.access.encodeJobs.recoverExpiredClaims();
-  await quarantinePendingPartials(
+  await reconcilePendingPublications(
     options.access.encodeJobs.listPendingPartialCleanups(),
     { ...options, runner },
   );
