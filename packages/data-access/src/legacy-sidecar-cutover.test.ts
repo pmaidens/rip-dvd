@@ -738,6 +738,7 @@ try {
     expect(cutoverCleanup).toEqual({
       claimToken: running.claimToken,
       jobId: running.id,
+      leaseToken: null,
       outputPath: running.outputPath,
       publicationPending: false,
     });
@@ -2686,6 +2687,7 @@ try {
     expect(service.encodeJobs.listPendingPartialCleanups()).toContainEqual({
       claimToken: running.claimToken,
       jobId: running.id,
+      leaseToken: null,
       outputPath: running.outputPath,
       publicationPending: false,
     });

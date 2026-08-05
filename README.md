@@ -656,13 +656,19 @@ only then is that link removed and its cleanup acknowledged. After a process
 crash, the next poll compares the retained final and partial inodes and completes
 the matching publication instead of stranding a visible final behind a failed
 job. Reconciliation only exposes cleanup owned by failed or completed jobs, so
-a healthy running publisher's partial remains exclusively owned. A publisher
+a healthy running publisher's partial remains exclusively owned. Immediately
+before moving a known-good final and linking its replacement, the publisher
+renews its SQLite claim; expiry or cutover invalidation therefore fences a stale
+snapshot while leaving durable prior-final recovery provenance. A publisher
 must also atomically revoke its current SQLite publication authority before any
 failure rollback; an expired publisher leaves the final and durable provenance
-for reconciliation. Legacy deterministic partials and ordinary failed attempts
-are moved with one atomic rename to collision-resistant `.failed` paths. A
-timed-out child keeps ownership of its partial until this worker observes that
-HandBrake closed it. Expired claims persist their exact output path and claim
+for reconciliation. Revoked-publication rollback acquires a recoverable cleanup
+lease after re-statting the final and immediately before its atomic rename, so a
+stale reconciler cannot move a later accepted retry. Legacy deterministic
+partials and ordinary failed attempts are moved with one atomic rename to
+collision-resistant `.failed` paths. A timed-out child keeps ownership of its
+partial until this worker observes that HandBrake closed it. Expired claims
+persist their exact output path and claim
 token as cleanup work before becoming retryable; both requeue and reclaim stay
 blocked until that partial is reconciled or quarantined. A different worker
 cannot trust the expired process's in-memory child registry, so it uses the same

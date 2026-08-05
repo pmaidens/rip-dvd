@@ -334,6 +334,7 @@ async function optionalMetadata(path: string): Promise<Stats | null> {
 async function moveAside(
   path: string,
   reservedQuarantinePath?: string,
+  authorizeRename?: () => void,
 ): Promise<string | null> {
   const metadata = await optionalMetadata(path);
   if (metadata === null) {
@@ -350,6 +351,7 @@ async function moveAside(
   ) {
     throw new Error("Encode failure path is unsafe");
   }
+  authorizeRename?.();
   await rename(path, failedPath);
   const quarantinedMetadata = await lstat(failedPath);
   if (!sameInode(metadata, quarantinedMetadata)) {
@@ -456,6 +458,7 @@ async function reconcilePendingPublications(
   });
   for (const cleanup of cleanups) {
     try {
+      let authorizedCleanup = cleanup;
       const { finalPath, partialPath, priorFinalPath } = await requireOutputPaths(
         mediaRoot,
         cleanup.outputPath,
@@ -488,14 +491,17 @@ async function reconcilePendingPublications(
         if (cleanup.publicationPending) {
           options.access.encodeJobs.completePublishedPartial(cleanup);
         } else {
-          await moveAside(finalPath);
+          await moveAside(finalPath, undefined, () => {
+            authorizedCleanup =
+              options.access.encodeJobs.claimPartialCleanup(cleanup);
+          });
           if (priorFinalMetadata !== null) {
             await restoreMovedAsideOutput(priorFinalPath, finalPath);
           }
         }
         await unlink(partialPath);
         await syncPath(dirname(finalPath));
-        options.access.encodeJobs.completePartialCleanup(cleanup);
+        options.access.encodeJobs.completePartialCleanup(authorizedCleanup);
         continue;
       }
       if (finalMetadata === null && priorFinalMetadata !== null) {
@@ -737,17 +743,24 @@ async function executeClaim(
       options.access.encodeJobs.registerPartialCleanup(claim, {
         publicationPending: true,
       });
-    if (replaceableFinal !== undefined) {
-      const currentFinal = await optionalMetadata(finalPath);
-      if (currentFinal !== null) {
-        if (!sameFile(replaceableFinal, currentFinal)) {
-          throw new Error("Encode Job final output changed during encoding");
-        }
-        priorFinalFailedPath = await moveAside(
-          finalPath,
-          paths.priorFinalPath,
-        );
-      }
+    const currentFinal =
+      replaceableFinal === undefined
+        ? null
+        : await optionalMetadata(finalPath);
+    if (
+      replaceableFinal !== undefined &&
+      currentFinal !== null &&
+      !sameFile(replaceableFinal, currentFinal)
+    ) {
+      throw new Error("Encode Job final output changed during encoding");
+    }
+    options.access.encodeJobs.renewClaim(claim);
+    signal.throwIfAborted();
+    if (currentFinal !== null) {
+      priorFinalFailedPath = await moveAside(
+        finalPath,
+        paths.priorFinalPath,
+      );
     }
     try {
       await link(partialPath, finalPath);

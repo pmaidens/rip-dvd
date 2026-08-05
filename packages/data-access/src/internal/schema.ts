@@ -25,6 +25,7 @@ import type {
   ArchiveJobClaimToken,
   DetectedDiscId,
   DiscSelectionId,
+  EncodeJobCleanupClaimToken,
   EncodeJobId,
   EncodeJobClaimToken,
   EncodingProfileId,
@@ -381,6 +382,8 @@ export const encodeJobs = sqliteTable(
     partialCleanupOutputPath: text("partial_cleanup_output_path"),
     partialCleanupClaimToken: text("partial_cleanup_claim_token")
       .$type<EncodeJobClaimToken>(),
+    partialCleanupLeaseToken: text("partial_cleanup_lease_token")
+      .$type<EncodeJobCleanupClaimToken>(),
     publicationPending: integer("publication_pending", { mode: "boolean" })
       .notNull()
       .default(false),
@@ -439,6 +442,10 @@ export const encodeJobs = sqliteTable(
     check(
       "encode_jobs_publication_pending_cleanup_check",
       sql`${table.publicationPending} = 0 or ${table.partialCleanupClaimToken} is not null`,
+    ),
+    check(
+      "encode_jobs_partial_cleanup_lease_check",
+      sql`${table.partialCleanupLeaseToken} is null or ${table.partialCleanupClaimToken} is not null`,
     ),
   ],
 );
