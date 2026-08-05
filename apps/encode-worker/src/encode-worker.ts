@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import {
   constants as fsConstants,
   linkSync,
+  lstatSync,
   renameSync,
   type Stats,
 } from "node:fs";
@@ -376,6 +377,37 @@ async function moveAside(
   return failedPath;
 }
 
+function moveAsideAtMutationBoundary(
+  path: string,
+  failedPath: string,
+  expectedMetadata: Stats,
+): string {
+  const metadata = lstatSync(path);
+  if (!sameFile(expectedMetadata, metadata)) {
+    throw new Error("Encode output changed before it could be quarantined");
+  }
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    throw new Error("Encode output path is not a regular file");
+  }
+  if (
+    Buffer.byteLength(failedPath) > MAX_PATH_BYTES ||
+    dirname(failedPath) !== dirname(path)
+  ) {
+    throw new Error("Encode failure path is unsafe");
+  }
+  renameSync(path, failedPath);
+  const quarantinedMetadata = lstatSync(failedPath);
+  if (!sameInode(metadata, quarantinedMetadata)) {
+    try {
+      linkSync(failedPath, path);
+    } catch {
+      // Durable provenance lets reconciliation recover the quarantined file.
+    }
+    throw new Error("Encode output changed while it was being quarantined");
+  }
+  return failedPath;
+}
+
 async function moveStalePartials(
   finalPath: string,
   runner: HandBrakeRunner,
@@ -415,6 +447,29 @@ function sameFile(first: Stats, second: Stats): boolean {
 
 function sameInode(first: Stats, second: Stats): boolean {
   return first.dev === second.dev && first.ino === second.ino;
+}
+
+function publicationMatches(
+  finalPath: string,
+  partialPath: string,
+): boolean {
+  try {
+    const finalMetadata = lstatSync(finalPath);
+    const partialMetadata = lstatSync(partialPath);
+    return (
+      finalMetadata.isFile() &&
+      !finalMetadata.isSymbolicLink() &&
+      partialMetadata.isFile() &&
+      !partialMetadata.isSymbolicLink() &&
+      partialMetadata.size > 0 &&
+      sameFile(finalMetadata, partialMetadata)
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
 }
 
 function fileIdentity(metadata: Stats): string {
@@ -499,16 +554,24 @@ async function reconcilePendingPublications(
         sameFile(finalMetadata, partialMetadata);
       if (finalMatchesPartial) {
         if (cleanup.publicationPending) {
-          options.access.encodeJobs.completePublishedPartial(cleanup);
+          options.access.encodeJobs.completePublishedPartial(
+            cleanup,
+            () => publicationMatches(finalPath, partialPath),
+          );
         } else {
-          await moveAside(finalPath, undefined, finalMetadata, () => {
-            authorizedCleanup =
-              options.access.encodeJobs.claimPartialCleanup(cleanup);
-            authorizedCleanup =
-              options.access.encodeJobs.renewPartialCleanup(
-                authorizedCleanup,
-              );
-          });
+          const rollbackPath = `${finalPath}.failed.${randomUUID()}`;
+          authorizedCleanup =
+            options.access.encodeJobs.withPartialCleanupMutationFence(
+              cleanup,
+              () => {
+                moveAsideAtMutationBoundary(
+                  finalPath,
+                  rollbackPath,
+                  finalMetadata,
+                );
+              },
+            );
+          await syncPath(dirname(finalPath));
           if (priorFinalMetadata !== null) {
             await restoreMovedAsideOutput(priorFinalPath, finalPath);
           }
@@ -771,21 +834,18 @@ async function executeClaim(
     }
     options.access.encodeJobs.renewClaim(claim);
     signal.throwIfAborted();
-    if (currentFinal !== null) {
-      priorFinalFailedPath = await moveAside(
-        finalPath,
-        paths.priorFinalPath,
-        currentFinal,
-        () => {
-          options.access.encodeJobs.renewClaim(claim);
-          signal.throwIfAborted();
-        },
-      );
-    }
     try {
-      options.access.encodeJobs.renewClaim(claim);
-      signal.throwIfAborted();
-      linkSync(partialPath, finalPath);
+      options.access.encodeJobs.withClaimMutationFence(claim, () => {
+        signal.throwIfAborted();
+        if (currentFinal !== null) {
+          priorFinalFailedPath = moveAsideAtMutationBoundary(
+            paths.finalPath,
+            paths.priorFinalPath,
+            currentFinal,
+          );
+        }
+        linkSync(paths.partialPath, paths.finalPath);
+      });
     } catch (publishError) {
       if (priorFinalFailedPath !== null) {
         try {
@@ -869,13 +929,34 @@ async function executeClaim(
     }
     if (published && finalPath !== undefined) {
       try {
-        const currentFinal = await optionalMetadata(finalPath);
-        if (
-          currentFinal !== null &&
-          publishedOutputMetadata !== undefined &&
-          sameInode(publishedOutputMetadata, currentFinal)
-        ) {
-          await moveAside(finalPath);
+        const rollbackFinalPath = finalPath;
+        let rolledBack = false;
+        options.access.encodeJobs.withClaimMutationFence(claim, () => {
+          let currentFinal: Stats | null;
+          try {
+            currentFinal = lstatSync(rollbackFinalPath);
+          } catch (metadataError) {
+            if ((metadataError as NodeJS.ErrnoException).code === "ENOENT") {
+              currentFinal = null;
+            } else {
+              throw metadataError;
+            }
+          }
+          if (
+            currentFinal !== null &&
+            publishedOutputMetadata !== undefined &&
+            sameInode(publishedOutputMetadata, currentFinal)
+          ) {
+            moveAsideAtMutationBoundary(
+              rollbackFinalPath,
+              `${rollbackFinalPath}.failed.${randomUUID()}`,
+              currentFinal,
+            );
+            rolledBack = true;
+          }
+        });
+        if (rolledBack) {
+          await syncPath(dirname(finalPath));
         }
       } catch (cleanupError) {
         cleanupFailures.push(
