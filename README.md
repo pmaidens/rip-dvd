@@ -649,23 +649,26 @@ to SQLite and appears through the existing dashboard SSE stream.
 
 Each attempt writes to a hidden claim-scoped partial file. A synced regular
 output first records its exact path and claim token with an explicit durable
-publication-pending marker, then is hard-linked into its final path without
-overwrite behavior.
+publication-pending marker. An initial output is hard-linked into its absent
+final path without overwrite behavior. A re-encode retains the known-good inode
+at its claim-scoped recovery path, hard-links the replacement at a hidden
+claim-scoped publication path, then atomically renames that link over the
+still-visible final.
 The partial hard link remains until the directory and completed job are durable;
 only then is that link removed and its cleanup acknowledged. After a process
 crash, the next poll compares the retained final and partial inodes and completes
 the matching publication instead of stranding a visible final behind a failed
 job. Reconciliation only exposes cleanup owned by failed or completed jobs, so
 a healthy running publisher's partial remains exclusively owned. Immediately
-before moving a known-good final and linking its replacement, the publisher
-renews its SQLite claim; expiry or cutover invalidation therefore fences a stale
-snapshot while leaving durable prior-final recovery provenance. A publisher
-must also atomically revoke its current SQLite publication authority before any
-failure rollback; an expired publisher leaves the final and durable provenance
-for reconciliation. Revoked-publication rollback acquires a recoverable cleanup
-lease after re-statting the final and immediately before its atomic rename, so a
-stale reconciler cannot move a later accepted retry. Legacy deterministic
-partials and ordinary failed attempts are moved with one atomic rename to
+before retaining a known-good final and staging its atomic replacement, the
+publisher renews its SQLite claim; expiry or cutover invalidation therefore
+fences a stale snapshot while leaving durable prior-final recovery provenance.
+A publisher must also atomically revoke its current SQLite publication authority
+before any failure rollback; an expired publisher leaves the final and durable
+provenance for reconciliation. Revoked-publication rollback acquires a
+recoverable cleanup lease after re-statting the final and immediately before its
+atomic rename, so a stale reconciler cannot move a later accepted retry. Legacy
+deterministic partials and ordinary failed attempts are moved with one atomic rename to
 collision-resistant `.failed` paths. A timed-out child keeps ownership of its
 partial until this worker observes that HandBrake closed it. Expired claims
 persist their exact output path and claim
@@ -676,9 +679,10 @@ atomic quarantine; any still-open writer remains attached to the quarantined
 inode while the next claim receives a distinct partial path.
 
 Re-encoding keeps the prior final visible until the replacement is complete,
-then preserves it at a collision-free `.failed` path before no-overwrite
-publication. Its claim-scoped quarantine path lets crash recovery restore the
-prior final when publication did not complete, and any failure after replacement
+preserves it at a collision-free `.failed` path with a recovery hard link, and
+atomically renames a claim-scoped replacement link over the public final. Its
+claim-scoped recovery path lets crash recovery restore the prior final when
+publication did not complete, and any failure after replacement
 publication quarantines the replacement and restores that prior final. Only a
 completed job requeued to the same output path owns that
 replacement. Its filesystem identity is retained through a failed attempt and

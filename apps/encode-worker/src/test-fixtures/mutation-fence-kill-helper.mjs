@@ -9,7 +9,7 @@ const [
   finalPath,
   partialPath,
   recoveryPath,
-  quarantinePath,
+  auxiliaryPath,
 ] = process.argv.slice(2);
 
 if (
@@ -39,14 +39,18 @@ if (mode === "publication") {
     if (boundary === "post-authority") {
       blockAt("post-authority");
     }
-    renameSync(finalPath, recoveryPath);
-    if (boundary === "post-rename") {
-      blockAt("post-rename");
+    linkSync(finalPath, recoveryPath);
+    if (!auxiliaryPath) {
+      throw new Error("Publication replacement path is unavailable");
     }
-    linkSync(partialPath, finalPath);
+    linkSync(partialPath, auxiliaryPath);
+    if (boundary === "post-replacement-link") {
+      blockAt("post-replacement-link");
+    }
+    renameSync(auxiliaryPath, finalPath);
   });
 } else if (mode === "cleanup") {
-  if (!quarantinePath) {
+  if (!auxiliaryPath) {
     throw new Error("Cleanup quarantine path is unavailable");
   }
   const cleanup = access.encodeJobs.listPendingPartialCleanups()[0];
@@ -57,7 +61,7 @@ if (mode === "publication") {
     if (boundary === "post-authority") {
       blockAt("post-authority");
     }
-    renameSync(finalPath, quarantinePath);
+    renameSync(finalPath, auxiliaryPath);
     blockAt("post-rename");
   });
 } else {

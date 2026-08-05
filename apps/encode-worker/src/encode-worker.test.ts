@@ -123,7 +123,8 @@ vi.mock("node:fs", async (importOriginal) => {
       if (
         replacementLinkFailure.armed &&
         !replacementLinkFailure.failed &&
-        destinationPath === replacementLinkFailure.finalPath &&
+        dirname(destinationPath) ===
+          dirname(replacementLinkFailure.finalPath) &&
         sourcePath.endsWith(".rip-dvd-partial")
       ) {
         replacementLinkFailure.failed = true;
@@ -132,6 +133,21 @@ vi.mock("node:fs", async (importOriginal) => {
         });
       }
       actual.linkSync(sourcePath, destinationPath);
+      if (
+        quarantineRace.armed &&
+        !quarantineRace.raced &&
+        sourcePath === quarantineRace.finalPath &&
+        destinationPath.startsWith(`${quarantineRace.finalPath}.failed.`)
+      ) {
+        quarantineRace.observed.push(
+          `${sourcePath} -> ${destinationPath}`,
+        );
+        actual.renameSync(
+          quarantineRace.competingPath,
+          quarantineRace.finalPath,
+        );
+        quarantineRace.raced = true;
+      }
       if (
         postLinkCommitFailure.armed &&
         destinationPath === postLinkCommitFailure.finalPath
@@ -147,6 +163,20 @@ vi.mock("node:fs", async (importOriginal) => {
     },
     renameSync: (sourcePath: string, destinationPath: string) => {
       actual.renameSync(sourcePath, destinationPath);
+      if (
+        sourcePath.endsWith(".rip-dvd-publish") &&
+        postLinkCommitFailure.armed &&
+        destinationPath === postLinkCommitFailure.finalPath
+      ) {
+        postLinkCommitFailure.linked = true;
+      }
+      if (
+        sourcePath.endsWith(".rip-dvd-publish") &&
+        publicationRace.armed &&
+        destinationPath === publicationRace.finalPath
+      ) {
+        publicationRace.linked = true;
+      }
       quarantineRace.observed.push(`${sourcePath} -> ${destinationPath}`);
       if (
         quarantineRace.armed &&
@@ -477,6 +507,13 @@ function claimPartialPath(outputPath: string, claimToken: string): string {
   return join(
     dirname(outputPath),
     `.${basename(outputPath)}.${claimToken}.rip-dvd-partial`,
+  );
+}
+
+function claimReplacementPath(outputPath: string, claimToken: string): string {
+  return join(
+    dirname(outputPath),
+    `.${basename(outputPath)}.${claimToken}.rip-dvd-publish`,
   );
 }
 
@@ -2439,6 +2476,9 @@ describe("encode worker polling", () => {
       const priorPath = reencode
         ? priorFinalPath(canonicalFinalPath, claim.claimToken)
         : "";
+      const replacementPath = reencode
+        ? claimReplacementPath(canonicalFinalPath, claim.claimToken)
+        : "";
       writeFileSync(partialPath, "published before crash", { flag: "wx" });
       expect(
         fixture.access.encodeJobs.registerPartialCleanup(claim, {
@@ -2458,6 +2498,7 @@ describe("encode worker polling", () => {
           partialPath,
           canonicalFinalPath,
           priorPath,
+          replacementPath,
         ],
         { stdio: ["pipe", "pipe", "pipe"] },
       );
@@ -2521,7 +2562,7 @@ describe("encode worker polling", () => {
 
   it.each([
     { boundary: "post-authority" },
-    { boundary: "post-rename" },
+    { boundary: "post-replacement-link" },
   ] as const)(
     "recovers a re-encode publication killed at its $boundary fence",
     async ({ boundary }) => {
@@ -2559,6 +2600,10 @@ describe("encode worker polling", () => {
         canonicalFinalPath,
         claim.claimToken,
       );
+      const replacementPath = claimReplacementPath(
+        canonicalFinalPath,
+        claim.claimToken,
+      );
       writeFileSync(partialPath, "fenced replacement", { flag: "wx" });
       fixture.access.encodeJobs.registerPartialCleanup(claim, {
         publicationPending: true,
@@ -2578,11 +2623,17 @@ describe("encode worker polling", () => {
           canonicalFinalPath,
           partialPath,
           priorPath,
+          replacementPath,
         ],
         { stdio: ["pipe", "pipe", "pipe"] },
       );
 
       await waitForChildLine(child, boundary);
+      if (boundary === "post-replacement-link") {
+        expect(readFileSync(canonicalFinalPath, "utf8")).toBe(
+          "known good encode",
+        );
+      }
       await killChild(child);
       vi.useFakeTimers();
       vi.setSystemTime(Date.now() + ENCODE_JOB_LEASE_DURATION_MS + 1);
@@ -2595,6 +2646,7 @@ describe("encode worker polling", () => {
       expect(readFileSync(fixture.outputPath, "utf8")).toBe(
         "known good encode",
       );
+      expect(existsSync(replacementPath)).toBe(false);
       expect(fixture.access.encodeJobs.list()).toEqual([
         expect.objectContaining({
           id: fixture.job.id,
