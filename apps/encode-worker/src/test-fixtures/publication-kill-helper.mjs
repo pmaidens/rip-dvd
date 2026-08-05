@@ -10,7 +10,13 @@ import {
 } from "node:fs";
 import { dirname } from "node:path";
 
-const [boundary, partialPath, finalPath, priorFinalPath = ""] =
+const [
+  boundary,
+  partialPath,
+  finalPath,
+  priorFinalPath = "",
+  replacementPath = "",
+] =
   process.argv.slice(2);
 
 if (!boundary || !partialPath || !finalPath) {
@@ -32,9 +38,15 @@ function blockAt(stage) {
 }
 
 if (priorFinalPath) {
-  renameSync(finalPath, priorFinalPath);
+  if (!replacementPath) {
+    throw new Error("Replacement publication path is unavailable");
+  }
+  linkSync(finalPath, priorFinalPath);
+  linkSync(partialPath, replacementPath);
+  renameSync(replacementPath, finalPath);
+} else {
+  linkSync(partialPath, finalPath);
 }
-linkSync(partialPath, finalPath);
 if (boundary === "final-linked") {
   blockAt("final-linked");
 }

@@ -302,6 +302,10 @@ async function requireOutputPaths(
     canonicalOutputDirectory,
     `.${basename(finalPath)}.${safeToken}.rip-dvd-partial`,
   );
+  const replacementPath = join(
+    canonicalOutputDirectory,
+    `.${basename(finalPath)}.${safeToken}.rip-dvd-publish`,
+  );
   const legacyPartialPath = join(
     canonicalOutputDirectory,
     `.${basename(finalPath)}.rip-dvd-partial`,
@@ -310,6 +314,7 @@ async function requireOutputPaths(
   for (const path of [
     finalPath,
     partialPath,
+    replacementPath,
     legacyPartialPath,
     priorFinalPath,
   ]) {
@@ -320,7 +325,13 @@ async function requireOutputPaths(
       throw new Error("Encode Job output path is unsafe");
     }
   }
-  return { finalPath, legacyPartialPath, partialPath, priorFinalPath };
+  return {
+    finalPath,
+    legacyPartialPath,
+    partialPath,
+    priorFinalPath,
+    replacementPath,
+  };
 }
 
 async function optionalMetadata(path: string): Promise<Stats | null> {
@@ -406,6 +417,54 @@ function moveAsideAtMutationBoundary(
     throw new Error("Encode output changed while it was being quarantined");
   }
   return failedPath;
+}
+
+function publishReplacementAtMutationBoundary(
+  finalPath: string,
+  priorFinalPath: string,
+  replacementPath: string,
+  partialPath: string,
+  expectedFinal: Stats,
+  onPublished: () => void,
+): void {
+  const finalMetadata = lstatSync(finalPath);
+  if (!sameFile(expectedFinal, finalMetadata)) {
+    throw new Error("Encode output changed before atomic replacement");
+  }
+  if (!finalMetadata.isFile() || finalMetadata.isSymbolicLink()) {
+    throw new Error("Encode output path is not a regular file");
+  }
+  linkSync(finalPath, priorFinalPath);
+  const priorFinalMetadata = lstatSync(priorFinalPath);
+  if (!sameInode(expectedFinal, priorFinalMetadata)) {
+    throw new Error("Encode output changed while retaining recovery");
+  }
+  linkSync(partialPath, replacementPath);
+  const currentFinalMetadata = lstatSync(finalPath);
+  if (!sameInode(expectedFinal, currentFinalMetadata)) {
+    throw new Error("Encode output changed before atomic replacement");
+  }
+  renameSync(replacementPath, finalPath);
+  onPublished();
+}
+
+async function cleanupReplacementLink(
+  replacementPath: string,
+  expectedMetadata?: Stats,
+): Promise<void> {
+  const metadata = await optionalMetadata(replacementPath);
+  if (metadata === null) {
+    return;
+  }
+  if (
+    expectedMetadata !== undefined &&
+    sameInode(expectedMetadata, metadata)
+  ) {
+    await unlink(replacementPath);
+    await syncPath(dirname(replacementPath));
+    return;
+  }
+  await moveAside(replacementPath);
 }
 
 async function moveStalePartials(
@@ -524,21 +583,29 @@ async function reconcilePendingPublications(
   for (const cleanup of cleanups) {
     try {
       let authorizedCleanup = cleanup;
-      const { finalPath, partialPath, priorFinalPath } = await requireOutputPaths(
-        mediaRoot,
-        cleanup.outputPath,
-        cleanup.claimToken,
-      );
-      const [finalMetadata, partialMetadata, priorFinalMetadata] =
+      const { finalPath, partialPath, priorFinalPath, replacementPath } =
+        await requireOutputPaths(
+          mediaRoot,
+          cleanup.outputPath,
+          cleanup.claimToken,
+        );
+      const [
+        finalMetadata,
+        partialMetadata,
+        priorFinalMetadata,
+        replacementMetadata,
+      ] =
         await Promise.all([
           optionalMetadata(finalPath),
           optionalMetadata(partialPath),
           optionalMetadata(priorFinalPath),
+          optionalMetadata(replacementPath),
         ]);
       for (const metadata of [
         finalMetadata,
         partialMetadata,
         priorFinalMetadata,
+        replacementMetadata,
       ]) {
         if (
           metadata !== null &&
@@ -552,6 +619,12 @@ async function reconcilePendingPublications(
         partialMetadata !== null &&
         partialMetadata.size > 0 &&
         sameFile(finalMetadata, partialMetadata);
+      if (replacementMetadata !== null) {
+        await cleanupReplacementLink(
+          replacementPath,
+          partialMetadata ?? undefined,
+        );
+      }
       if (finalMatchesPartial) {
         if (cleanup.publicationPending) {
           await syncPath(dirname(finalPath));
@@ -735,6 +808,7 @@ async function executeClaim(
   heartbeat.unref();
   let finalPath: string | undefined;
   let partialPath: string | undefined;
+  let replacementPath: string | undefined;
   let replaceableFinal: Stats | undefined;
   let priorFinalFailedPath: string | null = null;
   let priorFinalRestored = false;
@@ -762,6 +836,7 @@ async function executeClaim(
     );
     finalPath = paths.finalPath;
     partialPath = paths.partialPath;
+    replacementPath = paths.replacementPath;
     const existingFinal = await optionalMetadata(finalPath);
     if (
       existingFinal !== null &&
@@ -835,36 +910,25 @@ async function executeClaim(
     }
     options.access.encodeJobs.renewClaim(claim);
     signal.throwIfAborted();
-    try {
-      options.access.encodeJobs.withClaimMutationFence(claim, () => {
-        signal.throwIfAborted();
-        if (currentFinal !== null) {
-          priorFinalFailedPath = moveAsideAtMutationBoundary(
-            paths.finalPath,
-            paths.priorFinalPath,
-            currentFinal,
-          );
-        }
+    options.access.encodeJobs.withClaimMutationFence(claim, () => {
+      signal.throwIfAborted();
+      if (currentFinal !== null) {
+        priorFinalFailedPath = paths.priorFinalPath;
+        publishReplacementAtMutationBoundary(
+          paths.finalPath,
+          paths.priorFinalPath,
+          paths.replacementPath,
+          paths.partialPath,
+          currentFinal,
+          () => {
+            published = true;
+          },
+        );
+      } else {
         linkSync(paths.partialPath, paths.finalPath);
         published = true;
-      });
-    } catch (publishError) {
-      if (!published && priorFinalFailedPath !== null) {
-        try {
-          await restoreMovedAsideOutput(priorFinalFailedPath, finalPath);
-          priorFinalRestored = true;
-        } catch (restoreError) {
-          options.log(
-            `Prior Encode Job output could not be restored: ${
-              restoreError instanceof Error
-                ? restoreError.message
-                : String(restoreError)
-            }`,
-          );
-        }
       }
-      throw publishError;
-    }
+    });
     await syncPath(dirname(finalPath));
     options.access.encodeJobs.complete(claim);
     try {
@@ -882,6 +946,7 @@ async function executeClaim(
     }
   } catch (error) {
     const cleanupFailures: string[] = [];
+    let replacementCleanupFailed = false;
     let preserveReplacementAuthority = priorFinalRestored;
     if (published) {
       try {
@@ -916,11 +981,26 @@ async function executeClaim(
         const currentFinal = await optionalMetadata(finalPath);
         if (
           currentFinal !== null &&
-          sameFile(replaceableFinal, currentFinal)
+          fileIdentity(replaceableFinal) === fileIdentity(currentFinal)
         ) {
           preserveReplacementAuthority = true;
         }
       } catch (cleanupError) {
+        cleanupFailures.push(
+          cleanupError instanceof Error
+            ? cleanupError.message
+            : String(cleanupError),
+        );
+      }
+    }
+    if (!published && replacementPath !== undefined) {
+      try {
+        await cleanupReplacementLink(
+          replacementPath,
+          publishedOutputMetadata,
+        );
+      } catch (cleanupError) {
+        replacementCleanupFailed = true;
         cleanupFailures.push(
           cleanupError instanceof Error
             ? cleanupError.message
@@ -1029,7 +1109,11 @@ async function executeClaim(
         `Encode Job failure state could not be persisted: ${failureMessage}`,
       );
     }
-    if (partialPath !== undefined && pendingPartialCleanup !== undefined) {
+    if (
+      partialPath !== undefined &&
+      pendingPartialCleanup !== undefined &&
+      !replacementCleanupFailed
+    ) {
       const cleanup = pendingPartialCleanup;
       try {
         await quarantinePartial(
