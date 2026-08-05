@@ -99,10 +99,106 @@ const postLinkCommitFailure = vi.hoisted(() => ({
   triggered: false,
 }));
 
+const lateCutoverRace = vi.hoisted(() => ({
+  armed: false,
+  competingPath: "",
+  finalPath: "",
+  raced: false,
+  replacementPath: "",
+}));
+
+const stagedDirectoryDurability = vi.hoisted(() => ({
+  armed: false,
+  directoryDescriptors: new Set<number>(),
+  failNextSync: false,
+  finalPath: "",
+  observations: [] as Array<{
+    final: string;
+    priorExists: boolean;
+    replacementExists: boolean;
+  }>,
+  priorPath: "",
+  replacementPath: "",
+  triggered: false,
+}));
+
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return {
+    ...actual,
+    spawnSync: (...arguments_: unknown[]) => {
+      const paths = arguments_[1];
+      if (
+        lateCutoverRace.armed &&
+        !lateCutoverRace.raced &&
+        Array.isArray(paths) &&
+        paths[0] === lateCutoverRace.replacementPath &&
+        paths[1] === lateCutoverRace.finalPath
+      ) {
+        renameSync(
+          lateCutoverRace.competingPath,
+          lateCutoverRace.finalPath,
+        );
+        lateCutoverRace.raced = true;
+      }
+      const result = Reflect.apply(actual.spawnSync, actual, arguments_);
+      if (Array.isArray(paths) && result.status === 0) {
+        if (paths[1] === postLinkCommitFailure.finalPath) {
+          postLinkCommitFailure.linked = true;
+        }
+        if (paths[1] === publicationRace.finalPath) {
+          publicationRace.linked = true;
+        }
+      }
+      return result;
+    },
+  };
+});
+
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
   return {
     ...actual,
+    closeSync: (descriptor: number) => {
+      stagedDirectoryDurability.directoryDescriptors.delete(descriptor);
+      actual.closeSync(descriptor);
+    },
+    fsyncSync: (descriptor: number) => {
+      if (
+        stagedDirectoryDurability.armed &&
+        stagedDirectoryDurability.directoryDescriptors.has(descriptor)
+      ) {
+        const replacementExists = actual.existsSync(
+          stagedDirectoryDurability.replacementPath,
+        );
+        const priorExists = actual.existsSync(
+          stagedDirectoryDurability.priorPath,
+        );
+        stagedDirectoryDurability.observations.push({
+          final: actual.readFileSync(
+            stagedDirectoryDurability.finalPath,
+            "utf8",
+          ),
+          priorExists,
+          replacementExists,
+        });
+        if (stagedDirectoryDurability.failNextSync) {
+          if (replacementExists) {
+            actual.unlinkSync(stagedDirectoryDurability.replacementPath);
+          }
+          if (priorExists) {
+            actual.unlinkSync(stagedDirectoryDurability.priorPath);
+          }
+          stagedDirectoryDurability.failNextSync = false;
+          stagedDirectoryDurability.triggered = true;
+          throw Object.assign(
+            new Error("simulated staged directory durability loss"),
+            { code: "EIO" },
+          );
+        }
+      }
+      actual.fsyncSync(descriptor);
+    },
     lstatSync: (path: string) => {
       if (preQuarantineRace.armed && path === preQuarantineRace.finalPath) {
         preQuarantineRace.finalReads += 1;
@@ -161,7 +257,29 @@ vi.mock("node:fs", async (importOriginal) => {
         publicationRace.linked = true;
       }
     },
+    openSync: (path: string, flags: number) => {
+      const descriptor = actual.openSync(path, flags);
+      if (
+        stagedDirectoryDurability.armed &&
+        path === dirname(stagedDirectoryDurability.finalPath)
+      ) {
+        stagedDirectoryDurability.directoryDescriptors.add(descriptor);
+      }
+      return descriptor;
+    },
     renameSync: (sourcePath: string, destinationPath: string) => {
+      if (
+        lateCutoverRace.armed &&
+        !lateCutoverRace.raced &&
+        sourcePath === lateCutoverRace.replacementPath &&
+        destinationPath === lateCutoverRace.finalPath
+      ) {
+        actual.renameSync(
+          lateCutoverRace.competingPath,
+          lateCutoverRace.finalPath,
+        );
+        lateCutoverRace.raced = true;
+      }
       actual.renameSync(sourcePath, destinationPath);
       if (
         sourcePath.endsWith(".rip-dvd-publish") &&
@@ -363,6 +481,19 @@ afterEach(() => {
   postLinkCommitFailure.finalPath = "";
   postLinkCommitFailure.linked = false;
   postLinkCommitFailure.triggered = false;
+  lateCutoverRace.armed = false;
+  lateCutoverRace.competingPath = "";
+  lateCutoverRace.finalPath = "";
+  lateCutoverRace.raced = false;
+  lateCutoverRace.replacementPath = "";
+  stagedDirectoryDurability.armed = false;
+  stagedDirectoryDurability.directoryDescriptors.clear();
+  stagedDirectoryDurability.failNextSync = false;
+  stagedDirectoryDurability.finalPath = "";
+  stagedDirectoryDurability.observations = [];
+  stagedDirectoryDurability.priorPath = "";
+  stagedDirectoryDurability.replacementPath = "";
+  stagedDirectoryDurability.triggered = false;
   publicationRace.resume?.();
   publicationRace.armed = false;
   publicationRace.finalPath = "";
@@ -1827,6 +1958,172 @@ describe("encode worker polling", () => {
     fixture.access.close();
   });
 
+  it("retains a competing final published after the last cutover check", async () => {
+    const fixture = createQueuedJob();
+    const options = {
+      access: fixture.access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      signal: new AbortController().signal,
+    };
+    await pollEncodeWorker({
+      ...options,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "known good encode", { flag: "wx" });
+        }),
+      },
+    });
+    fixture.access.encodeJobs.requeue(fixture.job.id);
+    lateCutoverRace.finalPath = join(
+      realpathSync(fixture.mediaLibraryPath),
+      basename(fixture.outputPath),
+    );
+    lateCutoverRace.competingPath = join(
+      fixture.mediaLibraryPath,
+      ".post-check-competing-publisher.mkv",
+    );
+
+    await pollEncodeWorker({
+      ...options,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "worker replacement", { flag: "wx" });
+          const claimToken = basename(outputPath).slice(
+            `.${basename(lateCutoverRace.finalPath)}.`.length,
+            -".rip-dvd-partial".length,
+          );
+          lateCutoverRace.replacementPath = claimReplacementPath(
+            lateCutoverRace.finalPath,
+            claimToken,
+          );
+          writeFileSync(
+            lateCutoverRace.competingPath,
+            "post-check competing publication",
+            { flag: "wx" },
+          );
+          lateCutoverRace.armed = true;
+        }),
+      },
+    });
+
+    expect(lateCutoverRace.raced).toBe(true);
+    expect(readFileSync(fixture.outputPath, "utf8")).toBe(
+      "post-check competing publication",
+    );
+    expect(quarantinedContents(fixture.outputPath)).not.toContain(
+      "post-check competing publication",
+    );
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({ id: fixture.job.id, status: "failed" }),
+    ]);
+    fixture.access.close();
+  });
+
+  it("syncs retained links before cutover and replays a staging durability fault", async () => {
+    const fixture = createQueuedJob();
+    const options = {
+      access: fixture.access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      signal: new AbortController().signal,
+    };
+    await pollEncodeWorker({
+      ...options,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "known good encode", { flag: "wx" });
+        }),
+      },
+    });
+    fixture.access.encodeJobs.requeue(fixture.job.id);
+    stagedDirectoryDurability.finalPath = join(
+      realpathSync(fixture.mediaLibraryPath),
+      basename(fixture.outputPath),
+    );
+    stagedDirectoryDurability.armed = true;
+    stagedDirectoryDurability.failNextSync = true;
+
+    await pollEncodeWorker({
+      ...options,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "lost durability attempt", { flag: "wx" });
+          const claimToken = basename(outputPath).slice(
+            `.${basename(stagedDirectoryDurability.finalPath)}.`.length,
+            -".rip-dvd-partial".length,
+          );
+          stagedDirectoryDurability.priorPath = priorFinalPath(
+            stagedDirectoryDurability.finalPath,
+            claimToken,
+          );
+          stagedDirectoryDurability.replacementPath = claimReplacementPath(
+            stagedDirectoryDurability.finalPath,
+            claimToken,
+          );
+        }),
+      },
+    });
+
+    expect(stagedDirectoryDurability.triggered).toBe(true);
+    expect(stagedDirectoryDurability.observations).toEqual([
+      {
+        final: "known good encode",
+        priorExists: true,
+        replacementExists: true,
+      },
+    ]);
+    expect(readFileSync(fixture.outputPath, "utf8")).toBe("known good encode");
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({ id: fixture.job.id, status: "failed" }),
+    ]);
+
+    fixture.access.encodeJobs.requeue(fixture.job.id);
+    stagedDirectoryDurability.observations = [];
+    await pollEncodeWorker({
+      ...options,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "durable retry", { flag: "wx" });
+          const claimToken = basename(outputPath).slice(
+            `.${basename(stagedDirectoryDurability.finalPath)}.`.length,
+            -".rip-dvd-partial".length,
+          );
+          stagedDirectoryDurability.priorPath = priorFinalPath(
+            stagedDirectoryDurability.finalPath,
+            claimToken,
+          );
+          stagedDirectoryDurability.replacementPath = claimReplacementPath(
+            stagedDirectoryDurability.finalPath,
+            claimToken,
+          );
+        }),
+      },
+    });
+
+    expect(stagedDirectoryDurability.observations).toEqual([
+      {
+        final: "known good encode",
+        priorExists: true,
+        replacementExists: true,
+      },
+      {
+        final: "durable retry",
+        priorExists: true,
+        replacementExists: false,
+      },
+    ]);
+    expect(readFileSync(fixture.outputPath, "utf8")).toBe("durable retry");
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({ id: fixture.job.id, status: "completed" }),
+    ]);
+    fixture.access.close();
+  });
+
   it("keeps a prior final visible through a failed re-encode and replaces it on retry", async () => {
     const fixture = createQueuedJob();
     const options = {
@@ -2227,6 +2524,102 @@ describe("encode worker polling", () => {
 
     expect(existsSync(partialPath)).toBe(false);
     expect(quarantinedContents(partialPath)).toContain("worker publication");
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        partialCleanupClaimToken: null,
+        publicationPending: false,
+        status: "failed",
+      }),
+    ]);
+    fixture.access.close();
+  });
+
+  it("restores a displaced competitor after a crash at the exchange boundary", async () => {
+    vi.useFakeTimers();
+    const fixture = createQueuedJob();
+    const options = {
+      access: fixture.access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      signal: new AbortController().signal,
+    };
+    await pollEncodeWorker({
+      ...options,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "known good encode", { flag: "wx" });
+        }),
+      },
+    });
+    fixture.access.encodeJobs.requeue(fixture.job.id);
+    const claim = fixture.access.encodeJobs.claimNext("crashed-exchange");
+    if (!claim) {
+      throw new Error("Expected the crashed exchange claim");
+    }
+    const canonicalFinalPath = join(
+      realpathSync(fixture.mediaLibraryPath),
+      basename(fixture.outputPath),
+    );
+    const partialPath = claimPartialPath(
+      canonicalFinalPath,
+      claim.claimToken,
+    );
+    const priorPath = priorFinalPath(canonicalFinalPath, claim.claimToken);
+    const replacementPath = claimReplacementPath(
+      canonicalFinalPath,
+      claim.claimToken,
+    );
+    const competingPath = join(
+      fixture.mediaLibraryPath,
+      ".exchange-crash-competitor.mkv",
+    );
+    const exchangeTemporaryPath = join(
+      fixture.mediaLibraryPath,
+      ".exchange-crash-temporary.mkv",
+    );
+    writeFileSync(partialPath, "unaccepted worker replacement", {
+      flag: "wx",
+    });
+    writeFileSync(competingPath, "displaced competing publication", {
+      flag: "wx",
+    });
+    fixture.access.encodeJobs.registerPartialCleanup(claim, {
+      publicationPending: true,
+    });
+    linkSync(canonicalFinalPath, priorPath);
+    linkSync(partialPath, replacementPath);
+    renameSync(competingPath, canonicalFinalPath);
+    renameSync(canonicalFinalPath, exchangeTemporaryPath);
+    renameSync(replacementPath, canonicalFinalPath);
+    renameSync(exchangeTemporaryPath, replacementPath);
+    expect(readFileSync(canonicalFinalPath, "utf8")).toBe(
+      "unaccepted worker replacement",
+    );
+    expect(readFileSync(replacementPath, "utf8")).toBe(
+      "displaced competing publication",
+    );
+    vi.advanceTimersByTime(ENCODE_JOB_LEASE_DURATION_MS + 1);
+    fixture.access.encodeJobs.recoverExpiredClaims();
+
+    await pollEncodeWorker({
+      ...options,
+      runner: { run: vi.fn() },
+      workerId: "exchange-recovery",
+    });
+
+    expect(readFileSync(canonicalFinalPath, "utf8")).toBe(
+      "displaced competing publication",
+    );
+    expect(existsSync(replacementPath)).toBe(false);
+    expect(quarantinedContents(canonicalFinalPath)).not.toContain(
+      "displaced competing publication",
+    );
+    expect(quarantinedContents(partialPath)).toContain(
+      "unaccepted worker replacement",
+    );
     expect(fixture.access.encodeJobs.list()).toEqual([
       expect.objectContaining({
         id: fixture.job.id,
