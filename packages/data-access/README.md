@@ -127,7 +127,25 @@ immediately. Later reports persist when at least one second has elapsed or the
 reported value differs from the last persisted value by at least five
 percentage points; intermediate reports are coalesced in memory. Completion
 always persists 100%, and failure persists the newest coalesced value before
-recording the terminal status.
+recording the terminal status. Encode Job reports also persist the HandBrake
+phase and ETA; phase changes bypass percentage coalescing so scanning, preview,
+and encoding transitions reach the database immediately. Terminal updates
+clear an obsolete ETA, and requeue clears all prior progress fields. Encode
+claims use a renewable one-minute lease with the same attempt-token guard.
+Recovery moves at most 100 expired claims per call into visible failed state,
+and every mutation from the expired attempt is rejected. The same transaction
+records the expired claim's output path and token as durable partial-cleanup
+provenance. Queued work with pending cleanup cannot be claimed, and cleanup
+acknowledgement compares both retained values so a later path change cannot
+orphan or acknowledge the wrong partial.
+
+Requeue grants replacement authority only when a completed Encode Job keeps
+its output path. The worker records the owned final's filesystem identity;
+failure retains authority only when the same identity is still present, while
+recovery retains the stored identity for the next attempt to recheck before
+HandBrake starts. Changing the output path or observing a different final
+revokes authority rather than transferring ownership of an existing file at
+the destination.
 
 ## Transaction boundary
 

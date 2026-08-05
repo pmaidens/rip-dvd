@@ -715,6 +715,8 @@ try {
     expect(access.encodeJobs.list()).toEqual([
       expect.objectContaining({
         id: running.id,
+        partialCleanupClaimToken: running.claimToken,
+        partialCleanupOutputPath: running.outputPath,
         status: "failed",
         completedAt: null,
         errorMessage:
@@ -731,6 +733,11 @@ try {
     expect(access.encodeJobs.list()).toEqual([
       expect.objectContaining({ id: running.id, status: "failed" }),
     ]);
+    expect(access.encodeJobs.listPendingPartialCleanups()).toContainEqual({
+      claimToken: running.claimToken,
+      jobId: running.id,
+      outputPath: running.outputPath,
+    });
     access.close();
   });
 
@@ -2657,6 +2664,8 @@ try {
         completedJob,
         expect.objectContaining({
           id: running.id,
+          partialCleanupClaimToken: running.claimToken,
+          partialCleanupOutputPath: running.outputPath,
           status: "failed",
           errorMessage: expect.stringMatching(/cutover.*repair/i),
         }),
@@ -2665,6 +2674,11 @@ try {
     expect(() => service.encodeJobs.complete(running)).toThrow(
       StaleJobAttemptError,
     );
+    expect(service.encodeJobs.listPendingPartialCleanups()).toContainEqual({
+      claimToken: running.claimToken,
+      jobId: running.id,
+      outputPath: running.outputPath,
+    });
     service.close();
   });
 

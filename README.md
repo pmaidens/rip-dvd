@@ -636,6 +636,39 @@ options, `POST /api/encode-jobs` queues or updates the logical job, and
 `PATCH /api/encode-jobs` retries a terminal job. Mutations require the same
 trusted Origin and Host checks as archive approval.
 
+The encode worker atomically claims up to
+`RIP_DVD_ENCODE_WORKER_CONCURRENCY` queued jobs, resolves each job's immutable
+Original Disc Archive, Disc Selection, and Encoding Profile version, and runs
+`HandBrakeCLI` at the lowest configured process and I/O priority. Main-feature,
+DVD-title, and chapter-bounded selections map to HandBrake's documented source
+options. Each slot claims its next job as soon as its prior encode settles.
+Encode claims have a renewable one-minute lease; every poll recovers a bounded
+batch of expired claims into visible failed jobs for explicit retry. HandBrake
+scanning, preview, and encoding progress—including percent and ETA—is written
+to SQLite and appears through the existing dashboard SSE stream.
+
+Each attempt writes to a hidden claim-scoped partial file. A synced regular
+output is hard-linked into its final path without overwrite behavior, then the
+partial link is removed and the directory is synced before the job is completed
+in SQLite. Legacy deterministic partials and ordinary failed attempts are moved
+to collision-free `.failed` paths. A timed-out child keeps ownership of its
+partial until this worker observes that HandBrake closed it. Expired claims
+persist their exact output path and claim token as cleanup work before becoming
+retryable; reclaim stays blocked until that partial is quarantined. A different
+worker cannot trust the expired process's in-memory child registry, so it uses
+a collision-free hard-link-and-unlink quarantine: any still-open writer remains
+attached to the quarantined inode while the next claim receives a distinct
+partial path.
+
+Re-encoding keeps the prior final visible until the replacement is complete,
+then preserves it at a collision-free `.failed` path before no-overwrite
+publication. Only a completed job requeued to the same output path owns that
+replacement. Its filesystem identity is retained through a failed attempt and
+verified on retry; a changed final revokes replacement authority. Ordinary
+failed retries and jobs moved to a new path leave any existing final untouched.
+If a new final path appears during an encode, it is also left untouched and the
+new partial is quarantined.
+
 Visit `/health` for the visible service/database status or `/api/health` for
 the machine-readable health response. Validate schema history with
 `pnpm db:check`; the normal `pnpm check` command runs the facade integration

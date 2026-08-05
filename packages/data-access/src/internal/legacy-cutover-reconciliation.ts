@@ -233,7 +233,9 @@ export function reconcileLegacyRepairCutover(
     }
     sqlite.prepare(`
       UPDATE encode_jobs
-      SET status = 'failed',
+      SET partial_cleanup_output_path = output_path,
+          partial_cleanup_claim_token = claim_token,
+          status = 'failed',
           completed_at = NULL,
           error_message = 'Encode Job invalidated by legacy catalog cutover repair',
           updated_at = max(updated_at + 1, ?)

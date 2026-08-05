@@ -12,7 +12,10 @@ export {
   MEDIA_ITEM_KINDS,
 } from "./domain-values.js";
 export type * from "./types.js";
-export { ARCHIVE_JOB_LEASE_DURATION_MS } from "./types.js";
+export {
+  ARCHIVE_JOB_LEASE_DURATION_MS,
+  ENCODE_JOB_LEASE_DURATION_MS,
+} from "./types.js";
 export type { CreateDataAccessOptions } from "./internal/create-data-access.js";
 
 export function createDataAccess(input: CreateDataAccessOptions): DataAccess {
