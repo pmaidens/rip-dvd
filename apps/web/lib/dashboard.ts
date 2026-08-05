@@ -406,7 +406,9 @@ function readDashboardSnapshotRecords(
                 mediaTitle: mediaItem?.title ?? "Unknown Media Item",
                 mediaYear: mediaItem?.year ?? null,
                 encodingProfileName:
-                  profile?.displayName ?? "Unknown Encoding Profile",
+                  profile
+                    ? `${profile.displayName} · Version ${profile.version}`
+                    : "Unknown Encoding Profile",
                 status: job.status,
                 progressPercent: job.progressPercent,
               };

@@ -17,6 +17,7 @@ import {
 } from "../lib/dashboard-activity";
 import { displayTerm } from "../lib/display-term";
 import { CatalogReviewEditor } from "./catalog-review-editor";
+import { EncodeJobsManager, retryEncodeJob } from "./encode-jobs";
 import { EncodingProfilesManager } from "./encoding-profiles";
 
 export type DashboardSectionLoadState<T> =
@@ -190,12 +191,16 @@ export function DashboardView({
   state,
   onApproveDetectedDisc = () => undefined,
   approvingDetectedDiscId = null,
+  onRequeueEncodeJob = () => undefined,
+  requeueingEncodeJobId = null,
   onOpenCatalogReview = () => undefined,
   onCatalogReviewPage = () => undefined,
 }: {
   state: DashboardLoadState;
   onApproveDetectedDisc?: (id: string) => void;
   approvingDetectedDiscId?: string | null;
+  onRequeueEncodeJob?: (id: string) => void;
+  requeueingEncodeJobId?: string | null;
   onOpenCatalogReview?: (id: string) => void;
   onCatalogReviewPage?: (offset: number) => void;
 }) {
@@ -364,6 +369,23 @@ export function DashboardView({
             subtitle={job.encodingProfileName}
             status={job.status}
             progressPercent={job.progressPercent}
+            action={
+              job.status === "failed" || job.status === "completed" ? (
+                <button
+                  type="button"
+                  disabled={requeueingEncodeJobId !== null}
+                  onClick={() => onRequeueEncodeJob(job.id)}
+                >
+                  {requeueingEncodeJobId === job.id
+                    ? job.status === "failed"
+                      ? "Retrying…"
+                      : "Re-encoding…"
+                    : job.status === "failed"
+                      ? "Retry encode"
+                      : "Re-encode"}
+                </button>
+              ) : null
+            }
           />
         )}
       />
@@ -494,6 +516,10 @@ export function OperationsDashboard() {
     string | null
   >(null);
   const [archiveApprovalFailed, setArchiveApprovalFailed] = useState(false);
+  const [requeueingEncodeJobId, setRequeueingEncodeJobId] = useState<
+    string | null
+  >(null);
+  const [encodeRetryFailed, setEncodeRetryFailed] = useState(false);
   const [catalogReviewArchiveId, setCatalogReviewArchiveId] = useState<
     string | null
   >(null);
@@ -539,6 +565,22 @@ export function OperationsDashboard() {
     }
   };
 
+  const requeueEncodeJob = async (encodeJobId: string) => {
+    if (requeueingEncodeJobId !== null) {
+      return;
+    }
+    setRequeueingEncodeJobId(encodeJobId);
+    setEncodeRetryFailed(false);
+    try {
+      await retryEncodeJob(encodeJobId);
+      setRequestNumber((value) => value + 1);
+    } catch {
+      setEncodeRetryFailed(true);
+    } finally {
+      setRequeueingEncodeJobId(null);
+    }
+  };
+
   return (
     <main className="dashboard-shell">
       <header className="dashboard-header">
@@ -565,7 +607,14 @@ export function OperationsDashboard() {
         </div>
       </header>
 
-      <EncodingProfilesManager />
+      <EncodingProfilesManager
+        onChanged={() => setRequestNumber((value) => value + 1)}
+      />
+
+      <EncodeJobsManager
+        key={requestNumber}
+        onChanged={() => setRequestNumber((value) => value + 1)}
+      />
 
       {catalogReviewArchiveId ? (
         <CatalogReviewEditor
@@ -585,10 +634,18 @@ export function OperationsDashboard() {
         </p>
       ) : null}
 
+      {encodeRetryFailed ? (
+        <p className="job-error" role="status">
+          Encode Job retry failed. Confirm its catalog review, then try again.
+        </p>
+      ) : null}
+
       <DashboardView
         state={state}
         onApproveDetectedDisc={(id) => void approveDetectedDisc(id)}
         approvingDetectedDiscId={approvingDetectedDiscId}
+        onRequeueEncodeJob={(id) => void requeueEncodeJob(id)}
+        requeueingEncodeJobId={requeueingEncodeJobId}
         onOpenCatalogReview={setCatalogReviewArchiveId}
         onCatalogReviewPage={setCatalogReviewOffset}
       />
