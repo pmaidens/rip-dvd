@@ -1,11 +1,15 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
+  closeSync,
   constants as fsConstants,
+  fsyncSync,
   linkSync,
   lstatSync,
+  openSync,
   renameSync,
   type Stats,
+  unlinkSync,
 } from "node:fs";
 import {
   link,
@@ -20,6 +24,7 @@ import {
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import type { Readable } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 
 import {
   ENCODE_JOB_LEASE_DURATION_MS,
@@ -33,6 +38,11 @@ import {
 const HANDBRAKE_TIMEOUT_MS = 24 * 60 * 60_000;
 const MAX_DIAGNOSTIC_BYTES = 65_536;
 const MAX_PATH_BYTES = 4_096;
+const ATOMIC_EXCHANGE_PATH = fileURLToPath(
+  new URL("../dist/rip-dvd-atomic-exchange", import.meta.url),
+);
+
+class PendingPublicationRecoveryError extends Error {}
 
 export interface HandBrakeRunRequest {
   arguments_: readonly string[];
@@ -419,6 +429,44 @@ function moveAsideAtMutationBoundary(
   return failedPath;
 }
 
+function exchangePathsAtMutationBoundary(
+  firstPath: string,
+  secondPath: string,
+): void {
+  const exchange = spawnSync(
+    ATOMIC_EXCHANGE_PATH,
+    [firstPath, secondPath],
+    {
+      encoding: "utf8",
+      maxBuffer: MAX_DIAGNOSTIC_BYTES,
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 30_000,
+    },
+  );
+  if (exchange.error) {
+    throw new Error(
+      `Atomic Encode output exchange failed: ${exchange.error.message}`,
+    );
+  }
+  if (exchange.status !== 0) {
+    throw new Error(
+      `Atomic Encode output exchange failed: ${boundedDiagnostic(
+        exchange.stderr || `exit status ${String(exchange.status)}`,
+      )}`,
+    );
+  }
+}
+
+function syncPathAtMutationBoundary(path: string): void {
+  const descriptor = openSync(path, fsConstants.O_RDONLY);
+  try {
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
 function publishReplacementAtMutationBoundary(
   finalPath: string,
   priorFinalPath: string,
@@ -440,12 +488,46 @@ function publishReplacementAtMutationBoundary(
     throw new Error("Encode output changed while retaining recovery");
   }
   linkSync(partialPath, replacementPath);
+  syncPathAtMutationBoundary(dirname(finalPath));
   const currentFinalMetadata = lstatSync(finalPath);
   if (!sameInode(expectedFinal, currentFinalMetadata)) {
     throw new Error("Encode output changed before atomic replacement");
   }
-  renameSync(replacementPath, finalPath);
+  exchangePathsAtMutationBoundary(replacementPath, finalPath);
+  let displacedFinalError: Error | null = null;
+  try {
+    const displacedFinalMetadata = lstatSync(replacementPath);
+    if (
+      !displacedFinalMetadata.isFile() ||
+      displacedFinalMetadata.isSymbolicLink() ||
+      !sameInode(expectedFinal, displacedFinalMetadata)
+    ) {
+      displacedFinalError = new Error(
+        "Encode output changed during atomic replacement",
+      );
+    }
+  } catch (error) {
+    displacedFinalError =
+      error instanceof Error ? error : new Error(String(error));
+  }
+  if (displacedFinalError !== null) {
+    try {
+      exchangePathsAtMutationBoundary(replacementPath, finalPath);
+      syncPathAtMutationBoundary(dirname(finalPath));
+    } catch (rollbackError) {
+      throw new PendingPublicationRecoveryError(
+        `${displacedFinalError.message}; atomic exchange rollback requires reconciliation: ${
+          rollbackError instanceof Error
+            ? rollbackError.message
+            : String(rollbackError)
+        }`,
+      );
+    }
+    throw displacedFinalError;
+  }
   onPublished();
+  unlinkSync(replacementPath);
+  syncPathAtMutationBoundary(dirname(finalPath));
 }
 
 async function cleanupReplacementLink(
@@ -619,10 +701,60 @@ async function reconcilePendingPublications(
         partialMetadata !== null &&
         partialMetadata.size > 0 &&
         sameFile(finalMetadata, partialMetadata);
+      if (
+        finalMatchesPartial &&
+        replacementMetadata !== null &&
+        partialMetadata !== null &&
+        !sameInode(partialMetadata, replacementMetadata) &&
+        (priorFinalMetadata === null ||
+          !sameInode(priorFinalMetadata, replacementMetadata))
+      ) {
+        let displacedFinalRestored = false;
+        try {
+          options.access.encodeJobs.completePublishedPartial(cleanup, () => {
+            const currentFinalMetadata = lstatSync(finalPath);
+            const currentReplacementMetadata = lstatSync(replacementPath);
+            if (
+              !sameFile(finalMetadata, currentFinalMetadata) ||
+              !sameFile(replacementMetadata, currentReplacementMetadata)
+            ) {
+              return false;
+            }
+            exchangePathsAtMutationBoundary(replacementPath, finalPath);
+            const restoredFinalMetadata = lstatSync(finalPath);
+            const stagedWorkerMetadata = lstatSync(replacementPath);
+            if (
+              !sameInode(replacementMetadata, restoredFinalMetadata) ||
+              !sameInode(finalMetadata, stagedWorkerMetadata)
+            ) {
+              throw new PendingPublicationRecoveryError(
+                "Displaced Encode output exchange requires reconciliation",
+              );
+            }
+            syncPathAtMutationBoundary(dirname(finalPath));
+            displacedFinalRestored = true;
+            return false;
+          });
+        } catch (error) {
+          if (!displacedFinalRestored) {
+            throw error;
+          }
+        }
+        await cleanupReplacementLink(replacementPath, partialMetadata);
+        await quarantinePartial(
+          partialPath,
+          options.runner,
+          options.log,
+          () => options.access.encodeJobs.completePartialCleanup(cleanup),
+        );
+        continue;
+      }
       if (replacementMetadata !== null) {
         await cleanupReplacementLink(
           replacementPath,
-          partialMetadata ?? undefined,
+          finalMatchesPartial && priorFinalMetadata !== null
+            ? priorFinalMetadata
+            : partialMetadata ?? undefined,
         );
       }
       if (finalMatchesPartial) {
@@ -945,6 +1077,12 @@ async function executeClaim(
       );
     }
   } catch (error) {
+    if (error instanceof PendingPublicationRecoveryError) {
+      options.log(
+        `Encode publication mutation requires reconciliation: ${error.message}`,
+      );
+      return;
+    }
     const cleanupFailures: string[] = [];
     let replacementCleanupFailed = false;
     let preserveReplacementAuthority = priorFinalRestored;

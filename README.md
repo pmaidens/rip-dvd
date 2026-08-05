@@ -679,9 +679,10 @@ atomic quarantine; any still-open writer remains attached to the quarantined
 inode while the next claim receives a distinct partial path.
 
 Re-encoding keeps the prior final visible until the replacement is complete,
-preserves it at a collision-free `.failed` path with a recovery hard link, and
-atomically renames a claim-scoped replacement link over the public final. Its
-claim-scoped recovery path lets crash recovery restore the prior final when
+durably stages it at a collision-free `.failed` recovery hard link, and
+atomically exchanges a claim-scoped replacement link with the public final.
+The displaced inode is retained and validated before the cutover is accepted.
+Its claim-scoped recovery path lets crash recovery restore the prior final when
 publication did not complete, and any failure after replacement
 publication quarantines the replacement and restores that prior final. Only a
 completed job requeued to the same output path owns that
