@@ -17,6 +17,7 @@ import {
   createDataAccess,
   DVD_TITLE_MAP_SCHEMA_VERSION,
   DomainInvariantError,
+  ENCODE_JOB_LEASE_DURATION_MS,
   InvalidStatusTransitionError,
   MAX_DVD_TITLES,
   MAX_MEDIA_ITEM_HIERARCHY_DEPTH,
@@ -1957,6 +1958,15 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
+        name: "20260805022523_far_archangel",
+      },
+      {
+        name: "20260805015911_heavy_franklin_richards",
+      },
+      {
+        name: "20260805005453_outstanding_texas_twister",
+      },
+      {
         name: "20260804184603_tense_zzzax",
       },
       {
@@ -1964,15 +1974,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260804143147_durable-legacy-cutover-staging",
-      },
-      {
-        name: "20260804051834_legacy-cutover-fence",
-      },
-      {
-        name: "20260804011718_catalog-item-other-kind",
-      },
-      {
-        name: "20260803213207_catalog-review-upgrade-guard",
       },
     ]);
     expect(
@@ -4732,25 +4733,64 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     if (!firstClaim) {
       throw new Error("Expected the encode job to be claimed");
     }
-    access.encodeJobs.updateProgress(firstClaim, 10);
-    access.encodeJobs.updateProgress(firstClaim, 11);
-    access.encodeJobs.updateProgress(firstClaim, 12);
+    access.encodeJobs.updateProgress(firstClaim, {
+      phase: "encoding",
+      progressPercent: 10,
+      etaSeconds: 100,
+    });
+    access.encodeJobs.updateProgress(firstClaim, {
+      phase: "encoding",
+      progressPercent: 11,
+      etaSeconds: 95,
+    });
+    access.encodeJobs.updateProgress(firstClaim, {
+      phase: "encoding",
+      progressPercent: 12,
+      etaSeconds: 90,
+    });
     expect(access.encodeJobs.list()).toEqual([
-      expect.objectContaining({ id: job.id, progressPercent: 10 }),
+      expect.objectContaining({
+        id: job.id,
+        progressPhase: "encoding",
+        progressPercent: 10,
+        progressEtaSeconds: 100,
+      }),
     ]);
     vi.advanceTimersByTime(1_000);
-    access.encodeJobs.updateProgress(firstClaim, 12);
+    access.encodeJobs.updateProgress(firstClaim, {
+      phase: "encoding",
+      progressPercent: 12,
+      etaSeconds: 90,
+    });
     expect(access.encodeJobs.list()).toEqual([
-      expect.objectContaining({ id: job.id, progressPercent: 12 }),
+      expect.objectContaining({
+        id: job.id,
+        progressPercent: 12,
+        progressEtaSeconds: 90,
+      }),
     ]);
-    access.encodeJobs.updateProgress(firstClaim, 17);
+    access.encodeJobs.updateProgress(firstClaim, {
+      phase: "encoding",
+      progressPercent: 17,
+      etaSeconds: 80,
+    });
     expect(access.encodeJobs.list()).toEqual([
-      expect.objectContaining({ id: job.id, progressPercent: 17 }),
+      expect.objectContaining({
+        id: job.id,
+        progressPercent: 17,
+        progressEtaSeconds: 80,
+      }),
     ]);
-    access.encodeJobs.updateProgress(firstClaim, 18);
+    access.encodeJobs.updateProgress(firstClaim, {
+      phase: "encoding",
+      progressPercent: 18,
+      etaSeconds: 70,
+    });
     expect(access.encodeJobs.complete(firstClaim)).toMatchObject({
       status: "completed",
+      progressPhase: "encoding",
       progressPercent: 100,
+      progressEtaSeconds: null,
     });
     expect(
       access.encodeJobs.enqueue({
@@ -4762,7 +4802,10 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     ).toMatchObject({
       id: job.id,
       status: "queued",
+      progressPhase: null,
       progressPercent: 0,
+      progressEtaSeconds: null,
+      replaceExistingOutput: false,
       claimedBy: null,
       outputPath: "/media/movies/Movie/Movie-remastered.mkv",
       priority: 20,
@@ -4775,17 +4818,87 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(() => access.encodeJobs.updateProgress(firstClaim, 50)).toThrow();
     expect(() => access.encodeJobs.complete(firstClaim)).toThrow();
     expect(() => access.encodeJobs.fail(firstClaim, "stale failure")).toThrow();
-    access.encodeJobs.updateProgress(secondClaim, 16);
-    access.encodeJobs.updateProgress(secondClaim, 17);
+    access.encodeJobs.updateProgress(secondClaim, {
+      phase: "scanning",
+      progressPercent: 16,
+      etaSeconds: null,
+    });
+    access.encodeJobs.updateProgress(secondClaim, {
+      phase: "previewing",
+      progressPercent: 17,
+      etaSeconds: null,
+    });
     expect(access.encodeJobs.list()).toEqual([
-      expect.objectContaining({ id: job.id, progressPercent: 16 }),
+      expect.objectContaining({
+        id: job.id,
+        progressPhase: "previewing",
+        progressPercent: 17,
+      }),
     ]);
+    access.encodeJobs.updateProgress(secondClaim, {
+      phase: "previewing",
+      progressPercent: 18,
+      etaSeconds: null,
+    });
     expect(access.encodeJobs.fail(secondClaim, "encode failed")).toMatchObject({
       status: "failed",
-      progressPercent: 17,
+      progressPhase: "previewing",
+      progressPercent: 18,
+      progressEtaSeconds: null,
+      replaceExistingOutput: false,
       errorMessage: "encode failed",
     });
     expect(access.encodeJobs.list()).toHaveLength(1);
+
+    expect(access.encodeJobs.requeue(job.id)).toMatchObject({
+      id: job.id,
+      status: "queued",
+    });
+    const abandoned = access.encodeJobs.claimNext("encode-worker-crashed");
+    if (!abandoned) {
+      throw new Error("Expected the abandoned Encode Job to be claimed");
+    }
+    vi.advanceTimersByTime(ENCODE_JOB_LEASE_DURATION_MS + 1);
+    expect(access.encodeJobs.recoverExpiredClaims()).toEqual([
+      expect.objectContaining({
+        id: job.id,
+        partialCleanupClaimToken: abandoned.claimToken,
+        partialCleanupOutputPath: abandoned.outputPath,
+        status: "failed",
+        errorMessage: "Encode worker lease expired",
+      }),
+    ]);
+    expect(() => access.encodeJobs.updateProgress(abandoned, 50)).toThrow();
+
+    const recoveredOutputPath = "/media/movies/Movie/Movie-recovered.mkv";
+    access.encodeJobs.enqueue({
+      discSelectionId: job.discSelectionId,
+      encodingProfileId: job.encodingProfileId,
+      outputPath: recoveredOutputPath,
+    });
+    expect(access.encodeJobs.claimNext("cleanup-not-finished")).toBeNull();
+    const [cleanup] = access.encodeJobs.listPendingPartialCleanups();
+    expect(cleanup).toEqual({
+      claimToken: abandoned.claimToken,
+      jobId: job.id,
+      outputPath: abandoned.outputPath,
+    });
+    if (!cleanup) {
+      throw new Error("Expected pending Encode Job partial cleanup");
+    }
+    access.encodeJobs.completePartialCleanup(cleanup);
+    const renewed = access.encodeJobs.claimNext("encode-worker-renewed");
+    if (!renewed) {
+      throw new Error("Expected the renewed Encode Job to be claimed");
+    }
+    expect(renewed.outputPath).toBe(recoveredOutputPath);
+    vi.advanceTimersByTime(ENCODE_JOB_LEASE_DURATION_MS - 1);
+    expect(access.encodeJobs.renewClaim(renewed)).toMatchObject({
+      id: job.id,
+      status: "running",
+    });
+    vi.advanceTimersByTime(2);
+    expect(access.encodeJobs.recoverExpiredClaims()).toEqual([]);
     access.close();
   });
 });

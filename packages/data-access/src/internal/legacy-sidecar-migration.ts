@@ -10,6 +10,7 @@ import {
   inArray,
   isNull,
   or,
+  sql,
 } from "drizzle-orm";
 
 import { DomainInvariantError } from "../errors.js";
@@ -273,6 +274,8 @@ export function createLegacySidecarImportAccess(
             transaction
               .update(encodeJobs)
               .set({
+                partialCleanupOutputPath: sql`${encodeJobs.outputPath}`,
+                partialCleanupClaimToken: sql`${encodeJobs.claimToken}`,
                 status: "failed",
                 completedAt: null,
                 errorMessage:

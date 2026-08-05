@@ -3,6 +3,7 @@ import type {
   DETECTED_DISC_STATUSES,
   DISC_KINDS,
   DISC_SELECTION_KINDS,
+  ENCODE_PROGRESS_PHASES,
   JOB_STATUSES,
   MEDIA_DOMAINS,
   MEDIA_ITEM_KINDS,
@@ -15,6 +16,7 @@ export type MediaItemKind = (typeof MEDIA_ITEM_KINDS)[number];
 export type DiscSelectionKind = (typeof DISC_SELECTION_KINDS)[number];
 export type MediaDomain = (typeof MEDIA_DOMAINS)[number];
 export type JobStatus = (typeof JOB_STATUSES)[number];
+export type EncodeProgressPhase = (typeof ENCODE_PROGRESS_PHASES)[number];
 
 declare const domainIdBrand: unique symbol;
 type DomainId<Name extends string> = string & {
@@ -33,6 +35,7 @@ export type ArchiveJobClaimToken = DomainId<"ArchiveJobClaim">;
 export type EncodeJobClaimToken = DomainId<"EncodeJobClaim">;
 
 export const ARCHIVE_JOB_LEASE_DURATION_MS = 60_000;
+export const ENCODE_JOB_LEASE_DURATION_MS = 60_000;
 
 export interface ServiceHealth {
   status: "ok";
@@ -195,7 +198,13 @@ export interface EncodeJob {
   outputPath: string;
   status: JobStatus;
   priority: number;
+  replaceExistingOutput: boolean;
+  replacementOutputIdentity: string | null;
+  partialCleanupOutputPath: string | null;
+  partialCleanupClaimToken: EncodeJobClaimToken | null;
+  progressPhase: EncodeProgressPhase | null;
   progressPercent: number;
+  progressEtaSeconds: number | null;
   claimedBy: string | null;
   claimToken: EncodeJobClaimToken | null;
   claimedAt: Date | null;
@@ -215,6 +224,22 @@ export type RunningEncodeJob = EncodeJob & {
   status: "running";
   claimToken: EncodeJobClaimToken;
 };
+
+export interface EncodeJobProgress {
+  phase: EncodeProgressPhase;
+  progressPercent: number;
+  etaSeconds: number | null;
+}
+
+export interface EncodeJobPartialCleanup {
+  jobId: EncodeJobId;
+  outputPath: string;
+  claimToken: EncodeJobClaimToken;
+}
+
+export interface EncodeJobFailureOptions {
+  preserveReplacementAuthority?: boolean;
+}
 
 export interface DiscoveredOpticalDrive {
   devicePath: string;
@@ -395,13 +420,29 @@ export interface EncodeJobAccess {
     priority?: number;
   }): EncodeJob;
   claimNext(workerId: string): RunningEncodeJob | null;
+  renewClaim(claim: RunningEncodeJob): RunningEncodeJob;
+  recoverExpiredClaims(): EncodeJob[];
+  recordReplacementOutputIdentity(
+    claim: RunningEncodeJob,
+    identity: string,
+  ): RunningEncodeJob;
+  registerPartialCleanup(claim: RunningEncodeJob): EncodeJobPartialCleanup;
+  listPendingPartialCleanups(): EncodeJobPartialCleanup[];
+  completePartialCleanup(cleanup: EncodeJobPartialCleanup): EncodeJob;
   list(
     statuses?: JobStatus[],
     options?: ChronologicalListOptions,
   ): EncodeJob[];
-  updateProgress(claim: RunningEncodeJob, progressPercent: number): EncodeJob;
+  updateProgress(
+    claim: RunningEncodeJob,
+    progress: number | EncodeJobProgress,
+  ): EncodeJob;
   complete(claim: RunningEncodeJob): EncodeJob;
-  fail(claim: RunningEncodeJob, errorMessage: string): EncodeJob;
+  fail(
+    claim: RunningEncodeJob,
+    errorMessage: string,
+    options?: EncodeJobFailureOptions,
+  ): EncodeJob;
   requeue(id: EncodeJobId): EncodeJob;
 }
 

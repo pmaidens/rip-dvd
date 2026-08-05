@@ -157,7 +157,9 @@ describe("DashboardView", () => {
             mediaYear: 2001,
             encodingProfileName: "DVD library",
             status: "failed",
+            progressPhase: null,
             progressPercent: 18,
+            progressEtaSeconds: null,
           },
         ],
       },
@@ -276,7 +278,9 @@ describe("DashboardView", () => {
                 mediaYear: null,
                 encodingProfileName: "DVD library v1",
                 status: "queued",
+                progressPhase: null,
                 progressPercent: 0,
+                progressEtaSeconds: null,
               },
               {
                 id: "running-job",
@@ -284,7 +288,9 @@ describe("DashboardView", () => {
                 mediaYear: null,
                 encodingProfileName: "DVD library v1",
                 status: "running",
+                progressPhase: "encoding",
                 progressPercent: 42,
+                progressEtaSeconds: 723,
               },
               {
                 id: "completed-job",
@@ -292,7 +298,9 @@ describe("DashboardView", () => {
                 mediaYear: null,
                 encodingProfileName: "DVD library v1",
                 status: "completed",
+                progressPhase: "encoding",
                 progressPercent: 100,
+                progressEtaSeconds: null,
               },
               {
                 id: "failed-job",
@@ -300,7 +308,9 @@ describe("DashboardView", () => {
                 mediaYear: null,
                 encodingProfileName: "DVD library v1",
                 status: "failed",
+                progressPhase: "encoding",
                 progressPercent: 19,
+                progressEtaSeconds: null,
               },
             ],
           },
@@ -320,6 +330,7 @@ describe("DashboardView", () => {
       expect(html).toContain(title);
     }
     expect(html).toContain("Re-encode");
+    expect(html).toContain("Encoding · ETA 12m 3s");
     expect(html).toContain("Retrying…");
     expect(html).not.toContain("Retry encode");
   });

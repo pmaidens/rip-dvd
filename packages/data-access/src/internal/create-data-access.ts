@@ -63,7 +63,10 @@ import {
   decodeDvdTitleMap,
   isDvdContentId,
 } from "../dvd-scan.js";
-import { MAX_MEDIA_ITEM_HIERARCHY_DEPTH } from "../domain-values.js";
+import {
+  ENCODE_PROGRESS_PHASES,
+  MAX_MEDIA_ITEM_HIERARCHY_DEPTH,
+} from "../domain-values.js";
 import {
   DomainInvariantError,
   InvalidStatusTransitionError,
@@ -86,6 +89,9 @@ import type {
   EncodeJobClaimToken,
   EncodeJobId,
   EncodeJob,
+  EncodeJobFailureOptions,
+  EncodeJobPartialCleanup,
+  EncodeJobProgress,
   EncodingProfileId,
   JobStatus,
   MediaDomain,
@@ -95,14 +101,17 @@ import type {
   RunningArchiveJob,
   RunningEncodeJob,
 } from "../types.js";
-import { ARCHIVE_JOB_LEASE_DURATION_MS } from "../types.js";
+import {
+  ARCHIVE_JOB_LEASE_DURATION_MS,
+  ENCODE_JOB_LEASE_DURATION_MS,
+} from "../types.js";
 import { newId, requireRow } from "./persistence.js";
 
 const BUSY_TIMEOUT_MS = 5_000;
 const MIGRATION_LOCK_TIMEOUT_MS = 15_000;
 const MIGRATION_LOCK_STALE_MS = 300_000;
 const MIGRATION_LOCK_POLL_MS = 10;
-const ARCHIVE_JOB_RECOVERY_LIMIT = 100;
+const JOB_RECOVERY_LIMIT = 100;
 const LEGACY_ARCHIVE_RECONCILIATION_LIMIT = 4;
 const LEGACY_ARCHIVE_RECONCILIATION_BYTES = 9_000_000_000;
 const DISC_SELECTION_REVIEW_BATCH_SIZE = 100;
@@ -1302,7 +1311,7 @@ export function createDataAccessInternal(
           .get();
       }, { behavior: "immediate" });
     },
-    requeue: (id, expectedStatus, update) =>
+    requeue: (id, expectedStatus, _current, update) =>
       database
         .update(archiveJobs)
         .set(update)
@@ -1400,6 +1409,39 @@ export function createDataAccessInternal(
     },
   });
 
+  const encodeAttemptCondition = (
+    claim: RunningEncodeJob,
+    timestamp: Date,
+  ) =>
+    and(
+      eq(encodeJobs.id, claim.id),
+      eq(encodeJobs.status, "running"),
+      eq(encodeJobs.claimToken, claim.claimToken),
+      gt(
+        encodeJobs.updatedAt,
+        new Date(timestamp.getTime() - ENCODE_JOB_LEASE_DURATION_MS),
+      ),
+      exists(
+        database
+          .select({ id: discSelections.id })
+          .from(discSelections)
+          .innerJoin(
+            originalDiscArchives,
+            eq(
+              originalDiscArchives.id,
+              discSelections.originalDiscArchiveId,
+            ),
+          )
+          .where(
+            and(
+              eq(discSelections.id, encodeJobs.discSelectionId),
+              eq(discSelections.isCatalogActive, true),
+              eq(originalDiscArchives.legacyCutoverPending, false),
+            ),
+          ),
+      ),
+    );
+
   const encodeJobAdapter = {
     recordType: "encode job",
     find: (id) =>
@@ -1423,6 +1465,8 @@ export function createDataAccessInternal(
         .where(
           and(
             eq(encodeJobs.status, "queued"),
+            isNull(encodeJobs.partialCleanupClaimToken),
+            isNull(encodeJobs.partialCleanupOutputPath),
             eq(discSelections.isCatalogActive, true),
             isNotNull(originalDiscArchives.catalogReviewedAt),
             eq(originalDiscArchives.legacyCutoverPending, false),
@@ -1455,45 +1499,78 @@ export function createDataAccessInternal(
         .get();
       return claimed ? asRunningEncodeJob(claimed) : undefined;
     },
-    updateAttempt: (claim, update) =>
+    isAttemptCurrent: (current, _claim, timestamp) =>
+      current.updatedAt.getTime() >
+      timestamp.getTime() - ENCODE_JOB_LEASE_DURATION_MS,
+    updateAttempt: (claim, update, _completion, failureOptions) =>
       database
         .update(encodeJobs)
-        .set(update)
-        .where(
-          and(
-            eq(encodeJobs.id, claim.id),
-            eq(encodeJobs.status, "running"),
-            eq(encodeJobs.claimToken, claim.claimToken),
-            exists(
-              database
-                .select({ id: discSelections.id })
-                .from(discSelections)
-                .innerJoin(
-                  originalDiscArchives,
-                  eq(
-                    originalDiscArchives.id,
-                    discSelections.originalDiscArchiveId,
-                  ),
-                )
-                .where(
-                  and(
-                    eq(discSelections.id, encodeJobs.discSelectionId),
-                    eq(discSelections.isCatalogActive, true),
-                    eq(originalDiscArchives.legacyCutoverPending, false),
-                  ),
-                ),
-            ),
-          ),
-        )
+        .set({
+          ...update,
+          ...(update.status === "completed"
+            ? {
+                progressEtaSeconds: null,
+                replaceExistingOutput: false,
+                replacementOutputIdentity: null,
+              }
+            : update.status === "failed"
+              ? {
+                  progressEtaSeconds: null,
+                  ...(failureOptions?.preserveReplacementAuthority
+                    ? {}
+                    : {
+                        replaceExistingOutput: false,
+                        replacementOutputIdentity: null,
+                      }),
+                }
+              : {}),
+        })
+        .where(encodeAttemptCondition(claim, update.updatedAt))
         .returning()
         .get(),
-    requeue: (id, expectedStatus, update, options) =>
+    updateProgressAttempt: (claim, update, details, failureOptions) =>
       database
+        .update(encodeJobs)
+        .set({
+          ...update,
+          progressPhase: details.phase,
+          progressEtaSeconds:
+            update.status === "failed" ? null : details.etaSeconds,
+          ...(update.status === "failed" &&
+            !failureOptions?.preserveReplacementAuthority
+            ? {
+                replaceExistingOutput: false,
+                replacementOutputIdentity: null,
+              }
+            : {}),
+        })
+        .where(encodeAttemptCondition(claim, update.updatedAt))
+        .returning()
+        .get(),
+    progressDetailsChanged: (current, previous) =>
+      current?.phase !== previous?.phase,
+    requeue: (id, expectedStatus, current, update, options) => {
+      const keepsOutputPath =
+        options?.outputPath === undefined ||
+        options.outputPath === current.outputPath;
+      const preservesFailedReplacement =
+        expectedStatus === "failed" &&
+        keepsOutputPath &&
+        current.replaceExistingOutput;
+      return database
         .update(encodeJobs)
         .set({
           ...update,
           outputPath: options?.outputPath,
           priority: options?.priority,
+          progressPhase: null,
+          progressEtaSeconds: null,
+          replaceExistingOutput:
+            (expectedStatus === "completed" && keepsOutputPath) ||
+            preservesFailedReplacement,
+          replacementOutputIdentity: preservesFailedReplacement
+            ? current.replacementOutputIdentity
+            : null,
         })
         .where(
           and(
@@ -1522,7 +1599,8 @@ export function createDataAccessInternal(
           ),
         )
         .returning()
-        .get(),
+        .get();
+    },
   } satisfies JobQueueAdapter<
     EncodeJob,
     RunningEncodeJob,
@@ -1530,7 +1608,9 @@ export function createDataAccessInternal(
     EncodeJobClaimToken,
     void,
     EncodeRequeueOptions,
-    void
+    void,
+    Pick<EncodeJobProgress, "etaSeconds" | "phase">,
+    EncodeJobFailureOptions
   >;
 
   const archiveJobQueue = createJobQueueController({
@@ -3464,7 +3544,7 @@ export function createDataAccessInternal(
               ),
             )
             .orderBy(asc(archiveJobs.updatedAt), asc(archiveJobs.id))
-            .limit(ARCHIVE_JOB_RECOVERY_LIMIT)
+            .limit(JOB_RECOVERY_LIMIT)
             .all()
             .map(({ id }) => id);
           if (expiredIds.length === 0) {
@@ -3640,8 +3720,199 @@ export function createDataAccessInternal(
       },
 
       claimNext: encodeJobQueue.claimNext,
+      renewClaim(claim) {
+        const timestamp = now();
+        const renewed = database
+          .update(encodeJobs)
+          .set({ updatedAt: timestamp })
+          .where(encodeAttemptCondition(claim, timestamp))
+          .returning()
+          .get();
+        if (!renewed) {
+          throw new StaleJobAttemptError("encode job", claim.id);
+        }
+        return asRunningEncodeJob(renewed);
+      },
+      recoverExpiredClaims() {
+        const timestamp = now();
+        const expiredBefore = new Date(
+          timestamp.getTime() - ENCODE_JOB_LEASE_DURATION_MS,
+        );
+        return database.transaction((transaction) => {
+          const expiredIds = transaction
+            .select({ id: encodeJobs.id })
+            .from(encodeJobs)
+            .where(
+              and(
+                eq(encodeJobs.status, "running"),
+                lte(encodeJobs.updatedAt, expiredBefore),
+              ),
+            )
+            .orderBy(asc(encodeJobs.updatedAt), asc(encodeJobs.id))
+            .limit(JOB_RECOVERY_LIMIT)
+            .all()
+            .map(({ id }) => id);
+          if (expiredIds.length === 0) {
+            return [];
+          }
+          return transaction
+            .update(encodeJobs)
+            .set({
+              status: "failed",
+              progressEtaSeconds: null,
+              partialCleanupOutputPath: sql`${encodeJobs.outputPath}`,
+              partialCleanupClaimToken: sql`${encodeJobs.claimToken}`,
+              errorMessage: "Encode worker lease expired",
+              updatedAt: timestamp,
+            })
+            .where(
+              and(
+                inArray(encodeJobs.id, expiredIds),
+                eq(encodeJobs.status, "running"),
+                lte(encodeJobs.updatedAt, expiredBefore),
+              ),
+            )
+            .returning()
+            .all();
+        }, { behavior: "immediate" });
+      },
+      recordReplacementOutputIdentity(claim, identity) {
+        const timestamp = now();
+        const normalizedIdentity = requireNonEmpty(
+          identity,
+          "replacementOutputIdentity",
+        );
+        const updated = database
+          .update(encodeJobs)
+          .set({
+            replacementOutputIdentity: normalizedIdentity,
+            updatedAt: timestamp,
+          })
+          .where(
+            and(
+              encodeAttemptCondition(claim, timestamp),
+              eq(encodeJobs.replaceExistingOutput, true),
+              or(
+                isNull(encodeJobs.replacementOutputIdentity),
+                eq(
+                  encodeJobs.replacementOutputIdentity,
+                  normalizedIdentity,
+                ),
+              ),
+            ),
+          )
+          .returning()
+          .get();
+        if (!updated) {
+          throw new StaleJobAttemptError("encode job", claim.id);
+        }
+        return asRunningEncodeJob(updated);
+      },
+      registerPartialCleanup(claim) {
+        const timestamp = now();
+        const updated = database
+          .update(encodeJobs)
+          .set({
+            partialCleanupOutputPath: claim.outputPath,
+            partialCleanupClaimToken: claim.claimToken,
+            updatedAt: timestamp,
+          })
+          .where(encodeAttemptCondition(claim, timestamp))
+          .returning()
+          .get();
+        if (!updated) {
+          throw new StaleJobAttemptError("encode job", claim.id);
+        }
+        return {
+          jobId: updated.id,
+          outputPath: claim.outputPath,
+          claimToken: claim.claimToken,
+        };
+      },
+      listPendingPartialCleanups() {
+        return database
+          .select({
+            jobId: encodeJobs.id,
+            outputPath: encodeJobs.partialCleanupOutputPath,
+            claimToken: encodeJobs.partialCleanupClaimToken,
+          })
+          .from(encodeJobs)
+          .where(
+            and(
+              isNotNull(encodeJobs.partialCleanupOutputPath),
+              isNotNull(encodeJobs.partialCleanupClaimToken),
+            ),
+          )
+          .orderBy(asc(encodeJobs.updatedAt), asc(encodeJobs.id))
+          .limit(JOB_RECOVERY_LIMIT)
+          .all()
+          .map((cleanup): EncodeJobPartialCleanup => {
+            if (cleanup.outputPath === null || cleanup.claimToken === null) {
+              throw new DomainInvariantError(
+                "Encode Job partial cleanup provenance is incomplete",
+              );
+            }
+            return {
+              jobId: cleanup.jobId,
+              outputPath: cleanup.outputPath,
+              claimToken: cleanup.claimToken,
+            };
+          });
+      },
+      completePartialCleanup(cleanup) {
+        const updated = database
+          .update(encodeJobs)
+          .set({
+            partialCleanupOutputPath: null,
+            partialCleanupClaimToken: null,
+          })
+          .where(
+            and(
+              eq(encodeJobs.id, cleanup.jobId),
+              eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
+              eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
+            ),
+          )
+          .returning()
+          .get();
+        if (updated) {
+          return updated;
+        }
+        const current = database
+          .select()
+          .from(encodeJobs)
+          .where(eq(encodeJobs.id, cleanup.jobId))
+          .get();
+        if (
+          current?.partialCleanupOutputPath === null &&
+          current.partialCleanupClaimToken === null
+        ) {
+          return current;
+        }
+        throw new StaleJobAttemptError("encode job cleanup", cleanup.jobId);
+      },
       list: encodeJobQueue.list,
-      updateProgress: encodeJobQueue.updateProgress,
+      updateProgress(claim, progress) {
+        if (typeof progress === "number") {
+          return encodeJobQueue.updateProgress(claim, progress);
+        }
+        if (!ENCODE_PROGRESS_PHASES.includes(progress.phase)) {
+          throw new DomainInvariantError("Encode Job progress phase is invalid");
+        }
+        const etaSeconds = optionalSafeInteger(
+          progress.etaSeconds,
+          "etaSeconds",
+          0,
+        );
+        return encodeJobQueue.updateProgress(
+          claim,
+          progress.progressPercent,
+          {
+            phase: progress.phase,
+            etaSeconds: etaSeconds ?? null,
+          },
+        );
+      },
       complete: (claim) => encodeJobQueue.complete(claim, undefined),
       fail: encodeJobQueue.fail,
       requeue: encodeJobQueue.requeue,

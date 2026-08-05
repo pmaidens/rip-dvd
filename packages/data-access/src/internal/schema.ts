@@ -15,6 +15,7 @@ import {
   DETECTED_DISC_STATUSES,
   DISC_KINDS,
   DISC_SELECTION_KINDS,
+  ENCODE_PROGRESS_PHASES,
   JOB_STATUSES,
   MEDIA_DOMAINS,
   MEDIA_ITEM_KINDS,
@@ -371,7 +372,20 @@ export const encodeJobs = sqliteTable(
       .default(true),
     status: text("status", { enum: JOB_STATUSES }).notNull().default("queued"),
     priority: integer("priority").notNull().default(0),
+    replaceExistingOutput: integer("replace_existing_output", {
+      mode: "boolean",
+    })
+      .notNull()
+      .default(false),
+    replacementOutputIdentity: text("replacement_output_identity"),
+    partialCleanupOutputPath: text("partial_cleanup_output_path"),
+    partialCleanupClaimToken: text("partial_cleanup_claim_token")
+      .$type<EncodeJobClaimToken>(),
+    progressPhase: text("progress_phase", {
+      enum: ENCODE_PROGRESS_PHASES,
+    }),
     progressPercent: integer("progress_percent").notNull().default(0),
+    progressEtaSeconds: integer("progress_eta_seconds"),
     claimedBy: text("claimed_by"),
     claimToken: text("claim_token").$type<EncodeJobClaimToken>(),
     claimedAt: integer("claimed_at", { mode: "timestamp_ms" }),
@@ -400,8 +414,24 @@ export const encodeJobs = sqliteTable(
       sql`${table.progressPercent} between 0 and 100`,
     ),
     check(
+      "encode_jobs_progress_phase_check",
+      sql`${table.progressPhase} is null or ${table.progressPhase} in (${sqliteStringLiterals(ENCODE_PROGRESS_PHASES)})`,
+    ),
+    check(
+      "encode_jobs_progress_eta_check",
+      sql`${table.progressEtaSeconds} is null or (typeof(${table.progressEtaSeconds}) = 'integer' and ${table.progressEtaSeconds} >= 0)`,
+    ),
+    check(
       "encode_jobs_output_reservation_check",
       sql`${table.reservesOutputPath} = 1 or ${table.status} = 'failed'`,
+    ),
+    check(
+      "encode_jobs_replacement_identity_check",
+      sql`${table.replacementOutputIdentity} is null or ${table.replaceExistingOutput} = 1`,
+    ),
+    check(
+      "encode_jobs_partial_cleanup_pair_check",
+      sql`(${table.partialCleanupOutputPath} is null) = (${table.partialCleanupClaimToken} is null)`,
     ),
   ],
 );
