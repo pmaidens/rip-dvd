@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   DashboardConnectionStatus,
   DashboardView,
+  OperationsDashboard,
   requestArchiveApproval,
   type DashboardLoadState,
 } from "./operations-dashboard";
@@ -256,6 +257,78 @@ describe("DashboardView", () => {
     expect(html.match(/data-state="error"/g)).toHaveLength(1);
     expect(html).toContain("Upper drive");
     expect(html).toContain("NEEDS_REVIEW");
+  });
+
+  it("shows every Encode Job state with terminal retry actions", () => {
+    const onRequeueEncodeJob = vi.fn();
+    const html = renderToStaticMarkup(
+      <DashboardView
+        state={{
+          opticalDrives: { status: "loaded", items: [] },
+          detectedDiscs: { status: "loaded", items: [] },
+          archiveJobs: { status: "loaded", items: [] },
+          encodeJobs: {
+            status: "loaded",
+            items: [
+              {
+                id: "queued-job",
+                mediaTitle: "Queued title",
+                mediaYear: null,
+                encodingProfileName: "DVD library v1",
+                status: "queued",
+                progressPercent: 0,
+              },
+              {
+                id: "running-job",
+                mediaTitle: "Running title",
+                mediaYear: null,
+                encodingProfileName: "DVD library v1",
+                status: "running",
+                progressPercent: 42,
+              },
+              {
+                id: "completed-job",
+                mediaTitle: "Completed title",
+                mediaYear: null,
+                encodingProfileName: "DVD library v1",
+                status: "completed",
+                progressPercent: 100,
+              },
+              {
+                id: "failed-job",
+                mediaTitle: "Failed title",
+                mediaYear: null,
+                encodingProfileName: "DVD library v1",
+                status: "failed",
+                progressPercent: 19,
+              },
+            ],
+          },
+          catalogReview: { status: "loaded", items: [] },
+        }}
+        onRequeueEncodeJob={onRequeueEncodeJob}
+        requeueingEncodeJobId="failed-job"
+      />,
+    );
+
+    for (const title of [
+      "Queued title",
+      "Running title",
+      "Completed title",
+      "Failed title",
+    ]) {
+      expect(html).toContain(title);
+    }
+    expect(html).toContain("Re-encode");
+    expect(html).toContain("Retrying…");
+    expect(html).not.toContain("Retry encode");
+  });
+
+  it("includes reviewed Encode Job queueing in the operations control plane", () => {
+    const html = renderToStaticMarkup(<OperationsDashboard />);
+
+    expect(html).toContain("Queue Encode Jobs");
+    expect(html).toContain("Loading encoding options");
   });
 });
 

@@ -214,7 +214,11 @@ export function EncodingProfilesView({
   );
 }
 
-export function EncodingProfilesManager() {
+export function EncodingProfilesManager({
+  onChanged = () => undefined,
+}: {
+  onChanged?: () => void;
+}) {
   const mounted = useRef(false);
   const loadedProfiles = useRef<EncodingProfileDto[] | null>(null);
   const [state, setState] = useState<EncodingProfilesLoadState>({
@@ -284,6 +288,9 @@ export function EncodingProfilesManager() {
         onSuccess?.();
       }
       await load();
+      if (mounted.current) {
+        onChanged();
+      }
     } catch {
       if (mounted.current) {
         setHasRequestError(true);

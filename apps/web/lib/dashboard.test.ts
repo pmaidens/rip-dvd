@@ -155,7 +155,7 @@ describe("readDashboardSnapshot", () => {
           expect.objectContaining({
             mediaTitle: "Queued Movie",
             mediaYear: 2004,
-            encodingProfileName: "Fast 480p30",
+            encodingProfileName: "Fast 480p30 · Version 1",
             status: "queued",
           }),
         ],
@@ -362,7 +362,7 @@ describe("readDashboardSnapshot", () => {
         expect.objectContaining({
           mediaTitle: "The Example",
           mediaYear: 2001,
-          encodingProfileName: "DVD library",
+          encodingProfileName: "DVD library · Version 1",
           status: "failed",
         }),
       ],
