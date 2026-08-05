@@ -412,7 +412,6 @@ function fileIdentity(metadata: Stats): string {
     metadata.size,
     metadata.birthtimeMs,
     metadata.mtimeMs,
-    metadata.ctimeMs,
   ]);
 }
 
@@ -787,6 +786,30 @@ async function executeClaim(
   } catch (error) {
     const cleanupFailures: string[] = [];
     let preserveReplacementAuthority = false;
+    if (published) {
+      try {
+        if (pendingPartialCleanup === undefined) {
+          throw new Error("Encode publication provenance is unavailable");
+        }
+        pendingPartialCleanup =
+          options.access.encodeJobs.revokePublication(
+            claim,
+            pendingPartialCleanup,
+          );
+      } catch (authorityError) {
+        options.log(
+          `Stale Encode publisher left publication recovery to reconciliation: ${
+            authorityError instanceof Error
+              ? authorityError.message
+              : String(authorityError)
+          }`,
+        );
+        if (options.signal.aborted) {
+          throw error;
+        }
+        return;
+      }
+    }
     if (
       !published &&
       finalPath !== undefined &&

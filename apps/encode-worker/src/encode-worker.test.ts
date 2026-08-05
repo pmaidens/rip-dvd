@@ -5,6 +5,7 @@ import {
 import { EventEmitter, once } from "node:events";
 import {
   existsSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -39,6 +40,13 @@ const quarantineRace = vi.hoisted(() => ({
   raced: false,
 }));
 
+const publicationRace = vi.hoisted(() => ({
+  armed: false,
+  finalPath: "",
+  reached: undefined as (() => void) | undefined,
+  resume: undefined as (() => void) | undefined,
+}));
+
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
   const publishCompetitorAfterQuarantine = async (
@@ -63,6 +71,15 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     ...actual,
     link: async (sourcePath: string, destinationPath: string) => {
       await actual.link(sourcePath, destinationPath);
+      if (
+        publicationRace.armed &&
+        destinationPath === publicationRace.finalPath
+      ) {
+        publicationRace.reached?.();
+        await new Promise<void>((resolve) => {
+          publicationRace.resume = resolve;
+        });
+      }
       await publishCompetitorAfterQuarantine(sourcePath, destinationPath);
     },
     rename: async (sourcePath: string, destinationPath: string) => {
@@ -76,6 +93,11 @@ const temporaryDirectories: string[] = [];
 
 afterEach(() => {
   vi.useRealTimers();
+  publicationRace.resume?.();
+  publicationRace.armed = false;
+  publicationRace.finalPath = "";
+  publicationRace.reached = undefined;
+  publicationRace.resume = undefined;
   quarantineRace.armed = false;
   quarantineRace.competingPath = "";
   quarantineRace.finalPath = "";
@@ -507,6 +529,56 @@ describe("encode worker polling", () => {
     fixture.access.close();
   });
 
+  it("does not reconcile publication provenance owned by a healthy competing claim", async () => {
+    const fixture = createQueuedJob();
+    const competingAccess = createLegacySidecarDataAccess({
+      databasePath: fixture.databasePath,
+    });
+    const claim = fixture.access.encodeJobs.claimNext("publishing-worker");
+    if (!claim) {
+      throw new Error("Expected the Encode Job to be claimed");
+    }
+    mkdirSync(dirname(fixture.outputPath), { recursive: true });
+    const partialPath = claimPartialPath(
+      fixture.outputPath,
+      claim.claimToken,
+    );
+    writeFileSync(partialPath, "healthy publication in progress", {
+      flag: "wx",
+    });
+    const cleanup = fixture.access.encodeJobs.registerPartialCleanup(claim, {
+      publicationPending: true,
+    });
+
+    await pollEncodeWorker({
+      access: competingAccess,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      runner: { run: vi.fn() },
+      signal: new AbortController().signal,
+      workerId: "observing-worker",
+    });
+
+    expect(readFileSync(partialPath, "utf8")).toBe(
+      "healthy publication in progress",
+    );
+    expect(competingAccess.encodeJobs.listPendingPartialCleanups()).toEqual([]);
+    expect(competingAccess.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        claimedBy: "publishing-worker",
+        partialCleanupClaimToken: cleanup.claimToken,
+        partialCleanupOutputPath: cleanup.outputPath,
+        publicationPending: true,
+        status: "running",
+      }),
+    ]);
+    competingAccess.close();
+    fixture.access.close();
+  });
+
   it("refuses to start HandBrake when catalog review reopens after claim", async () => {
     const fixture = createQueuedJob();
     const claimNext = fixture.access.encodeJobs.claimNext.bind(
@@ -736,6 +808,100 @@ describe("encode worker polling", () => {
         status: "failed",
       }),
     ]);
+    fixture.access.encodeJobs.requeue(fixture.job.id);
+    const retryRunner: HandBrakeRunner = {
+      run: vi.fn(async ({ outputPath }) => {
+        writeFileSync(outputPath, "committed replacement", { flag: "wx" });
+      }),
+    };
+
+    await pollEncodeWorker({ ...options, runner: retryRunner });
+
+    expect(retryRunner.run).toHaveBeenCalledOnce();
+    expect(readFileSync(fixture.outputPath, "utf8")).toBe(
+      "committed replacement",
+    );
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        replaceExistingOutput: false,
+        replacementOutputIdentity: null,
+        status: "completed",
+      }),
+    ]);
+    fixture.access.close();
+  });
+
+  it("does not roll back a final accepted while its expired publisher is paused", async () => {
+    vi.useFakeTimers();
+    const fixture = createQueuedJob();
+    const reconcilingAccess = createLegacySidecarDataAccess({
+      databasePath: fixture.databasePath,
+    });
+    let finalLinked!: () => void;
+    const finalWasLinked = new Promise<void>((resolve) => {
+      finalLinked = resolve;
+    });
+    mkdirSync(fixture.mediaLibraryPath, { recursive: true });
+    publicationRace.armed = true;
+    publicationRace.finalPath = join(
+      realpathSync(fixture.mediaLibraryPath),
+      basename(fixture.outputPath),
+    );
+    publicationRace.reached = finalLinked;
+    const stalePublisherAccess: DataAccess = {
+      ...fixture.access,
+      encodeJobs: {
+        ...fixture.access.encodeJobs,
+        renewClaim(claim) {
+          return claim;
+        },
+      },
+    };
+    const options = {
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      signal: new AbortController().signal,
+    };
+    const stalePoll = pollEncodeWorker({
+      ...options,
+      access: stalePublisherAccess,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "accepted encode", { flag: "wx" });
+        }),
+      },
+      workerId: "paused-publisher",
+    });
+    await finalWasLinked;
+    await vi.advanceTimersByTimeAsync(ENCODE_JOB_LEASE_DURATION_MS + 1);
+
+    await pollEncodeWorker({
+      ...options,
+      access: reconcilingAccess,
+      runner: { run: vi.fn() },
+      workerId: "reconciling-worker",
+    });
+    expect(reconcilingAccess.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        publicationPending: false,
+        status: "completed",
+      }),
+    ]);
+    expect(readFileSync(fixture.outputPath, "utf8")).toBe("accepted encode");
+
+    publicationRace.armed = false;
+    publicationRace.resume?.();
+    await stalePoll;
+
+    expect(readFileSync(fixture.outputPath, "utf8")).toBe("accepted encode");
+    expect(reconcilingAccess.encodeJobs.list()).toEqual([
+      expect.objectContaining({ id: fixture.job.id, status: "completed" }),
+    ]);
+    reconcilingAccess.close();
     fixture.access.close();
   });
 
@@ -1003,6 +1169,26 @@ describe("encode worker polling", () => {
       fixture.mediaLibraryPath,
       "Recovered Elsewhere.mkv",
     );
+    expect(() =>
+      fixture.access.encodeJobs.enqueue({
+        discSelectionId: fixture.job.discSelectionId,
+        encodingProfileId: fixture.job.encodingProfileId,
+        outputPath: replacementOutputPath,
+      }),
+    ).toThrow(/failed.*queued/i);
+    const options = {
+      access: fixture.access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      signal: new AbortController().signal,
+    };
+    const cleanupRunner: HandBrakeRunner = { run: vi.fn() };
+
+    await pollEncodeWorker({ ...options, runner: cleanupRunner });
+
+    expect(cleanupRunner.run).not.toHaveBeenCalled();
     fixture.access.encodeJobs.enqueue({
       discSelectionId: fixture.job.discSelectionId,
       encodingProfileId: fixture.job.encodingProfileId,
@@ -1017,15 +1203,7 @@ describe("encode worker polling", () => {
       }),
     };
 
-    await pollEncodeWorker({
-      access: fixture.access,
-      concurrency: 1,
-      log: vi.fn(),
-      mediaLibraryPath: fixture.mediaLibraryPath,
-      originalsLibraryPath: fixture.originalsLibraryPath,
-      runner,
-      signal: new AbortController().signal,
-    });
+    await pollEncodeWorker({ ...options, runner });
 
     expect(runner.run).toHaveBeenCalledOnce();
     expect(quarantinedContents(abandonedPartial)).toContain(
@@ -1043,6 +1221,77 @@ describe("encode worker polling", () => {
       }),
     ]);
     vi.useRealTimers();
+    fixture.access.close();
+  });
+
+  it("rejects requeue until an expired publication is reconciled, then retries", async () => {
+    vi.useFakeTimers();
+    const fixture = createQueuedJob();
+    const claim = fixture.access.encodeJobs.claimNext("expired-publisher");
+    if (!claim) {
+      throw new Error("Expected the Encode Job to be claimed");
+    }
+    mkdirSync(dirname(fixture.outputPath), { recursive: true });
+    const partialPath = claimPartialPath(
+      fixture.outputPath,
+      claim.claimToken,
+    );
+    writeFileSync(partialPath, "published before lease expiry", { flag: "wx" });
+    fixture.access.encodeJobs.registerPartialCleanup(claim, {
+      publicationPending: true,
+    });
+    linkSync(partialPath, fixture.outputPath);
+    vi.advanceTimersByTime(ENCODE_JOB_LEASE_DURATION_MS + 1);
+    expect(fixture.access.encodeJobs.recoverExpiredClaims()).toEqual([
+      expect.objectContaining({ id: fixture.job.id, status: "failed" }),
+    ]);
+
+    expect(() => fixture.access.encodeJobs.requeue(fixture.job.id)).toThrow(
+      /failed.*queued/i,
+    );
+
+    const options = {
+      access: fixture.access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      signal: new AbortController().signal,
+    };
+    const reconciliationRunner: HandBrakeRunner = { run: vi.fn() };
+    await pollEncodeWorker({ ...options, runner: reconciliationRunner });
+    expect(reconciliationRunner.run).not.toHaveBeenCalled();
+    expect(readFileSync(fixture.outputPath, "utf8")).toBe(
+      "published before lease expiry",
+    );
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        partialCleanupClaimToken: null,
+        partialCleanupOutputPath: null,
+        publicationPending: false,
+        status: "completed",
+      }),
+    ]);
+
+    expect(fixture.access.encodeJobs.requeue(fixture.job.id)).toMatchObject({
+      id: fixture.job.id,
+      status: "queued",
+    });
+    const retryRunner: HandBrakeRunner = {
+      run: vi.fn(async ({ outputPath }) => {
+        writeFileSync(outputPath, "retry after reconciliation", { flag: "wx" });
+      }),
+    };
+    await pollEncodeWorker({ ...options, runner: retryRunner });
+
+    expect(retryRunner.run).toHaveBeenCalledOnce();
+    expect(readFileSync(fixture.outputPath, "utf8")).toBe(
+      "retry after reconciliation",
+    );
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({ id: fixture.job.id, status: "completed" }),
+    ]);
     fixture.access.close();
   });
 

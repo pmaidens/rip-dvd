@@ -436,6 +436,10 @@ export interface EncodeJobAccess {
     claim: RunningEncodeJob,
     options?: EncodeJobPartialCleanupOptions,
   ): EncodeJobPartialCleanup;
+  revokePublication(
+    claim: RunningEncodeJob,
+    cleanup: EncodeJobPartialCleanup,
+  ): EncodeJobPartialCleanup;
   listPendingPartialCleanups(): EncodeJobPartialCleanup[];
   completePublishedPartial(cleanup: EncodeJobPartialCleanup): EncodeJob;
   completePartialCleanup(cleanup: EncodeJobPartialCleanup): EncodeJob;
