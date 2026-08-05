@@ -87,6 +87,7 @@ import type {
   DiscSelection,
   DiscSelectionId,
   EncodeJobClaimToken,
+  EncodeJobCleanupClaimToken,
   EncodeJobId,
   EncodeJob,
   EncodeJobFailureOptions,
@@ -1467,6 +1468,7 @@ export function createDataAccessInternal(
             eq(encodeJobs.status, "queued"),
             isNull(encodeJobs.partialCleanupClaimToken),
             isNull(encodeJobs.partialCleanupOutputPath),
+            isNull(encodeJobs.partialCleanupLeaseToken),
             eq(discSelections.isCatalogActive, true),
             isNotNull(originalDiscArchives.catalogReviewedAt),
             eq(originalDiscArchives.legacyCutoverPending, false),
@@ -1578,6 +1580,7 @@ export function createDataAccessInternal(
             eq(encodeJobs.status, expectedStatus),
             isNull(encodeJobs.partialCleanupOutputPath),
             isNull(encodeJobs.partialCleanupClaimToken),
+            isNull(encodeJobs.partialCleanupLeaseToken),
             eq(encodeJobs.publicationPending, false),
             exists(
               database
@@ -3765,6 +3768,7 @@ export function createDataAccessInternal(
               progressEtaSeconds: null,
               partialCleanupOutputPath: sql`${encodeJobs.outputPath}`,
               partialCleanupClaimToken: sql`${encodeJobs.claimToken}`,
+              partialCleanupLeaseToken: null,
               errorMessage: "Encode worker lease expired",
               updatedAt: timestamp,
             })
@@ -3819,6 +3823,7 @@ export function createDataAccessInternal(
           .set({
             partialCleanupOutputPath: claim.outputPath,
             partialCleanupClaimToken: claim.claimToken,
+            partialCleanupLeaseToken: null,
             publicationPending,
             updatedAt: timestamp,
           })
@@ -3832,6 +3837,7 @@ export function createDataAccessInternal(
           jobId: updated.id,
           outputPath: claim.outputPath,
           claimToken: claim.claimToken,
+          leaseToken: null,
           publicationPending,
         };
       },
@@ -3850,6 +3856,7 @@ export function createDataAccessInternal(
               encodeAttemptCondition(claim, timestamp),
               eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
               eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
+              isNull(encodeJobs.partialCleanupLeaseToken),
               eq(encodeJobs.publicationPending, true),
             ),
           )
@@ -3869,6 +3876,7 @@ export function createDataAccessInternal(
             jobId: encodeJobs.id,
             outputPath: encodeJobs.partialCleanupOutputPath,
             claimToken: encodeJobs.partialCleanupClaimToken,
+            leaseToken: encodeJobs.partialCleanupLeaseToken,
             publicationPending: encodeJobs.publicationPending,
           })
           .from(encodeJobs)
@@ -3892,9 +3900,50 @@ export function createDataAccessInternal(
               jobId: cleanup.jobId,
               outputPath: cleanup.outputPath,
               claimToken: cleanup.claimToken,
+              leaseToken: cleanup.leaseToken,
               publicationPending: cleanup.publicationPending,
             };
           });
+      },
+      claimPartialCleanup(cleanup) {
+        if (cleanup.publicationPending) {
+          throw new DomainInvariantError(
+            "Encode Job publication cleanup cannot be claimed for rollback",
+          );
+        }
+        const timestamp = now();
+        const expiredBefore = new Date(
+          timestamp.getTime() - ENCODE_JOB_LEASE_DURATION_MS,
+        );
+        const leaseToken = newId<EncodeJobCleanupClaimToken>();
+        const updated = database
+          .update(encodeJobs)
+          .set({
+            partialCleanupLeaseToken: leaseToken,
+            updatedAt: timestamp,
+          })
+          .where(
+            and(
+              eq(encodeJobs.id, cleanup.jobId),
+              inArray(encodeJobs.status, ["failed", "completed"]),
+              eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
+              eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
+              eq(encodeJobs.publicationPending, false),
+              or(
+                isNull(encodeJobs.partialCleanupLeaseToken),
+                lte(encodeJobs.updatedAt, expiredBefore),
+              ),
+            ),
+          )
+          .returning()
+          .get();
+        if (!updated) {
+          throw new StaleJobAttemptError(
+            "encode job cleanup",
+            cleanup.jobId,
+          );
+        }
+        return { ...cleanup, leaseToken };
       },
       completePublishedPartial(cleanup) {
         if (!cleanup.publicationPending) {
@@ -3922,6 +3971,7 @@ export function createDataAccessInternal(
               eq(encodeJobs.publicationPending, true),
               eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
               eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
+              isNull(encodeJobs.partialCleanupLeaseToken),
             ),
           )
           .returning()
@@ -3940,6 +3990,7 @@ export function createDataAccessInternal(
           .set({
             partialCleanupOutputPath: null,
             partialCleanupClaimToken: null,
+            partialCleanupLeaseToken: null,
             publicationPending: false,
           })
           .where(
@@ -3947,6 +3998,12 @@ export function createDataAccessInternal(
               eq(encodeJobs.id, cleanup.jobId),
               eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
               eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
+              cleanup.leaseToken === null
+                ? isNull(encodeJobs.partialCleanupLeaseToken)
+                : eq(
+                    encodeJobs.partialCleanupLeaseToken,
+                    cleanup.leaseToken,
+                  ),
             ),
           )
           .returning()
@@ -3962,6 +4019,7 @@ export function createDataAccessInternal(
         if (
           current?.partialCleanupOutputPath === null &&
           current.partialCleanupClaimToken === null &&
+          current.partialCleanupLeaseToken === null &&
           !current.publicationPending
         ) {
           return current;

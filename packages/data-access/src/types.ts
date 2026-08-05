@@ -33,6 +33,7 @@ export type ArchiveJobId = DomainId<"ArchiveJob">;
 export type EncodeJobId = DomainId<"EncodeJob">;
 export type ArchiveJobClaimToken = DomainId<"ArchiveJobClaim">;
 export type EncodeJobClaimToken = DomainId<"EncodeJobClaim">;
+export type EncodeJobCleanupClaimToken = DomainId<"EncodeJobCleanupClaim">;
 
 export const ARCHIVE_JOB_LEASE_DURATION_MS = 60_000;
 export const ENCODE_JOB_LEASE_DURATION_MS = 60_000;
@@ -202,6 +203,7 @@ export interface EncodeJob {
   replacementOutputIdentity: string | null;
   partialCleanupOutputPath: string | null;
   partialCleanupClaimToken: EncodeJobClaimToken | null;
+  partialCleanupLeaseToken: EncodeJobCleanupClaimToken | null;
   publicationPending: boolean;
   progressPhase: EncodeProgressPhase | null;
   progressPercent: number;
@@ -236,6 +238,7 @@ export interface EncodeJobPartialCleanup {
   jobId: EncodeJobId;
   outputPath: string;
   claimToken: EncodeJobClaimToken;
+  leaseToken: EncodeJobCleanupClaimToken | null;
   publicationPending: boolean;
 }
 
@@ -441,6 +444,9 @@ export interface EncodeJobAccess {
     cleanup: EncodeJobPartialCleanup,
   ): EncodeJobPartialCleanup;
   listPendingPartialCleanups(): EncodeJobPartialCleanup[];
+  claimPartialCleanup(
+    cleanup: EncodeJobPartialCleanup,
+  ): EncodeJobPartialCleanup;
   completePublishedPartial(cleanup: EncodeJobPartialCleanup): EncodeJob;
   completePartialCleanup(cleanup: EncodeJobPartialCleanup): EncodeJob;
   list(

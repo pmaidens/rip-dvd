@@ -145,9 +145,13 @@ failed or already-completed job with the exact flagged provenance can therefore
 be completed by crash reconciliation before cleanup is acknowledged; cleanup
 enumeration excludes running owners. A current publisher must atomically revoke
 that flag before destructive rollback, so an expired attempt cannot undo a
-publication already accepted by another process. Timeout cleanup and legacy
-cutover invalidation never set that flag, so queued, cutover-invalidated, and
-unrelated attempts cannot use the transition.
+publication already accepted by another process. Revoked-publication rollback
+uses a recoverable cleanup lease, acquired by compare-and-set immediately before
+the final rename. Cleanup acknowledgement authenticates that lease; while it is
+held, other reconcilers cannot roll back from stale observations and requeue
+remains blocked. Timeout cleanup and legacy cutover invalidation never set the
+publication flag, so queued, cutover-invalidated, and unrelated attempts cannot
+use the completion transition.
 
 Requeue grants replacement authority only when a completed Encode Job keeps
 its output path. The worker records the owned final's filesystem identity;

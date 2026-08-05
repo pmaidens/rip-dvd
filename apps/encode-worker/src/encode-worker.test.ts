@@ -11,6 +11,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -47,6 +48,14 @@ const publicationRace = vi.hoisted(() => ({
   resume: undefined as (() => void) | undefined,
 }));
 
+const cleanupRollbackRace = vi.hoisted(() => ({
+  armed: false,
+  paused: false,
+  priorFinalPath: "",
+  reached: undefined as (() => void) | undefined,
+  resume: undefined as (() => void) | undefined,
+}));
+
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
   const publishCompetitorAfterQuarantine = async (
@@ -69,6 +78,21 @@ vi.mock("node:fs/promises", async (importOriginal) => {
   };
   return {
     ...actual,
+    lstat: async (path: string) => {
+      const metadata = await actual.lstat(path);
+      if (
+        cleanupRollbackRace.armed &&
+        !cleanupRollbackRace.paused &&
+        path === cleanupRollbackRace.priorFinalPath
+      ) {
+        cleanupRollbackRace.paused = true;
+        cleanupRollbackRace.reached?.();
+        await new Promise<void>((resolve) => {
+          cleanupRollbackRace.resume = resolve;
+        });
+      }
+      return metadata;
+    },
     link: async (sourcePath: string, destinationPath: string) => {
       await actual.link(sourcePath, destinationPath);
       if (
@@ -93,6 +117,12 @@ const temporaryDirectories: string[] = [];
 
 afterEach(() => {
   vi.useRealTimers();
+  cleanupRollbackRace.resume?.();
+  cleanupRollbackRace.armed = false;
+  cleanupRollbackRace.paused = false;
+  cleanupRollbackRace.priorFinalPath = "";
+  cleanupRollbackRace.reached = undefined;
+  cleanupRollbackRace.resume = undefined;
   publicationRace.resume?.();
   publicationRace.armed = false;
   publicationRace.finalPath = "";
@@ -902,6 +932,201 @@ describe("encode worker polling", () => {
       expect.objectContaining({ id: fixture.job.id, status: "completed" }),
     ]);
     reconcilingAccess.close();
+    fixture.access.close();
+  });
+
+  it("does not move a known-good final after publication provenance becomes stale", async () => {
+    vi.useFakeTimers();
+    const fixture = createQueuedJob();
+    const options = {
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      signal: new AbortController().signal,
+    };
+    await pollEncodeWorker({
+      ...options,
+      access: fixture.access,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "known good encode", { flag: "wx" });
+        }),
+      },
+    });
+    fixture.access.encodeJobs.requeue(fixture.job.id);
+    const reconcilingAccess = createLegacySidecarDataAccess({
+      databasePath: fixture.databasePath,
+    });
+    const registerPartialCleanup =
+      fixture.access.encodeJobs.registerPartialCleanup.bind(
+        fixture.access.encodeJobs,
+      );
+    const renewClaim = fixture.access.encodeJobs.renewClaim.bind(
+      fixture.access.encodeJobs,
+    );
+    let publicationRegistered = false;
+    const stalePublisherAccess: DataAccess = {
+      ...fixture.access,
+      encodeJobs: {
+        ...fixture.access.encodeJobs,
+        renewClaim(claim) {
+          return publicationRegistered ? renewClaim(claim) : claim;
+        },
+        registerPartialCleanup(claim, cleanupOptions) {
+          const cleanup = registerPartialCleanup(claim, cleanupOptions);
+          vi.advanceTimersByTime(ENCODE_JOB_LEASE_DURATION_MS + 1);
+          expect(reconcilingAccess.encodeJobs.recoverExpiredClaims()).toEqual([
+            expect.objectContaining({ id: claim.id, status: "failed" }),
+          ]);
+          expect(
+            reconcilingAccess.encodeJobs.listPendingPartialCleanups(),
+          ).toEqual([cleanup]);
+          publicationRegistered = true;
+          return cleanup;
+        },
+      },
+    };
+
+    await pollEncodeWorker({
+      ...options,
+      access: stalePublisherAccess,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "stale replacement", { flag: "wx" });
+        }),
+      },
+      workerId: "stale-reencode-publisher",
+    });
+    await pollEncodeWorker({
+      ...options,
+      access: reconcilingAccess,
+      runner: { run: vi.fn() },
+      workerId: "reconciling-worker",
+    });
+
+    expect(readFileSync(fixture.outputPath, "utf8")).toBe(
+      "known good encode",
+    );
+    expect(reconcilingAccess.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        partialCleanupClaimToken: null,
+        partialCleanupOutputPath: null,
+        replaceExistingOutput: true,
+        status: "failed",
+      }),
+    ]);
+    reconcilingAccess.close();
+    fixture.access.close();
+  });
+
+  it("does not roll back a new publication from a stale cleanup snapshot", async () => {
+    const fixture = createQueuedJob();
+    const options = {
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      signal: new AbortController().signal,
+    };
+    await pollEncodeWorker({
+      ...options,
+      access: fixture.access,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "known good encode", { flag: "wx" });
+        }),
+      },
+    });
+    fixture.access.encodeJobs.requeue(fixture.job.id);
+    const claim = fixture.access.encodeJobs.claimNext("revoked-publisher");
+    if (!claim) {
+      throw new Error("Expected the re-encode to be claimed");
+    }
+    const canonicalFinalPath = join(
+      realpathSync(fixture.mediaLibraryPath),
+      basename(fixture.outputPath),
+    );
+    const partialPath = claimPartialPath(
+      canonicalFinalPath,
+      claim.claimToken,
+    );
+    const knownGoodRecoveryPath = priorFinalPath(
+      canonicalFinalPath,
+      claim.claimToken,
+    );
+    writeFileSync(partialPath, "revoked replacement", { flag: "wx" });
+    const publication = fixture.access.encodeJobs.registerPartialCleanup(
+      claim,
+      { publicationPending: true },
+    );
+    renameSync(canonicalFinalPath, knownGoodRecoveryPath);
+    linkSync(partialPath, canonicalFinalPath);
+    const revoked = fixture.access.encodeJobs.revokePublication(
+      claim,
+      publication,
+    );
+    expect(fixture.access.encodeJobs.fail(claim, "publication revoked", {
+      preserveReplacementAuthority: true,
+    })).toMatchObject({ status: "failed" });
+    expect(revoked).toMatchObject({ publicationPending: false });
+
+    const firstReconciler = createLegacySidecarDataAccess({
+      databasePath: fixture.databasePath,
+    });
+    const secondReconciler = createLegacySidecarDataAccess({
+      databasePath: fixture.databasePath,
+    });
+    let staleSnapshotRead!: () => void;
+    const staleSnapshotWasRead = new Promise<void>((resolve) => {
+      staleSnapshotRead = resolve;
+    });
+    cleanupRollbackRace.armed = true;
+    cleanupRollbackRace.priorFinalPath = knownGoodRecoveryPath;
+    cleanupRollbackRace.reached = staleSnapshotRead;
+    const firstPoll = pollEncodeWorker({
+      ...options,
+      access: firstReconciler,
+      runner: { run: vi.fn() },
+      workerId: "first-reconciler",
+    });
+    await staleSnapshotWasRead;
+
+    await pollEncodeWorker({
+      ...options,
+      access: secondReconciler,
+      runner: { run: vi.fn() },
+      workerId: "second-reconciler",
+    });
+    expect(readFileSync(fixture.outputPath, "utf8")).toBe(
+      "known good encode",
+    );
+    expect(secondReconciler.encodeJobs.requeue(fixture.job.id)).toMatchObject({
+      status: "queued",
+    });
+    await pollEncodeWorker({
+      ...options,
+      access: secondReconciler,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "accepted retry", { flag: "wx" });
+        }),
+      },
+      workerId: "retry-publisher",
+    });
+    expect(readFileSync(fixture.outputPath, "utf8")).toBe("accepted retry");
+
+    cleanupRollbackRace.armed = false;
+    cleanupRollbackRace.resume?.();
+    await firstPoll;
+
+    expect(readFileSync(fixture.outputPath, "utf8")).toBe("accepted retry");
+    expect(secondReconciler.encodeJobs.list()).toEqual([
+      expect.objectContaining({ id: fixture.job.id, status: "completed" }),
+    ]);
+    secondReconciler.close();
+    firstReconciler.close();
     fixture.access.close();
   });
 

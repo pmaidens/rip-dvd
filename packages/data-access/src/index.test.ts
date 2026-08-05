@@ -1954,7 +1954,10 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       sqlite
         .prepare("select name from pragma_table_info('encode_jobs')")
         .all(),
-    ).toContainEqual({ name: "publication_pending" });
+    ).toEqual(expect.arrayContaining([
+      { name: "partial_cleanup_lease_token" },
+      { name: "publication_pending" },
+    ]));
     expect(
       sqlite
         .prepare(
@@ -1962,6 +1965,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         )
         .all(),
     ).toEqual([
+      {
+        name: "20260805163203_unique_gideon",
+      },
       {
         name: "20260805142313_glamorous_rage",
       },
@@ -1979,9 +1985,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260804182121_dizzy_wither",
-      },
-      {
-        name: "20260804143147_durable-legacy-cutover-staging",
       },
     ]);
     expect(
@@ -4891,6 +4894,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(cleanup).toEqual({
       claimToken: abandoned.claimToken,
       jobId: job.id,
+      leaseToken: null,
       outputPath: abandoned.outputPath,
       publicationPending: false,
     });
