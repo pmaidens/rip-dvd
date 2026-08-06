@@ -4092,6 +4092,57 @@ export function createDataAccessInternal(
           return updated;
         }, { behavior: "immediate" });
       },
+      completePublishedClaim(claim, cleanup, publicationMatches) {
+        if (!cleanup.publicationPending) {
+          throw new DomainInvariantError(
+            "Encode Job cleanup is not publication provenance",
+          );
+        }
+        const timestamp = now();
+        const publicationCondition = and(
+          encodeAttemptCondition(claim, timestamp),
+          eq(encodeJobs.publicationPending, true),
+          eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
+          eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
+          isNull(encodeJobs.partialCleanupLeaseToken),
+        );
+        return database.transaction((transaction) => {
+          const owned = transaction
+            .update(encodeJobs)
+            .set({ updatedAt: timestamp })
+            .where(publicationCondition)
+            .returning()
+            .get();
+          if (!owned || !publicationMatches()) {
+            throw new StaleJobAttemptError(
+              "encode job publication",
+              cleanup.jobId,
+            );
+          }
+          const updated = transaction
+            .update(encodeJobs)
+            .set({
+              status: "completed",
+              progressPercent: 100,
+              progressEtaSeconds: null,
+              completedAt: timestamp,
+              errorMessage: null,
+              replaceExistingOutput: false,
+              replacementOutputIdentity: null,
+              updatedAt: timestamp,
+            })
+            .where(publicationCondition)
+            .returning()
+            .get();
+          if (!updated) {
+            throw new StaleJobAttemptError(
+              "encode job publication",
+              cleanup.jobId,
+            );
+          }
+          return updated;
+        }, { behavior: "immediate" });
+      },
       completePartialCleanup(cleanup) {
         const updated = database
           .update(encodeJobs)

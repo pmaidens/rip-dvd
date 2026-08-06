@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   closeSync,
@@ -21,6 +21,7 @@ import {
   rename,
   unlink,
 } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import type { Readable } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
@@ -39,7 +40,7 @@ const HANDBRAKE_TIMEOUT_MS = 24 * 60 * 60_000;
 const MAX_DIAGNOSTIC_BYTES = 65_536;
 const MAX_PATH_BYTES = 4_096;
 const ATOMIC_EXCHANGE_PATH = fileURLToPath(
-  new URL("../dist/rip-dvd-atomic-exchange", import.meta.url),
+  new URL("../dist/rip-dvd-atomic-exchange.node", import.meta.url),
 );
 
 class PendingPublicationRecoveryError extends Error {}
@@ -56,6 +57,26 @@ export interface HandBrakeRunner {
   isActive?(outputPath: string): boolean;
   whenInactive?(outputPath: string): Promise<void>;
 }
+
+export interface AtomicPathExchange {
+  exchange(firstPath: string, secondPath: string): void;
+}
+
+interface AtomicPathExchangeBinding {
+  exchangePaths(firstPath: string, secondPath: string): void;
+}
+
+export function createNodeAtomicPathExchange(): AtomicPathExchange {
+  const require = createRequire(import.meta.url);
+  const binding = require(ATOMIC_EXCHANGE_PATH) as AtomicPathExchangeBinding;
+  return {
+    exchange(firstPath, secondPath) {
+      binding.exchangePaths(firstPath, secondPath);
+    },
+  };
+}
+
+export const nodeAtomicPathExchange = createNodeAtomicPathExchange();
 
 interface HandBrakeChildProcess {
   stderr: Readable;
@@ -221,6 +242,7 @@ export const nodeHandBrakeRunner = createNodeHandBrakeRunner();
 
 export interface PollEncodeWorkerOptions {
   access: DataAccess;
+  atomicPathExchange?: AtomicPathExchange;
   concurrency: number;
   log(message: string): void;
   mediaLibraryPath: string;
@@ -430,32 +452,11 @@ function moveAsideAtMutationBoundary(
 }
 
 function exchangePathsAtMutationBoundary(
+  atomicPathExchange: AtomicPathExchange,
   firstPath: string,
   secondPath: string,
 ): void {
-  const exchange = spawnSync(
-    ATOMIC_EXCHANGE_PATH,
-    [firstPath, secondPath],
-    {
-      encoding: "utf8",
-      maxBuffer: MAX_DIAGNOSTIC_BYTES,
-      shell: false,
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: 30_000,
-    },
-  );
-  if (exchange.error) {
-    throw new Error(
-      `Atomic Encode output exchange failed: ${exchange.error.message}`,
-    );
-  }
-  if (exchange.status !== 0) {
-    throw new Error(
-      `Atomic Encode output exchange failed: ${boundedDiagnostic(
-        exchange.stderr || `exit status ${String(exchange.status)}`,
-      )}`,
-    );
-  }
+  atomicPathExchange.exchange(firstPath, secondPath);
 }
 
 function syncPathAtMutationBoundary(path: string): void {
@@ -468,6 +469,7 @@ function syncPathAtMutationBoundary(path: string): void {
 }
 
 function publishReplacementAtMutationBoundary(
+  atomicPathExchange: AtomicPathExchange,
   finalPath: string,
   priorFinalPath: string,
   replacementPath: string,
@@ -493,11 +495,27 @@ function publishReplacementAtMutationBoundary(
   if (!sameInode(expectedFinal, currentFinalMetadata)) {
     throw new Error("Encode output changed before atomic replacement");
   }
-  exchangePathsAtMutationBoundary(replacementPath, finalPath);
+  let exchangeError: Error | null = null;
+  try {
+    exchangePathsAtMutationBoundary(
+      atomicPathExchange,
+      replacementPath,
+      finalPath,
+    );
+  } catch (error) {
+    exchangeError = error instanceof Error ? error : new Error(String(error));
+  }
+  const partialMetadata = lstatSync(partialPath);
+  let publishedFinalMetadata: Stats | null = null;
+  let displacedFinalMetadata: Stats | null = null;
   let displacedFinalError: Error | null = null;
   try {
-    const displacedFinalMetadata = lstatSync(replacementPath);
+    publishedFinalMetadata = lstatSync(finalPath);
+    displacedFinalMetadata = lstatSync(replacementPath);
     if (
+      !publishedFinalMetadata.isFile() ||
+      publishedFinalMetadata.isSymbolicLink() ||
+      !sameInode(partialMetadata, publishedFinalMetadata) ||
       !displacedFinalMetadata.isFile() ||
       displacedFinalMetadata.isSymbolicLink() ||
       !sameInode(expectedFinal, displacedFinalMetadata)
@@ -510,9 +528,26 @@ function publishReplacementAtMutationBoundary(
     displacedFinalError =
       error instanceof Error ? error : new Error(String(error));
   }
+  if (exchangeError !== null && displacedFinalError !== null) {
+    const exchangeDidNotOccur =
+      publishedFinalMetadata !== null &&
+      displacedFinalMetadata !== null &&
+      sameInode(expectedFinal, publishedFinalMetadata) &&
+      sameInode(partialMetadata, displacedFinalMetadata);
+    if (exchangeDidNotOccur) {
+      throw exchangeError;
+    }
+    throw new PendingPublicationRecoveryError(
+      `${exchangeError.message}; atomic exchange endpoints require reconciliation`,
+    );
+  }
   if (displacedFinalError !== null) {
     try {
-      exchangePathsAtMutationBoundary(replacementPath, finalPath);
+      exchangePathsAtMutationBoundary(
+        atomicPathExchange,
+        replacementPath,
+        finalPath,
+      );
       syncPathAtMutationBoundary(dirname(finalPath));
     } catch (rollbackError) {
       throw new PendingPublicationRecoveryError(
@@ -654,7 +689,10 @@ async function quarantinePartial(
 
 async function reconcilePendingPublications(
   cleanups: readonly EncodeJobPartialCleanup[],
-  options: PollEncodeWorkerOptions & { runner: HandBrakeRunner },
+  options: PollEncodeWorkerOptions & {
+    atomicPathExchange: AtomicPathExchange;
+    runner: HandBrakeRunner;
+  },
 ): Promise<void> {
   if (cleanups.length === 0) {
     return;
@@ -720,7 +758,11 @@ async function reconcilePendingPublications(
             ) {
               return false;
             }
-            exchangePathsAtMutationBoundary(replacementPath, finalPath);
+            exchangePathsAtMutationBoundary(
+              options.atomicPathExchange,
+              replacementPath,
+              finalPath,
+            );
             const restoredFinalMetadata = lstatSync(finalPath);
             const stagedWorkerMetadata = lstatSync(replacementPath);
             if (
@@ -926,7 +968,10 @@ function resolveClaimInput(access: DataAccess, claim: RunningEncodeJob) {
 
 async function executeClaim(
   claim: RunningEncodeJob,
-  options: PollEncodeWorkerOptions & { runner: HandBrakeRunner },
+  options: PollEncodeWorkerOptions & {
+    atomicPathExchange: AtomicPathExchange;
+    runner: HandBrakeRunner;
+  },
 ): Promise<void> {
   const claimController = new AbortController();
   const signal = AbortSignal.any([options.signal, claimController.signal]);
@@ -1047,6 +1092,7 @@ async function executeClaim(
       if (currentFinal !== null) {
         priorFinalFailedPath = paths.priorFinalPath;
         publishReplacementAtMutationBoundary(
+          options.atomicPathExchange,
           paths.finalPath,
           paths.priorFinalPath,
           paths.replacementPath,
@@ -1062,7 +1108,29 @@ async function executeClaim(
       }
     });
     await syncPath(dirname(finalPath));
-    options.access.encodeJobs.complete(claim);
+    let publicationChangedBeforeCompletion = false;
+    try {
+      options.access.encodeJobs.completePublishedClaim(
+        claim,
+        pendingPartialCleanup,
+        () => {
+          const matches = publicationMatches(
+            paths.finalPath,
+            paths.partialPath,
+          );
+          publicationChangedBeforeCompletion = !matches;
+          return matches;
+        },
+      );
+    } catch (error) {
+      if (publicationChangedBeforeCompletion) {
+        options.log(
+          "Encode publication changed before completion; retained for reconciliation",
+        );
+        return;
+      }
+      throw error;
+    }
     try {
       await unlink(partialPath);
       await syncPath(dirname(finalPath));
@@ -1288,10 +1356,12 @@ export async function pollEncodeWorker(
     throw new Error("Encode worker concurrency is invalid");
   }
   const runner = options.runner ?? nodeHandBrakeRunner;
+  const atomicPathExchange =
+    options.atomicPathExchange ?? nodeAtomicPathExchange;
   options.access.encodeJobs.recoverExpiredClaims();
   await reconcilePendingPublications(
     options.access.encodeJobs.listPendingPartialCleanups(),
-    { ...options, runner },
+    { ...options, atomicPathExchange, runner },
   );
   const runSlot = async () => {
     while (!options.signal.aborted) {
@@ -1301,7 +1371,7 @@ export async function pollEncodeWorker(
       if (!claim) {
         return;
       }
-      await executeClaim(claim, { ...options, runner });
+      await executeClaim(claim, { ...options, atomicPathExchange, runner });
     }
   };
   const results = await Promise.allSettled(

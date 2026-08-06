@@ -682,6 +682,14 @@ Re-encoding keeps the prior final visible until the replacement is complete,
 durably stages it at a collision-free `.failed` recovery hard link, and
 atomically exchanges a claim-scoped replacement link with the public final.
 The displaced inode is retained and validated before the cutover is accepted.
+The exchange uses an in-process native binding, so no helper process can outlive
+or block the short SQLite mutation fence. If the binding reports an error, the
+worker reconciles both exchange endpoints before deciding whether publication
+occurred; an indeterminate result retains its durable publication provenance.
+Normal initial and replacement completion also revalidate the final and partial
+identities inside the SQLite completion transaction. A mismatch leaves the job
+and its provenance for crash reconciliation instead of accepting or unlinking
+an unrelated final.
 Its claim-scoped recovery path lets crash recovery restore the prior final when
 publication did not complete, and any failure after replacement
 publication quarantines the replacement and restores that prior final. Only a

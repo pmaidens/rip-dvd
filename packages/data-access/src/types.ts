@@ -462,6 +462,11 @@ export interface EncodeJobAccess {
     cleanup: EncodeJobPartialCleanup,
     publicationMatches: () => boolean,
   ): EncodeJob;
+  completePublishedClaim(
+    claim: RunningEncodeJob,
+    cleanup: EncodeJobPartialCleanup,
+    publicationMatches: () => boolean,
+  ): EncodeJob;
   completePartialCleanup(cleanup: EncodeJobPartialCleanup): EncodeJob;
   list(
     statuses?: JobStatus[],

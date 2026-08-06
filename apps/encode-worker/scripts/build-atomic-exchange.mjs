@@ -1,5 +1,5 @@
 import { chmodSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -7,9 +7,14 @@ const sourcePath = fileURLToPath(
   new URL("../src/native/atomic-exchange.c", import.meta.url),
 );
 const outputPath = fileURLToPath(
-  new URL("../dist/rip-dvd-atomic-exchange", import.meta.url),
+  new URL("../dist/rip-dvd-atomic-exchange.node", import.meta.url),
 );
 mkdirSync(dirname(outputPath), { recursive: true });
+
+const platformLinkerArguments =
+  process.platform === "darwin"
+    ? ["-bundle", "-undefined", "dynamic_lookup"]
+    : ["-shared", "-fPIC"];
 
 const compilation = spawnSync(
   process.env.CC || "cc",
@@ -19,6 +24,8 @@ const compilation = spawnSync(
     "-Wall",
     "-Wextra",
     "-Werror",
+    `-I${resolve(dirname(process.execPath), "../include/node")}`,
+    ...platformLinkerArguments,
     sourcePath,
     "-o",
     outputPath,
@@ -35,7 +42,7 @@ if (compilation.error) {
 }
 if (compilation.status !== 0) {
   throw new Error(
-    `Atomic exchange helper compilation failed: ${compilation.stderr.trim()}`,
+    `Atomic exchange binding compilation failed: ${compilation.stderr.trim()}`,
   );
 }
 chmodSync(outputPath, 0o755);
