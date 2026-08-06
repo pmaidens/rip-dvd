@@ -1,11 +1,13 @@
 import {
   spawn as spawnProcess,
+  spawnSync,
   type ChildProcessWithoutNullStreams,
 } from "node:child_process";
 import { EventEmitter, once } from "node:events";
 import {
   existsSync,
   linkSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -652,6 +654,22 @@ function createQueuedJob(
     profile,
     sourcePath,
   };
+}
+
+function probeSQLiteWriter(databasePath: string) {
+  return spawnSync(
+    process.execPath,
+    [
+      fileURLToPath(
+        new URL(
+          "./test-fixtures/sqlite-writer-helper.mjs",
+          import.meta.url,
+        ),
+      ),
+      databasePath,
+    ],
+    { encoding: "utf8", timeout: 2_000 },
+  );
 }
 
 function addQueuedJob(
@@ -2036,7 +2054,7 @@ describe("encode worker polling", () => {
     await pollEncodeWorker({
       ...options,
       atomicPathExchange: {
-        exchange(firstPath, secondPath) {
+        exchange(firstPath, secondPath, expectedSecond) {
           if (lateCutoverRace.armed && !lateCutoverRace.raced) {
             renameSync(
               lateCutoverRace.competingPath,
@@ -2044,7 +2062,11 @@ describe("encode worker polling", () => {
             );
             lateCutoverRace.raced = true;
           }
-          nodeAtomicPathExchange.exchange(firstPath, secondPath);
+          return nodeAtomicPathExchange.exchange(
+            firstPath,
+            secondPath,
+            expectedSecond,
+          );
         },
       },
       runner: {
@@ -2115,10 +2137,15 @@ describe("encode worker polling", () => {
     await pollEncodeWorker({
       ...options,
       atomicPathExchange: {
-        exchange(firstPath, secondPath) {
-          nodeAtomicPathExchange.exchange(firstPath, secondPath);
+        exchange(firstPath, secondPath, expectedSecond) {
+          const exchanged = nodeAtomicPathExchange.exchange(
+            firstPath,
+            secondPath,
+            expectedSecond,
+          );
           renameSync(competingPath, finalPath);
           raced = true;
+          return exchanged;
         },
       },
       runner: {
@@ -2172,6 +2199,181 @@ describe("encode worker polling", () => {
         status: "failed",
       }),
     ]);
+    fixture.access.close();
+  });
+
+  it("retains a newer competing final published before compensation", async () => {
+    vi.useFakeTimers();
+    const fixture = createQueuedJob();
+    const options = {
+      access: fixture.access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      signal: new AbortController().signal,
+    };
+    await pollEncodeWorker({
+      ...options,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "known good encode", { flag: "wx" });
+        }),
+      },
+    });
+    fixture.access.encodeJobs.requeue(fixture.job.id);
+    const finalPath = join(
+      realpathSync(fixture.mediaLibraryPath),
+      basename(fixture.outputPath),
+    );
+    const displacedPath = join(
+      fixture.mediaLibraryPath,
+      ".compensation-displaced-publisher.mkv",
+    );
+    const newerPath = join(
+      fixture.mediaLibraryPath,
+      ".compensation-newer-publisher.mkv",
+    );
+    let partialPath = "";
+    let exchanges = 0;
+
+    await pollEncodeWorker({
+      ...options,
+      atomicPathExchange: {
+        exchange(firstPath, secondPath, expectedSecond) {
+          exchanges += 1;
+          if (exchanges === 1) {
+            renameSync(displacedPath, finalPath);
+            return nodeAtomicPathExchange.exchange(
+              firstPath,
+              secondPath,
+              lstatSync(secondPath),
+            );
+          } else if (exchanges === 2) {
+            renameSync(newerPath, finalPath);
+          }
+          return nodeAtomicPathExchange.exchange(
+            firstPath,
+            secondPath,
+            expectedSecond,
+          );
+        },
+      },
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          partialPath = outputPath;
+          writeFileSync(outputPath, "worker replacement", { flag: "wx" });
+          writeFileSync(displacedPath, "displaced competitor", { flag: "wx" });
+          writeFileSync(newerPath, "newer competitor", { flag: "wx" });
+        }),
+      },
+    });
+
+    expect(exchanges).toBe(2);
+    expect(readFileSync(finalPath, "utf8")).toBe("newer competitor");
+    expect(readFileSync(partialPath, "utf8")).toBe("worker replacement");
+    expect(quarantinedContents(finalPath)).not.toContain("newer competitor");
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        partialCleanupClaimToken: expect.any(String),
+        publicationPending: true,
+        status: "running",
+      }),
+    ]);
+
+    vi.advanceTimersByTime(ENCODE_JOB_LEASE_DURATION_MS + 1);
+    await pollEncodeWorker({
+      ...options,
+      runner: { run: vi.fn() },
+      workerId: "compensation-race-recovery",
+    });
+
+    expect(readFileSync(finalPath, "utf8")).toBe("newer competitor");
+    expect(quarantinedContents(finalPath)).not.toContain("newer competitor");
+    expect(existsSync(partialPath)).toBe(false);
+    expect(quarantinedContents(partialPath)).toContain("worker replacement");
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        partialCleanupClaimToken: null,
+        publicationPending: false,
+        status: "failed",
+      }),
+    ]);
+    fixture.access.close();
+  });
+
+  it("keeps SQLite writable during replacement filesystem mutation", async () => {
+    const fixture = createQueuedJob();
+    const options = {
+      access: fixture.access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      signal: new AbortController().signal,
+    };
+    await pollEncodeWorker({
+      ...options,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "known good encode", { flag: "wx" });
+        }),
+      },
+    });
+    fixture.access.encodeJobs.requeue(fixture.job.id);
+    let writerResult: ReturnType<typeof spawnSync> | undefined;
+
+    await pollEncodeWorker({
+      ...options,
+      atomicPathExchange: {
+        exchange(firstPath, secondPath, expectedSecond) {
+          writerResult = probeSQLiteWriter(fixture.databasePath);
+          return nodeAtomicPathExchange.exchange(
+            firstPath,
+            secondPath,
+            expectedSecond,
+          );
+        },
+      },
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "replacement encode", { flag: "wx" });
+        }),
+      },
+    });
+
+    expect(writerResult?.status).toBe(0);
+    expect(readFileSync(fixture.outputPath, "utf8")).toBe(
+      "replacement encode",
+    );
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({ id: fixture.job.id, status: "completed" }),
+    ]);
+    fixture.access.close();
+  });
+
+  it("keeps SQLite writable during revoked-publication cleanup mutation", () => {
+    const fixture = createQueuedJob();
+    const claim = fixture.access.encodeJobs.claimNext("cleanup-writer-probe");
+    if (!claim) {
+      throw new Error("Expected the Encode Job to be claimed");
+    }
+    const cleanup = fixture.access.encodeJobs.registerPartialCleanup(claim);
+    fixture.access.encodeJobs.fail(claim, "publication revoked");
+    let writerResult: ReturnType<typeof spawnSync> | undefined;
+
+    const authorizedCleanup =
+      fixture.access.encodeJobs.withPartialCleanupMutationFence(
+        cleanup,
+        () => {
+          writerResult = probeSQLiteWriter(fixture.databasePath);
+        },
+      );
+
+    expect(writerResult?.status).toBe(0);
+    expect(authorizedCleanup.leaseToken).toEqual(expect.any(String));
     fixture.access.close();
   });
 
@@ -2238,8 +2440,12 @@ describe("encode worker polling", () => {
     await pollEncodeWorker({
       ...options,
       atomicPathExchange: {
-        exchange(firstPath, secondPath) {
-          nodeAtomicPathExchange.exchange(firstPath, secondPath);
+        exchange(firstPath, secondPath, expectedSecond) {
+          nodeAtomicPathExchange.exchange(
+            firstPath,
+            secondPath,
+            expectedSecond,
+          );
           failedAfterExchange = true;
           throw new Error("simulated post-syscall exchange failure");
         },
@@ -2544,6 +2750,72 @@ describe("encode worker polling", () => {
     );
     expect(readFileSync(fixture.outputPath, "utf8")).toBe(
       "nested durable encode",
+    );
+    expect(fixture.access.encodeJobs.listPendingPartialCleanups()).toEqual([]);
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({ id: fixture.job.id, status: "completed" }),
+    ]);
+    fixture.access.close();
+  });
+
+  it("keeps a newly created media-library root durable after completion", async () => {
+    const fixture = createQueuedJob();
+    const mediaLibraryParent = dirname(fixture.mediaLibraryPath);
+    outputHierarchyDurability.armed = true;
+    outputHierarchyDurability.directories = [
+      mediaLibraryParent,
+      fixture.mediaLibraryPath,
+    ];
+    let completionCleanupReached = false;
+    let mediaRootLostAfterCrash = false;
+    const encodeJobs = new Proxy(fixture.access.encodeJobs, {
+      get(target, property, receiver) {
+        const value = Reflect.get(target, property, receiver) as unknown;
+        if (
+          property === "completePartialCleanup" &&
+          typeof value === "function"
+        ) {
+          return (...arguments_: unknown[]) => {
+            const completed = Reflect.apply(value, target, arguments_);
+            completionCleanupReached = true;
+            if (
+              outputHierarchyDurability.directories.some(
+                (directory) =>
+                  !outputHierarchyDurability.syncedDirectories.has(directory),
+              )
+            ) {
+              rmSync(fixture.mediaLibraryPath, { recursive: true });
+              mediaRootLostAfterCrash = true;
+            }
+            return completed;
+          };
+        }
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const crashingAccess: DataAccess = { ...fixture.access, encodeJobs };
+
+    await pollEncodeWorker({
+      access: crashingAccess,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "root durable encode", { flag: "wx" });
+        }),
+      },
+      signal: new AbortController().signal,
+    });
+
+    expect(completionCleanupReached).toBe(true);
+    expect(mediaRootLostAfterCrash).toBe(false);
+    expect(outputHierarchyDurability.syncedDirectories).toEqual(
+      new Set(outputHierarchyDurability.directories),
+    );
+    expect(readFileSync(fixture.outputPath, "utf8")).toBe(
+      "root durable encode",
     );
     expect(fixture.access.encodeJobs.listPendingPartialCleanups()).toEqual([]);
     expect(fixture.access.encodeJobs.list()).toEqual([
@@ -3031,13 +3303,25 @@ describe("encode worker polling", () => {
     );
     vi.advanceTimersByTime(ENCODE_JOB_LEASE_DURATION_MS + 1);
     fixture.access.encodeJobs.recoverExpiredClaims();
+    let writerResult: ReturnType<typeof spawnSync> | undefined;
 
     await pollEncodeWorker({
       ...options,
+      atomicPathExchange: {
+        exchange(firstPath, secondPath, expectedSecond) {
+          writerResult = probeSQLiteWriter(fixture.databasePath);
+          return nodeAtomicPathExchange.exchange(
+            firstPath,
+            secondPath,
+            expectedSecond,
+          );
+        },
+      },
       runner: { run: vi.fn() },
       workerId: "exchange-recovery",
     });
 
+    expect(writerResult?.status).toBe(0);
     expect(readFileSync(canonicalFinalPath, "utf8")).toBe(
       "displaced competing publication",
     );
@@ -3045,6 +3329,142 @@ describe("encode worker polling", () => {
     expect(quarantinedContents(canonicalFinalPath)).not.toContain(
       "displaced competing publication",
     );
+    expect(quarantinedContents(partialPath)).toContain(
+      "unaccepted worker replacement",
+    );
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        partialCleanupClaimToken: null,
+        publicationPending: false,
+        status: "failed",
+      }),
+    ]);
+    fixture.access.close();
+  });
+
+  it("retains a newer public final published before recovery compensation", async () => {
+    vi.useFakeTimers();
+    const fixture = createQueuedJob();
+    const options = {
+      access: fixture.access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      signal: new AbortController().signal,
+    };
+    await pollEncodeWorker({
+      ...options,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "known good encode", { flag: "wx" });
+        }),
+      },
+    });
+    fixture.access.encodeJobs.requeue(fixture.job.id);
+    const claim = fixture.access.encodeJobs.claimNext("crashed-exchange-race");
+    if (!claim) {
+      throw new Error("Expected the crashed exchange claim");
+    }
+    const canonicalFinalPath = join(
+      realpathSync(fixture.mediaLibraryPath),
+      basename(fixture.outputPath),
+    );
+    const partialPath = claimPartialPath(
+      canonicalFinalPath,
+      claim.claimToken,
+    );
+    const priorPath = priorFinalPath(canonicalFinalPath, claim.claimToken);
+    const replacementPath = claimReplacementPath(
+      canonicalFinalPath,
+      claim.claimToken,
+    );
+    const displacedPath = join(
+      fixture.mediaLibraryPath,
+      ".recovery-compensation-displaced.mkv",
+    );
+    const exchangeTemporaryPath = join(
+      fixture.mediaLibraryPath,
+      ".recovery-compensation-temporary.mkv",
+    );
+    const newerPath = join(
+      fixture.mediaLibraryPath,
+      ".recovery-compensation-newer.mkv",
+    );
+    writeFileSync(partialPath, "unaccepted worker replacement", {
+      flag: "wx",
+    });
+    writeFileSync(displacedPath, "displaced competing publication", {
+      flag: "wx",
+    });
+    writeFileSync(newerPath, "newer public final", { flag: "wx" });
+    fixture.access.encodeJobs.registerPartialCleanup(claim, {
+      publicationPending: true,
+    });
+    linkSync(canonicalFinalPath, priorPath);
+    linkSync(partialPath, replacementPath);
+    renameSync(displacedPath, canonicalFinalPath);
+    renameSync(canonicalFinalPath, exchangeTemporaryPath);
+    renameSync(replacementPath, canonicalFinalPath);
+    renameSync(exchangeTemporaryPath, replacementPath);
+    vi.advanceTimersByTime(ENCODE_JOB_LEASE_DURATION_MS + 1);
+    fixture.access.encodeJobs.recoverExpiredClaims();
+    let exchanges = 0;
+
+    await pollEncodeWorker({
+      ...options,
+      atomicPathExchange: {
+        exchange(firstPath, secondPath, expectedSecond) {
+          exchanges += 1;
+          renameSync(newerPath, canonicalFinalPath);
+          return nodeAtomicPathExchange.exchange(
+            firstPath,
+            secondPath,
+            expectedSecond,
+          );
+        },
+      },
+      runner: { run: vi.fn() },
+      workerId: "exchange-race-recovery",
+    });
+
+    expect(exchanges).toBe(1);
+    expect(readFileSync(canonicalFinalPath, "utf8")).toBe(
+      "newer public final",
+    );
+    expect(readFileSync(replacementPath, "utf8")).toBe(
+      "displaced competing publication",
+    );
+    expect(readFileSync(partialPath, "utf8")).toBe(
+      "unaccepted worker replacement",
+    );
+    expect(quarantinedContents(canonicalFinalPath)).not.toContain(
+      "newer public final",
+    );
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        partialCleanupClaimToken: claim.claimToken,
+        publicationPending: true,
+        status: "failed",
+      }),
+    ]);
+
+    await pollEncodeWorker({
+      ...options,
+      runner: { run: vi.fn() },
+      workerId: "exchange-race-cleanup",
+    });
+
+    expect(readFileSync(canonicalFinalPath, "utf8")).toBe(
+      "newer public final",
+    );
+    expect(quarantinedContents(canonicalFinalPath)).not.toContain(
+      "newer public final",
+    );
+    expect(existsSync(replacementPath)).toBe(false);
+    expect(existsSync(partialPath)).toBe(false);
     expect(quarantinedContents(partialPath)).toContain(
       "unaccepted worker replacement",
     );

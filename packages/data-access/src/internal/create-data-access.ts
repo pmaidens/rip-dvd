@@ -3741,7 +3741,7 @@ export function createDataAccessInternal(
       },
       withClaimMutationFence(claim, mutation) {
         const timestamp = now();
-        return database.transaction((transaction) => {
+        database.transaction((transaction) => {
           const renewed = transaction
             .update(encodeJobs)
             .set({ updatedAt: timestamp })
@@ -3751,8 +3751,8 @@ export function createDataAccessInternal(
           if (!renewed) {
             throw new StaleJobAttemptError("encode job", claim.id);
           }
-          mutation();
         }, { behavior: "immediate" });
+        mutation();
       },
       recoverExpiredClaims() {
         const timestamp = now();
@@ -4008,7 +4008,7 @@ export function createDataAccessInternal(
           timestamp.getTime() - ENCODE_JOB_LEASE_DURATION_MS,
         );
         const leaseToken = newId<EncodeJobCleanupClaimToken>();
-        return database.transaction((transaction) => {
+        const authorizedCleanup = database.transaction((transaction) => {
           const updated = transaction
             .update(encodeJobs)
             .set({
@@ -4036,9 +4036,41 @@ export function createDataAccessInternal(
               cleanup.jobId,
             );
           }
-          mutation();
           return { ...cleanup, leaseToken };
         }, { behavior: "immediate" });
+        mutation();
+        return authorizedCleanup;
+      },
+      renewPublishedPartial(cleanup, publicationMatches) {
+        if (!cleanup.publicationPending) {
+          throw new DomainInvariantError(
+            "Encode Job cleanup is not publication provenance",
+          );
+        }
+        const timestamp = now();
+        const publicationCondition = and(
+          eq(encodeJobs.id, cleanup.jobId),
+          inArray(encodeJobs.status, ["failed", "completed"]),
+          eq(encodeJobs.publicationPending, true),
+          eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
+          eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
+          isNull(encodeJobs.partialCleanupLeaseToken),
+        );
+        database.transaction((transaction) => {
+          const owned = transaction
+            .update(encodeJobs)
+            .set({ updatedAt: timestamp })
+            .where(publicationCondition)
+            .returning()
+            .get();
+          if (!owned || !publicationMatches()) {
+            throw new StaleJobAttemptError(
+              "encode job publication",
+              cleanup.jobId,
+            );
+          }
+        }, { behavior: "immediate" });
+        return cleanup;
       },
       completePublishedPartial(cleanup, publicationMatches) {
         if (!cleanup.publicationPending) {

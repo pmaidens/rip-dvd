@@ -3,20 +3,38 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <node_api.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 enum { MAX_PATH_BYTES = 4096 };
 
 static napi_value exchange_paths(napi_env environment,
                                  napi_callback_info callback) {
-  size_t argument_count = 2;
-  napi_value arguments[2];
+  size_t argument_count = 4;
+  napi_value arguments[4];
   if (napi_get_cb_info(environment, callback, &argument_count, arguments, NULL,
                        NULL) != napi_ok ||
-      argument_count != 2) {
+      argument_count != 4) {
     napi_throw_type_error(environment, NULL,
-                          "Atomic exchange requires two paths");
+                          "Atomic exchange requires two paths and an identity");
+    return NULL;
+  }
+
+  uint64_t expected_device;
+  uint64_t expected_inode;
+  bool device_lossless;
+  bool inode_lossless;
+  if (napi_get_value_bigint_uint64(environment, arguments[2],
+                                   &expected_device, &device_lossless) !=
+          napi_ok ||
+      napi_get_value_bigint_uint64(environment, arguments[3], &expected_inode,
+                                   &inode_lossless) != napi_ok ||
+      !device_lossless || !inode_lossless) {
+    napi_throw_type_error(environment, NULL,
+                          "Atomic exchange identity is invalid");
     return NULL;
   }
 
@@ -37,6 +55,19 @@ static napi_value exchange_paths(napi_env environment,
     }
   }
 
+  struct stat current_second;
+  if (fstatat(AT_FDCWD, paths[1], &current_second, AT_SYMLINK_NOFOLLOW) != 0) {
+    napi_throw_error(environment, NULL, strerror(errno));
+    return NULL;
+  }
+  if (!S_ISREG(current_second.st_mode) ||
+      (uint64_t)current_second.st_dev != expected_device ||
+      (uint64_t)current_second.st_ino != expected_inode) {
+    napi_value rejected;
+    napi_get_boolean(environment, false, &rejected);
+    return rejected;
+  }
+
 #if defined(__linux__)
   const int result =
       renameat2(AT_FDCWD, paths[0], AT_FDCWD, paths[1], RENAME_EXCHANGE);
@@ -52,9 +83,9 @@ static napi_value exchange_paths(napi_env environment,
     return NULL;
   }
 
-  napi_value undefined;
-  napi_get_undefined(environment, &undefined);
-  return undefined;
+  napi_value exchanged;
+  napi_get_boolean(environment, true, &exchanged);
+  return exchanged;
 }
 
 NAPI_MODULE_INIT() {

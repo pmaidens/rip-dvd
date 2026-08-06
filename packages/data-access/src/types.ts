@@ -458,6 +458,10 @@ export interface EncodeJobAccess {
     cleanup: EncodeJobPartialCleanup,
     mutation: () => void,
   ): EncodeJobPartialCleanup;
+  renewPublishedPartial(
+    cleanup: EncodeJobPartialCleanup,
+    publicationMatches: () => boolean,
+  ): EncodeJobPartialCleanup;
   completePublishedPartial(
     cleanup: EncodeJobPartialCleanup,
     publicationMatches: () => boolean,
