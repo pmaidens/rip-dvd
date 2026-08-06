@@ -20,6 +20,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createDataAccess,
   DomainInvariantError,
+  ENCODE_JOB_LEASE_DURATION_MS,
   StaleJobAttemptError,
 } from "./index.js";
 import { createLegacySidecarDataAccess } from "./legacy-sidecars.js";
@@ -2764,7 +2765,7 @@ try {
     const publication = importer.encodeJobs.registerPartialCleanup(running, {
       publicationPending: true,
     });
-    const mutation = importer.encodeJobs.beginPublicationMutation(
+    importer.encodeJobs.beginPublicationMutation(
       running,
       publication,
     );
@@ -2781,21 +2782,27 @@ try {
       createDataAccess({ databasePath, originalsLibraryPath })
     ).toThrow(/active Encode publication mutation/);
 
-    const observer = createDataAccess({ databasePath });
-    expect(observer.encodeJobs.list()).toEqual([
-      expect.objectContaining({
-        id: running.id,
-        partialCleanupClaimToken: running.claimToken,
-        partialCleanupLeaseToken: mutation.leaseToken,
-        publicationPending: true,
-        status: "running",
-      }),
-    ]);
-    const revoked = observer.encodeJobs.revokePublication(running, mutation);
-    observer.encodeJobs.completePartialCleanup(revoked);
-    observer.close();
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.now() + ENCODE_JOB_LEASE_DURATION_MS + 1);
+    expect(() =>
+      createDataAccess({
+        databasePath,
+        originalsLibraryPath,
+        publicationMutationRecoveryLock: {
+          tryAcquire: () => null,
+        },
+      })
+    ).toThrow(/active Encode publication mutation/);
 
-    const service = createDataAccess({ databasePath, originalsLibraryPath });
+    const release = vi.fn();
+    const tryAcquire = vi.fn(() => ({ release }));
+    const service = createDataAccess({
+      databasePath,
+      originalsLibraryPath,
+      publicationMutationRecoveryLock: { tryAcquire },
+    });
+    expect(tryAcquire).toHaveBeenCalledWith(outputPath);
+    expect(release).toHaveBeenCalledOnce();
     expect(service.encodeJobs.list()).toEqual([
       expect.objectContaining({
         id: running.id,

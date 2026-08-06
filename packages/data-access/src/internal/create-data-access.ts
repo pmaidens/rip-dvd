@@ -42,7 +42,10 @@ import {
   originalDiscArchiveContentIds,
   originalDiscArchives,
 } from "./schema.js";
-import { reconcileLegacyRepairCutover } from "./legacy-cutover-reconciliation.js";
+import {
+  reconcileLegacyRepairCutover,
+  type PublicationMutationRecoveryLock,
+} from "./legacy-cutover-reconciliation.js";
 import {
   dvdArchiveFileMatchesIdentity,
   hashDvdArchiveFile,
@@ -382,7 +385,10 @@ export interface CreateDataAccessOptions {
   databasePath: string;
   migrationsFolder?: string;
   originalsLibraryPath?: string;
+  publicationMutationRecoveryLock?: PublicationMutationRecoveryLock;
 }
+
+export type { PublicationMutationRecoveryLock };
 
 export type LegacySidecarMigrationAdapter = LegacySidecarImportAccessFactory;
 
@@ -440,6 +446,7 @@ function openMigratedDatabase(
   databasePath: string,
   migrationsFolder: string,
   originalsLibraryPath?: string,
+  publicationMutationRecoveryLock?: PublicationMutationRecoveryLock,
 ) {
   const releaseMigrationLock =
     databasePath === ":memory:"
@@ -476,7 +483,11 @@ function openMigratedDatabase(
     }
     sqlite.exec("PRAGMA foreign_keys = ON");
     if (originalsLibraryPath !== undefined) {
-      reconcileLegacyRepairCutover(sqlite, originalsLibraryPath);
+      reconcileLegacyRepairCutover(
+        sqlite,
+        originalsLibraryPath,
+        publicationMutationRecoveryLock,
+      );
     }
     releaseMigrationLock();
     return { database, sqlite };
@@ -499,6 +510,7 @@ export function createDataAccessInternal(
     databasePath,
     migrationsFolder = DEFAULT_MIGRATIONS_FOLDER,
     originalsLibraryPath,
+    publicationMutationRecoveryLock,
   }: CreateDataAccessOptions,
   legacySidecarMigration?: LegacySidecarMigrationAdapter,
 ): DataAccess | LegacySidecarDataAccess {
@@ -515,6 +527,7 @@ export function createDataAccessInternal(
     normalizedDatabasePath,
     migrationsFolder,
     normalizedOriginalsLibraryPath,
+    publicationMutationRecoveryLock,
   );
 
   function now(): Date {
@@ -4410,7 +4423,8 @@ export function createDataAccessInternal(
             .update(encodeJobs)
             .set({
               status: owned.status,
-              publicationCompletionPending: false,
+              publicationCompletionPending:
+                owned.publicationCompletionPending,
               completedAt: owned.completedAt,
               errorMessage: owned.errorMessage,
               updatedAt: now(),

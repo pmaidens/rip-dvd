@@ -16,7 +16,10 @@ export {
   ARCHIVE_JOB_LEASE_DURATION_MS,
   ENCODE_JOB_LEASE_DURATION_MS,
 } from "./types.js";
-export type { CreateDataAccessOptions } from "./internal/create-data-access.js";
+export type {
+  CreateDataAccessOptions,
+  PublicationMutationRecoveryLock,
+} from "./internal/create-data-access.js";
 
 export function createDataAccess(input: CreateDataAccessOptions): DataAccess {
   return createDataAccessInternal(input);

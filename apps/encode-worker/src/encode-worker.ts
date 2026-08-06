@@ -7,6 +7,7 @@ import {
   linkSync,
   lstatSync,
   openSync,
+  realpathSync,
   renameSync,
   type Stats,
   unlinkSync,
@@ -33,6 +34,7 @@ import {
   type DiscSelection,
   type EncodeJobPartialCleanup,
   type EncodeJobProgress,
+  type PublicationMutationRecoveryLock,
   type RunningEncodeJob,
 } from "@rip-dvd/data-access";
 
@@ -99,6 +101,55 @@ export function createNodePublicationMutationLock(): PublicationMutationLock {
 export const nodeAtomicPathExchange = createNodeAtomicPathExchange();
 export const nodePublicationMutationLock =
   createNodePublicationMutationLock();
+
+export function createEncodePublicationMutationRecoveryLock(
+  mediaLibraryPath: string,
+  mutationLock: PublicationMutationLock = nodePublicationMutationLock,
+): PublicationMutationRecoveryLock {
+  const resolvedMediaRoot = resolve(mediaLibraryPath);
+  if (Buffer.byteLength(resolvedMediaRoot) > MAX_PATH_BYTES) {
+    throw new Error("Library path exceeds the safety limit");
+  }
+  return {
+    tryAcquire(outputPath) {
+      const mediaRoot = realpathSync(resolvedMediaRoot);
+      const mediaRootMetadata = lstatSync(mediaRoot);
+      if (
+        !mediaRootMetadata.isDirectory() ||
+        mediaRootMetadata.isSymbolicLink()
+      ) {
+        throw new Error("Library path must be a real directory");
+      }
+      const resolvedOutput = resolve(outputPath);
+      if (
+        !outputPath.startsWith(sep) ||
+        Buffer.byteLength(resolvedOutput) > MAX_PATH_BYTES ||
+        !resolvedOutput.toLowerCase().endsWith(".mkv") ||
+        resolvedOutput === mediaRoot
+      ) {
+        throw new Error("Encode Job output path escaped the media library");
+      }
+      const canonicalOutputDirectory = realpathSync(dirname(resolvedOutput));
+      if (!isContained(mediaRoot, canonicalOutputDirectory)) {
+        throw new Error("Encode Job output directory escaped the media library");
+      }
+      const mutationLockPath = join(
+        canonicalOutputDirectory,
+        `.${basename(resolvedOutput)}.rip-dvd-mutation-lock`,
+      );
+      if (
+        Buffer.byteLength(mutationLockPath) > MAX_PATH_BYTES ||
+        dirname(mutationLockPath) !== canonicalOutputDirectory
+      ) {
+        throw new Error("Encode Job output path is unsafe");
+      }
+      const handle = mutationLock.tryAcquire(mutationLockPath);
+      return handle === null
+        ? null
+        : { release: () => mutationLock.release(handle) };
+    },
+  };
+}
 
 interface HandBrakeChildProcess {
   stderr: Readable;
@@ -924,7 +975,22 @@ async function reconcilePendingPublications(
             await syncPath(dirname(finalPath));
             quarantineMetadata = null;
           } else if (currentFinalMetadata === null) {
-            renameSync(cleanupQuarantinePath, finalPath);
+            try {
+              linkSync(cleanupQuarantinePath, finalPath);
+            } catch (error) {
+              if (
+                error instanceof Error &&
+                "code" in error &&
+                error.code === "EEXIST"
+              ) {
+                throw new PendingPublicationRecoveryError(
+                  "A newer Encode output appeared during quarantine recovery",
+                );
+              }
+              throw error;
+            }
+            await syncPath(dirname(finalPath));
+            await unlink(cleanupQuarantinePath);
             await syncPath(dirname(finalPath));
             finalMetadata = lstatSync(finalPath);
             quarantineMetadata = null;
