@@ -3867,6 +3867,7 @@ export function createDataAccessInternal(
           .update(encodeJobs)
           .set({
             status: "completed",
+            publicationCompletionPending: true,
             progressPercent: 100,
             progressEtaSeconds: null,
             completedAt: timestamp,
@@ -3892,6 +3893,7 @@ export function createDataAccessInternal(
         const completionCondition = and(
           eq(encodeJobs.id, cleanup.jobId),
           eq(encodeJobs.status, "completed"),
+          eq(encodeJobs.publicationCompletionPending, true),
           eq(encodeJobs.publicationPending, true),
           eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
           eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
@@ -3902,6 +3904,7 @@ export function createDataAccessInternal(
             .update(encodeJobs)
             .set({
               status: "running",
+              publicationCompletionPending: false,
               completedAt: null,
               updatedAt: now(),
             })
@@ -3924,6 +3927,7 @@ export function createDataAccessInternal(
           .set({
             replaceExistingOutput: false,
             replacementOutputIdentity: null,
+            publicationCompletionPending: false,
             updatedAt: now(),
           })
           .where(completionCondition)
@@ -4374,6 +4378,7 @@ export function createDataAccessInternal(
             .update(encodeJobs)
             .set({
               status: "completed",
+              publicationCompletionPending: true,
               progressPercent: 100,
               progressEtaSeconds: null,
               completedAt: sql`coalesce(${encodeJobs.completedAt}, ${timestamp.getTime()})`,
@@ -4394,6 +4399,7 @@ export function createDataAccessInternal(
         const completionCondition = and(
           eq(encodeJobs.id, cleanup.jobId),
           eq(encodeJobs.status, "completed"),
+          eq(encodeJobs.publicationCompletionPending, true),
           eq(encodeJobs.publicationPending, true),
           eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
           eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
@@ -4404,6 +4410,7 @@ export function createDataAccessInternal(
             .update(encodeJobs)
             .set({
               status: owned.status,
+              publicationCompletionPending: false,
               completedAt: owned.completedAt,
               errorMessage: owned.errorMessage,
               updatedAt: now(),
@@ -4427,6 +4434,7 @@ export function createDataAccessInternal(
           .set({
             replaceExistingOutput: false,
             replacementOutputIdentity: null,
+            publicationCompletionPending: false,
             updatedAt: now(),
           })
           .where(completionCondition)
@@ -4486,6 +4494,7 @@ export function createDataAccessInternal(
             .update(encodeJobs)
             .set({
               status: "completed",
+              publicationCompletionPending: true,
               progressPercent: 100,
               progressEtaSeconds: null,
               completedAt: timestamp,
@@ -4506,6 +4515,7 @@ export function createDataAccessInternal(
         const completionCondition = and(
           eq(encodeJobs.id, cleanup.jobId),
           eq(encodeJobs.status, "completed"),
+          eq(encodeJobs.publicationCompletionPending, true),
           eq(encodeJobs.claimToken, claim.claimToken),
           eq(encodeJobs.publicationPending, true),
           eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
@@ -4522,6 +4532,7 @@ export function createDataAccessInternal(
             .update(encodeJobs)
             .set({
               status: "failed",
+              publicationCompletionPending: false,
               completedAt: null,
               errorMessage:
                 "Encode publication changed across completion commit",
@@ -4546,6 +4557,7 @@ export function createDataAccessInternal(
           .set({
             replaceExistingOutput: false,
             replacementOutputIdentity: null,
+            publicationCompletionPending: false,
             updatedAt: now(),
           })
           .where(completionCondition)
@@ -4563,10 +4575,14 @@ export function createDataAccessInternal(
         const updated = database
           .update(encodeJobs)
           .set({
+            status: sql`case when ${encodeJobs.publicationCompletionPending} = 1 then 'failed' else ${encodeJobs.status} end`,
+            completedAt: sql`case when ${encodeJobs.publicationCompletionPending} = 1 then null else ${encodeJobs.completedAt} end`,
+            errorMessage: sql`case when ${encodeJobs.publicationCompletionPending} = 1 then 'Encode publication completion was interrupted' else ${encodeJobs.errorMessage} end`,
             partialCleanupOutputPath: null,
             partialCleanupClaimToken: null,
             partialCleanupLeaseToken: null,
             publicationPending: false,
+            publicationCompletionPending: false,
           })
           .where(
             and(

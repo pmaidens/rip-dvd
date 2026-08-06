@@ -2719,6 +2719,95 @@ try {
     service.close();
   });
 
+  it("does not bootstrap a repair cutover across an active publication mutation", () => {
+    const root = temporaryDirectories.create(
+      "rip-dvd-cutover-live-publication-bootstrap-",
+    );
+    const originalsLibraryPath = join(root, "originals");
+    const archivePath = join(originalsLibraryPath, "Live publication.iso");
+    const sidecarPath = join(
+      originalsLibraryPath,
+      "Live publication.rip-dvd.json",
+    );
+    const markerPath = join(
+      originalsLibraryPath,
+      ".rip-dvd-sqlite-catalog",
+    );
+    const outputPath = join(root, "movies", "Live publication.mkv");
+    const databasePath = join(root, "catalog.sqlite");
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    writeFileSync(archivePath, "live publication archive");
+    writeFileSync(sidecarPath, JSON.stringify({
+      schema_version: 2,
+      source: archivePath,
+      title: "Live publication",
+      disc_fingerprint: "live-publication-bootstrap-fingerprint",
+      jobs: [{
+        label: "Movie: Live publication",
+        source: archivePath,
+        output: outputPath,
+        preset: "Fast 480p30",
+        selection: "main_feature",
+        title_number: null,
+      }],
+    }));
+    markerFault.failure = null;
+    const importer = createLegacySidecarDataAccess({ databasePath });
+    expect(importer.legacySidecars.importLibrary({ originalsLibraryPath }))
+      .toMatchObject({ sidecarsImported: 1, issues: [] });
+    const running = importer.encodeJobs.claimNext(
+      "live-publication-bootstrap-worker",
+    );
+    if (!running) {
+      throw new Error("Expected the live publication Encode Job");
+    }
+    const publication = importer.encodeJobs.registerPartialCleanup(running, {
+      publicationPending: true,
+    });
+    const mutation = importer.encodeJobs.beginPublicationMutation(
+      running,
+      publication,
+    );
+    const marker = JSON.parse(readFileSync(markerPath, "utf8")) as {
+      legacyQueueStatus: string;
+    };
+    writeFileSync(markerPath, `${JSON.stringify({
+      ...marker,
+      legacyQueueStatus: "repair",
+    })}\n`);
+    importer.close();
+
+    expect(() =>
+      createDataAccess({ databasePath, originalsLibraryPath })
+    ).toThrow(/active Encode publication mutation/);
+
+    const observer = createDataAccess({ databasePath });
+    expect(observer.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: running.id,
+        partialCleanupClaimToken: running.claimToken,
+        partialCleanupLeaseToken: mutation.leaseToken,
+        publicationPending: true,
+        status: "running",
+      }),
+    ]);
+    const revoked = observer.encodeJobs.revokePublication(running, mutation);
+    observer.encodeJobs.completePartialCleanup(revoked);
+    observer.close();
+
+    const service = createDataAccess({ databasePath, originalsLibraryPath });
+    expect(service.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: running.id,
+        partialCleanupClaimToken: running.claimToken,
+        partialCleanupLeaseToken: null,
+        publicationPending: false,
+        status: "failed",
+      }),
+    ]);
+    service.close();
+  });
+
   it("fences a current-identity archive published after repair bootstrap", () => {
     const root = temporaryDirectories.create(
       "rip-dvd-cutover-late-archive-bootstrap-",

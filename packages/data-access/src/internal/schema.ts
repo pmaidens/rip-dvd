@@ -387,6 +387,12 @@ export const encodeJobs = sqliteTable(
     publicationPending: integer("publication_pending", { mode: "boolean" })
       .notNull()
       .default(false),
+    publicationCompletionPending: integer(
+      "publication_completion_pending",
+      { mode: "boolean" },
+    )
+      .notNull()
+      .default(false),
     progressPhase: text("progress_phase", {
       enum: ENCODE_PROGRESS_PHASES,
     }),
@@ -442,6 +448,10 @@ export const encodeJobs = sqliteTable(
     check(
       "encode_jobs_publication_pending_cleanup_check",
       sql`${table.publicationPending} = 0 or ${table.partialCleanupClaimToken} is not null`,
+    ),
+    check(
+      "encode_jobs_publication_completion_pending_check",
+      sql`${table.publicationCompletionPending} = 0 or ${table.publicationPending} = 1`,
     ),
     check(
       "encode_jobs_partial_cleanup_lease_check",

@@ -175,9 +175,11 @@ returns; process execution never belongs in a database transaction.
 Encode publication persists a mutation token in one short transaction before
 filesystem work begins. Identity callbacks inspect already-staged media entries
 only outside writer transactions. Completion first commits while retaining the
-token and cleanup provenance, rechecks the media identity after that commit,
-then finalizes success in another bounded write. A cross-boundary mismatch
-restores the nonaccepted state without removing provenance. Recovery and legacy
+token and cleanup provenance plus a durable completion-pending marker, rechecks
+the media identity after that commit, then finalizes success in another bounded
+write. A cross-boundary mismatch restores the nonaccepted state without
+removing provenance; restart cleanup converts a mismatched tentative completion
+back to failure before acknowledging that provenance. Recovery and legacy
 cutover respect the persisted token, while a process-scoped filesystem lock
 distinguishes a paused owner from an abandoned mutation. No media-filesystem
 call or external process runs while SQLite holds its writer transaction.

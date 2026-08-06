@@ -407,7 +407,10 @@ async function requireOutputPaths(
     `.${basename(finalPath)}.rip-dvd-partial`,
   );
   const priorFinalPath = `${finalPath}.failed.${safeToken}`;
+  const cleanupQuarantinePath =
+    `${finalPath}.failed.${safeToken}.publication-rollback`;
   for (const path of [
+    cleanupQuarantinePath,
     finalPath,
     partialPath,
     replacementPath,
@@ -423,6 +426,7 @@ async function requireOutputPaths(
     }
   }
   return {
+    cleanupQuarantinePath,
     finalPath,
     legacyPartialPath,
     mutationLockPath,
@@ -503,6 +507,16 @@ function moveAsideAtMutationBoundary(
     dirname(failedPath) !== dirname(path)
   ) {
     throw new Error("Encode failure path is unsafe");
+  }
+  try {
+    lstatSync(failedPath);
+    throw new PendingPublicationRecoveryError(
+      "Encode output quarantine already requires reconciliation",
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw error;
+    }
   }
   renameSync(path, failedPath);
   const quarantinedMetadata = lstatSync(failedPath);
@@ -847,6 +861,7 @@ async function reconcilePendingPublications(
     try {
       let authorizedCleanup = cleanup;
       const {
+        cleanupQuarantinePath,
         finalPath,
         mutationLockPath,
         partialPath,
@@ -857,19 +872,22 @@ async function reconcilePendingPublications(
         cleanup.outputPath,
         cleanup.claimToken,
       );
-      const [
+      let [
+        quarantineMetadata,
         finalMetadata,
         partialMetadata,
         priorFinalMetadata,
         replacementMetadata,
       ] =
         await Promise.all([
+          optionalMetadata(cleanupQuarantinePath),
           optionalMetadata(finalPath),
           optionalMetadata(partialPath),
           optionalMetadata(priorFinalPath),
           optionalMetadata(replacementPath),
         ]);
       for (const metadata of [
+        quarantineMetadata,
         finalMetadata,
         partialMetadata,
         priorFinalMetadata,
@@ -882,15 +900,47 @@ async function reconcilePendingPublications(
           throw new Error("Pending Encode publication is not a regular file");
         }
       }
-      const finalMatchesPartial =
-        finalMetadata !== null &&
-        partialMetadata !== null &&
-        partialMetadata.size > 0 &&
-        sameFile(finalMetadata, partialMetadata);
       mutationLockHandle = options.mutationLock.tryAcquire(mutationLockPath);
       if (mutationLockHandle === null) {
         continue;
       }
+      quarantineMetadata = await optionalMetadata(cleanupQuarantinePath);
+      if (quarantineMetadata !== null) {
+        const currentPartialMetadata = await optionalMetadata(partialPath);
+        const currentFinalMetadata = await optionalMetadata(finalPath);
+        if (quarantineMetadata !== null) {
+          if (
+            currentFinalMetadata !== null &&
+            sameInode(currentFinalMetadata, quarantineMetadata)
+          ) {
+            await unlink(cleanupQuarantinePath);
+            await syncPath(dirname(finalPath));
+            quarantineMetadata = null;
+          } else if (
+            currentPartialMetadata !== null &&
+            sameInode(currentPartialMetadata, quarantineMetadata)
+          ) {
+            await unlink(cleanupQuarantinePath);
+            await syncPath(dirname(finalPath));
+            quarantineMetadata = null;
+          } else if (currentFinalMetadata === null) {
+            renameSync(cleanupQuarantinePath, finalPath);
+            await syncPath(dirname(finalPath));
+            finalMetadata = lstatSync(finalPath);
+            quarantineMetadata = null;
+          } else {
+            throw new PendingPublicationRecoveryError(
+              "A quarantined external Encode output requires reconciliation",
+            );
+          }
+        }
+      }
+      const reconciledFinalMetadata = finalMetadata;
+      const finalMatchesPartial =
+        reconciledFinalMetadata !== null &&
+        partialMetadata !== null &&
+        partialMetadata.size > 0 &&
+        sameFile(reconciledFinalMetadata, partialMetadata);
       if (
         finalMatchesPartial &&
         replacementMetadata !== null &&
@@ -908,7 +958,7 @@ async function reconcilePendingPublications(
                 const currentFinalMetadata = lstatSync(finalPath);
                 const currentReplacementMetadata = lstatSync(replacementPath);
                 return (
-                  sameFile(finalMetadata, currentFinalMetadata) &&
+                  sameFile(reconciledFinalMetadata, currentFinalMetadata) &&
                   sameFile(replacementMetadata, currentReplacementMetadata)
                 );
               },
@@ -916,7 +966,7 @@ async function reconcilePendingPublications(
           const currentFinalMetadata = lstatSync(finalPath);
           const currentReplacementMetadata = lstatSync(replacementPath);
           if (
-            !sameFile(finalMetadata, currentFinalMetadata) ||
+            !sameFile(reconciledFinalMetadata, currentFinalMetadata) ||
             !sameFile(replacementMetadata, currentReplacementMetadata)
           ) {
             throw new PendingPublicationRecoveryError(
@@ -939,7 +989,7 @@ async function reconcilePendingPublications(
           const stagedWorkerMetadata = lstatSync(replacementPath);
           if (
             !sameInode(replacementMetadata, restoredFinalMetadata) ||
-            !sameInode(finalMetadata, stagedWorkerMetadata)
+            !sameInode(reconciledFinalMetadata, stagedWorkerMetadata)
           ) {
             throw new PendingPublicationRecoveryError(
               "Displaced Encode output exchange requires reconciliation",
@@ -982,15 +1032,14 @@ async function reconcilePendingPublications(
             );
           authorizedCleanup = completion.cleanup;
         } else {
-          const rollbackPath = `${finalPath}.failed.${randomUUID()}`;
           authorizedCleanup =
             options.access.encodeJobs.withPartialCleanupMutationFence(
               cleanup,
               () => {
                 moveAsideAtMutationBoundary(
                   finalPath,
-                  rollbackPath,
-                  finalMetadata,
+                  cleanupQuarantinePath,
+                  reconciledFinalMetadata,
                 );
               },
             );
@@ -1004,7 +1053,7 @@ async function reconcilePendingPublications(
         options.access.encodeJobs.completePartialCleanup(authorizedCleanup);
         continue;
       }
-      if (finalMetadata === null && priorFinalMetadata !== null) {
+      if (reconciledFinalMetadata === null && priorFinalMetadata !== null) {
         await restoreMovedAsideOutput(priorFinalPath, finalPath);
       }
       await quarantinePartial(
@@ -1258,6 +1307,7 @@ async function executeClaim(
   let finalPath: string | undefined;
   let partialPath: string | undefined;
   let replacementPath: string | undefined;
+  let cleanupQuarantinePath: string | undefined;
   let replaceableFinal: Stats | undefined;
   let priorFinalFailedPath: string | null = null;
   let priorFinalRestored = false;
@@ -1287,6 +1337,7 @@ async function executeClaim(
     finalPath = paths.finalPath;
     partialPath = paths.partialPath;
     replacementPath = paths.replacementPath;
+    cleanupQuarantinePath = paths.cleanupQuarantinePath;
     const existingFinal = await optionalMetadata(finalPath);
     if (
       existingFinal !== null &&
@@ -1515,9 +1566,12 @@ async function executeClaim(
           publishedOutputMetadata !== undefined &&
           sameInode(publishedOutputMetadata, currentFinal)
         ) {
+          if (cleanupQuarantinePath === undefined) {
+            throw new Error("Encode output quarantine path is unavailable");
+          }
           moveAsideAtMutationBoundary(
             rollbackFinalPath,
-            `${rollbackFinalPath}.failed.${randomUUID()}`,
+            cleanupQuarantinePath,
             currentFinal,
           );
           rolledBack = true;
