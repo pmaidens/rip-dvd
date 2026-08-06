@@ -3871,8 +3871,6 @@ export function createDataAccessInternal(
             progressEtaSeconds: null,
             completedAt: timestamp,
             errorMessage: null,
-            replaceExistingOutput: false,
-            replacementOutputIdentity: null,
             updatedAt: timestamp,
           })
           .where(and(
@@ -3891,7 +3889,53 @@ export function createDataAccessInternal(
             cleanup.jobId,
           );
         }
-        return updated;
+        const completionCondition = and(
+          eq(encodeJobs.id, cleanup.jobId),
+          eq(encodeJobs.status, "completed"),
+          eq(encodeJobs.publicationPending, true),
+          eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
+          eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
+          eq(encodeJobs.partialCleanupLeaseToken, cleanup.leaseToken),
+        );
+        if (!publicationMatches()) {
+          const invalidated = database
+            .update(encodeJobs)
+            .set({
+              status: "running",
+              completedAt: null,
+              updatedAt: now(),
+            })
+            .where(completionCondition)
+            .returning()
+            .get();
+          if (!invalidated) {
+            throw new StaleJobAttemptError(
+              "encode job publication mutation",
+              cleanup.jobId,
+            );
+          }
+          throw new StaleJobAttemptError(
+            "encode job publication mutation",
+            cleanup.jobId,
+          );
+        }
+        const finalized = database
+          .update(encodeJobs)
+          .set({
+            replaceExistingOutput: false,
+            replacementOutputIdentity: null,
+            updatedAt: now(),
+          })
+          .where(completionCondition)
+          .returning()
+          .get();
+        if (!finalized) {
+          throw new StaleJobAttemptError(
+            "encode job publication mutation",
+            cleanup.jobId,
+          );
+        }
+        return finalized;
       },
       recoverExpiredPublicationMutation(cleanup) {
         if (cleanup.leaseToken === null) {
@@ -4311,7 +4355,7 @@ export function createDataAccessInternal(
           );
         }
         const matches = publicationMatches();
-        return database.transaction((transaction) => {
+        database.transaction((transaction) => {
           if (!matches) {
             throw new StaleJobAttemptError(
               "encode job publication",
@@ -4334,8 +4378,6 @@ export function createDataAccessInternal(
               progressEtaSeconds: null,
               completedAt: sql`coalesce(${encodeJobs.completedAt}, ${timestamp.getTime()})`,
               errorMessage: null,
-              replaceExistingOutput: false,
-              replacementOutputIdentity: null,
               updatedAt: timestamp,
             })
             .where(fencedPublicationCondition)
@@ -4347,11 +4389,59 @@ export function createDataAccessInternal(
               cleanup.jobId,
             );
           }
-          return {
-            cleanup: { ...cleanup, leaseToken },
-            job: updated,
-          };
+          return updated;
         }, { behavior: "immediate" });
+        const completionCondition = and(
+          eq(encodeJobs.id, cleanup.jobId),
+          eq(encodeJobs.status, "completed"),
+          eq(encodeJobs.publicationPending, true),
+          eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
+          eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
+          eq(encodeJobs.partialCleanupLeaseToken, leaseToken),
+        );
+        if (!publicationMatches()) {
+          const invalidated = database
+            .update(encodeJobs)
+            .set({
+              status: owned.status,
+              completedAt: owned.completedAt,
+              errorMessage: owned.errorMessage,
+              updatedAt: now(),
+            })
+            .where(completionCondition)
+            .returning()
+            .get();
+          if (!invalidated) {
+            throw new StaleJobAttemptError(
+              "encode job publication",
+              cleanup.jobId,
+            );
+          }
+          throw new StaleJobAttemptError(
+            "encode job publication",
+            cleanup.jobId,
+          );
+        }
+        const finalized = database
+          .update(encodeJobs)
+          .set({
+            replaceExistingOutput: false,
+            replacementOutputIdentity: null,
+            updatedAt: now(),
+          })
+          .where(completionCondition)
+          .returning()
+          .get();
+        if (!finalized) {
+          throw new StaleJobAttemptError(
+            "encode job publication",
+            cleanup.jobId,
+          );
+        }
+        return {
+          cleanup: { ...cleanup, leaseToken },
+          job: finalized,
+        };
       },
       completePublishedClaim(claim, cleanup, publicationMatches) {
         if (!cleanup.publicationPending) {
@@ -4379,7 +4469,7 @@ export function createDataAccessInternal(
               ),
         );
         const matches = publicationMatches();
-        return database.transaction((transaction) => {
+        database.transaction((transaction) => {
           const owned = transaction
             .update(encodeJobs)
             .set({ updatedAt: timestamp })
@@ -4400,8 +4490,6 @@ export function createDataAccessInternal(
               progressEtaSeconds: null,
               completedAt: timestamp,
               errorMessage: null,
-              replaceExistingOutput: false,
-              replacementOutputIdentity: null,
               updatedAt: timestamp,
             })
             .where(publicationCondition)
@@ -4415,6 +4503,61 @@ export function createDataAccessInternal(
           }
           return updated;
         }, { behavior: "immediate" });
+        const completionCondition = and(
+          eq(encodeJobs.id, cleanup.jobId),
+          eq(encodeJobs.status, "completed"),
+          eq(encodeJobs.claimToken, claim.claimToken),
+          eq(encodeJobs.publicationPending, true),
+          eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
+          eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
+          cleanup.leaseToken === null
+            ? isNull(encodeJobs.partialCleanupLeaseToken)
+            : eq(
+                encodeJobs.partialCleanupLeaseToken,
+                cleanup.leaseToken,
+              ),
+        );
+        if (!publicationMatches()) {
+          const invalidated = database
+            .update(encodeJobs)
+            .set({
+              status: "failed",
+              completedAt: null,
+              errorMessage:
+                "Encode publication changed across completion commit",
+              updatedAt: now(),
+            })
+            .where(completionCondition)
+            .returning()
+            .get();
+          if (!invalidated) {
+            throw new StaleJobAttemptError(
+              "encode job publication",
+              cleanup.jobId,
+            );
+          }
+          throw new StaleJobAttemptError(
+            "encode job publication",
+            cleanup.jobId,
+          );
+        }
+        const finalized = database
+          .update(encodeJobs)
+          .set({
+            replaceExistingOutput: false,
+            replacementOutputIdentity: null,
+            updatedAt: now(),
+          })
+          .where(completionCondition)
+          .returning()
+          .get();
+        if (!finalized) {
+          throw new StaleJobAttemptError(
+            "encode job publication",
+            cleanup.jobId,
+          );
+        }
+        return finalized;
       },
       completePartialCleanup(cleanup) {
         const updated = database

@@ -148,6 +148,14 @@ const completionMediaProbe = vi.hoisted(() => ({
   triggered: false,
 }));
 
+const completionCommitRace = vi.hoisted(() => ({
+  armed: false,
+  competingPath: "",
+  finalPath: "",
+  mode: "commit" as "commit" | "update",
+  triggered: false,
+}));
+
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:child_process")>();
   return {
@@ -585,6 +593,11 @@ afterEach(() => {
   completionMediaProbe.finalPath = "";
   completionMediaProbe.result = undefined;
   completionMediaProbe.triggered = false;
+  completionCommitRace.armed = false;
+  completionCommitRace.competingPath = "";
+  completionCommitRace.finalPath = "";
+  completionCommitRace.mode = "commit";
+  completionCommitRace.triggered = false;
   publicationRace.resume?.();
   publicationRace.armed = false;
   publicationRace.finalPath = "";
@@ -785,6 +798,54 @@ function failPublicationFenceCommit(finalPath: string): void {
                 new Error("simulated publication fence COMMIT failure"),
                 { code: "SQLITE_IOERR" },
               );
+            };
+          }
+          const value = Reflect.get(target, property, target) as unknown;
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      }) as StatementSync;
+    }
+    return statement;
+  });
+}
+
+function racePublicationCompletionCommit(
+  mode: "commit" | "update" = "commit",
+): void {
+  completionCommitRace.mode = mode;
+  const prepare = DatabaseSync.prototype.prepare;
+  vi.spyOn(DatabaseSync.prototype, "prepare").mockImplementation(function (
+    this: DatabaseSync,
+    sql: string,
+  ) {
+    const statement = prepare.call(this, sql);
+    const normalizedSql = sql.trim().toLowerCase();
+    const boundaryMatches =
+      completionCommitRace.mode === "commit"
+        ? normalizedSql === "commit"
+        : normalizedSql.includes('update "encode_jobs"');
+    if (
+      completionCommitRace.armed &&
+      !completionCommitRace.triggered &&
+      boundaryMatches
+    ) {
+      return new Proxy(statement, {
+        get(target, property) {
+          const boundaryMethod =
+            completionCommitRace.mode === "commit" ? "run" : "get";
+          if (property === boundaryMethod) {
+            return (...arguments_: unknown[]) => {
+              renameSync(
+                completionCommitRace.competingPath,
+                completionCommitRace.finalPath,
+              );
+              completionCommitRace.triggered = true;
+              completionCommitRace.armed = false;
+              const method =
+                completionCommitRace.mode === "commit"
+                  ? target.run
+                  : target.get;
+              return Reflect.apply(method, target, arguments_);
             };
           }
           const value = Reflect.get(target, property, target) as unknown;
@@ -2529,6 +2590,86 @@ describe("encode worker polling", () => {
     fixture.access.close();
   });
 
+  it("retains a newer competing final published after compensation", async () => {
+    const fixture = createQueuedJob();
+    const options = {
+      access: fixture.access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      signal: new AbortController().signal,
+    };
+    await pollEncodeWorker({
+      ...options,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "known good encode", { flag: "wx" });
+        }),
+      },
+    });
+    fixture.access.encodeJobs.requeue(fixture.job.id);
+    const finalPath = join(
+      realpathSync(fixture.mediaLibraryPath),
+      basename(fixture.outputPath),
+    );
+    const displacedPath = join(
+      fixture.mediaLibraryPath,
+      ".post-compensation-displaced-publisher.mkv",
+    );
+    const newerPath = join(
+      fixture.mediaLibraryPath,
+      ".post-compensation-newer-publisher.mkv",
+    );
+    let partialPath = "";
+    let exchanges = 0;
+
+    await pollEncodeWorker({
+      ...options,
+      atomicPathExchange: {
+        exchange(firstPath, secondPath) {
+          exchanges += 1;
+          if (exchanges === 1) {
+            renameSync(displacedPath, finalPath);
+          }
+          nodeAtomicPathExchange.exchange(firstPath, secondPath);
+          if (exchanges === 2) {
+            renameSync(newerPath, finalPath);
+          }
+        },
+      },
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          partialPath = outputPath;
+          writeFileSync(outputPath, "worker replacement", { flag: "wx" });
+          writeFileSync(displacedPath, "displaced competitor", { flag: "wx" });
+          writeFileSync(newerPath, "post-compensation competitor", {
+            flag: "wx",
+          });
+        }),
+      },
+    });
+
+    expect(exchanges).toBe(2);
+    expect(readFileSync(finalPath, "utf8")).toBe(
+      "post-compensation competitor",
+    );
+    expect(quarantinedContents(finalPath)).not.toContain(
+      "post-compensation competitor",
+    );
+    expect(existsSync(partialPath)).toBe(false);
+    expect(quarantinedContents(partialPath)).toContain("worker replacement");
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        partialCleanupClaimToken: null,
+        publicationPending: false,
+        status: "failed",
+      }),
+    ]);
+    fixture.access.close();
+  });
+
   it("keeps SQLite writable during replacement filesystem mutation", async () => {
     const fixture = createQueuedJob();
     const options = {
@@ -2855,6 +2996,319 @@ describe("encode worker polling", () => {
       fixture.access.close();
     },
   );
+
+  it("retains publication provenance when the final changes during completion commit", async () => {
+    const fixture = createQueuedJob();
+    const options = {
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      signal: new AbortController().signal,
+    };
+    mkdirSync(fixture.mediaLibraryPath, { recursive: true });
+    completionCommitRace.finalPath = join(
+      realpathSync(fixture.mediaLibraryPath),
+      basename(fixture.outputPath),
+    );
+    completionCommitRace.competingPath = join(
+      fixture.mediaLibraryPath,
+      ".completion-commit-competitor.mkv",
+    );
+    writeFileSync(
+      completionCommitRace.competingPath,
+      "commit-boundary competitor",
+      { flag: "wx" },
+    );
+    racePublicationCompletionCommit();
+    const completePublishedClaim =
+      fixture.access.encodeJobs.completePublishedClaim.bind(
+        fixture.access.encodeJobs,
+      );
+    const racingAccess: DataAccess = {
+      ...fixture.access,
+      encodeJobs: {
+        ...fixture.access.encodeJobs,
+        completePublishedClaim(claim, cleanup, publicationMatches) {
+          return completePublishedClaim(claim, cleanup, () => {
+            const matches = publicationMatches();
+            if (!completionCommitRace.triggered) {
+              completionCommitRace.armed = true;
+            }
+            return matches;
+          });
+        },
+      },
+    };
+    let partialPath = "";
+
+    await pollEncodeWorker({
+      ...options,
+      access: racingAccess,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          partialPath = outputPath;
+          writeFileSync(outputPath, "worker publication", { flag: "wx" });
+        }),
+      },
+    });
+
+    expect(completionCommitRace.triggered).toBe(true);
+    expect(readFileSync(completionCommitRace.finalPath, "utf8")).toBe(
+      "commit-boundary competitor",
+    );
+    expect(readFileSync(partialPath, "utf8")).toBe("worker publication");
+    expect(quarantinedContents(partialPath)).toEqual([]);
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        partialCleanupClaimToken: expect.any(String),
+        publicationPending: true,
+        status: "failed",
+      }),
+    ]);
+
+    await pollEncodeWorker({
+      ...options,
+      access: fixture.access,
+      runner: { run: vi.fn() },
+      workerId: "completion-commit-recovery",
+    });
+
+    expect(readFileSync(completionCommitRace.finalPath, "utf8")).toBe(
+      "commit-boundary competitor",
+    );
+    expect(existsSync(partialPath)).toBe(false);
+    expect(quarantinedContents(partialPath)).toContain("worker publication");
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        partialCleanupClaimToken: null,
+        publicationPending: false,
+        status: "failed",
+      }),
+    ]);
+    fixture.access.close();
+  });
+
+  it("retains recovery provenance when the final changes during completion commit", async () => {
+    const fixture = createQueuedJob();
+    const options = {
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      signal: new AbortController().signal,
+    };
+    mkdirSync(fixture.mediaLibraryPath, { recursive: true });
+    const claim = fixture.access.encodeJobs.claimNext("completion-recovery");
+    if (!claim) {
+      throw new Error("Expected the completion-recovery claim");
+    }
+    completionCommitRace.finalPath = join(
+      realpathSync(fixture.mediaLibraryPath),
+      basename(fixture.outputPath),
+    );
+    const partialPath = claimPartialPath(
+      completionCommitRace.finalPath,
+      claim.claimToken,
+    );
+    completionCommitRace.competingPath = join(
+      fixture.mediaLibraryPath,
+      ".recovery-completion-commit-competitor.mkv",
+    );
+    writeFileSync(partialPath, "recoverable worker publication", {
+      flag: "wx",
+    });
+    linkSync(partialPath, completionCommitRace.finalPath);
+    writeFileSync(
+      completionCommitRace.competingPath,
+      "recovery commit-boundary competitor",
+      { flag: "wx" },
+    );
+    fixture.access.encodeJobs.registerPartialCleanup(claim, {
+      publicationPending: true,
+    });
+    fixture.access.encodeJobs.fail(claim, "simulated post-link failure");
+    racePublicationCompletionCommit();
+    const completePublishedPartial =
+      fixture.access.encodeJobs.completePublishedPartial.bind(
+        fixture.access.encodeJobs,
+      );
+    const racingAccess: DataAccess = {
+      ...fixture.access,
+      encodeJobs: {
+        ...fixture.access.encodeJobs,
+        completePublishedPartial(cleanup, publicationMatches) {
+          return completePublishedPartial(cleanup, () => {
+            const matches = publicationMatches();
+            if (!completionCommitRace.triggered) {
+              completionCommitRace.armed = true;
+            }
+            return matches;
+          });
+        },
+      },
+    };
+
+    await pollEncodeWorker({
+      ...options,
+      access: racingAccess,
+      runner: { run: vi.fn() },
+      workerId: "raced-completion-recovery",
+    });
+
+    expect(completionCommitRace.triggered).toBe(true);
+    expect(readFileSync(completionCommitRace.finalPath, "utf8")).toBe(
+      "recovery commit-boundary competitor",
+    );
+    expect(readFileSync(partialPath, "utf8")).toBe(
+      "recoverable worker publication",
+    );
+    expect(quarantinedContents(partialPath)).toEqual([]);
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        partialCleanupClaimToken: claim.claimToken,
+        publicationPending: true,
+        status: "failed",
+      }),
+    ]);
+
+    await pollEncodeWorker({
+      ...options,
+      access: fixture.access,
+      runner: { run: vi.fn() },
+      workerId: "completion-recovery-cleanup",
+    });
+
+    expect(readFileSync(completionCommitRace.finalPath, "utf8")).toBe(
+      "recovery commit-boundary competitor",
+    );
+    expect(existsSync(partialPath)).toBe(false);
+    expect(quarantinedContents(partialPath)).toContain(
+      "recoverable worker publication",
+    );
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        partialCleanupClaimToken: null,
+        publicationPending: false,
+        status: "failed",
+      }),
+    ]);
+    fixture.access.close();
+  });
+
+  it("retains active-mutation provenance when the final changes at completion", async () => {
+    vi.useFakeTimers();
+    const fixture = createQueuedJob();
+    const options = {
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      signal: new AbortController().signal,
+    };
+    mkdirSync(fixture.mediaLibraryPath, { recursive: true });
+    const claim = fixture.access.encodeJobs.claimNext("active-completion");
+    if (!claim) {
+      throw new Error("Expected the active-completion claim");
+    }
+    completionCommitRace.finalPath = join(
+      realpathSync(fixture.mediaLibraryPath),
+      basename(fixture.outputPath),
+    );
+    const partialPath = claimPartialPath(
+      completionCommitRace.finalPath,
+      claim.claimToken,
+    );
+    completionCommitRace.competingPath = join(
+      fixture.mediaLibraryPath,
+      ".active-completion-competitor.mkv",
+    );
+    writeFileSync(partialPath, "active worker publication", { flag: "wx" });
+    linkSync(partialPath, completionCommitRace.finalPath);
+    writeFileSync(
+      completionCommitRace.competingPath,
+      "active completion-boundary competitor",
+      { flag: "wx" },
+    );
+    const publication = fixture.access.encodeJobs.registerPartialCleanup(
+      claim,
+      { publicationPending: true },
+    );
+    fixture.access.encodeJobs.beginPublicationMutation(claim, publication);
+    racePublicationCompletionCommit("update");
+    const completePublishedMutation =
+      fixture.access.encodeJobs.completePublishedMutation.bind(
+        fixture.access.encodeJobs,
+      );
+    const racingAccess: DataAccess = {
+      ...fixture.access,
+      encodeJobs: {
+        ...fixture.access.encodeJobs,
+        completePublishedMutation(cleanup, publicationMatches) {
+          return completePublishedMutation(cleanup, () => {
+            const matches = publicationMatches();
+            if (!completionCommitRace.triggered) {
+              completionCommitRace.armed = true;
+            }
+            return matches;
+          });
+        },
+      },
+    };
+
+    await pollEncodeWorker({
+      ...options,
+      access: racingAccess,
+      runner: { run: vi.fn() },
+      workerId: "raced-active-completion",
+    });
+
+    expect(completionCommitRace.triggered).toBe(true);
+    expect(readFileSync(completionCommitRace.finalPath, "utf8")).toBe(
+      "active completion-boundary competitor",
+    );
+    expect(readFileSync(partialPath, "utf8")).toBe(
+      "active worker publication",
+    );
+    expect(quarantinedContents(partialPath)).toEqual([]);
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        partialCleanupClaimToken: claim.claimToken,
+        publicationPending: true,
+        status: "running",
+      }),
+    ]);
+
+    vi.advanceTimersByTime(ENCODE_JOB_LEASE_DURATION_MS + 1);
+    await pollEncodeWorker({
+      ...options,
+      access: fixture.access,
+      runner: { run: vi.fn() },
+      workerId: "active-completion-recovery",
+    });
+
+    expect(readFileSync(completionCommitRace.finalPath, "utf8")).toBe(
+      "active completion-boundary competitor",
+    );
+    expect(existsSync(partialPath)).toBe(false);
+    expect(quarantinedContents(partialPath)).toContain(
+      "active worker publication",
+    );
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        partialCleanupClaimToken: null,
+        publicationPending: false,
+        status: "failed",
+      }),
+    ]);
+    fixture.access.close();
+  });
 
   it("syncs retained links before cutover and replays a staging durability fault", async () => {
     const fixture = createQueuedJob();

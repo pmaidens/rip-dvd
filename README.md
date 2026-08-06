@@ -692,8 +692,11 @@ validated afterward, and a raced public inode is repeatedly restored until a
 stable compensating swap is observed. Indeterminate results retain durable
 publication provenance. Filesystem staging and identity checks run outside
 SQLite writer transactions. Short transactions persist and authenticate the
-mutation token around those checks, so a stalled media mount cannot monopolize
-SQLite and a mismatch still leaves the job and provenance for reconciliation.
+mutation token around those checks. Completion retains that provenance and the
+worker partial through a post-commit identity check; a final changed across the
+commit boundary restores the nonaccepted job state for reconciliation instead
+of unlinking the worker output. A stalled media mount therefore cannot
+monopolize SQLite, while a mismatch still leaves durable recovery authority.
 Its claim-scoped recovery path lets crash recovery restore the prior final when
 publication did not complete, and any failure after replacement
 publication quarantines the replacement and restores that prior final. Only a
