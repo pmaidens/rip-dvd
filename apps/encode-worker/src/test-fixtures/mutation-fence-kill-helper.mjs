@@ -35,20 +35,25 @@ if (mode === "publication") {
   if (!claim) {
     throw new Error("Publication claim is unavailable");
   }
-  access.encodeJobs.withClaimMutationFence(claim, () => {
-    if (boundary === "post-authority") {
-      blockAt("post-authority");
-    }
-    linkSync(finalPath, recoveryPath);
-    if (!auxiliaryPath) {
-      throw new Error("Publication replacement path is unavailable");
-    }
-    linkSync(partialPath, auxiliaryPath);
-    if (boundary === "post-replacement-link") {
-      blockAt("post-replacement-link");
-    }
-    renameSync(auxiliaryPath, finalPath);
+  access.encodeJobs.beginPublicationMutation(claim, {
+    jobId: claim.id,
+    outputPath: claim.outputPath,
+    claimToken: claim.claimToken,
+    leaseToken: null,
+    publicationPending: true,
   });
+  if (boundary === "post-authority") {
+    blockAt("post-authority");
+  }
+  linkSync(finalPath, recoveryPath);
+  if (!auxiliaryPath) {
+    throw new Error("Publication replacement path is unavailable");
+  }
+  linkSync(partialPath, auxiliaryPath);
+  if (boundary === "post-replacement-link") {
+    blockAt("post-replacement-link");
+  }
+  renameSync(auxiliaryPath, finalPath);
 } else if (mode === "cleanup") {
   if (!auxiliaryPath) {
     throw new Error("Cleanup quarantine path is unavailable");

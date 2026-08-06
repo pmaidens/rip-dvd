@@ -430,10 +430,19 @@ export interface EncodeJobAccess {
   }): EncodeJob;
   claimNext(workerId: string): RunningEncodeJob | null;
   renewClaim(claim: RunningEncodeJob): RunningEncodeJob;
-  withClaimMutationFence(
+  beginPublicationMutation(
     claim: RunningEncodeJob,
-    mutation: () => void,
-  ): void;
+    cleanup: EncodeJobPartialCleanup,
+  ): EncodeJobPartialCleanup;
+  listPublicationMutations(): EncodeJobPartialCleanup[];
+  listExpiredPublicationMutations(): EncodeJobPartialCleanup[];
+  completePublishedMutation(
+    cleanup: EncodeJobPartialCleanup,
+    publicationMatches: () => boolean,
+  ): EncodeJob;
+  recoverExpiredPublicationMutation(
+    cleanup: EncodeJobPartialCleanup,
+  ): EncodeJob;
   recoverExpiredClaims(): EncodeJob[];
   recordReplacementOutputIdentity(
     claim: RunningEncodeJob,
@@ -465,7 +474,7 @@ export interface EncodeJobAccess {
   completePublishedPartial(
     cleanup: EncodeJobPartialCleanup,
     publicationMatches: () => boolean,
-  ): EncodeJob;
+  ): { cleanup: EncodeJobPartialCleanup; job: EncodeJob };
   completePublishedClaim(
     claim: RunningEncodeJob,
     cleanup: EncodeJobPartialCleanup,

@@ -660,11 +660,13 @@ The partial hard link remains until the directory and completed job are durable;
 only then is that link removed and its cleanup acknowledged. After a process
 crash, the next poll compares the retained final and partial inodes and completes
 the matching publication instead of stranding a visible final behind a failed
-job. Reconciliation only exposes cleanup owned by failed or completed jobs, so
-a healthy running publisher's partial remains exclusively owned. Immediately
-before retaining a known-good final and staging its atomic replacement, the
-publisher renews its SQLite claim; expiry or cutover invalidation therefore
-fences a stale snapshot while leaving durable prior-final recovery provenance.
+job. Before filesystem mutation, the publisher persists a claim-scoped
+mutation token and holds a process-scoped filesystem lock. Lease recovery and
+legacy cutover respect that token; a live paused owner remains authoritative,
+while a dead owner's released lock lets reconciliation recover the durable
+provenance. Immediately before retaining a known-good final and staging its
+atomic replacement, the publisher renews its SQLite claim and persists this
+fence, so the commit-to-mutation gap cannot publish stale work.
 A publisher must also atomically revoke its current SQLite publication authority
 before any failure rollback; an expired publisher leaves the final and durable
 provenance for reconciliation. Revoked-publication rollback acquires a
@@ -683,17 +685,15 @@ inode while the next claim receives a distinct partial path.
 Re-encoding keeps the prior final visible until the replacement is complete,
 durably stages it at a collision-free `.failed` recovery hard link, and
 atomically exchanges a claim-scoped replacement link with the public final.
-The displaced inode is retained and validated before the cutover is accepted.
-The exchange uses an in-process native binding, so no helper process can outlive
-or block the short SQLite mutation fence. If the binding reports an error, the
-worker reconciles both exchange endpoints before deciding whether publication
-occurred; an indeterminate result retains its durable publication provenance.
-An unrecognized public final observed after the exchange is left in place for
-that same provenance-driven reconciliation rather than exchanged or quarantined.
-Normal initial and replacement completion also revalidate the final and partial
-identities inside the SQLite completion transaction. A mismatch leaves the job
-and its provenance for crash reconciliation instead of accepting or unlinking
-an unrelated final.
+The displaced inode is retained and its post-recovery-link content snapshot is
+validated before the cutover is accepted. The in-process native exchange is
+treated as an unconditional swap, not compare-exchange: both endpoints are
+validated afterward, and a raced public inode is repeatedly restored until a
+stable compensating swap is observed. Indeterminate results retain durable
+publication provenance. Filesystem staging and identity checks run outside
+SQLite writer transactions. Short transactions persist and authenticate the
+mutation token around those checks, so a stalled media mount cannot monopolize
+SQLite and a mismatch still leaves the job and provenance for reconciliation.
 Its claim-scoped recovery path lets crash recovery restore the prior final when
 publication did not complete, and any failure after replacement
 publication quarantines the replacement and restores that prior final. Only a
