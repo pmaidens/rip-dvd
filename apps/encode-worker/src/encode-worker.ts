@@ -560,12 +560,18 @@ function restoreHiddenFinalAtMutationBoundary(
     );
     const publicAfter = lstatSync(finalPath);
     const hiddenAfter = lstatSync(replacementPath);
+    syncPathAtMutationBoundary(dirname(finalPath));
+    if (sameInode(workerMetadata, hiddenAfter)) {
+      return true;
+    }
     if (
       sameStableFile(hiddenBefore, publicAfter) &&
       sameStableFile(publicBefore, hiddenAfter)
     ) {
-      syncPathAtMutationBoundary(dirname(finalPath));
-      return sameInode(workerMetadata, hiddenAfter);
+      if (sameInode(workerMetadata, publicAfter)) {
+        continue;
+      }
+      return false;
     }
   }
 }
