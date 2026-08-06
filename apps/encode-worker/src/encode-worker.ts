@@ -268,6 +268,29 @@ function isContained(root: string, candidate: string): boolean {
   );
 }
 
+async function syncOutputDirectoryHierarchy(
+  mediaLibraryPath: string,
+  outputDirectory: string,
+): Promise<void> {
+  if (!isContained(mediaLibraryPath, outputDirectory)) {
+    throw new Error("Encode output directory hierarchy is invalid");
+  }
+  const relativeOutputDirectory = relative(mediaLibraryPath, outputDirectory);
+  const hierarchy =
+    relativeOutputDirectory.length === 0
+      ? []
+      : relativeOutputDirectory.split(sep);
+  let currentDirectory = mediaLibraryPath;
+  await syncPath(currentDirectory);
+  for (const segment of hierarchy) {
+    if (segment.length === 0 || segment === "." || segment === "..") {
+      throw new Error("Encode output directory hierarchy is invalid");
+    }
+    currentDirectory = join(currentDirectory, segment);
+    await syncPath(currentDirectory);
+  }
+}
+
 async function requireLibraryRoot(
   path: string,
   { create }: { create: boolean },
@@ -320,11 +343,18 @@ async function requireOutputPaths(
     throw new Error("Encode Job output path escaped the media library");
   }
   const outputDirectory = dirname(resolvedOutput);
-  await mkdir(outputDirectory, { recursive: true, mode: 0o750 });
+  await mkdir(outputDirectory, {
+    recursive: true,
+    mode: 0o750,
+  });
   const canonicalOutputDirectory = await realpath(outputDirectory);
   if (!isContained(mediaLibraryPath, canonicalOutputDirectory)) {
     throw new Error("Encode Job output directory escaped the media library");
   }
+  await syncOutputDirectoryHierarchy(
+    mediaLibraryPath,
+    canonicalOutputDirectory,
+  );
   const finalPath = join(canonicalOutputDirectory, basename(resolvedOutput));
   const safeToken = claimToken.replaceAll(/[^a-zA-Z0-9-]/g, "");
   if (safeToken.length === 0 || safeToken !== claimToken) {
@@ -542,6 +572,17 @@ function publishReplacementAtMutationBoundary(
     );
   }
   if (displacedFinalError !== null) {
+    const canRestoreDisplacedFinal =
+      publishedFinalMetadata !== null &&
+      sameInode(partialMetadata, publishedFinalMetadata) &&
+      displacedFinalMetadata !== null &&
+      displacedFinalMetadata.isFile() &&
+      !displacedFinalMetadata.isSymbolicLink();
+    if (!canRestoreDisplacedFinal) {
+      throw new PendingPublicationRecoveryError(
+        `${displacedFinalError.message}; atomic exchange endpoints changed before inspection`,
+      );
+    }
     try {
       exchangePathsAtMutationBoundary(
         atomicPathExchange,

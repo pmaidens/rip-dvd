@@ -125,6 +125,12 @@ const stagedDirectoryDurability = vi.hoisted(() => ({
   triggered: false,
 }));
 
+const outputHierarchyDurability = vi.hoisted(() => ({
+  armed: false,
+  directories: [] as string[],
+  syncedDirectories: new Set<string>(),
+}));
+
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:child_process")>();
   return {
@@ -394,6 +400,23 @@ vi.mock("node:fs/promises", async (importOriginal) => {
           publicationRace.resume = resolve;
         });
       }
+      if (
+        outputHierarchyDurability.armed &&
+        outputHierarchyDurability.directories.includes(path)
+      ) {
+        return new Proxy(handle, {
+          get(target, property) {
+            if (property === "sync") {
+              return async () => {
+                await target.sync();
+                outputHierarchyDurability.syncedDirectories.add(path);
+              };
+            }
+            const value = Reflect.get(target, property, target) as unknown;
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+      }
       return handle;
     },
     lstat: async (path: string) => {
@@ -513,6 +536,9 @@ afterEach(() => {
   stagedDirectoryDurability.priorPath = "";
   stagedDirectoryDurability.replacementPath = "";
   stagedDirectoryDurability.triggered = false;
+  outputHierarchyDurability.armed = false;
+  outputHierarchyDurability.directories = [];
+  outputHierarchyDurability.syncedDirectories.clear();
   publicationRace.resume?.();
   publicationRace.armed = false;
   publicationRace.finalPath = "";
@@ -550,13 +576,14 @@ type TestSelection =
 
 function createQueuedJob(
   selectionInput: TestSelection = { kind: "main_feature" },
+  outputRelativePath = "Example.mkv",
 ) {
   const root = mkdtempSync(join(tmpdir(), "rip-dvd-encode-worker-"));
   temporaryDirectories.push(root);
   const originalsLibraryPath = join(root, "originals");
   const mediaLibraryPath = join(root, "media");
   const sourcePath = join(originalsLibraryPath, "Example.iso");
-  const outputPath = join(mediaLibraryPath, "Example.mkv");
+  const outputPath = join(mediaLibraryPath, outputRelativePath);
   const databasePath = join(root, "rip-dvd.sqlite");
   const access = createLegacySidecarDataAccess({ databasePath });
   mkdirSync(originalsLibraryPath, { recursive: true });
@@ -2054,6 +2081,100 @@ describe("encode worker polling", () => {
     fixture.access.close();
   });
 
+  it("retains a competing final published after the replacement exchange", async () => {
+    vi.useFakeTimers();
+    const fixture = createQueuedJob();
+    const options = {
+      access: fixture.access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      signal: new AbortController().signal,
+    };
+    await pollEncodeWorker({
+      ...options,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "known good encode", { flag: "wx" });
+        }),
+      },
+    });
+    fixture.access.encodeJobs.requeue(fixture.job.id);
+    const finalPath = join(
+      realpathSync(fixture.mediaLibraryPath),
+      basename(fixture.outputPath),
+    );
+    const competingPath = join(
+      fixture.mediaLibraryPath,
+      ".post-exchange-competing-publisher.mkv",
+    );
+    let partialPath = "";
+    let raced = false;
+
+    await pollEncodeWorker({
+      ...options,
+      atomicPathExchange: {
+        exchange(firstPath, secondPath) {
+          nodeAtomicPathExchange.exchange(firstPath, secondPath);
+          renameSync(competingPath, finalPath);
+          raced = true;
+        },
+      },
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          partialPath = outputPath;
+          writeFileSync(outputPath, "worker replacement", { flag: "wx" });
+          writeFileSync(competingPath, "post-exchange competitor", {
+            flag: "wx",
+          });
+        }),
+      },
+    });
+
+    expect(raced).toBe(true);
+    expect(readFileSync(finalPath, "utf8")).toBe(
+      "post-exchange competitor",
+    );
+    expect(readFileSync(partialPath, "utf8")).toBe("worker replacement");
+    expect(quarantinedContents(finalPath)).not.toContain(
+      "post-exchange competitor",
+    );
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        partialCleanupClaimToken: expect.any(String),
+        publicationPending: true,
+        status: "running",
+      }),
+    ]);
+
+    vi.advanceTimersByTime(ENCODE_JOB_LEASE_DURATION_MS + 1);
+    await pollEncodeWorker({
+      ...options,
+      runner: { run: vi.fn() },
+      workerId: "post-exchange-race-recovery",
+    });
+
+    expect(readFileSync(finalPath, "utf8")).toBe(
+      "post-exchange competitor",
+    );
+    expect(quarantinedContents(finalPath)).not.toContain(
+      "post-exchange competitor",
+    );
+    expect(existsSync(partialPath)).toBe(false);
+    expect(quarantinedContents(partialPath)).toContain("worker replacement");
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        partialCleanupClaimToken: null,
+        publicationPending: false,
+        status: "failed",
+      }),
+    ]);
+    fixture.access.close();
+  });
+
   it("publishes a replacement without an atomic-exchange child process", async () => {
     const fixture = createQueuedJob();
     const options = {
@@ -2352,6 +2473,79 @@ describe("encode worker polling", () => {
       },
     ]);
     expect(readFileSync(fixture.outputPath, "utf8")).toBe("durable retry");
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({ id: fixture.job.id, status: "completed" }),
+    ]);
+    fixture.access.close();
+  });
+
+  it("keeps a newly created nested output hierarchy durable after completion", async () => {
+    const fixture = createQueuedJob(
+      { kind: "main_feature" },
+      join("new", "sub", "Example.mkv"),
+    );
+    mkdirSync(fixture.mediaLibraryPath, { recursive: true });
+    const canonicalMediaLibraryPath = realpathSync(fixture.mediaLibraryPath);
+    const createdRoot = join(canonicalMediaLibraryPath, "new");
+    const outputDirectory = join(createdRoot, "sub");
+    outputHierarchyDurability.armed = true;
+    outputHierarchyDurability.directories = [
+      canonicalMediaLibraryPath,
+      createdRoot,
+      outputDirectory,
+    ];
+    let completionCleanupReached = false;
+    let hierarchyLostAfterCrash = false;
+    const encodeJobs = new Proxy(fixture.access.encodeJobs, {
+      get(target, property, receiver) {
+        const value = Reflect.get(target, property, receiver) as unknown;
+        if (
+          property === "completePartialCleanup" &&
+          typeof value === "function"
+        ) {
+          return (...arguments_: unknown[]) => {
+            const completed = Reflect.apply(value, target, arguments_);
+            completionCleanupReached = true;
+            if (
+              outputHierarchyDurability.directories.some(
+                (directory) =>
+                  !outputHierarchyDurability.syncedDirectories.has(directory),
+              )
+            ) {
+              rmSync(createdRoot, { recursive: true });
+              hierarchyLostAfterCrash = true;
+            }
+            return completed;
+          };
+        }
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const crashingAccess: DataAccess = { ...fixture.access, encodeJobs };
+
+    await pollEncodeWorker({
+      access: crashingAccess,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "nested durable encode", { flag: "wx" });
+        }),
+      },
+      signal: new AbortController().signal,
+    });
+
+    expect(completionCleanupReached).toBe(true);
+    expect(hierarchyLostAfterCrash).toBe(false);
+    expect(outputHierarchyDurability.syncedDirectories).toEqual(
+      new Set(outputHierarchyDurability.directories),
+    );
+    expect(readFileSync(fixture.outputPath, "utf8")).toBe(
+      "nested durable encode",
+    );
+    expect(fixture.access.encodeJobs.listPendingPartialCleanups()).toEqual([]);
     expect(fixture.access.encodeJobs.list()).toEqual([
       expect.objectContaining({ id: fixture.job.id, status: "completed" }),
     ]);

@@ -654,6 +654,8 @@ final path without overwrite behavior. A re-encode retains the known-good inode
 at its claim-scoped recovery path, hard-links the replacement at a hidden
 claim-scoped publication path, then atomically renames that link over the
 still-visible final.
+Before creating those files, every newly created output-directory entry is
+synced from its existing parent down through the leaf directory.
 The partial hard link remains until the directory and completed job are durable;
 only then is that link removed and its cleanup acknowledged. After a process
 crash, the next poll compares the retained final and partial inodes and completes
@@ -686,6 +688,8 @@ The exchange uses an in-process native binding, so no helper process can outlive
 or block the short SQLite mutation fence. If the binding reports an error, the
 worker reconciles both exchange endpoints before deciding whether publication
 occurred; an indeterminate result retains its durable publication provenance.
+An unrecognized public final observed after the exchange is left in place for
+that same provenance-driven reconciliation rather than exchanged or quarantined.
 Normal initial and replacement completion also revalidate the final and partial
 identities inside the SQLite completion transaction. A mismatch leaves the job
 and its provenance for crash reconciliation instead of accepting or unlinking
