@@ -172,6 +172,11 @@ use short internal transactions. Queue claims use one atomic
 `UPDATE ... RETURNING` statement and return only after that statement has
 committed. Workers must start external programs only after `claimNext()`
 returns; process execution never belongs in a database transaction.
+Encode publication completion is the corresponding synchronous filesystem
+exception: the facade authenticates the live claim and durable publication
+provenance, invokes the caller's identity check, and commits completion in one
+short immediate transaction. The callback must only inspect the already-staged
+filesystem entries; it must not start a process or perform unbounded work.
 
 ## Legacy sidecar import
 
