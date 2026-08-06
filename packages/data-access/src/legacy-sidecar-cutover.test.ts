@@ -20,6 +20,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createDataAccess,
   DomainInvariantError,
+  ENCODE_JOB_LEASE_DURATION_MS,
   StaleJobAttemptError,
 } from "./index.js";
 import { createLegacySidecarDataAccess } from "./legacy-sidecars.js";
@@ -706,6 +707,31 @@ try {
       }],
     }));
 
+    const pendingPublication = access.encodeJobs.registerPartialCleanup(
+      running,
+      { publicationPending: true },
+    );
+    const activeMutation = access.encodeJobs.beginPublicationMutation(
+      running,
+      pendingPublication,
+    );
+    expect(() =>
+      access.legacySidecars.importLibrary({ originalsLibraryPath }),
+    ).toThrow(/active Encode publication mutation/);
+    expect(access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: running.id,
+        partialCleanupLeaseToken: activeMutation.leaseToken,
+        publicationPending: true,
+        status: "running",
+      }),
+    ]);
+    const revokedMutation = access.encodeJobs.revokePublication(
+      running,
+      activeMutation,
+    );
+    access.encodeJobs.completePartialCleanup(revokedMutation);
+
     expect(() =>
       access.legacySidecars.importLibrary({ originalsLibraryPath }),
     ).toThrow(/injected marker write failure/);
@@ -715,6 +741,8 @@ try {
     expect(access.encodeJobs.list()).toEqual([
       expect.objectContaining({
         id: running.id,
+        partialCleanupClaimToken: running.claimToken,
+        partialCleanupOutputPath: running.outputPath,
         status: "failed",
         completedAt: null,
         errorMessage:
@@ -731,6 +759,21 @@ try {
     expect(access.encodeJobs.list()).toEqual([
       expect.objectContaining({ id: running.id, status: "failed" }),
     ]);
+    const [cutoverCleanup] =
+      access.encodeJobs.listPendingPartialCleanups();
+    expect(cutoverCleanup).toEqual({
+      claimToken: running.claimToken,
+      jobId: running.id,
+      leaseToken: null,
+      outputPath: running.outputPath,
+      publicationPending: false,
+    });
+    if (!cutoverCleanup) {
+      throw new Error("Expected cutover partial cleanup provenance");
+    }
+    expect(() =>
+      access.encodeJobs.completePublishedPartial(cutoverCleanup, () => true),
+    ).toThrow(/not publication provenance/);
     access.close();
   });
 
@@ -2657,6 +2700,8 @@ try {
         completedJob,
         expect.objectContaining({
           id: running.id,
+          partialCleanupClaimToken: running.claimToken,
+          partialCleanupOutputPath: running.outputPath,
           status: "failed",
           errorMessage: expect.stringMatching(/cutover.*repair/i),
         }),
@@ -2665,6 +2710,108 @@ try {
     expect(() => service.encodeJobs.complete(running)).toThrow(
       StaleJobAttemptError,
     );
+    expect(service.encodeJobs.listPendingPartialCleanups()).toContainEqual({
+      claimToken: running.claimToken,
+      jobId: running.id,
+      leaseToken: null,
+      outputPath: running.outputPath,
+      publicationPending: false,
+    });
+    service.close();
+  });
+
+  it("does not bootstrap a repair cutover across an active publication mutation", () => {
+    const root = temporaryDirectories.create(
+      "rip-dvd-cutover-live-publication-bootstrap-",
+    );
+    const originalsLibraryPath = join(root, "originals");
+    const archivePath = join(originalsLibraryPath, "Live publication.iso");
+    const sidecarPath = join(
+      originalsLibraryPath,
+      "Live publication.rip-dvd.json",
+    );
+    const markerPath = join(
+      originalsLibraryPath,
+      ".rip-dvd-sqlite-catalog",
+    );
+    const outputPath = join(root, "movies", "Live publication.mkv");
+    const databasePath = join(root, "catalog.sqlite");
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    writeFileSync(archivePath, "live publication archive");
+    writeFileSync(sidecarPath, JSON.stringify({
+      schema_version: 2,
+      source: archivePath,
+      title: "Live publication",
+      disc_fingerprint: "live-publication-bootstrap-fingerprint",
+      jobs: [{
+        label: "Movie: Live publication",
+        source: archivePath,
+        output: outputPath,
+        preset: "Fast 480p30",
+        selection: "main_feature",
+        title_number: null,
+      }],
+    }));
+    markerFault.failure = null;
+    const importer = createLegacySidecarDataAccess({ databasePath });
+    expect(importer.legacySidecars.importLibrary({ originalsLibraryPath }))
+      .toMatchObject({ sidecarsImported: 1, issues: [] });
+    const running = importer.encodeJobs.claimNext(
+      "live-publication-bootstrap-worker",
+    );
+    if (!running) {
+      throw new Error("Expected the live publication Encode Job");
+    }
+    const publication = importer.encodeJobs.registerPartialCleanup(running, {
+      publicationPending: true,
+    });
+    importer.encodeJobs.beginPublicationMutation(
+      running,
+      publication,
+    );
+    const marker = JSON.parse(readFileSync(markerPath, "utf8")) as {
+      legacyQueueStatus: string;
+    };
+    writeFileSync(markerPath, `${JSON.stringify({
+      ...marker,
+      legacyQueueStatus: "repair",
+    })}\n`);
+    importer.close();
+
+    expect(() =>
+      createDataAccess({ databasePath, originalsLibraryPath })
+    ).toThrow(/active Encode publication mutation/);
+
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.now() + ENCODE_JOB_LEASE_DURATION_MS + 1);
+    expect(() =>
+      createDataAccess({
+        databasePath,
+        originalsLibraryPath,
+        publicationMutationRecoveryLock: {
+          tryAcquire: () => null,
+        },
+      })
+    ).toThrow(/active Encode publication mutation/);
+
+    const release = vi.fn();
+    const tryAcquire = vi.fn(() => ({ release }));
+    const service = createDataAccess({
+      databasePath,
+      originalsLibraryPath,
+      publicationMutationRecoveryLock: { tryAcquire },
+    });
+    expect(tryAcquire).toHaveBeenCalledWith(outputPath);
+    expect(release).toHaveBeenCalledOnce();
+    expect(service.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: running.id,
+        partialCleanupClaimToken: running.claimToken,
+        partialCleanupLeaseToken: null,
+        publicationPending: false,
+        status: "failed",
+      }),
+    ]);
     service.close();
   });
 

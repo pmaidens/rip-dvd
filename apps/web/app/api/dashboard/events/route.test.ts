@@ -300,7 +300,11 @@ describe("GET /api/dashboard/events", () => {
     await reader.read();
 
     access.archiveJobs.updateProgress(archiveClaim, 42);
-    access.encodeJobs.updateProgress(encodeClaim, 18);
+    access.encodeJobs.updateProgress(encodeClaim, {
+      phase: "encoding",
+      progressPercent: 18,
+      etaSeconds: 723,
+    });
     await vi.advanceTimersByTimeAsync(1_000);
     const nextChunk = await reader.read();
     abortController.abort();
@@ -310,6 +314,8 @@ describe("GET /api/dashboard/events", () => {
     expect(event).toContain('"mediaTitle":"Streamed Movie"');
     expect(event).toContain('"progressPercent":42');
     expect(event).toContain('"progressPercent":18');
+    expect(event).toContain('"progressPhase":"encoding"');
+    expect(event).toContain('"progressEtaSeconds":723');
     expect(event).not.toContain("/media/");
   });
 

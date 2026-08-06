@@ -13,6 +13,7 @@ import { isAbsolute, join, normalize } from "node:path";
 import { TextDecoder } from "node:util";
 import type { DatabaseSync } from "node:sqlite";
 
+import { ENCODE_JOB_LEASE_DURATION_MS } from "../types.js";
 import { isPathWithinDirectory } from "./path-containment.js";
 
 const LEGACY_QUEUE_CUTOVER_MARKER = ".rip-dvd-sqlite-catalog";
@@ -25,6 +26,25 @@ interface LegacyRepairArchiveIdentity {
   archivePath: string;
   fingerprint: string;
   sidecarPath: string;
+}
+
+export interface PublicationMutationRecoveryLockHandle {
+  release(): void;
+}
+
+export interface PublicationMutationRecoveryLock {
+  tryAcquire(outputPath: string): PublicationMutationRecoveryLockHandle | null;
+}
+
+interface ActivePublicationMutationRow {
+  archivePath: string;
+  claimToken: string;
+  fingerprint: string;
+  id: string;
+  legacyCutoverPending: number;
+  leaseToken: string;
+  outputPath: string;
+  updatedAt: number;
 }
 
 function objectValue(value: unknown): Record<string, unknown> | null {
@@ -147,15 +167,75 @@ function readLegacyRepairArchiveInventory(
 export function reconcileLegacyRepairCutover(
   sqlite: DatabaseSync,
   originalsLibraryPath: string,
+  publicationMutationRecoveryLock?: PublicationMutationRecoveryLock,
 ): void {
-  sqlite.exec("BEGIN IMMEDIATE");
+  const inventory = readLegacyRepairArchiveInventory(originalsLibraryPath);
+  if (inventory.length === 0) {
+    return;
+  }
+  const libraryPath = realpathSync(originalsLibraryPath);
+  const inventoryIdentities = new Set(
+    inventory.flatMap(({ archivePath, fingerprint }) => [
+      `archive:${archivePath}`,
+      `fingerprint:${fingerprint}`,
+    ]),
+  );
+  const activePublicationMutations = sqlite.prepare(`
+    SELECT encode_jobs.id,
+           encode_jobs.output_path AS outputPath,
+           encode_jobs.claim_token AS claimToken,
+           encode_jobs.partial_cleanup_lease_token AS leaseToken,
+           encode_jobs.updated_at AS updatedAt,
+           original_disc_archives.archive_path AS archivePath,
+           original_disc_archives.fingerprint,
+           original_disc_archives.legacy_cutover_pending AS legacyCutoverPending
+    FROM encode_jobs
+    INNER JOIN disc_selections
+      ON disc_selections.id = encode_jobs.disc_selection_id
+    INNER JOIN original_disc_archives
+      ON original_disc_archives.id = disc_selections.original_disc_archive_id
+    WHERE encode_jobs.status = 'running'
+      AND encode_jobs.partial_cleanup_lease_token IS NOT NULL
+  `).all() as unknown as ActivePublicationMutationRow[];
+  const relatedPublicationMutations = activePublicationMutations.filter(
+    (mutation) =>
+      mutation.legacyCutoverPending === 1 ||
+      inventoryIdentities.has(`archive:${mutation.archivePath}`) ||
+      inventoryIdentities.has(`fingerprint:${mutation.fingerprint}`),
+  );
+  const expiredBefore = Date.now() - ENCODE_JOB_LEASE_DURATION_MS;
+  const authorizedMutations = new Map(
+    relatedPublicationMutations.map((mutation) => [mutation.id, mutation]),
+  );
+  const acquiredLocks = new Map<
+    string,
+    PublicationMutationRecoveryLockHandle
+  >();
   try {
-    const inventory = readLegacyRepairArchiveInventory(originalsLibraryPath);
-    if (inventory.length === 0) {
-      sqlite.exec("COMMIT");
-      return;
+    for (const mutation of relatedPublicationMutations) {
+      if (
+        mutation.updatedAt > expiredBefore ||
+        publicationMutationRecoveryLock === undefined
+      ) {
+        throw new Error(
+          "Legacy cutover is blocked by an active Encode publication mutation",
+        );
+      }
+      if (!acquiredLocks.has(mutation.outputPath)) {
+        const handle = publicationMutationRecoveryLock.tryAcquire(
+          mutation.outputPath,
+        );
+        if (handle === null) {
+          throw new Error(
+            "Legacy cutover is blocked by an active Encode publication mutation",
+          );
+        }
+        acquiredLocks.set(mutation.outputPath, handle);
+      }
     }
-    const libraryPath = realpathSync(originalsLibraryPath);
+
+    sqlite.exec("BEGIN IMMEDIATE");
+    try {
     const stagedSidecars = sqlite.prepare(`
       SELECT sidecar_path AS sidecarPath,
              archive_path AS archivePath,
@@ -231,9 +311,47 @@ export function reconcileLegacyRepairCutover(
         identity.archivePath,
       );
     }
+    const currentPublicationMutations = sqlite.prepare(`
+      SELECT encode_jobs.id,
+             encode_jobs.output_path AS outputPath,
+             encode_jobs.claim_token AS claimToken,
+             encode_jobs.partial_cleanup_lease_token AS leaseToken,
+             encode_jobs.updated_at AS updatedAt,
+             original_disc_archives.archive_path AS archivePath,
+             original_disc_archives.fingerprint,
+             original_disc_archives.legacy_cutover_pending AS legacyCutoverPending
+      FROM encode_jobs
+      INNER JOIN disc_selections
+        ON disc_selections.id = encode_jobs.disc_selection_id
+      INNER JOIN original_disc_archives
+        ON original_disc_archives.id = disc_selections.original_disc_archive_id
+      WHERE original_disc_archives.legacy_cutover_pending = true
+        AND encode_jobs.status = 'running'
+        AND encode_jobs.partial_cleanup_lease_token IS NOT NULL
+    `).all() as unknown as ActivePublicationMutationRow[];
+    for (const mutation of currentPublicationMutations) {
+      const authorized = authorizedMutations.get(mutation.id);
+      if (
+        authorized === undefined ||
+        authorized.outputPath !== mutation.outputPath ||
+        authorized.claimToken !== mutation.claimToken ||
+        authorized.leaseToken !== mutation.leaseToken ||
+        mutation.updatedAt > expiredBefore ||
+        !acquiredLocks.has(mutation.outputPath)
+      ) {
+        throw new Error(
+          "Legacy cutover is blocked by an active Encode publication mutation",
+        );
+      }
+    }
     sqlite.prepare(`
       UPDATE encode_jobs
-      SET status = 'failed',
+      SET partial_cleanup_output_path = output_path,
+          partial_cleanup_claim_token = claim_token,
+          partial_cleanup_lease_token = NULL,
+          publication_pending = 0,
+          publication_completion_pending = 0,
+          status = 'failed',
           completed_at = NULL,
           error_message = 'Encode Job invalidated by legacy catalog cutover repair',
           updated_at = max(updated_at + 1, ?)
@@ -248,8 +366,13 @@ export function reconcileLegacyRepairCutover(
         )
     `).run(timestamp);
     sqlite.exec("COMMIT");
-  } catch (error) {
-    sqlite.exec("ROLLBACK");
-    throw error;
+    } catch (error) {
+      sqlite.exec("ROLLBACK");
+      throw error;
+    }
+  } finally {
+    for (const handle of [...acquiredLocks.values()].reverse()) {
+      handle.release();
+    }
   }
 }

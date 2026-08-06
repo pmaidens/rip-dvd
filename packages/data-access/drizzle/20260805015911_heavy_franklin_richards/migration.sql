@@ -1,0 +1,1 @@
+ALTER TABLE `encode_jobs` ADD `replace_existing_output` integer DEFAULT false NOT NULL;

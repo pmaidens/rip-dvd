@@ -36,6 +36,12 @@ importers:
 
   apps/encode-worker:
     dependencies:
+      '@rip-dvd/config':
+        specifier: workspace:*
+        version: link:../../packages/config
+      '@rip-dvd/data-access':
+        specifier: workspace:*
+        version: link:../../packages/data-access
       '@rip-dvd/worker-runtime':
         specifier: workspace:*
         version: link:../../packages/worker-runtime

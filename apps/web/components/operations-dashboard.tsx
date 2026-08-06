@@ -104,6 +104,7 @@ interface DashboardJobItemProps {
   subtitle: string;
   status: DashboardArchiveJob["status"];
   progressPercent: number;
+  progressDetail?: string | null;
   action?: React.ReactNode;
 }
 
@@ -112,6 +113,7 @@ function DashboardJobItem({
   subtitle,
   status,
   progressPercent,
+  progressDetail,
   action,
 }: DashboardJobItemProps) {
   return (
@@ -127,12 +129,38 @@ function DashboardJobItem({
         <Progress value={progressPercent} />
         <strong>{progressPercent}%</strong>
       </div>
+      {progressDetail ? <p>{progressDetail}</p> : null}
       {status === "failed" ? (
         <p className="job-error">Worker reported a failure.</p>
       ) : null}
       {action}
     </article>
   );
+}
+
+function encodeProgressDetail(job: DashboardEncodeJob): string | null {
+  if (job.status !== "running" || job.progressPhase === null) {
+    return null;
+  }
+  const phase = {
+    scanning: "Scanning titles",
+    previewing: "Scanning previews",
+    encoding: "Encoding",
+  }[job.progressPhase];
+  if (job.progressEtaSeconds === null) {
+    return phase;
+  }
+  const hours = Math.floor(job.progressEtaSeconds / 3_600);
+  const minutes = Math.floor((job.progressEtaSeconds % 3_600) / 60);
+  const seconds = job.progressEtaSeconds % 60;
+  const eta = [
+    hours > 0 ? `${hours}h` : null,
+    minutes > 0 ? `${minutes}m` : null,
+    hours === 0 && seconds > 0 ? `${seconds}s` : null,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return `${phase} · ETA ${eta || "0s"}`;
 }
 
 function DashboardSection<T>({
@@ -369,6 +397,7 @@ export function DashboardView({
             subtitle={job.encodingProfileName}
             status={job.status}
             progressPercent={job.progressPercent}
+            progressDetail={encodeProgressDetail(job)}
             action={
               job.status === "failed" || job.status === "completed" ? (
                 <button
