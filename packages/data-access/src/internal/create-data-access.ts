@@ -42,7 +42,10 @@ import {
   originalDiscArchiveContentIds,
   originalDiscArchives,
 } from "./schema.js";
-import { reconcileLegacyRepairCutover } from "./legacy-cutover-reconciliation.js";
+import {
+  reconcileLegacyRepairCutover,
+  type PublicationMutationRecoveryLock,
+} from "./legacy-cutover-reconciliation.js";
 import {
   dvdArchiveFileMatchesIdentity,
   hashDvdArchiveFile,
@@ -63,7 +66,10 @@ import {
   decodeDvdTitleMap,
   isDvdContentId,
 } from "../dvd-scan.js";
-import { MAX_MEDIA_ITEM_HIERARCHY_DEPTH } from "../domain-values.js";
+import {
+  ENCODE_PROGRESS_PHASES,
+  MAX_MEDIA_ITEM_HIERARCHY_DEPTH,
+} from "../domain-values.js";
 import {
   DomainInvariantError,
   InvalidStatusTransitionError,
@@ -84,8 +90,12 @@ import type {
   DiscSelection,
   DiscSelectionId,
   EncodeJobClaimToken,
+  EncodeJobCleanupClaimToken,
   EncodeJobId,
   EncodeJob,
+  EncodeJobFailureOptions,
+  EncodeJobPartialCleanup,
+  EncodeJobProgress,
   EncodingProfileId,
   JobStatus,
   MediaDomain,
@@ -95,14 +105,17 @@ import type {
   RunningArchiveJob,
   RunningEncodeJob,
 } from "../types.js";
-import { ARCHIVE_JOB_LEASE_DURATION_MS } from "../types.js";
+import {
+  ARCHIVE_JOB_LEASE_DURATION_MS,
+  ENCODE_JOB_LEASE_DURATION_MS,
+} from "../types.js";
 import { newId, requireRow } from "./persistence.js";
 
 const BUSY_TIMEOUT_MS = 5_000;
 const MIGRATION_LOCK_TIMEOUT_MS = 15_000;
 const MIGRATION_LOCK_STALE_MS = 300_000;
 const MIGRATION_LOCK_POLL_MS = 10;
-const ARCHIVE_JOB_RECOVERY_LIMIT = 100;
+const JOB_RECOVERY_LIMIT = 100;
 const LEGACY_ARCHIVE_RECONCILIATION_LIMIT = 4;
 const LEGACY_ARCHIVE_RECONCILIATION_BYTES = 9_000_000_000;
 const DISC_SELECTION_REVIEW_BATCH_SIZE = 100;
@@ -372,7 +385,10 @@ export interface CreateDataAccessOptions {
   databasePath: string;
   migrationsFolder?: string;
   originalsLibraryPath?: string;
+  publicationMutationRecoveryLock?: PublicationMutationRecoveryLock;
 }
+
+export type { PublicationMutationRecoveryLock };
 
 export type LegacySidecarMigrationAdapter = LegacySidecarImportAccessFactory;
 
@@ -430,6 +446,7 @@ function openMigratedDatabase(
   databasePath: string,
   migrationsFolder: string,
   originalsLibraryPath?: string,
+  publicationMutationRecoveryLock?: PublicationMutationRecoveryLock,
 ) {
   const releaseMigrationLock =
     databasePath === ":memory:"
@@ -466,7 +483,11 @@ function openMigratedDatabase(
     }
     sqlite.exec("PRAGMA foreign_keys = ON");
     if (originalsLibraryPath !== undefined) {
-      reconcileLegacyRepairCutover(sqlite, originalsLibraryPath);
+      reconcileLegacyRepairCutover(
+        sqlite,
+        originalsLibraryPath,
+        publicationMutationRecoveryLock,
+      );
     }
     releaseMigrationLock();
     return { database, sqlite };
@@ -489,6 +510,7 @@ export function createDataAccessInternal(
     databasePath,
     migrationsFolder = DEFAULT_MIGRATIONS_FOLDER,
     originalsLibraryPath,
+    publicationMutationRecoveryLock,
   }: CreateDataAccessOptions,
   legacySidecarMigration?: LegacySidecarMigrationAdapter,
 ): DataAccess | LegacySidecarDataAccess {
@@ -505,6 +527,7 @@ export function createDataAccessInternal(
     normalizedDatabasePath,
     migrationsFolder,
     normalizedOriginalsLibraryPath,
+    publicationMutationRecoveryLock,
   );
 
   function now(): Date {
@@ -1302,7 +1325,7 @@ export function createDataAccessInternal(
           .get();
       }, { behavior: "immediate" });
     },
-    requeue: (id, expectedStatus, update) =>
+    requeue: (id, expectedStatus, _current, update) =>
       database
         .update(archiveJobs)
         .set(update)
@@ -1400,6 +1423,39 @@ export function createDataAccessInternal(
     },
   });
 
+  const encodeAttemptCondition = (
+    claim: RunningEncodeJob,
+    timestamp: Date,
+  ) =>
+    and(
+      eq(encodeJobs.id, claim.id),
+      eq(encodeJobs.status, "running"),
+      eq(encodeJobs.claimToken, claim.claimToken),
+      gt(
+        encodeJobs.updatedAt,
+        new Date(timestamp.getTime() - ENCODE_JOB_LEASE_DURATION_MS),
+      ),
+      exists(
+        database
+          .select({ id: discSelections.id })
+          .from(discSelections)
+          .innerJoin(
+            originalDiscArchives,
+            eq(
+              originalDiscArchives.id,
+              discSelections.originalDiscArchiveId,
+            ),
+          )
+          .where(
+            and(
+              eq(discSelections.id, encodeJobs.discSelectionId),
+              eq(discSelections.isCatalogActive, true),
+              eq(originalDiscArchives.legacyCutoverPending, false),
+            ),
+          ),
+      ),
+    );
+
   const encodeJobAdapter = {
     recordType: "encode job",
     find: (id) =>
@@ -1423,6 +1479,9 @@ export function createDataAccessInternal(
         .where(
           and(
             eq(encodeJobs.status, "queued"),
+            isNull(encodeJobs.partialCleanupClaimToken),
+            isNull(encodeJobs.partialCleanupOutputPath),
+            isNull(encodeJobs.partialCleanupLeaseToken),
             eq(discSelections.isCatalogActive, true),
             isNotNull(originalDiscArchives.catalogReviewedAt),
             eq(originalDiscArchives.legacyCutoverPending, false),
@@ -1455,50 +1514,87 @@ export function createDataAccessInternal(
         .get();
       return claimed ? asRunningEncodeJob(claimed) : undefined;
     },
-    updateAttempt: (claim, update) =>
+    isAttemptCurrent: (current, _claim, timestamp) =>
+      current.updatedAt.getTime() >
+      timestamp.getTime() - ENCODE_JOB_LEASE_DURATION_MS,
+    updateAttempt: (claim, update, _completion, failureOptions) =>
       database
         .update(encodeJobs)
-        .set(update)
-        .where(
-          and(
-            eq(encodeJobs.id, claim.id),
-            eq(encodeJobs.status, "running"),
-            eq(encodeJobs.claimToken, claim.claimToken),
-            exists(
-              database
-                .select({ id: discSelections.id })
-                .from(discSelections)
-                .innerJoin(
-                  originalDiscArchives,
-                  eq(
-                    originalDiscArchives.id,
-                    discSelections.originalDiscArchiveId,
-                  ),
-                )
-                .where(
-                  and(
-                    eq(discSelections.id, encodeJobs.discSelectionId),
-                    eq(discSelections.isCatalogActive, true),
-                    eq(originalDiscArchives.legacyCutoverPending, false),
-                  ),
-                ),
-            ),
-          ),
-        )
+        .set({
+          ...update,
+          ...(update.status === "completed"
+            ? {
+                progressEtaSeconds: null,
+                replaceExistingOutput: false,
+                replacementOutputIdentity: null,
+              }
+            : update.status === "failed"
+              ? {
+                  progressEtaSeconds: null,
+                  ...(failureOptions?.preserveReplacementAuthority
+                    ? {}
+                    : {
+                        replaceExistingOutput: false,
+                        replacementOutputIdentity: null,
+                      }),
+                }
+              : {}),
+        })
+        .where(encodeAttemptCondition(claim, update.updatedAt))
         .returning()
         .get(),
-    requeue: (id, expectedStatus, update, options) =>
+    updateProgressAttempt: (claim, update, details, failureOptions) =>
       database
+        .update(encodeJobs)
+        .set({
+          ...update,
+          progressPhase: details.phase,
+          progressEtaSeconds:
+            update.status === "failed" ? null : details.etaSeconds,
+          ...(update.status === "failed" &&
+            !failureOptions?.preserveReplacementAuthority
+            ? {
+                replaceExistingOutput: false,
+                replacementOutputIdentity: null,
+              }
+            : {}),
+        })
+        .where(encodeAttemptCondition(claim, update.updatedAt))
+        .returning()
+        .get(),
+    progressDetailsChanged: (current, previous) =>
+      current?.phase !== previous?.phase,
+    requeue: (id, expectedStatus, current, update, options) => {
+      const keepsOutputPath =
+        options?.outputPath === undefined ||
+        options.outputPath === current.outputPath;
+      const preservesFailedReplacement =
+        expectedStatus === "failed" &&
+        keepsOutputPath &&
+        current.replaceExistingOutput;
+      return database
         .update(encodeJobs)
         .set({
           ...update,
           outputPath: options?.outputPath,
           priority: options?.priority,
+          progressPhase: null,
+          progressEtaSeconds: null,
+          replaceExistingOutput:
+            (expectedStatus === "completed" && keepsOutputPath) ||
+            preservesFailedReplacement,
+          replacementOutputIdentity: preservesFailedReplacement
+            ? current.replacementOutputIdentity
+            : null,
         })
         .where(
           and(
             eq(encodeJobs.id, id),
             eq(encodeJobs.status, expectedStatus),
+            isNull(encodeJobs.partialCleanupOutputPath),
+            isNull(encodeJobs.partialCleanupClaimToken),
+            isNull(encodeJobs.partialCleanupLeaseToken),
+            eq(encodeJobs.publicationPending, false),
             exists(
               database
                 .select({ id: discSelections.id })
@@ -1522,7 +1618,8 @@ export function createDataAccessInternal(
           ),
         )
         .returning()
-        .get(),
+        .get();
+    },
   } satisfies JobQueueAdapter<
     EncodeJob,
     RunningEncodeJob,
@@ -1530,7 +1627,9 @@ export function createDataAccessInternal(
     EncodeJobClaimToken,
     void,
     EncodeRequeueOptions,
-    void
+    void,
+    Pick<EncodeJobProgress, "etaSeconds" | "phase">,
+    EncodeJobFailureOptions
   >;
 
   const archiveJobQueue = createJobQueueController({
@@ -3464,7 +3563,7 @@ export function createDataAccessInternal(
               ),
             )
             .orderBy(asc(archiveJobs.updatedAt), asc(archiveJobs.id))
-            .limit(ARCHIVE_JOB_RECOVERY_LIMIT)
+            .limit(JOB_RECOVERY_LIMIT)
             .all()
             .map(({ id }) => id);
           if (expiredIds.length === 0) {
@@ -3640,8 +3739,920 @@ export function createDataAccessInternal(
       },
 
       claimNext: encodeJobQueue.claimNext,
+      renewClaim(claim) {
+        const timestamp = now();
+        const renewed = database
+          .update(encodeJobs)
+          .set({ updatedAt: timestamp })
+          .where(encodeAttemptCondition(claim, timestamp))
+          .returning()
+          .get();
+        if (!renewed) {
+          throw new StaleJobAttemptError("encode job", claim.id);
+        }
+        return asRunningEncodeJob(renewed);
+      },
+      beginPublicationMutation(claim, cleanup) {
+        if (!cleanup.publicationPending || cleanup.leaseToken !== null) {
+          throw new DomainInvariantError(
+            "Encode Job publication mutation requires unfenced provenance",
+          );
+        }
+        const timestamp = now();
+        const leaseToken = newId<EncodeJobCleanupClaimToken>();
+        return database.transaction((transaction) => {
+          const renewed = transaction
+            .update(encodeJobs)
+            .set({
+              partialCleanupLeaseToken: leaseToken,
+              updatedAt: timestamp,
+            })
+            .where(and(
+              encodeAttemptCondition(claim, timestamp),
+              eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
+              eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
+              eq(encodeJobs.publicationPending, true),
+              isNull(encodeJobs.partialCleanupLeaseToken),
+            ))
+            .returning()
+            .get();
+          if (!renewed) {
+            throw new StaleJobAttemptError("encode job", claim.id);
+          }
+          return { ...cleanup, leaseToken };
+        }, { behavior: "immediate" });
+      },
+      listPublicationMutations() {
+        return database
+          .select({
+            jobId: encodeJobs.id,
+            outputPath: encodeJobs.partialCleanupOutputPath,
+            claimToken: encodeJobs.partialCleanupClaimToken,
+            leaseToken: encodeJobs.partialCleanupLeaseToken,
+            publicationPending: encodeJobs.publicationPending,
+          })
+          .from(encodeJobs)
+          .where(and(
+            eq(encodeJobs.status, "running"),
+            isNotNull(encodeJobs.partialCleanupOutputPath),
+            isNotNull(encodeJobs.partialCleanupClaimToken),
+            isNotNull(encodeJobs.partialCleanupLeaseToken),
+          ))
+          .orderBy(asc(encodeJobs.updatedAt), asc(encodeJobs.id))
+          .limit(JOB_RECOVERY_LIMIT)
+          .all()
+          .map((cleanup): EncodeJobPartialCleanup => {
+            if (
+              cleanup.outputPath === null ||
+              cleanup.claimToken === null ||
+              cleanup.leaseToken === null
+            ) {
+              throw new DomainInvariantError(
+                "Encode Job publication mutation provenance is incomplete",
+              );
+            }
+            return {
+              jobId: cleanup.jobId,
+              outputPath: cleanup.outputPath,
+              claimToken: cleanup.claimToken,
+              leaseToken: cleanup.leaseToken,
+              publicationPending: cleanup.publicationPending,
+            };
+          });
+      },
+      listExpiredPublicationMutations() {
+        const expiredBefore = new Date(
+          now().getTime() - ENCODE_JOB_LEASE_DURATION_MS,
+        );
+        return database
+          .select({
+            jobId: encodeJobs.id,
+            outputPath: encodeJobs.partialCleanupOutputPath,
+            claimToken: encodeJobs.partialCleanupClaimToken,
+            leaseToken: encodeJobs.partialCleanupLeaseToken,
+            publicationPending: encodeJobs.publicationPending,
+          })
+          .from(encodeJobs)
+          .where(and(
+            eq(encodeJobs.status, "running"),
+            isNotNull(encodeJobs.partialCleanupOutputPath),
+            isNotNull(encodeJobs.partialCleanupClaimToken),
+            isNotNull(encodeJobs.partialCleanupLeaseToken),
+            lte(encodeJobs.updatedAt, expiredBefore),
+          ))
+          .orderBy(asc(encodeJobs.updatedAt), asc(encodeJobs.id))
+          .limit(JOB_RECOVERY_LIMIT)
+          .all()
+          .map((cleanup): EncodeJobPartialCleanup => {
+            if (
+              cleanup.outputPath === null ||
+              cleanup.claimToken === null ||
+              cleanup.leaseToken === null
+            ) {
+              throw new DomainInvariantError(
+                "Encode Job publication mutation provenance is incomplete",
+              );
+            }
+            return {
+              jobId: cleanup.jobId,
+              outputPath: cleanup.outputPath,
+              claimToken: cleanup.claimToken,
+              leaseToken: cleanup.leaseToken,
+              publicationPending: cleanup.publicationPending,
+            };
+          });
+      },
+      completePublishedMutation(cleanup, publicationMatches) {
+        if (!cleanup.publicationPending || cleanup.leaseToken === null) {
+          throw new DomainInvariantError(
+            "Encode Job publication mutation completion requires fenced provenance",
+          );
+        }
+        const matches = publicationMatches();
+        if (!matches) {
+          throw new StaleJobAttemptError(
+            "encode job publication mutation",
+            cleanup.jobId,
+          );
+        }
+        const timestamp = now();
+        const updated = database
+          .update(encodeJobs)
+          .set({
+            status: "completed",
+            publicationCompletionPending: true,
+            progressPercent: 100,
+            progressEtaSeconds: null,
+            completedAt: timestamp,
+            errorMessage: null,
+            updatedAt: timestamp,
+          })
+          .where(and(
+            eq(encodeJobs.id, cleanup.jobId),
+            eq(encodeJobs.status, "running"),
+            eq(encodeJobs.publicationPending, true),
+            eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
+            eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
+            eq(encodeJobs.partialCleanupLeaseToken, cleanup.leaseToken),
+          ))
+          .returning()
+          .get();
+        if (!updated) {
+          throw new StaleJobAttemptError(
+            "encode job publication mutation",
+            cleanup.jobId,
+          );
+        }
+        const completionCondition = and(
+          eq(encodeJobs.id, cleanup.jobId),
+          eq(encodeJobs.status, "completed"),
+          eq(encodeJobs.publicationCompletionPending, true),
+          eq(encodeJobs.publicationPending, true),
+          eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
+          eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
+          eq(encodeJobs.partialCleanupLeaseToken, cleanup.leaseToken),
+        );
+        if (!publicationMatches()) {
+          const invalidated = database
+            .update(encodeJobs)
+            .set({
+              status: "running",
+              publicationCompletionPending: false,
+              completedAt: null,
+              updatedAt: now(),
+            })
+            .where(completionCondition)
+            .returning()
+            .get();
+          if (!invalidated) {
+            throw new StaleJobAttemptError(
+              "encode job publication mutation",
+              cleanup.jobId,
+            );
+          }
+          throw new StaleJobAttemptError(
+            "encode job publication mutation",
+            cleanup.jobId,
+          );
+        }
+        const finalized = database
+          .update(encodeJobs)
+          .set({
+            replaceExistingOutput: false,
+            replacementOutputIdentity: null,
+            publicationCompletionPending: false,
+            updatedAt: now(),
+          })
+          .where(completionCondition)
+          .returning()
+          .get();
+        if (!finalized) {
+          throw new StaleJobAttemptError(
+            "encode job publication mutation",
+            cleanup.jobId,
+          );
+        }
+        return finalized;
+      },
+      recoverExpiredPublicationMutation(cleanup) {
+        if (cleanup.leaseToken === null) {
+          throw new DomainInvariantError(
+            "Encode Job publication mutation recovery requires fenced provenance",
+          );
+        }
+        const timestamp = now();
+        const expiredBefore = new Date(
+          timestamp.getTime() - ENCODE_JOB_LEASE_DURATION_MS,
+        );
+        const updated = database
+          .update(encodeJobs)
+          .set({
+            status: "failed",
+            partialCleanupLeaseToken: null,
+            errorMessage: "Encode publication mutation was abandoned",
+            updatedAt: timestamp,
+          })
+          .where(and(
+            eq(encodeJobs.id, cleanup.jobId),
+            eq(encodeJobs.status, "running"),
+            eq(
+              encodeJobs.publicationPending,
+              cleanup.publicationPending,
+            ),
+            eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
+            eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
+            eq(encodeJobs.partialCleanupLeaseToken, cleanup.leaseToken),
+            lte(encodeJobs.updatedAt, expiredBefore),
+          ))
+          .returning()
+          .get();
+        if (!updated) {
+          throw new StaleJobAttemptError(
+            "encode job publication mutation",
+            cleanup.jobId,
+          );
+        }
+        return updated;
+      },
+      recoverExpiredClaims() {
+        const timestamp = now();
+        const expiredBefore = new Date(
+          timestamp.getTime() - ENCODE_JOB_LEASE_DURATION_MS,
+        );
+        return database.transaction((transaction) => {
+          const expiredIds = transaction
+            .select({ id: encodeJobs.id })
+            .from(encodeJobs)
+            .where(
+              and(
+                eq(encodeJobs.status, "running"),
+                isNull(encodeJobs.partialCleanupLeaseToken),
+                lte(encodeJobs.updatedAt, expiredBefore),
+              ),
+            )
+            .orderBy(asc(encodeJobs.updatedAt), asc(encodeJobs.id))
+            .limit(JOB_RECOVERY_LIMIT)
+            .all()
+            .map(({ id }) => id);
+          if (expiredIds.length === 0) {
+            return [];
+          }
+          return transaction
+            .update(encodeJobs)
+            .set({
+              status: "failed",
+              progressEtaSeconds: null,
+              partialCleanupOutputPath: sql`${encodeJobs.outputPath}`,
+              partialCleanupClaimToken: sql`${encodeJobs.claimToken}`,
+              partialCleanupLeaseToken: null,
+              errorMessage: "Encode worker lease expired",
+              updatedAt: timestamp,
+            })
+            .where(
+              and(
+                inArray(encodeJobs.id, expiredIds),
+                eq(encodeJobs.status, "running"),
+                isNull(encodeJobs.partialCleanupLeaseToken),
+                lte(encodeJobs.updatedAt, expiredBefore),
+              ),
+            )
+            .returning()
+            .all();
+        }, { behavior: "immediate" });
+      },
+      recordReplacementOutputIdentity(claim, identity) {
+        const timestamp = now();
+        const normalizedIdentity = requireNonEmpty(
+          identity,
+          "replacementOutputIdentity",
+        );
+        const updated = database
+          .update(encodeJobs)
+          .set({
+            replacementOutputIdentity: normalizedIdentity,
+            updatedAt: timestamp,
+          })
+          .where(
+            and(
+              encodeAttemptCondition(claim, timestamp),
+              eq(encodeJobs.replaceExistingOutput, true),
+              or(
+                isNull(encodeJobs.replacementOutputIdentity),
+                eq(
+                  encodeJobs.replacementOutputIdentity,
+                  normalizedIdentity,
+                ),
+              ),
+            ),
+          )
+          .returning()
+          .get();
+        if (!updated) {
+          throw new StaleJobAttemptError("encode job", claim.id);
+        }
+        return asRunningEncodeJob(updated);
+      },
+      registerPartialCleanup(claim, options) {
+        const timestamp = now();
+        const publicationPending = options?.publicationPending === true;
+        const updated = database
+          .update(encodeJobs)
+          .set({
+            partialCleanupOutputPath: claim.outputPath,
+            partialCleanupClaimToken: claim.claimToken,
+            partialCleanupLeaseToken: null,
+            publicationPending,
+            updatedAt: timestamp,
+          })
+          .where(encodeAttemptCondition(claim, timestamp))
+          .returning()
+          .get();
+        if (!updated) {
+          throw new StaleJobAttemptError("encode job", claim.id);
+        }
+        return {
+          jobId: updated.id,
+          outputPath: claim.outputPath,
+          claimToken: claim.claimToken,
+          leaseToken: null,
+          publicationPending,
+        };
+      },
+      revokePublication(claim, cleanup) {
+        if (!cleanup.publicationPending) {
+          throw new DomainInvariantError(
+            "Encode Job cleanup is not publication provenance",
+          );
+        }
+        const timestamp = now();
+        const updated = database
+          .update(encodeJobs)
+          .set({ publicationPending: false, updatedAt: timestamp })
+          .where(
+            and(
+              cleanup.leaseToken === null
+                ? encodeAttemptCondition(claim, timestamp)
+                : and(
+                    eq(encodeJobs.id, claim.id),
+                    eq(encodeJobs.status, "running"),
+                    eq(encodeJobs.claimToken, claim.claimToken),
+                  ),
+              eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
+              eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
+              cleanup.leaseToken === null
+                ? isNull(encodeJobs.partialCleanupLeaseToken)
+                : eq(
+                    encodeJobs.partialCleanupLeaseToken,
+                    cleanup.leaseToken,
+                  ),
+              eq(encodeJobs.publicationPending, true),
+            ),
+          )
+          .returning()
+          .get();
+        if (!updated) {
+          throw new StaleJobAttemptError(
+            "encode job publication",
+            cleanup.jobId,
+          );
+        }
+        return { ...cleanup, publicationPending: false };
+      },
+      listPendingPartialCleanups() {
+        return database
+          .select({
+            jobId: encodeJobs.id,
+            outputPath: encodeJobs.partialCleanupOutputPath,
+            claimToken: encodeJobs.partialCleanupClaimToken,
+            leaseToken: encodeJobs.partialCleanupLeaseToken,
+            publicationPending: encodeJobs.publicationPending,
+          })
+          .from(encodeJobs)
+          .where(
+            and(
+              inArray(encodeJobs.status, ["failed", "completed"]),
+              isNotNull(encodeJobs.partialCleanupOutputPath),
+              isNotNull(encodeJobs.partialCleanupClaimToken),
+            ),
+          )
+          .orderBy(asc(encodeJobs.updatedAt), asc(encodeJobs.id))
+          .limit(JOB_RECOVERY_LIMIT)
+          .all()
+          .map((cleanup): EncodeJobPartialCleanup => {
+            if (cleanup.outputPath === null || cleanup.claimToken === null) {
+              throw new DomainInvariantError(
+                "Encode Job partial cleanup provenance is incomplete",
+              );
+            }
+            return {
+              jobId: cleanup.jobId,
+              outputPath: cleanup.outputPath,
+              claimToken: cleanup.claimToken,
+              leaseToken: cleanup.leaseToken,
+              publicationPending: cleanup.publicationPending,
+            };
+          });
+      },
+      claimPartialCleanup(cleanup) {
+        if (cleanup.publicationPending) {
+          throw new DomainInvariantError(
+            "Encode Job publication cleanup cannot be claimed for rollback",
+          );
+        }
+        const timestamp = now();
+        const expiredBefore = new Date(
+          timestamp.getTime() - ENCODE_JOB_LEASE_DURATION_MS,
+        );
+        const leaseToken = newId<EncodeJobCleanupClaimToken>();
+        const updated = database
+          .update(encodeJobs)
+          .set({
+            partialCleanupLeaseToken: leaseToken,
+            updatedAt: timestamp,
+          })
+          .where(
+            and(
+              eq(encodeJobs.id, cleanup.jobId),
+              inArray(encodeJobs.status, ["failed", "completed"]),
+              eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
+              eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
+              eq(encodeJobs.publicationPending, false),
+              or(
+                isNull(encodeJobs.partialCleanupLeaseToken),
+                lte(encodeJobs.updatedAt, expiredBefore),
+              ),
+            ),
+          )
+          .returning()
+          .get();
+        if (!updated) {
+          throw new StaleJobAttemptError(
+            "encode job cleanup",
+            cleanup.jobId,
+          );
+        }
+        return { ...cleanup, leaseToken };
+      },
+      renewPartialCleanup(cleanup) {
+        if (cleanup.leaseToken === null) {
+          throw new DomainInvariantError(
+            "Encode Job cleanup renewal requires a cleanup lease",
+          );
+        }
+        const timestamp = now();
+        const expiredBefore = new Date(
+          timestamp.getTime() - ENCODE_JOB_LEASE_DURATION_MS,
+        );
+        const updated = database
+          .update(encodeJobs)
+          .set({ updatedAt: timestamp })
+          .where(
+            and(
+              eq(encodeJobs.id, cleanup.jobId),
+              inArray(encodeJobs.status, ["failed", "completed"]),
+              eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
+              eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
+              eq(
+                encodeJobs.partialCleanupLeaseToken,
+                cleanup.leaseToken,
+              ),
+              eq(encodeJobs.publicationPending, false),
+              gt(encodeJobs.updatedAt, expiredBefore),
+            ),
+          )
+          .returning()
+          .get();
+        if (!updated) {
+          throw new StaleJobAttemptError(
+            "encode job cleanup",
+            cleanup.jobId,
+          );
+        }
+        return cleanup;
+      },
+      withPartialCleanupMutationFence(cleanup, mutation) {
+        if (cleanup.publicationPending) {
+          throw new DomainInvariantError(
+            "Encode Job publication cleanup cannot be claimed for rollback",
+          );
+        }
+        const timestamp = now();
+        const expiredBefore = new Date(
+          timestamp.getTime() - ENCODE_JOB_LEASE_DURATION_MS,
+        );
+        const leaseToken = newId<EncodeJobCleanupClaimToken>();
+        const authorizedCleanup = database.transaction((transaction) => {
+          const updated = transaction
+            .update(encodeJobs)
+            .set({
+              partialCleanupLeaseToken: leaseToken,
+              updatedAt: timestamp,
+            })
+            .where(
+              and(
+                eq(encodeJobs.id, cleanup.jobId),
+                inArray(encodeJobs.status, ["failed", "completed"]),
+                eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
+                eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
+                eq(encodeJobs.publicationPending, false),
+                or(
+                  isNull(encodeJobs.partialCleanupLeaseToken),
+                  lte(encodeJobs.updatedAt, expiredBefore),
+                ),
+              ),
+            )
+            .returning()
+            .get();
+          if (!updated) {
+            throw new StaleJobAttemptError(
+              "encode job cleanup",
+              cleanup.jobId,
+            );
+          }
+          return { ...cleanup, leaseToken };
+        }, { behavior: "immediate" });
+        mutation();
+        return authorizedCleanup;
+      },
+      renewPublishedPartial(cleanup, publicationMatches) {
+        if (!cleanup.publicationPending) {
+          throw new DomainInvariantError(
+            "Encode Job cleanup is not publication provenance",
+          );
+        }
+        const timestamp = now();
+        const leaseToken =
+          cleanup.leaseToken ?? newId<EncodeJobCleanupClaimToken>();
+        const publicationCondition = and(
+          eq(encodeJobs.id, cleanup.jobId),
+          inArray(encodeJobs.status, ["failed", "completed"]),
+          eq(encodeJobs.publicationPending, true),
+          eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
+          eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
+          cleanup.leaseToken === null
+            ? isNull(encodeJobs.partialCleanupLeaseToken)
+            : eq(encodeJobs.partialCleanupLeaseToken, leaseToken),
+        );
+        const owned = database
+          .update(encodeJobs)
+          .set({
+            partialCleanupLeaseToken: leaseToken,
+            updatedAt: timestamp,
+          })
+          .where(publicationCondition)
+          .returning()
+          .get();
+        if (!owned) {
+          throw new StaleJobAttemptError(
+            "encode job publication",
+            cleanup.jobId,
+          );
+        }
+        const matches = publicationMatches();
+        if (!matches) {
+          throw new StaleJobAttemptError(
+            "encode job publication",
+            cleanup.jobId,
+          );
+        }
+        return { ...cleanup, leaseToken };
+      },
+      completePublishedPartial(cleanup, publicationMatches) {
+        if (!cleanup.publicationPending) {
+          throw new DomainInvariantError(
+            "Encode Job cleanup is not publication provenance",
+          );
+        }
+        const timestamp = now();
+        const leaseToken =
+          cleanup.leaseToken ?? newId<EncodeJobCleanupClaimToken>();
+        const publicationCondition = and(
+          eq(encodeJobs.id, cleanup.jobId),
+          inArray(encodeJobs.status, ["failed", "completed"]),
+          eq(encodeJobs.publicationPending, true),
+          eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
+          eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
+          cleanup.leaseToken === null
+            ? isNull(encodeJobs.partialCleanupLeaseToken)
+            : eq(encodeJobs.partialCleanupLeaseToken, leaseToken),
+        );
+        const owned = database
+          .update(encodeJobs)
+          .set({
+            partialCleanupLeaseToken: leaseToken,
+            updatedAt: timestamp,
+          })
+          .where(publicationCondition)
+          .returning()
+          .get();
+        if (!owned) {
+          throw new StaleJobAttemptError(
+            "encode job publication",
+            cleanup.jobId,
+          );
+        }
+        const matches = publicationMatches();
+        database.transaction((transaction) => {
+          if (!matches) {
+            throw new StaleJobAttemptError(
+              "encode job publication",
+              cleanup.jobId,
+            );
+          }
+          const fencedPublicationCondition = and(
+            eq(encodeJobs.id, cleanup.jobId),
+            inArray(encodeJobs.status, ["failed", "completed"]),
+            eq(encodeJobs.publicationPending, true),
+            eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
+            eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
+            eq(encodeJobs.partialCleanupLeaseToken, leaseToken),
+          );
+          const updated = transaction
+            .update(encodeJobs)
+            .set({
+              status: "completed",
+              publicationCompletionPending: true,
+              progressPercent: 100,
+              progressEtaSeconds: null,
+              completedAt: sql`coalesce(${encodeJobs.completedAt}, ${timestamp.getTime()})`,
+              errorMessage: null,
+              updatedAt: timestamp,
+            })
+            .where(fencedPublicationCondition)
+            .returning()
+            .get();
+          if (!updated) {
+            throw new StaleJobAttemptError(
+              "encode job publication",
+              cleanup.jobId,
+            );
+          }
+          return updated;
+        }, { behavior: "immediate" });
+        const completionCondition = and(
+          eq(encodeJobs.id, cleanup.jobId),
+          eq(encodeJobs.status, "completed"),
+          eq(encodeJobs.publicationCompletionPending, true),
+          eq(encodeJobs.publicationPending, true),
+          eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
+          eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
+          eq(encodeJobs.partialCleanupLeaseToken, leaseToken),
+        );
+        if (!publicationMatches()) {
+          const invalidated = database
+            .update(encodeJobs)
+            .set({
+              status: owned.status,
+              publicationCompletionPending:
+                owned.publicationCompletionPending,
+              completedAt: owned.completedAt,
+              errorMessage: owned.errorMessage,
+              updatedAt: now(),
+            })
+            .where(completionCondition)
+            .returning()
+            .get();
+          if (!invalidated) {
+            throw new StaleJobAttemptError(
+              "encode job publication",
+              cleanup.jobId,
+            );
+          }
+          throw new StaleJobAttemptError(
+            "encode job publication",
+            cleanup.jobId,
+          );
+        }
+        const finalized = database
+          .update(encodeJobs)
+          .set({
+            replaceExistingOutput: false,
+            replacementOutputIdentity: null,
+            publicationCompletionPending: false,
+            updatedAt: now(),
+          })
+          .where(completionCondition)
+          .returning()
+          .get();
+        if (!finalized) {
+          throw new StaleJobAttemptError(
+            "encode job publication",
+            cleanup.jobId,
+          );
+        }
+        return {
+          cleanup: { ...cleanup, leaseToken },
+          job: finalized,
+        };
+      },
+      completePublishedClaim(claim, cleanup, publicationMatches) {
+        if (!cleanup.publicationPending) {
+          throw new DomainInvariantError(
+            "Encode Job cleanup is not publication provenance",
+          );
+        }
+        const timestamp = now();
+        const publicationCondition = and(
+          cleanup.leaseToken === null
+            ? encodeAttemptCondition(claim, timestamp)
+            : and(
+                eq(encodeJobs.id, claim.id),
+                eq(encodeJobs.status, "running"),
+                eq(encodeJobs.claimToken, claim.claimToken),
+              ),
+          eq(encodeJobs.publicationPending, true),
+          eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
+          eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
+          cleanup.leaseToken === null
+            ? isNull(encodeJobs.partialCleanupLeaseToken)
+            : eq(
+                encodeJobs.partialCleanupLeaseToken,
+                cleanup.leaseToken,
+              ),
+        );
+        const matches = publicationMatches();
+        database.transaction((transaction) => {
+          const owned = transaction
+            .update(encodeJobs)
+            .set({ updatedAt: timestamp })
+            .where(publicationCondition)
+            .returning()
+            .get();
+          if (!owned || !matches) {
+            throw new StaleJobAttemptError(
+              "encode job publication",
+              cleanup.jobId,
+            );
+          }
+          const updated = transaction
+            .update(encodeJobs)
+            .set({
+              status: "completed",
+              publicationCompletionPending: true,
+              progressPercent: 100,
+              progressEtaSeconds: null,
+              completedAt: timestamp,
+              errorMessage: null,
+              updatedAt: timestamp,
+            })
+            .where(publicationCondition)
+            .returning()
+            .get();
+          if (!updated) {
+            throw new StaleJobAttemptError(
+              "encode job publication",
+              cleanup.jobId,
+            );
+          }
+          return updated;
+        }, { behavior: "immediate" });
+        const completionCondition = and(
+          eq(encodeJobs.id, cleanup.jobId),
+          eq(encodeJobs.status, "completed"),
+          eq(encodeJobs.publicationCompletionPending, true),
+          eq(encodeJobs.claimToken, claim.claimToken),
+          eq(encodeJobs.publicationPending, true),
+          eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
+          eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
+          cleanup.leaseToken === null
+            ? isNull(encodeJobs.partialCleanupLeaseToken)
+            : eq(
+                encodeJobs.partialCleanupLeaseToken,
+                cleanup.leaseToken,
+              ),
+        );
+        if (!publicationMatches()) {
+          const invalidated = database
+            .update(encodeJobs)
+            .set({
+              status: "failed",
+              publicationCompletionPending: false,
+              completedAt: null,
+              errorMessage:
+                "Encode publication changed across completion commit",
+              updatedAt: now(),
+            })
+            .where(completionCondition)
+            .returning()
+            .get();
+          if (!invalidated) {
+            throw new StaleJobAttemptError(
+              "encode job publication",
+              cleanup.jobId,
+            );
+          }
+          throw new StaleJobAttemptError(
+            "encode job publication",
+            cleanup.jobId,
+          );
+        }
+        const finalized = database
+          .update(encodeJobs)
+          .set({
+            replaceExistingOutput: false,
+            replacementOutputIdentity: null,
+            publicationCompletionPending: false,
+            updatedAt: now(),
+          })
+          .where(completionCondition)
+          .returning()
+          .get();
+        if (!finalized) {
+          throw new StaleJobAttemptError(
+            "encode job publication",
+            cleanup.jobId,
+          );
+        }
+        return finalized;
+      },
+      completePartialCleanup(cleanup) {
+        const updated = database
+          .update(encodeJobs)
+          .set({
+            status: sql`case when ${encodeJobs.publicationCompletionPending} = 1 then 'failed' else ${encodeJobs.status} end`,
+            completedAt: sql`case when ${encodeJobs.publicationCompletionPending} = 1 then null else ${encodeJobs.completedAt} end`,
+            errorMessage: sql`case when ${encodeJobs.publicationCompletionPending} = 1 then 'Encode publication completion was interrupted' else ${encodeJobs.errorMessage} end`,
+            partialCleanupOutputPath: null,
+            partialCleanupClaimToken: null,
+            partialCleanupLeaseToken: null,
+            publicationPending: false,
+            publicationCompletionPending: false,
+          })
+          .where(
+            and(
+              eq(encodeJobs.id, cleanup.jobId),
+              eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
+              eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
+              cleanup.leaseToken === null
+                ? isNull(encodeJobs.partialCleanupLeaseToken)
+                : eq(
+                    encodeJobs.partialCleanupLeaseToken,
+                    cleanup.leaseToken,
+                  ),
+            ),
+          )
+          .returning()
+          .get();
+        if (updated) {
+          return updated;
+        }
+        const current = database
+          .select()
+          .from(encodeJobs)
+          .where(eq(encodeJobs.id, cleanup.jobId))
+          .get();
+        if (
+          current?.partialCleanupOutputPath === null &&
+          current.partialCleanupClaimToken === null &&
+          current.partialCleanupLeaseToken === null &&
+          !current.publicationPending
+        ) {
+          return current;
+        }
+        throw new StaleJobAttemptError("encode job cleanup", cleanup.jobId);
+      },
       list: encodeJobQueue.list,
-      updateProgress: encodeJobQueue.updateProgress,
+      updateProgress(claim, progress) {
+        if (typeof progress === "number") {
+          return encodeJobQueue.updateProgress(claim, progress);
+        }
+        if (!ENCODE_PROGRESS_PHASES.includes(progress.phase)) {
+          throw new DomainInvariantError("Encode Job progress phase is invalid");
+        }
+        const etaSeconds = optionalSafeInteger(
+          progress.etaSeconds,
+          "etaSeconds",
+          0,
+        );
+        return encodeJobQueue.updateProgress(
+          claim,
+          progress.progressPercent,
+          {
+            phase: progress.phase,
+            etaSeconds: etaSeconds ?? null,
+          },
+        );
+      },
       complete: (claim) => encodeJobQueue.complete(claim, undefined),
       fail: encodeJobQueue.fail,
       requeue: encodeJobQueue.requeue,

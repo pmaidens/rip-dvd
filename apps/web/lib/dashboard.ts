@@ -5,6 +5,7 @@ import type {
   DetectedDiscId,
   DetectedDiscStatus,
   DiscKind,
+  EncodeProgressPhase,
   JobStatus,
 } from "@rip-dvd/data-access";
 import {
@@ -57,7 +58,9 @@ export interface DashboardEncodeJob {
   mediaYear: number | null;
   encodingProfileName: string;
   status: JobStatus;
+  progressPhase: EncodeProgressPhase | null;
   progressPercent: number;
+  progressEtaSeconds: number | null;
 }
 
 export interface DashboardCatalogReviewItem {
@@ -410,7 +413,9 @@ function readDashboardSnapshotRecords(
                     ? `${profile.displayName} · Version ${profile.version}`
                     : "Unknown Encoding Profile",
                 status: job.status,
+                progressPhase: job.progressPhase,
                 progressPercent: job.progressPercent,
+                progressEtaSeconds: job.progressEtaSeconds,
               };
             }),
           );

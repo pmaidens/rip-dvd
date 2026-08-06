@@ -6,7 +6,7 @@ WORKDIR /app
 
 FROM build-base AS dependencies
 RUN apt-get update \
-  && apt-get install --yes --no-install-recommends python3-minimal \
+  && apt-get install --yes --no-install-recommends gcc libc6-dev python3-minimal \
   && rm -rf /var/lib/apt/lists/*
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .node-version ./
 COPY scripts/check-toolchain.mjs scripts/check-toolchain.mjs
@@ -62,7 +62,8 @@ RUN pnpm --filter @rip-dvd/archive-worker build \
 
 FROM shared-builder AS encode-worker-builder
 COPY apps/encode-worker apps/encode-worker
-RUN pnpm --filter @rip-dvd/encode-worker build
+RUN pnpm --filter @rip-dvd/encode-worker build \
+  && pnpm --filter @rip-dvd/encode-worker --prod deploy --legacy /encode-worker
 
 FROM node:22.23.1-bookworm-slim AS runtime-base
 ENV NODE_ENV="production"
@@ -114,9 +115,6 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 RUN mkdir --parents /media/movies /media/originals \
   && chown node:node /media/movies /media/originals
-COPY --from=encode-worker-builder --chown=node:node /app/apps/encode-worker/package.json ./apps/encode-worker/package.json
-COPY --from=encode-worker-builder --chown=node:node /app/apps/encode-worker/dist ./apps/encode-worker/dist
-RUN mkdir --parents apps/encode-worker/node_modules/@rip-dvd \
-  && ln --symbolic ../../../../packages/worker-runtime apps/encode-worker/node_modules/@rip-dvd/worker-runtime
+COPY --from=encode-worker-builder --chown=node:node /encode-worker ./apps/encode-worker
 USER node
 CMD ["node", "apps/encode-worker/dist/index.js"]

@@ -52,6 +52,8 @@ export interface JobQueueAdapter<
   Completion,
   RequeueOptions,
   ClaimOptions,
+  ProgressDetails = never,
+  FailureOptions = never,
 > {
   readonly recordType: string;
   find(id: Id): Job | undefined;
@@ -66,11 +68,23 @@ export interface JobQueueAdapter<
     claim: Running,
     update: AttemptUpdate,
     completion?: Completion,
+    failureOptions?: FailureOptions,
   ): Job | undefined;
+  updateProgressAttempt?(
+    claim: Running,
+    update: AttemptUpdate,
+    details: ProgressDetails,
+    failureOptions?: FailureOptions,
+  ): Job | undefined;
+  progressDetailsChanged?(
+    current: ProgressDetails | undefined,
+    previous: ProgressDetails | undefined,
+  ): boolean;
   isAttemptCurrent?(current: Job, claim: Running, timestamp: Date): boolean;
   requeue(
     id: Id,
     expectedStatus: "failed" | "completed",
+    current: Job,
     update: RequeueUpdate,
     options?: RequeueOptions,
   ): Job | undefined;
@@ -84,12 +98,18 @@ export interface JobQueueController<
   Completion,
   RequeueOptions,
   ClaimOptions,
+  ProgressDetails = never,
+  FailureOptions = never,
 > {
   claimNext(workerId: string, options?: ClaimOptions): Running | null;
   list(statuses?: JobStatus[], options?: ChronologicalListOptions): Job[];
-  updateProgress(claim: Running, progressPercent: number): Job;
+  updateProgress(
+    claim: Running,
+    progressPercent: number,
+    details?: ProgressDetails,
+  ): Job;
   complete(claim: Running, completion: Completion): Job;
-  fail(claim: Running, errorMessage: string): Job;
+  fail(claim: Running, errorMessage: string, options?: FailureOptions): Job;
   requeue(id: Id, options?: RequeueOptions): Job;
 }
 
@@ -114,6 +134,8 @@ export function createJobQueueController<
   Completion,
   RequeueOptions,
   ClaimOptions,
+  ProgressDetails = never,
+  FailureOptions = never,
 >({
   adapter,
   createToken,
@@ -127,7 +149,9 @@ export function createJobQueueController<
     Token,
     Completion,
     RequeueOptions,
-    ClaimOptions
+    ClaimOptions,
+    ProgressDetails,
+    FailureOptions
   >;
   createToken(): Token;
   now(): Date;
@@ -139,7 +163,9 @@ export function createJobQueueController<
   Token,
   Completion,
   RequeueOptions,
-  ClaimOptions
+  ClaimOptions,
+  ProgressDetails,
+  FailureOptions
 > {
   const progress = new Map<
     Id,
@@ -148,6 +174,8 @@ export function createJobQueueController<
       latest: number;
       lastPersisted: number;
       lastPersistedAt: number;
+      latestDetails: ProgressDetails | undefined;
+      lastPersistedDetails: ProgressDetails | undefined;
     }
   >();
 
@@ -176,8 +204,18 @@ export function createJobQueueController<
     claim: Running,
     update: AttemptUpdate,
     completion?: Completion,
+    progressDetails?: ProgressDetails,
+    failureOptions?: FailureOptions,
   ): Job {
-    const updated = adapter.updateAttempt(claim, update, completion);
+    const updated =
+      progressDetails !== undefined && adapter.updateProgressAttempt
+        ? adapter.updateProgressAttempt(
+            claim,
+            update,
+            progressDetails,
+            failureOptions,
+          )
+        : adapter.updateAttempt(claim, update, completion, failureOptions);
     if (!updated) {
       throw new StaleJobAttemptError(adapter.recordType, claim.id);
     }
@@ -201,38 +239,56 @@ export function createJobQueueController<
 
     list: adapter.list,
 
-    updateProgress(claim, progressPercent) {
+    updateProgress(claim, progressPercent, details) {
       const requestedProgress = requireProgress(progressPercent);
       const current = requireActiveAttempt(claim);
       const timestamp = now();
       const state = progress.get(claim.id);
       if (!state || state.token !== claim.claimToken) {
-        const updated = requireAttemptUpdate(claim, {
-          progressPercent: requestedProgress,
-          updatedAt: timestamp,
-        });
+        const updated = requireAttemptUpdate(
+          claim,
+          {
+            progressPercent: requestedProgress,
+            updatedAt: timestamp,
+          },
+          undefined,
+          details,
+        );
         progress.set(claim.id, {
           token: claim.claimToken,
           latest: requestedProgress,
           lastPersisted: requestedProgress,
           lastPersistedAt: timestamp.getTime(),
+          latestDetails: details,
+          lastPersistedDetails: details,
         });
         return updated;
       }
 
       state.latest = requestedProgress;
+      state.latestDetails = details;
       if (
         Math.abs(requestedProgress - state.lastPersisted) >=
           PROGRESS_WRITE_DELTA ||
         timestamp.getTime() - state.lastPersistedAt >=
-          PROGRESS_WRITE_INTERVAL_MS
+          PROGRESS_WRITE_INTERVAL_MS ||
+        (adapter.progressDetailsChanged?.(
+          details,
+          state.lastPersistedDetails,
+        ) ?? false)
       ) {
-        const updated = requireAttemptUpdate(claim, {
-          progressPercent: requestedProgress,
-          updatedAt: timestamp,
-        });
+        const updated = requireAttemptUpdate(
+          claim,
+          {
+            progressPercent: requestedProgress,
+            updatedAt: timestamp,
+          },
+          undefined,
+          details,
+        );
         state.lastPersisted = requestedProgress;
         state.lastPersistedAt = timestamp.getTime();
+        state.lastPersistedDetails = details;
         return updated;
       }
 
@@ -257,15 +313,21 @@ export function createJobQueueController<
       return completed;
     },
 
-    fail(claim, errorMessage) {
+    fail(claim, errorMessage, options) {
       const current = requireActiveAttempt(claim);
       const pendingProgress = progress.get(claim.id);
-      const failed = requireAttemptUpdate(claim, {
-        status: "failed",
-        progressPercent: pendingProgress?.latest ?? current.progressPercent,
-        errorMessage: requireNonEmpty(errorMessage, "errorMessage"),
-        updatedAt: now(),
-      });
+      const failed = requireAttemptUpdate(
+        claim,
+        {
+          status: "failed",
+          progressPercent: pendingProgress?.latest ?? current.progressPercent,
+          errorMessage: requireNonEmpty(errorMessage, "errorMessage"),
+          updatedAt: now(),
+        },
+        undefined,
+        pendingProgress?.latestDetails,
+        options,
+      );
       progress.delete(claim.id);
       return failed;
     },
@@ -289,6 +351,7 @@ export function createJobQueueController<
       const requeued = adapter.requeue(
         id,
         current.status,
+        current,
         {
           status: "queued",
           progressPercent: 0,

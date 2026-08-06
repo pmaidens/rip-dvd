@@ -636,6 +636,84 @@ options, `POST /api/encode-jobs` queues or updates the logical job, and
 `PATCH /api/encode-jobs` retries a terminal job. Mutations require the same
 trusted Origin and Host checks as archive approval.
 
+The encode worker atomically claims up to
+`RIP_DVD_ENCODE_WORKER_CONCURRENCY` queued jobs, resolves each job's immutable
+Original Disc Archive, Disc Selection, and Encoding Profile version, and runs
+`HandBrakeCLI` at the lowest configured process and I/O priority. Main-feature,
+DVD-title, and chapter-bounded selections map to HandBrake's documented source
+options. Each slot claims its next job as soon as its prior encode settles.
+Encode claims have a renewable one-minute lease; every poll recovers a bounded
+batch of expired claims into visible failed jobs for explicit retry. HandBrake
+scanning, preview, and encoding progress—including percent and ETA—is written
+to SQLite and appears through the existing dashboard SSE stream.
+
+Each attempt writes to a hidden claim-scoped partial file. A synced regular
+output first records its exact path and claim token with an explicit durable
+publication-pending marker. An initial output is hard-linked into its absent
+final path without overwrite behavior. A re-encode retains the known-good inode
+at its claim-scoped recovery path, hard-links the replacement at a hidden
+claim-scoped publication path, then atomically renames that link over the
+still-visible final.
+Before creating those files, every newly created output-directory entry is
+synced from its existing parent down through the leaf directory.
+The partial hard link remains until the directory and completed job are durable;
+only then is that link removed and its cleanup acknowledged. After a process
+crash, the next poll compares the retained final and partial inodes and completes
+the matching publication instead of stranding a visible final behind a failed
+job. Before filesystem mutation, the publisher persists a claim-scoped
+mutation token and holds a process-scoped filesystem lock. Lease recovery and
+legacy cutover respect that token; a live paused owner remains authoritative,
+while a dead owner's released lock lets reconciliation recover the durable
+provenance. Immediately before retaining a known-good final and staging its
+atomic replacement, the publisher renews its SQLite claim and persists this
+fence, so the commit-to-mutation gap cannot publish stale work.
+A publisher must also atomically revoke its current SQLite publication authority
+before any failure rollback; an expired publisher leaves the final and durable
+provenance for reconciliation. Revoked-publication rollback acquires a
+recoverable cleanup lease after re-statting the final and immediately before its
+atomic rename, so a stale reconciler cannot move a later accepted retry. Its
+claim-derived quarantine path is reconstructible from durable provenance, so a
+process killed after the rename can restore an external final moved in the
+post-stat syscall gap. Legacy
+deterministic partials and ordinary failed attempts are moved with one atomic rename to
+collision-resistant `.failed` paths. A timed-out child keeps ownership of its
+partial until this worker observes that HandBrake closed it. Expired claims
+persist their exact output path and claim
+token as cleanup work before becoming retryable; both requeue and reclaim stay
+blocked until that partial is reconciled or quarantined. A different worker
+cannot trust the expired process's in-memory child registry, so it uses the same
+atomic quarantine; any still-open writer remains attached to the quarantined
+inode while the next claim receives a distinct partial path.
+
+Re-encoding keeps the prior final visible until the replacement is complete,
+durably stages it at a collision-free `.failed` recovery hard link, and
+atomically exchanges a claim-scoped replacement link with the public final.
+The displaced inode is retained and its post-recovery-link content snapshot is
+validated before the cutover is accepted. The in-process native exchange is
+treated as an unconditional swap, not compare-exchange: both endpoints are
+validated afterward, and a raced public inode is repeatedly restored until a
+stable compensating swap is observed. Indeterminate results retain durable
+publication provenance. Filesystem staging and identity checks run outside
+SQLite writer transactions. Short transactions persist and authenticate the
+mutation token around those checks. Completion retains that provenance and the
+worker partial through a post-commit identity check; a final changed across the
+commit boundary restores the nonaccepted job state for reconciliation instead
+of unlinking the worker output. The provisional completed row carries a durable
+completion-pending marker, so restart cleanup converts a mismatched tentative
+success back to a retryable failure before clearing provenance. A stalled media
+mount therefore cannot
+monopolize SQLite, while a mismatch still leaves durable recovery authority.
+Its claim-scoped recovery path lets crash recovery restore the prior final when
+publication did not complete, and any failure after replacement
+publication quarantines the replacement and restores that prior final. Only a
+completed job requeued to the same output path owns that
+replacement. Its filesystem identity is retained through a failed attempt and
+verified on retry, while remaining stable across the worker's own rename and
+hard-link restoration; a changed final revokes replacement authority. Ordinary
+failed retries and jobs moved to a new path leave any existing final untouched.
+If a new final path appears during an encode, it is also left untouched and the
+new partial is quarantined.
+
 Visit `/health` for the visible service/database status or `/api/health` for
 the machine-readable health response. Validate schema history with
 `pnpm db:check`; the normal `pnpm check` command runs the facade integration

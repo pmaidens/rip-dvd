@@ -36,3 +36,9 @@ export const JOB_STATUSES = [
   "completed",
   "failed",
 ] as const;
+
+export const ENCODE_PROGRESS_PHASES = [
+  "scanning",
+  "previewing",
+  "encoding",
+] as const;

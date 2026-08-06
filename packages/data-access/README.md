@@ -127,7 +127,40 @@ immediately. Later reports persist when at least one second has elapsed or the
 reported value differs from the last persisted value by at least five
 percentage points; intermediate reports are coalesced in memory. Completion
 always persists 100%, and failure persists the newest coalesced value before
-recording the terminal status.
+recording the terminal status. Encode Job reports also persist the HandBrake
+phase and ETA; phase changes bypass percentage coalescing so scanning, preview,
+and encoding transitions reach the database immediately. Terminal updates
+clear an obsolete ETA, and requeue clears all prior progress fields. Encode
+claims use a renewable one-minute lease with the same attempt-token guard.
+Recovery moves at most 100 expired claims per call into visible failed state,
+and every mutation from the expired attempt is rejected. The same transaction
+records the expired claim's output path and token as durable partial-cleanup
+provenance. Queued work with pending cleanup cannot be claimed, and cleanup
+acknowledgement compares both retained values so a later path change cannot
+orphan or acknowledge the wrong partial. Requeue is likewise rejected until
+that provenance is reconciled or acknowledged. The encode worker also records
+this provenance before filesystem publication, marks that cleanup as
+publication-pending, and retains the partial inode until SQLite completion. A
+failed or already-completed job with the exact flagged provenance can therefore
+be completed by crash reconciliation before cleanup is acknowledged; cleanup
+enumeration excludes running owners. A current publisher must atomically revoke
+that flag before destructive rollback, so an expired attempt cannot undo a
+publication already accepted by another process. Revoked-publication rollback
+uses a recoverable cleanup lease, acquired by compare-and-set immediately before
+the final rename. Cleanup acknowledgement authenticates that lease; while it is
+held, other reconcilers cannot roll back from stale observations and requeue
+remains blocked. Timeout cleanup and legacy cutover invalidation never set the
+publication flag, so queued, cutover-invalidated, and unrelated attempts cannot
+use the completion transition.
+
+Requeue grants replacement authority only when a completed Encode Job keeps
+its output path. The worker records the owned final's filesystem identity;
+failure retains authority only when the same identity is still present, while
+recovery retains the stored identity for the next attempt to recheck before
+HandBrake starts. The identity excludes link-count ctime changes made by the
+worker's own rename and hard-link restoration. Changing the output path or
+observing a different final revokes authority rather than transferring
+ownership of an existing file at the destination.
 
 ## Transaction boundary
 
@@ -139,6 +172,17 @@ use short internal transactions. Queue claims use one atomic
 `UPDATE ... RETURNING` statement and return only after that statement has
 committed. Workers must start external programs only after `claimNext()`
 returns; process execution never belongs in a database transaction.
+Encode publication persists a mutation token in one short transaction before
+filesystem work begins. Identity callbacks inspect already-staged media entries
+only outside writer transactions. Completion first commits while retaining the
+token and cleanup provenance plus a durable completion-pending marker, rechecks
+the media identity after that commit, then finalizes success in another bounded
+write. A cross-boundary mismatch restores the nonaccepted state without
+removing provenance; restart cleanup converts a mismatched tentative completion
+back to failure before acknowledging that provenance. Recovery and legacy
+cutover respect the persisted token, while a process-scoped filesystem lock
+distinguishes a paused owner from an abandoned mutation. No media-filesystem
+call or external process runs while SQLite holds its writer transaction.
 
 ## Legacy sidecar import
 
