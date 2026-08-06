@@ -44,6 +44,7 @@ const ATOMIC_EXCHANGE_PATH = fileURLToPath(
 );
 
 class PendingPublicationRecoveryError extends Error {}
+class AtomicExchangeConditionError extends Error {}
 
 export interface HandBrakeRunRequest {
   arguments_: readonly string[];
@@ -59,19 +60,41 @@ export interface HandBrakeRunner {
 }
 
 export interface AtomicPathExchange {
-  exchange(firstPath: string, secondPath: string): void;
+  exchange(
+    firstPath: string,
+    secondPath: string,
+    expectedSecond: Stats,
+  ): boolean;
 }
 
 interface AtomicPathExchangeBinding {
-  exchangePaths(firstPath: string, secondPath: string): void;
+  exchangePaths(
+    firstPath: string,
+    secondPath: string,
+    expectedDevice: bigint,
+    expectedInode: bigint,
+  ): boolean;
 }
 
 export function createNodeAtomicPathExchange(): AtomicPathExchange {
   const require = createRequire(import.meta.url);
   const binding = require(ATOMIC_EXCHANGE_PATH) as AtomicPathExchangeBinding;
   return {
-    exchange(firstPath, secondPath) {
-      binding.exchangePaths(firstPath, secondPath);
+    exchange(firstPath, secondPath, expectedSecond) {
+      if (
+        !Number.isSafeInteger(expectedSecond.dev) ||
+        expectedSecond.dev < 0 ||
+        !Number.isSafeInteger(expectedSecond.ino) ||
+        expectedSecond.ino < 0
+      ) {
+        throw new Error("Atomic exchange identity is invalid");
+      }
+      return binding.exchangePaths(
+        firstPath,
+        secondPath,
+        BigInt(expectedSecond.dev),
+        BigInt(expectedSecond.ino),
+      );
     },
   };
 }
@@ -299,14 +322,21 @@ async function requireLibraryRoot(
   if (Buffer.byteLength(resolved) > MAX_PATH_BYTES) {
     throw new Error("Library path exceeds the safety limit");
   }
-  if (create) {
-    await mkdir(resolved, { recursive: true, mode: 0o750 });
-  }
+  const firstCreatedDirectory = create
+    ? await mkdir(resolved, { recursive: true, mode: 0o750 })
+    : undefined;
   const metadata = await lstat(resolved);
   if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
     throw new Error("Library path must be a real directory");
   }
-  return realpath(resolved);
+  const canonical = await realpath(resolved);
+  if (firstCreatedDirectory !== undefined) {
+    await syncOutputDirectoryHierarchy(
+      dirname(firstCreatedDirectory),
+      resolved,
+    );
+  }
+  return canonical;
 }
 
 async function requireSourcePath(
@@ -485,8 +515,13 @@ function exchangePathsAtMutationBoundary(
   atomicPathExchange: AtomicPathExchange,
   firstPath: string,
   secondPath: string,
+  expectedSecond: Stats,
 ): void {
-  atomicPathExchange.exchange(firstPath, secondPath);
+  if (!atomicPathExchange.exchange(firstPath, secondPath, expectedSecond)) {
+    throw new AtomicExchangeConditionError(
+      "Encode output changed before atomic exchange",
+    );
+  }
 }
 
 function syncPathAtMutationBoundary(path: string): void {
@@ -531,9 +566,13 @@ function publishReplacementAtMutationBoundary(
       atomicPathExchange,
       replacementPath,
       finalPath,
+      currentFinalMetadata,
     );
   } catch (error) {
     exchangeError = error instanceof Error ? error : new Error(String(error));
+  }
+  if (exchangeError instanceof AtomicExchangeConditionError) {
+    throw exchangeError;
   }
   const partialMetadata = lstatSync(partialPath);
   let publishedFinalMetadata: Stats | null = null;
@@ -572,13 +611,13 @@ function publishReplacementAtMutationBoundary(
     );
   }
   if (displacedFinalError !== null) {
-    const canRestoreDisplacedFinal =
-      publishedFinalMetadata !== null &&
-      sameInode(partialMetadata, publishedFinalMetadata) &&
-      displacedFinalMetadata !== null &&
-      displacedFinalMetadata.isFile() &&
-      !displacedFinalMetadata.isSymbolicLink();
-    if (!canRestoreDisplacedFinal) {
+    if (
+      publishedFinalMetadata === null ||
+      !sameInode(partialMetadata, publishedFinalMetadata) ||
+      displacedFinalMetadata === null ||
+      !displacedFinalMetadata.isFile() ||
+      displacedFinalMetadata.isSymbolicLink()
+    ) {
       throw new PendingPublicationRecoveryError(
         `${displacedFinalError.message}; atomic exchange endpoints changed before inspection`,
       );
@@ -588,6 +627,7 @@ function publishReplacementAtMutationBoundary(
         atomicPathExchange,
         replacementPath,
         finalPath,
+        publishedFinalMetadata,
       );
       syncPathAtMutationBoundary(dirname(finalPath));
     } catch (rollbackError) {
@@ -790,34 +830,42 @@ async function reconcilePendingPublications(
       ) {
         let displacedFinalRestored = false;
         try {
-          options.access.encodeJobs.completePublishedPartial(cleanup, () => {
+          options.access.encodeJobs.renewPublishedPartial(cleanup, () => {
             const currentFinalMetadata = lstatSync(finalPath);
             const currentReplacementMetadata = lstatSync(replacementPath);
-            if (
-              !sameFile(finalMetadata, currentFinalMetadata) ||
-              !sameFile(replacementMetadata, currentReplacementMetadata)
-            ) {
-              return false;
-            }
-            exchangePathsAtMutationBoundary(
-              options.atomicPathExchange,
-              replacementPath,
-              finalPath,
+            return (
+              sameFile(finalMetadata, currentFinalMetadata) &&
+              sameFile(replacementMetadata, currentReplacementMetadata)
             );
-            const restoredFinalMetadata = lstatSync(finalPath);
-            const stagedWorkerMetadata = lstatSync(replacementPath);
-            if (
-              !sameInode(replacementMetadata, restoredFinalMetadata) ||
-              !sameInode(finalMetadata, stagedWorkerMetadata)
-            ) {
-              throw new PendingPublicationRecoveryError(
-                "Displaced Encode output exchange requires reconciliation",
-              );
-            }
-            syncPathAtMutationBoundary(dirname(finalPath));
-            displacedFinalRestored = true;
-            return false;
           });
+          const currentFinalMetadata = lstatSync(finalPath);
+          const currentReplacementMetadata = lstatSync(replacementPath);
+          if (
+            !sameFile(finalMetadata, currentFinalMetadata) ||
+            !sameFile(replacementMetadata, currentReplacementMetadata)
+          ) {
+            throw new PendingPublicationRecoveryError(
+              "Displaced Encode output changed after recovery authorization",
+            );
+          }
+          exchangePathsAtMutationBoundary(
+            options.atomicPathExchange,
+            replacementPath,
+            finalPath,
+            currentFinalMetadata,
+          );
+          const restoredFinalMetadata = lstatSync(finalPath);
+          const stagedWorkerMetadata = lstatSync(replacementPath);
+          if (
+            !sameInode(replacementMetadata, restoredFinalMetadata) ||
+            !sameInode(finalMetadata, stagedWorkerMetadata)
+          ) {
+            throw new PendingPublicationRecoveryError(
+              "Displaced Encode output exchange requires reconciliation",
+            );
+          }
+          await syncPath(dirname(finalPath));
+          displacedFinalRestored = true;
         } catch (error) {
           if (!displacedFinalRestored) {
             throw error;
