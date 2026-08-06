@@ -3,7 +3,10 @@ import { randomUUID } from "node:crypto";
 import { createDataAccess } from "@rip-dvd/data-access";
 import { runConfiguredAsyncWorker } from "@rip-dvd/worker-runtime";
 
-import { runEncodeWorker } from "./encode-worker.js";
+import {
+  createEncodePublicationMutationRecoveryLock,
+  runEncodeWorker,
+} from "./encode-worker.js";
 
 await runConfiguredAsyncWorker(
   {
@@ -15,6 +18,10 @@ await runConfiguredAsyncWorker(
     const access = createDataAccess({
       databasePath: config.databasePath,
       originalsLibraryPath: config.originalsLibraryPath,
+      publicationMutationRecoveryLock:
+        createEncodePublicationMutationRecoveryLock(
+          config.mediaLibraryPath,
+        ),
     });
     try {
       await runEncodeWorker({

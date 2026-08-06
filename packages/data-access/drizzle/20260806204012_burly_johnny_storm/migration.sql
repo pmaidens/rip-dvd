@@ -1,4 +1,10 @@
 ALTER TABLE `encode_jobs` ADD `publication_completion_pending` integer DEFAULT false NOT NULL;--> statement-breakpoint
+UPDATE `encode_jobs`
+SET `publication_completion_pending` = true
+WHERE `status` = 'completed'
+  AND `publication_pending` = true
+  AND `partial_cleanup_output_path` IS NOT NULL
+  AND `partial_cleanup_claim_token` IS NOT NULL;--> statement-breakpoint
 PRAGMA foreign_keys=OFF;--> statement-breakpoint
 CREATE TABLE `__new_encode_jobs` (
 	`id` text PRIMARY KEY,
@@ -41,7 +47,7 @@ CREATE TABLE `__new_encode_jobs` (
 	CONSTRAINT "encode_jobs_partial_cleanup_lease_check" CHECK("partial_cleanup_lease_token" is null or "partial_cleanup_claim_token" is not null)
 );
 --> statement-breakpoint
-INSERT INTO `__new_encode_jobs`(`id`, `disc_selection_id`, `encoding_profile_id`, `output_path`, `reserves_output_path`, `status`, `priority`, `replace_existing_output`, `replacement_output_identity`, `partial_cleanup_output_path`, `partial_cleanup_claim_token`, `partial_cleanup_lease_token`, `publication_pending`, `progress_phase`, `progress_percent`, `progress_eta_seconds`, `claimed_by`, `claim_token`, `claimed_at`, `started_at`, `completed_at`, `error_message`, `created_at`, `updated_at`) SELECT `id`, `disc_selection_id`, `encoding_profile_id`, `output_path`, `reserves_output_path`, `status`, `priority`, `replace_existing_output`, `replacement_output_identity`, `partial_cleanup_output_path`, `partial_cleanup_claim_token`, `partial_cleanup_lease_token`, `publication_pending`, `progress_phase`, `progress_percent`, `progress_eta_seconds`, `claimed_by`, `claim_token`, `claimed_at`, `started_at`, `completed_at`, `error_message`, `created_at`, `updated_at` FROM `encode_jobs`;--> statement-breakpoint
+INSERT INTO `__new_encode_jobs`(`id`, `disc_selection_id`, `encoding_profile_id`, `output_path`, `reserves_output_path`, `status`, `priority`, `replace_existing_output`, `replacement_output_identity`, `partial_cleanup_output_path`, `partial_cleanup_claim_token`, `partial_cleanup_lease_token`, `publication_pending`, `publication_completion_pending`, `progress_phase`, `progress_percent`, `progress_eta_seconds`, `claimed_by`, `claim_token`, `claimed_at`, `started_at`, `completed_at`, `error_message`, `created_at`, `updated_at`) SELECT `id`, `disc_selection_id`, `encoding_profile_id`, `output_path`, `reserves_output_path`, `status`, `priority`, `replace_existing_output`, `replacement_output_identity`, `partial_cleanup_output_path`, `partial_cleanup_claim_token`, `partial_cleanup_lease_token`, `publication_pending`, `publication_completion_pending`, `progress_phase`, `progress_percent`, `progress_eta_seconds`, `claimed_by`, `claim_token`, `claimed_at`, `started_at`, `completed_at`, `error_message`, `created_at`, `updated_at` FROM `encode_jobs`;--> statement-breakpoint
 DROP TABLE `encode_jobs`;--> statement-breakpoint
 ALTER TABLE `__new_encode_jobs` RENAME TO `encode_jobs`;--> statement-breakpoint
 PRAGMA foreign_keys=ON;--> statement-breakpoint

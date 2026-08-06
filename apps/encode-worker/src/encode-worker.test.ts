@@ -93,6 +93,14 @@ const durableQuarantineCrash = vi.hoisted(() => ({
   triggered: false,
 }));
 
+const quarantineRestoreRace = vi.hoisted(() => ({
+  armed: false,
+  competingPath: "",
+  finalPath: "",
+  raced: false,
+  sourcePath: "",
+}));
+
 const matchingCompletionRace = vi.hoisted(() => ({
   armed: false,
   competingPath: "",
@@ -286,6 +294,18 @@ vi.mock("node:fs", async (importOriginal) => {
     },
     linkSync: (sourcePath: string, destinationPath: string) => {
       if (
+        quarantineRestoreRace.armed &&
+        !quarantineRestoreRace.raced &&
+        sourcePath === quarantineRestoreRace.sourcePath &&
+        destinationPath === quarantineRestoreRace.finalPath
+      ) {
+        actual.renameSync(
+          quarantineRestoreRace.competingPath,
+          quarantineRestoreRace.finalPath,
+        );
+        quarantineRestoreRace.raced = true;
+      }
+      if (
         replacementLinkFailure.armed &&
         !replacementLinkFailure.failed &&
         dirname(destinationPath) ===
@@ -348,6 +368,18 @@ vi.mock("node:fs", async (importOriginal) => {
       return descriptor;
     },
     renameSync: (sourcePath: string, destinationPath: string) => {
+      if (
+        quarantineRestoreRace.armed &&
+        !quarantineRestoreRace.raced &&
+        sourcePath === quarantineRestoreRace.sourcePath &&
+        destinationPath === quarantineRestoreRace.finalPath
+      ) {
+        actual.renameSync(
+          quarantineRestoreRace.competingPath,
+          quarantineRestoreRace.finalPath,
+        );
+        quarantineRestoreRace.raced = true;
+      }
       if (
         durableQuarantineCrash.armed &&
         !durableQuarantineCrash.triggered &&
@@ -588,6 +620,11 @@ afterEach(() => {
   durableQuarantineCrash.finalPath = "";
   durableQuarantineCrash.raced = false;
   durableQuarantineCrash.triggered = false;
+  quarantineRestoreRace.armed = false;
+  quarantineRestoreRace.competingPath = "";
+  quarantineRestoreRace.finalPath = "";
+  quarantineRestoreRace.raced = false;
+  quarantineRestoreRace.sourcePath = "";
   matchingCompletionRace.armed = false;
   matchingCompletionRace.competingPath = "";
   matchingCompletionRace.finalPath = "";
@@ -3238,6 +3275,144 @@ describe("encode worker polling", () => {
     fixture.access.close();
   });
 
+  it("preserves pre-existing tentative recovery authority across an identity race", async () => {
+    const fixture = createQueuedJob();
+    const options = {
+      access: fixture.access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      signal: new AbortController().signal,
+    };
+    mkdirSync(fixture.mediaLibraryPath, { recursive: true });
+    const claim = fixture.access.encodeJobs.claimNext(
+      "tentative-recovery-owner",
+    );
+    if (!claim) {
+      throw new Error("Expected the tentative recovery claim");
+    }
+    completionCommitRace.finalPath = join(
+      realpathSync(fixture.mediaLibraryPath),
+      basename(fixture.outputPath),
+    );
+    const partialPath = claimPartialPath(
+      completionCommitRace.finalPath,
+      claim.claimToken,
+    );
+    completionCommitRace.competingPath = join(
+      fixture.mediaLibraryPath,
+      ".tentative-recovery-race-competitor.mkv",
+    );
+    writeFileSync(partialPath, "tentative recoverable publication", {
+      flag: "wx",
+    });
+    linkSync(partialPath, completionCommitRace.finalPath);
+    writeFileSync(
+      completionCommitRace.competingPath,
+      "tentative recovery competitor",
+      { flag: "wx" },
+    );
+    fixture.access.encodeJobs.registerPartialCleanup(claim, {
+      publicationPending: true,
+    });
+    fixture.access.encodeJobs.fail(claim, "simulated publication failure");
+    const child = spawnProcess(
+      process.execPath,
+      [
+        fileURLToPath(
+          new URL(
+            "./test-fixtures/tentative-completion-kill-helper.mjs",
+            import.meta.url,
+          ),
+        ),
+        "recovery",
+        fixture.databasePath,
+      ],
+      { stdio: ["pipe", "pipe", "pipe"] },
+    );
+    await waitForChildLine(child, "tentative-completed");
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        publicationCompletionPending: true,
+        publicationPending: true,
+        status: "completed",
+      }),
+    ]);
+    await killChild(child);
+
+    racePublicationCompletionCommit();
+    const completePublishedPartial =
+      fixture.access.encodeJobs.completePublishedPartial.bind(
+        fixture.access.encodeJobs,
+      );
+    const racingAccess: DataAccess = {
+      ...fixture.access,
+      encodeJobs: {
+        ...fixture.access.encodeJobs,
+        completePublishedPartial(cleanup, publicationMatches) {
+          return completePublishedPartial(cleanup, () => {
+            const matches = publicationMatches();
+            if (!completionCommitRace.triggered) {
+              completionCommitRace.armed = true;
+            }
+            return matches;
+          });
+        },
+      },
+    };
+
+    await pollEncodeWorker({
+      ...options,
+      access: racingAccess,
+      runner: { run: vi.fn() },
+      workerId: "tentative-recovery-race",
+    });
+
+    expect(completionCommitRace.triggered).toBe(true);
+    expect(readFileSync(completionCommitRace.finalPath, "utf8")).toBe(
+      "tentative recovery competitor",
+    );
+    expect(readFileSync(partialPath, "utf8")).toBe(
+      "tentative recoverable publication",
+    );
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        partialCleanupClaimToken: claim.claimToken,
+        publicationCompletionPending: true,
+        publicationPending: true,
+        status: "completed",
+      }),
+    ]);
+
+    await pollEncodeWorker({
+      ...options,
+      runner: { run: vi.fn() },
+      workerId: "tentative-recovery-cleanup",
+    });
+
+    expect(readFileSync(completionCommitRace.finalPath, "utf8")).toBe(
+      "tentative recovery competitor",
+    );
+    expect(existsSync(partialPath)).toBe(false);
+    expect(quarantinedContents(partialPath)).toContain(
+      "tentative recoverable publication",
+    );
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        completedAt: null,
+        partialCleanupClaimToken: null,
+        publicationCompletionPending: false,
+        publicationPending: false,
+        status: "failed",
+      }),
+    ]);
+    fixture.access.close();
+  });
+
   it("retains active-mutation provenance when the final changes at completion", async () => {
     vi.useFakeTimers();
     const fixture = createQueuedJob();
@@ -4871,11 +5046,47 @@ describe("encode worker polling", () => {
     );
 
     durableQuarantineCrash.armed = false;
+    const laterCompetitorPath = join(
+      fixture.mediaLibraryPath,
+      ".quarantine-restore-competitor.mkv",
+    );
+    writeFileSync(laterCompetitorPath, "newer authoritative final", {
+      flag: "wx",
+    });
+    quarantineRestoreRace.armed = true;
+    quarantineRestoreRace.competingPath = laterCompetitorPath;
+    quarantineRestoreRace.finalPath = canonicalFinalPath;
+    quarantineRestoreRace.sourcePath = durablePath;
     vi.advanceTimersByTime(ENCODE_JOB_LEASE_DURATION_MS + 1);
     await pollEncodeWorker({
       ...options,
       runner: { run: vi.fn() },
       workerId: "quarantine-boundary-recovery",
+    });
+
+    expect(quarantineRestoreRace.raced).toBe(true);
+    expect(readFileSync(canonicalFinalPath, "utf8")).toBe(
+      "newer authoritative final",
+    );
+    expect(readFileSync(durablePath, "utf8")).toBe(
+      "external authoritative final",
+    );
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        partialCleanupClaimToken: claim.claimToken,
+        publicationPending: false,
+        status: "failed",
+      }),
+    ]);
+
+    quarantineRestoreRace.armed = false;
+    rmSync(canonicalFinalPath);
+    vi.advanceTimersByTime(ENCODE_JOB_LEASE_DURATION_MS + 1);
+    await pollEncodeWorker({
+      ...options,
+      runner: { run: vi.fn() },
+      workerId: "quarantine-boundary-final-recovery",
     });
 
     expect(readFileSync(canonicalFinalPath, "utf8")).toBe(
