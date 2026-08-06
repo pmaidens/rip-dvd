@@ -205,6 +205,7 @@ export interface EncodeJob {
   partialCleanupClaimToken: EncodeJobClaimToken | null;
   partialCleanupLeaseToken: EncodeJobCleanupClaimToken | null;
   publicationPending: boolean;
+  publicationCompletionPending: boolean;
   progressPhase: EncodeProgressPhase | null;
   progressPercent: number;
   progressEtaSeconds: number | null;

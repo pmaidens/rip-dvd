@@ -1956,6 +1956,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual(expect.arrayContaining([
       { name: "partial_cleanup_lease_token" },
+      { name: "publication_completion_pending" },
       { name: "publication_pending" },
     ]));
     expect(
@@ -1965,6 +1966,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         )
         .all(),
     ).toEqual([
+      {
+        name: "20260806204012_burly_johnny_storm",
+      },
       {
         name: "20260805163203_unique_gideon",
       },
@@ -1982,9 +1986,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260804184603_tense_zzzax",
-      },
-      {
-        name: "20260804182121_dizzy_wither",
       },
     ]);
     expect(

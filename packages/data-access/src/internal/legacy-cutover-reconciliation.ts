@@ -231,12 +231,30 @@ export function reconcileLegacyRepairCutover(
         identity.archivePath,
       );
     }
+    const activePublicationMutation = sqlite.prepare(`
+      SELECT encode_jobs.id
+      FROM encode_jobs
+      INNER JOIN disc_selections
+        ON disc_selections.id = encode_jobs.disc_selection_id
+      INNER JOIN original_disc_archives
+        ON original_disc_archives.id = disc_selections.original_disc_archive_id
+      WHERE original_disc_archives.legacy_cutover_pending = true
+        AND encode_jobs.status = 'running'
+        AND encode_jobs.partial_cleanup_lease_token IS NOT NULL
+      LIMIT 1
+    `).get();
+    if (activePublicationMutation !== undefined) {
+      throw new Error(
+        "Legacy cutover is blocked by an active Encode publication mutation",
+      );
+    }
     sqlite.prepare(`
       UPDATE encode_jobs
       SET partial_cleanup_output_path = output_path,
           partial_cleanup_claim_token = claim_token,
           partial_cleanup_lease_token = NULL,
           publication_pending = 0,
+          publication_completion_pending = 0,
           status = 'failed',
           completed_at = NULL,
           error_message = 'Encode Job invalidated by legacy catalog cutover repair',

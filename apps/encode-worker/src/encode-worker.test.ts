@@ -24,6 +24,7 @@ import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 
 import {
+  createDataAccess,
   ENCODE_JOB_LEASE_DURATION_MS,
   type DataAccess,
 } from "@rip-dvd/data-access";
@@ -80,6 +81,15 @@ const cleanupRollbackRace = vi.hoisted(() => ({
 const staleCleanupRenameCrash = vi.hoisted(() => ({
   armed: false,
   finalPath: "",
+  triggered: false,
+}));
+
+const durableQuarantineCrash = vi.hoisted(() => ({
+  armed: false,
+  competingPath: "",
+  destinationPath: "",
+  finalPath: "",
+  raced: false,
   triggered: false,
 }));
 
@@ -339,6 +349,21 @@ vi.mock("node:fs", async (importOriginal) => {
     },
     renameSync: (sourcePath: string, destinationPath: string) => {
       if (
+        durableQuarantineCrash.armed &&
+        !durableQuarantineCrash.triggered &&
+        sourcePath === durableQuarantineCrash.finalPath &&
+        destinationPath === durableQuarantineCrash.destinationPath
+      ) {
+        actual.renameSync(
+          durableQuarantineCrash.competingPath,
+          durableQuarantineCrash.finalPath,
+        );
+        durableQuarantineCrash.raced = true;
+        actual.renameSync(sourcePath, destinationPath);
+        durableQuarantineCrash.triggered = true;
+        throw new Error("simulated process kill after quarantine rename");
+      }
+      if (
         lateCutoverRace.armed &&
         !lateCutoverRace.raced &&
         sourcePath === lateCutoverRace.replacementPath &&
@@ -557,6 +582,12 @@ afterEach(() => {
   staleCleanupRenameCrash.armed = false;
   staleCleanupRenameCrash.finalPath = "";
   staleCleanupRenameCrash.triggered = false;
+  durableQuarantineCrash.armed = false;
+  durableQuarantineCrash.competingPath = "";
+  durableQuarantineCrash.destinationPath = "";
+  durableQuarantineCrash.finalPath = "";
+  durableQuarantineCrash.raced = false;
+  durableQuarantineCrash.triggered = false;
   matchingCompletionRace.armed = false;
   matchingCompletionRace.competingPath = "";
   matchingCompletionRace.finalPath = "";
@@ -771,6 +802,13 @@ function claimReplacementPath(outputPath: string, claimToken: string): string {
 
 function priorFinalPath(outputPath: string, claimToken: string): string {
   return `${outputPath}.failed.${claimToken}`;
+}
+
+function cleanupQuarantinePath(
+  outputPath: string,
+  claimToken: string,
+): string {
+  return `${outputPath}.failed.${claimToken}.publication-rollback`;
 }
 
 function failPublicationFenceCommit(finalPath: string): void {
@@ -4751,6 +4789,217 @@ describe("encode worker polling", () => {
       ]);
       vi.useRealTimers();
       fixture.access.close();
+    },
+  );
+
+  it("recovers an external final moved after quarantine validation when the process dies after rename", async () => {
+    vi.useFakeTimers();
+    const fixture = createQueuedJob();
+    const options = {
+      access: fixture.access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      signal: new AbortController().signal,
+    };
+    await pollEncodeWorker({
+      ...options,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "known good encode", { flag: "wx" });
+        }),
+      },
+    });
+    fixture.access.encodeJobs.requeue(fixture.job.id);
+    const claim = fixture.access.encodeJobs.claimNext(
+      "quarantine-boundary-publisher",
+    );
+    if (!claim) {
+      throw new Error("Expected the quarantine-boundary claim");
+    }
+    const canonicalFinalPath = join(
+      realpathSync(fixture.mediaLibraryPath),
+      basename(fixture.outputPath),
+    );
+    const partialPath = claimPartialPath(
+      canonicalFinalPath,
+      claim.claimToken,
+    );
+    const priorPath = priorFinalPath(
+      canonicalFinalPath,
+      claim.claimToken,
+    );
+    const durablePath = cleanupQuarantinePath(
+      canonicalFinalPath,
+      claim.claimToken,
+    );
+    const competitorPath = join(
+      fixture.mediaLibraryPath,
+      ".quarantine-boundary-competitor.mkv",
+    );
+    writeFileSync(partialPath, "revoked worker publication", { flag: "wx" });
+    writeFileSync(competitorPath, "external authoritative final", {
+      flag: "wx",
+    });
+    const publication = fixture.access.encodeJobs.registerPartialCleanup(
+      claim,
+      { publicationPending: true },
+    );
+    renameSync(canonicalFinalPath, priorPath);
+    linkSync(partialPath, canonicalFinalPath);
+    fixture.access.encodeJobs.revokePublication(claim, publication);
+    fixture.access.encodeJobs.fail(claim, "publication revoked", {
+      preserveReplacementAuthority: true,
+    });
+    durableQuarantineCrash.armed = true;
+    durableQuarantineCrash.competingPath = competitorPath;
+    durableQuarantineCrash.destinationPath = durablePath;
+    durableQuarantineCrash.finalPath = canonicalFinalPath;
+
+    await pollEncodeWorker({
+      ...options,
+      runner: { run: vi.fn() },
+      workerId: "quarantine-boundary-crash",
+    });
+
+    expect(durableQuarantineCrash.raced).toBe(true);
+    expect(durableQuarantineCrash.triggered).toBe(true);
+    expect(existsSync(canonicalFinalPath)).toBe(false);
+    expect(readFileSync(durablePath, "utf8")).toBe(
+      "external authoritative final",
+    );
+
+    durableQuarantineCrash.armed = false;
+    vi.advanceTimersByTime(ENCODE_JOB_LEASE_DURATION_MS + 1);
+    await pollEncodeWorker({
+      ...options,
+      runner: { run: vi.fn() },
+      workerId: "quarantine-boundary-recovery",
+    });
+
+    expect(readFileSync(canonicalFinalPath, "utf8")).toBe(
+      "external authoritative final",
+    );
+    expect(existsSync(durablePath)).toBe(false);
+    expect(existsSync(partialPath)).toBe(false);
+    expect(quarantinedContents(partialPath)).toContain(
+      "revoked worker publication",
+    );
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        partialCleanupClaimToken: null,
+        publicationPending: false,
+        status: "failed",
+      }),
+    ]);
+    fixture.access.close();
+  });
+
+  it.each([
+    { completion: "normal" },
+    { completion: "recovery" },
+    { completion: "active-mutation" },
+  ] as const)(
+    "recovers a $completion publication after death with tentative completion committed",
+    async ({ completion }) => {
+      const fixture = createQueuedJob();
+      mkdirSync(fixture.mediaLibraryPath, { recursive: true });
+      const claim = fixture.access.encodeJobs.claimNext(
+        `tentative-${completion}`,
+      );
+      if (!claim) {
+        throw new Error(`Expected the tentative-${completion} claim`);
+      }
+      const canonicalFinalPath = join(
+        realpathSync(fixture.mediaLibraryPath),
+        basename(fixture.outputPath),
+      );
+      const partialPath = claimPartialPath(
+        canonicalFinalPath,
+        claim.claimToken,
+      );
+      const competitorPath = join(
+        fixture.mediaLibraryPath,
+        `.tentative-${completion}-competitor.mkv`,
+      );
+      writeFileSync(partialPath, `tentative ${completion} worker output`, {
+        flag: "wx",
+      });
+      linkSync(partialPath, canonicalFinalPath);
+      writeFileSync(
+        competitorPath,
+        `tentative ${completion} external final`,
+        { flag: "wx" },
+      );
+      const cleanup = fixture.access.encodeJobs.registerPartialCleanup(claim, {
+        publicationPending: true,
+      });
+      if (completion === "recovery") {
+        fixture.access.encodeJobs.fail(claim, "simulated publication failure");
+      } else {
+        fixture.access.encodeJobs.beginPublicationMutation(
+          claim,
+          cleanup,
+        );
+      }
+      const child = spawnProcess(
+        process.execPath,
+        [
+          fileURLToPath(
+            new URL(
+              "./test-fixtures/tentative-completion-kill-helper.mjs",
+              import.meta.url,
+            ),
+          ),
+          completion,
+          fixture.databasePath,
+        ],
+        { stdio: ["pipe", "pipe", "pipe"] },
+      );
+      await waitForChildLine(child, "tentative-completed");
+      expect(fixture.access.encodeJobs.list()).toEqual([
+        expect.objectContaining({
+          id: fixture.job.id,
+          partialCleanupClaimToken: claim.claimToken,
+          publicationPending: true,
+          status: "completed",
+        }),
+      ]);
+      renameSync(competitorPath, canonicalFinalPath);
+      await killChild(child);
+      fixture.access.close();
+
+      const recovered = createDataAccess({ databasePath: fixture.databasePath });
+      await pollEncodeWorker({
+        access: recovered,
+        concurrency: 1,
+        log: vi.fn(),
+        mediaLibraryPath: fixture.mediaLibraryPath,
+        originalsLibraryPath: fixture.originalsLibraryPath,
+        runner: { run: vi.fn() },
+        signal: new AbortController().signal,
+        workerId: `tentative-${completion}-recovery`,
+      });
+
+      expect(readFileSync(canonicalFinalPath, "utf8")).toBe(
+        `tentative ${completion} external final`,
+      );
+      expect(existsSync(partialPath)).toBe(false);
+      expect(quarantinedContents(partialPath)).toContain(
+        `tentative ${completion} worker output`,
+      );
+      expect(recovered.encodeJobs.list()).toEqual([
+        expect.objectContaining({
+          id: fixture.job.id,
+          completedAt: null,
+          partialCleanupClaimToken: null,
+          publicationPending: false,
+          status: "failed",
+        }),
+      ]);
+      recovered.close();
     },
   );
 

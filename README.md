@@ -671,7 +671,10 @@ A publisher must also atomically revoke its current SQLite publication authority
 before any failure rollback; an expired publisher leaves the final and durable
 provenance for reconciliation. Revoked-publication rollback acquires a
 recoverable cleanup lease after re-statting the final and immediately before its
-atomic rename, so a stale reconciler cannot move a later accepted retry. Legacy
+atomic rename, so a stale reconciler cannot move a later accepted retry. Its
+claim-derived quarantine path is reconstructible from durable provenance, so a
+process killed after the rename can restore an external final moved in the
+post-stat syscall gap. Legacy
 deterministic partials and ordinary failed attempts are moved with one atomic rename to
 collision-resistant `.failed` paths. A timed-out child keeps ownership of its
 partial until this worker observes that HandBrake closed it. Expired claims
@@ -695,7 +698,10 @@ SQLite writer transactions. Short transactions persist and authenticate the
 mutation token around those checks. Completion retains that provenance and the
 worker partial through a post-commit identity check; a final changed across the
 commit boundary restores the nonaccepted job state for reconciliation instead
-of unlinking the worker output. A stalled media mount therefore cannot
+of unlinking the worker output. The provisional completed row carries a durable
+completion-pending marker, so restart cleanup converts a mismatched tentative
+success back to a retryable failure before clearing provenance. A stalled media
+mount therefore cannot
 monopolize SQLite, while a mismatch still leaves durable recovery authority.
 Its claim-scoped recovery path lets crash recovery restore the prior final when
 publication did not complete, and any failure after replacement
