@@ -706,6 +706,31 @@ try {
       }],
     }));
 
+    const pendingPublication = access.encodeJobs.registerPartialCleanup(
+      running,
+      { publicationPending: true },
+    );
+    const activeMutation = access.encodeJobs.beginPublicationMutation(
+      running,
+      pendingPublication,
+    );
+    expect(() =>
+      access.legacySidecars.importLibrary({ originalsLibraryPath }),
+    ).toThrow(/active Encode publication mutation/);
+    expect(access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: running.id,
+        partialCleanupLeaseToken: activeMutation.leaseToken,
+        publicationPending: true,
+        status: "running",
+      }),
+    ]);
+    const revokedMutation = access.encodeJobs.revokePublication(
+      running,
+      activeMutation,
+    );
+    access.encodeJobs.completePartialCleanup(revokedMutation);
+
     expect(() =>
       access.legacySidecars.importLibrary({ originalsLibraryPath }),
     ).toThrow(/injected marker write failure/);

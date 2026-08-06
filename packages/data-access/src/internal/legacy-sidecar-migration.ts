@@ -8,6 +8,7 @@ import {
   exists,
   gt,
   inArray,
+  isNotNull,
   isNull,
   or,
   sql,
@@ -248,6 +249,27 @@ export function createLegacySidecarImportAccess(
               )
               .all();
             for (const archive of relatedArchives) {
+              const activePublicationMutation = transaction
+                .select({ id: encodeJobs.id })
+                .from(encodeJobs)
+                .innerJoin(
+                  discSelections,
+                  eq(discSelections.id, encodeJobs.discSelectionId),
+                )
+                .where(and(
+                  eq(
+                    discSelections.originalDiscArchiveId,
+                    archive.id,
+                  ),
+                  eq(encodeJobs.status, "running"),
+                  isNotNull(encodeJobs.partialCleanupLeaseToken),
+                ))
+                .get();
+              if (activePublicationMutation) {
+                throw new DomainInvariantError(
+                  "Legacy cutover is blocked by an active Encode publication mutation",
+                );
+              }
               cutoverFenceArchiveIds.add(archive.id);
               newlyFencedArchiveIds.add(archive.id);
               if (archive.catalogReviewedAt !== null) {

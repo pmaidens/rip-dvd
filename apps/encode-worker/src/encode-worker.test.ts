@@ -33,6 +33,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createNodeHandBrakeRunner,
   nodeAtomicPathExchange,
+  nodePublicationMutationLock,
   pollEncodeWorker,
   type HandBrakeRunner,
 } from "./encode-worker.js";
@@ -133,6 +134,20 @@ const outputHierarchyDurability = vi.hoisted(() => ({
   syncedDirectories: new Set<string>(),
 }));
 
+const retainedFinalMutation = vi.hoisted(() => ({
+  armed: false,
+  finalPath: "",
+  mutated: false,
+}));
+
+const completionMediaProbe = vi.hoisted(() => ({
+  armed: false,
+  databasePath: "",
+  finalPath: "",
+  result: undefined as ReturnType<typeof spawnSync> | undefined,
+  triggered: false,
+}));
+
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:child_process")>();
   return {
@@ -217,6 +232,16 @@ vi.mock("node:fs", async (importOriginal) => {
       actual.fsyncSync(descriptor);
     },
     lstatSync: (path: string) => {
+      if (
+        completionMediaProbe.armed &&
+        !completionMediaProbe.triggered &&
+        path === completionMediaProbe.finalPath
+      ) {
+        completionMediaProbe.result = probeSQLiteWriter(
+          completionMediaProbe.databasePath,
+        );
+        completionMediaProbe.triggered = true;
+      }
       if (preQuarantineRace.armed && path === preQuarantineRace.finalPath) {
         preQuarantineRace.finalReads += 1;
         if (
@@ -255,6 +280,17 @@ vi.mock("node:fs", async (importOriginal) => {
         });
       }
       actual.linkSync(sourcePath, destinationPath);
+      if (
+        retainedFinalMutation.armed &&
+        !retainedFinalMutation.mutated &&
+        destinationPath.endsWith(".rip-dvd-publish")
+      ) {
+        actual.writeFileSync(
+          retainedFinalMutation.finalPath,
+          "same inode changed content",
+        );
+        retainedFinalMutation.mutated = true;
+      }
       if (
         quarantineRace.armed &&
         !quarantineRace.raced &&
@@ -541,6 +577,14 @@ afterEach(() => {
   outputHierarchyDurability.armed = false;
   outputHierarchyDurability.directories = [];
   outputHierarchyDurability.syncedDirectories.clear();
+  retainedFinalMutation.armed = false;
+  retainedFinalMutation.finalPath = "";
+  retainedFinalMutation.mutated = false;
+  completionMediaProbe.armed = false;
+  completionMediaProbe.databasePath = "";
+  completionMediaProbe.finalPath = "";
+  completionMediaProbe.result = undefined;
+  completionMediaProbe.triggered = false;
   publicationRace.resume?.();
   publicationRace.armed = false;
   publicationRace.finalPath = "";
@@ -1615,8 +1659,8 @@ describe("encode worker polling", () => {
     const renewClaim = fixture.access.encodeJobs.renewClaim.bind(
       fixture.access.encodeJobs,
     );
-    const withClaimMutationFence =
-      fixture.access.encodeJobs.withClaimMutationFence.bind(
+    const beginPublicationMutation =
+      fixture.access.encodeJobs.beginPublicationMutation.bind(
         fixture.access.encodeJobs,
       );
     let firstRenewalCompleted = false;
@@ -1633,13 +1677,13 @@ describe("encode worker polling", () => {
           }
           return claim;
         },
-        withClaimMutationFence(claim, mutation) {
+        beginPublicationMutation(claim, cleanup) {
           vi.advanceTimersByTime(ENCODE_JOB_LEASE_DURATION_MS + 1);
           expect(reconcilingAccess.encodeJobs.recoverExpiredClaims()).toEqual([
             expect.objectContaining({ id: claim.id, status: "failed" }),
           ]);
           invalidatedBeforeFence = true;
-          return withClaimMutationFence(claim, mutation);
+          return beginPublicationMutation(claim, cleanup);
         },
       },
     };
@@ -1674,6 +1718,156 @@ describe("encode worker polling", () => {
       }),
     ]);
     reconcilingAccess.close();
+    fixture.access.close();
+  });
+
+  it("keeps a committed publication mutation authoritative through recovery", async () => {
+    vi.useFakeTimers();
+    const fixture = createQueuedJob();
+    const recoveryAccess = createLegacySidecarDataAccess({
+      databasePath: fixture.databasePath,
+    });
+    const options = {
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      signal: new AbortController().signal,
+    };
+    await pollEncodeWorker({
+      ...options,
+      access: fixture.access,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "known good encode", { flag: "wx" });
+        }),
+      },
+    });
+    fixture.access.encodeJobs.requeue(fixture.job.id);
+    const beginPublicationMutation =
+      fixture.access.encodeJobs.beginPublicationMutation.bind(
+        fixture.access.encodeJobs,
+      );
+    let recoveryResult: ReturnType<
+      typeof recoveryAccess.encodeJobs.recoverExpiredClaims
+    > | undefined;
+    let competingMutationLockHandle: number | null | undefined;
+    const mutationLockPath = join(
+      realpathSync(fixture.mediaLibraryPath),
+      `.${basename(fixture.outputPath)}.rip-dvd-mutation-lock`,
+    );
+    const mutationGapAccess: DataAccess = {
+      ...fixture.access,
+      encodeJobs: {
+        ...fixture.access.encodeJobs,
+        renewClaim(claim) {
+          return claim;
+        },
+        beginPublicationMutation(claim, cleanup) {
+          const authorized = beginPublicationMutation(claim, cleanup);
+          vi.advanceTimersByTime(ENCODE_JOB_LEASE_DURATION_MS + 1);
+          recoveryResult =
+            recoveryAccess.encodeJobs.recoverExpiredClaims();
+          competingMutationLockHandle =
+            nodePublicationMutationLock.tryAcquire(mutationLockPath);
+          return authorized;
+        },
+      },
+    };
+
+    await pollEncodeWorker({
+      ...options,
+      access: mutationGapAccess,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "authorized replacement", { flag: "wx" });
+        }),
+      },
+      workerId: "mutation-gap-publisher",
+    });
+
+    expect(recoveryResult).toEqual([]);
+    expect(competingMutationLockHandle).toBe(null);
+    expect(readFileSync(fixture.outputPath, "utf8")).toBe(
+      "authorized replacement",
+    );
+    expect(recoveryAccess.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        partialCleanupLeaseToken: null,
+        publicationPending: false,
+        status: "completed",
+      }),
+    ]);
+    recoveryAccess.close();
+    fixture.access.close();
+  });
+
+  it("recovers a publication mutation abandoned after durable revocation", async () => {
+    vi.useFakeTimers();
+    const fixture = createQueuedJob();
+    const options = {
+      access: fixture.access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      signal: new AbortController().signal,
+    };
+    await pollEncodeWorker({
+      ...options,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "known good encode", { flag: "wx" });
+        }),
+      },
+    });
+    fixture.access.encodeJobs.requeue(fixture.job.id);
+    const claim = fixture.access.encodeJobs.claimNext("revocation-gap");
+    if (!claim) {
+      throw new Error("Expected the revocation-gap claim");
+    }
+    const canonicalFinalPath = join(
+      realpathSync(fixture.mediaLibraryPath),
+      basename(fixture.outputPath),
+    );
+    const partialPath = claimPartialPath(
+      canonicalFinalPath,
+      claim.claimToken,
+    );
+    writeFileSync(partialPath, "abandoned replacement", { flag: "wx" });
+    const publication = fixture.access.encodeJobs.registerPartialCleanup(
+      claim,
+      { publicationPending: true },
+    );
+    const mutation = fixture.access.encodeJobs.beginPublicationMutation(
+      claim,
+      publication,
+    );
+    fixture.access.encodeJobs.revokePublication(claim, mutation);
+
+    vi.advanceTimersByTime(ENCODE_JOB_LEASE_DURATION_MS + 1);
+    await pollEncodeWorker({
+      ...options,
+      runner: { run: vi.fn() },
+      workerId: "revocation-gap-recovery",
+    });
+
+    expect(readFileSync(canonicalFinalPath, "utf8")).toBe(
+      "known good encode",
+    );
+    expect(existsSync(partialPath)).toBe(false);
+    expect(quarantinedContents(partialPath)).toContain(
+      "abandoned replacement",
+    );
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        partialCleanupClaimToken: null,
+        publicationPending: false,
+        status: "failed",
+      }),
+    ]);
     fixture.access.close();
   });
 
@@ -2054,7 +2248,7 @@ describe("encode worker polling", () => {
     await pollEncodeWorker({
       ...options,
       atomicPathExchange: {
-        exchange(firstPath, secondPath, expectedSecond) {
+        exchange(firstPath, secondPath) {
           if (lateCutoverRace.armed && !lateCutoverRace.raced) {
             renameSync(
               lateCutoverRace.competingPath,
@@ -2062,11 +2256,7 @@ describe("encode worker polling", () => {
             );
             lateCutoverRace.raced = true;
           }
-          return nodeAtomicPathExchange.exchange(
-            firstPath,
-            secondPath,
-            expectedSecond,
-          );
+          nodeAtomicPathExchange.exchange(firstPath, secondPath);
         },
       },
       runner: {
@@ -2099,6 +2289,55 @@ describe("encode worker polling", () => {
     );
     expect(fixture.access.encodeJobs.list()).toEqual([
       expect.objectContaining({ id: fixture.job.id, status: "failed" }),
+    ]);
+    fixture.access.close();
+  });
+
+  it("revokes replacement authority when the retained inode content changes", async () => {
+    const fixture = createQueuedJob();
+    const options = {
+      access: fixture.access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      signal: new AbortController().signal,
+    };
+    await pollEncodeWorker({
+      ...options,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "known good encode", { flag: "wx" });
+        }),
+      },
+    });
+    fixture.access.encodeJobs.requeue(fixture.job.id);
+    retainedFinalMutation.finalPath = join(
+      realpathSync(fixture.mediaLibraryPath),
+      basename(fixture.outputPath),
+    );
+    retainedFinalMutation.armed = true;
+
+    await pollEncodeWorker({
+      ...options,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "worker replacement", { flag: "wx" });
+        }),
+      },
+    });
+
+    expect(retainedFinalMutation.mutated).toBe(true);
+    expect(readFileSync(fixture.outputPath, "utf8")).toBe(
+      "same inode changed content",
+    );
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        replacementOutputIdentity: null,
+        replaceExistingOutput: false,
+        status: "failed",
+      }),
     ]);
     fixture.access.close();
   });
@@ -2137,15 +2376,10 @@ describe("encode worker polling", () => {
     await pollEncodeWorker({
       ...options,
       atomicPathExchange: {
-        exchange(firstPath, secondPath, expectedSecond) {
-          const exchanged = nodeAtomicPathExchange.exchange(
-            firstPath,
-            secondPath,
-            expectedSecond,
-          );
+        exchange(firstPath, secondPath) {
+          nodeAtomicPathExchange.exchange(firstPath, secondPath);
           renameSync(competingPath, finalPath);
           raced = true;
-          return exchanged;
         },
       },
       runner: {
@@ -2240,23 +2474,14 @@ describe("encode worker polling", () => {
     await pollEncodeWorker({
       ...options,
       atomicPathExchange: {
-        exchange(firstPath, secondPath, expectedSecond) {
+        exchange(firstPath, secondPath) {
           exchanges += 1;
           if (exchanges === 1) {
             renameSync(displacedPath, finalPath);
-            return nodeAtomicPathExchange.exchange(
-              firstPath,
-              secondPath,
-              lstatSync(secondPath),
-            );
           } else if (exchanges === 2) {
             renameSync(newerPath, finalPath);
           }
-          return nodeAtomicPathExchange.exchange(
-            firstPath,
-            secondPath,
-            expectedSecond,
-          );
+          nodeAtomicPathExchange.exchange(firstPath, secondPath);
         },
       },
       runner: {
@@ -2269,7 +2494,7 @@ describe("encode worker polling", () => {
       },
     });
 
-    expect(exchanges).toBe(2);
+    expect(exchanges).toBeGreaterThanOrEqual(2);
     expect(readFileSync(finalPath, "utf8")).toBe("newer competitor");
     expect(readFileSync(partialPath, "utf8")).toBe("worker replacement");
     expect(quarantinedContents(finalPath)).not.toContain("newer competitor");
@@ -2328,13 +2553,9 @@ describe("encode worker polling", () => {
     await pollEncodeWorker({
       ...options,
       atomicPathExchange: {
-        exchange(firstPath, secondPath, expectedSecond) {
+        exchange(firstPath, secondPath) {
           writerResult = probeSQLiteWriter(fixture.databasePath);
-          return nodeAtomicPathExchange.exchange(
-            firstPath,
-            secondPath,
-            expectedSecond,
-          );
+          nodeAtomicPathExchange.exchange(firstPath, secondPath);
         },
       },
       runner: {
@@ -2347,6 +2568,62 @@ describe("encode worker polling", () => {
     expect(writerResult?.status).toBe(0);
     expect(readFileSync(fixture.outputPath, "utf8")).toBe(
       "replacement encode",
+    );
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({ id: fixture.job.id, status: "completed" }),
+    ]);
+    fixture.access.close();
+  });
+
+  it("keeps SQLite writable while completion revalidates media identity", async () => {
+    const fixture = createQueuedJob();
+    const completePublishedClaim =
+      fixture.access.encodeJobs.completePublishedClaim.bind(
+        fixture.access.encodeJobs,
+      );
+    const probingAccess: DataAccess = {
+      ...fixture.access,
+      encodeJobs: {
+        ...fixture.access.encodeJobs,
+        completePublishedClaim(claim, cleanup, publicationMatches) {
+          completionMediaProbe.armed = true;
+          try {
+            return completePublishedClaim(
+              claim,
+              cleanup,
+              publicationMatches,
+            );
+          } finally {
+            completionMediaProbe.armed = false;
+          }
+        },
+      },
+    };
+    completionMediaProbe.databasePath = fixture.databasePath;
+    mkdirSync(fixture.mediaLibraryPath, { recursive: true });
+    completionMediaProbe.finalPath = join(
+      realpathSync(fixture.mediaLibraryPath),
+      basename(fixture.outputPath),
+    );
+
+    await pollEncodeWorker({
+      access: probingAccess,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "completion probe encode", { flag: "wx" });
+        }),
+      },
+      signal: new AbortController().signal,
+    });
+
+    expect(completionMediaProbe.triggered).toBe(true);
+    expect(completionMediaProbe.result?.status).toBe(0);
+    expect(readFileSync(fixture.outputPath, "utf8")).toBe(
+      "completion probe encode",
     );
     expect(fixture.access.encodeJobs.list()).toEqual([
       expect.objectContaining({ id: fixture.job.id, status: "completed" }),
@@ -2440,12 +2717,8 @@ describe("encode worker polling", () => {
     await pollEncodeWorker({
       ...options,
       atomicPathExchange: {
-        exchange(firstPath, secondPath, expectedSecond) {
-          nodeAtomicPathExchange.exchange(
-            firstPath,
-            secondPath,
-            expectedSecond,
-          );
+        exchange(firstPath, secondPath) {
+          nodeAtomicPathExchange.exchange(firstPath, secondPath);
           failedAfterExchange = true;
           throw new Error("simulated post-syscall exchange failure");
         },
@@ -3308,13 +3581,9 @@ describe("encode worker polling", () => {
     await pollEncodeWorker({
       ...options,
       atomicPathExchange: {
-        exchange(firstPath, secondPath, expectedSecond) {
+        exchange(firstPath, secondPath) {
           writerResult = probeSQLiteWriter(fixture.databasePath);
-          return nodeAtomicPathExchange.exchange(
-            firstPath,
-            secondPath,
-            expectedSecond,
-          );
+          nodeAtomicPathExchange.exchange(firstPath, secondPath);
         },
       },
       runner: { run: vi.fn() },
@@ -3415,21 +3684,19 @@ describe("encode worker polling", () => {
     await pollEncodeWorker({
       ...options,
       atomicPathExchange: {
-        exchange(firstPath, secondPath, expectedSecond) {
+        exchange(firstPath, secondPath) {
           exchanges += 1;
-          renameSync(newerPath, canonicalFinalPath);
-          return nodeAtomicPathExchange.exchange(
-            firstPath,
-            secondPath,
-            expectedSecond,
-          );
+          if (exchanges === 1) {
+            renameSync(newerPath, canonicalFinalPath);
+          }
+          nodeAtomicPathExchange.exchange(firstPath, secondPath);
         },
       },
       runner: { run: vi.fn() },
       workerId: "exchange-race-recovery",
     });
 
-    expect(exchanges).toBe(1);
+    expect(exchanges).toBeGreaterThanOrEqual(2);
     expect(readFileSync(canonicalFinalPath, "utf8")).toBe(
       "newer public final",
     );
