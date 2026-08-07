@@ -8,3 +8,5 @@ dist/
 *.tsbuildinfo
 .env
 .local/
+/backups/
+/compose.override.yaml

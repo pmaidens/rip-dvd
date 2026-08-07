@@ -65,10 +65,22 @@ COPY apps/encode-worker apps/encode-worker
 RUN pnpm --filter @rip-dvd/encode-worker build \
   && pnpm --filter @rip-dvd/encode-worker --prod deploy --legacy /encode-worker
 
+FROM shared-builder AS deployment-tools-builder
+RUN pnpm --filter @rip-dvd/data-access --prod deploy --legacy /deployment-tools
+
 FROM node:22.23.1-bookworm-slim AS runtime-base
 ENV NODE_ENV="production"
 WORKDIR /app
 RUN mkdir --parents /data && chown node:node /data
+
+FROM runtime-base AS deployment-tools
+RUN apt-get update \
+  && apt-get install --yes --no-install-recommends sqlite3 \
+  && rm -rf /var/lib/apt/lists/*
+COPY --from=deployment-tools-builder --chown=node:node /deployment-tools ./packages/data-access
+COPY --chown=node:node scripts/migrate-database.mjs ./scripts/migrate-database.mjs
+COPY --chown=node:node docker/backup-sqlite.sh ./scripts/backup-sqlite.sh
+USER node
 
 FROM runtime-base AS web
 ENV HOSTNAME="0.0.0.0"
@@ -96,6 +108,7 @@ COPY --from=shared-builder --chown=node:node /app/packages/worker-runtime/packag
 COPY --from=shared-builder --chown=node:node /app/packages/worker-runtime/dist ./packages/worker-runtime/dist
 RUN mkdir --parents packages/worker-runtime/node_modules/@rip-dvd \
   && ln --symbolic ../../../config packages/worker-runtime/node_modules/@rip-dvd/config
+COPY --chown=node:node docker/worker-priority-entrypoint.sh ./scripts/worker-priority-entrypoint.sh
 
 FROM worker-runtime-base AS archive-worker
 RUN apt-get update \
@@ -107,6 +120,7 @@ RUN mkdir --parents /media/originals \
   && chown node:node /media/originals
 COPY --from=archive-worker-builder --chown=node:node /archive-worker ./apps/archive-worker
 USER node
+ENTRYPOINT ["sh", "/app/scripts/worker-priority-entrypoint.sh"]
 CMD ["node", "apps/archive-worker/dist/index.js"]
 
 FROM worker-runtime-base AS encode-worker
@@ -117,4 +131,5 @@ RUN mkdir --parents /media/movies /media/originals \
   && chown node:node /media/movies /media/originals
 COPY --from=encode-worker-builder --chown=node:node /encode-worker ./apps/encode-worker
 USER node
+ENTRYPOINT ["sh", "/app/scripts/worker-priority-entrypoint.sh"]
 CMD ["node", "apps/encode-worker/dist/index.js"]
