@@ -33,6 +33,10 @@ export interface DashboardLoadState {
   catalogReview: DashboardSectionLoadState<DashboardCatalogReviewItem>;
 }
 
+export type FilesystemVerificationTarget =
+  | "original_disc_archive"
+  | "encode_job_output";
+
 function dashboardState(
   status: "loading" | "error",
 ): DashboardLoadState {
@@ -99,6 +103,32 @@ function StatusBadge({ value }: { value: DashboardStatus }) {
   return <span className={`status status-${value}`}>{displayTerm(value)}</span>;
 }
 
+type FilesystemVerificationDisplay = Pick<
+  DashboardEncodeJob,
+  "verificationStatus" | "verificationMessage" | "verifiedAt"
+>;
+
+function FilesystemVerificationResult({
+  verificationStatus,
+  verificationMessage,
+  verifiedAt,
+}: FilesystemVerificationDisplay) {
+  if (!verificationStatus || !verificationMessage || !verifiedAt) {
+    return <p className="verification-result">Not verified yet.</p>;
+  }
+  return (
+    <div
+      className={`verification-result verification-${verificationStatus}`}
+      role="status"
+      aria-live="polite"
+    >
+      <strong>{displayTerm(verificationStatus)}</strong>
+      <span>{verificationMessage}</span>
+      <small>Verified {formatTimestamp(verifiedAt)}</small>
+    </div>
+  );
+}
+
 interface DashboardJobItemProps {
   title: React.ReactNode;
   subtitle: string;
@@ -106,6 +136,7 @@ interface DashboardJobItemProps {
   progressPercent: number;
   progressDetail?: string | null;
   action?: React.ReactNode;
+  verification?: FilesystemVerificationDisplay;
 }
 
 function DashboardJobItem({
@@ -115,6 +146,7 @@ function DashboardJobItem({
   progressPercent,
   progressDetail,
   action,
+  verification,
 }: DashboardJobItemProps) {
   return (
     <article className="operation-item">
@@ -133,6 +165,7 @@ function DashboardJobItem({
       {status === "failed" ? (
         <p className="job-error">Worker reported a failure.</p>
       ) : null}
+      {verification ? <FilesystemVerificationResult {...verification} /> : null}
       {action}
     </article>
   );
@@ -223,6 +256,8 @@ export function DashboardView({
   requeueingEncodeJobId = null,
   onOpenCatalogReview = () => undefined,
   onCatalogReviewPage = () => undefined,
+  onVerifyFilesystem = () => undefined,
+  verifyingFilesystemTarget = null,
 }: {
   state: DashboardLoadState;
   onApproveDetectedDisc?: (id: string) => void;
@@ -231,6 +266,8 @@ export function DashboardView({
   requeueingEncodeJobId?: string | null;
   onOpenCatalogReview?: (id: string) => void;
   onCatalogReviewPage?: (offset: number) => void;
+  onVerifyFilesystem?: (target: FilesystemVerificationTarget, id: string) => void;
+  verifyingFilesystemTarget?: string | null;
 }) {
   const catalogReviewPage =
     state.catalogReview.status === "loaded"
@@ -398,22 +435,36 @@ export function DashboardView({
             status={job.status}
             progressPercent={job.progressPercent}
             progressDetail={encodeProgressDetail(job)}
+            verification={job}
             action={
-              job.status === "failed" || job.status === "completed" ? (
+              <div className="operation-actions">
+                {job.status === "failed" || job.status === "completed" ? (
+                  <button
+                    type="button"
+                    disabled={requeueingEncodeJobId !== null}
+                    onClick={() => onRequeueEncodeJob(job.id)}
+                  >
+                    {requeueingEncodeJobId === job.id
+                      ? job.status === "failed"
+                        ? "Retrying…"
+                        : "Re-encoding…"
+                      : job.status === "failed"
+                        ? "Retry encode"
+                        : "Re-encode"}
+                  </button>
+                ) : null}
                 <button
                   type="button"
-                  disabled={requeueingEncodeJobId !== null}
-                  onClick={() => onRequeueEncodeJob(job.id)}
+                  disabled={verifyingFilesystemTarget !== null}
+                  onClick={() =>
+                    onVerifyFilesystem("encode_job_output", job.id)
+                  }
                 >
-                  {requeueingEncodeJobId === job.id
-                    ? job.status === "failed"
-                      ? "Retrying…"
-                      : "Re-encoding…"
-                    : job.status === "failed"
-                      ? "Retry encode"
-                      : "Re-encode"}
+                  {verifyingFilesystemTarget === `encode_job_output:${job.id}`
+                    ? "Verifying output…"
+                    : "Verify output file"}
                 </button>
-              ) : null
+              </div>
             }
           />
         )}
@@ -442,12 +493,27 @@ export function DashboardView({
             <p className="item-time">
               Archived {formatTimestamp(archive.archivedAt)}
             </p>
-            <button
-              type="button"
-              onClick={() => onOpenCatalogReview(archive.id)}
-            >
-              Review catalog
-            </button>
+            <FilesystemVerificationResult {...archive} />
+            <div className="operation-actions">
+              <button
+                type="button"
+                onClick={() => onOpenCatalogReview(archive.id)}
+              >
+                Review catalog
+              </button>
+              <button
+                type="button"
+                disabled={verifyingFilesystemTarget !== null}
+                onClick={() =>
+                  onVerifyFilesystem("original_disc_archive", archive.id)
+                }
+              >
+                {verifyingFilesystemTarget ===
+                `original_disc_archive:${archive.id}`
+                  ? "Verifying archive…"
+                  : "Verify archive file"}
+              </button>
+            </div>
           </article>
         )}
       />
@@ -503,6 +569,21 @@ export async function requestArchiveApproval(
   }
 }
 
+export async function requestFilesystemVerification(
+  target: FilesystemVerificationTarget,
+  id: string,
+  fetcher: DashboardFetch = fetch,
+): Promise<void> {
+  const response = await fetcher("/api/filesystem-verification", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ target, id }),
+  });
+  if (!response.ok) {
+    throw new Error("Filesystem verification request failed");
+  }
+}
+
 export function DashboardConnectionStatus({
   connectionStatus,
   streamStatus,
@@ -553,6 +634,11 @@ export function OperationsDashboard() {
     string | null
   >(null);
   const [catalogReviewOffset, setCatalogReviewOffset] = useState(0);
+  const [verifyingFilesystemTarget, setVerifyingFilesystemTarget] = useState<
+    string | null
+  >(null);
+  const [filesystemVerificationFailed, setFilesystemVerificationFailed] =
+    useState(false);
 
   useEffect(() => {
     setState(dashboardState("loading"));
@@ -607,6 +693,25 @@ export function OperationsDashboard() {
       setEncodeRetryFailed(true);
     } finally {
       setRequeueingEncodeJobId(null);
+    }
+  };
+
+  const verifyFilesystem = async (
+    target: FilesystemVerificationTarget,
+    id: string,
+  ) => {
+    if (verifyingFilesystemTarget !== null) {
+      return;
+    }
+    setVerifyingFilesystemTarget(`${target}:${id}`);
+    setFilesystemVerificationFailed(false);
+    try {
+      await requestFilesystemVerification(target, id);
+      setRequestNumber((value) => value + 1);
+    } catch {
+      setFilesystemVerificationFailed(true);
+    } finally {
+      setVerifyingFilesystemTarget(null);
     }
   };
 
@@ -669,6 +774,12 @@ export function OperationsDashboard() {
         </p>
       ) : null}
 
+      {filesystemVerificationFailed ? (
+        <p className="job-error" role="status">
+          Filesystem verification could not be recorded. Try again.
+        </p>
+      ) : null}
+
       <DashboardView
         state={state}
         onApproveDetectedDisc={(id) => void approveDetectedDisc(id)}
@@ -677,6 +788,10 @@ export function OperationsDashboard() {
         requeueingEncodeJobId={requeueingEncodeJobId}
         onOpenCatalogReview={setCatalogReviewArchiveId}
         onCatalogReviewPage={setCatalogReviewOffset}
+        onVerifyFilesystem={(target, id) =>
+          void verifyFilesystem(target, id)
+        }
+        verifyingFilesystemTarget={verifyingFilesystemTarget}
       />
 
       <footer className="dashboard-footer">

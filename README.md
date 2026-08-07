@@ -374,6 +374,17 @@ database intentionally shows an empty state in each section until workers or
 another facade caller record operations; the web app does not infer catalog
 state from library files or process streams.
 
+Original Disc Archives in the review queue and Encode Jobs have explicit
+**Verify archive file** and **Verify output file** actions. These actions ask the
+web process to inspect only the selected database-recorded path through its
+read-only library mounts, then store an accessible, missing, inaccessible, or
+unexpected-error result with a verification time in SQLite. The dashboard and
+SSE snapshots show that stored result without exposing the path. Ordinary
+dashboard, catalog, and queue reads continue to trust SQLite and never scan the
+media or originals libraries implicitly. Verification uses the same trusted
+Origin/Host mutation policy as the other dashboard actions and is exposed at
+`POST /api/filesystem-verification`.
+
 The paged Catalog Review queue keeps every archived disc reachable until review
 is explicitly completed; creating the first selection does not hide a partially
 cataloged multi-episode disc. **Review catalog** opens the archived DVD's

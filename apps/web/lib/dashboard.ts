@@ -6,6 +6,7 @@ import type {
   DetectedDiscStatus,
   DiscKind,
   EncodeProgressPhase,
+  FilesystemVerificationStatus,
   JobStatus,
 } from "@rip-dvd/data-access";
 import {
@@ -61,6 +62,9 @@ export interface DashboardEncodeJob {
   progressPhase: EncodeProgressPhase | null;
   progressPercent: number;
   progressEtaSeconds: number | null;
+  verificationStatus?: FilesystemVerificationStatus | null;
+  verificationMessage?: string | null;
+  verifiedAt?: string | null;
 }
 
 export interface DashboardCatalogReviewItem {
@@ -69,6 +73,9 @@ export interface DashboardCatalogReviewItem {
   discKind: DiscKind;
   archiveFormat: ArchiveFormat;
   archivedAt: string;
+  verificationStatus?: FilesystemVerificationStatus | null;
+  verificationMessage?: string | null;
+  verifiedAt?: string | null;
 }
 
 export interface DashboardPage {
@@ -416,6 +423,9 @@ function readDashboardSnapshotRecords(
                 progressPhase: job.progressPhase,
                 progressPercent: job.progressPercent,
                 progressEtaSeconds: job.progressEtaSeconds,
+                verificationStatus: job.verificationStatus,
+                verificationMessage: job.verificationMessage,
+                verifiedAt: job.verifiedAt?.toISOString() ?? null,
               };
             }),
           );
@@ -435,6 +445,9 @@ function readDashboardSnapshotRecords(
             discKind: archive.discKind,
             archiveFormat: archive.archiveFormat,
             archivedAt: archive.archivedAt.toISOString(),
+            verificationStatus: archive.verificationStatus,
+            verificationMessage: archive.verificationMessage,
+            verifiedAt: archive.verifiedAt?.toISOString() ?? null,
           })),
           ...(activityLimit !== undefined &&
           (catalogReviewOffset > 0 || archiveSource.value.length > activityLimit)

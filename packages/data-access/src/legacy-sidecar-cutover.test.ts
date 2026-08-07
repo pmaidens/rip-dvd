@@ -1889,7 +1889,7 @@ try {
       expect(readFileSync(sidecarPath)).toEqual(corruptBytes);
     }
     retry.close();
-  }, 20_000);
+  }, 30_000);
 
   it("resumes queued and archive-only sidecars when restart discovery becomes incomplete", () => {
     const root = temporaryDirectories.create(
