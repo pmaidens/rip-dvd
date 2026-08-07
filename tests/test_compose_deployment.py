@@ -60,6 +60,11 @@ def run_compose_script(
             "fi\n"
             "printf '%s|%s|%s\\n' \"$PWD\" \"${RIP_DVD_BACKUP_HOST_PATH:-}\" \"$*\" "
             '>> \"$DOCKER_CALL_LOG\"\n'
+            "if [ -n \"${DOCKER_FAIL_MATCH:-}\" ]; then\n"
+            "  case \"$*\" in\n"
+            "    *\"$DOCKER_FAIL_MATCH\"*) exit \"${DOCKER_FAIL_STATUS:-1}\" ;;\n"
+            "  esac\n"
+            "fi\n"
         )
         docker.chmod(0o755)
         result = subprocess.run(
@@ -193,24 +198,47 @@ class ComposeDeploymentTests(unittest.TestCase):
             ],
         )
 
-    def test_migration_script_runs_the_one_shot_migrator(self) -> None:
+    def test_migration_script_quiesces_runtime_services_before_migrating(self) -> None:
         result, calls = run_compose_script("compose-migrate.sh")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             calls,
             [
+                f"{ROOT}||compose stop --timeout 30 archive-worker encode-worker web",
                 f"{ROOT}||compose --profile maintenance run --rm --no-deps migrate"
             ],
         )
 
-    def test_start_script_migrates_before_starting_runtime_services(self) -> None:
+    def test_migration_aborts_before_ddl_when_runtime_quiescence_fails(
+        self,
+    ) -> None:
+        result, calls = run_compose_script(
+            "compose-migrate.sh",
+            environment={
+                "DOCKER_FAIL_MATCH": "compose stop --timeout 30",
+                "DOCKER_FAIL_STATUS": "73",
+            },
+        )
+
+        self.assertEqual(result.returncode, 73, result.stderr)
+        self.assertEqual(
+            calls,
+            [
+                f"{ROOT}||compose stop --timeout 30 archive-worker encode-worker web"
+            ],
+        )
+
+    def test_start_script_quiesces_then_migrates_before_starting_services(
+        self,
+    ) -> None:
         result, calls = run_compose_script("compose-start.sh")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             calls,
             [
+                f"{ROOT}||compose stop --timeout 30 archive-worker encode-worker web",
                 f"{ROOT}||compose --profile maintenance run --rm --no-deps migrate",
                 f"{ROOT}||compose up --detach --no-build web archive-worker encode-worker",
             ],
@@ -226,6 +254,7 @@ class ComposeDeploymentTests(unittest.TestCase):
         self.assertEqual(
             calls,
             [
+                f"{ROOT}||compose stop --timeout 30 archive-worker encode-worker web",
                 f"{ROOT}||compose --profile maintenance run --rm --no-deps migrate",
                 f"{ROOT}||compose --file compose.yaml --file compose.linux-priority.yaml up --detach --no-build web archive-worker encode-worker",
             ],
@@ -245,6 +274,7 @@ class ComposeDeploymentTests(unittest.TestCase):
         self.assertEqual(
             calls,
             [
+                f"{ROOT}||compose stop --timeout 30 archive-worker encode-worker web",
                 f"{ROOT}||compose --profile maintenance run --rm --no-deps migrate",
                 f"{ROOT}||compose --file compose.yaml --file compose.linux-priority.yaml up --detach --no-build web archive-worker encode-worker",
             ],
@@ -259,6 +289,49 @@ class ComposeDeploymentTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("must be 0 or 1", result.stderr)
         self.assertEqual(calls, [])
+
+    def test_failed_runtime_start_requiesces_partial_services_for_safe_retry(
+        self,
+    ) -> None:
+        result, calls = run_compose_script(
+            "compose-start.sh",
+            environment={
+                "DOCKER_FAIL_MATCH": "compose up --detach",
+                "DOCKER_FAIL_STATUS": "42",
+            },
+        )
+
+        self.assertEqual(result.returncode, 42, result.stderr)
+        self.assertEqual(
+            calls,
+            [
+                f"{ROOT}||compose stop --timeout 30 archive-worker encode-worker web",
+                f"{ROOT}||compose --profile maintenance run --rm --no-deps migrate",
+                f"{ROOT}||compose up --detach --no-build web archive-worker encode-worker",
+                f"{ROOT}||compose stop --timeout 30 archive-worker encode-worker web",
+            ],
+        )
+        self.assertIn("runtime startup failed", result.stderr.lower())
+
+    def test_retry_after_failed_start_repeats_the_safe_upgrade_sequence(
+        self,
+    ) -> None:
+        failed, _ = run_compose_script(
+            "compose-start.sh",
+            environment={"DOCKER_FAIL_MATCH": "compose up --detach"},
+        )
+        retried, retry_calls = run_compose_script("compose-start.sh")
+
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertEqual(retried.returncode, 0, retried.stderr)
+        self.assertEqual(
+            retry_calls,
+            [
+                f"{ROOT}||compose stop --timeout 30 archive-worker encode-worker web",
+                f"{ROOT}||compose --profile maintenance run --rm --no-deps migrate",
+                f"{ROOT}||compose up --detach --no-build web archive-worker encode-worker",
+            ],
+        )
 
     def test_stop_script_preserves_containers_networks_and_volumes(self) -> None:
         result, calls = run_compose_script("compose-stop.sh")
@@ -418,6 +491,7 @@ class ComposeDeploymentTests(unittest.TestCase):
             "Never run `docker compose down --volumes`",
             "SQLite online backup API",
             "Stop all three runtime services before restoring",
+            "remain stopped after a failed migration or startup",
             "UID/GID 1000",
             "`/dev/sr0`",
             "compose.hardware.example.yaml",
