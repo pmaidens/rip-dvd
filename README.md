@@ -336,6 +336,36 @@ Docker Compose defaults. Compose fixes the database and library paths to
 remain inside the declared persistent mounts. Direct, non-Compose launches can
 still set those three `RIP_DVD_*_PATH` variables through the shared loader.
 
+### TypeScript roadmap and implementation frontier
+
+[GitHub issue #5](https://github.com/pmaidens/rip-dvd/issues/5) is the umbrella
+PRD for the Dockerized TypeScript application, not an implementation ticket.
+Future agents should select the first open child whose listed blockers are
+closed, then implement only that child. The intended dependency order is:
+
+1. Runtime and control-plane foundation: [#6](https://github.com/pmaidens/rip-dvd/issues/6)
+   → [#7](https://github.com/pmaidens/rip-dvd/issues/7) →
+   [#8](https://github.com/pmaidens/rip-dvd/issues/8) →
+   [#9](https://github.com/pmaidens/rip-dvd/issues/9).
+2. Catalog inputs after the foundation: [#10](https://github.com/pmaidens/rip-dvd/issues/10)
+   and [#11](https://github.com/pmaidens/rip-dvd/issues/11), plus drive discovery
+   [#12](https://github.com/pmaidens/rip-dvd/issues/12) after #8 and #9.
+3. Preservation and review: [#13](https://github.com/pmaidens/rip-dvd/issues/13)
+   after #12, then [#14](https://github.com/pmaidens/rip-dvd/issues/14) after
+   #10 and #13.
+4. Encoding: [#15](https://github.com/pmaidens/rip-dvd/issues/15) after #11 and
+   #14, then [#16](https://github.com/pmaidens/rip-dvd/issues/16) after #9 and
+   #15.
+5. Operational safety: [#17](https://github.com/pmaidens/rip-dvd/issues/17)
+   after #14 and #16, and [#18](https://github.com/pmaidens/rip-dvd/issues/18)
+   after #13 and #16.
+6. End-to-end verification: [#19](https://github.com/pmaidens/rip-dvd/issues/19)
+   only after #17 and #18.
+
+Issue #19 is the finishing frontier for the current #5 plan. Treat GitHub issue
+state and each ticket's **Blocked by** section as authoritative if this list and
+the tracker ever diverge.
+
 ### Docker Compose deployment
 
 The real-hardware deployment target is a native Linux Docker Engine with the
