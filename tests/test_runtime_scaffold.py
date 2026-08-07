@@ -55,7 +55,7 @@ class RuntimeScaffoldTests(unittest.TestCase):
         for variable, path in expected_paths.items():
             self.assertIn(f"{variable}: {path}", compose)
             self.assertNotIn(f"${{{variable}", compose)
-        self.assertEqual(compose.count("environment: *runtime-environment"), 3)
+        self.assertEqual(compose.count("*runtime-environment"), 3)
 
     def test_compose_environment_example_does_not_expose_container_paths(self) -> None:
         example = (ROOT / ".env.example").read_text()
