@@ -2,7 +2,12 @@
 
 import { useEffect, useState } from "react";
 
-import type { FilesystemVerificationStatus } from "@rip-dvd/data-access";
+import type {
+  ArchiveFormat,
+  DiscKind,
+  FilesystemVerificationStatus,
+  JobStatus,
+} from "@rip-dvd/data-access";
 
 import { displayTerm } from "../lib/display-term";
 
@@ -10,13 +15,29 @@ export type FilesystemVerificationInventoryTarget =
   | "original_disc_archive"
   | "encode_job_output";
 
-export interface FilesystemVerificationInventoryItem {
-  target: FilesystemVerificationInventoryTarget;
+interface FilesystemVerificationInventoryItemBase {
   id: string;
   status: FilesystemVerificationStatus | null;
   message: string | null;
   verifiedAt: string | null;
 }
+
+export type FilesystemVerificationInventoryItem =
+  | (FilesystemVerificationInventoryItemBase & {
+      target: "encode_job_output";
+      mediaTitle: string;
+      mediaYear: number | null;
+      encodingProfileName: string;
+      jobStatus: JobStatus;
+      updatedAt: string;
+    })
+  | (FilesystemVerificationInventoryItemBase & {
+      target: "original_disc_archive";
+      discLabel: string;
+      discKind: DiscKind;
+      archiveFormat: ArchiveFormat;
+      archivedAt: string;
+    });
 
 export interface FilesystemVerificationInventoryPage {
   offset: number;
@@ -91,6 +112,42 @@ function VerificationResult({
   );
 }
 
+function InventoryIdentity({
+  item,
+}: {
+  item: FilesystemVerificationInventoryItem;
+}) {
+  if (item.target === "encode_job_output") {
+    const title =
+      item.mediaYear === null
+        ? item.mediaTitle
+        : `${item.mediaTitle} (${item.mediaYear})`;
+    return (
+      <div>
+        <div className="verification-identity-heading">
+          <h4>{title}</h4>
+          <span className={`status status-${item.jobStatus}`}>
+            {displayTerm(item.jobStatus)}
+          </span>
+        </div>
+        <p>{item.encodingProfileName}</p>
+        <p className="item-time">Updated {formatTimestamp(item.updatedAt)}</p>
+        <code className="verification-record-id">{item.id}</code>
+      </div>
+    );
+  }
+  return (
+    <div>
+      <h4>{item.discLabel}</h4>
+      <p>
+        {displayTerm(item.discKind)} · {item.archiveFormat.toUpperCase()}
+      </p>
+      <p className="item-time">Archived {formatTimestamp(item.archivedAt)}</p>
+      <code className="verification-record-id">{item.id}</code>
+    </div>
+  );
+}
+
 function InventoryList({
   title,
   itemName,
@@ -136,10 +193,7 @@ function InventoryList({
           {state.items.map((item) => (
             <article className="operation-item" key={item.id}>
               <div className="item-heading">
-                <div>
-                  <h4>{itemName}</h4>
-                  <code className="verification-record-id">{item.id}</code>
-                </div>
+                <InventoryIdentity item={item} />
               </div>
               <VerificationResult item={item} />
               <button

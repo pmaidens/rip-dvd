@@ -19,6 +19,7 @@ function createVerificationRecords() {
     opticalDriveId: drive.id,
     discKind: "dvd",
     fingerprint: "api-verification",
+    volumeLabel: "API_VERIFICATION_DISC",
   });
   access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
   access.catalog.updateDetectedDiscStatus(disc.id, "approved");
@@ -66,7 +67,7 @@ function verificationRequest(target: string, id: string) {
 }
 
 describe("Filesystem Verification API", () => {
-  it("pages every Encode Job output beyond the operations history cap", async () => {
+  it("pages every Encode Job output beyond the operations history cap with a usable identity", async () => {
     const { access, job, selection } = createVerificationRecords();
     const jobs = [job];
     for (let index = 0; index < 21; index += 1) {
@@ -99,6 +100,9 @@ describe("Filesystem Verification API", () => {
         : [];
     const hiddenJob = jobs.find(({ id }) => !dashboardIds.includes(id));
     expect(hiddenJob).toBeDefined();
+    const hiddenProfile = access.encodingProfiles.list({
+      ids: [hiddenJob!.encodingProfileId],
+    })[0]!;
 
     const response = createFilesystemVerificationInventoryRoute(
       new Request(
@@ -120,14 +124,55 @@ describe("Filesystem Verification API", () => {
     });
     expect(body.inventory.items).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ id: hiddenJob!.id, target: "encode_job_output" }),
+        expect.objectContaining({
+          id: hiddenJob!.id,
+          target: "encode_job_output",
+          mediaTitle: "API Verification",
+          mediaYear: null,
+          encodingProfileName: `${hiddenProfile.displayName} · Version ${hiddenProfile.version}`,
+          jobStatus: "failed",
+          updatedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+        }),
       ]),
     );
+    expect(
+      new Set(
+        body.inventory.items.map(
+          (item: { encodingProfileName: string }) => item.encodingProfileName,
+        ),
+      ).size,
+    ).toBe(body.inventory.items.length);
     expect(JSON.stringify(body)).not.toContain("/media/");
   });
 
-  it("keeps a reviewed Original Disc Archive in the verification inventory", async () => {
+  it("keeps reviewed Original Disc Archives distinguishable in the verification inventory", async () => {
     const { access, archive } = createVerificationRecords();
+    const drive = access.catalog.listOpticalDrives()[0]!;
+    const secondDisc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "second-reviewed-verification",
+      volumeLabel: "SECOND_REVIEWED_DISC",
+    });
+    access.catalog.updateDetectedDiscStatus(secondDisc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(secondDisc.id, "approved");
+    const secondArchive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: secondDisc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Second Reviewed Verification.iso",
+      fingerprint: secondDisc.fingerprint,
+    });
+    const secondMediaItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Second Reviewed Verification",
+    });
+    access.catalog.createDiscSelection({
+      originalDiscArchiveId: secondArchive.id,
+      mediaItemId: secondMediaItem.id,
+      kind: "main_feature",
+    });
+    access.catalog.completeCatalogReview(secondArchive.id);
     const dashboard = readDashboardSnapshot(access, { activityLimit: 20 });
     expect(dashboard.catalogReview).toEqual({ status: "loaded", items: [] });
 
@@ -140,15 +185,33 @@ describe("Filesystem Verification API", () => {
     const body = await response.json();
 
     expect(response.status).toBe(200);
-    expect(body.inventory.items).toEqual([
-      expect.objectContaining({
-        target: "original_disc_archive",
-        id: archive.id,
-        status: null,
-        message: null,
-        verifiedAt: null,
-      }),
-    ]);
+    expect(body.inventory.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          target: "original_disc_archive",
+          id: archive.id,
+          discLabel: "API_VERIFICATION_DISC",
+          discKind: "dvd",
+          archiveFormat: "iso",
+          archivedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+          status: null,
+          message: null,
+          verifiedAt: null,
+        }),
+        expect.objectContaining({
+          target: "original_disc_archive",
+          id: secondArchive.id,
+          discLabel: "SECOND_REVIEWED_DISC",
+        }),
+      ]),
+    );
+    expect(
+      new Set(
+        body.inventory.items.map(
+          (item: { discLabel: string }) => item.discLabel,
+        ),
+      ).size,
+    ).toBe(body.inventory.items.length);
     expect(JSON.stringify(body)).not.toContain("/media/");
   });
 

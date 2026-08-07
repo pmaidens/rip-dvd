@@ -787,6 +787,34 @@ h3 {
   letter-spacing: 0.05em;
 }
 
+.verification-inventory .item-heading h4 {
+  margin: 0;
+  color: #eef4f1;
+  font-size: 0.98rem;
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+}
+
+.verification-identity-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.verification-identity-heading h4 {
+  min-width: 0;
+}
+
+.verification-inventory .item-time {
+  margin-top: 0.35rem;
+}
+
+.verification-inventory .verification-record-id {
+  display: block;
+  margin-top: 0.45rem;
+}
+
 .verification-inventory-list .profile-actions {
   margin-top: 0.85rem;
 }
