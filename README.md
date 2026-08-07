@@ -382,11 +382,18 @@ Use the deployment scripts from the repository root:
 ```
 
 `scripts/compose-build.sh` builds the migration, backup, web, archive-worker,
-and encode-worker images as separate targets. `scripts/compose-migrate.sh` runs
-the versioned Drizzle migrations as a one-shot non-root container.
-`scripts/compose-start.sh` refuses implicit rebuilds, migrates first, and then
-starts only the three long-running services. `scripts/compose-stop.sh` stops
-those services without removing containers, networks, images, or volumes.
+and encode-worker images as separate targets. `scripts/compose-migrate.sh`
+stops the web, archive, and encode runtimes before running versioned Drizzle
+migrations in a one-shot non-root container; if the bounded stop fails, no DDL
+is attempted. `scripts/compose-start.sh` refuses implicit rebuilds, uses that
+quiescing migration path, and then starts only the three long-running services.
+If startup partially fails, it performs another bounded stop and returns the
+original startup failure.
+Runtime services remain stopped after a failed migration or startup.
+Correct the reported configuration, image, or host
+error, verify the services are stopped with `docker compose ps`, and rerun
+`scripts/compose-start.sh`. `scripts/compose-stop.sh` stops those services
+without removing containers, networks, images, or volumes.
 
 Then open <http://localhost:3000>. Compose keeps SQLite in the project-scoped
 `rip-dvd-data` local volume. Media and original archives use project-scoped
