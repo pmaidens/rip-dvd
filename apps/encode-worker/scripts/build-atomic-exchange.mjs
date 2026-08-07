@@ -1,4 +1,5 @@
-import { chmodSync, mkdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { chmodSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -9,6 +10,7 @@ const sourcePath = fileURLToPath(
 const outputPath = fileURLToPath(
   new URL("../dist/rip-dvd-atomic-exchange.node", import.meta.url),
 );
+const temporaryOutputPath = `${outputPath}.${process.pid}.${randomUUID()}.tmp`;
 mkdirSync(dirname(outputPath), { recursive: true });
 
 const platformLinkerArguments =
@@ -28,7 +30,7 @@ const compilation = spawnSync(
     ...platformLinkerArguments,
     sourcePath,
     "-o",
-    outputPath,
+    temporaryOutputPath,
   ],
   {
     encoding: "utf8",
@@ -37,12 +39,17 @@ const compilation = spawnSync(
   },
 );
 
-if (compilation.error) {
-  throw compilation.error;
+try {
+  if (compilation.error) {
+    throw compilation.error;
+  }
+  if (compilation.status !== 0) {
+    throw new Error(
+      `Atomic exchange binding compilation failed: ${compilation.stderr.trim()}`,
+    );
+  }
+  chmodSync(temporaryOutputPath, 0o755);
+  renameSync(temporaryOutputPath, outputPath);
+} finally {
+  rmSync(temporaryOutputPath, { force: true });
 }
-if (compilation.status !== 0) {
-  throw new Error(
-    `Atomic exchange binding compilation failed: ${compilation.stderr.trim()}`,
-  );
-}
-chmodSync(outputPath, 0o755);
