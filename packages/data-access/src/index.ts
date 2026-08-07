@@ -18,9 +18,9 @@ export {
 } from "./types.js";
 export type {
   CreateDataAccessOptions,
-  FilesystemPathProbe,
   PublicationMutationRecoveryLock,
 } from "./internal/create-data-access.js";
+export type { FilesystemPathProbe } from "./internal/bounded-filesystem-path-probe.js";
 
 export function createDataAccess(input: CreateDataAccessOptions): DataAccess {
   return createDataAccessInternal(input);

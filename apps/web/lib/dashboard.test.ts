@@ -62,7 +62,7 @@ function seedEncodeJob(access: LegacySidecarDataAccess) {
 }
 
 describe("readDashboardSnapshot", () => {
-  it("serializes explicit verification results without exposing paths", () => {
+  it("serializes explicit verification results without exposing paths", async () => {
     const access = dataAccessFixture.create();
     const { job } = seedEncodeJob(access);
     const drive = access.catalog.listOpticalDrives()[0]!;
@@ -82,8 +82,10 @@ describe("readDashboardSnapshot", () => {
       fingerprint: reviewDisc.fingerprint,
     });
 
-    access.filesystemVerification.verifyEncodeJobOutput(job.id);
-    access.filesystemVerification.verifyOriginalDiscArchive(reviewArchive.id);
+    await access.filesystemVerification.verifyEncodeJobOutput(job.id);
+    await access.filesystemVerification.verifyOriginalDiscArchive(
+      reviewArchive.id,
+    );
     const dashboard = readDashboardSnapshot(access, { activityLimit: 20 });
 
     expect(dashboard.encodeJobs).toEqual({

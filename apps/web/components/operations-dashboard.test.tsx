@@ -412,6 +412,14 @@ describe("DashboardView", () => {
     expect(html).toContain("Queue Encode Jobs");
     expect(html).toContain("Loading encoding options");
   });
+
+  it("includes durable verification inventory beyond transient operation sections", () => {
+    const html = renderToStaticMarkup(<OperationsDashboard />);
+
+    expect(html).toContain("Filesystem Verification");
+    expect(html).toContain("Encode Job outputs");
+    expect(html).toContain("Original Disc Archives");
+  });
 });
 
 describe("DashboardConnectionStatus", () => {

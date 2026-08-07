@@ -97,8 +97,26 @@ function createEncodeJobFixture(
 }
 
 describe("explicit filesystem verification", () => {
-  it("does not inspect files during normal catalog and queue reads", () => {
-    const inspect = vi.fn(() => "file" as const);
+  it("does not touch the Media Library while constructing or reading the facade", () => {
+    const directory = mkdtempSync(join(tmpdir(), "rip-dvd-verification-open-"));
+    temporaryDirectories.push(directory);
+    const inspect = vi.fn(async () => "file" as const);
+    const access = createLegacySidecarDataAccess({
+      databasePath: join(directory, "catalog.sqlite"),
+      filesystemPathProbe: { inspect },
+      mediaLibraryPath: join(directory, "missing-media-library"),
+      originalsLibraryPath: directory,
+    });
+
+    expect(access.checkHealth()).toMatchObject({ status: "ok" });
+    expect(access.catalog.listOriginalDiscArchives()).toEqual([]);
+    expect(access.encodeJobs.list()).toEqual([]);
+    expect(inspect).not.toHaveBeenCalled();
+    access.close();
+  });
+
+  it("does not inspect files during normal catalog and queue reads", async () => {
+    const inspect = vi.fn(async () => "file" as const);
     const fixture = createArchiveFixture({
       filesystemPathProbe: { inspect },
     });
@@ -114,8 +132,8 @@ describe("explicit filesystem verification", () => {
 
     expect(inspect).not.toHaveBeenCalled();
 
-    access.filesystemVerification.verifyOriginalDiscArchive(archive.id);
-    access.filesystemVerification.verifyEncodeJobOutput(job.id);
+    await access.filesystemVerification.verifyOriginalDiscArchive(archive.id);
+    await access.filesystemVerification.verifyEncodeJobOutput(job.id);
 
     expect(inspect).toHaveBeenNthCalledWith(
       1,
@@ -130,10 +148,10 @@ describe("explicit filesystem verification", () => {
     access.close();
   });
 
-  it("refuses database paths outside the configured libraries without probing them", () => {
+  it("refuses database paths outside the configured libraries without probing them", async () => {
     const allowedRoot = mkdtempSync(join(tmpdir(), "rip-dvd-allowed-root-"));
     temporaryDirectories.push(allowedRoot);
-    const inspect = vi.fn(() => "file" as const);
+    const inspect = vi.fn(async () => "file" as const);
     const fixture = createArchiveFixture({
       filesystemPathProbe: { inspect },
       verificationRoots: {
@@ -145,14 +163,14 @@ describe("explicit filesystem verification", () => {
     const { job } = createEncodeJobFixture(fixture);
 
     expect(
-      access.filesystemVerification.verifyOriginalDiscArchive(archive.id),
+      await access.filesystemVerification.verifyOriginalDiscArchive(archive.id),
     ).toMatchObject({
       verificationStatus: "error",
       verificationMessage:
         "Recorded path is outside the configured library.",
     });
     expect(
-      access.filesystemVerification.verifyEncodeJobOutput(job.id),
+      await access.filesystemVerification.verifyEncodeJobOutput(job.id),
     ).toMatchObject({
       verificationStatus: "error",
       verificationMessage:
@@ -162,7 +180,7 @@ describe("explicit filesystem verification", () => {
     access.close();
   });
 
-  it("does not follow a symlink stored as an archive path", () => {
+  it("does not follow a symlink stored as an archive path", async () => {
     const fixture = createArchiveFixture();
     const { access, archive, directory } = fixture;
     const outsideDirectory = mkdtempSync(join(tmpdir(), "rip-dvd-outside-"));
@@ -173,7 +191,7 @@ describe("explicit filesystem verification", () => {
     symlinkSync(outsidePath, archive.archivePath);
 
     expect(
-      access.filesystemVerification.verifyOriginalDiscArchive(archive.id),
+      await access.filesystemVerification.verifyOriginalDiscArchive(archive.id),
     ).toMatchObject({
       verificationStatus: "error",
       verificationMessage: "Recorded path is not a regular file.",
@@ -182,7 +200,7 @@ describe("explicit filesystem verification", () => {
     access.close();
   });
 
-  it("records an accessible Original Disc Archive only when explicitly requested", () => {
+  it("records an accessible Original Disc Archive only when explicitly requested", async () => {
     const { access, archive } = createArchiveFixture();
 
     expect(access.catalog.listOriginalDiscArchives()[0]).toMatchObject({
@@ -192,9 +210,8 @@ describe("explicit filesystem verification", () => {
       verifiedAt: null,
     });
 
-    const verified = access.filesystemVerification.verifyOriginalDiscArchive(
-      archive.id,
-    );
+    const verified =
+      await access.filesystemVerification.verifyOriginalDiscArchive(archive.id);
 
     expect(verified).toMatchObject({
       id: archive.id,
@@ -207,7 +224,7 @@ describe("explicit filesystem verification", () => {
     access.close();
   });
 
-  it("records an accessible Encode Job output only when explicitly requested", () => {
+  it("records an accessible Encode Job output only when explicitly requested", async () => {
     const fixture = createArchiveFixture();
     const { access } = fixture;
     const { job } = createEncodeJobFixture(fixture);
@@ -219,7 +236,8 @@ describe("explicit filesystem verification", () => {
       verifiedAt: null,
     });
 
-    const verified = access.filesystemVerification.verifyEncodeJobOutput(job.id);
+    const verified =
+      await access.filesystemVerification.verifyEncodeJobOutput(job.id);
 
     expect(verified).toMatchObject({
       id: job.id,
@@ -232,11 +250,11 @@ describe("explicit filesystem verification", () => {
     access.close();
   });
 
-  it("clears verification when an Encode Job is requeued to a different path", () => {
+  it("clears verification when an Encode Job is requeued to a different path", async () => {
     const fixture = createArchiveFixture();
     const { access, directory } = fixture;
     const { job } = createEncodeJobFixture(fixture);
-    access.filesystemVerification.verifyEncodeJobOutput(job.id);
+    await access.filesystemVerification.verifyEncodeJobOutput(job.id);
     const claim = access.encodeJobs.claimNext("verification-worker");
     expect(claim).not.toBeNull();
     access.encodeJobs.fail(claim!, "retry elsewhere");
@@ -253,7 +271,7 @@ describe("explicit filesystem verification", () => {
       verifiedAt: null,
     });
     expect(
-      access.filesystemVerification.verifyEncodeJobOutput(job.id),
+      await access.filesystemVerification.verifyEncodeJobOutput(job.id),
     ).toMatchObject({
       verificationStatus: "missing",
       verificationMessage: "File is missing at the recorded path.",
@@ -261,7 +279,36 @@ describe("explicit filesystem verification", () => {
     access.close();
   });
 
-  it("records missing archive and output paths without failing verification", () => {
+  it("persists an unexpected error when the isolated probe fails", async () => {
+    const fixture = createArchiveFixture({
+      filesystemPathProbe: {
+        inspect() {
+          return Promise.reject(
+            Object.assign(new Error("sensitive helper failure"), {
+              code: "ETIMEDOUT",
+            }),
+          );
+        },
+      },
+    });
+    const { access, archive } = fixture;
+
+    await expect(
+      access.filesystemVerification.verifyOriginalDiscArchive(archive.id),
+    ).resolves.toMatchObject({
+      id: archive.id,
+      verificationStatus: "error",
+      verificationMessage: "Verification failed unexpectedly.",
+    });
+    expect(access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0])
+      .toMatchObject({
+        verificationStatus: "error",
+        verificationMessage: "Verification failed unexpectedly.",
+      });
+    access.close();
+  });
+
+  it("records missing archive and output paths without failing verification", async () => {
     const fixture = createArchiveFixture();
     const { access, archive } = fixture;
     const { job } = createEncodeJobFixture(fixture, { createOutput: false });
@@ -274,7 +321,7 @@ describe("explicit filesystem verification", () => {
       () => access.filesystemVerification.verifyEncodeJobOutput(job.id),
     ]) {
       try {
-        results.push(verify());
+        results.push(await verify());
       } catch (error) {
         results.push(error);
       }
@@ -308,7 +355,7 @@ describe("explicit filesystem verification", () => {
     },
   ])(
     "records $code verification failures without leaking error details",
-    ({ code, expectedStatus, expectedMessage }) => {
+    async ({ code, expectedStatus, expectedMessage }) => {
       const failure = Object.assign(new Error(`sensitive ${code} detail`), {
         code,
       });
@@ -329,7 +376,7 @@ describe("explicit filesystem verification", () => {
         () => access.filesystemVerification.verifyEncodeJobOutput(job.id),
       ]) {
         try {
-          results.push(verify());
+          results.push(await verify());
         } catch (error) {
           results.push(error);
         }

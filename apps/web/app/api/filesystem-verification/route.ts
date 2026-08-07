@@ -14,6 +14,7 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 type VerificationTarget = "original_disc_archive" | "encode_job_output";
+const INVENTORY_PAGE_LIMIT = 20;
 
 function response(body: unknown, status = 200): Response {
   return Response.json(body, {
@@ -92,6 +93,64 @@ function verificationTarget(value: unknown): VerificationTarget | null {
     : null;
 }
 
+function inventoryOffset(request: Request): number | null {
+  const value = new URL(request.url).searchParams.get("offset");
+  if (value === null) {
+    return 0;
+  }
+  if (!/^(0|[1-9]\d*)$/.test(value) || value.length > 16) {
+    return null;
+  }
+  const offset = Number(value);
+  return Number.isSafeInteger(offset) ? offset : null;
+}
+
+export function createFilesystemVerificationInventoryRoute(
+  request: Request,
+  getAccess: () => DataAccess = getDataAccess,
+): Response {
+  const target = verificationTarget(
+    new URL(request.url).searchParams.get("target"),
+  );
+  const offset = inventoryOffset(request);
+  if (target === null || offset === null) {
+    return response({ error: "Invalid filesystem verification inventory" }, 400);
+  }
+  try {
+    const access = getAccess();
+    const records =
+      target === "original_disc_archive"
+        ? access.filesystemVerification.listOriginalDiscArchives({
+            limit: INVENTORY_PAGE_LIMIT + 1,
+            offset,
+          })
+        : access.filesystemVerification.listEncodeJobOutputs({
+            limit: INVENTORY_PAGE_LIMIT + 1,
+            offset,
+          });
+    return response({
+      inventory: {
+        target,
+        items: records.slice(-INVENTORY_PAGE_LIMIT).map((record) => ({
+          target,
+          id: record.id,
+          status: record.verificationStatus,
+          message: record.verificationMessage,
+          verifiedAt: record.verifiedAt?.toISOString() ?? null,
+        })),
+        page: {
+          offset,
+          limit: INVENTORY_PAGE_LIMIT,
+          hasPrevious: offset > 0,
+          hasNext: records.length > INVENTORY_PAGE_LIMIT,
+        },
+      },
+    });
+  } catch {
+    return response({ error: "Filesystem verification is unavailable" }, 503);
+  }
+}
+
 function serializeVerification(
   target: VerificationTarget,
   record: {
@@ -146,12 +205,13 @@ export async function createFilesystemVerificationRoute(
       return response({ error: "Invalid filesystem verification" }, 400);
     }
     const access = getAccess();
-    const record =
+    const record = await (
       target === "original_disc_archive"
         ? access.filesystemVerification.verifyOriginalDiscArchive(
             id as OriginalDiscArchiveId,
           )
-        : access.filesystemVerification.verifyEncodeJobOutput(id as EncodeJobId);
+        : access.filesystemVerification.verifyEncodeJobOutput(id as EncodeJobId)
+    );
     return response(serializeVerification(target, record));
   } catch (error) {
     if (error instanceof RecordNotFoundError) {
@@ -166,4 +226,8 @@ export async function createFilesystemVerificationRoute(
 
 export function POST(request: Request): Promise<Response> {
   return createFilesystemVerificationRoute(request);
+}
+
+export function GET(request: Request): Response {
+  return createFilesystemVerificationInventoryRoute(request);
 }

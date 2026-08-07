@@ -374,16 +374,23 @@ database intentionally shows an empty state in each section until workers or
 another facade caller record operations; the web app does not infer catalog
 state from library files or process streams.
 
-Original Disc Archives in the review queue and Encode Jobs have explicit
-**Verify archive file** and **Verify output file** actions. These actions ask the
-web process to inspect only the selected database-recorded path through its
-read-only library mounts, then store an accessible, missing, inaccessible, or
-unexpected-error result with a verification time in SQLite. The dashboard and
-SSE snapshots show that stored result without exposing the path. Ordinary
-dashboard, catalog, and queue reads continue to trust SQLite and never scan the
-media or originals libraries implicitly. Verification uses the same trusted
-Origin/Host mutation policy as the other dashboard actions and is exposed at
-`POST /api/filesystem-verification`.
+Original Disc Archives and Encode Jobs have explicit **Verify archive file**
+and **Verify output file** actions. A separately paged Filesystem Verification
+inventory keeps every known output and archive reachable after it leaves the
+bounded operations history or completes catalog review. These actions inspect
+only the selected database-recorded path through the read-only library mounts,
+then store an accessible, missing, inaccessible, or unexpected-error result
+with a verification time in SQLite. The probe runs in a short-lived helper
+process with a three-second deadline and a two-helper admission ceiling, so a
+stalled mount cannot block the Next.js request event loop or create unbounded
+work. Media Library root canonicalization happens inside that bounded explicit
+helper; opening the shared data-access facade never touches the Media Library.
+The dashboard and SSE snapshots show stored results without exposing paths.
+Ordinary dashboard, catalog, and queue reads continue to trust SQLite and never
+scan the media or originals libraries implicitly. Verification uses the same
+trusted Origin/Host mutation policy as the other dashboard actions and is
+exposed at `POST /api/filesystem-verification`; its path-free inventory is read
+from `GET /api/filesystem-verification`.
 
 The paged Catalog Review queue keeps every archived disc reachable until review
 is explicitly completed; creating the first selection does not hide a partially

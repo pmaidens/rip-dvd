@@ -19,6 +19,7 @@ import { displayTerm } from "../lib/display-term";
 import { CatalogReviewEditor } from "./catalog-review-editor";
 import { EncodeJobsManager, retryEncodeJob } from "./encode-jobs";
 import { EncodingProfilesManager } from "./encoding-profiles";
+import { FilesystemVerificationInventory } from "./filesystem-verification-inventory";
 
 export type DashboardSectionLoadState<T> =
   | { status: "loading" }
@@ -779,6 +780,12 @@ export function OperationsDashboard() {
           Filesystem verification could not be recorded. Try again.
         </p>
       ) : null}
+
+      <FilesystemVerificationInventory
+        refreshKey={requestNumber}
+        onVerify={(target, id) => void verifyFilesystem(target, id)}
+        verifyingTarget={verifyingFilesystemTarget}
+      />
 
       <DashboardView
         state={state}

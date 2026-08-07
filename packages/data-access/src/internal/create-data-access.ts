@@ -1,8 +1,5 @@
 import {
-  accessSync,
   closeSync,
-  constants,
-  lstatSync,
   mkdirSync,
   openSync,
   realpathSync,
@@ -33,6 +30,10 @@ import {
 import { drizzle } from "drizzle-orm/node-sqlite";
 import { migrate } from "drizzle-orm/node-sqlite/migrator";
 
+import {
+  createBoundedFilesystemPathProbe,
+  type FilesystemPathProbe,
+} from "./bounded-filesystem-path-probe.js";
 import {
   archiveJobs,
   detectedDiscs,
@@ -393,10 +394,6 @@ export interface CreateDataAccessOptions {
   filesystemPathProbe?: FilesystemPathProbe;
 }
 
-export interface FilesystemPathProbe {
-  inspect(path: string, configuredRoot?: string): "file" | "other" | "unsafe";
-}
-
 export type { PublicationMutationRecoveryLock };
 
 function isContainedPath(root: string, path: string): boolean {
@@ -531,22 +528,7 @@ export function createDataAccessInternal(
     mediaLibraryPath,
     originalsLibraryPath,
     publicationMutationRecoveryLock,
-    filesystemPathProbe = {
-      inspect(path, configuredRoot) {
-        const metadata = lstatSync(path);
-        if (metadata.isSymbolicLink() || !metadata.isFile()) {
-          return "other";
-        }
-        if (
-          configuredRoot !== undefined &&
-          !isContainedPath(configuredRoot, realpathSync(path))
-        ) {
-          return "unsafe";
-        }
-        accessSync(path, constants.R_OK);
-        return "file";
-      },
-    },
+    filesystemPathProbe = createBoundedFilesystemPathProbe(),
   }: CreateDataAccessOptions,
   legacySidecarMigration?: LegacySidecarMigrationAdapter,
 ): DataAccess | LegacySidecarDataAccess {
@@ -559,14 +541,12 @@ export function createDataAccessInternal(
     originalsLibraryPath === undefined
       ? undefined
       : {
-          canonicalPath: normalizedOriginalsLibraryPath!,
           resolvedPath: resolve(originalsLibraryPath),
         };
   const mediaVerificationRoot =
     mediaLibraryPath === undefined
       ? undefined
       : {
-          canonicalPath: realpathSync(mediaLibraryPath),
           resolvedPath: resolve(mediaLibraryPath),
         };
   if (normalizedDatabasePath !== ":memory:") {
@@ -584,18 +564,17 @@ export function createDataAccessInternal(
     return new Date();
   }
 
-  function inspectFilesystemPath(
+  async function inspectFilesystemPath(
     path: string,
-    configuredRoot?: { canonicalPath: string; resolvedPath: string },
-  ): {
+    configuredRoot?: { resolvedPath: string },
+  ): Promise<{
     verificationStatus: "accessible" | "missing" | "inaccessible" | "error";
     verificationMessage: string;
     verifiedAt: Date;
-  } {
+  }> {
     if (
       configuredRoot !== undefined &&
-      !isContainedPath(configuredRoot.resolvedPath, path) &&
-      !isContainedPath(configuredRoot.canonicalPath, path)
+      !isContainedPath(configuredRoot.resolvedPath, path)
     ) {
       return {
         verificationStatus: "error",
@@ -605,9 +584,9 @@ export function createDataAccessInternal(
       };
     }
     try {
-      const inspection = filesystemPathProbe.inspect(
+      const inspection = await filesystemPathProbe.inspect(
         path,
-        configuredRoot?.canonicalPath,
+        configuredRoot?.resolvedPath,
       );
       if (inspection === "unsafe") {
         return {
@@ -4786,7 +4765,22 @@ export function createDataAccessInternal(
     },
 
     filesystemVerification: {
-      verifyOriginalDiscArchive(id) {
+      listOriginalDiscArchives(options) {
+        return access.catalog.listOriginalDiscArchives(options);
+      },
+      listEncodeJobOutputs(options) {
+        const limit = requirePositiveSafeInteger(options.limit, "limit");
+        const offset = optionalSafeInteger(options.offset, "offset", 0) ?? 0;
+        return database
+          .select()
+          .from(encodeJobs)
+          .orderBy(desc(encodeJobs.createdAt), desc(encodeJobs.id))
+          .limit(limit)
+          .offset(offset)
+          .all()
+          .reverse();
+      },
+      async verifyOriginalDiscArchive(id) {
         const archive = requireRow(
           database
             .select()
@@ -4796,7 +4790,7 @@ export function createDataAccessInternal(
           "original disc archive",
           id,
         );
-        const verification = inspectFilesystemPath(
+        const verification = await inspectFilesystemPath(
           archive.archivePath,
           originalsVerificationRoot,
         );
@@ -4816,7 +4810,7 @@ export function createDataAccessInternal(
           id,
         );
       },
-      verifyEncodeJobOutput(id) {
+      async verifyEncodeJobOutput(id) {
         const job = requireRow(
           database
             .select()
@@ -4826,7 +4820,7 @@ export function createDataAccessInternal(
           "encode job",
           id,
         );
-        const verification = inspectFilesystemPath(
+        const verification = await inspectFilesystemPath(
           job.outputPath,
           mediaVerificationRoot,
         );
