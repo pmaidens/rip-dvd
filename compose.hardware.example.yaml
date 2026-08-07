@@ -1,0 +1,8 @@
+# Copy this file to compose.override.yaml and list every optical drive that the
+# archive worker should discover. Docker Compose loads that local override
+# automatically alongside compose.yaml.
+services:
+  archive-worker:
+    devices:
+      - "${RIP_DVD_ARCHIVE_DEVICE_PATH:-/dev/sr0}:${RIP_DVD_ARCHIVE_DEVICE_PATH:-/dev/sr0}:r"
+      - "/dev/sr1:/dev/sr1:r"
