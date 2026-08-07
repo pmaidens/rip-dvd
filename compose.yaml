@@ -19,6 +19,31 @@ services:
       target: validation
     command: ["true"]
 
+  migrate:
+    profiles: ["maintenance"]
+    build:
+      context: .
+      dockerfile: docker/runtime.Dockerfile
+      target: deployment-tools
+    environment:
+      RIP_DVD_DATABASE_PATH: /data/rip-dvd.sqlite
+    command: ["node", "scripts/migrate-database.mjs"]
+    volumes:
+      - rip-dvd-data:/data
+
+  backup:
+    profiles: ["maintenance"]
+    build:
+      context: .
+      dockerfile: docker/runtime.Dockerfile
+      target: deployment-tools
+    command: ["sh", "scripts/backup-sqlite.sh"]
+    volumes:
+      # SQLite WAL readers may create/update the shared-memory lock file. The
+      # backup command itself never mutates application rows.
+      - rip-dvd-data:/data
+      - ${RIP_DVD_BACKUP_HOST_PATH:-./backups}:/backups
+
   web:
     build:
       context: .
@@ -50,7 +75,14 @@ services:
       context: .
       dockerfile: docker/runtime.Dockerfile
       target: archive-worker
-    environment: *runtime-environment
+    environment:
+      <<: *runtime-environment
+      RIP_DVD_WORKER_NICE_LEVEL: ${RIP_DVD_ARCHIVE_NICE_LEVEL:-10}
+      RIP_DVD_WORKER_IONICE_CLASS: ${RIP_DVD_ARCHIVE_IONICE_CLASS:-2}
+      RIP_DVD_WORKER_IONICE_LEVEL: ${RIP_DVD_ARCHIVE_IONICE_LEVEL:-7}
+    cpu_shares: ${RIP_DVD_ARCHIVE_CPU_SHARES:-512}
+    group_add:
+      - "${RIP_DVD_OPTICAL_DEVICE_GID:-24}"
     devices:
       - "${RIP_DVD_ARCHIVE_DEVICE_PATH:-/dev/sr0}:${RIP_DVD_ARCHIVE_DEVICE_PATH:-/dev/sr0}:r"
     volumes:
@@ -63,7 +95,12 @@ services:
       context: .
       dockerfile: docker/runtime.Dockerfile
       target: encode-worker
-    environment: *runtime-environment
+    environment:
+      <<: *runtime-environment
+      RIP_DVD_WORKER_NICE_LEVEL: ${RIP_DVD_ENCODE_NICE_LEVEL:-19}
+      RIP_DVD_WORKER_IONICE_CLASS: ${RIP_DVD_ENCODE_IONICE_CLASS:-3}
+      RIP_DVD_WORKER_IONICE_LEVEL: ${RIP_DVD_ENCODE_IONICE_LEVEL:-7}
+    cpu_shares: ${RIP_DVD_ENCODE_CPU_SHARES:-128}
     volumes:
       - rip-dvd-data:/data
       - ${RIP_DVD_MEDIA_LIBRARY_HOST_PATH:-rip-dvd-media}:/media/movies

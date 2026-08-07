@@ -336,17 +336,106 @@ Docker Compose defaults. Compose fixes the database and library paths to
 remain inside the declared persistent mounts. Direct, non-Compose launches can
 still set those three `RIP_DVD_*_PATH` variables through the shared loader.
 
-Build and start all three runtimes with:
+### Docker Compose deployment
+
+The real-hardware deployment target is a native Linux Docker Engine with the
+Docker Compose plugin. Docker Desktop can build and validate the images, but it
+does not expose a Linux host optical drive and may ignore Linux block-I/O
+scheduling. Before starting on the server:
+
+1. Copy `.env.example` to `.env` and set the exact library, device, bind, and
+   trusted-origin values for that host.
+2. Confirm every configured optical device exists (the default is `/dev/sr0`),
+   identify the numeric host group that can read it, and set
+   `RIP_DVD_OPTICAL_DEVICE_GID` to that GID.
+3. Create any bind-mounted Media Library, Original Disc Archive, and backup
+   directories. The containers run as UID/GID 1000; grant that identity the
+   documented read/write access with ownership, a shared group, or an ACL.
+4. Keep the database on the Compose-managed `rip-dvd-data` local volume. SQLite
+   is not supported on NFS, SMB, or another network filesystem.
+
+The runtime mount and hardware boundary is deliberately narrow:
+
+| Service | SQLite data | Media Library | Original Disc Archive | Optical device |
+| --- | --- | --- | --- | --- |
+| web | read/write | read-only verification | read-only verification | none |
+| archive worker | read/write | none | read/write | configured device, read-only |
+| encode worker | read/write | read/write | read-only | none |
+| migration | read/write | none | none | none |
+| backup | read/write for WAL locking | none | none | none |
+
+The web image contains only the Next.js runtime and its traced dependencies. It
+does not contain `lsdvd`, HandBrake, ffmpeg, `sqlite3`, or worker hardware
+permissions. The archive-worker image adds `lsdvd`, `lsblk`, `dd`, `nice`, and
+`ionice`; the encode-worker image adds HandBrake, ffmpeg, `nice`, and `ionice`.
+The short-lived deployment-tools image owns schema migration and SQLite backup
+commands instead of expanding the web image's attack surface.
+
+Use the deployment scripts from the repository root:
 
 ```bash
-docker compose up --build
+./scripts/compose-build.sh
+./scripts/compose-migrate.sh
+./scripts/compose-start.sh
+./scripts/compose-backup.sh
+./scripts/compose-stop.sh
 ```
 
-Then open <http://localhost:3000>. Compose stores application data, encoded
-media, and original backups in the project-scoped `rip-dvd-data`,
-`rip-dvd-media`, and `rip-dvd-originals` named volumes by default. Their mount
-points are owned by the non-root runtime user (UID/GID 1000), so the archive
-and encode workers can write their outputs without running as root.
+`scripts/compose-build.sh` builds the migration, backup, web, archive-worker,
+and encode-worker images as separate targets. `scripts/compose-migrate.sh` runs
+the versioned Drizzle migrations as a one-shot non-root container.
+`scripts/compose-start.sh` refuses implicit rebuilds, migrates first, and then
+starts only the three long-running services. `scripts/compose-stop.sh` stops
+those services without removing containers, networks, images, or volumes.
+
+Then open <http://localhost:3000>. Compose keeps SQLite in the project-scoped
+`rip-dvd-data` local volume. Media and original archives use project-scoped
+`rip-dvd-media` and `rip-dvd-originals` named volumes unless host bind paths are
+configured. Container restarts and the provided stop/start scripts preserve all
+three volumes. Never run `docker compose down --volumes` for this deployment:
+that explicitly deletes the durable SQLite volume and the default library
+volumes.
+
+#### SQLite backup and restore expectations
+
+Run `scripts/compose-backup.sh` regularly and before every upgrade. It writes a
+timestamped mode-0600 database under `RIP_DVD_BACKUP_HOST_PATH` (`./backups` by
+default). The non-root maintenance container has database-volume write access
+because a WAL reader may need to create or update SQLite's shared-memory lock
+file; its command performs only the SQLite online backup API. The snapshot
+includes committed WAL state while the app is running and is published only
+after `PRAGMA integrity_check` returns `ok`. Copy those backup files to storage
+outside the Docker host and periodically test a restore into a disposable
+Compose project.
+
+Stop all three runtime services before restoring. Never restore by copying only
+`rip-dvd.sqlite` over a live database: its `-wal` and `-shm` files are part of
+the active state. Preserve the current volume first, verify the selected backup
+with `PRAGMA integrity_check`, and use SQLite's `.restore` or `.backup` command
+from an offline maintenance container to write a fresh database. Treat the old
+database, WAL, and shared-memory files as one recovery set. After replacement,
+run `scripts/compose-migrate.sh`, verify integrity again, then use
+`scripts/compose-start.sh`. Restore is intentionally not automated because it
+is destructive; rehearse the host-specific volume recovery procedure before
+depending on it.
+
+#### Worker resource priority
+
+The web service retains normal host scheduling. The archive worker defaults to
+nice level 10, best-effort I/O priority 7, and `cpu_shares` 512. The encode
+worker defaults to nice level 19, idle I/O priority, and `cpu_shares` 128. CPU
+shares are relative under contention, not a hard limit. Unsupported `ionice`
+requests log a warning and continue with reduced CPU priority.
+
+`compose.linux-priority.yaml` additionally wires `blkio_config.weight` 500 for
+archive work and 100 for encode work. Docker fails container startup rather than
+ignoring these fields when the cgroup I/O controller is unavailable, so the
+portable base does not enable them automatically. After verifying that the
+native Linux host's cgroup driver and I/O scheduler expose weight control, set
+`RIP_DVD_ENABLE_BLOCK_IO_WEIGHTS=1`; `scripts/compose-start.sh` will include the
+override. Leave it disabled on Docker Desktop, rootless Docker, and unsupported
+storage drivers. Tune CPU shares and process priorities through `.env`; edit a
+reviewed local override if the server needs different block-I/O weights.
 
 The dashboard has no authentication and Compose binds it to `127.0.0.1` by
 default. Archive approval requires both the request `Origin` and `Host` to
@@ -475,23 +564,25 @@ keeps its current enabled/disabled authorization. A drive that disappears may
 keep authorization only when the same serial proves continuity when it returns;
 uncertain same-path hardware fails closed.
 
-Compose passes the single `RIP_DVD_ARCHIVE_DEVICE_PATH` device through to the
-archive worker at the same container path with read-only device permission. It
-defaults to `/dev/sr0`; set the variable to another `/dev/...` path when that is
-the one drive the worker should inspect. The non-root container user must also
-have host permission to read the device. If the host grants that access through
-a device group, add only that group in a local Compose override, for example:
+Compose passes `RIP_DVD_ARCHIVE_DEVICE_PATH` through to the archive worker at
+the same container path with read-only device permission. It defaults to
+`/dev/sr0`; set the variable to another `/dev/...` path when that is the primary
+drive. Compose adds only `RIP_DVD_OPTICAL_DEVICE_GID` (numeric GID 24 by default)
+to the non-root archive user, so set it to the host group that can read the
+device (often the `cdrom` group).
 
-```yaml
-services:
-  archive-worker:
-    group_add:
-      - "${RIP_DVD_OPTICAL_DEVICE_GID:-24}"
+For a server with additional drives, copy the reviewed example to Compose's
+automatic local override and edit its read-only device list:
+
+```bash
+cp compose.hardware.example.yaml compose.override.yaml
 ```
 
-Set `RIP_DVD_OPTICAL_DEVICE_GID` to the host group that can read the device
-(often the `cdrom` group). The configured read-only mapping is sufficient for
-discovery, scanning, and copying the DVD image; this worker does not eject media.
+Keep only real optical-device paths in that local file; never map all of `/dev`.
+The archive worker can then discover and use each explicitly mapped drive while
+the web and encode containers retain no device access. Device mappings remain
+read-only; this worker does not eject media. The start script also includes this
+local override explicitly when block-I/O weights are enabled.
 
 The worker runs discovery on each configured poll interval. An empty drive is a
 normal state. Scanner failures are logged per drive without hiding other drives,

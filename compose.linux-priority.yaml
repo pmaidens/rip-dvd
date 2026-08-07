@@ -1,0 +1,8 @@
+services:
+  archive-worker:
+    blkio_config:
+      weight: 500
+
+  encode-worker:
+    blkio_config:
+      weight: 100
