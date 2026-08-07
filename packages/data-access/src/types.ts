@@ -4,6 +4,7 @@ import type {
   DISC_KINDS,
   DISC_SELECTION_KINDS,
   ENCODE_PROGRESS_PHASES,
+  FILESYSTEM_VERIFICATION_STATUSES,
   JOB_STATUSES,
   MEDIA_DOMAINS,
   MEDIA_ITEM_KINDS,
@@ -17,6 +18,8 @@ export type DiscSelectionKind = (typeof DISC_SELECTION_KINDS)[number];
 export type MediaDomain = (typeof MEDIA_DOMAINS)[number];
 export type JobStatus = (typeof JOB_STATUSES)[number];
 export type EncodeProgressPhase = (typeof ENCODE_PROGRESS_PHASES)[number];
+export type FilesystemVerificationStatus =
+  (typeof FILESYSTEM_VERIFICATION_STATUSES)[number];
 
 declare const domainIdBrand: unique symbol;
 type DomainId<Name extends string> = string & {
@@ -82,6 +85,9 @@ export interface OriginalDiscArchive {
   sizeBytes: number | null;
   archivedAt: Date;
   catalogReviewedAt: Date | null;
+  verificationStatus: FilesystemVerificationStatus | null;
+  verificationMessage: string | null;
+  verifiedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -215,6 +221,9 @@ export interface EncodeJob {
   startedAt: Date | null;
   completedAt: Date | null;
   errorMessage: string | null;
+  verificationStatus: FilesystemVerificationStatus | null;
+  verificationMessage: string | null;
+  verifiedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -499,6 +508,18 @@ export interface EncodeJobAccess {
   requeue(id: EncodeJobId): EncodeJob;
 }
 
+export interface FilesystemVerificationAccess {
+  listOriginalDiscArchives(options: {
+    limit: number;
+    offset?: number;
+  }): OriginalDiscArchive[];
+  listEncodeJobOutputs(options: { limit: number; offset?: number }): EncodeJob[];
+  verifyOriginalDiscArchive(
+    id: OriginalDiscArchiveId,
+  ): Promise<OriginalDiscArchive>;
+  verifyEncodeJobOutput(id: EncodeJobId): Promise<EncodeJob>;
+}
+
 export type SnapshotCatalogAccess = Pick<
   CatalogAccess,
   | "listOpticalDrives"
@@ -520,6 +541,7 @@ export interface DataAccess {
   readonly encodingProfiles: EncodingProfileAccess;
   readonly archiveJobs: ArchiveJobAccess;
   readonly encodeJobs: EncodeJobAccess;
+  readonly filesystemVerification: FilesystemVerificationAccess;
   readConsistentSnapshot<T>(read: (access: ConsistentReadAccess) => T): T;
   checkHealth(): ServiceHealth;
   close(): void;

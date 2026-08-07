@@ -320,6 +320,56 @@ h1 {
   margin-top: 1rem;
 }
 
+.operation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  margin-top: 1rem;
+}
+
+.operation-actions button {
+  min-height: 2.25rem;
+  padding: 0.45rem 0.65rem;
+  font-size: 0.72rem;
+}
+
+.verification-result {
+  display: grid;
+  gap: 0.2rem;
+  margin: 0.85rem 0 0;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid #365149;
+  border-radius: 0.55rem;
+  background: #10231e;
+  color: #b8c8c3;
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+
+p.verification-result {
+  display: block;
+}
+
+.verification-result strong {
+  color: #eef4f1;
+}
+
+.verification-result small {
+  color: #9fb0ab;
+}
+
+.verification-accessible {
+  border-color: #386a57;
+  background: rgba(54, 126, 94, 0.12);
+}
+
+.verification-missing,
+.verification-inaccessible,
+.verification-error {
+  border-color: #713d37;
+  background: rgba(164, 71, 60, 0.12);
+}
+
 .profiles-header,
 .profile-form {
   padding: 1.35rem 1.4rem;
@@ -700,6 +750,81 @@ h3 {
   font-size: 0.78rem;
 }
 
+.verification-inventory {
+  display: grid;
+  gap: 1rem;
+}
+
+.verification-inventory .section-header {
+  border-bottom: 1px solid #1b342e;
+}
+
+.verification-inventory .section-header p:last-child {
+  max-width: 42rem;
+  margin: 0.5rem 0 0;
+  color: #9fb0ab;
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.verification-inventory-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  background: #1b342e;
+}
+
+.verification-inventory-list {
+  min-width: 0;
+  padding: 1rem;
+  background: #102620;
+}
+
+.verification-inventory-list > h3 {
+  margin: 0 0 0.85rem;
+  color: #d5e1dd;
+  font-size: 0.84rem;
+  letter-spacing: 0.05em;
+}
+
+.verification-inventory .item-heading h4 {
+  margin: 0;
+  color: #eef4f1;
+  font-size: 0.98rem;
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+}
+
+.verification-identity-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.verification-identity-heading h4 {
+  min-width: 0;
+}
+
+.verification-inventory .item-time {
+  margin-top: 0.35rem;
+}
+
+.verification-inventory .verification-record-id {
+  display: block;
+  margin-top: 0.45rem;
+}
+
+.verification-inventory-list .profile-actions {
+  margin-top: 0.85rem;
+}
+
+.verification-record-id {
+  color: #9fb0ab;
+  font-size: 0.7rem;
+  overflow-wrap: anywhere;
+}
+
 .attention-mark {
   border-color: #796331;
   color: #e1b765;
@@ -780,8 +905,13 @@ h3 {
   .profile-list,
   .profile-fields,
   .catalog-editor-grid,
-  .catalog-fields {
+  .catalog-fields,
+  .verification-inventory-grid {
     display: block;
+  }
+
+  .verification-inventory-list + .verification-inventory-list {
+    border-top: 1px solid #1b342e;
   }
 
   .profile-fields label + label {
