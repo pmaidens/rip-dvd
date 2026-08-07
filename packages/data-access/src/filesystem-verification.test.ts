@@ -1,4 +1,5 @@
 import {
+  mkdirSync,
   mkdtempSync,
   rmSync,
   symlinkSync,
@@ -23,6 +24,7 @@ interface ArchiveFixtureOptions extends Pick<
   Parameters<typeof createLegacySidecarDataAccess>[0],
   "filesystemPathProbe"
 > {
+  libraryDirectory?: string;
   verificationRoots?: {
     mediaLibraryPath: string;
     originalsLibraryPath: string;
@@ -30,8 +32,12 @@ interface ArchiveFixtureOptions extends Pick<
 }
 
 function createArchiveFixture(options: ArchiveFixtureOptions = {}) {
-  const directory = mkdtempSync(join(tmpdir(), "rip-dvd-verification-"));
-  temporaryDirectories.push(directory);
+  const directory =
+    options.libraryDirectory ??
+    mkdtempSync(join(tmpdir(), "rip-dvd-verification-"));
+  if (options.libraryDirectory === undefined) {
+    temporaryDirectories.push(directory);
+  }
   const archivePath = join(directory, "Original Disc.iso");
   writeFileSync(archivePath, "preserved disc");
   const access = createLegacySidecarDataAccess({
@@ -115,6 +121,43 @@ describe("explicit filesystem verification", () => {
     access.close();
   });
 
+  it("verifies canonical paths through symlinked configured library roots", async () => {
+    const root = mkdtempSync(join(tmpdir(), "rip-dvd-verification-alias-"));
+    temporaryDirectories.push(root);
+    const libraryDirectory = join(root, "canonical-library");
+    const mediaLibraryAlias = join(root, "media-library-alias");
+    const originalsLibraryAlias = join(root, "originals-library-alias");
+    mkdirSync(libraryDirectory);
+    symlinkSync(libraryDirectory, mediaLibraryAlias, "dir");
+    symlinkSync(libraryDirectory, originalsLibraryAlias, "dir");
+    const fixture = createArchiveFixture({
+      libraryDirectory,
+      verificationRoots: {
+        mediaLibraryPath: mediaLibraryAlias,
+        originalsLibraryPath: originalsLibraryAlias,
+      },
+    });
+    const { access, archive } = fixture;
+    const { job } = createEncodeJobFixture(fixture);
+
+    const [archiveVerification, outputVerification] = await Promise.all([
+      access.filesystemVerification.verifyOriginalDiscArchive(archive.id),
+      access.filesystemVerification.verifyEncodeJobOutput(job.id),
+    ]);
+
+    expect([archiveVerification, outputVerification]).toEqual([
+      expect.objectContaining({
+        verificationStatus: "accessible",
+        verificationMessage: "File is accessible.",
+      }),
+      expect.objectContaining({
+        verificationStatus: "accessible",
+        verificationMessage: "File is accessible.",
+      }),
+    ]);
+    access.close();
+  });
+
   it("does not inspect files during normal catalog and queue reads", async () => {
     const inspect = vi.fn(async () => "file" as const);
     const fixture = createArchiveFixture({
@@ -148,10 +191,10 @@ describe("explicit filesystem verification", () => {
     access.close();
   });
 
-  it("refuses database paths outside the configured libraries without probing them", async () => {
+  it("refuses paths the isolated probe finds outside configured libraries", async () => {
     const allowedRoot = mkdtempSync(join(tmpdir(), "rip-dvd-allowed-root-"));
     temporaryDirectories.push(allowedRoot);
-    const inspect = vi.fn(async () => "file" as const);
+    const inspect = vi.fn(async () => "unsafe" as const);
     const fixture = createArchiveFixture({
       filesystemPathProbe: { inspect },
       verificationRoots: {
@@ -176,7 +219,8 @@ describe("explicit filesystem verification", () => {
       verificationMessage:
         "Recorded path is outside the configured library.",
     });
-    expect(inspect).not.toHaveBeenCalled();
+    expect(inspect).toHaveBeenNthCalledWith(1, archive.archivePath, allowedRoot);
+    expect(inspect).toHaveBeenNthCalledWith(2, job.outputPath, allowedRoot);
     access.close();
   });
 

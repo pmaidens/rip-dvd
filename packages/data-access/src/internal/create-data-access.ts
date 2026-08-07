@@ -572,17 +572,6 @@ export function createDataAccessInternal(
     verificationMessage: string;
     verifiedAt: Date;
   }> {
-    if (
-      configuredRoot !== undefined &&
-      !isContainedPath(configuredRoot.resolvedPath, path)
-    ) {
-      return {
-        verificationStatus: "error",
-        verificationMessage:
-          "Recorded path is outside the configured library.",
-        verifiedAt: now(),
-      };
-    }
     try {
       const inspection = await filesystemPathProbe.inspect(
         path,
