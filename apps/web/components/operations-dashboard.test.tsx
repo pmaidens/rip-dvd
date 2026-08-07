@@ -6,6 +6,7 @@ import {
   DashboardView,
   OperationsDashboard,
   requestArchiveApproval,
+  requestFilesystemVerification,
   type DashboardLoadState,
 } from "./operations-dashboard";
 
@@ -219,6 +220,76 @@ describe("DashboardView", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ detectedDiscId: "disc-1" }),
     });
+  });
+
+  it.each([
+    ["original_disc_archive", "archive-1"],
+    ["encode_job_output", "encode-job-1"],
+  ] as const)("submits an explicit %s verification", async (target, id) => {
+    const fetcher = vi.fn(async () => new Response(null, { status: 200 }));
+
+    await requestFilesystemVerification(target, id, fetcher);
+
+    expect(fetcher).toHaveBeenCalledWith("/api/filesystem-verification", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ target, id }),
+    });
+  });
+
+  it("renders explicit verification actions and database-backed results", () => {
+    const html = renderToStaticMarkup(
+      <DashboardView
+        state={{
+          opticalDrives: { status: "loaded", items: [] },
+          detectedDiscs: { status: "loaded", items: [] },
+          archiveJobs: { status: "loaded", items: [] },
+          encodeJobs: {
+            status: "loaded",
+            items: [
+              {
+                id: "encode-job-1",
+                mediaTitle: "Missing output",
+                mediaYear: 2001,
+                encodingProfileName: "DVD library · Version 1",
+                status: "completed",
+                progressPhase: "encoding",
+                progressPercent: 100,
+                progressEtaSeconds: null,
+                verificationStatus: "missing",
+                verificationMessage: "File is missing at the recorded path.",
+                verifiedAt: "2026-08-06T20:00:00.000Z",
+              },
+            ],
+          },
+          catalogReview: {
+            status: "loaded",
+            items: [
+              {
+                id: "archive-1",
+                discLabel: "UNREADABLE_DISC",
+                discKind: "dvd",
+                archiveFormat: "iso",
+                archivedAt: "2026-08-06T19:00:00.000Z",
+                verificationStatus: "inaccessible",
+                verificationMessage:
+                  "The web process cannot access the recorded path.",
+                verifiedAt: "2026-08-06T20:05:00.000Z",
+              },
+            ],
+          },
+        }}
+        verifyingFilesystemTarget="encode_job_output:encode-job-1"
+      />,
+    );
+
+    expect(html).toContain("Verify archive file");
+    expect(html).toContain("Verifying output…");
+    expect(html).toContain("File is missing at the recorded path.");
+    expect(html).toContain(
+      "The web process cannot access the recorded path.",
+    );
+    expect(html).not.toContain("/media/");
   });
 
   it("renders mixed section states independently", () => {

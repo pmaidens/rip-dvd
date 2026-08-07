@@ -16,6 +16,7 @@ import {
   DISC_KINDS,
   DISC_SELECTION_KINDS,
   ENCODE_PROGRESS_PHASES,
+  FILESYSTEM_VERIFICATION_STATUSES,
   JOB_STATUSES,
   MEDIA_DOMAINS,
   MEDIA_ITEM_KINDS,
@@ -135,6 +136,11 @@ export const originalDiscArchives = sqliteTable(
     })
       .notNull()
       .default(false),
+    verificationStatus: text("verification_status", {
+      enum: FILESYSTEM_VERIFICATION_STATUSES,
+    }),
+    verificationMessage: text("verification_message"),
+    verifiedAt: integer("verified_at", { mode: "timestamp_ms" }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -156,6 +162,10 @@ export const originalDiscArchives = sqliteTable(
     check(
       "original_disc_archives_size_check",
       sql`${table.sizeBytes} is null or ${table.sizeBytes} >= 0`,
+    ),
+    check(
+      "original_disc_archives_verification_check",
+      sql`(${table.verificationStatus} is null and ${table.verificationMessage} is null and ${table.verifiedAt} is null) or (${table.verificationStatus} in (${sqliteStringLiterals(FILESYSTEM_VERIFICATION_STATUSES)}) and ${table.verificationMessage} is not null and ${table.verifiedAt} is not null)`,
     ),
   ],
 );
@@ -404,6 +414,11 @@ export const encodeJobs = sqliteTable(
     startedAt: integer("started_at", { mode: "timestamp_ms" }),
     completedAt: integer("completed_at", { mode: "timestamp_ms" }),
     errorMessage: text("error_message"),
+    verificationStatus: text("verification_status", {
+      enum: FILESYSTEM_VERIFICATION_STATUSES,
+    }),
+    verificationMessage: text("verification_message"),
+    verifiedAt: integer("verified_at", { mode: "timestamp_ms" }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -456,6 +471,10 @@ export const encodeJobs = sqliteTable(
     check(
       "encode_jobs_partial_cleanup_lease_check",
       sql`${table.partialCleanupLeaseToken} is null or ${table.partialCleanupClaimToken} is not null`,
+    ),
+    check(
+      "encode_jobs_verification_check",
+      sql`(${table.verificationStatus} is null and ${table.verificationMessage} is null and ${table.verifiedAt} is null) or (${table.verificationStatus} in (${sqliteStringLiterals(FILESYSTEM_VERIFICATION_STATUSES)}) and ${table.verificationMessage} is not null and ${table.verifiedAt} is not null)`,
     ),
   ],
 );

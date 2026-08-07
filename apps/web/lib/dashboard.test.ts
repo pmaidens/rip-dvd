@@ -16,7 +16,7 @@ import {
 
 const dataAccessFixture = useDataAccessFixture();
 
-function seedEncodeJob(access: LegacySidecarDataAccess): void {
+function seedEncodeJob(access: LegacySidecarDataAccess) {
   const drive = access.catalog.upsertOpticalDrive({
     devicePath: "/dev/sr0",
     isEnabled: true,
@@ -53,14 +53,64 @@ function seedEncodeJob(access: LegacySidecarDataAccess): void {
     mediaDomain: "dvd_video",
     settings: {},
   });
-  access.encodeJobs.enqueue({
+  const job = access.encodeJobs.enqueue({
     discSelectionId: selection.id,
     encodingProfileId: profile.id,
     outputPath: "/media/movies/enrichment.mkv",
   });
+  return { archive, job };
 }
 
 describe("readDashboardSnapshot", () => {
+  it("serializes explicit verification results without exposing paths", () => {
+    const access = dataAccessFixture.create();
+    const { job } = seedEncodeJob(access);
+    const drive = access.catalog.listOpticalDrives()[0]!;
+    const reviewDisc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "verification-review-disc",
+      volumeLabel: "VERIFY_REVIEW_DISC",
+    });
+    access.catalog.updateDetectedDiscStatus(reviewDisc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(reviewDisc.id, "approved");
+    const reviewArchive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: reviewDisc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/verification-review.iso",
+      fingerprint: reviewDisc.fingerprint,
+    });
+
+    access.filesystemVerification.verifyEncodeJobOutput(job.id);
+    access.filesystemVerification.verifyOriginalDiscArchive(reviewArchive.id);
+    const dashboard = readDashboardSnapshot(access, { activityLimit: 20 });
+
+    expect(dashboard.encodeJobs).toEqual({
+      status: "loaded",
+      items: [
+        expect.objectContaining({
+          id: job.id,
+          verificationStatus: "missing",
+          verificationMessage: "File is missing at the recorded path.",
+          verifiedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+        }),
+      ],
+    });
+    expect(dashboard.catalogReview).toEqual({
+      status: "loaded",
+      items: [
+        expect.objectContaining({
+          id: reviewArchive.id,
+          verificationStatus: "missing",
+          verificationMessage: "File is missing at the recorded path.",
+          verifiedAt: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+        }),
+      ],
+    });
+    expect(JSON.stringify(dashboard)).not.toContain("/media/");
+  });
+
   it("keeps a partially mapped archive visible until catalog review completes", () => {
     const access = dataAccessFixture.create();
     const drive = access.catalog.upsertOpticalDrive({

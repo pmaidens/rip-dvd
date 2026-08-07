@@ -1949,7 +1949,12 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
           "select name from pragma_table_info('original_disc_archives')",
         )
         .all(),
-    ).toContainEqual({ name: "legacy_cutover_pending" });
+    ).toEqual(expect.arrayContaining([
+      { name: "legacy_cutover_pending" },
+      { name: "verification_message" },
+      { name: "verification_status" },
+      { name: "verified_at" },
+    ]));
     expect(
       sqlite
         .prepare("select name from pragma_table_info('encode_jobs')")
@@ -1958,6 +1963,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       { name: "partial_cleanup_lease_token" },
       { name: "publication_completion_pending" },
       { name: "publication_pending" },
+      { name: "verification_message" },
+      { name: "verification_status" },
+      { name: "verified_at" },
     ]));
     expect(
       sqlite
@@ -1966,6 +1974,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         )
         .all(),
     ).toEqual([
+      {
+        name: "20260807000001_explicit-filesystem-verification",
+      },
       {
         name: "20260806204012_burly_johnny_storm",
       },
@@ -1983,9 +1994,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260805005453_outstanding_texas_twister",
-      },
-      {
-        name: "20260804184603_tense_zzzax",
       },
     ]);
     expect(

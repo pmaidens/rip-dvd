@@ -18,6 +18,7 @@ export {
 } from "./types.js";
 export type {
   CreateDataAccessOptions,
+  FilesystemPathProbe,
   PublicationMutationRecoveryLock,
 } from "./internal/create-data-access.js";
 

@@ -42,3 +42,10 @@ export const ENCODE_PROGRESS_PHASES = [
   "previewing",
   "encoding",
 ] as const;
+
+export const FILESYSTEM_VERIFICATION_STATUSES = [
+  "accessible",
+  "missing",
+  "inaccessible",
+  "error",
+] as const;
