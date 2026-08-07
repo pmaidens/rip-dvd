@@ -36,6 +36,11 @@ describe("FilesystemVerificationInventory", () => {
             {
               target: "encode_job_output",
               id: "encode-job-beyond-dashboard-cap",
+              mediaTitle: "Hidden Film",
+              mediaYear: 2004,
+              encodingProfileName: "DVD archive · Version 3",
+              jobStatus: "failed",
+              updatedAt: "2026-08-06T23:45:00.000Z",
               status: null,
               message: null,
               verifiedAt: null,
@@ -66,6 +71,10 @@ describe("FilesystemVerificationInventory", () => {
       { cache: "no-store" },
     );
     expect(html).toContain("encode-job-beyond-dashboard-cap");
+    expect(html).toContain("Hidden Film (2004)");
+    expect(html).toContain("DVD archive · Version 3");
+    expect(html).toContain("Failed");
+    expect(html).toContain("Updated Aug 6, 2026");
     expect(html).toContain("Verify output file");
     expect(html).toContain("Previous outputs");
     expect(html).not.toContain("/media/");
@@ -90,6 +99,10 @@ describe("FilesystemVerificationInventory", () => {
             {
               target: "original_disc_archive",
               id: "reviewed-original-archive",
+              discLabel: "REVIEWED_DISC",
+              discKind: "dvd",
+              archiveFormat: "iso",
+              archivedAt: "2026-08-05T18:15:00.000Z",
               status: "accessible",
               message: "File is accessible.",
               verifiedAt: "2026-08-07T02:30:00.000Z",
@@ -106,6 +119,9 @@ describe("FilesystemVerificationInventory", () => {
     );
 
     expect(html).toContain("reviewed-original-archive");
+    expect(html).toContain("REVIEWED_DISC");
+    expect(html).toContain("DVD · ISO");
+    expect(html).toContain("Archived Aug 5, 2026");
     expect(html).toContain("Verify archive file");
     expect(html).toContain("File is accessible.");
     expect(html).not.toContain("Review catalog");
