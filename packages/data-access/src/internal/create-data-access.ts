@@ -6,7 +6,7 @@ import {
   statSync,
   unlinkSync,
 } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { isDeepStrictEqual } from "node:util";
@@ -30,6 +30,10 @@ import {
 import { drizzle } from "drizzle-orm/node-sqlite";
 import { migrate } from "drizzle-orm/node-sqlite/migrator";
 
+import {
+  createBoundedFilesystemPathProbe,
+  type FilesystemPathProbe,
+} from "./bounded-filesystem-path-probe.js";
 import {
   archiveJobs,
   detectedDiscs,
@@ -384,11 +388,23 @@ function nextCatalogMutationTimestamp(timestamp: Date) {
 export interface CreateDataAccessOptions {
   databasePath: string;
   migrationsFolder?: string;
+  mediaLibraryPath?: string;
   originalsLibraryPath?: string;
   publicationMutationRecoveryLock?: PublicationMutationRecoveryLock;
+  filesystemPathProbe?: FilesystemPathProbe;
 }
 
 export type { PublicationMutationRecoveryLock };
+
+function isContainedPath(root: string, path: string): boolean {
+  const relativePath = relative(root, resolve(path));
+  return (
+    relativePath !== "" &&
+    relativePath !== ".." &&
+    !relativePath.startsWith(`..${sep}`) &&
+    !isAbsolute(relativePath)
+  );
+}
 
 export type LegacySidecarMigrationAdapter = LegacySidecarImportAccessFactory;
 
@@ -509,8 +525,10 @@ export function createDataAccessInternal(
   {
     databasePath,
     migrationsFolder = DEFAULT_MIGRATIONS_FOLDER,
+    mediaLibraryPath,
     originalsLibraryPath,
     publicationMutationRecoveryLock,
+    filesystemPathProbe = createBoundedFilesystemPathProbe(),
   }: CreateDataAccessOptions,
   legacySidecarMigration?: LegacySidecarMigrationAdapter,
 ): DataAccess | LegacySidecarDataAccess {
@@ -519,6 +537,18 @@ export function createDataAccessInternal(
     originalsLibraryPath === undefined
       ? undefined
       : realpathSync(originalsLibraryPath);
+  const originalsVerificationRoot =
+    originalsLibraryPath === undefined
+      ? undefined
+      : {
+          resolvedPath: resolve(originalsLibraryPath),
+        };
+  const mediaVerificationRoot =
+    mediaLibraryPath === undefined
+      ? undefined
+      : {
+          resolvedPath: resolve(mediaLibraryPath),
+        };
   if (normalizedDatabasePath !== ":memory:") {
     mkdirSync(dirname(resolve(normalizedDatabasePath)), { recursive: true });
   }
@@ -532,6 +562,64 @@ export function createDataAccessInternal(
 
   function now(): Date {
     return new Date();
+  }
+
+  async function inspectFilesystemPath(
+    path: string,
+    configuredRoot?: { resolvedPath: string },
+  ): Promise<{
+    verificationStatus: "accessible" | "missing" | "inaccessible" | "error";
+    verificationMessage: string;
+    verifiedAt: Date;
+  }> {
+    try {
+      const inspection = await filesystemPathProbe.inspect(
+        path,
+        configuredRoot?.resolvedPath,
+      );
+      if (inspection === "unsafe") {
+        return {
+          verificationStatus: "error",
+          verificationMessage:
+            "Recorded path is outside the configured library.",
+          verifiedAt: now(),
+        };
+      }
+      if (inspection !== "file") {
+        return {
+          verificationStatus: "error",
+          verificationMessage: "Recorded path is not a regular file.",
+          verifiedAt: now(),
+        };
+      }
+      return {
+        verificationStatus: "accessible",
+        verificationMessage: "File is accessible.",
+        verifiedAt: now(),
+      };
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "ENOTDIR") {
+        return {
+          verificationStatus: "missing",
+          verificationMessage: "File is missing at the recorded path.",
+          verifiedAt: now(),
+        };
+      }
+      if (code === "EACCES" || code === "EPERM") {
+        return {
+          verificationStatus: "inaccessible",
+          verificationMessage:
+            "The web process cannot access the recorded path.",
+          verifiedAt: now(),
+        };
+      }
+      return {
+        verificationStatus: "error",
+        verificationMessage: "Verification failed unexpectedly.",
+        verifiedAt: now(),
+      };
+    }
   }
 
   function legacyCutoverFenceCondition(
@@ -1586,6 +1674,13 @@ export function createDataAccessInternal(
           replacementOutputIdentity: preservesFailedReplacement
             ? current.replacementOutputIdentity
             : null,
+          ...(keepsOutputPath
+            ? {}
+            : {
+                verificationStatus: null,
+                verificationMessage: null,
+                verifiedAt: null,
+              }),
         })
         .where(
           and(
@@ -4656,6 +4751,84 @@ export function createDataAccessInternal(
       complete: (claim) => encodeJobQueue.complete(claim, undefined),
       fail: encodeJobQueue.fail,
       requeue: encodeJobQueue.requeue,
+    },
+
+    filesystemVerification: {
+      listOriginalDiscArchives(options) {
+        return access.catalog.listOriginalDiscArchives(options);
+      },
+      listEncodeJobOutputs(options) {
+        const limit = requirePositiveSafeInteger(options.limit, "limit");
+        const offset = optionalSafeInteger(options.offset, "offset", 0) ?? 0;
+        return database
+          .select()
+          .from(encodeJobs)
+          .orderBy(desc(encodeJobs.createdAt), desc(encodeJobs.id))
+          .limit(limit)
+          .offset(offset)
+          .all()
+          .reverse();
+      },
+      async verifyOriginalDiscArchive(id) {
+        const archive = requireRow(
+          database
+            .select()
+            .from(originalDiscArchives)
+            .where(eq(originalDiscArchives.id, id))
+            .get(),
+          "original disc archive",
+          id,
+        );
+        const verification = await inspectFilesystemPath(
+          archive.archivePath,
+          originalsVerificationRoot,
+        );
+        return requireRow(
+          database
+            .update(originalDiscArchives)
+            .set(verification)
+            .where(
+              and(
+                eq(originalDiscArchives.id, id),
+                eq(originalDiscArchives.archivePath, archive.archivePath),
+              ),
+            )
+            .returning()
+            .get(),
+          "original disc archive",
+          id,
+        );
+      },
+      async verifyEncodeJobOutput(id) {
+        const job = requireRow(
+          database
+            .select()
+            .from(encodeJobs)
+            .where(eq(encodeJobs.id, id))
+            .get(),
+          "encode job",
+          id,
+        );
+        const verification = await inspectFilesystemPath(
+          job.outputPath,
+          mediaVerificationRoot,
+        );
+        return requireRow(
+          database
+            .update(encodeJobs)
+            .set(verification)
+            .where(
+              and(
+                eq(encodeJobs.id, id),
+                eq(encodeJobs.outputPath, job.outputPath),
+              ),
+            )
+            .returning()
+            .get(),
+          "encode job",
+          id,
+        );
+      },
     },
 
     legacySidecars: legacySidecarMigration
