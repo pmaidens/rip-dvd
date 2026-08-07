@@ -750,6 +750,53 @@ h3 {
   font-size: 0.78rem;
 }
 
+.verification-inventory {
+  display: grid;
+  gap: 1rem;
+}
+
+.verification-inventory .section-header {
+  border-bottom: 1px solid #1b342e;
+}
+
+.verification-inventory .section-header p:last-child {
+  max-width: 42rem;
+  margin: 0.5rem 0 0;
+  color: #9fb0ab;
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.verification-inventory-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  background: #1b342e;
+}
+
+.verification-inventory-list {
+  min-width: 0;
+  padding: 1rem;
+  background: #102620;
+}
+
+.verification-inventory-list > h3 {
+  margin: 0 0 0.85rem;
+  color: #d5e1dd;
+  font-size: 0.84rem;
+  letter-spacing: 0.05em;
+}
+
+.verification-inventory-list .profile-actions {
+  margin-top: 0.85rem;
+}
+
+.verification-record-id {
+  color: #9fb0ab;
+  font-size: 0.7rem;
+  overflow-wrap: anywhere;
+}
+
 .attention-mark {
   border-color: #796331;
   color: #e1b765;
@@ -830,8 +877,13 @@ h3 {
   .profile-list,
   .profile-fields,
   .catalog-editor-grid,
-  .catalog-fields {
+  .catalog-fields,
+  .verification-inventory-grid {
     display: block;
+  }
+
+  .verification-inventory-list + .verification-inventory-list {
+    border-top: 1px solid #1b342e;
   }
 
   .profile-fields label + label {

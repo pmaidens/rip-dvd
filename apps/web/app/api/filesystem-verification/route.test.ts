@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { readDashboardSnapshot } from "../../../lib/dashboard";
 import { useDataAccessFixture } from "../../../test/data-access-fixture";
-import { createFilesystemVerificationRoute } from "./route";
+import {
+  createFilesystemVerificationInventoryRoute,
+  createFilesystemVerificationRoute,
+} from "./route";
 
 const dataAccessFixture = useDataAccessFixture();
 
@@ -46,7 +50,7 @@ function createVerificationRecords() {
     encodingProfileId: profile.id,
     outputPath: "/media/movies/API Verification.mkv",
   });
-  return { access, archive, job };
+  return { access, archive, job, selection };
 }
 
 function verificationRequest(target: string, id: string) {
@@ -62,6 +66,92 @@ function verificationRequest(target: string, id: string) {
 }
 
 describe("Filesystem Verification API", () => {
+  it("pages every Encode Job output beyond the operations history cap", async () => {
+    const { access, job, selection } = createVerificationRecords();
+    const jobs = [job];
+    for (let index = 0; index < 21; index += 1) {
+      const profile = access.encodingProfiles.create({
+        key: `verification-history-${index}`,
+        displayName: `Verification history ${index}`,
+        mediaDomain: "dvd_video",
+        settings: { index },
+      });
+      jobs.push(
+        access.encodeJobs.enqueue({
+          discSelectionId: selection.id,
+          encodingProfileId: profile.id,
+          outputPath: `/media/movies/Verification History ${index}.mkv`,
+        }),
+      );
+    }
+    for (;;) {
+      const claim = access.encodeJobs.claimNext("verification-history-worker");
+      if (!claim) {
+        break;
+      }
+      access.encodeJobs.fail(claim, "historical fixture");
+    }
+    const dashboard = readDashboardSnapshot(access, { activityLimit: 20 });
+    expect(dashboard.encodeJobs.status).toBe("loaded");
+    const dashboardIds =
+      dashboard.encodeJobs.status === "loaded"
+        ? dashboard.encodeJobs.items.map(({ id }) => id)
+        : [];
+    const hiddenJob = jobs.find(({ id }) => !dashboardIds.includes(id));
+    expect(hiddenJob).toBeDefined();
+
+    const response = createFilesystemVerificationInventoryRoute(
+      new Request(
+        "http://localhost:3000/api/filesystem-verification?target=encode_job_output&offset=20",
+      ),
+      () => access,
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.inventory).toMatchObject({
+      target: "encode_job_output",
+      page: {
+        offset: 20,
+        limit: 20,
+        hasPrevious: true,
+        hasNext: false,
+      },
+    });
+    expect(body.inventory.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: hiddenJob!.id, target: "encode_job_output" }),
+      ]),
+    );
+    expect(JSON.stringify(body)).not.toContain("/media/");
+  });
+
+  it("keeps a reviewed Original Disc Archive in the verification inventory", async () => {
+    const { access, archive } = createVerificationRecords();
+    const dashboard = readDashboardSnapshot(access, { activityLimit: 20 });
+    expect(dashboard.catalogReview).toEqual({ status: "loaded", items: [] });
+
+    const response = createFilesystemVerificationInventoryRoute(
+      new Request(
+        "http://localhost:3000/api/filesystem-verification?target=original_disc_archive&offset=0",
+      ),
+      () => access,
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.inventory.items).toEqual([
+      expect.objectContaining({
+        target: "original_disc_archive",
+        id: archive.id,
+        status: null,
+        message: null,
+        verifiedAt: null,
+      }),
+    ]);
+    expect(JSON.stringify(body)).not.toContain("/media/");
+  });
+
   it("explicitly verifies archive and Encode Job paths without exposing them", async () => {
     const { access, archive, job } = createVerificationRecords();
 

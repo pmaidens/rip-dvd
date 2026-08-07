@@ -509,10 +509,15 @@ export interface EncodeJobAccess {
 }
 
 export interface FilesystemVerificationAccess {
+  listOriginalDiscArchives(options: {
+    limit: number;
+    offset?: number;
+  }): OriginalDiscArchive[];
+  listEncodeJobOutputs(options: { limit: number; offset?: number }): EncodeJob[];
   verifyOriginalDiscArchive(
     id: OriginalDiscArchiveId,
-  ): OriginalDiscArchive;
-  verifyEncodeJobOutput(id: EncodeJobId): EncodeJob;
+  ): Promise<OriginalDiscArchive>;
+  verifyEncodeJobOutput(id: EncodeJobId): Promise<EncodeJob>;
 }
 
 export type SnapshotCatalogAccess = Pick<
