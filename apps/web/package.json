@@ -5,6 +5,7 @@
   "scripts": {
     "build": "next build",
     "dev": "next dev",
+    "pretest": "node ../encode-worker/scripts/build-atomic-exchange.mjs",
     "start": "next start",
     "test": "tsc -p ../../packages/config/tsconfig.build.json && tsc -p ../../packages/data-access/tsconfig.build.json && vitest run",
     "typecheck": "tsc --noEmit"
