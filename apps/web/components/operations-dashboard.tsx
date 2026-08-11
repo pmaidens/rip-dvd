@@ -160,7 +160,11 @@ function DashboardJobItem({
         <Progress value={progressPercent} />
         <strong>{progressPercent}%</strong>
       </div>
-      {progressDetail ? <p>{progressDetail}</p> : null}
+      {progressDetail ? (
+        <p className="job-progress-detail" aria-live="polite">
+          {progressDetail}
+        </p>
+      ) : null}
       {status === "failed" ? (
         <p className="job-error">Worker reported a failure.</p>
       ) : null}
@@ -193,6 +197,20 @@ function encodeProgressDetail(job: DashboardEncodeJob): string | null {
     .filter(Boolean)
     .join(" ");
   return `${phase} · ETA ${eta || "0s"}`;
+}
+
+function archiveProgressDetail(job: DashboardArchiveJob): string | null {
+  if (job.status !== "queued" && job.status !== "running") {
+    return null;
+  }
+  return {
+    waiting: "Waiting for the archive worker to inspect the disc",
+    inspecting_drive: "Inspecting the disc currently in this drive",
+    preparing: "Preparing the disc for archiving",
+    copying: "Copying the disc image",
+    verifying: "Verifying the disc image",
+    finalizing: "Saving the archive",
+  }[job.progressPhase];
 }
 
 function DashboardSection<T>({
@@ -570,6 +588,7 @@ export function DashboardView({
             subtitle={job.opticalDriveName}
             status={job.status}
             progressPercent={job.progressPercent}
+            progressDetail={archiveProgressDetail(job)}
             action={
               job.retryable ? (
                 <button

@@ -1020,6 +1020,13 @@ h3 {
   background: linear-gradient(90deg, #9e742d, #e0b25f);
 }
 
+.job-progress-detail {
+  margin: 0.7rem 0 0;
+  color: #9fb0ab;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
 .job-error {
   margin: 0.85rem 0 0;
   color: #e89a90;

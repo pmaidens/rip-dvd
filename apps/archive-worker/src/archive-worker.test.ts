@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  ARCHIVE_INSPECTION_LEASE_DURATION_MS,
   ARCHIVE_JOB_LEASE_DURATION_MS,
   type DiscoveredOpticalDrive,
 } from "@rip-dvd/data-access";
@@ -102,14 +103,27 @@ describe("archive worker polling", () => {
     });
     access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
     const job = access.archiveJobs.approve({ detectedDiscId: disc.id });
+    let scanCount = 0;
     const hardware: OpticalDriveHardware = {
       ...stableDeviceBinding(),
       discover: vi.fn().mockResolvedValue([discoveredDrive]),
-      scanDvd: vi.fn().mockResolvedValue({
-        fingerprint,
-        scanData,
-        sizeBytes: 9,
-        volumeLabel: "EXAMPLE_DISC",
+      scanDvd: vi.fn().mockImplementation(async () => {
+        scanCount += 1;
+        if (scanCount === 1) {
+          expect(access.archiveJobs.list(["queued"])).toEqual([
+            expect.objectContaining({
+              id: job.id,
+              progressPhase: "inspecting_drive",
+              progressPercent: 0,
+            }),
+          ]);
+        }
+        return {
+          fingerprint,
+          scanData,
+          sizeBytes: 9,
+          volumeLabel: "EXAMPLE_DISC",
+        };
       }),
     };
     const copyRunner: DvdCopyRunner = {
@@ -137,6 +151,7 @@ describe("archive worker polling", () => {
       expect.objectContaining({
         id: job.id,
         status: "completed",
+        progressPhase: "finalizing",
         progressPercent: 100,
         originalDiscArchiveId: expect.any(String),
       }),
@@ -149,6 +164,144 @@ describe("archive worker polling", () => {
     });
     expect(readFileSync(archive.archivePath, "utf8")).toBe("dvd-image");
     expect(existsSync(`${archive.archivePath}.failed`)).toBe(false);
+  });
+
+  it("preserves a live inspection and recovers it after its lease expires", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-11T12:00:00.000Z"));
+    const access = openTestDataAccess();
+    const drive = access.catalog.reconcileOpticalDrives([
+      {
+        devicePath: "/dev/sr0",
+        serialNumber: "INTERRUPTED-INSPECTION-001",
+        isConfiguredDevice: true,
+      },
+    ])[0]!;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "interrupted-inspection-disc",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    const job = access.archiveJobs.approve({ detectedDiscId: disc.id });
+    access.archiveJobs.beginDriveInspection(drive.id);
+
+    const pollOptions = {
+      access,
+      configuredDevicePath: "/dev/sr0",
+      hardware: {
+        ...stableDeviceBinding(),
+        discover: vi.fn().mockResolvedValue([]),
+        scanDvd: vi.fn(),
+      },
+      log: vi.fn(),
+      signal: new AbortController().signal,
+    };
+
+    await pollArchiveWorker(pollOptions);
+
+    expect(access.archiveJobs.list(["queued"])).toEqual([
+      expect.objectContaining({
+        id: job.id,
+        progressPhase: "inspecting_drive",
+        progressPercent: 0,
+      }),
+    ]);
+
+    vi.advanceTimersByTime(ARCHIVE_INSPECTION_LEASE_DURATION_MS + 1);
+    await pollArchiveWorker(pollOptions);
+
+    expect(access.archiveJobs.list(["queued"])).toEqual([
+      expect.objectContaining({
+        id: job.id,
+        progressPhase: "waiting",
+        progressPercent: 0,
+      }),
+    ]);
+  });
+
+  it("aborts a scan after its inspection lease ownership changes", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-11T13:00:00.000Z"));
+    const access = openTestDataAccess();
+    const discoveredDrive = {
+      devicePath: "/dev/sr0",
+      serialNumber: "INSPECTION-LEASE-001",
+    };
+    const drive = access.catalog.reconcileOpticalDrives([
+      { ...discoveredDrive, isConfiguredDevice: true },
+    ])[0]!;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "inspection-lease-disc",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    const job = access.archiveJobs.approve({ detectedDiscId: disc.id });
+    let scanSignal: AbortSignal | undefined;
+    const scanDvd = vi.fn(
+      async (_binding: unknown, activeSignal: AbortSignal) => {
+        scanSignal = activeSignal;
+        return await new Promise<null>((_resolve, reject) => {
+          activeSignal.addEventListener(
+            "abort",
+            () => reject(activeSignal.reason),
+            { once: true },
+          );
+        });
+      },
+    );
+    const log = vi.fn();
+
+    const polling = pollArchiveWorker({
+      access,
+      configuredDevicePath: "/dev/sr0",
+      hardware: {
+        ...stableDeviceBinding(),
+        discover: vi.fn().mockResolvedValue([discoveredDrive]),
+        scanDvd,
+      },
+      log,
+      signal: new AbortController().signal,
+    });
+
+    await vi.waitFor(() => expect(scanDvd).toHaveBeenCalledOnce());
+    const initiallyOwned = access.archiveJobs.list(["queued"])[0]!;
+    expect(initiallyOwned.progressPhase).toBe("inspecting_drive");
+    expect(initiallyOwned.inspectionToken).not.toBeNull();
+
+    await vi.advanceTimersByTimeAsync(
+      Math.floor(ARCHIVE_INSPECTION_LEASE_DURATION_MS / 3),
+    );
+    const renewed = access.archiveJobs.list(["queued"])[0]!;
+    expect(renewed.inspectionUpdatedAt!.getTime()).toBeGreaterThan(
+      initiallyOwned.inspectionUpdatedAt!.getTime(),
+    );
+    access.archiveJobs.finishDriveInspection({
+      jobIds: [job.id],
+      opticalDriveId: drive.id,
+      token: renewed.inspectionToken!,
+    });
+    const replacement = access.archiveJobs.beginDriveInspection(drive.id);
+    expect(replacement.token).not.toBe(renewed.inspectionToken);
+
+    await vi.advanceTimersByTimeAsync(
+      Math.floor(ARCHIVE_INSPECTION_LEASE_DURATION_MS / 3),
+    );
+    await polling;
+
+    expect(scanSignal?.aborted).toBe(true);
+    expect(access.archiveJobs.list(["queued"])).toEqual([
+      expect.objectContaining({
+        id: job.id,
+        inspectionToken: replacement.token,
+        progressPhase: "inspecting_drive",
+      }),
+    ]);
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining("Stale archive inspection attempt"),
+    );
+    access.archiveJobs.finishDriveInspection(replacement);
   });
 
   it("persists recoverable failure state and leaves no completed archive", async () => {
@@ -225,6 +378,7 @@ describe("archive worker polling", () => {
       expect.objectContaining({
         id: job.id,
         status: "failed",
+        progressPhase: "copying",
         progressPercent: 44,
         errorMessage: "dd read failed",
         originalDiscArchiveId: null,

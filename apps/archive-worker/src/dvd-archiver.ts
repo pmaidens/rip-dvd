@@ -23,6 +23,7 @@ import {
 import { dirname, join, resolve } from "node:path";
 
 import { createRawDvdContentIdHasher } from "@rip-dvd/data-access/dvd-content-id";
+import type { ArchiveJobProgress } from "@rip-dvd/data-access";
 import { isDvdContentId } from "@rip-dvd/data-access/dvd-scan";
 
 import { requireDvdContentSize } from "./dvd-content-policy.js";
@@ -468,7 +469,7 @@ export interface PreserveDvdArchiveOptions {
   sizeBytes: number;
   sync?(path: string): Promise<void>;
   verifySource(): Promise<void>;
-  onProgress(progressPercent: number): void;
+  onProgress(progress: ArchiveJobProgress): void;
 }
 
 export interface PreservedDvdArchive {
@@ -585,6 +586,7 @@ export async function preserveDvdArchive({
   onProgress,
 }: PreserveDvdArchiveOptions): Promise<PreservedDvdArchive> {
   signal.throwIfAborted();
+  onProgress({ phase: "preparing", progressPercent: 0 });
   const safeDevicePath = requireSafeOpticalDevicePath(devicePath);
   const safeSizeBytes = requireDvdContentSize(sizeBytes);
   if (!isDvdContentId(fingerprint)) {
@@ -626,6 +628,7 @@ export async function preserveDvdArchive({
 
   const existingArchive = await optionalMetadata(archivePath);
   if (existingArchive) {
+    onProgress({ phase: "verifying", progressPercent: 0 });
     if (!existingArchive.isFile() || existingArchive.isSymbolicLink()) {
       throw new Error("Existing DVD archive path is not a regular file");
     }
@@ -638,11 +641,11 @@ export async function preserveDvdArchive({
     }
     await verifySource();
     signal.throwIfAborted();
+    onProgress({ phase: "finalizing", progressPercent: 99 });
     await sync(archivePath);
     signal.throwIfAborted();
     await sync(root);
     signal.throwIfAborted();
-    onProgress(99);
     return { archivePath, recovered: true, sizeBytes: safeSizeBytes };
   }
 
@@ -652,6 +655,7 @@ export async function preserveDvdArchive({
   await movePartialAside(partialPath);
   let finalPublished = false;
   try {
+    onProgress({ phase: "copying", progressPercent: 0 });
     await runner.copy({
       devicePath: safeDevicePath,
       outputPath: partialPath,
@@ -661,7 +665,13 @@ export async function preserveDvdArchive({
         if (!Number.isSafeInteger(bytes) || bytes < 0) {
           return;
         }
-        onProgress(Math.min(99, Math.floor((bytes * 100) / safeSizeBytes)));
+        onProgress({
+          phase: "copying",
+          progressPercent: Math.min(
+            99,
+            Math.floor((bytes * 100) / safeSizeBytes),
+          ),
+        });
       },
     });
     signal.throwIfAborted();
@@ -673,6 +683,7 @@ export async function preserveDvdArchive({
     ) {
       throw new Error("DVD archive copy did not produce the expected complete image");
     }
+    onProgress({ phase: "verifying", progressPercent: 99 });
     await verifySource();
     signal.throwIfAborted();
     if (
@@ -681,6 +692,7 @@ export async function preserveDvdArchive({
     ) {
       throw new Error("DVD archive copy fingerprint does not match the Detected Disc");
     }
+    onProgress({ phase: "finalizing", progressPercent: 99 });
     await sync(partialPath);
     // A hard link publishes the fully-synced inode without the overwrite
     // behavior of POSIX rename. Both paths are in the same bounded directory.

@@ -16,6 +16,7 @@ import { EventEmitter, once } from "node:events";
 import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ArchiveJobProgress } from "@rip-dvd/data-access";
 
 import {
   preserveDvdArchive,
@@ -565,7 +566,7 @@ describe("DVD archive publication", () => {
     const originalsLibraryPath = createOriginalsLibrary();
     const content = Buffer.from("dvd-image");
     const digest = "e5cbeaa2965a33da9559ec142f30f4046ff91d1788a8d2f6ba22490b095f1c61";
-    const progress: number[] = [];
+    const progress: ArchiveJobProgress[] = [];
     const runner: DvdCopyRunner = {
       copy: vi.fn(async ({ outputPath, onBytesCopied }) => {
         expect(basename(outputPath)).toMatch(/^\..+\.rip-dvd-partial$/);
@@ -597,7 +598,14 @@ describe("DVD archive publication", () => {
     expect(
       existsSync(join(originalsLibraryPath, `.${digest}.iso.rip-dvd-partial`)),
     ).toBe(false);
-    expect(progress).toEqual([44, 99]);
+    expect(progress).toEqual([
+      { phase: "preparing", progressPercent: 0 },
+      { phase: "copying", progressPercent: 0 },
+      { phase: "copying", progressPercent: 44 },
+      { phase: "copying", progressPercent: 99 },
+      { phase: "verifying", progressPercent: 99 },
+      { phase: "finalizing", progressPercent: 99 },
+    ]);
     expect(verifySource).toHaveBeenCalledOnce();
   });
 
