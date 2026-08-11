@@ -1,12 +1,32 @@
 import { describe, expect, it } from "vitest";
 
-import { loadConfig } from "./index.js";
+import { loadConfig, normalizeHttpOrigin } from "./index.js";
 
 const requiredEnvironment = {
   RIP_DVD_DATABASE_PATH: "/data/rip-dvd.sqlite",
   RIP_DVD_MEDIA_LIBRARY_PATH: "/media/movies",
   RIP_DVD_ORIGINALS_LIBRARY_PATH: "/media/originals",
 };
+
+describe("normalizeHttpOrigin", () => {
+  it.each([
+    ["http://localhost:3000", "http://localhost:3000"],
+    ["https://dvd.example.test:8443/", "https://dvd.example.test:8443"],
+    ["HTTPS://DVD.EXAMPLE.TEST", "https://dvd.example.test"],
+  ])("normalizes an HTTP(S) origin (%s)", (value, expected) => {
+    expect(normalizeHttpOrigin(value)).toBe(expected);
+  });
+
+  it.each([
+    "ftp://localhost:3000",
+    "http://user:secret@localhost:3000",
+    "http://localhost:3000/dashboard",
+    "http://localhost:3000?redirect=elsewhere",
+    "not an origin",
+  ])("rejects a value that is not an HTTP(S) origin (%s)", (value) => {
+    expect(normalizeHttpOrigin(value)).toBeNull();
+  });
+});
 
 describe("loadConfig", () => {
   it("loads required paths and applies worker defaults", () => {

@@ -61,17 +61,12 @@ function timerDelayMilliseconds(
   return value;
 }
 
-function httpOrigin(
-  environment: Environment,
-  name: string,
-  defaultValue: string,
-): string {
-  const rawValue = environment[name]?.trim() || defaultValue;
+export function normalizeHttpOrigin(value: string): string | null {
   let url: URL;
   try {
-    url = new URL(rawValue);
+    url = new URL(value);
   } catch {
-    throw new Error(`${name} must be an HTTP(S) origin`);
+    return null;
   }
   if (
     (url.protocol !== "http:" && url.protocol !== "https:") ||
@@ -81,9 +76,22 @@ function httpOrigin(
     url.search !== "" ||
     url.hash !== ""
   ) {
-    throw new Error(`${name} must be an HTTP(S) origin`);
+    return null;
   }
   return url.origin;
+}
+
+function httpOrigin(
+  environment: Environment,
+  name: string,
+  defaultValue: string,
+): string {
+  const rawValue = environment[name]?.trim() || defaultValue;
+  const origin = normalizeHttpOrigin(rawValue);
+  if (origin === null) {
+    throw new Error(`${name} must be an HTTP(S) origin`);
+  }
+  return origin;
 }
 
 export function loadConfig(environment: Environment = process.env): RuntimeConfig {

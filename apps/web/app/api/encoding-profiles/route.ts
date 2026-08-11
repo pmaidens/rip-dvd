@@ -2,12 +2,16 @@ import type {
   DataAccess,
   EncodingProfileId,
 } from "@rip-dvd/data-access";
+import { loadConfig } from "@rip-dvd/config";
 import {
   DomainInvariantError,
   RecordNotFoundError,
 } from "@rip-dvd/data-access";
 
 import { getDataAccess } from "../../../lib/data-access";
+import {
+  trustedMutationRequestProblem,
+} from "../../../lib/server/trusted-mutation-request";
 import {
   toEncodingProfileDto,
   type DvdVideoEncodingSettings,
@@ -21,31 +25,6 @@ function response(body: unknown, status = 200): Response {
     status,
     headers: { "Cache-Control": "no-store" },
   });
-}
-
-function mutationRequestProblem(request: Request): Response | null {
-  const contentType = request.headers
-    .get("Content-Type")
-    ?.split(";", 1)[0]
-    ?.trim()
-    .toLowerCase();
-  if (contentType !== "application/json") {
-    return response({ error: "JSON content type required" }, 415);
-  }
-
-  const requestOrigin = new URL(request.url).origin;
-  const origin = request.headers.get("Origin");
-  const fetchSite = request.headers.get("Sec-Fetch-Site")?.toLowerCase();
-  if (
-    (origin !== null && origin !== requestOrigin) ||
-    (fetchSite !== undefined &&
-      fetchSite !== "same-origin" &&
-      fetchSite !== "none")
-  ) {
-    return response({ error: "Cross-origin mutation rejected" }, 403);
-  }
-
-  return null;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -79,6 +58,7 @@ function parseDvdVideoSettings(
 export async function createEncodingProfilesRoute(
   request: Request,
   getAccess: () => DataAccess = getDataAccess,
+  getTrustedOrigin: () => string = () => loadConfig().webTrustedOrigin,
 ): Promise<Response> {
   try {
     if (request.method === "GET") {
@@ -90,11 +70,17 @@ export async function createEncodingProfilesRoute(
       });
     }
 
-    if (request.method === "POST") {
-      const problem = mutationRequestProblem(request);
+    if (request.method === "POST" || request.method === "PATCH") {
+      const problem = trustedMutationRequestProblem(
+        request,
+        getTrustedOrigin(),
+      );
       if (problem) {
         return problem;
       }
+    }
+
+    if (request.method === "POST") {
       const access = getAccess();
       const body = asRecord(await request.json().catch(() => null));
       const sourceProfileId = requiredString(body?.sourceProfileId);
@@ -125,10 +111,6 @@ export async function createEncodingProfilesRoute(
     }
 
     if (request.method === "PATCH") {
-      const problem = mutationRequestProblem(request);
-      if (problem) {
-        return problem;
-      }
       const access = getAccess();
       const body = asRecord(await request.json().catch(() => null));
       const id = requiredString(body?.id);

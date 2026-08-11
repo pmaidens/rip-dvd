@@ -4,14 +4,37 @@ import { useDataAccessFixture } from "../../../test/data-access-fixture";
 import { createEncodingProfilesRoute } from "./route";
 
 const dataAccessFixture = useDataAccessFixture();
+const trustedOrigin = "http://localhost";
+
+function mutationRequest({
+  method,
+  body,
+  headers = {},
+}: {
+  method: "POST" | "PATCH";
+  body: string;
+  headers?: Record<string, string>;
+}): Request {
+  return new Request(`${trustedOrigin}/api/encoding-profiles`, {
+    method,
+    headers: {
+      "Content-Type": "application/json",
+      Host: "localhost",
+      Origin: trustedOrigin,
+      ...headers,
+    },
+    body,
+  });
+}
+
+const getTrustedOrigin = () => trustedOrigin;
 
 describe("Encoding Profiles API", () => {
   it("creates and lists an active DVD video Encoding Profile", async () => {
     const access = dataAccessFixture.create();
     const createResponse = await createEncodingProfilesRoute(
-      new Request("http://localhost/api/encoding-profiles", {
+      mutationRequest({
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           key: "dvd-library",
           displayName: "DVD library",
@@ -19,6 +42,7 @@ describe("Encoding Profiles API", () => {
         }),
       }),
       () => access,
+      getTrustedOrigin,
     );
 
     expect(createResponse.status).toBe(201);
@@ -61,15 +85,15 @@ describe("Encoding Profiles API", () => {
     });
 
     const response = await createEncodingProfilesRoute(
-      new Request("http://localhost/api/encoding-profiles", {
+      mutationRequest({
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           sourceProfileId: versionOne.id,
           settings: { preset: "HQ 480p30 Surround", container: "mkv" },
         }),
       }),
       () => access,
+      getTrustedOrigin,
     );
 
     expect(response.status).toBe(201);
@@ -113,12 +137,12 @@ describe("Encoding Profiles API", () => {
     });
 
     const activateResponse = await createEncodingProfilesRoute(
-      new Request("http://localhost/api/encoding-profiles", {
+      mutationRequest({
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id: versionTwo.id, isActive: true }),
       }),
       () => access,
+      getTrustedOrigin,
     );
     expect(activateResponse.status).toBe(200);
     expect(await activateResponse.json()).toEqual({
@@ -133,12 +157,12 @@ describe("Encoding Profiles API", () => {
     ).toEqual(expect.objectContaining({ id: versionOne.id, isActive: false }));
 
     const deactivateResponse = await createEncodingProfilesRoute(
-      new Request("http://localhost/api/encoding-profiles", {
+      mutationRequest({
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id: versionTwo.id, isActive: false }),
       }),
       () => access,
+      getTrustedOrigin,
     );
     expect(deactivateResponse.status).toBe(200);
     expect(await deactivateResponse.json()).toEqual({
@@ -156,9 +180,8 @@ describe("Encoding Profiles API", () => {
     });
 
     const invalidSettingsResponse = await createEncodingProfilesRoute(
-      new Request("http://localhost/api/encoding-profiles", {
+      mutationRequest({
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           key: "invalid",
           displayName: "Invalid",
@@ -166,13 +189,13 @@ describe("Encoding Profiles API", () => {
         }),
       }),
       () => access,
+      getTrustedOrigin,
     );
     expect(invalidSettingsResponse.status).toBe(400);
 
     const invalidPresetResponse = await createEncodingProfilesRoute(
-      new Request("http://localhost/api/encoding-profiles", {
+      mutationRequest({
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           key: "invalid-preset",
           displayName: "Invalid preset",
@@ -180,19 +203,20 @@ describe("Encoding Profiles API", () => {
         }),
       }),
       () => access,
+      getTrustedOrigin,
     );
     expect(invalidPresetResponse.status).toBe(400);
 
     const crossDomainResponse = await createEncodingProfilesRoute(
-      new Request("http://localhost/api/encoding-profiles", {
+      mutationRequest({
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           sourceProfileId: audioProfile.id,
           settings: { preset: "Fast 480p30", container: "mkv" },
         }),
       }),
       () => access,
+      getTrustedOrigin,
     );
     expect(crossDomainResponse.status).toBe(400);
     expect(
@@ -209,33 +233,33 @@ describe("Encoding Profiles API", () => {
     });
 
     const textResponse = await createEncodingProfilesRoute(
-      new Request("http://localhost/api/encoding-profiles", {
+      mutationRequest({
         method: "POST",
         headers: {
           "Content-Type": "text/plain",
-          Origin: "http://localhost",
         },
         body: input,
       }),
       () => access,
+      getTrustedOrigin,
     );
     expect(textResponse.status).toBe(415);
 
     const crossOriginResponse = await createEncodingProfilesRoute(
-      new Request("http://localhost/api/encoding-profiles", {
+      mutationRequest({
         method: "POST",
         headers: {
-          "Content-Type": "application/json",
           Origin: "https://attacker.example",
         },
         body: input,
       }),
       () => access,
+      getTrustedOrigin,
     );
     expect(crossOriginResponse.status).toBe(403);
 
     const crossSitePatchResponse = await createEncodingProfilesRoute(
-      new Request("http://localhost/api/encoding-profiles", {
+      mutationRequest({
         method: "PATCH",
         headers: {
           "Content-Type": "application/json; charset=utf-8",
@@ -244,26 +268,27 @@ describe("Encoding Profiles API", () => {
         body: JSON.stringify({ id: "profile-id", isActive: true }),
       }),
       () => access,
+      getTrustedOrigin,
     );
     expect(crossSitePatchResponse.status).toBe(403);
 
     const malformedResponse = await createEncodingProfilesRoute(
-      new Request("http://localhost/api/encoding-profiles", {
+      mutationRequest({
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: "{",
       }),
       () => access,
+      getTrustedOrigin,
     );
     expect(malformedResponse.status).toBe(400);
 
     const arrayResponse = await createEncodingProfilesRoute(
-      new Request("http://localhost/api/encoding-profiles", {
+      mutationRequest({
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: "[]",
       }),
       () => access,
+      getTrustedOrigin,
     );
     expect(arrayResponse.status).toBe(400);
     expect(
