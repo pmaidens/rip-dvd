@@ -5323,9 +5323,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       progressPhase: null,
       progressPercent: 0,
       progressEtaSeconds: null,
-      replaceExistingOutput: false,
+      replaceExistingOutput: true,
       claimedBy: null,
-      outputPath: "/media/movies/Movie/Movie-remastered.mkv",
+      outputPath: "/media/movies/Movie/Movie.mkv",
       priority: 20,
     });
     const secondClaim = access.encodeJobs.claimNext("encode-worker-2");

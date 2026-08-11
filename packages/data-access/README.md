@@ -172,14 +172,18 @@ remains blocked. Timeout cleanup and legacy cutover invalidation never set the
 publication flag, so queued, cutover-invalidated, and unrelated attempts cannot
 use the completion transition.
 
-Requeue grants replacement authority only when a completed Encode Job keeps
-its output path. The worker records the owned final's filesystem identity;
-failure retains authority only when the same identity is still present, while
-recovery retains the stored identity for the next attempt to recheck before
-HandBrake starts. The identity excludes link-count ctime changes made by the
-worker's own rename and hard-link restoration. Changing the output path or
-observing a different final revokes authority rather than transferring
-ownership of an existing file at the destination.
+Requeue first grants replacement authority only when a completed Encode Job
+keeps its output path. Terminal queue submission retains that authoritative
+path for completed jobs and for failed replacements that still own their prior
+final, preserving both SQLite provenance and the existing path reservation even
+when the request supplies a different path. A failed job without retained
+replacement authority may move to a new path. The worker records the owned
+final's filesystem identity; failure retains authority only when the same
+identity is still present, while recovery retains the stored identity for the
+next attempt to recheck before HandBrake starts. The identity excludes
+link-count ctime changes made by the worker's own rename and hard-link
+restoration. Observing a different final revokes authority rather than
+transferring ownership of an existing file at the destination.
 
 ## Transaction boundary
 

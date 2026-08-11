@@ -2121,11 +2121,14 @@ describe("legacy sidecar import", () => {
     const completedJob = fixture.access.encodeJobs
       .list(["completed"])
       .find((job) => job.outputPath === fixture.movieOutputPath)!;
-    const retryOutputPath = join(fixture.originalsLibraryPath, "retry.mkv");
+    const requestedRetryOutputPath = join(
+      fixture.originalsLibraryPath,
+      "retry.mkv",
+    );
     const retryJob = fixture.access.encodeJobs.enqueue({
       discSelectionId: completedJob.discSelectionId,
       encodingProfileId: completedJob.encodingProfileId,
-      outputPath: retryOutputPath,
+      outputPath: requestedRetryOutputPath,
       priority: 23,
     });
     const sidecar = JSON.parse(readFileSync(fixture.sidecarPath, "utf8")) as {
@@ -2153,11 +2156,6 @@ describe("legacy sidecar import", () => {
       expect.arrayContaining([
         expect.objectContaining({
           code: "duplicate_record",
-          jobIndex: 0,
-          message: expect.stringMatching(/schema-1.*ambiguous/i),
-        }),
-        expect.objectContaining({
-          code: "duplicate_record",
           jobIndex: 2,
           message: expect.stringMatching(/schema-1.*ambiguous/i),
         }),
@@ -2172,8 +2170,9 @@ describe("legacy sidecar import", () => {
       expect.arrayContaining([
         expect.objectContaining({
           id: retryJob.id,
-          outputPath: retryOutputPath,
+          outputPath: completedJob.outputPath,
           priority: 23,
+          replaceExistingOutput: true,
           status: "queued",
         }),
       ]),
@@ -2767,7 +2766,7 @@ describe("legacy sidecar import", () => {
     if (!completedJob) {
       throw new Error("Expected the completed imported Encode Job");
     }
-    const retryOutputPath = join(
+    const requestedRetryOutputPath = join(
       fixture.originalsLibraryPath,
       "retries",
       "Example Movie retry.mkv",
@@ -2775,7 +2774,7 @@ describe("legacy sidecar import", () => {
     const retry = fixture.access.encodeJobs.enqueue({
       discSelectionId: completedJob.discSelectionId,
       encodingProfileId: completedJob.encodingProfileId,
-      outputPath: retryOutputPath,
+      outputPath: requestedRetryOutputPath,
       priority: 17,
     });
 
@@ -2793,8 +2792,9 @@ describe("legacy sidecar import", () => {
       expect.arrayContaining([
         expect.objectContaining({
           id: retry.id,
-          outputPath: retryOutputPath,
+          outputPath: completedJob.outputPath,
           priority: 17,
+          replaceExistingOutput: true,
           status: "queued",
           progressPercent: 0,
           completedAt: null,
