@@ -198,6 +198,67 @@ class ComposeDeploymentTests(unittest.TestCase):
             ],
         )
 
+    def test_build_context_excludes_operational_files_and_keeps_project_inputs(
+        self,
+    ) -> None:
+        if shutil.which("docker") is None:
+            raise unittest.SkipTest("Docker is unavailable")
+
+        required_inputs = (
+            ".env.example",
+            ".node-version",
+            "apps/web/package.json",
+            "compose.yaml",
+            "docker/runtime.Dockerfile",
+            "package.json",
+            "packages/config/package.json",
+            "pnpm-lock.yaml",
+            "pnpm-workspace.yaml",
+            "scripts/check-toolchain.mjs",
+            "tests/test_compose_deployment.py",
+            "tsconfig.base.json",
+        )
+        operational_files = (
+            ".env",
+            "backups/rip-dvd.sqlite",
+            "compose.override.yaml",
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = pathlib.Path(directory)
+            context = temporary / "context"
+            output = temporary / "output"
+            context.mkdir()
+            shutil.copy(ROOT / ".dockerignore", context / ".dockerignore")
+
+            for relative_path in (*required_inputs, *operational_files):
+                path = context / relative_path
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(f"fixture for {relative_path}\n")
+
+            result = subprocess.run(
+                [
+                    "docker",
+                    "build",
+                    "--file",
+                    "-",
+                    "--output",
+                    f"type=local,dest={output}",
+                    str(context),
+                ],
+                input="FROM scratch\nCOPY . /build-context\n",
+                capture_output=True,
+                check=False,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            exported_context = output / "build-context"
+            for relative_path in operational_files:
+                self.assertFalse((exported_context / relative_path).exists())
+            for relative_path in required_inputs:
+                self.assertTrue((exported_context / relative_path).is_file())
+
     def test_migration_script_quiesces_runtime_services_before_migrating(self) -> None:
         result, calls = run_compose_script("compose-migrate.sh")
 
