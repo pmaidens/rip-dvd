@@ -18,6 +18,7 @@ try {
 
   parentPort.postMessage({ type: "ready" });
   Atomics.wait(barrier, 0, 0);
+  parentPort.postMessage({ type: "operation-started" });
 
   if (workerData.mode === "open") {
     access = createDataAccess({ databasePath: workerData.databasePath });
@@ -104,6 +105,25 @@ try {
       parentPort.postMessage({
         type: "result",
         value: { outcome: "enqueued", id: job.id },
+      });
+    } catch (error) {
+      if (!(error instanceof DomainInvariantError)) {
+        throw error;
+      }
+      parentPort.postMessage({
+        type: "result",
+        value: { outcome: "rejected" },
+      });
+    }
+  } else if (workerData.operation === "complete-catalog-review") {
+    try {
+      const archive = access.catalog.completeCatalogReview(
+        workerData.originalDiscArchiveId,
+        workerData.catalogRevision,
+      );
+      parentPort.postMessage({
+        type: "result",
+        value: { outcome: "reviewed", id: archive.id },
       });
     } catch (error) {
       if (!(error instanceof DomainInvariantError)) {

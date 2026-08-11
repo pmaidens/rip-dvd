@@ -57,18 +57,21 @@ mutations are serialized, reject cycles, and cap each hierarchy at 32 items.
 The facade derives canonical DVD source identities, rejects duplicate source
 slices, requires title selections to reference the archived scan, and keeps
 chapter ranges within the selected title; main-feature selections remain a
-distinct DVD source kind. Encode Job
-enqueueing checks that review boundary and writes in one short immediate
-transaction, so a concurrent Disc Selection cannot reopen review between the
-eligibility read and queue write. It also requires the referenced Encoding
+distinct DVD source kind. Full catalog validation for review completion and
+Encode Job enqueueing runs in a consistent deferred read snapshot. Each
+operation then compares the archive's monotonic catalog revision and writes in
+one short immediate transaction, so a concurrent Disc Selection cannot reopen
+review between validation and the queue or review write. Enqueueing also
+requires the referenced Encoding
 Profile version to be active in the DVD video domain and rejects a final output
 path already reserved by another logical job. Encode Job requeue and claim
 operations also require the review boundary. Requeue preserves the referenced
 historical profile version even when it is no longer active. Existing databases
 preserve the review time for canonical main-feature-only catalogs. Caller-era
 scan-dependent, noncanonical, or otherwise unsafe catalogs are reopened
-conservatively, their active Encode Jobs fail visibly, and bounded catalog
-validation is required before review can complete again. Duplicate logical
+conservatively, their active Encode Jobs fail visibly, and paged catalog
+validation outside the writer lock is required before review can complete
+again. Duplicate logical
 slices, noncanonical source keys, missing DVD
 titles, and out-of-range chapters fail that validation. Scan evidence referenced
 by an Original Disc Archive is immutable across rediscovery, so reviewed
