@@ -404,11 +404,32 @@ commands instead of expanding the web image's attack surface.
 Use the deployment scripts from the repository root:
 
 ```bash
+./scripts/update.sh
 ./scripts/compose-build.sh
 ./scripts/compose-migrate.sh
 ./scripts/compose-start.sh
 ./scripts/compose-backup.sh
 ./scripts/compose-stop.sh
+```
+
+For routine updates on an installed host, run `scripts/update.sh`. It refuses
+dirty checkouts, detached HEADs, branches without an upstream, and concurrent
+updates. The updater takes an online SQLite backup before using
+`git pull --ff-only`, builds the new images while the existing services remain
+running, and then uses the normal quiesce, migration, and startup path. It
+verifies that the web service is healthy and both workers are running. If
+verification fails, it stops all runtime services rather than leaving a partial
+deployment running. The checkout and database are not automatically rolled
+back; correct the error or follow the documented restore procedure, then rerun
+the updater.
+
+The updater runs from a temporary snapshot of itself. This prevents a pull
+that changes `scripts/update.sh` from mixing old and new shell instructions in
+one update. Run it locally or over SSH from the repository root:
+
+```bash
+cd /opt/rip-dvd
+./scripts/update.sh
 ```
 
 `scripts/compose-build.sh` builds the migration, backup, web, archive-worker,
