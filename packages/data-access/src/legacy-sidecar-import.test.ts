@@ -2163,9 +2163,7 @@ describe("legacy sidecar import", () => {
       fixture.originalsLibraryPath,
       "retry.mkv",
     );
-    const retryJob = fixture.access.encodeJobs.enqueue({
-      discSelectionId: completedJob.discSelectionId,
-      encodingProfileId: completedJob.encodingProfileId,
+    const retryJob = fixture.access.encodeJobs.requeue(completedJob.id, {
       outputPath: requestedRetryOutputPath,
       priority: 23,
     });
@@ -2809,9 +2807,7 @@ describe("legacy sidecar import", () => {
       "retries",
       "Example Movie retry.mkv",
     );
-    const retry = fixture.access.encodeJobs.enqueue({
-      discSelectionId: completedJob.discSelectionId,
-      encodingProfileId: completedJob.encodingProfileId,
+    const retry = fixture.access.encodeJobs.requeue(completedJob.id, {
       outputPath: requestedRetryOutputPath,
       priority: 17,
     });

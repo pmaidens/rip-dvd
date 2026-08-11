@@ -1545,9 +1545,7 @@ describe("encode worker polling", () => {
     };
     await pollEncodeWorker({ ...options, runner: firstRunner });
     expect(
-      fixture.access.encodeJobs.enqueue({
-        discSelectionId: fixture.job.discSelectionId,
-        encodingProfileId: fixture.job.encodingProfileId,
+      fixture.access.encodeJobs.requeue(fixture.job.id, {
         outputPath: requestedOutputPath,
       }),
     ).toMatchObject({
@@ -1711,9 +1709,7 @@ describe("encode worker polling", () => {
     ]);
     replacementLinkFailure.armed = false;
     expect(
-      fixture.access.encodeJobs.enqueue({
-        discSelectionId: fixture.job.discSelectionId,
-        encodingProfileId: fixture.job.encodingProfileId,
+      fixture.access.encodeJobs.requeue(fixture.job.id, {
         outputPath: join(
           fixture.mediaLibraryPath,
           "Requested failed replacement retry.mkv",
@@ -4161,10 +4157,19 @@ describe("encode worker polling", () => {
       fixture.mediaLibraryPath,
       "Recovered Elsewhere.mkv",
     );
-    expect(() =>
+    expect(
       fixture.access.encodeJobs.enqueue({
         discSelectionId: fixture.job.discSelectionId,
         encodingProfileId: fixture.job.encodingProfileId,
+        outputPath: replacementOutputPath,
+      }),
+    ).toMatchObject({
+      id: fixture.job.id,
+      outputPath: fixture.outputPath,
+      status: "failed",
+    });
+    expect(() =>
+      fixture.access.encodeJobs.requeue(fixture.job.id, {
         outputPath: replacementOutputPath,
       }),
     ).toThrow(/failed.*queued/i);
@@ -4181,9 +4186,7 @@ describe("encode worker polling", () => {
     await pollEncodeWorker({ ...options, runner: cleanupRunner });
 
     expect(cleanupRunner.run).not.toHaveBeenCalled();
-    fixture.access.encodeJobs.enqueue({
-      discSelectionId: fixture.job.discSelectionId,
-      encodingProfileId: fixture.job.encodingProfileId,
+    fixture.access.encodeJobs.requeue(fixture.job.id, {
       outputPath: replacementOutputPath,
     });
     const runner: HandBrakeRunner = {

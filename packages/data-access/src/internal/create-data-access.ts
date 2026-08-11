@@ -107,6 +107,7 @@ import type {
   EncodeJobFailureOptions,
   EncodeJobPartialCleanup,
   EncodeJobProgress,
+  EncodeJobRequeueOptions,
   EncodingProfileId,
   MediaDomain,
   MediaItemId,
@@ -1258,11 +1259,6 @@ export function createDataAccessInternal(
     }
   >;
 
-  type EncodeRequeueOptions = {
-    outputPath?: string;
-    priority?: number;
-  };
-
   const listEncodeJobs = createJobList<EncodeJob>({
     readQueue(statuses) {
       return database
@@ -1429,9 +1425,13 @@ export function createDataAccessInternal(
     progressDetailsChanged: (current, previous) =>
       current?.phase !== previous?.phase,
     requeue: (id, expectedStatus, current, update, options) => {
+      const effectiveOutputPath =
+        expectedStatus === "completed" || current.replaceExistingOutput
+          ? current.outputPath
+          : options?.outputPath;
       const keepsOutputPath =
-        options?.outputPath === undefined ||
-        options.outputPath === current.outputPath;
+        effectiveOutputPath === undefined ||
+        effectiveOutputPath === current.outputPath;
       const preservesFailedReplacement =
         expectedStatus === "failed" &&
         keepsOutputPath &&
@@ -1440,7 +1440,7 @@ export function createDataAccessInternal(
         .update(encodeJobs)
         .set({
           ...update,
-          outputPath: options?.outputPath,
+          outputPath: effectiveOutputPath,
           priority: options?.priority,
           progressPhase: null,
           progressEtaSeconds: null,
@@ -1497,7 +1497,7 @@ export function createDataAccessInternal(
     EncodeJobId,
     EncodeJobClaimToken,
     void,
-    EncodeRequeueOptions,
+    EncodeJobRequeueOptions,
     void,
     Pick<EncodeJobProgress, "etaSeconds" | "phase">,
     EncodeJobFailureOptions
@@ -3345,25 +3345,15 @@ export function createDataAccessInternal(
                 ),
               )
               .get();
-            if (
-              existing &&
-              existing.status !== "failed" &&
-              existing.status !== "completed"
-            ) {
+            if (existing) {
               return existing;
             }
-            const effectiveOutputPath =
-              existing &&
-              (existing.status === "completed" ||
-                existing.replaceExistingOutput)
-                ? existing.outputPath
-                : outputPath;
             const outputOwner = transaction
               .select({ id: encodeJobs.id })
               .from(encodeJobs)
               .where(
                 and(
-                  eq(encodeJobs.outputPath, effectiveOutputPath),
+                  eq(encodeJobs.outputPath, outputPath),
                   eq(encodeJobs.reservesOutputPath, true),
                   or(
                     ne(encodeJobs.discSelectionId, input.discSelectionId),
@@ -3375,14 +3365,8 @@ export function createDataAccessInternal(
               .get();
             if (outputOwner) {
               throw new DomainInvariantError(
-                `Encode Job output is already assigned: ${effectiveOutputPath}`,
+                `Encode Job output is already assigned: ${outputPath}`,
               );
-            }
-            if (existing) {
-              return encodeJobQueue.requeue(existing.id, {
-                outputPath: effectiveOutputPath,
-                priority: input.priority ?? 0,
-              });
             }
             const profile = requireRow(
               transaction
@@ -3408,7 +3392,7 @@ export function createDataAccessInternal(
                 id: newId<EncodeJobId>(),
                 discSelectionId: input.discSelectionId,
                 encodingProfileId: input.encodingProfileId,
-                outputPath: effectiveOutputPath,
+                outputPath,
                 priority: input.priority ?? 0,
                 createdAt: timestamp,
                 updatedAt: timestamp,
@@ -4354,7 +4338,21 @@ export function createDataAccessInternal(
       },
       complete: (claim) => encodeJobQueue.complete(claim, undefined),
       fail: encodeJobQueue.fail,
-      requeue: encodeJobQueue.requeue,
+      requeue(id, options) {
+        const outputPath = options?.outputPath === undefined
+          ? undefined
+          : requireNonEmpty(options.outputPath, "outputPath");
+        if (
+          options?.priority !== undefined &&
+          !Number.isSafeInteger(options.priority)
+        ) {
+          throw new DomainInvariantError("priority must be a safe integer");
+        }
+        return encodeJobQueue.requeue(id, {
+          outputPath,
+          priority: options?.priority,
+        });
+      },
     },
 
     filesystemVerification: {
