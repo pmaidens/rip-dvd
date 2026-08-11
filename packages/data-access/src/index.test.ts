@@ -647,6 +647,60 @@ describe("data-access facade", () => {
     access.close();
   });
 
+  it("applies bounded offset pagination consistently across catalog lists", () => {
+    vi.useFakeTimers();
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const catalogEntries = Array.from({ length: 3 }, (_, index) => {
+      vi.setSystemTime(new Date(`2026-08-10T12:00:0${index}.000Z`));
+      const fingerprint = `bounded-catalog-page-${index}`;
+      const disc = access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint,
+      });
+      access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+      access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+      const archive = access.catalog.createOriginalDiscArchive({
+        detectedDiscId: disc.id,
+        discKind: "dvd",
+        archiveFormat: "iso",
+        archivePath: `/media/originals/Bounded Catalog Page ${index}.iso`,
+        fingerprint,
+      });
+      const mediaItem = access.catalog.createMediaItem({
+        kind: "movie",
+        title: `Bounded Catalog Page ${index}`,
+      });
+      const discSelection = access.catalog.createDiscSelection({
+        originalDiscArchiveId: archive.id,
+        mediaItemId: mediaItem.id,
+        kind: "main_feature",
+      });
+      return { archive, mediaItem, discSelection };
+    });
+
+    expect(access.catalog.listOriginalDiscArchives({ limit: 1, offset: 1 }))
+      .toEqual([expect.objectContaining({ id: catalogEntries[1]!.archive.id })]);
+    expect(access.catalog.listMediaItems({ limit: 1, offset: 1 })).toEqual([
+      expect.objectContaining({ id: catalogEntries[1]!.mediaItem.id }),
+    ]);
+    expect(access.catalog.listDiscSelections({ limit: 1, offset: 1 })).toEqual([
+      expect.objectContaining({ id: catalogEntries[1]!.discSelection.id }),
+    ]);
+
+    expect(() => access.catalog.listOriginalDiscArchives({ offset: 1 }))
+      .toThrow("Original Disc Archive offset requires a bounded limit");
+    expect(() => access.catalog.listMediaItems({ offset: 1 }))
+      .toThrow("Media Item offset requires a bounded limit");
+    expect(() => access.catalog.listDiscSelections({ offset: 1 }))
+      .toThrow("Disc Selection offset requires a bounded limit");
+    access.close();
+  });
+
   it("keeps partially cataloged archives in review until review is explicitly completed", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-03T18:00:00.000Z"));
