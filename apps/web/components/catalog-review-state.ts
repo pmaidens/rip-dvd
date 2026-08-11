@@ -1,0 +1,269 @@
+"use client";
+
+import { useCallback, useEffect, useRef, useState } from "react";
+
+import type { CatalogReviewCommand } from "../lib/catalog-review-command";
+import type {
+  CatalogReviewDto,
+  CatalogReviewLoadState,
+  CreateDiscSelectionInput,
+  DiscSelectionKind,
+  SaveMediaItemInput,
+} from "./catalog-review-model";
+
+type CatalogReviewFetch = (
+  input: RequestInfo | URL,
+  init?: RequestInit,
+) => Promise<Response>;
+
+export function createCatalogReviewRequestScope(initialArchiveId: string) {
+  let activeArchiveId: string | null = initialArchiveId;
+  let currentRequest = Symbol("catalog-review-request");
+  return {
+    activate(archiveId: string) {
+      if (activeArchiveId !== archiveId) {
+        activeArchiveId = archiveId;
+        currentRequest = Symbol("catalog-review-request");
+      }
+    },
+    begin(archiveId: string): symbol | null {
+      if (activeArchiveId !== archiveId) {
+        return null;
+      }
+      currentRequest = Symbol("catalog-review-request");
+      return currentRequest;
+    },
+    invalidate(archiveId: string) {
+      if (activeArchiveId === archiveId) {
+        currentRequest = Symbol("catalog-review-request");
+      }
+    },
+    deactivate(archiveId: string) {
+      if (activeArchiveId === archiveId) {
+        activeArchiveId = null;
+        currentRequest = Symbol("catalog-review-request");
+      }
+    },
+    isCurrent(archiveId: string, request: symbol): boolean {
+      return activeArchiveId === archiveId && currentRequest === request;
+    },
+  };
+}
+
+export async function requestCatalogReview(
+  archiveId: string,
+  mediaItemOffset: number,
+  discSelectionOffset: number,
+  editingMediaItemId: string | null,
+  fetcher: CatalogReviewFetch = fetch,
+): Promise<CatalogReviewDto> {
+  const query = new URLSearchParams({
+    mediaOffset: String(mediaItemOffset),
+    selectionOffset: String(discSelectionOffset),
+  });
+  if (editingMediaItemId !== null) {
+    query.set("editingMediaItemId", editingMediaItemId);
+  }
+  const response = await fetcher(
+    `/api/catalog-reviews/${encodeURIComponent(archiveId)}?${query.toString()}`,
+    { cache: "no-store", headers: { Accept: "application/json" } },
+  );
+  if (!response.ok) {
+    throw new Error("Catalog review request failed");
+  }
+  return response.json() as Promise<CatalogReviewDto>;
+}
+
+export async function mutateCatalogReview(
+  archiveId: string,
+  command: CatalogReviewCommand,
+  fetcher: CatalogReviewFetch = fetch,
+): Promise<void> {
+  const response = await fetcher(
+    `/api/catalog-reviews/${encodeURIComponent(archiveId)}`,
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(command),
+    },
+  );
+  if (!response.ok) {
+    let message = "Catalog review mutation failed";
+    try {
+      const body: unknown = await response.json();
+      if (
+        typeof body === "object" &&
+        body !== null &&
+        "error" in body &&
+        typeof body.error === "string" &&
+        body.error.trim() !== ""
+      ) {
+        message = body.error.trim().slice(0, 512);
+      }
+    } catch {
+      // Keep the bounded generic message for non-JSON error responses.
+    }
+    throw new Error(message);
+  }
+}
+
+interface UseCatalogReviewStateOptions {
+  archiveId: string;
+  onCompleted(): void;
+}
+
+export function useCatalogReviewState({
+  archiveId,
+  onCompleted,
+}: UseCatalogReviewStateOptions) {
+  const [state, setState] = useState<CatalogReviewLoadState>({
+    status: "loading",
+  });
+  const [editingMediaItemId, setEditingMediaItemId] = useState<string | null>(
+    null,
+  );
+  const [mediaItemOffset, setMediaItemOffset] = useState(0);
+  const [discSelectionOffset, setDiscSelectionOffset] = useState(0);
+  const [selectionKind, setSelectionKind] =
+    useState<DiscSelectionKind>("main_feature");
+  const [isSaving, setIsSaving] = useState(false);
+  const [requestError, setRequestError] = useState<string | null>(null);
+  const requestScope = useRef<
+    ReturnType<typeof createCatalogReviewRequestScope> | null
+  >(null);
+  requestScope.current ??= createCatalogReviewRequestScope(archiveId);
+  requestScope.current.activate(archiveId);
+
+  const load = useCallback(async () => {
+    const request = requestScope.current?.begin(archiveId);
+    if (request === null || request === undefined) {
+      return;
+    }
+    try {
+      const review = await requestCatalogReview(
+        archiveId,
+        mediaItemOffset,
+        discSelectionOffset,
+        editingMediaItemId,
+      );
+      if (!requestScope.current?.isCurrent(archiveId, request)) {
+        return;
+      }
+      setState({ status: "loaded", review });
+      setRequestError(null);
+    } catch {
+      if (!requestScope.current?.isCurrent(archiveId, request)) {
+        return;
+      }
+      setState({ status: "error" });
+    }
+  }, [
+    archiveId,
+    discSelectionOffset,
+    editingMediaItemId,
+    mediaItemOffset,
+  ]);
+
+  useEffect(() => {
+    setState({ status: "loading" });
+    void load();
+  }, [load]);
+
+  useEffect(
+    () => () => requestScope.current?.deactivate(archiveId),
+    [archiveId],
+  );
+
+  async function mutate(command: CatalogReviewCommand, complete = false) {
+    if (isSaving) {
+      return;
+    }
+    setIsSaving(true);
+    setRequestError(null);
+    try {
+      await mutateCatalogReview(archiveId, command);
+      setEditingMediaItemId(null);
+      if (complete) {
+        onCompleted();
+      } else {
+        await load();
+      }
+    } catch (error) {
+      setRequestError(
+        error instanceof Error
+          ? error.message
+          : "Catalog review mutation failed",
+      );
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  function changeEditingMediaItem(id: string | null) {
+    if (editingMediaItemId === id) {
+      return;
+    }
+    requestScope.current?.invalidate(archiveId);
+    setEditingMediaItemId(id);
+  }
+
+  function changeMediaItemOffset(offset: number) {
+    if (mediaItemOffset === offset) {
+      return;
+    }
+    requestScope.current?.invalidate(archiveId);
+    setMediaItemOffset(offset);
+  }
+
+  function changeDiscSelectionOffset(offset: number) {
+    if (discSelectionOffset === offset) {
+      return;
+    }
+    requestScope.current?.invalidate(archiveId);
+    setDiscSelectionOffset(offset);
+  }
+
+  function saveMediaItem(input: SaveMediaItemInput) {
+    const { id, ...values } = input;
+    void mutate(
+      id
+        ? { action: "update_media_item", mediaItemId: id, changes: values }
+        : { action: "create_media_item", mediaItem: values },
+    );
+  }
+
+  function createDiscSelection(selection: CreateDiscSelectionInput) {
+    const { replacesDiscSelectionId, ...values } = selection;
+    void mutate(
+      replacesDiscSelectionId
+        ? {
+            action: "repair_disc_selection",
+            discSelectionId: replacesDiscSelectionId,
+            selection: values,
+          }
+        : { action: "create_disc_selection", selection: values },
+    );
+  }
+
+  return {
+    state,
+    editingMediaItemId,
+    isSaving,
+    requestError,
+    selectionKind,
+    retry: () => void load(),
+    editMediaItem: (id: string) => changeEditingMediaItem(id),
+    cancelEdit: () => changeEditingMediaItem(null),
+    changeMediaItemOffset,
+    changeDiscSelectionOffset,
+    changeSelectionKind: setSelectionKind,
+    saveMediaItem,
+    createDiscSelection,
+    deleteDiscSelection: (discSelectionId: string) =>
+      void mutate({ action: "delete_disc_selection", discSelectionId }),
+    completeReview: () => void mutate({ action: "complete_review" }, true),
+  };
+}
