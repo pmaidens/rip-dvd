@@ -9,6 +9,7 @@ import {
   realpathSync,
   renameSync,
   symlinkSync,
+  truncateSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -1681,6 +1682,167 @@ try {
       ]);
       retry.close();
     },
+  );
+
+  it.each([
+    {
+      bound: "scan bytes",
+      normalMessage:
+        "Aggregate sidecar scan work exceeds the 67108864-byte limit",
+      recoveryMessage:
+        "Aggregate recovery sidecar scan work exceeds the 67108864-byte limit",
+      sidecarCount: 64,
+    },
+    {
+      bound: "retained bytes",
+      normalMessage:
+        "Aggregate sidecar bytes exceed the 8388608-byte import limit",
+      recoveryMessage:
+        "Aggregate recovery sidecar bytes exceed the 8388608-byte import limit",
+      sidecarCount: 10,
+    },
+    {
+      bound: "jobs",
+      normalMessage:
+        "Aggregate legacy jobs exceed the 1000-job import limit",
+      recoveryMessage:
+        "Aggregate recovery legacy jobs exceed the 1000-job import limit",
+      sidecarCount: 11,
+    },
+  ] as const)(
+    "identifies the shared $bound bound in discovery and historical recovery",
+    ({ bound, normalMessage, recoveryMessage, sidecarCount }) => {
+      const root = temporaryDirectories.create(
+        "rip-dvd-cutover-shared-import-budget-",
+      );
+      const originalsLibraryPath = join(root, "originals");
+      const databasePath = join(root, "catalog.sqlite");
+      const markerPath = join(
+        originalsLibraryPath,
+        ".rip-dvd-sqlite-catalog",
+      );
+      const capturedSidecars: Array<{
+        archivePath: string;
+        sidecarPath: string;
+        sidecar: Record<string, unknown>;
+      }> = [];
+      mkdirSync(originalsLibraryPath, { recursive: true });
+      for (
+        let sidecarIndex = 1;
+        sidecarIndex <= sidecarCount;
+        sidecarIndex += 1
+      ) {
+        const archivePath = join(
+          originalsLibraryPath,
+          `Shared Budget ${sidecarIndex}.iso`,
+        );
+        const sidecarPath = join(
+          originalsLibraryPath,
+          `Shared Budget ${sidecarIndex}.rip-dvd.json`,
+        );
+        const sidecar = {
+          schema_version: 2,
+          source: archivePath,
+          title: `Shared Budget ${sidecarIndex}`,
+          disc_fingerprint: `shared-job-budget-${sidecarIndex}`,
+          jobs: [{
+            label: `Extra 1: Shared Budget ${sidecarIndex}`,
+            source: archivePath,
+            output: join(
+              root,
+              "movies",
+              `shared-budget-${sidecarIndex}-1.mkv`,
+            ),
+            preset: "Fast 480p30",
+            selection: "title",
+            title_number: 1,
+          }],
+        };
+        writeFileSync(archivePath, `archive ${sidecarIndex}`);
+        writeFileSync(sidecarPath, JSON.stringify(sidecar));
+        capturedSidecars.push({ archivePath, sidecarPath, sidecar });
+      }
+      markerFault.failure = "directory-sync";
+      const interrupted = createLegacySidecarDataAccess({ databasePath });
+      expect(() => interrupted.legacySidecars.importLibrary({
+        originalsLibraryPath,
+      })).toThrow(/injected directory sync failure/i);
+      interrupted.close();
+      const currentMarker = JSON.parse(
+        readFileSync(markerPath, "utf8"),
+      ) as {
+        legacyJobs: Array<{
+          jobIndex: number;
+          logicalKey: string;
+          sidecarPath: string;
+          signature: string;
+        }>;
+      };
+      writeFileSync(markerPath, JSON.stringify({
+        schemaVersion: 3,
+        legacyQueueStatus: "retired",
+        authoritativeStore: "sqlite",
+        legacyJobs: currentMarker.legacyJobs,
+        snapshotDigest: createHash("sha256")
+          .update(JSON.stringify(currentMarker.legacyJobs))
+          .digest("hex"),
+      }));
+      for (const [sidecarIndex, captured] of capturedSidecars.entries()) {
+        const { archivePath, sidecarPath, sidecar } = captured;
+        if (bound === "scan bytes") {
+          truncateSync(sidecarPath, 1_048_577);
+          continue;
+        }
+        writeFileSync(sidecarPath, JSON.stringify({
+          ...sidecar,
+          ...(bound === "retained bytes"
+            ? { padding: "x".repeat(840_000) }
+            : {}),
+          jobs: bound === "jobs"
+            ? Array.from({ length: 100 }, (_, jobIndex) => ({
+                label: `Extra ${jobIndex + 1}: Shared Budget`,
+                source: archivePath,
+                output: join(
+                  root,
+                  "movies",
+                  `shared-budget-${sidecarIndex + 1}-${jobIndex + 1}.mkv`,
+                ),
+                preset: "Fast 480p30",
+                selection: "title",
+                title_number: jobIndex + 1,
+              }))
+            : sidecar.jobs,
+        }));
+      }
+      markerFault.failure = null;
+      const retry = createLegacySidecarDataAccess({ databasePath });
+
+      const report = retry.legacySidecars.importLibrary({
+        originalsLibraryPath,
+        recoverHistoricalCutover: true,
+      });
+
+      expect(report).toMatchObject({
+        sidecarsImported: 0,
+        sidecarsSkipped: sidecarCount,
+      });
+      expect(report.issues).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          code: "invalid_sidecar",
+          message: normalMessage,
+          sidecarPath: originalsLibraryPath,
+        }),
+        expect.objectContaining({
+          code: "invalid_sidecar",
+          message: recoveryMessage,
+          sidecarPath: originalsLibraryPath,
+        }),
+      ]));
+      expect(retry.catalog.listOriginalDiscArchives()).toEqual([]);
+      expect(retry.encodeJobs.list()).toEqual([]);
+      retry.close();
+    },
+    30_000,
   );
 
   it("uses schema-3 job locations when restart traversal is incomplete", () => {
