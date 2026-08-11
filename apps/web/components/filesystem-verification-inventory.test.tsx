@@ -5,8 +5,67 @@ import {
   FilesystemVerificationInventoryView,
   requestFilesystemVerificationInventory,
 } from "./filesystem-verification-inventory";
+import {
+  expectVerificationResultList,
+  VERIFICATION_RESULT_CASES,
+  VERIFICATION_TIMESTAMP,
+} from "./filesystem-verification-result.test-support";
 
 describe("FilesystemVerificationInventory", () => {
+  it("shows null and verified filesystem states consistently", () => {
+    const html = renderToStaticMarkup(
+      <FilesystemVerificationInventoryView
+        encodeOutputs={{
+          status: "loaded",
+          items: [
+            ...VERIFICATION_RESULT_CASES.map(({ status, message }, index) => ({
+              target: "encode_job_output" as const,
+              id: `verified-output-${index}`,
+              mediaTitle: `Verified output ${index}`,
+              mediaYear: null,
+              encodingProfileName: "DVD archive · Version 3",
+              jobStatus: "completed" as const,
+              updatedAt: "2026-08-06T23:45:00.000Z",
+              status,
+              message,
+              verifiedAt: VERIFICATION_TIMESTAMP,
+            })),
+            {
+              target: "encode_job_output",
+              id: "unverified-output",
+              mediaTitle: "Unverified output",
+              mediaYear: null,
+              encodingProfileName: "DVD archive · Version 3",
+              jobStatus: "completed",
+              updatedAt: "2026-08-06T23:45:00.000Z",
+              status: null,
+              message: null,
+              verifiedAt: null,
+            },
+          ],
+          page: {
+            offset: 0,
+            limit: 20,
+            hasPrevious: false,
+            hasNext: false,
+          },
+        }}
+        originalArchives={{
+          status: "loaded",
+          items: [],
+          page: {
+            offset: 0,
+            limit: 20,
+            hasPrevious: false,
+            hasNext: false,
+          },
+        }}
+      />,
+    );
+
+    expectVerificationResultList(html);
+  });
+
   it("keeps an Encode Job beyond the operations cap explicitly verifiable", async () => {
     const fetcher = vi.fn(async () =>
       Response.json({
