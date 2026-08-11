@@ -44,7 +44,7 @@ interface ExistingDetectedDiscEvidence {
   volumeLabel: string | null;
 }
 
-interface MatchingArchiveProvenance {
+interface ContentIdentityArchiveProvenance {
   detectedDiscId: string;
   discKind: DiscKind;
 }
@@ -54,7 +54,7 @@ export function evaluateDetectedDiscRediscovery({
   existing,
   fingerprintObservationDiscKind,
   isNewMediumObservation,
-  matchingArchive,
+  contentIdentityArchive,
   scanData,
   volumeLabel,
 }: {
@@ -62,11 +62,11 @@ export function evaluateDetectedDiscRediscovery({
   existing?: ExistingDetectedDiscEvidence;
   fingerprintObservationDiscKind?: DiscKind;
   isNewMediumObservation?: boolean;
-  matchingArchive?: MatchingArchiveProvenance;
+  contentIdentityArchive?: ContentIdentityArchiveProvenance;
   scanData: unknown | undefined;
   volumeLabel: string | undefined;
 }): { observationChanged: boolean; statusChanged: boolean } {
-  if (matchingArchive && matchingArchive.discKind !== discKind) {
+  if (contentIdentityArchive && contentIdentityArchive.discKind !== discKind) {
     throw new DomainInvariantError(
       "Rediscovered disc kind must match existing archive provenance",
     );
@@ -80,9 +80,9 @@ export function evaluateDetectedDiscRediscovery({
     );
   }
   if (
-    matchingArchive !== undefined &&
+    contentIdentityArchive !== undefined &&
     existing !== undefined &&
-    matchingArchive.detectedDiscId === existing.id &&
+    contentIdentityArchive.detectedDiscId === existing.id &&
     scanData !== undefined &&
     !isDeepStrictEqual(existing.scanData, scanData)
   ) {
@@ -91,7 +91,7 @@ export function evaluateDetectedDiscRediscovery({
     );
   }
   if (
-    matchingArchive === undefined &&
+    contentIdentityArchive === undefined &&
     existing?.status === "approved" &&
     (existing.discKind !== discKind ||
       (scanData !== undefined &&
@@ -110,7 +110,7 @@ export function evaluateDetectedDiscRediscovery({
       existing.volumeLabel !== (volumeLabel ?? null) ||
       !isDeepStrictEqual(existing.scanData, scanData ?? null),
     statusChanged:
-      matchingArchive !== undefined && existing?.status !== "archived",
+      contentIdentityArchive !== undefined && existing?.status !== "archived",
   };
 }
 

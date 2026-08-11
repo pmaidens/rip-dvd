@@ -596,8 +596,12 @@ export function createDataAccessInternal(
     );
   }
 
-  function findOriginalArchiveByContentId(
-    fingerprint: string,
+  /**
+   * Matches an Original Disc Archive by either its stored legacy/current
+   * fingerprint or a recorded current content-ID alias.
+   */
+  function findOriginalArchiveByFingerprintOrContentIdAlias(
+    fingerprintOrContentIdAlias: string,
     querySource: Pick<typeof database, "select"> = database,
   ) {
     return querySource
@@ -616,8 +620,14 @@ export function createDataAccessInternal(
       )
       .where(
         or(
-          eq(originalDiscArchives.fingerprint, fingerprint),
-          eq(originalDiscArchiveContentIds.contentId, fingerprint),
+          eq(
+            originalDiscArchives.fingerprint,
+            fingerprintOrContentIdAlias,
+          ),
+          eq(
+            originalDiscArchiveContentIds.contentId,
+            fingerprintOrContentIdAlias,
+          ),
         ),
       )
       .get();
@@ -657,7 +667,8 @@ export function createDataAccessInternal(
     if (
       sizeBytes === undefined ||
       !isDvdContentId(fingerprint) ||
-      findOriginalArchiveByContentId(fingerprint) !== undefined
+      findOriginalArchiveByFingerprintOrContentIdAlias(fingerprint) !==
+        undefined
     ) {
       return;
     }
@@ -1081,7 +1092,12 @@ export function createDataAccessInternal(
               "archived",
             );
           }
-          if (findOriginalArchiveByContentId(disc.fingerprint, transaction)) {
+          if (
+            findOriginalArchiveByFingerprintOrContentIdAlias(
+              disc.fingerprint,
+              transaction,
+            )
+          ) {
             throw new DomainInvariantError(
               "DVD content already has Original Disc Archive provenance",
             );
@@ -1563,11 +1579,12 @@ export function createDataAccessInternal(
           "approved",
         );
       }
-      const matchingArchive = findOriginalArchiveByContentId(
-        disc.fingerprint,
-        transaction,
-      );
-      if (matchingArchive) {
+      const contentIdentityArchive =
+        findOriginalArchiveByFingerprintOrContentIdAlias(
+          disc.fingerprint,
+          transaction,
+        );
+      if (contentIdentityArchive) {
         throw new DomainInvariantError(
           "A Detected Disc with existing archive provenance cannot be approved",
         );
@@ -1936,10 +1953,11 @@ export function createDataAccessInternal(
           );
         }
         return database.transaction((transaction) => {
-          const matchingArchive = findOriginalArchiveByContentId(
-            fingerprint,
-            transaction,
-          );
+          const contentIdentityArchive =
+            findOriginalArchiveByFingerprintOrContentIdAlias(
+              fingerprint,
+              transaction,
+            );
           const matchingObservation = transaction
             .select({ discKind: detectedDiscs.discKind })
             .from(detectedDiscs)
@@ -1969,7 +1987,7 @@ export function createDataAccessInternal(
               existing,
               fingerprintObservationDiscKind: matchingObservation?.discKind,
               isNewMediumObservation: input.isNewMediumObservation,
-              matchingArchive,
+              contentIdentityArchive,
               scanData,
               volumeLabel: input.volumeLabel,
             });
@@ -1983,7 +2001,7 @@ export function createDataAccessInternal(
               fingerprint,
               volumeLabel: input.volumeLabel,
               scanData,
-              status: matchingArchive ? "archived" : "detected",
+              status: contentIdentityArchive ? "archived" : "detected",
               detectedAt: timestamp,
               createdAt: timestamp,
               updatedAt: timestamp,
@@ -1999,7 +2017,9 @@ export function createDataAccessInternal(
               discKind: input.discKind,
               volumeLabel: input.volumeLabel,
               scanData,
-              ...(matchingArchive ? { status: "archived" as const } : {}),
+              ...(contentIdentityArchive
+                ? { status: "archived" as const }
+                : {}),
               ...(observationChanged
                 ? { detectedAt: timestamp, updatedAt: timestamp }
                 : statusChanged
@@ -2010,7 +2030,7 @@ export function createDataAccessInternal(
               and(
                 eq(detectedDiscs.opticalDriveId, input.opticalDriveId),
                 eq(detectedDiscs.fingerprint, fingerprint),
-                matchingArchive
+                contentIdentityArchive
                   ? undefined
                   : or(
                       eq(detectedDiscs.discKind, input.discKind),
@@ -2038,7 +2058,7 @@ export function createDataAccessInternal(
               "Rediscovery cannot change a Detected Disc kind with archive provenance",
             );
           }
-          if (matchingArchive) {
+          if (contentIdentityArchive) {
             transaction
               .delete(archiveJobs)
               .where(queuedArchiveJobsForFingerprint(fingerprint))
@@ -2117,7 +2137,12 @@ export function createDataAccessInternal(
           );
         }
         return database.transaction((transaction) => {
-          if (findOriginalArchiveByContentId(fingerprint, transaction)) {
+          if (
+            findOriginalArchiveByFingerprintOrContentIdAlias(
+              fingerprint,
+              transaction,
+            )
+          ) {
             throw new DomainInvariantError(
               "DVD content already has Original Disc Archive provenance",
             );
