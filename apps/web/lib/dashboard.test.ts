@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import { readDashboardSnapshot } from "./dashboard";
+import { seedFailedArchiveJobAndQueuedDuplicate } from "../test/archive-job-fixture";
 import {
   useDataAccessFixture,
   withSnapshotOverrides,
@@ -439,6 +440,50 @@ describe("readDashboardSnapshot", () => {
       archiveJobs: { status: "loaded", items: [] },
       encodeJobs: { status: "loaded", items: [] },
       catalogReview: { status: "loaded", items: [] },
+    });
+  });
+
+  it("keeps a failed duplicate Archive Job visible but projects it as non-retryable", () => {
+    const access = dataAccessFixture.create();
+    const fixture = seedFailedArchiveJobAndQueuedDuplicate(
+      access,
+      "dashboard-superseded-archive-job",
+    );
+
+    expect(readDashboardSnapshot(access).archiveJobs).toEqual({
+      status: "loaded",
+      items: expect.arrayContaining([
+        expect.objectContaining({
+          id: fixture.failedJob.id,
+          status: "failed",
+          retryable: true,
+        }),
+      ]),
+    });
+    const publishedJob = fixture.publishDuplicate();
+
+    expect(access.archiveJobs.list(["failed"])).toEqual([
+      expect.objectContaining({
+        id: fixture.failedJob.id,
+        detectedDiscId: fixture.failedDisc.id,
+        errorMessage: "disc read failed",
+      }),
+    ]);
+    expect(readDashboardSnapshot(access).archiveJobs).toEqual({
+      status: "loaded",
+      items: expect.arrayContaining([
+        expect.objectContaining({
+          id: fixture.failedJob.id,
+          discLabel: "FAILED_DUPLICATE",
+          status: "failed",
+          retryable: false,
+        }),
+        expect.objectContaining({
+          id: publishedJob.id,
+          status: "completed",
+          retryable: false,
+        }),
+      ]),
     });
   });
 

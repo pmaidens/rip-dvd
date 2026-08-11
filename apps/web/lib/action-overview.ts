@@ -4,6 +4,8 @@ import type {
   FilesystemVerificationStatus,
 } from "@rip-dvd/data-access";
 
+import { isArchiveJobRetryable } from "./archive-job-retryability";
+
 const PREVIEW_LIMIT = 3;
 
 export interface ActionOverviewItem {
@@ -90,6 +92,9 @@ function readSnapshot(access: ConsistentReadAccess): ActionOverviewSnapshot {
       ? []
       : access.catalog.listDetectedDiscs(undefined, { ids: detectedDiscIds });
   const discsById = new Map(relevantDiscs.map((disc) => [disc.id, disc]));
+  const retryableFailedArchiveJobs = failedArchiveJobs.filter(
+    (job) => isArchiveJobRetryable(job, discsById.get(job.detectedDiscId)),
+  );
 
   const relevantEncodeJobs = [...failedEncodeJobs, ...encodeProblems];
   const selectionIds = [
@@ -127,7 +132,7 @@ function readSnapshot(access: ConsistentReadAccess): ActionOverviewSnapshot {
       })),
     ),
     failedArchives: category(
-      failedArchiveJobs.map((job) => ({
+      retryableFailedArchiveJobs.map((job) => ({
         id: job.id,
         label:
           discsById.get(job.detectedDiscId)?.volumeLabel ?? "Unlabeled disc",

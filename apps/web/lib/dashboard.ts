@@ -15,6 +15,7 @@ import {
   type DvdTitle,
 } from "@rip-dvd/data-access/dvd-scan";
 
+import { isArchiveJobRetryable } from "./archive-job-retryability";
 import {
   DASHBOARD_ACTIVE_DISC_LIMIT,
   DASHBOARD_ACTIVE_JOB_LIMIT,
@@ -52,6 +53,7 @@ export interface DashboardArchiveJob {
   opticalDriveName: string;
   status: JobStatus;
   progressPercent: number;
+  retryable: boolean;
 }
 
 export interface DashboardEncodeJob {
@@ -381,6 +383,7 @@ function readDashboardSnapshotRecords(
                   : "Unknown Optical Drive",
                 status: job.status,
                 progressPercent: job.progressPercent,
+                retryable: isArchiveJobRetryable(job, disc),
               };
             }),
           );
