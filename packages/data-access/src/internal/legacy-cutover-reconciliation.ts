@@ -29,9 +29,9 @@ interface LegacyRepairArchiveIdentity {
 }
 
 interface LegacyRepairMarkerSnapshot {
+  identityDigest: string;
   inventory: LegacyRepairArchiveIdentity[];
   libraryPath: string;
-  version: string;
 }
 
 interface MarkerFileVersion {
@@ -101,8 +101,8 @@ function sameMarkerFileVersion(
 }
 
 function readBoundedMarker(markerPath: string): {
+  identityDigest: string;
   value: unknown;
-  version: string;
 } {
   const namedStatBefore = lstatSync(markerPath, { bigint: true });
   if (!namedStatBefore.isFile() || namedStatBefore.isSymbolicLink()) {
@@ -162,12 +162,12 @@ function readBoundedMarker(markerPath: string): {
     }
     const bytes = buffer.subarray(0, bytesRead);
     return {
-      value: JSON.parse(UTF8_DECODER.decode(bytes)),
-      version: createHash("sha256")
+      identityDigest: createHash("sha256")
         .update(JSON.stringify(openedVersionAfter))
         .update("\n")
         .update(bytes)
         .digest("hex"),
+      value: JSON.parse(UTF8_DECODER.decode(bytes)),
     };
   } catch (error) {
     throw new Error(
@@ -180,7 +180,7 @@ function readBoundedMarker(markerPath: string): {
   }
 }
 
-function readLegacyRepairArchiveInventory(
+function readLegacyRepairMarkerSnapshot(
   originalsLibraryPath: string,
 ): LegacyRepairMarkerSnapshot | null {
   const libraryPath = realpathSync(originalsLibraryPath);
@@ -238,9 +238,9 @@ function readLegacyRepairArchiveInventory(
     return { archivePath, fingerprint, sidecarPath };
   });
   return {
+    identityDigest: markerSnapshot.identityDigest,
     inventory,
     libraryPath,
-    version: markerSnapshot.version,
   };
 }
 
@@ -249,7 +249,7 @@ export function reconcileLegacyRepairCutover(
   originalsLibraryPath: string,
   publicationMutationRecoveryLock?: PublicationMutationRecoveryLock,
 ): void {
-  const markerSnapshot = readLegacyRepairArchiveInventory(
+  const markerSnapshot = readLegacyRepairMarkerSnapshot(
     originalsLibraryPath,
   );
   if (markerSnapshot === null || markerSnapshot.inventory.length === 0) {
@@ -316,13 +316,13 @@ export function reconcileLegacyRepairCutover(
       }
     }
 
-    const currentMarkerSnapshot = readLegacyRepairArchiveInventory(
+    const currentMarkerSnapshot = readLegacyRepairMarkerSnapshot(
       originalsLibraryPath,
     );
     if (
       currentMarkerSnapshot === null ||
       currentMarkerSnapshot.libraryPath !== markerSnapshot.libraryPath ||
-      currentMarkerSnapshot.version !== markerSnapshot.version
+      currentMarkerSnapshot.identityDigest !== markerSnapshot.identityDigest
     ) {
       throw new Error(
         "Legacy repair marker changed while it was being reconciled",
