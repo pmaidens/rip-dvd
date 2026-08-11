@@ -1,34 +1,199 @@
-export const LEGACY_QUEUE_CUTOVER_PROTOCOL = {
-  version: 1,
-  indexes: {
-    state: 0,
-    release: 1,
-    heartbeat: 2,
-  },
-  states: {
-    starting: 0,
-    intentReady: 1,
-    ready: 2,
-    released: 3,
-    failed: 4,
-  },
-  sentinels: {
-    abort: "supervisor-abort",
-    error: "error",
-    intentReady: "intent-ready",
-    ready: "ready",
-    release: "release",
-    released: "released",
-    workerError: "worker-error",
-  },
-} as const;
+import { readFileSync } from "node:fs";
+import { basename } from "node:path";
 
-export const LEGACY_QUEUE_CUTOVER_PROTOCOL_ARGUMENT = [
-  String(LEGACY_QUEUE_CUTOVER_PROTOCOL.version),
-  ...Object.entries(LEGACY_QUEUE_CUTOVER_PROTOCOL.sentinels).map(
-    ([name, value]) => `${name}=${value}`,
-  ),
-].join("|");
+export interface LegacyQueueCutoverProtocol {
+  version: number;
+  command: string;
+  indexes: {
+    state: number;
+    release: number;
+    heartbeat: number;
+  };
+  states: {
+    starting: number;
+    intentReady: number;
+    ready: number;
+    released: number;
+    failed: number;
+  };
+  sentinels: {
+    abort: string;
+    error: string;
+    intentReady: string;
+    ready: string;
+    release: string;
+    released: string;
+    workerError: string;
+  };
+}
+
+function protocolRecord(value: unknown, path: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`Legacy queue cutover protocol ${path} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function protocolInteger(
+  record: Record<string, unknown>,
+  name: string,
+  path: string,
+): number {
+  const value = record[name];
+  if (!Number.isInteger(value) || (value as number) < 0) {
+    throw new Error(
+      `Legacy queue cutover protocol ${path}.${name} must be a non-negative integer`,
+    );
+  }
+  return value as number;
+}
+
+function protocolSentinel(
+  record: Record<string, unknown>,
+  name: string,
+): string {
+  const value = record[name];
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    basename(value) !== value
+  ) {
+    throw new Error(
+      `Legacy queue cutover protocol sentinels.${name} must be a non-empty basename`,
+    );
+  }
+  return value;
+}
+
+function protocolCommand(record: Record<string, unknown>): string {
+  const value = record.command;
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(
+      "Legacy queue cutover protocol contract.command must be a non-empty string",
+    );
+  }
+  return value;
+}
+
+function requireExactKeys(
+  record: Record<string, unknown>,
+  expectedKeys: readonly string[],
+  path: string,
+): void {
+  const actualKeys = Object.keys(record).sort();
+  const sortedExpectedKeys = [...expectedKeys].sort();
+  if (
+    actualKeys.length !== sortedExpectedKeys.length ||
+    actualKeys.some((key, index) => key !== sortedExpectedKeys[index])
+  ) {
+    const missing = sortedExpectedKeys.find((key) => !(key in record));
+    throw new Error(
+      `Legacy queue cutover protocol ${path}${
+        missing ? `.${missing}` : ""
+      } has unexpected fields`,
+    );
+  }
+}
+
+function requireUniqueValues(
+  values: readonly (number | string)[],
+  path: string,
+): void {
+  if (new Set(values).size !== values.length) {
+    throw new Error(
+      `Legacy queue cutover protocol ${path} values must be unique`,
+    );
+  }
+}
+
+export function loadLegacyQueueCutoverProtocol(
+  protocolPath: string,
+): LegacyQueueCutoverProtocol {
+  const decoded: unknown = JSON.parse(readFileSync(protocolPath, "utf8"));
+  const root = protocolRecord(decoded, "contract");
+  requireExactKeys(
+    root,
+    ["version", "command", "indexes", "states", "sentinels"],
+    "contract",
+  );
+  const indexesRecord = protocolRecord(root.indexes, "indexes");
+  const statesRecord = protocolRecord(root.states, "states");
+  const sentinelsRecord = protocolRecord(root.sentinels, "sentinels");
+  requireExactKeys(indexesRecord, ["state", "release", "heartbeat"], "indexes");
+  requireExactKeys(
+    statesRecord,
+    ["starting", "intentReady", "ready", "released", "failed"],
+    "states",
+  );
+  requireExactKeys(
+    sentinelsRecord,
+    [
+      "abort",
+      "error",
+      "intentReady",
+      "ready",
+      "release",
+      "released",
+      "workerError",
+    ],
+    "sentinels",
+  );
+
+  const protocol: LegacyQueueCutoverProtocol = {
+    version: protocolInteger(root, "version", "contract"),
+    command: protocolCommand(root),
+    indexes: {
+      state: protocolInteger(indexesRecord, "state", "indexes"),
+      release: protocolInteger(indexesRecord, "release", "indexes"),
+      heartbeat: protocolInteger(indexesRecord, "heartbeat", "indexes"),
+    },
+    states: {
+      starting: protocolInteger(statesRecord, "starting", "states"),
+      intentReady: protocolInteger(statesRecord, "intentReady", "states"),
+      ready: protocolInteger(statesRecord, "ready", "states"),
+      released: protocolInteger(statesRecord, "released", "states"),
+      failed: protocolInteger(statesRecord, "failed", "states"),
+    },
+    sentinels: {
+      abort: protocolSentinel(sentinelsRecord, "abort"),
+      error: protocolSentinel(sentinelsRecord, "error"),
+      intentReady: protocolSentinel(sentinelsRecord, "intentReady"),
+      ready: protocolSentinel(sentinelsRecord, "ready"),
+      release: protocolSentinel(sentinelsRecord, "release"),
+      released: protocolSentinel(sentinelsRecord, "released"),
+      workerError: protocolSentinel(sentinelsRecord, "workerError"),
+    },
+  };
+  requireUniqueValues(Object.values(protocol.indexes), "indexes");
+  requireUniqueValues(Object.values(protocol.states), "states");
+  requireUniqueValues(Object.values(protocol.sentinels), "sentinels");
+  const sortedIndexes = Object.values(protocol.indexes).sort(
+    (left, right) => left - right,
+  );
+  if (sortedIndexes.some((value, index) => value !== index)) {
+    throw new Error(
+      "Legacy queue cutover protocol indexes must be contiguous from zero",
+    );
+  }
+  if (
+    !(
+      protocol.states.starting < protocol.states.intentReady &&
+      protocol.states.intentReady < protocol.states.ready &&
+      protocol.states.ready < protocol.states.released
+    )
+  ) {
+    throw new Error(
+      "Legacy queue cutover protocol lifecycle states must be ordered",
+    );
+  }
+  return protocol;
+}
+
+export function serializeLegacyQueueCutoverProtocol(
+  protocol: LegacyQueueCutoverProtocol,
+): string {
+  return JSON.stringify(protocol);
+}
 
 export const LEGACY_QUEUE_CUTOVER_WORKER = String.raw`
 const { spawn } = require("node:child_process");
@@ -192,7 +357,7 @@ const helper = spawn(
   workerData.python,
   [
     workerData.helperPath,
-    "hold-cutover",
+    protocol.command,
     workerData.originalsLibraryPath,
     workerData.stateDirectory,
     "--protocol",

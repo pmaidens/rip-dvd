@@ -15,24 +15,14 @@ import { Worker } from "node:worker_threads";
 
 import { isPathWithinDirectory } from "./path-containment.js";
 import {
-  LEGACY_QUEUE_CUTOVER_PROTOCOL_ARGUMENT,
-  LEGACY_QUEUE_CUTOVER_PROTOCOL,
   LEGACY_QUEUE_CUTOVER_WORKER,
+  loadLegacyQueueCutoverProtocol,
 } from "./legacy-queue-cutover-protocol.js";
 
 const LEGACY_QUEUE_LOCK_POLL_MS = 10;
 const LEGACY_QUEUE_WORKER_STALL_MS = 2_000;
 const LEGACY_QUEUE_RELEASE_ACKNOWLEDGEMENT_MS = 1_000;
 const LEGACY_QUEUE_HELPER_TERMINATION_GRACE_MS = 250;
-const LEGACY_QUEUE_HELPER_STATE = LEGACY_QUEUE_CUTOVER_PROTOCOL.states;
-const LEGACY_QUEUE_HELPER_STATE_INDEX =
-  LEGACY_QUEUE_CUTOVER_PROTOCOL.indexes.state;
-const LEGACY_QUEUE_HELPER_RELEASE_INDEX =
-  LEGACY_QUEUE_CUTOVER_PROTOCOL.indexes.release;
-const LEGACY_QUEUE_HELPER_HEARTBEAT_INDEX =
-  LEGACY_QUEUE_CUTOVER_PROTOCOL.indexes.heartbeat;
-const LEGACY_QUEUE_SUPERVISOR_ABORT =
-  LEGACY_QUEUE_CUTOVER_PROTOCOL.sentinels.abort;
 
 export function acquireLegacyQueueCutoverLock(
   originalsLibraryPath: string,
@@ -45,6 +35,11 @@ export function acquireLegacyQueueCutoverLock(
     repositoryRoot,
     "rip_dvd",
     "legacy_queue_lease.py",
+  );
+  const expectedProtocolPath = resolve(
+    repositoryRoot,
+    "rip_dvd",
+    "legacy_queue_cutover_protocol.manifest",
   );
   let helperPath: string;
   try {
@@ -64,6 +59,31 @@ export function acquireLegacyQueueCutoverLock(
       }`,
     );
   }
+  let loadedProtocol;
+  try {
+    const expectedProtocolStat = lstatSync(expectedProtocolPath);
+    const protocolPath = realpathSync(expectedProtocolPath);
+    if (
+      !expectedProtocolStat.isFile() ||
+      expectedProtocolStat.isSymbolicLink() ||
+      !isPathWithinDirectory(repositoryRoot, protocolPath)
+    ) {
+      throw new Error("protocol contract is not a trusted regular file");
+    }
+    loadedProtocol = loadLegacyQueueCutoverProtocol(protocolPath);
+  } catch (error) {
+    throw new Error(
+      `Could not load the trusted legacy queue cutover protocol: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+  const { argument: protocolArgument, protocol } = loadedProtocol;
+  const helperStateValues = protocol.states;
+  const helperStateIndex = protocol.indexes.state;
+  const helperReleaseIndex = protocol.indexes.release;
+  const helperHeartbeatIndex = protocol.indexes.heartbeat;
+  const sentinels = protocol.sentinels;
   const python = process.env.RIP_DVD_PYTHON?.trim() || "python3";
   const pythonProbe = spawnSync(python, ["--version"], { stdio: "ignore" });
   if (pythonProbe.status !== 0) {
@@ -71,15 +91,20 @@ export function acquireLegacyQueueCutoverLock(
   }
   const stateDirectory = mkdtempSync(join(tmpdir(), "rip-dvd-cutover-"));
   const statePath = (name: string) => join(stateDirectory, name);
-  const helperState = new Int32Array(new SharedArrayBuffer(12));
+  const helperState = new Int32Array(
+    new SharedArrayBuffer(
+      Object.keys(protocol.indexes).length * Int32Array.BYTES_PER_ELEMENT,
+    ),
+  );
+  Atomics.store(helperState, helperStateIndex, helperStateValues.starting);
   const worker = new Worker(LEGACY_QUEUE_CUTOVER_WORKER, {
     eval: true,
     workerData: {
       helperPath,
       originalsLibraryPath,
       pollMs: LEGACY_QUEUE_LOCK_POLL_MS,
-      protocol: LEGACY_QUEUE_CUTOVER_PROTOCOL,
-      protocolArgument: LEGACY_QUEUE_CUTOVER_PROTOCOL_ARGUMENT,
+      protocol,
+      protocolArgument,
       python,
       sharedState: helperState.buffer,
       stateDirectory,
@@ -99,7 +124,7 @@ export function acquireLegacyQueueCutoverLock(
     if (workerFailure) {
       return workerFailure;
     }
-    for (const name of ["worker-error", "error"]) {
+    for (const name of [sentinels.workerError, sentinels.error]) {
       if (existsSync(statePath(name))) {
         try {
           return readFileSync(statePath(name), "utf8");
@@ -113,10 +138,10 @@ export function acquireLegacyQueueCutoverLock(
     return "Legacy queue lease helper terminated unexpectedly";
   };
   const waitPhase = (expectedState: number): string => {
-    if (expectedState === LEGACY_QUEUE_HELPER_STATE.intentReady) {
+    if (expectedState === helperStateValues.intentReady) {
       return "intent acquisition";
     }
-    if (expectedState === LEGACY_QUEUE_HELPER_STATE.ready) {
+    if (expectedState === helperStateValues.ready) {
       return "queue drain";
     }
     return "release acknowledgement";
@@ -128,15 +153,15 @@ export function acquireLegacyQueueCutoverLock(
     const phaseStartedAt = process.hrtime.bigint();
     let heartbeat = Atomics.load(
       helperState,
-      LEGACY_QUEUE_HELPER_HEARTBEAT_INDEX,
+      helperHeartbeatIndex,
     );
     let heartbeatObservedAt = process.hrtime.bigint();
     while (true) {
       const state = Atomics.load(
         helperState,
-        LEGACY_QUEUE_HELPER_STATE_INDEX,
+        helperStateIndex,
       );
-      if (state === LEGACY_QUEUE_HELPER_STATE.failed) {
+      if (state === helperStateValues.failed) {
         throw new Error(helperFailure());
       }
       if (state >= expectedState) {
@@ -153,7 +178,7 @@ export function acquireLegacyQueueCutoverLock(
       }
       const currentHeartbeat = Atomics.load(
         helperState,
-        LEGACY_QUEUE_HELPER_HEARTBEAT_INDEX,
+        helperHeartbeatIndex,
       );
       if (currentHeartbeat !== heartbeat) {
         heartbeat = currentHeartbeat;
@@ -170,14 +195,14 @@ export function acquireLegacyQueueCutoverLock(
       }
       Atomics.wait(
         helperState,
-        LEGACY_QUEUE_HELPER_STATE_INDEX,
+        helperStateIndex,
         state,
         LEGACY_QUEUE_LOCK_POLL_MS,
       );
     }
   };
   const stopUnresponsiveWorker = (): boolean => {
-    for (const name of ["release", LEGACY_QUEUE_SUPERVISOR_ABORT]) {
+    for (const name of [sentinels.release, sentinels.abort]) {
       if (existsSync(statePath(name))) {
         continue;
       }
@@ -187,23 +212,23 @@ export function acquireLegacyQueueCutoverLock(
         // The helper may have concurrently published or consumed the state.
       }
     }
-    Atomics.store(helperState, LEGACY_QUEUE_HELPER_RELEASE_INDEX, 1);
-    Atomics.notify(helperState, LEGACY_QUEUE_HELPER_RELEASE_INDEX);
+    Atomics.store(helperState, helperReleaseIndex, 1);
+    Atomics.notify(helperState, helperReleaseIndex);
     const deadline =
       process.hrtime.bigint() +
       BigInt(LEGACY_QUEUE_WORKER_STALL_MS) * 1_000_000n;
     while (
-      !existsSync(statePath("released")) &&
+      !existsSync(statePath(sentinels.released)) &&
       process.hrtime.bigint() < deadline
     ) {
       Atomics.wait(
         helperState,
-        LEGACY_QUEUE_HELPER_STATE_INDEX,
-        Atomics.load(helperState, LEGACY_QUEUE_HELPER_STATE_INDEX),
+        helperStateIndex,
+        Atomics.load(helperState, helperStateIndex),
         LEGACY_QUEUE_LOCK_POLL_MS,
       );
     }
-    const helperReleased = existsSync(statePath("released"));
+    const helperReleased = existsSync(statePath(sentinels.released));
     void worker.terminate();
     return helperReleased;
   };
@@ -214,7 +239,7 @@ export function acquireLegacyQueueCutoverLock(
       return;
     }
     const cleanupTimer = setInterval(() => {
-      if (!existsSync(statePath("released"))) {
+      if (!existsSync(statePath(sentinels.released))) {
         return;
       }
       clearInterval(cleanupTimer);
@@ -228,8 +253,8 @@ export function acquireLegacyQueueCutoverLock(
   };
 
   try {
-    waitForState(LEGACY_QUEUE_HELPER_STATE.intentReady);
-    waitForState(LEGACY_QUEUE_HELPER_STATE.ready);
+    waitForState(helperStateValues.intentReady);
+    waitForState(helperStateValues.ready);
     let released = false;
     return () => {
       if (released) {
@@ -238,13 +263,13 @@ export function acquireLegacyQueueCutoverLock(
       released = true;
       Atomics.store(
         helperState,
-        LEGACY_QUEUE_HELPER_RELEASE_INDEX,
+        helperReleaseIndex,
         1,
       );
-      Atomics.notify(helperState, LEGACY_QUEUE_HELPER_RELEASE_INDEX);
+      Atomics.notify(helperState, helperReleaseIndex);
       try {
         waitForState(
-          LEGACY_QUEUE_HELPER_STATE.released,
+          helperStateValues.released,
           LEGACY_QUEUE_RELEASE_ACKNOWLEDGEMENT_MS,
         );
       } catch (error) {

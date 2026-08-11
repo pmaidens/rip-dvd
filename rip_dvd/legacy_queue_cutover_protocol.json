@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "command": "hold-cutover",
+  "indexes": {
+    "state": 0,
+    "release": 1,
+    "heartbeat": 2
+  },
+  "states": {
+    "starting": 0,
+    "intentReady": 1,
+    "ready": 2,
+    "released": 3,
+    "failed": 4
+  },
+  "sentinels": {
+    "abort": "supervisor-abort",
+    "error": "error",
+    "intentReady": "intent-ready",
+    "ready": "ready",
+    "release": "release",
+    "released": "released",
+    "workerError": "worker-error"
+  }
+}

@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -17,6 +18,75 @@ from rip_dvd.legacy_queue_lease import (
 
 
 class LegacyQueueLeaseTests(unittest.TestCase):
+    def protocol_manifest(self, version=1, ready_sentinel="ready"):
+        return json.dumps(
+            {
+                "version": version,
+                "command": "hold-cutover",
+                "indexes": {"state": 0, "release": 1, "heartbeat": 2},
+                "states": {
+                    "starting": 0,
+                    "intentReady": 1,
+                    "ready": 2,
+                    "released": 3,
+                    "failed": 4,
+                },
+                "sentinels": {
+                    "abort": "supervisor-abort",
+                    "error": "error",
+                    "intentReady": "intent-ready",
+                    "ready": ready_sentinel,
+                    "release": "release",
+                    "released": "released",
+                    "workerError": "worker-error",
+                },
+            },
+            separators=(",", ":"),
+        )
+
+    def test_cutover_helper_consumes_the_authoritative_protocol_manifest(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            state_root = root / "state"
+            state_root.mkdir()
+            child = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "rip_dvd.legacy_queue_lease",
+                    "hold-cutover",
+                    str(root),
+                    str(state_root),
+                    "--protocol",
+                    self.protocol_manifest(),
+                ],
+                stdin=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                deadline = time.monotonic() + 2
+                while (
+                    not (state_root / "ready").exists()
+                    and time.monotonic() < deadline
+                ):
+                    time.sleep(0.01)
+                self.assertTrue((state_root / "intent-ready").exists())
+                self.assertTrue((state_root / "ready").exists())
+                self.assertIsNotNone(child.stdin)
+                child.stdin.close()
+                child.wait(timeout=2)
+                self.assertEqual(child.returncode, 0)
+                self.assertTrue((state_root / "released").exists())
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait(timeout=1)
+                if child.stdin is not None and not child.stdin.closed:
+                    child.stdin.close()
+                if child.stderr is not None:
+                    child.stderr.close()
+
     def test_cutover_helper_rejects_an_incompatible_protocol_manifest(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -32,7 +102,7 @@ class LegacyQueueLeaseTests(unittest.TestCase):
                     str(root),
                     str(state_root),
                     "--protocol",
-                    "2|abort=supervisor-abort",
+                    self.protocol_manifest(version=2),
                 ],
                 capture_output=True,
                 text=True,
@@ -41,6 +111,31 @@ class LegacyQueueLeaseTests(unittest.TestCase):
 
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("Unsupported legacy queue cutover protocol", result.stderr)
+
+    def test_cutover_helper_rejects_protocol_drift_at_the_python_boundary(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            state_root = root / "state"
+            state_root.mkdir()
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "rip_dvd.legacy_queue_lease",
+                    "hold-cutover",
+                    str(root),
+                    str(state_root),
+                    "--protocol",
+                    self.protocol_manifest(ready_sentinel="renamed-ready"),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("does not match the authoritative contract", result.stderr)
 
     def test_kernel_releases_a_crashed_command_lease(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -1,6 +1,7 @@
 import argparse
 from contextlib import contextmanager
 import fcntl
+import json
 import os
 from pathlib import Path
 import select
@@ -15,6 +16,7 @@ ORPHAN_PATTERNS = (
     ".rip-dvd-legacy-queue.owner.*.tmp",
     ".rip-dvd-legacy-queue.shared.*",
 )
+PROTOCOL_PATH = Path(__file__).with_name("legacy_queue_cutover_protocol.json")
 
 
 def _open_lock(path):
@@ -99,31 +101,30 @@ def _acquire_exclusive_or_abort(descriptor, state_root, abort_sentinel):
     return False
 
 
-def _validate_protocol(raw_protocol):
-    fields = raw_protocol.split("|")
-    if not fields or fields[0] != "1":
-        raise ValueError("Unsupported legacy queue cutover protocol version")
-    sentinels = {}
-    for field in fields[1:]:
-        name, separator, value = field.partition("=")
-        if not separator or name in sentinels:
-            raise ValueError("Malformed legacy queue cutover protocol manifest")
-        sentinels[name] = value
+def _load_protocol():
+    try:
+        return json.loads(PROTOCOL_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(
+            f"Could not load the authoritative legacy queue cutover protocol: {error}"
+        ) from error
+
+
+def _validate_protocol(raw_protocol, authoritative_protocol):
+    try:
+        protocol = json.loads(raw_protocol)
+    except json.JSONDecodeError as error:
+        raise ValueError("Malformed legacy queue cutover protocol manifest") from error
     if (
-        set(sentinels) != {
-            "abort",
-            "error",
-            "intentReady",
-            "ready",
-            "release",
-            "released",
-            "workerError",
-        }
-        or not all(value and Path(value).name == value for value in sentinels.values())
-        or len(set(sentinels.values())) != len(sentinels)
+        not isinstance(protocol, dict)
+        or protocol.get("version") != authoritative_protocol.get("version")
     ):
-        raise ValueError("Malformed legacy queue cutover protocol manifest")
-    return sentinels
+        raise ValueError("Unsupported legacy queue cutover protocol version")
+    if protocol != authoritative_protocol:
+        raise ValueError(
+            "Legacy queue cutover protocol does not match the authoritative contract"
+        )
+    return authoritative_protocol["sentinels"]
 
 
 def hold_cutover(originals_library, state_directory, sentinels):
@@ -176,17 +177,18 @@ def hold_cutover(originals_library, state_directory, sentinels):
 
 
 def main(argv=None):
+    authoritative_protocol = _load_protocol()
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("hold-cutover",))
+    parser.add_argument("command", choices=(authoritative_protocol["command"],))
     parser.add_argument("originals_library")
     parser.add_argument("state_directory")
     parser.add_argument("--protocol", required=True)
     arguments = parser.parse_args(argv)
-    if arguments.command == "hold-cutover":
+    if arguments.command == authoritative_protocol["command"]:
         hold_cutover(
             arguments.originals_library,
             arguments.state_directory,
-            _validate_protocol(arguments.protocol),
+            _validate_protocol(arguments.protocol, authoritative_protocol),
         )
     return 0
 
