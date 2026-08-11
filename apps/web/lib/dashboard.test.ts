@@ -346,6 +346,7 @@ describe("readDashboardSnapshot", () => {
       "HandBrake failed while reading /private/media/secret.iso",
     );
 
+    access.archiveJobs.beginDriveInspection(drive.id);
     const dashboard = readDashboardSnapshot(access);
 
     expect(dashboard.opticalDrives).toEqual({
@@ -406,6 +407,7 @@ describe("readDashboardSnapshot", () => {
         expect.objectContaining({
           discLabel: "WAITING_DISC",
           status: "queued",
+          progressPhase: "inspecting_drive",
           progressPercent: 0,
         }),
       ],

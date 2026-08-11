@@ -385,9 +385,10 @@ describe("legacy sidecar import", () => {
       ).run(timestamp, fixture.disc.id);
       sqlite.prepare(`
         insert into archive_jobs (
-          id, detected_disc_id, status, claimed_by, claim_token, claimed_at,
+          id, detected_disc_id, status, progress_phase,
+          claimed_by, claim_token, claimed_at,
           started_at, created_at, updated_at
-        ) values (?, ?, 'running', ?, ?, ?, ?, ?, ?)
+        ) values (?, ?, 'running', 'preparing', ?, ?, ?, ?, ?, ?)
       `).run(
         "unreconciled-publication-job",
         fixture.disc.id,

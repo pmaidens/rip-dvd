@@ -11,6 +11,9 @@ import {
 } from "drizzle-orm/sqlite-core";
 
 import {
+  ARCHIVE_PROGRESS_PHASES,
+  ARCHIVE_QUEUED_PROGRESS_PHASES,
+  ARCHIVE_RUNNING_PROGRESS_PHASES,
   ARCHIVE_FORMATS,
   DETECTED_DISC_STATUSES,
   DISC_KINDS,
@@ -24,6 +27,7 @@ import {
 import type {
   ArchiveJobId,
   ArchiveJobClaimToken,
+  ArchiveJobInspectionToken,
   DetectedDiscId,
   DiscSelectionId,
   EncodeJobCleanupClaimToken,
@@ -341,7 +345,16 @@ export const archiveJobs = sqliteTable(
       .references(() => originalDiscArchives.id, { onDelete: "restrict" }),
     status: text("status", { enum: JOB_STATUSES }).notNull().default("queued"),
     priority: integer("priority").notNull().default(0),
+    progressPhase: text("progress_phase", {
+      enum: ARCHIVE_PROGRESS_PHASES,
+    })
+      .notNull()
+      .default("waiting"),
     progressPercent: integer("progress_percent").notNull().default(0),
+    inspectionToken: text("inspection_token").$type<ArchiveJobInspectionToken>(),
+    inspectionUpdatedAt: integer("inspection_updated_at", {
+      mode: "timestamp_ms",
+    }),
     claimedBy: text("claimed_by"),
     claimToken: text("claim_token").$type<ArchiveJobClaimToken>(),
     claimedAt: integer("claimed_at", { mode: "timestamp_ms" }),
@@ -362,6 +375,18 @@ export const archiveJobs = sqliteTable(
     check(
       "archive_jobs_progress_check",
       sql`${table.progressPercent} between 0 and 100`,
+    ),
+    check(
+      "archive_jobs_progress_phase_check",
+      sql`${table.progressPhase} in (${sqliteStringLiterals(ARCHIVE_PROGRESS_PHASES)})`,
+    ),
+    check(
+      "archive_jobs_status_progress_phase_check",
+      sql`(${table.status} = 'queued' and ${table.progressPhase} in (${sqliteStringLiterals(ARCHIVE_QUEUED_PROGRESS_PHASES)})) or (${table.status} <> 'queued' and ${table.progressPhase} in (${sqliteStringLiterals(ARCHIVE_RUNNING_PROGRESS_PHASES)}))`,
+    ),
+    check(
+      "archive_jobs_inspection_lease_check",
+      sql`(${table.progressPhase} = 'inspecting_drive') = (${table.inspectionToken} is not null and ${table.inspectionUpdatedAt} is not null)`,
     ),
   ],
 );
