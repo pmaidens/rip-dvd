@@ -409,6 +409,76 @@ async function requireSourcePath(
   return canonical;
 }
 
+async function requireOutputDirectory(
+  mediaLibraryPath: string,
+  outputDirectory: string,
+): Promise<string> {
+  const missingSegments: string[] = [];
+  let existingAncestor = outputDirectory;
+  while (true) {
+    try {
+      await lstat(existingAncestor);
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw error;
+      }
+      const parentDirectory = dirname(existingAncestor);
+      if (parentDirectory === existingAncestor) {
+        throw new Error("Encode Job output directory is ambiguous");
+      }
+      missingSegments.unshift(basename(existingAncestor));
+      existingAncestor = parentDirectory;
+    }
+  }
+  let currentDirectory: string;
+  try {
+    currentDirectory = await realpath(existingAncestor);
+  } catch {
+    throw new Error("Encode Job output directory is ambiguous");
+  }
+  const ancestorMetadata = await lstat(currentDirectory);
+  if (
+    !ancestorMetadata.isDirectory() ||
+    ancestorMetadata.isSymbolicLink()
+  ) {
+    throw new Error("Encode Job output directory is ambiguous");
+  }
+  if (!isContained(mediaLibraryPath, currentDirectory)) {
+    throw new Error("Encode Job output directory escaped the media library");
+  }
+  for (const segment of missingSegments) {
+    if (segment.length === 0 || segment === "." || segment === "..") {
+      throw new Error("Encode Job output directory is ambiguous");
+    }
+    const candidateDirectory = join(currentDirectory, segment);
+    try {
+      await mkdir(candidateDirectory, { mode: 0o750 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        throw error;
+      }
+    }
+    let canonicalDirectory: string;
+    try {
+      canonicalDirectory = await realpath(candidateDirectory);
+    } catch {
+      throw new Error("Encode Job output directory is ambiguous");
+    }
+    const metadata = await lstat(canonicalDirectory);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+      throw new Error("Encode Job output directory is ambiguous");
+    }
+    if (!isContained(mediaLibraryPath, canonicalDirectory)) {
+      throw new Error(
+        "Encode Job output directory escaped the media library",
+      );
+    }
+    currentDirectory = canonicalDirectory;
+  }
+  return currentDirectory;
+}
+
 async function requireOutputPaths(
   mediaLibraryPath: string,
   outputPath: string,
@@ -424,14 +494,10 @@ async function requireOutputPaths(
     throw new Error("Encode Job output path escaped the media library");
   }
   const outputDirectory = dirname(resolvedOutput);
-  await mkdir(outputDirectory, {
-    recursive: true,
-    mode: 0o750,
-  });
-  const canonicalOutputDirectory = await realpath(outputDirectory);
-  if (!isContained(mediaLibraryPath, canonicalOutputDirectory)) {
-    throw new Error("Encode Job output directory escaped the media library");
-  }
+  const canonicalOutputDirectory = await requireOutputDirectory(
+    mediaLibraryPath,
+    outputDirectory,
+  );
   await syncOutputDirectoryHierarchy(
     mediaLibraryPath,
     canonicalOutputDirectory,
