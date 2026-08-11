@@ -766,6 +766,40 @@ export async function requestFilesystemVerification(
   }
 }
 
+interface DashboardMutationRunnerOptions<Id extends string> {
+  request(id: Id): Promise<void>;
+  setBusyId(id: Id | null): void;
+  setFailed(failed: boolean): void;
+  refresh(): void;
+}
+
+function createDashboardMutationRunner<Id extends string>({
+  request,
+  setBusyId,
+  setFailed,
+  refresh,
+}: DashboardMutationRunnerOptions<Id>): (id: Id) => Promise<void> {
+  let inFlight = false;
+
+  return async (id) => {
+    if (inFlight) {
+      return;
+    }
+    inFlight = true;
+    setBusyId(id);
+    setFailed(false);
+    try {
+      await request(id);
+      refresh();
+    } catch {
+      setFailed(true);
+    } finally {
+      setBusyId(null);
+      inFlight = false;
+    }
+  };
+}
+
 export function DashboardConnectionStatus({
   connectionStatus,
   streamStatus,
@@ -870,6 +904,22 @@ export function OperationsDashboard({
   >(null);
   const [filesystemVerificationFailed, setFilesystemVerificationFailed] =
     useState(false);
+  const [approveDetectedDisc] = useState(() =>
+    createDashboardMutationRunner({
+      request: requestArchiveApproval,
+      setBusyId: setApprovingDetectedDiscId,
+      setFailed: setArchiveApprovalFailed,
+      refresh: () => setRequestNumber((value) => value + 1),
+    }),
+  );
+  const [requeueEncodeJob] = useState(() =>
+    createDashboardMutationRunner<DashboardEncodeJob["id"]>({
+      request: retryEncodeJob,
+      setBusyId: setRequeueingEncodeJobId,
+      setFailed: setEncodeRetryFailed,
+      refresh: () => setRequestNumber((value) => value + 1),
+    }),
+  );
 
   useEffect(() => {
     if (page === "overview") {
@@ -945,38 +995,6 @@ export function OperationsDashboard({
         : actionOverview.status
       : connectionStatus;
   const copy = pageCopy[page];
-
-  const approveDetectedDisc = async (detectedDiscId: string) => {
-    if (approvingDetectedDiscId !== null) {
-      return;
-    }
-    setApprovingDetectedDiscId(detectedDiscId);
-    setArchiveApprovalFailed(false);
-    try {
-      await requestArchiveApproval(detectedDiscId);
-      setRequestNumber((value) => value + 1);
-    } catch {
-      setArchiveApprovalFailed(true);
-    } finally {
-      setApprovingDetectedDiscId(null);
-    }
-  };
-
-  const requeueEncodeJob = async (encodeJobId: DashboardEncodeJob["id"]) => {
-    if (requeueingEncodeJobId !== null) {
-      return;
-    }
-    setRequeueingEncodeJobId(encodeJobId);
-    setEncodeRetryFailed(false);
-    try {
-      await retryEncodeJob(encodeJobId);
-      setRequestNumber((value) => value + 1);
-    } catch {
-      setEncodeRetryFailed(true);
-    } finally {
-      setRequeueingEncodeJobId(null);
-    }
-  };
 
   const verifyFilesystem = async (
     target: FilesystemVerificationTarget,

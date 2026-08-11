@@ -20,7 +20,7 @@ importers:
         version: 5.9.3
       vitest:
         specifier: 4.1.10
-        version: 4.1.10(@types/node@22.20.0)(vite@8.1.5(@types/node@22.20.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.1))
+        version: 4.1.10(@types/node@22.20.0)(happy-dom@20.11.2)(vite@8.1.5(@types/node@22.20.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.1))
 
   apps/archive-worker:
     dependencies:
@@ -70,6 +70,9 @@ importers:
       '@types/react-dom':
         specifier: 19.2.3
         version: 19.2.3(@types/react@19.2.17)
+      happy-dom:
+        specifier: 20.11.2
+        version: 20.11.2
 
   packages/config: {}
 
@@ -778,6 +781,12 @@ packages:
   '@types/react@19.2.17':
     resolution: {integrity: sha512-MXfmqaVPEVgkBT/aY0aGCkRWWtByiYQXo3xdQ8r5RzuFrPiRn8Gar2tQdXSUQ2GKV3bkXckek89V8wQBY2Q/Aw==}
 
+  '@types/whatwg-mimetype@3.0.2':
+    resolution: {integrity: sha512-c2AKvDT8ToxLIOUlN51gTiHXflsfIFisS4pO7pDPoKouJCESkhZnEy623gwP9laCy5lnLDAw1vAzu2vM2YLOrA==}
+
+  '@types/ws@8.18.1':
+    resolution: {integrity: sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg==}
+
   '@vitest/expect@4.1.10':
     resolution: {integrity: sha512-YsCn+qAk1GWjQOWFEsEcL2gNQ0zmVmQu3T03qP6UyjhtmdtwtbuI+DASn/7iQB3HGTXkdBwGddzxPlmiql5vlA==}
 
@@ -815,6 +824,10 @@ packages:
     resolution: {integrity: sha512-T3ghW+sl/ZJ8w1v/yQx3qvJ9040DWoLBz8JT/CILbAKcFyG9b2MRe75v6W5uXjv6uH1lumK2Kv46y2zSkcej0Q==}
     engines: {node: '>=6.0.0'}
     hasBin: true
+
+  buffer-image-size@0.6.4:
+    resolution: {integrity: sha512-nEh+kZOPY1w+gcCMobZ6ETUp9WfibndnosbpwB1iJk/8Gt5ZF2bhS6+B6bPYz424KtwsR6Rflc3tCz1/ghX2dQ==}
+    engines: {node: '>=4.0'}
 
   caniuse-lite@1.0.30001806:
     resolution: {integrity: sha512-72Cuvd95zbSYPKq6Fhg8eDJRlzgWDf7/mtoZv6Qe/DYNCEBdNxoA3+rZAU2ZhGCpZlns3EssFavaZomckT5Uuw==}
@@ -986,6 +999,10 @@ packages:
       zod:
         optional: true
 
+  entities@7.0.1:
+    resolution: {integrity: sha512-TWrgLOFUQTH994YUyl1yT4uyavY5nNB5muff+RtWaqNVCAK408b5ZnnbNAUEWLTCpum9w6arT70i1XdQ4UeOPA==}
+    engines: {node: '>=0.12'}
+
   es-module-lexer@2.3.1:
     resolution: {integrity: sha512-shc1dbU90Yl/xq1QrC7QRtfcwURZuVRfPhZbDoldJ1cn1gzDvBaBWlv0eFolj5+0znnPJz5TXLxsN77X/12KTA==}
 
@@ -1022,6 +1039,10 @@ packages:
 
   get-tsconfig@4.14.0:
     resolution: {integrity: sha512-yTb+8DXzDREzgvYmh6s9vHsSVCHeC0G3PI5bEXNBHtmshPnO+S5O7qgLEOn0I5QvMy6kpZN8K1NKGyilLb93wA==}
+
+  happy-dom@20.11.2:
+    resolution: {integrity: sha512-7MB+bJLkxu3SowAfBJbjW+c55kNz5tkR45gu2qzrxznezhLeN5YIlJbwUgSzlGc+qWoZ8Ykg71H5ezz69xixrw==}
+    engines: {node: '>=20.0.0'}
 
   jiti@2.7.0:
     resolution: {integrity: sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ==}
@@ -1321,10 +1342,26 @@ packages:
       jsdom:
         optional: true
 
+  whatwg-mimetype@3.0.0:
+    resolution: {integrity: sha512-nt+N2dzIutVRxARx1nghPKGv1xHikU7HKdfafKkLNLindmPU/ch3U31NOCGGA/dmPcmb1VlofO0vnKAcsm0o/Q==}
+    engines: {node: '>=12'}
+
   why-is-node-running@2.3.0:
     resolution: {integrity: sha512-hUrmaWBdVDcxvYqnyh09zunKzROWjbZTiNy8dBEjkS7ehEDQibXJ7XvlmtbwuTclUiIyN+CyXQD4Vmko8fNm8w==}
     engines: {node: '>=8'}
     hasBin: true
+
+  ws@8.21.3:
+    resolution: {integrity: sha512-201TZ/kPWxoPr/OKWjquZR1SWKXcvxdH+e1xrx89b3YbmzLMFCLfnaG1HFIgWzJOEWZ7MvpK++odZufgYR50Rw==}
+    engines: {node: '>=10.0.0'}
+    peerDependencies:
+      bufferutil: ^4.0.1
+      utf-8-validate: '>=5.0.2'
+    peerDependenciesMeta:
+      bufferutil:
+        optional: true
+      utf-8-validate:
+        optional: true
 
 snapshots:
 
@@ -1738,6 +1775,12 @@ snapshots:
     dependencies:
       csstype: 3.2.3
 
+  '@types/whatwg-mimetype@3.0.2': {}
+
+  '@types/ws@8.18.1':
+    dependencies:
+      '@types/node': 22.20.0
+
   '@vitest/expect@4.1.10':
     dependencies:
       '@standard-schema/spec': 1.1.0
@@ -1783,6 +1826,10 @@ snapshots:
 
   baseline-browser-mapping@2.10.44: {}
 
+  buffer-image-size@0.6.4:
+    dependencies:
+      '@types/node': 22.20.0
+
   caniuse-lite@1.0.30001806: {}
 
   chai@6.2.2: {}
@@ -1804,6 +1851,8 @@ snapshots:
       jiti: 2.7.0
 
   drizzle-orm@1.0.0-rc.4: {}
+
+  entities@7.0.1: {}
 
   es-module-lexer@2.3.1: {}
 
@@ -1882,6 +1931,19 @@ snapshots:
   get-tsconfig@4.14.0:
     dependencies:
       resolve-pkg-maps: 1.0.0
+
+  happy-dom@20.11.2:
+    dependencies:
+      '@types/node': 22.20.0
+      '@types/whatwg-mimetype': 3.0.2
+      '@types/ws': 8.18.1
+      buffer-image-size: 0.6.4
+      entities: 7.0.1
+      whatwg-mimetype: 3.0.0
+      ws: 8.21.3
+    transitivePeerDependencies:
+      - bufferutil
+      - utf-8-validate
 
   jiti@2.7.0: {}
 
@@ -2099,7 +2161,7 @@ snapshots:
       jiti: 2.7.0
       tsx: 4.23.1
 
-  vitest@4.1.10(@types/node@22.20.0)(vite@8.1.5(@types/node@22.20.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.1)):
+  vitest@4.1.10(@types/node@22.20.0)(happy-dom@20.11.2)(vite@8.1.5(@types/node@22.20.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.1)):
     dependencies:
       '@vitest/expect': 4.1.10
       '@vitest/mocker': 4.1.10(vite@8.1.5(@types/node@22.20.0)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.1))
@@ -2123,10 +2185,15 @@ snapshots:
       why-is-node-running: 2.3.0
     optionalDependencies:
       '@types/node': 22.20.0
+      happy-dom: 20.11.2
     transitivePeerDependencies:
       - msw
+
+  whatwg-mimetype@3.0.0: {}
 
   why-is-node-running@2.3.0:
     dependencies:
       siginfo: 2.0.0
       stackback: 0.0.2
+
+  ws@8.21.3: {}
