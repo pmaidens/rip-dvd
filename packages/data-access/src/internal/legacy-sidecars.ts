@@ -45,14 +45,17 @@ import {
   LEGACY_QUEUE_CUTOVER_PROTOCOL,
   LEGACY_QUEUE_CUTOVER_WORKER,
 } from "./legacy-queue-cutover-protocol.js";
+import {
+  createLegacySidecarImportBudgetAccumulator,
+  MAX_LEGACY_IMPORT_BYTES,
+  MAX_LEGACY_IMPORT_JOBS,
+  MAX_LEGACY_SCAN_BYTES,
+} from "./legacy-sidecar-import-budget.js";
 
 const DEFAULT_HANDBRAKE_PRESET = "Fast 480p30";
 const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
 const MAX_LEGACY_SIDECAR_BYTES = 1_048_576;
 const MAX_LEGACY_SIDECAR_JOBS = 100;
-const MAX_LEGACY_IMPORT_BYTES = 8_388_608;
-const MAX_LEGACY_SCAN_BYTES = 67_108_864;
-const MAX_LEGACY_IMPORT_JOBS = 1_000;
 const MAX_LEGACY_MARKER_BYTES = 8_388_608;
 const LEGACY_QUEUE_STATUS_REPAIR = "repair";
 const LEGACY_QUEUE_STATUS_RETIRED = "retired";
@@ -1255,9 +1258,7 @@ export function discoverLegacySidecars(
 ): LegacySidecarDiscoveryBatch {
   const found = findSidecars(originalsLibraryPath);
   const discoveries: LegacySidecarDiscovery[] = [];
-  let retainedBytes = 0;
-  let scanBytes = 0;
-  let totalJobs = 0;
+  const importBudget = createLegacySidecarImportBudgetAccumulator();
   let totalMarkerBytes = LEGACY_MARKER_FIXED_BYTES;
   let totalMarkerJobs = 0;
   let totalMarkerSidecars = 0;
@@ -1283,15 +1284,8 @@ export function discoverLegacySidecars(
       }
     }
     discoveries.push(discovery);
-    scanBytes +=
-      discovery.outcome === "parsed"
-        ? discovery.sidecar.sourceBytes
-        : discovery.sourceBytes;
-    if (discovery.outcome === "parsed") {
-      retainedBytes += discovery.sidecar.sourceBytes;
-      totalJobs += discovery.sidecar.jobs.length;
-    }
-    if (scanBytes > MAX_LEGACY_SCAN_BYTES) {
+    const exceededImportBound = importBudget.record(discovery);
+    if (exceededImportBound === "scan-bytes") {
       found.complete = false;
       found.issues.push({
         code: "invalid_sidecar",
@@ -1300,7 +1294,7 @@ export function discoverLegacySidecars(
       });
       break;
     }
-    if (retainedBytes > MAX_LEGACY_IMPORT_BYTES) {
+    if (exceededImportBound === "retained-bytes") {
       found.complete = false;
       found.issues.push({
         code: "invalid_sidecar",
@@ -1309,7 +1303,7 @@ export function discoverLegacySidecars(
       });
       break;
     }
-    if (totalJobs > MAX_LEGACY_IMPORT_JOBS) {
+    if (exceededImportBound === "jobs") {
       found.complete = false;
       found.issues.push({
         code: "invalid_sidecar",
@@ -1663,9 +1657,7 @@ function recoverCapturedSidecars(
   );
   const discoveries: LegacySidecarDiscovery[] = [];
   const issues: LegacySidecarImportIssue[] = [];
-  let retainedBytes = 0;
-  let scanBytes = 0;
-  let totalJobs = 0;
+  const importBudget = createLegacySidecarImportBudgetAccumulator();
   for (const recordedPath of [...capturedByPath.keys()].sort()) {
     const captured = capturedByPath.get(recordedPath)!;
     const sidecarPath = resolve(recordedPath);
@@ -1690,15 +1682,8 @@ function recoverCapturedSidecars(
       originalsLibraryPath,
       snapshot: captured.snapshot,
     });
-    scanBytes += discovery.outcome === "parsed"
-      ? discovery.sidecar.sourceBytes
-      : discovery.sourceBytes;
-    retainedBytes += discovery.outcome === "parsed"
-      ? discovery.sidecar.sourceBytes
-      : 0;
-    totalJobs +=
-      discovery.outcome === "parsed" ? discovery.sidecar.jobs.length : 0;
-    if (scanBytes > MAX_LEGACY_SCAN_BYTES) {
+    const exceededImportBound = importBudget.record(discovery);
+    if (exceededImportBound === "scan-bytes") {
       issues.push({
         code: "invalid_sidecar",
         message: `Aggregate recovery sidecar scan work exceeds the ${MAX_LEGACY_SCAN_BYTES}-byte limit`,
@@ -1706,7 +1691,7 @@ function recoverCapturedSidecars(
       });
       break;
     }
-    if (retainedBytes > MAX_LEGACY_IMPORT_BYTES) {
+    if (exceededImportBound === "retained-bytes") {
       return {
         discoveries: [],
         issues: [{
@@ -1716,7 +1701,7 @@ function recoverCapturedSidecars(
         }],
       };
     }
-    if (totalJobs > MAX_LEGACY_IMPORT_JOBS) {
+    if (exceededImportBound === "jobs") {
       return {
         discoveries: [],
         issues: [{
