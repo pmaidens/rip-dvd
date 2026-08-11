@@ -5,6 +5,10 @@ import {
   FilesystemVerificationResult,
   type FilesystemVerificationDisplay,
 } from "./filesystem-verification-result";
+import {
+  VERIFICATION_RESULT_CASES,
+  VERIFICATION_TIMESTAMP,
+} from "./filesystem-verification-result.test-support";
 
 describe("FilesystemVerificationResult", () => {
   it("renders an unverified result when any display field is absent", () => {
@@ -29,23 +33,14 @@ describe("FilesystemVerificationResult", () => {
     }
   });
 
-  it.each([
-    ["accessible", "Accessible", "File is accessible."],
-    ["missing", "Missing", "File is missing at the recorded path."],
-    [
-      "inaccessible",
-      "Inaccessible",
-      "The web process cannot access the recorded path.",
-    ],
-    ["error", "Error", "Verification failed unexpectedly."],
-  ] as const)(
-    "renders the %s status, message, timestamp, and live-region semantics",
-    (status, label, message) => {
+  it.each(VERIFICATION_RESULT_CASES)(
+    "renders the $status status, message, timestamp, and live-region semantics",
+    ({ status, label, message }) => {
       const html = renderToStaticMarkup(
         <FilesystemVerificationResult
           status={status}
           message={message}
-          verifiedAt="2026-08-07T02:30:00.000Z"
+          verifiedAt={VERIFICATION_TIMESTAMP}
         />,
       );
 
@@ -57,7 +52,7 @@ describe("FilesystemVerificationResult", () => {
       expect(html).toContain(`<strong>${label}</strong>`);
       expect(html).toContain(`<span>${message}</span>`);
       expect(html).toMatch(/<small>Verified [^<]+<\/small>/);
-      expect(html).not.toContain("2026-08-07T02:30:00.000Z");
+      expect(html).not.toContain(VERIFICATION_TIMESTAMP);
     },
   );
 });

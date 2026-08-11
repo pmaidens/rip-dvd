@@ -20,6 +20,11 @@ import {
   requestFilesystemVerification,
   type DashboardLoadState,
 } from "./operations-dashboard";
+import {
+  expectVerificationResultList,
+  VERIFICATION_RESULT_CASES,
+  VERIFICATION_TIMESTAMP,
+} from "./filesystem-verification-result.test-support";
 
 vi.mock("../lib/dashboard-activity", async (importOriginal) => {
   const actual =
@@ -387,16 +392,7 @@ describe("DashboardView", () => {
     expect(html).not.toContain("/media/");
   });
 
-  it("renders every verification result through the shared display contract", () => {
-    const verificationResults = [
-      ["accessible", "File is accessible."],
-      ["missing", "File is missing at the recorded path."],
-      [
-        "inaccessible",
-        "The web process cannot access the recorded path.",
-      ],
-      ["error", "Verification failed unexpectedly."],
-    ] as const;
+  it("shows null and verified filesystem states consistently", () => {
     const html = renderToStaticMarkup(
       <DashboardView
         state={{
@@ -406,8 +402,14 @@ describe("DashboardView", () => {
           encodeJobs: {
             status: "loaded",
             items: [
-              ...verificationResults.map(
-                ([verificationStatus, verificationMessage], index) => ({
+              ...VERIFICATION_RESULT_CASES.map(
+                (
+                  {
+                    status: verificationStatus,
+                    message: verificationMessage,
+                  },
+                  index,
+                ) => ({
                   id: `verified-job-${index}`,
                   mediaTitle: `Verified job ${index}`,
                   mediaYear: null,
@@ -418,7 +420,7 @@ describe("DashboardView", () => {
                   progressEtaSeconds: null,
                   verificationStatus,
                   verificationMessage,
-                  verifiedAt: "2026-08-07T02:30:00.000Z",
+                  verifiedAt: VERIFICATION_TIMESTAMP,
                 }),
               ),
               {
@@ -441,15 +443,7 @@ describe("DashboardView", () => {
       />,
     );
 
-    for (const [status, message] of verificationResults) {
-      expect(html).toContain(`verification-${status}`);
-      expect(html).toContain(message);
-    }
-    expect(html.match(/role="status"/g)).toHaveLength(4);
-    expect(html.match(/aria-live="polite"/g)).toHaveLength(4);
-    expect(html.match(/<small>Verified [^<]+<\/small>/g)).toHaveLength(4);
-    expect(html).not.toContain("2026-08-07T02:30:00.000Z");
-    expect(html).toContain("Not verified yet.");
+    expectVerificationResultList(html);
   });
 
   it("renders mixed section states independently", () => {
