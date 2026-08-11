@@ -64,6 +64,7 @@ RUN pnpm --filter @rip-dvd/config build \
   && pnpm --filter @rip-dvd/worker-runtime build
 
 FROM dependencies AS validation
+COPY --from=dvdcss-reader-builder /usr/local/bin/rip-dvd-dvdcss-reader /usr/local/bin/rip-dvd-dvdcss-reader
 COPY . .
 RUN pnpm check \
   && pnpm db:check \
