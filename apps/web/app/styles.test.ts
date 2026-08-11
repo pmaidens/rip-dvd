@@ -4,6 +4,8 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
+import type { EncodeJobId } from "@rip-dvd/data-access";
+
 import {
   DashboardView,
   type DashboardLoadState,
@@ -127,7 +129,7 @@ describe("dashboard 320px fallback", () => {
         status: "loaded",
         items: [
           {
-            id: "encode-long",
+            id: "encode-long" as EncodeJobId,
             mediaTitle: longMediaTitle,
             mediaYear: null,
             encodingProfileName: longProfileName,

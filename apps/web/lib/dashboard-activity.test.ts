@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { EncodeJobId } from "@rip-dvd/data-access";
+
 import type {
   DashboardDetectedDiscDetails,
   DashboardSnapshot,
@@ -735,7 +737,7 @@ describe("watchDashboardActivity", () => {
         status: "loaded",
         items: [
           {
-            id: "encode-1",
+            id: "encode-1" as EncodeJobId,
             mediaTitle: "Live Movie",
             mediaYear: 2001,
             encodingProfileName: "DVD library",
