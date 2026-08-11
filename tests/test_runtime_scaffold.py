@@ -125,6 +125,7 @@ class RuntimeScaffoldTests(unittest.TestCase):
             dockerfile,
         )
         self.assertIn("sha256sum --check --strict", dockerfile)
+        self.assertIn("--libdir=lib", dockerfile)
         self.assertIn("rip-dvd-dvdcss-reader", dockerfile)
         self.assertIn("/usr/share/doc/rip-dvd-dvdcss-reader/COPYING", dockerfile)
         self.assertIn(

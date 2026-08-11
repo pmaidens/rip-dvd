@@ -36,6 +36,7 @@ RUN curl --fail --location --silent --show-error \
     --directory /tmp/libdvdcss-source --strip-components 1 \
   && meson setup /tmp/libdvdcss-build /tmp/libdvdcss-source \
     --buildtype=release --default-library=static \
+    --libdir=lib \
     -Denable_docs=false -Denable_examples=false \
   && meson compile --clean --verbose --jobs 2 -C /tmp/libdvdcss-build \
   && meson install -C /tmp/libdvdcss-build
