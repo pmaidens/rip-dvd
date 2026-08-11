@@ -13,7 +13,7 @@ import {
 import { requireDvdContentSize } from "./dvd-content-policy.js";
 import { optionalBoundedText } from "./bounded-text.js";
 
-const DEFAULT_CONTENT_HASH_TIMEOUT_MS = 4 * 60 * 60_000;
+const DEFAULT_CONTENT_HASH_TIMEOUT_MS = 8 * 60 * 60_000;
 const DEFAULT_MAX_ACTIVE_HASHES = 32;
 const MAX_CONTENT_HASH_OUTPUT_BYTES = 128;
 
