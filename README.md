@@ -649,7 +649,9 @@ hidden partial path, and publishes the fingerprint-named ISO and its Original
 Disc Archive record only after the source and completed image are reverified.
 Progress and terminal state are written to SQLite and reach the dashboard over
 SSE. Failed or interrupted copies are moved to a `.failed` recovery path and
-remain explicitly retryable from the dashboard.
+remain explicitly retryable from the dashboard unless another observation has
+already published an archive for the same fingerprint. Those superseded
+failures remain visible in Archive Job history without a retry action.
 
 A fingerprint
 already present in Original Disc Archives is shown as **Already archived**, and

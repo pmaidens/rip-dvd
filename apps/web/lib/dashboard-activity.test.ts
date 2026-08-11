@@ -484,6 +484,7 @@ describe("watchDashboardActivity", () => {
         opticalDriveName: "Drive",
         status: "running",
         progressPercent: 10,
+        retryable: false,
       }],
     };
     const newer = structuredClone(first);
@@ -730,6 +731,7 @@ describe("watchDashboardActivity", () => {
             opticalDriveName: "Upper drive",
             status: "running",
             progressPercent: 42,
+            retryable: false,
           },
         ],
       },

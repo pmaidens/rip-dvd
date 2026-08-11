@@ -174,6 +174,7 @@ describe("DashboardView", () => {
             opticalDriveName: "Upper drive",
             status: "failed",
             progressPercent: 42,
+            retryable: true,
           },
         ],
       },
@@ -236,6 +237,42 @@ describe("DashboardView", () => {
     expect(html).not.toContain("/dev/");
     expect(html).not.toContain("/media/");
     expect(html).not.toContain("HandBrake");
+  });
+
+  it("shows failed Archive Job history without retrying superseded duplicates", () => {
+    const html = render({
+      opticalDrives: { status: "loaded", items: [] },
+      detectedDiscs: { status: "loaded", items: [] },
+      archiveJobs: {
+        status: "loaded",
+        items: [
+          {
+            id: "retryable-archive-job",
+            detectedDiscId: "retryable-disc",
+            discLabel: "RETRYABLE_DISC",
+            opticalDriveName: "Upper drive",
+            status: "failed",
+            progressPercent: 20,
+            retryable: true,
+          },
+          {
+            id: "superseded-archive-job",
+            detectedDiscId: "superseded-disc",
+            discLabel: "SUPERSEDED_DISC",
+            opticalDriveName: "Lower drive",
+            status: "failed",
+            progressPercent: 30,
+            retryable: false,
+          },
+        ],
+      },
+      encodeJobs: { status: "loaded", items: [] },
+      catalogReview: { status: "loaded", items: [] },
+    });
+
+    expect(html).toContain("RETRYABLE_DISC");
+    expect(html).toContain("SUPERSEDED_DISC");
+    expect(html.match(/Retry archive/g)).toHaveLength(1);
   });
 
   it("submits a same-origin JSON archive approval", async () => {

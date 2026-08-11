@@ -578,7 +578,7 @@ export function DashboardView({
             status={job.status}
             progressPercent={job.progressPercent}
             action={
-              job.status === "failed" ? (
+              job.retryable ? (
                 <button
                   type="button"
                   disabled={approvingDetectedDiscId !== null}
