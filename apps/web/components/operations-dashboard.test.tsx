@@ -410,7 +410,7 @@ describe("DashboardView", () => {
                   },
                   index,
                 ) => ({
-                  id: `verified-job-${index}`,
+                  id: `verified-job-${index}` as EncodeJobId,
                   mediaTitle: `Verified job ${index}`,
                   mediaYear: null,
                   encodingProfileName: "DVD library · Version 1",
@@ -424,7 +424,7 @@ describe("DashboardView", () => {
                 }),
               ),
               {
-                id: "unverified-job",
+                id: "unverified-job" as EncodeJobId,
                 mediaTitle: "Unverified job",
                 mediaYear: null,
                 encodingProfileName: "DVD library · Version 1",
