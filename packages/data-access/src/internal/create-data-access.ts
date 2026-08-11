@@ -80,6 +80,7 @@ import {
   requirePositiveSafeInteger,
 } from "./validation.js";
 import { validateMediaItem } from "./media-item-validation.js";
+import { serializeDiscSelectionSourceIdentity } from "../disc-selection-source-identity.js";
 import { isDvdContentId } from "../dvd-scan.js";
 import {
   ENCODE_PROGRESS_PHASES,
@@ -540,8 +541,8 @@ export function createDataAccessInternal(
       for (const row of rows) {
         const selection = toDiscSelection(row);
         validator.validate(
-          selection,
-          { persistedSourceKey: selection.sourceKey },
+          selection.sourceIdentity,
+          { persistedSourceKey: row.sourceKey },
         );
         selectionCount += 1;
       }
@@ -2488,10 +2489,12 @@ export function createDataAccessInternal(
                 "DVD Disc Selections require a DVD Original Disc Archive",
               );
             }
-            const { coordinates, sourceKey } =
+            const sourceIdentity =
               createArchivedDvdSelectionValidator(source.scanData).validate(
-                input,
-              );
+              input.sourceIdentity,
+            );
+            const sourcePersistence =
+              serializeDiscSelectionSourceIdentity(sourceIdentity);
             const selection = toDiscSelection(
               requireRow(
                 transaction
@@ -2500,9 +2503,7 @@ export function createDataAccessInternal(
                     id,
                     originalDiscArchiveId: input.originalDiscArchiveId,
                     mediaItemId: input.mediaItemId,
-                    sourceKey,
-                    kind: input.kind,
-                    ...coordinates,
+                    ...sourcePersistence,
                     label: input.label,
                     createdAt: timestamp,
                     updatedAt: timestamp,
@@ -2612,7 +2613,11 @@ export function createDataAccessInternal(
             const validator = createArchivedDvdSelectionValidator(
               source.scanData,
             );
-            const { coordinates, sourceKey } = validator.validate(input);
+            const sourceIdentity = validator.validate(
+              input.sourceIdentity,
+            );
+            const sourcePersistence =
+              serializeDiscSelectionSourceIdentity(sourceIdentity);
             if (historicalJob) {
               if (!requiresLegacyDiscSelectionRepair(
                 current,
@@ -2656,9 +2661,7 @@ export function createDataAccessInternal(
                     id: replacementId,
                     originalDiscArchiveId: input.originalDiscArchiveId,
                     mediaItemId: input.mediaItemId,
-                    sourceKey,
-                    kind: input.kind,
-                    ...coordinates,
+                    ...sourcePersistence,
                     label: input.label ?? null,
                     isCatalogActive: true,
                     createdAt: timestamp,
@@ -2675,9 +2678,7 @@ export function createDataAccessInternal(
                   .update(discSelections)
                   .set({
                     mediaItemId: input.mediaItemId,
-                    sourceKey,
-                    kind: input.kind,
-                    ...coordinates,
+                    ...sourcePersistence,
                     label: input.label ?? null,
                     updatedAt: timestamp,
                   })

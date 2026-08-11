@@ -4,6 +4,8 @@ import {
 } from "./internal/create-data-access.js";
 import type { DataAccess } from "./types.js";
 
+export { createDiscSelectionSourceIdentity } from "./disc-selection-source-identity.js";
+
 export * from "./errors.js";
 export * from "./dvd-scan.js";
 export {
@@ -12,6 +14,10 @@ export {
   MEDIA_ITEM_KINDS,
 } from "./domain-values.js";
 export type * from "./types.js";
+export type {
+  DiscSelectionSourceIdentity,
+  DiscSelectionSourceIdentityInput,
+} from "./disc-selection-source-identity.js";
 export {
   ARCHIVE_JOB_LEASE_DURATION_MS,
   ENCODE_JOB_LEASE_DURATION_MS,

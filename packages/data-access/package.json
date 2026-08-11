@@ -22,6 +22,10 @@
       "types": "./src/catalog-kinds.ts",
       "default": "./dist/catalog-kinds.js"
     },
+    "./disc-selection-source-identity": {
+      "types": "./src/disc-selection-source-identity-api.ts",
+      "default": "./dist/disc-selection-source-identity-api.js"
+    },
     "./legacy-sidecars": {
       "types": "./src/legacy-sidecars.ts",
       "default": "./dist/legacy-sidecars.js"

@@ -703,7 +703,7 @@ try {
     const selection = access.catalog.createDiscSelection({
       originalDiscArchiveId: archive.id,
       mediaItemId: item.id,
-      kind: "main_feature",
+      sourceIdentity: { kind: "main_feature" },
     });
     completeCatalogReview(access, archive.id);
     const preset = "Fast 480p30";
@@ -1367,7 +1367,7 @@ try {
       setup.catalog.createDiscSelection({
         originalDiscArchiveId: archive.id,
         mediaItemId: item.id,
-        kind: "main_feature",
+        sourceIdentity: { kind: "main_feature" },
       });
       completeCatalogReview(setup, archive.id);
       const sidecarBytes = Buffer.from(JSON.stringify({
@@ -2479,7 +2479,7 @@ try {
       const selection = setup.catalog.createDiscSelection({
         originalDiscArchiveId: archive.id,
         mediaItemId: item.id,
-        kind: "main_feature",
+        sourceIdentity: { kind: "main_feature" },
       });
       completeCatalogReview(setup, archive.id);
       return { archive, selection };
@@ -2749,7 +2749,7 @@ try {
     const selection = setup.catalog.createDiscSelection({
       originalDiscArchiveId: archive.id,
       mediaItemId: item.id,
-      kind: "main_feature",
+      sourceIdentity: { kind: "main_feature" },
       label: "Pre-cutover local selection",
     });
     completeCatalogReview(setup, archive.id);
@@ -2796,7 +2796,7 @@ try {
         human.catalog.repairDiscSelection(selection.id, {
           originalDiscArchiveId: archive.id,
           mediaItemId: item.id,
-          kind: "main_feature",
+          sourceIdentity: { kind: "main_feature" },
           label: "Post-marker source correction",
         })
       ).toThrow(/legacy cutover.*pending/i);
@@ -2906,7 +2906,7 @@ try {
     setup.catalog.createDiscSelection({
       originalDiscArchiveId: archive.id,
       mediaItemId: item.id,
-      kind: "main_feature",
+      sourceIdentity: { kind: "main_feature" },
     });
     completeCatalogReview(setup, archive.id);
     setup.close();
@@ -3284,7 +3284,7 @@ try {
     service.catalog.createDiscSelection({
       originalDiscArchiveId: archive.id,
       mediaItemId: item.id,
-      kind: "main_feature",
+      sourceIdentity: { kind: "main_feature" },
     });
     expect(() => completeCatalogReview(service, archive.id)).toThrow(
       DomainInvariantError,
@@ -3353,8 +3353,7 @@ try {
       human.catalog.createDiscSelection({
         originalDiscArchiveId: archive.id,
         mediaItemId: item.id,
-        kind: "dvd_title",
-        titleNumber: 1,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
       });
       human.close();
     };

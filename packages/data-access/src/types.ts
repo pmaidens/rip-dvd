@@ -9,6 +9,10 @@ import type {
   MEDIA_DOMAINS,
   MEDIA_ITEM_KINDS,
 } from "./domain-values.js";
+import type {
+  DiscSelectionSourceIdentity,
+  DiscSelectionSourceIdentityInput,
+} from "./disc-selection-source-identity.js";
 
 export type ArchiveFormat = (typeof ARCHIVE_FORMATS)[number];
 export type DiscKind = (typeof DISC_KINDS)[number];
@@ -113,66 +117,25 @@ interface DiscSelectionBase {
   id: DiscSelectionId;
   originalDiscArchiveId: OriginalDiscArchiveId;
   mediaItemId: MediaItemId;
-  sourceKey: string;
+  sourceIdentity: DiscSelectionSourceIdentity;
   label: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
 
-export type DiscSelection = DiscSelectionBase &
-  (
-    | {
-        kind: "main_feature";
-        titleNumber: null;
-        chapterStart: null;
-        chapterEnd: null;
-      }
-    | {
-        kind: "dvd_title";
-        titleNumber: number;
-        chapterStart: null;
-        chapterEnd: null;
-      }
-    | {
-        kind: "dvd_chapters";
-        titleNumber: number;
-        chapterStart: number;
-        chapterEnd: number;
-      }
-  );
+export type DiscSelection = DiscSelectionBase;
 
 export type DeleteDiscSelectionResult = DiscSelection & {
   deletedEncodeJobs: number;
   deletionComplete: boolean;
 };
 
-type CreateDiscSelectionBase = {
+export type CreateDiscSelectionInput = {
   originalDiscArchiveId: OriginalDiscArchiveId;
   mediaItemId: MediaItemId;
+  sourceIdentity: DiscSelectionSourceIdentityInput;
   label?: string;
 };
-
-export type CreateDiscSelectionInput = CreateDiscSelectionBase &
-  (
-    | {
-        kind: "main_feature";
-        titleNumber?: never;
-        chapterStart?: never;
-        chapterEnd?: never;
-      }
-    | {
-        kind: "dvd_title";
-        titleNumber: number;
-        chapterStart?: never;
-        chapterEnd?: never;
-      }
-    | {
-        kind: "dvd_chapters";
-        titleNumber: number;
-        chapterStart: number;
-        chapterEnd: number;
-      }
-  );
 
 export interface EncodingProfile {
   id: EncodingProfileId;

@@ -103,7 +103,7 @@ describe("GET /api/dashboard/events", () => {
       const selection = access.catalog.createDiscSelection({
         originalDiscArchiveId: encodeArchive.id,
         mediaItemId: mediaItem.id,
-        kind: "main_feature",
+        sourceIdentity: { kind: "main_feature" },
       });
       completeCatalogReview(access, encodeArchive.id);
       access.encodeJobs.enqueue({
@@ -279,7 +279,7 @@ describe("GET /api/dashboard/events", () => {
     const selection = access.catalog.createDiscSelection({
       originalDiscArchiveId: archive.id,
       mediaItemId: mediaItem.id,
-      kind: "main_feature",
+      sourceIdentity: { kind: "main_feature" },
     });
     completeCatalogReview(access, archive.id);
     const profile = access.encodingProfiles.create({

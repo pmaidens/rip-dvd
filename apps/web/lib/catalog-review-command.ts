@@ -1,7 +1,8 @@
 import type {
-  DiscSelectionKind,
+  DiscSelectionSourceIdentityInput,
   MediaItemKind,
 } from "@rip-dvd/data-access";
+import { createDiscSelectionSourceIdentity } from "@rip-dvd/data-access/disc-selection-source-identity";
 
 export const CATALOG_REVIEW_COMMAND_ACTIONS = [
   "create_media_item",
@@ -14,7 +15,6 @@ export const CATALOG_REVIEW_COMMAND_ACTIONS = [
 
 export interface CatalogReviewCommandDomainValues {
   mediaItemKinds: readonly MediaItemKind[];
-  discSelectionKinds: readonly DiscSelectionKind[];
 }
 
 export interface CatalogReviewMediaItemInput {
@@ -41,16 +41,7 @@ interface CatalogReviewDiscSelectionBase {
 
 export type CatalogReviewDiscSelectionInput =
   & CatalogReviewDiscSelectionBase
-  & (
-    | { kind: "main_feature" }
-    | { kind: "dvd_title"; titleNumber: number }
-    | {
-        kind: "dvd_chapters";
-        titleNumber: number;
-        chapterStart: number;
-        chapterEnd: number;
-      }
-  );
+  & { sourceIdentity: DiscSelectionSourceIdentityInput };
 
 export type CatalogReviewCommand =
   | {
@@ -89,8 +80,6 @@ export type CatalogReviewCommandValidationError =
   | "Invalid Media Item seasonNumber"
   | "Invalid Media Item episodeNumber"
   | "Invalid Disc Selection"
-  | "Invalid DVD title number"
-  | "Invalid DVD chapter range"
   | "Invalid catalog review revision";
 
 export type CatalogReviewCommandParseResult =
@@ -270,63 +259,38 @@ function parseMediaItemChanges(
 
 function parseDiscSelectionInput(
   value: unknown,
-  domainValues: CatalogReviewCommandDomainValues,
 ):
   | { ok: true; selection: CatalogReviewDiscSelectionInput }
   | { ok: false; error: CatalogReviewCommandValidationError } {
   const input = asRecord(value);
   const mediaItemId = boundedString(input?.mediaItemId);
-  const kind = boundedString(input?.kind, 32);
+  const sourceIdentityInput = asRecord(input?.sourceIdentity);
   const label = input?.label === undefined
     ? undefined
     : boundedString(input.label);
   if (
     !input ||
     !mediaItemId ||
-    !kind ||
-    !domainValues.discSelectionKinds.includes(kind as DiscSelectionKind) ||
+    !sourceIdentityInput ||
     (input.label !== undefined && !label)
   ) {
     return { ok: false, error: "Invalid Disc Selection" };
   }
 
-  const common = {
-    mediaItemId,
-    ...(label ? { label } : {}),
-  };
-  if (kind === "main_feature") {
-    return { ok: true, selection: { ...common, kind } };
-  }
-
-  const titleNumber = optionalInteger(input.titleNumber, 1);
-  if (titleNumber === null || titleNumber === undefined) {
-    return { ok: false, error: "Invalid DVD title number" };
-  }
-  if (kind === "dvd_title") {
-    return {
-      ok: true,
-      selection: { ...common, kind, titleNumber },
-    };
-  }
-
-  const chapterStart = optionalInteger(input.chapterStart, 1);
-  const chapterEnd = optionalInteger(input.chapterEnd, 1);
-  if (
-    chapterStart === null ||
-    chapterStart === undefined ||
-    chapterEnd === null ||
-    chapterEnd === undefined
-  ) {
-    return { ok: false, error: "Invalid DVD chapter range" };
+  let sourceIdentity: DiscSelectionSourceIdentityInput;
+  try {
+    sourceIdentity = createDiscSelectionSourceIdentity(
+      sourceIdentityInput as unknown as DiscSelectionSourceIdentityInput,
+    );
+  } catch {
+    return { ok: false, error: "Invalid Disc Selection" };
   }
   return {
     ok: true,
     selection: {
-      ...common,
-      kind: "dvd_chapters",
-      titleNumber,
-      chapterStart,
-      chapterEnd,
+      mediaItemId,
+      sourceIdentity,
+      ...(label ? { label } : {}),
     },
   };
 }
@@ -362,10 +326,7 @@ export function parseCatalogReviewCommand(
         : invalid(parsedChanges.error);
     }
     case "create_disc_selection": {
-      const parsedSelection = parseDiscSelectionInput(
-        body.selection,
-        domainValues,
-      );
+      const parsedSelection = parseDiscSelectionInput(body.selection);
       return parsedSelection.ok
         ? {
             ok: true,
@@ -378,10 +339,7 @@ export function parseCatalogReviewCommand(
       if (!discSelectionId) {
         return invalid("Invalid Disc Selection");
       }
-      const parsedSelection = parseDiscSelectionInput(
-        body.selection,
-        domainValues,
-      );
+      const parsedSelection = parseDiscSelectionInput(body.selection);
       return parsedSelection.ok
         ? {
             ok: true,
