@@ -779,8 +779,11 @@ actions for those terminal states. Queued and running rows are left unchanged.
 The queue reserves each final output path for one logical job and keeps the
 database uniqueness constraint on Disc Selection plus Encoding Profile version.
 The dashboard shows the referenced profile version with queued, running,
-completed, and failed state. `GET /api/encode-jobs` provides bounded eligible
-options, `POST /api/encode-jobs` queues or updates the logical job, and
+completed, and failed state. `GET /api/encode-jobs` independently pages up to
+100 eligible Disc Selections with `selectionOffset` and 100 active DVD video
+Encoding Profile versions with `profileOffset`; its `page` and `profilePage`
+metadata keep every option reachable without an unbounded response.
+`POST /api/encode-jobs` queues or updates the logical job, and
 `PATCH /api/encode-jobs` retries a terminal job. Mutations require the same
 trusted Origin and Host checks as archive approval.
 
