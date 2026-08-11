@@ -673,7 +673,7 @@ capacity is recovered and a fresh retry is admitted only after confirmed close.
 Raw-disc open/read/hash work uses the same bounded helper-process lifecycle, so
 a kernel-blocked device operation cannot keep the archive worker alive.
 Reads are shell-free, size-capped, incremental, timed out, and
-cancellation-aware. The full-disc hash has a four-hour ceiling so slow physical
+cancellation-aware. The full-disc hash has an eight-hour ceiling so slow physical
 drives can complete while a permanently blocked read remains bounded.
 Repeated polls update the same Detected Disc. Dashboard approval atomically
 marks a scanned disc approved and creates its queued Archive Job; discovery
