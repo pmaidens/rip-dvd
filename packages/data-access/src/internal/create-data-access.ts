@@ -565,6 +565,36 @@ export function createDataAccessInternal(
     return archive;
   }
 
+  function validateDiscSelectionsOutsideWriter(
+    archiveId: OriginalDiscArchiveId,
+  ): typeof originalDiscArchives.$inferSelect {
+    return database.transaction(
+      (transaction) =>
+        requireReviewableDiscSelections(archiveId, transaction),
+      { behavior: "deferred" },
+    );
+  }
+
+  function requireCurrentCatalogValidation(
+    validatedArchive: typeof originalDiscArchives.$inferSelect,
+    querySource: Pick<typeof database, "select">,
+  ): typeof originalDiscArchives.$inferSelect {
+    const currentArchive = querySource
+      .select()
+      .from(originalDiscArchives)
+      .where(and(
+        eq(originalDiscArchives.id, validatedArchive.id),
+        eq(originalDiscArchives.updatedAt, validatedArchive.updatedAt),
+      ))
+      .get();
+    if (currentArchive) {
+      return currentArchive;
+    }
+    throw new DomainInvariantError(
+      "Catalog changed during validation; retry the operation",
+    );
+  }
+
   function findOriginalArchiveByContentId(
     fingerprint: string,
     querySource: Pick<typeof database, "select"> = database,
@@ -2250,8 +2280,12 @@ export function createDataAccessInternal(
           );
         }
         const timestamp = now();
+        const validatedArchive = validateDiscSelectionsOutsideWriter(id);
         return database.transaction((transaction) => {
-          const archive = requireReviewableDiscSelections(id, transaction);
+          const archive = requireCurrentCatalogValidation(
+            validatedArchive,
+            transaction,
+          );
           if (archive.legacyCutoverPending) {
             throw new DomainInvariantError(
               "Catalog review cannot be completed while legacy cutover repair is pending",
@@ -3169,42 +3203,72 @@ export function createDataAccessInternal(
       enqueue(input) {
         const timestamp = now();
         const outputPath = requireNonEmpty(input.outputPath, "outputPath");
+        const selectReviewState = (
+          querySource: Pick<typeof database, "select">,
+        ) =>
+          requireRow(
+            querySource
+              .select({
+                catalogReviewedAt: originalDiscArchives.catalogReviewedAt,
+                legacyCutoverPending:
+                  originalDiscArchives.legacyCutoverPending,
+                originalDiscArchiveId: originalDiscArchives.id,
+              })
+              .from(discSelections)
+              .innerJoin(
+                originalDiscArchives,
+                eq(
+                  originalDiscArchives.id,
+                  discSelections.originalDiscArchiveId,
+                ),
+              )
+              .where(and(
+                eq(discSelections.id, input.discSelectionId),
+                eq(discSelections.isCatalogActive, true),
+              ))
+              .get(),
+            "disc selection",
+            input.discSelectionId,
+          );
+        const requireCompletedReview = (
+          selectionReview: ReturnType<typeof selectReviewState>,
+        ) => {
+          if (
+            selectionReview.catalogReviewedAt === null ||
+            selectionReview.legacyCutoverPending
+          ) {
+            throw new DomainInvariantError(
+              "Encode Jobs require a completed catalog review",
+            );
+          }
+          return selectionReview;
+        };
+        const validatedArchive = database.transaction(
+          (transaction) => {
+            const selectionReview = requireCompletedReview(
+              selectReviewState(transaction),
+            );
+            return requireReviewableDiscSelections(
+              selectionReview.originalDiscArchiveId,
+              transaction,
+            );
+          },
+          { behavior: "deferred" },
+        );
         return database.transaction(
           (transaction) => {
-            const selectionReview = requireRow(
-              transaction
-                .select({
-                  catalogReviewedAt: originalDiscArchives.catalogReviewedAt,
-                  legacyCutoverPending:
-                    originalDiscArchives.legacyCutoverPending,
-                  originalDiscArchiveId: originalDiscArchives.id,
-                })
-                .from(discSelections)
-                .innerJoin(
-                  originalDiscArchives,
-                  eq(
-                    originalDiscArchives.id,
-                    discSelections.originalDiscArchiveId,
-                  ),
-                )
-                .where(and(
-                  eq(discSelections.id, input.discSelectionId),
-                  eq(discSelections.isCatalogActive, true),
-                ))
-                .get(),
-              "disc selection",
-              input.discSelectionId,
+            const selectionReview = requireCompletedReview(
+              selectReviewState(transaction),
             );
             if (
-              selectionReview.catalogReviewedAt === null ||
-              selectionReview.legacyCutoverPending
+              selectionReview.originalDiscArchiveId !== validatedArchive.id
             ) {
               throw new DomainInvariantError(
-                "Encode Jobs require a completed catalog review",
+                "Catalog changed during validation; retry the operation",
               );
             }
-            requireReviewableDiscSelections(
-              selectionReview.originalDiscArchiveId,
+            requireCurrentCatalogValidation(
+              validatedArchive,
               transaction,
             );
             const existing = transaction
