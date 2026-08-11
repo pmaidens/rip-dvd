@@ -2,9 +2,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  ActionOverview,
   DashboardConnectionStatus,
   DashboardView,
   OperationsDashboard,
+  requestActionOverview,
   requestArchiveApproval,
   requestFilesystemVerification,
   type DashboardLoadState,
@@ -74,6 +76,30 @@ describe("DashboardView", () => {
     expect(html).toContain("No Archive Jobs are recorded.");
     expect(html).toContain("No Encode Jobs are recorded.");
     expect(html).toContain("No Original Disc Archives need catalog review.");
+  });
+
+  it.each([
+    ["discs", ["Optical Drives", "Detected Discs", "Archive Jobs"]],
+    ["encoding", ["Encode Jobs"]],
+    ["catalog", ["Catalog Review"]],
+  ] as const)("renders only the %s detail-page sections", (section, expected) => {
+    const html = renderToStaticMarkup(
+      <DashboardView
+        section={section}
+        state={{
+          opticalDrives: { status: "loaded", items: [] },
+          detectedDiscs: { status: "loaded", items: [] },
+          archiveJobs: { status: "loaded", items: [] },
+          encodeJobs: { status: "loaded", items: [] },
+          catalogReview: { status: "loaded", items: [] },
+        }}
+      />,
+    );
+
+    const expectedSections = new Set<string>(expected);
+    for (const sectionName of sectionNames) {
+      expect(html.includes(sectionName)).toBe(expectedSections.has(sectionName));
+    }
   });
 
   it("renders populated operations without paths or worker diagnostics", () => {
@@ -219,6 +245,23 @@ describe("DashboardView", () => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ detectedDiscId: "disc-1" }),
+    });
+  });
+
+  it("requests the exact action overview without caching", async () => {
+    const snapshot = {
+      generatedAt: "2026-08-10T20:00:00.000Z",
+      discApprovals: { count: 0, items: [] },
+      failedArchives: { count: 0, items: [] },
+      failedEncodes: { count: 0, items: [] },
+      catalogReviews: { count: 0, items: [] },
+      filesystemProblems: { count: 0, items: [] },
+    };
+    const fetcher = vi.fn(async () => Response.json(snapshot));
+
+    await expect(requestActionOverview(fetcher)).resolves.toEqual(snapshot);
+    expect(fetcher).toHaveBeenCalledWith("/api/action-overview", {
+      cache: "no-store",
     });
   });
 
@@ -407,18 +450,116 @@ describe("DashboardView", () => {
   });
 
   it("includes reviewed Encode Job queueing in the operations control plane", () => {
-    const html = renderToStaticMarkup(<OperationsDashboard />);
+    const html = renderToStaticMarkup(<OperationsDashboard page="encoding" />);
 
     expect(html).toContain("Queue Encode Jobs");
     expect(html).toContain("Loading encoding options");
   });
 
   it("includes durable verification inventory beyond transient operation sections", () => {
-    const html = renderToStaticMarkup(<OperationsDashboard />);
+    const html = renderToStaticMarkup(
+      <OperationsDashboard page="verification" />,
+    );
 
     expect(html).toContain("Filesystem Verification");
     expect(html).toContain("Encode Job outputs");
     expect(html).toContain("Original Disc Archives");
+  });
+
+  it("keeps the default front page focused on the actionable overview", () => {
+    const html = renderToStaticMarkup(<OperationsDashboard />);
+
+    expect(html).toContain("What needs action");
+    expect(html).not.toContain("Queue Encode Jobs");
+    expect(html).not.toContain("Filesystem Verification");
+    expect(html).not.toContain("Optical Drives");
+  });
+});
+
+describe("ActionOverview", () => {
+  it("summarizes every operator-intervention category and links to its workflow", () => {
+    const html = renderToStaticMarkup(
+      <ActionOverview
+        state={{
+          status: "loaded",
+          snapshot: {
+            generatedAt: "2026-08-10T20:00:00.000Z",
+            discApprovals: {
+              count: 1,
+              items: [{ id: "disc-action", label: "NEEDS_APPROVAL" }],
+            },
+            failedArchives: {
+              count: 1,
+              items: [{ id: "archive-failed", label: "ARCHIVE_FAILED" }],
+            },
+            failedEncodes: {
+              count: 4,
+              items: [
+                { id: "encode-failed-1", label: "Encode Failed (2001)" },
+                { id: "encode-failed-2", label: "Encode Failed 2" },
+                { id: "encode-failed-3", label: "Encode Failed 3" },
+              ],
+            },
+            catalogReviews: {
+              count: 1,
+              items: [{ id: "review-1", label: "CATALOG_REVIEW" }],
+            },
+            filesystemProblems: {
+              count: 1,
+              items: [
+                {
+                  id: "encode_job_output:encode-failed-1",
+                  label: "Encode Failed (2001)",
+                },
+              ],
+            },
+          },
+        }}
+      />,
+    );
+
+    expect(html).toContain("Discs awaiting approval");
+    expect(html).toContain("Failed archives");
+    expect(html).toContain("Failed encodes");
+    expect(html).toContain("Catalog reviews");
+    expect(html).toContain("Filesystem problems");
+    expect(html).toContain("NEEDS_APPROVAL");
+    expect(html).toContain("ARCHIVE_FAILED");
+    expect(html).toContain("Encode Failed (2001)");
+    expect(html).toContain("CATALOG_REVIEW");
+    expect(html).toContain("+1 more");
+    expect(html).toContain('href="/discs"');
+    expect(html).toContain('href="/catalog"');
+    expect(html).toContain('href="/encoding"');
+    expect(html).toContain('href="/verification"');
+  });
+
+  it("distinguishes loading, unavailable, and clear attention categories", () => {
+    const loading = renderToStaticMarkup(
+      <ActionOverview state={{ status: "loading" }} />,
+    );
+    const unavailable = renderToStaticMarkup(
+      <ActionOverview state={{ status: "error" }} />,
+    );
+    const clear = renderToStaticMarkup(
+      <ActionOverview
+        state={{
+          status: "loaded",
+          snapshot: {
+            generatedAt: "2026-08-10T20:00:00.000Z",
+            discApprovals: { count: 0, items: [] },
+            failedArchives: { count: 0, items: [] },
+            failedEncodes: { count: 0, items: [] },
+            catalogReviews: { count: 0, items: [] },
+            filesystemProblems: { count: 0, items: [] },
+          },
+        }}
+      />,
+    );
+
+    expect(loading.match(/Checking current state/g)).toHaveLength(5);
+    expect(unavailable.match(/Current state unavailable/g)).toHaveLength(5);
+    expect(clear.match(/No action needed/g)).toHaveLength(5);
   });
 });
 
