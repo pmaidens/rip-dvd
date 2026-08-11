@@ -121,7 +121,7 @@ describe("DVD archive publication", () => {
       const devicePath = "/dev/zero";
       const previousDigest = "a".repeat(64);
       const replacementDigest =
-        "d0b8829a9f2a9c78882fb5d3aff464054e5a8a82978ecc2a922767782c739f7f";
+        "4561ae53176c6dec6f7e715600037e5d53d1a82d9bd8a3f6f9ac2af067bc1503";
       const previousPartialPath = join(
         previousRoot,
         `.${previousDigest}.iso.rip-dvd-partial`,
@@ -138,7 +138,7 @@ describe("DVD archive publication", () => {
         originalsLibraryPath: replacementOriginalsLibraryPath,
         runner: createNodeDvdCopyRunner({ timeoutMs: 1_000 }),
         signal: new AbortController().signal,
-        sizeBytes: 9,
+        sizeBytes: 2_048,
         verifySource: async () => undefined,
         onProgress: () => undefined,
       };
@@ -168,7 +168,7 @@ describe("DVD archive publication", () => {
       const root = realpathSync(originalsLibraryPath);
       const devicePath = "/dev/zero";
       const digest =
-        "d0b8829a9f2a9c78882fb5d3aff464054e5a8a82978ecc2a922767782c739f7f";
+        "4561ae53176c6dec6f7e715600037e5d53d1a82d9bd8a3f6f9ac2af067bc1503";
       const partialPath = join(
         root,
         `.${digest}.11111111-1111-4111-8111-111111111111.iso.rip-dvd-partial`,
@@ -190,7 +190,7 @@ describe("DVD archive publication", () => {
         originalsLibraryPath,
         runner: createNodeDvdCopyRunner({ timeoutMs: 1_000 }),
         signal: new AbortController().signal,
-        sizeBytes: 9,
+        sizeBytes: 2_048,
         verifySource: async () => undefined,
         onProgress: () => undefined,
       };
@@ -369,7 +369,7 @@ describe("DVD archive publication", () => {
       const originalsLibraryPath = createOriginalsLibrary();
       const root = realpathSync(originalsLibraryPath);
       const digest =
-        "d0b8829a9f2a9c78882fb5d3aff464054e5a8a82978ecc2a922767782c739f7f";
+        "4561ae53176c6dec6f7e715600037e5d53d1a82d9bd8a3f6f9ac2af067bc1503";
       const partialPath = join(root, `.${digest}.iso.rip-dvd-partial`);
       const readyPath = join(root, ".legacy-writer-ready");
       const writerPid = await startOrphanedWriter(
@@ -383,7 +383,7 @@ describe("DVD archive publication", () => {
         originalsLibraryPath,
         runner: createNodeDvdCopyRunner({ timeoutMs: 1_000 }),
         signal: new AbortController().signal,
-        sizeBytes: 9,
+        sizeBytes: 2_048,
         verifySource: async () => undefined,
         onProgress: () => undefined,
       };
