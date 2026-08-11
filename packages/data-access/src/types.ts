@@ -265,6 +265,11 @@ export interface EncodeJobFailureOptions {
   preserveReplacementAuthority?: boolean;
 }
 
+export interface EncodeJobRequeueOptions {
+  outputPath?: string;
+  priority?: number;
+}
+
 export interface DiscoveredOpticalDrive {
   devicePath: string;
   displayName?: string;
@@ -520,7 +525,7 @@ export interface EncodeJobAccess {
     errorMessage: string,
     options?: EncodeJobFailureOptions,
   ): EncodeJob;
-  requeue(id: EncodeJobId): EncodeJob;
+  requeue(id: EncodeJobId, options?: EncodeJobRequeueOptions): EncodeJob;
 }
 
 export interface FilesystemVerificationAccess {

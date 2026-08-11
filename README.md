@@ -794,13 +794,14 @@ Selections from completed catalog reviews and active DVD video Encoding Profile
 versions. Choose one of each and an absolute final `.mkv` path inside
 `RIP_DVD_MEDIA_LIBRARY_PATH`. Queueing the same Disc Selection and profile
 version again returns the existing logical Encode Job. If that job is failed or
-completed, the same request resets its row to queued instead of creating new
-history; the Encode Jobs dashboard also exposes Retry encode and Re-encode
-actions for those terminal states. A completed job, or a failed replacement
-that still owns its prior final, keeps its authoritative output path and path
-reservation when requeued even if the request supplies a different path. A
-failed job without a retained output may move to the requested path. Queued and
-running rows are left unchanged.
+ completed, the same request leaves its terminal state and recorded output
+ unchanged, so a delayed submission retry cannot trigger another encode. The
+ Encode Jobs dashboard exposes explicit Retry encode and Re-encode actions for
+ those terminal states. An explicit requeue of a completed job, or of a failed
+ replacement that still owns its prior final, keeps its authoritative output
+ path and path reservation even if the retry supplies a different path. A
+ failed job without a retained output may move to the requested path. Repeated
+ submissions also leave queued and running rows unchanged.
 
 The queue reserves each final output path for one logical job and keeps the
 database uniqueness constraint on Disc Selection plus Encoding Profile version.
@@ -809,7 +810,7 @@ completed, and failed state. `GET /api/encode-jobs` independently pages up to
 100 eligible Disc Selections with `selectionOffset` and 100 active DVD video
 Encoding Profile versions with `profileOffset`; its `page` and `profilePage`
 metadata keep every option reachable without an unbounded response.
-`POST /api/encode-jobs` queues or updates the logical job, and
+`POST /api/encode-jobs` queues or returns the logical job, and
 `PATCH /api/encode-jobs` retries a terminal job. Mutations require the same
 trusted Origin and Host checks as archive approval.
 
