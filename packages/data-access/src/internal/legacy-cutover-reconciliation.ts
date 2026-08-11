@@ -28,6 +28,20 @@ interface LegacyRepairArchiveIdentity {
   sidecarPath: string;
 }
 
+interface LegacyRepairMarkerSnapshot {
+  identityDigest: string;
+  inventory: LegacyRepairArchiveIdentity[];
+  libraryPath: string;
+}
+
+interface MarkerFileVersion {
+  changedAtNanoseconds: string;
+  deviceId: string;
+  inode: string;
+  modifiedAtNanoseconds: string;
+  sizeBytes: string;
+}
+
 export interface PublicationMutationRecoveryLockHandle {
   release(): void;
 }
@@ -57,19 +71,56 @@ function nonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null;
 }
 
-function readBoundedMarker(markerPath: string): unknown {
-  const markerStat = lstatSync(markerPath);
-  if (!markerStat.isFile() || markerStat.isSymbolicLink()) {
+function markerFileVersion(stat: {
+  ctimeNs: bigint;
+  dev: bigint;
+  ino: bigint;
+  mtimeNs: bigint;
+  size: bigint;
+}): MarkerFileVersion {
+  return {
+    changedAtNanoseconds: stat.ctimeNs.toString(),
+    deviceId: stat.dev.toString(),
+    inode: stat.ino.toString(),
+    modifiedAtNanoseconds: stat.mtimeNs.toString(),
+    sizeBytes: stat.size.toString(),
+  };
+}
+
+function sameMarkerFileVersion(
+  left: MarkerFileVersion,
+  right: MarkerFileVersion,
+): boolean {
+  return (
+    left.changedAtNanoseconds === right.changedAtNanoseconds &&
+    left.deviceId === right.deviceId &&
+    left.inode === right.inode &&
+    left.modifiedAtNanoseconds === right.modifiedAtNanoseconds &&
+    left.sizeBytes === right.sizeBytes
+  );
+}
+
+function readBoundedMarker(markerPath: string): {
+  identityDigest: string;
+  value: unknown;
+} {
+  const namedStatBefore = lstatSync(markerPath, { bigint: true });
+  if (!namedStatBefore.isFile() || namedStatBefore.isSymbolicLink()) {
     throw new Error("SQLite cutover marker must be a regular file");
   }
   let descriptor: number | undefined;
   try {
     descriptor = openSync(markerPath, "r");
-    const openedStat = fstatSync(descriptor);
-    if (!openedStat.isFile()) {
+    const openedStatBefore = fstatSync(descriptor, { bigint: true });
+    const namedVersionBefore = markerFileVersion(namedStatBefore);
+    const openedVersionBefore = markerFileVersion(openedStatBefore);
+    if (
+      !openedStatBefore.isFile() ||
+      !sameMarkerFileVersion(namedVersionBefore, openedVersionBefore)
+    ) {
       throw new Error("SQLite cutover marker must be a regular file");
     }
-    if (openedStat.size > MAX_LEGACY_MARKER_BYTES) {
+    if (openedStatBefore.size > BigInt(MAX_LEGACY_MARKER_BYTES)) {
       throw new Error(
         `SQLite cutover marker exceeds the ${MAX_LEGACY_MARKER_BYTES}-byte limit`,
       );
@@ -94,7 +145,30 @@ function readBoundedMarker(markerPath: string): unknown {
         `SQLite cutover marker exceeds the ${MAX_LEGACY_MARKER_BYTES}-byte limit`,
       );
     }
-    return JSON.parse(UTF8_DECODER.decode(buffer.subarray(0, bytesRead)));
+    const openedVersionAfter = markerFileVersion(
+      fstatSync(descriptor, { bigint: true }),
+    );
+    const namedStatAfter = lstatSync(markerPath, { bigint: true });
+    if (
+      !namedStatAfter.isFile() ||
+      namedStatAfter.isSymbolicLink() ||
+      !sameMarkerFileVersion(openedVersionBefore, openedVersionAfter) ||
+      !sameMarkerFileVersion(
+        openedVersionAfter,
+        markerFileVersion(namedStatAfter),
+      )
+    ) {
+      throw new Error("SQLite cutover marker changed while it was being read");
+    }
+    const bytes = buffer.subarray(0, bytesRead);
+    return {
+      identityDigest: createHash("sha256")
+        .update(JSON.stringify(openedVersionAfter))
+        .update("\n")
+        .update(bytes)
+        .digest("hex"),
+      value: JSON.parse(UTF8_DECODER.decode(bytes)),
+    };
   } catch (error) {
     throw new Error(
       `Invalid SQLite cutover marker: ${error instanceof Error ? error.message : String(error)}`,
@@ -106,24 +180,25 @@ function readBoundedMarker(markerPath: string): unknown {
   }
 }
 
-function readLegacyRepairArchiveInventory(
+function readLegacyRepairMarkerSnapshot(
   originalsLibraryPath: string,
-): LegacyRepairArchiveIdentity[] {
+): LegacyRepairMarkerSnapshot | null {
   const libraryPath = realpathSync(originalsLibraryPath);
   if (!statSync(libraryPath).isDirectory()) {
     throw new Error(`Originals library is not a directory: ${libraryPath}`);
   }
   const markerPath = join(libraryPath, LEGACY_QUEUE_CUTOVER_MARKER);
   if (!existsSync(markerPath)) {
-    return [];
+    return null;
   }
-  const value = objectValue(readBoundedMarker(markerPath));
+  const markerSnapshot = readBoundedMarker(markerPath);
+  const value = objectValue(markerSnapshot.value);
   if (
     value?.schemaVersion !== 4 ||
     value.authoritativeStore !== "sqlite" ||
     value.legacyQueueStatus !== "repair"
   ) {
-    return [];
+    return null;
   }
   if (
     !Array.isArray(value.legacySidecars) ||
@@ -141,7 +216,7 @@ function readLegacyRepairArchiveInventory(
   if (value.snapshotDigest !== digest) {
     throw new Error("Invalid SQLite cutover marker: snapshot digest mismatch");
   }
-  return value.legacySidecars.map((entry) => {
+  const inventory = value.legacySidecars.map((entry) => {
     const item = objectValue(entry);
     const archivePath = nonEmptyString(item?.archivePath);
     const fingerprint = nonEmptyString(item?.fingerprint);
@@ -162,6 +237,11 @@ function readLegacyRepairArchiveInventory(
     }
     return { archivePath, fingerprint, sidecarPath };
   });
+  return {
+    identityDigest: markerSnapshot.identityDigest,
+    inventory,
+    libraryPath,
+  };
 }
 
 export function reconcileLegacyRepairCutover(
@@ -169,11 +249,13 @@ export function reconcileLegacyRepairCutover(
   originalsLibraryPath: string,
   publicationMutationRecoveryLock?: PublicationMutationRecoveryLock,
 ): void {
-  const inventory = readLegacyRepairArchiveInventory(originalsLibraryPath);
-  if (inventory.length === 0) {
+  const markerSnapshot = readLegacyRepairMarkerSnapshot(
+    originalsLibraryPath,
+  );
+  if (markerSnapshot === null || markerSnapshot.inventory.length === 0) {
     return;
   }
-  const libraryPath = realpathSync(originalsLibraryPath);
+  const { inventory, libraryPath } = markerSnapshot;
   const inventoryIdentities = new Set(
     inventory.flatMap(({ archivePath, fingerprint }) => [
       `archive:${archivePath}`,
@@ -232,6 +314,19 @@ export function reconcileLegacyRepairCutover(
         }
         acquiredLocks.set(mutation.outputPath, handle);
       }
+    }
+
+    const currentMarkerSnapshot = readLegacyRepairMarkerSnapshot(
+      originalsLibraryPath,
+    );
+    if (
+      currentMarkerSnapshot === null ||
+      currentMarkerSnapshot.libraryPath !== markerSnapshot.libraryPath ||
+      currentMarkerSnapshot.identityDigest !== markerSnapshot.identityDigest
+    ) {
+      throw new Error(
+        "Legacy repair marker changed while it was being reconciled",
+      );
     }
 
     sqlite.exec("BEGIN IMMEDIATE");
