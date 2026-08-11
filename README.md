@@ -794,7 +794,11 @@ versions. Choose one of each and an absolute final `.mkv` path inside
 version again returns the existing logical Encode Job. If that job is failed or
 completed, the same request resets its row to queued instead of creating new
 history; the Encode Jobs dashboard also exposes Retry encode and Re-encode
-actions for those terminal states. Queued and running rows are left unchanged.
+actions for those terminal states. A completed job, or a failed replacement
+that still owns its prior final, keeps its authoritative output path and path
+reservation when requeued even if the request supplies a different path. A
+failed job without a retained output may move to the requested path. Queued and
+running rows are left unchanged.
 
 The queue reserves each final output path for one logical job and keeps the
 database uniqueness constraint on Disc Selection plus Encoding Profile version.
@@ -877,11 +881,12 @@ monopolize SQLite, while a mismatch still leaves durable recovery authority.
 Its claim-scoped recovery path lets crash recovery restore the prior final when
 publication did not complete, and any failure after replacement
 publication quarantines the replacement and restores that prior final. Only a
-completed job requeued to the same output path owns that
-replacement. Its filesystem identity is retained through a failed attempt and
-verified on retry, while remaining stable across the worker's own rename and
-hard-link restoration; a changed final revokes replacement authority. Ordinary
-failed retries and jobs moved to a new path leave any existing final untouched.
+completed job first grants replacement ownership, and terminal requeue retains
+that job's authoritative output path while replacement ownership survives. Its
+filesystem identity is retained through a failed attempt and verified on retry,
+while remaining stable across the worker's own rename and hard-link restoration;
+a changed final revokes replacement authority. Ordinary failed retries moved to
+a new path leave any existing final untouched.
 If a new final path appears during an encode, it is also left untouched and the
 new partial is quarantined.
 
