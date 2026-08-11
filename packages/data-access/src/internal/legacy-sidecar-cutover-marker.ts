@@ -26,6 +26,10 @@ import type {
   ParsedLegacySidecar,
 } from "./legacy-sidecars.js";
 import {
+  advanceLegacySidecarBudget,
+  emptyLegacySidecarBudget,
+} from "./legacy-sidecar-budget.js";
+import {
   createLegacyJobLogicalKey,
   legacyJobLogicalKey,
   legacyJobSignature,
@@ -46,6 +50,15 @@ import {
   legacySourceArchiveMatchesSnapshot,
   parseLegacySidecar,
 } from "./legacy-sidecar-parser.js";
+import {
+  legacyInteger,
+  nonEmptyString,
+  nonNegativeInteger,
+  objectValue,
+  optionalYear,
+  positiveInteger,
+  recordedDate,
+} from "./legacy-sidecar-validation.js";
 import { isPathWithinDirectory } from "./path-containment.js";
 
 const LEGACY_QUEUE_STATUS_REPAIR = "repair";
@@ -77,16 +90,6 @@ export function snapshotLegacySidecar(
     },
     sidecarPath: sidecar.sidecarPath,
   };
-}
-
-function objectValue(value: unknown): Record<string, unknown> | null {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
-function nonEmptyString(value: unknown): string | null {
-  return typeof value === "string" && value.trim() ? value : null;
 }
 
 function nonNegativeDecimalString(value: unknown): string | null {
@@ -124,39 +127,6 @@ function parseSourceArchiveSnapshot(
         sizeBytes,
       }
     : null;
-}
-
-function legacyInteger(value: unknown, defaultValue?: number): number | null {
-  if (value === undefined && defaultValue !== undefined) {
-    return defaultValue;
-  }
-  if (typeof value === "string" && /^-?\d+$/.test(value.trim())) {
-    value = Number(value);
-  }
-  return Number.isSafeInteger(value) ? Number(value) : null;
-}
-
-function positiveInteger(value: unknown): number | null {
-  const integer = legacyInteger(value);
-  return integer !== null && integer > 0 ? integer : null;
-}
-
-function optionalYear(value: unknown): number | null {
-  const year = positiveInteger(value);
-  return year !== null && year >= 1800 && year <= 9999 ? year : null;
-}
-
-function recordedDate(value: unknown): Date | null {
-  if (typeof value !== "string" || value.trim() === "") {
-    return null;
-  }
-  const milliseconds = Date.parse(value);
-  return Number.isFinite(milliseconds) ? new Date(milliseconds) : null;
-}
-
-function nonNegativeInteger(value: unknown): number | null {
-  const integer = legacyInteger(value);
-  return integer !== null && integer >= 0 ? integer : null;
 }
 
 function isValidPublishedJob(
@@ -458,9 +428,7 @@ function recoverCapturedSidecars(
   );
   const discoveries: LegacySidecarDiscovery[] = [];
   const issues: LegacySidecarImportIssue[] = [];
-  let retainedBytes = 0;
-  let scanBytes = 0;
-  let totalJobs = 0;
+  let budget = emptyLegacySidecarBudget();
   for (const recordedPath of [...capturedByPath.keys()].sort()) {
     const captured = capturedByPath.get(recordedPath)!;
     const sidecarPath = resolve(recordedPath);
@@ -485,15 +453,9 @@ function recoverCapturedSidecars(
       originalsLibraryPath,
       snapshot: captured.snapshot,
     });
-    scanBytes += discovery.outcome === "parsed"
-      ? discovery.sidecar.sourceBytes
-      : discovery.sourceBytes;
-    retainedBytes += discovery.outcome === "parsed"
-      ? discovery.sidecar.sourceBytes
-      : 0;
-    totalJobs +=
-      discovery.outcome === "parsed" ? discovery.sidecar.jobs.length : 0;
-    if (scanBytes > MAX_LEGACY_SCAN_BYTES) {
+    const budgetResult = advanceLegacySidecarBudget(budget, discovery);
+    budget = budgetResult.budget;
+    if (budgetResult.exceeded === "scan-bytes") {
       issues.push({
         code: "invalid_sidecar",
         message: `Aggregate recovery sidecar scan work exceeds the ${MAX_LEGACY_SCAN_BYTES}-byte limit`,
@@ -501,7 +463,7 @@ function recoverCapturedSidecars(
       });
       break;
     }
-    if (retainedBytes > MAX_LEGACY_IMPORT_BYTES) {
+    if (budgetResult.exceeded === "import-bytes") {
       return {
         discoveries: [],
         issues: [{
@@ -511,7 +473,7 @@ function recoverCapturedSidecars(
         }],
       };
     }
-    if (totalJobs > MAX_LEGACY_IMPORT_JOBS) {
+    if (budgetResult.exceeded === "import-jobs") {
       return {
         discoveries: [],
         issues: [{

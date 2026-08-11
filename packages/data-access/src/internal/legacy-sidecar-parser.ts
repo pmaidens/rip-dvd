@@ -24,6 +24,15 @@ import {
   MAX_LEGACY_SIDECAR_BYTES,
   MAX_LEGACY_SIDECAR_JOBS,
 } from "./legacy-sidecar-limits.js";
+import {
+  legacyInteger,
+  nonEmptyString,
+  nonNegativeInteger,
+  objectValue,
+  optionalYear,
+  positiveInteger,
+  recordedDate,
+} from "./legacy-sidecar-validation.js";
 import { isPathWithinDirectory } from "./path-containment.js";
 
 const DEFAULT_HANDBRAKE_PRESET = "Fast 480p30";
@@ -140,49 +149,6 @@ export function resolveLegacyOriginalsLibrary(path: string): string {
     throw new Error(`Originals library is not a directory: ${resolvedPath}`);
   }
   return canonicalPath;
-}
-
-function objectValue(value: unknown): Record<string, unknown> | null {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
-function nonEmptyString(value: unknown): string | null {
-  return typeof value === "string" && value.trim() ? value : null;
-}
-
-function legacyInteger(value: unknown, defaultValue?: number): number | null {
-  if (value === undefined && defaultValue !== undefined) {
-    return defaultValue;
-  }
-  if (typeof value === "string" && /^-?\d+$/.test(value.trim())) {
-    value = Number(value);
-  }
-  return Number.isSafeInteger(value) ? Number(value) : null;
-}
-
-function positiveInteger(value: unknown): number | null {
-  const integer = legacyInteger(value);
-  return integer !== null && integer > 0 ? integer : null;
-}
-
-function optionalYear(value: unknown): number | null {
-  const year = positiveInteger(value);
-  return year !== null && year >= 1800 && year <= 9999 ? year : null;
-}
-
-function recordedDate(value: unknown): Date | null {
-  if (typeof value !== "string" || value.trim() === "") {
-    return null;
-  }
-  const milliseconds = Date.parse(value);
-  return Number.isFinite(milliseconds) ? new Date(milliseconds) : null;
-}
-
-function nonNegativeInteger(value: unknown): number | null {
-  const integer = legacyInteger(value);
-  return integer !== null && integer >= 0 ? integer : null;
 }
 
 type RecordedPathResolution =

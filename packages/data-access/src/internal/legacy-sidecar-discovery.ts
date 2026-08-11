@@ -7,6 +7,10 @@ import type {
   LegacySidecarDiscoveryBatch,
 } from "./legacy-sidecars.js";
 import {
+  advanceLegacySidecarBudget,
+  emptyLegacySidecarBudget,
+} from "./legacy-sidecar-budget.js";
+import {
   LEGACY_MARKER_FIXED_BYTES,
   MAX_LEGACY_IMPORT_BYTES,
   MAX_LEGACY_IMPORT_JOBS,
@@ -85,9 +89,7 @@ export function discoverLegacySidecars(
 ): LegacySidecarDiscoveryBatch {
   const found = findSidecars(originalsLibraryPath);
   const discoveries: LegacySidecarDiscovery[] = [];
-  let retainedBytes = 0;
-  let scanBytes = 0;
-  let totalJobs = 0;
+  let budget = emptyLegacySidecarBudget();
   let totalMarkerBytes = LEGACY_MARKER_FIXED_BYTES;
   let totalMarkerJobs = 0;
   let totalMarkerSidecars = 0;
@@ -113,15 +115,9 @@ export function discoverLegacySidecars(
       }
     }
     discoveries.push(discovery);
-    scanBytes +=
-      discovery.outcome === "parsed"
-        ? discovery.sidecar.sourceBytes
-        : discovery.sourceBytes;
-    if (discovery.outcome === "parsed") {
-      retainedBytes += discovery.sidecar.sourceBytes;
-      totalJobs += discovery.sidecar.jobs.length;
-    }
-    if (scanBytes > MAX_LEGACY_SCAN_BYTES) {
+    const budgetResult = advanceLegacySidecarBudget(budget, discovery);
+    budget = budgetResult.budget;
+    if (budgetResult.exceeded === "scan-bytes") {
       found.complete = false;
       found.issues.push({
         code: "invalid_sidecar",
@@ -130,7 +126,7 @@ export function discoverLegacySidecars(
       });
       break;
     }
-    if (retainedBytes > MAX_LEGACY_IMPORT_BYTES) {
+    if (budgetResult.exceeded === "import-bytes") {
       found.complete = false;
       found.issues.push({
         code: "invalid_sidecar",
@@ -139,7 +135,7 @@ export function discoverLegacySidecars(
       });
       break;
     }
-    if (totalJobs > MAX_LEGACY_IMPORT_JOBS) {
+    if (budgetResult.exceeded === "import-jobs") {
       found.complete = false;
       found.issues.push({
         code: "invalid_sidecar",
