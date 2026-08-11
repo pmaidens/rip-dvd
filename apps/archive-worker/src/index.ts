@@ -21,6 +21,7 @@ await runConfiguredAsyncWorker(
     try {
       await runArchiveWorker({
         access,
+        concurrency: config.archiveWorkerConcurrency,
         configuredDevicePath: config.archiveDevicePath,
         copyRunner: nodeDvdCopyRunner,
         hardware: createLinuxOpticalDriveHardware(),

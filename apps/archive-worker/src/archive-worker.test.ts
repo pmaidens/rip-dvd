@@ -1388,6 +1388,69 @@ describe("archive worker polling", () => {
     access.close();
   });
 
+  it.each([
+    { concurrency: undefined, expectedConcurrency: 1, label: "default" },
+    { concurrency: 2, expectedConcurrency: 2, label: "configured" },
+  ])(
+    "limits concurrent drive work to the $label archive-worker concurrency",
+    async ({ concurrency, expectedConcurrency }) => {
+      const access = openTestDataAccess();
+      const discoveredDrives = Array.from({ length: 3 }, (_, index) => ({
+        devicePath: `/dev/sr${index}`,
+        serialNumber: `CONCURRENT-${index}`,
+      }));
+      for (const drive of discoveredDrives) {
+        access.catalog.upsertOpticalDrive({
+          ...drive,
+          isEnabled: true,
+          isPresent: true,
+        });
+      }
+      let releaseScans!: () => void;
+      const scansMayFinish = new Promise<void>((resolve) => {
+        releaseScans = resolve;
+      });
+      let activeScans = 0;
+      let maximumActiveScans = 0;
+      const scanDvd = vi.fn(async () => {
+        activeScans += 1;
+        maximumActiveScans = Math.max(maximumActiveScans, activeScans);
+        await scansMayFinish;
+        activeScans -= 1;
+        return null;
+      });
+      const polling = pollArchiveWorker({
+        access,
+        ...(concurrency === undefined ? {} : { concurrency }),
+        configuredDevicePath: "/dev/sr0",
+        hardware: {
+          ...stableDeviceBinding(),
+          discover: vi.fn().mockResolvedValue(discoveredDrives),
+          scanDvd,
+        },
+        log: vi.fn(),
+        signal: new AbortController().signal,
+      });
+
+      try {
+        await vi.waitFor(() =>
+          expect(scanDvd).toHaveBeenCalledTimes(expectedConcurrency),
+        );
+        expect(maximumActiveScans).toBe(expectedConcurrency);
+      } finally {
+        releaseScans();
+        try {
+          await polling;
+        } finally {
+          access.close();
+        }
+      }
+
+      expect(scanDvd).toHaveBeenCalledTimes(3);
+      expect(maximumActiveScans).toBe(expectedConcurrency);
+    },
+  );
+
   it("cancels an in-flight scan and stops polling during shutdown", async () => {
     const access = openTestDataAccess();
     const controller = new AbortController();
