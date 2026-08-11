@@ -1,5 +1,11 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, expectTypeOf, it, vi } from "vitest";
+
+import type {
+  DiscSelectionId,
+  EncodeJobId,
+  EncodingProfileId,
+} from "@rip-dvd/data-access";
 
 import {
   EncodeJobsView,
@@ -7,22 +13,59 @@ import {
   requestEncodeJobOptions,
   retryEncodeJob,
 } from "./encode-jobs";
+import type {
+  EncodeProfileOption,
+  EncodeSelectionOption,
+  QueueEncodeJobInput,
+} from "./encode-jobs";
+import type { DashboardEncodeJob } from "../lib/dashboard";
 
 describe("EncodeJobsView", () => {
+  it("keeps Disc Selection, Encoding Profile, and Encode Job identifiers distinct", () => {
+    expectTypeOf<EncodeSelectionOption["id"]>()
+      .toEqualTypeOf<DiscSelectionId>();
+    expectTypeOf<EncodeProfileOption["id"]>()
+      .toEqualTypeOf<EncodingProfileId>();
+    expectTypeOf<DashboardEncodeJob["id"]>().toEqualTypeOf<EncodeJobId>();
+
+    if (false) {
+      const selectionId = undefined as unknown as DiscSelectionId;
+      const profileId = undefined as unknown as EncodingProfileId;
+      const jobId = undefined as unknown as EncodeJobId;
+
+      const input: QueueEncodeJobInput = {
+        discSelectionId: selectionId,
+        encodingProfileId: profileId,
+        outputPath: "/media/movies/Queue Me (2001).mkv",
+      };
+      void queueEncodeJob(input);
+      void retryEncodeJob(jobId);
+
+      // @ts-expect-error Encoding Profile IDs cannot identify Disc Selections.
+      input.discSelectionId = profileId;
+      // @ts-expect-error Disc Selection IDs cannot identify Encoding Profiles.
+      input.encodingProfileId = selectionId;
+      // @ts-expect-error Disc Selection IDs cannot identify Encode Jobs.
+      void retryEncodeJob(selectionId);
+    }
+  });
+
   it("lets a user select a reviewed Disc Selection and active profile version", () => {
+    const selectionId = "selection-1" as DiscSelectionId;
+    const profileId = "profile-v2" as EncodingProfileId;
     const html = renderToStaticMarkup(
       <EncodeJobsView
         state={{
           status: "loaded",
           selections: [{
-            id: "selection-1",
+            id: selectionId,
             mediaItemId: "movie-1",
             mediaTitle: "Queue Me",
             mediaYear: 2001,
             sourceDescription: "DVD main feature",
           }],
           profiles: [{
-            id: "profile-v2",
+            id: profileId,
             displayName: "DVD library",
             version: 2,
           }],
@@ -51,6 +94,9 @@ describe("EncodeJobsView", () => {
   });
 
   it("loads options and submits a same-origin JSON queue request", async () => {
+    const selectionId = "selection-1" as DiscSelectionId;
+    const profileId = "profile-v2" as EncodingProfileId;
+    const jobId = "job-1" as EncodeJobId;
     const fetcher = vi.fn(async (input: RequestInfo | URL) =>
       String(input).includes("selectionOffset")
         ? Response.json({ selections: [], profiles: [], page: {} })
@@ -58,11 +104,11 @@ describe("EncodeJobsView", () => {
 
     await requestEncodeJobOptions(100, fetcher);
     await queueEncodeJob({
-      discSelectionId: "selection-1",
-      encodingProfileId: "profile-v2",
+      discSelectionId: selectionId,
+      encodingProfileId: profileId,
       outputPath: "/media/movies/Queue Me (2001).mkv",
     }, fetcher);
-    await retryEncodeJob("job-1", fetcher);
+    await retryEncodeJob(jobId, fetcher);
 
     expect(fetcher).toHaveBeenNthCalledWith(
       1,

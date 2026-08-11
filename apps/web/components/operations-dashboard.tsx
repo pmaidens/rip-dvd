@@ -433,8 +433,8 @@ export function DashboardView({
   section?: "all" | "discs" | "encoding" | "catalog";
   onApproveDetectedDisc?: (id: string) => void;
   approvingDetectedDiscId?: string | null;
-  onRequeueEncodeJob?: (id: string) => void;
-  requeueingEncodeJobId?: string | null;
+  onRequeueEncodeJob?: (id: DashboardEncodeJob["id"]) => void;
+  requeueingEncodeJobId?: DashboardEncodeJob["id"] | null;
   onOpenCatalogReview?: (id: string) => void;
   onCatalogReviewPage?: (offset: number) => void;
   onVerifyFilesystem?: (target: FilesystemVerificationTarget, id: string) => void;
@@ -858,7 +858,7 @@ export function OperationsDashboard({
   >(null);
   const [archiveApprovalFailed, setArchiveApprovalFailed] = useState(false);
   const [requeueingEncodeJobId, setRequeueingEncodeJobId] = useState<
-    string | null
+    DashboardEncodeJob["id"] | null
   >(null);
   const [encodeRetryFailed, setEncodeRetryFailed] = useState(false);
   const [catalogReviewArchiveId, setCatalogReviewArchiveId] = useState<
@@ -962,7 +962,7 @@ export function OperationsDashboard({
     }
   };
 
-  const requeueEncodeJob = async (encodeJobId: string) => {
+  const requeueEncodeJob = async (encodeJobId: DashboardEncodeJob["id"]) => {
     if (requeueingEncodeJobId !== null) {
       return;
     }
