@@ -4,6 +4,10 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 
 import type { DvdTitle } from "@rip-dvd/data-access/dvd-scan";
 
+import type {
+  CatalogReviewCommand,
+  CatalogReviewDiscSelectionInput,
+} from "../lib/catalog-review-command";
 import { displayTerm } from "../lib/display-term";
 
 const mediaItemKinds = [
@@ -83,15 +87,9 @@ interface SaveMediaItemInput {
   episodeNumber?: number | null;
 }
 
-interface CreateSelectionInput {
+type CreateSelectionInput = CatalogReviewDiscSelectionInput & {
   replacesDiscSelectionId?: string;
-  mediaItemId: string;
-  kind: DiscSelectionKind;
-  titleNumber?: number;
-  chapterStart?: number;
-  chapterEnd?: number;
-  label?: string;
-}
+};
 
 interface CatalogReviewViewProps {
   state: CatalogReviewLoadState;
@@ -223,22 +221,36 @@ export function CatalogReviewView({
     const replacesDiscSelectionId = String(
       form.get("replacesDiscSelectionId") ?? "",
     ).trim();
-    onCreateDiscSelection({
+    const common = {
       ...(replacesDiscSelectionId
         ? { replacesDiscSelectionId }
         : {}),
       mediaItemId: String(form.get("mediaItemId")),
-      kind: selectionKind,
-      ...(selectionKind === "main_feature"
-        ? {}
-        : { titleNumber: integerFormValue(form, "titleNumber") }),
-      ...(selectionKind === "dvd_chapters"
-        ? {
-            chapterStart: integerFormValue(form, "chapterStart"),
-            chapterEnd: integerFormValue(form, "chapterEnd"),
-          }
-        : {}),
       ...(label ? { label } : {}),
+    };
+    if (selectionKind === "main_feature") {
+      onCreateDiscSelection({ ...common, kind: selectionKind });
+      return;
+    }
+    const titleNumber = integerFormValue(form, "titleNumber");
+    if (titleNumber === undefined) {
+      return;
+    }
+    if (selectionKind === "dvd_title") {
+      onCreateDiscSelection({ ...common, kind: selectionKind, titleNumber });
+      return;
+    }
+    const chapterStart = integerFormValue(form, "chapterStart");
+    const chapterEnd = integerFormValue(form, "chapterEnd");
+    if (chapterStart === undefined || chapterEnd === undefined) {
+      return;
+    }
+    onCreateDiscSelection({
+      ...common,
+      kind: selectionKind,
+      titleNumber,
+      chapterStart,
+      chapterEnd,
     });
   }
 
@@ -623,7 +635,7 @@ export async function requestCatalogReview(
 
 export async function mutateCatalogReview(
   archiveId: string,
-  body: unknown,
+  command: CatalogReviewCommand,
   fetcher: CatalogReviewFetch = fetch,
 ): Promise<void> {
   const response = await fetcher(
@@ -634,7 +646,7 @@ export async function mutateCatalogReview(
         Accept: "application/json",
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify(command),
     },
   );
   if (!response.ok) {
@@ -720,14 +732,14 @@ export function CatalogReviewEditor({
     [archiveId],
   );
 
-  async function mutate(body: unknown, complete = false) {
+  async function mutate(command: CatalogReviewCommand, complete = false) {
     if (isSaving) {
       return;
     }
     setIsSaving(true);
     setRequestError(null);
     try {
-      await mutateCatalogReview(archiveId, body);
+      await mutateCatalogReview(archiveId, command);
       setEditingMediaItemId(null);
       if (complete) {
         onCompleted();

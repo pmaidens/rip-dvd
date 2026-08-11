@@ -1,5 +1,10 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
+
+import {
+  CATALOG_REVIEW_COMMAND_ACTIONS,
+  type CatalogReviewCommand,
+} from "../lib/catalog-review-command";
 
 import {
   CatalogReviewView,
@@ -87,6 +92,56 @@ describe("CatalogReviewView", () => {
     )).rejects.toThrow(
       "Disc Selection selection-1 cannot be deleted because Encode Job history must be preserved",
     );
+  });
+
+  it("posts every shared catalog review command variant", async () => {
+    expectTypeOf(mutateCatalogReview).parameter(1)
+      .toEqualTypeOf<CatalogReviewCommand>();
+    const commands = {
+      create_media_item: {
+        action: "create_media_item",
+        mediaItem: { kind: "movie", title: "Example Movie" },
+      },
+      update_media_item: {
+        action: "update_media_item",
+        mediaItemId: "media-item-1",
+        changes: { title: "Updated Movie" },
+      },
+      create_disc_selection: {
+        action: "create_disc_selection",
+        selection: {
+          mediaItemId: "media-item-1",
+          kind: "main_feature",
+        },
+      },
+      repair_disc_selection: {
+        action: "repair_disc_selection",
+        discSelectionId: "selection-1",
+        selection: {
+          mediaItemId: "media-item-1",
+          kind: "dvd_title",
+          titleNumber: 1,
+        },
+      },
+      delete_disc_selection: {
+        action: "delete_disc_selection",
+        discSelectionId: "selection-1",
+      },
+      complete_review: { action: "complete_review" },
+    } satisfies Record<CatalogReviewCommand["action"], CatalogReviewCommand>;
+    const postedBodies: unknown[] = [];
+    const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      postedBodies.push(JSON.parse(String(init?.body)) as unknown);
+      return Response.json({});
+    };
+
+    for (const action of CATALOG_REVIEW_COMMAND_ACTIONS) {
+      await mutateCatalogReview("archive-1", commands[action], fetcher);
+    }
+
+    expect(postedBodies).toEqual(CATALOG_REVIEW_COMMAND_ACTIONS.map(
+      (action) => commands[action],
+    ));
   });
 
   it("shows raw DVD coordinates separately from editable hierarchy and reviewed mappings", () => {

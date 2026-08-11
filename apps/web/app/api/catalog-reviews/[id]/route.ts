@@ -15,6 +15,7 @@ import {
 } from "@rip-dvd/data-access";
 import { loadConfig } from "@rip-dvd/config";
 
+import { parseCatalogReviewCommand } from "../../../../lib/catalog-review-command";
 import { getDataAccess } from "../../../../lib/data-access";
 
 export const dynamic = "force-dynamic";
@@ -22,14 +23,6 @@ export const runtime = "nodejs";
 
 const CATALOG_REVIEW_MEDIA_PAGE_SIZE = 100;
 const CATALOG_REVIEW_SELECTION_PAGE_SIZE = 100;
-const MEDIA_ITEM_UPDATE_FIELDS: ReadonlySet<string> = new Set([
-  "parentId",
-  "kind",
-  "title",
-  "year",
-  "seasonNumber",
-  "episodeNumber",
-]);
 
 function response(body: unknown, status = 200): Response {
   return Response.json(body, {
@@ -84,33 +77,12 @@ function mutationRequestProblem(
   return null;
 }
 
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
-}
-
 function boundedString(value: unknown, maximum = 256): string | null {
   if (typeof value !== "string") {
     return null;
   }
   const trimmed = value.trim();
   return trimmed.length > 0 && trimmed.length <= maximum ? trimmed : null;
-}
-
-function optionalInteger(
-  value: unknown,
-  minimum: number,
-  maximum = Number.MAX_SAFE_INTEGER,
-): number | null | undefined {
-  if (value === undefined || value === null) {
-    return value;
-  }
-  return Number.isSafeInteger(value) &&
-    (value as number) >= minimum &&
-    (value as number) <= maximum
-    ? value as number
-    : undefined;
 }
 
 function recordOffset(request: Request, parameter: string): number | null {
@@ -341,230 +313,167 @@ export async function createCatalogReviewRoute(
     ) {
       return response({ error: "Original Disc Archive not found" }, 404);
     }
-    const body = asRecord(await request.json().catch(() => null));
-    const action = boundedString(body?.action, 64);
-    if (!body || !action) {
-      return response({ error: "Invalid catalog review mutation" }, 400);
-    }
-
-    if (action === "create_media_item") {
-      const input = asRecord(body.mediaItem);
-      const kind = boundedString(input?.kind, 32);
-      const title = boundedString(input?.title);
-      const parentId = input?.parentId === undefined || input.parentId === null
-        ? undefined
-        : boundedString(input.parentId);
-      const year = optionalInteger(input?.year, 1800, 9999);
-      const seasonNumber = optionalInteger(input?.seasonNumber, 0);
-      const episodeNumber = optionalInteger(input?.episodeNumber, 1);
-      if (
-        !input ||
-        !kind ||
-        !MEDIA_ITEM_KINDS.includes(kind as never) ||
-        !title ||
-        (input.parentId !== undefined && input.parentId !== null && !parentId) ||
-        (input.year !== undefined && year === undefined) ||
-        (input.seasonNumber !== undefined && seasonNumber === undefined) ||
-        (input.episodeNumber !== undefined && episodeNumber === undefined)
-      ) {
-        return response({ error: "Invalid Media Item" }, 400);
-      }
-      const item = access.catalog.createMediaItem({
-        ...(parentId ? { parentId: parentId as MediaItemId } : {}),
-        kind: kind as (typeof MEDIA_ITEM_KINDS)[number],
-        title,
-        ...(year === null || year === undefined ? {} : { year }),
-        ...(seasonNumber === null || seasonNumber === undefined
-          ? {}
-          : { seasonNumber }),
-        ...(episodeNumber === null || episodeNumber === undefined
-          ? {}
-          : { episodeNumber }),
-      });
-      return response({ mediaItem: serializeMediaItem(item) }, 201);
-    }
-
-    if (action === "update_media_item") {
-      const mediaItemId = boundedString(body.mediaItemId);
-      const changes = asRecord(body.changes);
-      const changeFields = changes === null ? [] : Object.keys(changes);
-      if (
-        !mediaItemId ||
-        !changes ||
-        changeFields.length === 0 ||
-        changeFields.some((field) => !MEDIA_ITEM_UPDATE_FIELDS.has(field))
-      ) {
-        return response({ error: "Invalid Media Item update" }, 400);
-      }
-      const update: Parameters<
-        DataAccess["catalog"]["updateMediaItem"]
-      >[1] = {};
-      if ("parentId" in changes) {
-        if (changes.parentId === null) {
-          update.parentId = null;
-        } else {
-          const parentId = boundedString(changes.parentId);
-          if (!parentId) {
-            return response({ error: "Invalid Media Item parent" }, 400);
-          }
-          update.parentId = parentId as MediaItemId;
-        }
-      }
-      if ("kind" in changes) {
-        const kind = boundedString(changes.kind, 32);
-        if (!kind || !MEDIA_ITEM_KINDS.includes(kind as never)) {
-          return response({ error: "Invalid Media Item kind" }, 400);
-        }
-        update.kind = kind as (typeof MEDIA_ITEM_KINDS)[number];
-      }
-      if ("title" in changes) {
-        const title = boundedString(changes.title);
-        if (!title) {
-          return response({ error: "Invalid Media Item title" }, 400);
-        }
-        update.title = title;
-      }
-      for (const [field, minimum, maximum] of [
-        ["year", 1800, 9999],
-        ["seasonNumber", 0, Number.MAX_SAFE_INTEGER],
-        ["episodeNumber", 1, Number.MAX_SAFE_INTEGER],
-      ] as const) {
-        if (field in changes) {
-          const value = optionalInteger(changes[field], minimum, maximum);
-          if (value === undefined) {
-            return response({ error: `Invalid Media Item ${field}` }, 400);
-          }
-          update[field] = value;
-        }
-      }
-      const item = access.catalog.updateMediaItem(
-        mediaItemId as MediaItemId,
-        update,
-      );
-      return response({ mediaItem: serializeMediaItem(item) });
-    }
-
-    if (
-      action === "create_disc_selection" ||
-      action === "repair_disc_selection"
-    ) {
-      const input = asRecord(body.selection);
-      let repairSelectionId: DiscSelectionId | null = null;
-      if (action === "repair_disc_selection") {
-        const discSelectionId = boundedString(body.discSelectionId);
-        if (!discSelectionId) {
-          return response({ error: "Invalid Disc Selection" }, 400);
-        }
-        repairSelectionId = discSelectionId as DiscSelectionId;
-        const existing = access.catalog.listDiscSelections({
-          ids: [repairSelectionId],
-          originalDiscArchiveId: archiveId,
-        })[0];
-        if (!existing) {
-          return response({ error: "Disc Selection not found" }, 404);
-        }
-      }
-      const mediaItemId = boundedString(input?.mediaItemId);
-      const kind = boundedString(input?.kind, 32);
-      const label = input?.label === undefined
-        ? undefined
-        : boundedString(input.label);
-      if (
-        !input ||
-        !mediaItemId ||
-        !kind ||
-        !DISC_SELECTION_KINDS.includes(kind as never) ||
-        (input.label !== undefined && !label)
-      ) {
-        return response({ error: "Invalid Disc Selection" }, 400);
-      }
-      const common = {
-        originalDiscArchiveId: archiveId,
-        mediaItemId: mediaItemId as MediaItemId,
-        ...(label ? { label } : {}),
-      };
-      const saveSelection = (selectionInput: CreateDiscSelectionInput) =>
-        repairSelectionId === null
-          ? access.catalog.createDiscSelection(selectionInput)
-          : access.catalog.repairDiscSelection(
-              repairSelectionId,
-              selectionInput,
-            );
-      let selection: DiscSelection;
-      if (kind === "main_feature") {
-        selection = saveSelection({
-          ...common,
-          kind,
-        });
-      } else {
-        const titleNumber = optionalInteger(input.titleNumber, 1);
-        if (titleNumber === null || titleNumber === undefined) {
-          return response({ error: "Invalid DVD title number" }, 400);
-        }
-        if (kind === "dvd_title") {
-          selection = saveSelection({
-            ...common,
-            kind: "dvd_title",
-            titleNumber,
-          });
-        } else {
-          const chapterStart = optionalInteger(input.chapterStart, 1);
-          const chapterEnd = optionalInteger(input.chapterEnd, 1);
-          if (
-            chapterStart === null ||
-            chapterStart === undefined ||
-            chapterEnd === null ||
-            chapterEnd === undefined
-          ) {
-            return response({ error: "Invalid DVD chapter range" }, 400);
-          }
-          selection = saveSelection({
-            ...common,
-            kind: "dvd_chapters",
-            titleNumber,
-            chapterStart,
-            chapterEnd,
-          });
-        }
-      }
-      return response(
-        { discSelection: serializeDiscSelection(selection) },
-        repairSelectionId === null ? 201 : 200,
-      );
-    }
-
-    if (action === "delete_disc_selection") {
-      const discSelectionId = boundedString(body.discSelectionId);
-      if (!discSelectionId) {
-        return response({ error: "Invalid Disc Selection" }, 400);
-      }
-      const selectionId = discSelectionId as DiscSelectionId;
-      const selection = access.catalog.listDiscSelections({
-        ids: [selectionId],
+    const parsedCommand = parseCatalogReviewCommand(
+      await request.json().catch(() => null),
+      {
+        discSelectionKinds: DISC_SELECTION_KINDS,
+        mediaItemKinds: MEDIA_ITEM_KINDS,
+      },
+    );
+    const repairDiscSelectionId = parsedCommand.ok
+      ? parsedCommand.command.action === "repair_disc_selection"
+        ? parsedCommand.command.discSelectionId
+        : null
+      : parsedCommand.repairDiscSelectionId ?? null;
+    if (repairDiscSelectionId !== null) {
+      const existing = access.catalog.listDiscSelections({
+        ids: [repairDiscSelectionId as DiscSelectionId],
         originalDiscArchiveId: archiveId,
       })[0];
-      if (!selection) {
+      if (!existing) {
         return response({ error: "Disc Selection not found" }, 404);
       }
-      const deletion = access.catalog.deleteDiscSelection(selectionId);
-      return response({
-        discSelection: serializeDiscSelection(selection),
-        deletedEncodeJobs: deletion.deletedEncodeJobs,
-        deletionComplete: deletion.deletionComplete,
-      });
     }
-
-    if (action === "complete_review") {
-      const archive = access.catalog.completeCatalogReview(archiveId);
-      return response({
-        archive: {
-          id: archive.id,
-          catalogReviewedAt: archive.catalogReviewedAt?.toISOString() ?? null,
-        },
-      });
+    if (!parsedCommand.ok) {
+      return response({ error: parsedCommand.error }, 400);
     }
+    const command = parsedCommand.command;
 
-    return response({ error: "Unknown catalog review mutation" }, 400);
+    switch (command.action) {
+      case "create_media_item": {
+        const input = command.mediaItem;
+        const item = access.catalog.createMediaItem({
+          ...(input.parentId
+            ? { parentId: input.parentId as MediaItemId }
+            : {}),
+          kind: input.kind,
+          title: input.title,
+          ...(input.year === null || input.year === undefined
+            ? {}
+            : { year: input.year }),
+          ...(input.seasonNumber === null || input.seasonNumber === undefined
+            ? {}
+            : { seasonNumber: input.seasonNumber }),
+          ...(input.episodeNumber === null || input.episodeNumber === undefined
+            ? {}
+            : { episodeNumber: input.episodeNumber }),
+        });
+        return response({ mediaItem: serializeMediaItem(item) }, 201);
+      }
+
+      case "update_media_item": {
+        const update: Parameters<
+          DataAccess["catalog"]["updateMediaItem"]
+        >[1] = {};
+        const { changes } = command;
+        if ("parentId" in changes) {
+          update.parentId = changes.parentId === null
+            ? null
+            : changes.parentId as MediaItemId;
+        }
+        if ("kind" in changes) {
+          update.kind = changes.kind;
+        }
+        if ("title" in changes) {
+          update.title = changes.title;
+        }
+        if ("year" in changes) {
+          update.year = changes.year;
+        }
+        if ("seasonNumber" in changes) {
+          update.seasonNumber = changes.seasonNumber;
+        }
+        if ("episodeNumber" in changes) {
+          update.episodeNumber = changes.episodeNumber;
+        }
+        const item = access.catalog.updateMediaItem(
+          command.mediaItemId as MediaItemId,
+          update,
+        );
+        return response({ mediaItem: serializeMediaItem(item) });
+      }
+
+      case "create_disc_selection":
+      case "repair_disc_selection": {
+        const repairSelectionId = command.action === "repair_disc_selection"
+          ? command.discSelectionId as DiscSelectionId
+          : null;
+        const input = command.selection;
+        const common = {
+          originalDiscArchiveId: archiveId,
+          mediaItemId: input.mediaItemId as MediaItemId,
+          ...(input.label ? { label: input.label } : {}),
+        };
+        const saveSelection = (selectionInput: CreateDiscSelectionInput) =>
+          repairSelectionId === null
+            ? access.catalog.createDiscSelection(selectionInput)
+            : access.catalog.repairDiscSelection(
+                repairSelectionId,
+                selectionInput,
+              );
+        let selection: DiscSelection;
+        switch (input.kind) {
+          case "main_feature":
+            selection = saveSelection({ ...common, kind: input.kind });
+            break;
+          case "dvd_title":
+            selection = saveSelection({
+              ...common,
+              kind: input.kind,
+              titleNumber: input.titleNumber,
+            });
+            break;
+          case "dvd_chapters":
+            selection = saveSelection({
+              ...common,
+              kind: input.kind,
+              titleNumber: input.titleNumber,
+              chapterStart: input.chapterStart,
+              chapterEnd: input.chapterEnd,
+            });
+            break;
+          default:
+            input satisfies never;
+            throw new Error("Unhandled Disc Selection kind");
+        }
+        return response(
+          { discSelection: serializeDiscSelection(selection) },
+          repairSelectionId === null ? 201 : 200,
+        );
+      }
+
+      case "delete_disc_selection": {
+        const selectionId = command.discSelectionId as DiscSelectionId;
+        const selection = access.catalog.listDiscSelections({
+          ids: [selectionId],
+          originalDiscArchiveId: archiveId,
+        })[0];
+        if (!selection) {
+          return response({ error: "Disc Selection not found" }, 404);
+        }
+        const deletion = access.catalog.deleteDiscSelection(selectionId);
+        return response({
+          discSelection: serializeDiscSelection(selection),
+          deletedEncodeJobs: deletion.deletedEncodeJobs,
+          deletionComplete: deletion.deletionComplete,
+        });
+      }
+
+      case "complete_review": {
+        const archive = access.catalog.completeCatalogReview(archiveId);
+        return response({
+          archive: {
+            id: archive.id,
+            catalogReviewedAt:
+              archive.catalogReviewedAt?.toISOString() ?? null,
+          },
+        });
+      }
+
+      default:
+        command satisfies never;
+        throw new Error("Unhandled catalog review command");
+    }
   } catch (error) {
     if (error instanceof RecordNotFoundError) {
       return response({ error: error.message }, 404);
