@@ -20,6 +20,40 @@ COPY packages/worker-runtime/package.json packages/worker-runtime/package.json
 RUN pnpm install --frozen-lockfile
 RUN pnpm check:toolchain
 
+FROM build-base AS dvdcss-reader-builder
+ARG LIBDVDCSS_VERSION=1.6.0
+ARG LIBDVDCSS_SHA256=7ea556c846b7bfc32d47b41cae56d1863a6b6d5f706bb162778d6f298490977c
+RUN apt-get update \
+  && apt-get install --yes --no-install-recommends \
+    ca-certificates curl gcc libc6-dev libssl-dev meson ninja-build pkg-config xz-utils \
+  && rm -rf /var/lib/apt/lists/*
+COPY docker/libdvdcss-sg-io.h /tmp/libdvdcss-sg-io.h
+COPY docker/libdvdcss-sg-io.c /tmp/libdvdcss-sg-io.c
+RUN curl --fail --location --silent --show-error \
+    "https://download.videolan.org/pub/libdvdcss/${LIBDVDCSS_VERSION}/libdvdcss-${LIBDVDCSS_VERSION}.tar.xz" \
+    --output /tmp/libdvdcss.tar.xz \
+  && echo "${LIBDVDCSS_SHA256}  /tmp/libdvdcss.tar.xz" | sha256sum --check --strict \
+  && mkdir --parents /tmp/libdvdcss-source \
+  && tar --extract --file /tmp/libdvdcss.tar.xz \
+    --directory /tmp/libdvdcss-source --strip-components 1 \
+  && CFLAGS="-include /tmp/libdvdcss-sg-io.h" \
+    meson setup /tmp/libdvdcss-build /tmp/libdvdcss-source \
+    --buildtype=release --default-library=static \
+    --libdir=lib \
+    -Denable_docs=false -Denable_examples=false \
+  && meson compile --clean --verbose --jobs 2 -C /tmp/libdvdcss-build \
+  && meson install -C /tmp/libdvdcss-build
+COPY docker/dvdcss-reader.c /tmp/dvdcss-reader.c
+COPY docker/test-dvdcss-reader.mjs /tmp/test-dvdcss-reader.mjs
+RUN gcc -std=c17 -O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong \
+    -Wall -Wextra -Werror -Wformat=2 \
+    /tmp/dvdcss-reader.c /tmp/libdvdcss-sg-io.c \
+    --output /usr/local/bin/rip-dvd-dvdcss-reader \
+    $(pkg-config --cflags --libs libdvdcss) -lcrypto \
+  && ldd /usr/local/bin/rip-dvd-dvdcss-reader \
+  && ! ldd /usr/local/bin/rip-dvd-dvdcss-reader | grep --quiet libdvdcss \
+  && node /tmp/test-dvdcss-reader.mjs
+
 FROM dependencies AS shared-builder
 COPY tsconfig.base.json ./
 COPY packages/config packages/config
@@ -30,6 +64,7 @@ RUN pnpm --filter @rip-dvd/config build \
   && pnpm --filter @rip-dvd/worker-runtime build
 
 FROM dependencies AS validation
+COPY --from=dvdcss-reader-builder /usr/local/bin/rip-dvd-dvdcss-reader /usr/local/bin/rip-dvd-dvdcss-reader
 COPY . .
 RUN pnpm check \
   && pnpm db:check \
@@ -112,13 +147,20 @@ COPY --chown=node:node docker/worker-priority-entrypoint.sh ./scripts/worker-pri
 
 FROM worker-runtime-base AS archive-worker
 RUN apt-get update \
-  && apt-get install --yes --no-install-recommends lsdvd util-linux \
+  && apt-get install --yes --no-install-recommends libssl3 lsdvd util-linux \
   && rm -rf /var/lib/apt/lists/* \
   && lsblk --json --output PATH,TYPE,TRAN,VENDOR,MODEL,SERIAL >/dev/null \
   && node -e "const { constants } = require('node:fs'); if (!Number.isInteger(constants.O_NONBLOCK)) process.exit(1)"
 RUN mkdir --parents /media/originals \
   && chown node:node /media/originals
+COPY --from=dvdcss-reader-builder /usr/local/bin/rip-dvd-dvdcss-reader /usr/local/bin/rip-dvd-dvdcss-reader
+COPY --from=dvdcss-reader-builder /tmp/libdvdcss.tar.xz /usr/share/doc/rip-dvd-dvdcss-reader/libdvdcss-1.6.0.tar.xz
+COPY --from=dvdcss-reader-builder /tmp/libdvdcss-source/COPYING /usr/share/doc/rip-dvd-dvdcss-reader/COPYING
+COPY docker/dvdcss-reader.c /usr/share/doc/rip-dvd-dvdcss-reader/dvdcss-reader.c
+COPY docker/libdvdcss-sg-io.h /usr/share/doc/rip-dvd-dvdcss-reader/libdvdcss-sg-io.h
+COPY docker/libdvdcss-sg-io.c /usr/share/doc/rip-dvd-dvdcss-reader/libdvdcss-sg-io.c
 COPY --from=archive-worker-builder --chown=node:node /archive-worker ./apps/archive-worker
+ENV DVDCSS_CACHE="off"
 USER node
 ENTRYPOINT ["sh", "/app/scripts/worker-priority-entrypoint.sh"]
 CMD ["node", "apps/archive-worker/dist/index.js"]

@@ -5,4 +5,6 @@ services:
   archive-worker:
     devices:
       - "${RIP_DVD_ARCHIVE_DEVICE_PATH:-/dev/sr0}:${RIP_DVD_ARCHIVE_DEVICE_PATH:-/dev/sr0}:r"
+      - "${RIP_DVD_ARCHIVE_CSS_DEVICE_PATH:-/dev/sg1}:${RIP_DVD_ARCHIVE_CSS_DEVICE_PATH:-/dev/sg1}:r"
       - "/dev/sr1:/dev/sr1:r"
+      - "/dev/sg2:/dev/sg2:r"

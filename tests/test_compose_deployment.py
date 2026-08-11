@@ -142,7 +142,12 @@ class ComposeDeploymentTests(unittest.TestCase):
                         "source": "/dev/sr0",
                         "target": "/dev/sr0",
                         "permissions": "r",
-                    }
+                    },
+                    {
+                        "source": "/dev/sg1",
+                        "target": "/dev/sg1",
+                        "permissions": "r",
+                    },
                 ],
                 "target": "archive-worker",
             },
@@ -182,7 +187,17 @@ class ComposeDeploymentTests(unittest.TestCase):
             archive["devices"],
             [
                 {"source": "/dev/sr0", "target": "/dev/sr0", "permissions": "r"},
+                {
+                    "source": "/dev/sg1",
+                    "target": "/dev/sg1",
+                    "permissions": "r",
+                },
                 {"source": "/dev/sr1", "target": "/dev/sr1", "permissions": "r"},
+                {
+                    "source": "/dev/sg2",
+                    "target": "/dev/sg2",
+                    "permissions": "r",
+                },
             ],
         )
         self.assertEqual(archive["group_add"], ["24"])
@@ -555,6 +570,7 @@ class ComposeDeploymentTests(unittest.TestCase):
             "remain stopped after a failed migration or startup",
             "UID/GID 1000",
             "`/dev/sr0`",
+            "`/dev/sg1`",
             "compose.hardware.example.yaml",
             "RIP_DVD_OPTICAL_DEVICE_GID",
             "read-only",
@@ -567,6 +583,7 @@ class ComposeDeploymentTests(unittest.TestCase):
         for setting in (
             "RIP_DVD_BACKUP_HOST_PATH=./backups",
             "RIP_DVD_OPTICAL_DEVICE_GID=24",
+            "RIP_DVD_ARCHIVE_CSS_DEVICE_PATH=/dev/sg1",
             "RIP_DVD_ARCHIVE_CPU_SHARES=512",
             "RIP_DVD_ARCHIVE_NICE_LEVEL=10",
             "RIP_DVD_ENCODE_CPU_SHARES=128",

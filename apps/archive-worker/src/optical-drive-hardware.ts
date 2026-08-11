@@ -31,6 +31,7 @@ export {
 
 export {
   createNodeDiscContentProbeLauncher,
+  createNodeFileDiscContentProbeLauncher,
   createNodeDiscContentReader,
   nodeDiscContentProbeLauncher,
   nodeDiscContentReader,
