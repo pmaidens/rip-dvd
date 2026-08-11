@@ -191,6 +191,7 @@ describe("DashboardView", () => {
             discLabel: "MY_MOVIE",
             opticalDriveName: "Upper drive",
             status: "failed",
+            progressPhase: "copying",
             progressPercent: 42,
             retryable: true,
           },
@@ -269,6 +270,7 @@ describe("DashboardView", () => {
             discLabel: "RETRYABLE_DISC",
             opticalDriveName: "Upper drive",
             status: "failed",
+            progressPhase: "copying",
             progressPercent: 20,
             retryable: true,
           },
@@ -278,6 +280,7 @@ describe("DashboardView", () => {
             discLabel: "SUPERSEDED_DISC",
             opticalDriveName: "Lower drive",
             status: "failed",
+            progressPhase: "copying",
             progressPercent: 30,
             retryable: false,
           },
@@ -290,6 +293,40 @@ describe("DashboardView", () => {
     expect(html).toContain("RETRYABLE_DISC");
     expect(html).toContain("SUPERSEDED_DISC");
     expect(html.match(/Retry archive/g)).toHaveLength(1);
+  });
+
+  it("explains Archive Job work before and between percentage updates", () => {
+    const phases = [
+      ["waiting", "queued", "Waiting for the archive worker to inspect the disc"],
+      ["inspecting_drive", "queued", "Inspecting the disc currently in this drive"],
+      ["preparing", "running", "Preparing the disc for archiving"],
+      ["copying", "running", "Copying the disc image"],
+      ["verifying", "running", "Verifying the disc image"],
+      ["finalizing", "running", "Saving the archive"],
+    ] as const;
+    const html = render({
+      opticalDrives: { status: "loaded", items: [] },
+      detectedDiscs: { status: "loaded", items: [] },
+      archiveJobs: {
+        status: "loaded",
+        items: phases.map(([progressPhase, status], index) => ({
+          id: `archive-job-${index}`,
+          detectedDiscId: `disc-${index}`,
+          discLabel: `DISC_${index}`,
+          opticalDriveName: "Upper drive",
+          status,
+          progressPhase,
+          progressPercent: progressPhase === "waiting" ? 0 : 99,
+          retryable: false,
+        })),
+      },
+      encodeJobs: { status: "loaded", items: [] },
+      catalogReview: { status: "loaded", items: [] },
+    });
+
+    for (const [, , detail] of phases) {
+      expect(html).toContain(detail);
+    }
   });
 
   it("submits a same-origin JSON archive approval", async () => {

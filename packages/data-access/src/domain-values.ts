@@ -30,6 +30,23 @@ export const JOB_STATUSES = [
   "failed",
 ] as const;
 
+export const ARCHIVE_QUEUED_PROGRESS_PHASES = [
+  "waiting",
+  "inspecting_drive",
+] as const;
+
+export const ARCHIVE_RUNNING_PROGRESS_PHASES = [
+  "preparing",
+  "copying",
+  "verifying",
+  "finalizing",
+] as const;
+
+export const ARCHIVE_PROGRESS_PHASES = [
+  ...ARCHIVE_QUEUED_PROGRESS_PHASES,
+  ...ARCHIVE_RUNNING_PROGRESS_PHASES,
+] as const;
+
 export const ENCODE_PROGRESS_PHASES = [
   "scanning",
   "previewing",

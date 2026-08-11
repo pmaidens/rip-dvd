@@ -83,6 +83,7 @@ import { validateMediaItem } from "./media-item-validation.js";
 import { serializeDiscSelectionSourceIdentity } from "../disc-selection-source-identity.js";
 import { isDvdContentId } from "../dvd-scan.js";
 import {
+  ARCHIVE_RUNNING_PROGRESS_PHASES,
   ENCODE_PROGRESS_PHASES,
 } from "../domain-values.js";
 import {
@@ -95,7 +96,9 @@ import type { LegacySidecarDataAccess } from "../legacy-sidecar-types.js";
 import type {
   ArchiveJobClaimToken,
   ArchiveJobId,
+  ArchiveJobInspectionToken,
   ArchiveJob,
+  ArchiveJobProgress,
   ConsistentReadAccess,
   DataAccess,
   DetectedDiscId,
@@ -119,6 +122,7 @@ import type {
   RunningEncodeJob,
 } from "../types.js";
 import {
+  ARCHIVE_INSPECTION_LEASE_DURATION_MS,
   ARCHIVE_JOB_LEASE_DURATION_MS,
   ENCODE_JOB_LEASE_DURATION_MS,
 } from "../types.js";
@@ -893,6 +897,23 @@ export function createDataAccessInternal(
     },
   });
 
+  const queuedArchiveJobsForDrive = (opticalDriveId: OpticalDriveId) =>
+    and(
+      eq(archiveJobs.status, "queued"),
+      exists(
+        database
+          .select({ id: detectedDiscs.id })
+          .from(detectedDiscs)
+          .where(
+            and(
+              eq(detectedDiscs.id, archiveJobs.detectedDiscId),
+              eq(detectedDiscs.opticalDriveId, opticalDriveId),
+              eq(detectedDiscs.status, "approved"),
+            ),
+          ),
+      ),
+    );
+
   type ArchiveJobCompletion =
     | OriginalDiscArchiveId
     | { archivePath: string; sizeBytes: number };
@@ -964,6 +985,9 @@ export function createDataAccessInternal(
         .update(archiveJobs)
         .set({
           status: "running",
+          progressPhase: "preparing",
+          inspectionToken: null,
+          inspectionUpdatedAt: null,
           claimedBy: workerId,
           claimToken: token,
           claimedAt: timestamp,
@@ -1153,10 +1177,36 @@ export function createDataAccessInternal(
           .get();
       }, { behavior: "immediate" });
     },
+    updateProgressAttempt: (claim, update, details) =>
+      database
+        .update(archiveJobs)
+        .set({ ...update, progressPhase: details.phase })
+        .where(
+          and(
+            eq(archiveJobs.id, claim.id),
+            eq(archiveJobs.status, "running"),
+            eq(archiveJobs.claimToken, claim.claimToken),
+            gt(
+              archiveJobs.updatedAt,
+              new Date(
+                update.updatedAt.getTime() - ARCHIVE_JOB_LEASE_DURATION_MS,
+              ),
+            ),
+          ),
+        )
+        .returning()
+        .get(),
+    progressDetailsChanged: (current, previous) =>
+      current?.phase !== previous?.phase,
     requeue: (id, expectedStatus, _current, update) =>
       database
         .update(archiveJobs)
-        .set(update)
+        .set({
+          ...update,
+          progressPhase: "waiting",
+          inspectionToken: null,
+          inspectionUpdatedAt: null,
+        })
         .where(
           and(
             eq(archiveJobs.id, id),
@@ -1219,7 +1269,8 @@ export function createDataAccessInternal(
     {
       opticalDriveId: OpticalDriveId;
       fingerprint: string;
-    }
+    },
+    Pick<ArchiveJobProgress, "phase">
   >;
 
   const listEncodeJobs = createJobList<EncodeJob>({
@@ -1605,7 +1656,10 @@ export function createDataAccessInternal(
             .set({
               status: "queued",
               priority: input.priority ?? existing.priority,
+              progressPhase: "waiting",
               progressPercent: 0,
+              inspectionToken: null,
+              inspectionUpdatedAt: null,
               claimedBy: null,
               claimToken: null,
               claimedAt: null,
@@ -3152,6 +3206,117 @@ export function createDataAccessInternal(
         );
       },
 
+      beginDriveInspection(opticalDriveId) {
+        const timestamp = now();
+        const expiredBefore = new Date(
+          timestamp.getTime() - ARCHIVE_INSPECTION_LEASE_DURATION_MS,
+        );
+        const token = newId<ArchiveJobInspectionToken>();
+        const jobIds = database
+          .update(archiveJobs)
+          .set({
+            progressPhase: "inspecting_drive",
+            inspectionToken: token,
+            inspectionUpdatedAt: timestamp,
+            updatedAt: timestamp,
+          })
+          .where(
+            and(
+              queuedArchiveJobsForDrive(opticalDriveId),
+              or(
+                eq(archiveJobs.progressPhase, "waiting"),
+                and(
+                  eq(archiveJobs.progressPhase, "inspecting_drive"),
+                  lte(archiveJobs.inspectionUpdatedAt, expiredBefore),
+                ),
+              ),
+            ),
+          )
+          .returning({ id: archiveJobs.id })
+          .all()
+          .map(({ id }) => id);
+        return { jobIds, opticalDriveId, token };
+      },
+
+      renewDriveInspection(inspection) {
+        if (inspection.jobIds.length === 0) {
+          return [];
+        }
+        const timestamp = now();
+        const expiredBefore = new Date(
+          timestamp.getTime() - ARCHIVE_INSPECTION_LEASE_DURATION_MS,
+        );
+        const renewed = database
+          .update(archiveJobs)
+          .set({ inspectionUpdatedAt: timestamp, updatedAt: timestamp })
+          .where(
+            and(
+              queuedArchiveJobsForDrive(inspection.opticalDriveId),
+              inArray(archiveJobs.id, [...inspection.jobIds]),
+              eq(archiveJobs.progressPhase, "inspecting_drive"),
+              eq(archiveJobs.inspectionToken, inspection.token),
+              gt(archiveJobs.inspectionUpdatedAt, expiredBefore),
+            ),
+          )
+          .returning()
+          .all();
+        if (renewed.length !== inspection.jobIds.length) {
+          throw new StaleJobAttemptError(
+            "archive inspection",
+            inspection.opticalDriveId,
+          );
+        }
+        return renewed;
+      },
+
+      finishDriveInspection(inspection) {
+        if (inspection.jobIds.length === 0) {
+          return [];
+        }
+        return database
+          .update(archiveJobs)
+          .set({
+            progressPhase: "waiting",
+            inspectionToken: null,
+            inspectionUpdatedAt: null,
+            updatedAt: now(),
+          })
+          .where(
+            and(
+              queuedArchiveJobsForDrive(inspection.opticalDriveId),
+              inArray(archiveJobs.id, [...inspection.jobIds]),
+              eq(archiveJobs.progressPhase, "inspecting_drive"),
+              eq(archiveJobs.inspectionToken, inspection.token),
+            ),
+          )
+          .returning()
+          .all();
+      },
+
+      recoverInterruptedInspections() {
+        const timestamp = now();
+        const expiredBefore = new Date(
+          timestamp.getTime() - ARCHIVE_INSPECTION_LEASE_DURATION_MS,
+        );
+        return database
+          .update(archiveJobs)
+          .set({
+            progressPhase: "waiting",
+            inspectionToken: null,
+            inspectionUpdatedAt: null,
+            updatedAt: timestamp,
+          })
+          .where(
+            and(
+              eq(archiveJobs.status, "queued"),
+              eq(archiveJobs.progressPhase, "inspecting_drive"),
+              lte(archiveJobs.inspectionUpdatedAt, expiredBefore),
+            ),
+          )
+          .returning()
+          .all();
+      },
+
       claimNext: archiveJobQueue.claimNext,
       renewClaim(claim) {
         const timestamp = now();
@@ -3217,7 +3382,19 @@ export function createDataAccessInternal(
         }, { behavior: "immediate" });
       },
       list: archiveJobQueue.list,
-      updateProgress: archiveJobQueue.updateProgress,
+      updateProgress(claim, progress) {
+        if (typeof progress === "number") {
+          return archiveJobQueue.updateProgress(claim, progress);
+        }
+        if (!ARCHIVE_RUNNING_PROGRESS_PHASES.includes(progress.phase)) {
+          throw new DomainInvariantError("Archive Job progress phase is invalid");
+        }
+        return archiveJobQueue.updateProgress(
+          claim,
+          progress.progressPercent,
+          { phase: progress.phase },
+        );
+      },
       publish(claim, input) {
         return archiveJobQueue.complete(claim, input);
       },

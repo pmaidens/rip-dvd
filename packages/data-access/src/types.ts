@@ -1,4 +1,6 @@
 import type {
+  ARCHIVE_PROGRESS_PHASES,
+  ARCHIVE_RUNNING_PROGRESS_PHASES,
   ARCHIVE_FORMATS,
   DETECTED_DISC_STATUSES,
   DISC_KINDS,
@@ -21,6 +23,9 @@ export type MediaItemKind = (typeof MEDIA_ITEM_KINDS)[number];
 export type DiscSelectionKind = (typeof DISC_SELECTION_KINDS)[number];
 export type MediaDomain = (typeof MEDIA_DOMAINS)[number];
 export type JobStatus = (typeof JOB_STATUSES)[number];
+export type ArchiveProgressPhase = (typeof ARCHIVE_PROGRESS_PHASES)[number];
+export type ArchiveRunningProgressPhase =
+  (typeof ARCHIVE_RUNNING_PROGRESS_PHASES)[number];
 export type EncodeProgressPhase = (typeof ENCODE_PROGRESS_PHASES)[number];
 export type FilesystemVerificationStatus =
   (typeof FILESYSTEM_VERIFICATION_STATUSES)[number];
@@ -39,6 +44,7 @@ export type EncodingProfileId = DomainId<"EncodingProfile">;
 export type ArchiveJobId = DomainId<"ArchiveJob">;
 export type EncodeJobId = DomainId<"EncodeJob">;
 export type ArchiveJobClaimToken = DomainId<"ArchiveJobClaim">;
+export type ArchiveJobInspectionToken = DomainId<"ArchiveJobInspection">;
 export type EncodeJobClaimToken = DomainId<"EncodeJobClaim">;
 export type EncodeJobCleanupClaimToken = DomainId<"EncodeJobCleanupClaim">;
 
@@ -48,6 +54,7 @@ export type EncodeOutputFilesystemIdentity = string & {
 };
 
 export const ARCHIVE_JOB_LEASE_DURATION_MS = 60_000;
+export const ARCHIVE_INSPECTION_LEASE_DURATION_MS = 60_000;
 export const ENCODE_JOB_LEASE_DURATION_MS = 60_000;
 
 export interface ServiceHealth {
@@ -155,7 +162,10 @@ export interface ArchiveJob {
   originalDiscArchiveId: OriginalDiscArchiveId | null;
   status: JobStatus;
   priority: number;
+  progressPhase: ArchiveProgressPhase;
   progressPercent: number;
+  inspectionToken: ArchiveJobInspectionToken | null;
+  inspectionUpdatedAt: Date | null;
   claimedBy: string | null;
   claimToken: ArchiveJobClaimToken | null;
   claimedAt: Date | null;
@@ -200,6 +210,17 @@ export type RunningArchiveJob = ArchiveJob & {
   status: "running";
   claimToken: ArchiveJobClaimToken;
 };
+
+export interface ArchiveJobProgress {
+  phase: ArchiveRunningProgressPhase;
+  progressPercent: number;
+}
+
+export interface ArchiveJobInspection {
+  jobIds: readonly ArchiveJobId[];
+  opticalDriveId: OpticalDriveId;
+  token: ArchiveJobInspectionToken;
+}
 
 export type RunningEncodeJob = EncodeJob & {
   status: "running";
@@ -389,6 +410,10 @@ export interface ArchiveJobAccess {
     priority?: number;
   }): ArchiveJob;
   enqueue(input: { detectedDiscId: DetectedDiscId; priority?: number }): ArchiveJob;
+  beginDriveInspection(opticalDriveId: OpticalDriveId): ArchiveJobInspection;
+  renewDriveInspection(inspection: ArchiveJobInspection): ArchiveJob[];
+  finishDriveInspection(inspection: ArchiveJobInspection): ArchiveJob[];
+  recoverInterruptedInspections(): ArchiveJob[];
   claimNext(
     workerId: string,
     eligibility?: {
@@ -404,7 +429,7 @@ export interface ArchiveJobAccess {
   ): ArchiveJob[];
   updateProgress(
     claim: RunningArchiveJob,
-    progressPercent: number,
+    progress: number | ArchiveJobProgress,
   ): ArchiveJob;
   publish(
     claim: RunningArchiveJob,
