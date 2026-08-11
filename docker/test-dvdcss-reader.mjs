@@ -34,7 +34,7 @@ const progress = copy.stderr.trim().split("\n");
 if (
   copy.status !== 0 ||
   !readFileSync(copyPath).equals(content) ||
-  progress.length !== 3 ||
+  progress.length !== 2 ||
   progress.at(-1) !== `${content.byteLength} bytes copied`
 ) {
   throw new Error(`libdvdcss reader copy check failed: ${copy.stderr}`);

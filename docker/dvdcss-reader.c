@@ -16,7 +16,7 @@
 #include <unistd.h>
 
 /* Some USB optical bridges reject larger READ(10) transfer lengths. */
-#define READ_BLOCKS 16
+#define READ_BLOCKS 31
 #define MAX_DVD_CONTENT_BYTES UINT64_C(9000000000)
 
 enum operation {

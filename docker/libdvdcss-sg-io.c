@@ -91,7 +91,7 @@ static int open_sg_device(int block_descriptor)
     if (resolve_sg_device(block_descriptor, path) < 0) {
         return -1;
     }
-    return open(path, O_RDWR | O_CLOEXEC);
+    return open(path, O_RDONLY | O_CLOEXEC);
 }
 
 static int send_sg_command(int block_descriptor,
