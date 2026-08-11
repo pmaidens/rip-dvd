@@ -89,7 +89,81 @@ describe("Encode Jobs API", () => {
         hasPrevious: false,
         hasNext: false,
       },
+      profilePage: {
+        offset: 0,
+        limit: 100,
+        hasPrevious: false,
+        hasNext: false,
+      },
     });
+  });
+
+  it("bounds and pages active DVD profile options independently of selections", async () => {
+    const access = dataAccessFixture.create();
+    const reviewed = createSelection(access, "profile-pages");
+    access.catalog.completeCatalogReview(reviewed.archive.id);
+    const profileIds = Array.from({ length: 101 }, (_, index) =>
+      access.encodingProfiles.create({
+        key: `profile-${String(index).padStart(3, "0")}`,
+        displayName: `Profile ${index}`,
+        mediaDomain: "dvd_video",
+        settings: { preset: "Fast 480p30", container: "mkv" },
+      }).id);
+    const inactiveProfile = access.encodingProfiles.create({
+      key: "inactive-profile",
+      displayName: "Inactive profile",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30", container: "mkv" },
+    });
+    access.encodingProfiles.setActive({
+      id: inactiveProfile.id,
+      mediaDomain: "dvd_video",
+      isActive: false,
+    });
+    access.encodingProfiles.create({
+      key: "active-audio-profile",
+      displayName: "Active audio profile",
+      mediaDomain: "audio",
+      settings: {},
+    });
+
+    const firstResponse = await createEncodeJobsRoute(
+      new Request("http://localhost:3000/api/encode-jobs"),
+      () => access,
+    );
+    const firstPage = await firstResponse.json();
+
+    expect(firstPage.profiles.map((profile: { id: string }) => profile.id))
+      .toEqual(profileIds.slice(0, 100));
+    expect(firstPage.profilePage).toEqual({
+      offset: 0,
+      limit: 100,
+      hasPrevious: false,
+      hasNext: true,
+    });
+    expect(firstPage.selections).toEqual([
+      expect.objectContaining({ id: reviewed.selection.id }),
+    ]);
+
+    const secondResponse = await createEncodeJobsRoute(
+      new Request(
+        "http://localhost:3000/api/encode-jobs?selectionOffset=0&profileOffset=100",
+      ),
+      () => access,
+    );
+    const secondPage = await secondResponse.json();
+
+    expect(secondPage.profiles).toEqual([
+      expect.objectContaining({ id: profileIds[100] }),
+    ]);
+    expect(secondPage.profilePage).toEqual({
+      offset: 100,
+      limit: 100,
+      hasPrevious: true,
+      hasNext: false,
+    });
+    expect(secondPage.selections).toEqual(firstPage.selections);
+    expect(secondPage.page).toEqual(firstPage.page);
   });
 
   it("queues each selection and profile version once and requeues the existing completed row", async () => {

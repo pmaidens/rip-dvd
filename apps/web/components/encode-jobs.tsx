@@ -22,7 +22,7 @@ export interface EncodeProfileOption {
   version: number;
 }
 
-export interface EncodeSelectionPage {
+export interface EncodeOptionsPage {
   offset: number;
   limit: number;
   hasPrevious: boolean;
@@ -36,7 +36,8 @@ export type EncodeJobsLoadState =
       status: "loaded";
       selections: EncodeSelectionOption[];
       profiles: EncodeProfileOption[];
-      page: EncodeSelectionPage;
+      page: EncodeOptionsPage;
+      profilePage: EncodeOptionsPage;
     };
 
 export interface QueueEncodeJobInput {
@@ -52,6 +53,7 @@ interface EncodeJobsViewProps {
   onQueue(input: QueueEncodeJobInput): void;
   onRetry(): void;
   onSelectionPage(offset: number): void;
+  onProfilePage(offset: number): void;
 }
 
 export function EncodeJobsView({
@@ -61,6 +63,7 @@ export function EncodeJobsView({
   onQueue,
   onRetry,
   onSelectionPage,
+  onProfilePage,
 }: EncodeJobsViewProps) {
   function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -206,6 +209,36 @@ export function EncodeJobsView({
               </button>
             </nav>
           ) : null}
+          {state.profilePage.hasPrevious || state.profilePage.hasNext ? (
+            <nav
+              className="profile-actions profile-form"
+              aria-label="Encode profile pages"
+            >
+              <button
+                type="button"
+                disabled={isSaving || !state.profilePage.hasPrevious}
+                onClick={() =>
+                  onProfilePage(
+                    Math.max(
+                      0,
+                      state.profilePage.offset - state.profilePage.limit,
+                    ),
+                  )}
+              >
+                Previous active profiles
+              </button>
+              <button
+                type="button"
+                disabled={isSaving || !state.profilePage.hasNext}
+                onClick={() =>
+                  onProfilePage(
+                    state.profilePage.offset + state.profilePage.limit,
+                  )}
+              >
+                Next active profiles
+              </button>
+            </nav>
+          ) : null}
         </>
       )}
     </section>
@@ -237,10 +270,11 @@ async function errorMessage(response: Response, fallback: string) {
 
 export async function requestEncodeJobOptions(
   selectionOffset: number,
+  profileOffset: number,
   fetcher: EncodeJobsFetch = fetch,
 ): Promise<Extract<EncodeJobsLoadState, { status: "loaded" }>> {
   const response = await fetcher(
-    `/api/encode-jobs?selectionOffset=${selectionOffset}`,
+    `/api/encode-jobs?selectionOffset=${selectionOffset}&profileOffset=${profileOffset}`,
     { cache: "no-store", headers: { Accept: "application/json" } },
   );
   if (!response.ok) {
@@ -290,17 +324,18 @@ export async function retryEncodeJob(
 export function EncodeJobsManager({ onChanged }: { onChanged(): void }) {
   const [state, setState] = useState<EncodeJobsLoadState>({ status: "loading" });
   const [selectionOffset, setSelectionOffset] = useState(0);
+  const [profileOffset, setProfileOffset] = useState(0);
   const [isSaving, setIsSaving] = useState(false);
   const [requestError, setRequestError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
-      setState(await requestEncodeJobOptions(selectionOffset));
+      setState(await requestEncodeJobOptions(selectionOffset, profileOffset));
       setRequestError(null);
     } catch {
       setState({ status: "error" });
     }
-  }, [selectionOffset]);
+  }, [profileOffset, selectionOffset]);
 
   useEffect(() => {
     setState({ status: "loading" });
@@ -334,6 +369,7 @@ export function EncodeJobsManager({ onChanged }: { onChanged(): void }) {
       onQueue={(input) => void queue(input)}
       onRetry={() => void load()}
       onSelectionPage={setSelectionOffset}
+      onProfilePage={setProfileOffset}
     />
   );
 }

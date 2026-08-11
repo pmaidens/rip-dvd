@@ -17,6 +17,7 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 const ENCODE_SELECTION_PAGE_SIZE = 100;
+const ENCODE_PROFILE_PAGE_SIZE = 100;
 
 interface EncodeJobsRuntimeConfig {
   mediaLibraryPath: string;
@@ -30,8 +31,8 @@ function response(body: unknown, status = 200): Response {
   });
 }
 
-function selectionOffset(request: Request): number | null {
-  const value = new URL(request.url).searchParams.get("selectionOffset");
+function optionOffset(request: Request, parameter: string): number | null {
+  const value = new URL(request.url).searchParams.get(parameter);
   if (value === null) {
     return 0;
   }
@@ -176,15 +177,28 @@ function sourceDescription(selection: DiscSelection): string {
   return `DVD title ${selection.titleNumber}, chapters ${selection.chapterStart}–${selection.chapterEnd}`;
 }
 
-function readQueueOptions(access: DataAccess, offset: number) {
+function readQueueOptions(
+  access: DataAccess,
+  selectionOffset: number,
+  profileOffset: number,
+) {
   return access.readConsistentSnapshot((snapshot) => {
     const selectionRecords = snapshot.catalog.listDiscSelections({
       encodeEligibleOnly: true,
       limit: ENCODE_SELECTION_PAGE_SIZE + 1,
-      offset,
+      offset: selectionOffset,
     });
-    const hasNext = selectionRecords.length > ENCODE_SELECTION_PAGE_SIZE;
+    const hasNextSelection =
+      selectionRecords.length > ENCODE_SELECTION_PAGE_SIZE;
     const selections = selectionRecords.slice(0, ENCODE_SELECTION_PAGE_SIZE);
+    const profileRecords = snapshot.encodingProfiles.list({
+      mediaDomain: "dvd_video",
+      activeOnly: true,
+      limit: ENCODE_PROFILE_PAGE_SIZE + 1,
+      offset: profileOffset,
+    });
+    const hasNextProfile = profileRecords.length > ENCODE_PROFILE_PAGE_SIZE;
+    const profiles = profileRecords.slice(0, ENCODE_PROFILE_PAGE_SIZE);
     const mediaItems = snapshot.catalog.listMediaItems({
       ids: [...new Set(selections.map((selection) => selection.mediaItemId))],
     });
@@ -200,18 +214,22 @@ function readQueueOptions(access: DataAccess, offset: number) {
           sourceDescription: sourceDescription(selection),
         };
       }),
-      profiles: snapshot.encodingProfiles
-        .list({ mediaDomain: "dvd_video", activeOnly: true })
-        .map((profile) => ({
-          id: profile.id,
-          displayName: profile.displayName,
-          version: profile.version,
-        })),
+      profiles: profiles.map((profile) => ({
+        id: profile.id,
+        displayName: profile.displayName,
+        version: profile.version,
+      })),
       page: {
-        offset,
+        offset: selectionOffset,
         limit: ENCODE_SELECTION_PAGE_SIZE,
-        hasPrevious: offset > 0,
-        hasNext,
+        hasPrevious: selectionOffset > 0,
+        hasNext: hasNextSelection,
+      },
+      profilePage: {
+        offset: profileOffset,
+        limit: ENCODE_PROFILE_PAGE_SIZE,
+        hasPrevious: profileOffset > 0,
+        hasNext: hasNextProfile,
       },
     };
   });
@@ -231,11 +249,17 @@ export async function createEncodeJobsRoute(
   }
   try {
     if (request.method === "GET") {
-      const offset = selectionOffset(request);
-      if (offset === null) {
+      const selectionOffset = optionOffset(request, "selectionOffset");
+      if (selectionOffset === null) {
         return response({ error: "Invalid Disc Selection offset" }, 400);
       }
-      return response(readQueueOptions(getAccess(), offset));
+      const profileOffset = optionOffset(request, "profileOffset");
+      if (profileOffset === null) {
+        return response({ error: "Invalid Encoding Profile offset" }, 400);
+      }
+      return response(
+        readQueueOptions(getAccess(), selectionOffset, profileOffset),
+      );
     }
 
     let config: EncodeJobsRuntimeConfig;
