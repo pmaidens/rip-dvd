@@ -7,11 +7,28 @@ import {
 } from "../lib/catalog-review-command";
 
 import {
+  DISC_SELECTION_KINDS,
+  MEDIA_ITEM_KINDS,
+} from "@rip-dvd/data-access/catalog-kinds";
+
+import {
   CatalogReviewView,
   createCatalogReviewRequestScope,
   mutateCatalogReview,
   requestCatalogReview,
 } from "./catalog-review-editor";
+
+function selectOptionValues(html: string, name: string): string[] {
+  const select = html.match(
+    new RegExp(`<select[^>]*name="${name}"[^>]*>([\\s\\S]*?)</select>`),
+  )?.[1];
+  if (select === undefined) {
+    throw new Error(`Expected select named ${name}`);
+  }
+  return [...select.matchAll(/<option[^>]*value="([^"]*)"/g)].map(
+    ([, value]) => value,
+  );
+}
 
 describe("CatalogReviewView", () => {
   it("rejects superseded archive loads and old archive continuations", () => {
@@ -263,17 +280,10 @@ describe("CatalogReviewView", () => {
     expect(html).toContain("Remove Disc Selection");
     expect(html).toContain("Next Disc Selections");
     expect(html).toContain("Complete review");
-    for (const kind of [
-      "movie",
-      "tv_show",
-      "season",
-      "episode",
-      "trailer",
-      "bonus_feature",
-      "other",
-    ]) {
-      expect(html).toContain(`value="${kind}"`);
-    }
+    expect(selectOptionValues(html, "kind")).toEqual(MEDIA_ITEM_KINDS);
+    expect(selectOptionValues(html, "selectionKind")).toEqual(
+      DISC_SELECTION_KINDS,
+    );
   });
 
   it("preserves full hierarchy and mapping context while reparenting across pages", () => {
