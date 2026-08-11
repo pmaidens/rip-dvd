@@ -22,14 +22,16 @@ class LegacyQueueLeaseTests(unittest.TestCase):
         protocol_path = (
             Path(__file__).resolve().parents[1]
             / "rip_dvd"
-            / "legacy_queue_cutover_protocol.json"
+            / "legacy_queue_cutover_protocol.manifest"
         )
-        protocol = json.loads(protocol_path.read_text(encoding="utf-8"))
-        protocol["version"] = version
-        protocol["sentinels"]["ready"] = ready_sentinel
-        return json.dumps(
-            protocol,
-            separators=(",", ":"),
+        replacements = {
+            "version": str(version),
+            "sentinels.ready": ready_sentinel,
+        }
+        return "\n".join(
+            f"{name}={replacements.get(name, value)}"
+            for line in protocol_path.read_text(encoding="utf-8").splitlines()
+            for name, _, value in (line.partition("="),)
         )
 
     def test_cutover_helper_consumes_the_authoritative_protocol_manifest(self):

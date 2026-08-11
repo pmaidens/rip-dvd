@@ -18,10 +18,10 @@ describe("legacy queue cutover protocol", () => {
   it("preserves the stable command and sentinel behavior", () => {
     const protocolPath = resolve(
       import.meta.dirname,
-      "../../../../rip_dvd/legacy_queue_cutover_protocol.json",
+      "../../../../rip_dvd/legacy_queue_cutover_protocol.manifest",
     );
 
-    const protocol = loadLegacyQueueCutoverProtocol(protocolPath);
+    const { protocol } = loadLegacyQueueCutoverProtocol(protocolPath);
 
     expect(protocol.version).toBe(1);
     expect(protocol.command).toBe("hold-cutover");
@@ -39,16 +39,16 @@ describe("legacy queue cutover protocol", () => {
   it("rejects a contract that omits a required participant field", () => {
     const root = mkdtempSync(join(tmpdir(), "rip-dvd-cutover-protocol-"));
     temporaryDirectories.push(root);
-    const protocolPath = join(root, "protocol.json");
+    const protocolPath = join(root, "protocol.manifest");
     const authoritativeProtocolPath = resolve(
       import.meta.dirname,
-      "../../../../rip_dvd/legacy_queue_cutover_protocol.json",
+      "../../../../rip_dvd/legacy_queue_cutover_protocol.manifest",
     );
-    const incompleteProtocol = JSON.parse(
-      readFileSync(authoritativeProtocolPath, "utf8"),
-    ) as { sentinels: Record<string, string> };
-    delete incompleteProtocol.sentinels.workerError;
-    writeFileSync(protocolPath, JSON.stringify(incompleteProtocol));
+    const incompleteProtocol = readFileSync(authoritativeProtocolPath, "utf8")
+      .split("\n")
+      .filter((line) => !line.startsWith("sentinels.workerError="))
+      .join("\n");
+    writeFileSync(protocolPath, incompleteProtocol);
 
     expect(() => loadLegacyQueueCutoverProtocol(protocolPath)).toThrow(
       /sentinels\.workerError/,

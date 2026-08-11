@@ -27,47 +27,59 @@ export interface LegacyQueueCutoverProtocol {
   };
 }
 
-function protocolRecord(value: unknown, path: string): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error(`Legacy queue cutover protocol ${path} must be an object`);
+export interface LoadedLegacyQueueCutoverProtocol {
+  argument: string;
+  protocol: LegacyQueueCutoverProtocol;
+}
+
+function parseProtocolManifest(manifest: string): Record<string, string> {
+  const fields: Record<string, string> = {};
+  for (const line of manifest.split("\n")) {
+    const separatorIndex = line.indexOf("=");
+    if (separatorIndex <= 0) {
+      throw new Error("Legacy queue cutover protocol manifest is malformed");
+    }
+    const name = line.slice(0, separatorIndex);
+    const value = line.slice(separatorIndex + 1);
+    if (!value || name in fields) {
+      throw new Error("Legacy queue cutover protocol manifest is malformed");
+    }
+    fields[name] = value;
   }
-  return value as Record<string, unknown>;
+  return fields;
 }
 
 function protocolInteger(
-  record: Record<string, unknown>,
+  record: Record<string, string>,
   name: string,
-  path: string,
 ): number {
-  const value = record[name];
-  if (!Number.isInteger(value) || (value as number) < 0) {
+  const rawValue = record[name];
+  const value = Number(rawValue);
+  if (!Number.isSafeInteger(value) || value < 0 || String(value) !== rawValue) {
     throw new Error(
-      `Legacy queue cutover protocol ${path}.${name} must be a non-negative integer`,
-    );
-  }
-  return value as number;
-}
-
-function protocolSentinel(
-  record: Record<string, unknown>,
-  name: string,
-): string {
-  const value = record[name];
-  if (
-    typeof value !== "string" ||
-    value.length === 0 ||
-    basename(value) !== value
-  ) {
-    throw new Error(
-      `Legacy queue cutover protocol sentinels.${name} must be a non-empty basename`,
+      `Legacy queue cutover protocol ${name} must be a non-negative integer`,
     );
   }
   return value;
 }
 
-function protocolCommand(record: Record<string, unknown>): string {
+function protocolSentinel(
+  record: Record<string, string>,
+  name: string,
+): string {
+  const path = `sentinels.${name}`;
+  const value = record[path];
+  if (!value || basename(value) !== value) {
+    throw new Error(
+      `Legacy queue cutover protocol ${path} must be a non-empty basename`,
+    );
+  }
+  return value;
+}
+
+function protocolCommand(record: Record<string, string>): string {
   const value = record.command;
-  if (typeof value !== "string" || value.length === 0) {
+  if (!value) {
     throw new Error(
       "Legacy queue cutover protocol contract.command must be a non-empty string",
     );
@@ -76,7 +88,7 @@ function protocolCommand(record: Record<string, unknown>): string {
 }
 
 function requireExactKeys(
-  record: Record<string, unknown>,
+  record: Record<string, string>,
   expectedKeys: readonly string[],
   path: string,
 ): void {
@@ -108,60 +120,56 @@ function requireUniqueValues(
 
 export function loadLegacyQueueCutoverProtocol(
   protocolPath: string,
-): LegacyQueueCutoverProtocol {
-  const decoded: unknown = JSON.parse(readFileSync(protocolPath, "utf8"));
-  const root = protocolRecord(decoded, "contract");
+): LoadedLegacyQueueCutoverProtocol {
+  const argument = readFileSync(protocolPath, "utf8").trim();
+  const fields = parseProtocolManifest(argument);
   requireExactKeys(
-    root,
-    ["version", "command", "indexes", "states", "sentinels"],
-    "contract",
-  );
-  const indexesRecord = protocolRecord(root.indexes, "indexes");
-  const statesRecord = protocolRecord(root.states, "states");
-  const sentinelsRecord = protocolRecord(root.sentinels, "sentinels");
-  requireExactKeys(indexesRecord, ["state", "release", "heartbeat"], "indexes");
-  requireExactKeys(
-    statesRecord,
-    ["starting", "intentReady", "ready", "released", "failed"],
-    "states",
-  );
-  requireExactKeys(
-    sentinelsRecord,
+    fields,
     [
-      "abort",
-      "error",
-      "intentReady",
-      "ready",
-      "release",
-      "released",
-      "workerError",
+      "version",
+      "command",
+      "indexes.state",
+      "indexes.release",
+      "indexes.heartbeat",
+      "states.starting",
+      "states.intentReady",
+      "states.ready",
+      "states.released",
+      "states.failed",
+      "sentinels.abort",
+      "sentinels.error",
+      "sentinels.intentReady",
+      "sentinels.ready",
+      "sentinels.release",
+      "sentinels.released",
+      "sentinels.workerError",
     ],
-    "sentinels",
+    "manifest",
   );
 
   const protocol: LegacyQueueCutoverProtocol = {
-    version: protocolInteger(root, "version", "contract"),
-    command: protocolCommand(root),
+    version: protocolInteger(fields, "version"),
+    command: protocolCommand(fields),
     indexes: {
-      state: protocolInteger(indexesRecord, "state", "indexes"),
-      release: protocolInteger(indexesRecord, "release", "indexes"),
-      heartbeat: protocolInteger(indexesRecord, "heartbeat", "indexes"),
+      state: protocolInteger(fields, "indexes.state"),
+      release: protocolInteger(fields, "indexes.release"),
+      heartbeat: protocolInteger(fields, "indexes.heartbeat"),
     },
     states: {
-      starting: protocolInteger(statesRecord, "starting", "states"),
-      intentReady: protocolInteger(statesRecord, "intentReady", "states"),
-      ready: protocolInteger(statesRecord, "ready", "states"),
-      released: protocolInteger(statesRecord, "released", "states"),
-      failed: protocolInteger(statesRecord, "failed", "states"),
+      starting: protocolInteger(fields, "states.starting"),
+      intentReady: protocolInteger(fields, "states.intentReady"),
+      ready: protocolInteger(fields, "states.ready"),
+      released: protocolInteger(fields, "states.released"),
+      failed: protocolInteger(fields, "states.failed"),
     },
     sentinels: {
-      abort: protocolSentinel(sentinelsRecord, "abort"),
-      error: protocolSentinel(sentinelsRecord, "error"),
-      intentReady: protocolSentinel(sentinelsRecord, "intentReady"),
-      ready: protocolSentinel(sentinelsRecord, "ready"),
-      release: protocolSentinel(sentinelsRecord, "release"),
-      released: protocolSentinel(sentinelsRecord, "released"),
-      workerError: protocolSentinel(sentinelsRecord, "workerError"),
+      abort: protocolSentinel(fields, "abort"),
+      error: protocolSentinel(fields, "error"),
+      intentReady: protocolSentinel(fields, "intentReady"),
+      ready: protocolSentinel(fields, "ready"),
+      release: protocolSentinel(fields, "release"),
+      released: protocolSentinel(fields, "released"),
+      workerError: protocolSentinel(fields, "workerError"),
     },
   };
   requireUniqueValues(Object.values(protocol.indexes), "indexes");
@@ -186,7 +194,7 @@ export function loadLegacyQueueCutoverProtocol(
       "Legacy queue cutover protocol lifecycle states must be ordered",
     );
   }
-  return protocol;
+  return { argument, protocol };
 }
 
 export const LEGACY_QUEUE_CUTOVER_WORKER = String.raw`
