@@ -2908,7 +2908,7 @@ try {
       mediaItemId: item.id,
       kind: "main_feature",
     });
-    setup.catalog.completeCatalogReview(archive.id);
+    completeCatalogReview(setup, archive.id);
     setup.close();
 
     const legacySidecars = [{ archivePath, fingerprint, sidecarPath }];
