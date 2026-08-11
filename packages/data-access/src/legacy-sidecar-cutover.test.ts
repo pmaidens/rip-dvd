@@ -32,24 +32,35 @@ import { createTemporaryDirectoryFixture } from "./legacy-sidecar.test-support.j
 const markerFault = vi.hoisted(() => ({
   afterArchiveSnapshot: null as (() => void) | null,
   afterDirectorySync: null as (() => void) | null,
+  afterMarkerSnapshot: null as ((snapshotNumber: number) => void) | null,
   archivePath: null as string | null,
   directorySyncs: 0,
+  duringMarkerRead: null as ((snapshotNumber: number) => void) | null,
   failure: "rename" as "directory-sync" | "rename" | null,
+  markerSnapshots: 0,
 }));
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
   const archiveDescriptors = new Set<number>();
+  const markerDescriptors = new Map<number, number>();
+  const observedMarkerReads = new Set<number>();
   const isMarker = (path: unknown) =>
     typeof path === "string" && path.endsWith(".rip-dvd-sqlite-catalog");
   return {
     ...actual,
     closeSync(descriptor: number) {
       const result = actual.closeSync(descriptor);
+      const markerSnapshot = markerDescriptors.get(descriptor);
+      markerDescriptors.delete(descriptor);
+      observedMarkerReads.delete(descriptor);
       if (archiveDescriptors.delete(descriptor)) {
         const afterArchiveSnapshot = markerFault.afterArchiveSnapshot;
         markerFault.afterArchiveSnapshot = null;
         afterArchiveSnapshot?.();
+      }
+      if (markerSnapshot !== undefined) {
+        markerFault.afterMarkerSnapshot?.(markerSnapshot);
       }
       return result;
     },
@@ -78,7 +89,23 @@ vi.mock("node:fs", async (importOriginal) => {
       if (arguments_[0] === markerFault.archivePath) {
         archiveDescriptors.add(descriptor);
       }
+      if (isMarker(arguments_[0])) {
+        markerFault.markerSnapshots += 1;
+        markerDescriptors.set(descriptor, markerFault.markerSnapshots);
+      }
       return descriptor;
+    },
+    readSync(...arguments_: Parameters<typeof actual.readSync>) {
+      const descriptor = arguments_[0];
+      const markerSnapshot = markerDescriptors.get(descriptor);
+      if (
+        markerSnapshot !== undefined &&
+        !observedMarkerReads.has(descriptor)
+      ) {
+        observedMarkerReads.add(descriptor);
+        markerFault.duringMarkerRead?.(markerSnapshot);
+      }
+      return Reflect.apply(actual.readSync, actual, arguments_);
     },
     writeFileSync(...arguments_: Parameters<typeof actual.writeFileSync>) {
       if (markerFault.failure === "rename" && isMarker(arguments_[0])) {
@@ -96,9 +123,12 @@ afterEach(() => {
   delete process.env.RIP_DVD_PYTHON;
   markerFault.afterArchiveSnapshot = null;
   markerFault.afterDirectorySync = null;
+  markerFault.afterMarkerSnapshot = null;
   markerFault.archivePath = null;
   markerFault.directorySyncs = 0;
+  markerFault.duringMarkerRead = null;
   markerFault.failure = "rename";
+  markerFault.markerSnapshots = 0;
   temporaryDirectories.cleanup();
 });
 
@@ -2830,6 +2860,143 @@ try {
     ).toMatchObject({ sidecarsImported: 1, sidecarsSkipped: 0, issues: [] });
     expect(replay.encodeJobs.list()).toEqual(retainedJobs);
     replay.close();
+  });
+
+  function createRepairBootstrapFixture(prefix: string) {
+    const root = temporaryDirectories.create(prefix);
+    const originalsLibraryPath = join(root, "originals");
+    const archivePath = join(originalsLibraryPath, "Repair.iso");
+    const sidecarPath = join(
+      originalsLibraryPath,
+      "Repair.rip-dvd.json",
+    );
+    const markerPath = join(
+      originalsLibraryPath,
+      ".rip-dvd-sqlite-catalog",
+    );
+    const databasePath = join(root, "catalog.sqlite");
+    const fingerprint = `${prefix}-fingerprint`;
+    mkdirSync(originalsLibraryPath, { recursive: true });
+    writeFileSync(archivePath, "repair archive");
+    writeFileSync(sidecarPath, "{}");
+
+    const setup = createLegacySidecarDataAccess({ databasePath });
+    const drive = setup.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const disc = setup.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint,
+    });
+    setup.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    setup.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = setup.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath,
+      fingerprint,
+    });
+    const item = setup.catalog.createMediaItem({
+      kind: "movie",
+      title: "Repair",
+    });
+    setup.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: item.id,
+      kind: "main_feature",
+    });
+    setup.catalog.completeCatalogReview(archive.id);
+    setup.close();
+
+    const legacySidecars = [{ archivePath, fingerprint, sidecarPath }];
+    const legacyJobs: unknown[] = [];
+    const marker = {
+      schemaVersion: 4,
+      legacyQueueStatus: "repair",
+      authoritativeStore: "sqlite",
+      legacySidecars,
+      legacyJobs,
+      snapshotDigest: createHash("sha256")
+        .update(`${JSON.stringify(legacySidecars)}\n${JSON.stringify(legacyJobs)}`)
+        .digest("hex"),
+    };
+    markerFault.failure = null;
+    writeFileSync(markerPath, `${JSON.stringify(marker)}\n`);
+
+    return {
+      archiveId: archive.id,
+      databasePath,
+      marker,
+      markerPath,
+      originalsLibraryPath,
+    };
+  }
+
+  it("keeps SQLite writers available during bounded repair marker snapshots", () => {
+    const fixture = createRepairBootstrapFixture(
+      "rip-dvd-cutover-bounded-marker-snapshots-",
+    );
+    const writerErrors: unknown[] = [];
+    markerFault.markerSnapshots = 0;
+    markerFault.duringMarkerRead = () => {
+      const writer = new DatabaseSync(fixture.databasePath);
+      try {
+        writer.exec("PRAGMA busy_timeout = 0");
+        writer.exec("BEGIN IMMEDIATE; ROLLBACK");
+      } catch (error) {
+        writerErrors.push(error);
+      } finally {
+        writer.close();
+      }
+    };
+
+    const service = createDataAccess({
+      databasePath: fixture.databasePath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+
+    expect(writerErrors).toEqual([]);
+    expect(markerFault.markerSnapshots).toBe(2);
+    expect(service.catalog.listOriginalDiscArchives({
+      ids: [fixture.archiveId],
+    })[0]).toMatchObject({ legacyCutoverPending: true });
+    service.close();
+  });
+
+  it("fails closed when a repair marker changes after its first snapshot", () => {
+    const fixture = createRepairBootstrapFixture(
+      "rip-dvd-cutover-stale-marker-snapshot-",
+    );
+    markerFault.markerSnapshots = 0;
+    markerFault.afterMarkerSnapshot = (snapshotNumber) => {
+      if (snapshotNumber !== 1) {
+        return;
+      }
+      writeFileSync(fixture.markerPath, `${JSON.stringify({
+        ...fixture.marker,
+        legacyQueueStatus: "retired",
+      })}\n`);
+    };
+
+    expect(() =>
+      createDataAccess({
+        databasePath: fixture.databasePath,
+        originalsLibraryPath: fixture.originalsLibraryPath,
+      })
+    ).toThrow(/repair marker changed while it was being reconciled/i);
+
+    markerFault.afterMarkerSnapshot = null;
+    const observer = createDataAccess({ databasePath: fixture.databasePath });
+    expect(observer.catalog.listOriginalDiscArchives({
+      ids: [fixture.archiveId],
+    })[0]).toMatchObject({
+      catalogReviewedAt: expect.any(Date),
+      legacyCutoverPending: false,
+    });
+    observer.close();
   });
 
   it("reconciles an existing repair marker before ordinary service access", () => {
