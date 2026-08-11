@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { DomainInvariantError } from "../errors.js";
-import type { ChronologicalListOptions } from "../types.js";
 import {
   createBoundedChronologicalList,
   createJobList,
@@ -113,28 +112,6 @@ describe("bounded chronological list policy", () => {
         },
       }),
     ).toThrow(DomainInvariantError);
-  });
-
-  it("returns a chronological view of the newest bounded records", () => {
-    const readNewest = vi.fn(() => [records[0]!, records[3]!]);
-    const list = createBoundedChronologicalList<
-      TestRecord,
-      TestRecord["status"],
-      ChronologicalListOptions
-    >({
-      activeStatuses: ["active"],
-      historyStatuses: ["history"],
-      chronologicalAt: (record) => record.updatedAt,
-      readAll: () => records,
-      readNewest,
-    });
-
-    expect(
-      list(undefined, { policy: { mode: "newest", limit: 2 } }).map(
-        (record) => record.id,
-      ),
-    ).toEqual(["active-new", "history-new"]);
-    expect(readNewest).toHaveBeenCalledWith(undefined, 2, expect.anything());
   });
 
   it("gives job lists the shared active and terminal status policy", () => {

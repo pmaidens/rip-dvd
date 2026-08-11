@@ -273,13 +273,11 @@ export interface DiscoveredOpticalDrive {
   serialNumber?: string;
 }
 
-export type BoundedListPolicy =
-  | { mode: "newest"; limit: number }
-  | {
-      mode: "active-and-history";
-      activeLimit: number;
-      historyLimit: number;
-    };
+export type BoundedListPolicy = {
+  mode: "active-and-history";
+  activeLimit: number;
+  historyLimit: number;
+};
 
 export interface ChronologicalListOptions {
   policy?: BoundedListPolicy;
