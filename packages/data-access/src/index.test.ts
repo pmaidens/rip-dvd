@@ -5630,7 +5630,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     access.close();
   });
 
-  it("keeps encode jobs unique by selection and profile version and requeues them", () => {
+  it("keeps encode submission idempotent and requeues only on explicit intent", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
     const access = openTestDatabase();
@@ -5763,6 +5763,20 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       }),
     ).toMatchObject({
       id: job.id,
+      status: "completed",
+      progressPhase: "encoding",
+      progressPercent: 100,
+      progressEtaSeconds: null,
+      replaceExistingOutput: false,
+      outputPath: "/media/movies/Movie/Movie.mkv",
+      priority: 0,
+    });
+    expect(access.encodeJobs.claimNext("late-submit-retry")).toBeNull();
+    expect(access.encodeJobs.requeue(job.id, {
+      outputPath: "/media/movies/Movie/Movie-remastered.mkv",
+      priority: 20,
+    })).toMatchObject({
+      id: job.id,
       status: "queued",
       progressPhase: null,
       progressPercent: 0,
@@ -5833,13 +5847,17 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(() => access.encodeJobs.updateProgress(abandoned, 50)).toThrow();
 
     const recoveredOutputPath = "/media/movies/Movie/Movie-recovered.mkv";
-    expect(() =>
+    expect(
       access.encodeJobs.enqueue({
         discSelectionId: job.discSelectionId,
         encodingProfileId: job.encodingProfileId,
         outputPath: recoveredOutputPath,
       }),
-    ).toThrow(/failed.*queued/i);
+    ).toMatchObject({
+      id: job.id,
+      status: "failed",
+      outputPath: abandoned.outputPath,
+    });
     expect(access.encodeJobs.claimNext("cleanup-not-finished")).toBeNull();
     const [cleanup] = access.encodeJobs.listPendingPartialCleanups();
     expect(cleanup).toEqual({
@@ -5853,11 +5871,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       throw new Error("Expected pending Encode Job partial cleanup");
     }
     access.encodeJobs.completePartialCleanup(cleanup);
-    access.encodeJobs.enqueue({
-      discSelectionId: job.discSelectionId,
-      encodingProfileId: job.encodingProfileId,
-      outputPath: recoveredOutputPath,
-    });
+    access.encodeJobs.requeue(job.id, { outputPath: recoveredOutputPath });
     const renewed = access.encodeJobs.claimNext("encode-worker-renewed");
     if (!renewed) {
       throw new Error("Expected the renewed Encode Job to be claimed");

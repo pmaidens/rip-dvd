@@ -67,7 +67,9 @@ requires the referenced Encoding
 Profile version to be active in the DVD video domain and rejects a final output
 path already reserved by another logical job. Encode Job requeue and claim
 operations also require the review boundary. Requeue preserves the referenced
-historical profile version even when it is no longer active. Existing databases
+historical profile version even when it is no longer active. Submitting the
+same selection and profile preserves an existing Encode Job unchanged; only
+explicit requeue can transition terminal work. Existing databases
 preserve the review time for canonical main-feature-only catalogs. Caller-era
 scan-dependent, noncanonical, or otherwise unsafe catalogs are reopened
 conservatively, their active Encode Jobs fail visibly, and paged catalog
@@ -86,8 +88,8 @@ Disc Selection mutation preserves two distinct identity paths:
 
 - **Ordinary retry identity.** A current-valid Disc Selection with any dependent
   Encode Job history cannot be repaired or removed. Every dependent job remains
-  attached to the selection; `enqueue()` or `requeue()` of a terminal row resets
-  the same logical Encode Job and preserves its retry identity.
+  attached to the selection; `requeue()` of a terminal row resets the same
+  logical Encode Job and preserves its retry identity.
 - **Unsafe legacy quarantine.** A caller-era mapping that fails canonical-key or
   archived-scan validation is the only historical exception.
   `repairDiscSelection()` or `deleteDiscSelection()` deactivates the old Disc
@@ -179,7 +181,7 @@ publication flag, so queued, cutover-invalidated, and unrelated attempts cannot
 use the completion transition.
 
 Requeue first grants replacement authority only when a completed Encode Job
-keeps its output path. Terminal queue submission retains that authoritative
+keeps its output path. Explicit terminal requeue retains that authoritative
 path for completed jobs and for failed replacements that still own their prior
 final, preserving both SQLite provenance and the existing path reservation even
 when the request supplies a different path. A failed job without retained

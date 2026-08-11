@@ -295,7 +295,7 @@ describe("explicit filesystem verification", () => {
     access.close();
   });
 
-  it("clears verification when an Encode Job is requeued to a different path", async () => {
+  it("clears verification when an Encode Job is explicitly requeued to a different path", async () => {
     const fixture = createArchiveFixture();
     const { access, directory } = fixture;
     const { job } = createEncodeJobFixture(fixture);
@@ -303,9 +303,7 @@ describe("explicit filesystem verification", () => {
     const claim = access.encodeJobs.claimNext("verification-worker");
     expect(claim).not.toBeNull();
     access.encodeJobs.fail(claim!, "retry elsewhere");
-    const requeued = access.encodeJobs.enqueue({
-      discSelectionId: job.discSelectionId,
-      encodingProfileId: job.encodingProfileId,
+    const requeued = access.encodeJobs.requeue(job.id, {
       outputPath: join(directory, "Replacement Output.mkv"),
     });
 

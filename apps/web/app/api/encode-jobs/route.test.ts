@@ -169,7 +169,7 @@ describe("Encode Jobs API", () => {
     expect(secondPage.page).toEqual(firstPage.page);
   });
 
-  it("queues each selection and profile version once and requeues the existing completed row", async () => {
+  it("keeps repeated queue submissions idempotent after completion", async () => {
     const access = dataAccessFixture.create();
     const reviewed = createSelection(access, "queue");
     completeCatalogReview(access, reviewed.archive.id);
@@ -232,24 +232,24 @@ describe("Encode Jobs API", () => {
     }
     access.encodeJobs.complete(claim);
 
-    const requeuedResponse = await createEncodeJobsRoute(
-      request("/media/movies/Encode API queue remastered.mkv"),
+    const repeatedCompletedResponse = await createEncodeJobsRoute(
+      request("/media/movies/Encode API queue.mkv"),
       () => access,
       config,
     );
-    expect(requeuedResponse.status).toBe(200);
-    expect((await requeuedResponse.json()).job).toMatchObject({
+    expect(repeatedCompletedResponse.status).toBe(200);
+    expect((await repeatedCompletedResponse.json()).job).toMatchObject({
       id: queued.id,
       encodingProfileId: profile.id,
       outputPath: "/media/movies/Encode API queue.mkv",
-      status: "queued",
-      progressPercent: 0,
-      completedAt: null,
+      status: "completed",
+      progressPercent: 100,
     });
     expect(access.encodeJobs.list()).toHaveLength(1);
+    expect(access.encodeJobs.claimNext("late-post-retry")).toBeNull();
   });
 
-  it("requeues failed and completed Encode Jobs in place", async () => {
+  it("requires explicit retry intent for failed and completed Encode Jobs", async () => {
     const access = dataAccessFixture.create();
     const reviewed = createSelection(access, "retry");
     completeCatalogReview(access, reviewed.archive.id);
@@ -289,6 +289,35 @@ describe("Encode Jobs API", () => {
     }
     access.encodeJobs.updateProgress(firstClaim, 37);
     access.encodeJobs.fail(firstClaim, "HandBrake failed");
+
+    const repeatSubmission = () =>
+      createEncodeJobsRoute(
+        new Request("http://localhost:3000/api/encode-jobs", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Host: "localhost:3000",
+            Origin: "http://localhost:3000",
+          },
+          body: JSON.stringify({
+            discSelectionId: reviewed.selection.id,
+            encodingProfileId: profile.id,
+            outputPath: "/media/movies/Encode API retry.mkv",
+          }),
+        }),
+        () => access,
+        config,
+      );
+
+    expect((await (await repeatSubmission()).json()).job).toMatchObject({
+      id: original.id,
+      status: "failed",
+      progressPercent: 37,
+      errorMessage: "HandBrake failed",
+      outputPath: "/media/movies/Encode API retry.mkv",
+    });
+    expect(access.encodeJobs.claimNext("late-failed-post-retry")).toBeNull();
+
     expect((await (await retry()).json()).job).toMatchObject({
       id: original.id,
       status: "queued",
@@ -301,6 +330,15 @@ describe("Encode Jobs API", () => {
       throw new Error("Expected second Encode Job claim");
     }
     access.encodeJobs.complete(secondClaim);
+
+    expect((await (await repeatSubmission()).json()).job).toMatchObject({
+      id: original.id,
+      status: "completed",
+      progressPercent: 100,
+      outputPath: "/media/movies/Encode API retry.mkv",
+    });
+    expect(access.encodeJobs.claimNext("late-completed-post-retry")).toBeNull();
+
     expect((await (await retry()).json()).job).toMatchObject({
       id: original.id,
       status: "queued",
