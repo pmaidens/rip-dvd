@@ -333,7 +333,13 @@ describe("end-to-end operations dashboard workflow", () => {
     const selection = (await selectionResponse.json()).discSelection as {
       id: string;
     };
-    const completedReview = await catalogMutation({ action: "complete_review" });
+    const catalogRevision = access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]!.updatedAt.toISOString();
+    const completedReview = await catalogMutation({
+      action: "complete_review",
+      catalogRevision,
+    });
     expect(completedReview.status).toBe(200);
     expect((await completedReview.json()).archive.catalogReviewedAt).toEqual(
       expect.any(String),

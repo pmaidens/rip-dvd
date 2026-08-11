@@ -35,6 +35,7 @@ export interface CatalogReviewDiscSelection {
 }
 
 export interface CatalogReviewDto {
+  catalogRevision: string;
   archive: {
     id: string;
     discLabel: string;

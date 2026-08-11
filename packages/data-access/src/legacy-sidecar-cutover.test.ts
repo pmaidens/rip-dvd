@@ -18,6 +18,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { completeCatalogReview } from "./catalog.test-support.js";
 import { decodeDvdTitleMap } from "./dvd-scan.js";
 import {
   createDataAccess,
@@ -674,7 +675,7 @@ try {
       mediaItemId: item.id,
       kind: "main_feature",
     });
-    access.catalog.completeCatalogReview(archive.id);
+    completeCatalogReview(access, archive.id);
     const preset = "Fast 480p30";
     const profile = access.encodingProfiles.create({
       key: `legacy-handbrake-fast-480p30-${createHash("sha256")
@@ -1100,7 +1101,8 @@ try {
       legacyQueueStatus: "repair",
     });
     expect(() =>
-      incompleteRetry.catalog.completeCatalogReview(
+      completeCatalogReview(
+        incompleteRetry,
         incompleteRetry.catalog.listOriginalDiscArchives()[0]!.id,
       ),
     ).toThrow(DomainInvariantError);
@@ -1337,7 +1339,7 @@ try {
         mediaItemId: item.id,
         kind: "main_feature",
       });
-      setup.catalog.completeCatalogReview(archive.id);
+      completeCatalogReview(setup, archive.id);
       const sidecarBytes = Buffer.from(JSON.stringify({
         schema_version: 2,
         source: archivePath,
@@ -1368,7 +1370,7 @@ try {
     expect(existsSync(markerPath)).toBe(false);
     for (const archive of [first.archive, second.archive]) {
       expect(() =>
-        failedPublication.catalog.completeCatalogReview(archive.id),
+        completeCatalogReview(failedPublication, archive.id),
       ).toThrow(DomainInvariantError);
     }
     failedPublication.close();
@@ -1390,7 +1392,7 @@ try {
     expect(incompleteRetry.encodeJobs.list()).toEqual([]);
     for (const archive of [first.archive, second.archive]) {
       expect(() =>
-        incompleteRetry.catalog.completeCatalogReview(archive.id),
+        completeCatalogReview(incompleteRetry, archive.id),
       ).toThrow(DomainInvariantError);
     }
 
@@ -2449,7 +2451,7 @@ try {
         mediaItemId: item.id,
         kind: "main_feature",
       });
-      setup.catalog.completeCatalogReview(archive.id);
+      completeCatalogReview(setup, archive.id);
       return { archive, selection };
     };
     const fingerprintOwner = createReviewedArchive(
@@ -2512,7 +2514,7 @@ try {
     markerFault.afterDirectorySync = () => {
       const observer = createDataAccess({ databasePath });
       try {
-        observer.catalog.completeCatalogReview(fingerprintOwner.archive.id);
+        completeCatalogReview(observer, fingerprintOwner.archive.id);
       } catch (error) {
         reviewCompletionAtMarkerPublication = error;
       }
@@ -2631,10 +2633,10 @@ try {
       ]),
     });
     expect(() =>
-      access.catalog.completeCatalogReview(fingerprintOwner.archive.id)
+      completeCatalogReview(access, fingerprintOwner.archive.id)
     ).toThrow(DomainInvariantError);
     expect(() =>
-      access.catalog.completeCatalogReview(pathOwner.archive.id)
+      completeCatalogReview(access, pathOwner.archive.id)
     ).toThrow(DomainInvariantError);
 
     writeFileSync(repairedArchivePath, "repaired archive");
@@ -2720,7 +2722,7 @@ try {
       kind: "main_feature",
       label: "Pre-cutover local selection",
     });
-    setup.catalog.completeCatalogReview(archive.id);
+    completeCatalogReview(setup, archive.id);
     setup.close();
 
     writeFileSync(sidecarPath, JSON.stringify({
@@ -2907,7 +2909,7 @@ try {
     expect(
       service.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0],
     ).toMatchObject({ catalogReviewedAt: null });
-    expect(() => service.catalog.completeCatalogReview(archive.id)).toThrow(
+    expect(() => completeCatalogReview(service, archive.id)).toThrow(
       DomainInvariantError,
     );
     expect(service.encodeJobs.claimNext("post-upgrade-worker")).toBeNull();
@@ -3117,7 +3119,7 @@ try {
       mediaItemId: item.id,
       kind: "main_feature",
     });
-    expect(() => service.catalog.completeCatalogReview(archive.id)).toThrow(
+    expect(() => completeCatalogReview(service, archive.id)).toThrow(
       DomainInvariantError,
     );
     service.close();

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   type ConsistentReadAccess,
   type DataAccess,
+  type OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
 import {
   createLegacySidecarDataAccess,
@@ -18,6 +19,16 @@ type SnapshotOverrides = {
   archiveJobs?: Partial<ConsistentReadAccess["archiveJobs"]>;
   encodeJobs?: Partial<ConsistentReadAccess["encodeJobs"]>;
 };
+
+export function completeCatalogReview(
+  access: DataAccess,
+  archiveId: OriginalDiscArchiveId,
+) {
+  const archive = access.catalog.listOriginalDiscArchives({
+    ids: [archiveId],
+  })[0]!;
+  return access.catalog.completeCatalogReview(archiveId, archive.updatedAt);
+}
 
 export function withSnapshotOverrides(
   access: DataAccess,

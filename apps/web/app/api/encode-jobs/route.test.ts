@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { useDataAccessFixture } from "../../../test/data-access-fixture";
+import {
+  completeCatalogReview,
+  useDataAccessFixture,
+} from "../../../test/data-access-fixture";
 import { createEncodeJobsRoute } from "./route";
 
 const dataAccessFixture = useDataAccessFixture();
@@ -45,7 +48,7 @@ describe("Encode Jobs API", () => {
     const access = dataAccessFixture.create();
     createSelection(access, "unreviewed");
     const reviewed = createSelection(access, "reviewed");
-    access.catalog.completeCatalogReview(reviewed.archive.id);
+    completeCatalogReview(access, reviewed.archive.id);
     const activeProfile = access.encodingProfiles.create({
       key: "dvd-library",
       displayName: "DVD library",
@@ -101,7 +104,7 @@ describe("Encode Jobs API", () => {
   it("bounds and pages active DVD profile options independently of selections", async () => {
     const access = dataAccessFixture.create();
     const reviewed = createSelection(access, "profile-pages");
-    access.catalog.completeCatalogReview(reviewed.archive.id);
+    completeCatalogReview(access, reviewed.archive.id);
     const profileIds = Array.from({ length: 101 }, (_, index) =>
       access.encodingProfiles.create({
         key: `profile-${String(index).padStart(3, "0")}`,
@@ -169,7 +172,7 @@ describe("Encode Jobs API", () => {
   it("queues each selection and profile version once and requeues the existing completed row", async () => {
     const access = dataAccessFixture.create();
     const reviewed = createSelection(access, "queue");
-    access.catalog.completeCatalogReview(reviewed.archive.id);
+    completeCatalogReview(access, reviewed.archive.id);
     const profile = access.encodingProfiles.create({
       key: "queue-profile",
       displayName: "Queue profile",
@@ -249,7 +252,7 @@ describe("Encode Jobs API", () => {
   it("requeues failed and completed Encode Jobs in place", async () => {
     const access = dataAccessFixture.create();
     const reviewed = createSelection(access, "retry");
-    access.catalog.completeCatalogReview(reviewed.archive.id);
+    completeCatalogReview(access, reviewed.archive.id);
     const profile = access.encodingProfiles.create({
       key: "retry-profile",
       displayName: "Retry profile",
@@ -345,7 +348,7 @@ describe("Encode Jobs API", () => {
       );
 
     expect((await queue(activeProfile.id)).status).toBe(409);
-    access.catalog.completeCatalogReview(unreviewed.archive.id);
+    completeCatalogReview(access, unreviewed.archive.id);
     expect((await queue(inactiveProfile.id)).status).toBe(409);
     expect(access.encodeJobs.list()).toEqual([]);
   });
@@ -397,7 +400,7 @@ describe("Encode Jobs API", () => {
   it("reports a final output reserved by another logical job as a conflict", async () => {
     const access = dataAccessFixture.create();
     const reviewed = createSelection(access, "output-owner");
-    access.catalog.completeCatalogReview(reviewed.archive.id);
+    completeCatalogReview(access, reviewed.archive.id);
     const createProfile = (key: string) => access.encodingProfiles.create({
       key,
       displayName: key,

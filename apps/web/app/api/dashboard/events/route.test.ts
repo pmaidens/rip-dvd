@@ -1,7 +1,10 @@
 import type { DataAccess } from "@rip-dvd/data-access";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { useDataAccessFixture } from "../../../../test/data-access-fixture";
+import {
+  completeCatalogReview,
+  useDataAccessFixture,
+} from "../../../../test/data-access-fixture";
 import {
   createDashboardEventResponse,
   createDashboardEventRoute,
@@ -102,7 +105,7 @@ describe("GET /api/dashboard/events", () => {
         mediaItemId: mediaItem.id,
         kind: "main_feature",
       });
-      access.catalog.completeCatalogReview(encodeArchive.id);
+      completeCatalogReview(access, encodeArchive.id);
       access.encodeJobs.enqueue({
         discSelectionId: selection.id,
         encodingProfileId: profile.id,
@@ -278,7 +281,7 @@ describe("GET /api/dashboard/events", () => {
       mediaItemId: mediaItem.id,
       kind: "main_feature",
     });
-    access.catalog.completeCatalogReview(archive.id);
+    completeCatalogReview(access, archive.id);
     const profile = access.encodingProfiles.create({
       key: "streamed-profile",
       displayName: "DVD library",

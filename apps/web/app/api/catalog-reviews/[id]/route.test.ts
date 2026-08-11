@@ -6,6 +6,7 @@ import {
 } from "@rip-dvd/data-access";
 
 import {
+  completeCatalogReview,
   useDataAccessFixture,
   withSnapshotOverrides,
 } from "../../../../test/data-access-fixture";
@@ -58,6 +59,7 @@ describe("Catalog Review API", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("Cache-Control")).toBe("no-store");
     await expect(response.json()).resolves.toEqual({
+      catalogRevision: archive.updatedAt.toISOString(),
       archive: {
         id: archive.id,
         discLabel: "EPISODE_DISC",
@@ -151,6 +153,112 @@ describe("Catalog Review API", () => {
         subtitles: [{ id: 0 }],
       }),
     ]);
+  });
+
+  it("rejects stale review completion until the client reloads the catalog revision", async () => {
+    const [firstClient, secondClient] = dataAccessFixture.createPair();
+    const drive = firstClient.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const contentId = `sha256:${"a".repeat(64)}`;
+    const disc = firstClient.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: contentId,
+      scanData: {
+        schemaVersion: 2,
+        contentId,
+        titles: [{
+          number: 1,
+          durationSeconds: 2_400,
+          chapters: 8,
+          audioStreams: [],
+          subtitles: [],
+        }],
+      },
+    });
+    firstClient.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    firstClient.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = firstClient.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Stale Catalog Review.iso",
+      fingerprint: contentId,
+    });
+    const movie = firstClient.catalog.createMediaItem({
+      kind: "movie",
+      title: "Stale Catalog Review",
+    });
+    firstClient.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: movie.id,
+      kind: "main_feature",
+    });
+    const getReview = async (client: typeof firstClient) => {
+      const response = await createCatalogReviewRoute(
+        new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`),
+        archive.id,
+        () => client,
+        () => "http://localhost:3000",
+      );
+      expect(response.status).toBe(200);
+      return response.json();
+    };
+    const mutate = (client: typeof firstClient, body: unknown) =>
+      createCatalogReviewRoute(
+        new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Host: "localhost:3000",
+            Origin: "http://localhost:3000",
+          },
+          body: JSON.stringify(body),
+        }),
+        archive.id,
+        () => client,
+        () => "http://localhost:3000",
+      );
+
+    const staleReview = await getReview(firstClient);
+    await getReview(secondClient);
+    const missingRevision = await mutate(firstClient, {
+      action: "complete_review",
+    });
+    expect(missingRevision.status).toBe(400);
+    await expect(missingRevision.json()).resolves.toEqual({
+      error: "Invalid catalog review revision",
+    });
+    expect((await mutate(secondClient, {
+      action: "create_disc_selection",
+      selection: {
+        mediaItemId: movie.id,
+        kind: "dvd_title",
+        titleNumber: 1,
+      },
+    })).status).toBe(201);
+
+    const staleCompletion = await mutate(firstClient, {
+      action: "complete_review",
+      catalogRevision: staleReview.catalogRevision,
+    });
+    expect(staleCompletion.status).toBe(409);
+    await expect(staleCompletion.json()).resolves.toEqual({
+      error: "Catalog review changed; reload before completing review",
+    });
+    expect(firstClient.catalog.listOriginalDiscArchives({ ids: [archive.id] }))
+      .toEqual([expect.objectContaining({ catalogReviewedAt: null })]);
+
+    const currentReview = await getReview(firstClient);
+    expect(currentReview.catalogRevision).not.toBe(staleReview.catalogRevision);
+    expect((await mutate(firstClient, {
+      action: "complete_review",
+      catalogRevision: currentReview.catalogRevision,
+    })).status).toBe(200);
+    expect(firstClient.catalog.listOriginalDiscArchives({ ids: [archive.id] }))
+      .toEqual([expect.objectContaining({ catalogReviewedAt: expect.any(Date) })]);
   });
 
   it("pages a large Media Item catalog without blocking review", async () => {
@@ -568,7 +676,7 @@ describe("Catalog Review API", () => {
       mediaItemId: movie.id,
       kind: "main_feature",
     });
-    access.catalog.completeCatalogReview(archive.id);
+    completeCatalogReview(access, archive.id);
     const profile = access.encodingProfiles.create({
       key: "preserved-history",
       displayName: "Preserved history",
@@ -786,7 +894,12 @@ describe("Catalog Review API", () => {
         chapterEnd: 8,
       },
     })).status).toBe(201);
-    expect((await mutate({ action: "complete_review" })).status).toBe(200);
+    expect((await mutate({
+      action: "complete_review",
+      catalogRevision: access.catalog.listOriginalDiscArchives({
+        ids: [archive.id],
+      })[0]!.updatedAt.toISOString(),
+    })).status).toBe(200);
     const deleteResponse = await mutate({
       action: "delete_disc_selection",
       discSelectionId: firstSelection.id,
@@ -810,7 +923,12 @@ describe("Catalog Review API", () => {
         chapterEnd: 4,
       },
     })).status).toBe(201);
-    expect((await mutate({ action: "complete_review" })).status).toBe(200);
+    expect((await mutate({
+      action: "complete_review",
+      catalogRevision: access.catalog.listOriginalDiscArchives({
+        ids: [archive.id],
+      })[0]!.updatedAt.toISOString(),
+    })).status).toBe(200);
 
     const reviewed = await createCatalogReviewRoute(
       new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`),

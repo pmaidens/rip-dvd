@@ -10,6 +10,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { completeCatalogReview } from "./catalog.test-support.js";
 import { createLegacySidecarDataAccess } from "./legacy-sidecars.js";
 
 const temporaryDirectories: string[] = [];
@@ -83,7 +84,7 @@ function createEncodeJobFixture(
     mediaItemId: mediaItem.id,
     kind: "main_feature",
   });
-  access.catalog.completeCatalogReview(archive.id);
+  completeCatalogReview(access, archive.id);
   const profile = access.encodingProfiles.create({
     key: "verification-profile",
     displayName: "Verification profile",

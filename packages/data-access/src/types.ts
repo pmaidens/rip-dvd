@@ -336,7 +336,10 @@ export interface CatalogAccess {
     uncatalogedOnly?: boolean;
     needsCatalogReviewOnly?: boolean;
   }): OriginalDiscArchive[];
-  completeCatalogReview(id: OriginalDiscArchiveId): OriginalDiscArchive;
+  completeCatalogReview(
+    id: OriginalDiscArchiveId,
+    catalogRevision: Date,
+  ): OriginalDiscArchive;
   createMediaItem(input: {
     parentId?: MediaItemId;
     kind: MediaItemKind;
