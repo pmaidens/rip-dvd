@@ -5,6 +5,7 @@ import type { EncodeJobId } from "@rip-dvd/data-access";
 
 import {
   ActionOverview,
+  createDashboardMutationRunner,
   DashboardConnectionStatus,
   DashboardView,
   OperationsDashboard,
@@ -615,5 +616,63 @@ describe("DashboardConnectionStatus", () => {
     expect(html).toContain('aria-live="polite"');
     expect(html).toContain('aria-atomic="true"');
     expect(html).toContain("Live updates reconnecting");
+  });
+});
+
+describe.each([
+  ["archive approval", "disc-1"],
+  ["Encode Job requeue", "encode-job-1"],
+] as const)("%s dashboard mutation", (_action, id) => {
+  it("suppresses duplicate clicks, refreshes after success, and clears busy state", async () => {
+    let completeRequest: (() => void) | undefined;
+    const request = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          completeRequest = resolve;
+        }),
+    );
+    const setBusyId = vi.fn();
+    const setFailed = vi.fn();
+    const refresh = vi.fn();
+    const run = createDashboardMutationRunner({
+      request,
+      setBusyId,
+      setFailed,
+      refresh,
+    });
+
+    const firstClick = run(id);
+    await run(id);
+
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(setBusyId).toHaveBeenCalledTimes(1);
+    expect(setBusyId).toHaveBeenLastCalledWith(id);
+    expect(setFailed).toHaveBeenCalledExactlyOnceWith(false);
+    expect(refresh).not.toHaveBeenCalled();
+
+    completeRequest?.();
+    await firstClick;
+
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(setBusyId).toHaveBeenLastCalledWith(null);
+  });
+
+  it("reports failure without refreshing and clears busy state", async () => {
+    const request = vi.fn().mockRejectedValue(new Error("request failed"));
+    const setBusyId = vi.fn();
+    const setFailed = vi.fn();
+    const refresh = vi.fn();
+    const run = createDashboardMutationRunner({
+      request,
+      setBusyId,
+      setFailed,
+      refresh,
+    });
+
+    await run(id);
+
+    expect(setFailed.mock.calls).toEqual([[false], [true]]);
+    expect(refresh).not.toHaveBeenCalled();
+    expect(setBusyId.mock.calls).toEqual([[id], [null]]);
   });
 });
