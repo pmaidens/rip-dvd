@@ -14,6 +14,10 @@
       "types": "./src/dvd-scan.ts",
       "default": "./dist/dvd-scan.js"
     },
+    "./dvd-content-id": {
+      "types": "./src/dvd-content-id.ts",
+      "default": "./dist/dvd-content-id.js"
+    },
     "./legacy-sidecars": {
       "types": "./src/legacy-sidecars.ts",
       "default": "./dist/legacy-sidecars.js"

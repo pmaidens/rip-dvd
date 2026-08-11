@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import {
   type BigIntStats,
   closeSync,
@@ -11,9 +10,9 @@ import {
 } from "node:fs";
 import { isAbsolute, normalize } from "node:path";
 
+import { createRawDvdContentIdHasher } from "../dvd-content-id.js";
 import { DomainInvariantError } from "../errors.js";
 
-const DVD_CONTENT_HASH_DOMAIN = "rip-dvd-content-v2\0";
 const MAX_DVD_CONTENT_BYTES = 9_000_000_000;
 const MAX_ARCHIVE_PATH_BYTES = 4_096;
 const HASH_BUFFER_BYTES = 1_048_576;
@@ -146,9 +145,7 @@ export function hashDvdArchiveFile(
     }
 
     const identity = fileIdentity(openedBefore);
-    const hash = createHash("sha256");
-    hash.update(DVD_CONTENT_HASH_DOMAIN);
-    hash.update(String(safeSizeBytes));
+    const hasher = createRawDvdContentIdHasher(safeSizeBytes);
     const buffer = Buffer.allocUnsafe(HASH_BUFFER_BYTES);
     let remaining = safeSizeBytes;
     while (remaining > 0) {
@@ -164,7 +161,7 @@ export function hashDvdArchiveFile(
           "DVD archive ended before its declared content size",
         );
       }
-      hash.update(buffer.subarray(0, count));
+      hasher.update(buffer.subarray(0, count));
       remaining -= count;
     }
 
@@ -182,7 +179,7 @@ export function hashDvdArchiveFile(
     }
 
     return {
-      contentId: `sha256:${hash.digest("hex")}`,
+      contentId: hasher.digest(),
       identity,
     };
   } catch (error) {

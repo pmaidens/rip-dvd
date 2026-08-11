@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import {
   type Stats,
   closeSync,
@@ -22,6 +22,7 @@ import {
 } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
+import { createRawDvdContentIdHasher } from "@rip-dvd/data-access/dvd-content-id";
 import { isDvdContentId } from "@rip-dvd/data-access/dvd-scan";
 
 import { requireDvdContentSize } from "./dvd-content-policy.js";
@@ -508,14 +509,12 @@ async function fingerprintArchiveFile(
   sizeBytes: number,
   signal: AbortSignal,
 ): Promise<string> {
-  const hash = createHash("sha256");
-  hash.update("rip-dvd-content-v2\0");
-  hash.update(String(sizeBytes));
+  const hasher = createRawDvdContentIdHasher(sizeBytes);
   for await (const chunk of createReadStream(path, { signal })) {
     signal.throwIfAborted();
-    hash.update(chunk);
+    hasher.update(chunk);
   }
-  return `sha256:${hash.digest("hex")}`;
+  return hasher.digest();
 }
 
 async function requireSafeArchiveRoot(path: string): Promise<string> {
