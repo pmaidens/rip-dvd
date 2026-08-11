@@ -20,6 +20,7 @@ import {
   DomainInvariantError,
   InvalidStatusTransitionError,
 } from "./errors.js";
+import { decodeDvdTitleMap } from "./dvd-scan.js";
 import { createDataAccess } from "./index.js";
 import { createLegacySidecarDataAccess } from "./legacy-sidecars.js";
 import { createTemporaryDirectoryFixture } from "./legacy-sidecar.test-support.js";
@@ -766,6 +767,30 @@ describe("legacy sidecar import", () => {
         fingerprint: "example-disc-fingerprint",
       }),
     ]);
+    expect(
+      decodeDvdTitleMap(
+        fixture.access.catalog.listDetectedDiscs(["archived"])[0]?.scanData,
+      ),
+    ).toEqual({
+      schemaVersion: 2,
+      contentId: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
+      titles: [
+        {
+          number: 1,
+          durationSeconds: 6_000,
+          chapters: 12,
+          audioStreams: [{ id: 0 }, { id: 1 }],
+          subtitles: [{ id: 0 }, { id: 1 }, { id: 2 }],
+        },
+        {
+          number: 2,
+          durationSeconds: 240,
+          chapters: 1,
+          audioStreams: [{ id: 0 }],
+          subtitles: [],
+        },
+      ],
+    });
     expect(fixture.access.catalog.listDiscSelections()).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ kind: "main_feature", titleNumber: null }),
@@ -1231,6 +1256,63 @@ describe("legacy sidecar import", () => {
     expect(fixture.access.catalog.listOriginalDiscArchives()).toHaveLength(1);
     expect(fixture.access.catalog.listDiscSelections()).toHaveLength(2);
     expect(fixture.access.catalog.listMediaItems()).toHaveLength(2);
+
+    fixture.access.close();
+  });
+
+  it("normalizes legacy scan details captured by an earlier importer on retry", () => {
+    const fixture = createFixture();
+    fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+    const importedDisc = fixture.access.catalog.listDetectedDiscs([
+      "archived",
+    ])[0]!;
+    const sqlite = new DatabaseSync(fixture.databasePath);
+    sqlite.prepare(
+      "update detected_discs set scan_data = ? where id = ?",
+    ).run(JSON.stringify({
+      discTitle: "EXAMPLE_MOVIE",
+      legacySchemaVersion: 2,
+      titles: [
+        {
+          number: 1,
+          seconds: 6_000,
+          chapters: 12,
+          audio_streams: 2,
+          subtitles: 3,
+        },
+        {
+          number: 2,
+          seconds: 240,
+          chapters: 1,
+          audio_streams: 1,
+          subtitles: 0,
+        },
+      ],
+    }), importedDisc.id);
+    sqlite.close();
+
+    const report = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+    const repairedDisc = fixture.access.catalog.listDetectedDiscs([
+      "archived",
+    ])[0]!;
+
+    expect(report).toMatchObject({
+      sidecarsImported: 1,
+      sidecarsSkipped: 0,
+      recordsUpdated: 1,
+      issues: [],
+    });
+    expect(decodeDvdTitleMap(repairedDisc.scanData)).toMatchObject({
+      schemaVersion: 2,
+      titles: [
+        { number: 1, durationSeconds: 6_000, chapters: 12 },
+        { number: 2, durationSeconds: 240, chapters: 1 },
+      ],
+    });
 
     fixture.access.close();
   });
