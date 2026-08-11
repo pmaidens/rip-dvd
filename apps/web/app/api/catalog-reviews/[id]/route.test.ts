@@ -668,6 +668,16 @@ describe("Catalog Review API", () => {
         () => "http://localhost:3000",
       );
 
+    const invalidMissingRepair = await mutate({
+      action: "repair_disc_selection",
+      discSelectionId: "missing-selection",
+      selection: { kind: "main_feature" },
+    });
+    expect(invalidMissingRepair.status).toBe(404);
+    await expect(invalidMissingRepair.json()).resolves.toEqual({
+      error: "Disc Selection not found",
+    });
+
     const showResponse = await mutate({
       action: "create_media_item",
       mediaItem: { parentId: null, kind: "tv_show", title: "Chapter Show" },
