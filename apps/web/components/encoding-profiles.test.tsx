@@ -1,6 +1,10 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
+import {
+  HANDBRAKE_PRESET_GROUPS,
+  HANDBRAKE_PRESETS,
+} from "../lib/handbrake-presets";
 import { EncodingProfilesView } from "./encoding-profiles";
 
 describe("EncodingProfilesView", () => {
@@ -26,7 +30,7 @@ describe("EncodingProfilesView", () => {
               mediaDomain: "dvd_video",
               version: 2,
               isActive: false,
-              settings: { preset: "HQ 480p30", container: "mkv" },
+              settings: { preset: "HQ 480p30 Surround", container: "mkv" },
             },
           ],
         }}
@@ -49,9 +53,15 @@ describe("EncodingProfilesView", () => {
     expect(html).toContain("Active");
     expect(html).toContain("Inactive");
     expect(html).toContain("Fast 480p30");
-    expect(html).toContain("HQ 480p30");
+    expect(html).toContain("HQ 480p30 Surround");
     expect(html).toContain("MKV");
     expect(html).toContain("Create profile");
+    expect(html).toContain('<select name="preset" required="">');
+    expect(html).toContain('value="Fast 480p30" selected=""');
+    expect(html.match(/<option /g)).toHaveLength(HANDBRAKE_PRESETS.length);
+    for (const group of HANDBRAKE_PRESET_GROUPS) {
+      expect(html).toContain(`<optgroup label="${group.label}">`);
+    }
     expect(html).toContain("Create new version");
     expect(html).toContain("Deactivate");
     expect(html).toContain("Activate");
@@ -111,7 +121,7 @@ describe("EncodingProfilesView", () => {
               mediaDomain: "dvd_video",
               version: 1,
               isActive: true,
-              settings: { preset: "HQ 480p30", container: "mkv" },
+              settings: { preset: "HQ 480p30 Surround", container: "mkv" },
             },
           ],
         }}
@@ -138,5 +148,39 @@ describe("EncodingProfilesView", () => {
     expect(html).toContain(
       'aria-label="Deactivate DVD library, profile key archive, version 1"',
     );
+  });
+
+  it("keeps an unknown migrated preset visible but unavailable for new versions", () => {
+    const html = renderToStaticMarkup(
+      <EncodingProfilesView
+        state={{
+          status: "loaded",
+          profiles: [
+            {
+              id: "legacy-profile",
+              key: "legacy",
+              displayName: "Legacy profile",
+              mediaDomain: "dvd_video",
+              version: 1,
+              isActive: true,
+              settings: { preset: "Legacy Fast 480p30", container: null },
+            },
+          ],
+        }}
+        versionSourceId="legacy-profile"
+        isSaving={false}
+        hasRequestError={false}
+        onSave={() => undefined}
+        onCreateVersion={() => undefined}
+        onCancelVersion={() => undefined}
+        onRetry={() => undefined}
+        onSetActive={() => undefined}
+      />,
+    );
+
+    expect(html).toContain(
+      '<option value="" disabled="" selected="">Legacy Fast 480p30 (unavailable — select a replacement)</option>',
+    );
+    expect(html.match(/<option /g)).toHaveLength(HANDBRAKE_PRESETS.length + 1);
   });
 });
