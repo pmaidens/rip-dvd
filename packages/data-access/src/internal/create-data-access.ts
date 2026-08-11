@@ -77,10 +77,10 @@ import {
   requireNonEmpty,
   requirePositiveSafeInteger,
 } from "./validation.js";
+import { validateMediaItem } from "./media-item-validation.js";
 import { isDvdContentId } from "../dvd-scan.js";
 import {
   ENCODE_PROGRESS_PHASES,
-  MAX_MEDIA_ITEM_HIERARCHY_DEPTH,
 } from "../domain-values.js";
 import {
   DomainInvariantError,
@@ -474,75 +474,6 @@ export function createDataAccessInternal(
       );
     }
     return value;
-  }
-
-  function requireAcyclicMediaItemParent(
-    itemId: MediaItemId,
-    parentId: MediaItemId | null | undefined,
-    querySource: Pick<typeof database, "select"> = database,
-  ): number {
-    if (parentId === null || parentId === undefined) {
-      return 1;
-    }
-    const visited = new Set<MediaItemId>([itemId]);
-    let currentId: MediaItemId | null = parentId;
-    while (currentId !== null) {
-      if (visited.has(currentId)) {
-        throw new DomainInvariantError(
-          "Media Item hierarchy cannot contain a cycle",
-        );
-      }
-      if (visited.size >= MAX_MEDIA_ITEM_HIERARCHY_DEPTH) {
-        throw new DomainInvariantError(
-          "Media Item hierarchy exceeds the supported depth",
-        );
-      }
-      visited.add(currentId);
-      const current: { id: MediaItemId; parentId: MediaItemId | null } = requireRow(
-        querySource
-          .select({ id: mediaItems.id, parentId: mediaItems.parentId })
-          .from(mediaItems)
-          .where(eq(mediaItems.id, currentId))
-          .get(),
-        "media item",
-        currentId,
-      );
-      currentId = current.parentId;
-    }
-    return visited.size;
-  }
-
-  function requireMediaItemHierarchyWithinDepth(
-    itemId: MediaItemId,
-    parentId: MediaItemId | null | undefined,
-    querySource: Pick<typeof database, "get" | "select"> = database,
-  ): void {
-    const ancestorDepth = requireAcyclicMediaItemParent(
-      itemId,
-      parentId,
-      querySource,
-    );
-    const descendantDepth = querySource.get<{ maximumDepth: number }>(sql`
-      with recursive media_item_descendants(id, depth) as (
-        select ${itemId}, 1
-        union all
-        select ${mediaItems.id}, media_item_descendants.depth + 1
-        from ${mediaItems}
-        inner join media_item_descendants
-          on ${mediaItems.parentId} = media_item_descendants.id
-        where media_item_descendants.depth <= ${MAX_MEDIA_ITEM_HIERARCHY_DEPTH}
-      )
-      select max(depth) as maximumDepth
-      from media_item_descendants
-    `).maximumDepth;
-    if (
-      ancestorDepth + descendantDepth - 1 >
-        MAX_MEDIA_ITEM_HIERARCHY_DEPTH
-    ) {
-      throw new DomainInvariantError(
-        "Media Item hierarchy exceeds the supported depth",
-      );
-    }
   }
 
   function requireReviewableDiscSelections(
@@ -2361,35 +2292,21 @@ export function createDataAccessInternal(
       createMediaItem(input) {
         const timestamp = now();
         const id = newId<MediaItemId>();
-        const values = {
-          id,
-          parentId: input.parentId,
-          kind: input.kind,
-          title: requireNonEmpty(input.title, "title"),
-          year: optionalSafeInteger(input.year, "year", 1800, 9999),
-          seasonNumber: optionalSafeInteger(
-            input.seasonNumber,
-            "seasonNumber",
-            0,
-          ),
-          episodeNumber: optionalSafeInteger(
-            input.episodeNumber,
-            "episodeNumber",
-            1,
-          ),
-          createdAt: timestamp,
-          updatedAt: timestamp,
-        };
         return database.transaction((transaction) => {
-          requireMediaItemHierarchyWithinDepth(
-            id,
-            input.parentId,
+          const values = validateMediaItem(
+            { ...input, id },
             transaction,
+            { titleNormalization: "trim" },
           );
           return requireRow(
             transaction
               .insert(mediaItems)
-              .values(values)
+              .values({
+                id,
+                ...values,
+                createdAt: timestamp,
+                updatedAt: timestamp,
+              })
               .returning()
               .get(),
             "media item",
@@ -2409,39 +2326,38 @@ export function createDataAccessInternal(
             "media item",
             id,
           );
-          const parentId =
-            input.parentId === undefined ? current.parentId : input.parentId;
-          requireMediaItemHierarchyWithinDepth(id, parentId, transaction);
+          const values = validateMediaItem(
+            {
+              ...current,
+              ...input,
+              id,
+              parentId:
+                input.parentId === undefined
+                  ? current.parentId
+                  : input.parentId,
+              kind: input.kind === undefined ? current.kind : input.kind,
+              title: input.title === undefined ? current.title : input.title,
+              year: input.year === undefined ? current.year : input.year,
+              seasonNumber:
+                input.seasonNumber === undefined
+                  ? current.seasonNumber
+                  : input.seasonNumber,
+              episodeNumber:
+                input.episodeNumber === undefined
+                  ? current.episodeNumber
+                  : input.episodeNumber,
+            },
+            transaction,
+            {
+              titleNormalization:
+                input.title === undefined ? "preserve" : "trim",
+            },
+          );
           return requireRow(
             transaction
               .update(mediaItems)
               .set({
-                parentId,
-                kind: input.kind ?? current.kind,
-                title:
-                  input.title === undefined
-                    ? current.title
-                    : requireNonEmpty(input.title, "title"),
-                year:
-                  input.year === undefined
-                    ? current.year
-                    : optionalSafeInteger(input.year, "year", 1800, 9999),
-                seasonNumber:
-                  input.seasonNumber === undefined
-                    ? current.seasonNumber
-                    : optionalSafeInteger(
-                        input.seasonNumber,
-                        "seasonNumber",
-                        0,
-                      ),
-                episodeNumber:
-                  input.episodeNumber === undefined
-                    ? current.episodeNumber
-                    : optionalSafeInteger(
-                        input.episodeNumber,
-                        "episodeNumber",
-                        1,
-                      ),
+                ...values,
                 updatedAt: now(),
               })
               .where(eq(mediaItems.id, id))
