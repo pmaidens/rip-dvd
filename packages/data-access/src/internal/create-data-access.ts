@@ -1987,7 +1987,7 @@ export function createDataAccessInternal(
               existing,
               fingerprintObservationDiscKind: matchingObservation?.discKind,
               isNewMediumObservation: input.isNewMediumObservation,
-              matchingArchive: contentIdentityArchive,
+              contentIdentityArchive,
               scanData,
               volumeLabel: input.volumeLabel,
             });
