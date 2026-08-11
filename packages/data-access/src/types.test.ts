@@ -123,34 +123,27 @@ describe("data-access domain identifiers", () => {
     }
   });
 
-  it("makes bounded list policies mutually exclusive", () => {
-    const newest = {
-      mode: "newest",
-      limit: 20,
-    } satisfies BoundedListPolicy;
+  it("exposes only supported bounded list policies", () => {
     const activity = {
       mode: "active-and-history",
       activeLimit: 100,
       historyLimit: 20,
     } satisfies BoundedListPolicy;
 
-    expectTypeOf(newest).toMatchTypeOf<BoundedListPolicy>();
     expectTypeOf(activity).toMatchTypeOf<BoundedListPolicy>();
 
     if (false) {
-      const mixed: BoundedListPolicy = {
+      const newest: BoundedListPolicy = {
+        // @ts-expect-error The unsupported newest list policy is not public.
         mode: "newest",
         limit: 20,
-        // @ts-expect-error A newest policy cannot specify activity bounds.
-        activeLimit: 100,
-        historyLimit: 20,
       };
       // @ts-expect-error Both activity bounds are required together.
       const incomplete: BoundedListPolicy = {
         mode: "active-and-history",
         historyLimit: 20,
       };
-      void mixed;
+      void newest;
       void incomplete;
     }
   });
