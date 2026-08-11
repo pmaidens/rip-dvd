@@ -45,6 +45,7 @@ import {
   sameEncodeOutputInode,
   sameEncodeOutputMutationSnapshot,
 } from "./encode-output-filesystem-identity.js";
+import { normalizeErrorMessage } from "./normalize-error-message.js";
 
 const HANDBRAKE_TIMEOUT_MS = 24 * 60 * 60_000;
 const MAX_DIAGNOSTIC_BYTES = 65_536;
@@ -762,7 +763,8 @@ function publishReplacementAtMutationBoundary(
       finalPath,
     );
   } catch (error) {
-    exchangeError = error instanceof Error ? error : new Error(String(error));
+    exchangeError =
+      error instanceof Error ? error : new Error(normalizeErrorMessage(error));
   }
   const partialMetadata = lstatSync(partialPath);
   let publishedFinalMetadata: Stats | null = null;
@@ -788,7 +790,7 @@ function publishReplacementAtMutationBoundary(
     }
   } catch (error) {
     displacedFinalError =
-      error instanceof Error ? error : new Error(String(error));
+      error instanceof Error ? error : new Error(normalizeErrorMessage(error));
   }
   if (exchangeError !== null && displacedFinalError !== null) {
     const exchangeDidNotOccur =
@@ -837,9 +839,7 @@ function publishReplacementAtMutationBoundary(
       }
       throw new PendingPublicationRecoveryError(
         `${displacedFinalError.message}; atomic exchange rollback requires reconciliation: ${
-          rollbackError instanceof Error
-            ? rollbackError.message
-            : String(rollbackError)
+          normalizeErrorMessage(rollbackError)
         }`,
       );
     }
@@ -940,7 +940,7 @@ async function quarantinePartial(
       .catch((error: unknown) => {
         log(
           `Encode partial cleanup after HandBrake close failed: ${
-            error instanceof Error ? error.message : String(error)
+            normalizeErrorMessage(error)
           }`,
         );
       });
@@ -1216,7 +1216,7 @@ async function reconcilePendingPublications(
     } catch (error) {
       options.log(
         `Pending Encode publication could not be reconciled: ${
-          error instanceof Error ? error.message : String(error)
+          normalizeErrorMessage(error)
         }`,
       );
     } finally {
@@ -1261,7 +1261,7 @@ async function recoverAbandonedPublicationMutations(
     } catch (error) {
       options.log(
         `Encode publication mutation could not be recovered: ${
-          error instanceof Error ? error.message : String(error)
+          normalizeErrorMessage(error)
         }`,
       );
     }
@@ -1312,7 +1312,7 @@ async function reconcileActivePublicationMutations(
     } catch (error) {
       options.log(
         `Active Encode publication mutation could not be reconciled: ${
-          error instanceof Error ? error.message : String(error)
+          normalizeErrorMessage(error)
         }`,
       );
     }
@@ -1627,9 +1627,7 @@ async function executeClaim(
     } catch (cleanupError) {
       options.log(
         `Completed Encode publication cleanup failed: ${
-          cleanupError instanceof Error
-            ? cleanupError.message
-            : String(cleanupError)
+          normalizeErrorMessage(cleanupError)
         }`,
       );
     }
@@ -1656,9 +1654,7 @@ async function executeClaim(
       } catch (authorityError) {
         options.log(
           `Stale Encode publisher left publication recovery to reconciliation: ${
-            authorityError instanceof Error
-              ? authorityError.message
-              : String(authorityError)
+            normalizeErrorMessage(authorityError)
           }`,
         );
         if (options.signal.aborted) {
@@ -1684,11 +1680,7 @@ async function executeClaim(
           preserveReplacementAuthority = true;
         }
       } catch (cleanupError) {
-        cleanupFailures.push(
-          cleanupError instanceof Error
-            ? cleanupError.message
-            : String(cleanupError),
-        );
+        cleanupFailures.push(normalizeErrorMessage(cleanupError));
       }
     }
     if (!published && replacementPath !== undefined) {
@@ -1699,11 +1691,7 @@ async function executeClaim(
         );
       } catch (cleanupError) {
         replacementCleanupFailed = true;
-        cleanupFailures.push(
-          cleanupError instanceof Error
-            ? cleanupError.message
-            : String(cleanupError),
-        );
+        cleanupFailures.push(normalizeErrorMessage(cleanupError));
       }
     }
     if (published && finalPath !== undefined) {
@@ -1739,22 +1727,14 @@ async function executeClaim(
           await syncPath(dirname(finalPath));
         }
       } catch (cleanupError) {
-        cleanupFailures.push(
-          cleanupError instanceof Error
-            ? cleanupError.message
-            : String(cleanupError),
-        );
+        cleanupFailures.push(normalizeErrorMessage(cleanupError));
       }
       if (priorFinalFailedPath !== null) {
         try {
           await restoreMovedAsideOutput(priorFinalFailedPath, finalPath);
           preserveReplacementAuthority = true;
         } catch (cleanupError) {
-          cleanupFailures.push(
-            cleanupError instanceof Error
-              ? cleanupError.message
-              : String(cleanupError),
-          );
+          cleanupFailures.push(normalizeErrorMessage(cleanupError));
         }
       }
     }
@@ -1767,29 +1747,19 @@ async function executeClaim(
           pendingPartialCleanup =
             options.access.encodeJobs.registerPartialCleanup(claim);
         } catch (cleanupError) {
-          cleanupFailures.push(
-            cleanupError instanceof Error
-              ? cleanupError.message
-              : String(cleanupError),
-          );
+          cleanupFailures.push(normalizeErrorMessage(cleanupError));
         }
       } else if (pendingPartialCleanup === undefined) {
         try {
           await quarantinePartial(partialPath, options.runner, options.log);
         } catch (cleanupError) {
-          cleanupFailures.push(
-            cleanupError instanceof Error
-              ? cleanupError.message
-              : String(cleanupError),
-          );
+          cleanupFailures.push(normalizeErrorMessage(cleanupError));
         }
       }
     }
     const failureMessage = signal.aborted
       ? "Encode interrupted"
-      : error instanceof Error
-        ? error.message
-        : String(error);
+      : normalizeErrorMessage(error);
     const message = `${failureMessage}${
       cleanupFailures.length > 0
         ? `; cleanup failed: ${cleanupFailures.join("; ")}`
@@ -1800,10 +1770,7 @@ async function executeClaim(
         preserveReplacementAuthority,
       });
     } catch (failureError) {
-      const failureMessage =
-        failureError instanceof Error
-          ? failureError.message
-          : String(failureError);
+      const failureMessage = normalizeErrorMessage(failureError);
       options.log(
         `Encode Job failure state could not be persisted: ${failureMessage}`,
       );
@@ -1825,9 +1792,7 @@ async function executeClaim(
       } catch (cleanupError) {
         options.log(
           `Deferred Encode partial cleanup could not start: ${
-            cleanupError instanceof Error
-              ? cleanupError.message
-              : String(cleanupError)
+            normalizeErrorMessage(cleanupError)
           }`,
         );
       }
@@ -1910,7 +1875,7 @@ export async function runEncodeWorker({
       if (pollOptions.signal.aborted) {
         break;
       }
-      const message = error instanceof Error ? error.message : String(error);
+      const message = normalizeErrorMessage(error);
       pollOptions.log(`Encode worker poll failed: ${message}`);
     }
     if (pollOptions.signal.aborted) {
