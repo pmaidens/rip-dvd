@@ -628,9 +628,9 @@ the same container path with read-only device permission. It defaults to
 `/dev/sr0`; set the variable to another `/dev/...` path when that is the primary
 drive. CSS authentication also requires the matching SCSI-generic node. Set
 `RIP_DVD_ARCHIVE_CSS_DEVICE_PATH` (default `/dev/sg1`) to the entry listed in
-`/sys/class/block/sr0/device/scsi_generic`. Compose grants that node `rwm`
-device permission because CSS authentication uses SCSI REPORT KEY and SEND KEY
-commands; the reader does not issue media-write commands. Compose adds only
+`/sys/class/block/sr0/device/scsi_generic`. Compose grants that node read-only
+device permission; Linux permits the CSS REPORT KEY and SEND KEY authentication
+commands without opening access to media-write commands. Compose adds only
 `RIP_DVD_OPTICAL_DEVICE_GID` (numeric GID 24 by default) to the non-root archive
 user, so set it to the host group that can access both device nodes (often the
 `cdrom` group).
@@ -646,9 +646,8 @@ Keep only real optical and matching SCSI-generic device paths in that local
 file; never map all of `/dev`.
 The archive worker can then discover and use each explicitly mapped drive while
 the web and encode containers retain no device access. Device mappings remain
-read-only for sector access; only the SCSI-generic CSS authentication node has
-`rwm` ioctl permission. This worker does not eject media. The start script also
-includes this local override explicitly when block-I/O weights are enabled.
+read-only. This worker does not eject media. The start script also includes this
+local override explicitly when block-I/O weights are enabled.
 
 The worker runs discovery on each configured poll interval. An empty drive is a
 normal state. Scanner failures are logged per drive without hiding other drives,
@@ -674,7 +673,8 @@ capacity is recovered and a fresh retry is admitted only after confirmed close.
 Raw-disc open/read/hash work uses the same bounded helper-process lifecycle, so
 a kernel-blocked device operation cannot keep the archive worker alive.
 Reads are shell-free, size-capped, incremental, timed out, and
-cancellation-aware.
+cancellation-aware. The full-disc hash has a four-hour ceiling so slow physical
+drives can complete while a permanently blocked read remains bounded.
 Repeated polls update the same Detected Disc. Dashboard approval atomically
 marks a scanned disc approved and creates its queued Archive Job; discovery
 never approves or queues work by itself. The archive worker claims only work

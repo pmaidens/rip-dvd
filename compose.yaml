@@ -85,7 +85,7 @@ services:
       - "${RIP_DVD_OPTICAL_DEVICE_GID:-24}"
     devices:
       - "${RIP_DVD_ARCHIVE_DEVICE_PATH:-/dev/sr0}:${RIP_DVD_ARCHIVE_DEVICE_PATH:-/dev/sr0}:r"
-      - "${RIP_DVD_ARCHIVE_CSS_DEVICE_PATH:-/dev/sg1}:${RIP_DVD_ARCHIVE_CSS_DEVICE_PATH:-/dev/sg1}:rwm"
+      - "${RIP_DVD_ARCHIVE_CSS_DEVICE_PATH:-/dev/sg1}:${RIP_DVD_ARCHIVE_CSS_DEVICE_PATH:-/dev/sg1}:r"
     volumes:
       - rip-dvd-data:/data
       - ${RIP_DVD_ORIGINALS_LIBRARY_HOST_PATH:-rip-dvd-originals}:/media/originals

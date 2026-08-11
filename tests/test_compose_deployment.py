@@ -146,7 +146,7 @@ class ComposeDeploymentTests(unittest.TestCase):
                     {
                         "source": "/dev/sg1",
                         "target": "/dev/sg1",
-                        "permissions": "rwm",
+                        "permissions": "r",
                     },
                 ],
                 "target": "archive-worker",
@@ -190,13 +190,13 @@ class ComposeDeploymentTests(unittest.TestCase):
                 {
                     "source": "/dev/sg1",
                     "target": "/dev/sg1",
-                    "permissions": "rwm",
+                    "permissions": "r",
                 },
                 {"source": "/dev/sr1", "target": "/dev/sr1", "permissions": "r"},
                 {
                     "source": "/dev/sg2",
                     "target": "/dev/sg2",
-                    "permissions": "rwm",
+                    "permissions": "r",
                 },
             ],
         )
