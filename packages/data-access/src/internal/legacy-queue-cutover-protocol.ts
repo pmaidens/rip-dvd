@@ -189,12 +189,6 @@ export function loadLegacyQueueCutoverProtocol(
   return protocol;
 }
 
-export function serializeLegacyQueueCutoverProtocol(
-  protocol: LegacyQueueCutoverProtocol,
-): string {
-  return JSON.stringify(protocol);
-}
-
 export const LEGACY_QUEUE_CUTOVER_WORKER = String.raw`
 const { spawn } = require("node:child_process");
 const {

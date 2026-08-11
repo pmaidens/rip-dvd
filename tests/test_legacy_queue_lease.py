@@ -19,28 +19,16 @@ from rip_dvd.legacy_queue_lease import (
 
 class LegacyQueueLeaseTests(unittest.TestCase):
     def protocol_manifest(self, version=1, ready_sentinel="ready"):
+        protocol_path = (
+            Path(__file__).resolve().parents[1]
+            / "rip_dvd"
+            / "legacy_queue_cutover_protocol.json"
+        )
+        protocol = json.loads(protocol_path.read_text(encoding="utf-8"))
+        protocol["version"] = version
+        protocol["sentinels"]["ready"] = ready_sentinel
         return json.dumps(
-            {
-                "version": version,
-                "command": "hold-cutover",
-                "indexes": {"state": 0, "release": 1, "heartbeat": 2},
-                "states": {
-                    "starting": 0,
-                    "intentReady": 1,
-                    "ready": 2,
-                    "released": 3,
-                    "failed": 4,
-                },
-                "sentinels": {
-                    "abort": "supervisor-abort",
-                    "error": "error",
-                    "intentReady": "intent-ready",
-                    "ready": ready_sentinel,
-                    "release": "release",
-                    "released": "released",
-                    "workerError": "worker-error",
-                },
-            },
+            protocol,
             separators=(",", ":"),
         )
 
