@@ -241,7 +241,7 @@ describe("Encode Jobs API", () => {
     expect((await requeuedResponse.json()).job).toMatchObject({
       id: queued.id,
       encodingProfileId: profile.id,
-      outputPath: "/media/movies/Encode API queue remastered.mkv",
+      outputPath: "/media/movies/Encode API queue.mkv",
       status: "queued",
       progressPercent: 0,
       completedAt: null,
