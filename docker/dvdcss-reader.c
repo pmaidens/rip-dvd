@@ -15,7 +15,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define READ_BLOCKS 512
+/* Some USB optical bridges reject larger READ(10) transfer lengths. */
+#define READ_BLOCKS 16
 #define MAX_DVD_CONTENT_BYTES UINT64_C(9000000000)
 
 enum operation {
@@ -35,10 +36,11 @@ static int fail_errno(const char *operation)
     return 1;
 }
 
-static int fail_dvdcss(dvdcss_t dvdcss, const char *operation)
+static int fail_dvdcss_read(dvdcss_t dvdcss, uint64_t byte_offset)
 {
     const char *detail = dvdcss_error(dvdcss);
-    fprintf(stderr, "%s%s%s\n", operation, detail ? ": " : "", detail ? detail : "");
+    fprintf(stderr, "DVD content read failed at byte %" PRIu64 "%s%s\n",
+            byte_offset, detail ? ": " : "", detail ? detail : "");
     return 1;
 }
 
@@ -112,7 +114,7 @@ static int read_disc(dvdcss_t dvdcss, uint64_t size_bytes,
                             : (int)blocks_remaining;
         int result = dvdcss_read(dvdcss, buffer, requested, DVDCSS_NOFLAGS);
         if (result < 0) {
-            status = fail_dvdcss(dvdcss, "DVD content read failed");
+            status = fail_dvdcss_read(dvdcss, bytes_read);
             break;
         }
         if (result == 0) {
