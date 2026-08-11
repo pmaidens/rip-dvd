@@ -2,6 +2,14 @@
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 
+import type {
+  DiscSelectionKind,
+  MediaItemKind,
+} from "@rip-dvd/data-access";
+import {
+  DISC_SELECTION_KINDS,
+  MEDIA_ITEM_KINDS,
+} from "@rip-dvd/data-access/catalog-kinds";
 import type { DvdTitle } from "@rip-dvd/data-access/dvd-scan";
 
 import type {
@@ -10,18 +18,11 @@ import type {
 } from "../lib/catalog-review-command";
 import { displayTerm } from "../lib/display-term";
 
-const mediaItemKinds = [
-  "movie",
-  "tv_show",
-  "season",
-  "episode",
-  "trailer",
-  "bonus_feature",
-  "other",
-] as const;
-
-type MediaItemKind = (typeof mediaItemKinds)[number];
-type DiscSelectionKind = "main_feature" | "dvd_title" | "dvd_chapters";
+const discSelectionLabels = {
+  main_feature: "DVD main feature",
+  dvd_title: "DVD title",
+  dvd_chapters: "DVD chapter range",
+} satisfies Record<DiscSelectionKind, string>;
 
 export interface CatalogReviewMediaItem {
   id: string;
@@ -376,7 +377,7 @@ export function CatalogReviewView({
               <label>
                 Kind
                 <select name="kind" defaultValue={editing?.kind ?? "movie"}>
-                  {mediaItemKinds.map((kind) => (
+                  {MEDIA_ITEM_KINDS.map((kind) => (
                     <option key={kind} value={kind}>{displayTerm(kind)}</option>
                   ))}
                 </select>
@@ -503,9 +504,11 @@ export function CatalogReviewView({
                   onChange={(event) =>
                     setSelectionKind(event.currentTarget.value as DiscSelectionKind)}
                 >
-                  <option value="main_feature">DVD main feature</option>
-                  <option value="dvd_title">DVD title</option>
-                  <option value="dvd_chapters">DVD chapter range</option>
+                  {DISC_SELECTION_KINDS.map((kind) => (
+                    <option key={kind} value={kind}>
+                      {discSelectionLabels[kind]}
+                    </option>
+                  ))}
                 </select>
               </label>
               {selectionKind !== "main_feature" ? (
