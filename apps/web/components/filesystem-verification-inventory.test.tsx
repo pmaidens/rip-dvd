@@ -7,6 +7,77 @@ import {
 } from "./filesystem-verification-inventory";
 
 describe("FilesystemVerificationInventory", () => {
+  it("renders every verification result through the shared display contract", () => {
+    const verificationResults = [
+      ["accessible", "File is accessible."],
+      ["missing", "File is missing at the recorded path."],
+      [
+        "inaccessible",
+        "The web process cannot access the recorded path.",
+      ],
+      ["error", "Verification failed unexpectedly."],
+    ] as const;
+    const html = renderToStaticMarkup(
+      <FilesystemVerificationInventoryView
+        encodeOutputs={{
+          status: "loaded",
+          items: [
+            ...verificationResults.map(([status, message], index) => ({
+              target: "encode_job_output" as const,
+              id: `verified-output-${index}`,
+              mediaTitle: `Verified output ${index}`,
+              mediaYear: null,
+              encodingProfileName: "DVD archive · Version 3",
+              jobStatus: "completed" as const,
+              updatedAt: "2026-08-06T23:45:00.000Z",
+              status,
+              message,
+              verifiedAt: "2026-08-07T02:30:00.000Z",
+            })),
+            {
+              target: "encode_job_output",
+              id: "unverified-output",
+              mediaTitle: "Unverified output",
+              mediaYear: null,
+              encodingProfileName: "DVD archive · Version 3",
+              jobStatus: "completed",
+              updatedAt: "2026-08-06T23:45:00.000Z",
+              status: null,
+              message: null,
+              verifiedAt: null,
+            },
+          ],
+          page: {
+            offset: 0,
+            limit: 20,
+            hasPrevious: false,
+            hasNext: false,
+          },
+        }}
+        originalArchives={{
+          status: "loaded",
+          items: [],
+          page: {
+            offset: 0,
+            limit: 20,
+            hasPrevious: false,
+            hasNext: false,
+          },
+        }}
+      />,
+    );
+
+    for (const [status, message] of verificationResults) {
+      expect(html).toContain(`verification-${status}`);
+      expect(html).toContain(message);
+    }
+    expect(html.match(/role="status"/g)).toHaveLength(4);
+    expect(html.match(/aria-live="polite"/g)).toHaveLength(4);
+    expect(html.match(/<small>Verified [^<]+<\/small>/g)).toHaveLength(4);
+    expect(html).not.toContain("2026-08-07T02:30:00.000Z");
+    expect(html).toContain("Not verified yet.");
+  });
+
   it("keeps an Encode Job beyond the operations cap explicitly verifiable", async () => {
     const fetcher = vi.fn(async () =>
       Response.json({

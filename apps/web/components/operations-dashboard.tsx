@@ -25,6 +25,10 @@ import { CatalogReviewEditor } from "./catalog-review-editor";
 import { EncodeJobsManager, retryEncodeJob } from "./encode-jobs";
 import { EncodingProfilesManager } from "./encoding-profiles";
 import { FilesystemVerificationInventory } from "./filesystem-verification-inventory";
+import {
+  FilesystemVerificationResult,
+  type FilesystemVerificationDisplay,
+} from "./filesystem-verification-result";
 
 export type DashboardSectionLoadState<T> =
   | { status: "loading" }
@@ -109,30 +113,19 @@ function StatusBadge({ value }: { value: DashboardStatus }) {
   return <span className={`status status-${value}`}>{displayTerm(value)}</span>;
 }
 
-type FilesystemVerificationDisplay = Pick<
-  DashboardEncodeJob,
-  "verificationStatus" | "verificationMessage" | "verifiedAt"
->;
-
-function FilesystemVerificationResult({
+function toFilesystemVerificationDisplay({
   verificationStatus,
   verificationMessage,
   verifiedAt,
-}: FilesystemVerificationDisplay) {
-  if (!verificationStatus || !verificationMessage || !verifiedAt) {
-    return <p className="verification-result">Not verified yet.</p>;
-  }
-  return (
-    <div
-      className={`verification-result verification-${verificationStatus}`}
-      role="status"
-      aria-live="polite"
-    >
-      <strong>{displayTerm(verificationStatus)}</strong>
-      <span>{verificationMessage}</span>
-      <small>Verified {formatTimestamp(verifiedAt)}</small>
-    </div>
-  );
+}: Pick<
+  DashboardEncodeJob,
+  "verificationStatus" | "verificationMessage" | "verifiedAt"
+>): FilesystemVerificationDisplay {
+  return {
+    status: verificationStatus ?? null,
+    message: verificationMessage ?? null,
+    verifiedAt: verifiedAt ?? null,
+  };
 }
 
 interface DashboardJobItemProps {
@@ -612,7 +605,7 @@ export function DashboardView({
             status={job.status}
             progressPercent={job.progressPercent}
             progressDetail={encodeProgressDetail(job)}
-            verification={job}
+            verification={toFilesystemVerificationDisplay(job)}
             action={
               <div className="operation-actions">
                 {job.status === "failed" || job.status === "completed" ? (
@@ -673,7 +666,9 @@ export function DashboardView({
             <p className="item-time">
               Archived {formatTimestamp(archive.archivedAt)}
             </p>
-            <FilesystemVerificationResult {...archive} />
+            <FilesystemVerificationResult
+              {...toFilesystemVerificationDisplay(archive)}
+            />
             <div className="operation-actions">
               <button
                 type="button"
