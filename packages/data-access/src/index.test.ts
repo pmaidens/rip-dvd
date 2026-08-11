@@ -938,6 +938,125 @@ describe("data-access facade", () => {
     access.close();
   });
 
+  it("uses identical archived DVD scan and title decisions across selection callers", () => {
+    const databasePath = createTestDatabasePath();
+    let access = openTestDatabase(databasePath);
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const createArchive = (
+      suffix: string,
+      fingerprint: string,
+      scanData?: unknown,
+    ) => {
+      const disc = access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint,
+        ...(scanData === undefined ? {} : { scanData }),
+      });
+      access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+      access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+      const archive = access.catalog.createOriginalDiscArchive({
+        detectedDiscId: disc.id,
+        discKind: "dvd",
+        archiveFormat: "iso",
+        archivePath: `/media/originals/${suffix}.iso`,
+        fingerprint,
+      });
+      const mediaItem = access.catalog.createMediaItem({
+        kind: "movie",
+        title: suffix,
+      });
+      return { archive, mediaItem };
+    };
+
+    const unreviewable = createArchive(
+      "Unreviewable Selection Evidence",
+      `sha256:${"e".repeat(64)}`,
+    );
+    const unreviewableSelection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: unreviewable.archive.id,
+      mediaItemId: unreviewable.mediaItem.id,
+      kind: "main_feature",
+    });
+    const unreviewableTitle = {
+      originalDiscArchiveId: unreviewable.archive.id,
+      mediaItemId: unreviewable.mediaItem.id,
+      kind: "dvd_title" as const,
+      titleNumber: 1,
+    };
+    const scanError = /reviewable DVD title map/;
+    expect(() => access.catalog.createDiscSelection(unreviewableTitle))
+      .toThrow(scanError);
+    expect(() =>
+      access.catalog.repairDiscSelection(
+        unreviewableSelection.id,
+        unreviewableTitle,
+      )
+    ).toThrow(scanError);
+
+    const contentId = `sha256:${"d".repeat(64)}`;
+    const missingTitle = createArchive(
+      "Missing Title Evidence",
+      contentId,
+      {
+        schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+        contentId,
+        titles: [{
+          number: 2,
+          durationSeconds: 2_400,
+          chapters: 8,
+          audioStreams: [],
+          subtitles: [],
+        }],
+      },
+    );
+    const missingTitleSelection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: missingTitle.archive.id,
+      mediaItemId: missingTitle.mediaItem.id,
+      kind: "dvd_title",
+      titleNumber: 2,
+    });
+    const absentTitle = {
+      originalDiscArchiveId: missingTitle.archive.id,
+      mediaItemId: missingTitle.mediaItem.id,
+      kind: "dvd_title" as const,
+      titleNumber: 1,
+    };
+    const titleError = /DVD title 1 is not present in the archived scan/;
+    expect(() => access.catalog.createDiscSelection(absentTitle))
+      .toThrow(titleError);
+    expect(() =>
+      access.catalog.repairDiscSelection(
+        missingTitleSelection.id,
+        absentTitle,
+      )
+    ).toThrow(titleError);
+    access.close();
+
+    const sqlite = new DatabaseSync(databasePath);
+    const persistTitle = sqlite.prepare(
+      `update disc_selections
+       set source_key = ?, kind = 'dvd_title', title_number = 1,
+           chapter_start = null, chapter_end = null
+       where id = ?`,
+    );
+    persistTitle.run("dvd:title:1", unreviewableSelection.id);
+    persistTitle.run("dvd:title:1", missingTitleSelection.id);
+    sqlite.close();
+
+    access = openTestDatabase(databasePath);
+    expect(() =>
+      access.catalog.completeCatalogReview(unreviewable.archive.id)
+    ).toThrow(scanError);
+    expect(() =>
+      access.catalog.completeCatalogReview(missingTitle.archive.id)
+    ).toThrow(titleError);
+    access.close();
+  });
+
   it("lists only Disc Selections currently eligible for encoding", () => {
     const access = openTestDatabase();
     const drive = access.catalog.upsertOpticalDrive({
