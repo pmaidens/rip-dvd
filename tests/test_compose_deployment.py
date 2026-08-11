@@ -549,6 +549,7 @@ class ComposeDeploymentTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             backups = list(backup_directory.glob("rip-dvd-*.sqlite"))
             self.assertEqual(len(backups), 1)
+            self.assertEqual(backups[0].stat().st_mode & 0o777, 0o600)
             with sqlite3.connect(backups[0]) as snapshot:
                 self.assertEqual(
                     snapshot.execute("PRAGMA integrity_check").fetchone(), ("ok",)
@@ -557,7 +558,54 @@ class ComposeDeploymentTests(unittest.TestCase):
                     snapshot.execute("SELECT id FROM archive_jobs").fetchone(),
                     ("archive-job-18",),
                 )
-            self.assertEqual(list(backup_directory.glob("*.partial")), [])
+            self.assertEqual(list(backup_directory.glob("*.partial*")), [])
+
+    @unittest.skipUnless(shutil.which("sqlite3"), "sqlite3 is unavailable")
+    def test_backup_tool_cleans_partial_artifacts_when_integrity_check_fails(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            database_path = root / "rip-dvd.sqlite"
+            backup_directory = root / "backups"
+            backup_directory.mkdir()
+            sqlite3_path = shutil.which("sqlite3")
+            self.assertIsNotNone(sqlite3_path)
+
+            with sqlite3.connect(database_path) as database:
+                database.execute("CREATE TABLE archive_jobs (id TEXT PRIMARY KEY)")
+
+            sqlite3_wrapper = root / "sqlite3"
+            sqlite3_wrapper.write_text(
+                "#!/bin/sh\n"
+                "if [ \"$#\" -eq 2 ] && "
+                "[ \"$2\" = 'PRAGMA integrity_check;' ]; then\n"
+                "  : > \"$1-wal\"\n"
+                "  : > \"$1-shm\"\n"
+                "  printf 'corrupt\\n'\n"
+                "  exit 0\n"
+                "fi\n"
+                "exec \"$REAL_SQLITE3\" \"$@\"\n"
+            )
+            sqlite3_wrapper.chmod(0o755)
+
+            result = subprocess.run(
+                ["sh", str(ROOT / "docker" / "backup-sqlite.sh")],
+                capture_output=True,
+                check=False,
+                env={
+                    "PATH": f"{root}:/usr/bin:/bin",
+                    "REAL_SQLITE3": str(sqlite3_path),
+                    "RIP_DVD_BACKUP_DIRECTORY": str(backup_directory),
+                    "RIP_DVD_DATABASE_PATH": str(database_path),
+                },
+                text=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("SQLite backup integrity check failed", result.stderr)
+            self.assertEqual(list(backup_directory.glob("*.partial*")), [])
+            self.assertEqual(list(backup_directory.glob("rip-dvd-*.sqlite")), [])
 
     def test_deployment_tools_image_is_separate_from_the_web_runtime(self) -> None:
         dockerfile = (ROOT / "docker" / "runtime.Dockerfile").read_text()

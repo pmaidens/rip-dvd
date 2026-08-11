@@ -29,7 +29,7 @@ esac
 
 cleanup_partial() {
   if [ -n "${partial_path:-}" ]; then
-    rm -f -- "$partial_path"
+    rm -f -- "$partial_path" "$partial_path-wal" "$partial_path-shm"
   fi
 }
 trap cleanup_partial EXIT HUP INT TERM
@@ -45,6 +45,7 @@ if [ "$integrity" != ok ]; then
   exit 1
 fi
 
+rm -f -- "$partial_path-wal" "$partial_path-shm"
 chmod 0600 "$partial_path"
 sync -f "$partial_path" 2>/dev/null || true
 mv "$partial_path" "$backup_path"
