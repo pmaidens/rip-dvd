@@ -60,7 +60,10 @@ const validCommands = {
     action: "delete_disc_selection",
     discSelectionId: "selection-1",
   },
-  complete_review: { action: "complete_review" },
+  complete_review: {
+    action: "complete_review",
+    catalogRevision: "2026-08-11T06:00:00.000Z",
+  },
 } satisfies Record<CatalogReviewCommand["action"], CatalogReviewCommand>;
 
 describe("catalog review command contract", () => {
@@ -114,6 +117,14 @@ describe("catalog review command contract", () => {
     [
       { action: "delete_disc_selection" },
       "Invalid Disc Selection",
+    ],
+    [
+      { action: "complete_review" },
+      "Invalid catalog review revision",
+    ],
+    [
+      { action: "complete_review", catalogRevision: "2026-08-11" },
+      "Invalid catalog review revision",
     ],
   ])("rejects invalid body %#", (body, error) => {
     expect(parseCommand(body)).toEqual({ ok: false, error });

@@ -75,7 +75,7 @@ export type CatalogReviewCommand =
       action: "delete_disc_selection";
       discSelectionId: string;
     }
-  | { action: "complete_review" };
+  | { action: "complete_review"; catalogRevision: string };
 
 export type CatalogReviewCommandValidationError =
   | "Invalid catalog review mutation"
@@ -90,7 +90,8 @@ export type CatalogReviewCommandValidationError =
   | "Invalid Media Item episodeNumber"
   | "Invalid Disc Selection"
   | "Invalid DVD title number"
-  | "Invalid DVD chapter range";
+  | "Invalid DVD chapter range"
+  | "Invalid catalog review revision";
 
 export type CatalogReviewCommandParseResult =
   | { ok: true; command: CatalogReviewCommand }
@@ -121,6 +122,18 @@ function boundedString(value: unknown, maximum = 256): string | null {
   }
   const trimmed = value.trim();
   return trimmed.length > 0 && trimmed.length <= maximum ? trimmed : null;
+}
+
+function catalogRevision(value: unknown): string | null {
+  const serialized = boundedString(value, 64);
+  if (!serialized) {
+    return null;
+  }
+  const revision = new Date(serialized);
+  return Number.isSafeInteger(revision.getTime()) &&
+      revision.toISOString() === serialized
+    ? serialized
+    : null;
 }
 
 function optionalInteger(
@@ -386,8 +399,12 @@ export function parseCatalogReviewCommand(
         ? { ok: true, command: { action, discSelectionId } }
         : invalid("Invalid Disc Selection");
     }
-    case "complete_review":
-      return { ok: true, command: { action } };
+    case "complete_review": {
+      const revision = catalogRevision(body.catalogRevision);
+      return revision
+        ? { ok: true, command: { action, catalogRevision: revision } }
+        : invalid("Invalid catalog review revision");
+    }
     default:
       return invalid("Unknown catalog review mutation");
   }

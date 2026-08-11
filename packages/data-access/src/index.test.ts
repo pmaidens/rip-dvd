@@ -12,6 +12,7 @@ import { Worker } from "node:worker_threads";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { completeCatalogReview } from "./catalog.test-support.js";
 import {
   ARCHIVE_JOB_LEASE_DURATION_MS,
   createDataAccess,
@@ -743,7 +744,7 @@ describe("data-access facade", () => {
     ).toEqual([expect.objectContaining({ id: archive.id })]);
 
     vi.setSystemTime(new Date("2026-08-03T18:05:00.000Z"));
-    expect(access.catalog.completeCatalogReview(archive.id)).toMatchObject({
+    expect(completeCatalogReview(access, archive.id)).toMatchObject({
       id: archive.id,
       catalogReviewedAt: new Date("2026-08-03T18:05:00.000Z"),
     });
@@ -794,7 +795,7 @@ describe("data-access facade", () => {
       mediaItemId: movie.id,
       kind: "main_feature",
     });
-    access.catalog.completeCatalogReview(archive.id);
+    completeCatalogReview(access, archive.id);
 
     const episode = access.catalog.createMediaItem({
       kind: "episode",
@@ -828,7 +829,7 @@ describe("data-access facade", () => {
         outputPath: "/media/movies/Newly Found Episode.mkv",
       }),
     ).toThrow(DomainInvariantError);
-    access.catalog.completeCatalogReview(archive.id);
+    completeCatalogReview(access, archive.id);
     expect(
       access.encodeJobs.enqueue({
         discSelectionId: added.id,
@@ -919,7 +920,7 @@ describe("data-access facade", () => {
       .toThrow(chapterError);
     expect(() => access.catalog.repairDiscSelection(repaired.id, outOfBounds))
       .toThrow(chapterError);
-    expect(access.catalog.completeCatalogReview(archive.id)).toMatchObject({
+    expect(completeCatalogReview(access, archive.id)).toMatchObject({
       catalogReviewedAt: expect.any(Date),
     });
     access.close();
@@ -933,7 +934,7 @@ describe("data-access facade", () => {
     sqlite.close();
 
     access = openTestDatabase(databasePath);
-    expect(() => access.catalog.completeCatalogReview(archive.id))
+    expect(() => completeCatalogReview(access, archive.id))
       .toThrow(chapterError);
     access.close();
   });
@@ -1048,12 +1049,10 @@ describe("data-access facade", () => {
     sqlite.close();
 
     access = openTestDatabase(databasePath);
-    expect(() =>
-      access.catalog.completeCatalogReview(unreviewable.archive.id)
-    ).toThrow(scanError);
-    expect(() =>
-      access.catalog.completeCatalogReview(missingTitle.archive.id)
-    ).toThrow(titleError);
+    expect(() => completeCatalogReview(access, unreviewable.archive.id))
+      .toThrow(scanError);
+    expect(() => completeCatalogReview(access, missingTitle.archive.id))
+      .toThrow(titleError);
     access.close();
   });
 
@@ -1091,7 +1090,7 @@ describe("data-access facade", () => {
     };
     const unreviewed = createSelection("unreviewed");
     const reviewed = createSelection("reviewed");
-    access.catalog.completeCatalogReview(reviewed.archive.id);
+    completeCatalogReview(access, reviewed.archive.id);
 
     expect(access.catalog.listDiscSelections({ encodeEligibleOnly: true }))
       .toEqual([expect.objectContaining({ id: reviewed.selection.id })]);
@@ -1131,7 +1130,7 @@ describe("data-access facade", () => {
       mediaItemId: movie.id,
       kind: "main_feature",
     });
-    access.catalog.completeCatalogReview(archive.id);
+    completeCatalogReview(access, archive.id);
     const profile = access.encodingProfiles.create({
       key: "preserved-removal-history",
       displayName: "Preserved removal history",
@@ -1209,7 +1208,7 @@ describe("data-access facade", () => {
       mediaDomain: "dvd_video",
       settings: {},
     });
-    access.catalog.completeCatalogReview(archive.id);
+    completeCatalogReview(access, archive.id);
 
     const concurrentSqlite = new DatabaseSync(databasePath);
     concurrentSqlite.exec("pragma busy_timeout = 5000");
@@ -2685,17 +2684,20 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       })[0],
     ).toMatchObject({ catalogReviewedAt: new Date(400) });
     expect(() =>
-      access.catalog.completeCatalogReview(
+      completeCatalogReview(
+        access,
         "duplicate-archive" as OriginalDiscArchiveId,
       )
     ).toThrow(/duplicate logical Disc Selections/);
     expect(() =>
-      access.catalog.completeCatalogReview(
+      completeCatalogReview(
+        access,
         "noncanonical-archive" as OriginalDiscArchiveId,
       )
     ).toThrow(/canonical Disc Selection source keys/);
     expect(() =>
-      access.catalog.completeCatalogReview(
+      completeCatalogReview(
+        access,
         "scan-invalid-archive" as OriginalDiscArchiveId,
       )
     ).toThrow(/DVD title 999 is not present/);
@@ -2918,7 +2920,8 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       "scan-invalid-archive",
     ]) {
       expect(
-        access.catalog.completeCatalogReview(
+        completeCatalogReview(
+          access,
           archiveId as OriginalDiscArchiveId,
         ),
       ).toMatchObject({ catalogReviewedAt: expect.any(Date) });
@@ -3665,7 +3668,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       chapterStart: 5,
       chapterEnd: 8,
     });
-    const reviewed = access.catalog.completeCatalogReview(archive.id);
+    const reviewed = completeCatalogReview(access, archive.id);
     const profile = access.encodingProfiles.create({
       key: "frozen-evidence",
       displayName: "Frozen evidence",
@@ -5000,7 +5003,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
             mediaItemId: item.id,
             kind: "main_feature",
           });
-          access.catalog.completeCatalogReview(archive.id);
+          completeCatalogReview(access, archive.id);
           queuedId = access.encodeJobs.enqueue({
             discSelectionId: selection.id,
             encodingProfileId: profile.id,
@@ -5120,7 +5123,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       mediaItemId: item.id,
       kind: "main_feature",
     });
-    access.catalog.completeCatalogReview(archive.id);
+    completeCatalogReview(access, archive.id);
     const activeDvdProfile = access.encodingProfiles.create({
       key: "active-dvd",
       displayName: "Active DVD",
@@ -5227,7 +5230,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     ).toThrow(DomainInvariantError);
     expect(access.encodeJobs.list()).toEqual([]);
 
-    access.catalog.completeCatalogReview(archive.id);
+    completeCatalogReview(access, archive.id);
     const job = access.encodeJobs.enqueue({
       discSelectionId: selection.id,
       encodingProfileId: profile.id,

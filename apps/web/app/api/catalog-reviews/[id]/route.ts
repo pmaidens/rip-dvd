@@ -223,6 +223,7 @@ function readCatalogReview(
       (item) => !mediaItemPageIds.has(item.id),
     );
     return {
+      catalogRevision: archive.updatedAt.toISOString(),
       archive: {
         id: archive.id,
         discLabel: disc.volumeLabel ?? "Unlabeled disc",
@@ -460,7 +461,10 @@ export async function createCatalogReviewRoute(
       }
 
       case "complete_review": {
-        const archive = access.catalog.completeCatalogReview(archiveId);
+        const archive = access.catalog.completeCatalogReview(
+          archiveId,
+          new Date(command.catalogRevision),
+        );
         return response({
           archive: {
             id: archive.id,

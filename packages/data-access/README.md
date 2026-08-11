@@ -45,9 +45,12 @@ each have an explicit active cap before recent terminal history is added.
 Catalog review is explicit rather than inferred from the first Disc Selection.
 New Original Disc Archives remain in the review queue while a user builds a
 partial set of selections, and `catalog.completeCatalogReview()` records the
-review time only after at least one selection exists. Creating another Disc
-Selection atomically clears that review time, so encoding remains blocked until
-the changed catalog is explicitly completed again. Media Item hierarchy
+review time only after at least one selection exists and the caller supplies
+the archive's current `updatedAt` catalog revision. Completion compares that
+revision atomically, so a stale review cannot approve a Disc Selection added by
+another client. Creating another Disc Selection atomically clears the review
+time and advances the revision, so encoding remains blocked until the changed
+catalog is explicitly completed again. Media Item hierarchy
 mutations are serialized, reject cycles, and cap each hierarchy at 32 items.
 The facade derives canonical DVD source identities, rejects duplicate source
 slices, requires title selections to reference the archived scan, and keeps

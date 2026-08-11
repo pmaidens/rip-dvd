@@ -20,6 +20,7 @@ import {
   DomainInvariantError,
   InvalidStatusTransitionError,
 } from "./errors.js";
+import { completeCatalogReview } from "./catalog.test-support.js";
 import { decodeDvdTitleMap } from "./dvd-scan.js";
 import { createDataAccess } from "./index.js";
 import { createLegacySidecarDataAccess } from "./legacy-sidecars.js";
@@ -1099,7 +1100,7 @@ describe("legacy sidecar import", () => {
         chapterEnd: 9,
       })
     ).toThrow(/8 chapters/);
-    expect(access.catalog.completeCatalogReview(archive.id)).toMatchObject({
+    expect(completeCatalogReview(access, archive.id)).toMatchObject({
       catalogReviewedAt: expect.any(Date),
     });
     access.close();
@@ -1725,7 +1726,7 @@ describe("legacy sidecar import", () => {
       mediaItemId: movie.id,
       kind: "main_feature",
     });
-    expect(access.catalog.completeCatalogReview(archive.id)).toMatchObject({
+    expect(completeCatalogReview(access, archive.id)).toMatchObject({
       catalogReviewedAt: expect.any(Date),
     });
     writeFileSync(
@@ -1928,7 +1929,7 @@ describe("legacy sidecar import", () => {
     expect(existsSync(markerPath)).toBe(true);
     expect(access.encodeJobs.claimNext("repaired-import-worker")).toBeNull();
     const repairedArchive = access.catalog.listOriginalDiscArchives()[0]!;
-    access.catalog.completeCatalogReview(repairedArchive.id);
+    completeCatalogReview(access, repairedArchive.id);
     expect(access.encodeJobs.claimNext("repaired-import-worker"))
       .toMatchObject({ outputPath });
     access.close();
