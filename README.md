@@ -560,9 +560,10 @@ unsafe or newly added mapping, and bounded legacy title evidence remains usable
 for explicit title/chapter review. The same-origin, non-cacheable workflow pages
 large Media Item and Disc Selection catalogs while carrying mapped items and
 bounded ancestor chains as read-only context. Media Item mutations cap
-hierarchies at 32 items, and reads fail closed instead of presenting a truncated
-chain. An active Media Item edit survives page changes, allowing a different
-bounded page to supply parent choices. The workflow is exposed at `GET`/`POST
+parent-child chains at 32 levels without limiting siblings or the total Media
+Item count, and reads fail closed instead of presenting a truncated chain. An
+active Media Item edit survives page changes, allowing a different bounded page
+to supply parent choices. The workflow is exposed at `GET`/`POST
 /api/catalog-reviews/:archiveId`.
 
 To use host libraries instead, set `RIP_DVD_MEDIA_LIBRARY_HOST_PATH` and

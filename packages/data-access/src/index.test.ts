@@ -1762,6 +1762,26 @@ describe("data-access facade", () => {
     access.close();
   });
 
+  it("allows more than the hierarchy depth limit as siblings", () => {
+    const access = openTestDatabase();
+    const parent = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Sibling parent",
+    });
+    const siblingCount = MAX_MEDIA_ITEM_HIERARCHY_DEPTH + 1;
+
+    for (let sibling = 1; sibling <= siblingCount; sibling += 1) {
+      access.catalog.createMediaItem({
+        parentId: parent.id,
+        kind: "bonus_feature",
+        title: `Sibling ${sibling}`,
+      });
+    }
+
+    expect(access.catalog.listMediaItems()).toHaveLength(siblingCount + 1);
+    access.close();
+  });
+
   it("bounds Media Item hierarchy depth at the catalog mutation boundary", () => {
     const access = openTestDatabase();
     let parent = access.catalog.createMediaItem({

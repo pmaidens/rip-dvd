@@ -53,7 +53,8 @@ revision atomically, so a stale review cannot approve a Disc Selection added by
 another client. Creating another Disc Selection atomically clears the review
 time and advances the revision, so encoding remains blocked until the changed
 catalog is explicitly completed again. Media Item hierarchy
-mutations are serialized, reject cycles, and cap each hierarchy at 32 items.
+mutations are serialized, reject cycles, and cap parent-child chains at 32
+levels without limiting siblings or the total Media Item count.
 The facade derives canonical DVD source identities, rejects duplicate source
 slices, requires title selections to reference the archived scan, and keeps
 chapter ranges within the selected title; main-feature selections remain a

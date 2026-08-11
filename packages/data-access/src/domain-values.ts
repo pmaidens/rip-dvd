@@ -15,6 +15,10 @@ export const DETECTED_DISC_STATUSES = [
   "rejected",
 ] as const;
 
+/**
+ * Maximum levels in a Media Item parent-child chain, including the root.
+ * This does not limit siblings or the total number of Media Items.
+ */
 export const MAX_MEDIA_ITEM_HIERARCHY_DEPTH = 32;
 
 export const MEDIA_DOMAINS = ["dvd_video", "audio"] as const;
