@@ -1,5 +1,6 @@
 import type {
   ArchiveFormat,
+  ArchiveProgressPhase,
   ConsistentReadAccess,
   DataAccess,
   DetectedDiscId,
@@ -55,6 +56,7 @@ export interface DashboardArchiveJob {
   discLabel: string;
   opticalDriveName: string;
   status: JobStatus;
+  progressPhase: ArchiveProgressPhase;
   progressPercent: number;
   retryable: boolean;
 }
@@ -418,6 +420,7 @@ function readDashboardSnapshotRecords(
                   ? driveDisplayName(drive)
                   : "Unknown Optical Drive",
                 status: job.status,
+                progressPhase: job.progressPhase,
                 progressPercent: job.progressPercent,
                 retryable: isArchiveJobRetryable(job, disc),
               };

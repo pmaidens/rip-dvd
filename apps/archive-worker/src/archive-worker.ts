@@ -5,7 +5,10 @@ import type {
   DataAccess,
   DiscoveredOpticalDrive,
 } from "@rip-dvd/data-access";
-import { ARCHIVE_JOB_LEASE_DURATION_MS } from "@rip-dvd/data-access";
+import {
+  ARCHIVE_INSPECTION_LEASE_DURATION_MS,
+  ARCHIVE_JOB_LEASE_DURATION_MS,
+} from "@rip-dvd/data-access";
 import type { DvdTitleMap } from "@rip-dvd/data-access/dvd-scan";
 
 import {
@@ -164,6 +167,7 @@ export async function pollArchiveWorker({
   if (!Number.isSafeInteger(concurrency) || concurrency <= 0) {
     throw new Error("Archive worker concurrency is invalid");
   }
+  access.archiveJobs.recoverInterruptedInspections();
   access.archiveJobs.recoverExpiredClaims();
   const discovered = await hardware.discover(signal);
   signal.throwIfAborted();
@@ -210,7 +214,31 @@ export async function pollArchiveWorker({
         phase: "DVD scanning",
         signal,
       });
-      const scan = await hardware.scanDvd(binding, signal);
+      const inspection = access.archiveJobs.beginDriveInspection(drive.id);
+      const inspectionController = new AbortController();
+      const inspectionSignal = AbortSignal.any([
+        signal,
+        inspectionController.signal,
+      ]);
+      const inspectionHeartbeat = inspection.jobIds.length > 0
+        ? setInterval(() => {
+            try {
+              access.archiveJobs.renewDriveInspection(inspection);
+            } catch (error) {
+              inspectionController.abort(error);
+            }
+          }, Math.floor(ARCHIVE_INSPECTION_LEASE_DURATION_MS / 3))
+        : undefined;
+      inspectionHeartbeat?.unref();
+      let scan: ScannedDvd | null;
+      try {
+        scan = await hardware.scanDvd(binding, inspectionSignal);
+      } finally {
+        if (inspectionHeartbeat !== undefined) {
+          clearInterval(inspectionHeartbeat);
+        }
+        access.archiveJobs.finishDriveInspection(inspection);
+      }
       signal.throwIfAborted();
       if (scan === null) {
         return;
@@ -273,8 +301,8 @@ export async function pollArchiveWorker({
           runner: copyRunner,
           signal: archiveSignal,
           sizeBytes: scan.sizeBytes,
-          onProgress: (progressPercent) => {
-            access.archiveJobs.updateProgress(claim, progressPercent);
+          onProgress: (progress) => {
+            access.archiveJobs.updateProgress(claim, progress);
           },
           verifySource: async () => {
             await confirmAuthorizedDrive({

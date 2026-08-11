@@ -2754,6 +2754,27 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         'preceding-selection', 'preceding-archive', 'preceding-movie',
         'dvd:main-feature', 'main_feature', 400, 456
       );
+      insert into archive_jobs (
+        id, detected_disc_id, original_disc_archive_id, status,
+        progress_percent, started_at, completed_at, created_at, updated_at
+      ) values (
+        'preceding-archive-job', 'preceding-disc', 'preceding-archive',
+        'completed', 100, 190, 200, 180, 200
+      );
+      insert into detected_discs (
+        id, optical_drive_id, disc_kind, fingerprint, status, detected_at,
+        created_at, updated_at
+      ) values (
+        'active-disc', 'preceding-drive', 'dvd', 'active-fingerprint',
+        'approved', 500, 500, 500
+      );
+      insert into archive_jobs (
+        id, detected_disc_id, status, progress_percent, claimed_by,
+        claim_token, claimed_at, started_at, created_at, updated_at
+      ) values (
+        'active-archive-job', 'active-disc', 'running', 0, 'active-worker',
+        'active-token', 500, 500, 500, 500
+      );
     `);
     precedingSqlite.close();
 
@@ -2779,6 +2800,18 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         catalogReviewedAt: new Date(456),
       }),
     ]);
+    expect(migrated.archiveJobs.list()).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: "preceding-archive-job",
+        status: "completed",
+        progressPhase: "finalizing",
+      }),
+      expect.objectContaining({
+        id: "active-archive-job",
+        status: "running",
+        progressPhase: "preparing",
+      }),
+    ]));
     migrated.close();
 
     const sqlite = new DatabaseSync(databasePath);
@@ -2824,11 +2857,23 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     ]));
     expect(
       sqlite
+        .prepare("select name from pragma_table_info('archive_jobs')")
+        .all(),
+    ).toEqual(expect.arrayContaining([
+      { name: "inspection_token" },
+      { name: "inspection_updated_at" },
+      { name: "progress_phase" },
+    ]));
+    expect(
+      sqlite
         .prepare(
           "select name from __drizzle_migrations order by id desc limit 7",
         )
         .all(),
     ).toEqual([
+      {
+        name: "20260811214753_archive-job-progress-phase",
+      },
       {
         name: "20260811051606_blue_oracle",
       },
@@ -2846,9 +2891,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260805022523_far_archangel",
-      },
-      {
-        name: "20260805015911_heavy_franklin_richards",
       },
     ]);
     expect(
@@ -4594,7 +4636,8 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
   });
 
   it("claims each archive job once and permits only valid status transitions", () => {
-    const access = openTestDatabase();
+    const databasePath = createTestDatabasePath();
+    const access = openTestDatabase(databasePath);
     const drive = access.catalog.upsertOpticalDrive({
       devicePath: "/dev/sr0",
       isEnabled: true,
@@ -4620,9 +4663,23 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       detectedDiscId: secondDisc.id,
       priority: 10,
     });
+    expect(firstJob).toMatchObject({
+      status: "queued",
+      progressPhase: "waiting",
+      progressPercent: 0,
+    });
+    const inspection = access.archiveJobs.beginDriveInspection(drive.id);
+    expect(access.archiveJobs.list(["queued"])).toEqual([
+      expect.objectContaining({ progressPhase: "inspecting_drive" }),
+      expect.objectContaining({ progressPhase: "inspecting_drive" }),
+    ]);
+    expect(access.archiveJobs.recoverInterruptedInspections()).toEqual([]);
+    expect(access.archiveJobs.renewDriveInspection(inspection)).toHaveLength(2);
+    expect(access.archiveJobs.finishDriveInspection(inspection)).toHaveLength(2);
 
     const secondClaim = access.archiveJobs.claimNext("archive-worker-1");
     expect(secondClaim?.id).toBe(secondJob.id);
+    expect(secondClaim?.progressPhase).toBe("preparing");
     if (!secondClaim) {
       throw new Error("Expected the higher-priority archive job to be claimed");
     }
@@ -4639,6 +4696,33 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     if (!firstClaim) {
       throw new Error("Expected the first archive job to be claimed");
     }
+    access.archiveJobs.updateProgress(firstClaim, {
+      phase: "copying",
+      progressPercent: 0,
+    });
+    access.archiveJobs.updateProgress(firstClaim, {
+      phase: "verifying",
+      progressPercent: 0,
+    });
+    expect(() =>
+      access.archiveJobs.updateProgress(firstClaim, {
+        // @ts-expect-error Queued phases are rejected for running work.
+        phase: "waiting",
+        progressPercent: 0,
+      }),
+    ).toThrow(DomainInvariantError);
+    expect(() =>
+      access.archiveJobs.updateProgress(firstClaim, {
+        // @ts-expect-error Inspection is drive-scoped queued work, not running work.
+        phase: "inspecting_drive",
+        progressPercent: 0,
+      }),
+    ).toThrow(DomainInvariantError);
+    expect(access.archiveJobs.list(["running"])[0]).toMatchObject({
+      id: firstJob.id,
+      progressPhase: "verifying",
+      progressPercent: 0,
+    });
     const failed = access.archiveJobs.fail(firstClaim, "drive read failed");
     expect(failed).toMatchObject({
       status: "failed",
@@ -4646,6 +4730,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     });
     expect(access.archiveJobs.requeue(firstJob.id)).toMatchObject({
       status: "queued",
+      progressPhase: "waiting",
       claimedBy: null,
       errorMessage: null,
     });
@@ -4668,6 +4753,14 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(() => access.archiveJobs.fail(firstClaim, "stale failure")).toThrow();
     access.archiveJobs.fail(reclaimed, "second attempt failed");
     access.close();
+
+    const sqlite = new DatabaseSync(databasePath);
+    expect(() =>
+      sqlite
+        .prepare("update archive_jobs set progress_phase = 'waiting' where id = ?")
+        .run(reclaimed.id),
+    ).toThrow(/archive_jobs_status_progress_phase_check/);
+    sqlite.close();
   });
 
   it("atomically approves a scanned disc and creates or requeues its Archive Job", () => {
