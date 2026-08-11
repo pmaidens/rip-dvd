@@ -15,6 +15,7 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -1087,6 +1088,82 @@ describe("encode worker polling", () => {
         progressPhase: "previewing",
         progressPercent: 60,
         progressEtaSeconds: null,
+      }),
+    ]);
+    fixture.access.close();
+  });
+
+  it("does not create output directories through a symlink outside the media library", async () => {
+    const fixture = createQueuedJob(
+      { kind: "main_feature" },
+      join("linked-outside", "new", "sub", "Example.mkv"),
+    );
+    const outsideDirectory = join(dirname(fixture.mediaLibraryPath), "outside");
+    mkdirSync(fixture.mediaLibraryPath, { recursive: true });
+    mkdirSync(outsideDirectory, { recursive: true });
+    symlinkSync(
+      outsideDirectory,
+      join(fixture.mediaLibraryPath, "linked-outside"),
+      "dir",
+    );
+    const runner: HandBrakeRunner = { run: vi.fn() };
+
+    await pollEncodeWorker({
+      access: fixture.access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      runner,
+      signal: new AbortController().signal,
+    });
+
+    expect(runner.run).not.toHaveBeenCalled();
+    expect(existsSync(join(outsideDirectory, "new"))).toBe(false);
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        errorMessage: "Encode Job output directory escaped the media library",
+        status: "failed",
+      }),
+    ]);
+    fixture.access.close();
+  });
+
+  it("fails closed when an output directory contains a dangling symlink", async () => {
+    const fixture = createQueuedJob(
+      { kind: "main_feature" },
+      join("dangling", "new", "Example.mkv"),
+    );
+    const missingDirectory = join(
+      dirname(fixture.mediaLibraryPath),
+      "missing-outside",
+    );
+    mkdirSync(fixture.mediaLibraryPath, { recursive: true });
+    symlinkSync(
+      missingDirectory,
+      join(fixture.mediaLibraryPath, "dangling"),
+      "dir",
+    );
+    const runner: HandBrakeRunner = { run: vi.fn() };
+
+    await pollEncodeWorker({
+      access: fixture.access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      runner,
+      signal: new AbortController().signal,
+    });
+
+    expect(runner.run).not.toHaveBeenCalled();
+    expect(existsSync(missingDirectory)).toBe(false);
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        errorMessage: "Encode Job output directory is ambiguous",
+        status: "failed",
       }),
     ]);
     fixture.access.close();
