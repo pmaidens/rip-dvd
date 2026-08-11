@@ -196,7 +196,6 @@ export type {
   CatalogReviewMediaItem,
 } from "./catalog-review-model";
 export {
-  createCatalogReviewRequestScope,
   mutateCatalogReview,
   requestCatalogReview,
 } from "./catalog-review-state";

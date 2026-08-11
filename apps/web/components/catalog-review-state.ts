@@ -16,7 +16,7 @@ type CatalogReviewFetch = (
   init?: RequestInit,
 ) => Promise<Response>;
 
-export function createCatalogReviewRequestScope(initialArchiveId: string) {
+function createCatalogReviewRequestScope(initialArchiveId: string) {
   let activeArchiveId: string | null = initialArchiveId;
   let currentRequest = Symbol("catalog-review-request");
   return {
