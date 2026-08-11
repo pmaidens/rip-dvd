@@ -10,11 +10,12 @@ describe("CatalogReviewDiscSelections", () => {
         discSelections={[{
           id: "selection-1",
           mediaItemId: "episode-1",
-          sourceKey: "dvd:title:1:chapters:1-4",
-          kind: "dvd_chapters",
-          titleNumber: 1,
-          chapterStart: 1,
-          chapterEnd: 4,
+          sourceIdentity: {
+            kind: "dvd_chapters",
+            titleNumber: 1,
+            chapterStart: 1,
+            chapterEnd: 4,
+          },
           label: null,
         }]}
         page={{

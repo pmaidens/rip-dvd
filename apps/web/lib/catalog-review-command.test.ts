@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  DISC_SELECTION_KINDS,
   MEDIA_ITEM_KINDS,
 } from "@rip-dvd/data-access";
 
@@ -11,7 +10,6 @@ import {
 } from "./catalog-review-command";
 
 const domainValues = {
-  discSelectionKinds: DISC_SELECTION_KINDS,
   mediaItemKinds: MEDIA_ITEM_KINDS,
 };
 
@@ -40,8 +38,7 @@ const validCommands = {
     action: "create_disc_selection",
     selection: {
       mediaItemId: "media-item-1",
-      kind: "dvd_title",
-      titleNumber: 1,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
       label: "Feature",
     },
   },
@@ -50,10 +47,12 @@ const validCommands = {
     discSelectionId: "selection-1",
     selection: {
       mediaItemId: "media-item-1",
-      kind: "dvd_chapters",
-      titleNumber: 1,
-      chapterStart: 1,
-      chapterEnd: 4,
+      sourceIdentity: {
+        kind: "dvd_chapters",
+        titleNumber: 1,
+        chapterStart: 1,
+        chapterEnd: 4,
+      },
     },
   },
   delete_disc_selection: {
@@ -100,9 +99,12 @@ describe("catalog review command contract", () => {
     [
       {
         action: "create_disc_selection",
-        selection: { mediaItemId: "media-item-1", kind: "dvd_title" },
+        selection: {
+          mediaItemId: "media-item-1",
+          sourceIdentity: { kind: "dvd_title" },
+        },
       },
-      "Invalid DVD title number",
+      "Invalid Disc Selection",
     ],
     [
       {
@@ -134,7 +136,7 @@ describe("catalog review command contract", () => {
     expect(parseCommand({
       action: "repair_disc_selection",
       discSelectionId: "selection-1",
-      selection: { kind: "main_feature" },
+      selection: { sourceIdentity: { kind: "main_feature" } },
     })).toEqual({
       ok: false,
       error: "Invalid Disc Selection",

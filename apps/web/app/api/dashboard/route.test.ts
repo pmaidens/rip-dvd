@@ -51,7 +51,7 @@ describe("GET /api/dashboard", () => {
     access.catalog.createDiscSelection({
       originalDiscArchiveId: completedArchive.id,
       mediaItemId: mediaItem.id,
-      kind: "main_feature",
+      sourceIdentity: { kind: "main_feature" },
     });
     completeCatalogReview(access, completedArchive.id);
 
@@ -68,7 +68,7 @@ describe("GET /api/dashboard", () => {
     access.catalog.createDiscSelection({
       originalDiscArchiveId: finalArchive.id,
       mediaItemId: mediaItem.id,
-      kind: "main_feature",
+      sourceIdentity: { kind: "main_feature" },
     });
     completeCatalogReview(access, finalArchive.id);
 

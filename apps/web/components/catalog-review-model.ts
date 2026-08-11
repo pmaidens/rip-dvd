@@ -1,5 +1,6 @@
 import type { DvdTitle } from "@rip-dvd/data-access/dvd-scan";
 import type {
+  DiscSelectionSourceIdentityInput,
   DiscSelectionKind,
   MediaItemKind,
 } from "@rip-dvd/data-access";
@@ -26,11 +27,7 @@ export interface CatalogReviewMediaItem {
 export interface CatalogReviewDiscSelection {
   id: string;
   mediaItemId: string;
-  sourceKey: string;
-  kind: DiscSelectionKind;
-  titleNumber: number | null;
-  chapterStart: number | null;
-  chapterEnd: number | null;
+  sourceIdentity: DiscSelectionSourceIdentityInput;
   label: string | null;
 }
 

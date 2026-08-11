@@ -1,29 +1,18 @@
+import {
+  createDiscSelectionSourceIdentity,
+  serializeDiscSelectionSourceIdentity,
+  type DiscSelectionSourceIdentity,
+  type DiscSelectionSourceIdentityInput,
+} from "../disc-selection-source-identity.js";
 import { decodeArchivedDvdTitles } from "../dvd-scan.js";
 import { DomainInvariantError } from "../errors.js";
-import { requirePositiveSafeInteger } from "./validation.js";
 
-type ArchivedDvdSelectionInput = (
-  | {
-      kind: "main_feature";
-      titleNumber?: null;
-      chapterStart?: null;
-      chapterEnd?: null;
-    }
-  | {
-      kind: "dvd_title";
-      titleNumber: number;
-      chapterStart?: null;
-      chapterEnd?: null;
-    }
-  | {
-      kind: "dvd_chapters";
-      titleNumber: number;
-      chapterStart: number;
-      chapterEnd: number;
-    }
-);
-
-export function createArchivedDvdSelectionValidator(scanData: unknown) {
+export function createArchivedDvdSelectionValidator(scanData: unknown): {
+  validate(
+    sourceIdentityInput: DiscSelectionSourceIdentityInput,
+    options?: { persistedSourceKey?: string },
+  ): DiscSelectionSourceIdentity;
+} {
   const archivedTitles = decodeArchivedDvdTitles(scanData);
   const archivedTitlesByNumber = archivedTitles === null
     ? null
@@ -31,53 +20,14 @@ export function createArchivedDvdSelectionValidator(scanData: unknown) {
 
   return {
     validate(
-      selection: ArchivedDvdSelectionInput,
+      sourceIdentityInput: DiscSelectionSourceIdentityInput,
       { persistedSourceKey }: { persistedSourceKey?: string } = {},
     ) {
-      const coordinates =
-        selection.kind === "main_feature"
-          ? {
-              titleNumber: null,
-              chapterStart: null,
-              chapterEnd: null,
-            }
-          : selection.kind === "dvd_title"
-            ? {
-                titleNumber: requirePositiveSafeInteger(
-                  selection.titleNumber,
-                  "titleNumber",
-                ),
-                chapterStart: null,
-                chapterEnd: null,
-              }
-            : {
-                titleNumber: requirePositiveSafeInteger(
-                  selection.titleNumber,
-                  "titleNumber",
-                ),
-                chapterStart: requirePositiveSafeInteger(
-                  selection.chapterStart,
-                  "chapterStart",
-                ),
-                chapterEnd: requirePositiveSafeInteger(
-                  selection.chapterEnd,
-                  "chapterEnd",
-                ),
-              };
-      if (
-        coordinates.chapterStart !== null &&
-        coordinates.chapterEnd !== null &&
-        coordinates.chapterEnd < coordinates.chapterStart
-      ) {
-        throw new DomainInvariantError(
-          "chapterEnd must be greater than or equal to chapterStart",
-        );
-      }
-      const sourceKey = selection.kind === "main_feature"
-        ? "dvd:main-feature"
-        : selection.kind === "dvd_title"
-          ? `dvd:title:${coordinates.titleNumber}`
-          : `dvd:title:${coordinates.titleNumber}:chapters:${coordinates.chapterStart}-${coordinates.chapterEnd}`;
+      const sourceIdentity = createDiscSelectionSourceIdentity(
+        sourceIdentityInput,
+      );
+      const sourceKey =
+        serializeDiscSelectionSourceIdentity(sourceIdentity).sourceKey;
       if (
         persistedSourceKey !== undefined &&
         persistedSourceKey !== sourceKey
@@ -86,29 +36,29 @@ export function createArchivedDvdSelectionValidator(scanData: unknown) {
           "Catalog review requires canonical Disc Selection source keys",
         );
       }
-      if (coordinates.titleNumber === null) {
-        return { coordinates, sourceKey };
+      if (sourceIdentity.kind === "main_feature") {
+        return sourceIdentity;
       }
       if (!archivedTitlesByNumber) {
         throw new DomainInvariantError(
           "DVD title selections require a reviewable DVD title map",
         );
       }
-      const title = archivedTitlesByNumber.get(coordinates.titleNumber);
+      const title = archivedTitlesByNumber.get(sourceIdentity.titleNumber);
       if (!title) {
         throw new DomainInvariantError(
-          `DVD title ${coordinates.titleNumber} is not present in the archived scan`,
+          `DVD title ${sourceIdentity.titleNumber} is not present in the archived scan`,
         );
       }
       if (
-        coordinates.chapterEnd !== null &&
-        coordinates.chapterEnd > title.chapters
+        sourceIdentity.kind === "dvd_chapters" &&
+        sourceIdentity.chapterEnd > title.chapters
       ) {
         throw new DomainInvariantError(
           `chapterEnd must not exceed DVD title ${title.number}'s ${title.chapters} chapters`,
         );
       }
-      return { coordinates, sourceKey };
+      return sourceIdentity;
     },
   };
 }

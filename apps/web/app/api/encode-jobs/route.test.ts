@@ -38,7 +38,7 @@ function createSelection(
   const selection = access.catalog.createDiscSelection({
     originalDiscArchiveId: archive.id,
     mediaItemId: item.id,
-    kind: "main_feature",
+    sourceIdentity: { kind: "main_feature" },
   });
   return { archive, item, selection };
 }

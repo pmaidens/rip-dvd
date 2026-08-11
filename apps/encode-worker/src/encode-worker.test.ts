@@ -766,7 +766,7 @@ function createQueuedJob(
   const selection = access.catalog.createDiscSelection({
     originalDiscArchiveId: archive.id,
     mediaItemId: item.id,
-    ...selectionInput,
+    sourceIdentity: selectionInput,
   });
   completeCatalogReview(access, archive.id);
   const profile = access.encodingProfiles.create({
@@ -818,7 +818,7 @@ function addQueuedJob(
   const selection = fixture.access.catalog.createDiscSelection({
     originalDiscArchiveId: fixture.archive.id,
     mediaItemId: item.id,
-    ...selectionInput,
+    sourceIdentity: selectionInput,
   });
   completeCatalogReview(fixture.access, fixture.archive.id);
   return fixture.access.encodeJobs.enqueue({
@@ -1393,8 +1393,7 @@ describe("encode worker polling", () => {
             fixture.access.catalog.createDiscSelection({
               originalDiscArchiveId: fixture.archive.id,
               mediaItemId: item.id,
-              kind: "dvd_title",
-              titleNumber: 4,
+              sourceIdentity: { kind: "dvd_title", titleNumber: 4 },
             });
           }
           return claim;
@@ -1561,8 +1560,7 @@ describe("encode worker polling", () => {
     const competingSelection = fixture.access.catalog.createDiscSelection({
       originalDiscArchiveId: fixture.archive.id,
       mediaItemId: competingItem.id,
-      kind: "dvd_title",
-      titleNumber: 4,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 4 },
     });
     completeCatalogReview(fixture.access, fixture.archive.id);
     expect(() =>

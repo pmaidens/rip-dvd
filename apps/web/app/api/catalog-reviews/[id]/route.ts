@@ -1,6 +1,5 @@
 import {
   decodeArchivedDvdTitles,
-  DISC_SELECTION_KINDS,
   DomainInvariantError,
   MAX_MEDIA_ITEM_HIERARCHY_DEPTH,
   MEDIA_ITEM_KINDS,
@@ -78,11 +77,7 @@ function serializeDiscSelection(selection: DiscSelection) {
   return {
     id: selection.id,
     mediaItemId: selection.mediaItemId,
-    sourceKey: selection.sourceKey,
-    kind: selection.kind,
-    titleNumber: selection.titleNumber,
-    chapterStart: selection.chapterStart,
-    chapterEnd: selection.chapterEnd,
+    sourceIdentity: selection.sourceIdentity,
     label: selection.label,
   };
 }
@@ -274,7 +269,6 @@ export async function createCatalogReviewRoute(
     const parsedCommand = parseCatalogReviewCommand(
       await request.json().catch(() => null),
       {
-        discSelectionKinds: DISC_SELECTION_KINDS,
         mediaItemKinds: MEDIA_ITEM_KINDS,
       },
     );
@@ -369,31 +363,10 @@ export async function createCatalogReviewRoute(
                 repairSelectionId,
                 selectionInput,
               );
-        let selection: DiscSelection;
-        switch (input.kind) {
-          case "main_feature":
-            selection = saveSelection({ ...common, kind: input.kind });
-            break;
-          case "dvd_title":
-            selection = saveSelection({
-              ...common,
-              kind: input.kind,
-              titleNumber: input.titleNumber,
-            });
-            break;
-          case "dvd_chapters":
-            selection = saveSelection({
-              ...common,
-              kind: input.kind,
-              titleNumber: input.titleNumber,
-              chapterStart: input.chapterStart,
-              chapterEnd: input.chapterEnd,
-            });
-            break;
-          default:
-            input satisfies never;
-            throw new Error("Unhandled Disc Selection kind");
-        }
+        const selection: DiscSelection = saveSelection({
+          ...common,
+          sourceIdentity: input.sourceIdentity,
+        });
         return response(
           { discSelection: serializeDiscSelection(selection) },
           repairSelectionId === null ? 201 : 200,

@@ -121,13 +121,14 @@ function serializeJob(job: EncodeJob) {
 }
 
 function sourceDescription(selection: DiscSelection): string {
-  if (selection.kind === "main_feature") {
+  const sourceIdentity = selection.sourceIdentity;
+  if (sourceIdentity.kind === "main_feature") {
     return "DVD main feature";
   }
-  if (selection.kind === "dvd_title") {
-    return `DVD title ${selection.titleNumber}`;
+  if (sourceIdentity.kind === "dvd_title") {
+    return `DVD title ${sourceIdentity.titleNumber}`;
   }
-  return `DVD title ${selection.titleNumber}, chapters ${selection.chapterStart}–${selection.chapterEnd}`;
+  return `DVD title ${sourceIdentity.titleNumber}, chapters ${sourceIdentity.chapterStart}–${sourceIdentity.chapterEnd}`;
 }
 
 function readQueueOptions(

@@ -36,13 +36,14 @@ const discSelectionLabels = {
 function discSelectionDescription(
   selection: CatalogReviewDiscSelection,
 ): string {
-  if (selection.kind === "main_feature") {
+  const sourceIdentity = selection.sourceIdentity;
+  if (sourceIdentity.kind === "main_feature") {
     return "DVD main feature";
   }
-  if (selection.kind === "dvd_title") {
-    return `Title ${selection.titleNumber}`;
+  if (sourceIdentity.kind === "dvd_title") {
+    return `Title ${sourceIdentity.titleNumber}`;
   }
-  return `Title ${selection.titleNumber}, chapters ${selection.chapterStart}–${selection.chapterEnd}`;
+  return `Title ${sourceIdentity.titleNumber}, chapters ${sourceIdentity.chapterStart}–${sourceIdentity.chapterEnd}`;
 }
 
 export function CatalogReviewDiscSelections({
@@ -73,7 +74,10 @@ export function CatalogReviewDiscSelections({
       ...(label ? { label } : {}),
     };
     if (selectionKind === "main_feature") {
-      onCreate({ ...common, kind: selectionKind });
+      onCreate({
+        ...common,
+        sourceIdentity: { kind: selectionKind },
+      });
       return;
     }
     const titleNumber = integerFormValue(form, "titleNumber");
@@ -81,7 +85,10 @@ export function CatalogReviewDiscSelections({
       return;
     }
     if (selectionKind === "dvd_title") {
-      onCreate({ ...common, kind: selectionKind, titleNumber });
+      onCreate({
+        ...common,
+        sourceIdentity: { kind: selectionKind, titleNumber },
+      });
       return;
     }
     const chapterStart = integerFormValue(form, "chapterStart");
@@ -91,10 +98,12 @@ export function CatalogReviewDiscSelections({
     }
     onCreate({
       ...common,
-      kind: selectionKind,
-      titleNumber,
-      chapterStart,
-      chapterEnd,
+      sourceIdentity: {
+        kind: selectionKind,
+        titleNumber,
+        chapterStart,
+        chapterEnd,
+      },
     });
   }
 

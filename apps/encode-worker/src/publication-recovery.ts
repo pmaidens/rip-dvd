@@ -1134,17 +1134,18 @@ async function syncPath(path: string): Promise<void> {
 }
 
 function buildSelectionArguments(selection: DiscSelection): string[] {
-  if (selection.kind === "main_feature") {
+  const sourceIdentity = selection.sourceIdentity;
+  if (sourceIdentity.kind === "main_feature") {
     return ["--main-feature"];
   }
-  if (selection.kind === "dvd_title") {
-    return ["--title", String(selection.titleNumber)];
+  if (sourceIdentity.kind === "dvd_title") {
+    return ["--title", String(sourceIdentity.titleNumber)];
   }
   return [
     "--title",
-    String(selection.titleNumber),
+    String(sourceIdentity.titleNumber),
     "--chapters",
-    `${selection.chapterStart}-${selection.chapterEnd}`,
+    `${sourceIdentity.chapterStart}-${sourceIdentity.chapterEnd}`,
   ];
 }
 

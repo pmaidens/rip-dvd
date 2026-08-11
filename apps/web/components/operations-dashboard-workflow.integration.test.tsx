@@ -324,9 +324,9 @@ describe("end-to-end operations dashboard workflow", () => {
     const selectionResponse = await catalogMutation({
       action: "create_disc_selection",
       selection: {
-        kind: "main_feature",
         label: "Main feature",
         mediaItemId: mediaItem.id,
+        sourceIdentity: { kind: "main_feature" },
       },
     });
     expect(selectionResponse.status).toBe(201);

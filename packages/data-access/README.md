@@ -52,18 +52,21 @@ the archive's current `updatedAt` catalog revision. Completion compares that
 revision atomically, so a stale review cannot approve a Disc Selection added by
 another client. Creating another Disc Selection atomically clears the review
 time and advances the revision, so encoding remains blocked until the changed
-catalog is explicitly completed again. Media Item hierarchy
-mutations are serialized, reject cycles, and cap parent-child chains at 32
-levels without limiting siblings or the total Media Item count.
-The facade derives canonical DVD source identities, rejects duplicate source
-slices, requires title selections to reference the archived scan, and keeps
-chapter ranges within the selected title; main-feature selections remain a
-distinct DVD source kind. Full catalog validation for review completion and
-Encode Job enqueueing runs in a consistent deferred read snapshot. Each
-operation then compares the archive's monotonic catalog revision and writes in
-one short immediate transaction, so a concurrent Disc Selection cannot reopen
-review between validation and the queue or review write. Enqueueing also
-requires the referenced Encoding
+catalog is explicitly completed again. Media Item hierarchy mutations are
+serialized, reject cycles, and cap parent-child chains at 32 levels without
+limiting siblings or the total Media Item count.
+The facade carries each DVD source as one immutable, validated
+`DiscSelectionSourceIdentity` value instead of exposing a source key beside
+parallel kind, title, and chapter fields. Its persistence codec alone flattens
+that value into the normalized SQLite columns and derives the canonical legacy
+source key. The facade rejects duplicate source slices, requires title
+selections to reference the archived scan, and keeps chapter ranges within the
+selected title; main-feature selections remain a distinct DVD source kind.
+Full catalog validation for review completion and Encode Job enqueueing runs in
+a consistent deferred read snapshot. Each operation then compares the archive's
+monotonic catalog revision and writes in one short immediate transaction, so a
+concurrent Disc Selection cannot reopen review between validation and the queue
+or review write. Enqueueing also requires the referenced Encoding
 Profile version to be active in the DVD video domain and rejects a final output
 path already reserved by another logical job. Encode Job requeue and claim
 operations also require the review boundary. Requeue preserves the referenced

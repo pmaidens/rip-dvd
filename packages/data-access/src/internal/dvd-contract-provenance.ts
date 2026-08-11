@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 
+import { deserializeDiscSelectionSourceIdentity } from "../disc-selection-source-identity.js";
 import { decodeDvdTitleMap } from "../dvd-scan.js";
 import { DomainInvariantError } from "../errors.js";
 import type {
@@ -117,63 +118,20 @@ export function evaluateDetectedDiscRediscovery({
 export function toDiscSelection(
   row: typeof discSelections.$inferSelect,
 ): DiscSelection {
-  const common = {
+  return {
     id: row.id,
     originalDiscArchiveId: row.originalDiscArchiveId,
     mediaItemId: row.mediaItemId,
-    sourceKey: row.sourceKey,
+    sourceIdentity: deserializeDiscSelectionSourceIdentity({
+      kind: row.kind,
+      titleNumber: row.titleNumber,
+      chapterStart: row.chapterStart,
+      chapterEnd: row.chapterEnd,
+    }),
     label: row.label,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
-
-  switch (row.kind) {
-    case "main_feature":
-      if (
-        row.titleNumber !== null ||
-        row.chapterStart !== null ||
-        row.chapterEnd !== null
-      ) {
-        throw new DomainInvariantError("Invalid main feature selection shape");
-      }
-      return {
-        ...common,
-        kind: row.kind,
-        titleNumber: null,
-        chapterStart: null,
-        chapterEnd: null,
-      };
-    case "dvd_title":
-      if (
-        row.titleNumber === null ||
-        row.chapterStart !== null ||
-        row.chapterEnd !== null
-      ) {
-        throw new DomainInvariantError("Invalid DVD title selection shape");
-      }
-      return {
-        ...common,
-        kind: row.kind,
-        titleNumber: row.titleNumber,
-        chapterStart: null,
-        chapterEnd: null,
-      };
-    case "dvd_chapters":
-      if (
-        row.titleNumber === null ||
-        row.chapterStart === null ||
-        row.chapterEnd === null
-      ) {
-        throw new DomainInvariantError("Invalid DVD chapter selection shape");
-      }
-      return {
-        ...common,
-        kind: row.kind,
-        titleNumber: row.titleNumber,
-        chapterStart: row.chapterStart,
-        chapterEnd: row.chapterEnd,
-      };
-  }
 }
 
 export function requiresLegacyDiscSelectionRepair(
@@ -182,7 +140,7 @@ export function requiresLegacyDiscSelectionRepair(
 ): boolean {
   try {
     validator.validate(
-      toDiscSelection(row),
+      toDiscSelection(row).sourceIdentity,
       { persistedSourceKey: row.sourceKey },
     );
     return false;

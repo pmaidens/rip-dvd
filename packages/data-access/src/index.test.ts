@@ -16,6 +16,7 @@ import { completeCatalogReview } from "./catalog.test-support.js";
 import {
   ARCHIVE_JOB_LEASE_DURATION_MS,
   createDataAccess,
+  createDiscSelectionSourceIdentity,
   DVD_TITLE_MAP_SCHEMA_VERSION,
   DomainInvariantError,
   ENCODE_JOB_LEASE_DURATION_MS,
@@ -646,13 +647,17 @@ describe("data-access facade", () => {
     const selection = access.catalog.createDiscSelection({
       originalDiscArchiveId: archive.id,
       mediaItemId: movie.id,
-      kind: "main_feature",
+      sourceIdentity: createDiscSelectionSourceIdentity({
+        kind: "main_feature",
+      }),
     });
     expect(() =>
       access.catalog.createDiscSelection({
         originalDiscArchiveId: archive.id,
         mediaItemId: trailer.id,
-        kind: "main_feature",
+        sourceIdentity: createDiscSelectionSourceIdentity({
+          kind: "main_feature",
+        }),
       }),
     ).toThrow();
 
@@ -660,7 +665,7 @@ describe("data-access facade", () => {
       expect.objectContaining({ id: archive.id, fingerprint: "disc-fingerprint" }),
     ]);
     expect(selection.mediaItemId).toBe(movie.id);
-    expect(selection.sourceKey).toBe("dvd:main-feature");
+    expect(selection.sourceIdentity).toEqual({ kind: "main_feature" });
     access.close();
   });
 
@@ -695,7 +700,7 @@ describe("data-access facade", () => {
       const discSelection = access.catalog.createDiscSelection({
         originalDiscArchiveId: archive.id,
         mediaItemId: mediaItem.id,
-        kind: "main_feature",
+        sourceIdentity: { kind: "main_feature" },
       });
       return { archive, mediaItem, discSelection };
     });
@@ -753,7 +758,7 @@ describe("data-access facade", () => {
     access.catalog.createDiscSelection({
       originalDiscArchiveId: archive.id,
       mediaItemId: movie.id,
-      kind: "main_feature",
+      sourceIdentity: { kind: "main_feature" },
     });
     expect(
       access.catalog.listOriginalDiscArchives({ needsCatalogReviewOnly: true }),
@@ -809,7 +814,7 @@ describe("data-access facade", () => {
     access.catalog.createDiscSelection({
       originalDiscArchiveId: archive.id,
       mediaItemId: movie.id,
-      kind: "main_feature",
+      sourceIdentity: { kind: "main_feature" },
     });
     completeCatalogReview(access, archive.id);
 
@@ -820,10 +825,12 @@ describe("data-access facade", () => {
     const added = access.catalog.createDiscSelection({
       originalDiscArchiveId: archive.id,
       mediaItemId: episode.id,
-      kind: "dvd_chapters",
-      titleNumber: 1,
-      chapterStart: 1,
-      chapterEnd: 4,
+      sourceIdentity: {
+        kind: "dvd_chapters",
+        titleNumber: 1,
+        chapterStart: 1,
+        chapterEnd: 4,
+      },
     });
     expect(
       access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0],
@@ -896,40 +903,50 @@ describe("data-access facade", () => {
     const selection = access.catalog.createDiscSelection({
       originalDiscArchiveId: archive.id,
       mediaItemId: episode.id,
-      kind: "dvd_chapters",
-      titleNumber: 2,
-      chapterStart: 3,
-      chapterEnd: 6,
+      sourceIdentity: {
+        kind: "dvd_chapters",
+        titleNumber: 2,
+        chapterStart: 3,
+        chapterEnd: 6,
+      },
     });
     expect(selection).toMatchObject({
-      sourceKey: "dvd:title:2:chapters:3-6",
-      titleNumber: 2,
-      chapterStart: 3,
-      chapterEnd: 6,
+      sourceIdentity: {
+        kind: "dvd_chapters",
+        titleNumber: 2,
+        chapterStart: 3,
+        chapterEnd: 6,
+      },
     });
 
     const repaired = access.catalog.repairDiscSelection(selection.id, {
       originalDiscArchiveId: archive.id,
       mediaItemId: episode.id,
-      kind: "dvd_chapters",
-      titleNumber: 2,
-      chapterStart: 4,
-      chapterEnd: 8,
+      sourceIdentity: {
+        kind: "dvd_chapters",
+        titleNumber: 2,
+        chapterStart: 4,
+        chapterEnd: 8,
+      },
     });
     expect(repaired).toMatchObject({
-      sourceKey: "dvd:title:2:chapters:4-8",
-      titleNumber: 2,
-      chapterStart: 4,
-      chapterEnd: 8,
+      sourceIdentity: {
+        kind: "dvd_chapters",
+        titleNumber: 2,
+        chapterStart: 4,
+        chapterEnd: 8,
+      },
     });
 
     const outOfBounds = {
       originalDiscArchiveId: archive.id,
       mediaItemId: episode.id,
-      kind: "dvd_chapters" as const,
-      titleNumber: 2,
-      chapterStart: 7,
-      chapterEnd: 9,
+      sourceIdentity: {
+        kind: "dvd_chapters" as const,
+        titleNumber: 2,
+        chapterStart: 7,
+        chapterEnd: 9,
+      },
     };
     const chapterError = /must not exceed DVD title 2's 8 chapters/;
     expect(() => access.catalog.createDiscSelection(outOfBounds))
@@ -996,13 +1013,12 @@ describe("data-access facade", () => {
     const unreviewableSelection = access.catalog.createDiscSelection({
       originalDiscArchiveId: unreviewable.archive.id,
       mediaItemId: unreviewable.mediaItem.id,
-      kind: "main_feature",
+      sourceIdentity: { kind: "main_feature" },
     });
     const unreviewableTitle = {
       originalDiscArchiveId: unreviewable.archive.id,
       mediaItemId: unreviewable.mediaItem.id,
-      kind: "dvd_title" as const,
-      titleNumber: 1,
+      sourceIdentity: { kind: "dvd_title" as const, titleNumber: 1 },
     };
     const scanError = /reviewable DVD title map/;
     expect(() => access.catalog.createDiscSelection(unreviewableTitle))
@@ -1033,14 +1049,12 @@ describe("data-access facade", () => {
     const missingTitleSelection = access.catalog.createDiscSelection({
       originalDiscArchiveId: missingTitle.archive.id,
       mediaItemId: missingTitle.mediaItem.id,
-      kind: "dvd_title",
-      titleNumber: 2,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
     });
     const absentTitle = {
       originalDiscArchiveId: missingTitle.archive.id,
       mediaItemId: missingTitle.mediaItem.id,
-      kind: "dvd_title" as const,
-      titleNumber: 1,
+      sourceIdentity: { kind: "dvd_title" as const, titleNumber: 1 },
     };
     const titleError = /DVD title 1 is not present in the archived scan/;
     expect(() => access.catalog.createDiscSelection(absentTitle))
@@ -1112,7 +1126,7 @@ describe("data-access facade", () => {
     const selection = access.catalog.createDiscSelection({
       originalDiscArchiveId: archive.id,
       mediaItemId: item.id,
-      kind: "main_feature",
+      sourceIdentity: { kind: "main_feature" },
     });
     const profile = access.encodingProfiles.create({
       key: "large-catalog",
@@ -1364,7 +1378,7 @@ describe("data-access facade", () => {
       const selection = access.catalog.createDiscSelection({
         originalDiscArchiveId: archive.id,
         mediaItemId: item.id,
-        kind: "main_feature",
+        sourceIdentity: { kind: "main_feature" },
       });
       return { archive, selection };
     };
@@ -1408,7 +1422,7 @@ describe("data-access facade", () => {
     const selection = access.catalog.createDiscSelection({
       originalDiscArchiveId: archive.id,
       mediaItemId: movie.id,
-      kind: "main_feature",
+      sourceIdentity: { kind: "main_feature" },
     });
     completeCatalogReview(access, archive.id);
     const profile = access.encodingProfiles.create({
@@ -1476,7 +1490,7 @@ describe("data-access facade", () => {
     const selection = access.catalog.createDiscSelection({
       originalDiscArchiveId: archive.id,
       mediaItemId: movie.id,
-      kind: "main_feature",
+      sourceIdentity: { kind: "main_feature" },
     });
     const extra = access.catalog.createMediaItem({
       kind: "bonus_feature",
@@ -1897,7 +1911,8 @@ describe("data-access facade", () => {
   });
 
   it("maps main-feature, title, and bounded multi-episode selections to one Media Item each", () => {
-    const access = openTestDatabase();
+    const databasePath = createTestDatabasePath();
+    const access = openTestDatabase(databasePath);
     const drive = access.catalog.upsertOpticalDrive({
       devicePath: "/dev/sr0",
       isPresent: true,
@@ -1973,29 +1988,32 @@ describe("data-access facade", () => {
       access.catalog.createDiscSelection({
         originalDiscArchiveId: archive.id,
         mediaItemId: mainFeature.id,
-        kind: "main_feature",
+        sourceIdentity: { kind: "main_feature" },
       }),
       access.catalog.createDiscSelection({
         originalDiscArchiveId: archive.id,
         mediaItemId: trailer.id,
-        kind: "dvd_title",
-        titleNumber: 2,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
       }),
       access.catalog.createDiscSelection({
         originalDiscArchiveId: archive.id,
         mediaItemId: firstEpisode.id,
-        kind: "dvd_chapters",
-        titleNumber: 1,
-        chapterStart: 1,
-        chapterEnd: 4,
+        sourceIdentity: {
+          kind: "dvd_chapters",
+          titleNumber: 1,
+          chapterStart: 1,
+          chapterEnd: 4,
+        },
       }),
       access.catalog.createDiscSelection({
         originalDiscArchiveId: archive.id,
         mediaItemId: secondEpisode.id,
-        kind: "dvd_chapters",
-        titleNumber: 1,
-        chapterStart: 5,
-        chapterEnd: 8,
+        sourceIdentity: {
+          kind: "dvd_chapters",
+          titleNumber: 1,
+          chapterStart: 5,
+          chapterEnd: 8,
+        },
       }),
     ];
 
@@ -2005,31 +2023,57 @@ describe("data-access facade", () => {
       firstEpisode.id,
       secondEpisode.id,
     ]);
-    expect(selections.map((selection) => selection.sourceKey)).toEqual([
-      "dvd:main-feature",
-      "dvd:title:2",
-      "dvd:title:1:chapters:1-4",
-      "dvd:title:1:chapters:5-8",
+    const sourceIdentities = selections.map(
+      (selection) => selection.sourceIdentity,
+    );
+    expect(sourceIdentities).toEqual([
+      { kind: "main_feature" },
+      { kind: "dvd_title", titleNumber: 2 },
+      {
+        kind: "dvd_chapters",
+        titleNumber: 1,
+        chapterStart: 1,
+        chapterEnd: 4,
+      },
+      {
+        kind: "dvd_chapters",
+        titleNumber: 1,
+        chapterStart: 5,
+        chapterEnd: 8,
+      },
     ]);
     expect(() =>
       access.catalog.createDiscSelection({
         originalDiscArchiveId: archive.id,
         mediaItemId: firstEpisode.id,
-        kind: "dvd_chapters",
-        titleNumber: 1,
-        chapterStart: 8,
-        chapterEnd: 9,
+        sourceIdentity: {
+          kind: "dvd_chapters",
+          titleNumber: 1,
+          chapterStart: 8,
+          chapterEnd: 9,
+        },
       }),
     ).toThrow(DomainInvariantError);
     expect(() =>
       access.catalog.createDiscSelection({
         originalDiscArchiveId: archive.id,
         mediaItemId: trailer.id,
-        kind: "dvd_title",
-        titleNumber: 3,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 3 },
       }),
     ).toThrow(DomainInvariantError);
     access.close();
+
+    const reopened = openTestDatabase(databasePath);
+    const reopenedSourceIdentities = reopened.catalog
+      .listDiscSelections({
+        originalDiscArchiveId: archive.id,
+      })
+      .map((selection) => selection.sourceIdentity);
+    expect(reopenedSourceIdentities).toHaveLength(sourceIdentities.length);
+    expect(reopenedSourceIdentities).toEqual(
+      expect.arrayContaining(sourceIdentities),
+    );
+    reopened.close();
   });
 
   it("reconciles discovered Optical Drives without changing missing drives' last-seen time", () => {
@@ -3197,15 +3241,21 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       {
         originalDiscArchiveId: "duplicate-archive" as OriginalDiscArchiveId,
         mediaItemId: "legacy-episode-1-copy" as MediaItemId,
+        sourceIdentity: {
+          kind: "dvd_chapters",
+          titleNumber: 1,
+          chapterStart: 1,
+          chapterEnd: 1,
+        },
+      },
+    );
+    expect(repairedDuplicate).toMatchObject({
+      sourceIdentity: {
         kind: "dvd_chapters",
         titleNumber: 1,
         chapterStart: 1,
         chapterEnd: 1,
       },
-    );
-    expect(repairedDuplicate).toMatchObject({
-      sourceKey: "dvd:title:1:chapters:1-1",
-      kind: "dvd_chapters",
     });
     expect(repairedDuplicate.id).not.toBe("duplicate-b");
     expect(access.catalog.listDiscSelections({
@@ -3213,8 +3263,10 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     })).toEqual([
       expect.objectContaining({
         id: "duplicate-b",
-        sourceKey: "caller:title-one-copy",
-        titleNumber: 1,
+        sourceIdentity: {
+          kind: "dvd_title",
+          titleNumber: 1,
+        },
       }),
     ]);
     expect(access.encodeJobs.list(["failed"])).toEqual(
@@ -3241,7 +3293,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     })).toEqual([
       expect.objectContaining({
         id: "duplicate-main-b",
-        sourceKey: "caller:main",
+        sourceIdentity: { kind: "main_feature" },
       }),
     ]);
     expect(access.catalog.listDiscSelections({
@@ -3284,13 +3336,11 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         originalDiscArchiveId:
           "noncanonical-archive" as OriginalDiscArchiveId,
         mediaItemId: "legacy-noncanonical" as MediaItemId,
-        kind: "dvd_title",
-        titleNumber: 1,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
       },
     );
     expect(repairedNoncanonical).toMatchObject({
-      sourceKey: "dvd:title:1",
-      titleNumber: 1,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
     });
     expect(repairedNoncanonical.id).not.toBe("noncanonical");
     expect(access.catalog.listDiscSelections({
@@ -3298,8 +3348,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     })).toEqual([
       expect.objectContaining({
         id: "noncanonical",
-        sourceKey: "caller:title-one",
-        titleNumber: 1,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
       }),
     ]);
     expect(access.encodeJobs.list(["completed"])).toEqual(
@@ -3320,13 +3369,11 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         originalDiscArchiveId:
           "scan-invalid-archive" as OriginalDiscArchiveId,
         mediaItemId: "legacy-missing-title" as MediaItemId,
-        kind: "dvd_title",
-        titleNumber: 1,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
       },
     );
     expect(repairedMissingTitle).toMatchObject({
-      sourceKey: "dvd:title:1",
-      titleNumber: 1,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
     });
     expect(repairedMissingTitle.id).not.toBe("missing-title");
     expect(access.catalog.listDiscSelections({
@@ -3335,8 +3382,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     })).toEqual([
       expect.objectContaining({
         id: repairedMissingTitle.id,
-        sourceKey: "dvd:title:1",
-        titleNumber: 1,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
       }),
     ]);
     expect(access.catalog.listDiscSelections({
@@ -3344,8 +3390,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     })).toEqual([
       expect.objectContaining({
         id: "missing-title",
-        sourceKey: "dvd:title:999",
-        titleNumber: 999,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 999 },
       }),
     ]);
     expect(access.encodeJobs.list(["failed"])).toEqual(
@@ -4107,10 +4152,12 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     const selection = access.catalog.createDiscSelection({
       originalDiscArchiveId: archive.id,
       mediaItemId: episode.id,
-      kind: "dvd_chapters",
-      titleNumber: 1,
-      chapterStart: 5,
-      chapterEnd: 8,
+      sourceIdentity: {
+        kind: "dvd_chapters",
+        titleNumber: 1,
+        chapterStart: 5,
+        chapterEnd: 8,
+      },
     });
     const reviewed = completeCatalogReview(access, archive.id);
     const profile = access.encodingProfiles.create({
@@ -4446,8 +4493,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         access.catalog.createDiscSelection({
           originalDiscArchiveId: archive.id,
           mediaItemId: item.id,
-          kind: "dvd_title",
-          titleNumber,
+          sourceIdentity: { kind: "dvd_title", titleNumber },
         }),
       ).toThrow(DomainInvariantError);
     }
@@ -4455,20 +4501,24 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       access.catalog.createDiscSelection({
         originalDiscArchiveId: archive.id,
         mediaItemId: item.id,
-        kind: "dvd_chapters",
-        titleNumber: 1,
-        chapterStart: 1.5,
-        chapterEnd: 2,
+        sourceIdentity: {
+          kind: "dvd_chapters",
+          titleNumber: 1,
+          chapterStart: 1.5,
+          chapterEnd: 2,
+        },
       }),
     ).toThrow(DomainInvariantError);
     expect(() =>
       access.catalog.createDiscSelection({
         originalDiscArchiveId: archive.id,
         mediaItemId: item.id,
-        kind: "dvd_chapters",
-        titleNumber: 1,
-        chapterStart: 1,
-        chapterEnd: 2.5,
+        sourceIdentity: {
+          kind: "dvd_chapters",
+          titleNumber: 1,
+          chapterStart: 1,
+          chapterEnd: 2.5,
+        },
       }),
     ).toThrow(DomainInvariantError);
     access.close();
@@ -5445,7 +5495,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
           const selection = access.catalog.createDiscSelection({
             originalDiscArchiveId: archive.id,
             mediaItemId: item.id,
-            kind: "main_feature",
+            sourceIdentity: { kind: "main_feature" },
           });
           completeCatalogReview(access, archive.id);
           queuedId = access.encodeJobs.enqueue({
@@ -5565,7 +5615,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     const selection = access.catalog.createDiscSelection({
       originalDiscArchiveId: archive.id,
       mediaItemId: item.id,
-      kind: "main_feature",
+      sourceIdentity: { kind: "main_feature" },
     });
     completeCatalogReview(access, archive.id);
     const activeDvdProfile = access.encodingProfiles.create({
@@ -5656,7 +5706,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     const selection = access.catalog.createDiscSelection({
       originalDiscArchiveId: archive.id,
       mediaItemId: item.id,
-      kind: "main_feature",
+      sourceIdentity: { kind: "main_feature" },
     });
     const profile = access.encodingProfiles.create({
       key: "dvd-library",

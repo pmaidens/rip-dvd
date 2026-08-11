@@ -45,7 +45,7 @@ function seedEncodeJob(access: LegacySidecarDataAccess) {
   const selection = access.catalog.createDiscSelection({
     originalDiscArchiveId: archive.id,
     mediaItemId: mediaItem.id,
-    kind: "main_feature",
+    sourceIdentity: { kind: "main_feature" },
     label: "Main feature",
   });
   completeCatalogReview(access, archive.id);
@@ -143,7 +143,7 @@ describe("readDashboardSnapshot", () => {
     access.catalog.createDiscSelection({
       originalDiscArchiveId: archive.id,
       mediaItemId: item.id,
-      kind: "main_feature",
+      sourceIdentity: { kind: "main_feature" },
     });
 
     expect(readDashboardSnapshot(access, { activityLimit: 20 }).catalogReview)
@@ -323,7 +323,7 @@ describe("readDashboardSnapshot", () => {
     const selection = access.catalog.createDiscSelection({
       originalDiscArchiveId: catalogedArchive.id,
       mediaItemId: mediaItem.id,
-      kind: "main_feature",
+      sourceIdentity: { kind: "main_feature" },
       label: "Main feature",
     });
     completeCatalogReview(access, catalogedArchive.id);

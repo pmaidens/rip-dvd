@@ -113,12 +113,19 @@ describe("data-access domain identifiers", () => {
         // @ts-expect-error Optical Drive IDs cannot identify Detected Discs.
         detectedDiscId: driveId,
       });
-      // @ts-expect-error Chapter selections require a title and range.
       access.catalog.createDiscSelection({
         originalDiscArchiveId: archiveId,
         mediaItemId,
-        kind: "dvd_chapters",
+        // @ts-expect-error Chapter source identities require a title and range.
+        sourceIdentity: { kind: "dvd_chapters" },
         label: "missing coordinates",
+      });
+      access.catalog.createDiscSelection({
+        originalDiscArchiveId: archiveId,
+        mediaItemId,
+        // @ts-expect-error Source coordinates cannot be passed as parallel fields.
+        kind: "dvd_title",
+        titleNumber: 1,
       });
     }
   });
