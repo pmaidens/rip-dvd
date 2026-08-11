@@ -60,15 +60,6 @@ export function createBoundedChronologicalList<
       );
       return chronological([...active, ...history]);
     }
-    if (policy?.mode === "newest") {
-      return chronological(
-        readNewest(
-          statuses,
-          requirePositiveSafeInteger(policy.limit, "limit"),
-          options,
-        ),
-      );
-    }
     return readAll(statuses, options);
   };
 }
