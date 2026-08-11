@@ -56,6 +56,49 @@ interface EncodeJobsViewProps {
   onProfilePage(offset: number): void;
 }
 
+interface OptionPagerProps {
+  ariaLabel: string;
+  isSaving: boolean;
+  nextLabel: string;
+  onPage(offset: number): void;
+  page: EncodeOptionsPage;
+  previousLabel: string;
+}
+
+function OptionPager({
+  ariaLabel,
+  isSaving,
+  nextLabel,
+  onPage,
+  page,
+  previousLabel,
+}: OptionPagerProps) {
+  if (!page.hasPrevious && !page.hasNext) {
+    return null;
+  }
+  return (
+    <nav
+      className="profile-actions profile-form"
+      aria-label={ariaLabel}
+    >
+      <button
+        type="button"
+        disabled={isSaving || !page.hasPrevious}
+        onClick={() => onPage(Math.max(0, page.offset - page.limit))}
+      >
+        {previousLabel}
+      </button>
+      <button
+        type="button"
+        disabled={isSaving || !page.hasNext}
+        onClick={() => onPage(page.offset + page.limit)}
+      >
+        {nextLabel}
+      </button>
+    </nav>
+  );
+}
+
 export function EncodeJobsView({
   state,
   isSaving,
@@ -184,61 +227,22 @@ export function EncodeJobsView({
               No active DVD video Encoding Profiles are available.
             </div>
           ) : null}
-          {state.page.hasPrevious || state.page.hasNext ? (
-            <nav
-              className="profile-actions profile-form"
-              aria-label="Encode selection pages"
-            >
-              <button
-                type="button"
-                disabled={isSaving || !state.page.hasPrevious}
-                onClick={() =>
-                  onSelectionPage(
-                    Math.max(0, state.page.offset - state.page.limit),
-                  )}
-              >
-                Previous reviewed selections
-              </button>
-              <button
-                type="button"
-                disabled={isSaving || !state.page.hasNext}
-                onClick={() =>
-                  onSelectionPage(state.page.offset + state.page.limit)}
-              >
-                Next reviewed selections
-              </button>
-            </nav>
-          ) : null}
-          {state.profilePage.hasPrevious || state.profilePage.hasNext ? (
-            <nav
-              className="profile-actions profile-form"
-              aria-label="Encode profile pages"
-            >
-              <button
-                type="button"
-                disabled={isSaving || !state.profilePage.hasPrevious}
-                onClick={() =>
-                  onProfilePage(
-                    Math.max(
-                      0,
-                      state.profilePage.offset - state.profilePage.limit,
-                    ),
-                  )}
-              >
-                Previous active profiles
-              </button>
-              <button
-                type="button"
-                disabled={isSaving || !state.profilePage.hasNext}
-                onClick={() =>
-                  onProfilePage(
-                    state.profilePage.offset + state.profilePage.limit,
-                  )}
-              >
-                Next active profiles
-              </button>
-            </nav>
-          ) : null}
+          <OptionPager
+            ariaLabel="Encode selection pages"
+            isSaving={isSaving}
+            nextLabel="Next reviewed selections"
+            onPage={onSelectionPage}
+            page={state.page}
+            previousLabel="Previous reviewed selections"
+          />
+          <OptionPager
+            ariaLabel="Encode profile pages"
+            isSaving={isSaving}
+            nextLabel="Next active profiles"
+            onPage={onProfilePage}
+            page={state.profilePage}
+            previousLabel="Previous active profiles"
+          />
         </>
       )}
     </section>
