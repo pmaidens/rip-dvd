@@ -3308,12 +3308,18 @@ export function createDataAccessInternal(
             ) {
               return existing;
             }
+            const effectiveOutputPath =
+              existing &&
+              (existing.status === "completed" ||
+                existing.replaceExistingOutput)
+                ? existing.outputPath
+                : outputPath;
             const outputOwner = transaction
               .select({ id: encodeJobs.id })
               .from(encodeJobs)
               .where(
                 and(
-                  eq(encodeJobs.outputPath, outputPath),
+                  eq(encodeJobs.outputPath, effectiveOutputPath),
                   eq(encodeJobs.reservesOutputPath, true),
                   or(
                     ne(encodeJobs.discSelectionId, input.discSelectionId),
@@ -3325,12 +3331,12 @@ export function createDataAccessInternal(
               .get();
             if (outputOwner) {
               throw new DomainInvariantError(
-                `Encode Job output is already assigned: ${outputPath}`,
+                `Encode Job output is already assigned: ${effectiveOutputPath}`,
               );
             }
             if (existing) {
               return encodeJobQueue.requeue(existing.id, {
-                outputPath,
+                outputPath: effectiveOutputPath,
                 priority: input.priority ?? 0,
               });
             }
@@ -3358,7 +3364,7 @@ export function createDataAccessInternal(
                 id: newId<EncodeJobId>(),
                 discSelectionId: input.discSelectionId,
                 encodingProfileId: input.encodingProfileId,
-                outputPath,
+                outputPath: effectiveOutputPath,
                 priority: input.priority ?? 0,
                 createdAt: timestamp,
                 updatedAt: timestamp,

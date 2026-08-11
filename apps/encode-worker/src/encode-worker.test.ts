@@ -1526,6 +1526,10 @@ describe("encode worker polling", () => {
 
   it("preserves and replaces the prior output when a completed job is re-encoded", async () => {
     const fixture = createQueuedJob();
+    const requestedOutputPath = join(
+      fixture.mediaLibraryPath,
+      "Requested replacement.mkv",
+    );
     const firstRunner: HandBrakeRunner = {
       run: vi.fn(async ({ outputPath }) => {
         writeFileSync(outputPath, "old encode", { flag: "wx" });
@@ -1540,7 +1544,36 @@ describe("encode worker polling", () => {
       signal: new AbortController().signal,
     };
     await pollEncodeWorker({ ...options, runner: firstRunner });
-    fixture.access.encodeJobs.requeue(fixture.job.id);
+    expect(
+      fixture.access.encodeJobs.enqueue({
+        discSelectionId: fixture.job.discSelectionId,
+        encodingProfileId: fixture.job.encodingProfileId,
+        outputPath: requestedOutputPath,
+      }),
+    ).toMatchObject({
+      id: fixture.job.id,
+      outputPath: fixture.outputPath,
+      replaceExistingOutput: true,
+      status: "queued",
+    });
+    const competingItem = fixture.access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Competing output owner",
+    });
+    const competingSelection = fixture.access.catalog.createDiscSelection({
+      originalDiscArchiveId: fixture.archive.id,
+      mediaItemId: competingItem.id,
+      kind: "dvd_title",
+      titleNumber: 4,
+    });
+    completeCatalogReview(fixture.access, fixture.archive.id);
+    expect(() =>
+      fixture.access.encodeJobs.enqueue({
+        discSelectionId: competingSelection.id,
+        encodingProfileId: fixture.profile.id,
+        outputPath: fixture.outputPath,
+      }),
+    ).toThrow(/output is already assigned/i);
     const replacementRunner: HandBrakeRunner = {
       run: vi.fn(async ({ outputPath }) => {
         expect(readFileSync(fixture.outputPath, "utf8")).toBe("old encode");
@@ -1551,6 +1584,7 @@ describe("encode worker polling", () => {
     await pollEncodeWorker({ ...options, runner: replacementRunner });
 
     expect(readFileSync(fixture.outputPath, "utf8")).toBe("new encode");
+    expect(existsSync(requestedOutputPath)).toBe(false);
     expect(quarantinedContents(fixture.outputPath)).toContain("old encode");
     expect(fixture.access.encodeJobs.list()).toEqual([
       expect.objectContaining({ id: fixture.job.id, status: "completed" }),
@@ -1676,7 +1710,21 @@ describe("encode worker polling", () => {
       }),
     ]);
     replacementLinkFailure.armed = false;
-    fixture.access.encodeJobs.requeue(fixture.job.id);
+    expect(
+      fixture.access.encodeJobs.enqueue({
+        discSelectionId: fixture.job.discSelectionId,
+        encodingProfileId: fixture.job.encodingProfileId,
+        outputPath: join(
+          fixture.mediaLibraryPath,
+          "Requested failed replacement retry.mkv",
+        ),
+      }),
+    ).toMatchObject({
+      id: fixture.job.id,
+      outputPath: fixture.outputPath,
+      replaceExistingOutput: true,
+      status: "queued",
+    });
     const retryRunner: HandBrakeRunner = {
       run: vi.fn(async ({ outputPath }) => {
         writeFileSync(outputPath, "successful retry", { flag: "wx" });
