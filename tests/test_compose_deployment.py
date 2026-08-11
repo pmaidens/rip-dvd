@@ -366,6 +366,57 @@ class ComposeDeploymentTests(unittest.TestCase):
         self.assertIn("must be 0 or 1", result.stderr)
         self.assertEqual(calls, [])
 
+    def test_start_script_rejects_public_bind_with_loopback_trusted_origin(
+        self,
+    ) -> None:
+        result, calls = run_compose_script(
+            "compose-start.sh",
+            environment={
+                "DOCKER_COMPOSE_ENVIRONMENT": "\n".join(
+                    (
+                        "RIP_DVD_WEB_BIND_ADDRESS=0.0.0.0",
+                        "RIP_DVD_WEB_TRUSTED_ORIGIN=http://localhost:3000",
+                    )
+                ),
+            },
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(
+            "RIP_DVD_WEB_BIND_ADDRESS exposes the dashboard beyond loopback",
+            result.stderr,
+        )
+        self.assertIn(
+            "RIP_DVD_WEB_TRUSTED_ORIGIN must use the browser-facing origin",
+            result.stderr,
+        )
+        self.assertEqual(calls, [])
+
+    def test_start_script_allows_public_bind_with_public_trusted_origin(
+        self,
+    ) -> None:
+        result, calls = run_compose_script(
+            "compose-start.sh",
+            environment={
+                "DOCKER_COMPOSE_ENVIRONMENT": "\n".join(
+                    (
+                        "RIP_DVD_WEB_BIND_ADDRESS=0.0.0.0",
+                        "RIP_DVD_WEB_TRUSTED_ORIGIN=https://dvd.example.test",
+                    )
+                ),
+            },
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            calls,
+            [
+                f"{ROOT}||compose stop --timeout 30 archive-worker encode-worker web",
+                f"{ROOT}||compose --profile maintenance run --rm --no-deps migrate",
+                f"{ROOT}||compose up --detach --no-build web archive-worker encode-worker",
+            ],
+        )
+
     def test_failed_runtime_start_requiesces_partial_services_for_safe_retry(
         self,
     ) -> None:
