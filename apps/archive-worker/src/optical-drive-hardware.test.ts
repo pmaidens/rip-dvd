@@ -10,10 +10,11 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createLinuxOpticalDriveHardware,
   createNodeCommandRunner,
+  createNodeDiscContentProbeLauncher,
   createNodeDiscContentReader,
+  createNodeFileDiscContentProbeLauncher,
   createNodeMediaGenerationProbeLauncher,
   createNodeMediaGenerationObserver,
-  nodeDiscContentReader,
   type CommandRunner,
   type DiscContentProbeLauncher,
   type DiscContentReader,
@@ -22,6 +23,9 @@ import {
 import { readActiveMediaGeneration } from "./optical-media-probe.js";
 
 const execFileAsync = promisify(execFile);
+const nodeFileDiscContentReader = createNodeDiscContentReader({
+  probeLauncher: createNodeFileDiscContentProbeLauncher(),
+});
 
 async function createStuckThenSuccessfulProbeFixture() {
   const directory = await mkdtemp(join(tmpdir(), "rip-dvd-stuck-probe-"));
@@ -83,6 +87,31 @@ describe("Linux Optical Drive hardware boundary", () => {
       deviceInstanceObserver:
         options?.deviceInstanceObserver ?? stableDeviceInstanceObserver(),
     });
+
+  it("hashes DVD bytes through the libdvdcss reader", async () => {
+    const commandLauncher = {
+      start: vi.fn(() => ({
+        result: Promise.resolve({
+          exitCode: 0,
+          signal: null,
+          stderr: "",
+          stdout: `sha256:${"a".repeat(64)}`,
+        }),
+        closed: Promise.resolve(),
+        cancel: vi.fn(),
+      })),
+    };
+    const launcher = createNodeDiscContentProbeLauncher({ commandLauncher });
+
+    await expect(
+      launcher.start("/dev/sr0", 7_295_115_264).result,
+    ).resolves.toBe(`sha256:${"a".repeat(64)}`);
+    expect(commandLauncher.start).toHaveBeenCalledWith(
+      "rip-dvd-dvdcss-reader",
+      ["hash", "/dev/sr0", "7295115264"],
+      128,
+    );
+  });
 
   it("uses the production probe module to hold the device open while reading generation", () => {
     const events: string[] = [];
@@ -1176,12 +1205,12 @@ describe("Linux Optical Drive hardware boundary", () => {
     await writeFile(secondPath, secondContent);
     try {
       const signal = new AbortController().signal;
-      const first = await nodeDiscContentReader.hash(
+      const first = await nodeFileDiscContentReader.hash(
         firstPath,
         firstContent.length,
         signal,
       );
-      const second = await nodeDiscContentReader.hash(
+      const second = await nodeFileDiscContentReader.hash(
         secondPath,
         secondContent.length,
         signal,
@@ -1199,7 +1228,10 @@ describe("Linux Optical Drive hardware boundary", () => {
     const devicePath = join(directory, "blocked-device");
     await execFileAsync("mkfifo", [devicePath]);
     const controller = new AbortController();
-    const reader = createNodeDiscContentReader({ hashTimeoutMs: 5_000 });
+    const reader = createNodeDiscContentReader({
+      hashTimeoutMs: 5_000,
+      probeLauncher: createNodeFileDiscContentProbeLauncher(),
+    });
     let shutdownWatchdog: NodeJS.Timeout | undefined;
     try {
       const hashing = reader.hash(devicePath, 1, controller.signal);
@@ -1290,7 +1322,7 @@ describe("Linux Optical Drive hardware boundary", () => {
     await writeFile(devicePath, Buffer.from([1, 2, 3]));
     try {
       await expect(
-        nodeDiscContentReader.hash(
+        nodeFileDiscContentReader.hash(
           devicePath,
           4,
           new AbortController().signal,

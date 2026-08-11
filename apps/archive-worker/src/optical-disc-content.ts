@@ -5,12 +5,15 @@ import { isDvdContentId } from "@rip-dvd/data-access/dvd-scan";
 import {
   createBoundedSingleFlightCoordinator,
   createNodeBoundedChildProcessLauncher,
+  createNodeBoundedCommandProcessLauncher,
   type ActiveBoundedChildProcess,
   type BoundedChildProcessLauncher,
+  type BoundedCommandProcessLauncher,
 } from "./bounded-child-process.js";
 import { requireDvdContentSize } from "./dvd-content-policy.js";
+import { optionalBoundedText } from "./bounded-text.js";
 
-const DEFAULT_CONTENT_HASH_TIMEOUT_MS = 30 * 60_000;
+const DEFAULT_CONTENT_HASH_TIMEOUT_MS = 8 * 60 * 60_000;
 const DEFAULT_MAX_ACTIVE_HASHES = 32;
 const MAX_CONTENT_HASH_OUTPUT_BYTES = 128;
 
@@ -29,6 +32,11 @@ export interface DiscContentProbeLauncher {
 }
 
 interface NodeDiscContentProbeLauncherOptions {
+  commandLauncher?: BoundedCommandProcessLauncher;
+  executablePath?: string;
+}
+
+interface NodeFileDiscContentProbeLauncherOptions {
   scriptPath?: string;
   terminateProcess?: (child: { kill(signal: NodeJS.Signals): boolean }) => void;
 }
@@ -46,6 +54,38 @@ interface DiscContentProcessRequest {
 
 export function createNodeDiscContentProbeLauncher(
   options: NodeDiscContentProbeLauncherOptions = {},
+): DiscContentProbeLauncher {
+  const commandLauncher =
+    options.commandLauncher ?? createNodeBoundedCommandProcessLauncher();
+  const executablePath =
+    options.executablePath ?? "rip-dvd-dvdcss-reader";
+  return {
+    start(devicePath, sizeBytes) {
+      const activeProcess = commandLauncher.start(
+        executablePath,
+        ["hash", devicePath, String(sizeBytes)],
+        MAX_CONTENT_HASH_OUTPUT_BYTES,
+      );
+      return {
+        ...activeProcess,
+        result: activeProcess.result.then(
+          ({ exitCode, signal, stderr, stdout }) => {
+            if (exitCode === 0) {
+              return stdout;
+            }
+            const detail = optionalBoundedText(stderr, 500);
+            throw new Error(
+              `DVD content hashing failed${detail ? `: ${detail}` : ` with ${signal ?? `status ${exitCode}`}`}`,
+            );
+          },
+        ),
+      };
+    },
+  };
+}
+
+export function createNodeFileDiscContentProbeLauncher(
+  options: NodeFileDiscContentProbeLauncherOptions = {},
 ): DiscContentProbeLauncher {
   const childLauncher: BoundedChildProcessLauncher =
     createNodeBoundedChildProcessLauncher({

@@ -121,7 +121,7 @@ describe("DVD archive publication", () => {
       const devicePath = "/dev/zero";
       const previousDigest = "a".repeat(64);
       const replacementDigest =
-        "d0b8829a9f2a9c78882fb5d3aff464054e5a8a82978ecc2a922767782c739f7f";
+        "4561ae53176c6dec6f7e715600037e5d53d1a82d9bd8a3f6f9ac2af067bc1503";
       const previousPartialPath = join(
         previousRoot,
         `.${previousDigest}.iso.rip-dvd-partial`,
@@ -138,7 +138,7 @@ describe("DVD archive publication", () => {
         originalsLibraryPath: replacementOriginalsLibraryPath,
         runner: createNodeDvdCopyRunner({ timeoutMs: 1_000 }),
         signal: new AbortController().signal,
-        sizeBytes: 9,
+        sizeBytes: 2_048,
         verifySource: async () => undefined,
         onProgress: () => undefined,
       };
@@ -168,7 +168,7 @@ describe("DVD archive publication", () => {
       const root = realpathSync(originalsLibraryPath);
       const devicePath = "/dev/zero";
       const digest =
-        "d0b8829a9f2a9c78882fb5d3aff464054e5a8a82978ecc2a922767782c739f7f";
+        "4561ae53176c6dec6f7e715600037e5d53d1a82d9bd8a3f6f9ac2af067bc1503";
       const partialPath = join(
         root,
         `.${digest}.11111111-1111-4111-8111-111111111111.iso.rip-dvd-partial`,
@@ -190,7 +190,7 @@ describe("DVD archive publication", () => {
         originalsLibraryPath,
         runner: createNodeDvdCopyRunner({ timeoutMs: 1_000 }),
         signal: new AbortController().signal,
-        sizeBytes: 9,
+        sizeBytes: 2_048,
         verifySource: async () => undefined,
         onProgress: () => undefined,
       };
@@ -369,7 +369,7 @@ describe("DVD archive publication", () => {
       const originalsLibraryPath = createOriginalsLibrary();
       const root = realpathSync(originalsLibraryPath);
       const digest =
-        "d0b8829a9f2a9c78882fb5d3aff464054e5a8a82978ecc2a922767782c739f7f";
+        "4561ae53176c6dec6f7e715600037e5d53d1a82d9bd8a3f6f9ac2af067bc1503";
       const partialPath = join(root, `.${digest}.iso.rip-dvd-partial`);
       const readyPath = join(root, ".legacy-writer-ready");
       const writerPid = await startOrphanedWriter(
@@ -383,7 +383,7 @@ describe("DVD archive publication", () => {
         originalsLibraryPath,
         runner: createNodeDvdCopyRunner({ timeoutMs: 1_000 }),
         signal: new AbortController().signal,
-        sizeBytes: 9,
+        sizeBytes: 2_048,
         verifySource: async () => undefined,
         onProgress: () => undefined,
       };
@@ -413,7 +413,7 @@ describe("DVD archive publication", () => {
     },
   );
 
-  it("runs bounded GNU dd arguments and streams byte progress", async () => {
+  it("runs the bounded libdvdcss reader and streams byte progress", async () => {
     const originalsLibraryPath = createOriginalsLibrary();
     const outputPath = join(
       originalsLibraryPath,
@@ -426,7 +426,10 @@ describe("DVD archive publication", () => {
       unref: vi.fn(),
     });
     const spawnProcess = vi.fn(() => child);
-    const runner = createNodeDvdCopyRunner({ spawnProcess });
+    const runner = createNodeDvdCopyRunner({
+      requireInactive: () => undefined,
+      spawnProcess,
+    });
     const copied: number[] = [];
 
     const completion = runner.copy({
@@ -449,15 +452,11 @@ describe("DVD archive publication", () => {
         "--conflict-exit-code",
         "75",
         "/proc/self/fd/3",
-        "dd",
-        "if=/dev/zero",
-        `of=${outputPath}`,
-        "bs=4M",
-        "iflag=fullblock,count_bytes",
-        "count=9",
-        "oflag=nofollow",
-        "conv=excl,fsync",
-        "status=progress",
+        "rip-dvd-dvdcss-reader",
+        "copy",
+        "/dev/zero",
+        outputPath,
+        "9",
       ],
       {
         shell: false,
@@ -467,7 +466,7 @@ describe("DVD archive publication", () => {
     expect(copied).toEqual([4, 9]);
   });
 
-  it("times out without close and blocks retry until the dd child closes", async () => {
+  it("times out without close and blocks retry until the reader closes", async () => {
     vi.useFakeTimers();
     const originalsLibraryPath = createOriginalsLibrary();
     const children = Array.from({ length: 2 }, () =>
@@ -482,6 +481,7 @@ describe("DVD archive publication", () => {
       .mockReturnValueOnce(children[0])
       .mockReturnValueOnce(children[1]);
     const runner = createNodeDvdCopyRunner({
+      requireInactive: () => undefined,
       spawnProcess,
       timeoutMs: 10,
     });
@@ -527,7 +527,7 @@ describe("DVD archive publication", () => {
     await expect(retry).resolves.toBeUndefined();
   });
 
-  it("contains progress callback failures and waits for dd to close", async () => {
+  it("contains progress callback failures and waits for the reader to close", async () => {
     const originalsLibraryPath = createOriginalsLibrary();
     const stderr = Object.assign(new EventEmitter(), { destroy: vi.fn() });
     const child = Object.assign(new EventEmitter(), {
@@ -536,6 +536,7 @@ describe("DVD archive publication", () => {
       unref: vi.fn(),
     });
     const runner = createNodeDvdCopyRunner({
+      requireInactive: () => undefined,
       spawnProcess: vi.fn(() => child),
     });
     let settled = false;
@@ -608,7 +609,7 @@ describe("DVD archive publication", () => {
       copy: vi.fn(async ({ outputPath }) => {
         copiedPartialPath = outputPath;
         writeFileSync(outputPath, "partial evidence");
-        throw new Error("dd read failed");
+        throw new Error("disc read failed");
       }),
       isActive: () => false,
     };
@@ -624,7 +625,7 @@ describe("DVD archive publication", () => {
         verifySource: async () => undefined,
         onProgress: () => undefined,
       }),
-    ).rejects.toThrow("dd read failed");
+    ).rejects.toThrow("disc read failed");
 
     const root = realpathSync(originalsLibraryPath);
     expect(existsSync(join(root, `${digest}.iso`))).toBe(false);
@@ -634,7 +635,7 @@ describe("DVD archive publication", () => {
     );
   });
 
-  it("does not quarantine or retry a partial while its dd child is active", async () => {
+  it("does not quarantine or retry a partial while its reader is active", async () => {
     const originalsLibraryPath = createOriginalsLibrary();
     const root = realpathSync(originalsLibraryPath);
     const content = Buffer.from("dvd-image");

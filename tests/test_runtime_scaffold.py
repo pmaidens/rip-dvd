@@ -114,6 +114,35 @@ class RuntimeScaffoldTests(unittest.TestCase):
             '"${RIP_DVD_ARCHIVE_DEVICE_PATH:-/dev/sr0}:${RIP_DVD_ARCHIVE_DEVICE_PATH:-/dev/sr0}:r"',
             compose,
         )
+        self.assertIn(
+            '"${RIP_DVD_ARCHIVE_CSS_DEVICE_PATH:-/dev/sg1}:${RIP_DVD_ARCHIVE_CSS_DEVICE_PATH:-/dev/sg1}:r"',
+            compose,
+        )
+
+    def test_archive_worker_builds_a_verified_libdvdcss_reader(self) -> None:
+        dockerfile = (ROOT / "docker" / "runtime.Dockerfile").read_text()
+        reader = (ROOT / "docker" / "dvdcss-reader.c").read_text()
+
+        self.assertIn("ARG LIBDVDCSS_VERSION=1.6.0", dockerfile)
+        self.assertIn(
+            "ARG LIBDVDCSS_SHA256="
+            "7ea556c846b7bfc32d47b41cae56d1863a6b6d5f706bb162778d6f298490977c",
+            dockerfile,
+        )
+        self.assertIn("sha256sum --check --strict", dockerfile)
+        self.assertIn("--libdir=lib", dockerfile)
+        self.assertIn("rip-dvd-dvdcss-reader", dockerfile)
+        self.assertIn("/usr/share/doc/rip-dvd-dvdcss-reader/COPYING", dockerfile)
+        self.assertIn(
+            "/usr/share/doc/rip-dvd-dvdcss-reader/dvdcss-reader.c",
+            dockerfile,
+        )
+        self.assertIn(
+            "/usr/share/doc/rip-dvd-dvdcss-reader/libdvdcss-sg-io.c",
+            dockerfile,
+        )
+        self.assertIn("CFLAGS=\"-include /tmp/libdvdcss-sg-io.h\"", dockerfile)
+        self.assertIn("#define READ_BLOCKS 31", reader)
 
     def test_worker_smoke_uses_configured_command_and_bounded_shutdown(self) -> None:
         smoke = (ROOT / "scripts" / "smoke-compose-workers.sh").read_text()
