@@ -1,6 +1,8 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
+import type { EncodeJobId } from "@rip-dvd/data-access";
+
 import {
   ActionOverview,
   DashboardConnectionStatus,
@@ -179,7 +181,7 @@ describe("DashboardView", () => {
         status: "loaded",
         items: [
           {
-            id: "encode-job-1",
+            id: "encode-job-1" as EncodeJobId,
             mediaTitle: "My Movie",
             mediaYear: 2001,
             encodingProfileName: "DVD library",
@@ -291,7 +293,7 @@ describe("DashboardView", () => {
             status: "loaded",
             items: [
               {
-                id: "encode-job-1",
+                id: "encode-job-1" as EncodeJobId,
                 mediaTitle: "Missing output",
                 mediaYear: 2001,
                 encodingProfileName: "DVD library · Version 1",
@@ -387,7 +389,7 @@ describe("DashboardView", () => {
             status: "loaded",
             items: [
               {
-                id: "queued-job",
+                id: "queued-job" as EncodeJobId,
                 mediaTitle: "Queued title",
                 mediaYear: null,
                 encodingProfileName: "DVD library v1",
@@ -397,7 +399,7 @@ describe("DashboardView", () => {
                 progressEtaSeconds: null,
               },
               {
-                id: "running-job",
+                id: "running-job" as EncodeJobId,
                 mediaTitle: "Running title",
                 mediaYear: null,
                 encodingProfileName: "DVD library v1",
@@ -407,7 +409,7 @@ describe("DashboardView", () => {
                 progressEtaSeconds: 723,
               },
               {
-                id: "completed-job",
+                id: "completed-job" as EncodeJobId,
                 mediaTitle: "Completed title",
                 mediaYear: null,
                 encodingProfileName: "DVD library v1",
@@ -417,7 +419,7 @@ describe("DashboardView", () => {
                 progressEtaSeconds: null,
               },
               {
-                id: "failed-job",
+                id: "failed-job" as EncodeJobId,
                 mediaTitle: "Failed title",
                 mediaYear: null,
                 encodingProfileName: "DVD library v1",
@@ -431,7 +433,7 @@ describe("DashboardView", () => {
           catalogReview: { status: "loaded", items: [] },
         }}
         onRequeueEncodeJob={onRequeueEncodeJob}
-        requeueingEncodeJobId="failed-job"
+        requeueingEncodeJobId={"failed-job" as EncodeJobId}
       />,
     );
 

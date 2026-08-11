@@ -2,8 +2,14 @@
 
 import React, { useCallback, useEffect, useState } from "react";
 
+import type {
+  DiscSelectionId,
+  EncodeJobId,
+  EncodingProfileId,
+} from "@rip-dvd/data-access";
+
 export interface EncodeSelectionOption {
-  id: string;
+  id: DiscSelectionId;
   mediaItemId: string;
   mediaTitle: string;
   mediaYear: number | null;
@@ -11,7 +17,7 @@ export interface EncodeSelectionOption {
 }
 
 export interface EncodeProfileOption {
-  id: string;
+  id: EncodingProfileId;
   displayName: string;
   version: number;
 }
@@ -34,8 +40,8 @@ export type EncodeJobsLoadState =
     };
 
 export interface QueueEncodeJobInput {
-  discSelectionId: string;
-  encodingProfileId: string;
+  discSelectionId: DiscSelectionId;
+  encodingProfileId: EncodingProfileId;
   outputPath: string;
 }
 
@@ -60,8 +66,12 @@ export function EncodeJobsView({
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     onQueue({
-      discSelectionId: String(form.get("discSelectionId") ?? ""),
-      encodingProfileId: String(form.get("encodingProfileId") ?? ""),
+      discSelectionId: String(
+        form.get("discSelectionId") ?? "",
+      ) as DiscSelectionId,
+      encodingProfileId: String(
+        form.get("encodingProfileId") ?? "",
+      ) as EncodingProfileId,
       outputPath: String(form.get("outputPath") ?? "").trim(),
     });
   }
@@ -261,7 +271,7 @@ export async function queueEncodeJob(
 }
 
 export async function retryEncodeJob(
-  encodeJobId: string,
+  encodeJobId: EncodeJobId,
   fetcher: EncodeJobsFetch = fetch,
 ): Promise<void> {
   const response = await fetcher("/api/encode-jobs", {

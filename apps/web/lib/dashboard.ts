@@ -5,6 +5,7 @@ import type {
   DetectedDiscId,
   DetectedDiscStatus,
   DiscKind,
+  EncodeJobId,
   EncodeProgressPhase,
   FilesystemVerificationStatus,
   JobStatus,
@@ -54,7 +55,7 @@ export interface DashboardArchiveJob {
 }
 
 export interface DashboardEncodeJob {
-  id: string;
+  id: EncodeJobId;
   mediaTitle: string;
   mediaYear: number | null;
   encodingProfileName: string;
