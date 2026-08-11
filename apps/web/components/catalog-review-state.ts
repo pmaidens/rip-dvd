@@ -264,6 +264,13 @@ export function useCatalogReviewState({
     createDiscSelection,
     deleteDiscSelection: (discSelectionId: string) =>
       void mutate({ action: "delete_disc_selection", discSelectionId }),
-    completeReview: () => void mutate({ action: "complete_review" }, true),
+    completeReview: () => {
+      if (state.status === "loaded") {
+        void mutate({
+          action: "complete_review",
+          catalogRevision: state.review.catalogRevision,
+        }, true);
+      }
+    },
   };
 }

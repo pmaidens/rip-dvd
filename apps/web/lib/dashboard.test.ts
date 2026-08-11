@@ -11,6 +11,7 @@ import { describe, expect, it, vi } from "vitest";
 import { readDashboardSnapshot } from "./dashboard";
 import { seedFailedArchiveJobAndQueuedDuplicate } from "../test/archive-job-fixture";
 import {
+  completeCatalogReview,
   useDataAccessFixture,
   withSnapshotOverrides,
 } from "../test/data-access-fixture";
@@ -47,7 +48,7 @@ function seedEncodeJob(access: LegacySidecarDataAccess) {
     kind: "main_feature",
     label: "Main feature",
   });
-  access.catalog.completeCatalogReview(archive.id);
+  completeCatalogReview(access, archive.id);
   const profile = access.encodingProfiles.create({
     key: "enrichment-profile",
     displayName: "Enriched profile",
@@ -151,7 +152,7 @@ describe("readDashboardSnapshot", () => {
         items: [expect.objectContaining({ id: archive.id })],
       });
 
-    access.catalog.completeCatalogReview(archive.id);
+    completeCatalogReview(access, archive.id);
     expect(readDashboardSnapshot(access, { activityLimit: 20 }).catalogReview)
       .toEqual({ status: "loaded", items: [] });
   });
@@ -325,7 +326,7 @@ describe("readDashboardSnapshot", () => {
       kind: "main_feature",
       label: "Main feature",
     });
-    access.catalog.completeCatalogReview(catalogedArchive.id);
+    completeCatalogReview(access, catalogedArchive.id);
     const profile = access.encodingProfiles.create({
       key: "dvd-library",
       displayName: "DVD library",

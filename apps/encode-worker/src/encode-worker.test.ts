@@ -28,6 +28,7 @@ import {
   createDataAccess,
   ENCODE_JOB_LEASE_DURATION_MS,
   type DataAccess,
+  type OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -47,6 +48,16 @@ const quarantineRace = vi.hoisted(() => ({
   observed: [] as string[],
   raced: false,
 }));
+
+function completeCatalogReview(
+  access: DataAccess,
+  archiveId: OriginalDiscArchiveId,
+) {
+  const archive = access.catalog.listOriginalDiscArchives({
+    ids: [archiveId],
+  })[0]!;
+  return access.catalog.completeCatalogReview(archiveId, archive.updatedAt);
+}
 
 const preQuarantineRace = vi.hoisted(() => ({
   armed: false,
@@ -757,7 +768,7 @@ function createQueuedJob(
     mediaItemId: item.id,
     ...selectionInput,
   });
-  access.catalog.completeCatalogReview(archive.id);
+  completeCatalogReview(access, archive.id);
   const profile = access.encodingProfiles.create({
     key: "dvd-library",
     displayName: "DVD library",
@@ -809,7 +820,7 @@ function addQueuedJob(
     mediaItemId: item.id,
     ...selectionInput,
   });
-  fixture.access.catalog.completeCatalogReview(fixture.archive.id);
+  completeCatalogReview(fixture.access, fixture.archive.id);
   return fixture.access.encodeJobs.enqueue({
     discSelectionId: selection.id,
     encodingProfileId: fixture.profile.id,

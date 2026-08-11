@@ -62,7 +62,10 @@ describe("CatalogReviewView", () => {
         action: "delete_disc_selection",
         discSelectionId: "selection-1",
       },
-      complete_review: { action: "complete_review" },
+      complete_review: {
+        action: "complete_review",
+        catalogRevision: "2026-08-11T06:00:00.000Z",
+      },
     } satisfies Record<CatalogReviewCommand["action"], CatalogReviewCommand>;
     const postedBodies: unknown[] = [];
     const fetcher = async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -85,6 +88,7 @@ describe("CatalogReviewView", () => {
         state={{
           status: "loaded",
           review: {
+            catalogRevision: "2026-08-03T18:00:00.000Z",
             archive: {
               id: "archive-1",
               discLabel: "EPISODE_DISC",
@@ -212,6 +216,7 @@ describe("CatalogReviewView", () => {
         state={{
           status: "loaded",
           review: {
+            catalogRevision: "2026-08-03T19:00:00.000Z",
             archive: {
               id: "archive-1",
               discLabel: "PAGED_DISC",

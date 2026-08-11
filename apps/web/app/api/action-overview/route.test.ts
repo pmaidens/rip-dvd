@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import { seedFailedArchiveJobAndQueuedDuplicate } from "../../../test/archive-job-fixture";
-import { useDataAccessFixture } from "../../../test/data-access-fixture";
+import {
+  completeCatalogReview,
+  useDataAccessFixture,
+} from "../../../test/data-access-fixture";
 import { createActionOverviewRoute } from "./route";
 
 const dataAccessFixture = useDataAccessFixture();
@@ -38,7 +41,7 @@ describe("Action overview API", () => {
       mediaItemId: mediaItem.id,
       kind: "main_feature",
     });
-    access.catalog.completeCatalogReview(archive.id);
+    completeCatalogReview(access, archive.id);
 
     const jobs = [];
     for (let index = 0; index < 22; index += 1) {

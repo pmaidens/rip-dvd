@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { readDashboardSnapshot } from "../../../lib/dashboard";
-import { useDataAccessFixture } from "../../../test/data-access-fixture";
+import {
+  completeCatalogReview,
+  useDataAccessFixture,
+} from "../../../test/data-access-fixture";
 import {
   createFilesystemVerificationInventoryRoute,
   createFilesystemVerificationRoute,
@@ -39,7 +42,7 @@ function createVerificationRecords() {
     mediaItemId: mediaItem.id,
     kind: "main_feature",
   });
-  access.catalog.completeCatalogReview(archive.id);
+  completeCatalogReview(access, archive.id);
   const profile = access.encodingProfiles.create({
     key: "api-verification",
     displayName: "API verification",
@@ -172,7 +175,7 @@ describe("Filesystem Verification API", () => {
       mediaItemId: secondMediaItem.id,
       kind: "main_feature",
     });
-    access.catalog.completeCatalogReview(secondArchive.id);
+    completeCatalogReview(access, secondArchive.id);
     const dashboard = readDashboardSnapshot(access, { activityLimit: 20 });
     expect(dashboard.catalogReview).toEqual({ status: "loaded", items: [] });
 

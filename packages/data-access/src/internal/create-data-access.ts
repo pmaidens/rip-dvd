@@ -2309,7 +2309,15 @@ export function createDataAccessInternal(
         return isBounded ? rows.reverse() : rows;
       },
 
-      completeCatalogReview(id) {
+      completeCatalogReview(id, catalogRevision) {
+        if (
+          !(catalogRevision instanceof Date) ||
+          !Number.isSafeInteger(catalogRevision.getTime())
+        ) {
+          throw new DomainInvariantError(
+            "Catalog review revision must be a valid timestamp",
+          );
+        }
         const timestamp = now();
         return database.transaction((transaction) => {
           const archive = requireReviewableDiscSelections(id, transaction);
@@ -2318,24 +2326,35 @@ export function createDataAccessInternal(
               "Catalog review cannot be completed while legacy cutover repair is pending",
             );
           }
+          if (archive.updatedAt.getTime() !== catalogRevision.getTime()) {
+            throw new DomainInvariantError(
+              "Catalog review changed; reload before completing review",
+            );
+          }
           if (archive.catalogReviewedAt !== null) {
             return archive;
           }
-          return requireRow(
-            transaction
-              .update(originalDiscArchives)
-              .set({ catalogReviewedAt: timestamp, updatedAt: timestamp })
-              .where(
-                and(
-                  eq(originalDiscArchives.id, id),
-                  isNull(originalDiscArchives.catalogReviewedAt),
-                ),
-              )
-              .returning()
-              .get(),
-            "original disc archive",
-            id,
-          );
+          const completed = transaction
+            .update(originalDiscArchives)
+            .set({
+              catalogReviewedAt: timestamp,
+              updatedAt: nextCatalogMutationTimestamp(timestamp),
+            })
+            .where(
+              and(
+                eq(originalDiscArchives.id, id),
+                eq(originalDiscArchives.updatedAt, catalogRevision),
+                isNull(originalDiscArchives.catalogReviewedAt),
+              ),
+            )
+            .returning()
+            .get();
+          if (!completed) {
+            throw new DomainInvariantError(
+              "Catalog review changed; reload before completing review",
+            );
+          }
+          return completed;
         }, { behavior: "immediate" });
       },
 
