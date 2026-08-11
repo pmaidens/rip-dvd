@@ -45,6 +45,7 @@ export interface OpticalDriveHardware {
 
 export interface PollArchiveWorkerOptions {
   access: DataAccess;
+  concurrency?: number;
   configuredDevicePath: string;
   copyRunner?: DvdCopyRunner;
   hardware: OpticalDriveHardware;
@@ -154,6 +155,7 @@ async function confirmAuthorizedDrive({
 
 export async function pollArchiveWorker({
   access,
+  concurrency = 1,
   configuredDevicePath,
   copyRunner,
   hardware,
@@ -163,6 +165,9 @@ export async function pollArchiveWorker({
   workerId = "archive-worker",
 }: PollArchiveWorkerOptions): Promise<void> {
   signal.throwIfAborted();
+  if (!Number.isSafeInteger(concurrency) || concurrency <= 0) {
+    throw new Error("Archive worker concurrency is invalid");
+  }
   access.archiveJobs.recoverExpiredClaims();
   const discovered = await hardware.discover(signal);
   signal.throwIfAborted();
@@ -177,9 +182,11 @@ export async function pollArchiveWorker({
     discovered.map((drive) => [drive.devicePath, drive]),
   );
 
-  for (const drive of drives) {
+  const pollDrive = async (
+    drive: (typeof drives)[number],
+  ): Promise<void> => {
     if (!drive.isPresent || !drive.isEnabled) {
-      continue;
+      return;
     }
 
     try {
@@ -210,7 +217,7 @@ export async function pollArchiveWorker({
       const scan = await hardware.scanDvd(binding, signal);
       signal.throwIfAborted();
       if (scan === null) {
-        continue;
+        return;
       }
       const confirmedBeforePersistence = await confirmAuthorizedDrive({
         access,
@@ -238,14 +245,14 @@ export async function pollArchiveWorker({
         originalsLibraryPath === undefined ||
         scan.sizeBytes === undefined
       ) {
-        continue;
+        return;
       }
       const claim = access.archiveJobs.claimNext(workerId, {
         opticalDriveId: confirmedBeforePersistence.persisted.id,
         fingerprint: scan.fingerprint,
       });
       if (!claim) {
-        continue;
+        return;
       }
 
       const claimController = new AbortController();
@@ -317,7 +324,9 @@ export async function pollArchiveWorker({
             failureError instanceof Error
               ? failureError.message
               : String(failureError);
-          log(`Archive Job failure state could not be persisted: ${failureMessage}`);
+          log(
+            `Archive Job failure state could not be persisted: ${failureMessage}`,
+          );
         }
         if (publishedArchivePath !== undefined) {
           await quarantinePublishedArchive(publishedArchivePath);
@@ -336,6 +345,29 @@ export async function pollArchiveWorker({
       const message = error instanceof Error ? error.message : String(error);
       log(`DVD scan failed for ${drive.devicePath}: ${message}`);
     }
+  };
+
+  let nextDriveIndex = 0;
+  const pollNextDrive = async (): Promise<void> => {
+    while (nextDriveIndex < drives.length) {
+      const drive = drives[nextDriveIndex]!;
+      nextDriveIndex += 1;
+      await pollDrive(drive);
+    }
+  };
+
+  const results = await Promise.allSettled(
+    Array.from(
+      { length: Math.min(concurrency, drives.length) },
+      pollNextDrive,
+    ),
+  );
+  signal.throwIfAborted();
+  const failedLane = results.find(
+    (result): result is PromiseRejectedResult => result.status === "rejected",
+  );
+  if (failedLane) {
+    throw failedLane.reason;
   }
 }
 
