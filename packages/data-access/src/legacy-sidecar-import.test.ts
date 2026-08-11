@@ -430,9 +430,14 @@ describe("legacy sidecar import", () => {
     },
   );
 
-  it.each(["fresh import", "reviewed-schema reopen"] as const)(
-    "suppresses a current Archive Job when its content ID aliases a legacy archive fingerprint after %s",
-    (mode) => {
+  it.each([
+    ["stored legacy fingerprint", "fresh import"],
+    ["current content-ID alias", "fresh import"],
+    ["stored legacy fingerprint", "reviewed-schema reopen"],
+    ["current content-ID alias", "reviewed-schema reopen"],
+  ] as const)(
+    "suppresses an Archive Job when original archive lookup uses its %s after %s",
+    (lookupRelation, mode) => {
       const root = temporaryDirectories.create(
         "rip-dvd-legacy-current-identity-",
       );
@@ -443,6 +448,8 @@ describe("legacy sidecar import", () => {
         "Same DVD.rip-dvd.json",
       );
       const databasePath = join(root, "catalog.sqlite");
+      const legacyFingerprint =
+        "f29f3d4248b6da5db282553aa8b2edba7c0e71631e23412919a37fc526879765";
       mkdirSync(originalsLibraryPath, { recursive: true });
       writeFileSync(archivePath, "same dvd bytes");
       writeFileSync(sidecarPath, JSON.stringify({
@@ -451,8 +458,7 @@ describe("legacy sidecar import", () => {
         source: archivePath,
         title: "Same DVD",
         disc_title: "SAME_DISC",
-        disc_fingerprint:
-          "f29f3d4248b6da5db282553aa8b2edba7c0e71631e23412919a37fc526879765",
+        disc_fingerprint: legacyFingerprint,
         titles: [{
           number: 1,
           seconds: 3_600,
@@ -492,24 +498,32 @@ describe("legacy sidecar import", () => {
           isConfiguredDevice: true,
         },
       ])[0]!;
-      const contentId =
+      const currentContentId =
         "sha256:c173ea0693af01962a78a28bb2106b93920c0381b6dc06b9fb3f4c71a2e65cef";
+      const observedFingerprint =
+        lookupRelation === "stored legacy fingerprint"
+          ? legacyFingerprint
+          : currentContentId;
       const observation = access.catalog.registerDetectedDisc({
         opticalDriveId: drive.id,
         discKind: "dvd",
-        fingerprint: contentId,
-        scanData: {
-          schemaVersion: 2,
-          contentId,
-          titles: [{
-            number: 1,
-            durationSeconds: 3_600,
-            chapters: 10,
-            audioStreams: [],
-            subtitles: [],
-          }],
-        },
-        sizeBytes: 14,
+        fingerprint: observedFingerprint,
+        ...(lookupRelation === "current content-ID alias"
+          ? {
+              scanData: {
+                schemaVersion: 2 as const,
+                contentId: currentContentId,
+                titles: [{
+                  number: 1,
+                  durationSeconds: 3_600,
+                  chapters: 10,
+                  audioStreams: [],
+                  subtitles: [],
+                }],
+              },
+              sizeBytes: 14,
+            }
+          : {}),
       });
       const reviewed =
         observation.status === "detected"
@@ -529,8 +543,7 @@ describe("legacy sidecar import", () => {
       expect(access.catalog.listOriginalDiscArchives()).toEqual([
         expect.objectContaining({
           archivePath: realpathSync(archivePath),
-          fingerprint:
-            "f29f3d4248b6da5db282553aa8b2edba7c0e71631e23412919a37fc526879765",
+          fingerprint: legacyFingerprint,
         }),
       ]);
       access.close();
