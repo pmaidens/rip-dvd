@@ -287,6 +287,12 @@ export interface DetectedDiscListOptions extends ChronologicalListOptions {
   ids?: readonly DetectedDiscId[];
 }
 
+export interface OriginalDiscArchiveListCursor {
+  direction: "newer" | "older";
+  archivedAt: Date;
+  id: OriginalDiscArchiveId;
+}
+
 export interface OpticalDriveReconciliationInput
   extends DiscoveredOpticalDrive {
   isConfiguredDevice: boolean;
@@ -328,6 +334,7 @@ export interface CatalogAccess {
     status: DetectedDiscStatus,
   ): DetectedDisc;
   listOriginalDiscArchives(options?: {
+    cursor?: OriginalDiscArchiveListCursor;
     ids?: readonly OriginalDiscArchiveId[];
     limit?: number;
     offset?: number;

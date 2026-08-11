@@ -47,17 +47,18 @@ afterEach(() => {
 describe("watchDashboardActivity", () => {
   it("keeps HTTP and live activity on the requested catalog review page", async () => {
     const snapshot = emptySnapshot("2026-08-03T19:30:00.000Z");
-    const loadSnapshot = vi.fn(async (_offset: number) => snapshot);
+    const cursor = "v1.older.1785804600000.00000000-0000-4000-8000-000000000001";
+    const loadSnapshot = vi.fn(async (_cursor: string | null) => snapshot);
     const eventSource = {
       onerror: null,
       onopen: null,
       addEventListener: vi.fn(),
       close: vi.fn(),
     };
-    const openEventSource = vi.fn((_offset: number) => eventSource);
+    const openEventSource = vi.fn((_cursor: string | null) => eventSource);
 
     const stop = watchDashboardActivity({
-      catalogReviewOffset: 20,
+      catalogReviewCursor: cursor,
       loadSnapshot,
       openEventSource,
       onSnapshot: vi.fn(),
@@ -66,8 +67,8 @@ describe("watchDashboardActivity", () => {
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(loadSnapshot).toHaveBeenCalledWith(20);
-    expect(openEventSource).toHaveBeenCalledWith(20);
+    expect(loadSnapshot).toHaveBeenCalledWith(cursor);
+    expect(openEventSource).toHaveBeenCalledWith(cursor);
     stop();
   });
 

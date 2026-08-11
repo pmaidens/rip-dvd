@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { createDashboardResponse, createDashboardRoute } from "./route";
 import {
+  completeCatalogReview,
   useDataAccessFixture,
   withSnapshotOverrides,
 } from "../../../test/data-access-fixture";
@@ -9,12 +10,13 @@ import {
 const dataAccessFixture = useDataAccessFixture();
 
 describe("GET /api/dashboard", () => {
-  it("pages every pending catalog review beyond the activity history bound", async () => {
+  it("visits every pending catalog review once when a visible review completes", async () => {
     const access = dataAccessFixture.create();
     const drive = access.catalog.upsertOpticalDrive({
       devicePath: "/dev/sr0",
       isPresent: true,
     });
+    const archives = [];
     for (let index = 0; index < 21; index += 1) {
       const fingerprint = `pending-review-${index}`;
       const disc = access.catalog.registerDetectedDisc({
@@ -25,44 +27,123 @@ describe("GET /api/dashboard", () => {
       });
       access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
       access.catalog.updateDetectedDiscStatus(disc.id, "approved");
-      access.catalog.createOriginalDiscArchive({
+      archives.push(access.catalog.createOriginalDiscArchive({
         detectedDiscId: disc.id,
         discKind: "dvd",
         archiveFormat: "iso",
         archivePath: `/media/originals/Pending ${index}.iso`,
         fingerprint,
-      });
+      }));
     }
 
     const firstResponse = createDashboardRoute(
       () => access,
-      new Request("http://localhost:3000/api/dashboard?catalogReviewOffset=0"),
+      new Request("http://localhost:3000/api/dashboard"),
     );
     const first = await firstResponse.json();
+    const completedArchive = archives.find(
+      (archive) => archive.id === first.catalogReview.items[0].id,
+    )!;
+    const mediaItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Reviewed movie",
+    });
+    access.catalog.createDiscSelection({
+      originalDiscArchiveId: completedArchive.id,
+      mediaItemId: mediaItem.id,
+      kind: "main_feature",
+    });
+    completeCatalogReview(access, completedArchive.id);
+
     const secondResponse = createDashboardRoute(
       () => access,
-      new Request("http://localhost:3000/api/dashboard?catalogReviewOffset=20"),
+      new Request(
+        `http://localhost:3000/api/dashboard?catalogReviewCursor=${encodeURIComponent(first.catalogReview.page.nextCursor)}`,
+      ),
     );
     const second = await secondResponse.json();
+    const finalArchive = archives.find(
+      (archive) => archive.id === second.catalogReview.items[0].id,
+    )!;
+    access.catalog.createDiscSelection({
+      originalDiscArchiveId: finalArchive.id,
+      mediaItemId: mediaItem.id,
+      kind: "main_feature",
+    });
+    completeCatalogReview(access, finalArchive.id);
+
+    const refreshedSecondResponse = createDashboardRoute(
+      () => access,
+      new Request(
+        `http://localhost:3000/api/dashboard?catalogReviewCursor=${encodeURIComponent(first.catalogReview.page.nextCursor)}`,
+      ),
+    );
+    const refreshedSecond = await refreshedSecondResponse.json();
+    const previousResponse = createDashboardRoute(
+      () => access,
+      new Request(
+        `http://localhost:3000/api/dashboard?catalogReviewCursor=${encodeURIComponent(refreshedSecond.catalogReview.page.previousCursor)}`,
+      ),
+    );
+    const previous = await previousResponse.json();
 
     expect(first.catalogReview.items).toHaveLength(20);
     expect(first.catalogReview.page).toEqual({
-      offset: 0,
       limit: 20,
-      hasPrevious: false,
-      hasNext: true,
+      previousCursor: null,
+      nextCursor: expect.any(String),
     });
     expect(second.catalogReview.items).toHaveLength(1);
     expect(second.catalogReview.page).toEqual({
-      offset: 20,
       limit: 20,
-      hasPrevious: true,
-      hasNext: false,
+      previousCursor: expect.any(String),
+      nextCursor: null,
     });
-    expect(new Set([
+    expect(refreshedSecond.catalogReview).toEqual({
+      status: "loaded",
+      items: [],
+      page: {
+        limit: 20,
+        previousCursor: expect.any(String),
+        nextCursor: null,
+      },
+    });
+    const visitedIds = [
       ...first.catalogReview.items.map((item: { id: string }) => item.id),
       ...second.catalogReview.items.map((item: { id: string }) => item.id),
-    ])).toHaveLength(21);
+    ];
+    expect(new Set(visitedIds)).toHaveLength(21);
+    expect(new Set(visitedIds)).toEqual(
+      new Set(archives.map((archive) => archive.id)),
+    );
+    expect(
+      new Set(
+        previous.catalogReview.items.map((item: { id: string }) => item.id),
+      ),
+    ).toEqual(
+      new Set(
+        first.catalogReview.items
+          .map((item: { id: string }) => item.id)
+          .filter(
+            (id: string) =>
+              id !== completedArchive.id && id !== finalArchive.id,
+          ),
+      ),
+    );
+  });
+
+  it("rejects malformed catalog review cursors", async () => {
+    const response = createDashboardRoute(
+      () => dataAccessFixture.create(),
+      new Request(
+        "http://localhost:3000/api/dashboard?catalogReviewCursor=not-a-cursor",
+      ),
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "Invalid catalog review cursor",
+    });
   });
 
   it("returns facade-backed SQLite state over a non-cacheable HTTP response", async () => {

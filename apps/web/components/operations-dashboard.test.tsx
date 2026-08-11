@@ -214,10 +214,9 @@ describe("DashboardView", () => {
       catalogReview: {
         status: "loaded",
         page: {
-          offset: 20,
           limit: 20,
-          hasPrevious: true,
-          hasNext: true,
+          previousCursor: "previous-page",
+          nextCursor: "next-page",
         },
         items: [
           {
