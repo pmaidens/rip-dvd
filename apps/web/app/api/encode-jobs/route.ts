@@ -12,6 +12,9 @@ import {
 } from "@rip-dvd/data-access";
 
 import { getDataAccess } from "../../../lib/data-access";
+import {
+  trustedMutationRequestProblem,
+} from "../../../lib/server/trusted-mutation-request";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -41,56 +44,6 @@ function optionOffset(request: Request, parameter: string): number | null {
   }
   const offset = Number(value);
   return Number.isSafeInteger(offset) ? offset : null;
-}
-
-function headerOrigin(value: string): string | null {
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    return null;
-  }
-  if (
-    (url.protocol !== "http:" && url.protocol !== "https:") ||
-    url.username !== "" ||
-    url.password !== "" ||
-    url.pathname !== "/" ||
-    url.search !== "" ||
-    url.hash !== ""
-  ) {
-    return null;
-  }
-  return url.origin;
-}
-
-function mutationRequestProblem(
-  request: Request,
-  trustedOrigin: string,
-): Response | null {
-  const contentType = request.headers
-    .get("Content-Type")
-    ?.split(";", 1)[0]
-    ?.trim()
-    .toLowerCase();
-  if (contentType !== "application/json") {
-    return response({ error: "JSON content type required" }, 415);
-  }
-  const origin = request.headers.get("Origin");
-  const host = request.headers.get("Host")?.trim().toLowerCase();
-  const fetchSite = request.headers.get("Sec-Fetch-Site")?.toLowerCase();
-  const trustedUrl = new URL(trustedOrigin);
-  if (
-    origin === null ||
-    headerOrigin(origin) !== trustedUrl.origin ||
-    host === undefined ||
-    host !== trustedUrl.host.toLowerCase() ||
-    (fetchSite !== undefined &&
-      fetchSite !== "same-origin" &&
-      fetchSite !== "none")
-  ) {
-    return response({ error: "Cross-origin mutation rejected" }, 403);
-  }
-  return null;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -268,7 +221,10 @@ export async function createEncodeJobsRoute(
     } catch {
       return response({ error: "Encode Job queueing is unavailable" }, 503);
     }
-    const problem = mutationRequestProblem(request, config.webTrustedOrigin);
+    const problem = trustedMutationRequestProblem(
+      request,
+      config.webTrustedOrigin,
+    );
     if (problem) {
       return problem;
     }
