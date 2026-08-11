@@ -34,6 +34,48 @@ def compose_config(
     return json.loads(result.stdout)
 
 
+def write_fake_docker(directory: pathlib.Path) -> None:
+    docker = directory / "docker"
+    docker.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$*\" = 'compose config --environment' ]; then\n"
+        "  if [ -n \"${DOCKER_COMPOSE_ENVIRONMENT:-}\" ]; then\n"
+        "    printf '%s\\n' \"$DOCKER_COMPOSE_ENVIRONMENT\"\n"
+        "  else\n"
+        "    [ -z \"${RIP_DVD_ENABLE_BLOCK_IO_WEIGHTS:-}\" ] || "
+        "printf 'RIP_DVD_ENABLE_BLOCK_IO_WEIGHTS=%s\\n' "
+        "\"$RIP_DVD_ENABLE_BLOCK_IO_WEIGHTS\"\n"
+        "    [ -z \"${RIP_DVD_BACKUP_HOST_PATH:-}\" ] || "
+        "printf 'RIP_DVD_BACKUP_HOST_PATH=%s\\n' "
+        "\"$RIP_DVD_BACKUP_HOST_PATH\"\n"
+        "  fi\n"
+        "  exit 0\n"
+        "fi\n"
+        "if [ \"${DOCKER_LOG_STYLE:-compose}\" = update ]; then\n"
+        "  printf 'docker|%s\\n' \"$*\" >> \"$DOCKER_CALL_LOG\"\n"
+        "else\n"
+        "  printf '%s|%s|%s\\n' \"$PWD\" "
+        "\"${RIP_DVD_BACKUP_HOST_PATH:-}\" \"$*\" >> \"$DOCKER_CALL_LOG\"\n"
+        "fi\n"
+        "if [ -n \"${DOCKER_FAIL_MATCH:-}\" ]; then\n"
+        "  case \"$*\" in\n"
+        "    *\"$DOCKER_FAIL_MATCH\"*) "
+        "exit \"${DOCKER_FAIL_STATUS:-1}\" ;;\n"
+        "  esac\n"
+        "fi\n"
+        "case \"$*\" in\n"
+        "  'compose ps --quiet web') printf 'web-container\\n' ;;\n"
+        "  'inspect --format {{if .State.Health}}{{.State.Health.Status}}"
+        "{{else}}{{.State.Status}}{{end}} web-container') "
+        "printf '%s\\n' \"${WEB_HEALTH_STATUS:-healthy}\" ;;\n"
+        "  'compose ps --status running --services') "
+        "printf '%s\\n' \"${RUNNING_SERVICES:-web archive-worker encode-worker}\" | "
+        "tr ' ' '\\n' ;;\n"
+        "esac\n"
+    )
+    docker.chmod(0o755)
+
+
 def run_compose_script(
     script_name: str,
     *,
@@ -42,31 +84,7 @@ def run_compose_script(
     with tempfile.TemporaryDirectory() as directory:
         temporary = pathlib.Path(directory)
         calls = temporary / "calls"
-        docker = temporary / "docker"
-        docker.write_text(
-            "#!/bin/sh\n"
-            "if [ \"$*\" = 'compose config --environment' ]; then\n"
-            "  if [ -n \"${DOCKER_COMPOSE_ENVIRONMENT:-}\" ]; then\n"
-            "    printf '%s\\n' \"$DOCKER_COMPOSE_ENVIRONMENT\"\n"
-            "  else\n"
-            "    [ -z \"${RIP_DVD_ENABLE_BLOCK_IO_WEIGHTS:-}\" ] || "
-            "printf 'RIP_DVD_ENABLE_BLOCK_IO_WEIGHTS=%s\\n' "
-            "\"$RIP_DVD_ENABLE_BLOCK_IO_WEIGHTS\"\n"
-            "    [ -z \"${RIP_DVD_BACKUP_HOST_PATH:-}\" ] || "
-            "printf 'RIP_DVD_BACKUP_HOST_PATH=%s\\n' "
-            "\"$RIP_DVD_BACKUP_HOST_PATH\"\n"
-            "  fi\n"
-            "  exit 0\n"
-            "fi\n"
-            "printf '%s|%s|%s\\n' \"$PWD\" \"${RIP_DVD_BACKUP_HOST_PATH:-}\" \"$*\" "
-            '>> \"$DOCKER_CALL_LOG\"\n'
-            "if [ -n \"${DOCKER_FAIL_MATCH:-}\" ]; then\n"
-            "  case \"$*\" in\n"
-            "    *\"$DOCKER_FAIL_MATCH\"*) exit \"${DOCKER_FAIL_STATUS:-1}\" ;;\n"
-            "  esac\n"
-            "fi\n"
-        )
-        docker.chmod(0o755)
+        write_fake_docker(temporary)
         result = subprocess.run(
             ["sh", str(ROOT / "scripts" / script_name)],
             capture_output=True,
@@ -75,6 +93,72 @@ def run_compose_script(
             env={
                 "DOCKER_CALL_LOG": str(calls),
                 "PATH": f"{temporary}:/usr/bin:/bin",
+                **(environment or {}),
+            },
+            text=True,
+        )
+        return result, calls.read_text().splitlines() if calls.exists() else []
+
+
+def run_update_script(
+    *,
+    environment: dict[str, str] | None = None,
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    with tempfile.TemporaryDirectory() as directory:
+        temporary = pathlib.Path(directory)
+        calls = temporary / "calls"
+        pull_marker = temporary / "pulled"
+
+        git = temporary / "git"
+        git.write_text(
+            "#!/bin/sh\n"
+            "printf 'git|%s\\n' \"$*\" >> \"$UPDATE_CALL_LOG\"\n"
+            "case \"$*\" in\n"
+            "  'rev-parse --show-toplevel') printf '%s\\n' \"$UPDATE_ROOT\" ;;\n"
+            "  'rev-parse --git-path rip-dvd-update.lock') "
+            "printf '%s\\n' \"$UPDATE_LOCK_FILE\" ;;\n"
+            "  'status --porcelain --untracked-files=normal') "
+            "printf '%s' \"${GIT_STATUS_OUTPUT:-}\" ;;\n"
+            "  'symbolic-ref --quiet --short HEAD') printf 'main\\n' ;;\n"
+            "  'rev-parse --abbrev-ref --symbolic-full-name @{upstream}') "
+            "printf 'origin/main\\n' ;;\n"
+            "  'rev-parse HEAD')\n"
+            "    if [ -f \"$UPDATE_PULL_MARKER\" ]; then\n"
+            "      printf 'new-commit\\n'\n"
+            "    else\n"
+            "      printf 'old-commit\\n'\n"
+            "    fi\n"
+            "    ;;\n"
+            "  'pull --ff-only')\n"
+            "    [ -z \"${GIT_PULL_FAIL_STATUS:-}\" ] || "
+            "exit \"$GIT_PULL_FAIL_STATUS\"\n"
+            "    : > \"$UPDATE_PULL_MARKER\"\n"
+            "    ;;\n"
+            "  *) exit 64 ;;\n"
+            "esac\n"
+        )
+        git.chmod(0o755)
+
+        write_fake_docker(temporary)
+
+        flock = temporary / "flock"
+        flock.write_text("#!/bin/sh\nexit \"${FLOCK_STATUS:-0}\"\n")
+        flock.chmod(0o755)
+
+        result = subprocess.run(
+            ["sh", str(ROOT / "scripts" / "update.sh")],
+            capture_output=True,
+            check=False,
+            cwd=temporary,
+            env={
+                "PATH": f"{temporary}:/usr/bin:/bin",
+                "DOCKER_CALL_LOG": str(calls),
+                "DOCKER_LOG_STYLE": "update",
+                "RIP_DVD_BACKUP_HOST_PATH": str(temporary / "backups"),
+                "UPDATE_CALL_LOG": str(calls),
+                "UPDATE_LOCK_FILE": str(temporary / "update.lock"),
+                "UPDATE_PULL_MARKER": str(pull_marker),
+                "UPDATE_ROOT": str(ROOT),
                 **(environment or {}),
             },
             text=True,
@@ -197,6 +281,82 @@ class ComposeDeploymentTests(unittest.TestCase):
                 f"{ROOT}||compose --profile maintenance build migrate backup web archive-worker encode-worker"
             ],
         )
+
+    def test_update_script_backs_up_pulls_builds_starts_and_verifies(self) -> None:
+        result, calls = run_update_script()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        backup = next(
+            index
+            for index, call in enumerate(calls)
+            if "compose --profile maintenance run --rm --no-deps backup" in call
+        )
+        pull = calls.index("git|pull --ff-only")
+        build = next(
+            index
+            for index, call in enumerate(calls)
+            if "compose --profile maintenance build" in call
+        )
+        first_stop = next(
+            index
+            for index, call in enumerate(calls)
+            if "compose stop --timeout 30" in call
+        )
+        migrate = next(
+            index
+            for index, call in enumerate(calls)
+            if "compose --profile maintenance run --rm --no-deps migrate" in call
+        )
+        start = next(
+            index
+            for index, call in enumerate(calls)
+            if "compose up --detach --no-build" in call
+        )
+        health = next(
+            index
+            for index, call in enumerate(calls)
+            if call.startswith("docker|inspect --format")
+        )
+
+        self.assertLess(backup, pull)
+        self.assertLess(pull, build)
+        self.assertLess(build, first_stop)
+        self.assertLess(first_stop, migrate)
+        self.assertLess(migrate, start)
+        self.assertLess(start, health)
+        self.assertIn("old-commit -> new-commit", result.stdout)
+
+    def test_update_script_refuses_a_dirty_checkout_before_backup(self) -> None:
+        result, calls = run_update_script(
+            environment={"GIT_STATUS_OUTPUT": " M compose.yaml\n"}
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("local changes", result.stderr)
+        self.assertNotIn("git|pull --ff-only", calls)
+        self.assertFalse(any(call.startswith("docker|") for call in calls))
+
+    def test_update_build_failure_leaves_existing_services_running(self) -> None:
+        result, calls = run_update_script(
+            environment={
+                "DOCKER_FAIL_MATCH": "compose --profile maintenance build",
+                "DOCKER_FAIL_STATUS": "72",
+            }
+        )
+
+        self.assertEqual(result.returncode, 72, result.stderr)
+        self.assertIn("git|pull --ff-only", calls)
+        self.assertFalse(any("compose stop --timeout 30" in call for call in calls))
+
+    def test_update_verification_failure_stops_partial_runtime(self) -> None:
+        result, calls = run_update_script(
+            environment={"WEB_HEALTH_STATUS": "unhealthy"}
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        stops = [call for call in calls if "compose stop --timeout 30" in call]
+        self.assertEqual(len(stops), 2)
+        self.assertIn("stopping all runtime services", result.stderr)
 
     def test_build_context_excludes_operational_files_and_keeps_project_inputs(
         self,
@@ -541,6 +701,7 @@ class ComposeDeploymentTests(unittest.TestCase):
         environment_example = (ROOT / ".env.example").read_text()
 
         for script in (
+            "scripts/update.sh",
             "scripts/compose-build.sh",
             "scripts/compose-migrate.sh",
             "scripts/compose-start.sh",
