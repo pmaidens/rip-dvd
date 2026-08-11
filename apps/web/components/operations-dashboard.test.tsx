@@ -1,11 +1,17 @@
+// @vitest-environment happy-dom
+
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { watchDashboardActivity } from "../lib/dashboard-activity";
+import type { DashboardSnapshot } from "../lib/dashboard";
 
 import type { EncodeJobId } from "@rip-dvd/data-access";
 
 import {
   ActionOverview,
-  createDashboardMutationRunner,
   DashboardConnectionStatus,
   DashboardView,
   OperationsDashboard,
@@ -14,6 +20,12 @@ import {
   requestFilesystemVerification,
   type DashboardLoadState,
 } from "./operations-dashboard";
+
+vi.mock("../lib/dashboard-activity", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../lib/dashboard-activity")>();
+  return { ...actual, watchDashboardActivity: vi.fn() };
+});
 
 const sectionNames = [
   "Optical Drives",
@@ -619,60 +631,231 @@ describe("DashboardConnectionStatus", () => {
   });
 });
 
-describe.each([
-  ["archive approval", "disc-1"],
-  ["Encode Job requeue", "encode-job-1"],
-] as const)("%s dashboard mutation", (_action, id) => {
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve(value: T): void;
+  reject(reason: unknown): void;
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((onResolve, onReject) => {
+    resolve = onResolve;
+    reject = onReject;
+  });
+  return { promise, resolve, reject };
+}
+
+function mutationDashboardState(): DashboardSnapshot {
+  return {
+    generatedAt: "2026-08-10T20:00:00.000Z",
+    opticalDrives: { status: "loaded", items: [] },
+    detectedDiscs: {
+      status: "loaded",
+      items: [
+        {
+          id: "disc-1",
+          volumeLabel: "READY_TO_ARCHIVE",
+          discKind: "dvd",
+          status: "scanned",
+          opticalDriveName: "Upper drive",
+          fingerprint: "sha256:ready-to-archive",
+          titles: [],
+          detectedAt: "2026-08-10T19:00:00.000Z",
+        },
+      ],
+    },
+    archiveJobs: { status: "loaded", items: [] },
+    encodeJobs: {
+      status: "loaded",
+      items: [
+        {
+          id: "encode-job-1" as EncodeJobId,
+          mediaTitle: "Failed Encode",
+          mediaYear: 2001,
+          encodingProfileName: "DVD library · Version 1",
+          status: "failed",
+          progressPhase: "encoding",
+          progressPercent: 42,
+          progressEtaSeconds: null,
+        },
+      ],
+    },
+    catalogReview: { status: "loaded", items: [] },
+  };
+}
+
+function findButton(
+  container: HTMLElement,
+  label: string,
+): HTMLButtonElement {
+  const button = [...container.querySelectorAll("button")].find(
+    (candidate) => candidate.textContent === label,
+  );
+  if (!button) {
+    throw new Error(`Could not find button: ${label}`);
+  }
+  return button;
+}
+
+const dashboardMutationCases = [
+  {
+    action: "archive approval",
+    page: "discs",
+    readyLabel: "Approve archive",
+    busyLabel: "Approving…",
+    requestPath: "/api/archive-jobs",
+    requestMethod: "POST",
+    errorMessage: "Archive approval failed. Try again.",
+  },
+  {
+    action: "Encode Job requeue",
+    page: "encoding",
+    readyLabel: "Retry encode",
+    busyLabel: "Retrying…",
+    requestPath: "/api/encode-jobs",
+    requestMethod: "PATCH",
+    errorMessage:
+      "Encode Job retry failed. Confirm its catalog review, then try again.",
+  },
+] as const;
+
+async function renderMutationDashboard(
+  mutationCase: (typeof dashboardMutationCases)[number],
+  mutationResponse: Deferred<Response>,
+): Promise<{
+  container: HTMLDivElement;
+  root: Root;
+  mutationRequests: () => number;
+}> {
+  const watch = vi.mocked(watchDashboardActivity);
+  watch.mockImplementation(({ onSnapshot, onStreamStatus }) => {
+    onSnapshot(mutationDashboardState());
+    onStreamStatus?.("live");
+    return () => undefined;
+  });
+  const fetcher = vi.fn(
+    async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      const path = String(input);
+      if (
+        path === mutationCase.requestPath &&
+        init?.method === mutationCase.requestMethod
+      ) {
+        return mutationResponse.promise;
+      }
+      if (path === "/api/encoding-profiles") {
+        return Response.json({ profiles: [] });
+      }
+      if (path.startsWith("/api/encode-jobs?")) {
+        return Response.json({
+          selections: [],
+          profiles: [],
+          page: {
+            offset: 0,
+            limit: 20,
+            hasPrevious: false,
+            hasNext: false,
+          },
+          profilePage: {
+            offset: 0,
+            limit: 20,
+            hasPrevious: false,
+            hasNext: false,
+          },
+        });
+      }
+      throw new Error(`Unexpected dashboard request: ${path}`);
+    },
+  );
+  vi.stubGlobal("fetch", fetcher);
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<OperationsDashboard page={mutationCase.page} />);
+  });
+  return {
+    container,
+    root,
+    mutationRequests: () =>
+      fetcher.mock.calls.filter(
+        ([input, init]) =>
+          String(input) === mutationCase.requestPath &&
+          init?.method === mutationCase.requestMethod,
+      ).length,
+  };
+}
+
+afterEach(() => {
+  vi.mocked(watchDashboardActivity).mockReset();
+  vi.unstubAllGlobals();
+  document.body.replaceChildren();
+});
+
+describe.each(dashboardMutationCases)("$action dashboard mutation", (mutationCase) => {
   it("suppresses duplicate clicks, refreshes after success, and clears busy state", async () => {
-    let completeRequest: (() => void) | undefined;
-    const request = vi.fn(
-      () =>
-        new Promise<void>((resolve) => {
-          completeRequest = resolve;
-        }),
+    const mutationResponse = deferred<Response>();
+    const { container, root, mutationRequests } = await renderMutationDashboard(
+      mutationCase,
+      mutationResponse,
     );
-    const setBusyId = vi.fn();
-    const setFailed = vi.fn();
-    const refresh = vi.fn();
-    const run = createDashboardMutationRunner({
-      request,
-      setBusyId,
-      setFailed,
-      refresh,
+
+    const button = findButton(container, mutationCase.readyLabel);
+    await act(async () => {
+      button.click();
+      button.click();
+      await Promise.resolve();
     });
 
-    const firstClick = run(id);
-    await run(id);
+    expect(mutationRequests()).toBe(1);
+    expect(findButton(container, mutationCase.busyLabel).disabled).toBe(true);
+    expect(watchDashboardActivity).toHaveBeenCalledOnce();
 
-    expect(request).toHaveBeenCalledTimes(1);
-    expect(setBusyId).toHaveBeenCalledTimes(1);
-    expect(setBusyId).toHaveBeenLastCalledWith(id);
-    expect(setFailed).toHaveBeenCalledExactlyOnceWith(false);
-    expect(refresh).not.toHaveBeenCalled();
+    await act(async () => {
+      mutationResponse.resolve(new Response(null, { status: 200 }));
+      await mutationResponse.promise;
+    });
 
-    completeRequest?.();
-    await firstClick;
-
-    expect(refresh).toHaveBeenCalledOnce();
-    expect(setBusyId).toHaveBeenLastCalledWith(null);
+    expect(watchDashboardActivity).toHaveBeenCalledTimes(2);
+    expect(findButton(container, mutationCase.readyLabel).disabled).toBe(false);
+    await act(async () => root.unmount());
   });
 
-  it("reports failure without refreshing and clears busy state", async () => {
-    const request = vi.fn().mockRejectedValue(new Error("request failed"));
-    const setBusyId = vi.fn();
-    const setFailed = vi.fn();
-    const refresh = vi.fn();
-    const run = createDashboardMutationRunner({
-      request,
-      setBusyId,
-      setFailed,
-      refresh,
+  it("shows its action-specific failure and clears busy state without refreshing", async () => {
+    const mutationResponse = deferred<Response>();
+    const { container, root } = await renderMutationDashboard(
+      mutationCase,
+      mutationResponse,
+    );
+
+    await act(async () => {
+      findButton(container, mutationCase.readyLabel).click();
+      await Promise.resolve();
+    });
+    expect(findButton(container, mutationCase.busyLabel).disabled).toBe(true);
+
+    await act(async () => {
+      mutationResponse.reject(new Error("request failed"));
+      try {
+        await mutationResponse.promise;
+      } catch {
+        // The component converts the request rejection into visible error state.
+      }
     });
 
-    await run(id);
-
-    expect(setFailed.mock.calls).toEqual([[false], [true]]);
-    expect(refresh).not.toHaveBeenCalled();
-    expect(setBusyId.mock.calls).toEqual([[id], [null]]);
+    expect(watchDashboardActivity).toHaveBeenCalledOnce();
+    expect(findButton(container, mutationCase.readyLabel).disabled).toBe(false);
+    expect(
+      [...container.querySelectorAll('[role="status"]')].some(
+        (instance) => instance.textContent === mutationCase.errorMessage,
+      ),
+    ).toBe(true);
+    await act(async () => root.unmount());
   });
 });

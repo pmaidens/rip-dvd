@@ -773,7 +773,7 @@ interface DashboardMutationRunnerOptions<Id extends string> {
   refresh(): void;
 }
 
-export function createDashboardMutationRunner<Id extends string>({
+function createDashboardMutationRunner<Id extends string>({
   request,
   setBusyId,
   setFailed,
