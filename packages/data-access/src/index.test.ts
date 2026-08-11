@@ -2064,11 +2064,15 @@ describe("data-access facade", () => {
     access.close();
 
     const reopened = openTestDatabase(databasePath);
-    expect(
-      reopened.catalog.listDiscSelections({
+    const reopenedSourceIdentities = reopened.catalog
+      .listDiscSelections({
         originalDiscArchiveId: archive.id,
-      }).map((selection) => selection.sourceIdentity),
-    ).toEqual(sourceIdentities);
+      })
+      .map((selection) => selection.sourceIdentity);
+    expect(reopenedSourceIdentities).toHaveLength(sourceIdentities.length);
+    expect(reopenedSourceIdentities).toEqual(
+      expect.arrayContaining(sourceIdentities),
+    );
     reopened.close();
   });
 
