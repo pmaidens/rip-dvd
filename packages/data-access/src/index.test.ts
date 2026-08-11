@@ -1785,6 +1785,102 @@ describe("data-access facade", () => {
     access.close();
   });
 
+  it("enforces total filesystem-verification tuples after migration", () => {
+    const databasePath = createTestDatabasePath();
+    const access = openTestDatabase(databasePath);
+    access.close();
+
+    const sqlite = new DatabaseSync(databasePath);
+    sqlite.exec(`
+      pragma foreign_keys = on;
+      insert into optical_drives (
+        id, device_path, is_present, last_seen_at, created_at, updated_at
+      ) values ('verification-drive', '/dev/verification', 1, 1, 1, 1);
+      insert into detected_discs (
+        id, optical_drive_id, disc_kind, fingerprint, status, detected_at,
+        created_at, updated_at
+      ) values (
+        'verification-disc', 'verification-drive', 'dvd',
+        'verification-fingerprint', 'archived', 1, 1, 1
+      );
+      insert into original_disc_archives (
+        id, detected_disc_id, disc_kind, archive_format, archive_path,
+        fingerprint, archived_at, created_at, updated_at
+      ) values (
+        'verification-archive', 'verification-disc', 'dvd', 'iso',
+        '/media/originals/verification.iso', 'verification-fingerprint',
+        1, 1, 1
+      );
+      insert into media_items (
+        id, kind, title, created_at, updated_at
+      ) values ('verification-item', 'movie', 'Verification', 1, 1);
+      insert into disc_selections (
+        id, original_disc_archive_id, media_item_id, source_key, kind,
+        created_at, updated_at
+      ) values (
+        'verification-selection', 'verification-archive',
+        'verification-item', 'dvd:main-feature', 'main_feature', 1, 1
+      );
+      insert into encoding_profiles (
+        id, key, display_name, media_domain, version, is_active, settings,
+        created_at, updated_at
+      ) values (
+        'verification-profile', 'verification-profile',
+        'Verification profile', 'dvd_video', 1, 1, '{}', 1, 1
+      );
+      insert into encode_jobs (
+        id, disc_selection_id, encoding_profile_id, output_path,
+        created_at, updated_at
+      ) values (
+        'verification-job', 'verification-selection', 'verification-profile',
+        '/media/movies/verification.mkv', 1, 1
+      );
+    `);
+
+    const validStatuses = [
+      "accessible",
+      "missing",
+      "inaccessible",
+      "error",
+    ] as const;
+    const partialTuples = [
+      [null, "Verification message", 1],
+      [null, null, 1],
+      [null, "Verification message", null],
+      ["accessible", null, null],
+      ["accessible", "Verification message", null],
+      ["accessible", null, 1],
+    ] as const;
+    const targets = [
+      ["original_disc_archives", "verification-archive"],
+      ["encode_jobs", "verification-job"],
+    ] as const;
+
+    try {
+      for (const [table, id] of targets) {
+        const update = sqlite.prepare(`
+          update ${table}
+          set verification_status = ?, verification_message = ?, verified_at = ?
+          where id = ?
+        `);
+
+        expect(() => update.run(null, null, null, id)).not.toThrow();
+        for (const status of validStatuses) {
+          expect(() =>
+            update.run(status, "Verification message", 1, id),
+          ).not.toThrow();
+        }
+        for (const tuple of partialTuples) {
+          expect(() => update.run(...tuple, id)).toThrow(
+            /verification_check/,
+          );
+        }
+      }
+    } finally {
+      sqlite.close();
+    }
+  });
+
   it("preserves a legacy disabled choice through migration and configured reconciliation", () => {
     const databasePath = createTestDatabasePath();
     const sqlite = new DatabaseSync(databasePath);
@@ -1975,6 +2071,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
+        name: "20260811051606_blue_oracle",
+      },
+      {
         name: "20260807000001_explicit-filesystem-verification",
       },
       {
@@ -1991,9 +2090,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260805015911_heavy_franklin_richards",
-      },
-      {
-        name: "20260805005453_outstanding_texas_twister",
       },
     ]);
     expect(
