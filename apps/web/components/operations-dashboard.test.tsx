@@ -20,6 +20,11 @@ import {
   requestFilesystemVerification,
   type DashboardLoadState,
 } from "./operations-dashboard";
+import {
+  expectVerificationResultList,
+  VERIFICATION_RESULT_CASES,
+  VERIFICATION_TIMESTAMP,
+} from "./filesystem-verification-result.test-support";
 
 vi.mock("../lib/dashboard-activity", async (importOriginal) => {
   const actual =
@@ -385,6 +390,60 @@ describe("DashboardView", () => {
       "The web process cannot access the recorded path.",
     );
     expect(html).not.toContain("/media/");
+  });
+
+  it("shows null and verified filesystem states consistently", () => {
+    const html = renderToStaticMarkup(
+      <DashboardView
+        state={{
+          opticalDrives: { status: "loaded", items: [] },
+          detectedDiscs: { status: "loaded", items: [] },
+          archiveJobs: { status: "loaded", items: [] },
+          encodeJobs: {
+            status: "loaded",
+            items: [
+              ...VERIFICATION_RESULT_CASES.map(
+                (
+                  {
+                    status: verificationStatus,
+                    message: verificationMessage,
+                  },
+                  index,
+                ) => ({
+                  id: `verified-job-${index}` as EncodeJobId,
+                  mediaTitle: `Verified job ${index}`,
+                  mediaYear: null,
+                  encodingProfileName: "DVD library · Version 1",
+                  status: "completed" as const,
+                  progressPhase: "encoding" as const,
+                  progressPercent: 100,
+                  progressEtaSeconds: null,
+                  verificationStatus,
+                  verificationMessage,
+                  verifiedAt: VERIFICATION_TIMESTAMP,
+                }),
+              ),
+              {
+                id: "unverified-job" as EncodeJobId,
+                mediaTitle: "Unverified job",
+                mediaYear: null,
+                encodingProfileName: "DVD library · Version 1",
+                status: "completed",
+                progressPhase: "encoding",
+                progressPercent: 100,
+                progressEtaSeconds: null,
+                verificationStatus: null,
+                verificationMessage: null,
+                verifiedAt: null,
+              },
+            ],
+          },
+          catalogReview: { status: "loaded", items: [] },
+        }}
+      />,
+    );
+
+    expectVerificationResultList(html);
   });
 
   it("renders mixed section states independently", () => {

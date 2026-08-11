@@ -5,21 +5,22 @@ import { useEffect, useState } from "react";
 import type {
   ArchiveFormat,
   DiscKind,
-  FilesystemVerificationStatus,
   JobStatus,
 } from "@rip-dvd/data-access";
 
 import { displayTerm } from "../lib/display-term";
+import {
+  FilesystemVerificationResult,
+  type FilesystemVerificationDisplay,
+} from "./filesystem-verification-result";
 
 export type FilesystemVerificationInventoryTarget =
   | "original_disc_archive"
   | "encode_job_output";
 
-interface FilesystemVerificationInventoryItemBase {
+interface FilesystemVerificationInventoryItemBase
+  extends FilesystemVerificationDisplay {
   id: string;
-  status: FilesystemVerificationStatus | null;
-  message: string | null;
-  verifiedAt: string | null;
 }
 
 export type FilesystemVerificationInventoryItem =
@@ -89,27 +90,6 @@ function formatTimestamp(value: string): string {
     dateStyle: "medium",
     timeStyle: "short",
   }).format(new Date(value));
-}
-
-function VerificationResult({
-  item,
-}: {
-  item: FilesystemVerificationInventoryItem;
-}) {
-  if (!item.status || !item.message || !item.verifiedAt) {
-    return <p className="verification-result">Not verified yet.</p>;
-  }
-  return (
-    <div
-      className={`verification-result verification-${item.status}`}
-      role="status"
-      aria-live="polite"
-    >
-      <strong>{displayTerm(item.status)}</strong>
-      <span>{item.message}</span>
-      <small>Verified {formatTimestamp(item.verifiedAt)}</small>
-    </div>
-  );
 }
 
 function InventoryIdentity({
@@ -195,7 +175,7 @@ function InventoryList({
               <div className="item-heading">
                 <InventoryIdentity item={item} />
               </div>
-              <VerificationResult item={item} />
+              <FilesystemVerificationResult {...item} />
               <button
                 type="button"
                 disabled={verifyingTarget !== null}
