@@ -36,6 +36,7 @@ import type {
   LegacySidecarCatalogAdapter,
   LegacySidecarCatalogReadAdapter,
 } from "./legacy-sidecar-catalog-adapter.js";
+import { assignDvdContentIdAlias } from "./dvd-content-id-alias.js";
 import {
   discoverLegacySidecars,
   legacySourceArchiveMatchesSnapshot,
@@ -67,7 +68,6 @@ import {
   legacyCutoverStagedSidecars,
   mediaItems,
   opticalDrives,
-  originalDiscArchiveContentIds,
   originalDiscArchives,
 } from "./schema.js";
 import { requireNonEmpty } from "./validation.js";
@@ -972,50 +972,16 @@ export function createLegacySidecarImportAccess(
             }
 
             if (archiveContentIdentity) {
-              const archiveWithFingerprint = transaction
-                .select({ id: originalDiscArchives.id })
-                .from(originalDiscArchives)
-                .where(
-                  eq(
-                    originalDiscArchives.fingerprint,
-                    archiveContentIdentity.contentId,
-                  ),
-                )
-                .get();
-              if (
-                archiveWithFingerprint &&
-                archiveWithFingerprint.id !== archive.id
-              ) {
-                throw new DomainInvariantError(
-                  "Archive contents are already assigned to a different Original Disc Archive fingerprint",
-                );
-              }
-              transaction
-                .insert(originalDiscArchiveContentIds)
-                .values({
-                  originalDiscArchiveId: archive.id,
-                  contentId: archiveContentIdentity.contentId,
-                })
-                .onConflictDoNothing()
-                .run();
-              const archiveForContentId = transaction
-                .select({
-                  originalDiscArchiveId:
-                    originalDiscArchiveContentIds.originalDiscArchiveId,
-                })
-                .from(originalDiscArchiveContentIds)
-                .where(
-                  eq(
-                    originalDiscArchiveContentIds.contentId,
-                    archiveContentIdentity.contentId,
-                  ),
-                )
-                .get();
-              if (archiveForContentId?.originalDiscArchiveId !== archive.id) {
-                throw new DomainInvariantError(
-                  "Archive contents are already assigned to a different Original Disc Archive",
-                );
-              }
+              assignDvdContentIdAlias(transaction, {
+                originalDiscArchiveId: archive.id,
+                contentId: archiveContentIdentity.contentId,
+                conflictMessages: {
+                  fingerprintOwner:
+                    "Archive contents are already assigned to a different Original Disc Archive fingerprint",
+                  aliasOwner:
+                    "Archive contents are already assigned to a different Original Disc Archive",
+                },
+              });
             }
 
             let movieItem: typeof mediaItems.$inferSelect | undefined;
