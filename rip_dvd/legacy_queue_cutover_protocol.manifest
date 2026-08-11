@@ -1,0 +1,17 @@
+version=1
+command=hold-cutover
+indexes.state=0
+indexes.release=1
+indexes.heartbeat=2
+states.starting=0
+states.intentReady=1
+states.ready=2
+states.released=3
+states.failed=4
+sentinels.abort=supervisor-abort
+sentinels.error=error
+sentinels.intentReady=intent-ready
+sentinels.ready=ready
+sentinels.release=release
+sentinels.released=released
+sentinels.workerError=worker-error
