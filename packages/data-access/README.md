@@ -41,6 +41,8 @@ Bounded dashboard reads keep current state ahead of history: every present or
 enabled Optical Drive is returned before a capped history of disabled missing
 drives. Detected Discs awaiting review and the shared Archive/Encode Job policy
 each have an explicit active cap before recent terminal history is added.
+Pending catalog review pages use an archived-time and archive-ID keyset cursor,
+so completing a visible review does not shift or duplicate later pages.
 
 Catalog review is explicit rather than inferred from the first Disc Selection.
 New Original Disc Archives remain in the review queue while a user builds a

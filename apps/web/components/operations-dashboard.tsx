@@ -429,7 +429,7 @@ export function DashboardView({
   onRequeueEncodeJob?: (id: DashboardEncodeJob["id"]) => void;
   requeueingEncodeJobId?: DashboardEncodeJob["id"] | null;
   onOpenCatalogReview?: (id: string) => void;
-  onCatalogReviewPage?: (offset: number) => void;
+  onCatalogReviewPage?: (cursor: string | null) => void;
   onVerifyFilesystem?: (target: FilesystemVerificationTarget, id: string) => void;
   verifyingFilesystemTarget?: string | null;
 }) {
@@ -699,21 +699,16 @@ export function DashboardView({
         >
           <button
             type="button"
-            disabled={!catalogReviewPage.hasPrevious}
+            disabled={catalogReviewPage.previousCursor === null}
             onClick={() =>
-              onCatalogReviewPage(
-                Math.max(0, catalogReviewPage.offset - catalogReviewPage.limit),
-              )}
+              onCatalogReviewPage(catalogReviewPage.previousCursor)}
           >
             Previous pending reviews
           </button>
           <button
             type="button"
-            disabled={!catalogReviewPage.hasNext}
-            onClick={() =>
-              onCatalogReviewPage(
-                catalogReviewPage.offset + catalogReviewPage.limit,
-              )}
+            disabled={catalogReviewPage.nextCursor === null}
+            onClick={() => onCatalogReviewPage(catalogReviewPage.nextCursor)}
           >
             Next pending reviews
           </button>
@@ -893,7 +888,9 @@ export function OperationsDashboard({
   const [catalogReviewArchiveId, setCatalogReviewArchiveId] = useState<
     string | null
   >(null);
-  const [catalogReviewOffset, setCatalogReviewOffset] = useState(0);
+  const [catalogReviewCursor, setCatalogReviewCursor] = useState<string | null>(
+    null,
+  );
   const [verifyingFilesystemTarget, setVerifyingFilesystemTarget] = useState<
     string | null
   >(null);
@@ -923,12 +920,12 @@ export function OperationsDashboard({
     setState(dashboardState("loading"));
     setStreamStatus("connecting");
     return watchDashboardActivity({
-      catalogReviewOffset,
+      catalogReviewCursor,
       onSnapshot: setState,
       onInitialLoadError: () => setState(dashboardState("error")),
       onStreamStatus: setStreamStatus,
     });
-  }, [page, requestNumber, catalogReviewOffset]);
+  }, [page, requestNumber, catalogReviewCursor]);
 
   useEffect(() => {
     if (page !== "overview") {
@@ -1091,7 +1088,7 @@ export function OperationsDashboard({
           onRequeueEncodeJob={(id) => void requeueEncodeJob(id)}
           requeueingEncodeJobId={requeueingEncodeJobId}
           onOpenCatalogReview={setCatalogReviewArchiveId}
-          onCatalogReviewPage={setCatalogReviewOffset}
+          onCatalogReviewPage={setCatalogReviewCursor}
           onVerifyFilesystem={(target, id) =>
             void verifyFilesystem(target, id)
           }
