@@ -1,8 +1,9 @@
 // @ts-check
 
-import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { pathToFileURL } from "node:url";
+
+import { createRawDvdContentIdHasher } from "@rip-dvd/data-access/dvd-content-id";
 
 import { requireDvdContentSize } from "./dvd-content-policy.js";
 
@@ -22,9 +23,7 @@ export function hashDiscContent(devicePath, sizeBytes, fileSystem = fs) {
   const buffer = Buffer.allocUnsafe(
     Math.min(DVD_CONTENT_READ_BUFFER_BYTES, safeSizeBytes),
   );
-  const hash = createHash("sha256");
-  hash.update("rip-dvd-content-v2\0");
-  hash.update(String(safeSizeBytes));
+  const hasher = createRawDvdContentIdHasher(safeSizeBytes);
   let bytesRead = 0;
   try {
     while (bytesRead < safeSizeBytes) {
@@ -38,13 +37,13 @@ export function hashDiscContent(devicePath, sizeBytes, fileSystem = fs) {
       if (count === 0) {
         throw new Error("DVD content read ended before the declared media size");
       }
-      hash.update(buffer.subarray(0, count));
+      hasher.update(buffer.subarray(0, count));
       bytesRead += count;
     }
   } finally {
     fileSystem.closeSync(descriptor);
   }
-  return `sha256:${hash.digest("hex")}`;
+  return hasher.digest();
 }
 
 function runFromCommandLine() {
