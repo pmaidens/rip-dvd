@@ -3675,14 +3675,11 @@ export function createDataAccessInternal(
       },
       recordReplacementOutputIdentity(claim, identity) {
         const timestamp = now();
-        const normalizedIdentity = requireNonEmpty(
-          identity,
-          "replacementOutputIdentity",
-        );
+        requireNonEmpty(identity, "replacementOutputIdentity");
         const updated = database
           .update(encodeJobs)
           .set({
-            replacementOutputIdentity: normalizedIdentity,
+            replacementOutputIdentity: identity,
             updatedAt: timestamp,
           })
           .where(
@@ -3693,7 +3690,7 @@ export function createDataAccessInternal(
                 isNull(encodeJobs.replacementOutputIdentity),
                 eq(
                   encodeJobs.replacementOutputIdentity,
-                  normalizedIdentity,
+                  identity,
                 ),
               ),
             ),

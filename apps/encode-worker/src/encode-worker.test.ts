@@ -3948,6 +3948,58 @@ describe("encode worker polling", () => {
     fixture.access.close();
   });
 
+  it("fails closed when persisted replacement authority has an invalid identity", async () => {
+    const fixture = createQueuedJob();
+    const options = {
+      access: fixture.access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      signal: new AbortController().signal,
+    };
+    await pollEncodeWorker({
+      ...options,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "owned final", { flag: "wx" });
+        }),
+      },
+    });
+    fixture.access.encodeJobs.requeue(fixture.job.id);
+    await pollEncodeWorker({
+      ...options,
+      runner: {
+        run: vi.fn(async () => {
+          throw new Error("replacement failed");
+        }),
+      },
+    });
+    const database = new DatabaseSync(fixture.databasePath);
+    database
+      .prepare(
+        "update encode_jobs set replacement_output_identity = ? where id = ?",
+      )
+      .run("invalid-identity", fixture.job.id);
+    database.close();
+    fixture.access.encodeJobs.requeue(fixture.job.id);
+    const retryRunner: HandBrakeRunner = { run: vi.fn() };
+
+    await pollEncodeWorker({ ...options, runner: retryRunner });
+
+    expect(retryRunner.run).not.toHaveBeenCalled();
+    expect(readFileSync(fixture.outputPath, "utf8")).toBe("owned final");
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        replacementOutputIdentity: null,
+        replaceExistingOutput: false,
+        status: "failed",
+      }),
+    ]);
+    fixture.access.close();
+  });
+
   it("quarantines a crashed claim-scoped partial before retrying", async () => {
     const fixture = createQueuedJob();
     mkdirSync(dirname(fixture.outputPath), { recursive: true });

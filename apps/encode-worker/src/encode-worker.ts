@@ -38,6 +38,14 @@ import {
   type RunningEncodeJob,
 } from "@rip-dvd/data-access";
 
+import {
+  encodeOutputFilesystemIdentity,
+  matchesEncodeOutputFilesystemIdentity,
+  sameEncodeOutputAuthoritySnapshot,
+  sameEncodeOutputInode,
+  sameEncodeOutputMutationSnapshot,
+} from "./encode-output-filesystem-identity.js";
+
 const HANDBRAKE_TIMEOUT_MS = 24 * 60 * 60_000;
 const MAX_DIAGNOSTIC_BYTES = 65_536;
 const MAX_PATH_BYTES = 4_096;
@@ -574,7 +582,10 @@ async function moveAside(
   if (metadata === null) {
     return null;
   }
-  if (expectedMetadata !== undefined && !sameFile(expectedMetadata, metadata)) {
+  if (
+    expectedMetadata !== undefined &&
+    !sameEncodeOutputMutationSnapshot(expectedMetadata, metadata)
+  ) {
     throw new Error("Encode output changed before it could be quarantined");
   }
   if (!metadata.isFile() || metadata.isSymbolicLink()) {
@@ -595,7 +606,7 @@ async function moveAside(
     await rename(path, failedPath);
   }
   const quarantinedMetadata = await lstat(failedPath);
-  if (!sameInode(metadata, quarantinedMetadata)) {
+  if (!sameEncodeOutputInode(metadata, quarantinedMetadata)) {
     try {
       await restoreMovedAsideOutput(failedPath, path);
     } catch {
@@ -613,7 +624,7 @@ function moveAsideAtMutationBoundary(
   expectedMetadata: Stats,
 ): string {
   const metadata = lstatSync(path);
-  if (!sameFile(expectedMetadata, metadata)) {
+  if (!sameEncodeOutputMutationSnapshot(expectedMetadata, metadata)) {
     throw new Error("Encode output changed before it could be quarantined");
   }
   if (!metadata.isFile() || metadata.isSymbolicLink()) {
@@ -637,7 +648,7 @@ function moveAsideAtMutationBoundary(
   }
   renameSync(path, failedPath);
   const quarantinedMetadata = lstatSync(failedPath);
-  if (!sameInode(metadata, quarantinedMetadata)) {
+  if (!sameEncodeOutputInode(metadata, quarantinedMetadata)) {
     try {
       linkSync(failedPath, path);
     } catch {
@@ -692,14 +703,14 @@ function restoreHiddenFinalAtMutationBoundary(
     const publicAfter = lstatSync(finalPath);
     const hiddenAfter = lstatSync(replacementPath);
     syncPathAtMutationBoundary(dirname(finalPath));
-    if (sameInode(workerMetadata, hiddenAfter)) {
+    if (sameEncodeOutputInode(workerMetadata, hiddenAfter)) {
       return true;
     }
     if (
-      sameStableFile(hiddenBefore, publicAfter) &&
-      sameStableFile(publicBefore, hiddenAfter)
+      sameEncodeOutputAuthoritySnapshot(hiddenBefore, publicAfter) &&
+      sameEncodeOutputAuthoritySnapshot(publicBefore, hiddenAfter)
     ) {
-      if (sameInode(workerMetadata, publicAfter)) {
+      if (sameEncodeOutputInode(workerMetadata, publicAfter)) {
         continue;
       }
       return false;
@@ -717,7 +728,7 @@ function publishReplacementAtMutationBoundary(
   onPublished: () => void,
 ): void {
   const finalMetadata = lstatSync(finalPath);
-  if (!sameFile(expectedFinal, finalMetadata)) {
+  if (!sameEncodeOutputMutationSnapshot(expectedFinal, finalMetadata)) {
     throw new Error("Encode output changed before atomic replacement");
   }
   if (!finalMetadata.isFile() || finalMetadata.isSymbolicLink()) {
@@ -727,15 +738,20 @@ function publishReplacementAtMutationBoundary(
   const retainedFinalMetadata = lstatSync(finalPath);
   const priorFinalMetadata = lstatSync(priorFinalPath);
   if (
-    !sameInode(expectedFinal, retainedFinalMetadata) ||
-    !sameInode(retainedFinalMetadata, priorFinalMetadata)
+    !sameEncodeOutputInode(expectedFinal, retainedFinalMetadata) ||
+    !sameEncodeOutputInode(retainedFinalMetadata, priorFinalMetadata)
   ) {
     throw new Error("Encode output changed while retaining recovery");
   }
   linkSync(partialPath, replacementPath);
   syncPathAtMutationBoundary(dirname(finalPath));
   const currentFinalMetadata = lstatSync(finalPath);
-  if (!sameFile(retainedFinalMetadata, currentFinalMetadata)) {
+  if (
+    !sameEncodeOutputMutationSnapshot(
+      retainedFinalMetadata,
+      currentFinalMetadata,
+    )
+  ) {
     throw new Error("Encode output changed before atomic replacement");
   }
   let exchangeError: Error | null = null;
@@ -758,10 +774,13 @@ function publishReplacementAtMutationBoundary(
     if (
       !publishedFinalMetadata.isFile() ||
       publishedFinalMetadata.isSymbolicLink() ||
-      !sameInode(partialMetadata, publishedFinalMetadata) ||
+      !sameEncodeOutputInode(partialMetadata, publishedFinalMetadata) ||
       !displacedFinalMetadata.isFile() ||
       displacedFinalMetadata.isSymbolicLink() ||
-      !sameStableFile(retainedFinalMetadata, displacedFinalMetadata)
+      !sameEncodeOutputAuthoritySnapshot(
+        retainedFinalMetadata,
+        displacedFinalMetadata,
+      )
     ) {
       displacedFinalError = new Error(
         "Encode output changed during atomic replacement",
@@ -775,8 +794,11 @@ function publishReplacementAtMutationBoundary(
     const exchangeDidNotOccur =
       publishedFinalMetadata !== null &&
       displacedFinalMetadata !== null &&
-      sameStableFile(retainedFinalMetadata, publishedFinalMetadata) &&
-      sameInode(partialMetadata, displacedFinalMetadata);
+      sameEncodeOutputAuthoritySnapshot(
+        retainedFinalMetadata,
+        publishedFinalMetadata,
+      ) &&
+      sameEncodeOutputInode(partialMetadata, displacedFinalMetadata);
     if (exchangeDidNotOccur) {
       throw exchangeError;
     }
@@ -787,7 +809,7 @@ function publishReplacementAtMutationBoundary(
   if (displacedFinalError !== null) {
     if (
       publishedFinalMetadata === null ||
-      !sameInode(partialMetadata, publishedFinalMetadata) ||
+      !sameEncodeOutputInode(partialMetadata, publishedFinalMetadata) ||
       displacedFinalMetadata === null ||
       !displacedFinalMetadata.isFile() ||
       displacedFinalMetadata.isSymbolicLink()
@@ -838,7 +860,7 @@ async function cleanupReplacementLink(
   }
   if (
     expectedMetadata !== undefined &&
-    sameInode(expectedMetadata, metadata)
+    sameEncodeOutputInode(expectedMetadata, metadata)
   ) {
     await unlink(replacementPath);
     await syncPath(dirname(replacementPath));
@@ -874,29 +896,6 @@ async function restoreMovedAsideOutput(
   await syncPath(dirname(finalPath));
 }
 
-function sameFile(first: Stats, second: Stats): boolean {
-  return (
-    first.dev === second.dev &&
-    first.ino === second.ino &&
-    first.size === second.size &&
-    first.mtimeMs === second.mtimeMs &&
-    first.ctimeMs === second.ctimeMs
-  );
-}
-
-function sameInode(first: Stats, second: Stats): boolean {
-  return first.dev === second.dev && first.ino === second.ino;
-}
-
-function sameStableFile(first: Stats, second: Stats): boolean {
-  return (
-    sameInode(first, second) &&
-    first.size === second.size &&
-    first.birthtimeMs === second.birthtimeMs &&
-    first.mtimeMs === second.mtimeMs
-  );
-}
-
 function publicationMatches(
   finalPath: string,
   partialPath: string,
@@ -910,7 +909,7 @@ function publicationMatches(
       partialMetadata.isFile() &&
       !partialMetadata.isSymbolicLink() &&
       partialMetadata.size > 0 &&
-      sameFile(finalMetadata, partialMetadata)
+      sameEncodeOutputMutationSnapshot(finalMetadata, partialMetadata)
     );
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
@@ -918,16 +917,6 @@ function publicationMatches(
     }
     throw error;
   }
-}
-
-function fileIdentity(metadata: Stats): string {
-  return JSON.stringify([
-    metadata.dev,
-    metadata.ino,
-    metadata.size,
-    metadata.birthtimeMs,
-    metadata.mtimeMs,
-  ]);
 }
 
 async function quarantinePartial(
@@ -1028,14 +1017,20 @@ async function reconcilePendingPublications(
         if (quarantineMetadata !== null) {
           if (
             currentFinalMetadata !== null &&
-            sameInode(currentFinalMetadata, quarantineMetadata)
+            sameEncodeOutputInode(
+              currentFinalMetadata,
+              quarantineMetadata,
+            )
           ) {
             await unlink(cleanupQuarantinePath);
             await syncPath(dirname(finalPath));
             quarantineMetadata = null;
           } else if (
             currentPartialMetadata !== null &&
-            sameInode(currentPartialMetadata, quarantineMetadata)
+            sameEncodeOutputInode(
+              currentPartialMetadata,
+              quarantineMetadata,
+            )
           ) {
             await unlink(cleanupQuarantinePath);
             await syncPath(dirname(finalPath));
@@ -1072,14 +1067,20 @@ async function reconcilePendingPublications(
         reconciledFinalMetadata !== null &&
         partialMetadata !== null &&
         partialMetadata.size > 0 &&
-        sameFile(reconciledFinalMetadata, partialMetadata);
+        sameEncodeOutputMutationSnapshot(
+          reconciledFinalMetadata,
+          partialMetadata,
+        );
       if (
         finalMatchesPartial &&
         replacementMetadata !== null &&
         partialMetadata !== null &&
-        !sameInode(partialMetadata, replacementMetadata) &&
+        !sameEncodeOutputInode(partialMetadata, replacementMetadata) &&
         (priorFinalMetadata === null ||
-          !sameInode(priorFinalMetadata, replacementMetadata))
+          !sameEncodeOutputInode(
+            priorFinalMetadata,
+            replacementMetadata,
+          ))
       ) {
         let displacedFinalRestored = false;
         try {
@@ -1090,16 +1091,28 @@ async function reconcilePendingPublications(
                 const currentFinalMetadata = lstatSync(finalPath);
                 const currentReplacementMetadata = lstatSync(replacementPath);
                 return (
-                  sameFile(reconciledFinalMetadata, currentFinalMetadata) &&
-                  sameFile(replacementMetadata, currentReplacementMetadata)
+                  sameEncodeOutputMutationSnapshot(
+                    reconciledFinalMetadata,
+                    currentFinalMetadata,
+                  ) &&
+                  sameEncodeOutputMutationSnapshot(
+                    replacementMetadata,
+                    currentReplacementMetadata,
+                  )
                 );
               },
             );
           const currentFinalMetadata = lstatSync(finalPath);
           const currentReplacementMetadata = lstatSync(replacementPath);
           if (
-            !sameFile(reconciledFinalMetadata, currentFinalMetadata) ||
-            !sameFile(replacementMetadata, currentReplacementMetadata)
+            !sameEncodeOutputMutationSnapshot(
+              reconciledFinalMetadata,
+              currentFinalMetadata,
+            ) ||
+            !sameEncodeOutputMutationSnapshot(
+              replacementMetadata,
+              currentReplacementMetadata,
+            )
           ) {
             throw new PendingPublicationRecoveryError(
               "Displaced Encode output changed after recovery authorization",
@@ -1120,8 +1133,14 @@ async function reconcilePendingPublications(
           const restoredFinalMetadata = lstatSync(finalPath);
           const stagedWorkerMetadata = lstatSync(replacementPath);
           if (
-            !sameInode(replacementMetadata, restoredFinalMetadata) ||
-            !sameInode(reconciledFinalMetadata, stagedWorkerMetadata)
+            !sameEncodeOutputInode(
+              replacementMetadata,
+              restoredFinalMetadata,
+            ) ||
+            !sameEncodeOutputInode(
+              reconciledFinalMetadata,
+              stagedWorkerMetadata,
+            )
           ) {
             throw new PendingPublicationRecoveryError(
               "Displaced Encode output exchange requires reconciliation",
@@ -1278,7 +1297,7 @@ async function reconcileActivePublicationMutations(
         partialMetadata === null ||
         replacementMetadata !== null ||
         partialMetadata.size <= 0 ||
-        !sameFile(finalMetadata, partialMetadata)
+        !sameEncodeOutputMutationSnapshot(finalMetadata, partialMetadata)
       ) {
         continue;
       }
@@ -1481,13 +1500,18 @@ async function executeClaim(
       throw new Error("Encode Job final output already exists");
     }
     if (existingFinal !== null && claim.replaceExistingOutput) {
-      const identity = fileIdentity(existingFinal);
+      const identity = encodeOutputFilesystemIdentity(existingFinal);
       if (claim.replacementOutputIdentity === null) {
         options.access.encodeJobs.recordReplacementOutputIdentity(
           claim,
           identity,
         );
-      } else if (claim.replacementOutputIdentity !== identity) {
+      } else if (
+        !matchesEncodeOutputFilesystemIdentity(
+          claim.replacementOutputIdentity,
+          existingFinal,
+        )
+      ) {
         throw new Error("Encode Job prior final output changed before retry");
       }
     }
@@ -1537,7 +1561,7 @@ async function executeClaim(
     if (
       replaceableFinal !== undefined &&
       currentFinal !== null &&
-      !sameFile(replaceableFinal, currentFinal)
+      !sameEncodeOutputMutationSnapshot(replaceableFinal, currentFinal)
     ) {
       throw new Error("Encode Job final output changed during encoding");
     }
@@ -1652,7 +1676,10 @@ async function executeClaim(
         const currentFinal = await optionalMetadata(finalPath);
         if (
           currentFinal !== null &&
-          fileIdentity(replaceableFinal) === fileIdentity(currentFinal)
+          sameEncodeOutputAuthoritySnapshot(
+            replaceableFinal,
+            currentFinal,
+          )
         ) {
           preserveReplacementAuthority = true;
         }
@@ -1696,7 +1723,7 @@ async function executeClaim(
         if (
           currentFinal !== null &&
           publishedOutputMetadata !== undefined &&
-          sameInode(publishedOutputMetadata, currentFinal)
+          sameEncodeOutputInode(publishedOutputMetadata, currentFinal)
         ) {
           if (cleanupQuarantinePath === undefined) {
             throw new Error("Encode output quarantine path is unavailable");

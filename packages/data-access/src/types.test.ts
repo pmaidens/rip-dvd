@@ -7,11 +7,13 @@ import type {
   DetectedDiscId,
   DiscSelectionId,
   EncodeJobId,
+  EncodeOutputFilesystemIdentity,
   EncodingProfileId,
   MediaItemId,
   OpticalDriveId,
   OriginalDiscArchiveId,
   RunningArchiveJob,
+  RunningEncodeJob,
 } from "./types.js";
 import type {
   LegacySidecarAccess,
@@ -78,6 +80,20 @@ describe("data-access domain identifiers", () => {
     expectTypeOf<MediaItemId>().not.toEqualTypeOf<DiscSelectionId>();
     expectTypeOf<EncodingProfileId>().not.toEqualTypeOf<EncodeJobId>();
     expectTypeOf<ArchiveJobId>().not.toEqualTypeOf<EncodeJobId>();
+  });
+
+  it("keeps Encode output filesystem identities opaque", () => {
+    expectTypeOf<EncodeOutputFilesystemIdentity>()
+      .toMatchTypeOf<string>();
+    expectTypeOf<string>()
+      .not.toMatchTypeOf<EncodeOutputFilesystemIdentity>();
+
+    if (false) {
+      const access = undefined as unknown as DataAccess;
+      const claim = undefined as unknown as RunningEncodeJob;
+      // @ts-expect-error Filesystem identities must come from the Encode codec.
+      access.encodeJobs.recordReplacementOutputIdentity(claim, "raw");
+    }
   });
 
   it("rejects cross-wired identifiers at facade command boundaries", () => {
