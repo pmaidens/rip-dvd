@@ -12,6 +12,7 @@ import {
   toEncodingProfileDto,
   type DvdVideoEncodingSettings,
 } from "../../../lib/encoding-profiles";
+import { isHandBrakePreset } from "../../../lib/handbrake-presets";
 
 export const dynamic = "force-dynamic";
 
@@ -64,7 +65,12 @@ function parseDvdVideoSettings(
 ): DvdVideoEncodingSettings | null {
   const settings = asRecord(value);
   const preset = requiredString(settings?.preset);
-  if (!settings || !preset || settings.container !== "mkv") {
+  if (
+    !settings ||
+    !preset ||
+    !isHandBrakePreset(preset) ||
+    settings.container !== "mkv"
+  ) {
     return null;
   }
   return { preset, container: "mkv" };

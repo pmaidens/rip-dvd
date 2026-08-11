@@ -4,6 +4,10 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 
 import { displayTerm } from "../lib/display-term";
 import type { EncodingProfileDto } from "../lib/encoding-profiles";
+import {
+  HANDBRAKE_PRESET_GROUPS,
+  isHandBrakePreset,
+} from "../lib/handbrake-presets";
 
 export type EncodingProfilesLoadState =
   | { status: "loading" }
@@ -44,6 +48,13 @@ export function EncodingProfilesView({
   const versionSource = profiles.find(
     (profile) => profile.id === versionSourceId,
   );
+  const selectedPreset = versionSource
+    ? (versionSource.settings.preset ?? "")
+    : "Fast 480p30";
+  const unavailablePreset =
+    selectedPreset !== "" && !isHandBrakePreset(selectedPreset)
+      ? selectedPreset
+      : null;
 
   function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -103,16 +114,29 @@ export function EncodingProfilesView({
           ) : null}
           <label>
             HandBrake preset
-            <input
+            <select
               key={versionSource?.id ?? "new-profile"}
               name="preset"
               required
-              defaultValue={
-                versionSource
-                  ? (versionSource.settings.preset ?? "")
-                  : "Fast 480p30"
-              }
-            />
+              defaultValue={unavailablePreset ? "" : selectedPreset}
+            >
+              {selectedPreset === "" || unavailablePreset ? (
+                <option value="" disabled>
+                  {unavailablePreset
+                    ? `${unavailablePreset} (unavailable — select a replacement)`
+                    : "Select a preset"}
+                </option>
+              ) : null}
+              {HANDBRAKE_PRESET_GROUPS.map((group) => (
+                <optgroup key={group.label} label={group.label}>
+                  {group.presets.map((preset) => (
+                    <option key={preset} value={preset}>
+                      {preset}
+                    </option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
           </label>
           <label>
             Container

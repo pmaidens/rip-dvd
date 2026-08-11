@@ -66,7 +66,7 @@ describe("Encoding Profiles API", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           sourceProfileId: versionOne.id,
-          settings: { preset: "HQ 480p30", container: "mkv" },
+          settings: { preset: "HQ 480p30 Surround", container: "mkv" },
         }),
       }),
       () => access,
@@ -80,7 +80,7 @@ describe("Encoding Profiles API", () => {
         mediaDomain: "dvd_video",
         version: 2,
         isActive: false,
-        settings: { preset: "HQ 480p30", container: "mkv" },
+        settings: { preset: "HQ 480p30 Surround", container: "mkv" },
       }),
     });
     expect(
@@ -109,7 +109,7 @@ describe("Encoding Profiles API", () => {
     const versionTwo = access.encodingProfiles.createVersion({
       sourceProfileId: versionOne.id,
       mediaDomain: "dvd_video",
-      settings: { preset: "HQ 480p30", container: "mkv" },
+      settings: { preset: "HQ 480p30 Surround", container: "mkv" },
     });
 
     const activateResponse = await createEncodingProfilesRoute(
@@ -168,6 +168,20 @@ describe("Encoding Profiles API", () => {
       () => access,
     );
     expect(invalidSettingsResponse.status).toBe(400);
+
+    const invalidPresetResponse = await createEncodingProfilesRoute(
+      new Request("http://localhost/api/encoding-profiles", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          key: "invalid-preset",
+          displayName: "Invalid preset",
+          settings: { preset: "Not a HandBrake preset", container: "mkv" },
+        }),
+      }),
+      () => access,
+    );
+    expect(invalidPresetResponse.status).toBe(400);
 
     const crossDomainResponse = await createEncodingProfilesRoute(
       new Request("http://localhost/api/encoding-profiles", {
