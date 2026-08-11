@@ -1,15 +1,13 @@
 import { isDeepStrictEqual } from "node:util";
 
-import {
-  decodeArchivedDvdTitles,
-  decodeDvdTitleMap,
-} from "../dvd-scan.js";
+import { decodeDvdTitleMap } from "../dvd-scan.js";
 import { DomainInvariantError } from "../errors.js";
 import type {
   DetectedDiscStatus,
   DiscKind,
   DiscSelection,
 } from "../types.js";
+import { createArchivedDvdSelectionValidator } from "./archived-dvd-selection-validator.js";
 import { discSelections } from "./schema.js";
 
 export function normalizeDetectedDiscScan({
@@ -178,35 +176,20 @@ export function toDiscSelection(
   }
 }
 
-export function canonicalDvdSelectionSourceKey(
-  selection: Pick<
-    DiscSelection,
-    "chapterEnd" | "chapterStart" | "kind" | "titleNumber"
-  >,
-): string {
-  return selection.kind === "main_feature"
-    ? "dvd:main-feature"
-    : selection.kind === "dvd_title"
-      ? `dvd:title:${selection.titleNumber}`
-      : `dvd:title:${selection.titleNumber}:chapters:${selection.chapterStart}-${selection.chapterEnd}`;
-}
-
 export function requiresLegacyDiscSelectionRepair(
   row: typeof discSelections.$inferSelect,
-  archivedTitles: ReturnType<typeof decodeArchivedDvdTitles>,
+  validator: ReturnType<typeof createArchivedDvdSelectionValidator>,
 ): boolean {
-  const selection = toDiscSelection(row);
-  const title = selection.titleNumber === null
-    ? null
-    : archivedTitles?.find(
-        (candidate) => candidate.number === selection.titleNumber,
-      );
-  return (
-    row.sourceKey !== canonicalDvdSelectionSourceKey(selection) ||
-    (selection.titleNumber !== null &&
-      (title === null ||
-        title === undefined ||
-        (selection.chapterEnd !== null &&
-          selection.chapterEnd > title.chapters)))
-  );
+  try {
+    validator.validate(
+      toDiscSelection(row),
+      { persistedSourceKey: row.sourceKey },
+    );
+    return false;
+  } catch (error) {
+    if (error instanceof DomainInvariantError) {
+      return true;
+    }
+    throw error;
+  }
 }
