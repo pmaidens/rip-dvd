@@ -397,6 +397,8 @@ export interface EncodingProfileAccess {
     ids?: readonly EncodingProfileId[];
     mediaDomain?: MediaDomain;
     activeOnly?: boolean;
+    limit?: number;
+    offset?: number;
   }): EncodingProfile[];
 }
 

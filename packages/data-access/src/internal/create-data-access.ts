@@ -3514,7 +3514,7 @@ export function createDataAccessInternal(
             : undefined,
           input.activeOnly ? eq(encodingProfiles.isActive, true) : undefined,
         ].filter((condition) => condition !== undefined);
-        return database
+        const query = database
           .select()
           .from(encodingProfiles)
           .where(conditions.length > 0 ? and(...conditions) : undefined)
@@ -3522,8 +3522,21 @@ export function createDataAccessInternal(
             asc(encodingProfiles.mediaDomain),
             asc(encodingProfiles.key),
             asc(encodingProfiles.version),
-          )
-          .all();
+          );
+        if (input.limit === undefined) {
+          return query.all();
+        }
+        const limited = query.limit(
+          requirePositiveSafeInteger(input.limit, "limit"),
+        );
+        if (input.offset === undefined) {
+          return limited.all();
+        }
+        const offset = optionalSafeInteger(input.offset, "offset", 0);
+        if (offset === null || offset === undefined) {
+          throw new DomainInvariantError("offset must be a safe integer");
+        }
+        return limited.offset(offset).all();
       },
     },
 

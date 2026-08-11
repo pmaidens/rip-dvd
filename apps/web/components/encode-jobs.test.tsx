@@ -75,12 +75,19 @@ describe("EncodeJobsView", () => {
             hasPrevious: false,
             hasNext: false,
           },
+          profilePage: {
+            offset: 0,
+            limit: 100,
+            hasPrevious: false,
+            hasNext: true,
+          },
         }}
         isSaving={false}
         requestError={null}
         onQueue={() => undefined}
         onRetry={() => undefined}
         onSelectionPage={() => undefined}
+        onProfilePage={() => undefined}
       />,
     );
 
@@ -91,6 +98,7 @@ describe("EncodeJobsView", () => {
     expect(html).toContain('name="encodingProfileId"');
     expect(html).toContain('name="outputPath"');
     expect(html).toContain("Queue encode");
+    expect(html).toContain("Next active profiles");
   });
 
   it("loads options and submits a same-origin JSON queue request", async () => {
@@ -102,7 +110,7 @@ describe("EncodeJobsView", () => {
         ? Response.json({ selections: [], profiles: [], page: {} })
         : Response.json({ job: { id: "job-1" } }));
 
-    await requestEncodeJobOptions(100, fetcher);
+    await requestEncodeJobOptions(100, 200, fetcher);
     await queueEncodeJob({
       discSelectionId: selectionId,
       encodingProfileId: profileId,
@@ -112,7 +120,7 @@ describe("EncodeJobsView", () => {
 
     expect(fetcher).toHaveBeenNthCalledWith(
       1,
-      "/api/encode-jobs?selectionOffset=100",
+      "/api/encode-jobs?selectionOffset=100&profileOffset=200",
       { cache: "no-store", headers: { Accept: "application/json" } },
     );
     expect(fetcher).toHaveBeenNthCalledWith(2, "/api/encode-jobs", {
