@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { seedFailedArchiveJobAndQueuedDuplicate } from "../../../test/archive-job-fixture";
 import { useDataAccessFixture } from "../../../test/data-access-fixture";
 import { createActionOverviewRoute } from "./route";
 
@@ -91,6 +92,32 @@ describe("Action overview API", () => {
       ]),
     );
     expect(JSON.stringify(body)).not.toContain("/missing/");
+  });
+
+  it("excludes failed Archive Jobs superseded by a published duplicate", async () => {
+    const access = dataAccessFixture.create();
+    const fixture = seedFailedArchiveJobAndQueuedDuplicate(
+      access,
+      "action-overview-superseded-archive-job",
+    );
+
+    const beforePublication = await createActionOverviewRoute(
+      () => access,
+    ).json();
+    expect(beforePublication.failedArchives).toEqual({
+      count: 1,
+      items: [
+        { id: fixture.failedJob.id, label: "FAILED_DUPLICATE" },
+      ],
+    });
+    fixture.publishDuplicate();
+
+    const body = await createActionOverviewRoute(() => access).json();
+
+    expect(access.archiveJobs.list(["failed"])).toEqual([
+      expect.objectContaining({ id: fixture.failedJob.id }),
+    ]);
+    expect(body.failedArchives).toEqual({ count: 0, items: [] });
   });
 
   it("fails closed when the catalog is unavailable", async () => {
