@@ -35,10 +35,10 @@ import {
 
 const MAX_ARCHIVE_PATH_BYTES = 4_096;
 const MAX_ARCHIVE_RECOVERY_ENTRIES = 4_096;
-const MAX_DD_DIAGNOSTIC_BYTES = 65_536;
+const MAX_COPY_DIAGNOSTIC_BYTES = 65_536;
 const MAX_PROC_ENTRIES = 4_096;
 const MAX_PROC_FILE_DESCRIPTORS = 65_536;
-const DD_TIMEOUT_MS = 12 * 60 * 60_000;
+const COPY_TIMEOUT_MS = 12 * 60 * 60_000;
 const FLOCK_CONFLICT_EXIT_CODE = 75;
 
 export interface DvdCopyRequest {
@@ -105,9 +105,11 @@ function openDeviceLock(devicePath: string): number {
 }
 
 export function createNodeDvdCopyRunner({
+  requireInactive = requireDeviceInactive,
   spawnProcess = spawn as SpawnDvdCopyProcess,
-  timeoutMs = DD_TIMEOUT_MS,
+  timeoutMs = COPY_TIMEOUT_MS,
 }: {
+  requireInactive?: (devicePath: string) => void;
   spawnProcess?: SpawnDvdCopyProcess;
   timeoutMs?: number;
 } = {}): DvdCopyRunner {
@@ -139,15 +141,11 @@ export function createNodeDvdCopyRunner({
             "--conflict-exit-code",
             String(FLOCK_CONFLICT_EXIT_CODE),
             "/proc/self/fd/3",
-            "dd",
-            `if=${requireSafeOpticalDevicePath(request.devicePath)}`,
-            `of=${request.outputPath}`,
-            "bs=4M",
-            "iflag=fullblock,count_bytes",
-            `count=${requireDvdContentSize(request.sizeBytes)}`,
-            "oflag=nofollow",
-            "conv=excl,fsync",
-            "status=progress",
+            "rip-dvd-dvdcss-reader",
+            "copy",
+            requireSafeOpticalDevicePath(request.devicePath),
+            request.outputPath,
+            String(requireDvdContentSize(request.sizeBytes)),
           ],
           {
             shell: false,
@@ -207,8 +205,8 @@ export function createNodeDvdCopyRunner({
       };
       const parseProgress = (text: string, flush = false) => {
         progressBuffer += text;
-        if (progressBuffer.length > MAX_DD_DIAGNOSTIC_BYTES) {
-          progressBuffer = progressBuffer.slice(-MAX_DD_DIAGNOSTIC_BYTES);
+        if (progressBuffer.length > MAX_COPY_DIAGNOSTIC_BYTES) {
+          progressBuffer = progressBuffer.slice(-MAX_COPY_DIAGNOSTIC_BYTES);
         }
         const segments = progressBuffer.split(/[\r\n]/);
         progressBuffer = flush ? "" : (segments.pop() ?? "");
@@ -223,7 +221,7 @@ export function createNodeDvdCopyRunner({
 
       child.stderr.on("data", (chunk) => {
         const text = chunk.toString("utf8");
-        diagnostics = `${diagnostics}${text}`.slice(-MAX_DD_DIAGNOSTIC_BYTES);
+        diagnostics = `${diagnostics}${text}`.slice(-MAX_COPY_DIAGNOSTIC_BYTES);
         if (operationSettled || cancellationRequested) {
           return;
         }
@@ -277,7 +275,7 @@ export function createNodeDvdCopyRunner({
   return {
     copy(request) {
       const safeDevicePath = requireSafeOpticalDevicePath(request.devicePath);
-      requireDeviceInactive(safeDevicePath);
+      requireInactive(safeDevicePath);
       return coordinator.run(copyKey(safeDevicePath, request.outputPath), request, {
         signal: request.signal,
         timeoutError: "DVD archive copy timed out",

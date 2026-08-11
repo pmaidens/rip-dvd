@@ -396,8 +396,9 @@ The runtime mount and hardware boundary is deliberately narrow:
 
 The web image contains only the Next.js runtime and its traced dependencies. It
 does not contain `lsdvd`, HandBrake, ffmpeg, `sqlite3`, or worker hardware
-permissions. The archive-worker image adds `lsdvd`, `lsblk`, `dd`, `nice`, and
-`ionice`; the encode-worker image adds HandBrake, ffmpeg, `nice`, and `ionice`.
+permissions. The archive-worker image adds `lsdvd`, `lsblk`, a statically linked
+`libdvdcss` disc reader, `nice`, and `ionice`; the encode-worker image adds
+HandBrake, ffmpeg, `nice`, and `ionice`.
 The short-lived deployment-tools image owns schema migration and SQLite backup
 commands instead of expanding the web image's attack surface.
 
@@ -644,7 +645,9 @@ normal state. Scanner failures are logged per drive without hiding other drives,
 and a failed discovery does not mark every known drive missing. Successful DVD
 scans store title numbers, durations, chapter counts, bounded per-stream
 language/format/channel/source-ID metadata, and a deterministic SHA-256 content
-identity over every declared raw-disc byte. Before trusting a cached scan and
+identity over every declared raw-disc byte. The scanner authenticates through
+`libdvdcss` but deliberately reads without its decrypt flag, so CSS-protected
+discs remain byte-identical to the archived ISO. Before trusting a cached scan and
 again after a new scan, the worker opens the device read-only and nonblocking.
 That open actively asks Linux's optical driver to observe media events before
 the worker reads the resulting sysfs generation. A generation change fails the
@@ -723,7 +726,7 @@ regular archive with an unknown size is measured and backfilled before hashing;
 an archive whose identity cannot be proven requires operator remediation.
 Publication rechecks the barrier transactionally before it can create new
 provenance.
-A worker must let the claim commit and only then start `dd`, `lsdvd`,
+A worker must let the claim commit and only then start the DVD reader, `lsdvd`,
 `HandBrakeCLI`, or any other external process. External process execution must
 never occur inside a database transaction.
 
@@ -739,13 +742,13 @@ Archive claims also carry a bounded one-minute lease. The owning worker renews
 it with the same attempt-token compare-and-set guard while copying. Each poll
 recovers at most 100 expired claims, oldest first, into visible failed jobs that
 must be explicitly retried; a stale worker cannot renew, report, fail, or
-publish that recovered attempt. A timed-out or cancelled `dd` returns control
+publish that recovered attempt. A timed-out or cancelled DVD read returns control
 at its deadline, kills and detaches the child, and retains a device/output
 tombstone until the operating system reports the child closed. While that
 tombstone remains, retries are rejected and the live partial path is neither
 renamed nor quarantined. Across direct worker replacement, the worker also
 fails closed while a same-service-UID process still holds the configured device
-inode, and each new `dd` holds a nonblocking exclusive lock on that opened
+inode, and each new DVD reader holds a nonblocking exclusive lock on that opened
 device inode. Device ownership therefore remains independent of the archive
 fingerprint and originals-library root. Publication syncs the copied inode and parent
 directory; recovery of an already-complete verified ISO likewise syncs the

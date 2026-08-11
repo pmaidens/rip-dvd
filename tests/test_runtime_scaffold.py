@@ -115,6 +115,23 @@ class RuntimeScaffoldTests(unittest.TestCase):
             compose,
         )
 
+    def test_archive_worker_builds_a_verified_libdvdcss_reader(self) -> None:
+        dockerfile = (ROOT / "docker" / "runtime.Dockerfile").read_text()
+
+        self.assertIn("ARG LIBDVDCSS_VERSION=1.6.0", dockerfile)
+        self.assertIn(
+            "ARG LIBDVDCSS_SHA256="
+            "7ea556c846b7bfc32d47b41cae56d1863a6b6d5f706bb162778d6f298490977c",
+            dockerfile,
+        )
+        self.assertIn("sha256sum --check --strict", dockerfile)
+        self.assertIn("rip-dvd-dvdcss-reader", dockerfile)
+        self.assertIn("/usr/share/doc/rip-dvd-dvdcss-reader/COPYING", dockerfile)
+        self.assertIn(
+            "/usr/share/doc/rip-dvd-dvdcss-reader/dvdcss-reader.c",
+            dockerfile,
+        )
+
     def test_worker_smoke_uses_configured_command_and_bounded_shutdown(self) -> None:
         smoke = (ROOT / "scripts" / "smoke-compose-workers.sh").read_text()
 
