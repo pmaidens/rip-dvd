@@ -529,8 +529,9 @@ review requires at least one selection and records a separate reviewed time;
 adding another selection reopens review before any new encode can be enqueued.
 The facade derives canonical DVD source identities and rejects duplicate source
 slices. Supported upgrades reopen caller-era scan-dependent or noncanonical
-catalogs and fail their active Encode Jobs until bounded validation completes
-again; unsafe jobs cannot be enqueued, requeued, or claimed. The review editor
+catalogs and fail their active Encode Jobs until paged validation outside the
+SQLite writer lock completes again; unsafe jobs cannot be enqueued, requeued,
+or claimed. The review editor
 keeps ordinary retry history separate from unsafe legacy recovery:
 
 - **Ordinary retry identity.** A current-valid Disc Selection with any dependent

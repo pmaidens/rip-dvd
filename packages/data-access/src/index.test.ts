@@ -47,6 +47,7 @@ type ConcurrentWorkerResult =
         | "created"
         | "enqueued"
         | "rejected"
+        | "reviewed"
         | "versioned";
       id?: string;
       version?: number;
@@ -80,6 +81,11 @@ type ConcurrentOperation =
       outputPath: string;
     }
   | {
+      operation: "complete-catalog-review";
+      originalDiscArchiveId: OriginalDiscArchiveId;
+      catalogRevision: Date;
+    }
+  | {
       operation: "create-media-item";
       parentId: MediaItemId;
       title: string;
@@ -98,6 +104,7 @@ async function runBarrierWorkers(
   hooks: {
     beforeRelease?(): void;
     afterRelease?(): Promise<void> | void;
+    afterOperationsStart?(): Promise<void> | void;
   } = {},
 ): Promise<ConcurrentWorkerResult[]> {
   const { databasePath, mode } = options;
@@ -163,6 +170,19 @@ async function runBarrierWorkers(
         });
       }),
   );
+  const operationStarts = workers.map(
+    (worker) =>
+      new Promise<void>((resolve, reject) => {
+        const onMessage = (message: { type: string }) => {
+          if (message.type === "operation-started") {
+            worker.off("message", onMessage);
+            resolve();
+          }
+        };
+        worker.on("message", onMessage);
+        worker.once("error", reject);
+      }),
+  );
 
   await Promise.all(ready);
   hooks.beforeRelease?.();
@@ -170,6 +190,10 @@ async function runBarrierWorkers(
   Atomics.notify(new Int32Array(barrier), 0, count);
   const workerResults = Promise.all(results);
   await hooks.afterRelease?.();
+  if (hooks.afterOperationsStart) {
+    await Promise.all(operationStarts);
+    await hooks.afterOperationsStart();
+  }
   return workerResults;
 }
 
@@ -1047,6 +1071,270 @@ describe("data-access facade", () => {
       .toThrow(titleError);
     access.close();
   });
+
+  it("validates a large catalog outside the SQLite writer lock without weakening review or encode checks", async () => {
+    const databasePath = createTestDatabasePath();
+    const access = openTestDatabase(databasePath);
+    const contentId = `sha256:${"b".repeat(64)}`;
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: contentId,
+      scanData: {
+        schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+        contentId,
+        titles: [{
+          number: 1,
+          durationSeconds: 100_000,
+          chapters: 100_000,
+          audioStreams: [],
+          subtitles: [],
+        }],
+      },
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Large Catalog.iso",
+      fingerprint: contentId,
+    });
+    const item = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Large Catalog",
+    });
+    const selection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: item.id,
+      kind: "main_feature",
+    });
+    const profile = access.encodingProfiles.create({
+      key: "large-catalog",
+      displayName: "Large catalog",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+
+    const sqlite = new DatabaseSync(databasePath);
+    const selectionCount = 5_000;
+    const insertSelection = sqlite.prepare(`
+      insert into disc_selections (
+        id,
+        original_disc_archive_id,
+        media_item_id,
+        source_key,
+        kind,
+        title_number,
+        chapter_start,
+        chapter_end,
+        created_at,
+        updated_at
+      ) values (?, ?, ?, ?, 'dvd_chapters', 1, ?, ?, 0, 0)
+    `);
+    sqlite.exec("begin");
+    for (let chapter = 1; chapter <= selectionCount; chapter += 1) {
+      insertSelection.run(
+        `large-selection-${String(chapter).padStart(6, "0")}`,
+        archive.id,
+        item.id,
+        `dvd:title:1:chapters:${chapter}-${chapter}`,
+        chapter,
+        chapter,
+      );
+    }
+    sqlite.prepare(`
+      update original_disc_archives
+      set updated_at = updated_at + 1
+      where id = ?
+    `).run(archive.id);
+    sqlite.exec("commit");
+
+    const finalSelectionId =
+      `large-selection-${String(selectionCount).padStart(6, "0")}`;
+    const canonicalFinalSourceKey =
+      `dvd:title:1:chapters:${selectionCount}-${selectionCount}`;
+    sqlite.prepare(`
+      update disc_selections
+      set source_key = 'legacy:noncanonical'
+      where id = ?
+    `).run(finalSelectionId);
+    sqlite.prepare(`
+      update original_disc_archives
+      set updated_at = updated_at + 1
+      where id = ?
+    `).run(archive.id);
+
+    expect(() => completeCatalogReview(access, archive.id)).toThrow(
+      "Catalog review requires canonical Disc Selection source keys",
+    );
+
+    sqlite.prepare(`
+      update disc_selections
+      set source_key = ?
+      where id = ?
+    `).run(canonicalFinalSourceKey, finalSelectionId);
+    sqlite.prepare(`
+      update original_disc_archives
+      set updated_at = updated_at + 1
+      where id = ?
+    `).run(archive.id);
+    sqlite.exec("pragma busy_timeout = 0");
+
+    const concurrentSelectionId = "concurrent-large-selection" as DiscSelectionId;
+    const staleReviewRevision = access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]!.updatedAt;
+    const staleReviewResults = await runBarrierWorkers(
+      {
+        databasePath,
+        mode: "operation",
+        operations: [{
+          operation: "complete-catalog-review",
+          originalDiscArchiveId: archive.id,
+          catalogRevision: staleReviewRevision,
+        }],
+      },
+      {
+        beforeRelease() {
+          sqlite.exec("begin immediate");
+        },
+        async afterOperationsStart() {
+          await new Promise((resolve) => setTimeout(resolve, 250));
+          insertSelection.run(
+            concurrentSelectionId,
+            archive.id,
+            item.id,
+            `dvd:title:1:chapters:${selectionCount + 1}-${selectionCount + 1}`,
+            selectionCount + 1,
+            selectionCount + 1,
+          );
+          sqlite.prepare(`
+            update original_disc_archives
+            set catalog_reviewed_at = null, updated_at = updated_at + 1
+            where id = ?
+          `).run(archive.id);
+          sqlite.exec("commit");
+        },
+      },
+    );
+    expect(staleReviewResults).toEqual([{ outcome: "rejected" }]);
+    expect(access.catalog.listDiscSelections({ ids: [concurrentSelectionId] }))
+      .toHaveLength(1);
+    expect(
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0],
+    ).toMatchObject({ catalogReviewedAt: null });
+
+    let writerAcquiredDuringReviewValidation = false;
+    const reviewRevision = access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]!.updatedAt;
+    const reviewResults = await runBarrierWorkers(
+      {
+        databasePath,
+        mode: "operation",
+        operations: Array.from({ length: 2 }, () => ({
+          operation: "complete-catalog-review" as const,
+          originalDiscArchiveId: archive.id,
+          catalogRevision: reviewRevision,
+        })),
+      },
+      {
+        async afterOperationsStart() {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          try {
+            sqlite.exec("begin immediate");
+            sqlite.prepare(`
+              update encoding_profiles
+              set display_name = display_name || ' reviewed'
+              where id = ?
+            `).run(profile.id);
+            sqlite.exec("commit");
+            writerAcquiredDuringReviewValidation = true;
+          } catch {
+            // The assertion below reports whether validation held the writer.
+          }
+        },
+      },
+    );
+    expect(writerAcquiredDuringReviewValidation).toBe(true);
+    expect(reviewResults).toEqual(expect.arrayContaining([
+      { outcome: "reviewed", id: archive.id },
+      { outcome: "rejected" },
+    ]));
+
+    sqlite.prepare(`
+      update disc_selections
+      set source_key = 'legacy:noncanonical'
+      where id = ?
+    `).run(finalSelectionId);
+    sqlite.prepare(`
+      update original_disc_archives
+      set updated_at = updated_at + 1
+      where id = ?
+    `).run(archive.id);
+    expect(() =>
+      access.encodeJobs.enqueue({
+        discSelectionId: selection.id,
+        encodingProfileId: profile.id,
+        outputPath: "/media/movies/Large Catalog invalid.mkv",
+      }),
+    ).toThrow("Catalog review requires canonical Disc Selection source keys");
+
+    sqlite.prepare(`
+      update disc_selections
+      set source_key = ?
+      where id = ?
+    `).run(canonicalFinalSourceKey, finalSelectionId);
+    sqlite.prepare(`
+      update original_disc_archives
+      set updated_at = updated_at + 1
+      where id = ?
+    `).run(archive.id);
+
+    let writerAcquiredDuringEncodeValidation = false;
+    const encodeResults = await runBarrierWorkers(
+      {
+        databasePath,
+        mode: "operation",
+        operations: [{
+          operation: "enqueue-encode",
+          discSelectionId: selection.id,
+          encodingProfileId: profile.id,
+          outputPath: "/media/movies/Large Catalog.mkv",
+        }],
+      },
+      {
+        async afterOperationsStart() {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          try {
+            sqlite.exec("begin immediate");
+            sqlite.prepare(`
+              update encoding_profiles
+              set display_name = display_name || ' enqueued'
+              where id = ?
+            `).run(profile.id);
+            sqlite.exec("commit");
+            writerAcquiredDuringEncodeValidation = true;
+          } catch {
+            // The assertion below reports whether validation held the writer.
+          }
+        },
+      },
+    );
+    expect(writerAcquiredDuringEncodeValidation).toBe(true);
+    expect(encodeResults).toEqual([
+      expect.objectContaining({ outcome: "enqueued" }),
+    ]);
+
+    sqlite.close();
+    access.close();
+  }, 20_000);
 
   it("lists only Disc Selections currently eligible for encoding", () => {
     const access = openTestDatabase();
