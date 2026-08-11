@@ -431,7 +431,7 @@ describe("legacy sidecar import", () => {
   );
 
   it.each(["fresh import", "reviewed-schema reopen"] as const)(
-    "suppresses a current Archive Job for the same DVD after %s",
+    "suppresses a current Archive Job when its content ID aliases a legacy archive fingerprint after %s",
     (mode) => {
       const root = temporaryDirectories.create(
         "rip-dvd-legacy-current-identity-",
