@@ -106,11 +106,7 @@ function catalogReview({
     discSelections: [{
       id: `${archiveId}-selection-${discSelectionOffset}`,
       mediaItemId,
-      sourceKey: `dvd:title:${titleNumber}`,
-      kind: "dvd_title",
-      titleNumber,
-      chapterStart: null,
-      chapterEnd: null,
+      sourceIdentity: { kind: "dvd_title", titleNumber },
       label: null,
     }],
     discSelectionsPage: {
@@ -254,7 +250,7 @@ describe("CatalogReviewView", () => {
         action: "create_disc_selection",
         selection: {
           mediaItemId: "media-item-1",
-          kind: "main_feature",
+          sourceIdentity: { kind: "main_feature" },
         },
       },
       repair_disc_selection: {
@@ -262,8 +258,7 @@ describe("CatalogReviewView", () => {
         discSelectionId: "selection-1",
         selection: {
           mediaItemId: "media-item-1",
-          kind: "dvd_title",
-          titleNumber: 1,
+          sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
         },
       },
       delete_disc_selection: {
@@ -354,11 +349,12 @@ describe("CatalogReviewView", () => {
             discSelections: [{
               id: "selection-1",
               mediaItemId: "episode-1",
-              sourceKey: "dvd:title:1:chapters:1-4",
-              kind: "dvd_chapters",
-              titleNumber: 1,
-              chapterStart: 1,
-              chapterEnd: 4,
+              sourceIdentity: {
+                kind: "dvd_chapters",
+                titleNumber: 1,
+                chapterStart: 1,
+                chapterEnd: 4,
+              },
               label: null,
             }],
             discSelectionsPage: {
@@ -483,11 +479,7 @@ describe("CatalogReviewView", () => {
             discSelections: [{
               id: "selection-1",
               mediaItemId: "episode-1",
-              sourceKey: "dvd:title:1",
-              kind: "dvd_title",
-              titleNumber: 1,
-              chapterStart: null,
-              chapterEnd: null,
+              sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
               label: null,
             }],
             discSelectionsPage: {

@@ -18,7 +18,7 @@ const archivedScan = {
 };
 
 describe("archived DVD selection validator", () => {
-  it("returns canonical coordinates and source keys from archived title evidence", () => {
+  it("returns the validated source identity from archived title evidence", () => {
     const validator = createArchivedDvdSelectionValidator(archivedScan);
 
     expect(validator.validate({
@@ -27,37 +27,23 @@ describe("archived DVD selection validator", () => {
       chapterStart: 3,
       chapterEnd: 6,
     })).toEqual({
-      coordinates: {
-        titleNumber: 2,
-        chapterStart: 3,
-        chapterEnd: 6,
-      },
-      sourceKey: "dvd:title:2:chapters:3-6",
+      kind: "dvd_chapters",
+      titleNumber: 2,
+      chapterStart: 3,
+      chapterEnd: 6,
     });
   });
 
-  it("canonicalizes main feature and whole-title selections", () => {
+  it("validates main feature and whole-title identities", () => {
     const validator = createArchivedDvdSelectionValidator(archivedScan);
 
     expect(validator.validate({ kind: "main_feature" })).toEqual({
-      coordinates: {
-        titleNumber: null,
-        chapterStart: null,
-        chapterEnd: null,
-      },
-      sourceKey: "dvd:main-feature",
+      kind: "main_feature",
     });
     expect(validator.validate({
       kind: "dvd_title",
       titleNumber: 2,
-    })).toEqual({
-      coordinates: {
-        titleNumber: 2,
-        chapterStart: null,
-        chapterEnd: null,
-      },
-      sourceKey: "dvd:title:2",
-    });
+    })).toEqual({ kind: "dvd_title", titleNumber: 2 });
   });
 
   it("applies the same archived scan, title, and chapter bounds", () => {
@@ -78,7 +64,7 @@ describe("archived DVD selection validator", () => {
       titleNumber: 2,
       chapterStart: 6,
       chapterEnd: 5,
-    })).toThrow(/greater than or equal to chapterStart/);
+    })).toThrow(/Invalid Disc Selection source identity/);
     expect(() => validator.validate({
       kind: "dvd_chapters",
       titleNumber: 2,

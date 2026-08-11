@@ -194,7 +194,7 @@ describe("Catalog Review API", () => {
     firstClient.catalog.createDiscSelection({
       originalDiscArchiveId: archive.id,
       mediaItemId: movie.id,
-      kind: "main_feature",
+      sourceIdentity: { kind: "main_feature" },
     });
     const getReview = async (client: typeof firstClient) => {
       const response = await createCatalogReviewRoute(
@@ -452,8 +452,7 @@ describe("Catalog Review API", () => {
     const selection = access.catalog.createDiscSelection({
       originalDiscArchiveId: archive.id,
       mediaItemId: episode.id,
-      kind: "dvd_title",
-      titleNumber: 1,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
     });
 
     const response = await createCatalogReviewRoute(
@@ -593,8 +592,7 @@ describe("Catalog Review API", () => {
       access.catalog.createDiscSelection({
         originalDiscArchiveId: archive.id,
         mediaItemId: mediaItem.id,
-        kind: "dvd_title",
-        titleNumber,
+        sourceIdentity: { kind: "dvd_title", titleNumber },
       });
     }
 
@@ -674,7 +672,7 @@ describe("Catalog Review API", () => {
     const selection = access.catalog.createDiscSelection({
       originalDiscArchiveId: archive.id,
       mediaItemId: movie.id,
-      kind: "main_feature",
+      sourceIdentity: { kind: "main_feature" },
     });
     completeCatalogReview(access, archive.id);
     const profile = access.encodingProfiles.create({
@@ -878,14 +876,24 @@ describe("Catalog Review API", () => {
       changes: { unsupportedField: "ignored" },
     })).status).toBe(400);
 
+    expect((await mutate({
+      action: "create_disc_selection",
+      selection: {
+        mediaItemId: firstEpisode.id,
+        sourceIdentity: { kind: "main_feature", titleNumber: 1 },
+      },
+    })).status).toBe(400);
+
     const firstSelectionResponse = await mutate({
       action: "create_disc_selection",
       selection: {
         mediaItemId: firstEpisode.id,
-        kind: "dvd_chapters",
-        titleNumber: 1,
-        chapterStart: 1,
-        chapterEnd: 4,
+        sourceIdentity: {
+          kind: "dvd_chapters",
+          titleNumber: 1,
+          chapterStart: 1,
+          chapterEnd: 4,
+        },
       },
     });
     expect(firstSelectionResponse.status).toBe(201);
@@ -895,10 +903,12 @@ describe("Catalog Review API", () => {
       discSelectionId: firstSelection.id,
       selection: {
         mediaItemId: firstEpisode.id,
-        kind: "dvd_chapters",
-        titleNumber: 1,
-        chapterStart: 1,
-        chapterEnd: 4,
+        sourceIdentity: {
+          kind: "dvd_chapters",
+          titleNumber: 1,
+          chapterStart: 1,
+          chapterEnd: 4,
+        },
       },
     });
     expect(repairSelectionResponse.status).toBe(200);
@@ -906,17 +916,24 @@ describe("Catalog Review API", () => {
       discSelection: expect.objectContaining({
         id: firstSelection.id,
         mediaItemId: firstEpisode.id,
-        sourceKey: "dvd:title:1:chapters:1-4",
+        sourceIdentity: {
+          kind: "dvd_chapters",
+          titleNumber: 1,
+          chapterStart: 1,
+          chapterEnd: 4,
+        },
       }),
     });
     expect((await mutate({
       action: "create_disc_selection",
       selection: {
         mediaItemId: secondEpisode.id,
-        kind: "dvd_chapters",
-        titleNumber: 1,
-        chapterStart: 5,
-        chapterEnd: 8,
+        sourceIdentity: {
+          kind: "dvd_chapters",
+          titleNumber: 1,
+          chapterStart: 5,
+          chapterEnd: 8,
+        },
       },
     })).status).toBe(201);
     expect((await mutate({
@@ -942,10 +959,12 @@ describe("Catalog Review API", () => {
       action: "create_disc_selection",
       selection: {
         mediaItemId: firstEpisode.id,
-        kind: "dvd_chapters",
-        titleNumber: 1,
-        chapterStart: 1,
-        chapterEnd: 4,
+        sourceIdentity: {
+          kind: "dvd_chapters",
+          titleNumber: 1,
+          chapterStart: 1,
+          chapterEnd: 4,
+        },
       },
     })).status).toBe(201);
     expect((await mutate({
@@ -991,17 +1010,21 @@ describe("Catalog Review API", () => {
       expect.arrayContaining([
         expect.objectContaining({
           mediaItemId: firstEpisode.id,
-          kind: "dvd_chapters",
-          titleNumber: 1,
-          chapterStart: 1,
-          chapterEnd: 4,
+          sourceIdentity: {
+            kind: "dvd_chapters",
+            titleNumber: 1,
+            chapterStart: 1,
+            chapterEnd: 4,
+          },
         }),
         expect.objectContaining({
           mediaItemId: secondEpisode.id,
-          kind: "dvd_chapters",
-          titleNumber: 1,
-          chapterStart: 5,
-          chapterEnd: 8,
+          sourceIdentity: {
+            kind: "dvd_chapters",
+            titleNumber: 1,
+            chapterStart: 5,
+            chapterEnd: 8,
+          },
         }),
       ]),
     );

@@ -807,8 +807,12 @@ describe("legacy sidecar import", () => {
     });
     expect(fixture.access.catalog.listDiscSelections()).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ kind: "main_feature", titleNumber: null }),
-        expect.objectContaining({ kind: "dvd_title", titleNumber: 2 }),
+        expect.objectContaining({
+          sourceIdentity: { kind: "main_feature" },
+        }),
+        expect.objectContaining({
+          sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+        }),
       ]),
     );
     expect(fixture.access.catalog.listMediaItems()).toEqual(
@@ -907,7 +911,7 @@ describe("legacy sidecar import", () => {
       fixture.access.catalog.repairDiscSelection(completedSelection.id, {
         originalDiscArchiveId: completedSelection.originalDiscArchiveId,
         mediaItemId: completedSelection.mediaItemId,
-        kind: "main_feature",
+        sourceIdentity: { kind: "main_feature" },
       })
     ).toThrow(/ordinary Encode Job history.*retry identity/i);
     expect(fixture.access.catalog.listDiscSelections({
@@ -1050,7 +1054,9 @@ describe("legacy sidecar import", () => {
       }),
     ]);
     expect(access.catalog.listDiscSelections()).toEqual([
-      expect.objectContaining({ kind: "dvd_title", titleNumber: 1 }),
+      expect.objectContaining({
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      }),
     ]);
     expect(access.encodingProfiles.list()).toEqual([
       expect.objectContaining({ settings: { preset: "Fast 480p30" } }),
@@ -1106,23 +1112,29 @@ describe("legacy sidecar import", () => {
       access.catalog.createDiscSelection({
         originalDiscArchiveId: archive.id,
         mediaItemId: wholeTitleItem.id,
-        kind: "dvd_title",
-        titleNumber: 1,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
       }),
-    ).toMatchObject({ sourceKey: "dvd:title:1", titleNumber: 1 });
+    ).toMatchObject({
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    });
     expect(
       access.catalog.createDiscSelection({
         originalDiscArchiveId: archive.id,
         mediaItemId: episode.id,
+        sourceIdentity: {
+          kind: "dvd_chapters",
+          titleNumber: 1,
+          chapterStart: 5,
+          chapterEnd: 8,
+        },
+      }),
+    ).toMatchObject({
+      sourceIdentity: {
         kind: "dvd_chapters",
         titleNumber: 1,
         chapterStart: 5,
         chapterEnd: 8,
-      }),
-    ).toMatchObject({
-      sourceKey: "dvd:title:1:chapters:5-8",
-      chapterStart: 5,
-      chapterEnd: 8,
+      },
     });
     expect(() =>
       access.catalog.createDiscSelection({
@@ -1132,10 +1144,12 @@ describe("legacy sidecar import", () => {
           title: "Out of bounds",
           episodeNumber: 2,
         }).id,
-        kind: "dvd_chapters",
-        titleNumber: 1,
-        chapterStart: 8,
-        chapterEnd: 9,
+        sourceIdentity: {
+          kind: "dvd_chapters",
+          titleNumber: 1,
+          chapterStart: 8,
+          chapterEnd: 9,
+        },
       })
     ).toThrow(/8 chapters/);
     expect(completeCatalogReview(access, archive.id)).toMatchObject({
@@ -1601,8 +1615,7 @@ describe("legacy sidecar import", () => {
     fixture.access.catalog.createDiscSelection({
       originalDiscArchiveId: archive.id,
       mediaItemId: humanItem.id,
-      kind: "dvd_title",
-      titleNumber: 1,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
     });
     expect(
       fixture.access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0],
@@ -1762,7 +1775,7 @@ describe("legacy sidecar import", () => {
     access.catalog.createDiscSelection({
       originalDiscArchiveId: archive.id,
       mediaItemId: movie.id,
-      kind: "main_feature",
+      sourceIdentity: { kind: "main_feature" },
     });
     expect(completeCatalogReview(access, archive.id)).toMatchObject({
       catalogReviewedAt: expect.any(Date),
@@ -2742,15 +2755,17 @@ describe("legacy sidecar import", () => {
     const failedSelection = fixture.access.catalog.listDiscSelections({
       ids: [claim.discSelectionId],
     })[0];
-    if (!failedSelection || failedSelection.kind !== "dvd_title") {
+    if (
+      !failedSelection ||
+      failedSelection.sourceIdentity.kind !== "dvd_title"
+    ) {
       throw new Error("Expected the failed trailer's DVD title selection");
     }
     expect(() =>
       fixture.access.catalog.repairDiscSelection(failedSelection.id, {
         originalDiscArchiveId: failedSelection.originalDiscArchiveId,
         mediaItemId: failedSelection.mediaItemId,
-        kind: "dvd_title",
-        titleNumber: failedSelection.titleNumber,
+        sourceIdentity: failedSelection.sourceIdentity,
       })
     ).toThrow(/ordinary Encode Job history.*retry identity/i);
     expect(fixture.access.encodeJobs.requeue(claim.id)).toMatchObject({
