@@ -34,6 +34,7 @@ import {
   createBoundedFilesystemPathProbe,
   type FilesystemPathProbe,
 } from "./bounded-filesystem-path-probe.js";
+import { listWithBoundedOffset } from "./bounded-offset-pagination.js";
 import {
   archiveJobs,
   detectedDiscs,
@@ -2577,11 +2578,6 @@ export function createDataAccessInternal(
         if (options?.ids !== undefined && options.ids.length === 0) {
           return [];
         }
-        if (options?.offset !== undefined && options.limit === undefined) {
-          throw new DomainInvariantError(
-            "Original Disc Archive offset requires a bounded limit",
-          );
-        }
         const conditions = [
           options?.ids
             ? inArray(originalDiscArchives.id, [...options.ids])
@@ -2608,31 +2604,25 @@ export function createDataAccessInternal(
         ].filter((condition) => condition !== undefined);
         const condition =
           conditions.length > 0 ? and(...conditions) : undefined;
-        if (options?.limit !== undefined) {
-          const query = database
-            .select()
-            .from(originalDiscArchives)
-            .where(condition)
-            .orderBy(
-              desc(originalDiscArchives.archivedAt),
-              desc(originalDiscArchives.id),
-            )
-            .limit(requirePositiveSafeInteger(options.limit, "limit"));
-          if (options.offset === undefined) {
-            return query.all().reverse();
-          }
-          const offset = optionalSafeInteger(options.offset, "offset", 0);
-          if (offset === null || offset === undefined) {
-            throw new DomainInvariantError("offset must be a safe integer");
-          }
-          return query.offset(offset).all().reverse();
-        }
-        return database
+        const isBounded = options?.limit !== undefined;
+        const query = database
           .select()
           .from(originalDiscArchives)
           .where(condition)
-          .orderBy(asc(originalDiscArchives.archivedAt))
-          .all();
+          .orderBy(
+            ...(isBounded
+              ? [
+                  desc(originalDiscArchives.archivedAt),
+                  desc(originalDiscArchives.id),
+                ]
+              : [asc(originalDiscArchives.archivedAt)]),
+          );
+        const rows = listWithBoundedOffset(
+          query,
+          options,
+          "Original Disc Archive",
+        );
+        return isBounded ? rows.reverse() : rows;
       },
 
       completeCatalogReview(id) {
@@ -2764,11 +2754,6 @@ export function createDataAccessInternal(
         if (options?.ids !== undefined && options.ids.length === 0) {
           return [];
         }
-        if (options?.offset !== undefined && options.limit === undefined) {
-          throw new DomainInvariantError(
-            "Media Item offset requires a bounded limit",
-          );
-        }
         const query = database
           .select()
           .from(mediaItems)
@@ -2782,20 +2767,11 @@ export function createDataAccessInternal(
             asc(mediaItems.createdAt),
             asc(mediaItems.id),
           );
-        if (options?.limit === undefined) {
-          return query.all();
-        }
-        const limited = query.limit(
-          requirePositiveSafeInteger(options.limit, "limit"),
+        return listWithBoundedOffset(
+          query,
+          options,
+          "Media Item",
         );
-        if (options.offset === undefined) {
-          return limited.all();
-        }
-        const offset = optionalSafeInteger(options.offset, "offset", 0);
-        if (offset === null || offset === undefined) {
-          throw new DomainInvariantError("offset must be a safe integer");
-        }
-        return limited.offset(offset).all();
       },
 
       createDiscSelection(input) {
@@ -3284,11 +3260,6 @@ export function createDataAccessInternal(
         if (options?.ids !== undefined && options.ids.length === 0) {
           return [];
         }
-        if (options?.offset !== undefined && options.limit === undefined) {
-          throw new DomainInvariantError(
-            "Disc Selection offset requires a bounded limit",
-          );
-        }
         const conditions = [
           options?.ids
             ? inArray(discSelections.id, [...options.ids])
@@ -3325,23 +3296,11 @@ export function createDataAccessInternal(
           .from(discSelections)
           .where(conditions.length > 0 ? and(...conditions) : undefined)
           .orderBy(asc(discSelections.createdAt), asc(discSelections.id));
-        let rows;
-        if (options?.limit === undefined) {
-          rows = query.all();
-        } else {
-          const limited = query.limit(
-            requirePositiveSafeInteger(options.limit, "limit"),
-          );
-          if (options.offset === undefined) {
-            rows = limited.all();
-          } else {
-            const offset = optionalSafeInteger(options.offset, "offset", 0);
-            if (offset === null || offset === undefined) {
-              throw new DomainInvariantError("offset must be a safe integer");
-            }
-            rows = limited.offset(offset).all();
-          }
-        }
+        const rows = listWithBoundedOffset(
+          query,
+          options,
+          "Disc Selection",
+        );
         return rows.map(toDiscSelection);
       },
     },
