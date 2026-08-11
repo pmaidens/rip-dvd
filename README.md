@@ -674,10 +674,10 @@ directory for exact same-fingerprint attempt-unique partials, fails closed if
 discovery or inode ownership is ambiguous, and quarantines every inactive match
 before starting a new copy.
 
-A fingerprint
-already present in Original Disc Archives is shown as **Already archived**, and
-any obsolete queued Archive Job for that fingerprint is removed by the
-data-access facade.
+A fingerprint already stored by an Original Disc Archive, or recorded as a
+current content-ID alias for its legacy fingerprint, is shown as **Already
+archived**. The data-access facade removes any obsolete queued Archive Job for
+either form of that content identity.
 
 The dashboard's HTTP snapshot carries review details. One-second SSE activity
 events retain up to 100 live Detected Discs and jobs ahead of 20 terminal-history
