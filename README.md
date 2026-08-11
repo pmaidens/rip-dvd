@@ -375,9 +375,12 @@ scheduling. Before starting on the server:
 
 1. Copy `.env.example` to `.env` and set the exact library, device, bind, and
    trusted-origin values for that host.
-2. Confirm every configured optical device exists (the default is `/dev/sr0`),
-   identify the numeric host group that can read it, and set
-   `RIP_DVD_OPTICAL_DEVICE_GID` to that GID.
+2. Confirm every configured optical device exists (the default is `/dev/sr0`).
+   Find its SCSI-generic sibling under
+   `/sys/class/block/sr0/device/scsi_generic` (the default is `/dev/sg1`) and
+   set `RIP_DVD_ARCHIVE_CSS_DEVICE_PATH` to that path. Identify the numeric
+   host group that can access both nodes and set `RIP_DVD_OPTICAL_DEVICE_GID`
+   to that GID.
 3. Create any bind-mounted Media Library, Original Disc Archive, and backup
    directories. The containers run as UID/GID 1000; grant that identity the
    documented read/write access with ownership, a shared group, or an ACL.
@@ -389,7 +392,7 @@ The runtime mount and hardware boundary is deliberately narrow:
 | Service | SQLite data | Media Library | Original Disc Archive | Optical device |
 | --- | --- | --- | --- | --- |
 | web | read/write | read-only verification | read-only verification | none |
-| archive worker | read/write | none | read/write | configured device, read-only |
+| archive worker | read/write | none | read/write | block device read-only; matching SCSI-generic device for CSS authentication |
 | encode worker | read/write | read/write | read-only | none |
 | migration | read/write | none | none | none |
 | backup | read/write for WAL locking | none | none | none |
@@ -623,22 +626,29 @@ uncertain same-path hardware fails closed.
 Compose passes `RIP_DVD_ARCHIVE_DEVICE_PATH` through to the archive worker at
 the same container path with read-only device permission. It defaults to
 `/dev/sr0`; set the variable to another `/dev/...` path when that is the primary
-drive. Compose adds only `RIP_DVD_OPTICAL_DEVICE_GID` (numeric GID 24 by default)
-to the non-root archive user, so set it to the host group that can read the
-device (often the `cdrom` group).
+drive. CSS authentication also requires the matching SCSI-generic node. Set
+`RIP_DVD_ARCHIVE_CSS_DEVICE_PATH` (default `/dev/sg1`) to the entry listed in
+`/sys/class/block/sr0/device/scsi_generic`. Compose grants that node `rwm`
+device permission because CSS authentication uses SCSI REPORT KEY and SEND KEY
+commands; the reader does not issue media-write commands. Compose adds only
+`RIP_DVD_OPTICAL_DEVICE_GID` (numeric GID 24 by default) to the non-root archive
+user, so set it to the host group that can access both device nodes (often the
+`cdrom` group).
 
 For a server with additional drives, copy the reviewed example to Compose's
-automatic local override and edit its read-only device list:
+automatic local override and edit its device list:
 
 ```bash
 cp compose.hardware.example.yaml compose.override.yaml
 ```
 
-Keep only real optical-device paths in that local file; never map all of `/dev`.
+Keep only real optical and matching SCSI-generic device paths in that local
+file; never map all of `/dev`.
 The archive worker can then discover and use each explicitly mapped drive while
 the web and encode containers retain no device access. Device mappings remain
-read-only; this worker does not eject media. The start script also includes this
-local override explicitly when block-I/O weights are enabled.
+read-only for sector access; only the SCSI-generic CSS authentication node has
+`rwm` ioctl permission. This worker does not eject media. The start script also
+includes this local override explicitly when block-I/O weights are enabled.
 
 The worker runs discovery on each configured poll interval. An empty drive is a
 normal state. Scanner failures are logged per drive without hiding other drives,
@@ -647,7 +657,10 @@ scans store title numbers, durations, chapter counts, bounded per-stream
 language/format/channel/source-ID metadata, and a deterministic SHA-256 content
 identity over every declared raw-disc byte. The scanner authenticates through
 `libdvdcss` but deliberately reads without its decrypt flag, so CSS-protected
-discs remain byte-identical to the archived ISO. Before trusting a cached scan and
+discs remain byte-identical to the archived ISO. On SCSI-generic VM passthrough,
+a small compatibility bridge sends libdvdcss's CSS authentication exchanges
+through the block device's mapped SCSI-generic sibling while all sector reads
+stay on the read-only block device. Before trusting a cached scan and
 again after a new scan, the worker opens the device read-only and nonblocking.
 That open actively asks Linux's optical driver to observe media events before
 the worker reads the resulting sysfs generation. A generation change fails the

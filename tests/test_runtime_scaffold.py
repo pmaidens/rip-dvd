@@ -114,6 +114,10 @@ class RuntimeScaffoldTests(unittest.TestCase):
             '"${RIP_DVD_ARCHIVE_DEVICE_PATH:-/dev/sr0}:${RIP_DVD_ARCHIVE_DEVICE_PATH:-/dev/sr0}:r"',
             compose,
         )
+        self.assertIn(
+            '"${RIP_DVD_ARCHIVE_CSS_DEVICE_PATH:-/dev/sg1}:${RIP_DVD_ARCHIVE_CSS_DEVICE_PATH:-/dev/sg1}:rwm"',
+            compose,
+        )
 
     def test_archive_worker_builds_a_verified_libdvdcss_reader(self) -> None:
         dockerfile = (ROOT / "docker" / "runtime.Dockerfile").read_text()
@@ -132,6 +136,11 @@ class RuntimeScaffoldTests(unittest.TestCase):
             "/usr/share/doc/rip-dvd-dvdcss-reader/dvdcss-reader.c",
             dockerfile,
         )
+        self.assertIn(
+            "/usr/share/doc/rip-dvd-dvdcss-reader/libdvdcss-sg-io.c",
+            dockerfile,
+        )
+        self.assertIn("CFLAGS=\"-include /tmp/libdvdcss-sg-io.h\"", dockerfile)
 
     def test_worker_smoke_uses_configured_command_and_bounded_shutdown(self) -> None:
         smoke = (ROOT / "scripts" / "smoke-compose-workers.sh").read_text()
