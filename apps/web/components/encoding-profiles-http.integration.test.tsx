@@ -20,7 +20,7 @@ describe("database-backed Encoding Profiles over HTTP", () => {
     const versionTwo = access.encodingProfiles.createVersion({
       sourceProfileId: versionOne.id,
       mediaDomain: "dvd_video",
-      settings: { preset: "HQ 480p30", container: "mkv" },
+      settings: { preset: "HQ 480p30 Surround", container: "mkv" },
     });
     access.encodingProfiles.setActive({
       id: versionTwo.id,
@@ -53,7 +53,7 @@ describe("database-backed Encoding Profiles over HTTP", () => {
     expect(html).toContain("Version 1");
     expect(html).toContain("Version 2");
     expect(html).toContain("Fast 480p30");
-    expect(html).toContain("HQ 480p30");
+    expect(html).toContain("HQ 480p30 Surround");
     expect(html).toContain("Inactive");
     expect(html).toContain("Active");
     expect(html).toContain("DVD video");
@@ -91,6 +91,8 @@ describe("database-backed Encoding Profiles over HTTP", () => {
 
     expect(response.status).toBe(200);
     expect(html).toContain("Legacy Fast 480p30");
-    expect(html).toContain('value="Legacy Fast 480p30"');
+    expect(html).toContain(
+      '<option value="" disabled="" selected="">Legacy Fast 480p30 (unavailable — select a replacement)</option>',
+    );
   });
 });
