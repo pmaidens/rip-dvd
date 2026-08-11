@@ -834,6 +834,31 @@ describe("legacy sidecar import", () => {
     fixture.access.close();
   });
 
+  it("preserves accepted legacy Media Item title whitespace", () => {
+    const fixture = createFixture();
+    const sidecar = JSON.parse(readFileSync(fixture.sidecarPath, "utf8"));
+    sidecar.title = "  Example Movie  ";
+    writeFileSync(fixture.sidecarPath, JSON.stringify(sidecar));
+
+    const report = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+
+    expect(report).toMatchObject({ sidecarsImported: 1, issues: [] });
+    const movie = fixture.access.catalog.listMediaItems().find(
+      (item) => item.kind === "movie",
+    )!;
+    const bonus = fixture.access.catalog.listMediaItems().find(
+      (item) => item.kind === "bonus_feature",
+    )!;
+    expect(movie.title).toBe("  Example Movie  ");
+    expect(bonus.title).toBe("Trailer");
+    expect(
+      fixture.access.catalog.updateMediaItem(movie.id, { year: 2002 }),
+    ).toMatchObject({ title: "  Example Movie  ", year: 2002 });
+    fixture.access.close();
+  });
+
   it("preserves imported completed Encode Job provenance and rejects ordinary historical repair", () => {
     const fixture = createFixture();
     fixture.access.legacySidecars.importLibrary({

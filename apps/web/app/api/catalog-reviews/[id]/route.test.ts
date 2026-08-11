@@ -797,7 +797,8 @@ describe("Catalog Review API", () => {
       mediaItem: { parentId: null, kind: "other", title: "Local Recording" },
     });
     expect(localItemResponse.status).toBe(201);
-    await expect(localItemResponse.json()).resolves.toEqual({
+    const localItemBody = await localItemResponse.json();
+    expect(localItemBody).toEqual({
       mediaItem: expect.objectContaining({
         kind: "other",
         title: "Local Recording",
@@ -833,6 +834,30 @@ describe("Catalog Review API", () => {
       },
     });
     const secondEpisode = (await secondEpisodeResponse.json()).mediaItem;
+
+    const localItemUpdateResponse = await mutate({
+      action: "update_media_item",
+      mediaItemId: localItemBody.mediaItem.id,
+      changes: {
+        parentId: show.id,
+        kind: "other",
+        title: "Edited Local Recording",
+        year: 1800,
+        seasonNumber: 0,
+        episodeNumber: 1,
+      },
+    });
+    expect(localItemUpdateResponse.status).toBe(200);
+    await expect(localItemUpdateResponse.json()).resolves.toEqual({
+      mediaItem: expect.objectContaining({
+        parentId: show.id,
+        kind: "other",
+        title: "Edited Local Recording",
+        year: 1800,
+        seasonNumber: 0,
+        episodeNumber: 1,
+      }),
+    });
 
     const editedResponse = await mutate({
       action: "update_media_item",
@@ -947,7 +972,14 @@ describe("Catalog Review API", () => {
         expect.objectContaining({ id: show.id, kind: "tv_show" }),
         expect.objectContaining({ id: season.id, parentId: show.id }),
         expect.objectContaining({ id: firstEpisode.id, parentId: season.id }),
-        expect.objectContaining({ kind: "other", title: "Local Recording" }),
+        expect.objectContaining({
+          parentId: show.id,
+          kind: "other",
+          title: "Edited Local Recording",
+          year: 1800,
+          seasonNumber: 0,
+          episodeNumber: 1,
+        }),
         expect.objectContaining({
           id: secondEpisode.id,
           parentId: season.id,
