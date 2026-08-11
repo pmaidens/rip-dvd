@@ -88,11 +88,7 @@ function hasSameHardwareIdentity(
     expected.devicePath === observed.devicePath &&
     expectedSerial !== undefined &&
     expectedSerial ===
-      normalizeHardwareEvidence(observed.serialNumber) &&
-    normalizeHardwareEvidence(expected.vendor) ===
-      normalizeHardwareEvidence(observed.vendor) &&
-    normalizeHardwareEvidence(expected.product) ===
-      normalizeHardwareEvidence(observed.product)
+      normalizeHardwareEvidence(observed.serialNumber)
   );
 }
 
