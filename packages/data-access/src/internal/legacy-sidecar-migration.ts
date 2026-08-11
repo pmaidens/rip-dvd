@@ -58,6 +58,7 @@ import {
   isCurrentDvdContentSize,
 } from "./dvd-content-identity.js";
 import { newId, requireRow } from "./persistence.js";
+import { validateMediaItem } from "./media-item-validation.js";
 import {
   detectedDiscs,
   discSelections,
@@ -1071,18 +1072,30 @@ export function createLegacySidecarImportAccess(
                 }
               }
             }
+            const validateLegacyMediaItem = (
+              candidate: Parameters<typeof validateMediaItem>[0],
+            ) => validateMediaItem(
+              candidate,
+              transaction,
+              { titleNormalization: "preserve" },
+            );
             const requireMovieItem = () => {
               if (movieItem) {
                 return movieItem;
               }
+              const id = newId<MediaItemId>();
+              const values = validateLegacyMediaItem({
+                id,
+                kind: "movie",
+                title: sidecar.movieTitle,
+                year: sidecar.movieYear,
+              });
               movieItem = requireRow(
                 transaction
                   .insert(mediaItems)
                   .values({
-                    id: newId<MediaItemId>(),
-                    kind: "movie",
-                    title: sidecar.movieTitle,
-                    year: sidecar.movieYear,
+                    id,
+                    ...values,
                     createdAt: importedCreatedAt,
                     updatedAt: importedUpdatedAt,
                   })
@@ -1093,6 +1106,29 @@ export function createLegacySidecarImportAccess(
               );
               created.mediaItems += 1;
               return movieItem;
+            };
+            const createBonusFeatureItem = (title: string) => {
+              const id = newId<MediaItemId>();
+              const values = validateLegacyMediaItem({
+                id,
+                parentId: requireMovieItem().id,
+                kind: "bonus_feature",
+                title,
+              });
+              return requireRow(
+                transaction
+                  .insert(mediaItems)
+                  .values({
+                    id,
+                    ...values,
+                    createdAt: importedCreatedAt,
+                    updatedAt: importedUpdatedAt,
+                  })
+                  .returning()
+                  .get(),
+                "legacy media item",
+                title,
+              );
             };
 
             for (const job of acceptedJobs) {
@@ -1247,22 +1283,7 @@ export function createLegacySidecarImportAccess(
                 mediaItem =
                   job.mediaItemKind === "movie"
                     ? requireMovieItem()
-                    : requireRow(
-                        transaction
-                          .insert(mediaItems)
-                          .values({
-                            id: newId<MediaItemId>(),
-                            parentId: requireMovieItem().id,
-                            kind: "bonus_feature",
-                            title: job.mediaTitle,
-                            createdAt: importedCreatedAt,
-                            updatedAt: importedUpdatedAt,
-                          })
-                          .returning()
-                          .get(),
-                        "legacy media item",
-                        job.mediaTitle,
-                      );
+                    : createBonusFeatureItem(job.mediaTitle);
                 if (job.mediaItemKind !== "movie") {
                   created.mediaItems += 1;
                 }

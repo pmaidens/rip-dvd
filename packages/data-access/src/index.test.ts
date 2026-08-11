@@ -22,6 +22,7 @@ import {
   InvalidStatusTransitionError,
   MAX_DVD_TITLES,
   MAX_MEDIA_ITEM_HIERARCHY_DEPTH,
+  RecordNotFoundError,
   StaleJobAttemptError,
 } from "./index.js";
 import type {
@@ -228,6 +229,25 @@ function createTestMigrationsFolder(): string {
 function openTestDatabase(databasePath = createTestDatabasePath()) {
   return createLegacySidecarDataAccess({ databasePath });
 }
+
+const invalidMediaItemFields = [
+  ["blank title", "title", "   "],
+  ["non-string title", "title", 42],
+  ["year below the supported range", "year", 1799],
+  ["year above the supported range", "year", 10_000],
+  ["fractional year", "year", 2000.5],
+  ["non-number year", "year", "2000"],
+  ["negative season number", "seasonNumber", -1],
+  ["fractional season number", "seasonNumber", 0.5],
+  ["unsafe season number", "seasonNumber", Number.MAX_SAFE_INTEGER + 1],
+  ["non-number season number", "seasonNumber", "1"],
+  ["zero episode number", "episodeNumber", 0],
+  ["fractional episode number", "episodeNumber", 1.5],
+  ["unsafe episode number", "episodeNumber", Number.MAX_SAFE_INTEGER + 1],
+  ["non-number episode number", "episodeNumber", "1"],
+] as const;
+
+const invalidMediaItemKinds = ["unsupported", null, 42] as const;
 
 afterEach(() => {
   vi.useRealTimers();
@@ -1245,6 +1265,20 @@ describe("data-access facade", () => {
     access.close();
   });
 
+  it("retains Media Item title trimming for explicit facade writes", () => {
+    const access = openTestDatabase();
+    const item = access.catalog.createMediaItem({
+      kind: "other",
+      title: "  Created title  ",
+    });
+
+    expect(item.title).toBe("Created title");
+    expect(
+      access.catalog.updateMediaItem(item.id, { title: "  Updated title  " }),
+    ).toMatchObject({ title: "Updated title" });
+    access.close();
+  });
+
   it("creates and edits an acyclic Media Item hierarchy with every catalog kind", () => {
     const access = openTestDatabase();
     const show = access.catalog.createMediaItem({
@@ -1278,8 +1312,30 @@ describe("data-access facade", () => {
       title: "Behind the Scenes",
     });
     const other = access.catalog.createMediaItem({
+      parentId: episode.id,
       kind: "other",
       title: "Local Recording",
+      year: 1800,
+      seasonNumber: 0,
+      episodeNumber: 1,
+    });
+    expect(
+      access.catalog.updateMediaItem(other.id, {
+        parentId: undefined,
+        kind: undefined,
+        title: undefined,
+        year: undefined,
+        seasonNumber: undefined,
+        episodeNumber: undefined,
+      }),
+    ).toMatchObject({
+      id: other.id,
+      parentId: episode.id,
+      kind: "other",
+      title: "Local Recording",
+      year: 1800,
+      seasonNumber: 0,
+      episodeNumber: 1,
     });
     expect(
       access.catalog.updateMediaItem(episode.id, {
@@ -1304,9 +1360,117 @@ describe("data-access facade", () => {
         expect.objectContaining({ id: movie.id, kind: "movie" }),
         expect.objectContaining({ id: trailer.id, kind: "trailer" }),
         expect.objectContaining({ id: bonus.id, kind: "bonus_feature" }),
-        expect.objectContaining({ id: other.id, kind: "other" }),
+        expect.objectContaining({
+          id: other.id,
+          parentId: episode.id,
+          kind: "other",
+          year: 1800,
+          seasonNumber: 0,
+          episodeNumber: 1,
+        }),
       ]),
     );
+    access.close();
+  });
+
+  it("rejects unsupported Media Item kinds on create and update", () => {
+    const access = openTestDatabase();
+
+    for (const kind of invalidMediaItemKinds) {
+      expect(() =>
+        access.catalog.createMediaItem({
+          kind: kind as never,
+          title: "Unsupported item",
+        }),
+      ).toThrow(DomainInvariantError);
+    }
+    const item = access.catalog.createMediaItem({
+      kind: "other",
+      title: "Valid item",
+    });
+    for (const kind of invalidMediaItemKinds) {
+      expect(() =>
+        access.catalog.updateMediaItem(item.id, {
+          kind: kind as never,
+        }),
+      ).toThrow(DomainInvariantError);
+    }
+
+    access.close();
+  });
+
+  it("rejects every invalid Media Item field on create and update", () => {
+    const access = openTestDatabase();
+
+    for (const [label, field, value] of invalidMediaItemFields) {
+      expect(
+        () =>
+          access.catalog.createMediaItem({
+            kind: "other",
+            title: "Valid title",
+            [field]: value,
+          } as never),
+        `create: ${label}`,
+      ).toThrow(DomainInvariantError);
+    }
+
+    const item = access.catalog.createMediaItem({
+      kind: "other",
+      title: "Valid item",
+    });
+    for (const [label, field, value] of invalidMediaItemFields) {
+      expect(
+        () =>
+          access.catalog.updateMediaItem(
+            item.id,
+            { [field]: value } as never,
+          ),
+        `update: ${label}`,
+      ).toThrow(DomainInvariantError);
+    }
+    expect(access.catalog.listMediaItems({ ids: [item.id] })[0]).toMatchObject({
+      title: "Valid item",
+      year: null,
+      seasonNumber: null,
+      episodeNumber: null,
+    });
+
+    access.close();
+  });
+
+  it("rejects missing and malformed Media Item parents on create and update", () => {
+    const access = openTestDatabase();
+    const missingParentId = "missing-media-item" as MediaItemId;
+
+    expect(() =>
+      access.catalog.createMediaItem({
+        parentId: missingParentId,
+        kind: "other",
+        title: "Missing parent",
+      }),
+    ).toThrow(RecordNotFoundError);
+    expect(() =>
+      access.catalog.createMediaItem({
+        parentId: "" as MediaItemId,
+        kind: "other",
+        title: "Malformed parent",
+      }),
+    ).toThrow(DomainInvariantError);
+
+    const item = access.catalog.createMediaItem({
+      kind: "other",
+      title: "Valid item",
+    });
+    expect(() =>
+      access.catalog.updateMediaItem(item.id, { parentId: missingParentId }),
+    ).toThrow(RecordNotFoundError);
+    expect(() =>
+      access.catalog.updateMediaItem(item.id, { parentId: item.id }),
+    ).toThrow(DomainInvariantError);
+    expect(access.catalog.listMediaItems({ ids: [item.id] })[0]).toMatchObject({
+      parentId: null,
+    });
+
     access.close();
   });
 
