@@ -165,7 +165,7 @@ export const originalDiscArchives = sqliteTable(
     ),
     check(
       "original_disc_archives_verification_check",
-      sql`(${table.verificationStatus} is null and ${table.verificationMessage} is null and ${table.verifiedAt} is null) or (${table.verificationStatus} in (${sqliteStringLiterals(FILESYSTEM_VERIFICATION_STATUSES)}) and ${table.verificationMessage} is not null and ${table.verifiedAt} is not null)`,
+      sql`(${table.verificationStatus} is null) = (${table.verificationMessage} is null) and (${table.verificationStatus} is null) = (${table.verifiedAt} is null) and (${table.verificationStatus} is null or ${table.verificationStatus} in (${sqliteStringLiterals(FILESYSTEM_VERIFICATION_STATUSES)}))`,
     ),
   ],
 );
@@ -474,7 +474,7 @@ export const encodeJobs = sqliteTable(
     ),
     check(
       "encode_jobs_verification_check",
-      sql`(${table.verificationStatus} is null and ${table.verificationMessage} is null and ${table.verifiedAt} is null) or (${table.verificationStatus} in (${sqliteStringLiterals(FILESYSTEM_VERIFICATION_STATUSES)}) and ${table.verificationMessage} is not null and ${table.verifiedAt} is not null)`,
+      sql`(${table.verificationStatus} is null) = (${table.verificationMessage} is null) and (${table.verificationStatus} is null) = (${table.verifiedAt} is null) and (${table.verificationStatus} is null or ${table.verificationStatus} in (${sqliteStringLiterals(FILESYSTEM_VERIFICATION_STATUSES)}))`,
     ),
   ],
 );
