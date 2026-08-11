@@ -839,6 +839,105 @@ describe("data-access facade", () => {
     access.close();
   });
 
+  it("uses identical archived DVD coordinates for creation, repair, and review completion", () => {
+    const databasePath = createTestDatabasePath();
+    let access = openTestDatabase(databasePath);
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const contentId = `sha256:${"c".repeat(64)}`;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: contentId,
+      scanData: {
+        schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+        contentId,
+        titles: [{
+          number: 2,
+          durationSeconds: 2_400,
+          chapters: 8,
+          audioStreams: [],
+          subtitles: [],
+        }],
+      },
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Coordinate Decisions.iso",
+      fingerprint: contentId,
+    });
+    const episode = access.catalog.createMediaItem({
+      kind: "episode",
+      title: "Coordinate Decisions",
+    });
+    const selection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: episode.id,
+      kind: "dvd_chapters",
+      titleNumber: 2,
+      chapterStart: 3,
+      chapterEnd: 6,
+    });
+    expect(selection).toMatchObject({
+      sourceKey: "dvd:title:2:chapters:3-6",
+      titleNumber: 2,
+      chapterStart: 3,
+      chapterEnd: 6,
+    });
+
+    const repaired = access.catalog.repairDiscSelection(selection.id, {
+      originalDiscArchiveId: archive.id,
+      mediaItemId: episode.id,
+      kind: "dvd_chapters",
+      titleNumber: 2,
+      chapterStart: 4,
+      chapterEnd: 8,
+    });
+    expect(repaired).toMatchObject({
+      sourceKey: "dvd:title:2:chapters:4-8",
+      titleNumber: 2,
+      chapterStart: 4,
+      chapterEnd: 8,
+    });
+
+    const outOfBounds = {
+      originalDiscArchiveId: archive.id,
+      mediaItemId: episode.id,
+      kind: "dvd_chapters" as const,
+      titleNumber: 2,
+      chapterStart: 7,
+      chapterEnd: 9,
+    };
+    const chapterError = /must not exceed DVD title 2's 8 chapters/;
+    expect(() => access.catalog.createDiscSelection(outOfBounds))
+      .toThrow(chapterError);
+    expect(() => access.catalog.repairDiscSelection(repaired.id, outOfBounds))
+      .toThrow(chapterError);
+    expect(access.catalog.completeCatalogReview(archive.id)).toMatchObject({
+      catalogReviewedAt: expect.any(Date),
+    });
+    access.close();
+
+    const sqlite = new DatabaseSync(databasePath);
+    sqlite.prepare(
+      `update disc_selections
+       set source_key = 'dvd:title:2:chapters:4-9', chapter_end = 9
+       where id = ?`,
+    ).run(repaired.id);
+    sqlite.close();
+
+    access = openTestDatabase(databasePath);
+    expect(() => access.catalog.completeCatalogReview(archive.id))
+      .toThrow(chapterError);
+    access.close();
+  });
+
   it("lists only Disc Selections currently eligible for encoding", () => {
     const access = openTestDatabase();
     const drive = access.catalog.upsertOpticalDrive({
