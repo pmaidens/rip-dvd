@@ -608,6 +608,71 @@ describe("archive worker polling", () => {
     access.close();
   });
 
+  it("scans when a matching serial proves continuity across model-text changes", async () => {
+    const access = openTestDataAccess();
+    const fingerprint =
+      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const initialDrive = {
+      devicePath: "/dev/sr0",
+      vendor: "Pioneer",
+      product: "DVD-RW",
+      serialNumber: "STABLE-SERIAL",
+    };
+    const updatedDrive = {
+      ...initialDrive,
+      vendor: "HL-DT-ST",
+      product: "DVDRAM",
+    };
+    const discover = vi
+      .fn()
+      .mockResolvedValueOnce([initialDrive])
+      .mockResolvedValue([updatedDrive]);
+    const scanDvd = vi.fn().mockResolvedValue({
+      fingerprint,
+      volumeLabel: "MODEL_TEXT_CHANGED",
+      scanData: {
+        schemaVersion: 2,
+        contentId: fingerprint,
+        titles: [
+          {
+            number: 1,
+            durationSeconds: 60,
+            chapters: 1,
+            audioStreams: [],
+            subtitles: [],
+          },
+        ],
+      },
+    });
+
+    await pollArchiveWorker({
+      access,
+      configuredDevicePath: "/dev/sr0",
+      hardware: { ...stableDeviceBinding(), discover, scanDvd },
+      log: vi.fn(),
+      signal: new AbortController().signal,
+    });
+
+    expect(scanDvd).toHaveBeenCalledOnce();
+    expect(access.catalog.listOpticalDrives()).toEqual([
+      expect.objectContaining({
+        devicePath: "/dev/sr0",
+        vendor: "HL-DT-ST",
+        product: "DVDRAM",
+        serialNumber: "STABLE-SERIAL",
+        isEnabled: true,
+      }),
+    ]);
+    expect(access.catalog.listDetectedDiscs()).toEqual([
+      expect.objectContaining({
+        fingerprint,
+        volumeLabel: "MODEL_TEXT_CHANGED",
+        status: "scanned",
+      }),
+    ]);
+    access.close();
+  });
+
   it("fails closed when same-path hardware has no serial continuity evidence", async () => {
     const access = openTestDataAccess();
     const log = vi.fn();
