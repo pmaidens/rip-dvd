@@ -1027,10 +1027,73 @@ h3 {
   line-height: 1.45;
 }
 
-.job-error {
+.job-error,
+.job-failure {
   margin: 0.85rem 0 0;
   color: #e89a90;
   font-size: 0.78rem;
+}
+
+.job-failure summary {
+  display: flex;
+  align-items: center;
+  width: fit-content;
+  cursor: pointer;
+  font-weight: 700;
+  list-style: none;
+}
+
+.job-failure summary::-webkit-details-marker {
+  display: none;
+}
+
+.job-failure summary::after {
+  width: 0.42rem;
+  height: 0.42rem;
+  margin-left: 0.55rem;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  content: "";
+  transform: rotate(45deg) translateY(-0.12rem);
+  transition: transform 140ms ease;
+}
+
+.job-failure[open] summary::after {
+  transform: rotate(225deg) translate(-0.1rem, -0.05rem);
+}
+
+.job-failure summary:hover {
+  color: #f2afa6;
+}
+
+.job-failure summary:focus-visible {
+  border-radius: 0.2rem;
+  outline: 3px solid #d2a14b;
+  outline-offset: 3px;
+}
+
+.job-failure-detail {
+  margin-top: 0.7rem;
+  padding: 0.75rem 0.85rem;
+  border: 1px solid #713d37;
+  border-radius: 0.55rem;
+  background: rgba(164, 71, 60, 0.1);
+}
+
+.job-failure-detail strong {
+  color: #f2afa6;
+  font-size: 0.65rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.job-failure-detail p {
+  margin: 0.35rem 0 0;
+  overflow-wrap: anywhere;
+  color: #e89a90;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
 }
 
 .verification-inventory {
@@ -1296,5 +1359,9 @@ h3 {
 @media (prefers-reduced-motion: reduce) {
   .loading-dot {
     animation: none;
+  }
+
+  .job-failure summary::after {
+    transition: none;
   }
 }
