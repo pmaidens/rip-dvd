@@ -421,8 +421,10 @@ stops the web, archive, and encode runtimes before running versioned Drizzle
 migrations in a one-shot non-root container; if the bounded stop fails, no DDL
 is attempted. `scripts/compose-start.sh` refuses implicit rebuilds, uses that
 quiescing migration path, and then starts only the three long-running services.
-If startup partially fails, it performs another bounded stop and returns the
-original startup failure.
+It also rejects a dashboard bind beyond loopback when
+`RIP_DVD_WEB_TRUSTED_ORIGIN` still names a loopback origin, before migration or
+runtime startup begins. If startup partially fails, it performs another bounded
+stop and returns the original startup failure.
 Runtime services remain stopped after a failed migration or startup.
 Correct the reported configuration, image, or host
 error, verify the services are stopped with `docker compose ps`, and rerun
