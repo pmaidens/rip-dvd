@@ -38,6 +38,11 @@ export type ArchiveJobClaimToken = DomainId<"ArchiveJobClaim">;
 export type EncodeJobClaimToken = DomainId<"EncodeJobClaim">;
 export type EncodeJobCleanupClaimToken = DomainId<"EncodeJobCleanupClaim">;
 
+declare const encodeOutputFilesystemIdentityBrand: unique symbol;
+export type EncodeOutputFilesystemIdentity = string & {
+  readonly [encodeOutputFilesystemIdentityBrand]: true;
+};
+
 export const ARCHIVE_JOB_LEASE_DURATION_MS = 60_000;
 export const ENCODE_JOB_LEASE_DURATION_MS = 60_000;
 
@@ -206,7 +211,7 @@ export interface EncodeJob {
   status: JobStatus;
   priority: number;
   replaceExistingOutput: boolean;
-  replacementOutputIdentity: string | null;
+  replacementOutputIdentity: EncodeOutputFilesystemIdentity | null;
   partialCleanupOutputPath: string | null;
   partialCleanupClaimToken: EncodeJobClaimToken | null;
   partialCleanupLeaseToken: EncodeJobCleanupClaimToken | null;
@@ -458,7 +463,7 @@ export interface EncodeJobAccess {
   recoverExpiredClaims(): EncodeJob[];
   recordReplacementOutputIdentity(
     claim: RunningEncodeJob,
-    identity: string,
+    identity: EncodeOutputFilesystemIdentity,
   ): RunningEncodeJob;
   registerPartialCleanup(
     claim: RunningEncodeJob,

@@ -29,6 +29,7 @@ import type {
   EncodeJobCleanupClaimToken,
   EncodeJobId,
   EncodeJobClaimToken,
+  EncodeOutputFilesystemIdentity,
   EncodingProfileId,
   MediaItemId,
   OpticalDriveId,
@@ -388,7 +389,8 @@ export const encodeJobs = sqliteTable(
     })
       .notNull()
       .default(false),
-    replacementOutputIdentity: text("replacement_output_identity"),
+    replacementOutputIdentity: text("replacement_output_identity")
+      .$type<EncodeOutputFilesystemIdentity>(),
     partialCleanupOutputPath: text("partial_cleanup_output_path"),
     partialCleanupClaimToken: text("partial_cleanup_claim_token")
       .$type<EncodeJobClaimToken>(),
