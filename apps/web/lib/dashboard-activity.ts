@@ -36,6 +36,29 @@ export type DashboardStreamStatus =
 
 const DETAIL_REQUEST_TIMEOUT_MS = 10_000;
 
+interface InsertionOrderedEntries<Key> {
+  readonly size: number;
+  delete(key: Key): boolean;
+  keys(): IterableIterator<Key>;
+}
+
+function rememberBoundedEntry<Key>(
+  entries: InsertionOrderedEntries<Key>,
+  key: Key,
+  maximumEntries: number,
+  insert: () => void,
+): void {
+  entries.delete(key);
+  insert();
+  while (entries.size > maximumEntries) {
+    const oldest = entries.keys().next();
+    if (oldest.done) {
+      break;
+    }
+    entries.delete(oldest.value);
+  }
+}
+
 function mergeActivitySnapshot(
   detailed: DashboardSnapshot,
   activity: DashboardSnapshot,
@@ -162,27 +185,21 @@ export function watchDashboardActivity({
   const detailRetryDelayMs = 1_000;
 
   const rememberAttempt = (key: string) => {
-    attemptedDetailVersions.delete(key);
-    attemptedDetailVersions.add(key);
-    while (attemptedDetailVersions.size > maximumRememberedVersions) {
-      const oldest = attemptedDetailVersions.values().next().value;
-      if (oldest === undefined) {
-        break;
-      }
-      attemptedDetailVersions.delete(oldest);
-    }
+    rememberBoundedEntry(
+      attemptedDetailVersions,
+      key,
+      maximumRememberedVersions,
+      () => attemptedDetailVersions.add(key),
+    );
   };
 
   const rememberFailure = (key: string) => {
-    failedDetailVersions.delete(key);
-    failedDetailVersions.set(key, Date.now() + detailRetryDelayMs);
-    while (failedDetailVersions.size > maximumRememberedVersions) {
-      const oldest = failedDetailVersions.keys().next().value;
-      if (oldest === undefined) {
-        break;
-      }
-      failedDetailVersions.delete(oldest);
-    }
+    rememberBoundedEntry(
+      failedDetailVersions,
+      key,
+      maximumRememberedVersions,
+      () => failedDetailVersions.set(key, Date.now() + detailRetryDelayMs),
+    );
   };
 
   const startNextDetailRefresh = () => {

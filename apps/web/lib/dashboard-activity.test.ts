@@ -7,6 +7,7 @@ import type {
   DashboardSnapshot,
 } from "./dashboard";
 import { watchDashboardActivity } from "./dashboard-activity";
+import { DASHBOARD_ACTIVITY_DETECTED_DISC_LIMIT } from "./dashboard-bounds";
 
 function emptySnapshot(generatedAt: string): DashboardSnapshot {
   return {
@@ -17,6 +18,26 @@ function emptySnapshot(generatedAt: string): DashboardSnapshot {
     encodeJobs: { status: "loaded", items: [] },
     catalogReview: { status: "loaded", items: [] },
   };
+}
+
+function detectedDiscSummary(index: number) {
+  return {
+    id: `disc-${index}`,
+    volumeLabel: `DISC_${index}`,
+    discKind: "dvd" as const,
+    status: "scanned" as const,
+    opticalDriveName: "Upper drive",
+    fingerprint: `sha256:disc-${index}`,
+    titles: [],
+    detectedAt: new Date(Date.UTC(2026, 6, 26, 15, 0, index)).toISOString(),
+  };
+}
+
+async function flushUntil(condition: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 1_000 && !condition(); attempt += 1) {
+    await Promise.resolve();
+  }
+  expect(condition()).toBe(true);
 }
 
 afterEach(() => {
@@ -191,6 +212,112 @@ describe("watchDashboardActivity", () => {
     dashboardListener?.({ data: JSON.stringify(changed) } as MessageEvent<string>);
 
     expect(loadDiscDetails).toHaveBeenCalledOnce();
+    stop();
+  });
+
+  it("evicts the oldest attempted detail version at the shared cache bound", async () => {
+    const initial = emptySnapshot("2026-07-26T16:00:00.000Z");
+    initial.detectedDiscs = {
+      status: "loaded",
+      items: Array.from(
+        { length: DASHBOARD_ACTIVITY_DETECTED_DISC_LIMIT },
+        (_, index) => detectedDiscSummary(index),
+      ),
+    };
+    const overflow = structuredClone(initial);
+    if (overflow.detectedDiscs.status === "loaded") {
+      overflow.detectedDiscs.items.push(
+        detectedDiscSummary(DASHBOARD_ACTIVITY_DETECTED_DISC_LIMIT),
+      );
+    }
+    const loadDiscDetails = vi.fn(
+      async (
+        id: string,
+        detectedAt: string,
+      ): Promise<DashboardDetectedDiscDetails> => ({
+        id,
+        detectedAt,
+        titles: [],
+      }),
+    );
+    let dashboardListener: ((event: MessageEvent<string>) => void) | undefined;
+    const stop = watchDashboardActivity({
+      loadSnapshot: async () => initial,
+      loadDiscDetails,
+      openEventSource: () => ({
+        onerror: null,
+        onopen: null,
+        addEventListener(_type, listener) {
+          dashboardListener = listener;
+        },
+        close: vi.fn(),
+      }),
+      onSnapshot: vi.fn(),
+      onInitialLoadError: vi.fn(),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    dashboardListener?.({ data: JSON.stringify(overflow) } as MessageEvent<string>);
+    await flushUntil(() => loadDiscDetails.mock.calls.length === 1);
+    await Promise.resolve();
+    await Promise.resolve();
+    dashboardListener?.({ data: JSON.stringify(overflow) } as MessageEvent<string>);
+    await flushUntil(() => loadDiscDetails.mock.calls.length > 1);
+
+    expect(loadDiscDetails.mock.calls[0]?.[0]).toBe(
+      `disc-${DASHBOARD_ACTIVITY_DETECTED_DISC_LIMIT}`,
+    );
+    expect(loadDiscDetails.mock.calls[1]?.[0]).toBe("disc-0");
+    stop();
+  });
+
+  it("evicts the oldest failed detail version at the shared cache bound", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-26T16:00:00.000Z"));
+    const initial = emptySnapshot("2026-07-26T16:00:00.000Z");
+    const overflow = emptySnapshot("2026-07-26T16:00:01.000Z");
+    overflow.detectedDiscs = {
+      status: "loaded",
+      items: Array.from(
+        { length: DASHBOARD_ACTIVITY_DETECTED_DISC_LIMIT + 1 },
+        (_, index) => detectedDiscSummary(index),
+      ),
+    };
+    const loadDiscDetails = vi.fn().mockRejectedValue(
+      new Error("temporary detail failure"),
+    );
+    let dashboardListener: ((event: MessageEvent<string>) => void) | undefined;
+    const stop = watchDashboardActivity({
+      loadSnapshot: async () => initial,
+      loadDiscDetails,
+      openEventSource: () => ({
+        onerror: null,
+        onopen: null,
+        addEventListener(_type, listener) {
+          dashboardListener = listener;
+        },
+        close: vi.fn(),
+      }),
+      onSnapshot: vi.fn(),
+      onInitialLoadError: vi.fn(),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    for (const expectedCalls of [20, 40, 60, 80, 100, 120, 121]) {
+      dashboardListener?.({
+        data: JSON.stringify(overflow),
+      } as MessageEvent<string>);
+      await flushUntil(() => loadDiscDetails.mock.calls.length === expectedCalls);
+    }
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      await Promise.resolve();
+    }
+    dashboardListener?.({ data: JSON.stringify(overflow) } as MessageEvent<string>);
+    await flushUntil(() => loadDiscDetails.mock.calls.length === 122);
+
+    expect(loadDiscDetails.mock.calls.at(-1)?.[0]).toBe("disc-0");
     stop();
   });
 
