@@ -162,7 +162,7 @@ describe("DVD archive publication", () => {
   );
 
   it.runIf(supportsLinuxWriterOwnership)(
-    "keeps an orphaned writer excluded across a direct worker replacement",
+    "recovers an inactive attempt-unique partial after direct worker replacement",
     async () => {
       const originalsLibraryPath = createOriginalsLibrary();
       const root = realpathSync(originalsLibraryPath);
@@ -196,7 +196,7 @@ describe("DVD archive publication", () => {
       };
 
       await expect(preserveDvdArchive(options)).rejects.toThrow(
-        "DVD archive device is still active",
+        "DVD archive copy is still active",
       );
       expect(readFileSync(partialPath, "utf8")).toBe("live partial");
       expect(existsSync(`${partialPath}.failed`)).toBe(false);
@@ -223,10 +223,145 @@ describe("DVD archive publication", () => {
           runner: createNodeDvdCopyRunner({ timeoutMs: 1_000 }),
         }),
       ).resolves.toMatchObject({ recovered: false });
-      expect(readFileSync(partialPath, "utf8")).toBe("live partial");
-      expect(existsSync(`${partialPath}.failed`)).toBe(false);
+      expect(existsSync(partialPath)).toBe(false);
+      expect(readFileSync(`${partialPath}.failed`, "utf8")).toBe(
+        "live partial",
+      );
     },
   );
+
+  it.runIf(supportsLinuxWriterOwnership)(
+    "quarantines repeated inactive attempt-unique partials for only the same fingerprint",
+    async () => {
+      const originalsLibraryPath = createOriginalsLibrary();
+      const root = realpathSync(originalsLibraryPath);
+      const digest =
+        "231552f40a93fbd25f6328825ddb49288b8076f1d42809b0852eaff66d9a4118";
+      const partialPaths = [
+        join(
+          root,
+          `.${digest}.11111111-1111-4111-8111-111111111111.iso.rip-dvd-partial`,
+        ),
+        join(
+          root,
+          `.${digest}.22222222-2222-4222-8222-222222222222.iso.rip-dvd-partial`,
+        ),
+      ];
+      writeFileSync(partialPaths[0]!, "first failed attempt");
+      writeFileSync(partialPaths[1]!, "second failed attempt");
+      const otherFingerprintPartial = join(
+        root,
+        `.${"f".repeat(64)}.33333333-3333-4333-8333-333333333333.iso.rip-dvd-partial`,
+      );
+      writeFileSync(otherFingerprintPartial, "other disc");
+      const content = Buffer.from("fresh");
+      const runner: DvdCopyRunner = {
+        copy: vi.fn(async ({ outputPath }) => writeFileSync(outputPath, content)),
+        isActive: () => false,
+      };
+
+      await expect(
+        preserveDvdArchive({
+          devicePath: "/dev/sr0",
+          fingerprint: `sha256:${digest}`,
+          originalsLibraryPath,
+          runner,
+          signal: new AbortController().signal,
+          sizeBytes: content.byteLength,
+          verifySource: async () => undefined,
+          onProgress: () => undefined,
+        }),
+      ).resolves.toMatchObject({ recovered: false });
+
+      expect(readFileSync(`${partialPaths[0]}.failed`, "utf8")).toBe(
+        "first failed attempt",
+      );
+      expect(readFileSync(`${partialPaths[1]}.failed`, "utf8")).toBe(
+        "second failed attempt",
+      );
+      expect(readFileSync(otherFingerprintPartial, "utf8")).toBe("other disc");
+    },
+  );
+
+  it.runIf(supportsLinuxWriterOwnership)(
+    "fails closed before quarantining when attempt-partial recovery is unsafe",
+    async () => {
+      const originalsLibraryPath = createOriginalsLibrary();
+      const root = realpathSync(originalsLibraryPath);
+      const digest = "a".repeat(64);
+      const inactivePartial = join(
+        root,
+        `.${digest}.11111111-1111-4111-8111-111111111111.iso.rip-dvd-partial`,
+      );
+      const unsafePartial = join(
+        root,
+        `.${digest}.22222222-2222-4222-8222-222222222222.iso.rip-dvd-partial`,
+      );
+      const outsidePath = join(root, "outside");
+      writeFileSync(inactivePartial, "recoverable evidence");
+      writeFileSync(outsidePath, "outside");
+      symlinkSync(outsidePath, unsafePartial);
+      const runner: DvdCopyRunner = {
+        copy: vi.fn(),
+        isActive: () => false,
+      };
+
+      await expect(
+        preserveDvdArchive({
+          devicePath: "/dev/sr0",
+          fingerprint: `sha256:${digest}`,
+          originalsLibraryPath,
+          runner,
+          signal: new AbortController().signal,
+          sizeBytes: 9,
+          verifySource: async () => undefined,
+          onProgress: () => undefined,
+        }),
+      ).rejects.toThrow("DVD archive partial path is unsafe");
+
+      expect(runner.copy).not.toHaveBeenCalled();
+      expect(readFileSync(inactivePartial, "utf8")).toBe(
+        "recoverable evidence",
+      );
+      expect(existsSync(`${inactivePartial}.failed`)).toBe(false);
+      expect(readFileSync(outsidePath, "utf8")).toBe("outside");
+    },
+  );
+
+  it("bounds attempt-partial discovery before mutating or retrying", async () => {
+    const originalsLibraryPath = createOriginalsLibrary();
+    const root = realpathSync(originalsLibraryPath);
+    const digest = "b".repeat(64);
+    const partialPath = join(
+      root,
+      `.${digest}.11111111-1111-4111-8111-111111111111.iso.rip-dvd-partial`,
+    );
+    writeFileSync(partialPath, "recoverable evidence");
+    for (let index = 0; index < 4_096; index += 1) {
+      writeFileSync(join(root, `unrelated-${index}`), "");
+    }
+    const runner: DvdCopyRunner = {
+      copy: vi.fn(),
+      isActive: () => false,
+    };
+
+    await expect(
+      preserveDvdArchive({
+        devicePath: "/dev/sr0",
+        fingerprint: `sha256:${digest}`,
+        originalsLibraryPath,
+        runner,
+        signal: new AbortController().signal,
+        sizeBytes: 9,
+        verifySource: async () => undefined,
+        onProgress: () => undefined,
+      }),
+    ).rejects.toThrow("DVD archive partial recovery exceeds the safety limit");
+
+    expect(runner.copy).not.toHaveBeenCalled();
+    expect(readFileSync(partialPath, "utf8")).toBe("recoverable evidence");
+    expect(existsSync(`${partialPath}.failed`)).toBe(false);
+  });
 
   it.runIf(supportsLinuxWriterOwnership)(
     "fails closed while a pre-upgrade deterministic partial is open",
@@ -549,8 +684,8 @@ describe("DVD archive publication", () => {
       recovered: false,
     });
     expect(runner.copy).toHaveBeenCalledTimes(2);
-    expect(readFileSync(partialPath!, "utf8")).toBe("live partial");
-    expect(existsSync(`${partialPath}.failed`)).toBe(false);
+    expect(existsSync(partialPath!)).toBe(false);
+    expect(readFileSync(`${partialPath}.failed`, "utf8")).toBe("live partial");
   });
 
   it.runIf(supportsLinuxWriterOwnership)(

@@ -651,7 +651,11 @@ Progress and terminal state are written to SQLite and reach the dashboard over
 SSE. Failed or interrupted copies are moved to a `.failed` recovery path and
 remain explicitly retryable from the dashboard unless another observation has
 already published an archive for the same fingerprint. Those superseded
-failures remain visible in Archive Job history without a retry action.
+failures remain visible in Archive Job history without a retry action. Before
+retrying, the worker examines at most 4,096 entries in the canonical originals
+directory for exact same-fingerprint attempt-unique partials, fails closed if
+discovery or inode ownership is ambiguous, and quarantines every inactive match
+before starting a new copy.
 
 A fingerprint
 already present in Original Disc Archives is shown as **Already archived**, and
