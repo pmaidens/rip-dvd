@@ -76,11 +76,27 @@ unsafe or newly added mappings leave the archive awaiting explicit review and
 their queued jobs remain unclaimable. Bounded legacy title evidence is also
 normalized for the review response and for title/chapter selection validation,
 so archive-only imports can be reviewed without weakening current scan writes.
-Disc Selection removal is rejected whenever any dependent Encode Job history
-exists, including completed and imported provenance. The bounded repair facade
-can correct a caller-era selection only when its dependent jobs are the failed,
-permanently ineligible records created by the upgrade guard; it preserves those
-records and reopens review. Job-free selections can still be removed normally.
+Disc Selection mutation preserves two distinct identity paths:
+
+- **Ordinary retry identity.** A current-valid Disc Selection with any dependent
+  Encode Job history cannot be repaired or removed. Every dependent job remains
+  attached to the selection; `enqueue()` or `requeue()` of a terminal row resets
+  the same logical Encode Job and preserves its retry identity.
+- **Unsafe legacy quarantine.** A caller-era mapping that fails canonical-key or
+  archived-scan validation is the only historical exception.
+  `repairDiscSelection()` or `deleteDiscSelection()` deactivates the old Disc
+  Selection rather than deleting it. Repair inserts a new active selection
+  identity; removal inserts none. The inactive mapping and every dependent
+  Encode Job remain as history, and the archive returns to review.
+- **Retained completed provenance.** Completed Encode Jobs attached to the
+  quarantined mapping remain terminal, preserve their original selection,
+  profile, and output provenance, and continue to reserve their output paths.
+- **Released failed-job reservations.** Failed Encode Jobs attached to the
+  quarantined mapping, including upgrade-guard failures, are permanently
+  ineligible. Only their output-path reservations are released, so a corrected
+  mapping can enqueue a new logical job at the same path.
+
+Job-free selections can still be removed normally.
 
 ## Queue attempts and progress
 

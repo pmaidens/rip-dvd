@@ -531,12 +531,28 @@ The facade derives canonical DVD source identities and rejects duplicate source
 slices. Supported upgrades reopen caller-era scan-dependent or noncanonical
 catalogs and fail their active Encode Jobs until bounded validation completes
 again; unsafe jobs cannot be enqueued, requeued, or claimed. The review editor
-rejects Disc Selection removal whenever any dependent Encode Job history
-exists, including completed or imported provenance. A separate repair action
-can correct a quarantined caller-era mapping against archived scan evidence
-without deleting its failed job record; that migration job remains permanently
-ineligible. Job-free mappings can still be removed normally, and every catalog
-change reopens explicit review. Archived scan
+keeps ordinary retry history separate from unsafe legacy recovery:
+
+- **Ordinary retry identity.** A current-valid Disc Selection with any dependent
+  Encode Job history, including completed or imported history, cannot be
+  repaired or removed. Every job stays attached to that selection; retry or
+  re-encode of a terminal row resets the same logical Encode Job.
+- **Unsafe legacy quarantine.** Only a caller-era mapping that fails current
+  canonical or archived-scan validation takes the recovery path. Repair or
+  removal deactivates the old Disc Selection rather than deleting it; repair
+  creates a new active selection identity, while removal creates none. The
+  quarantined mapping and every dependent Encode Job remain as history, and the
+  catalog returns to explicit review.
+- **Retained completed provenance.** Completed Encode Jobs on a quarantined
+  mapping remain terminal, retain their selection, profile, and output
+  provenance, and continue to reserve their output paths.
+- **Released failed-job reservations.** Failed Encode Jobs on a quarantined
+  mapping, including jobs failed by the upgrade guard, are permanently
+  ineligible. Only their output-path reservations are released, allowing a
+  corrected mapping to enqueue a new logical job and reuse the path.
+
+Job-free mappings can still be removed normally, and every catalog change
+reopens explicit review. Archived scan
 evidence is immutable, while rediscovery may still refresh observation metadata
 such as the volume label. Legacy sidecar import cannot restore review across an
 unsafe or newly added mapping, and bounded legacy title evidence remains usable
