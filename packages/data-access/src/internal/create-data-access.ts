@@ -9,7 +9,6 @@ import {
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
-import { isDeepStrictEqual } from "node:util";
 
 import {
   and,
@@ -35,6 +34,17 @@ import {
   type FilesystemPathProbe,
 } from "./bounded-filesystem-path-probe.js";
 import { listWithBoundedOffset } from "./bounded-offset-pagination.js";
+import {
+  createBoundedChronologicalList,
+  createJobList,
+} from "./bounded-chronological-list.js";
+import {
+  canonicalDvdSelectionSourceKey,
+  evaluateDetectedDiscRediscovery,
+  normalizeDetectedDiscScan,
+  requiresLegacyDiscSelectionRepair,
+  toDiscSelection,
+} from "./dvd-contract-provenance.js";
 import {
   archiveJobs,
   detectedDiscs,
@@ -62,13 +72,13 @@ import {
   type JobQueueAdapter,
 } from "./job-queue.js";
 import type { LegacySidecarImportAccessFactory } from "./legacy-sidecar-catalog-adapter.js";
+import { planOpticalDriveReconciliation } from "./optical-drive-reconciliation.js";
 import {
   requireNonEmpty,
   requirePositiveSafeInteger,
 } from "./validation.js";
 import {
   decodeArchivedDvdTitles,
-  decodeDvdTitleMap,
   isDvdContentId,
 } from "../dvd-scan.js";
 import {
@@ -86,13 +96,11 @@ import type {
   ArchiveJobClaimToken,
   ArchiveJobId,
   ArchiveJob,
-  ChronologicalListOptions,
   ConsistentReadAccess,
   DataAccess,
   DetectedDiscId,
   DetectedDiscListOptions,
   DetectedDiscStatus,
-  DiscSelection,
   DiscSelectionId,
   EncodeJobClaimToken,
   EncodeJobCleanupClaimToken,
@@ -102,7 +110,6 @@ import type {
   EncodeJobPartialCleanup,
   EncodeJobProgress,
   EncodingProfileId,
-  JobStatus,
   MediaDomain,
   MediaItemId,
   OpticalDriveId,
@@ -152,94 +159,6 @@ const detectedDiscTransitions: Readonly<
   rejected: ["detected"],
 };
 
-interface ChronologicalRecord {
-  id: string;
-}
-
-function createBoundedChronologicalList<
-  RecordType extends ChronologicalRecord,
-  Status extends string,
-  Options extends ChronologicalListOptions,
->({
-  activeStatuses,
-  historyStatuses,
-  chronologicalAt,
-  readAll,
-  readNewest,
-}: {
-  activeStatuses: Status[];
-  historyStatuses: Status[];
-  chronologicalAt(record: RecordType): Date;
-  readAll(
-    statuses: Status[] | undefined,
-    options: Options | undefined,
-  ): RecordType[];
-  readNewest(
-    statuses: Status[] | undefined,
-    limit: number,
-    options: Options | undefined,
-  ): RecordType[];
-}) {
-  const chronological = (rows: RecordType[]) =>
-    rows.sort(
-      (left, right) =>
-        chronologicalAt(left).getTime() - chronologicalAt(right).getTime() ||
-        left.id.localeCompare(right.id),
-    );
-
-  return (statuses?: Status[], options?: Options): RecordType[] => {
-    const policy = options?.policy;
-    if (policy?.mode === "active-and-history") {
-      if (statuses !== undefined) {
-        throw new DomainInvariantError(
-          "active-and-history list policy cannot be combined with explicit statuses",
-        );
-      }
-      const active = readNewest(
-        activeStatuses,
-        requirePositiveSafeInteger(policy.activeLimit, "activeLimit"),
-        options,
-      );
-      const history = readNewest(
-        historyStatuses,
-        requirePositiveSafeInteger(policy.historyLimit, "historyLimit"),
-        options,
-      );
-      return chronological([...active, ...history]);
-    }
-    if (policy?.mode === "newest") {
-      return chronological(
-        readNewest(
-          statuses,
-          requirePositiveSafeInteger(policy.limit, "limit"),
-          options,
-        ),
-      );
-    }
-    return readAll(statuses, options);
-  };
-}
-
-function createJobList<Job extends ChronologicalRecord & { updatedAt: Date }>({
-  readQueue,
-  readNewest,
-}: {
-  readQueue(statuses?: JobStatus[]): Job[];
-  readNewest(statuses: JobStatus[] | undefined, limit: number): Job[];
-}) {
-  return createBoundedChronologicalList<
-    Job,
-    JobStatus,
-    ChronologicalListOptions
-  >({
-    activeStatuses: ["queued", "running"],
-    historyStatuses: ["completed", "failed"],
-    chronologicalAt: (job) => job.updatedAt,
-    readAll: (statuses) => readQueue(statuses),
-    readNewest: (statuses, limit) => readNewest(statuses, limit),
-  });
-}
-
 function asRunningArchiveJob(job: ArchiveJob): RunningArchiveJob {
   if (job.status !== "running" || job.claimToken === null) {
     throw new DomainInvariantError("Claimed Archive Job is not running");
@@ -284,101 +203,6 @@ const unresolvedLegacyDvdArchiveIdentity = and(
       where ${originalDiscArchiveContentIds.originalDiscArchiveId} = ${originalDiscArchives.id}
     )`,
 );
-
-function toDiscSelection(
-  row: typeof discSelections.$inferSelect,
-): DiscSelection {
-  const common = {
-    id: row.id,
-    originalDiscArchiveId: row.originalDiscArchiveId,
-    mediaItemId: row.mediaItemId,
-    sourceKey: row.sourceKey,
-    label: row.label,
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
-  };
-
-  switch (row.kind) {
-    case "main_feature":
-      if (
-        row.titleNumber !== null ||
-        row.chapterStart !== null ||
-        row.chapterEnd !== null
-      ) {
-        throw new DomainInvariantError("Invalid main feature selection shape");
-      }
-      return {
-        ...common,
-        kind: row.kind,
-        titleNumber: null,
-        chapterStart: null,
-        chapterEnd: null,
-      };
-    case "dvd_title":
-      if (
-        row.titleNumber === null ||
-        row.chapterStart !== null ||
-        row.chapterEnd !== null
-      ) {
-        throw new DomainInvariantError("Invalid DVD title selection shape");
-      }
-      return {
-        ...common,
-        kind: row.kind,
-        titleNumber: row.titleNumber,
-        chapterStart: null,
-        chapterEnd: null,
-      };
-    case "dvd_chapters":
-      if (
-        row.titleNumber === null ||
-        row.chapterStart === null ||
-        row.chapterEnd === null
-      ) {
-        throw new DomainInvariantError("Invalid DVD chapter selection shape");
-      }
-      return {
-        ...common,
-        kind: row.kind,
-        titleNumber: row.titleNumber,
-        chapterStart: row.chapterStart,
-        chapterEnd: row.chapterEnd,
-      };
-  }
-}
-
-function canonicalDvdSelectionSourceKey(
-  selection: Pick<
-    DiscSelection,
-    "chapterEnd" | "chapterStart" | "kind" | "titleNumber"
-  >,
-): string {
-  return selection.kind === "main_feature"
-    ? "dvd:main-feature"
-    : selection.kind === "dvd_title"
-      ? `dvd:title:${selection.titleNumber}`
-      : `dvd:title:${selection.titleNumber}:chapters:${selection.chapterStart}-${selection.chapterEnd}`;
-}
-
-function requiresLegacyDiscSelectionRepair(
-  row: typeof discSelections.$inferSelect,
-  archivedTitles: ReturnType<typeof decodeArchivedDvdTitles>,
-): boolean {
-  const selection = toDiscSelection(row);
-  const title = selection.titleNumber === null
-    ? null
-    : archivedTitles?.find(
-        (candidate) => candidate.number === selection.titleNumber,
-      );
-  return (
-    row.sourceKey !== canonicalDvdSelectionSourceKey(selection) ||
-    (selection.titleNumber !== null &&
-      (title === null ||
-        title === undefined ||
-        (selection.chapterEnd !== null &&
-          selection.chapterEnd > title.chapters)))
-  );
-}
 
 function nextCatalogMutationTimestamp(timestamp: Date) {
   // Review restoration uses updatedAt as a compare-and-set version. Advance it
@@ -1981,25 +1805,6 @@ export function createDataAccessInternal(
     catalog: {
       reconcileOpticalDrives(discovered) {
         const timestamp = now();
-        const normalized = discovered.map((drive) => ({
-          ...drive,
-          devicePath: requireNonEmpty(drive.devicePath, "devicePath"),
-        }));
-        const uniquePaths = new Set(normalized.map((drive) => drive.devicePath));
-        if (uniquePaths.size !== normalized.length) {
-          throw new DomainInvariantError(
-            "Discovered Optical Drive paths must be unique",
-          );
-        }
-        const configuredTargets = normalized.filter(
-          (drive) => drive.isConfiguredDevice,
-        );
-        if (configuredTargets.length > 1) {
-          throw new DomainInvariantError(
-            "A discovery snapshot can prove only one configured Optical Drive",
-          );
-        }
-        const configuredTargetPath = configuredTargets[0]?.devicePath;
 
         return database.transaction((transaction) => {
           const existingDrives = transaction
@@ -2015,17 +1820,11 @@ export function createDataAccessInternal(
             })
             .from(opticalDrives)
             .all();
-          const existingByPath = new Map(
-            existingDrives.map((drive) => [drive.devicePath, drive]),
+          const plan = planOpticalDriveReconciliation(
+            discovered,
+            existingDrives,
           );
-          const previousConfiguredTargetPath = existingDrives.find(
-            (drive) => drive.isConfiguredTarget,
-          )?.devicePath;
-          const configuredTargetChanged =
-            configuredTargetPath !== undefined &&
-            previousConfiguredTargetPath !== undefined &&
-            configuredTargetPath !== previousConfiguredTargetPath;
-          if (configuredTargetPath !== undefined) {
+          if (plan.configuredTargetPath !== undefined) {
             transaction
               .update(opticalDrives)
               .set({ isConfiguredTarget: false })
@@ -2038,32 +1837,8 @@ export function createDataAccessInternal(
             .where(eq(opticalDrives.isPresent, true))
             .run();
 
-          for (const drive of normalized) {
-            const existing = existingByPath.get(drive.devicePath);
-            const existingSerial = existing?.serialNumber?.trim() || undefined;
-            const discoveredSerial = drive.serialNumber?.trim() || undefined;
-            const serialChanged =
-              existing !== undefined && existingSerial !== discoveredSerial;
-            const stableIdentityMatches =
-              existingSerial !== undefined &&
-              discoveredSerial !== undefined &&
-              existingSerial === discoveredSerial;
-            const modelEvidenceChanged =
-              existing !== undefined &&
-              ((existing.vendor ?? undefined) !== drive.vendor ||
-                (existing.product ?? undefined) !== drive.product);
-            const continuityUnprovenAfterDisappearance =
-              existing !== undefined &&
-              !existing.isPresent &&
-              !stableIdentityMatches;
-            const isReplacement =
-              serialChanged ||
-              (modelEvidenceChanged && !stableIdentityMatches) ||
-              continuityUnprovenAfterDisappearance;
-            const applyConfiguredDefault =
-              drive.isConfiguredDevice === true &&
-              !configuredTargetChanged &&
-              existing?.configurationDefaultResolved !== true;
+          for (const decision of plan.drives) {
+            const { drive } = decision;
             transaction
               .insert(opticalDrives)
               .values({
@@ -2073,12 +1848,8 @@ export function createDataAccessInternal(
                 vendor: drive.vendor,
                 product: drive.product,
                 serialNumber: drive.serialNumber,
-                isEnabled:
-                  drive.isConfiguredDevice === true &&
-                  !configuredTargetChanged,
-                configurationDefaultResolved:
-                  drive.isConfiguredDevice === true,
-                isConfiguredTarget: drive.isConfiguredDevice === true,
+                ...decision.insertAuthorization,
+                isConfiguredTarget: drive.isConfiguredDevice,
                 isPresent: true,
                 lastSeenAt: timestamp,
                 createdAt: timestamp,
@@ -2094,21 +1865,7 @@ export function createDataAccessInternal(
                   ...(drive.isConfiguredDevice
                     ? { isConfiguredTarget: true }
                     : {}),
-                  ...(isReplacement
-                    ? {
-                        configurationDefaultResolved:
-                          existing?.configurationDefaultResolved === true ||
-                          drive.isConfiguredDevice === true,
-                        isEnabled: false,
-                      }
-                    : drive.isConfiguredDevice && configuredTargetChanged
-                      ? { configurationDefaultResolved: true }
-                      : applyConfiguredDefault
-                        ? {
-                            configurationDefaultResolved: true,
-                            isEnabled: true,
-                          }
-                        : {}),
+                  ...decision.authorizationUpdate,
                   isPresent: true,
                   lastSeenAt: timestamp,
                   updatedAt: timestamp,
@@ -2232,21 +1989,11 @@ export function createDataAccessInternal(
       registerDetectedDisc(input) {
         const timestamp = now();
         const fingerprint = requireNonEmpty(input.fingerprint, "fingerprint");
-        let scanData = input.scanData;
-        if (input.discKind === "dvd" && scanData !== undefined) {
-          const decoded = decodeDvdTitleMap(scanData);
-          if (decoded === null) {
-            throw new DomainInvariantError(
-              "DVD scan data must match the versioned title-map contract",
-            );
-          }
-          if (decoded.contentId !== fingerprint) {
-            throw new DomainInvariantError(
-              "DVD scan content ID must match its Detected Disc fingerprint",
-            );
-          }
-          scanData = decoded;
-        }
+        const scanData = normalizeDetectedDiscScan({
+          discKind: input.discKind,
+          fingerprint,
+          scanData: input.scanData,
+        });
         if (input.discKind === "dvd") {
           reconcileLegacyDvdArchiveContentId(
             fingerprint,
@@ -2258,27 +2005,11 @@ export function createDataAccessInternal(
             fingerprint,
             transaction,
           );
-          if (
-            matchingArchive &&
-            matchingArchive.discKind !== input.discKind
-          ) {
-            throw new DomainInvariantError(
-              "Rediscovered disc kind must match existing archive provenance",
-            );
-          }
           const matchingObservation = transaction
             .select({ discKind: detectedDiscs.discKind })
             .from(detectedDiscs)
             .where(eq(detectedDiscs.fingerprint, fingerprint))
             .get();
-          if (
-            matchingObservation &&
-            matchingObservation.discKind !== input.discKind
-          ) {
-            throw new DomainInvariantError(
-              "Rediscovered disc kind must match existing fingerprint identity",
-            );
-          }
           const existing = transaction
             .select({
               id: detectedDiscs.id,
@@ -2297,36 +2028,16 @@ export function createDataAccessInternal(
               ),
             )
             .get();
-          if (
-            matchingArchive !== undefined &&
-            existing !== undefined &&
-            matchingArchive.detectedDiscId === existing.id &&
-            scanData !== undefined &&
-            !isDeepStrictEqual(existing.scanData, scanData)
-          ) {
-            throw new DomainInvariantError(
-              "Rediscovery cannot change archived scan evidence",
-            );
-          }
-          const observationChanged =
-            existing === undefined ||
-            input.isNewMediumObservation === true ||
-            existing.discKind !== input.discKind ||
-            existing.volumeLabel !== (input.volumeLabel ?? null) ||
-            !isDeepStrictEqual(existing.scanData, scanData ?? null);
-          const statusChanged =
-            matchingArchive !== undefined && existing?.status !== "archived";
-          if (
-            !matchingArchive &&
-            existing?.status === "approved" &&
-            (existing.discKind !== input.discKind ||
-              (scanData !== undefined &&
-                !isDeepStrictEqual(existing.scanData, scanData)))
-          ) {
-            throw new DomainInvariantError(
-              "Rediscovery cannot change reviewed data for an approved Detected Disc",
-            );
-          }
+          const { observationChanged, statusChanged } =
+            evaluateDetectedDiscRediscovery({
+              discKind: input.discKind,
+              existing,
+              fingerprintObservationDiscKind: matchingObservation?.discKind,
+              isNewMediumObservation: input.isNewMediumObservation,
+              matchingArchive,
+              scanData,
+              volumeLabel: input.volumeLabel,
+            });
 
           transaction
             .insert(detectedDiscs)
