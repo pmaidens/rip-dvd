@@ -343,7 +343,7 @@ describe("readDashboardSnapshot", () => {
     expect(encodeClaim?.id).toBe(encodeJob.id);
     access.encodeJobs.fail(
       encodeClaim!,
-      "HandBrake failed while reading /private/media/secret.iso",
+      "HandBrake failed while reading '/private/media/secret file.iso': output /media/movies/partial.mkv",
     );
 
     access.archiveJobs.beginDriveInspection(drive.id);
@@ -420,6 +420,7 @@ describe("readDashboardSnapshot", () => {
           mediaYear: 2001,
           encodingProfileName: "DVD library · Version 1",
           status: "failed",
+          failureDetail: "The worker could not read its input.",
         }),
       ],
     });
@@ -431,6 +432,7 @@ describe("readDashboardSnapshot", () => {
     expect(JSON.stringify(dashboard)).not.toContain("/dev/sr0");
     expect(JSON.stringify(dashboard)).not.toContain("/media/");
     expect(JSON.stringify(dashboard)).not.toContain("secret.iso");
+    expect(JSON.stringify(dashboard)).not.toContain("secret file.iso");
   });
 
   it("returns explicit empty collections when the database has no operations", () => {
@@ -459,6 +461,7 @@ describe("readDashboardSnapshot", () => {
         expect.objectContaining({
           id: fixture.failedJob.id,
           status: "failed",
+          failureDetail: "The worker could not read its input.",
           retryable: true,
         }),
       ]),
@@ -479,6 +482,7 @@ describe("readDashboardSnapshot", () => {
           id: fixture.failedJob.id,
           discLabel: "FAILED_DUPLICATE",
           status: "failed",
+          failureDetail: "The worker could not read its input.",
           retryable: false,
         }),
         expect.objectContaining({

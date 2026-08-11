@@ -90,6 +90,15 @@ describe("dashboard secondary text contrast", () => {
   });
 });
 
+describe("dashboard error treatments", () => {
+  it("keeps mutation errors and worker failure disclosures visibly styled", () => {
+    const declarations = selectorDeclarations(".job-error, .job-failure");
+
+    expect(declarations).toMatch(/color:\s*#e89a90/);
+    expect(declarations).toMatch(/font-size:\s*0\.78rem/);
+  });
+});
+
 describe("dashboard 320px fallback", () => {
   it("keeps long unbroken database-backed values shrinkable and wrap-safe", () => {
     const longDriveName = `Drive_${"A".repeat(96)}`;

@@ -134,6 +134,7 @@ interface DashboardJobItemProps {
   status: DashboardArchiveJob["status"];
   progressPercent: number;
   progressDetail?: string | null;
+  failureDetail?: string | null;
   action?: React.ReactNode;
   verification?: FilesystemVerificationDisplay;
 }
@@ -144,6 +145,7 @@ function DashboardJobItem({
   status,
   progressPercent,
   progressDetail,
+  failureDetail,
   action,
   verification,
 }: DashboardJobItemProps) {
@@ -166,7 +168,13 @@ function DashboardJobItem({
         </p>
       ) : null}
       {status === "failed" ? (
-        <p className="job-error">Worker reported a failure.</p>
+        <details className="job-failure">
+          <summary>Worker reported a failure.</summary>
+          <div className="job-failure-detail">
+            <strong>Failure details</strong>
+            <p>{failureDetail ?? "No additional details were recorded."}</p>
+          </div>
+        </details>
       ) : null}
       {verification ? <FilesystemVerificationResult {...verification} /> : null}
       {action}
@@ -589,6 +597,7 @@ export function DashboardView({
             status={job.status}
             progressPercent={job.progressPercent}
             progressDetail={archiveProgressDetail(job)}
+            failureDetail={job.failureDetail}
             action={
               job.retryable ? (
                 <button
@@ -624,6 +633,7 @@ export function DashboardView({
             status={job.status}
             progressPercent={job.progressPercent}
             progressDetail={encodeProgressDetail(job)}
+            failureDetail={job.failureDetail}
             verification={toFilesystemVerificationDisplay(job)}
             action={
               <div className="operation-actions">

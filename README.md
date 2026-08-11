@@ -538,7 +538,8 @@ process with a three-second deadline and a two-helper admission ceiling, so a
 stalled mount cannot block the Next.js request event loop or create unbounded
 work. Media Library root canonicalization happens inside that bounded explicit
 helper; opening the shared data-access facade never touches the Media Library.
-The dashboard and SSE snapshots show stored results without exposing paths.
+The dashboard and SSE snapshots show stored results and normalized, path-free
+worker failure reasons without exposing raw diagnostics or paths.
 Ordinary dashboard, catalog, and queue reads continue to trust SQLite and never
 scan the media or originals libraries implicitly. Verification uses the same
 trusted Origin/Host mutation policy as the other dashboard actions and is

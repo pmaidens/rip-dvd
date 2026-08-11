@@ -24,6 +24,7 @@ import {
   DASHBOARD_ACTIVE_DISC_LIMIT,
   DASHBOARD_ACTIVE_JOB_LIMIT,
 } from "./dashboard-bounds";
+import { formatFailureDetail } from "./failure-detail";
 
 export interface DashboardOpticalDrive {
   id: string;
@@ -58,6 +59,7 @@ export interface DashboardArchiveJob {
   status: JobStatus;
   progressPhase: ArchiveProgressPhase;
   progressPercent: number;
+  failureDetail?: string | null;
   retryable: boolean;
 }
 
@@ -70,6 +72,7 @@ export interface DashboardEncodeJob {
   progressPhase: EncodeProgressPhase | null;
   progressPercent: number;
   progressEtaSeconds: number | null;
+  failureDetail?: string | null;
   verificationStatus?: FilesystemVerificationStatus | null;
   verificationMessage?: string | null;
   verifiedAt?: string | null;
@@ -422,6 +425,7 @@ function readDashboardSnapshotRecords(
                 status: job.status,
                 progressPhase: job.progressPhase,
                 progressPercent: job.progressPercent,
+                failureDetail: formatFailureDetail(job.errorMessage),
                 retryable: isArchiveJobRetryable(job, disc),
               };
             }),
@@ -466,6 +470,7 @@ function readDashboardSnapshotRecords(
                 progressPhase: job.progressPhase,
                 progressPercent: job.progressPercent,
                 progressEtaSeconds: job.progressEtaSeconds,
+                failureDetail: formatFailureDetail(job.errorMessage),
                 verificationStatus: job.verificationStatus,
                 verificationMessage: job.verificationMessage,
                 verifiedAt: job.verifiedAt?.toISOString() ?? null,

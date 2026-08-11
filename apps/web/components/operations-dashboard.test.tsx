@@ -122,7 +122,7 @@ describe("DashboardView", () => {
     }
   });
 
-  it("renders populated operations without paths or worker diagnostics", () => {
+  it("renders populated operations with path-free worker failure details", () => {
     const html = render({
       generatedAt: "2026-07-22T08:00:00.000Z",
       opticalDrives: {
@@ -193,6 +193,7 @@ describe("DashboardView", () => {
             status: "failed",
             progressPhase: "copying",
             progressPercent: 42,
+            failureDetail: "DVD archive copy failed: Input/output error",
             retryable: true,
           },
         ],
@@ -209,6 +210,7 @@ describe("DashboardView", () => {
             progressPhase: null,
             progressPercent: 18,
             progressEtaSeconds: null,
+            failureDetail: "HandBrake stopped after a source read error",
           },
         ],
       },
@@ -250,11 +252,56 @@ describe("DashboardView", () => {
     expect(html).toContain("Previous pending reviews");
     expect(html).toContain("Next pending reviews");
     expect(html).toContain("Worker reported a failure");
+    expect(html.match(/<details class="job-failure">/g)).toHaveLength(2);
+    expect(html).toContain("DVD archive copy failed: Input/output error");
+    expect(html).toContain("HandBrake stopped after a source read error");
     expect(html).toContain("Approve archive");
     expect(html).toContain("Retry archive");
     expect(html).not.toContain("/dev/");
     expect(html).not.toContain("/media/");
-    expect(html).not.toContain("HandBrake");
+  });
+
+  it("expands a worker failure when its summary is clicked", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <DashboardView
+          section="discs"
+          state={{
+            opticalDrives: { status: "loaded", items: [] },
+            detectedDiscs: { status: "loaded", items: [] },
+            archiveJobs: {
+              status: "loaded",
+              items: [
+                {
+                  id: "failed-archive",
+                  detectedDiscId: "failed-disc",
+                  discLabel: "FAILED_DISC",
+                  opticalDriveName: "Upper drive",
+                  status: "failed",
+                  progressPhase: "copying",
+                  progressPercent: 28,
+                  failureDetail: "DVD archive copy failed: Input/output error",
+                  retryable: true,
+                },
+              ],
+            },
+            encodeJobs: { status: "loaded", items: [] },
+            catalogReview: { status: "loaded", items: [] },
+          }}
+        />,
+      );
+    });
+
+    const disclosure = container.querySelector("details");
+    const summary = container.querySelector("summary");
+    expect(disclosure?.open).toBe(false);
+    await act(async () => summary?.click());
+    expect(disclosure?.open).toBe(true);
+    await act(async () => root.unmount());
   });
 
   it("shows failed Archive Job history without retrying superseded duplicates", () => {
