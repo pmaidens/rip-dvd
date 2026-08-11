@@ -33,13 +33,13 @@ import {
   createBoundedFilesystemPathProbe,
   type FilesystemPathProbe,
 } from "./bounded-filesystem-path-probe.js";
+import { createArchivedDvdSelectionValidator } from "./archived-dvd-selection-validator.js";
 import { listWithBoundedOffset } from "./bounded-offset-pagination.js";
 import {
   createBoundedChronologicalList,
   createJobList,
 } from "./bounded-chronological-list.js";
 import {
-  canonicalDvdSelectionSourceKey,
   evaluateDetectedDiscRediscovery,
   normalizeDetectedDiscScan,
   requiresLegacyDiscSelectionRepair,
@@ -77,10 +77,7 @@ import {
   requireNonEmpty,
   requirePositiveSafeInteger,
 } from "./validation.js";
-import {
-  decodeArchivedDvdTitles,
-  isDvdContentId,
-} from "../dvd-scan.js";
+import { isDvdContentId } from "../dvd-scan.js";
 import {
   ENCODE_PROGRESS_PHASES,
   MAX_MEDIA_ITEM_HIERARCHY_DEPTH,
@@ -597,7 +594,7 @@ export function createDataAccessInternal(
       );
     }
 
-    const archivedTitles = decodeArchivedDvdTitles(scanData);
+    const validator = createArchivedDvdSelectionValidator(scanData);
     let lastSelectionId: DiscSelectionId | undefined;
     let selectionCount = 0;
     while (true) {
@@ -618,34 +615,10 @@ export function createDataAccessInternal(
         .all();
       for (const row of rows) {
         const selection = toDiscSelection(row);
-        const canonicalSourceKey = canonicalDvdSelectionSourceKey(selection);
-        if (selection.sourceKey !== canonicalSourceKey) {
-          throw new DomainInvariantError(
-            "Catalog review requires canonical Disc Selection source keys",
-          );
-        }
-        if (selection.titleNumber !== null) {
-          if (!archivedTitles) {
-            throw new DomainInvariantError(
-              "DVD title selections require a reviewable DVD title map",
-            );
-          }
-          const title = archivedTitles.find(
-            (candidate) => candidate.number === selection.titleNumber,
-          );
-          if (!title) {
-            throw new DomainInvariantError(
-              `DVD title ${selection.titleNumber} is not present in the archived scan`,
-            );
-          }
-          if (selection.chapterEnd !== null) {
-            if (selection.chapterEnd > title.chapters) {
-              throw new DomainInvariantError(
-                `chapterEnd must not exceed DVD title ${selection.titleNumber}'s ${title.chapters} chapters`,
-              );
-            }
-          }
-        }
+        validator.validate(
+          selection,
+          { persistedSourceKey: selection.sourceKey },
+        );
         selectionCount += 1;
       }
       if (rows.length < DISC_SELECTION_REVIEW_BATCH_SIZE) {
@@ -2520,69 +2493,10 @@ export function createDataAccessInternal(
                 "DVD Disc Selections require a DVD Original Disc Archive",
               );
             }
-            const coordinates =
-              input.kind === "main_feature"
-                ? { titleNumber: null, chapterStart: null, chapterEnd: null }
-                : input.kind === "dvd_title"
-                  ? {
-                      titleNumber: requirePositiveSafeInteger(
-                        input.titleNumber,
-                        "titleNumber",
-                      ),
-                      chapterStart: null,
-                      chapterEnd: null,
-                    }
-                  : {
-                      titleNumber: requirePositiveSafeInteger(
-                        input.titleNumber,
-                        "titleNumber",
-                      ),
-                      chapterStart: requirePositiveSafeInteger(
-                        input.chapterStart,
-                        "chapterStart",
-                      ),
-                      chapterEnd: requirePositiveSafeInteger(
-                        input.chapterEnd,
-                        "chapterEnd",
-                      ),
-                    };
-            if (
-              coordinates.chapterStart !== null &&
-              coordinates.chapterEnd !== null &&
-              coordinates.chapterEnd < coordinates.chapterStart
-            ) {
-              throw new DomainInvariantError(
-                "chapterEnd must be greater than or equal to chapterStart",
+            const { coordinates, sourceKey } =
+              createArchivedDvdSelectionValidator(source.scanData).validate(
+                input,
               );
-            }
-            if (coordinates.titleNumber !== null) {
-              const archivedTitles = decodeArchivedDvdTitles(source.scanData);
-              if (!archivedTitles) {
-                throw new DomainInvariantError(
-                  "DVD title selections require a reviewable DVD title map",
-                );
-              }
-              const title = archivedTitles.find(
-                (candidate) => candidate.number === coordinates.titleNumber,
-              );
-              if (!title) {
-                throw new DomainInvariantError(
-                  `DVD title ${coordinates.titleNumber} is not present in the archived scan`,
-                );
-              }
-              if (
-                coordinates.chapterEnd !== null &&
-                coordinates.chapterEnd > title.chapters
-              ) {
-                throw new DomainInvariantError(
-                  `chapterEnd must not exceed DVD title ${title.number}'s ${title.chapters} chapters`,
-                );
-              }
-            }
-            const sourceKey = canonicalDvdSelectionSourceKey({
-              kind: input.kind,
-              ...coordinates,
-            });
             const selection = toDiscSelection(
               requireRow(
                 transaction
@@ -2700,73 +2614,14 @@ export function createDataAccessInternal(
                 "DVD Disc Selections require a DVD Original Disc Archive",
               );
             }
-            const coordinates =
-              input.kind === "main_feature"
-                ? { titleNumber: null, chapterStart: null, chapterEnd: null }
-                : input.kind === "dvd_title"
-                  ? {
-                      titleNumber: requirePositiveSafeInteger(
-                        input.titleNumber,
-                        "titleNumber",
-                      ),
-                      chapterStart: null,
-                      chapterEnd: null,
-                    }
-                  : {
-                      titleNumber: requirePositiveSafeInteger(
-                        input.titleNumber,
-                        "titleNumber",
-                      ),
-                      chapterStart: requirePositiveSafeInteger(
-                        input.chapterStart,
-                        "chapterStart",
-                      ),
-                      chapterEnd: requirePositiveSafeInteger(
-                        input.chapterEnd,
-                        "chapterEnd",
-                      ),
-                    };
-            if (
-              coordinates.chapterStart !== null &&
-              coordinates.chapterEnd !== null &&
-              coordinates.chapterEnd < coordinates.chapterStart
-            ) {
-              throw new DomainInvariantError(
-                "chapterEnd must be greater than or equal to chapterStart",
-              );
-            }
-            const archivedTitles = decodeArchivedDvdTitles(source.scanData);
-            if (coordinates.titleNumber !== null) {
-              if (!archivedTitles) {
-                throw new DomainInvariantError(
-                  "DVD title selections require a reviewable DVD title map",
-                );
-              }
-              const title = archivedTitles.find(
-                (candidate) => candidate.number === coordinates.titleNumber,
-              );
-              if (!title) {
-                throw new DomainInvariantError(
-                  `DVD title ${coordinates.titleNumber} is not present in the archived scan`,
-                );
-              }
-              if (
-                coordinates.chapterEnd !== null &&
-                coordinates.chapterEnd > title.chapters
-              ) {
-                throw new DomainInvariantError(
-                  `chapterEnd must not exceed DVD title ${title.number}'s ${title.chapters} chapters`,
-                );
-              }
-            }
-            const sourceKey = canonicalDvdSelectionSourceKey({
-              kind: input.kind,
-              ...coordinates,
-            });
+            const validator = createArchivedDvdSelectionValidator(
+              source.scanData,
+            );
+            const { coordinates, sourceKey } = validator.validate(input);
             if (historicalJob) {
               if (!requiresLegacyDiscSelectionRepair(
                 current,
-                archivedTitles,
+                validator,
               )) {
                 throw new DomainInvariantError(
                   `Disc Selection ${id} cannot be repaired because ordinary Encode Job history must keep its retry identity (job ${historicalJob.id})`,
@@ -2906,7 +2761,7 @@ export function createDataAccessInternal(
             if (dependentJob) {
               if (!requiresLegacyDiscSelectionRepair(
                 selection,
-                decodeArchivedDvdTitles(archiveState.scanData),
+                createArchivedDvdSelectionValidator(archiveState.scanData),
               )) {
                 throw new DomainInvariantError(
                   `Disc Selection ${id} cannot be deleted because Encode Job history must be preserved (job ${dependentJob.id})`,
