@@ -34,6 +34,7 @@ import {
 } from "./bounded-child-process.js";
 
 const MAX_ARCHIVE_PATH_BYTES = 4_096;
+const MAX_ARCHIVE_RECOVERY_ENTRIES = 4_096;
 const MAX_DD_DIAGNOSTIC_BYTES = 65_536;
 const MAX_PROC_ENTRIES = 4_096;
 const MAX_PROC_FILE_DESCRIPTORS = 65_536;
@@ -394,7 +395,7 @@ function requireDeviceInactive(devicePath: string): void {
   );
 }
 
-function requireLegacyPartialInactive(partialPath: string): void {
+function requirePartialInactive(partialPath: string): void {
   let partial;
   try {
     partial = lstatSync(partialPath);
@@ -405,14 +406,57 @@ function requireLegacyPartialInactive(partialPath: string): void {
     throw error;
   }
   if (!partial.isFile() || partial.isSymbolicLink()) {
-    throw new Error("Legacy DVD archive partial path is unsafe");
+    throw new Error("DVD archive partial path is unsafe");
   }
   requireSameOwnerInodeInactive(
     partial,
     partial.uid,
     "DVD archive copy is still active",
-    "Could not prove the legacy DVD archive partial is inactive",
+    "Could not prove the DVD archive partial is inactive",
   );
+}
+
+const UUID_V4_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+function discoverAttemptPartialPaths(root: string, digest: string): string[] {
+  const prefix = `.${digest}.`;
+  const suffix = ".iso.rip-dvd-partial";
+  const partialPaths: string[] = [];
+  let directory;
+  try {
+    directory = opendirSync(root);
+  } catch {
+    throw new Error("Could not safely discover DVD archive partials");
+  }
+  let entryCount = 0;
+  try {
+    let entry;
+    while ((entry = directory.readSync()) !== null) {
+      entryCount += 1;
+      if (entryCount > MAX_ARCHIVE_RECOVERY_ENTRIES) {
+        throw new Error("DVD archive partial recovery exceeds the safety limit");
+      }
+      if (!entry.name.startsWith(prefix) || !entry.name.endsWith(suffix)) {
+        continue;
+      }
+      const attemptId = entry.name.slice(prefix.length, -suffix.length);
+      if (UUID_V4_PATTERN.test(attemptId)) {
+        partialPaths.push(join(root, entry.name));
+      }
+    }
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message === "DVD archive partial recovery exceeds the safety limit"
+    ) {
+      throw error;
+    }
+    throw new Error("Could not safely discover DVD archive partials");
+  } finally {
+    directory.closeSync();
+  }
+  return partialPaths.sort();
 }
 
 export const nodeDvdCopyRunner = createNodeDvdCopyRunner();
@@ -568,8 +612,19 @@ export async function preserveDvdArchive({
   ) {
     throw new Error("Archive path escaped the originals library");
   }
-  requireLegacyPartialInactive(legacyPartialPath);
-  await movePartialAside(legacyPartialPath);
+  const recoveryPaths = [
+    legacyPartialPath,
+    ...discoverAttemptPartialPaths(root, digest),
+  ];
+  for (const recoveryPath of recoveryPaths) {
+    if (runner.isActive(safeDevicePath, recoveryPath)) {
+      throw new Error("DVD archive copy is still active");
+    }
+    requirePartialInactive(recoveryPath);
+  }
+  for (const recoveryPath of recoveryPaths) {
+    await movePartialAside(recoveryPath);
+  }
 
   const existingArchive = await optionalMetadata(archivePath);
   if (existingArchive) {
