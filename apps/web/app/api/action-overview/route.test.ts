@@ -1,0 +1,106 @@
+import { describe, expect, it } from "vitest";
+
+import { useDataAccessFixture } from "../../../test/data-access-fixture";
+import { createActionOverviewRoute } from "./route";
+
+const dataAccessFixture = useDataAccessFixture();
+
+describe("Action overview API", () => {
+  it("counts all failed jobs and reviewed-archive filesystem problems", async () => {
+    const access = dataAccessFixture.create();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "action-overview-disc",
+      volumeLabel: "ACTION_OVERVIEW_DISC",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/missing/action-overview.iso",
+      fingerprint: disc.fingerprint,
+    });
+    const mediaItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Action Overview",
+      year: 2001,
+    });
+    const selection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: mediaItem.id,
+      kind: "main_feature",
+    });
+    access.catalog.completeCatalogReview(archive.id);
+
+    const jobs = [];
+    for (let index = 0; index < 22; index += 1) {
+      const profile = access.encodingProfiles.create({
+        key: `action-overview-${index}`,
+        displayName: `Action overview ${index}`,
+        mediaDomain: "dvd_video",
+        settings: { index },
+      });
+      jobs.push(
+        access.encodeJobs.enqueue({
+          discSelectionId: selection.id,
+          encodingProfileId: profile.id,
+          outputPath: `/missing/action-overview-${index}.mkv`,
+        }),
+      );
+    }
+    for (;;) {
+      const claim = access.encodeJobs.claimNext("action-overview-worker");
+      if (!claim) {
+        break;
+      }
+      access.encodeJobs.fail(claim, "fixture failure");
+    }
+    await access.filesystemVerification.verifyOriginalDiscArchive(archive.id);
+    await access.filesystemVerification.verifyEncodeJobOutput(jobs[0]!.id);
+
+    const response = createActionOverviewRoute(() => access);
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.failedEncodes).toMatchObject({ count: 22 });
+    expect(body.failedEncodes.items).toHaveLength(3);
+    expect(body.failedEncodes.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: "Action Overview (2001)" }),
+      ]),
+    );
+    expect(body.catalogReviews).toEqual({ count: 0, items: [] });
+    expect(body.filesystemProblems).toMatchObject({ count: 2 });
+    expect(body.filesystemProblems.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: `original_disc_archive:${archive.id}`,
+          label: "ACTION_OVERVIEW_DISC",
+        }),
+        expect.objectContaining({
+          id: `encode_job_output:${jobs[0]!.id}`,
+          label: "Action Overview (2001)",
+        }),
+      ]),
+    );
+    expect(JSON.stringify(body)).not.toContain("/missing/");
+  });
+
+  it("fails closed when the catalog is unavailable", async () => {
+    const response = createActionOverviewRoute(() => {
+      throw new Error("unavailable");
+    });
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({
+      error: "Action overview is unavailable",
+    });
+  });
+});

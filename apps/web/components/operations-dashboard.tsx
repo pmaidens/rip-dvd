@@ -1,7 +1,12 @@
 "use client";
 
+import Link from "next/link";
 import React, { useEffect, useState } from "react";
 
+import type {
+  ActionOverviewCategory,
+  ActionOverviewSnapshot,
+} from "../lib/action-overview";
 import type {
   DashboardArchiveJob,
   DashboardCatalogReviewItem,
@@ -249,8 +254,172 @@ function DashboardSection<T>({
   );
 }
 
+type AttentionState =
+  | { status: "loading" }
+  | { status: "error" }
+  | { status: "loaded"; count: number; items: ActionOverviewCategory["items"] };
+
+export type ActionOverviewLoadState =
+  | { status: "loading" }
+  | { status: "error" }
+  | { status: "loaded"; snapshot: ActionOverviewSnapshot };
+
+const ACTION_OVERVIEW_REFRESH_INTERVAL_MS = 30_000;
+
+export async function requestActionOverview(
+  fetcher: typeof fetch = fetch,
+  signal?: AbortSignal,
+): Promise<ActionOverviewSnapshot> {
+  const response = await fetcher("/api/action-overview", {
+    cache: "no-store",
+    ...(signal ? { signal } : {}),
+  });
+  if (!response.ok) {
+    throw new Error("Action overview request failed");
+  }
+  return (await response.json()) as ActionOverviewSnapshot;
+}
+
+function attentionState(
+  state: ActionOverviewLoadState,
+  category: keyof Omit<ActionOverviewSnapshot, "generatedAt">,
+): AttentionState {
+  return state.status === "loaded"
+    ? { status: "loaded", ...state.snapshot[category] }
+    : state;
+}
+
+function AttentionCard({
+  eyebrow,
+  title,
+  description,
+  href,
+  linkLabel,
+  state,
+}: {
+  eyebrow: string;
+  title: string;
+  description: string;
+  href: string;
+  linkLabel: string;
+  state: AttentionState;
+}) {
+  const hasAttention = state.status === "loaded" && state.count > 0;
+  return (
+    <article
+      className={`attention-card${hasAttention ? " attention-card-active" : ""}`}
+      data-state={
+        state.status === "loaded"
+          ? hasAttention
+            ? "attention"
+            : "clear"
+          : state.status
+      }
+    >
+      <div className="attention-card-heading">
+        <div>
+          <p className="section-eyebrow">{eyebrow}</p>
+          <h2>{title}</h2>
+        </div>
+        {state.status === "loaded" ? (
+          <strong className="attention-count">{state.count}</strong>
+        ) : null}
+      </div>
+      <p className="attention-description">{description}</p>
+      {state.status === "loading" ? (
+        <p className="attention-state">
+          <span className="loading-dot" aria-hidden="true" />
+          Checking current state…
+        </p>
+      ) : state.status === "error" ? (
+        <p className="attention-state attention-unavailable">
+          Current state unavailable
+        </p>
+      ) : state.count === 0 ? (
+        <p className="attention-state attention-clear">No action needed</p>
+      ) : (
+        <ul className="attention-items">
+          {state.items.map((item) => (
+            <li key={item.id}>{item.label}</li>
+          ))}
+          {state.count > state.items.length ? (
+            <li>+{state.count - state.items.length} more</li>
+          ) : null}
+        </ul>
+      )}
+      <Link className="attention-link" href={href}>
+        {linkLabel}
+        <span aria-hidden="true">→</span>
+      </Link>
+    </article>
+  );
+}
+
+export function ActionOverview({ state }: { state: ActionOverviewLoadState }) {
+  const detectedDiscs = attentionState(state, "discApprovals");
+  const archiveJobs = attentionState(state, "failedArchives");
+  const encodeJobs = attentionState(state, "failedEncodes");
+  const catalogReview = attentionState(state, "catalogReviews");
+  const filesystemProblems = attentionState(state, "filesystemProblems");
+
+  return (
+    <section className="attention-overview" aria-labelledby="attention-title">
+      <header className="attention-overview-header">
+        <div>
+          <p className="section-eyebrow">Operator attention</p>
+          <h2 id="attention-title">What needs action</h2>
+        </div>
+        <p>Only work that needs a decision, retry, review, or repair appears here.</p>
+      </header>
+      <div className="attention-grid">
+        <AttentionCard
+          eyebrow="Disc intake"
+          title="Discs awaiting approval"
+          description="Scanned discs that are ready for an archive decision."
+          href="/discs"
+          linkLabel="Open disc intake"
+          state={detectedDiscs}
+        />
+        <AttentionCard
+          eyebrow="Preservation"
+          title="Failed archives"
+          description="Archive jobs that stopped and can be retried."
+          href="/discs"
+          linkLabel="Open archive jobs"
+          state={archiveJobs}
+        />
+        <AttentionCard
+          eyebrow="Media queue"
+          title="Failed encodes"
+          description="Encoding jobs that require an operator retry."
+          href="/encoding"
+          linkLabel="Open encoding"
+          state={encodeJobs}
+        />
+        <AttentionCard
+          eyebrow="Library metadata"
+          title="Catalog reviews"
+          description="Archived discs waiting for title and selection review."
+          href="/catalog"
+          linkLabel="Open catalog review"
+          state={catalogReview}
+        />
+        <AttentionCard
+          eyebrow="Recorded files"
+          title="Filesystem problems"
+          description="Recorded checks that found a missing or inaccessible file."
+          href="/verification"
+          linkLabel="Open verification"
+          state={filesystemProblems}
+        />
+      </div>
+    </section>
+  );
+}
+
 export function DashboardView({
   state,
+  section = "all",
   onApproveDetectedDisc = () => undefined,
   approvingDetectedDiscId = null,
   onRequeueEncodeJob = () => undefined,
@@ -261,6 +430,7 @@ export function DashboardView({
   verifyingFilesystemTarget = null,
 }: {
   state: DashboardLoadState;
+  section?: "all" | "discs" | "encoding" | "catalog";
   onApproveDetectedDisc?: (id: string) => void;
   approvingDetectedDiscId?: string | null;
   onRequeueEncodeJob?: (id: string) => void;
@@ -275,8 +445,10 @@ export function DashboardView({
       ? state.catalogReview.page
       : undefined;
   return (
-    <div className="dashboard-grid">
-      <DashboardSection
+    <div className={`dashboard-grid dashboard-grid-${section}`}>
+      {section === "all" || section === "discs" ? (
+        <>
+          <DashboardSection
         title="Optical Drives"
         eyebrow="Hardware"
         state={state.opticalDrives}
@@ -297,7 +469,7 @@ export function DashboardView({
         )}
       />
 
-      <DashboardSection
+          <DashboardSection
         title="Detected Discs"
         eyebrow="Intake"
         state={state.detectedDiscs}
@@ -393,7 +565,7 @@ export function DashboardView({
         )}
       />
 
-      <DashboardSection
+          <DashboardSection
         title="Archive Jobs"
         eyebrow="Preservation queue"
         state={state.archiveJobs}
@@ -422,8 +594,12 @@ export function DashboardView({
         )}
       />
 
-      <DashboardSection
-        title="Encode Jobs"
+        </>
+      ) : null}
+
+      {section === "all" || section === "encoding" ? (
+        <DashboardSection
+          title="Encode Jobs"
         eyebrow="Media queue"
         className="wide-section"
         state={state.encodeJobs}
@@ -469,10 +645,13 @@ export function DashboardView({
             }
           />
         )}
-      />
+        />
+      ) : null}
 
-      <DashboardSection
-        title="Catalog Review"
+      {section === "all" || section === "catalog" ? (
+        <>
+          <DashboardSection
+            title="Catalog Review"
         eyebrow="Needs attention"
         className="wide-section"
         state={state.catalogReview}
@@ -517,8 +696,8 @@ export function DashboardView({
             </div>
           </article>
         )}
-      />
-      {catalogReviewPage ? (
+          />
+          {catalogReviewPage ? (
         <nav
           className="profile-actions wide-section"
           aria-label="Catalog review pages"
@@ -544,6 +723,8 @@ export function DashboardView({
             Next pending reviews
           </button>
         </nav>
+          ) : null}
+        </>
       ) : null}
     </div>
   );
@@ -616,10 +797,59 @@ export function DashboardConnectionStatus({
   );
 }
 
-export function OperationsDashboard() {
+export type OperationsDashboardPage =
+  | "overview"
+  | "discs"
+  | "catalog"
+  | "encoding"
+  | "verification";
+
+const pageCopy: Record<
+  OperationsDashboardPage,
+  { kicker: string; title: string; summary: string }
+> = {
+  overview: {
+    kicker: "Operations overview",
+    title: "What needs your attention.",
+    summary:
+      "A focused view of decisions, retries, reviews, and repairs across the local media workflow.",
+  },
+  discs: {
+    kicker: "Disc intake",
+    title: "Preserve every disc with confidence.",
+    summary:
+      "Monitor optical drives, inspect detected titles, approve archives, and recover failed preservation jobs.",
+  },
+  catalog: {
+    kicker: "Catalog review",
+    title: "Turn archives into a clean media catalog.",
+    summary:
+      "Review archived discs, connect titles to media items, and prepare selections for encoding.",
+  },
+  encoding: {
+    kicker: "Encoding",
+    title: "Manage the path to the media library.",
+    summary:
+      "Maintain encoding profiles, queue reviewed selections, and follow each encode through publication.",
+  },
+  verification: {
+    kicker: "Filesystem verification",
+    title: "Confirm the files behind the catalog.",
+    summary:
+      "Run explicit checks for original archives and encoded outputs without turning routine reads into filesystem probes.",
+  },
+};
+
+export function OperationsDashboard({
+  page = "overview",
+}: {
+  page?: OperationsDashboardPage;
+}) {
   const [state, setState] = useState<DashboardLoadState>(
     () => dashboardState("loading"),
   );
+  const [actionOverview, setActionOverview] =
+    useState<ActionOverviewLoadState>({ status: "loading" });
   const [requestNumber, setRequestNumber] = useState(0);
   const [streamStatus, setStreamStatus] =
     useState<DashboardStreamStatus>("connecting");
@@ -642,6 +872,9 @@ export function OperationsDashboard() {
     useState(false);
 
   useEffect(() => {
+    if (page === "overview") {
+      return;
+    }
     setState(dashboardState("loading"));
     setStreamStatus("connecting");
     return watchDashboardActivity({
@@ -650,7 +883,48 @@ export function OperationsDashboard() {
       onInitialLoadError: () => setState(dashboardState("error")),
       onStreamStatus: setStreamStatus,
     });
-  }, [requestNumber, catalogReviewOffset]);
+  }, [page, requestNumber, catalogReviewOffset]);
+
+  useEffect(() => {
+    if (page !== "overview") {
+      return;
+    }
+    let active = true;
+    let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+    let requestController: AbortController | undefined;
+    setActionOverview({ status: "loading" });
+    const load = async () => {
+      try {
+        requestController = new AbortController();
+        const snapshot = await requestActionOverview(
+          fetch,
+          requestController.signal,
+        );
+        if (active) {
+          setActionOverview({ status: "loaded", snapshot });
+        }
+      } catch {
+        if (active) {
+          setActionOverview({ status: "error" });
+        }
+      } finally {
+        if (active) {
+          refreshTimer = setTimeout(
+            () => void load(),
+            ACTION_OVERVIEW_REFRESH_INTERVAL_MS,
+          );
+        }
+      }
+    };
+    void load();
+    return () => {
+      active = false;
+      requestController?.abort();
+      if (refreshTimer !== undefined) {
+        clearTimeout(refreshTimer);
+      }
+    };
+  }, [page, requestNumber]);
 
   const sectionStates = [
     state.opticalDrives.status,
@@ -664,6 +938,13 @@ export function OperationsDashboard() {
     : sectionStates.includes("error")
       ? "error"
       : "loaded";
+  const pageConnectionStatus: DashboardConnection =
+    page === "overview"
+      ? actionOverview.status === "loaded"
+        ? "loaded"
+        : actionOverview.status
+      : connectionStatus;
+  const copy = pageCopy[page];
 
   const approveDetectedDisc = async (detectedDiscId: string) => {
     if (approvingDetectedDiscId !== null) {
@@ -720,38 +1001,37 @@ export function OperationsDashboard() {
     <main className="dashboard-shell">
       <header className="dashboard-header">
         <div>
-          <p className="brand">rip-dvd</p>
-          <p className="kicker">Operations dashboard</p>
-          <h1>Disc operations, at a glance.</h1>
-          <p className="dashboard-summary">
-            Monitor physical drives, preservation work, encoding, and catalog
-            review from one local control plane.
-          </p>
+          <p className="kicker">{copy.kicker}</p>
+          <h1>{copy.title}</h1>
+          <p className="dashboard-summary">{copy.summary}</p>
         </div>
         <div className="dashboard-controls">
           <DashboardConnectionStatus
-            connectionStatus={connectionStatus}
+            connectionStatus={pageConnectionStatus}
             streamStatus={streamStatus}
           />
           <button
             type="button"
             onClick={() => setRequestNumber((value) => value + 1)}
           >
-            {connectionStatus === "error" ? "Try again" : "Refresh"}
+            {pageConnectionStatus === "error" ? "Try again" : "Refresh"}
           </button>
         </div>
       </header>
 
-      <EncodingProfilesManager
-        onChanged={() => setRequestNumber((value) => value + 1)}
-      />
+      {page === "encoding" ? (
+        <>
+          <EncodingProfilesManager
+            onChanged={() => setRequestNumber((value) => value + 1)}
+          />
+          <EncodeJobsManager
+            key={requestNumber}
+            onChanged={() => setRequestNumber((value) => value + 1)}
+          />
+        </>
+      ) : null}
 
-      <EncodeJobsManager
-        key={requestNumber}
-        onChanged={() => setRequestNumber((value) => value + 1)}
-      />
-
-      {catalogReviewArchiveId ? (
+      {page === "catalog" && catalogReviewArchiveId ? (
         <CatalogReviewEditor
           key={catalogReviewArchiveId}
           archiveId={catalogReviewArchiveId}
@@ -781,30 +1061,44 @@ export function OperationsDashboard() {
         </p>
       ) : null}
 
-      <FilesystemVerificationInventory
-        refreshKey={requestNumber}
-        onVerify={(target, id) => void verifyFilesystem(target, id)}
-        verifyingTarget={verifyingFilesystemTarget}
-      />
-
-      <DashboardView
-        state={state}
-        onApproveDetectedDisc={(id) => void approveDetectedDisc(id)}
-        approvingDetectedDiscId={approvingDetectedDiscId}
-        onRequeueEncodeJob={(id) => void requeueEncodeJob(id)}
-        requeueingEncodeJobId={requeueingEncodeJobId}
-        onOpenCatalogReview={setCatalogReviewArchiveId}
-        onCatalogReviewPage={setCatalogReviewOffset}
-        onVerifyFilesystem={(target, id) =>
-          void verifyFilesystem(target, id)
-        }
-        verifyingFilesystemTarget={verifyingFilesystemTarget}
-      />
+      {page === "verification" ? (
+        <FilesystemVerificationInventory
+          refreshKey={requestNumber}
+          onVerify={(target, id) => void verifyFilesystem(target, id)}
+          verifyingTarget={verifyingFilesystemTarget}
+        />
+      ) : page === "overview" ? (
+        <ActionOverview state={actionOverview} />
+      ) : (
+        <DashboardView
+          state={state}
+          section={page}
+          onApproveDetectedDisc={(id) => void approveDetectedDisc(id)}
+          approvingDetectedDiscId={approvingDetectedDiscId}
+          onRequeueEncodeJob={(id) => void requeueEncodeJob(id)}
+          requeueingEncodeJobId={requeueingEncodeJobId}
+          onOpenCatalogReview={setCatalogReviewArchiveId}
+          onCatalogReviewPage={setCatalogReviewOffset}
+          onVerifyFilesystem={(target, id) =>
+            void verifyFilesystem(target, id)
+          }
+          verifyingFilesystemTarget={verifyingFilesystemTarget}
+        />
+      )}
 
       <footer className="dashboard-footer">
         <span>Local control plane</span>
-        {state.generatedAt ? (
-          <span>Updated {formatTimestamp(state.generatedAt)}</span>
+        {(page === "overview" && actionOverview.status === "loaded"
+          ? actionOverview.snapshot.generatedAt
+          : state.generatedAt) ? (
+          <span>
+            Updated{" "}
+            {formatTimestamp(
+              page === "overview" && actionOverview.status === "loaded"
+                ? actionOverview.snapshot.generatedAt
+                : state.generatedAt!,
+            )}
+          </span>
         ) : null}
       </footer>
     </main>
