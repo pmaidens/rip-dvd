@@ -20,6 +20,7 @@ import {
   inArray,
   isNotNull,
   isNull,
+  lt,
   lte,
   ne,
   notExists,
@@ -2193,6 +2194,16 @@ export function createDataAccessInternal(
         if (options?.ids !== undefined && options.ids.length === 0) {
           return [];
         }
+        if (options?.cursor !== undefined && options.limit === undefined) {
+          throw new DomainInvariantError(
+            "Original Disc Archive cursor requires a bounded limit",
+          );
+        }
+        if (options?.cursor !== undefined && options.offset !== undefined) {
+          throw new DomainInvariantError(
+            "Original Disc Archive cursor cannot be combined with an offset",
+          );
+        }
         const conditions = [
           options?.ids
             ? inArray(originalDiscArchives.id, [...options.ids])
@@ -2216,20 +2227,48 @@ export function createDataAccessInternal(
           options?.needsCatalogReviewOnly
             ? isNull(originalDiscArchives.catalogReviewedAt)
             : undefined,
+          options?.cursor
+            ? or(
+                options.cursor.direction === "older"
+                  ? lt(
+                      originalDiscArchives.archivedAt,
+                      options.cursor.archivedAt,
+                    )
+                  : gt(
+                      originalDiscArchives.archivedAt,
+                      options.cursor.archivedAt,
+                    ),
+                and(
+                  eq(
+                    originalDiscArchives.archivedAt,
+                    options.cursor.archivedAt,
+                  ),
+                  options.cursor.direction === "older"
+                    ? lt(originalDiscArchives.id, options.cursor.id)
+                    : gt(originalDiscArchives.id, options.cursor.id),
+                ),
+              )
+            : undefined,
         ].filter((condition) => condition !== undefined);
         const condition =
           conditions.length > 0 ? and(...conditions) : undefined;
         const isBounded = options?.limit !== undefined;
+        const readsNewer = options?.cursor?.direction === "newer";
         const query = database
           .select()
           .from(originalDiscArchives)
           .where(condition)
           .orderBy(
             ...(isBounded
-              ? [
-                  desc(originalDiscArchives.archivedAt),
-                  desc(originalDiscArchives.id),
-                ]
+              ? readsNewer
+                ? [
+                    asc(originalDiscArchives.archivedAt),
+                    asc(originalDiscArchives.id),
+                  ]
+                : [
+                    desc(originalDiscArchives.archivedAt),
+                    desc(originalDiscArchives.id),
+                  ]
               : [asc(originalDiscArchives.archivedAt)]),
           );
         const rows = listWithBoundedOffset(
@@ -2237,7 +2276,7 @@ export function createDataAccessInternal(
           options,
           "Original Disc Archive",
         );
-        return isBounded ? rows.reverse() : rows;
+        return isBounded && !readsNewer ? rows.reverse() : rows;
       },
 
       completeCatalogReview(id, catalogRevision) {

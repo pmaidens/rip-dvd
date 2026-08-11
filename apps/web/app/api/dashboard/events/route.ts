@@ -1,9 +1,12 @@
-import type { DataAccess } from "@rip-dvd/data-access";
+import type {
+  DataAccess,
+  OriginalDiscArchiveListCursor,
+} from "@rip-dvd/data-access";
 
 import { getDataAccess } from "../../../../lib/data-access";
 import { DASHBOARD_ACTIVITY_HISTORY_LIMIT } from "../../../../lib/dashboard-bounds";
 import {
-  parseDashboardCatalogReviewOffset,
+  parseDashboardCatalogReviewCursor,
   readDashboardSnapshot,
   type DashboardSnapshot,
 } from "../../../../lib/dashboard";
@@ -16,7 +19,7 @@ const RECONNECT_DELAY_MS = 3_000;
 
 interface DashboardEventResponseOptions {
   signal: AbortSignal;
-  catalogReviewOffset?: number;
+  catalogReviewCursor?: OriginalDiscArchiveListCursor;
   pollIntervalMs?: number;
 }
 
@@ -34,7 +37,7 @@ export function createDashboardEventResponse(
   access: DataAccess,
   {
     signal,
-    catalogReviewOffset = 0,
+    catalogReviewCursor,
     pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
   }: DashboardEventResponseOptions,
 ): Response {
@@ -80,7 +83,7 @@ export function createDashboardEventResponse(
         }
         const snapshot = readDashboardSnapshot(access, {
           activityLimit: DASHBOARD_ACTIVITY_HISTORY_LIMIT,
-          catalogReviewOffset,
+          catalogReviewCursor,
           includeDetectedDiscDetails: false,
         });
         controller.enqueue(
@@ -125,8 +128,8 @@ export function createDashboardEventRoute(
   getAccess: () => DataAccess = getDataAccess,
 ): Response {
   try {
-    const catalogReviewOffset = parseDashboardCatalogReviewOffset(request);
-    if (catalogReviewOffset === null) {
+    const catalogReviewCursor = parseDashboardCatalogReviewCursor(request);
+    if (catalogReviewCursor === null) {
       return new Response(null, {
         headers: { "Cache-Control": "no-store" },
         status: 400,
@@ -134,7 +137,7 @@ export function createDashboardEventRoute(
     }
     return createDashboardEventResponse(getAccess(), {
       signal: request.signal,
-      catalogReviewOffset,
+      catalogReviewCursor,
     });
   } catch {
     return new Response(null, {

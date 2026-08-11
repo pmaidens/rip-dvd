@@ -9,6 +9,9 @@ import type {
   EncodeProgressPhase,
   FilesystemVerificationStatus,
   JobStatus,
+  OriginalDiscArchive,
+  OriginalDiscArchiveId,
+  OriginalDiscArchiveListCursor,
 } from "@rip-dvd/data-access";
 import {
   decodeDvdTitleMap,
@@ -82,10 +85,9 @@ export interface DashboardCatalogReviewItem {
 }
 
 export interface DashboardPage {
-  offset: number;
   limit: number;
-  hasPrevious: boolean;
-  hasNext: boolean;
+  previousCursor: string | null;
+  nextCursor: string | null;
 }
 
 export type DashboardStatus =
@@ -108,22 +110,44 @@ export interface DashboardSnapshot {
 
 export interface DashboardSnapshotOptions {
   activityLimit?: number;
-  catalogReviewOffset?: number;
+  catalogReviewCursor?: OriginalDiscArchiveListCursor;
   includeDetectedDiscDetails?: boolean;
 }
 
-export function parseDashboardCatalogReviewOffset(
+const CATALOG_REVIEW_CURSOR_PATTERN =
+  /^v1\.(newer|older)\.(\d{1,16})\.([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+
+function encodeCatalogReviewCursor(
+  direction: OriginalDiscArchiveListCursor["direction"],
+  archive: Pick<OriginalDiscArchive, "archivedAt" | "id">,
+): string {
+  return `v1.${direction}.${archive.archivedAt.getTime()}.${archive.id}`;
+}
+
+export function parseDashboardCatalogReviewCursor(
   request: Request,
-): number | null {
-  const value = new URL(request.url).searchParams.get("catalogReviewOffset");
+): OriginalDiscArchiveListCursor | null | undefined {
+  const value = new URL(request.url).searchParams.get("catalogReviewCursor");
   if (value === null) {
-    return 0;
+    return undefined;
   }
-  if (!/^(0|[1-9]\d*)$/.test(value) || value.length > 16) {
+  const match = CATALOG_REVIEW_CURSOR_PATTERN.exec(value);
+  if (!match) {
     return null;
   }
-  const offset = Number(value);
-  return Number.isSafeInteger(offset) ? offset : null;
+  const archivedAtMilliseconds = Number(match[2]);
+  const archivedAt = new Date(archivedAtMilliseconds);
+  if (
+    !Number.isSafeInteger(archivedAtMilliseconds) ||
+    Number.isNaN(archivedAt.getTime())
+  ) {
+    return null;
+  }
+  return {
+    direction: match[1] as OriginalDiscArchiveListCursor["direction"],
+    archivedAt,
+    id: match[3] as OriginalDiscArchiveId,
+  };
 }
 
 type SourceResult<T> =
@@ -158,7 +182,7 @@ function readDashboardSnapshotRecords(
   access: ConsistentReadAccess,
   {
     activityLimit,
-    catalogReviewOffset = 0,
+    catalogReviewCursor,
     includeDetectedDiscDetails = true,
   }: DashboardSnapshotOptions = {},
 ): DashboardSnapshot {
@@ -217,17 +241,29 @@ function readDashboardSnapshotRecords(
         ? { needsCatalogReviewOnly: true }
         : {
             limit: activityLimit + 1,
-            offset: catalogReviewOffset,
+            cursor: catalogReviewCursor,
             needsCatalogReviewOnly: true,
           },
     ),
   );
   const catalogReviewArchives =
     archiveSource.status === "loaded" && activityLimit !== undefined
-      ? archiveSource.value.slice(-activityLimit)
+      ? catalogReviewCursor?.direction === "newer"
+        ? archiveSource.value.slice(0, activityLimit)
+        : archiveSource.value.slice(-activityLimit)
       : archiveSource.status === "loaded"
         ? archiveSource.value
         : [];
+  const previousCatalogReviewBoundary =
+    catalogReviewArchives.at(-1) ??
+    (catalogReviewCursor?.direction === "older"
+      ? catalogReviewCursor
+      : undefined);
+  const nextCatalogReviewBoundary =
+    catalogReviewArchives[0] ??
+    (catalogReviewCursor?.direction === "newer"
+      ? catalogReviewCursor
+      : undefined);
   const relevantDetectedDiscIds =
     activityLimit === undefined
       ? undefined
@@ -454,13 +490,31 @@ function readDashboardSnapshotRecords(
             verifiedAt: archive.verifiedAt?.toISOString() ?? null,
           })),
           ...(activityLimit !== undefined &&
-          (catalogReviewOffset > 0 || archiveSource.value.length > activityLimit)
+          (catalogReviewCursor !== undefined ||
+            archiveSource.value.length > activityLimit)
             ? {
                 page: {
-                  offset: catalogReviewOffset,
                   limit: activityLimit,
-                  hasPrevious: catalogReviewOffset > 0,
-                  hasNext: archiveSource.value.length > activityLimit,
+                  previousCursor:
+                    (catalogReviewCursor?.direction === "newer"
+                      ? archiveSource.value.length > activityLimit
+                      : catalogReviewCursor !== undefined) &&
+                    previousCatalogReviewBoundary !== undefined
+                      ? encodeCatalogReviewCursor(
+                          "newer",
+                          previousCatalogReviewBoundary,
+                        )
+                      : null,
+                  nextCursor:
+                    (catalogReviewCursor?.direction === "newer"
+                      ? catalogReviewCursor !== undefined
+                      : archiveSource.value.length > activityLimit) &&
+                    nextCatalogReviewBoundary !== undefined
+                      ? encodeCatalogReviewCursor(
+                          "older",
+                          nextCatalogReviewBoundary,
+                        )
+                      : null,
                 },
               }
             : {}),
