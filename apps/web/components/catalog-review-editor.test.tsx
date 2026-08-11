@@ -1,5 +1,17 @@
+// @vitest-environment happy-dom
+
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, expectTypeOf, it } from "vitest";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  expectTypeOf,
+  it,
+  vi,
+} from "vitest";
 
 import {
   CATALOG_REVIEW_COMMAND_ACTIONS,
@@ -12,9 +24,205 @@ import {
 } from "@rip-dvd/data-access/catalog-kinds";
 
 import {
+  CatalogReviewEditor,
+  type CatalogReviewDto,
   CatalogReviewView,
   mutateCatalogReview,
 } from "./catalog-review-editor";
+
+interface PendingRequest {
+  url: string;
+  resolve(response: Response): void;
+}
+
+let container: HTMLDivElement;
+let root: Root;
+
+beforeEach(() => {
+  (globalThis as typeof globalThis & {
+    IS_REACT_ACT_ENVIRONMENT: boolean;
+  }).IS_REACT_ACT_ENVIRONMENT = true;
+  container = document.createElement("div");
+  document.body.append(container);
+  root = createRoot(container);
+});
+
+afterEach(async () => {
+  await act(async () => root.unmount());
+  container.remove();
+  vi.unstubAllGlobals();
+});
+
+function stubDeferredCatalogReviewRequests(): PendingRequest[] {
+  const requests: PendingRequest[] = [];
+  vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) =>
+    new Promise<Response>((resolve) => {
+      requests.push({ url: String(input), resolve });
+    })));
+  return requests;
+}
+
+function catalogReview({
+  archiveId,
+  discLabel,
+  mediaOffset = 0,
+  discSelectionOffset = 0,
+}: {
+  archiveId: string;
+  discLabel: string;
+  mediaOffset?: number;
+  discSelectionOffset?: number;
+}): CatalogReviewDto {
+  const mediaItemId = `${archiveId}-item-${mediaOffset}`;
+  const titleNumber = discSelectionOffset / 100 + 1;
+  return {
+    catalogRevision: "2026-08-11T06:00:00.000Z",
+    archive: {
+      id: archiveId,
+      discLabel,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivedAt: "2026-08-03T18:00:00.000Z",
+      catalogReviewedAt: null,
+    },
+    reviewStatus: "needs_review",
+    rawScan: { titles: [] },
+    mediaItems: [{
+      id: mediaItemId,
+      parentId: null,
+      kind: "movie",
+      title: `${discLabel} item at offset ${mediaOffset}`,
+      year: null,
+      seasonNumber: null,
+      episodeNumber: null,
+    }],
+    mediaItemsPage: {
+      offset: mediaOffset,
+      limit: 100,
+      hasPrevious: mediaOffset > 0,
+      hasNext: mediaOffset === 0,
+      itemIds: [mediaItemId],
+    },
+    discSelections: [{
+      id: `${archiveId}-selection-${discSelectionOffset}`,
+      mediaItemId,
+      sourceKey: `dvd:title:${titleNumber}`,
+      kind: "dvd_title",
+      titleNumber,
+      chapterStart: null,
+      chapterEnd: null,
+      label: null,
+    }],
+    discSelectionsPage: {
+      offset: discSelectionOffset,
+      limit: 100,
+      hasPrevious: discSelectionOffset > 0,
+      hasNext: discSelectionOffset === 0,
+    },
+  };
+}
+
+async function resolveRequest(
+  request: PendingRequest,
+  body: CatalogReviewDto,
+): Promise<void> {
+  await act(async () => {
+    request.resolve(Response.json(body));
+  });
+}
+
+function renderCatalogReviewEditor(archiveId: string): void {
+  root.render(
+    <CatalogReviewEditor
+      archiveId={archiveId}
+      onClose={() => undefined}
+      onCompleted={() => undefined}
+    />,
+  );
+}
+
+describe("CatalogReviewEditor", () => {
+  it("keeps the current archive visible when archive requests resolve out of order", async () => {
+    const requests = stubDeferredCatalogReviewRequests();
+
+    await act(async () => renderCatalogReviewEditor("archive-a"));
+    await act(async () => renderCatalogReviewEditor("archive-b"));
+
+    expect(requests.map(({ url }) => url)).toEqual([
+      "/api/catalog-reviews/archive-a?mediaOffset=0&selectionOffset=0",
+      "/api/catalog-reviews/archive-b?mediaOffset=0&selectionOffset=0",
+    ]);
+
+    await resolveRequest(
+      requests[1]!,
+      catalogReview({ archiveId: "archive-b", discLabel: "CURRENT_ARCHIVE" }),
+    );
+    expect(container.textContent).toContain("Catalog CURRENT_ARCHIVE");
+
+    await resolveRequest(
+      requests[0]!,
+      catalogReview({ archiveId: "archive-a", discLabel: "STALE_ARCHIVE" }),
+    );
+    expect(container.textContent).toContain("Catalog CURRENT_ARCHIVE");
+    expect(container.textContent).not.toContain("STALE_ARCHIVE");
+  });
+
+  it("keeps the current rendered pages when page requests resolve out of order", async () => {
+    const requests = stubDeferredCatalogReviewRequests();
+
+    await act(async () => renderCatalogReviewEditor("archive-a"));
+    await resolveRequest(
+      requests[0]!,
+      catalogReview({ archiveId: "archive-a", discLabel: "FIRST_PAGE" }),
+    );
+
+    const nextMediaItemsPage = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Next Media Items",
+    );
+    if (!nextMediaItemsPage) {
+      throw new Error("Expected the next Media Items page control");
+    }
+    const nextDiscSelectionsPage = [...container.querySelectorAll("button")]
+      .find((button) => button.textContent === "Next Disc Selections");
+    if (!nextDiscSelectionsPage) {
+      throw new Error("Expected the next Disc Selections page control");
+    }
+    await act(async () => {
+      nextMediaItemsPage.click();
+      await Promise.resolve();
+      nextDiscSelectionsPage.click();
+    });
+    expect(requests.slice(1).map(({ url }) => url)).toEqual([
+      "/api/catalog-reviews/archive-a?mediaOffset=100&selectionOffset=0",
+      "/api/catalog-reviews/archive-a?mediaOffset=100&selectionOffset=100",
+    ]);
+
+    await resolveRequest(
+      requests[2]!,
+      catalogReview({
+        archiveId: "archive-a",
+        discLabel: "CURRENT_PAGE",
+        mediaOffset: 100,
+        discSelectionOffset: 100,
+      }),
+    );
+    expect(container.textContent).toContain("CURRENT_PAGE item at offset 100");
+    expect(container.textContent).toContain("Title 2");
+
+    await resolveRequest(
+      requests[1]!,
+      catalogReview({
+        archiveId: "archive-a",
+        discLabel: "STALE_PAGE",
+        mediaOffset: 100,
+        discSelectionOffset: 0,
+      }),
+    );
+    expect(container.textContent).toContain("CURRENT_PAGE item at offset 100");
+    expect(container.textContent).toContain("Title 2");
+    expect(container.textContent).not.toContain("STALE_PAGE");
+  });
+});
 
 function selectOptionValues(html: string, name: string): string[] {
   const select = html.match(
