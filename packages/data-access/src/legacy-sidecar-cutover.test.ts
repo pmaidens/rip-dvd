@@ -2670,7 +2670,7 @@ try {
     access.close();
   });
 
-  it("preserves SQLite catalog authority after initial marker publication", () => {
+  it("fences public Disc Selection deletion across cutover replay", () => {
     const root = temporaryDirectories.create(
       "rip-dvd-cutover-initial-human-catalog-edit-",
     );
@@ -2680,7 +2680,12 @@ try {
       originalsLibraryPath,
       "Authoritative.rip-dvd.json",
     );
+    const outputPath = join(root, "movies", "Authoritative.mkv");
     const databasePath = join(root, "catalog.sqlite");
+    const markerPath = join(
+      originalsLibraryPath,
+      ".rip-dvd-sqlite-catalog",
+    );
     mkdirSync(originalsLibraryPath, { recursive: true });
     writeFileSync(archivePath, "authoritative archive");
 
@@ -2726,7 +2731,7 @@ try {
       jobs: [{
         label: "Legacy sidecar selection",
         source: archivePath,
-        output: join(root, "movies", "Authoritative.mkv"),
+        output: outputPath,
         preset: "Fast 480p30",
         selection: "main_feature",
         title_number: null,
@@ -2738,7 +2743,10 @@ try {
       const human = createDataAccess({ databasePath });
       expect(human.catalog.listOriginalDiscArchives({
         ids: [archive.id],
-      })[0]).toMatchObject({ legacyCutoverPending: true });
+      })[0]).toMatchObject({
+        catalogReviewedAt: null,
+        legacyCutoverPending: true,
+      });
       human.catalog.updateMediaItem(item.id, {
         kind: "other",
         title: "Post-marker human correction",
@@ -2747,6 +2755,10 @@ try {
       expect(() =>
         human.catalog.deleteDiscSelection(selection.id)
       ).toThrow(/legacy cutover.*pending/i);
+      expect(human.catalog.listDiscSelections({ ids: [selection.id] }))
+        .toEqual([expect.objectContaining({ id: selection.id })]);
+      expect(human.encodeJobs.claimNext("cutover-public-deletion"))
+        .toBeNull();
       expect(() =>
         human.catalog.repairDiscSelection(selection.id, {
           originalDiscArchiveId: archive.id,
@@ -2756,24 +2768,65 @@ try {
         })
       ).toThrow(/legacy cutover.*pending/i);
       human.close();
+      throw new Error("injected post-publication replay");
     };
-    const access = createLegacySidecarDataAccess({ databasePath });
+    const firstAttempt = createLegacySidecarDataAccess({ databasePath });
 
+    expect(() =>
+      firstAttempt.legacySidecars.importLibrary({ originalsLibraryPath })
+    ).toThrow(/injected post-publication replay/);
+    firstAttempt.close();
+
+    expect(JSON.parse(readFileSync(markerPath, "utf8"))).toMatchObject({
+      legacyQueueStatus: "retired",
+    });
+    const pendingReplay = createDataAccess({ databasePath });
+    expect(pendingReplay.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]).toMatchObject({
+      catalogReviewedAt: null,
+      legacyCutoverPending: true,
+    });
+    expect(pendingReplay.catalog.listDiscSelections({ ids: [selection.id] }))
+      .toEqual([expect.objectContaining({ id: selection.id })]);
+    expect(pendingReplay.encodeJobs.claimNext("cutover-pending-replay"))
+      .toBeNull();
+    pendingReplay.close();
+
+    const replay = createLegacySidecarDataAccess({ databasePath });
     expect(
-      access.legacySidecars.importLibrary({ originalsLibraryPath }),
+      replay.legacySidecars.importLibrary({ originalsLibraryPath }),
     ).toMatchObject({ sidecarsImported: 1, sidecarsSkipped: 0, issues: [] });
 
-    expect(access.catalog.listMediaItems({ ids: [item.id] })).toEqual([
+    expect(replay.catalog.listMediaItems({ ids: [item.id] })).toEqual([
       expect.objectContaining({
         kind: "other",
         title: "Post-marker human correction",
         year: 2002,
       }),
     ]);
-    expect(access.catalog.listDiscSelections({ ids: [selection.id] })).toEqual([
+    expect(replay.catalog.listDiscSelections({ ids: [selection.id] })).toEqual([
       expect.objectContaining({ label: "Pre-cutover local selection" }),
     ]);
-    access.close();
+    expect(replay.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]).toMatchObject({
+      catalogReviewedAt: null,
+      legacyCutoverPending: false,
+    });
+    const retainedJobs = replay.encodeJobs.list();
+    expect(retainedJobs).toEqual([
+      expect.objectContaining({
+        discSelectionId: selection.id,
+        outputPath,
+        status: "queued",
+      }),
+    ]);
+    expect(
+      replay.legacySidecars.importLibrary({ originalsLibraryPath }),
+    ).toMatchObject({ sidecarsImported: 1, sidecarsSkipped: 0, issues: [] });
+    expect(replay.encodeJobs.list()).toEqual(retainedJobs);
+    replay.close();
   });
 
   it("reconciles an existing repair marker before ordinary service access", () => {
