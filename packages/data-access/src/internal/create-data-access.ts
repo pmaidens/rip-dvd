@@ -6,7 +6,7 @@ import {
   statSync,
   unlinkSync,
 } from "node:fs";
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 
@@ -218,16 +218,6 @@ export interface CreateDataAccessOptions {
 }
 
 export type { PublicationMutationRecoveryLock };
-
-function isContainedPath(root: string, path: string): boolean {
-  const relativePath = relative(root, resolve(path));
-  return (
-    relativePath !== "" &&
-    relativePath !== ".." &&
-    !relativePath.startsWith(`..${sep}`) &&
-    !isAbsolute(relativePath)
-  );
-}
 
 export type LegacySidecarMigrationAdapter = LegacySidecarImportAccessFactory;
 
