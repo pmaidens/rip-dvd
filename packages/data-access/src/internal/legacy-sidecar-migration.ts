@@ -15,6 +15,10 @@ import {
 } from "drizzle-orm";
 
 import { DomainInvariantError } from "../errors.js";
+import {
+  decodeArchivedDvdTitles,
+  DVD_TITLE_MAP_SCHEMA_VERSION,
+} from "../dvd-scan.js";
 import type {
   LegacySidecarAccess,
   LegacySidecarImportReport,
@@ -69,6 +73,20 @@ import { requireNonEmpty } from "./validation.js";
 
 const LEGACY_CUTOVER_INVENTORY_LIMIT = 10_000;
 const LEGACY_CUTOVER_RELEASE_PAGE_SIZE = 500;
+
+function normalizeLegacyDvdScan(
+  scanData: unknown,
+  contentId: string,
+): unknown {
+  const titles = decodeArchivedDvdTitles(scanData);
+  return titles && titles.length > 0
+    ? {
+        schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+        contentId,
+        titles,
+      }
+    : scanData;
+}
 
 function emptyLegacyImportRecordCounts():
   LegacySidecarImportReport["recordsCreated"] {
@@ -757,6 +775,12 @@ export function createLegacySidecarImportAccess(
             requireCapturedSourceArchive();
             throw error;
           }
+          const importedScanData = archiveContentIdentity
+            ? normalizeLegacyDvdScan(
+                sidecar.scanData,
+                archiveContentIdentity.contentId,
+              )
+            : sidecar.scanData;
           database.transaction((transaction) => {
             requireCapturedSourceArchive();
             const existingByFingerprint = transaction
@@ -848,7 +872,7 @@ export function createLegacySidecarImportAccess(
                   fingerprint: sidecar.fingerprint,
                   volumeLabel: sidecar.movieTitle,
                   status: "archived",
-                  scanData: sidecar.scanData,
+                  scanData: importedScanData,
                   detectedAt: importedCreatedAt,
                   createdAt: importedCreatedAt,
                   updatedAt: importedUpdatedAt,
@@ -920,6 +944,29 @@ export function createLegacySidecarImportAccess(
                 updated += 1;
               } else {
                 unchanged += 1;
+              }
+            }
+
+            if (archiveAlreadyExisted) {
+              const importedDisc = requireRow(
+                transaction
+                  .select({ scanData: detectedDiscs.scanData })
+                  .from(detectedDiscs)
+                  .where(eq(detectedDiscs.id, archive.detectedDiscId))
+                  .get(),
+                "legacy detected disc",
+                archive.detectedDiscId,
+              );
+              if (
+                isDeepStrictEqual(importedDisc.scanData, sidecar.scanData) &&
+                !isDeepStrictEqual(importedDisc.scanData, importedScanData)
+              ) {
+                transaction
+                  .update(detectedDiscs)
+                  .set({ scanData: importedScanData })
+                  .where(eq(detectedDiscs.id, archive.detectedDiscId))
+                  .run();
+                updated += 1;
               }
             }
 

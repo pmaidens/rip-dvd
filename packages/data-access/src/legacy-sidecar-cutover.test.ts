@@ -18,6 +18,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { decodeDvdTitleMap } from "./dvd-scan.js";
 import {
   createDataAccess,
   DomainInvariantError,
@@ -3253,6 +3254,14 @@ try {
     });
 
     expect(report.issues).toEqual([]);
+    expect(
+      decodeDvdTitleMap(
+        retry.catalog.listDetectedDiscs(["archived"])[0]?.scanData,
+      ),
+    ).toMatchObject({
+      schemaVersion: 2,
+      titles: [{ number: 1, durationSeconds: 600 }],
+    });
     expect(retry.catalog.listOriginalDiscArchives()).toEqual([
       expect.objectContaining({ fingerprint: "frozen-state-fingerprint" }),
     ]);
