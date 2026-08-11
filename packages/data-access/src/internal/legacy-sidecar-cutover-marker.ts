@@ -26,9 +26,11 @@ import type {
   ParsedLegacySidecar,
 } from "./legacy-sidecars.js";
 import {
-  advanceLegacySidecarBudget,
-  emptyLegacySidecarBudget,
-} from "./legacy-sidecar-budget.js";
+  createLegacySidecarImportBudgetAccumulator,
+  MAX_LEGACY_IMPORT_BYTES,
+  MAX_LEGACY_IMPORT_JOBS,
+  MAX_LEGACY_SCAN_BYTES,
+} from "./legacy-sidecar-import-budget.js";
 import {
   createLegacyJobLogicalKey,
   legacyJobLogicalKey,
@@ -38,11 +40,8 @@ import {
 } from "./legacy-sidecar-identity.js";
 import {
   LEGACY_MARKER_PREFIX,
-  MAX_LEGACY_IMPORT_BYTES,
-  MAX_LEGACY_IMPORT_JOBS,
   MAX_LEGACY_LIBRARY_ENTRIES,
   MAX_LEGACY_MARKER_BYTES,
-  MAX_LEGACY_SCAN_BYTES,
   MAX_LEGACY_SIDECAR_BYTES,
   MAX_LEGACY_SIDECAR_JOBS,
 } from "./legacy-sidecar-limits.js";
@@ -428,7 +427,7 @@ function recoverCapturedSidecars(
   );
   const discoveries: LegacySidecarDiscovery[] = [];
   const issues: LegacySidecarImportIssue[] = [];
-  let budget = emptyLegacySidecarBudget();
+  const importBudget = createLegacySidecarImportBudgetAccumulator();
   for (const recordedPath of [...capturedByPath.keys()].sort()) {
     const captured = capturedByPath.get(recordedPath)!;
     const sidecarPath = resolve(recordedPath);
@@ -453,9 +452,8 @@ function recoverCapturedSidecars(
       originalsLibraryPath,
       snapshot: captured.snapshot,
     });
-    const budgetResult = advanceLegacySidecarBudget(budget, discovery);
-    budget = budgetResult.budget;
-    if (budgetResult.exceeded === "scan-bytes") {
+    const exceededImportBound = importBudget.record(discovery);
+    if (exceededImportBound === "scan-bytes") {
       issues.push({
         code: "invalid_sidecar",
         message: `Aggregate recovery sidecar scan work exceeds the ${MAX_LEGACY_SCAN_BYTES}-byte limit`,
@@ -463,7 +461,7 @@ function recoverCapturedSidecars(
       });
       break;
     }
-    if (budgetResult.exceeded === "import-bytes") {
+    if (exceededImportBound === "retained-bytes") {
       return {
         discoveries: [],
         issues: [{
@@ -473,7 +471,7 @@ function recoverCapturedSidecars(
         }],
       };
     }
-    if (budgetResult.exceeded === "import-jobs") {
+    if (exceededImportBound === "jobs") {
       return {
         discoveries: [],
         issues: [{
