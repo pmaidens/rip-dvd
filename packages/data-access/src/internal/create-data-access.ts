@@ -46,6 +46,7 @@ import {
   requiresLegacyDiscSelectionRepair,
   toDiscSelection,
 } from "./dvd-contract-provenance.js";
+import { assignDvdContentIdAlias } from "./dvd-content-id-alias.js";
 import {
   archiveJobs,
   detectedDiscs,
@@ -766,45 +767,16 @@ export function createDataAccessInternal(
             );
           }
         }
-        const archiveWithFingerprint = transaction
-          .select({ id: originalDiscArchives.id })
-          .from(originalDiscArchives)
-          .where(eq(originalDiscArchives.fingerprint, hashed.contentId))
-          .get();
-        if (
-          archiveWithFingerprint &&
-          archiveWithFingerprint.id !== candidate.id
-        ) {
-          throw new DomainInvariantError(
-            "DVD content identity is already stored as a different Original Disc Archive fingerprint",
-          );
-        }
-        transaction
-          .insert(originalDiscArchiveContentIds)
-          .values({
-            originalDiscArchiveId: candidate.id,
-            contentId: hashed.contentId,
-          })
-          .onConflictDoNothing()
-          .run();
-        const archiveForContentId = transaction
-          .select({
-            originalDiscArchiveId:
-              originalDiscArchiveContentIds.originalDiscArchiveId,
-          })
-          .from(originalDiscArchiveContentIds)
-          .where(
-            eq(
-              originalDiscArchiveContentIds.contentId,
-              hashed.contentId,
-            ),
-          )
-          .get();
-        if (archiveForContentId?.originalDiscArchiveId !== candidate.id) {
-          throw new DomainInvariantError(
-            "DVD content identity is already assigned to a different Original Disc Archive",
-          );
-        }
+        assignDvdContentIdAlias(transaction, {
+          originalDiscArchiveId: candidate.id,
+          contentId: hashed.contentId,
+          conflictMessages: {
+            fingerprintOwner:
+              "DVD content identity is already stored as a different Original Disc Archive fingerprint",
+            aliasOwner:
+              "DVD content identity is already assigned to a different Original Disc Archive",
+          },
+        });
       }, { behavior: "immediate" });
       if (hashed.contentId === fingerprint) {
         return;
