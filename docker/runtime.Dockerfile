@@ -27,6 +27,8 @@ RUN apt-get update \
   && apt-get install --yes --no-install-recommends \
     ca-certificates curl gcc libc6-dev libssl-dev meson ninja-build pkg-config xz-utils \
   && rm -rf /var/lib/apt/lists/*
+COPY docker/libdvdcss-sg-io.h /tmp/libdvdcss-sg-io.h
+COPY docker/libdvdcss-sg-io.c /tmp/libdvdcss-sg-io.c
 RUN curl --fail --location --silent --show-error \
     "https://download.videolan.org/pub/libdvdcss/${LIBDVDCSS_VERSION}/libdvdcss-${LIBDVDCSS_VERSION}.tar.xz" \
     --output /tmp/libdvdcss.tar.xz \
@@ -34,7 +36,8 @@ RUN curl --fail --location --silent --show-error \
   && mkdir --parents /tmp/libdvdcss-source \
   && tar --extract --file /tmp/libdvdcss.tar.xz \
     --directory /tmp/libdvdcss-source --strip-components 1 \
-  && meson setup /tmp/libdvdcss-build /tmp/libdvdcss-source \
+  && CFLAGS="-include /tmp/libdvdcss-sg-io.h" \
+    meson setup /tmp/libdvdcss-build /tmp/libdvdcss-source \
     --buildtype=release --default-library=static \
     --libdir=lib \
     -Denable_docs=false -Denable_examples=false \
@@ -44,7 +47,8 @@ COPY docker/dvdcss-reader.c /tmp/dvdcss-reader.c
 COPY docker/test-dvdcss-reader.mjs /tmp/test-dvdcss-reader.mjs
 RUN gcc -std=c17 -O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong \
     -Wall -Wextra -Werror -Wformat=2 \
-    /tmp/dvdcss-reader.c --output /usr/local/bin/rip-dvd-dvdcss-reader \
+    /tmp/dvdcss-reader.c /tmp/libdvdcss-sg-io.c \
+    --output /usr/local/bin/rip-dvd-dvdcss-reader \
     $(pkg-config --cflags --libs libdvdcss) -lcrypto \
   && ldd /usr/local/bin/rip-dvd-dvdcss-reader \
   && ! ldd /usr/local/bin/rip-dvd-dvdcss-reader | grep --quiet libdvdcss \
@@ -152,6 +156,8 @@ COPY --from=dvdcss-reader-builder /usr/local/bin/rip-dvd-dvdcss-reader /usr/loca
 COPY --from=dvdcss-reader-builder /tmp/libdvdcss.tar.xz /usr/share/doc/rip-dvd-dvdcss-reader/libdvdcss-1.6.0.tar.xz
 COPY --from=dvdcss-reader-builder /tmp/libdvdcss-source/COPYING /usr/share/doc/rip-dvd-dvdcss-reader/COPYING
 COPY docker/dvdcss-reader.c /usr/share/doc/rip-dvd-dvdcss-reader/dvdcss-reader.c
+COPY docker/libdvdcss-sg-io.h /usr/share/doc/rip-dvd-dvdcss-reader/libdvdcss-sg-io.h
+COPY docker/libdvdcss-sg-io.c /usr/share/doc/rip-dvd-dvdcss-reader/libdvdcss-sg-io.c
 COPY --from=archive-worker-builder --chown=node:node /archive-worker ./apps/archive-worker
 ENV DVDCSS_CACHE="off"
 USER node
