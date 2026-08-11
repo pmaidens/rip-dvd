@@ -1,9 +1,8 @@
-import {
-  createDiscSelectionSourceIdentity,
-  DomainInvariantError,
-  type DiscSelectionSourceIdentityInput,
-  type MediaItemKind,
+import type {
+  DiscSelectionSourceIdentityInput,
+  MediaItemKind,
 } from "@rip-dvd/data-access";
+import { createDiscSelectionSourceIdentity } from "@rip-dvd/data-access/disc-selection-source-identity";
 
 export const CATALOG_REVIEW_COMMAND_ACTIONS = [
   "create_media_item",
@@ -283,10 +282,7 @@ function parseDiscSelectionInput(
     sourceIdentity = createDiscSelectionSourceIdentity(
       sourceIdentityInput as unknown as DiscSelectionSourceIdentityInput,
     );
-  } catch (error) {
-    if (!(error instanceof DomainInvariantError)) {
-      throw error;
-    }
+  } catch {
     return { ok: false, error: "Invalid Disc Selection" };
   }
   return {

@@ -235,8 +235,7 @@ describe("Catalog Review API", () => {
       action: "create_disc_selection",
       selection: {
         mediaItemId: movie.id,
-        kind: "dvd_title",
-        titleNumber: 1,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
       },
     })).status).toBe(201);
 
