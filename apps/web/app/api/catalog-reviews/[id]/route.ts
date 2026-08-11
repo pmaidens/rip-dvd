@@ -1,7 +1,9 @@
 import {
   decodeArchivedDvdTitles,
+  DISC_SELECTION_KINDS,
   DomainInvariantError,
   MAX_MEDIA_ITEM_HIERARCHY_DEPTH,
+  MEDIA_ITEM_KINDS,
   RecordNotFoundError,
   type DataAccess,
   type CreateDiscSelectionInput,
@@ -313,7 +315,25 @@ export async function createCatalogReviewRoute(
     }
     const parsedCommand = parseCatalogReviewCommand(
       await request.json().catch(() => null),
+      {
+        discSelectionKinds: DISC_SELECTION_KINDS,
+        mediaItemKinds: MEDIA_ITEM_KINDS,
+      },
     );
+    const repairDiscSelectionId = parsedCommand.ok
+      ? parsedCommand.command.action === "repair_disc_selection"
+        ? parsedCommand.command.discSelectionId
+        : null
+      : parsedCommand.repairDiscSelectionId ?? null;
+    if (repairDiscSelectionId !== null) {
+      const existing = access.catalog.listDiscSelections({
+        ids: [repairDiscSelectionId as DiscSelectionId],
+        originalDiscArchiveId: archiveId,
+      })[0];
+      if (!existing) {
+        return response({ error: "Disc Selection not found" }, 404);
+      }
+    }
     if (!parsedCommand.ok) {
       return response({ error: parsedCommand.error }, 400);
     }
@@ -378,15 +398,6 @@ export async function createCatalogReviewRoute(
         const repairSelectionId = command.action === "repair_disc_selection"
           ? command.discSelectionId as DiscSelectionId
           : null;
-        if (repairSelectionId !== null) {
-          const existing = access.catalog.listDiscSelections({
-            ids: [repairSelectionId],
-            originalDiscArchiveId: archiveId,
-          })[0];
-          if (!existing) {
-            return response({ error: "Disc Selection not found" }, 404);
-          }
-        }
         const input = command.selection;
         const common = {
           originalDiscArchiveId: archiveId,

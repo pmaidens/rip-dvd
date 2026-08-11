@@ -4,17 +4,24 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 
 import type { DvdTitle } from "@rip-dvd/data-access/dvd-scan";
 
-import {
-  CATALOG_REVIEW_DISC_SELECTION_KINDS,
-  CATALOG_REVIEW_MEDIA_ITEM_KINDS,
-  type CatalogReviewCommand,
-  type CatalogReviewDiscSelectionInput,
+import type {
+  CatalogReviewCommand,
+  CatalogReviewDiscSelectionInput,
 } from "../lib/catalog-review-command";
 import { displayTerm } from "../lib/display-term";
 
-type MediaItemKind = (typeof CATALOG_REVIEW_MEDIA_ITEM_KINDS)[number];
-type DiscSelectionKind =
-  (typeof CATALOG_REVIEW_DISC_SELECTION_KINDS)[number];
+const mediaItemKinds = [
+  "movie",
+  "tv_show",
+  "season",
+  "episode",
+  "trailer",
+  "bonus_feature",
+  "other",
+] as const;
+
+type MediaItemKind = (typeof mediaItemKinds)[number];
+type DiscSelectionKind = "main_feature" | "dvd_title" | "dvd_chapters";
 
 export interface CatalogReviewMediaItem {
   id: string;
@@ -369,7 +376,7 @@ export function CatalogReviewView({
               <label>
                 Kind
                 <select name="kind" defaultValue={editing?.kind ?? "movie"}>
-                  {CATALOG_REVIEW_MEDIA_ITEM_KINDS.map((kind) => (
+                  {mediaItemKinds.map((kind) => (
                     <option key={kind} value={kind}>{displayTerm(kind)}</option>
                   ))}
                 </select>

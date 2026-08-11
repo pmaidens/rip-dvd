@@ -1,3 +1,8 @@
+import type {
+  DiscSelectionKind,
+  MediaItemKind,
+} from "@rip-dvd/data-access";
+
 export const CATALOG_REVIEW_COMMAND_ACTIONS = [
   "create_media_item",
   "update_media_item",
@@ -7,28 +12,14 @@ export const CATALOG_REVIEW_COMMAND_ACTIONS = [
   "complete_review",
 ] as const;
 
-export const CATALOG_REVIEW_MEDIA_ITEM_KINDS = [
-  "movie",
-  "tv_show",
-  "season",
-  "episode",
-  "trailer",
-  "bonus_feature",
-  "other",
-] as const;
-
-export const CATALOG_REVIEW_DISC_SELECTION_KINDS = [
-  "main_feature",
-  "dvd_title",
-  "dvd_chapters",
-] as const;
-
-type CatalogReviewMediaItemKind =
-  (typeof CATALOG_REVIEW_MEDIA_ITEM_KINDS)[number];
+export interface CatalogReviewCommandDomainValues {
+  mediaItemKinds: readonly MediaItemKind[];
+  discSelectionKinds: readonly DiscSelectionKind[];
+}
 
 export interface CatalogReviewMediaItemInput {
   parentId?: string | null;
-  kind: CatalogReviewMediaItemKind;
+  kind: MediaItemKind;
   title: string;
   year?: number | null;
   seasonNumber?: number | null;
@@ -103,7 +94,11 @@ export type CatalogReviewCommandValidationError =
 
 export type CatalogReviewCommandParseResult =
   | { ok: true; command: CatalogReviewCommand }
-  | { ok: false; error: CatalogReviewCommandValidationError };
+  | {
+      ok: false;
+      error: CatalogReviewCommandValidationError;
+      repairDiscSelectionId?: string;
+    };
 
 const MEDIA_ITEM_UPDATE_FIELDS: ReadonlySet<string> = new Set([
   "parentId",
@@ -145,12 +140,16 @@ function optionalInteger(
 
 function invalid(
   error: CatalogReviewCommandValidationError,
+  repairDiscSelectionId?: string,
 ): CatalogReviewCommandParseResult {
-  return { ok: false, error };
+  return repairDiscSelectionId === undefined
+    ? { ok: false, error }
+    : { ok: false, error, repairDiscSelectionId };
 }
 
 function parseMediaItemInput(
   value: unknown,
+  domainValues: CatalogReviewCommandDomainValues,
 ): CatalogReviewMediaItemInput | null {
   const input = asRecord(value);
   const kind = boundedString(input?.kind, 32);
@@ -164,9 +163,7 @@ function parseMediaItemInput(
   if (
     !input ||
     !kind ||
-    !CATALOG_REVIEW_MEDIA_ITEM_KINDS.includes(
-      kind as CatalogReviewMediaItemKind,
-    ) ||
+    !domainValues.mediaItemKinds.includes(kind as MediaItemKind) ||
     !title ||
     (input.parentId !== undefined && input.parentId !== null && !parentId) ||
     (input.year !== undefined && year === undefined) ||
@@ -177,7 +174,7 @@ function parseMediaItemInput(
   }
   return {
     ...(input.parentId === undefined ? {} : { parentId: parentId ?? null }),
-    kind: kind as CatalogReviewMediaItemKind,
+    kind: kind as MediaItemKind,
     title,
     ...(input.year === undefined ? {} : { year: year ?? null }),
     ...(input.seasonNumber === undefined
@@ -191,6 +188,7 @@ function parseMediaItemInput(
 
 function parseMediaItemChanges(
   value: unknown,
+  domainValues: CatalogReviewCommandDomainValues,
 ):
   | { ok: true; changes: CatalogReviewMediaItemChanges }
   | { ok: false; error: CatalogReviewCommandValidationError } {
@@ -220,13 +218,11 @@ function parseMediaItemChanges(
     const kind = boundedString(input.kind, 32);
     if (
       !kind ||
-      !CATALOG_REVIEW_MEDIA_ITEM_KINDS.includes(
-        kind as CatalogReviewMediaItemKind,
-      )
+      !domainValues.mediaItemKinds.includes(kind as MediaItemKind)
     ) {
       return { ok: false, error: "Invalid Media Item kind" };
     }
-    changes.kind = kind as CatalogReviewMediaItemKind;
+    changes.kind = kind as MediaItemKind;
   }
   if ("title" in input) {
     const title = boundedString(input.title);
@@ -261,6 +257,7 @@ function parseMediaItemChanges(
 
 function parseDiscSelectionInput(
   value: unknown,
+  domainValues: CatalogReviewCommandDomainValues,
 ):
   | { ok: true; selection: CatalogReviewDiscSelectionInput }
   | { ok: false; error: CatalogReviewCommandValidationError } {
@@ -274,9 +271,7 @@ function parseDiscSelectionInput(
     !input ||
     !mediaItemId ||
     !kind ||
-    !CATALOG_REVIEW_DISC_SELECTION_KINDS.includes(
-      kind as (typeof CATALOG_REVIEW_DISC_SELECTION_KINDS)[number],
-    ) ||
+    !domainValues.discSelectionKinds.includes(kind as DiscSelectionKind) ||
     (input.label !== undefined && !label)
   ) {
     return { ok: false, error: "Invalid Disc Selection" };
@@ -325,6 +320,7 @@ function parseDiscSelectionInput(
 
 export function parseCatalogReviewCommand(
   value: unknown,
+  domainValues: CatalogReviewCommandDomainValues,
 ): CatalogReviewCommandParseResult {
   const body = asRecord(value);
   const action = boundedString(body?.action, 64);
@@ -334,14 +330,14 @@ export function parseCatalogReviewCommand(
 
   switch (action) {
     case "create_media_item": {
-      const mediaItem = parseMediaItemInput(body.mediaItem);
+      const mediaItem = parseMediaItemInput(body.mediaItem, domainValues);
       return mediaItem
         ? { ok: true, command: { action, mediaItem } }
         : invalid("Invalid Media Item");
     }
     case "update_media_item": {
       const mediaItemId = boundedString(body.mediaItemId);
-      const parsedChanges = parseMediaItemChanges(body.changes);
+      const parsedChanges = parseMediaItemChanges(body.changes, domainValues);
       if (!mediaItemId) {
         return invalid("Invalid Media Item update");
       }
@@ -353,7 +349,10 @@ export function parseCatalogReviewCommand(
         : invalid(parsedChanges.error);
     }
     case "create_disc_selection": {
-      const parsedSelection = parseDiscSelectionInput(body.selection);
+      const parsedSelection = parseDiscSelectionInput(
+        body.selection,
+        domainValues,
+      );
       return parsedSelection.ok
         ? {
             ok: true,
@@ -366,7 +365,10 @@ export function parseCatalogReviewCommand(
       if (!discSelectionId) {
         return invalid("Invalid Disc Selection");
       }
-      const parsedSelection = parseDiscSelectionInput(body.selection);
+      const parsedSelection = parseDiscSelectionInput(
+        body.selection,
+        domainValues,
+      );
       return parsedSelection.ok
         ? {
             ok: true,
@@ -376,7 +378,7 @@ export function parseCatalogReviewCommand(
               selection: parsedSelection.selection,
             },
           }
-        : invalid(parsedSelection.error);
+        : invalid(parsedSelection.error, discSelectionId);
     }
     case "delete_disc_selection": {
       const discSelectionId = boundedString(body.discSelectionId);

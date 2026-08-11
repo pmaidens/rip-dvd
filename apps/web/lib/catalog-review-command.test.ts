@@ -1,10 +1,23 @@
 import { describe, expect, it } from "vitest";
+import {
+  DISC_SELECTION_KINDS,
+  MEDIA_ITEM_KINDS,
+} from "@rip-dvd/data-access";
 
 import {
   CATALOG_REVIEW_COMMAND_ACTIONS,
   parseCatalogReviewCommand,
   type CatalogReviewCommand,
 } from "./catalog-review-command";
+
+const domainValues = {
+  discSelectionKinds: DISC_SELECTION_KINDS,
+  mediaItemKinds: MEDIA_ITEM_KINDS,
+};
+
+function parseCommand(value: unknown) {
+  return parseCatalogReviewCommand(value, domainValues);
+}
 
 const validCommands = {
   create_media_item: {
@@ -56,7 +69,7 @@ describe("catalog review command contract", () => {
 
     for (const action of CATALOG_REVIEW_COMMAND_ACTIONS) {
       const command = validCommands[action];
-      expect(parseCatalogReviewCommand(command)).toEqual({
+      expect(parseCommand(command)).toEqual({
         ok: true,
         command,
       });
@@ -103,6 +116,18 @@ describe("catalog review command contract", () => {
       "Invalid Disc Selection",
     ],
   ])("rejects invalid body %#", (body, error) => {
-    expect(parseCatalogReviewCommand(body)).toEqual({ ok: false, error });
+    expect(parseCommand(body)).toEqual({ ok: false, error });
+  });
+
+  it("retains a validated repair target when its replacement is invalid", () => {
+    expect(parseCommand({
+      action: "repair_disc_selection",
+      discSelectionId: "selection-1",
+      selection: { kind: "main_feature" },
+    })).toEqual({
+      ok: false,
+      error: "Invalid Disc Selection",
+      repairDiscSelectionId: "selection-1",
+    });
   });
 });
