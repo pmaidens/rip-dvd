@@ -262,7 +262,7 @@ export type DiscSelectionActionAvailability =
     reason: string;
     relatedEncodeJob: {
       id: EncodeJobId;
-      status: "queued" | "running";
+      status: "queued" | "running" | "cancellation_requested";
     } | null;
   }
   | {
@@ -489,6 +489,11 @@ export interface ArchiveJobProgress {
 
 export type RunningEncodeJob = EncodeJob & {
   status: "running";
+  claimToken: EncodeJobClaimToken;
+};
+
+export type ClaimedEncodeJob = EncodeJob & {
+  status: "running" | "cancellation_requested";
   claimToken: EncodeJobClaimToken;
 };
 
@@ -767,9 +772,10 @@ export interface EncodeJobAccess {
     outputPath: string;
     priority?: number;
   }): EncodeJob;
-  cancelQueued(id: EncodeJobId): EncodeJob;
+  requestCancellation(id: EncodeJobId): EncodeJob;
   claimNext(workerId: string): RunningEncodeJob | null;
-  renewClaim(claim: RunningEncodeJob): RunningEncodeJob;
+  renewClaim(claim: RunningEncodeJob): ClaimedEncodeJob;
+  completeCancellation(claim: RunningEncodeJob): EncodeJob;
   beginPublicationMutation(
     claim: RunningEncodeJob,
     cleanup: EncodeJobPartialCleanup,

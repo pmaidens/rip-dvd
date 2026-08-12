@@ -111,6 +111,7 @@ import type {
   ArchiveJobProgress,
   ArchiveRequestId,
   ArchiveRequestStatus,
+  ClaimedEncodeJob,
   ChronologicalListOptions,
   ConsistentReadAccess,
   CreateDiscSelectionInput,
@@ -207,6 +208,15 @@ function asRunningEncodeJob(job: EncodeJob): RunningEncodeJob {
   return job as RunningEncodeJob;
 }
 
+function asClaimedEncodeJob(job: EncodeJob): ClaimedEncodeJob {
+  if (
+    (job.status !== "running" && job.status !== "cancellation_requested") ||
+    job.claimToken === null
+  ) {
+    throw new DomainInvariantError("Claimed Encode Job has no active claim");
+  }
+  return job as ClaimedEncodeJob;
+}
 const archiveUsesCurrentDvdContentId = sql<boolean>`
   length(${originalDiscArchives.fingerprint}) = 71
   and substr(${originalDiscArchives.fingerprint}, 1, 7) = 'sha256:'
@@ -1239,7 +1249,7 @@ export function createDataAccessInternal(
   });
 
   const listEncodeJobs = createJobList<EncodeJob, EncodeJobStatus>({
-    activeStatuses: ["queued", "running"],
+    activeStatuses: ["queued", "running", "cancellation_requested"],
     historyStatuses: ["completed", "failed", "cancelled"],
     readQueue(statuses) {
       return database
@@ -3080,7 +3090,11 @@ export function createDataAccessInternal(
               .where(
                 and(
                   eq(encodeJobs.discSelectionId, id),
-                  inArray(encodeJobs.status, ["queued", "running"]),
+                  inArray(encodeJobs.status, [
+                    "queued",
+                    "running",
+                    "cancellation_requested",
+                  ]),
                 ),
               )
               .limit(1)
@@ -3439,7 +3453,7 @@ export function createDataAccessInternal(
             .from(encodeJobs)
             .where(eq(encodeJobs.discSelectionId, selection.id))
             .orderBy(
-              sql`case ${encodeJobs.status} when 'running' then 0 when 'queued' then 1 when 'completed' then 2 else 3 end`,
+              sql`case ${encodeJobs.status} when 'cancellation_requested' then 0 when 'running' then 1 when 'queued' then 2 when 'completed' then 3 else 4 end`,
               asc(encodeJobs.createdAt),
               asc(encodeJobs.id),
             )
@@ -3450,10 +3464,11 @@ export function createDataAccessInternal(
             createArchivedDvdSelectionValidator(scanData),
           );
           const activeJob = relatedEncodeJob?.status === "queued" ||
-              relatedEncodeJob?.status === "running"
+              relatedEncodeJob?.status === "running" ||
+              relatedEncodeJob?.status === "cancellation_requested"
             ? relatedEncodeJob as {
               id: EncodeJobId;
-              status: "queued" | "running";
+              status: "queued" | "running" | "cancellation_requested";
             }
             : null;
 
@@ -5782,7 +5797,7 @@ export function createDataAccessInternal(
         );
       },
 
-      cancelQueued(id) {
+      requestCancellation(id) {
         const timestamp = now();
         return database.transaction((transaction) => {
           const current = requireRow(
@@ -5794,30 +5809,51 @@ export function createDataAccessInternal(
             "encode job",
             id,
           );
-          if (current.status !== "queued") {
+          if (current.status !== "queued" && current.status !== "running") {
             throw new InvalidStatusTransitionError(
               "encode job",
               current.status,
               "cancelled",
             );
           }
-          return requireRow(
-            transaction
-              .update(encodeJobs)
-              .set({
-                status: "cancelled",
-                reservesOutputPath: current.replaceExistingOutput,
-                updatedAt: timestamp,
-              })
-              .where(and(
-                eq(encodeJobs.id, id),
-                eq(encodeJobs.status, "queued"),
-              ))
-              .returning()
-              .get(),
-            "encode job",
-            id,
-          );
+          const claimToken = current.status === "running"
+            ? current.claimToken
+            : null;
+          if (current.status === "running" && claimToken === null) {
+            throw new DomainInvariantError(
+              "Running Encode Job has no claim token",
+            );
+          }
+          const requestedStatus = current.status === "running"
+            ? "cancellation_requested" as const
+            : "cancelled" as const;
+          const updated = transaction
+            .update(encodeJobs)
+            .set({
+              status: requestedStatus,
+              reservesOutputPath: current.status === "queued"
+                ? current.replaceExistingOutput
+                : true,
+              progressEtaSeconds: null,
+              updatedAt: timestamp,
+            })
+            .where(and(
+              eq(encodeJobs.id, id),
+              eq(encodeJobs.status, current.status),
+              claimToken !== null
+                ? eq(encodeJobs.claimToken, claimToken)
+                : undefined,
+            ))
+            .returning()
+            .get();
+          if (!updated) {
+            throw new InvalidStatusTransitionError(
+              "encode job",
+              current.status,
+              requestedStatus,
+            );
+          }
+          return updated;
         }, { behavior: "immediate" });
       },
 
@@ -5827,13 +5863,63 @@ export function createDataAccessInternal(
         const renewed = database
           .update(encodeJobs)
           .set({ updatedAt: timestamp })
-          .where(encodeAttemptCondition(claim, timestamp))
+          .where(and(
+            eq(encodeJobs.id, claim.id),
+            inArray(encodeJobs.status, [
+              "running",
+              "cancellation_requested",
+            ]),
+            eq(encodeJobs.claimToken, claim.claimToken),
+            gt(
+              encodeJobs.updatedAt,
+              new Date(
+                timestamp.getTime() - ENCODE_JOB_LEASE_DURATION_MS,
+              ),
+            ),
+          ))
           .returning()
           .get();
         if (!renewed) {
           throw new StaleJobAttemptError("encode job", claim.id);
         }
-        return asRunningEncodeJob(renewed);
+        return asClaimedEncodeJob(renewed);
+      },
+      completeCancellation(claim) {
+        const timestamp = now();
+        const cancelled = database
+          .update(encodeJobs)
+          .set({
+            status: "cancelled",
+            reservesOutputPath: claim.replaceExistingOutput,
+            partialCleanupOutputPath: null,
+            partialCleanupClaimToken: null,
+            partialCleanupLeaseToken: null,
+            publicationPending: false,
+            publicationCompletionPending: false,
+            progressEtaSeconds: null,
+            claimedBy: null,
+            claimToken: null,
+            claimedAt: null,
+            completedAt: null,
+            errorMessage: null,
+            updatedAt: timestamp,
+          })
+          .where(and(
+            eq(encodeJobs.id, claim.id),
+            eq(encodeJobs.status, "cancellation_requested"),
+            eq(encodeJobs.claimToken, claim.claimToken),
+            isNull(encodeJobs.partialCleanupOutputPath),
+            isNull(encodeJobs.partialCleanupClaimToken),
+            isNull(encodeJobs.partialCleanupLeaseToken),
+            eq(encodeJobs.publicationPending, false),
+            eq(encodeJobs.publicationCompletionPending, false),
+          ))
+          .returning()
+          .get();
+        if (!cancelled) {
+          throw new StaleJobAttemptError("encode job", claim.id);
+        }
+        return cancelled;
       },
       beginPublicationMutation(claim, cleanup) {
         if (!cleanup.publicationPending || cleanup.leaseToken !== null) {
@@ -5917,7 +6003,10 @@ export function createDataAccessInternal(
           })
           .from(encodeJobs)
           .where(and(
-            eq(encodeJobs.status, "running"),
+            inArray(encodeJobs.status, [
+              "running",
+              "cancellation_requested",
+            ]),
             isNotNull(encodeJobs.partialCleanupOutputPath),
             isNotNull(encodeJobs.partialCleanupClaimToken),
             isNotNull(encodeJobs.partialCleanupLeaseToken),
@@ -6050,14 +6139,22 @@ export function createDataAccessInternal(
         const updated = database
           .update(encodeJobs)
           .set({
-            status: "failed",
+            status: sql`case when ${encodeJobs.status} = 'cancellation_requested' then 'cancelled' else 'failed' end`,
+            reservesOutputPath: sql`case when ${encodeJobs.status} = 'cancellation_requested' then ${encodeJobs.replaceExistingOutput} else ${encodeJobs.reservesOutputPath} end`,
             partialCleanupLeaseToken: null,
-            errorMessage: "Encode publication mutation was abandoned",
+            publicationPending: sql`case when ${encodeJobs.status} = 'cancellation_requested' then 0 else ${encodeJobs.publicationPending} end`,
+            errorMessage: sql`case when ${encodeJobs.status} = 'cancellation_requested' then null else 'Encode publication mutation was abandoned' end`,
+            claimedBy: sql`case when ${encodeJobs.status} = 'cancellation_requested' then null else ${encodeJobs.claimedBy} end`,
+            claimToken: sql`case when ${encodeJobs.status} = 'cancellation_requested' then null else ${encodeJobs.claimToken} end`,
+            claimedAt: sql`case when ${encodeJobs.status} = 'cancellation_requested' then null else ${encodeJobs.claimedAt} end`,
             updatedAt: timestamp,
           })
           .where(and(
             eq(encodeJobs.id, cleanup.jobId),
-            eq(encodeJobs.status, "running"),
+            inArray(encodeJobs.status, [
+              "running",
+              "cancellation_requested",
+            ]),
             eq(
               encodeJobs.publicationPending,
               cleanup.publicationPending,
@@ -6088,7 +6185,10 @@ export function createDataAccessInternal(
             .from(encodeJobs)
             .where(
               and(
-                eq(encodeJobs.status, "running"),
+                inArray(encodeJobs.status, [
+                  "running",
+                  "cancellation_requested",
+                ]),
                 isNull(encodeJobs.partialCleanupLeaseToken),
                 lte(encodeJobs.updatedAt, expiredBefore),
               ),
@@ -6103,18 +6203,25 @@ export function createDataAccessInternal(
           return transaction
             .update(encodeJobs)
             .set({
-              status: "failed",
+              status: sql`case when ${encodeJobs.status} = 'cancellation_requested' then 'cancelled' else 'failed' end`,
+              reservesOutputPath: sql`case when ${encodeJobs.status} = 'cancellation_requested' then ${encodeJobs.replaceExistingOutput} else ${encodeJobs.reservesOutputPath} end`,
               progressEtaSeconds: null,
               partialCleanupOutputPath: sql`${encodeJobs.outputPath}`,
               partialCleanupClaimToken: sql`${encodeJobs.claimToken}`,
               partialCleanupLeaseToken: null,
-              errorMessage: "Encode worker lease expired",
+              errorMessage: sql`case when ${encodeJobs.status} = 'cancellation_requested' then null else 'Encode worker lease expired' end`,
+              claimedBy: sql`case when ${encodeJobs.status} = 'cancellation_requested' then null else ${encodeJobs.claimedBy} end`,
+              claimToken: sql`case when ${encodeJobs.status} = 'cancellation_requested' then null else ${encodeJobs.claimToken} end`,
+              claimedAt: sql`case when ${encodeJobs.status} = 'cancellation_requested' then null else ${encodeJobs.claimedAt} end`,
               updatedAt: timestamp,
             })
             .where(
               and(
                 inArray(encodeJobs.id, expiredIds),
-                eq(encodeJobs.status, "running"),
+                inArray(encodeJobs.status, [
+                  "running",
+                  "cancellation_requested",
+                ]),
                 isNull(encodeJobs.partialCleanupLeaseToken),
                 lte(encodeJobs.updatedAt, expiredBefore),
               ),
@@ -6191,10 +6298,20 @@ export function createDataAccessInternal(
           .where(
             and(
               cleanup.leaseToken === null
-                ? encodeAttemptCondition(claim, timestamp)
+                ? and(
+                    eq(encodeJobs.id, claim.id),
+                    inArray(encodeJobs.status, [
+                      "running",
+                      "cancellation_requested",
+                    ]),
+                    eq(encodeJobs.claimToken, claim.claimToken),
+                  )
                 : and(
                     eq(encodeJobs.id, claim.id),
-                    eq(encodeJobs.status, "running"),
+                    inArray(encodeJobs.status, [
+                      "running",
+                      "cancellation_requested",
+                    ]),
                     eq(encodeJobs.claimToken, claim.claimToken),
                   ),
               eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
@@ -6230,7 +6347,11 @@ export function createDataAccessInternal(
           .from(encodeJobs)
           .where(
             and(
-              inArray(encodeJobs.status, ["failed", "completed"]),
+              inArray(encodeJobs.status, [
+                "failed",
+                "completed",
+                "cancelled",
+              ]),
               isNotNull(encodeJobs.partialCleanupOutputPath),
               isNotNull(encodeJobs.partialCleanupClaimToken),
             ),
@@ -6273,7 +6394,11 @@ export function createDataAccessInternal(
           .where(
             and(
               eq(encodeJobs.id, cleanup.jobId),
-              inArray(encodeJobs.status, ["failed", "completed"]),
+              inArray(encodeJobs.status, [
+                "failed",
+                "completed",
+                "cancelled",
+              ]),
               eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
               eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
               eq(encodeJobs.publicationPending, false),
@@ -6309,7 +6434,11 @@ export function createDataAccessInternal(
           .where(
             and(
               eq(encodeJobs.id, cleanup.jobId),
-              inArray(encodeJobs.status, ["failed", "completed"]),
+              inArray(encodeJobs.status, [
+                "failed",
+                "completed",
+                "cancelled",
+              ]),
               eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
               eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
               eq(
@@ -6351,7 +6480,11 @@ export function createDataAccessInternal(
             .where(
               and(
                 eq(encodeJobs.id, cleanup.jobId),
-                inArray(encodeJobs.status, ["failed", "completed"]),
+                inArray(encodeJobs.status, [
+                  "failed",
+                  "completed",
+                  "cancelled",
+                ]),
                 eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
                 eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
                 eq(encodeJobs.publicationPending, false),

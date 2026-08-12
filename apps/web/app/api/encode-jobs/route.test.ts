@@ -348,7 +348,7 @@ describe("Encode Jobs API", () => {
     expect(access.encodeJobs.list()).toHaveLength(1);
   });
 
-  it("cancels only queued Encode Jobs through a trusted explicit command", async () => {
+  it("cancels queued jobs and durably requests running cancellation through a trusted command", async () => {
     const access = dataAccessFixture.create();
     const reviewed = createSelection(access, "cancel");
     completeCatalogReview(access, reviewed.archive.id);
@@ -409,6 +409,12 @@ describe("Encode Jobs API", () => {
     expect(access.encodeJobs.claimNext("route-running-cancel")?.id).toBe(
       runningJob.id,
     );
+    const requested = await cancel(runningJob.id);
+    expect(requested.status).toBe(200);
+    expect((await requested.json()).job).toMatchObject({
+      id: runningJob.id,
+      status: "cancellation_requested",
+    });
     expect((await cancel(runningJob.id)).status).toBe(409);
     expect((await cancel("missing-job")).status).toBe(404);
     expect((await cancel(queued.id, "https://attacker.example")).status).toBe(
@@ -431,7 +437,7 @@ describe("Encode Jobs API", () => {
     expect(malformed.status).toBe(400);
     expect(access.encodeJobs.list().map((job) => [job.id, job.status])).toEqual(
       expect.arrayContaining([
-        [runningJob.id, "running"],
+        [runningJob.id, "cancellation_requested"],
         [queued.id, "cancelled"],
       ]),
     );

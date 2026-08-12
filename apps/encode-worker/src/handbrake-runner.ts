@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import type { Readable } from "node:stream";
 
 const HANDBRAKE_TIMEOUT_MS = 24 * 60 * 60_000;
+const HANDBRAKE_TERMINATION_GRACE_MS = 10_000;
 const MAX_DIAGNOSTIC_BYTES = 65_536;
 
 export interface HandBrakeRunRequest {
@@ -110,6 +111,7 @@ export function createNodeHandBrakeRunner({
         }
         let settled = false;
         let diagnostics = "";
+        let terminationTimeout: ReturnType<typeof setTimeout> | undefined;
         const finish = (error?: unknown) => {
           if (settled) {
             return;
@@ -119,12 +121,15 @@ export function createNodeHandBrakeRunner({
           signal.removeEventListener("abort", abort);
           error === undefined ? resolveRun() : rejectRun(error);
         };
-        const cancel = (error: unknown) => {
+        const cancel = (
+          error: unknown,
+          killSignal: NodeJS.Signals = "SIGKILL",
+        ) => {
           if (settled) {
             return;
           }
           try {
-            child.kill("SIGKILL");
+            child.kill(killSignal);
           } catch {
             // The original timeout, abort, or parser error remains authoritative.
           }
@@ -143,7 +148,21 @@ export function createNodeHandBrakeRunner({
           }
         };
         const abort = () => {
-          cancel(signal.reason ?? new Error("HandBrake was interrupted"));
+          cancel(
+            signal.reason ?? new Error("HandBrake was interrupted"),
+            "SIGTERM",
+          );
+          terminationTimeout = setTimeout(() => {
+            if (!activeOutputs.has(outputPath)) {
+              return;
+            }
+            try {
+              child.kill("SIGKILL");
+            } catch {
+              // Process closure remains the ownership boundary.
+            }
+          }, HANDBRAKE_TERMINATION_GRACE_MS);
+          terminationTimeout.unref();
         };
         const timeout = setTimeout(() => {
           cancel(new Error("HandBrake timed out"));
@@ -153,6 +172,9 @@ export function createNodeHandBrakeRunner({
         child.stderr.on("data", capture);
         child.once("error", (error) => finish(error));
         child.once("close", (code, closeSignal) => {
+          if (terminationTimeout !== undefined) {
+            clearTimeout(terminationTimeout);
+          }
           releaseOutput(outputPath);
           if (settled) {
             return;
