@@ -922,6 +922,88 @@ describe("CatalogReviewEditor", () => {
     }]);
     expect(onCompleted).toHaveBeenCalledOnce();
   });
+
+  it("reloads a stale Archive-only completion before another attempt", async () => {
+    const initialReview = catalogReview({
+      archiveId: "archive-a",
+      discLabel: "STALE_ARCHIVE_ONLY_DISC",
+    });
+    initialReview.coverage = {
+      discSelectionCount: 0,
+      mediaItemsWithSelections: 0,
+      mappedTitles: 0,
+      partiallyMappedTitles: 0,
+      unmappedTitles: 0,
+      mainFeatureSelections: 0,
+      titles: [],
+    };
+    initialReview.discSelections = [];
+    const refreshedReview = catalogReview({
+      archiveId: "archive-a",
+      discLabel: "REFRESHED_SELECTION_DISC",
+    });
+    refreshedReview.catalogRevision = "2026-08-11T06:00:01.000Z";
+    const requests: Array<{ method: string; url: string }> = [];
+    let getCount = 0;
+    vi.stubGlobal("fetch", vi.fn(async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const method = init?.method ?? "GET";
+      requests.push({ method, url: String(input) });
+      if (method === "POST") {
+        return Response.json(
+          { error: "Catalog review changed; reload before completing review" },
+          { status: 409 },
+        );
+      }
+      getCount += 1;
+      return Response.json(getCount === 1 ? initialReview : refreshedReview);
+    }));
+    const onCompleted = vi.fn();
+
+    await act(async () => {
+      root.render(
+        <CatalogReviewEditor
+          archiveId="archive-a"
+          onClose={() => undefined}
+          onCompleted={onCompleted}
+        />,
+      );
+    });
+    const archiveOnly = container.querySelector<HTMLInputElement>(
+      '.catalog-complete-action input[type="checkbox"]',
+    );
+    const complete = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Complete review",
+    );
+    if (!archiveOnly || !complete) {
+      throw new Error("Expected inline Archive-only completion controls");
+    }
+
+    await act(async () => archiveOnly.click());
+    await act(async () => complete.click());
+
+    expect(requests).toEqual([
+      {
+        method: "GET",
+        url: "/api/catalog-reviews/archive-a?selectionOffset=0",
+      },
+      { method: "POST", url: "/api/catalog-reviews/archive-a" },
+      {
+        method: "GET",
+        url: "/api/catalog-reviews/archive-a?selectionOffset=0",
+      },
+    ]);
+    expect(container.textContent).toContain("REFRESHED_SELECTION_DISC");
+    expect(container.textContent).toContain("Title 1");
+    expect(archiveOnly.checked).toBe(false);
+    expect(archiveOnly.disabled).toBe(true);
+    expect(container.textContent).toContain(
+      "Catalog review changed; reload before completing review",
+    );
+    expect(onCompleted).not.toHaveBeenCalled();
+  });
 });
 
 function selectOptionValues(html: string, name: string): string[] {
