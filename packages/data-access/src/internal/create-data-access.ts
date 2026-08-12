@@ -13,6 +13,8 @@ import { DatabaseSync } from "node:sqlite";
 import {
   and,
   asc,
+  count,
+  countDistinct,
   desc,
   eq,
   exists,
@@ -135,6 +137,7 @@ import type {
   EncodeJobStatus,
   EncodingProfileId,
   MediaDomain,
+  MediaItemMaintenance,
   MediaItemId,
   OpticalDriveId,
   OriginalDiscArchiveId,
@@ -409,6 +412,97 @@ export function createDataAccessInternal(
   type CatalogTransaction = Parameters<
     Parameters<typeof database.transaction>[0]
   >[0];
+
+  function mediaItemDeletionReason(
+    childCount: number,
+    discSelectionReferenceCount: number,
+  ): string | null {
+    const blockers = [
+      childCount === 0
+        ? null
+        : `${childCount} child ${
+          childCount === 1 ? "Media Item" : "Media Items"
+        }`,
+      discSelectionReferenceCount === 0
+        ? null
+        : `${discSelectionReferenceCount} Disc Selection ${
+          discSelectionReferenceCount === 1 ? "reference" : "references"
+        }`,
+    ].filter((blocker): blocker is string => blocker !== null);
+    return blockers.length === 0 ? null : blockers.join(" and ");
+  }
+
+  function readMediaItemMaintenance(
+    ids: readonly MediaItemId[],
+    currentArchiveId: OriginalDiscArchiveId | undefined,
+    querySource: Pick<typeof database, "select"> = database,
+  ): MediaItemMaintenance[] {
+    if (ids.length === 0) {
+      return [];
+    }
+    if (ids.length > MEDIA_ITEM_SEARCH_LIMIT) {
+      throw new DomainInvariantError(
+        `Media Item maintenance is limited to ${MEDIA_ITEM_SEARCH_LIMIT} records`,
+      );
+    }
+    const existingIds = querySource
+      .select({ id: mediaItems.id })
+      .from(mediaItems)
+      .where(inArray(mediaItems.id, [...ids]))
+      .all()
+      .map(({ id }) => id);
+    const childCounts = new Map(
+      querySource
+        .select({ mediaItemId: mediaItems.parentId, value: count() })
+        .from(mediaItems)
+        .where(inArray(mediaItems.parentId, [...ids]))
+        .groupBy(mediaItems.parentId)
+        .all()
+        .map((row) => [row.mediaItemId, row.value]),
+    );
+    const selectionCounts = new Map(
+      querySource
+        .select({
+          mediaItemId: discSelections.mediaItemId,
+          discSelectionReferenceCount: count(),
+          referencedArchiveCount: countDistinct(
+            discSelections.originalDiscArchiveId,
+          ),
+          otherArchiveCount: currentArchiveId === undefined
+            ? countDistinct(discSelections.originalDiscArchiveId)
+            : countDistinct(
+              sql`case when ${discSelections.originalDiscArchiveId} <> ${
+                currentArchiveId
+              } then ${discSelections.originalDiscArchiveId} end`,
+            ),
+        })
+        .from(discSelections)
+        .where(inArray(discSelections.mediaItemId, [...ids]))
+        .groupBy(discSelections.mediaItemId)
+        .all()
+        .map((row) => [row.mediaItemId, row]),
+    );
+    return existingIds.map((mediaItemId) => {
+      const childCount = childCounts.get(mediaItemId) ?? 0;
+      const selectionCount = selectionCounts.get(mediaItemId);
+      const discSelectionReferenceCount =
+        selectionCount?.discSelectionReferenceCount ?? 0;
+      const reason = mediaItemDeletionReason(
+        childCount,
+        discSelectionReferenceCount,
+      );
+      return {
+        mediaItemId,
+        childCount,
+        discSelectionReferenceCount,
+        referencedArchiveCount: selectionCount?.referencedArchiveCount ?? 0,
+        otherArchiveCount: selectionCount?.otherArchiveCount ?? 0,
+        deletionAvailability: reason === null
+          ? { state: "available", reason: null }
+          : { state: "unavailable", reason },
+      } satisfies MediaItemMaintenance;
+    });
+  }
 
   function insertDiscSelection(
     transaction: CatalogTransaction,
@@ -1605,6 +1699,8 @@ export function createDataAccessInternal(
           listOriginalDiscArchives: (options) =>
             access.catalog.listOriginalDiscArchives(options),
           listMediaItems: (options) => access.catalog.listMediaItems(options),
+          listMediaItemMaintenance: (options) =>
+            access.catalog.listMediaItemMaintenance(options),
           searchMediaItems: (options) =>
             access.catalog.searchMediaItems(options),
           listDiscSelections: (options) =>
@@ -2670,6 +2766,49 @@ export function createDataAccessInternal(
             id,
           );
         }, { behavior: "immediate" });
+      },
+
+      deleteMediaItem(id) {
+        return database.transaction((transaction) => {
+          const current = requireRow(
+            transaction
+              .select()
+              .from(mediaItems)
+              .where(eq(mediaItems.id, id))
+              .get(),
+            "media item",
+            id,
+          );
+          const maintenance = readMediaItemMaintenance(
+            [id],
+            undefined,
+            transaction,
+          )[0]!;
+          if (maintenance.deletionAvailability.state === "unavailable") {
+            throw new DomainInvariantError(
+              `Media Item deletion is unavailable: ${
+                maintenance.deletionAvailability.reason
+              }`,
+            );
+          }
+          requireRow(
+            transaction
+              .delete(mediaItems)
+              .where(eq(mediaItems.id, id))
+              .returning({ id: mediaItems.id })
+              .get(),
+            "media item",
+            id,
+          );
+          return current;
+        }, { behavior: "immediate" });
+      },
+
+      listMediaItemMaintenance(options) {
+        return readMediaItemMaintenance(
+          options.ids,
+          options.currentArchiveId,
+        );
       },
 
       listMediaItems(options) {

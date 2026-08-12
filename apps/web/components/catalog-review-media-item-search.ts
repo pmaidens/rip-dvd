@@ -8,12 +8,16 @@ type MediaItemSearchFetch = (
 export async function requestMediaItemSearch(
   query: string,
   offset: number,
+  options: { archiveId?: string } = {},
   fetcher: MediaItemSearchFetch = fetch,
 ): Promise<MediaItemSearchDto> {
   const parameters = new URLSearchParams({
     query,
     offset: String(offset),
   });
+  if (options.archiveId !== undefined) {
+    parameters.set("archiveId", options.archiveId);
+  }
   const response = await fetcher(`/api/media-items?${parameters.toString()}`, {
     cache: "no-store",
     headers: { Accept: "application/json" },

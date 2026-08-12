@@ -29,6 +29,17 @@ export interface CatalogReviewMediaItem {
   year: number | null;
   seasonNumber: number | null;
   episodeNumber: number | null;
+  maintenance?: MediaItemMaintenance;
+}
+
+export interface MediaItemMaintenance {
+  childCount: number;
+  discSelectionReferenceCount: number;
+  referencedArchiveCount: number;
+  otherArchiveCount: number;
+  deletionAvailability:
+    | { state: "available"; reason: null }
+    | { state: "unavailable"; reason: string };
 }
 
 export interface CatalogReviewDiscSelection {
@@ -139,6 +150,7 @@ export interface CreateEpisodicMappingProposalInput {
 export interface MediaItemSearchResult {
   mediaItem: CatalogReviewMediaItem;
   ancestors: CatalogReviewMediaItem[];
+  maintenance: MediaItemMaintenance;
   suggestion: "exact" | "normalized" | null;
 }
 

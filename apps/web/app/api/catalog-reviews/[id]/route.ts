@@ -11,6 +11,7 @@ import {
   type DiscSelectionId,
   type MediaItem,
   type MediaItemId,
+  type MediaItemMaintenance,
   type OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
 import { loadConfig } from "@rip-dvd/config";
@@ -57,7 +58,10 @@ function recordOffset(request: Request, parameter: string): number | null {
   return Number.isSafeInteger(offset) ? offset : null;
 }
 
-function serializeMediaItem(item: MediaItem) {
+function serializeMediaItem(
+  item: MediaItem,
+  maintenance?: MediaItemMaintenance,
+) {
   return {
     id: item.id,
     parentId: item.parentId,
@@ -66,6 +70,18 @@ function serializeMediaItem(item: MediaItem) {
     year: item.year,
     seasonNumber: item.seasonNumber,
     episodeNumber: item.episodeNumber,
+    ...(maintenance === undefined
+      ? {}
+      : {
+        maintenance: {
+          childCount: maintenance.childCount,
+          discSelectionReferenceCount:
+            maintenance.discSelectionReferenceCount,
+          referencedArchiveCount: maintenance.referencedArchiveCount,
+          otherArchiveCount: maintenance.otherArchiveCount,
+          deletionAvailability: maintenance.deletionAvailability,
+        },
+      }),
   };
 }
 
@@ -166,6 +182,12 @@ function readCatalogReview(
       snapshot.catalog,
       discSelectionsPage.map((selection) => selection.mediaItemId),
     );
+    const maintenanceByMediaItemId = new Map(
+      snapshot.catalog.listMediaItemMaintenance({
+        ids: reviewMediaItems.map((item) => item.id),
+        currentArchiveId: id,
+      }).map((maintenance) => [maintenance.mediaItemId, maintenance]),
+    );
     const rawTitles = decodeArchivedDvdTitles(disc.scanData) ?? [];
     return {
       catalogRevision: archive.updatedAt.toISOString(),
@@ -183,7 +205,9 @@ function readCatalogReview(
         titles: rawTitles,
       },
       coverage: calculateCatalogReviewCoverage(rawTitles, allDiscSelections),
-      mediaItems: reviewMediaItems.map(serializeMediaItem),
+      mediaItems: reviewMediaItems.map((item) =>
+        serializeMediaItem(item, maintenanceByMediaItemId.get(item.id))
+      ),
       discSelections: discSelectionsPage.map((selection) => {
         const availability = actionAvailabilityById.get(selection.id);
         if (!availability) {
@@ -326,6 +350,7 @@ export async function createCatalogReviewRoute(
           discSelection: command.discSelection,
         });
         return response({
+          message: "Mapping changed; review required",
           mediaItem: serializeMediaItem(proposal.mediaItem),
           discSelection: serializeDiscSelection(proposal.discSelection),
         }, 201);
@@ -335,7 +360,10 @@ export async function createCatalogReviewRoute(
         const item = access.catalog.createMediaItem(
           createMediaItemInput(command.mediaItem),
         );
-        return response({ mediaItem: serializeMediaItem(item) }, 201);
+        return response({
+          message: "Media Item created",
+          mediaItem: serializeMediaItem(item),
+        }, 201);
       }
 
       case "update_media_item": {
@@ -367,7 +395,20 @@ export async function createCatalogReviewRoute(
           command.mediaItemId as MediaItemId,
           update,
         );
-        return response({ mediaItem: serializeMediaItem(item) });
+        return response({
+          message: "Metadata saved",
+          mediaItem: serializeMediaItem(item),
+        });
+      }
+
+      case "delete_media_item": {
+        const item = access.catalog.deleteMediaItem(
+          command.mediaItemId as MediaItemId,
+        );
+        return response({
+          message: "Media Item deleted",
+          mediaItem: serializeMediaItem(item),
+        });
       }
 
       case "create_disc_selection":
@@ -393,7 +434,10 @@ export async function createCatalogReviewRoute(
           sourceIdentity: input.sourceIdentity,
         });
         return response(
-          { discSelection: serializeDiscSelection(selection) },
+          {
+            message: "Mapping changed; review required",
+            discSelection: serializeDiscSelection(selection),
+          },
           repairSelectionId === null ? 201 : 200,
         );
       }
@@ -409,6 +453,7 @@ export async function createCatalogReviewRoute(
         }
         const deletion = access.catalog.deleteDiscSelection(selectionId);
         return response({
+          message: "Mapping changed; review required",
           discSelection: serializeDiscSelection(selection),
           deletedEncodeJobs: deletion.deletedEncodeJobs,
           deletionComplete: deletion.deletionComplete,
