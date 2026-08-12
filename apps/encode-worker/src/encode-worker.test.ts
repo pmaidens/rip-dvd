@@ -5524,17 +5524,21 @@ describe("encode worker polling", () => {
     fixture.access.close();
   });
 
-  it("prevents an attempt that loses cancellation from publishing completed output", async () => {
+  it("observes progress-loop cancellation before an attempt can publish", async () => {
     const fixture = createQueuedJob();
     let runningJobId = fixture.job.id;
     let partialPath = "";
     const log = vi.fn();
     const runner: HandBrakeRunner = {
-      run: vi.fn(async ({ outputPath }) => {
+      run: vi.fn(async ({ onOutput, outputPath, signal }) => {
         partialPath = outputPath;
         writeFileSync(outputPath, "race loser output", { flag: "wx" });
         expect(fixture.access.encodeJobs.requestCancellation(runningJobId))
           .toMatchObject({ status: "cancellation_requested" });
+        expect(() => {
+          onOutput("Encoding: task 1 of 1, 18.00 %\r");
+        }).not.toThrow();
+        expect(signal.aborted).toBe(true);
       }),
     };
 

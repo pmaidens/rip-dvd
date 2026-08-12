@@ -1272,7 +1272,18 @@ export async function executeEncodeClaim(
     await moveAside(paths.legacyPartialPath);
     await moveStalePartials(finalPath, options.runner);
     const parseProgress = createProgressParser((progress) => {
-      options.access.encodeJobs.updateProgress(claim, progress);
+      try {
+        options.access.encodeJobs.updateProgress(claim, progress);
+      } catch (error) {
+        try {
+          renewClaim();
+        } catch (renewalError) {
+          if (renewalError instanceof EncodeCancellationRequestedError) {
+            return;
+          }
+        }
+        throw error;
+      }
     });
     const arguments_ = [
       ...buildSelectionArguments(input.selection),

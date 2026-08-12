@@ -6298,23 +6298,12 @@ export function createDataAccessInternal(
           .set({ publicationPending: false, updatedAt: timestamp })
           .where(
             and(
-              cleanup.leaseToken === null
-                ? and(
-                    eq(encodeJobs.id, claim.id),
-                    inArray(encodeJobs.status, [
-                      "running",
-                      "cancellation_requested",
-                    ]),
-                    eq(encodeJobs.claimToken, claim.claimToken),
-                  )
-                : and(
-                    eq(encodeJobs.id, claim.id),
-                    inArray(encodeJobs.status, [
-                      "running",
-                      "cancellation_requested",
-                    ]),
-                    eq(encodeJobs.claimToken, claim.claimToken),
-                  ),
+              eq(encodeJobs.id, claim.id),
+              inArray(encodeJobs.status, [
+                "running",
+                "cancellation_requested",
+              ]),
+              eq(encodeJobs.claimToken, claim.claimToken),
               eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
               eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
               cleanup.leaseToken === null
