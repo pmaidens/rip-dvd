@@ -1493,7 +1493,7 @@ export function OperationsDashboard({
       refresh: () => setRequestNumber((value) => value + 1),
     }),
   );
-  const [cancelQueuedEncodeJob] = useState(() =>
+  const [requestEncodeCancellation] = useState(() =>
     createDashboardMutationRunner<DashboardEncodeJob["id"]>({
       request: cancelEncodeJob,
       setBusyId: setCancellingEncodeJobId,
@@ -1730,7 +1730,7 @@ export function OperationsDashboard({
           }
           onRequeueEncodeJob={(id) => void requeueEncodeJob(id)}
           requeueingEncodeJobId={requeueingEncodeJobId}
-          onCancelEncodeJob={(id) => void cancelQueuedEncodeJob(id)}
+          onCancelEncodeJob={(id) => void requestEncodeCancellation(id)}
           cancellingEncodeJobId={cancellingEncodeJobId}
           onOpenCatalogReview={setCatalogReviewArchiveId}
           onCatalogReviewPage={setCatalogReviewCursor}
