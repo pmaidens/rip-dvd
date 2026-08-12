@@ -1,3 +1,5 @@
+import { DatabaseSync } from "node:sqlite";
+
 import { describe, expect, it, vi } from "vitest";
 import {
   MAX_MEDIA_ITEM_HIERARCHY_DEPTH,
@@ -94,6 +96,313 @@ describe("Catalog Review API", () => {
         hasNext: false,
       },
     });
+  });
+
+  it("offers direct correction, label editing, and removal for a job-free Disc Selection", async () => {
+    const access = dataAccessFixture.create();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const contentId = `sha256:${"1".repeat(64)}`;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: contentId,
+      scanData: {
+        schemaVersion: 2,
+        contentId,
+        titles: [{
+          number: 1,
+          durationSeconds: 2_400,
+          chapters: 8,
+          audioStreams: [],
+          subtitles: [],
+        }],
+      },
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Editable Selection.iso",
+      fingerprint: contentId,
+    });
+    const movie = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Editable Selection",
+    });
+    const selection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: movie.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      label: "Original label",
+    });
+
+    const response = await createCatalogReviewRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`),
+      archive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.discSelections).toEqual([
+      expect.objectContaining({
+        id: selection.id,
+        actionAvailability: {
+          state: "editable",
+          availableActions: ["correct", "edit_label", "remove"],
+          reason: null,
+          relatedEncodeJob: null,
+        },
+      }),
+    ]);
+  });
+
+  it("locks ordinary Encode Job provenance and identifies active dependency states without exposing paths", async () => {
+    const access = dataAccessFixture.create();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const contentId = `sha256:${"2".repeat(64)}`;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: contentId,
+      scanData: {
+        schemaVersion: 2,
+        contentId,
+        titles: Array.from({ length: 4 }, (_, index) => ({
+          number: index + 1,
+          durationSeconds: 2_400,
+          chapters: 8,
+          audioStreams: [],
+          subtitles: [],
+        })),
+      },
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Locked Selections.iso",
+      fingerprint: contentId,
+    });
+    const selections = Array.from({ length: 4 }, (_, index) => {
+      const item = access.catalog.createMediaItem({
+        kind: "bonus_feature",
+        title: `Locked Selection ${index + 1}`,
+      });
+      return access.catalog.createDiscSelection({
+        originalDiscArchiveId: archive.id,
+        mediaItemId: item.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: index + 1 },
+      });
+    });
+    completeCatalogReview(access, archive.id);
+    const profile = access.encodingProfiles.create({
+      key: "locked-selections",
+      displayName: "Locked selections",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    access.encodeJobs.enqueue({
+      discSelectionId: selections[0]!.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Completed provenance.mkv",
+    });
+    const completedClaim = access.encodeJobs.claimNext("completed-worker");
+    if (!completedClaim) {
+      throw new Error("Expected completed Encode Job claim");
+    }
+    const completedJob = access.encodeJobs.complete(completedClaim);
+    access.encodeJobs.enqueue({
+      discSelectionId: selections[1]!.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Failed provenance.mkv",
+    });
+    const failedClaim = access.encodeJobs.claimNext("failed-worker");
+    if (!failedClaim) {
+      throw new Error("Expected failed Encode Job claim");
+    }
+    const failedJob = access.encodeJobs.fail(
+      failedClaim,
+      "expected test failure",
+    );
+    access.encodeJobs.enqueue({
+      discSelectionId: selections[2]!.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Running provenance.mkv",
+    });
+    const runningClaim = access.encodeJobs.claimNext("running-worker");
+    if (!runningClaim) {
+      throw new Error("Expected running Encode Job claim");
+    }
+    const queuedJob = access.encodeJobs.enqueue({
+      discSelectionId: selections[3]!.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Queued provenance.mkv",
+    });
+
+    const response = await createCatalogReviewRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`),
+      archive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    const availabilityBySelection = new Map(
+      body.discSelections.map((selection: {
+        id: string;
+        actionAvailability: unknown;
+      }) => [selection.id, selection.actionAvailability]),
+    );
+    for (const [selection, job] of [
+      [selections[0]!, completedJob],
+      [selections[1]!, failedJob],
+      [selections[2]!, runningClaim],
+      [selections[3]!, queuedJob],
+    ] as const) {
+      expect(availabilityBySelection.get(selection.id)).toMatchObject({
+        state: "locked_provenance",
+        availableActions: [],
+        reason: expect.stringContaining(job.status),
+        relatedEncodeJob: { id: job.id, status: job.status },
+      });
+    }
+    expect(JSON.stringify([...availabilityBySelection.values()]))
+      .not.toContain("/media/");
+  });
+
+  it("exposes only repair and removal for unsafe legacy selections while retaining quarantine provenance", async () => {
+    const { access, databasePath } =
+      dataAccessFixture.createWithDatabasePath();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const contentId = `sha256:${"4".repeat(64)}`;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: contentId,
+      scanData: {
+        schemaVersion: 2,
+        contentId,
+        titles: [{
+          number: 1,
+          durationSeconds: 2_400,
+          chapters: 8,
+          audioStreams: [],
+          subtitles: [],
+        }],
+      },
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Legacy Recovery.iso",
+      fingerprint: contentId,
+    });
+    const movie = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Legacy Recovery",
+    });
+    const selection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: movie.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    });
+    completeCatalogReview(access, archive.id);
+    const profile = access.encodingProfiles.create({
+      key: "legacy-recovery",
+      displayName: "Legacy recovery",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    access.encodeJobs.enqueue({
+      discSelectionId: selection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Legacy Recovery.mkv",
+    });
+    const claim = access.encodeJobs.claimNext("legacy-recovery-worker");
+    if (!claim) {
+      throw new Error("Expected legacy recovery Encode Job claim");
+    }
+    const completedJob = access.encodeJobs.complete(claim);
+    const sqlite = new DatabaseSync(databasePath);
+    sqlite.prepare(`
+      update disc_selections
+      set source_key = 'caller:title-one'
+      where id = ?
+    `).run(selection.id);
+    sqlite.close();
+
+    const response = await createCatalogReviewRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`),
+      archive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.discSelections).toEqual([
+      expect.objectContaining({
+        id: selection.id,
+        actionAvailability: {
+          state: "needs_repair",
+          availableActions: ["repair", "remove"],
+          reason:
+            "Unsafe legacy Disc Selection; repair or remove it before completing Catalog Review",
+          relatedEncodeJob: null,
+        },
+      }),
+    ]);
+
+    const repairResponse = await createCatalogReviewRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+        },
+        body: JSON.stringify({
+          action: "repair_disc_selection",
+          discSelectionId: selection.id,
+          selection: {
+            mediaItemId: movie.id,
+            sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+          },
+        }),
+      }),
+      archive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+    expect(repairResponse.status).toBe(200);
+    const repaired = (await repairResponse.json()).discSelection;
+    expect(repaired.id).not.toBe(selection.id);
+    expect(access.catalog.listDiscSelections({ ids: [selection.id] }))
+      .toEqual([expect.objectContaining({ id: selection.id })]);
+    expect(access.encodeJobs.list(["completed"]))
+      .toEqual([expect.objectContaining({
+        id: completedJob.id,
+        discSelectionId: selection.id,
+      })]);
   });
 
   it("returns bounded archived legacy title evidence for catalog review", async () => {

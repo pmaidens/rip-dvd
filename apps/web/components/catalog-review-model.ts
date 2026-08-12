@@ -29,7 +29,34 @@ export interface CatalogReviewDiscSelection {
   mediaItemId: string;
   sourceIdentity: DiscSelectionSourceIdentityInput;
   label: string | null;
+  actionAvailability: CatalogReviewDiscSelectionActionAvailability;
 }
+
+export type CatalogReviewDiscSelectionActionAvailability =
+  | {
+    state: "editable";
+    availableActions: readonly ["correct", "edit_label", "remove"];
+    reason: null;
+    relatedEncodeJob: null;
+  }
+  | {
+    state: "locked_provenance";
+    availableActions: readonly [];
+    reason: string;
+    relatedEncodeJob: {
+      id: string;
+      status: "queued" | "running" | "completed" | "failed";
+    };
+  }
+  | {
+    state: "needs_repair";
+    availableActions: readonly ["repair", "remove"] | readonly [];
+    reason: string;
+    relatedEncodeJob: {
+      id: string;
+      status: "queued" | "running";
+    } | null;
+  };
 
 export interface CatalogReviewDto {
   catalogRevision: string;

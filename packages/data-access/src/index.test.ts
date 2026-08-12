@@ -1450,6 +1450,118 @@ describe("data-access facade", () => {
     access.close();
   });
 
+  it("exposes only recovery actions for unsafe legacy Disc Selections and preserves quarantine history", () => {
+    const databasePath = createTestDatabasePath();
+    let access = openTestDatabase(databasePath);
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const contentId = `sha256:${"3".repeat(64)}`;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: contentId,
+      scanData: {
+        schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+        contentId,
+        titles: [{
+          number: 1,
+          durationSeconds: 2_400,
+          chapters: 8,
+          audioStreams: [],
+          subtitles: [],
+        }],
+      },
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Unsafe Legacy Selection.iso",
+      fingerprint: contentId,
+    });
+    const movie = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Unsafe Legacy Selection",
+    });
+    const selection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: movie.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    });
+    completeCatalogReview(access, archive.id);
+    const profile = access.encodingProfiles.create({
+      key: "unsafe-legacy-selection",
+      displayName: "Unsafe legacy selection",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    access.encodeJobs.enqueue({
+      discSelectionId: selection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Unsafe Legacy Selection.mkv",
+    });
+    const claim = access.encodeJobs.claimNext("legacy-worker");
+    if (!claim) {
+      throw new Error("Expected unsafe legacy Encode Job claim");
+    }
+    const completedJob = access.encodeJobs.complete(claim);
+    access.close();
+
+    const sqlite = new DatabaseSync(databasePath);
+    sqlite.prepare(`
+      update disc_selections
+      set source_key = 'caller:title-one'
+      where id = ?
+    `).run(selection.id);
+    sqlite.close();
+
+    access = openTestDatabase(databasePath);
+    const availability = access.catalog.listDiscSelectionActionAvailability({
+      ids: [selection.id],
+    });
+    expect(availability).toEqual([{
+      discSelectionId: selection.id,
+      state: "needs_repair",
+      availableActions: ["repair", "remove"],
+      reason:
+        "Unsafe legacy Disc Selection; repair or remove it before completing Catalog Review",
+      relatedEncodeJob: null,
+    }]);
+    expect(JSON.stringify(availability)).not.toContain(completedJob.outputPath);
+    expect(() =>
+      access.catalog.listDiscSelectionActionAvailability({
+        ids: Array.from({ length: 101 }, () => selection.id),
+      })
+    ).toThrow(
+      "Disc Selection action availability is limited to 100 records",
+    );
+
+    const repaired = access.catalog.repairDiscSelection(selection.id, {
+      originalDiscArchiveId: archive.id,
+      mediaItemId: movie.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    });
+    expect(repaired.id).not.toBe(selection.id);
+    expect(access.catalog.listDiscSelections({ ids: [selection.id] }))
+      .toEqual([expect.objectContaining({ id: selection.id })]);
+    expect(access.encodeJobs.list(["completed"]))
+      .toEqual([expect.objectContaining({
+        id: completedJob.id,
+        discSelectionId: selection.id,
+      })]);
+    expect(access.catalog.listDiscSelectionActionAvailability({
+      ids: [selection.id, repaired.id],
+    })).toEqual([expect.objectContaining({
+      discSelectionId: repaired.id,
+      state: "editable",
+    })]);
+    access.close();
+  });
+
   it("does not enqueue after a concurrent Disc Selection reopens review", async () => {
     const databasePath = createTestDatabasePath();
     const access = openTestDatabase(databasePath);

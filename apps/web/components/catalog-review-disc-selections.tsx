@@ -1,5 +1,6 @@
 import React from "react";
 
+import type { DiscSelectionAction } from "@rip-dvd/data-access";
 import type { DvdTitle } from "@rip-dvd/data-access/dvd-scan";
 import { DISC_SELECTION_KINDS } from "@rip-dvd/data-access/catalog-kinds";
 
@@ -32,6 +33,21 @@ const discSelectionLabels = {
   dvd_title: "DVD title",
   dvd_chapters: "DVD chapter range",
 } satisfies Record<DiscSelectionKind, string>;
+
+const actionStateLabels = {
+  editable: "Editable",
+  locked_provenance: "Locked provenance",
+  needs_repair: "Needs repair",
+} as const;
+
+function hasAction(
+  selection: CatalogReviewDiscSelection,
+  action: DiscSelectionAction,
+): boolean {
+  const actions = selection.actionAvailability.availableActions as readonly
+    DiscSelectionAction[];
+  return actions.includes(action);
+}
 
 function discSelectionDescription(
   selection: CatalogReviewDiscSelection,
@@ -116,18 +132,31 @@ export function CatalogReviewDiscSelections({
         <ul className="selection-list">
           {discSelections.map((selection) => (
             <li key={selection.id}>
-              <strong>
-                {itemsById.get(selection.mediaItemId)?.title ??
-                  "Unknown Media Item"}
-              </strong>
-              <span>{discSelectionDescription(selection)}</span>
-              <button
-                type="button"
-                disabled={isSaving}
-                onClick={() => onDelete(selection.id)}
-              >
-                Remove Disc Selection
-              </button>
+              <div>
+                <strong>
+                  {itemsById.get(selection.mediaItemId)?.title ??
+                    "Unknown Media Item"}
+                </strong>
+                <span>{discSelectionDescription(selection)}</span>
+              </div>
+              <div className="selection-action-state">
+                <span className="attention-mark">
+                  {actionStateLabels[selection.actionAvailability.state]}
+                </span>
+                <p>
+                  {selection.actionAvailability.reason ??
+                    "Direct correction, label editing, and removal are available."}
+                </p>
+                {hasAction(selection, "remove") ? (
+                  <button
+                    type="button"
+                    disabled={isSaving}
+                    onClick={() => onDelete(selection.id)}
+                  >
+                    Remove Disc Selection
+                  </button>
+                ) : null}
+              </div>
             </li>
           ))}
         </ul>
@@ -148,13 +177,19 @@ export function CatalogReviewDiscSelections({
             Catalog action
             <select name="replacesDiscSelectionId" defaultValue="">
               <option value="">Add a new Disc Selection</option>
-              {discSelections.map((selection) => (
-                <option key={selection.id} value={selection.id}>
-                  Repair an existing Disc Selection: {
-                    discSelectionDescription(selection)
-                  }
-                </option>
-              ))}
+              {discSelections
+                .filter((selection) =>
+                  hasAction(selection, "correct") ||
+                  hasAction(selection, "repair")
+                )
+                .map((selection) => (
+                  <option key={selection.id} value={selection.id}>
+                    {hasAction(selection, "repair")
+                      ? "Repair unsafe legacy Disc Selection: "
+                      : "Correct or edit label: "}
+                    {discSelectionDescription(selection)}
+                  </option>
+                ))}
             </select>
           </label>
           <label>
