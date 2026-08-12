@@ -960,7 +960,7 @@ describe("Catalog Review API", () => {
     });
   });
 
-  it("pages more than 500 selections and bounds maintenance reads with hierarchy context", async () => {
+  it("pages more than 500 valid Disc Selections without blocking review", async () => {
     const access = dataAccessFixture.create();
     const drive = access.catalog.upsertOpticalDrive({
       devicePath: "/dev/sr0",
@@ -992,27 +992,14 @@ describe("Catalog Review API", () => {
       archivePath: "/media/originals/Many Selections.iso",
       fingerprint: contentId,
     });
-    const show = access.catalog.createMediaItem({
-      kind: "tv_show",
-      title: "Many Selections Show",
+    const mediaItem = access.catalog.createMediaItem({
+      kind: "bonus_feature",
+      title: "Disc feature",
     });
-    const season = access.catalog.createMediaItem({
-      parentId: show.id,
-      kind: "season",
-      title: "Many Selections Season",
-      seasonNumber: 1,
-    });
-    const episodes = Array.from({ length: 100 }, (_, index) =>
-      access.catalog.createMediaItem({
-        parentId: season.id,
-        kind: "episode",
-        title: `Episode ${index + 1}`,
-        episodeNumber: index + 1,
-      }));
     for (let titleNumber = 1; titleNumber <= 501; titleNumber += 1) {
       access.catalog.createDiscSelection({
         originalDiscArchiveId: archive.id,
-        mediaItemId: episodes[(titleNumber - 1) % episodes.length]!.id,
+        mediaItemId: mediaItem.id,
         sourceIdentity: { kind: "dvd_title", titleNumber },
       });
     }
@@ -1028,7 +1015,6 @@ describe("Catalog Review API", () => {
     expect(firstResponse.status).toBe(200);
     const first = await firstResponse.json();
     expect(first.discSelections).toHaveLength(100);
-    expect(first.mediaItems).toHaveLength(102);
     expect(first.discSelectionsPage).toEqual({
       offset: 0,
       limit: 100,
@@ -1037,7 +1023,7 @@ describe("Catalog Review API", () => {
     });
     expect(first.coverage).toMatchObject({
       discSelectionCount: 501,
-      mediaItemsWithSelections: 100,
+      mediaItemsWithSelections: 1,
       mappedTitles: 501,
       partiallyMappedTitles: 0,
       unmappedTitles: 0,
@@ -1063,6 +1049,80 @@ describe("Catalog Review API", () => {
       hasNext: false,
     });
     expect(last.coverage).toEqual(first.coverage);
+  });
+
+  it("bounds maintenance reads for a full selection page plus ancestors", async () => {
+    const access = dataAccessFixture.create();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const contentId = `sha256:${"6".repeat(64)}`;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: contentId,
+      scanData: {
+        schemaVersion: 2,
+        contentId,
+        titles: Array.from({ length: 101 }, (_, index) => ({
+          number: index + 1,
+          durationSeconds: 60,
+          chapters: 1,
+          audioStreams: [],
+          subtitles: [],
+        })),
+      },
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Many Items.iso",
+      fingerprint: contentId,
+    });
+    const show = access.catalog.createMediaItem({
+      kind: "tv_show",
+      title: "Many Items Show",
+    });
+    const season = access.catalog.createMediaItem({
+      parentId: show.id,
+      kind: "season",
+      title: "Many Items Season",
+      seasonNumber: 1,
+    });
+    const episodes = Array.from({ length: 101 }, (_, index) =>
+      access.catalog.createMediaItem({
+        parentId: season.id,
+        kind: "episode",
+        title: `Many Items Episode ${index + 1}`,
+        episodeNumber: index + 1,
+      }));
+    episodes.forEach((episode, index) =>
+      access.catalog.createDiscSelection({
+        originalDiscArchiveId: archive.id,
+        mediaItemId: episode.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: index + 1 },
+      }));
+
+    const response = await createCatalogReviewRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`),
+      archive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+
+    expect(response.status).toBe(200);
+    const review = await response.json();
+    expect(review.discSelections).toHaveLength(100);
+    expect(review.mediaItems).toHaveLength(102);
+    expect(review.mediaItems).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: show.id }),
+      expect.objectContaining({ id: season.id }),
+    ]));
+    expect(review.discSelectionsPage.hasNext).toBe(true);
   });
 
   it("reports preserved completed Encode Job history when selection removal is refused", async () => {
@@ -1557,6 +1617,7 @@ describe("Catalog Review API", () => {
 
     expect(response.status).toBe(201);
     await expect(response.json()).resolves.toMatchObject({
+      message: "Mapping changed; review required",
       tvShow: { kind: "tv_show", title: "Route Show" },
       season: { kind: "season", seasonNumber: 2 },
       episodes: [
