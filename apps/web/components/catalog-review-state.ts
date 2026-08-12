@@ -223,6 +223,9 @@ export function useCatalogReviewState({
       const message = error instanceof Error
         ? error.message
         : "Catalog review mutation failed";
+      if (complete) {
+        await load();
+      }
       if (errorTarget === "mapping_proposal") {
         setMappingProposalError(message);
       } else {
