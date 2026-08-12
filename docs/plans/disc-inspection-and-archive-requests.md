@@ -468,6 +468,7 @@ All tasks are AFK-ready; no product or architecture HITL decisions remain. Keep 
 - Reworked archive-worker orchestration to inspect first, reuse completed current inspections, create a job only immediately before archive execution, poll cancellation independently of lease renewal, and quarantine output when cancellation wins publication.
 - Added request/inspection mutation routes, bounded dashboard DTOs, request-based operator attention, nested Disc Inspection and Archive Request presentation, grouped job attempts, semantic determinate/indeterminate progress, local timers, reduced-motion behavior, and responsive mutation-safe controls.
 - Updated root/package documentation, workflow fixtures, concurrency helpers, and tests; removed the obsolete Archive Job inspection helper and runtime `inspecting_drive` semantics.
+- Review remediation replaced text-derived inspection classification with typed outcomes, split polling from focused inspection/archive runners, rechecks media generation after failed reads, defers manual retry until fresh worker evidence, roots related dashboard reads from visible records, retains completed-inspection detail until fulfillment, and derives retry copy from the consecutive failure streak.
 
 ### Migration and recovery rehearsal
 
@@ -485,7 +486,7 @@ All tasks are AFK-ready; no product or architecture HITL decisions remain. Keep 
 
 - `pnpm db:check` — passed; Drizzle reports the schema and migration history consistent.
 - `pnpm typecheck` — passed across all six packages/applications.
-- `pnpm test` — passed: 741 tests passed and 7 platform-gated tests skipped.
+- `pnpm test` — passed after review remediation: 779 tests passed and 7 platform-gated tests skipped.
 - `pnpm build` — passed, including the production Next.js build and both worker builds.
 - `sh scripts/smoke-compose-workers.sh all` — passed the native reader compile/test and named-volume plus bind-mount archive/encode worker smoke paths under UID 1000. The script deliberately retained its inspection resources under project prefixes `rip-dvd-worker-smoke-20260812045947-4d59e85f5409c1fd-named` and `rip-dvd-worker-smoke-20260812045947-4d59e85f5409c1fd-bind`, with bind source `/var/folders/nq/1b74p7fn7gn1d850ny6dr7d00000gn/T//rip-dvd-worker-bind-smoke.ebvCrr`.
 - Deterministic browser verification passed at 1440×1000 and 390×844 with no horizontal document overflow. Reviewer evidence: `/private/tmp/rip-dvd-visual.V7yDMy/disc-dashboard-desktop.png` and `/private/tmp/rip-dvd-visual.V7yDMy/disc-dashboard-narrow.png`.

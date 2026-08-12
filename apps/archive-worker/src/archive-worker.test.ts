@@ -132,6 +132,64 @@ describe("archive worker polling", () => {
     ]);
   });
 
+  it("aborts without consuming retry budget when the medium changes after hashing throws", async () => {
+    const access = openTestDataAccess();
+    const discoveredDrive = {
+      devicePath: "/dev/sr0",
+      serialNumber: "HASH-REMOVAL-001",
+    };
+    const observeMediaGeneration = vi
+      .fn()
+      .mockResolvedValueOnce("insertion-a")
+      .mockResolvedValue("insertion-b");
+    const scanDvd = vi.fn(async (_binding, _signal, options) => {
+      options?.onPhase?.("reading_metadata");
+      options?.onMetadata?.({
+        audioStreamCount: 0,
+        chapterCount: 1,
+        subtitleStreamCount: 0,
+        titleCount: 1,
+        totalBytes: 1_000,
+        volumeLabel: "REMOVED_DURING_HASH",
+      });
+      options?.onPhase?.("hashing_content");
+      options?.onBytesHashed?.(440);
+      throw new Error("DVD content read failed during hashing");
+    });
+
+    await pollArchiveWorker({
+      access,
+      configuredDevicePath: "/dev/sr0",
+      hardware: {
+        ...stableDeviceBinding(),
+        discover: vi.fn().mockResolvedValue([discoveredDrive]),
+        observeMediaGeneration,
+        scanDvd,
+      },
+      log: vi.fn(),
+      signal: new AbortController().signal,
+    });
+
+    expect(observeMediaGeneration).toHaveBeenCalledTimes(2);
+    const abortedInspections = access.discInspections.list();
+    expect(abortedInspections).toEqual([
+      expect.objectContaining({
+        status: "aborted",
+        reasonCode: "media_changed",
+        consecutiveFailureCount: 0,
+        retryAt: null,
+      }),
+    ]);
+    expect(access.discInspections.listAttempts(
+      abortedInspections[0]!.id,
+    )).toEqual([
+      expect.objectContaining({
+        outcome: "aborted",
+        reasonCode: "media_changed",
+      }),
+    ]);
+  });
+
   it("matches requested work, streams progress, and publishes the archive atomically", async () => {
     const access = openTestDataAccess();
     const originalsLibraryPath = mkdtempSync(

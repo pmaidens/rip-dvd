@@ -127,6 +127,7 @@ export interface DiscInspection {
   bytesPerSecond: number | null;
   etaSeconds: number | null;
   retryAt: Date | null;
+  manualRetryRequestedAt: Date | null;
   reasonCode: DiscInspectionReasonCode | null;
   diagnostic: string | null;
   claimToken: DiscInspectionClaimToken | null;
@@ -576,6 +577,9 @@ export interface ArchiveJobAccess {
     statuses?: ArchiveJobStatus[],
     options?: ChronologicalListOptions,
   ): ArchiveJob[];
+  listLatestForRequests(
+    archiveRequestIds: readonly ArchiveRequestId[],
+  ): ArchiveJob[];
   isCancellationRequested(claim: RunningArchiveJob): boolean;
   updateProgress(
     claim: RunningArchiveJob,
@@ -596,7 +600,7 @@ export interface DiscInspectionAccess {
   }): DiscInspectionStart;
   renew(claim: DiscInspectionClaim): DiscInspection;
   record(claim: DiscInspectionClaim, event: DiscInspectionEvent): DiscInspection;
-  retry(id: DiscInspectionId, mediaGeneration: string): DiscInspection;
+  requestRetry(id: DiscInspectionId): DiscInspection;
   clearCurrent(input: {
     opticalDriveId: OpticalDriveId;
     mediaGeneration?: string;
@@ -620,6 +624,9 @@ export interface ArchiveRequestAccess {
   list(
     statuses?: ArchiveRequestStatus[],
     options?: ChronologicalListOptions,
+  ): ArchiveRequest[];
+  listRelevantForDetectedDiscs(
+    detectedDiscIds: readonly DetectedDiscId[],
   ): ArchiveRequest[];
 }
 
@@ -727,8 +734,14 @@ export interface ConsistentReadAccess {
   readonly catalog: SnapshotCatalogAccess;
   readonly encodingProfiles: Pick<EncodingProfileAccess, "list">;
   readonly discInspections: Pick<DiscInspectionAccess, "list">;
-  readonly archiveRequests: Pick<ArchiveRequestAccess, "list">;
-  readonly archiveJobs: Pick<ArchiveJobAccess, "list">;
+  readonly archiveRequests: Pick<
+    ArchiveRequestAccess,
+    "list" | "listRelevantForDetectedDiscs"
+  >;
+  readonly archiveJobs: Pick<
+    ArchiveJobAccess,
+    "list" | "listLatestForRequests"
+  >;
   readonly encodeJobs: Pick<EncodeJobAccess, "list">;
 }
 

@@ -128,8 +128,10 @@ Drive. Drive identity and media generation fence replacement, while a renewable
 claim token fences stale worker callbacks. Structured metadata, hash bytes,
 rate/ETA, attempt history, retry deadlines, reason codes, and bounded diagnostics
 are persisted without display strings. The fifth consecutive transient failure
-is terminal; manual retry preserves lifetime attempts while resetting only the
-consecutive budget. Removal and replacement abort rather than fail.
+is terminal. `requestRetry()` persists operator intent while the inspection
+remains failed; only `beginOrResume()` with freshly observed matching media
+generation reopens it and resets the consecutive budget. Lifetime attempts are
+preserved. Removal and replacement abort rather than fail.
 
 `archiveRequests.create()` atomically approves a scanned Detected Disc and
 records durable intent without creating an Archive Job. Pending requests wait

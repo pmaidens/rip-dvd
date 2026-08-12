@@ -163,6 +163,9 @@ export const discInspections = sqliteTable(
     bytesPerSecond: integer("bytes_per_second"),
     etaSeconds: integer("eta_seconds"),
     retryAt: integer("retry_at", { mode: "timestamp_ms" }),
+    manualRetryRequestedAt: integer("manual_retry_requested_at", {
+      mode: "timestamp_ms",
+    }),
     reasonCode: text("reason_code", { enum: DISC_INSPECTION_REASON_CODES }),
     diagnostic: text("diagnostic"),
     claimToken: text("claim_token").$type<DiscInspectionClaimToken>(),
@@ -224,7 +227,7 @@ export const discInspections = sqliteTable(
     ),
     check(
       "disc_inspections_retry_check",
-      sql`${table.retryAt} is null or (${table.status} = 'running' and ${table.phase} = 'retry_wait')`,
+      sql`(${table.retryAt} is null or (${table.status} = 'running' and ${table.phase} = 'retry_wait')) and (${table.manualRetryRequestedAt} is null or (${table.status} = 'failed' and ${table.isCurrent} = 1))`,
     ),
   ],
 );

@@ -448,6 +448,107 @@ describe("readDashboardSnapshot", () => {
     });
   });
 
+  it("collapses completed inspection detail only after its Archive Request is fulfilled", () => {
+    const access = dataAccessFixture.create();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      displayName: "Archive drive",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "completed-inspection-disc",
+      volumeLabel: "COMPLETED_INSPECTION",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    const inspection = completeDiscInspection(
+      access,
+      disc,
+      "completed-inspection-generation",
+    );
+    access.archiveRequests.create({ detectedDiscId: disc.id });
+
+    const beforeArchive = readDashboardSnapshot(access);
+    expect(beforeArchive.opticalDrives).toEqual({
+      status: "loaded",
+      items: [
+        expect.objectContaining({
+          currentInspection: expect.objectContaining({
+            id: inspection.id,
+            status: "completed",
+            archiveWorkFulfilled: false,
+          }),
+        }),
+      ],
+    });
+
+    const job = access.archiveJobs.startForInspection(inspection.id, "worker-1")!;
+    access.archiveJobs.publish(job, {
+      archivePath: "/media/originals/completed-inspection.iso",
+      sizeBytes: 9,
+    });
+
+    const afterArchive = readDashboardSnapshot(access);
+    expect(afterArchive.opticalDrives).toEqual({
+      status: "loaded",
+      items: [
+        expect.objectContaining({
+          currentInspection: expect.objectContaining({
+            id: inspection.id,
+            archiveWorkFulfilled: true,
+          }),
+        }),
+      ],
+    });
+  });
+
+  it("keeps each displayed request linked to its latest attempt across activity bounds", () => {
+    const access = dataAccessFixture.create();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      displayName: "Archive drive",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const seedFailure = (fingerprint: string, message: string) => {
+      const disc = access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint,
+        volumeLabel: fingerprint,
+      });
+      access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+      const inspection = completeDiscInspection(
+        access,
+        disc,
+        `${fingerprint}-generation`,
+      );
+      const request = access.archiveRequests.create({ detectedDiscId: disc.id });
+      const job = access.archiveJobs.startForInspection(
+        inspection.id,
+        `${fingerprint}-worker`,
+      )!;
+      access.archiveJobs.fail(job, message);
+      return { disc, request };
+    };
+    const older = seedFailure("OLDER_FAILURE", "older attempt failed");
+    seedFailure("NEWER_FAILURE", "newer attempt failed");
+
+    const snapshot = readDashboardSnapshot(access, { activityLimit: 1 });
+    expect(snapshot.detectedDiscs.status).toBe("loaded");
+    const olderDisc = snapshot.detectedDiscs.status === "loaded"
+      ? snapshot.detectedDiscs.items.find((disc) => disc.id === older.disc.id)
+      : undefined;
+    expect(olderDisc?.archiveRequest).toMatchObject({
+      id: older.request.id,
+      attemptCount: 1,
+      latestFailureDetail: expect.any(String),
+      status: "needs_attention",
+    });
+  });
+
   it("keeps a failed duplicate Archive Job visible but projects it as non-retryable", () => {
     const access = dataAccessFixture.create();
     const fixture = seedFailedArchiveJobAndQueuedDuplicate(

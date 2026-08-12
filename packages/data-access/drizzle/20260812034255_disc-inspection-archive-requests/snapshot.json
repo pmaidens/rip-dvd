@@ -699,6 +699,16 @@
       "table": "disc_inspections"
     },
     {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "manual_retry_requested_at",
+      "entityType": "columns",
+      "table": "disc_inspections"
+    },
+    {
       "type": "text",
       "notNull": false,
       "autoincrement": false,
@@ -2622,7 +2632,7 @@
       "table": "disc_inspections"
     },
     {
-      "value": "\"retry_at\" is null or (\"status\" = 'running' and \"phase\" = 'retry_wait')",
+      "value": "(\"retry_at\" is null or (\"status\" = 'running' and \"phase\" = 'retry_wait')) and (\"manual_retry_requested_at\" is null or (\"status\" = 'failed' and \"is_current\" = 1))",
       "name": "disc_inspections_retry_check",
       "entityType": "checks",
       "table": "disc_inspections"

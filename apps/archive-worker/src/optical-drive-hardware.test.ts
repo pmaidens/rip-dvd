@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 
 import { describe, expect, it, vi } from "vitest";
 
+import { DiscInspectionError } from "./disc-inspection-error.js";
 import {
   createLinuxOpticalDriveHardware,
   createNodeCommandRunner,
@@ -1141,7 +1142,12 @@ describe("Linux Optical Drive hardware boundary", () => {
     });
     const signal = new AbortController().signal;
 
-    await expect(hardware.scanDvd(boundOpticalDrive(), signal)).resolves.toBeNull();
+    await expect(hardware.scanDvd(boundOpticalDrive(), signal)).rejects.toEqual(
+      expect.objectContaining<Partial<DiscInspectionError>>({
+        kind: "abort",
+        reasonCode: "no_medium",
+      }),
+    );
     await expect(hardware.scanDvd(boundOpticalDrive(), signal)).resolves.toMatchObject({
       volumeLabel: "DISC_A",
       fingerprint: `sha256:${"a".repeat(64)}`,
@@ -1445,7 +1451,10 @@ describe("Linux Optical Drive hardware boundary", () => {
         runner: emptyRunner,
         mediaGenerationObserver: stableMediaGenerationObserver(),
       }).scanDvd(boundOpticalDrive(), signal),
-    ).resolves.toBeNull();
+    ).rejects.toEqual(expect.objectContaining<Partial<DiscInspectionError>>({
+      kind: "abort",
+      reasonCode: "no_medium",
+    }));
 
     const failedRunner: CommandRunner = {
       run: vi.fn().mockResolvedValueOnce({

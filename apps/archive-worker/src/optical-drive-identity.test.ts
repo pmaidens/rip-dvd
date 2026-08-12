@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { DiscInspectionError } from "./disc-inspection-error.js";
 import { createBoundOpticalDriveIdentity } from "./optical-drive-identity.js";
 
 describe("bound Optical Drive identity", () => {
@@ -17,6 +18,10 @@ describe("bound Optical Drive identity", () => {
 
     await expect(
       identity.requireCurrent(binding, "before DVD persistence", signal),
-    ).rejects.toThrow("Optical Drive instance changed before DVD persistence");
+    ).rejects.toEqual(expect.objectContaining<Partial<DiscInspectionError>>({
+      kind: "abort",
+      message: "Optical Drive instance changed before DVD persistence",
+      reasonCode: "drive_identity_changed",
+    }));
   });
 });
