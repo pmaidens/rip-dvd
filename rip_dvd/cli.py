@@ -85,10 +85,9 @@ def print_title_summary(scan):
         log("No DVD titles found.")
         return
 
-    feature_count = sum(1 for title in scan.titles if title.seconds >= 3600)
     log("Titles found:")
     for title in sorted(scan.titles, key=lambda item: item.number):
-        classification = classify_title(title.seconds, feature_count=feature_count)
+        classification = classify_title(title.seconds)
         log(
             f"[{title.number:02d}] {format_duration(title.seconds):>8}  "
             f"chapters={title.chapters:>2}  audio={title.audio_streams:>2}  "

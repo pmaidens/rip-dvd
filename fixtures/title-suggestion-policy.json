@@ -1,0 +1,17 @@
+{
+  "cases": [
+    { "durationSeconds": 0, "suggestion": "Very short or menu candidate" },
+    { "durationSeconds": 119, "suggestion": "Very short or menu candidate" },
+    { "durationSeconds": 120, "suggestion": "Short or extra candidate" },
+    { "durationSeconds": 1199, "suggestion": "Short or extra candidate" },
+    {
+      "durationSeconds": 1200,
+      "suggestion": "Episode or long-extra candidate"
+    },
+    {
+      "durationSeconds": 3599,
+      "suggestion": "Episode or long-extra candidate"
+    },
+    { "durationSeconds": 3600, "suggestion": "Feature-length candidate" }
+  ]
+}

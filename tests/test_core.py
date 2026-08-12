@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import unittest
 
@@ -40,8 +41,14 @@ class NamingTests(unittest.TestCase):
     def test_pretty_from_label_title_cases_disc_labels(self):
         self.assertEqual(pretty_from_label("THE_MATRIX_RELOADED"), "The Matrix Reloaded")
 
-    def test_classify_title_accounts_for_multiple_feature_length_titles(self):
-        self.assertEqual(classify_title(7200, feature_count=2), "possible feature / double feature")
+    def test_classify_title_uses_conservative_candidate_boundaries(self):
+        policy_path = Path(__file__).parents[1] / "fixtures" / "title-suggestion-policy.json"
+        cases = json.loads(policy_path.read_text())["cases"]
+
+        for case in cases:
+            seconds = case["durationSeconds"]
+            with self.subTest(seconds=seconds):
+                self.assertEqual(classify_title(seconds), case["suggestion"])
 
 
 class ScanParsingTests(unittest.TestCase):

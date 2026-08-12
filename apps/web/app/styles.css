@@ -492,7 +492,6 @@ h1 {
   border-bottom: 0;
 }
 
-.catalog-coordinate-list,
 .media-hierarchy-list,
 .selection-list {
   display: grid;
@@ -502,7 +501,6 @@ h1 {
   list-style: none;
 }
 
-.catalog-coordinate-list li,
 .selection-list li,
 .media-hierarchy-list li {
   display: flex;
@@ -528,12 +526,195 @@ h1 {
 }
 
 .media-hierarchy-list span,
-.selection-list span,
-.catalog-coordinate-list span {
+.selection-list span {
   display: block;
   margin-top: 0.2rem;
   color: #9fb0ab;
   font-size: 0.68rem;
+}
+
+.catalog-volume-labels {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+  margin: 1rem 0;
+}
+
+.catalog-volume-labels > div {
+  min-width: 0;
+  padding: 0.7rem 0.8rem;
+  border-radius: 0.55rem;
+  background: #10231e;
+}
+
+.catalog-volume-labels dt {
+  color: #829790;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+}
+
+.catalog-volume-labels dd {
+  margin: 0.3rem 0 0;
+  overflow-wrap: anywhere;
+  color: #dbe6e2;
+  font-size: 0.76rem;
+}
+
+.catalog-volume-labels code {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.catalog-suggestion-help {
+  margin: 1rem 0 0;
+  padding: 0.75rem 0.8rem;
+  border-left: 0.2rem solid #d2a14b;
+  background: rgba(95, 77, 40, 0.18);
+  color: #b8c8c3;
+  font-size: 0.74rem;
+  line-height: 1.5;
+}
+
+.catalog-title-evidence-list {
+  display: grid;
+  gap: 0.75rem;
+  margin: 1rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.catalog-title-evidence {
+  min-width: 0;
+  padding: 0.85rem;
+  overflow-wrap: anywhere;
+  border: 1px solid #29483f;
+  border-radius: 0.7rem;
+  background: #10231e;
+}
+
+.catalog-title-evidence-heading {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.catalog-title-evidence-heading > div {
+  min-width: 0;
+}
+
+.catalog-title-evidence-heading h4 {
+  color: #eef4f1;
+  font-size: 0.86rem;
+}
+
+.catalog-title-evidence-heading p {
+  margin: 0.25rem 0 0;
+  color: #b8c8c3;
+  font-size: 0.72rem;
+}
+
+.catalog-title-badges {
+  display: flex;
+  min-width: 0;
+  align-items: flex-end;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.catalog-factual-badge,
+.catalog-title-suggestion {
+  max-width: 100%;
+  border-radius: 999px;
+  font-size: 0.65rem;
+}
+
+.catalog-factual-badge {
+  padding: 0.28rem 0.55rem;
+  border: 1px solid #547f70;
+  color: #dbe6e2;
+}
+
+.catalog-title-suggestion {
+  display: grid;
+  gap: 0.12rem;
+  padding: 0.35rem 0.55rem;
+  background: #273d35;
+  color: #eef4f1;
+}
+
+.catalog-title-suggestion > span {
+  color: #9fb0ab;
+  font-size: 0.58rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.catalog-language-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 1rem;
+  margin: 0.75rem 0 0;
+  color: #b8c8c3;
+  font-size: 0.72rem;
+}
+
+.catalog-stream-details {
+  margin-top: 0.75rem;
+  border-top: 1px solid #29483f;
+}
+
+.catalog-stream-details summary {
+  padding: 0.65rem 0 0;
+  color: #d2a14b;
+  font-size: 0.72rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.catalog-stream-details summary:focus-visible {
+  outline: 3px solid #d2a14b;
+  outline-offset: 3px;
+}
+
+.catalog-stream-details > p {
+  margin: 0.65rem 0 0;
+  color: #9fb0ab;
+  font-size: 0.7rem;
+}
+
+.catalog-stream-groups {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+}
+
+.catalog-stream-groups h5 {
+  color: #b8c8c3;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+}
+
+.catalog-stream-groups ul {
+  display: grid;
+  gap: 0.4rem;
+  margin: 0.45rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.catalog-stream-groups li {
+  display: grid;
+  min-width: 0;
+  gap: 0.15rem;
+  color: #9fb0ab;
+  font-size: 0.68rem;
+}
+
+.catalog-stream-groups strong {
+  color: #dbe6e2;
 }
 
 .media-hierarchy-list button {
@@ -1411,6 +1592,20 @@ h3 {
 
   .catalog-fields label + label {
     margin-top: 0.8rem;
+  }
+
+  .catalog-volume-labels,
+  .catalog-stream-groups {
+    grid-template-columns: 1fr;
+  }
+
+  .catalog-title-evidence-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .catalog-title-badges {
+    align-items: flex-start;
   }
 
   .catalog-editor-header,

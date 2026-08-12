@@ -3,6 +3,10 @@
 import { displayTerm } from "../lib/display-term";
 import { CatalogReviewCompletion } from "./catalog-review-completion";
 import { CatalogReviewDiscSelections } from "./catalog-review-disc-selections";
+import {
+  CatalogReviewEvidence,
+  formatVolumeLabel,
+} from "./catalog-review-evidence";
 import { CatalogReviewMediaItems } from "./catalog-review-media-items";
 import type {
   CatalogReviewLoadState,
@@ -74,7 +78,10 @@ export function CatalogReviewView({
       <header className="catalog-editor-header">
         <div>
           <p className="section-eyebrow">Archived disc review</p>
-          <h2 id="catalog-editor-title">Catalog {review.archive.discLabel}</h2>
+          <h2 id="catalog-editor-title">
+            Catalog {formatVolumeLabel(review.archive.discLabel) ||
+              "Unlabeled disc"}
+          </h2>
           <p>
             {displayTerm(review.archive.discKind)} · {
               review.archive.archiveFormat.toUpperCase()
@@ -96,26 +103,10 @@ export function CatalogReviewView({
       ) : null}
 
       <div className="catalog-editor-grid">
-        <section className="catalog-pane" aria-labelledby="raw-title-map">
-          <h3 id="raw-title-map">Raw DVD title map</h3>
-          <p className="catalog-help">
-            Archive scan data is read-only source evidence, not reviewed catalog data.
-          </p>
-          {review.rawScan.titles.length === 0 ? (
-            <p className="catalog-empty">
-              No reviewable DVD titles were recorded.
-            </p>
-          ) : (
-            <ol className="catalog-coordinate-list">
-              {review.rawScan.titles.map((title) => (
-                <li key={title.number}>
-                  <strong>Title {title.number}</strong>
-                  <span>{title.chapters} chapters</span>
-                </li>
-              ))}
-            </ol>
-          )}
-        </section>
+        <CatalogReviewEvidence
+          volumeLabel={review.archive.discLabel}
+          titles={review.rawScan.titles}
+        />
 
         <CatalogReviewMediaItems
           mediaItems={review.mediaItems}
