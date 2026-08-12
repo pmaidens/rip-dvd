@@ -50,7 +50,6 @@ export function decodeLsblkDevices(output) {
         kernelName,
         model: normalizeOpticalHardwareText(device.model),
         serialNumber: normalizeOpticalHardwareText(device.serial),
-        transport: normalizeOpticalHardwareText(device.tran),
         vendor: normalizeOpticalHardwareText(device.vendor),
       };
     });
@@ -110,7 +109,7 @@ export function discoverPhysicalOpticalDrives({
     command("lsblk", [
       "--json",
       "--output",
-      "PATH,KNAME,TYPE,TRAN,VENDOR,MODEL,SERIAL",
+      "PATH,KNAME,TYPE,VENDOR,MODEL,SERIAL",
     ]),
   );
   const discovered = [];
