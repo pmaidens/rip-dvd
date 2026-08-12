@@ -327,7 +327,7 @@ describe("DashboardView", () => {
     expect(html).toContain("No Original Disc Archives need catalog review.");
   });
 
-  it("offers queued cancellation and renders Cancelled separately from failure", () => {
+  it("offers active cancellation and renders requested and Cancelled states truthfully", () => {
     const html = render({
       opticalDrives: { status: "loaded", items: [] },
       detectedDiscs: { status: "loaded", items: [] },
@@ -343,6 +343,26 @@ describe("DashboardView", () => {
             status: "queued",
             progressPhase: null,
             progressPercent: 0,
+            progressEtaSeconds: null,
+          },
+          {
+            id: "running-encode" as EncodeJobId,
+            mediaTitle: "Running Movie",
+            mediaYear: null,
+            encodingProfileName: "DVD library · Version 1",
+            status: "running",
+            progressPhase: "encoding",
+            progressPercent: 42,
+            progressEtaSeconds: 120,
+          },
+          {
+            id: "cancellation-requested-encode" as EncodeJobId,
+            mediaTitle: "Stopping Movie",
+            mediaYear: null,
+            encodingProfileName: "DVD library · Version 1",
+            status: "cancellation_requested",
+            progressPhase: "encoding",
+            progressPercent: 43,
             progressEtaSeconds: null,
           },
           {
@@ -373,6 +393,10 @@ describe("DashboardView", () => {
     });
 
     expect(html).toContain("Cancel queued encode");
+    expect(html).toContain("Request cancellation");
+    expect(html).toContain("Cancellation requested");
+    expect(html).toContain("Waiting for HandBrake to stop safely");
+    expect(html).toContain("status status-cancellation_requested");
     expect(html).toContain("Requeue encode");
     expect(html).toContain("status status-cancelled");
     expect(html).toContain(">Cancelled<");

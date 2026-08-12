@@ -63,7 +63,12 @@ export type CatalogReviewDiscSelectionActionAvailability =
     reason: string;
     relatedEncodeJob: {
       id: string;
-      status: "queued" | "running" | "completed" | "failed";
+      status:
+        | "queued"
+        | "running"
+        | "cancellation_requested"
+        | "completed"
+        | "failed";
     };
   }
   | {
@@ -72,7 +77,7 @@ export type CatalogReviewDiscSelectionActionAvailability =
     reason: string;
     relatedEncodeJob: {
       id: string;
-      status: "queued" | "running";
+      status: "queued" | "running" | "cancellation_requested";
     } | null;
   }
   | {

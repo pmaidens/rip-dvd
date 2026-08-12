@@ -99,13 +99,29 @@ try {
     }
   } else if (workerData.operation === "cancel-encode") {
     try {
-      const job = access.encodeJobs.cancelQueued(workerData.encodeJobId);
+      const job = access.encodeJobs.requestCancellation(workerData.encodeJobId);
       parentPort.postMessage({
         type: "result",
-        value: { outcome: "cancelled", id: job.id },
+        value: { outcome: job.status, id: job.id },
       });
     } catch (error) {
       if (!(error instanceof InvalidStatusTransitionError)) {
+        throw error;
+      }
+      parentPort.postMessage({
+        type: "result",
+        value: { outcome: "rejected" },
+      });
+    }
+  } else if (workerData.operation === "complete-encode") {
+    try {
+      const job = access.encodeJobs.complete(workerData.claim);
+      parentPort.postMessage({
+        type: "result",
+        value: { outcome: "completed", id: job.id },
+      });
+    } catch (error) {
+      if (error?.name !== "StaleJobAttemptError") {
         throw error;
       }
       parentPort.postMessage({
