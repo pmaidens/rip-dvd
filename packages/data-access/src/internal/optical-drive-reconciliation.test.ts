@@ -106,6 +106,67 @@ describe("optical drive reconciliation policy", () => {
     ).toThrow("Discovered Optical Drive serial numbers must be unique");
   });
 
+  it("reserves serial matches before matching replacements at old paths", () => {
+    const movedDriveId = "moved-drive" as OpticalDriveId;
+    const plan = planOpticalDriveReconciliation(
+      [
+        {
+          devicePath: "/dev/sr0",
+          isConfiguredDevice: false,
+          serialNumber: "REPLACEMENT",
+        },
+        {
+          devicePath: "/dev/sr1",
+          isConfiguredDevice: true,
+          serialNumber: "MOVED",
+        },
+      ],
+      [
+        {
+          id: movedDriveId,
+          devicePath: "/dev/sr0",
+          configurationDefaultResolved: true,
+          isConfiguredTarget: true,
+          isPresent: true,
+          product: "DVD RW",
+          serialNumber: "MOVED",
+          vendor: "Optiarc",
+        },
+      ],
+    );
+
+    expect(plan.drives).toMatchObject([
+      {
+        existingId: undefined,
+        insertAuthorization: { isEnabled: false },
+      },
+      {
+        existingId: movedDriveId,
+        authorizationUpdate: {},
+      },
+    ]);
+  });
+
+  it("rejects ambiguous stored serial evidence before any persistence", () => {
+    const stored = (id: string, devicePath: string) => ({
+      id: id as OpticalDriveId,
+      devicePath,
+      configurationDefaultResolved: true,
+      isConfiguredTarget: false,
+      isPresent: false,
+      product: "DVD RW",
+      serialNumber: "DUPLICATE-STORED",
+      vendor: "Optiarc",
+    });
+
+    expect(() =>
+      planOpticalDriveReconciliation(
+        [],
+        [stored("first", "/dev/sr0"), stored("second", "/dev/sr1")],
+      ),
+    ).toThrow("Stored Optical Drive serial number is ambiguous");
+  });
+
   it("disables same-path hardware when continuity is unproven after disappearance", () => {
     const plan = planOpticalDriveReconciliation(
       [{ devicePath: "/dev/sr0", isConfiguredDevice: false }],

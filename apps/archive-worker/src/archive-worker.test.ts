@@ -1222,6 +1222,56 @@ describe("archive worker polling", () => {
     },
   );
 
+  it("scans a serial-proven moved drive when its new path has history", async () => {
+    const access = openTestDataAccess();
+    access.catalog.reconcileOpticalDrives([
+      {
+        devicePath: "/dev/sr1",
+        serialNumber: "STALE-PATH-HISTORY",
+        isConfiguredDevice: false,
+      },
+      {
+        devicePath: "/dev/sr2",
+        serialNumber: "MOVED-STABLE-DRIVE",
+        isConfiguredDevice: true,
+      },
+    ]);
+    const scanDvd = vi.fn().mockResolvedValue(null);
+
+    await pollArchiveWorker({
+      access,
+      configuredDevicePath: "/dev/sr1",
+      hardware: {
+        ...stableDeviceBinding(),
+        discover: vi.fn().mockResolvedValue([
+          {
+            devicePath: "/dev/sr1",
+            serialNumber: "MOVED-STABLE-DRIVE",
+          },
+        ]),
+        scanDvd,
+      },
+      log: vi.fn(),
+      signal: new AbortController().signal,
+    });
+
+    expect(scanDvd).toHaveBeenCalledOnce();
+    expect(access.catalog.listOpticalDrives()).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        devicePath: "/dev/sr1",
+        serialNumber: "MOVED-STABLE-DRIVE",
+        isEnabled: true,
+        isPresent: true,
+      }),
+      expect.objectContaining({
+        devicePath: "/dev/sr1",
+        serialNumber: "STALE-PATH-HISTORY",
+        isPresent: false,
+      }),
+    ]));
+    access.close();
+  });
+
   it("keeps repeated polls idempotent and marks disappeared drives missing", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-26T18:00:00.000Z"));
