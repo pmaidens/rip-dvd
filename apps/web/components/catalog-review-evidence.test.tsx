@@ -1,6 +1,8 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
+import titleSuggestionPolicy from "../../../fixtures/title-suggestion-policy.json";
+
 import {
   CatalogReviewEvidence,
   formatVolumeLabel,
@@ -8,17 +10,12 @@ import {
 } from "./catalog-review-evidence";
 
 describe("Catalog Review Title Suggestions", () => {
-  it.each([
-    [0, "Very short or menu candidate"],
-    [119, "Very short or menu candidate"],
-    [120, "Short or extra candidate"],
-    [1_199, "Short or extra candidate"],
-    [1_200, "Episode or long-extra candidate"],
-    [3_599, "Episode or long-extra candidate"],
-    [3_600, "Feature-length candidate"],
-  ])("labels %i seconds conservatively", (durationSeconds, suggestion) => {
-    expect(titleSuggestion(durationSeconds)).toBe(suggestion);
-  });
+  it.each(titleSuggestionPolicy.cases)(
+    "labels $durationSeconds seconds conservatively",
+    ({ durationSeconds, suggestion }) => {
+      expect(titleSuggestion(durationSeconds)).toBe(suggestion);
+    },
+  );
 });
 
 describe("Catalog Review volume-label formatting", () => {
