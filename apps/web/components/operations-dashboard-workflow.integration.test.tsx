@@ -275,7 +275,11 @@ describe("end-to-end operations dashboard workflow", () => {
     const reviewRevision = access.catalog.listOriginalDiscArchives({
       ids: [archive.id],
     })[0]!.updatedAt;
-    access.catalog.completeCatalogReview(archive.id, reviewRevision);
+    access.catalog.completeCatalogReview(
+      archive.id,
+      reviewRevision,
+      "reviewed_with_selections",
+    );
     const reviewedArchive = access.catalog.listOriginalDiscArchives({
       ids: [archive.id],
     })[0]!;
@@ -308,7 +312,7 @@ describe("end-to-end operations dashboard workflow", () => {
     );
     expect(refreshedResponse.status).toBe(200);
     const refreshed = await refreshedResponse.json() as CatalogReviewDto;
-    expect(refreshed.reviewStatus).toBe("needs_review");
+    expect(refreshed.reviewOutcome).toBe("needs_review");
     expect(refreshed.coverage).toMatchObject({
       discSelectionCount: 3,
       mediaItemsWithSelections: 3,
