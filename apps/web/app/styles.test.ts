@@ -176,6 +176,20 @@ describe("dashboard 320px fallback", () => {
   });
 });
 
+describe("Catalog Review Mapping Proposal layout", () => {
+  it("places the active proposal beside title evidence on desktop and below it on mobile", () => {
+    expect(selectorDeclarations(".catalog-title-evidence-active")).toMatch(
+      /display:\s*grid/,
+    );
+    expect(selectorDeclarations(".catalog-title-evidence-active")).toMatch(
+      /grid-template-columns:\s*minmax\(0,\s*1fr\)\s+minmax\(18rem,\s*0\.9fr\)/,
+    );
+    expect(styles.replace(/\s+/g, " ")).toMatch(
+      /@media \(max-width: 47rem\).*\.catalog-title-evidence-active \{ grid-template-columns: 1fr;/,
+    );
+  });
+});
+
 describe("Catalog Review evidence presentation", () => {
   it("keeps title evidence wrap-safe with keyboard-visible disclosures", () => {
     expect(selectorDeclarations(".catalog-title-evidence")).toMatch(

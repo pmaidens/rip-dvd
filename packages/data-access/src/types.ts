@@ -259,6 +259,30 @@ export type CreateDiscSelectionInput = {
   label?: string;
 };
 
+export interface CreateMediaItemInput {
+  parentId?: MediaItemId;
+  kind: MediaItemKind;
+  title: string;
+  year?: number;
+  seasonNumber?: number;
+  episodeNumber?: number;
+}
+
+export interface CreateMappingProposalInput {
+  originalDiscArchiveId: OriginalDiscArchiveId;
+  catalogRevision: Date;
+  mediaItem: CreateMediaItemInput;
+  discSelection: {
+    sourceIdentity: DiscSelectionSourceIdentityInput;
+    label?: string;
+  };
+}
+
+export interface CreatedMappingProposal {
+  mediaItem: MediaItem;
+  discSelection: DiscSelection;
+}
+
 export interface EncodingProfile {
   id: EncodingProfileId;
   key: string;
@@ -493,14 +517,10 @@ export interface CatalogAccess {
     id: OriginalDiscArchiveId,
     catalogRevision: Date,
   ): OriginalDiscArchive;
-  createMediaItem(input: {
-    parentId?: MediaItemId;
-    kind: MediaItemKind;
-    title: string;
-    year?: number;
-    seasonNumber?: number;
-    episodeNumber?: number;
-  }): MediaItem;
+  createMediaItem(input: CreateMediaItemInput): MediaItem;
+  createMappingProposal(
+    input: CreateMappingProposalInput,
+  ): CreatedMappingProposal;
   updateMediaItem(
     id: MediaItemId,
     input: {

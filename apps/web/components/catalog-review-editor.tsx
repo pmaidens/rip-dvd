@@ -11,7 +11,9 @@ import { CatalogReviewMediaItems } from "./catalog-review-media-items";
 import type {
   CatalogReviewLoadState,
   CreateDiscSelectionInput,
+  CreateMappingProposalInput,
   DiscSelectionKind,
+  MappingProposal,
   SaveMediaItemInput,
 } from "./catalog-review-model";
 import { useCatalogReviewState } from "./catalog-review-state";
@@ -21,7 +23,9 @@ interface CatalogReviewViewProps {
   editingMediaItemId: string | null;
   isSaving: boolean;
   requestError: string | null;
+  mappingProposalError: string | null;
   selectionKind: DiscSelectionKind;
+  activeMappingProposal: MappingProposal | null;
   onClose(): void;
   onRetry(): void;
   onEditMediaItem(id: string): void;
@@ -29,6 +33,9 @@ interface CatalogReviewViewProps {
   onMediaItemsPage(offset: number): void;
   onDiscSelectionsPage(offset: number): void;
   onSelectionKindChange(kind: DiscSelectionKind): void;
+  onStartMappingProposal(proposal: MappingProposal): void;
+  onCancelMappingProposal(): void;
+  onCreateMappingProposal(input: CreateMappingProposalInput): void;
   onSaveMediaItem(input: SaveMediaItemInput): void;
   onCreateDiscSelection(input: CreateDiscSelectionInput): void;
   onDeleteDiscSelection(id: string): void;
@@ -40,7 +47,9 @@ export function CatalogReviewView({
   editingMediaItemId,
   isSaving,
   requestError,
+  mappingProposalError,
   selectionKind,
+  activeMappingProposal,
   onClose,
   onRetry,
   onEditMediaItem,
@@ -48,6 +57,9 @@ export function CatalogReviewView({
   onMediaItemsPage,
   onDiscSelectionsPage,
   onSelectionKindChange,
+  onStartMappingProposal,
+  onCancelMappingProposal,
+  onCreateMappingProposal,
   onSaveMediaItem,
   onCreateDiscSelection,
   onDeleteDiscSelection,
@@ -106,6 +118,13 @@ export function CatalogReviewView({
         <CatalogReviewEvidence
           volumeLabel={review.archive.discLabel}
           titles={review.rawScan.titles}
+          mediaItems={review.mediaItems}
+          activeMappingProposal={activeMappingProposal}
+          isSaving={isSaving}
+          mappingProposalError={mappingProposalError}
+          onStartMappingProposal={onStartMappingProposal}
+          onCancelMappingProposal={onCancelMappingProposal}
+          onCreateMappingProposal={onCreateMappingProposal}
         />
 
         <CatalogReviewMediaItems
@@ -164,7 +183,9 @@ export function CatalogReviewEditor({
       editingMediaItemId={review.editingMediaItemId}
       isSaving={review.isSaving}
       requestError={review.requestError}
+      mappingProposalError={review.mappingProposalError}
       selectionKind={review.selectionKind}
+      activeMappingProposal={review.activeMappingProposal}
       onClose={onClose}
       onRetry={review.retry}
       onEditMediaItem={review.editMediaItem}
@@ -172,6 +193,9 @@ export function CatalogReviewEditor({
       onMediaItemsPage={review.changeMediaItemOffset}
       onDiscSelectionsPage={review.changeDiscSelectionOffset}
       onSelectionKindChange={review.changeSelectionKind}
+      onStartMappingProposal={review.startMappingProposal}
+      onCancelMappingProposal={review.cancelMappingProposal}
+      onCreateMappingProposal={review.createMappingProposal}
       onSaveMediaItem={review.saveMediaItem}
       onCreateDiscSelection={review.createDiscSelection}
       onDeleteDiscSelection={review.deleteDiscSelection}

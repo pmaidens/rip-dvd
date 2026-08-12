@@ -4,6 +4,14 @@ import type {
   DvdTitle,
 } from "@rip-dvd/data-access/dvd-scan";
 
+import { CatalogReviewMappingProposal } from "./catalog-review-mapping-proposal";
+import type {
+  CatalogReviewMediaItem,
+  CreateMappingProposalInput,
+  MappingProposal,
+  MappingProposalAction,
+} from "./catalog-review-model";
+
 export type TitleSuggestion =
   | "Feature-length candidate"
   | "Episode or long-extra candidate"
@@ -98,6 +106,17 @@ function languageSummary(
   return languages.length > 0 ? languages.join(", ") : "None";
 }
 
+function mappingProposalIdentity(proposal: MappingProposal): string {
+  const source = proposal.sourceIdentity;
+  if (source.kind === "main_feature") {
+    return `${proposal.action}:main_feature`;
+  }
+  if (source.kind === "dvd_title") {
+    return `${proposal.action}:title:${source.titleNumber}`;
+  }
+  return `${proposal.action}:title:${source.titleNumber}:chapters:${source.chapterStart}-${source.chapterEnd}`;
+}
+
 function TechnicalStreamDetails({ title }: { title: DvdTitle }) {
   return (
     <details className="catalog-stream-details">
@@ -155,13 +174,37 @@ function TechnicalStreamDetails({ title }: { title: DvdTitle }) {
 export function CatalogReviewEvidence({
   volumeLabel,
   titles,
+  mediaItems = [],
+  activeMappingProposal = null,
+  isSaving = false,
+  mappingProposalError = null,
+  onStartMappingProposal,
+  onCancelMappingProposal = () => undefined,
+  onCreateMappingProposal = () => undefined,
 }: {
   volumeLabel: string;
   titles: readonly DvdTitle[];
+  mediaItems?: CatalogReviewMediaItem[];
+  activeMappingProposal?: MappingProposal | null;
+  isSaving?: boolean;
+  mappingProposalError?: string | null;
+  onStartMappingProposal?(proposal: MappingProposal): void;
+  onCancelMappingProposal?(): void;
+  onCreateMappingProposal?(input: CreateMappingProposalInput): void;
 }) {
   const longestDuration = Math.max(
     ...titles.map((title) => title.durationSeconds),
   );
+  const proposedTitle = formatVolumeLabel(volumeLabel);
+  function startWholeTitleProposal(
+    titleNumber: number,
+    action: Exclude<MappingProposalAction, "chapters" | "main_feature">,
+  ) {
+    onStartMappingProposal?.({
+      action,
+      sourceIdentity: { kind: "dvd_title", titleNumber },
+    });
+  }
   return (
     <section
       className="catalog-pane catalog-evidence"
@@ -185,6 +228,35 @@ export function CatalogReviewEvidence({
           <dd>{formatVolumeLabel(volumeLabel) || "Unlabeled disc"}</dd>
         </div>
       </dl>
+      {onStartMappingProposal ? (
+        <div className="catalog-archive-mapping-action">
+          <button
+            type="button"
+            disabled={isSaving}
+            onClick={() => onStartMappingProposal({
+              action: "main_feature",
+              sourceIdentity: { kind: "main_feature" },
+            })}
+          >
+            Map DVD main feature
+          </button>
+          <span>
+            Archive-level action; HandBrake resolves the source during encode.
+          </span>
+        </div>
+      ) : null}
+      {activeMappingProposal?.sourceIdentity.kind === "main_feature" ? (
+        <CatalogReviewMappingProposal
+          key={mappingProposalIdentity(activeMappingProposal)}
+          proposal={activeMappingProposal}
+          proposedTitle={proposedTitle}
+          mediaItems={mediaItems}
+          isSaving={isSaving}
+          error={mappingProposalError}
+          onCancel={onCancelMappingProposal}
+          onCreate={onCreateMappingProposal}
+        />
+      ) : null}
       <p className="catalog-suggestion-help">
         Title Suggestions use duration only. They do not identify content,
         select a source, or create a Disc Selection.
@@ -195,37 +267,126 @@ export function CatalogReviewEvidence({
         </p>
       ) : (
         <ol className="catalog-title-evidence-list">
-          {titles.map((title) => (
-            <li key={title.number} className="catalog-title-evidence">
-              <header className="catalog-title-evidence-heading">
-                <div>
-                  <h4>Title {title.number}</h4>
-                  <p>
-                    {formatDuration(title.durationSeconds)} · {countLabel(
-                      title.chapters,
-                      "chapter",
-                    )}
+          {titles.map((title) => {
+            const proposalSource = activeMappingProposal?.sourceIdentity;
+            const activeTitleProposal = proposalSource?.kind === "dvd_title" ||
+                proposalSource?.kind === "dvd_chapters"
+              ? proposalSource.titleNumber === title.number
+              : false;
+            return (
+              <li
+                key={title.number}
+                className={activeTitleProposal
+                  ? "catalog-title-evidence catalog-title-evidence-active"
+                  : "catalog-title-evidence"}
+              >
+                <div className="catalog-title-evidence-content">
+                  <header className="catalog-title-evidence-heading">
+                    <div>
+                      <h4>Title {title.number}</h4>
+                      <p>
+                        {formatDuration(title.durationSeconds)} · {countLabel(
+                          title.chapters,
+                          "chapter",
+                        )}
+                      </p>
+                    </div>
+                    <div className="catalog-title-badges">
+                      {title.durationSeconds === longestDuration ? (
+                        <span className="catalog-factual-badge">
+                          Longest title
+                        </span>
+                      ) : null}
+                      <span className="catalog-title-suggestion">
+                        <span>Title Suggestion</span>
+                        <strong>{titleSuggestion(title.durationSeconds)}</strong>
+                      </span>
+                    </div>
+                  </header>
+                  <p className="catalog-language-summary">
+                    <span>Audio: {languageSummary(title.audioStreams)}</span>
+                    <span>Subtitles: {languageSummary(title.subtitles)}</span>
                   </p>
-                </div>
-                <div className="catalog-title-badges">
-                  {title.durationSeconds === longestDuration ? (
-                    <span className="catalog-factual-badge">
-                      Longest title
-                    </span>
+                  <TechnicalStreamDetails title={title} />
+                  {onStartMappingProposal ? (
+                    <div
+                      className="catalog-title-actions"
+                      role="group"
+                      aria-label={`Map Title ${title.number}`}
+                    >
+                      <button
+                        type="button"
+                        disabled={isSaving}
+                        onClick={() => startWholeTitleProposal(
+                          title.number,
+                          "movie",
+                        )}
+                      >
+                        Map as movie
+                      </button>
+                      <button
+                        type="button"
+                        disabled={isSaving}
+                        onClick={() => startWholeTitleProposal(
+                          title.number,
+                          "bonus_feature",
+                        )}
+                      >
+                        Map as bonus feature
+                      </button>
+                      <button
+                        type="button"
+                        disabled={isSaving}
+                        onClick={() => startWholeTitleProposal(
+                          title.number,
+                          "trailer",
+                        )}
+                      >
+                        Map as trailer
+                      </button>
+                      <button
+                        type="button"
+                        disabled={isSaving}
+                        onClick={() => onStartMappingProposal({
+                          action: "chapters",
+                          sourceIdentity: {
+                            kind: "dvd_chapters",
+                            titleNumber: title.number,
+                            chapterStart: 1,
+                            chapterEnd: title.chapters,
+                          },
+                        })}
+                      >
+                        Map chapters
+                      </button>
+                      <button
+                        type="button"
+                        disabled={isSaving}
+                        onClick={() => startWholeTitleProposal(
+                          title.number,
+                          "other",
+                        )}
+                      >
+                        Map as other
+                      </button>
+                    </div>
                   ) : null}
-                  <span className="catalog-title-suggestion">
-                    <span>Title Suggestion</span>
-                    <strong>{titleSuggestion(title.durationSeconds)}</strong>
-                  </span>
                 </div>
-              </header>
-              <p className="catalog-language-summary">
-                <span>Audio: {languageSummary(title.audioStreams)}</span>
-                <span>Subtitles: {languageSummary(title.subtitles)}</span>
-              </p>
-              <TechnicalStreamDetails title={title} />
-            </li>
-          ))}
+                {activeTitleProposal && activeMappingProposal ? (
+                  <CatalogReviewMappingProposal
+                    key={mappingProposalIdentity(activeMappingProposal)}
+                    proposal={activeMappingProposal}
+                    proposedTitle={proposedTitle}
+                    mediaItems={mediaItems}
+                    isSaving={isSaving}
+                    error={mappingProposalError}
+                    onCancel={onCancelMappingProposal}
+                    onCreate={onCreateMappingProposal}
+                  />
+                ) : null}
+              </li>
+            );
+          })}
         </ol>
       )}
     </section>

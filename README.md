@@ -558,6 +558,16 @@ hierarchies. A Disc Selection maps one Media Item to the DVD main feature, one
 DVD title, or an inclusive chapter range within a scanned title. Completing
 review requires at least one selection and records a separate reviewed time;
 adding another selection reopens review before any new encode can be enqueued.
+Each archived title exposes Assisted Mapping actions for a movie, bonus
+feature, trailer, chapter range, or other content. The editable Mapping
+Proposal remains next to that title on desktop and follows it on narrow screens;
+it preserves the initiating title while showing Media Item fields, source
+coordinates, and an optional Disc Selection label before saving both records
+atomically. DVD main feature mapping remains a separate archive-level action.
+New-item titles begin with formatting-only volume-label cleanup: separators
+become spaces, whitespace is normalized, and uniformly cased labels receive
+conservative title case without removing years, disc identifiers, seasons, or
+edition wording.
 The facade derives canonical DVD source identities and rejects duplicate source
 slices. Supported upgrades reopen caller-era scan-dependent or noncanonical
 catalogs and fail their active Encode Jobs until paged validation outside the

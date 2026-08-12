@@ -9,6 +9,7 @@ import { MEDIA_ITEM_KINDS } from "@rip-dvd/data-access/catalog-kinds";
 import type {
   CatalogReviewDiscSelectionInput,
   CatalogReviewMediaItemInput,
+  CatalogReviewProposedDiscSelectionInput,
 } from "../lib/catalog-review-command";
 
 export const mediaItemKinds = MEDIA_ITEM_KINDS;
@@ -105,3 +106,21 @@ export type SaveMediaItemInput = CatalogReviewMediaItemInput & {
 export type CreateDiscSelectionInput = CatalogReviewDiscSelectionInput & {
   replacesDiscSelectionId?: string;
 };
+
+export type MappingProposalAction =
+  | "movie"
+  | "bonus_feature"
+  | "trailer"
+  | "chapters"
+  | "other"
+  | "main_feature";
+
+export interface MappingProposal {
+  action: MappingProposalAction;
+  sourceIdentity: DiscSelectionSourceIdentityInput;
+}
+
+export interface CreateMappingProposalInput {
+  mediaItem: CatalogReviewMediaItemInput;
+  discSelection: CatalogReviewProposedDiscSelectionInput;
+}
