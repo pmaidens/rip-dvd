@@ -18,6 +18,7 @@ import {
 } from "../../encode-worker/src/encode-worker.js";
 import { createArchiveRequestsRoute } from "../app/api/archive-requests/route";
 import { createCatalogReviewRoute } from "../app/api/catalog-reviews/[id]/route";
+import { createMediaItemSearchRoute } from "../app/api/media-items/route";
 import { createDashboardEventResponse } from "../app/api/dashboard/events/route";
 import { createDashboardResponse } from "../app/api/dashboard/route";
 import { createEncodeJobsRoute } from "../app/api/encode-jobs/route";
@@ -95,7 +96,6 @@ function renderCatalogReview(review: CatalogReviewDto): string {
       onRetry={() => undefined}
       onEditMediaItem={() => undefined}
       onCancelEdit={() => undefined}
-      onMediaItemsPage={() => undefined}
       onDiscSelectionsPage={() => undefined}
       onSelectionKindChange={() => undefined}
       onStartMappingProposal={() => undefined}
@@ -377,6 +377,26 @@ describe("end-to-end operations dashboard workflow", () => {
     expect(completedArchiveDashboard.html).toContain("Review catalog");
     const archive = access.catalog.listOriginalDiscArchives()[0]!;
     expect(existsSync(archive.archivePath)).toBe(true);
+    const unrelatedMediaItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Unrelated Global Noise",
+    });
+    const existingShow = access.catalog.createMediaItem({
+      kind: "tv_show",
+      title: "Existing Workflow Show",
+    });
+    const existingSeason = access.catalog.createMediaItem({
+      parentId: existingShow.id,
+      kind: "season",
+      title: "Season 1",
+      seasonNumber: 1,
+    });
+    const existingEpisode = access.catalog.createMediaItem({
+      parentId: existingSeason.id,
+      kind: "episode",
+      title: "Workflow Movie",
+      episodeNumber: 1,
+    });
 
     const catalogReviewResponse = await createCatalogReviewRoute(
       new Request(`${trustedOrigin}/api/catalog-reviews/${archive.id}`),
@@ -387,6 +407,7 @@ describe("end-to-end operations dashboard workflow", () => {
     expect(catalogReviewResponse.status).toBe(200);
     const catalogReview = await catalogReviewResponse.json() as
       CatalogReviewDto;
+    expect(catalogReview.mediaItems).toEqual([]);
     const catalogReviewHtml = renderCatalogReview(catalogReview);
     expect(catalogReviewHtml).toContain("Catalog Workflow Disc");
     expect(catalogReviewHtml).toContain("Original volume label");
@@ -407,6 +428,35 @@ describe("end-to-end operations dashboard workflow", () => {
     expect(catalogReviewHtml).toContain("Map as trailer");
     expect(catalogReviewHtml).toContain("Map chapters");
     expect(catalogReviewHtml).toContain("Map as other");
+    expect(catalogReviewHtml).not.toContain("Unrelated Global Noise");
+    expect(catalogReviewHtml).not.toContain("Existing Workflow Show");
+
+    const mediaItemSearchResponse = await createMediaItemSearchRoute(
+      new Request(
+        `${trustedOrigin}/api/media-items?query=Workflow%20Movie&offset=0`,
+      ),
+      () => access,
+    );
+    expect(mediaItemSearchResponse.status).toBe(200);
+    expect(mediaItemSearchResponse.headers.get("Cache-Control")).toBe(
+      "no-store",
+    );
+    await expect(mediaItemSearchResponse.json()).resolves.toEqual({
+      results: [{
+        mediaItem: expect.objectContaining({ id: existingEpisode.id }),
+        ancestors: [
+          expect.objectContaining({ id: existingShow.id }),
+          expect.objectContaining({ id: existingSeason.id }),
+        ],
+        suggestion: "exact",
+      }],
+      page: {
+        offset: 0,
+        limit: 20,
+        hasPrevious: false,
+        hasNext: false,
+      },
+    });
 
     const catalogMutation = (body: unknown) =>
       createCatalogReviewRoute(
@@ -418,13 +468,16 @@ describe("end-to-end operations dashboard workflow", () => {
     const failedProposal = await catalogMutation({
       action: "create_mapping_proposal",
       catalogRevision: catalogReview.catalogRevision,
-      mediaItem: { kind: "movie", title: "Orphaned Workflow Movie" },
+      target: {
+        choice: "create_new",
+        mediaItem: { kind: "movie", title: "Orphaned Workflow Movie" },
+      },
       discSelection: {
         sourceIdentity: { kind: "dvd_title", titleNumber: 99 },
       },
     });
     expect(failedProposal.status).toBe(409);
-    expect(access.catalog.listMediaItems()).toEqual([]);
+    expect(access.catalog.listMediaItems()).toHaveLength(4);
     expect(access.catalog.listDiscSelections({
       originalDiscArchiveId: archive.id,
     })).toEqual([]);
@@ -432,7 +485,10 @@ describe("end-to-end operations dashboard workflow", () => {
     const proposalResponse = await catalogMutation({
       action: "create_mapping_proposal",
       catalogRevision: catalogReview.catalogRevision,
-      mediaItem: { kind: "movie", title: "Workflow Movie", year: 2001 },
+      target: {
+        choice: "create_new",
+        mediaItem: { kind: "movie", title: "Workflow Movie", year: 2001 },
+      },
       discSelection: {
         label: "Exact archived title",
         sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
@@ -444,12 +500,15 @@ describe("end-to-end operations dashboard workflow", () => {
       discSelection: { id: string };
     };
     const selection = proposal.discSelection;
-    expect(access.catalog.listMediaItems()).toEqual([
+    expect(access.catalog.listMediaItems()).toHaveLength(5);
+    expect(proposal.mediaItem.id).not.toBe(existingEpisode.id);
+    expect(access.catalog.listMediaItems()).toEqual(expect.arrayContaining([
       expect.objectContaining({
         id: proposal.mediaItem.id,
         title: "Workflow Movie",
       }),
-    ]);
+      expect.objectContaining({ id: existingEpisode.id }),
+    ]));
     expect(access.catalog.listDiscSelections({
       originalDiscArchiveId: archive.id,
     })).toEqual([
@@ -594,12 +653,20 @@ describe("end-to-end operations dashboard workflow", () => {
     const additionalProposal = await catalogMutation({
       action: "create_mapping_proposal",
       catalogRevision: reviewedRevision,
-      mediaItem: { kind: "other", title: "Workflow Menu" },
+      target: {
+        choice: "use_existing",
+        mediaItemId: existingEpisode.id,
+      },
       discSelection: {
         sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
       },
     });
     expect(additionalProposal.status).toBe(201);
+    await expect(additionalProposal.json()).resolves.toMatchObject({
+      mediaItem: { id: existingEpisode.id },
+      discSelection: { mediaItemId: existingEpisode.id },
+    });
+    expect(access.catalog.listMediaItems()).toHaveLength(5);
     expect(access.catalog.listOriginalDiscArchives({
       ids: [archive.id],
     })[0]!.catalogReviewedAt).toBeNull();
@@ -632,6 +699,15 @@ describe("end-to-end operations dashboard workflow", () => {
     expect(refreshedCoverageHtml).toContain("3 mapped titles");
     expect(refreshedCoverageHtml).toContain("0 partially mapped titles");
     expect(refreshedCoverageHtml).toContain("2 unmapped titles");
+    expect(refreshedCoverage.mediaItems).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: proposal.mediaItem.id }),
+      expect.objectContaining({ id: existingShow.id }),
+      expect.objectContaining({ id: existingSeason.id }),
+      expect.objectContaining({ id: existingEpisode.id }),
+    ]));
+    expect(refreshedCoverage.mediaItems).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: unrelatedMediaItem.id }),
+    ]));
     expect((await catalogMutation({
       action: "complete_review",
       catalogRevision: refreshedCoverage.catalogRevision,

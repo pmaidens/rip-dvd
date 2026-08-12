@@ -20,7 +20,6 @@ import {
 
 import {
   DISC_SELECTION_KINDS,
-  MEDIA_ITEM_KINDS,
 } from "@rip-dvd/data-access/catalog-kinds";
 
 import {
@@ -65,15 +64,13 @@ function stubDeferredCatalogReviewRequests(): PendingRequest[] {
 function catalogReview({
   archiveId,
   discLabel,
-  mediaOffset = 0,
   discSelectionOffset = 0,
 }: {
   archiveId: string;
   discLabel: string;
-  mediaOffset?: number;
   discSelectionOffset?: number;
 }): CatalogReviewDto {
-  const mediaItemId = `${archiveId}-item-${mediaOffset}`;
+  const mediaItemId = `${archiveId}-item-${discSelectionOffset}`;
   const titleNumber = discSelectionOffset / 100 + 1;
   return {
     catalogRevision: "2026-08-11T06:00:00.000Z",
@@ -100,18 +97,11 @@ function catalogReview({
       id: mediaItemId,
       parentId: null,
       kind: "movie",
-      title: `${discLabel} item at offset ${mediaOffset}`,
+      title: `${discLabel} item`,
       year: null,
       seasonNumber: null,
       episodeNumber: null,
     }],
-    mediaItemsPage: {
-      offset: mediaOffset,
-      limit: 100,
-      hasPrevious: mediaOffset > 0,
-      hasNext: mediaOffset === 0,
-      itemIds: [mediaItemId],
-    },
     discSelections: [{
       id: `${archiveId}-selection-${discSelectionOffset}`,
       mediaItemId,
@@ -160,8 +150,8 @@ describe("CatalogReviewEditor", () => {
     await act(async () => renderCatalogReviewEditor("archive-b"));
 
     expect(requests.map(({ url }) => url)).toEqual([
-      "/api/catalog-reviews/archive-a?mediaOffset=0&selectionOffset=0",
-      "/api/catalog-reviews/archive-b?mediaOffset=0&selectionOffset=0",
+      "/api/catalog-reviews/archive-a?selectionOffset=0",
+      "/api/catalog-reviews/archive-b?selectionOffset=0",
     ]);
 
     await resolveRequest(
@@ -178,7 +168,7 @@ describe("CatalogReviewEditor", () => {
     expect(container.textContent).not.toContain("STALE_ARCHIVE");
   });
 
-  it("keeps the current rendered pages when page requests resolve out of order", async () => {
+  it("keeps the current rendered Disc Selection page", async () => {
     const requests = stubDeferredCatalogReviewRequests();
 
     await act(async () => renderCatalogReviewEditor("archive-a"));
@@ -187,51 +177,26 @@ describe("CatalogReviewEditor", () => {
       catalogReview({ archiveId: "archive-a", discLabel: "FIRST_PAGE" }),
     );
 
-    const nextMediaItemsPage = [...container.querySelectorAll("button")].find(
-      (button) => button.textContent === "Next Media Items",
-    );
-    if (!nextMediaItemsPage) {
-      throw new Error("Expected the next Media Items page control");
-    }
     const nextDiscSelectionsPage = [...container.querySelectorAll("button")]
       .find((button) => button.textContent === "Next Disc Selections");
     if (!nextDiscSelectionsPage) {
       throw new Error("Expected the next Disc Selections page control");
     }
-    await act(async () => {
-      nextMediaItemsPage.click();
-      await Promise.resolve();
-      nextDiscSelectionsPage.click();
-    });
+    await act(async () => nextDiscSelectionsPage.click());
     expect(requests.slice(1).map(({ url }) => url)).toEqual([
-      "/api/catalog-reviews/archive-a?mediaOffset=100&selectionOffset=0",
-      "/api/catalog-reviews/archive-a?mediaOffset=100&selectionOffset=100",
+      "/api/catalog-reviews/archive-a?selectionOffset=100",
     ]);
-
-    await resolveRequest(
-      requests[2]!,
-      catalogReview({
-        archiveId: "archive-a",
-        discLabel: "CURRENT_PAGE",
-        mediaOffset: 100,
-        discSelectionOffset: 100,
-      }),
-    );
-    expect(container.textContent).toContain("CURRENT_PAGE item at offset 100");
-    expect(container.textContent).toContain("Title 2");
 
     await resolveRequest(
       requests[1]!,
       catalogReview({
         archiveId: "archive-a",
-        discLabel: "STALE_PAGE",
-        mediaOffset: 100,
-        discSelectionOffset: 0,
+        discLabel: "CURRENT_PAGE",
+        discSelectionOffset: 100,
       }),
     );
-    expect(container.textContent).toContain("CURRENT_PAGE item at offset 100");
+    expect(container.textContent).toContain("CURRENT_PAGE item");
     expect(container.textContent).toContain("Title 2");
-    expect(container.textContent).not.toContain("STALE_PAGE");
   });
 
   it("keeps a failed Mapping Proposal editable and refreshes the exact-source mapping after success", async () => {
@@ -247,7 +212,6 @@ describe("CatalogReviewEditor", () => {
       subtitles: [],
     }];
     initialReview.mediaItems = [];
-    initialReview.mediaItemsPage.itemIds = [];
     initialReview.discSelections = [];
     const refreshedReview: CatalogReviewDto = {
       ...initialReview,
@@ -261,10 +225,6 @@ describe("CatalogReviewEditor", () => {
         seasonNumber: null,
         episodeNumber: null,
       }],
-      mediaItemsPage: {
-        ...initialReview.mediaItemsPage,
-        itemIds: ["created-movie"],
-      },
       discSelections: [{
         id: "created-selection",
         mediaItemId: "created-movie",
@@ -340,13 +300,16 @@ describe("CatalogReviewEditor", () => {
       {
         action: "create_mapping_proposal",
         catalogRevision: initialReview.catalogRevision,
-        mediaItem: {
-          parentId: null,
-          kind: "movie",
-          title: "Corrected Proposal Title",
-          year: null,
-          seasonNumber: null,
-          episodeNumber: null,
+        target: {
+          choice: "create_new",
+          mediaItem: {
+            parentId: null,
+            kind: "movie",
+            title: "Corrected Proposal Title",
+            year: null,
+            seasonNumber: null,
+            episodeNumber: null,
+          },
         },
         discSelection: {
           sourceIdentity: { kind: "dvd_title", titleNumber: 3 },
@@ -355,13 +318,16 @@ describe("CatalogReviewEditor", () => {
       {
         action: "create_mapping_proposal",
         catalogRevision: initialReview.catalogRevision,
-        mediaItem: {
-          parentId: null,
-          kind: "movie",
-          title: "Corrected Proposal Title",
-          year: null,
-          seasonNumber: null,
-          episodeNumber: null,
+        target: {
+          choice: "create_new",
+          mediaItem: {
+            parentId: null,
+            kind: "movie",
+            title: "Corrected Proposal Title",
+            year: null,
+            seasonNumber: null,
+            episodeNumber: null,
+          },
         },
         discSelection: {
           sourceIdentity: { kind: "dvd_title", titleNumber: 3 },
@@ -383,7 +349,6 @@ describe("CatalogReviewEditor", () => {
       subtitles: [],
     }];
     review.mediaItems = [];
-    review.mediaItemsPage.itemIds = [];
     review.discSelections = [];
     vi.stubGlobal("fetch", vi.fn(async () => Response.json(review)));
 
@@ -419,6 +384,135 @@ describe("CatalogReviewEditor", () => {
       '.catalog-mapping-proposal input[name="title"]',
     )?.value).toBe("Action Switch Disc");
   });
+
+  it("requires an explicit existing Media Item selection after bounded search", async () => {
+    const review = catalogReview({
+      archiveId: "archive-a",
+      discLabel: "EXISTING_MOVIE",
+    });
+    review.rawScan.titles = [{
+      number: 1,
+      durationSeconds: 5_400,
+      chapters: 12,
+      audioStreams: [],
+      subtitles: [],
+    }];
+    review.mediaItems = [];
+    review.discSelections = [];
+    const postedCommands: unknown[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const url = String(input);
+      if (url.startsWith("/api/media-items?")) {
+        return Response.json({
+          results: [{
+            mediaItem: {
+              id: "existing-movie",
+              parentId: "existing-season",
+              kind: "episode",
+              title: "Existing Movie",
+              year: null,
+              seasonNumber: null,
+              episodeNumber: 4,
+            },
+            ancestors: [{
+              id: "existing-show",
+              parentId: null,
+              kind: "tv_show",
+              title: "Existing Show",
+              year: null,
+              seasonNumber: null,
+              episodeNumber: null,
+            }, {
+              id: "existing-season",
+              parentId: "existing-show",
+              kind: "season",
+              title: "Season 2",
+              year: null,
+              seasonNumber: 2,
+              episodeNumber: null,
+            }],
+            suggestion: "exact",
+          }],
+          page: {
+            offset: 0,
+            limit: 20,
+            hasPrevious: false,
+            hasNext: false,
+          },
+        });
+      }
+      if (init?.method === "POST") {
+        postedCommands.push(JSON.parse(String(init.body)) as unknown);
+        return Response.json({}, { status: 201 });
+      }
+      return Response.json(review);
+    }));
+
+    await act(async () => renderCatalogReviewEditor("archive-a"));
+    const mapMovie = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Map as movie",
+    );
+    if (!mapMovie) {
+      throw new Error("Expected a title-row movie mapping action");
+    }
+    await act(async () => mapMovie.click());
+
+    expect(container.textContent).toContain("Create new Media Item");
+    expect(container.textContent).toContain("Use existing Media Item");
+    const useExisting = container.querySelector<HTMLInputElement>(
+      'input[name="mappingTargetChoice"][value="use_existing"]',
+    );
+    if (!useExisting) {
+      throw new Error("Expected the existing Media Item choice");
+    }
+    await act(async () => useExisting.click());
+
+    const search = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Search full catalog",
+    );
+    if (!search) {
+      throw new Error("Expected the full-catalog search action");
+    }
+    await act(async () => search.click());
+
+    expect(container.textContent).toContain(
+      "Existing Show › Season 2 › Existing Movie",
+    );
+    expect(container.textContent).toContain("Exact title suggestion");
+    const existingResult = container.querySelector<HTMLInputElement>(
+      'input[name="existingMediaItemId"][value="existing-movie"]',
+    );
+    expect(existingResult?.checked).toBe(false);
+    if (!existingResult) {
+      throw new Error("Expected an unselected catalog result");
+    }
+    await act(async () => existingResult.click());
+
+    const submit = [...container.querySelectorAll("button")].find(
+      (button) =>
+        button.textContent ===
+          "Use existing Media Item and create Disc Selection",
+    );
+    if (!submit) {
+      throw new Error("Expected the explicit reuse submit action");
+    }
+    await act(async () => submit.click());
+
+    expect(postedCommands).toEqual([{
+      action: "create_mapping_proposal",
+      catalogRevision: review.catalogRevision,
+      target: {
+        choice: "use_existing",
+        mediaItemId: "existing-movie",
+      },
+      discSelection: {
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      },
+    }]);
+  });
 });
 
 function selectOptionValues(html: string, name: string): string[] {
@@ -441,7 +535,10 @@ describe("CatalogReviewView", () => {
       create_mapping_proposal: {
         action: "create_mapping_proposal",
         catalogRevision: "2026-08-11T06:00:00.000Z",
-        mediaItem: { kind: "movie", title: "Proposed Movie" },
+        target: {
+          choice: "create_new",
+          mediaItem: { kind: "movie", title: "Proposed Movie" },
+        },
         discSelection: {
           sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
         },
@@ -584,13 +681,6 @@ describe("CatalogReviewView", () => {
                 episodeNumber: 1,
               },
             ],
-            mediaItemsPage: {
-              offset: 0,
-              limit: 100,
-              hasPrevious: false,
-              hasNext: true,
-              itemIds: ["season-1", "episode-1"],
-            },
             discSelections: [{
               id: "selection-1",
               mediaItemId: "episode-1",
@@ -629,7 +719,6 @@ describe("CatalogReviewView", () => {
         onRetry={() => undefined}
         onEditMediaItem={() => undefined}
         onCancelEdit={() => undefined}
-        onMediaItemsPage={() => undefined}
         onDiscSelectionsPage={() => undefined}
         onSelectionKindChange={() => undefined}
         onStartMappingProposal={() => undefined}
@@ -663,13 +752,12 @@ describe("CatalogReviewView", () => {
     expect(html).toContain("Media Item hierarchy");
     expect(html).toContain("Chapter Show");
     expect(html).toContain("Parent context");
-    expect(html.match(/>Edit<\/button>/g)).toHaveLength(2);
+    expect(html.match(/>Edit<\/button>/g)).toHaveLength(3);
     expect(html).toContain("Season 1");
     expect(html).toContain("Episode One");
     expect(html).toContain("Reviewed Disc Selections");
     expect(html).toContain("Title 1, chapters 1–4");
-    expect(html).toContain("Create Media Item");
-    expect(html).toContain("Next Media Items");
+    expect(html).not.toContain("Next Media Items");
     expect(html).toContain("Add Disc Selection");
     expect(html).toContain('name="replacesDiscSelectionId"');
     expect(html).toContain("Locked provenance");
@@ -678,13 +766,12 @@ describe("CatalogReviewView", () => {
     expect(html).not.toContain("Remove Disc Selection");
     expect(html).toContain("Next Disc Selections");
     expect(html).toContain("Complete review");
-    expect(selectOptionValues(html, "kind")).toEqual(MEDIA_ITEM_KINDS);
     expect(selectOptionValues(html, "selectionKind")).toEqual(
       DISC_SELECTION_KINDS,
     );
   });
 
-  it("preserves full hierarchy and mapping context while reparenting across pages", () => {
+  it("preserves full mapped hierarchy and ancestor context while editing", () => {
     const html = renderToStaticMarkup(
       <CatalogReviewView
         state={{
@@ -738,23 +825,7 @@ describe("CatalogReviewView", () => {
                 seasonNumber: null,
                 episodeNumber: 1,
               },
-              {
-                id: "target-1",
-                parentId: null,
-                kind: "tv_show",
-                title: "Different-page target",
-                year: null,
-                seasonNumber: null,
-                episodeNumber: null,
-              },
             ],
-            mediaItemsPage: {
-              offset: 100,
-              limit: 100,
-              hasPrevious: true,
-              hasNext: false,
-              itemIds: ["target-1"],
-            },
             discSelections: [{
               id: "selection-1",
               mediaItemId: "episode-1",
@@ -785,7 +856,6 @@ describe("CatalogReviewView", () => {
         onRetry={() => undefined}
         onEditMediaItem={() => undefined}
         onCancelEdit={() => undefined}
-        onMediaItemsPage={() => undefined}
         onDiscSelectionsPage={() => undefined}
         onSelectionKindChange={() => undefined}
         onStartMappingProposal={() => undefined}
@@ -800,9 +870,8 @@ describe("CatalogReviewView", () => {
 
     expect(html).toContain("Parent context");
     expect(html).toContain('value="season-1" selected="">— Parent Season');
-    expect(html).toContain('value="target-1">Different-page target');
     expect(html).toContain("Mapped Episode");
     expect(html).not.toContain("Unknown Media Item");
-    expect(html.match(/>Edit<\/button>/g)).toHaveLength(1);
+    expect(html.match(/>Edit<\/button>/g)).toHaveLength(3);
   });
 });

@@ -30,7 +30,6 @@ interface CatalogReviewViewProps {
   onRetry(): void;
   onEditMediaItem(id: string): void;
   onCancelEdit(): void;
-  onMediaItemsPage(offset: number): void;
   onDiscSelectionsPage(offset: number): void;
   onSelectionKindChange(kind: DiscSelectionKind): void;
   onStartMappingProposal(proposal: MappingProposal): void;
@@ -54,7 +53,6 @@ export function CatalogReviewView({
   onRetry,
   onEditMediaItem,
   onCancelEdit,
-  onMediaItemsPage,
   onDiscSelectionsPage,
   onSelectionKindChange,
   onStartMappingProposal,
@@ -130,12 +128,13 @@ export function CatalogReviewView({
 
         <CatalogReviewMediaItems
           mediaItems={review.mediaItems}
-          page={review.mediaItemsPage}
+          mappedMediaItemIds={review.discSelections.map(
+            (selection) => selection.mediaItemId,
+          )}
           editingMediaItemId={editingMediaItemId}
           isSaving={isSaving}
           onEdit={onEditMediaItem}
           onCancelEdit={onCancelEdit}
-          onPage={onMediaItemsPage}
           onSave={onSaveMediaItem}
         />
 
@@ -191,7 +190,6 @@ export function CatalogReviewEditor({
       onRetry={review.retry}
       onEditMediaItem={review.editMediaItem}
       onCancelEdit={review.cancelEdit}
-      onMediaItemsPage={review.changeMediaItemOffset}
       onDiscSelectionsPage={review.changeDiscSelectionOffset}
       onSelectionKindChange={review.changeSelectionKind}
       onStartMappingProposal={review.startMappingProposal}

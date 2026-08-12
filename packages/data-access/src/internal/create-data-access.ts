@@ -99,6 +99,7 @@ import {
   StaleJobAttemptError,
 } from "../errors.js";
 import type { LegacySidecarDataAccess } from "../legacy-sidecar-types.js";
+import { normalizeMediaItemSearchTitle } from "../media-item-title-search.js";
 import type {
   ArchiveJobClaimToken,
   ArchiveJobId,
@@ -156,6 +157,7 @@ const LEGACY_ARCHIVE_RECONCILIATION_LIMIT = 4;
 const LEGACY_ARCHIVE_RECONCILIATION_BYTES = 9_000_000_000;
 const DISC_SELECTION_REVIEW_BATCH_SIZE = 100;
 const DISC_SELECTION_ACTION_AVAILABILITY_LIMIT = 100;
+const MEDIA_ITEM_SEARCH_LIMIT = 100;
 const DEFAULT_MIGRATIONS_FOLDER = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../drizzle",
@@ -303,6 +305,14 @@ function openMigratedDatabase(
 
   try {
     sqlite = new DatabaseSync(databasePath);
+    sqlite.function(
+      "rip_dvd_normalize_media_item_title",
+      { deterministic: true },
+      (value) =>
+        typeof value === "string"
+          ? normalizeMediaItemSearchTitle(value)
+          : null,
+    );
     sqlite.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
     sqlite.exec("PRAGMA foreign_keys = ON");
     if (sqlite.prepare("PRAGMA foreign_key_check").get() !== undefined) {
@@ -1521,6 +1531,8 @@ export function createDataAccessInternal(
           listOriginalDiscArchives: (options) =>
             access.catalog.listOriginalDiscArchives(options),
           listMediaItems: (options) => access.catalog.listMediaItems(options),
+          searchMediaItems: (options) =>
+            access.catalog.searchMediaItems(options),
           listDiscSelections: (options) =>
             access.catalog.listDiscSelections(options),
           listDiscSelectionActionAvailability: (options) =>
@@ -2353,35 +2365,47 @@ export function createDataAccessInternal(
             );
           }
 
-          const mediaItemValues = validateMediaItem(
-            { ...input.mediaItem, id: mediaItemId },
-            transaction,
-            { titleNormalization: "trim" },
-          );
-          validateAssistedMappingShape(transaction, mediaItemValues);
           const label = input.discSelection.label === undefined
             ? undefined
             : requireNonEmpty(input.discSelection.label, "label");
 
-          const mediaItem = requireRow(
-            transaction
-              .insert(mediaItems)
-              .values({
-                id: mediaItemId,
-                ...mediaItemValues,
-                createdAt: timestamp,
-                updatedAt: timestamp,
-              })
-              .returning()
-              .get(),
-            "media item",
-            mediaItemId,
-          );
+          const mediaItem = input.existingMediaItemId === undefined
+            ? (() => {
+              const mediaItemValues = validateMediaItem(
+                { ...input.mediaItem, id: mediaItemId },
+                transaction,
+                { titleNormalization: "trim" },
+              );
+              validateAssistedMappingShape(transaction, mediaItemValues);
+              return requireRow(
+                transaction
+                  .insert(mediaItems)
+                  .values({
+                    id: mediaItemId,
+                    ...mediaItemValues,
+                    createdAt: timestamp,
+                    updatedAt: timestamp,
+                  })
+                  .returning()
+                  .get(),
+                "media item",
+                mediaItemId,
+              );
+            })()
+            : requireRow(
+              transaction
+                .select()
+                .from(mediaItems)
+                .where(eq(mediaItems.id, input.existingMediaItemId))
+                .get(),
+              "media item",
+              input.existingMediaItemId,
+            );
           const discSelection = insertDiscSelection(
             transaction,
             {
               originalDiscArchiveId: input.originalDiscArchiveId,
-              mediaItemId,
+              mediaItemId: mediaItem.id,
               sourceIdentity: input.discSelection.sourceIdentity,
               ...(label === undefined ? {} : { label }),
             },
@@ -2474,6 +2498,47 @@ export function createDataAccessInternal(
           options,
           "Media Item",
         );
+      },
+
+      searchMediaItems(options) {
+        const searchQuery = requireNonEmpty(options.query, "query");
+        if (searchQuery.length > 256) {
+          throw new DomainInvariantError(
+            "Media Item search query must be at most 256 characters",
+          );
+        }
+        if (
+          !Number.isSafeInteger(options.limit) ||
+          options.limit < 1 ||
+          options.limit > MEDIA_ITEM_SEARCH_LIMIT
+        ) {
+          throw new DomainInvariantError(
+            `Media Item search limit must be a safe integer between 1 and ${MEDIA_ITEM_SEARCH_LIMIT}`,
+          );
+        }
+        const normalizedQuery = normalizeMediaItemSearchTitle(searchQuery);
+        if (normalizedQuery.length === 0) {
+          throw new DomainInvariantError(
+            "Media Item search query must contain a letter or number",
+          );
+        }
+        const pattern = `%${normalizedQuery.replaceAll(" ", "%")}%`;
+        const normalizedTitle =
+          sql`rip_dvd_normalize_media_item_title(${mediaItems.title})`;
+        const query = database
+          .select()
+          .from(mediaItems)
+          .where(sql`${normalizedTitle} like ${pattern}`)
+          .orderBy(
+            sql`case
+              when ${mediaItems.title} = ${searchQuery} then 0
+              when ${normalizedTitle} = ${normalizedQuery} then 1
+              else 2
+            end`,
+            asc(mediaItems.title),
+            asc(mediaItems.id),
+          );
+        return listWithBoundedOffset(query, options, "Media Item search");
       },
 
       createDiscSelection(input) {
