@@ -24,6 +24,22 @@ const hash = spawnSync(
 if (hash.status !== 0 || hash.stdout !== `sha256:${expectedHash}`) {
   throw new Error(`libdvdcss reader hash check failed: ${hash.stderr}`);
 }
+const hashProgress = hash.stderr.trim().split("\n").map((line) => {
+  const match = /^(\d+) bytes hashed$/.exec(line);
+  return match ? Number(match[1]) : Number.NaN;
+});
+if (
+  hashProgress.length === 0 ||
+  hashProgress.some((bytes, index) =>
+    !Number.isSafeInteger(bytes) ||
+    bytes <= (hashProgress[index - 1] ?? -1) ||
+    bytes > content.byteLength
+  ) ||
+  hashProgress.at(-1) !== content.byteLength ||
+  hash.stderr.length > 1_024
+) {
+  throw new Error(`libdvdcss reader hash progress check failed: ${hash.stderr}`);
+}
 
 const copy = spawnSync(
   executable,

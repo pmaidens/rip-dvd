@@ -1,7 +1,7 @@
 import { DomainInvariantError } from "../errors.js";
 import type {
   ChronologicalListOptions,
-  JobStatus,
+  EncodeJobStatus,
 } from "../types.js";
 import { requirePositiveSafeInteger } from "./validation.js";
 
@@ -66,7 +66,7 @@ export function createBoundedChronologicalList<
 
 export function createJobList<
   Job extends ChronologicalRecord & { updatedAt: Date },
-  Status extends string = JobStatus,
+  Status extends string = EncodeJobStatus,
 >({
   activeStatuses = ["queued", "running"] as Status[],
   historyStatuses = ["completed", "failed"] as Status[],

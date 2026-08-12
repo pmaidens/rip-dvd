@@ -608,12 +608,13 @@ describe("watchDashboardActivity", () => {
       items: [{
         id: "job-1",
         detectedDiscId: "disc-1",
+        archiveRequestId: "request-1",
+        attemptOrdinal: 1,
         discLabel: "DISC",
         opticalDriveName: "Drive",
         status: "running",
         progressPhase: "copying",
         progressPercent: 10,
-        retryable: false,
       }],
     };
     const newer = structuredClone(first);
@@ -856,12 +857,13 @@ describe("watchDashboardActivity", () => {
           {
             id: "archive-1",
             detectedDiscId: "disc-1",
+            archiveRequestId: "request-1",
+            attemptOrdinal: 1,
             discLabel: "LIVE_DISC",
             opticalDriveName: "Upper drive",
             status: "running",
             progressPhase: "copying",
             progressPercent: 42,
-            retryable: false,
           },
         ],
       },

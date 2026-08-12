@@ -643,7 +643,9 @@ describe("DVD archive publication", () => {
     );
   });
 
-  it("does not quarantine or retry a partial while its reader is active", async () => {
+  it.runIf(supportsLinuxWriterOwnership)(
+    "does not quarantine or retry a partial while its reader is active",
+    async () => {
     const originalsLibraryPath = createOriginalsLibrary();
     const root = realpathSync(originalsLibraryPath);
     const content = Buffer.from("dvd-image");
@@ -695,7 +697,8 @@ describe("DVD archive publication", () => {
     expect(runner.copy).toHaveBeenCalledTimes(2);
     expect(existsSync(partialPath!)).toBe(false);
     expect(readFileSync(`${partialPath}.failed`, "utf8")).toBe("live partial");
-  });
+    },
+  );
 
   it.runIf(supportsLinuxWriterOwnership)(
     "quarantines a stale partial image before retrying the copy",

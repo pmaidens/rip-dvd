@@ -1,15 +1,18 @@
 import type {
-  ARCHIVE_PROGRESS_PHASES,
-  ARCHIVE_RUNNING_PROGRESS_PHASES,
   ARCHIVE_JOB_STATUSES,
+  ARCHIVE_REQUEST_STATUSES,
+  ARCHIVE_RUNNING_PROGRESS_PHASES,
   ARCHIVE_FORMATS,
   DETECTED_DISC_STATUSES,
   DISC_KINDS,
+  DISC_INSPECTION_ATTEMPT_OUTCOMES,
+  DISC_INSPECTION_PHASES,
+  DISC_INSPECTION_REASON_CODES,
+  DISC_INSPECTION_STATUSES,
   DISC_SELECTION_KINDS,
-  ENCODE_PROGRESS_PHASES,
   ENCODE_JOB_STATUSES,
+  ENCODE_PROGRESS_PHASES,
   FILESYSTEM_VERIFICATION_STATUSES,
-  JOB_STATUSES,
   MEDIA_DOMAINS,
   MEDIA_ITEM_KINDS,
 } from "./domain-values.js";
@@ -24,12 +27,18 @@ export type DetectedDiscStatus = (typeof DETECTED_DISC_STATUSES)[number];
 export type MediaItemKind = (typeof MEDIA_ITEM_KINDS)[number];
 export type DiscSelectionKind = (typeof DISC_SELECTION_KINDS)[number];
 export type MediaDomain = (typeof MEDIA_DOMAINS)[number];
-export type JobStatus = (typeof JOB_STATUSES)[number];
 export type ArchiveJobStatus = (typeof ARCHIVE_JOB_STATUSES)[number];
+export type ArchiveRequestStatus = (typeof ARCHIVE_REQUEST_STATUSES)[number];
+export type DiscInspectionStatus = (typeof DISC_INSPECTION_STATUSES)[number];
+export type DiscInspectionPhase = (typeof DISC_INSPECTION_PHASES)[number];
+export type DiscInspectionAttemptOutcome =
+  (typeof DISC_INSPECTION_ATTEMPT_OUTCOMES)[number];
+export type DiscInspectionReasonCode =
+  (typeof DISC_INSPECTION_REASON_CODES)[number];
 export type EncodeJobStatus = (typeof ENCODE_JOB_STATUSES)[number];
-export type ArchiveProgressPhase = (typeof ARCHIVE_PROGRESS_PHASES)[number];
 export type ArchiveRunningProgressPhase =
   (typeof ARCHIVE_RUNNING_PROGRESS_PHASES)[number];
+export type ArchiveProgressPhase = ArchiveRunningProgressPhase;
 export type EncodeProgressPhase = (typeof ENCODE_PROGRESS_PHASES)[number];
 export type FilesystemVerificationStatus =
   (typeof FILESYSTEM_VERIFICATION_STATUSES)[number];
@@ -40,7 +49,10 @@ type DomainId<Name extends string> = string & {
 };
 
 export type OpticalDriveId = DomainId<"OpticalDrive">;
+export type DiscInspectionId = DomainId<"DiscInspection">;
+export type DiscInspectionAttemptId = DomainId<"DiscInspectionAttempt">;
 export type DetectedDiscId = DomainId<"DetectedDisc">;
+export type ArchiveRequestId = DomainId<"ArchiveRequest">;
 export type OriginalDiscArchiveId = DomainId<"OriginalDiscArchive">;
 export type MediaItemId = DomainId<"MediaItem">;
 export type DiscSelectionId = DomainId<"DiscSelection">;
@@ -48,7 +60,7 @@ export type EncodingProfileId = DomainId<"EncodingProfile">;
 export type ArchiveJobId = DomainId<"ArchiveJob">;
 export type EncodeJobId = DomainId<"EncodeJob">;
 export type ArchiveJobClaimToken = DomainId<"ArchiveJobClaim">;
-export type ArchiveJobInspectionToken = DomainId<"ArchiveJobInspection">;
+export type DiscInspectionClaimToken = DomainId<"DiscInspectionClaim">;
 export type EncodeJobClaimToken = DomainId<"EncodeJobClaim">;
 export type EncodeJobCleanupClaimToken = DomainId<"EncodeJobCleanupClaim">;
 
@@ -58,7 +70,7 @@ export type EncodeOutputFilesystemIdentity = string & {
 };
 
 export const ARCHIVE_JOB_LEASE_DURATION_MS = 60_000;
-export const ARCHIVE_INSPECTION_LEASE_DURATION_MS = 60_000;
+export const DISC_INSPECTION_LEASE_DURATION_MS = 60_000;
 export const ENCODE_JOB_LEASE_DURATION_MS = 60_000;
 
 export interface ServiceHealth {
@@ -91,6 +103,62 @@ export interface DetectedDisc {
   status: DetectedDiscStatus;
   scanData: unknown;
   detectedAt: Date;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface DiscInspection {
+  id: DiscInspectionId;
+  opticalDriveId: OpticalDriveId;
+  detectedDiscId: DetectedDiscId | null;
+  mediaGeneration: string;
+  isCurrent: boolean;
+  status: DiscInspectionStatus;
+  phase: DiscInspectionPhase;
+  attemptCount: number;
+  consecutiveFailureCount: number;
+  volumeLabel: string | null;
+  titleCount: number | null;
+  chapterCount: number | null;
+  audioStreamCount: number | null;
+  subtitleStreamCount: number | null;
+  totalBytes: number | null;
+  bytesHashed: number | null;
+  bytesPerSecond: number | null;
+  etaSeconds: number | null;
+  retryAt: Date | null;
+  reasonCode: DiscInspectionReasonCode | null;
+  diagnostic: string | null;
+  claimToken: DiscInspectionClaimToken | null;
+  claimUpdatedAt: Date | null;
+  phaseStartedAt: Date;
+  attemptStartedAt: Date;
+  startedAt: Date;
+  completedAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface DiscInspectionAttempt {
+  id: DiscInspectionAttemptId;
+  discInspectionId: DiscInspectionId;
+  attemptNumber: number;
+  outcome: DiscInspectionAttemptOutcome;
+  phase: DiscInspectionPhase;
+  reasonCode: DiscInspectionReasonCode | null;
+  diagnostic: string | null;
+  startedAt: Date;
+  endedAt: Date;
+}
+
+export interface ArchiveRequest {
+  id: ArchiveRequestId;
+  detectedDiscId: DetectedDiscId;
+  status: ArchiveRequestStatus;
+  priority: number;
+  cancellationRequestedAt: Date | null;
+  fulfilledAt: Date | null;
+  cancelledAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -157,7 +225,7 @@ export type DiscSelectionActionAvailability =
     reason: string;
     relatedEncodeJob: {
       id: EncodeJobId;
-      status: JobStatus;
+      status: EncodeJobStatus;
     };
   }
   | {
@@ -204,14 +272,14 @@ export interface EncodingProfile {
 
 export interface ArchiveJob {
   id: ArchiveJobId;
+  archiveRequestId: ArchiveRequestId;
   detectedDiscId: DetectedDiscId;
   originalDiscArchiveId: OriginalDiscArchiveId | null;
+  attemptOrdinal: number;
   status: ArchiveJobStatus;
   priority: number;
   progressPhase: ArchiveProgressPhase;
   progressPercent: number;
-  inspectionToken: ArchiveJobInspectionToken | null;
-  inspectionUpdatedAt: Date | null;
   claimedBy: string | null;
   claimToken: ArchiveJobClaimToken | null;
   claimedAt: Date | null;
@@ -257,15 +325,59 @@ export type RunningArchiveJob = ArchiveJob & {
   claimToken: ArchiveJobClaimToken;
 };
 
+export interface DiscInspectionClaim {
+  id: DiscInspectionId;
+  opticalDriveId: OpticalDriveId;
+  mediaGeneration: string;
+  claimToken: DiscInspectionClaimToken;
+}
+
+export interface DiscInspectionStart {
+  inspection: DiscInspection;
+  claim: DiscInspectionClaim | null;
+}
+
+export type DiscInspectionEvent =
+  | {
+      type: "metadata";
+      volumeLabel: string | null;
+      titleCount: number;
+      chapterCount: number;
+      audioStreamCount: number;
+      subtitleStreamCount: number;
+      totalBytes: number;
+    }
+  | {
+      type: "hash_progress";
+      bytesHashed: number;
+      bytesPerSecond: number | null;
+      etaSeconds: number | null;
+    }
+  | { type: "confirming_media" }
+  | {
+      type: "retry";
+      reasonCode: DiscInspectionReasonCode;
+      diagnostic?: string;
+      retryAt: Date;
+    }
+  | {
+      type: "complete";
+      detectedDiscId: DetectedDiscId;
+    }
+  | {
+      type: "fail";
+      reasonCode: DiscInspectionReasonCode;
+      diagnostic?: string;
+    }
+  | {
+      type: "abort";
+      reasonCode: DiscInspectionReasonCode;
+      diagnostic?: string;
+    };
+
 export interface ArchiveJobProgress {
   phase: ArchiveRunningProgressPhase;
   progressPercent: number;
-}
-
-export interface ArchiveJobInspection {
-  jobIds: readonly ArchiveJobId[];
-  opticalDriveId: OpticalDriveId;
-  token: ArchiveJobInspectionToken;
 }
 
 export type RunningEncodeJob = EncodeJob & {
@@ -454,21 +566,9 @@ export interface EncodingProfileAccess {
 }
 
 export interface ArchiveJobAccess {
-  approve(input: {
-    detectedDiscId: DetectedDiscId;
-    priority?: number;
-  }): ArchiveJob;
-  enqueue(input: { detectedDiscId: DetectedDiscId; priority?: number }): ArchiveJob;
-  beginDriveInspection(opticalDriveId: OpticalDriveId): ArchiveJobInspection;
-  renewDriveInspection(inspection: ArchiveJobInspection): ArchiveJob[];
-  finishDriveInspection(inspection: ArchiveJobInspection): ArchiveJob[];
-  recoverInterruptedInspections(): ArchiveJob[];
-  claimNext(
+  startForInspection(
+    inspectionId: DiscInspectionId,
     workerId: string,
-    eligibility?: {
-      opticalDriveId: OpticalDriveId;
-      fingerprint?: string;
-    },
   ): RunningArchiveJob | null;
   renewClaim(claim: RunningArchiveJob): RunningArchiveJob;
   recoverExpiredClaims(): ArchiveJob[];
@@ -476,6 +576,7 @@ export interface ArchiveJobAccess {
     statuses?: ArchiveJobStatus[],
     options?: ChronologicalListOptions,
   ): ArchiveJob[];
+  isCancellationRequested(claim: RunningArchiveJob): boolean;
   updateProgress(
     claim: RunningArchiveJob,
     progress: number | ArchiveJobProgress,
@@ -485,7 +586,41 @@ export interface ArchiveJobAccess {
     input: { archivePath: string; sizeBytes: number },
   ): ArchiveJob;
   fail(claim: RunningArchiveJob, errorMessage: string): ArchiveJob;
-  requeue(id: ArchiveJobId): ArchiveJob;
+  abort(claim: RunningArchiveJob, errorMessage: string): ArchiveJob;
+}
+
+export interface DiscInspectionAccess {
+  beginOrResume(input: {
+    opticalDriveId: OpticalDriveId;
+    mediaGeneration: string;
+  }): DiscInspectionStart;
+  renew(claim: DiscInspectionClaim): DiscInspection;
+  record(claim: DiscInspectionClaim, event: DiscInspectionEvent): DiscInspection;
+  retry(id: DiscInspectionId, mediaGeneration: string): DiscInspection;
+  clearCurrent(input: {
+    opticalDriveId: OpticalDriveId;
+    mediaGeneration?: string;
+    reasonCode?: DiscInspectionReasonCode;
+  }): DiscInspection | null;
+  list(options?: {
+    currentOnly?: boolean;
+    ids?: readonly DiscInspectionId[];
+    limit?: number;
+  }): DiscInspection[];
+  listAttempts(id: DiscInspectionId): DiscInspectionAttempt[];
+}
+
+export interface ArchiveRequestAccess {
+  create(input: {
+    detectedDiscId: DetectedDiscId;
+    priority?: number;
+  }): ArchiveRequest;
+  cancel(id: ArchiveRequestId): ArchiveRequest;
+  retry(id: ArchiveRequestId): ArchiveRequest;
+  list(
+    statuses?: ArchiveRequestStatus[],
+    options?: ChronologicalListOptions,
+  ): ArchiveRequest[];
 }
 
 export interface EncodeJobAccess {
@@ -591,6 +726,8 @@ export type SnapshotCatalogAccess = Pick<
 export interface ConsistentReadAccess {
   readonly catalog: SnapshotCatalogAccess;
   readonly encodingProfiles: Pick<EncodingProfileAccess, "list">;
+  readonly discInspections: Pick<DiscInspectionAccess, "list">;
+  readonly archiveRequests: Pick<ArchiveRequestAccess, "list">;
   readonly archiveJobs: Pick<ArchiveJobAccess, "list">;
   readonly encodeJobs: Pick<EncodeJobAccess, "list">;
 }
@@ -598,6 +735,8 @@ export interface ConsistentReadAccess {
 export interface DataAccess {
   readonly catalog: CatalogAccess;
   readonly encodingProfiles: EncodingProfileAccess;
+  readonly discInspections: DiscInspectionAccess;
+  readonly archiveRequests: ArchiveRequestAccess;
   readonly archiveJobs: ArchiveJobAccess;
   readonly encodeJobs: EncodeJobAccess;
   readonly filesystemVerification: FilesystemVerificationAccess;

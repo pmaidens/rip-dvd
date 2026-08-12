@@ -25,36 +25,17 @@ try {
     access = createDataAccess({ databasePath: workerData.databasePath });
     const health = access.checkHealth();
     parentPort.postMessage({ type: "result", value: health.status });
-  } else if (workerData.mode === "claim") {
-    const queue =
-      workerData.queue === "archive"
-        ? access.archiveJobs
-        : access.encodeJobs;
-    const claim = queue.claimNext(workerData.workerId);
+  } else if (workerData.operation === "start-archive") {
+    const job = access.archiveJobs.startForInspection(
+      workerData.discInspectionId,
+      workerData.workerId,
+    );
     parentPort.postMessage({
       type: "result",
-      value: claim
-        ? { id: claim.id, claimToken: claim.claimToken }
-        : null,
+      value: job
+        ? { outcome: "started", id: job.id }
+        : { outcome: "skipped" },
     });
-  } else if (workerData.operation === "enqueue") {
-    try {
-      const job = access.archiveJobs.enqueue({
-        detectedDiscId: workerData.detectedDiscId,
-      });
-      parentPort.postMessage({
-        type: "result",
-        value: { outcome: "enqueued", id: job.id },
-      });
-    } catch (error) {
-      if (!(error instanceof DomainInvariantError)) {
-        throw error;
-      }
-      parentPort.postMessage({
-        type: "result",
-        value: { outcome: "rejected" },
-      });
-    }
   } else if (workerData.operation === "reject") {
     const disc = access.catalog.updateDetectedDiscStatus(
       workerData.detectedDiscId,

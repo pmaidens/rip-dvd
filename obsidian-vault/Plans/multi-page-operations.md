@@ -22,7 +22,7 @@ The control plane places configuration, queue creation, verification inventory, 
 
 ## Proposed behavior
 
-- `/`: actionable overview covering discs awaiting approval, failed archive jobs, failed encode jobs, catalog reviews, and recorded filesystem verification problems.
+- `/`: actionable overview covering discs awaiting approval, archive requests needing attention, failed encode jobs, catalog reviews, and recorded filesystem verification problems.
 - `/discs`: optical drives, detected discs, and archive jobs.
 - `/catalog`: pending catalog review and its editor.
 - `/encoding`: encoding profiles, queue creation, and encode jobs.

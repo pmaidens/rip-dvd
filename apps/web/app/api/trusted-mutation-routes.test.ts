@@ -1,7 +1,7 @@
 import type { DataAccess } from "@rip-dvd/data-access";
 import { describe, expect, it, vi } from "vitest";
 
-import { createArchiveJobsRoute } from "./archive-jobs/route";
+import { createArchiveRequestsRoute } from "./archive-requests/route";
 import { createCatalogReviewRoute } from "./catalog-reviews/[id]/route";
 import { createEncodeJobsRoute } from "./encode-jobs/route";
 import { createEncodingProfilesRoute } from "./encoding-profiles/route";
@@ -29,11 +29,11 @@ interface RejectionCase {
 
 const mutationRoutes = [
   {
-    name: "Archive Jobs",
-    path: "/api/archive-jobs",
-    unavailableError: "Archive Job approval is unavailable",
+    name: "Archive Requests",
+    path: "/api/archive-requests",
+    unavailableError: "Archive Request creation is unavailable",
     run: (request, getAccess, getTrustedOrigin) =>
-      createArchiveJobsRoute(request, getAccess, getTrustedOrigin),
+      createArchiveRequestsRoute(request, getAccess, getTrustedOrigin),
   },
   {
     name: "Encode Jobs",
