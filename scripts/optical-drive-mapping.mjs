@@ -11,45 +11,16 @@ import {
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
+import {
+  flattenBlockDeviceGraph,
+  isVirtualQemuOpticalDevice,
+  normalizeOpticalHardwareText,
+} from "../apps/archive-worker/src/optical-drive-discovery-policy.js";
+
 const MAX_COMMAND_OUTPUT_BYTES = 1_048_576;
 const MAX_BLOCK_DEVICES = 256;
 const MAX_CONFIGURED_DRIVES = 32;
 const DEVICE_PATH = /^\/dev\/(sr|sg)\d+$/;
-
-function nonemptyText(value) {
-  return typeof value === "string" && value.trim() !== ""
-    ? value.trim()
-    : undefined;
-}
-
-function flattenBlockDevices(value) {
-  if (!Array.isArray(value)) {
-    throw new Error("lsblk output does not contain a blockdevices array");
-  }
-  const pending = [...value];
-  const result = [];
-  while (pending.length > 0) {
-    if (result.length >= MAX_BLOCK_DEVICES) {
-      throw new Error(`lsblk output exceeds ${MAX_BLOCK_DEVICES} devices`);
-    }
-    const current = pending.shift();
-    if (
-      typeof current !== "object" ||
-      current === null ||
-      Array.isArray(current)
-    ) {
-      throw new Error("lsblk output contains a malformed block device");
-    }
-    result.push(current);
-    if (current.children !== undefined) {
-      if (!Array.isArray(current.children)) {
-        throw new Error("lsblk output contains malformed children");
-      }
-      pending.push(...current.children);
-    }
-  }
-  return result;
-}
 
 export function decodeLsblkDevices(output) {
   let parsed;
@@ -58,11 +29,14 @@ export function decodeLsblkDevices(output) {
   } catch {
     throw new Error("lsblk returned malformed JSON");
   }
-  return flattenBlockDevices(parsed?.blockdevices)
+  return flattenBlockDeviceGraph(parsed?.blockdevices, {
+    maxDevices: MAX_BLOCK_DEVICES,
+    source: "lsblk",
+  })
     .filter((device) => device.type === "rom")
     .map((device) => {
-      const blockDevicePath = nonemptyText(device.path);
-      const kernelName = nonemptyText(device.kname);
+      const blockDevicePath = normalizeOpticalHardwareText(device.path);
+      const kernelName = normalizeOpticalHardwareText(device.kname);
       if (
         blockDevicePath === undefined ||
         kernelName === undefined ||
@@ -74,10 +48,10 @@ export function decodeLsblkDevices(output) {
       return {
         blockDevicePath,
         kernelName,
-        model: nonemptyText(device.model),
-        serialNumber: nonemptyText(device.serial),
-        transport: nonemptyText(device.tran),
-        vendor: nonemptyText(device.vendor),
+        model: normalizeOpticalHardwareText(device.model),
+        serialNumber: normalizeOpticalHardwareText(device.serial),
+        transport: normalizeOpticalHardwareText(device.tran),
+        vendor: normalizeOpticalHardwareText(device.vendor),
       };
     });
 }
@@ -91,15 +65,6 @@ export function decodeUdevProperties(output) {
     }
   }
   return properties;
-}
-
-function isVirtualQemuDevice(device, udev) {
-  const vendor = (nonemptyText(udev.get("ID_VENDOR")) ?? device.vendor ?? "")
-    .toLowerCase();
-  const model = (nonemptyText(udev.get("ID_MODEL")) ?? device.model ?? "")
-    .replaceAll("_", " ")
-    .toLowerCase();
-  return vendor === "qemu" || model.startsWith("qemu ");
 }
 
 export function pairScsiGenericDevice(kernelName, sysfsRoot = "/sys") {
@@ -157,19 +122,23 @@ export function discoverPhysicalOpticalDrives({
         `--name=${device.blockDevicePath}`,
       ]),
     );
-    if (isVirtualQemuDevice(device, udev)) {
+    const model =
+      normalizeOpticalHardwareText(udev.get("ID_MODEL")) ?? device.model;
+    const vendor =
+      normalizeOpticalHardwareText(udev.get("ID_VENDOR")) ?? device.vendor;
+    if (isVirtualQemuOpticalDevice({ model, vendor })) {
       continue;
     }
     const serialNumber =
-      nonemptyText(udev.get("ID_SERIAL_SHORT")) ??
+      normalizeOpticalHardwareText(udev.get("ID_SERIAL_SHORT")) ??
       device.serialNumber ??
-      nonemptyText(udev.get("ID_SERIAL"));
+      normalizeOpticalHardwareText(udev.get("ID_SERIAL"));
     discovered.push({
       blockDevicePath: device.blockDevicePath,
-      model: nonemptyText(udev.get("ID_MODEL")) ?? device.model,
+      model,
       scsiGenericPath: pairScsiGenericDevice(device.kernelName, sysfsRoot),
       serialNumber,
-      vendor: nonemptyText(udev.get("ID_VENDOR")) ?? device.vendor,
+      vendor,
     });
   }
   return discovered.sort((left, right) =>
@@ -189,7 +158,7 @@ export function parseHardwareIdentityConfig(value) {
     throw new Error("opticalDriveSerialNumbers must be a nonempty array");
   }
   const normalized = serialNumbers.map((serial) => {
-    const value = nonemptyText(serial);
+    const value = normalizeOpticalHardwareText(serial);
     if (value === undefined) {
       throw new Error(
         "Configured optical-drive serial numbers must be nonempty strings",
@@ -205,7 +174,9 @@ export function parseHardwareIdentityConfig(value) {
   if (new Set(normalized).size !== normalized.length) {
     throw new Error("Configured optical-drive serial numbers must be unique");
   }
-  const primarySerialNumber = nonemptyText(value.primarySerialNumber);
+  const primarySerialNumber = normalizeOpticalHardwareText(
+    value.primarySerialNumber,
+  );
   if (
     primarySerialNumber === undefined ||
     !normalized.includes(primarySerialNumber)
@@ -218,7 +189,7 @@ export function parseHardwareIdentityConfig(value) {
 export function resolveConfiguredMappings(config, discovered) {
   const discoveredBySerial = new Map();
   for (const drive of discovered) {
-    const serial = nonemptyText(drive.serialNumber);
+    const serial = normalizeOpticalHardwareText(drive.serialNumber);
     if (serial === undefined) {
       continue;
     }

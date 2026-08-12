@@ -2437,6 +2437,47 @@ describe("data-access facade", () => {
     access.close();
   });
 
+  it("separates replacement hardware from a serial-proven renumbered drive", () => {
+    const access = openTestDatabase();
+    const original = access.catalog.reconcileOpticalDrives([
+      {
+        devicePath: "/dev/sr0",
+        serialNumber: "MOVED-STABLE-DRIVE",
+        isConfiguredDevice: true,
+      },
+    ])[0]!;
+
+    const reconciled = access.catalog.reconcileOpticalDrives([
+      {
+        devicePath: "/dev/sr0",
+        serialNumber: "REPLACEMENT-AT-OLD-PATH",
+        isConfiguredDevice: false,
+      },
+      {
+        devicePath: "/dev/sr1",
+        serialNumber: "MOVED-STABLE-DRIVE",
+        isConfiguredDevice: true,
+      },
+    ]);
+
+    expect(reconciled).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: original.id,
+        devicePath: "/dev/sr1",
+        isEnabled: true,
+        isPresent: true,
+      }),
+      expect.objectContaining({
+        devicePath: "/dev/sr0",
+        serialNumber: "REPLACEMENT-AT-OLD-PATH",
+        isEnabled: false,
+        isPresent: true,
+      }),
+    ]));
+
+    access.close();
+  });
+
   it("treats a matching serial as authoritative when model text changes", () => {
     const access = openTestDatabase();
     const original = access.catalog.upsertOpticalDrive({

@@ -84,6 +84,13 @@ export function planOpticalDriveReconciliation(
       existingBySerial.set(serial, withSerial);
     }
   }
+  for (const [serial, matches] of existingBySerial) {
+    if (matches.length > 1) {
+      throw new DomainInvariantError(
+        `Stored Optical Drive serial number is ambiguous: ${serial}`,
+      );
+    }
+  }
   const previousConfiguredTarget = existingDrives.find(
     (drive) => drive.isConfiguredTarget,
   );
@@ -100,32 +107,51 @@ export function planOpticalDriveReconciliation(
       configuredTargetSerial === previousConfiguredTargetSerial
     );
 
+  const claimedExistingIds = new Set<OpticalDriveId>();
+  const existingByDiscoveredIndex = new Map<
+    number,
+    StoredOpticalDriveReconciliationState
+  >();
+  normalized.forEach((drive, index) => {
+    const discoveredSerial = drive.serialNumber?.trim();
+    if (!discoveredSerial) {
+      return;
+    }
+    const serialMatch = existingBySerial.get(discoveredSerial)?.[0];
+    if (serialMatch !== undefined) {
+      claimedExistingIds.add(serialMatch.id);
+      existingByDiscoveredIndex.set(index, serialMatch);
+    }
+  });
+  normalized.forEach((drive, index) => {
+    if (existingByDiscoveredIndex.has(index)) {
+      return;
+    }
+    const pathMatches = (existingByPath.get(drive.devicePath) ?? []).filter(
+      (candidate) => !claimedExistingIds.has(candidate.id),
+    );
+    const presentPathMatches = pathMatches.filter(
+      (candidate) => candidate.isPresent,
+    );
+    if (presentPathMatches.length > 1) {
+      throw new DomainInvariantError(
+        `Stored present Optical Drive path is ambiguous: ${drive.devicePath}`,
+      );
+    }
+    const pathMatch =
+      presentPathMatches[0] ??
+      (pathMatches.length === 1 ? pathMatches[0] : undefined);
+    if (pathMatch !== undefined) {
+      claimedExistingIds.add(pathMatch.id);
+      existingByDiscoveredIndex.set(index, pathMatch);
+    }
+  });
+
   return {
     configuredTargetPath,
-    drives: normalized.map((drive) => {
+    drives: normalized.map((drive, index) => {
+      const existing = existingByDiscoveredIndex.get(index);
       const discoveredSerial = drive.serialNumber?.trim() || undefined;
-      const serialMatches =
-        discoveredSerial === undefined
-          ? []
-          : (existingBySerial.get(discoveredSerial) ?? []);
-      if (serialMatches.length > 1) {
-        throw new DomainInvariantError(
-          `Stored Optical Drive serial number is ambiguous: ${discoveredSerial}`,
-        );
-      }
-      const pathMatches = existingByPath.get(drive.devicePath) ?? [];
-      const presentPathMatches = pathMatches.filter(
-        (candidate) => candidate.isPresent,
-      );
-      if (presentPathMatches.length > 1) {
-        throw new DomainInvariantError(
-          `Stored present Optical Drive path is ambiguous: ${drive.devicePath}`,
-        );
-      }
-      const unambiguousPathMatch =
-        presentPathMatches[0] ??
-        (pathMatches.length === 1 ? pathMatches[0] : undefined);
-      const existing = serialMatches[0] ?? unambiguousPathMatch;
       const existingSerial = existing?.serialNumber?.trim() || undefined;
       const serialChanged =
         existing !== undefined && existingSerial !== discoveredSerial;
