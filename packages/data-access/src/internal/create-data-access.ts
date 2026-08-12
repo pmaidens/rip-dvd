@@ -3473,10 +3473,12 @@ export function createDataAccessInternal(
                   phase: terminal ? current.phase : "retry_wait",
                   consecutiveFailureCount: failureCount,
                   bytesHashed: latestProgress?.latestBytes ?? current.bytesHashed,
-                  bytesPerSecond:
-                    latestProgress?.latestBytesPerSecond ?? current.bytesPerSecond,
-                  etaSeconds:
-                    latestProgress?.latestEtaSeconds ?? current.etaSeconds,
+                  bytesPerSecond: latestProgress === undefined
+                    ? current.bytesPerSecond
+                    : latestProgress.latestBytesPerSecond,
+                  etaSeconds: latestProgress === undefined
+                    ? current.etaSeconds
+                    : latestProgress.latestEtaSeconds,
                   retryAt: terminal ? null : event.retryAt,
                   reasonCode: event.reasonCode,
                   diagnostic,
@@ -3565,10 +3567,12 @@ export function createDataAccessInternal(
                     5,
                   ),
                   bytesHashed: latestProgress?.latestBytes ?? current.bytesHashed,
-                  bytesPerSecond:
-                    latestProgress?.latestBytesPerSecond ?? current.bytesPerSecond,
-                  etaSeconds:
-                    latestProgress?.latestEtaSeconds ?? current.etaSeconds,
+                  bytesPerSecond: latestProgress === undefined
+                    ? current.bytesPerSecond
+                    : latestProgress.latestBytesPerSecond,
+                  etaSeconds: latestProgress === undefined
+                    ? current.etaSeconds
+                    : latestProgress.latestEtaSeconds,
                   retryAt: null,
                   reasonCode: event.reasonCode,
                   diagnostic,
@@ -3604,10 +3608,12 @@ export function createDataAccessInternal(
                 isCurrent: false,
                 status: "aborted",
                 bytesHashed: latestProgress?.latestBytes ?? current.bytesHashed,
-                bytesPerSecond:
-                  latestProgress?.latestBytesPerSecond ?? current.bytesPerSecond,
-                etaSeconds:
-                  latestProgress?.latestEtaSeconds ?? current.etaSeconds,
+                bytesPerSecond: latestProgress === undefined
+                  ? current.bytesPerSecond
+                  : latestProgress.latestBytesPerSecond,
+                etaSeconds: latestProgress === undefined
+                  ? current.etaSeconds
+                  : latestProgress.latestEtaSeconds,
                 retryAt: null,
                 reasonCode: event.reasonCode,
                 diagnostic,
@@ -4213,6 +4219,111 @@ export function createDataAccessInternal(
           }
           return jobs;
         }, { behavior: "immediate" });
+      },
+
+      listExpiredCancellations() {
+        const expiredBefore = new Date(
+          now().getTime() - ARCHIVE_JOB_LEASE_DURATION_MS,
+        );
+        return database
+          .select({ job: archiveJobs })
+          .from(archiveJobs)
+          .innerJoin(
+            archiveRequests,
+            eq(archiveRequests.id, archiveJobs.archiveRequestId),
+          )
+          .where(
+            and(
+              eq(archiveJobs.status, "running"),
+              eq(archiveRequests.status, "cancellation_requested"),
+              lte(archiveJobs.updatedAt, expiredBefore),
+            ),
+          )
+          .orderBy(asc(archiveJobs.updatedAt), asc(archiveJobs.id))
+          .limit(JOB_RECOVERY_LIMIT)
+          .all()
+          .map(({ job }) => asRunningArchiveJob(job));
+      },
+
+      finalizeExpiredCancellation(claim) {
+        const timestamp = now();
+        const expiredBefore = new Date(
+          timestamp.getTime() - ARCHIVE_JOB_LEASE_DURATION_MS,
+        );
+        const completed = database.transaction((transaction) => {
+          const cachedProgress = archiveProgress.get(claim.id);
+          const latestProgress = cachedProgress?.token === claim.claimToken
+            ? cachedProgress
+            : undefined;
+          const job = transaction
+            .update(archiveJobs)
+            .set({
+              status: "aborted",
+              ...(latestProgress === undefined
+                ? {}
+                : {
+                    progressPhase: latestProgress.latestPhase,
+                    progressPercent: latestProgress.latestPercent,
+                  }),
+              completedAt: timestamp,
+              errorMessage: "Archive cancelled after worker recovery",
+              updatedAt: timestamp,
+            })
+            .where(
+              and(
+                eq(archiveJobs.id, claim.id),
+                eq(archiveJobs.archiveRequestId, claim.archiveRequestId),
+                eq(archiveJobs.detectedDiscId, claim.detectedDiscId),
+                eq(archiveJobs.status, "running"),
+                eq(archiveJobs.claimToken, claim.claimToken),
+                lte(archiveJobs.updatedAt, expiredBefore),
+                exists(
+                  transaction
+                    .select({ id: archiveRequests.id })
+                    .from(archiveRequests)
+                    .where(
+                      and(
+                        eq(
+                          archiveRequests.id,
+                          archiveJobs.archiveRequestId,
+                        ),
+                        eq(
+                          archiveRequests.status,
+                          "cancellation_requested",
+                        ),
+                      ),
+                    ),
+                ),
+              ),
+            )
+            .returning()
+            .get();
+          if (job === undefined) {
+            throw new StaleJobAttemptError("archive job", claim.id);
+          }
+          requireRow(
+            transaction
+              .update(archiveRequests)
+              .set({
+                status: "cancelled",
+                cancelledAt: timestamp,
+                updatedAt: timestamp,
+              })
+              .where(
+                and(
+                  eq(archiveRequests.id, job.archiveRequestId),
+                  eq(archiveRequests.status, "cancellation_requested"),
+                ),
+              )
+              .returning({ id: archiveRequests.id })
+              .get(),
+            "archive request",
+            job.archiveRequestId,
+          );
+          return job;
+        }, { behavior: "immediate" });
+        archiveProgress.delete(claim.id);
+        return completed;
       },
 
         list: listArchiveJobs,

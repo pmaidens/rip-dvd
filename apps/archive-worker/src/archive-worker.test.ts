@@ -850,6 +850,88 @@ describe("archive worker polling", () => {
     expect(log).toHaveBeenCalledWith("DVD archive cancelled for /dev/sr0");
   });
 
+  it("recovers an expired cancellation only after archive work is proven inactive", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-12T07:00:00.000Z"));
+    const access = openTestDataAccess();
+    const originalsLibraryPath = mkdtempSync(
+      join(tmpdir(), "rip-dvd-cancel-recovery-"),
+    );
+    temporaryDirectories.push(originalsLibraryPath);
+    const drive = access.catalog.reconcileOpticalDrives([{
+      devicePath: "/dev/sr0",
+      serialNumber: "ARCHIVE-CANCEL-RECOVERY-001",
+      isConfiguredDevice: true,
+    }])[0]!;
+    const started = access.discInspections.beginOrResume({
+      opticalDriveId: drive.id,
+      mediaGeneration: "cancelled-worker-insertion",
+    });
+    const fingerprint = `sha256:${"a".repeat(64)}`;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint,
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    const inspection = access.discInspections.record(started.claim!, {
+      type: "complete",
+      detectedDiscId: disc.id,
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const request = access.archiveRequests.list(["pending"])[0]!;
+    const claim = access.archiveJobs.startForInspection(
+      inspection.id,
+      "worker-that-exited",
+    )!;
+    access.archiveRequests.cancel(request.id);
+    vi.advanceTimersByTime(ARCHIVE_JOB_LEASE_DURATION_MS + 1);
+
+    let active = true;
+    const copyRunner: DvdCopyRunner = {
+      copy: vi.fn(),
+      isActive: vi.fn(() => active),
+      waitForInactive: vi.fn(async () => undefined),
+    };
+    const log = vi.fn();
+    const pollOptions = {
+      access,
+      configuredDevicePath: "/dev/sr0",
+      copyRunner,
+      hardware: {
+        ...stableDeviceBinding(),
+        discover: vi.fn().mockResolvedValue([]),
+        scanDvd: vi.fn().mockResolvedValue(null),
+      },
+      log,
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+    };
+
+    await pollArchiveWorker(pollOptions);
+    expect(access.archiveJobs.list(["running"])).toEqual([
+      expect.objectContaining({ id: claim.id }),
+    ]);
+    expect(access.archiveRequests.list(["cancellation_requested"])).toEqual([
+      expect.objectContaining({ id: request.id }),
+    ]);
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining("DVD archive copy is still active"),
+    );
+
+    active = false;
+    await pollArchiveWorker(pollOptions);
+    expect(access.archiveJobs.list(["aborted"])).toEqual([
+      expect.objectContaining({
+        id: claim.id,
+        errorMessage: "Archive cancelled after worker recovery",
+      }),
+    ]);
+    expect(access.archiveRequests.list(["cancelled"])).toEqual([
+      expect.objectContaining({ id: request.id }),
+    ]);
+  });
+
   it("discovers an enabled Optical Drive and stores its scanned Detected Disc", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-26T18:00:00.000Z"));

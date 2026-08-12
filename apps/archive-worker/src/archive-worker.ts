@@ -8,7 +8,10 @@ import { runArchiveJob } from "./archive-job-runner.js";
 import { reconcileDiscoveredDrives } from "./authorized-optical-drive.js";
 import { DiscInspectionError } from "./disc-inspection-error.js";
 import { runDiscInspection } from "./disc-inspection-runner.js";
-import type { DvdCopyRunner } from "./dvd-archiver.js";
+import {
+  type DvdCopyRunner,
+  requireCancelledDvdArchiveInactive,
+} from "./dvd-archiver.js";
 
 export type {
   BoundOpticalDrive,
@@ -62,6 +65,36 @@ export async function pollArchiveWorker({
     throw new Error("Archive worker concurrency is invalid");
   }
   access.archiveJobs.recoverExpiredClaims();
+  if (copyRunner !== undefined && originalsLibraryPath !== undefined) {
+    for (const claim of access.archiveJobs.listExpiredCancellations()) {
+      try {
+        const disc = access.catalog.listDetectedDiscs(undefined, {
+          ids: [claim.detectedDiscId],
+        })[0];
+        if (disc === undefined) {
+          throw new Error("Cancelled Archive Job has no Detected Disc");
+        }
+        const drive = access.catalog.listOpticalDrives({
+          ids: [disc.opticalDriveId],
+        })[0];
+        if (drive === undefined) {
+          throw new Error("Cancelled Archive Job has no Optical Drive");
+        }
+        await requireCancelledDvdArchiveInactive({
+          devicePath: drive.devicePath,
+          fingerprint: disc.fingerprint,
+          originalsLibraryPath,
+          runner: copyRunner,
+        });
+        access.archiveJobs.finalizeExpiredCancellation(claim);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        log(
+          `Cancelled Archive Job recovery deferred for ${claim.id}: ${message}`,
+        );
+      }
+    }
+  }
   const discovered = await hardware.discover(signal);
   signal.throwIfAborted();
   const configuredCanonicalPath =
