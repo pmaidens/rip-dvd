@@ -927,10 +927,12 @@ export function createDataAccessInternal(
       const eligibilityCondition = eligibility
         ? and(
             eq(detectedDiscs.opticalDriveId, eligibility.opticalDriveId),
-            eq(
-              detectedDiscs.fingerprint,
-              requireNonEmpty(eligibility.fingerprint, "fingerprint"),
-            ),
+            eligibility.fingerprint === undefined
+              ? undefined
+              : eq(
+                  detectedDiscs.fingerprint,
+                  requireNonEmpty(eligibility.fingerprint, "fingerprint"),
+                ),
           )
         : sql`1`;
       const nextApprovedJobId = sql<ArchiveJobId>`(
@@ -1268,7 +1270,7 @@ export function createDataAccessInternal(
     void,
     {
       opticalDriveId: OpticalDriveId;
-      fingerprint: string;
+      fingerprint?: string;
     },
     Pick<ArchiveJobProgress, "phase">
   >;

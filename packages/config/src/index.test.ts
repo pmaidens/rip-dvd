@@ -37,7 +37,7 @@ describe("loadConfig", () => {
       archiveDevicePath: "/dev/sr0",
       webTrustedOrigin: "http://localhost:3000",
       workerPollIntervalMs: 5_000,
-      archiveWorkerConcurrency: 1,
+      archiveWorkerConcurrency: 2,
       encodeWorkerConcurrency: 1,
     });
   });

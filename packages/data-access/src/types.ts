@@ -418,7 +418,7 @@ export interface ArchiveJobAccess {
     workerId: string,
     eligibility?: {
       opticalDriveId: OpticalDriveId;
-      fingerprint: string;
+      fingerprint?: string;
     },
   ): RunningArchiveJob | null;
   renewClaim(claim: RunningArchiveJob): RunningArchiveJob;
