@@ -3936,6 +3936,13 @@ export function createDataAccessInternal(
             detectedDiscs,
             eq(detectedDiscs.id, discInspections.detectedDiscId),
           )
+          .innerJoin(
+            archiveRequests,
+            and(
+              eq(archiveRequests.detectedDiscId, detectedDiscs.id),
+              eq(archiveRequests.status, "pending"),
+            ),
+          )
           .where(
             and(
               eq(discInspections.id, inspectionId),
@@ -3944,7 +3951,10 @@ export function createDataAccessInternal(
             ),
           )
           .get();
-        if (preflight?.discKind === "dvd") {
+        if (preflight === undefined) {
+          return null;
+        }
+        if (preflight.discKind === "dvd") {
           requireLegacyDvdArchiveIdentitiesResolved(
             preflight.discKind,
             preflight.fingerprint,
@@ -3987,7 +3997,6 @@ export function createDataAccessInternal(
                     detectedDiscs.opticalDriveId,
                     inspection.disc_inspections.opticalDriveId,
                   ),
-                  eq(detectedDiscs.status, "approved"),
                 ),
               )
               .get(),
@@ -4011,6 +4020,11 @@ export function createDataAccessInternal(
             .get();
           if (!request) {
             return null;
+          }
+          if (disc.status !== "approved") {
+            throw new DomainInvariantError(
+              `pending Archive Request references a ${disc.status} Detected Disc`,
+            );
           }
           if (
             findOriginalArchiveByFingerprintOrContentIdAlias(

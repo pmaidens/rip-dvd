@@ -39,6 +39,27 @@ export interface RunArchiveWorkerOptions extends PollArchiveWorkerOptions {
   ) => Promise<void>;
 }
 
+interface DrivePollAdmission {
+  release(devicePath: string): void;
+  tryAcquire(devicePath: string): boolean;
+}
+
+const MAX_ARCHIVE_DRIVE_POLL_INTERVAL_MS = 5_000;
+
+function requireArchiveWorkerConcurrency(value: number): number {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error("Archive worker concurrency is invalid");
+  }
+  return value;
+}
+
+function boundedArchiveDrivePollInterval(pollIntervalMs: number): number {
+  if (!Number.isSafeInteger(pollIntervalMs) || pollIntervalMs <= 0) {
+    throw new Error("Archive worker poll interval is invalid");
+  }
+  return Math.min(pollIntervalMs, MAX_ARCHIVE_DRIVE_POLL_INTERVAL_MS);
+}
+
 function resolveConfiguredDevicePath(devicePath: string): string {
   try {
     return realpathSync(devicePath);
@@ -49,21 +70,56 @@ function resolveConfiguredDevicePath(devicePath: string): string {
   }
 }
 
-export async function pollArchiveWorker({
-  access,
-  concurrency = 1,
-  configuredDevicePath,
-  copyRunner,
-  hardware,
-  log,
-  originalsLibraryPath,
-  signal,
-  workerId = "archive-worker",
-}: PollArchiveWorkerOptions): Promise<void> {
-  signal.throwIfAborted();
-  if (!Number.isSafeInteger(concurrency) || concurrency <= 0) {
-    throw new Error("Archive worker concurrency is invalid");
+function prioritizeDrivesWithPendingRequests<
+  Drive extends { id: string },
+>(access: DataAccess, drives: readonly Drive[]): Drive[] {
+  const priorityByDriveId = new Map<string, number>();
+  for (const inspection of access.discInspections.list({ currentOnly: true })) {
+    if (
+      inspection.status !== "completed" ||
+      inspection.detectedDiscId === null
+    ) {
+      continue;
+    }
+    const request = access.archiveRequests.listRelevantForDetectedDiscs([
+      inspection.detectedDiscId,
+    ])[0];
+    if (request?.status === "pending") {
+      priorityByDriveId.set(inspection.opticalDriveId, request.priority);
+    }
   }
+  return drives
+    .map((drive, index) => ({ drive, index }))
+    .sort((left, right) => {
+      const leftPriority = priorityByDriveId.get(left.drive.id);
+      const rightPriority = priorityByDriveId.get(right.drive.id);
+      if (leftPriority === undefined) {
+        return rightPriority === undefined ? left.index - right.index : 1;
+      }
+      if (rightPriority === undefined) {
+        return -1;
+      }
+      return rightPriority - leftPriority || left.index - right.index;
+    })
+    .map(({ drive }) => drive);
+}
+
+async function pollArchiveWorkerWithDriveAdmission(
+  {
+    access,
+    concurrency: requestedConcurrency = 1,
+    configuredDevicePath,
+    copyRunner,
+    hardware,
+    log,
+    originalsLibraryPath,
+    signal,
+    workerId = "archive-worker",
+  }: PollArchiveWorkerOptions,
+  admission?: DrivePollAdmission,
+): Promise<void> {
+  signal.throwIfAborted();
+  const concurrency = requireArchiveWorkerConcurrency(requestedConcurrency);
   access.archiveJobs.recoverExpiredClaims();
   if (copyRunner !== undefined && originalsLibraryPath !== undefined) {
     for (const claim of access.archiveJobs.listExpiredCancellations()) {
@@ -118,9 +174,13 @@ export async function pollArchiveWorker({
       });
     }
   }
+  const prioritizedDrives = prioritizeDrivesWithPendingRequests(access, drives);
 
   const pollDrive = async (drive: (typeof drives)[number]): Promise<void> => {
     if (!drive.isPresent || !drive.isEnabled) {
+      return;
+    }
+    if (admission !== undefined && !admission.tryAcquire(drive.devicePath)) {
       return;
     }
     try {
@@ -148,6 +208,14 @@ export async function pollArchiveWorker({
       ) {
         return;
       }
+      const detectedDiscId = completed.inspection.detectedDiscId;
+      if (
+        detectedDiscId === null ||
+        access.archiveRequests.listRelevantForDetectedDiscs([detectedDiscId])[0]
+          ?.status !== "pending"
+      ) {
+        return;
+      }
       await runArchiveJob({
         access,
         completed,
@@ -165,13 +233,15 @@ export async function pollArchiveWorker({
       }
       const message = error instanceof Error ? error.message : String(error);
       log(`DVD scan failed for ${drive.devicePath}: ${message}`);
+    } finally {
+      admission?.release(drive.devicePath);
     }
   };
 
   let nextDriveIndex = 0;
   const pollNextDrive = async (): Promise<void> => {
-    while (nextDriveIndex < drives.length) {
-      const drive = drives[nextDriveIndex]!;
+    while (nextDriveIndex < prioritizedDrives.length) {
+      const drive = prioritizedDrives[nextDriveIndex]!;
       nextDriveIndex += 1;
       await pollDrive(drive);
     }
@@ -179,7 +249,7 @@ export async function pollArchiveWorker({
 
   const results = await Promise.allSettled(
     Array.from(
-      { length: Math.min(concurrency, drives.length) },
+      { length: Math.min(concurrency, prioritizedDrives.length) },
       pollNextDrive,
     ),
   );
@@ -190,6 +260,12 @@ export async function pollArchiveWorker({
   if (failedLane) {
     throw failedLane.reason;
   }
+}
+
+export async function pollArchiveWorker(
+  options: PollArchiveWorkerOptions,
+): Promise<void> {
+  await pollArchiveWorkerWithDriveAdmission(options);
 }
 
 async function waitForNextPoll(
@@ -204,25 +280,68 @@ export async function runArchiveWorker({
   waitForNextPoll: wait = waitForNextPoll,
   ...pollOptions
 }: RunArchiveWorkerOptions): Promise<void> {
-  while (!pollOptions.signal.aborted) {
-    try {
-      await pollArchiveWorker(pollOptions);
-    } catch (error) {
+  const concurrency = requireArchiveWorkerConcurrency(
+    pollOptions.concurrency ?? 1,
+  );
+  const driveIntervalMs = boundedArchiveDrivePollInterval(pollIntervalMs);
+  // Long-running work owns only its physical drive and one configured slot.
+  // Later ticks can continue polling other drives without overlapping it.
+  const activeDevicePaths = new Set<string>();
+  const admission: DrivePollAdmission = {
+    release(devicePath) {
+      activeDevicePaths.delete(devicePath);
+    },
+    tryAcquire(devicePath) {
+      if (
+        activeDevicePaths.has(devicePath) ||
+        activeDevicePaths.size >= concurrency
+      ) {
+        return false;
+      }
+      activeDevicePaths.add(devicePath);
+      return true;
+    },
+  };
+  const inFlightPolls = new Set<Promise<void>>();
+  const startAvailableDrivePolls = () => {
+    if (
+      activeDevicePaths.size >= concurrency ||
+      inFlightPolls.size >= concurrency
+    ) {
+      return;
+    }
+    let polling!: Promise<void>;
+    polling = pollArchiveWorkerWithDriveAdmission(
+      pollOptions,
+      admission,
+    )
+      .catch((error: unknown) => {
+        if (!pollOptions.signal.aborted) {
+          const message = error instanceof Error ? error.message : String(error);
+          pollOptions.log(`Archive worker poll failed: ${message}`);
+        }
+      })
+      .finally(() => {
+        inFlightPolls.delete(polling);
+      });
+    inFlightPolls.add(polling);
+  };
+
+  try {
+    while (!pollOptions.signal.aborted) {
+      startAvailableDrivePolls();
       if (pollOptions.signal.aborted) {
         break;
       }
-      const message = error instanceof Error ? error.message : String(error);
-      pollOptions.log(`Archive worker poll failed: ${message}`);
-    }
-    if (pollOptions.signal.aborted) {
-      break;
-    }
-    try {
-      await wait(pollIntervalMs, pollOptions.signal);
-    } catch (error) {
-      if (!pollOptions.signal.aborted) {
-        throw error;
+      try {
+        await wait(driveIntervalMs, pollOptions.signal);
+      } catch (error) {
+        if (!pollOptions.signal.aborted) {
+          throw error;
+        }
       }
     }
+  } finally {
+    await Promise.allSettled(inFlightPolls);
   }
 }

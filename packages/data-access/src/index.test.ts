@@ -5535,11 +5535,14 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       isEnabled: true,
       isPresent: true,
     });
-    const { disc } = completeDiscInspection(access, {
+    const { disc, inspection } = completeDiscInspection(access, {
       opticalDriveId: drive.id,
       mediaGeneration: "301",
       fingerprint: "request-only-disc",
     });
+    expect(
+      access.archiveJobs.startForInspection(inspection.id, "idle-worker"),
+    ).toBeNull();
 
     const request = access.archiveRequests.create({
       detectedDiscId: disc.id,
@@ -5569,6 +5572,44 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(replacement.status).toBe("pending");
     expect(access.archiveRequests.listRelevantForDetectedDiscs([disc.id]))
       .toEqual([expect.objectContaining({ id: replacement.id })]);
+    access.close();
+  });
+
+  it("leaves an unrequested completed inspection idle before legacy reconciliation", () => {
+    const access = openTestDatabase();
+    const legacyDrive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/legacy",
+      isPresent: true,
+    });
+    const legacyDisc = access.catalog.registerDetectedDisc({
+      opticalDriveId: legacyDrive.id,
+      discKind: "dvd",
+      fingerprint: "legacy-unresolved-fingerprint",
+    });
+    access.catalog.updateDetectedDiscStatus(legacyDisc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(legacyDisc.id, "approved");
+    access.catalog.createOriginalDiscArchive({
+      detectedDiscId: legacyDisc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Legacy unresolved.iso",
+      fingerprint: legacyDisc.fingerprint,
+    });
+    const currentDrive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/current",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const { inspection } = completeDiscInspection(access, {
+      opticalDriveId: currentDrive.id,
+      mediaGeneration: "unrequested-current-disc",
+      fingerprint: `sha256:${"a".repeat(64)}`,
+    });
+
+    expect(
+      access.archiveJobs.startForInspection(inspection.id, "idle-worker"),
+    ).toBeNull();
+    expect(access.archiveJobs.list()).toEqual([]);
     access.close();
   });
 
