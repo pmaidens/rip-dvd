@@ -489,14 +489,14 @@ All tasks are AFK-ready; no product or architecture HITL decisions remain. Keep 
 
 - `pnpm db:check` — passed; Drizzle reports the schema and migration history consistent.
 - `pnpm typecheck` — passed across all six packages/applications.
-- `pnpm test` — passed locally with 814 tests, including 107 Archive Worker tests; macOS skipped the 9 Linux-only ownership assertions.
+- `pnpm test` — passed locally with 845 tests, including 107 Archive Worker tests; macOS skipped the 9 Linux-only ownership assertions.
 - `pnpm build` — passed, including the production Next.js build and both worker builds.
-- `docker compose --profile validation build validation` — passed the pinned Node/pnpm toolchain check, native reader compile/test, all 823 tests (including all 116 Archive Worker tests and Linux ownership assertions), Drizzle consistency check, and all production builds on Linux.
-- `sh scripts/smoke-compose-workers.sh all` — passed the native reader compile/test and named-volume plus bind-mount archive/encode worker smoke paths under UID 1000 after the final review fixes. The script deliberately retained its inspection resources under project prefixes `rip-dvd-worker-smoke-20260812150523-dbf723dbbaef06eb-named` and `rip-dvd-worker-smoke-20260812150523-dbf723dbbaef06eb-bind`, with bind source `/var/folders/nq/1b74p7fn7gn1d850ny6dr7d00000gn/T//rip-dvd-worker-bind-smoke.nNt1ZB`.
+- `docker compose --profile validation build validation` — passed the pinned Node/pnpm toolchain check, native reader compile/test, all 854 tests (including all 116 Archive Worker tests and Linux ownership assertions), Drizzle consistency check, and all production builds on Linux.
+- `sh scripts/smoke-compose-workers.sh all` — passed the native reader compile/test and named-volume plus bind-mount archive/encode worker smoke paths under UID 1000 after the final review fixes. The script deliberately retained its inspection resources under project prefixes `rip-dvd-worker-smoke-20260812152312-2172fdb630e68c21-named` and `rip-dvd-worker-smoke-20260812152312-2172fdb630e68c21-bind`, with bind source `/var/folders/nq/1b74p7fn7gn1d850ny6dr7d00000gn/T//rip-dvd-worker-bind-smoke.rrgKNR`.
 - Deterministic browser verification passed at 1440×1000 and 390×844 with no horizontal document overflow. Reviewer evidence: `/private/tmp/rip-dvd-visual.V7yDMy/disc-dashboard-desktop.png` and `/private/tmp/rip-dvd-visual.V7yDMy/disc-dashboard-narrow.png`.
 - Iterative parallel Standards/Spec review continued through the post-rebase scheduler integration and per-device cancellation-recovery fixes. Every finding was fixed and revalidated; the final round returned no Standards problems and no Spec problems.
 - `git diff --check` passed. A stale-interface scan found `inspecting_drive` only in this historical plan text and the intentional predecessor migration fixture; no obsolete inspection/job interface remains in runtime code.
-- The implementation branch was rebased onto current `origin/main` at `2257d07` while preserving its feature history. The source handoff remains at `98ae8d6` with exactly its four intended untracked planning/domain artifacts. `CONTEXT.md` and both ADRs in this worktree remain byte-identical to their source copies; this plan alone was advanced with implementation results as required.
+- The implementation branch was rebased onto current `origin/main` at `e7bdca4` while preserving its feature history. The source handoff remains at `98ae8d6` with exactly its four intended untracked planning/domain artifacts. `CONTEXT.md` and both ADRs in this worktree remain byte-identical to their source copies; this plan alone was advanced with implementation results as required.
 
 ## Risks and mitigations
 
