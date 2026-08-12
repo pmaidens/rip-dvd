@@ -345,6 +345,7 @@ export async function createCatalogReviewRoute(
           episodes: command.episodes,
         });
         return response({
+          message: "Mapping changed; review required",
           tvShow: serializeMediaItem(proposal.tvShow),
           season: serializeMediaItem(proposal.season),
           episodes: proposal.episodes.map((episode) => ({

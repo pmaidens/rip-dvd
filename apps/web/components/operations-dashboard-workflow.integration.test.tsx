@@ -302,6 +302,9 @@ describe("end-to-end operations dashboard workflow", () => {
     );
 
     expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toMatchObject({
+      message: "Mapping changed; review required",
+    });
     expect(access.catalog.listOriginalDiscArchives({
       ids: [archive.id],
     })[0]!.catalogReviewedAt).toBeNull();
