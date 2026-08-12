@@ -12,10 +12,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
-  ARCHIVE_INSPECTION_LEASE_DURATION_MS,
   ARCHIVE_JOB_LEASE_DURATION_MS,
+  DISC_INSPECTION_LEASE_DURATION_MS,
   type DiscoveredOpticalDrive,
 } from "@rip-dvd/data-access";
+import { createRawDvdContentIdHasher } from "@rip-dvd/data-access/dvd-content-id";
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -25,6 +26,7 @@ import {
   type OpticalDriveHardware,
 } from "./archive-worker.js";
 import type { DvdCopyRunner } from "./dvd-archiver.js";
+import { DiscInspectionError } from "./disc-inspection-error.js";
 import {
   createLinuxOpticalDriveHardware,
   type CommandRunner,
@@ -53,6 +55,7 @@ function stableDeviceBinding() {
         signal.throwIfAborted();
       },
     ),
+    observeMediaGeneration: vi.fn(async () => "test-media-generation"),
   };
 }
 
@@ -64,7 +67,203 @@ afterEach(() => {
 });
 
 describe("archive worker polling", () => {
-  it("claims approved work, streams progress, and publishes the archive atomically", async () => {
+  it("persists metadata findings and hash progress before completing inspection", async () => {
+    const access = openTestDataAccess();
+    const fingerprint = `sha256:${"7".repeat(64)}`;
+    const scanData = {
+      schemaVersion: 2 as const,
+      contentId: fingerprint,
+      titles: [{
+        number: 1,
+        durationSeconds: 600,
+        chapters: 4,
+        audioStreams: [{ id: 128, language: "English", format: "ac3", channels: 2 }],
+        subtitles: [],
+      }],
+    };
+    const discoveredDrive = {
+      devicePath: "/dev/sr0",
+      serialNumber: "INSPECTION-PROGRESS-001",
+    };
+    const observedDuringHash: unknown[] = [];
+    const hardware: OpticalDriveHardware = {
+      ...stableDeviceBinding(),
+      discover: vi.fn().mockResolvedValue([discoveredDrive]),
+      scanDvd: vi.fn(async (_binding, _signal, options) => {
+        options?.onPhase?.("reading_metadata");
+        options?.onMetadata?.({
+          audioStreamCount: 1,
+          chapterCount: 4,
+          subtitleStreamCount: 0,
+          titleCount: 1,
+          totalBytes: 1_000,
+          volumeLabel: "PROGRESS_DISC",
+        });
+        options?.onPhase?.("hashing_content");
+        options?.onBytesHashed?.(440);
+        observedDuringHash.push(access.discInspections.list({ currentOnly: true })[0]);
+        options?.onBytesHashed?.(1_000);
+        options?.onPhase?.("confirming_media");
+        return { fingerprint, scanData, sizeBytes: 1_000, volumeLabel: "PROGRESS_DISC" };
+      }),
+    };
+
+    await pollArchiveWorker({
+      access,
+      configuredDevicePath: "/dev/sr0",
+      hardware,
+      log: vi.fn(),
+      signal: new AbortController().signal,
+    });
+
+    expect(observedDuringHash).toEqual([
+      expect.objectContaining({
+        phase: "hashing_content",
+        volumeLabel: "PROGRESS_DISC",
+        titleCount: 1,
+        bytesHashed: 440,
+        status: "running",
+      }),
+    ]);
+    expect(access.discInspections.list({ currentOnly: true })).toEqual([
+      expect.objectContaining({
+        bytesHashed: 1_000,
+        detectedDiscId: expect.any(String),
+        status: "completed",
+      }),
+    ]);
+  });
+
+  it("aborts without consuming retry budget when the medium changes after hashing throws", async () => {
+    const access = openTestDataAccess();
+    const discoveredDrive = {
+      devicePath: "/dev/sr0",
+      serialNumber: "HASH-REMOVAL-001",
+    };
+    const observeMediaGeneration = vi
+      .fn()
+      .mockResolvedValueOnce("insertion-a")
+      .mockResolvedValue("insertion-b");
+    const scanDvd = vi.fn(async (_binding, _signal, options) => {
+      options?.onPhase?.("reading_metadata");
+      options?.onMetadata?.({
+        audioStreamCount: 0,
+        chapterCount: 1,
+        subtitleStreamCount: 0,
+        titleCount: 1,
+        totalBytes: 1_000,
+        volumeLabel: "REMOVED_DURING_HASH",
+      });
+      options?.onPhase?.("hashing_content");
+      options?.onBytesHashed?.(440);
+      throw new Error("DVD content read failed during hashing");
+    });
+
+    await pollArchiveWorker({
+      access,
+      configuredDevicePath: "/dev/sr0",
+      hardware: {
+        ...stableDeviceBinding(),
+        discover: vi.fn().mockResolvedValue([discoveredDrive]),
+        observeMediaGeneration,
+        scanDvd,
+      },
+      log: vi.fn(),
+      signal: new AbortController().signal,
+    });
+
+    expect(observeMediaGeneration).toHaveBeenCalledTimes(2);
+    const abortedInspections = access.discInspections.list();
+    expect(abortedInspections).toEqual([
+      expect.objectContaining({
+        status: "aborted",
+        reasonCode: "media_changed",
+        consecutiveFailureCount: 0,
+        retryAt: null,
+      }),
+    ]);
+    expect(access.discInspections.listAttempts(
+      abortedInspections[0]!.id,
+    )).toEqual([
+      expect.objectContaining({
+        outcome: "aborted",
+        reasonCode: "media_changed",
+      }),
+    ]);
+  });
+
+  it.each([
+    ["reading metadata", "metadata_read_failed"],
+    ["acquiring content size", "content_size_failed"],
+    ["confirming media", "drive_not_ready"],
+  ] as const)(
+    "aborts without retrying when the medium changes while %s",
+    async (boundary, reasonCode) => {
+      const access = openTestDataAccess();
+      const discoveredDrive = {
+        devicePath: "/dev/sr0",
+        serialNumber: `PHASE-REMOVAL-${reasonCode}`,
+      };
+      const observeMediaGeneration = vi
+        .fn()
+        .mockResolvedValueOnce("insertion-a")
+        .mockResolvedValue("insertion-b");
+      const scanDvd = vi.fn(async (_binding, _signal, options) => {
+        options?.onPhase?.("reading_metadata");
+        if (boundary === "confirming media") {
+          options?.onMetadata?.({
+            audioStreamCount: 0,
+            chapterCount: 1,
+            subtitleStreamCount: 0,
+            titleCount: 1,
+            totalBytes: 1_000,
+            volumeLabel: "REMOVED_DISC",
+          });
+          options?.onPhase?.("hashing_content");
+          options?.onBytesHashed?.(1_000);
+          options?.onPhase?.("confirming_media");
+        }
+        throw new DiscInspectionError(
+          "retry",
+          reasonCode,
+          `DVD medium disappeared while ${boundary}`,
+        );
+      });
+
+      await pollArchiveWorker({
+        access,
+        configuredDevicePath: "/dev/sr0",
+        hardware: {
+          ...stableDeviceBinding(),
+          discover: vi.fn().mockResolvedValue([discoveredDrive]),
+          observeMediaGeneration,
+          scanDvd,
+        },
+        log: vi.fn(),
+        signal: new AbortController().signal,
+      });
+
+      expect(observeMediaGeneration).toHaveBeenCalledTimes(2);
+      const [inspection] = access.discInspections.list();
+      expect(inspection).toMatchObject({
+        status: "aborted",
+        reasonCode: "media_changed",
+        consecutiveFailureCount: 0,
+        retryAt: null,
+        ...(boundary === "confirming media"
+          ? { phase: "confirming_media", bytesHashed: 1_000 }
+          : { phase: "reading_metadata" }),
+      });
+      expect(access.discInspections.listAttempts(inspection!.id)).toEqual([
+        expect.objectContaining({
+          outcome: "aborted",
+          reasonCode: "media_changed",
+        }),
+      ]);
+    },
+  );
+
+  it("matches requested work, streams progress, and publishes the archive atomically", async () => {
     const access = openTestDataAccess();
     const originalsLibraryPath = mkdtempSync(
       join(tmpdir(), "rip-dvd-originals-"),
@@ -102,7 +301,7 @@ describe("archive worker polling", () => {
       scanData,
     });
     access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
-    const job = access.archiveJobs.approve({ detectedDiscId: disc.id });
+    const request = access.archiveRequests.create({ detectedDiscId: disc.id });
     let scanCount = 0;
     const hardware: OpticalDriveHardware = {
       ...stableDeviceBinding(),
@@ -110,13 +309,7 @@ describe("archive worker polling", () => {
       scanDvd: vi.fn().mockImplementation(async () => {
         scanCount += 1;
         if (scanCount === 1) {
-          expect(access.archiveJobs.list(["running"])).toEqual([
-            expect.objectContaining({
-              id: job.id,
-              progressPhase: "preparing",
-              progressPercent: 0,
-            }),
-          ]);
+          expect(access.archiveJobs.list()).toEqual([]);
         }
         return {
           fingerprint,
@@ -133,6 +326,8 @@ describe("archive worker polling", () => {
         onBytesCopied(9);
       }),
       isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
     };
 
     await pollArchiveWorker({
@@ -149,7 +344,7 @@ describe("archive worker polling", () => {
     const completed = access.archiveJobs.list(["completed"]);
     expect(completed).toEqual([
       expect.objectContaining({
-        id: job.id,
+        archiveRequestId: request.id,
         status: "completed",
         progressPhase: "finalizing",
         progressPercent: 100,
@@ -166,7 +361,244 @@ describe("archive worker polling", () => {
     expect(existsSync(`${archive.archivePath}.failed`)).toBe(false);
   });
 
-  it("starts an approved Archive Job within ten seconds despite slow validation", async () => {
+  it("copies requested work on different drives within configured concurrency", async () => {
+    const access = openTestDataAccess();
+    const originalsLibraryPath = mkdtempSync(
+      join(tmpdir(), "rip-dvd-originals-copy-admission-"),
+    );
+    temporaryDirectories.push(originalsLibraryPath);
+    const discoveredDrives = [
+      { devicePath: "/dev/sr0", serialNumber: "COPY-ADMISSION-001" },
+      { devicePath: "/dev/sr1", serialNumber: "COPY-ADMISSION-002" },
+    ];
+    const contents = ["dvd-one", "dvd-two"];
+    const fingerprints = contents.map((content) => {
+      const bytes = Buffer.from(content);
+      const hasher = createRawDvdContentIdHasher(bytes.byteLength);
+      hasher.update(bytes);
+      return hasher.digest();
+    });
+    const drives = discoveredDrives.map((drive) =>
+      access.catalog.upsertOpticalDrive({
+        ...drive,
+        isEnabled: true,
+        isPresent: true,
+      }),
+    );
+    const requests = drives.map((drive, index) => {
+      const fingerprint = fingerprints[index]!;
+      const disc = access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint,
+        scanData: {
+          schemaVersion: 2,
+          contentId: fingerprint,
+          titles: [
+            {
+              number: 1,
+              durationSeconds: 600,
+              chapters: 4,
+              audioStreams: [],
+              subtitles: [],
+            },
+          ],
+        },
+        sizeBytes: 7,
+      });
+      access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+      return access.archiveRequests.create({ detectedDiscId: disc.id });
+    });
+    let releaseCopies!: () => void;
+    const copiesMayFinish = new Promise<void>((resolve) => {
+      releaseCopies = resolve;
+    });
+    let activeCopies = 0;
+    let maximumActiveCopies = 0;
+    const copy = vi.fn(async ({ outputPath, onBytesCopied }) => {
+      activeCopies += 1;
+      maximumActiveCopies = Math.max(maximumActiveCopies, activeCopies);
+      try {
+        await copiesMayFinish;
+        const contentIndex = fingerprints.findIndex((fingerprint) =>
+          outputPath.includes(fingerprint.slice("sha256:".length)),
+        );
+        writeFileSync(outputPath, contents[contentIndex]!);
+        onBytesCopied(7);
+      } finally {
+        activeCopies -= 1;
+      }
+    });
+    const copyRunner: DvdCopyRunner = {
+      copy,
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    };
+    const pollOptions = {
+      access,
+      concurrency: 2,
+      configuredDevicePath: "/dev/sr0",
+      copyRunner,
+      hardware: {
+        ...stableDeviceBinding(),
+        discover: vi.fn().mockResolvedValue(discoveredDrives),
+        scanDvd: vi.fn(async (binding: { drive: DiscoveredOpticalDrive }) => {
+          const index = discoveredDrives.findIndex(
+            (drive) => drive.devicePath === binding.drive.devicePath,
+          );
+          const fingerprint = fingerprints[index]!;
+          return {
+            fingerprint,
+            scanData: {
+              schemaVersion: 2 as const,
+              contentId: fingerprint,
+              titles: [
+                {
+                  number: 1,
+                  durationSeconds: 600,
+                  chapters: 4,
+                  audioStreams: [],
+                  subtitles: [],
+                },
+              ],
+            },
+            sizeBytes: 7,
+          };
+        }),
+      },
+      log: vi.fn(),
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+    };
+    const poll = pollArchiveWorker(pollOptions);
+
+    await vi.waitFor(() => expect(copy).toHaveBeenCalledTimes(2));
+    expect(maximumActiveCopies).toBe(2);
+    expect(access.archiveJobs.list(["running"])).toHaveLength(2);
+    expect(access.archiveJobs.list(["failed"])).toEqual([]);
+    expect(access.archiveRequests.list(["pending"])).toEqual([]);
+
+    releaseCopies();
+    await poll;
+
+    expect(access.archiveJobs.list(["failed"])).toEqual([]);
+    expect(access.archiveJobs.list(["completed"])).toHaveLength(2);
+    expect(access.archiveRequests.list(["fulfilled"])).toEqual(
+      expect.arrayContaining(
+        requests.map((request) => expect.objectContaining({ id: request.id })),
+      ),
+    );
+  });
+
+  it("admits completed inspections in Archive Request priority order", async () => {
+    const access = openTestDataAccess();
+    const originalsLibraryPath = mkdtempSync(
+      join(tmpdir(), "rip-dvd-originals-priority-"),
+    );
+    temporaryDirectories.push(originalsLibraryPath);
+    const discoveredDrives = [
+      { devicePath: "/dev/sr0", serialNumber: "PRIORITY-LOW" },
+      { devicePath: "/dev/sr1", serialNumber: "PRIORITY-HIGH" },
+    ];
+    const contents = ["low-dvd", "high-dvd"];
+    const fingerprints = contents.map((content) => {
+      const bytes = Buffer.from(content);
+      const hasher = createRawDvdContentIdHasher(bytes.byteLength);
+      hasher.update(bytes);
+      return hasher.digest();
+    });
+    const drives = discoveredDrives.map((drive) =>
+      access.catalog.upsertOpticalDrive({
+        ...drive,
+        isEnabled: true,
+        isPresent: true,
+      }),
+    );
+    const requests = drives.map((drive, index) => {
+      const fingerprint = fingerprints[index]!;
+      const content = contents[index]!;
+      const disc = access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint,
+        scanData: {
+          schemaVersion: 2,
+          contentId: fingerprint,
+          titles: [{
+            number: 1,
+            durationSeconds: 600,
+            chapters: 4,
+            audioStreams: [],
+            subtitles: [],
+          }],
+        },
+        sizeBytes: Buffer.byteLength(content),
+      });
+      access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+      const started = access.discInspections.beginOrResume({
+        opticalDriveId: drive.id,
+        mediaGeneration: "test-media-generation",
+      });
+      access.discInspections.record(started.claim!, {
+        type: "metadata",
+        audioStreamCount: 0,
+        chapterCount: 4,
+        subtitleStreamCount: 0,
+        titleCount: 1,
+        totalBytes: Buffer.byteLength(content),
+        volumeLabel: null,
+      });
+      access.discInspections.record(started.claim!, {
+        type: "complete",
+        detectedDiscId: disc.id,
+      });
+      return access.archiveRequests.create({
+        detectedDiscId: disc.id,
+        priority: index === 0 ? 0 : 100,
+      });
+    });
+    const copiedFingerprints: string[] = [];
+    const copyRunner: DvdCopyRunner = {
+      copy: vi.fn(async ({ outputPath, onBytesCopied }) => {
+        const contentIndex = fingerprints.findIndex((fingerprint) =>
+          outputPath.includes(fingerprint.slice("sha256:".length)),
+        );
+        copiedFingerprints.push(fingerprints[contentIndex]!);
+        writeFileSync(outputPath, contents[contentIndex]!);
+        onBytesCopied(Buffer.byteLength(contents[contentIndex]!));
+      }),
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    };
+
+    await pollArchiveWorker({
+      access,
+      concurrency: 1,
+      configuredDevicePath: "/dev/sr0",
+      copyRunner,
+      hardware: {
+        ...stableDeviceBinding(),
+        discover: vi.fn().mockResolvedValue(discoveredDrives),
+        scanDvd: vi.fn(() => {
+          throw new Error("Completed Disc Inspection should be reused");
+        }),
+      },
+      log: vi.fn(),
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+    });
+
+    expect(copiedFingerprints).toEqual([fingerprints[1], fingerprints[0]]);
+    expect(access.archiveRequests.list(["fulfilled"])).toEqual(
+      expect.arrayContaining(
+        requests.map((request) => expect.objectContaining({ id: request.id })),
+      ),
+    );
+  });
+
+  it("starts requested archive work promptly while another drive inspection is slow", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-12T12:00:00.000Z"));
     const access = openTestDataAccess();
@@ -175,7 +607,8 @@ describe("archive worker polling", () => {
     );
     temporaryDirectories.push(originalsLibraryPath);
     const controller = new AbortController();
-    const fingerprint = `sha256:${"a".repeat(64)}`;
+    const fingerprint =
+      "sha256:e5cbeaa2965a33da9559ec142f30f4046ff91d1788a8d2f6ba22490b095f1c61";
     const scanData = {
       schemaVersion: 2 as const,
       contentId: fingerprint,
@@ -195,31 +628,48 @@ describe("archive worker polling", () => {
     };
     const slowDiscoveredDrive = {
       devicePath: "/dev/sr1",
+      isConfiguredDevice: false,
       serialNumber: "SLOW-SCAN-001",
     };
-    const drive = access.catalog.upsertOpticalDrive({
-      ...fastDiscoveredDrive,
-      isEnabled: true,
-      isPresent: true,
-    });
+    const [fastDrive] = access.catalog.reconcileOpticalDrives([
+      { ...fastDiscoveredDrive, isConfiguredDevice: true },
+      slowDiscoveredDrive,
+    ]);
     access.catalog.upsertOpticalDrive({
-      ...slowDiscoveredDrive,
+      devicePath: slowDiscoveredDrive.devicePath,
       isEnabled: true,
       isPresent: true,
+      serialNumber: slowDiscoveredDrive.serialNumber,
+    });
+    const started = access.discInspections.beginOrResume({
+      opticalDriveId: fastDrive!.id,
+      mediaGeneration: "test-media-generation",
     });
     const disc = access.catalog.registerDetectedDisc({
-      opticalDriveId: drive.id,
+      opticalDriveId: fastDrive!.id,
       discKind: "dvd",
       fingerprint,
       scanData,
       sizeBytes: 9,
     });
     access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
-    let noteFirstFastScan!: () => void;
-    const firstFastScan = new Promise<void>((resolve) => {
-      noteFirstFastScan = resolve;
+    access.discInspections.record(started.claim!, {
+      type: "metadata",
+      audioStreamCount: 0,
+      chapterCount: 10,
+      subtitleStreamCount: 0,
+      titleCount: 1,
+      totalBytes: 9,
+      volumeLabel: "START_LATENCY",
     });
-    let fastScanCount = 0;
+    const inspection = access.discInspections.record(started.claim!, {
+      type: "complete",
+      detectedDiscId: disc.id,
+    });
+    const startForInspectionSpy = vi.spyOn(
+      access.archiveJobs,
+      "startForInspection",
+    );
     const waitForShutdown = async (signal: AbortSignal) => {
       signal.throwIfAborted();
       return await new Promise<null>((_resolve, reject) => {
@@ -233,24 +683,27 @@ describe("archive worker polling", () => {
         binding: { drive: DiscoveredOpticalDrive },
         signal: AbortSignal,
       ) => {
-        if (binding.drive.devicePath === fastDiscoveredDrive.devicePath) {
-          fastScanCount += 1;
-          if (fastScanCount === 1) {
-            noteFirstFastScan();
-            return { fingerprint, scanData, sizeBytes: 9 };
-          }
+        if (binding.drive.devicePath === slowDiscoveredDrive.devicePath) {
+          return await waitForShutdown(signal);
         }
-        return await waitForShutdown(signal);
+        throw new Error("Completed Disc Inspection should be reused");
       },
     );
+    const copyRunner: DvdCopyRunner = {
+      copy: vi.fn(async ({ outputPath, onBytesCopied }) => {
+        onBytesCopied(9);
+        writeFileSync(outputPath, "dvd-image");
+      }),
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    };
+    const log = vi.fn();
     const polling = runArchiveWorker({
       access,
       concurrency: 2,
       configuredDevicePath: "/dev/sr0",
-      copyRunner: {
-        copy: vi.fn(),
-        isActive: () => false,
-      },
+      copyRunner,
       hardware: {
         ...stableDeviceBinding(),
         discover: vi
@@ -258,7 +711,7 @@ describe("archive worker polling", () => {
           .mockResolvedValue([fastDiscoveredDrive, slowDiscoveredDrive]),
         scanDvd,
       },
-      log: vi.fn(),
+      log,
       originalsLibraryPath,
       pollIntervalMs: 60_000,
       signal: controller.signal,
@@ -278,25 +731,30 @@ describe("archive worker polling", () => {
     });
 
     try {
-      await firstFastScan;
-      const job = access.archiveJobs.approve({ detectedDiscId: disc.id });
-      await vi.advanceTimersByTimeAsync(9_999);
+      await vi.advanceTimersByTimeAsync(1);
       expect(
-        scanDvd.mock.calls.filter(
-          ([binding]) =>
-            binding.drive.devicePath === fastDiscoveredDrive.devicePath,
-        ),
-      ).toHaveLength(2);
-      expect(
-        scanDvd.mock.calls.filter(
+        scanDvd.mock.calls.some(
           ([binding]) =>
             binding.drive.devicePath === slowDiscoveredDrive.devicePath,
         ),
-      ).toHaveLength(1);
-      const running = access.archiveJobs.list(["running"]);
-      expect(running).toEqual([expect.objectContaining({ id: job.id })]);
+      ).toBe(true);
+      expect(startForInspectionSpy).not.toHaveBeenCalled();
+      const request = access.archiveRequests.create({
+        detectedDiscId: disc.id,
+      });
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(startForInspectionSpy).toHaveBeenCalledTimes(1);
+      expect(log.mock.calls).toEqual([]);
+      await vi.waitFor(() => expect(copyRunner.copy).toHaveBeenCalledTimes(1));
+      const [job] = access.archiveJobs.list();
+      expect(job).toEqual(
+        expect.objectContaining({
+          archiveRequestId: request.id,
+          detectedDiscId: disc.id,
+        }),
+      );
       expect(
-        running[0]!.startedAt!.getTime() - job.createdAt.getTime(),
+        job!.startedAt!.getTime() - request.createdAt.getTime(),
       ).toBeLessThan(10_000);
     } finally {
       controller.abort(new Error("test complete"));
@@ -304,76 +762,7 @@ describe("archive worker polling", () => {
     }
   });
 
-  it("fails a started Archive Job before copying when the physical disc changed", async () => {
-    const access = openTestDataAccess();
-    const originalsLibraryPath = mkdtempSync(
-      join(tmpdir(), "rip-dvd-originals-changed-disc-"),
-    );
-    temporaryDirectories.push(originalsLibraryPath);
-    const approvedFingerprint = `sha256:${"a".repeat(64)}`;
-    const observedFingerprint = `sha256:${"b".repeat(64)}`;
-    const title = {
-      number: 1,
-      durationSeconds: 3_600,
-      chapters: 10,
-      audioStreams: [],
-      subtitles: [],
-    };
-    const discoveredDrive = {
-      devicePath: "/dev/sr0",
-      serialNumber: "CHANGED-DISC-001",
-    };
-    const drive = access.catalog.upsertOpticalDrive({
-      ...discoveredDrive,
-      isEnabled: true,
-      isPresent: true,
-    });
-    const disc = access.catalog.registerDetectedDisc({
-      opticalDriveId: drive.id,
-      discKind: "dvd",
-      fingerprint: approvedFingerprint,
-      scanData: {
-        schemaVersion: 2,
-        contentId: approvedFingerprint,
-        titles: [title],
-      },
-    });
-    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
-    const job = access.archiveJobs.approve({ detectedDiscId: disc.id });
-    const copy = vi.fn();
-
-    await pollArchiveWorker({
-      access,
-      configuredDevicePath: "/dev/sr0",
-      copyRunner: { copy, isActive: () => false },
-      hardware: {
-        ...stableDeviceBinding(),
-        discover: vi.fn().mockResolvedValue([discoveredDrive]),
-        scanDvd: vi.fn().mockResolvedValue({
-          fingerprint: observedFingerprint,
-          scanData: {
-            schemaVersion: 2,
-            contentId: observedFingerprint,
-            titles: [title],
-          },
-          sizeBytes: 9,
-        }),
-      },
-      log: vi.fn(),
-      originalsLibraryPath,
-      signal: new AbortController().signal,
-    });
-
-    expect(access.archiveJobs.list(["failed"])).toEqual([
-      expect.objectContaining({
-        errorMessage: "DVD medium changed before archiving",
-        id: job.id,
-      }),
-    ]);
-    expect(copy).not.toHaveBeenCalled();
-  });
-
-  it("preserves a live inspection and recovers it after its lease expires", async () => {
+  it("reacquires the same insertion after an expired inspection lease", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-11T12:00:00.000Z"));
     const access = openTestDataAccess();
@@ -384,50 +773,44 @@ describe("archive worker polling", () => {
         isConfiguredDevice: true,
       },
     ])[0]!;
-    const disc = access.catalog.registerDetectedDisc({
+    const original = access.discInspections.beginOrResume({
       opticalDriveId: drive.id,
-      discKind: "dvd",
-      fingerprint: "interrupted-inspection-disc",
+      mediaGeneration: "test-media-generation",
     });
-    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
-    const job = access.archiveJobs.approve({ detectedDiscId: disc.id });
-    access.archiveJobs.beginDriveInspection(drive.id);
 
     const pollOptions = {
       access,
       configuredDevicePath: "/dev/sr0",
       hardware: {
         ...stableDeviceBinding(),
-        discover: vi.fn().mockResolvedValue([]),
-        scanDvd: vi.fn(),
+        discover: vi.fn().mockResolvedValue([{
+          devicePath: "/dev/sr0",
+          serialNumber: "INTERRUPTED-INSPECTION-001",
+        }]),
+        scanDvd: vi.fn().mockResolvedValue(null),
       },
       log: vi.fn(),
       signal: new AbortController().signal,
     };
 
+    vi.advanceTimersByTime(DISC_INSPECTION_LEASE_DURATION_MS + 1);
     await pollArchiveWorker(pollOptions);
 
-    expect(access.archiveJobs.list(["queued"])).toEqual([
+    expect(access.discInspections.list()).toEqual([
       expect.objectContaining({
-        id: job.id,
-        progressPhase: "inspecting_drive",
-        progressPercent: 0,
+        id: original.inspection.id,
+        attemptCount: 2,
+        status: "aborted",
+        reasonCode: "no_medium",
       }),
     ]);
-
-    vi.advanceTimersByTime(ARCHIVE_INSPECTION_LEASE_DURATION_MS + 1);
-    await pollArchiveWorker(pollOptions);
-
-    expect(access.archiveJobs.list(["queued"])).toEqual([
-      expect.objectContaining({
-        id: job.id,
-        progressPhase: "waiting",
-        progressPercent: 0,
-      }),
+    expect(access.discInspections.listAttempts(original.inspection.id)).toEqual([
+      expect.objectContaining({ outcome: "interrupted" }),
+      expect.objectContaining({ outcome: "aborted", reasonCode: "no_medium" }),
     ]);
   });
 
-  it("aborts a scan after its inspection lease ownership changes", async () => {
+  it("aborts an in-flight scan when inspection lease renewal fails", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-11T13:00:00.000Z"));
     const access = openTestDataAccess();
@@ -438,13 +821,6 @@ describe("archive worker polling", () => {
     const drive = access.catalog.reconcileOpticalDrives([
       { ...discoveredDrive, isConfiguredDevice: true },
     ])[0]!;
-    const disc = access.catalog.registerDetectedDisc({
-      opticalDriveId: drive.id,
-      discKind: "dvd",
-      fingerprint: "inspection-lease-disc",
-    });
-    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
-    const job = access.archiveJobs.approve({ detectedDiscId: disc.id });
     let scanSignal: AbortSignal | undefined;
     const scanDvd = vi.fn(
       async (_binding: unknown, activeSignal: AbortSignal) => {
@@ -473,42 +849,29 @@ describe("archive worker polling", () => {
     });
 
     await vi.waitFor(() => expect(scanDvd).toHaveBeenCalledOnce());
-    const initiallyOwned = access.archiveJobs.list(["queued"])[0]!;
-    expect(initiallyOwned.progressPhase).toBe("inspecting_drive");
-    expect(initiallyOwned.inspectionToken).not.toBeNull();
-
-    await vi.advanceTimersByTimeAsync(
-      Math.floor(ARCHIVE_INSPECTION_LEASE_DURATION_MS / 3),
-    );
-    const renewed = access.archiveJobs.list(["queued"])[0]!;
-    expect(renewed.inspectionUpdatedAt!.getTime()).toBeGreaterThan(
-      initiallyOwned.inspectionUpdatedAt!.getTime(),
-    );
-    access.archiveJobs.finishDriveInspection({
-      jobIds: [job.id],
-      opticalDriveId: drive.id,
-      token: renewed.inspectionToken!,
+    expect(access.discInspections.list({ currentOnly: true })).toEqual([
+      expect.objectContaining({ status: "running", attemptCount: 1 }),
+    ]);
+    vi.spyOn(access.discInspections, "renew").mockImplementation(() => {
+      throw new Error("Stale disc inspection attempt");
     });
-    const replacement = access.archiveJobs.beginDriveInspection(drive.id);
-    expect(replacement.token).not.toBe(renewed.inspectionToken);
 
     await vi.advanceTimersByTimeAsync(
-      Math.floor(ARCHIVE_INSPECTION_LEASE_DURATION_MS / 3),
+      Math.floor(DISC_INSPECTION_LEASE_DURATION_MS / 3),
     );
     await polling;
 
     expect(scanSignal?.aborted).toBe(true);
-    expect(access.archiveJobs.list(["queued"])).toEqual([
+    expect(access.discInspections.list({ currentOnly: true })).toEqual([
       expect.objectContaining({
-        id: job.id,
-        inspectionToken: replacement.token,
-        progressPhase: "inspecting_drive",
+        status: "running",
+        phase: "retry_wait",
+        consecutiveFailureCount: 1,
       }),
     ]);
     expect(log).toHaveBeenCalledWith(
-      expect.stringContaining("Stale archive inspection attempt"),
+      expect.stringContaining("DVD scan failed"),
     );
-    access.archiveJobs.finishDriveInspection(replacement);
   });
 
   it("persists recoverable failure state and leaves no completed archive", async () => {
@@ -549,7 +912,7 @@ describe("archive worker polling", () => {
       scanData,
     });
     access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
-    const job = access.archiveJobs.approve({ detectedDiscId: disc.id });
+    const request = access.archiveRequests.create({ detectedDiscId: disc.id });
     const hardware: OpticalDriveHardware = {
       ...stableDeviceBinding(),
       discover: vi.fn().mockResolvedValue([discoveredDrive]),
@@ -568,6 +931,8 @@ describe("archive worker polling", () => {
         throw new Error("dd read failed");
       }),
       isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
     };
 
     await pollArchiveWorker({
@@ -583,7 +948,7 @@ describe("archive worker polling", () => {
 
     expect(access.archiveJobs.list(["failed"])).toEqual([
       expect.objectContaining({
-        id: job.id,
+        archiveRequestId: request.id,
         status: "failed",
         progressPhase: "copying",
         progressPercent: 44,
@@ -640,7 +1005,7 @@ describe("archive worker polling", () => {
       scanData,
     });
     access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
-    const job = access.archiveJobs.approve({ detectedDiscId: disc.id });
+    const request = access.archiveRequests.create({ detectedDiscId: disc.id });
     const controller = new AbortController();
     const hardware: OpticalDriveHardware = {
       ...stableDeviceBinding(),
@@ -661,6 +1026,8 @@ describe("archive worker polling", () => {
         controller.abort(interruption);
       }),
       isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
     };
 
     await expect(
@@ -678,7 +1045,7 @@ describe("archive worker polling", () => {
 
     expect(access.archiveJobs.list(["failed"])).toEqual([
       expect.objectContaining({
-        id: job.id,
+        archiveRequestId: request.id,
         status: "failed",
         progressPercent: 44,
         errorMessage: "Archive interrupted",
@@ -735,7 +1102,7 @@ describe("archive worker polling", () => {
       scanData,
     });
     access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
-    const job = access.archiveJobs.approve({ detectedDiscId: disc.id });
+    const request = access.archiveRequests.create({ detectedDiscId: disc.id });
     const controller = new AbortController();
     const hardware: OpticalDriveHardware = {
       ...stableDeviceBinding(),
@@ -768,6 +1135,8 @@ describe("archive worker polling", () => {
         });
       }),
       isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
     };
     const polling = pollArchiveWorker({
       access,
@@ -784,12 +1153,201 @@ describe("archive worker polling", () => {
     await vi.advanceTimersByTimeAsync(ARCHIVE_JOB_LEASE_DURATION_MS * 2);
     expect(access.archiveJobs.recoverExpiredClaims()).toEqual([]);
     expect(access.archiveJobs.list(["running"])).toEqual([
-      expect.objectContaining({ id: job.id }),
+      expect.objectContaining({ archiveRequestId: request.id }),
     ]);
 
     const interruption = new Error("worker shutdown");
     controller.abort(interruption);
     await expect(polling).rejects.toBe(interruption);
+  });
+
+  it("does not finalize cancellation until the copy helper is closed", async () => {
+    vi.useFakeTimers();
+    const access = openTestDataAccess();
+    const originalsLibraryPath = mkdtempSync(join(tmpdir(), "rip-dvd-cancel-"));
+    temporaryDirectories.push(originalsLibraryPath);
+    const fingerprint = `sha256:${"c".repeat(64)}`;
+    const scanData = {
+      schemaVersion: 2 as const,
+      contentId: fingerprint,
+      titles: [{
+        number: 1,
+        durationSeconds: 600,
+        chapters: 4,
+        audioStreams: [],
+        subtitles: [],
+      }],
+    };
+    const discoveredDrive = {
+      devicePath: "/dev/sr0",
+      serialNumber: "ARCHIVE-CANCEL-001",
+    };
+    const drive = access.catalog.reconcileOpticalDrives([
+      { ...discoveredDrive, isConfiguredDevice: true },
+    ])[0]!;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint,
+      scanData,
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    const request = access.archiveRequests.create({ detectedDiscId: disc.id });
+    const hardware: OpticalDriveHardware = {
+      ...stableDeviceBinding(),
+      discover: vi.fn().mockResolvedValue([discoveredDrive]),
+      scanDvd: vi.fn().mockResolvedValue({ fingerprint, scanData, sizeBytes: 9 }),
+    };
+    let copyStarted!: () => void;
+    const started = new Promise<void>((resolve) => { copyStarted = resolve; });
+    let copyActive = false;
+    let confirmCopyClosed!: () => void;
+    const copyClosed = new Promise<void>((resolve) => {
+      confirmCopyClosed = () => {
+        copyActive = false;
+        resolve();
+      };
+    });
+    const copyRunner: DvdCopyRunner = {
+      isActive: () => copyActive,
+      withDeviceInactive: vi.fn(async (_path, mutation) => {
+        if (copyActive) {
+          throw new Error("DVD archive copy is still active");
+        }
+        return mutation();
+      }),
+      waitForInactive: vi.fn(async () => copyClosed),
+      copy: vi.fn(({ signal }) => {
+        copyActive = true;
+        copyStarted();
+        return new Promise<void>((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        });
+      }),
+    };
+    const log = vi.fn();
+    const polling = pollArchiveWorker({
+      access,
+      configuredDevicePath: "/dev/sr0",
+      copyRunner,
+      hardware,
+      log,
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+    });
+    await started;
+
+    expect(access.archiveRequests.cancel(request.id).status).toBe("cancellation_requested");
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    await vi.waitFor(() => {
+      expect(copyRunner.waitForInactive).toHaveBeenCalledOnce();
+    });
+    expect(access.archiveJobs.list(["running"])).toEqual([
+      expect.objectContaining({ archiveRequestId: request.id }),
+    ]);
+    expect(access.archiveRequests.list(["cancellation_requested"])).toEqual([
+      expect.objectContaining({ id: request.id }),
+    ]);
+
+    confirmCopyClosed();
+    await polling;
+
+    expect(access.archiveJobs.list(["aborted"])).toEqual([
+      expect.objectContaining({ errorMessage: "Archive cancelled by operator" }),
+    ]);
+    expect(access.archiveRequests.list(["cancelled"])).toEqual([
+      expect.objectContaining({ id: request.id }),
+    ]);
+    expect(log).toHaveBeenCalledWith("DVD archive cancelled for /dev/sr0");
+  });
+
+  it("recovers an expired cancellation only after archive work is proven inactive", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-12T07:00:00.000Z"));
+    const access = openTestDataAccess();
+    const originalsLibraryPath = mkdtempSync(
+      join(tmpdir(), "rip-dvd-cancel-recovery-"),
+    );
+    temporaryDirectories.push(originalsLibraryPath);
+    const drive = access.catalog.reconcileOpticalDrives([{
+      devicePath: "/dev/sr0",
+      serialNumber: "ARCHIVE-CANCEL-RECOVERY-001",
+      isConfiguredDevice: true,
+    }])[0]!;
+    const started = access.discInspections.beginOrResume({
+      opticalDriveId: drive.id,
+      mediaGeneration: "cancelled-worker-insertion",
+    });
+    const fingerprint = `sha256:${"a".repeat(64)}`;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint,
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    const inspection = access.discInspections.record(started.claim!, {
+      type: "complete",
+      detectedDiscId: disc.id,
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const request = access.archiveRequests.list(["pending"])[0]!;
+    const claim = access.archiveJobs.startForInspection(
+      inspection.id,
+      "worker-that-exited",
+    )!;
+    access.archiveRequests.cancel(request.id);
+    vi.advanceTimersByTime(ARCHIVE_JOB_LEASE_DURATION_MS + 1);
+
+    let active = true;
+    const copyRunner: DvdCopyRunner = {
+      copy: vi.fn(),
+      isActive: vi.fn(() => false),
+      withDeviceInactive: vi.fn(async (_path, mutation) => {
+        if (active) {
+          throw new Error("DVD archive copy is still active");
+        }
+        return mutation();
+      }),
+      waitForInactive: vi.fn(async () => undefined),
+    };
+    const log = vi.fn();
+    const pollOptions = {
+      access,
+      configuredDevicePath: "/dev/sr0",
+      copyRunner,
+      hardware: {
+        ...stableDeviceBinding(),
+        discover: vi.fn().mockResolvedValue([]),
+        scanDvd: vi.fn().mockResolvedValue(null),
+      },
+      log,
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+    };
+
+    await pollArchiveWorker(pollOptions);
+    expect(access.archiveJobs.list(["running"])).toEqual([
+      expect.objectContaining({ id: claim.id }),
+    ]);
+    expect(access.archiveRequests.list(["cancellation_requested"])).toEqual([
+      expect.objectContaining({ id: request.id }),
+    ]);
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining("DVD archive copy is still active"),
+    );
+
+    active = false;
+    await pollArchiveWorker(pollOptions);
+    expect(access.archiveJobs.list(["aborted"])).toEqual([
+      expect.objectContaining({
+        id: claim.id,
+        errorMessage: "Archive cancelled after worker recovery",
+      }),
+    ]);
+    expect(access.archiveRequests.list(["cancelled"])).toEqual([
+      expect.objectContaining({ id: request.id }),
+    ]);
   });
 
   it("discovers an enabled Optical Drive and stores its scanned Detected Disc", async () => {
@@ -1244,13 +1802,13 @@ describe("archive worker polling", () => {
     });
 
     expect(access.catalog.listDetectedDiscs()).toEqual([]);
-    expect(runner.run).toHaveBeenCalledWith(
+    expect(runner.run).not.toHaveBeenCalledWith(
       "lsdvd",
-      ["-Oh", "-a", "-c", "-s", "/dev/sr0"],
-      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      expect.anything(),
+      expect.anything(),
     );
     expect(log).toHaveBeenCalledWith(
-      "DVD scan failed for /dev/sr0: Optical Drive instance changed during DVD scanning",
+      "DVD scan failed for /dev/sr0: Optical Drive instance changed before DVD scanning",
     );
     access.close();
   });
@@ -1295,6 +1853,7 @@ describe("archive worker polling", () => {
         drive: expect.objectContaining({ devicePath: discoveredDevicePath }),
       }),
       expect.any(AbortSignal),
+      expect.any(Object),
     );
     access.close();
   });
@@ -1354,6 +1913,7 @@ describe("archive worker polling", () => {
         drive: expect.objectContaining({ devicePath: discoveredDevicePath }),
       }),
       expect.any(AbortSignal),
+      expect.any(Object),
     );
     access.close();
   });
@@ -1424,60 +1984,11 @@ describe("archive worker polling", () => {
           drive: expect.objectContaining({ devicePath: originalDevicePath }),
         }),
         expect.any(AbortSignal),
+        expect.any(Object),
       );
       access.close();
     },
   );
-
-  it("scans a serial-proven moved drive when its new path has history", async () => {
-    const access = openTestDataAccess();
-    access.catalog.reconcileOpticalDrives([
-      {
-        devicePath: "/dev/sr1",
-        serialNumber: "STALE-PATH-HISTORY",
-        isConfiguredDevice: false,
-      },
-      {
-        devicePath: "/dev/sr2",
-        serialNumber: "MOVED-STABLE-DRIVE",
-        isConfiguredDevice: true,
-      },
-    ]);
-    const scanDvd = vi.fn().mockResolvedValue(null);
-
-    await pollArchiveWorker({
-      access,
-      configuredDevicePath: "/dev/sr1",
-      hardware: {
-        ...stableDeviceBinding(),
-        discover: vi.fn().mockResolvedValue([
-          {
-            devicePath: "/dev/sr1",
-            serialNumber: "MOVED-STABLE-DRIVE",
-          },
-        ]),
-        scanDvd,
-      },
-      log: vi.fn(),
-      signal: new AbortController().signal,
-    });
-
-    expect(scanDvd).toHaveBeenCalledOnce();
-    expect(access.catalog.listOpticalDrives()).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        devicePath: "/dev/sr1",
-        serialNumber: "MOVED-STABLE-DRIVE",
-        isEnabled: true,
-        isPresent: true,
-      }),
-      expect.objectContaining({
-        devicePath: "/dev/sr1",
-        serialNumber: "STALE-PATH-HISTORY",
-        isPresent: false,
-      }),
-    ]));
-    access.close();
-  });
 
   it("keeps repeated polls idempotent and marks disappeared drives missing", async () => {
     vi.useFakeTimers();
@@ -1939,11 +2450,11 @@ describe("archive worker polling", () => {
     );
     const waitForNextPoll = vi.fn(
       async (_intervalMs: number, signal: AbortSignal) => {
-        signal.throwIfAborted();
-        await new Promise<void>((_resolve, reject) => {
-          signal.addEventListener("abort", () => reject(signal.reason), {
-            once: true,
-          });
+        if (signal.aborted) {
+          return;
+        }
+        await new Promise<void>((resolve) => {
+          signal.addEventListener("abort", () => resolve(), { once: true });
         });
       },
     );
@@ -1969,7 +2480,7 @@ describe("archive worker polling", () => {
     ).resolves.toBeUndefined();
 
     expect(scanDvd).toHaveBeenCalledTimes(1);
-    expect(waitForNextPoll).toHaveBeenCalledOnce();
+    expect(waitForNextPoll).toHaveBeenCalledTimes(1);
     access.close();
   });
 });

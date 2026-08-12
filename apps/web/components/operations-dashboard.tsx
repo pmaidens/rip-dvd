@@ -9,6 +9,7 @@ import type {
 } from "../lib/action-overview";
 import type {
   DashboardArchiveJob,
+  DashboardArchiveRequest,
   DashboardCatalogReviewItem,
   DashboardDetectedDisc,
   DashboardEncodeJob,
@@ -105,10 +106,25 @@ function streamLanguage(stream: {
   return stream.language ?? stream.languageCode ?? "Unknown language";
 }
 
-function Progress({ value }: { value: number }) {
+function Progress({ value, label = `${value}% complete` }: { value: number; label?: string }) {
   return (
-    <div className="progress" aria-label={`${value}% complete`}>
+    <div
+      className="progress"
+      role="progressbar"
+      aria-label={label}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={value}
+    >
       <span style={{ width: `${value}%` }} />
+    </div>
+  );
+}
+
+function IndeterminateProgress({ label }: { label: string }) {
+  return (
+    <div className="progress progress-indeterminate" role="progressbar" aria-label={label}>
+      <span />
     </div>
   );
 }
@@ -212,17 +228,244 @@ function encodeProgressDetail(job: DashboardEncodeJob): string | null {
 }
 
 function archiveProgressDetail(job: DashboardArchiveJob): string | null {
-  if (job.status !== "queued" && job.status !== "running") {
+  if (job.status !== "running") {
     return null;
   }
   return {
-    waiting: "Waiting for the archive worker to inspect the disc",
-    inspecting_drive: "Inspecting the disc currently in this drive",
     preparing: "Preparing the disc for archiving",
     copying: "Copying the disc image",
     verifying: "Verifying the disc image",
     finalizing: "Saving the archive",
   }[job.progressPhase];
+}
+
+function formatBytes(bytes: number): string {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1_000 && unit < units.length - 1) {
+    value /= 1_000;
+    unit += 1;
+  }
+  return `${value >= 10 || unit === 0 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
+}
+
+function inspectionReason(reason: DashboardOpticalDrive["currentInspection"] extends infer T
+  ? T extends { reasonCode: infer R } ? R : never
+  : never): string {
+  return ({
+    no_medium: "No disc is present",
+    media_changed: "The disc was removed or replaced",
+    drive_identity_changed: "The Optical Drive changed",
+    drive_unavailable: "The Optical Drive is unavailable",
+    drive_not_ready: "The Optical Drive is not ready",
+    metadata_read_failed: "Disc metadata could not be read",
+    invalid_metadata: "The disc metadata is invalid",
+    content_size_failed: "The disc size could not be read",
+    content_read_failed: "The disc content could not be read",
+    invalid_content: "The disc content is invalid",
+    worker_interrupted: "The inspection worker was interrupted",
+    operator_cancelled: "Inspection was cancelled",
+    unknown: "Inspection failed",
+  } as Record<string, string>)[reason ?? "unknown"] ?? "Inspection failed";
+}
+
+function useCurrentTime(intervalMs: number): number {
+  const [currentTime, setCurrentTime] = useState(() => Date.now());
+  useEffect(() => {
+    if (intervalMs <= 0) return;
+    const timer = setInterval(() => setCurrentTime(Date.now()), intervalMs);
+    return () => clearInterval(timer);
+  }, [intervalMs]);
+  return currentTime;
+}
+
+function DiscInspectionItem({
+  inspection,
+  onRetry,
+  busy,
+}: {
+  inspection: NonNullable<DashboardOpticalDrive["currentInspection"]>;
+  onRetry(id: string): void;
+  busy: boolean;
+}) {
+  const now = useCurrentTime(
+    inspection.status !== "running"
+      ? 0
+      : inspection.phase === "retry_wait"
+        ? 1_000
+        : 5_000,
+  );
+  const elapsedSeconds = Math.max(
+    0,
+    Math.floor((now - new Date(inspection.phaseStartedAt).getTime()) / 5_000) * 5,
+  );
+  const percent = inspection.totalBytes && inspection.bytesHashed !== null
+    ? Math.min(
+        100,
+        Math.floor(inspection.bytesHashed * 100 / inspection.totalBytes),
+      )
+    : 0;
+  const hashDetail = inspection.bytesPerSecond === null
+    ? "Calculating speed and time remaining…"
+    : `${formatBytes(inspection.bytesPerSecond)}/s · about ${formatDuration(inspection.etaSeconds ?? 0)} remaining`;
+  const retryAttempt = inspection.consecutiveFailureCount === 0
+    ? "Manual retry queued"
+    : `Attempt ${inspection.consecutiveFailureCount + 1} of 5`;
+  const retrySeconds = Math.max(
+    0,
+    Math.ceil(
+      ((inspection.retryAt
+        ? new Date(inspection.retryAt).getTime()
+        : now) - now) / 1_000,
+    ),
+  );
+  const findings =
+    inspection.archiveWorkFulfilled || inspection.titleCount === null
+      ? null
+      : [
+          inspection.volumeLabel,
+          countLabel(inspection.titleCount, "title"),
+          countLabel(inspection.chapterCount ?? 0, "chapter"),
+          `${inspection.audioStreamCount ?? 0} audio`,
+          countLabel(inspection.subtitleStreamCount ?? 0, "subtitle"),
+        ]
+          .filter(Boolean)
+          .join(" · ");
+  return (
+    <section
+      className="nested-operation disc-inspection"
+      aria-label="Disc Inspection"
+    >
+      <div className="item-heading">
+        <div>
+          <strong>Disc Inspection</strong>
+          {findings ? <p>{findings}</p> : null}
+        </div>
+        <StatusBadge value={inspection.status} />
+      </div>
+      <span className="visually-hidden" aria-live="polite" aria-atomic="true">
+        Disc Inspection {displayTerm(inspection.status)} ·{" "}
+        {displayTerm(inspection.phase)}
+      </span>
+      <div>
+        {inspection.status === "running" && inspection.phase === "reading_metadata" ? (
+          <>
+            <IndeterminateProgress label="Reading DVD metadata" />
+            <p>
+              Reading titles, chapters, audio, and subtitles ·{" "}
+              {formatDuration(elapsedSeconds)} elapsed
+            </p>
+          </>
+        ) : inspection.status === "running" && inspection.phase === "hashing_content" ? (
+          <>
+            <div className="progress-row">
+              <Progress value={percent} label="Hashing DVD content" />
+              <strong>{percent}%</strong>
+            </div>
+            <p>
+              {formatBytes(inspection.bytesHashed ?? 0)} of{" "}
+              {formatBytes(inspection.totalBytes ?? 0)} · {hashDetail}
+            </p>
+          </>
+        ) : inspection.status === "running" && inspection.phase === "retry_wait" ? (
+          <p>
+            {inspectionReason(inspection.reasonCode)} · {retryAttempt} ·
+            retrying in {retrySeconds}s
+          </p>
+        ) : inspection.status === "running" ? (
+          <p>Confirming the inserted disc…</p>
+        ) : inspection.status === "completed" &&
+          !inspection.archiveWorkFulfilled ? (
+          <>
+            <div className="progress-row">
+              <Progress value={100} label="DVD content inspected" />
+              <strong>100%</strong>
+            </div>
+            <p>Inspection complete · ready for archive work</p>
+          </>
+        ) : inspection.status === "completed" ? (
+          <p>Inspection complete</p>
+        ) : inspection.status === "failed" &&
+          inspection.manualRetryRequested ? (
+          <p>Retry requested · waiting for the worker to verify this insertion</p>
+        ) : (
+          <p>{inspectionReason(inspection.reasonCode)}</p>
+        )}
+      </div>
+      {inspection.status === "failed" && !inspection.manualRetryRequested ? (
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => onRetry(inspection.id)}
+        >
+          {busy ? "Retrying…" : "Retry inspection"}
+        </button>
+      ) : null}
+    </section>
+  );
+}
+
+function ArchiveRequestItem({
+  request,
+  onCancel,
+  onRetry,
+  busy,
+}: {
+  request: DashboardArchiveRequest;
+  onCancel(id: string): void;
+  onRetry(id: string): void;
+  busy: boolean;
+}) {
+  const detail = {
+    pending: "Waiting for this disc to be inserted and inspected",
+    running: "Archiving now",
+    needs_attention:
+      request.latestFailureDetail ?? "The latest attempt needs attention",
+    cancellation_requested: "Cancellation in progress",
+    fulfilled: "Archive request fulfilled",
+    cancelled: "Archive request cancelled",
+  }[request.status];
+  return (
+    <section
+      className="nested-operation archive-request"
+      aria-label="Archive Request"
+    >
+      <div className="item-heading">
+        <div>
+          <strong>Archive Request</strong>
+          <p>{detail}</p>
+        </div>
+        <StatusBadge value={request.status} />
+      </div>
+      {request.status === "pending" ||
+      request.status === "running" ||
+      request.status === "needs_attention" ? (
+        <div className="operation-actions">
+          {request.status === "needs_attention" ? (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => onRetry(request.id)}
+            >
+              {busy ? "Retrying…" : "Retry archive"}
+            </button>
+          ) : null}
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => onCancel(request.id)}
+          >
+            {busy
+              ? "Working…"
+              : request.status === "running"
+                ? "Cancel archive"
+                : "Cancel request"}
+          </button>
+        </div>
+      ) : null}
+    </section>
+  );
 }
 
 function DashboardSection<T>({
@@ -362,11 +605,17 @@ function DetectedDiscDetails({ disc }: { disc: DashboardDetectedDisc }) {
 function DetectedDiscItem({
   disc,
   approvingDetectedDiscId,
+  busyWorkflowId,
+  onCancelArchiveRequest,
   onApproveDetectedDisc,
+  onRetryArchiveRequest,
 }: {
   disc: DashboardDetectedDisc;
   approvingDetectedDiscId: string | null;
+  busyWorkflowId: string | null;
+  onCancelArchiveRequest: (id: string) => void;
   onApproveDetectedDisc: (id: string) => void;
+  onRetryArchiveRequest: (id: string) => void;
 }) {
   if (disc.status === "archived") {
     return (
@@ -404,9 +653,17 @@ function DetectedDiscItem({
           onClick={() => onApproveDetectedDisc(disc.id)}
         >
           {approvingDetectedDiscId === disc.id
-            ? "Approving…"
-            : "Approve archive"}
+            ? "Requesting…"
+            : "Request archive"}
         </button>
+      ) : null}
+      {disc.archiveRequest ? (
+        <ArchiveRequestItem
+          request={disc.archiveRequest}
+          onCancel={onCancelArchiveRequest}
+          onRetry={onRetryArchiveRequest}
+          busy={busyWorkflowId === disc.archiveRequest.id}
+        />
       ) : null}
     </article>
   );
@@ -515,7 +772,7 @@ function AttentionCard({
 
 export function ActionOverview({ state }: { state: ActionOverviewLoadState }) {
   const detectedDiscs = attentionState(state, "discApprovals");
-  const archiveJobs = attentionState(state, "failedArchives");
+  const archiveRequests = attentionState(state, "failedArchives");
   const encodeJobs = attentionState(state, "failedEncodes");
   const catalogReview = attentionState(state, "catalogReviews");
   const filesystemProblems = attentionState(state, "filesystemProblems");
@@ -540,11 +797,11 @@ export function ActionOverview({ state }: { state: ActionOverviewLoadState }) {
         />
         <AttentionCard
           eyebrow="Preservation"
-          title="Failed archives"
-          description="Archive jobs that stopped and can be retried."
+          title="Archive requests"
+          description="Requests whose latest attempt needs an operator retry."
           href="/discs"
-          linkLabel="Open archive jobs"
-          state={archiveJobs}
+          linkLabel="Open archive requests"
+          state={archiveRequests}
         />
         <AttentionCard
           eyebrow="Media queue"
@@ -580,6 +837,10 @@ export function DashboardView({
   section = "all",
   onApproveDetectedDisc = () => undefined,
   approvingDetectedDiscId = null,
+  onCancelArchiveRequest = () => undefined,
+  onRetryArchiveRequest = () => undefined,
+  onRetryDiscInspection = () => undefined,
+  busyWorkflowId = null,
   onRequeueEncodeJob = () => undefined,
   requeueingEncodeJobId = null,
   onCancelEncodeJob = () => undefined,
@@ -593,6 +854,10 @@ export function DashboardView({
   section?: "all" | "discs" | "encoding" | "catalog";
   onApproveDetectedDisc?: (id: string) => void;
   approvingDetectedDiscId?: string | null;
+  onCancelArchiveRequest?: (id: string) => void;
+  onRetryArchiveRequest?: (id: string) => void;
+  onRetryDiscInspection?: (id: string) => void;
+  busyWorkflowId?: string | null;
   onRequeueEncodeJob?: (id: DashboardEncodeJob["id"]) => void;
   requeueingEncodeJobId?: DashboardEncodeJob["id"] | null;
   onCancelEncodeJob?: (id: DashboardEncodeJob["id"]) => void;
@@ -606,6 +871,28 @@ export function DashboardView({
     state.catalogReview.status === "loaded"
       ? state.catalogReview.page
       : undefined;
+  const archiveJobGroups = state.archiveJobs.status !== "loaded"
+    ? state.archiveJobs
+    : {
+        status: "loaded" as const,
+        items: [...state.archiveJobs.items.reduce((groups, job) => {
+          const attempts = groups.get(job.archiveRequestId) ?? [];
+          attempts.push(job);
+          groups.set(job.archiveRequestId, attempts);
+          return groups;
+        }, new Map<string, DashboardArchiveJob[]>()).entries()].map(
+          ([archiveRequestId, attempts]) => {
+            const ordered = attempts.toSorted(
+              (left, right) => right.attemptOrdinal - left.attemptOrdinal,
+            );
+            return {
+              archiveRequestId,
+              latest: ordered[0]!,
+              older: ordered.slice(1),
+            };
+          },
+        ),
+      };
   return (
     <div className={`dashboard-grid dashboard-grid-${section}`}>
       {section === "all" || section === "discs" ? (
@@ -627,6 +914,15 @@ export function DashboardView({
             <p className="item-time">
               Last seen {formatTimestamp(drive.lastSeenAt)}
             </p>
+            {drive.currentInspection ? (
+              <DiscInspectionItem
+                inspection={drive.currentInspection}
+                onRetry={onRetryDiscInspection}
+                busy={busyWorkflowId === drive.currentInspection.id}
+              />
+            ) : drive.state === "ready" ? (
+              <p className="nested-operation">Ready for a disc</p>
+            ) : null}
           </article>
         )}
       />
@@ -641,7 +937,10 @@ export function DashboardView({
                 key={disc.id}
                 disc={disc}
                 approvingDetectedDiscId={approvingDetectedDiscId}
+                busyWorkflowId={busyWorkflowId}
+                onCancelArchiveRequest={onCancelArchiveRequest}
                 onApproveDetectedDisc={onApproveDetectedDisc}
+                onRetryArchiveRequest={onRetryArchiveRequest}
               />
             )}
           />
@@ -649,31 +948,44 @@ export function DashboardView({
           <DashboardSection
         title="Archive Jobs"
         eyebrow="Preservation queue"
-        state={state.archiveJobs}
+        state={archiveJobGroups}
         emptyMessage="No Archive Jobs are recorded."
-        renderItem={(job) => (
-          <DashboardJobItem
-            key={job.id}
-            title={job.discLabel}
-            subtitle={job.opticalDriveName}
-            status={job.status}
-            progressPercent={job.progressPercent}
-            progressDetail={archiveProgressDetail(job)}
-            failureDetail={job.failureDetail}
-            action={
-              job.retryable ? (
-                <button
-                  type="button"
-                  disabled={approvingDetectedDiscId !== null}
-                  onClick={() => onApproveDetectedDisc(job.detectedDiscId)}
-                >
-                  {approvingDetectedDiscId === job.detectedDiscId
-                    ? "Retrying…"
-                    : "Retry archive"}
-                </button>
-              ) : null
-            }
-          />
+        renderItem={(group) => (
+          <div key={group.archiveRequestId} className="archive-attempt-group">
+            <DashboardJobItem
+              title={group.latest.discLabel}
+              subtitle={group.latest.opticalDriveName}
+              status={group.latest.status}
+              progressPercent={group.latest.progressPercent}
+              progressDetail={archiveProgressDetail(group.latest)}
+              failureDetail={group.latest.failureDetail}
+              action={
+                <p className="item-time">
+                  Attempt {group.latest.attemptOrdinal} ·{" "}
+                  {group.latest.attemptOrdinal} total
+                </p>
+              }
+            />
+            {group.older.length > 0 ? (
+              <details className="archive-attempt-history">
+                <summary>
+                  {group.older.length} older{" "}
+                  {group.older.length === 1 ? "attempt" : "attempts"}
+                </summary>
+                <ol>
+                  {group.older.map((attempt) => (
+                    <li key={attempt.id}>
+                      Attempt {attempt.attemptOrdinal} ·{" "}
+                      {displayTerm(attempt.status)}
+                      {attempt.failureDetail
+                        ? ` · ${attempt.failureDetail}`
+                        : ""}
+                    </li>
+                  ))}
+                </ol>
+              </details>
+            ) : null}
+          </div>
         )}
       />
 
@@ -851,15 +1163,35 @@ export async function requestArchiveApproval(
   detectedDiscId: string,
   fetcher: DashboardFetch = fetch,
 ): Promise<void> {
-  const response = await fetcher("/api/archive-jobs", {
+  const response = await fetcher("/api/archive-requests", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ detectedDiscId }),
   });
   if (!response.ok) {
-    throw new Error("Archive approval request failed");
+    throw new Error("Archive Request creation failed");
   }
 }
+
+async function requestWorkflowMutation(
+  path: string,
+  method: "POST" | "DELETE",
+  fetcher: DashboardFetch = fetch,
+): Promise<void> {
+  const response = await fetcher(path, {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: "{}",
+  });
+  if (!response.ok) throw new Error("Workflow mutation failed");
+}
+
+export const requestArchiveRequestCancellation = (id: string) =>
+  requestWorkflowMutation(`/api/archive-requests/${encodeURIComponent(id)}`, "DELETE");
+export const requestArchiveRequestRetry = (id: string) =>
+  requestWorkflowMutation(`/api/archive-requests/${encodeURIComponent(id)}/retry`, "POST");
+export const requestDiscInspectionRetry = (id: string) =>
+  requestWorkflowMutation(`/api/disc-inspections/${encodeURIComponent(id)}/retry`, "POST");
 
 export async function requestFilesystemVerification(
   target: FilesystemVerificationTarget,
@@ -1001,6 +1333,9 @@ export function OperationsDashboard({
     string | null
   >(null);
   const [archiveApprovalFailed, setArchiveApprovalFailed] = useState(false);
+  const [busyWorkflowId, setBusyWorkflowId] = useState<string | null>(null);
+  const [workflowMutationFailed, setWorkflowMutationFailed] = useState(false);
+  const workflowMutationInFlight = React.useRef(false);
   const [requeueingEncodeJobId, setRequeueingEncodeJobId] = useState<
     DashboardEncodeJob["id"] | null
   >(null);
@@ -1045,6 +1380,24 @@ export function OperationsDashboard({
       refresh: () => setRequestNumber((value) => value + 1),
     }),
   );
+  const runWorkflowMutation = async (
+    id: string,
+    request: (id: string) => Promise<void>,
+  ) => {
+    if (workflowMutationInFlight.current) return;
+    workflowMutationInFlight.current = true;
+    setBusyWorkflowId(id);
+    setWorkflowMutationFailed(false);
+    try {
+      await request(id);
+      setRequestNumber((value) => value + 1);
+    } catch {
+      setWorkflowMutationFailed(true);
+    } finally {
+      setBusyWorkflowId(null);
+      workflowMutationInFlight.current = false;
+    }
+  };
 
   useEffect(() => {
     if (page === "overview") {
@@ -1188,7 +1541,13 @@ export function OperationsDashboard({
 
       {archiveApprovalFailed ? (
         <p className="job-error" role="status">
-          Archive approval failed. Try again.
+          Archive Request creation failed. Try again.
+        </p>
+      ) : null}
+
+      {workflowMutationFailed ? (
+        <p className="job-error" role="status">
+          The requested workflow change failed. Refresh the state and try again.
         </p>
       ) : null}
 
@@ -1224,6 +1583,16 @@ export function OperationsDashboard({
           section={page}
           onApproveDetectedDisc={(id) => void approveDetectedDisc(id)}
           approvingDetectedDiscId={approvingDetectedDiscId}
+          busyWorkflowId={busyWorkflowId}
+          onCancelArchiveRequest={(id) =>
+            void runWorkflowMutation(id, requestArchiveRequestCancellation)
+          }
+          onRetryArchiveRequest={(id) =>
+            void runWorkflowMutation(id, requestArchiveRequestRetry)
+          }
+          onRetryDiscInspection={(id) =>
+            void runWorkflowMutation(id, requestDiscInspectionRetry)
+          }
           onRequeueEncodeJob={(id) => void requeueEncodeJob(id)}
           requeueingEncodeJobId={requeueingEncodeJobId}
           onCancelEncodeJob={(id) => void cancelQueuedEncodeJob(id)}

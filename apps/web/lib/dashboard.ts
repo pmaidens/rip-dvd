@@ -2,11 +2,15 @@ import type {
   ArchiveFormat,
   ArchiveJobStatus,
   ArchiveProgressPhase,
+  ArchiveRequestStatus,
   ConsistentReadAccess,
   DataAccess,
   DetectedDiscId,
   DetectedDiscStatus,
   DiscKind,
+  DiscInspectionPhase,
+  DiscInspectionReasonCode,
+  DiscInspectionStatus,
   EncodeJobId,
   EncodeJobStatus,
   EncodeProgressPhase,
@@ -20,7 +24,6 @@ import {
   type DvdTitle,
 } from "@rip-dvd/data-access/dvd-scan";
 
-import { isArchiveJobRetryable } from "./archive-job-retryability";
 import {
   DASHBOARD_ACTIVE_DISC_LIMIT,
   DASHBOARD_ACTIVE_JOB_LIMIT,
@@ -33,6 +36,40 @@ export interface DashboardOpticalDrive {
   hardwareName: string | null;
   state: "ready" | "disabled" | "missing";
   lastSeenAt: string;
+  currentInspection?: DashboardDiscInspection | null;
+}
+
+export interface DashboardDiscInspection {
+  id: string;
+  status: DiscInspectionStatus;
+  phase: DiscInspectionPhase;
+  attemptCount: number;
+  consecutiveFailureCount: number;
+  volumeLabel: string | null;
+  titleCount: number | null;
+  chapterCount: number | null;
+  audioStreamCount: number | null;
+  subtitleStreamCount: number | null;
+  totalBytes: number | null;
+  bytesHashed: number | null;
+  bytesPerSecond: number | null;
+  etaSeconds: number | null;
+  retryAt: string | null;
+  manualRetryRequested: boolean;
+  reasonCode: DiscInspectionReasonCode | null;
+  archiveWorkFulfilled: boolean;
+  phaseStartedAt: string;
+  startedAt: string;
+  completedAt: string | null;
+}
+
+export interface DashboardArchiveRequest {
+  id: string;
+  status: ArchiveRequestStatus;
+  attemptCount: number;
+  latestFailureDetail: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface DashboardDetectedDisc {
@@ -44,6 +81,7 @@ export interface DashboardDetectedDisc {
   fingerprint: string;
   titles: readonly DvdTitle[];
   detectedAt: string;
+  archiveRequest?: DashboardArchiveRequest | null;
 }
 
 export interface DashboardDetectedDiscDetails {
@@ -55,13 +93,14 @@ export interface DashboardDetectedDiscDetails {
 export interface DashboardArchiveJob {
   id: string;
   detectedDiscId: string;
+  archiveRequestId: string;
+  attemptOrdinal: number;
   discLabel: string;
   opticalDriveName: string;
   status: ArchiveJobStatus;
   progressPhase: ArchiveProgressPhase;
   progressPercent: number;
   failureDetail?: string | null;
-  retryable: boolean;
 }
 
 export interface DashboardEncodeJob {
@@ -100,6 +139,8 @@ export interface DashboardPage {
 export type DashboardStatus =
   | DashboardOpticalDrive["state"]
   | DetectedDiscStatus
+  | DiscInspectionStatus
+  | ArchiveRequestStatus
   | ArchiveJobStatus
   | EncodeJobStatus;
 
@@ -215,6 +256,9 @@ function readDashboardSnapshotRecords(
           },
     ),
   );
+  const discInspectionSource = readSource(() =>
+    access.discInspections.list({ currentOnly: true }),
+  );
   const archiveJobSource = readSource(() =>
     access.archiveJobs.list(
       undefined,
@@ -226,8 +270,34 @@ function readDashboardSnapshotRecords(
               activeLimit: DASHBOARD_ACTIVE_JOB_LIMIT,
               historyLimit: activityLimit,
             },
-          },
+      },
     ),
+  );
+  const displayedDetectedDiscIds = [
+    ...(detectedDiscSource.status === "loaded"
+      ? detectedDiscSource.value.map((disc) => disc.id)
+      : []),
+    ...(discInspectionSource.status === "loaded"
+      ? discInspectionSource.value.flatMap((inspection) =>
+          inspection.detectedDiscId === null
+            ? []
+            : [inspection.detectedDiscId],
+        )
+      : []),
+  ];
+  const archiveRequestSource = readSource(() =>
+    activityLimit === undefined
+      ? access.archiveRequests.list()
+      : access.archiveRequests.listRelevantForDetectedDiscs(
+          [...new Set(displayedDetectedDiscIds)],
+        ),
+  );
+  const latestRequestJobSource = readSource(() =>
+    activityLimit === undefined || archiveRequestSource.status === "error"
+      ? []
+      : access.archiveJobs.listLatestForRequests(
+          archiveRequestSource.value.map((request) => request.id),
+        ),
   );
   const encodeJobSource = readSource(() =>
     access.encodeJobs.list(
@@ -370,38 +440,127 @@ function readDashboardSnapshotRecords(
           linkedOpticalDriveSource.value.map((drive) => [drive.id, drive]),
         )
       : null;
+  const currentInspectionByDrive =
+    discInspectionSource.status === "loaded"
+      ? new Map(
+          discInspectionSource.value.map((inspection) => [
+            inspection.opticalDriveId,
+            inspection,
+          ]),
+        )
+      : null;
   const discsById =
     linkedDetectedDiscSource.status === "loaded"
       ? new Map(
           linkedDetectedDiscSource.value.map((disc) => [disc.id, disc]),
         )
       : null;
+  const jobsByRequestId =
+    archiveJobSource.status === "loaded" &&
+    latestRequestJobSource.status === "loaded"
+    ? [...new Map(
+        [...archiveJobSource.value, ...latestRequestJobSource.value]
+          .map((job) => [job.id, job]),
+      ).values()].reduce((grouped, job) => {
+        const jobs = grouped.get(job.archiveRequestId) ?? [];
+        jobs.push(job);
+        grouped.set(job.archiveRequestId, jobs);
+        return grouped;
+      }, new Map<
+        (typeof archiveJobSource.value)[number]["archiveRequestId"],
+        (typeof archiveJobSource.value)[number][]
+      >())
+    : null;
+  const requestByDiscId = archiveRequestSource.status === "loaded"
+    ? archiveRequestSource.value.reduce((requests, request) => {
+        const existing = requests.get(request.detectedDiscId);
+        const requestIsActive = !["fulfilled", "cancelled"].includes(
+          request.status,
+        );
+        const existingIsActive =
+          existing !== undefined &&
+          !["fulfilled", "cancelled"].includes(existing.status);
+        if (
+          existing === undefined ||
+          (requestIsActive && !existingIsActive) ||
+          (requestIsActive === existingIsActive &&
+            request.updatedAt > existing.updatedAt)
+        ) {
+          requests.set(request.detectedDiscId, request);
+        }
+        return requests;
+      }, new Map<
+        (typeof archiveRequestSource.value)[number]["detectedDiscId"],
+        (typeof archiveRequestSource.value)[number]
+      >())
+    : null;
 
   const opticalDrives =
-    opticalDriveSource.status === "error"
+    opticalDriveSource.status === "error" ||
+    currentInspectionByDrive === null
       ? unavailable<DashboardOpticalDrive>()
       : loaded(
-          opticalDriveSource.value.map((drive): DashboardOpticalDrive => ({
-            id: drive.id,
-            displayName: driveDisplayName(drive),
-            hardwareName:
-              [drive.vendor, drive.product].filter(Boolean).join(" ") || null,
-            state: !drive.isPresent
-              ? "missing"
-              : drive.isEnabled
-                ? "ready"
-                : "disabled",
-            lastSeenAt: drive.lastSeenAt.toISOString(),
-          })),
+          opticalDriveSource.value.map((drive): DashboardOpticalDrive => {
+            const inspection = currentInspectionByDrive.get(drive.id);
+            return {
+              id: drive.id,
+              displayName: driveDisplayName(drive),
+              hardwareName:
+                [drive.vendor, drive.product].filter(Boolean).join(" ") || null,
+              state: !drive.isPresent
+                ? "missing"
+                : drive.isEnabled
+                  ? "ready"
+                  : "disabled",
+              lastSeenAt: drive.lastSeenAt.toISOString(),
+              currentInspection: inspection === undefined ? null : {
+                id: inspection.id,
+                status: inspection.status,
+                phase: inspection.phase,
+                attemptCount: inspection.attemptCount,
+                consecutiveFailureCount: inspection.consecutiveFailureCount,
+                volumeLabel: inspection.volumeLabel,
+                titleCount: inspection.titleCount,
+                chapterCount: inspection.chapterCount,
+                audioStreamCount: inspection.audioStreamCount,
+                subtitleStreamCount: inspection.subtitleStreamCount,
+                totalBytes: inspection.totalBytes,
+                bytesHashed: inspection.bytesHashed,
+                bytesPerSecond: inspection.bytesPerSecond,
+                etaSeconds: inspection.etaSeconds,
+                retryAt: inspection.retryAt?.toISOString() ?? null,
+                manualRetryRequested:
+                  inspection.manualRetryRequestedAt !== null,
+                reasonCode: inspection.reasonCode,
+                archiveWorkFulfilled:
+                  inspection.detectedDiscId !== null &&
+                  requestByDiscId?.get(inspection.detectedDiscId)?.status ===
+                    "fulfilled",
+                phaseStartedAt: inspection.phaseStartedAt.toISOString(),
+                startedAt: inspection.startedAt.toISOString(),
+                completedAt: inspection.completedAt?.toISOString() ?? null,
+              },
+            };
+          }),
         );
 
   const detectedDiscs =
-    detectedDiscSource.status === "error" || drivesById === null
+    detectedDiscSource.status === "error" ||
+    drivesById === null ||
+    requestByDiscId === null ||
+    jobsByRequestId === null
       ? unavailable<DashboardDetectedDisc>()
       : (() => {
           return loaded(
             detectedDiscSource.value.map((disc) => {
               const drive = drivesById.get(disc.opticalDriveId);
+              const request = requestByDiscId.get(disc.id);
+              const requestJobs = request === undefined
+                ? []
+                : (jobsByRequestId.get(request.id) ?? []);
+              const latestJob = requestJobs.toSorted(
+                (left, right) => right.attemptOrdinal - left.attemptOrdinal,
+              )[0];
               return {
                 id: disc.id,
                 volumeLabel: disc.volumeLabel ?? "Unlabeled disc",
@@ -415,6 +574,16 @@ function readDashboardSnapshotRecords(
                   ? (decodeDvdTitleMap(disc.scanData)?.titles ?? [])
                   : [],
                 detectedAt: disc.detectedAt.toISOString(),
+                archiveRequest: request === undefined ? null : {
+                  id: request.id,
+                  status: request.status,
+                  attemptCount: latestJob?.attemptOrdinal ?? 0,
+                  latestFailureDetail: formatFailureDetail(
+                    latestJob?.errorMessage ?? null,
+                  ),
+                  createdAt: request.createdAt.toISOString(),
+                  updatedAt: request.updatedAt.toISOString(),
+                },
               };
             }),
           );
@@ -434,6 +603,8 @@ function readDashboardSnapshotRecords(
                 : undefined;
               return {
                 id: job.id,
+                archiveRequestId: job.archiveRequestId,
+                attemptOrdinal: job.attemptOrdinal,
                 detectedDiscId: job.detectedDiscId,
                 discLabel: disc?.volumeLabel ?? "Unlabeled disc",
                 opticalDriveName: drive
@@ -443,7 +614,6 @@ function readDashboardSnapshotRecords(
                 progressPhase: job.progressPhase,
                 progressPercent: job.progressPercent,
                 failureDetail: formatFailureDetail(job.errorMessage),
-                retryable: isArchiveJobRetryable(job, disc),
               };
             }),
           );

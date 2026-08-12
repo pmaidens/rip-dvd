@@ -4,8 +4,6 @@ import type {
   FilesystemVerificationStatus,
 } from "@rip-dvd/data-access";
 
-import { isArchiveJobRetryable } from "./archive-job-retryability";
-
 const PREVIEW_LIMIT = 3;
 
 export interface ActionOverviewItem {
@@ -64,7 +62,9 @@ function mediaLabel(
 
 function readSnapshot(access: ConsistentReadAccess): ActionOverviewSnapshot {
   const discsAwaitingApproval = access.catalog.listDetectedDiscs(["scanned"]);
-  const failedArchiveJobs = access.archiveJobs.list(["failed"]);
+  const archiveRequestsNeedingAttention = access.archiveRequests.list([
+    "needs_attention",
+  ]);
   const allArchives = access.catalog.listOriginalDiscArchives();
   const allEncodeJobs = access.encodeJobs.list();
   const failedEncodeJobs = allEncodeJobs.filter(
@@ -82,7 +82,7 @@ function readSnapshot(access: ConsistentReadAccess): ActionOverviewSnapshot {
 
   const detectedDiscIds = [
     ...new Set([
-      ...failedArchiveJobs.map((job) => job.detectedDiscId),
+      ...archiveRequestsNeedingAttention.map((request) => request.detectedDiscId),
       ...catalogReviewArchives.map((archive) => archive.detectedDiscId),
       ...archiveProblems.map((archive) => archive.detectedDiscId),
     ]),
@@ -92,9 +92,6 @@ function readSnapshot(access: ConsistentReadAccess): ActionOverviewSnapshot {
       ? []
       : access.catalog.listDetectedDiscs(undefined, { ids: detectedDiscIds });
   const discsById = new Map(relevantDiscs.map((disc) => [disc.id, disc]));
-  const retryableFailedArchiveJobs = failedArchiveJobs.filter(
-    (job) => isArchiveJobRetryable(job, discsById.get(job.detectedDiscId)),
-  );
 
   const relevantEncodeJobs = [...failedEncodeJobs, ...encodeProblems];
   const selectionIds = [
@@ -132,11 +129,11 @@ function readSnapshot(access: ConsistentReadAccess): ActionOverviewSnapshot {
       })),
     ),
     failedArchives: category(
-      retryableFailedArchiveJobs.map((job) => ({
-        id: job.id,
+      archiveRequestsNeedingAttention.map((request) => ({
+        id: request.id,
         label:
-          discsById.get(job.detectedDiscId)?.volumeLabel ?? "Unlabeled disc",
-        occurredAt: job.updatedAt,
+          discsById.get(request.detectedDiscId)?.volumeLabel ?? "Unlabeled disc",
+        occurredAt: request.updatedAt,
       })),
     ),
     failedEncodes: category(

@@ -110,7 +110,7 @@ describe("Action overview API", () => {
     expect(beforePublication.failedArchives).toEqual({
       count: 1,
       items: [
-        { id: fixture.failedJob.id, label: "FAILED_DUPLICATE" },
+        { id: fixture.failedRequestId, label: "FAILED_DUPLICATE" },
       ],
     });
     fixture.publishDuplicate();

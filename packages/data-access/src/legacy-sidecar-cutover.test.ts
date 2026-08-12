@@ -18,7 +18,10 @@ import { DatabaseSync } from "node:sqlite";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { completeCatalogReview } from "./catalog.test-support.js";
+import {
+  completeCatalogReview,
+  startArchiveJobForTest,
+} from "./catalog.test-support.js";
 import { decodeDvdTitleMap } from "./dvd-scan.js";
 import {
   createDataAccess,
@@ -881,17 +884,11 @@ try {
       fingerprint: concurrentFingerprint,
     });
     service.catalog.updateDetectedDiscStatus(concurrentDisc.id, "scanned");
-    service.archiveJobs.approve({ detectedDiscId: concurrentDisc.id });
-    const concurrentClaim = service.archiveJobs.claimNext(
+    const concurrentClaim = startArchiveJobForTest(
+      service,
+      service.catalog.listDetectedDiscs(undefined, { ids: [concurrentDisc.id] })[0]!,
       "concurrent-worker",
-      {
-        opticalDriveId: drive.id,
-        fingerprint: concurrentFingerprint,
-      },
     );
-    if (!concurrentClaim) {
-      throw new Error("Expected the concurrent Archive Job to be claimed");
-    }
     service.archiveJobs.publish(concurrentClaim, {
       archivePath: concurrentArchivePath,
       sizeBytes: 4_700_000_000,
@@ -1259,14 +1256,11 @@ try {
       fingerprint: repairedFingerprint,
     });
     service.catalog.updateDetectedDiscStatus(disc.id, "scanned");
-    service.archiveJobs.approve({ detectedDiscId: disc.id });
-    const claim = service.archiveJobs.claimNext("replacement-worker", {
-      opticalDriveId: drive.id,
-      fingerprint: repairedFingerprint,
-    });
-    if (!claim) {
-      throw new Error("Expected the repaired Archive Job to be claimed");
-    }
+    const claim = startArchiveJobForTest(
+      service,
+      service.catalog.listDetectedDiscs(undefined, { ids: [disc.id] })[0]!,
+      "replacement-worker",
+    );
     service.archiveJobs.publish(claim, {
       archivePath: repairedArchivePath,
       sizeBytes: 4_700_000_000,
@@ -3260,14 +3254,11 @@ try {
       fingerprint: currentFingerprint,
     });
     service.catalog.updateDetectedDiscStatus(disc.id, "scanned");
-    service.archiveJobs.approve({ detectedDiscId: disc.id });
-    const claim = service.archiveJobs.claimNext("late-bootstrap-worker", {
-      opticalDriveId: drive.id,
-      fingerprint: currentFingerprint,
-    });
-    if (!claim) {
-      throw new Error("Expected the late Archive Job to be claimed");
-    }
+    const claim = startArchiveJobForTest(
+      service,
+      service.catalog.listDetectedDiscs(undefined, { ids: [disc.id] })[0]!,
+      "late-bootstrap-worker",
+    );
     service.archiveJobs.publish(claim, {
       archivePath: publishedArchivePath,
       sizeBytes: 4_700_000_000,

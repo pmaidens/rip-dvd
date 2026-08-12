@@ -22,13 +22,17 @@ const writerSource = String.raw`
   const [partialPath, readyPath, devicePath] = process.argv.slice(1);
   const deviceDescriptor =
     devicePath === "-" ? undefined : openSync(devicePath, "r");
-  const descriptor = openSync(partialPath, "w", 0o600);
-  writeSync(descriptor, Buffer.from("live partial"));
-  fsyncSync(descriptor);
+  const descriptor = partialPath === "-"
+    ? undefined
+    : openSync(partialPath, "w", 0o600);
+  if (descriptor !== undefined) {
+    writeSync(descriptor, Buffer.from("live partial"));
+    fsyncSync(descriptor);
+  }
   writeFileSync(readyPath, String(process.pid), { mode: 0o600 });
   process.on("SIGTERM", () => {});
   process.on("exit", () => {
-    closeSync(descriptor);
+    if (descriptor !== undefined) closeSync(descriptor);
     if (deviceDescriptor !== undefined) closeSync(deviceDescriptor);
   });
   setInterval(() => {}, 60_000);

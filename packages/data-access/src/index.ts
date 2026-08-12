@@ -19,8 +19,8 @@ export type {
   DiscSelectionSourceIdentityInput,
 } from "./disc-selection-source-identity.js";
 export {
-  ARCHIVE_INSPECTION_LEASE_DURATION_MS,
   ARCHIVE_JOB_LEASE_DURATION_MS,
+  DISC_INSPECTION_LEASE_DURATION_MS,
   ENCODE_JOB_LEASE_DURATION_MS,
 } from "./types.js";
 export type {

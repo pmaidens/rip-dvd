@@ -6,6 +6,10 @@ import {
   useDataAccessFixture,
 } from "../../../../test/data-access-fixture";
 import {
+  completeDiscInspection,
+  startArchiveJob,
+} from "../../../../test/archive-job-fixture";
+import {
   createDashboardEventResponse,
   createDashboardEventRoute,
 } from "./route";
@@ -77,7 +81,8 @@ describe("GET /api/dashboard/events", () => {
       });
       access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
       access.catalog.updateDetectedDiscStatus(disc.id, "approved");
-      access.archiveJobs.enqueue({ detectedDiscId: disc.id });
+      const archivedAttempt = startArchiveJob(access, disc, `bounds-worker-${index}`);
+      access.archiveJobs.fail(archivedAttempt, "bounded history fixture");
 
       const encodeFingerprint =
         `sha256:${(index + 100).toString(16).padStart(64, "0")}`;
@@ -177,7 +182,7 @@ describe("GET /api/dashboard/events", () => {
     expect(
       snapshot.detectedDiscs.items.every((disc) => disc.titles.length === 0),
     ).toBe(true);
-    expect(snapshot.archiveJobs.items).toHaveLength(25);
+    expect(snapshot.archiveJobs.items).toHaveLength(20);
     expect(
       snapshot.archiveJobs.items.every(
         (job) => job.discLabel !== "Unlabeled disc",
@@ -197,7 +202,7 @@ describe("GET /api/dashboard/events", () => {
         (item) => item.discLabel !== "Unlabeled disc",
       ),
     ).toBe(true);
-    expect(Buffer.byteLength(event)).toBeLessThan(50_000);
+    expect(Buffer.byteLength(event)).toBeLessThan(70_000);
   });
 
   it("frames the current database snapshot as a reconnectable dashboard event", async () => {
@@ -254,8 +259,7 @@ describe("GET /api/dashboard/events", () => {
     });
     access.catalog.updateDetectedDiscStatus(archiveDisc.id, "scanned");
     access.catalog.updateDetectedDiscStatus(archiveDisc.id, "approved");
-    access.archiveJobs.enqueue({ detectedDiscId: archiveDisc.id });
-    const archiveClaim = access.archiveJobs.claimNext("archive-worker-test")!;
+    const archiveClaim = startArchiveJob(access, archiveDisc, "archive-worker-test");
 
     const encodeDisc = access.catalog.registerDetectedDisc({
       opticalDriveId: drive.id,
@@ -338,8 +342,17 @@ describe("GET /api/dashboard/events", () => {
       volumeLabel: "LIFECYCLE_DISC",
     });
     access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
-    const job = access.archiveJobs.approve({ detectedDiscId: disc.id });
-    const firstClaim = access.archiveJobs.claimNext("archive-worker-first")!;
+    const request = access.archiveRequests.create({ detectedDiscId: disc.id });
+    const inspection = completeDiscInspection(
+      access,
+      disc,
+      "archive-lifecycle-generation",
+    );
+    const firstClaim = access.archiveJobs.startForInspection(
+      inspection.id,
+      "archive-worker-first",
+    )!;
+    const job = firstClaim;
     access.archiveJobs.updateProgress(firstClaim, 37);
 
     const abortController = new AbortController();
@@ -383,8 +396,11 @@ describe("GET /api/dashboard/events", () => {
     });
     expect(failed.catalogReview.items).toEqual([]);
 
-    access.archiveJobs.approve({ detectedDiscId: disc.id });
-    const retryClaim = access.archiveJobs.claimNext("archive-worker-retry")!;
+    access.archiveRequests.retry(request.id);
+    const retryClaim = access.archiveJobs.startForInspection(
+      inspection.id,
+      "archive-worker-retry",
+    )!;
     access.archiveJobs.publish(retryClaim, {
       archivePath: "/media/originals/lifecycle.iso",
       sizeBytes: 9,
@@ -393,10 +409,13 @@ describe("GET /api/dashboard/events", () => {
     const completed = await parseSnapshot();
     abortController.abort();
 
-    expect(completed.archiveJobs).toMatchObject({
-      status: "loaded",
-      items: [{ id: job.id, status: "completed", progressPercent: 100 }],
-    });
+    expect(completed.archiveJobs.status).toBe("loaded");
+    expect(completed.archiveJobs.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: retryClaim.id, status: "completed", progressPercent: 100 }),
+        expect.objectContaining({ id: job.id, status: "failed", progressPercent: 37 }),
+      ]),
+    );
     expect(completed.catalogReview).toMatchObject({
       status: "loaded",
       items: [{ discLabel: "LIFECYCLE_DISC" }],

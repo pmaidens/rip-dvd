@@ -1,8 +1,11 @@
 import type { DataAccess } from "@rip-dvd/data-access";
 import { describe, expect, it, vi } from "vitest";
 
-import { createArchiveJobsRoute } from "./archive-jobs/route";
+import { createArchiveRequestCancellationRoute } from "./archive-requests/[id]/route";
+import { createArchiveRequestRetryRoute } from "./archive-requests/[id]/retry/route";
+import { createArchiveRequestsRoute } from "./archive-requests/route";
 import { createCatalogReviewRoute } from "./catalog-reviews/[id]/route";
+import { createDiscInspectionRetryRoute } from "./disc-inspections/[id]/retry/route";
 import { createEncodeJobsRoute } from "./encode-jobs/route";
 import { createEncodingProfilesRoute } from "./encoding-profiles/route";
 import { createFilesystemVerificationRoute } from "./filesystem-verification/route";
@@ -10,6 +13,7 @@ import { createFilesystemVerificationRoute } from "./filesystem-verification/rou
 type GetTrustedOrigin = () => string;
 
 interface MutationRouteCase {
+  method?: "DELETE" | "POST";
   name: string;
   path: string;
   unavailableError: string;
@@ -29,11 +33,48 @@ interface RejectionCase {
 
 const mutationRoutes = [
   {
-    name: "Archive Jobs",
-    path: "/api/archive-jobs",
-    unavailableError: "Archive Job approval is unavailable",
+    name: "Archive Requests",
+    path: "/api/archive-requests",
+    unavailableError: "Archive Request creation is unavailable",
     run: (request, getAccess, getTrustedOrigin) =>
-      createArchiveJobsRoute(request, getAccess, getTrustedOrigin),
+      createArchiveRequestsRoute(request, getAccess, getTrustedOrigin),
+  },
+  {
+    method: "DELETE",
+    name: "Archive Request cancellation",
+    path: "/api/archive-requests/archive-request-id",
+    unavailableError: "Archive Request cancellation is unavailable",
+    run: (request, getAccess, getTrustedOrigin) =>
+      createArchiveRequestCancellationRoute(
+        request,
+        "archive-request-id",
+        getAccess,
+        getTrustedOrigin,
+      ),
+  },
+  {
+    name: "Archive Request retry",
+    path: "/api/archive-requests/archive-request-id/retry",
+    unavailableError: "Archive Request retry is unavailable",
+    run: (request, getAccess, getTrustedOrigin) =>
+      createArchiveRequestRetryRoute(
+        request,
+        "archive-request-id",
+        getAccess,
+        getTrustedOrigin,
+      ),
+  },
+  {
+    name: "Disc Inspection retry",
+    path: "/api/disc-inspections/disc-inspection-id/retry",
+    unavailableError: "Disc Inspection retry is unavailable",
+    run: (request, getAccess, getTrustedOrigin) =>
+      createDiscInspectionRetryRoute(
+        request,
+        "disc-inspection-id",
+        getAccess,
+        getTrustedOrigin,
+      ),
   },
   {
     name: "Encode Jobs",
@@ -138,7 +179,7 @@ describe.each(mutationRoutes)("$name mutation boundary", (route) => {
       const getAccess = vi.fn<() => DataAccess>();
       const response = await route.run(
         new Request(`http://localhost:3000${route.path}`, {
-          method: "POST",
+          method: route.method ?? "POST",
           headers,
           body: "{}",
         }),
@@ -157,7 +198,7 @@ describe.each(mutationRoutes)("$name mutation boundary", (route) => {
     const getAccess = vi.fn<() => DataAccess>();
     const response = await route.run(
       new Request(`http://localhost:3000${route.path}`, {
-        method: "POST",
+        method: route.method ?? "POST",
         headers: defaultTrustedHeaders,
         body: "{}",
       }),
@@ -177,7 +218,7 @@ describe.each(mutationRoutes)("$name mutation boundary", (route) => {
     const getAccess = vi.fn<() => DataAccess>();
     const response = await route.run(
       new Request(`http://localhost:3000${route.path}`, {
-        method: "POST",
+        method: route.method ?? "POST",
         headers: defaultTrustedHeaders,
         body: "{}",
       }),
