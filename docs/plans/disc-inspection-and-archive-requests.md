@@ -489,9 +489,9 @@ All tasks are AFK-ready; no product or architecture HITL decisions remain. Keep 
 
 - `pnpm db:check` — passed; Drizzle reports the schema and migration history consistent.
 - `pnpm typecheck` — passed across all six packages/applications.
-- `pnpm test` — passed locally with 814 tests, including 107 Archive Worker tests; macOS skipped the 9 Linux-only ownership assertions.
+- `pnpm test` — passed locally with 845 tests, including 107 Archive Worker tests; macOS skipped the 9 Linux-only ownership assertions.
 - `pnpm build` — passed, including the production Next.js build and both worker builds.
-- `docker compose --profile validation build validation` — passed the pinned Node/pnpm toolchain check, native reader compile/test, all 823 tests (including all 116 Archive Worker tests and Linux ownership assertions), Drizzle consistency check, and all production builds on Linux.
+- `docker compose --profile validation build validation` — passed the pinned Node/pnpm toolchain check, native reader compile/test, all 854 tests (including all 116 Archive Worker tests and Linux ownership assertions), Drizzle consistency check, and all production builds on Linux.
 - `sh scripts/smoke-compose-workers.sh all` — passed the native reader compile/test and named-volume plus bind-mount archive/encode worker smoke paths under UID 1000 after the final review fixes.
 - Deterministic browser verification passed at 1440×1000 and 390×844 with no horizontal document overflow.
 - Iterative parallel Standards/Spec review continued through the post-rebase scheduler integration and per-device cancellation-recovery fixes. Every finding was fixed and revalidated; the final round returned no Standards problems and no Spec problems.
