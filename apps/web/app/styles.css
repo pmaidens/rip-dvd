@@ -1194,12 +1194,34 @@ h1 {
 
 .catalog-complete-action {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  align-items: stretch;
+  flex-direction: column;
   gap: 1rem;
   margin-top: 1rem;
   padding-top: 1rem;
   border-top: 1px solid #29483f;
+}
+
+.catalog-archive-only-choice label,
+.catalog-complete-submit {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.catalog-archive-only-choice label {
+  color: #dbe6e2;
+  font-size: 0.78rem;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.catalog-archive-only-choice input {
+  flex: 0 0 auto;
+}
+
+.catalog-complete-submit {
+  justify-content: space-between;
 }
 
 .review-item > button {
@@ -2088,7 +2110,7 @@ h3 {
   }
 
   .catalog-editor-header,
-  .catalog-complete-action {
+  .catalog-complete-submit {
     align-items: stretch;
     flex-direction: column;
   }

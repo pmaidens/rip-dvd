@@ -10,6 +10,7 @@ export { normalizeMediaItemSearchTitle } from "./media-item-title-search.js";
 export * from "./errors.js";
 export * from "./dvd-scan.js";
 export {
+  CATALOG_REVIEW_OUTCOMES,
   DISC_SELECTION_KINDS,
   MAX_MEDIA_ITEM_HIERARCHY_DEPTH,
   MEDIA_ITEM_KINDS,

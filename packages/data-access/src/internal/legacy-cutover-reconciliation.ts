@@ -389,6 +389,7 @@ export function reconcileLegacyRepairCutover(
     const fenceArchive = sqlite.prepare(`
       UPDATE original_disc_archives
       SET catalog_reviewed_at = NULL,
+          catalog_review_outcome = 'needs_review',
           legacy_cutover_pending = true,
           updated_at = max(updated_at + 1, ?)
       WHERE fingerprint = ? OR archive_path = ?

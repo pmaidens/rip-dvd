@@ -71,7 +71,7 @@ function readSnapshot(access: ConsistentReadAccess): ActionOverviewSnapshot {
     (job) => job.status === "failed",
   );
   const catalogReviewArchives = allArchives.filter(
-    (archive) => archive.catalogReviewedAt === null,
+    (archive) => archive.catalogReviewOutcome === "needs_review",
   );
   const archiveProblems = allArchives.filter((archive) =>
     isFilesystemProblem(archive.verificationStatus),
