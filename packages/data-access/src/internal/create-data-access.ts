@@ -98,6 +98,7 @@ import type {
   ArchiveJobId,
   ArchiveJobInspectionToken,
   ArchiveJob,
+  ArchiveJobStatus,
   ArchiveJobProgress,
   ConsistentReadAccess,
   DataAccess,
@@ -114,6 +115,7 @@ import type {
   EncodeJobPartialCleanup,
   EncodeJobProgress,
   EncodeJobRequeueOptions,
+  EncodeJobStatus,
   EncodingProfileId,
   MediaDomain,
   MediaItemId,
@@ -871,7 +873,7 @@ export function createDataAccessInternal(
     on conflict (detected_disc_id) do nothing
   `);
 
-  const listArchiveJobs = createJobList<ArchiveJob>({
+  const listArchiveJobs = createJobList<ArchiveJob, ArchiveJobStatus>({
     readQueue(statuses) {
       return database
         .select()
@@ -1277,7 +1279,9 @@ export function createDataAccessInternal(
     Pick<ArchiveJobProgress, "phase">
   >;
 
-  const listEncodeJobs = createJobList<EncodeJob>({
+  const listEncodeJobs = createJobList<EncodeJob, EncodeJobStatus>({
+    activeStatuses: ["queued", "running"],
+    historyStatuses: ["completed", "failed", "cancelled"],
     readQueue(statuses) {
       return database
         .select()
@@ -1450,64 +1454,83 @@ export function createDataAccessInternal(
       const keepsOutputPath =
         effectiveOutputPath === undefined ||
         effectiveOutputPath === current.outputPath;
-      const preservesFailedReplacement =
-        expectedStatus === "failed" &&
+      const preservesTerminalReplacement =
+        expectedStatus !== "completed" &&
         keepsOutputPath &&
         current.replaceExistingOutput;
-      return database
-        .update(encodeJobs)
-        .set({
-          ...update,
-          outputPath: effectiveOutputPath,
-          priority: options?.priority,
-          progressPhase: null,
-          progressEtaSeconds: null,
-          replaceExistingOutput:
-            (expectedStatus === "completed" && keepsOutputPath) ||
-            preservesFailedReplacement,
-          replacementOutputIdentity: preservesFailedReplacement
-            ? current.replacementOutputIdentity
-            : null,
-          ...(keepsOutputPath
-            ? {}
-            : {
-                verificationStatus: null,
-                verificationMessage: null,
-                verifiedAt: null,
-              }),
-        })
-        .where(
-          and(
-            eq(encodeJobs.id, id),
-            eq(encodeJobs.status, expectedStatus),
-            isNull(encodeJobs.partialCleanupOutputPath),
-            isNull(encodeJobs.partialCleanupClaimToken),
-            isNull(encodeJobs.partialCleanupLeaseToken),
-            eq(encodeJobs.publicationPending, false),
-            exists(
-              database
-                .select({ id: discSelections.id })
-                .from(discSelections)
-                .innerJoin(
-                  originalDiscArchives,
-                  eq(
-                    originalDiscArchives.id,
-                    discSelections.originalDiscArchiveId,
+      const targetOutputPath = effectiveOutputPath ?? current.outputPath;
+      return database.transaction((transaction) => {
+        const outputOwner = transaction
+          .select({ id: encodeJobs.id })
+          .from(encodeJobs)
+          .where(and(
+            eq(encodeJobs.outputPath, targetOutputPath),
+            eq(encodeJobs.reservesOutputPath, true),
+            ne(encodeJobs.id, id),
+          ))
+          .limit(1)
+          .get();
+        if (outputOwner) {
+          throw new DomainInvariantError(
+            `Encode Job output is already assigned: ${targetOutputPath}`,
+          );
+        }
+        return transaction
+          .update(encodeJobs)
+          .set({
+            ...update,
+            outputPath: effectiveOutputPath,
+            reservesOutputPath: true,
+            priority: options?.priority,
+            progressPhase: null,
+            progressEtaSeconds: null,
+            replaceExistingOutput:
+              (expectedStatus === "completed" && keepsOutputPath) ||
+              preservesTerminalReplacement,
+            replacementOutputIdentity: preservesTerminalReplacement
+              ? current.replacementOutputIdentity
+              : null,
+            ...(keepsOutputPath
+              ? {}
+              : {
+                  verificationStatus: null,
+                  verificationMessage: null,
+                  verifiedAt: null,
+                }),
+          })
+          .where(
+            and(
+              eq(encodeJobs.id, id),
+              eq(encodeJobs.status, expectedStatus),
+              isNull(encodeJobs.partialCleanupOutputPath),
+              isNull(encodeJobs.partialCleanupClaimToken),
+              isNull(encodeJobs.partialCleanupLeaseToken),
+              eq(encodeJobs.publicationPending, false),
+              exists(
+                transaction
+                  .select({ id: discSelections.id })
+                  .from(discSelections)
+                  .innerJoin(
+                    originalDiscArchives,
+                    eq(
+                      originalDiscArchives.id,
+                      discSelections.originalDiscArchiveId,
+                    ),
+                  )
+                  .where(
+                    and(
+                      eq(discSelections.id, encodeJobs.discSelectionId),
+                      eq(discSelections.isCatalogActive, true),
+                      isNotNull(originalDiscArchives.catalogReviewedAt),
+                      eq(originalDiscArchives.legacyCutoverPending, false),
+                    ),
                   ),
-                )
-                .where(
-                  and(
-                    eq(discSelections.id, encodeJobs.discSelectionId),
-                    eq(discSelections.isCatalogActive, true),
-                    isNotNull(originalDiscArchives.catalogReviewedAt),
-                    eq(originalDiscArchives.legacyCutoverPending, false),
-                  ),
-                ),
+              ),
             ),
-          ),
-        )
-        .returning()
-        .get();
+          )
+          .returning()
+          .get();
+      }, { behavior: "immediate" });
     },
   } satisfies JobQueueAdapter<
     EncodeJob,
@@ -1531,7 +1554,7 @@ export function createDataAccessInternal(
     adapter: encodeJobAdapter,
     createToken: () => newId<EncodeJobClaimToken>(),
     now,
-    requeueFrom: ["failed", "completed"],
+    requeueFrom: ["failed", "completed", "cancelled"],
   });
 
   const detectedDiscConditionFor = (
@@ -3695,6 +3718,45 @@ export function createDataAccessInternal(
           },
           { behavior: "immediate" },
         );
+      },
+
+      cancelQueued(id) {
+        const timestamp = now();
+        return database.transaction((transaction) => {
+          const current = requireRow(
+            transaction
+              .select()
+              .from(encodeJobs)
+              .where(eq(encodeJobs.id, id))
+              .get(),
+            "encode job",
+            id,
+          );
+          if (current.status !== "queued") {
+            throw new InvalidStatusTransitionError(
+              "encode job",
+              current.status,
+              "cancelled",
+            );
+          }
+          return requireRow(
+            transaction
+              .update(encodeJobs)
+              .set({
+                status: "cancelled",
+                reservesOutputPath: current.replaceExistingOutput,
+                updatedAt: timestamp,
+              })
+              .where(and(
+                eq(encodeJobs.id, id),
+                eq(encodeJobs.status, "queued"),
+              ))
+              .returning()
+              .get(),
+            "encode job",
+            id,
+          );
+        }, { behavior: "immediate" });
       },
 
       claimNext: encodeJobQueue.claimNext,

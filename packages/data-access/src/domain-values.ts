@@ -23,12 +23,19 @@ export const MAX_MEDIA_ITEM_HIERARCHY_DEPTH = 32;
 
 export const MEDIA_DOMAINS = ["dvd_video", "audio"] as const;
 
-export const JOB_STATUSES = [
+export const ARCHIVE_JOB_STATUSES = [
   "queued",
   "running",
   "completed",
   "failed",
 ] as const;
+
+export const JOB_STATUSES = [
+  ...ARCHIVE_JOB_STATUSES,
+  "cancelled",
+] as const;
+
+export const ENCODE_JOB_STATUSES = JOB_STATUSES;
 
 export const ARCHIVE_QUEUED_PROGRESS_PHASES = [
   "waiting",

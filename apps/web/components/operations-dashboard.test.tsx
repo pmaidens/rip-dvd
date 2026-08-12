@@ -98,6 +98,61 @@ describe("DashboardView", () => {
     expect(html).toContain("No Original Disc Archives need catalog review.");
   });
 
+  it("offers queued cancellation and renders Cancelled separately from failure", () => {
+    const html = render({
+      opticalDrives: { status: "loaded", items: [] },
+      detectedDiscs: { status: "loaded", items: [] },
+      archiveJobs: { status: "loaded", items: [] },
+      encodeJobs: {
+        status: "loaded",
+        items: [
+          {
+            id: "queued-encode" as EncodeJobId,
+            mediaTitle: "Queued Movie",
+            mediaYear: null,
+            encodingProfileName: "DVD library · Version 1",
+            status: "queued",
+            progressPhase: null,
+            progressPercent: 0,
+            progressEtaSeconds: null,
+          },
+          {
+            id: "cancelled-encode" as EncodeJobId,
+            mediaTitle: "Cancelled Movie",
+            mediaYear: null,
+            encodingProfileName: "DVD library · Version 1",
+            status: "cancelled",
+            progressPhase: null,
+            progressPercent: 0,
+            progressEtaSeconds: null,
+            requeueable: true,
+          },
+          {
+            id: "cancelled-ineligible-encode" as EncodeJobId,
+            mediaTitle: "Cancelled Ineligible Movie",
+            mediaYear: null,
+            encodingProfileName: "DVD library · Version 1",
+            status: "cancelled",
+            progressPhase: null,
+            progressPercent: 0,
+            progressEtaSeconds: null,
+            requeueable: false,
+          },
+        ],
+      },
+      catalogReview: { status: "loaded", items: [] },
+    });
+
+    expect(html).toContain("Cancel queued encode");
+    expect(html).toContain("Requeue encode");
+    expect(html).toContain("status status-cancelled");
+    expect(html).toContain(">Cancelled<");
+    expect(html).toContain(
+      "Requeue requires an active Disc Selection with completed",
+    );
+    expect(html).not.toContain("Worker reported a failure");
+  });
+
   it.each([
     ["discs", ["Optical Drives", "Detected Discs", "Archive Jobs"]],
     ["encoding", ["Encode Jobs"]],
@@ -854,7 +909,9 @@ function deferred<T>(): Deferred<T> {
   return { promise, resolve, reject };
 }
 
-function mutationDashboardState(): DashboardSnapshot {
+function mutationDashboardState(
+  encodeJobStatus: "failed" | "queued" = "failed",
+): DashboardSnapshot {
   return {
     generatedAt: "2026-08-10T20:00:00.000Z",
     opticalDrives: { status: "loaded", items: [] },
@@ -879,12 +936,14 @@ function mutationDashboardState(): DashboardSnapshot {
       items: [
         {
           id: "encode-job-1" as EncodeJobId,
-          mediaTitle: "Failed Encode",
+          mediaTitle: encodeJobStatus === "failed"
+            ? "Failed Encode"
+            : "Queued Encode",
           mediaYear: 2001,
           encodingProfileName: "DVD library · Version 1",
-          status: "failed",
-          progressPhase: "encoding",
-          progressPercent: 42,
+          status: encodeJobStatus,
+          progressPhase: encodeJobStatus === "failed" ? "encoding" : null,
+          progressPercent: encodeJobStatus === "failed" ? 42 : 0,
           progressEtaSeconds: null,
         },
       ],
@@ -926,6 +985,17 @@ const dashboardMutationCases = [
     errorMessage:
       "Encode Job retry failed. Confirm its catalog review, then try again.",
   },
+  {
+    action: "Encode Job cancellation",
+    page: "encoding",
+    readyLabel: "Cancel queued encode",
+    busyLabel: "Cancelling…",
+    requestPath: "/api/encode-jobs",
+    requestMethod: "PATCH",
+    errorMessage:
+      "Encode Job cancellation failed. Refresh the queue and try again.",
+    encodeJobStatus: "queued",
+  },
 ] as const;
 
 async function renderMutationDashboard(
@@ -938,7 +1008,11 @@ async function renderMutationDashboard(
 }> {
   const watch = vi.mocked(watchDashboardActivity);
   watch.mockImplementation(({ onSnapshot, onStreamStatus }) => {
-    onSnapshot(mutationDashboardState());
+    onSnapshot(mutationDashboardState(
+      "encodeJobStatus" in mutationCase
+        ? mutationCase.encodeJobStatus
+        : "failed",
+    ));
     onStreamStatus?.("live");
     return () => undefined;
   });

@@ -66,20 +66,25 @@ export function createBoundedChronologicalList<
 
 export function createJobList<
   Job extends ChronologicalRecord & { updatedAt: Date },
+  Status extends string = JobStatus,
 >({
+  activeStatuses = ["queued", "running"] as Status[],
+  historyStatuses = ["completed", "failed"] as Status[],
   readQueue,
   readNewest,
 }: {
-  readQueue(statuses?: JobStatus[]): Job[];
-  readNewest(statuses: JobStatus[] | undefined, limit: number): Job[];
+  activeStatuses?: Status[];
+  historyStatuses?: Status[];
+  readQueue(statuses?: Status[]): Job[];
+  readNewest(statuses: Status[] | undefined, limit: number): Job[];
 }) {
   return createBoundedChronologicalList<
     Job,
-    JobStatus,
+    Status,
     ChronologicalListOptions
   >({
-    activeStatuses: ["queued", "running"],
-    historyStatuses: ["completed", "failed"],
+    activeStatuses,
+    historyStatuses,
     chronologicalAt: (job) => job.updatedAt,
     readAll: (statuses) => readQueue(statuses),
     readNewest: (statuses, limit) => readNewest(statuses, limit),

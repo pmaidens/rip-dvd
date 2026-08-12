@@ -232,10 +232,17 @@ export async function createEncodeJobsRoute(
     const body = asRecord(await request.json().catch(() => null));
     if (request.method === "PATCH") {
       const encodeJobId = boundedString(body?.encodeJobId);
-      if (!body || !encodeJobId) {
-        return response({ error: "Invalid Encode Job retry" }, 400);
+      const action = body?.action === undefined ? "requeue" : body.action;
+      if (
+        !body ||
+        !encodeJobId ||
+        (action !== "cancel" && action !== "requeue")
+      ) {
+        return response({ error: "Invalid Encode Job command" }, 400);
       }
-      const job = getAccess().encodeJobs.requeue(encodeJobId as EncodeJobId);
+      const job = action === "cancel"
+        ? getAccess().encodeJobs.cancelQueued(encodeJobId as EncodeJobId)
+        : getAccess().encodeJobs.requeue(encodeJobId as EncodeJobId);
       return response({ job: serializeJob(job) });
     }
     const discSelectionId = boundedString(body?.discSelectionId);

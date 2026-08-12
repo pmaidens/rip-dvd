@@ -57,7 +57,7 @@ export interface JobQueueAdapter<
 > {
   readonly recordType: string;
   find(id: Id): Job | undefined;
-  list(statuses?: JobStatus[], options?: ChronologicalListOptions): Job[];
+  list(statuses?: Job["status"][], options?: ChronologicalListOptions): Job[];
   claim(
     workerId: string,
     token: Token,
@@ -83,7 +83,7 @@ export interface JobQueueAdapter<
   isAttemptCurrent?(current: Job, claim: Running, timestamp: Date): boolean;
   requeue(
     id: Id,
-    expectedStatus: "failed" | "completed",
+    expectedStatus: Job["status"],
     current: Job,
     update: RequeueUpdate,
     options?: RequeueOptions,
@@ -102,7 +102,7 @@ export interface JobQueueController<
   FailureOptions = never,
 > {
   claimNext(workerId: string, options?: ClaimOptions): Running | null;
-  list(statuses?: JobStatus[], options?: ChronologicalListOptions): Job[];
+  list(statuses?: Job["status"][], options?: ChronologicalListOptions): Job[];
   updateProgress(
     claim: Running,
     progressPercent: number,
@@ -155,7 +155,7 @@ export function createJobQueueController<
   >;
   createToken(): Token;
   now(): Date;
-  requeueFrom: readonly ("failed" | "completed")[];
+  requeueFrom: readonly Job["status"][];
 }): JobQueueController<
   Job,
   Running,
@@ -334,13 +334,6 @@ export function createJobQueueController<
 
     requeue(id, options) {
       const current = requireRecord(id);
-      if (current.status !== "failed" && current.status !== "completed") {
-        throw new InvalidStatusTransitionError(
-          adapter.recordType,
-          current.status,
-          "queued",
-        );
-      }
       if (!requeueFrom.includes(current.status)) {
         throw new InvalidStatusTransitionError(
           adapter.recordType,
