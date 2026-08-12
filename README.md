@@ -371,16 +371,19 @@ the tracker ever diverge.
 The real-hardware deployment target is a native Linux Docker Engine with the
 Docker Compose plugin. Docker Desktop can build and validate the images, but it
 does not expose a Linux host optical drive and may ignore Linux block-I/O
-scheduling. Before starting on the server:
+scheduling. Stable identity mapping also uses the repository's supported
+Node.js 22.23.1 runtime plus host `lsblk` and `udevadm`. Before starting on the
+server:
 
-1. Copy `.env.example` to `.env` and set the exact library, device, bind, and
-   trusted-origin values for that host.
-2. Confirm every configured optical device exists (the default is `/dev/sr0`).
-   Find its SCSI-generic sibling under
-   `/sys/class/block/sr0/device/scsi_generic` (the default is `/dev/sg1`) and
-   set `RIP_DVD_ARCHIVE_CSS_DEVICE_PATH` to that path. Identify the numeric
-   host group that can access both nodes and set `RIP_DVD_OPTICAL_DEVICE_GID`
-   to that GID.
+1. Copy `.env.example` to `.env` and set the exact library, bind, and
+   trusted-origin values for that host. The `/dev/sr0` and `/dev/sg1` settings
+   are backward-compatible single-drive defaults; stable-serial configuration
+   below supersedes them at startup.
+2. Copy `optical-drives.example.json` to `.local/optical-drives.json`. Replace
+   every placeholder with a physical drive's stable serial and choose one as
+   `primarySerialNumber`. Identify the numeric host group that can access its
+   optical block and SCSI-generic nodes and set `RIP_DVD_OPTICAL_DEVICE_GID` to
+   that GID.
 3. Create any bind-mounted Media Library, Original Disc Archive, and backup
    directories. The containers run as UID/GID 1000; grant that identity the
    documented read/write access with ownership, a shared group, or an ACL.
@@ -645,7 +648,11 @@ to a different canonical device path consumes the configured default. A new or
 identity-changed target is disabled, while an existing identity-stable target
 keeps its current enabled/disabled authorization. A drive that disappears may
 keep authorization only when the same serial proves continuity when it returns;
-uncertain same-path hardware fails closed.
+uncertain same-path hardware fails closed. When a nonempty stable serial moves
+from one `/dev/srN` path to another, reconciliation updates the existing Optical
+Drive record rather than creating a new logical drive, preserving its ID and
+explicit enabled/disabled authorization. A duplicate observed or stored serial
+is ambiguous and aborts reconciliation before persistence.
 
 Compose passes `RIP_DVD_ARCHIVE_DEVICE_PATH` through to the archive worker at
 the same container path with read-only device permission. It defaults to
@@ -659,19 +666,41 @@ commands without opening access to media-write commands. Compose adds only
 user, so set it to the host group that can access both device nodes (often the
 `cdrom` group).
 
-For a server with additional drives, copy the reviewed example to Compose's
-automatic local override and edit its device list:
+For durable mapping, configure hardware identities locally and generate the
+automatic Compose override:
 
 ```bash
-cp compose.hardware.example.yaml compose.override.yaml
+mkdir -p .local
+cp optical-drives.example.json .local/optical-drives.json
+$EDITOR .local/optical-drives.json
+node scripts/optical-drive-mapping.mjs
 ```
 
-Keep only real optical and matching SCSI-generic device paths in that local
-file; never map all of `/dev`.
-The archive worker can then discover and use each explicitly mapped drive while
-the web and encode containers retain no device access. Device mappings remain
-read-only. This worker does not eject media. The start script also includes this
-local override explicitly when block-I/O weights are enabled.
+The resolver uses `lsblk` and `udevadm` to identify optical block devices and
+the block device's own sysfs `scsi_generic` directory to pair `/dev/srN` with
+its actual `/dev/sgN`; numeric suffixes are never assumed to correspond. It
+excludes QEMU virtual CD-ROMs and all non-optical block devices, then selects
+only the configured stable serials. Serial-less hardware cannot be admitted by
+this automatic mapping because its identity cannot be proven.
+
+Generation is deterministic and atomic. Every configured serial must match
+exactly one physical optical device and every block device must have exactly
+one sysfs SCSI-generic sibling. On missing or ambiguous evidence the command
+fails before renaming, leaving an existing working `compose.override.yaml`
+unchanged. The generated Compose `!override` list replaces stale mappings,
+maps only each selected block/generic pair, and grants read-only device access;
+it never exposes all of `/dev`. `scripts/compose-start.sh` reruns the resolver
+automatically whenever `.local/optical-drives.json` exists, so the normal
+`scripts/update.sh` path refreshes mappings after Linux renumbering before
+migration or service restart. `compose.hardware.example.yaml` documents the
+generated shape for review.
+
+The repository owns this generic resolver, example schema, reconciliation
+policy, and startup integration. Real serials, hypervisor passthrough targets,
+host aliases, udev rule instances, the generated override, and service
+activation are host-local configuration and must not be committed. The archive
+worker can discover and use each explicitly mapped drive while the web and
+encode containers retain no device access. This worker does not eject media.
 
 The worker runs discovery on each configured poll interval. An empty drive is a
 normal state. Scanner failures are logged per drive without hiding other drives,

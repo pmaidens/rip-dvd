@@ -2367,6 +2367,117 @@ describe("data-access facade", () => {
     access.close();
   });
 
+  it("preserves logical identity and authorization across device-path renumbering", () => {
+    const access = openTestDatabase();
+    const original = access.catalog.reconcileOpticalDrives([
+      {
+        devicePath: "/dev/sr2",
+        serialNumber: "STABLE-RENUMBERED-SERIAL",
+        isConfiguredDevice: true,
+      },
+    ])[0]!;
+
+    expect(
+      access.catalog.reconcileOpticalDrives([
+        {
+          devicePath: "/dev/sr1",
+          serialNumber: "STABLE-RENUMBERED-SERIAL",
+          isConfiguredDevice: true,
+        },
+      ]),
+    ).toEqual([
+      expect.objectContaining({
+        id: original.id,
+        devicePath: "/dev/sr1",
+        isEnabled: true,
+        isPresent: true,
+      }),
+    ]);
+
+    access.close();
+  });
+
+  it("preserves a serial-proven drive when its new path has missing history", () => {
+    const access = openTestDatabase();
+    const original = access.catalog.reconcileOpticalDrives([
+      {
+        devicePath: "/dev/sr2",
+        serialNumber: "PHYSICAL-OPTICAL-DRIVE",
+        isConfiguredDevice: true,
+      },
+      {
+        devicePath: "/dev/sr1",
+        serialNumber: "OLD-VIRTUAL-CDROM",
+        isConfiguredDevice: false,
+      },
+    ]).find((drive) => drive.serialNumber === "PHYSICAL-OPTICAL-DRIVE")!;
+
+    const reconciled = access.catalog.reconcileOpticalDrives([
+      {
+        devicePath: "/dev/sr1",
+        serialNumber: "PHYSICAL-OPTICAL-DRIVE",
+        isConfiguredDevice: true,
+      },
+    ]);
+
+    expect(reconciled).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: original.id,
+        devicePath: "/dev/sr1",
+        isEnabled: true,
+        isPresent: true,
+      }),
+      expect.objectContaining({
+        serialNumber: "OLD-VIRTUAL-CDROM",
+        isEnabled: false,
+        isPresent: false,
+      }),
+    ]));
+
+    access.close();
+  });
+
+  it("separates replacement hardware from a serial-proven renumbered drive", () => {
+    const access = openTestDatabase();
+    const original = access.catalog.reconcileOpticalDrives([
+      {
+        devicePath: "/dev/sr0",
+        serialNumber: "MOVED-STABLE-DRIVE",
+        isConfiguredDevice: true,
+      },
+    ])[0]!;
+
+    const reconciled = access.catalog.reconcileOpticalDrives([
+      {
+        devicePath: "/dev/sr0",
+        serialNumber: "REPLACEMENT-AT-OLD-PATH",
+        isConfiguredDevice: false,
+      },
+      {
+        devicePath: "/dev/sr1",
+        serialNumber: "MOVED-STABLE-DRIVE",
+        isConfiguredDevice: true,
+      },
+    ]);
+
+    expect(reconciled).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: original.id,
+        devicePath: "/dev/sr1",
+        isEnabled: true,
+        isPresent: true,
+      }),
+      expect.objectContaining({
+        devicePath: "/dev/sr0",
+        serialNumber: "REPLACEMENT-AT-OLD-PATH",
+        isEnabled: false,
+        isPresent: true,
+      }),
+    ]));
+
+    access.close();
+  });
+
   it("treats a matching serial as authoritative when model text changes", () => {
     const access = openTestDatabase();
     const original = access.catalog.upsertOpticalDrive({
@@ -2872,6 +2983,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
+        name: "20260812011518_optical_drive_present_path_identity",
+      },
+      {
         name: "20260811214753_archive-job-progress-phase",
       },
       {
@@ -2888,9 +3002,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260805142313_glamorous_rage",
-      },
-      {
-        name: "20260805022523_far_archangel",
       },
     ]);
     expect(

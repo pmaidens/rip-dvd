@@ -841,26 +841,33 @@ export function createLegacySidecarImportAccess(
             }
             if (!archive) {
               const legacyDevicePath = `legacy-sidecar:${originalsLibraryPath}`;
-              transaction
-                .insert(opticalDrives)
-                .values({
-                  id: newId<OpticalDriveId>(),
-                  devicePath: legacyDevicePath,
-                  displayName: "Legacy sidecar import",
-                  isEnabled: false,
-                  isPresent: false,
-                  lastSeenAt: timestamp,
-                  createdAt: timestamp,
-                  updatedAt: timestamp,
-                })
-                .onConflictDoNothing({ target: opticalDrives.devicePath })
-                .run();
-              const drive = requireRow(
+              let drive = transaction
+                .select()
+                .from(opticalDrives)
+                .where(eq(opticalDrives.devicePath, legacyDevicePath))
+                .get();
+              if (drive === undefined) {
                 transaction
+                  .insert(opticalDrives)
+                  .values({
+                    id: newId<OpticalDriveId>(),
+                    devicePath: legacyDevicePath,
+                    displayName: "Legacy sidecar import",
+                    isEnabled: false,
+                    isPresent: false,
+                    lastSeenAt: timestamp,
+                    createdAt: timestamp,
+                    updatedAt: timestamp,
+                  })
+                  .run();
+                drive = transaction
                   .select()
                   .from(opticalDrives)
                   .where(eq(opticalDrives.devicePath, legacyDevicePath))
-                  .get(),
+                  .get();
+              }
+              const legacyDrive = requireRow(
+                drive,
                 "legacy import source",
                 legacyDevicePath,
               );
@@ -868,7 +875,7 @@ export function createLegacySidecarImportAccess(
                 .insert(detectedDiscs)
                 .values({
                   id: newId<DetectedDiscId>(),
-                  opticalDriveId: drive.id,
+                  opticalDriveId: legacyDrive.id,
                   discKind: "dvd",
                   fingerprint: sidecar.fingerprint,
                   volumeLabel: sidecar.movieTitle,
@@ -891,7 +898,7 @@ export function createLegacySidecarImportAccess(
                   .from(detectedDiscs)
                   .where(
                     and(
-                      eq(detectedDiscs.opticalDriveId, drive.id),
+                      eq(detectedDiscs.opticalDriveId, legacyDrive.id),
                       eq(detectedDiscs.fingerprint, sidecar.fingerprint),
                     ),
                   )

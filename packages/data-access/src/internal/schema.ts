@@ -77,7 +77,9 @@ export const opticalDrives = sqliteTable(
     updatedAt: updatedAt(),
   },
   (table) => [
-    uniqueIndex("optical_drives_device_path_unique").on(table.devicePath),
+    uniqueIndex("optical_drives_present_device_path_unique")
+      .on(table.devicePath)
+      .where(sql`${table.isPresent} = true`),
     check("optical_drives_id_not_null", sql`${table.id} is not null`),
   ],
 );
