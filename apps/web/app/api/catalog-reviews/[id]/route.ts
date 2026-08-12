@@ -6,6 +6,7 @@ import {
   RecordNotFoundError,
   type DataAccess,
   type CreateDiscSelectionInput,
+  type CreateMediaItemInput,
   type DiscSelection,
   type DiscSelectionActionAvailability,
   type DiscSelectionId,
@@ -15,7 +16,10 @@ import {
 } from "@rip-dvd/data-access";
 import { loadConfig } from "@rip-dvd/config";
 
-import { parseCatalogReviewCommand } from "../../../../lib/catalog-review-command";
+import {
+  parseCatalogReviewCommand,
+  type CatalogReviewMediaItemInput,
+} from "../../../../lib/catalog-review-command";
 import { getDataAccess } from "../../../../lib/data-access";
 import {
   trustedMutationRequestProblem,
@@ -71,6 +75,27 @@ function serializeMediaItem(item: MediaItem) {
     year: item.year,
     seasonNumber: item.seasonNumber,
     episodeNumber: item.episodeNumber,
+  };
+}
+
+function createMediaItemInput(
+  input: CatalogReviewMediaItemInput,
+): CreateMediaItemInput {
+  return {
+    ...(input.parentId
+      ? { parentId: input.parentId as MediaItemId }
+      : {}),
+    kind: input.kind,
+    title: input.title,
+    ...(input.year === null || input.year === undefined
+      ? {}
+      : { year: input.year }),
+    ...(input.seasonNumber === null || input.seasonNumber === undefined
+      ? {}
+      : { seasonNumber: input.seasonNumber }),
+    ...(input.episodeNumber === null || input.episodeNumber === undefined
+      ? {}
+      : { episodeNumber: input.episodeNumber }),
   };
 }
 
@@ -323,24 +348,23 @@ export async function createCatalogReviewRoute(
     const command = parsedCommand.command;
 
     switch (command.action) {
-      case "create_media_item": {
-        const input = command.mediaItem;
-        const item = access.catalog.createMediaItem({
-          ...(input.parentId
-            ? { parentId: input.parentId as MediaItemId }
-            : {}),
-          kind: input.kind,
-          title: input.title,
-          ...(input.year === null || input.year === undefined
-            ? {}
-            : { year: input.year }),
-          ...(input.seasonNumber === null || input.seasonNumber === undefined
-            ? {}
-            : { seasonNumber: input.seasonNumber }),
-          ...(input.episodeNumber === null || input.episodeNumber === undefined
-            ? {}
-            : { episodeNumber: input.episodeNumber }),
+      case "create_mapping_proposal": {
+        const proposal = access.catalog.createMappingProposal({
+          originalDiscArchiveId: archiveId,
+          catalogRevision: new Date(command.catalogRevision),
+          mediaItem: createMediaItemInput(command.mediaItem),
+          discSelection: command.discSelection,
         });
+        return response({
+          mediaItem: serializeMediaItem(proposal.mediaItem),
+          discSelection: serializeDiscSelection(proposal.discSelection),
+        }, 201);
+      }
+
+      case "create_media_item": {
+        const item = access.catalog.createMediaItem(
+          createMediaItemInput(command.mediaItem),
+        );
         return response({ mediaItem: serializeMediaItem(item) }, 201);
       }
 

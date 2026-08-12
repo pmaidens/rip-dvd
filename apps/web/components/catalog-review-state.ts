@@ -7,7 +7,9 @@ import type {
   CatalogReviewDto,
   CatalogReviewLoadState,
   CreateDiscSelectionInput,
+  CreateMappingProposalInput,
   DiscSelectionKind,
+  MappingProposal,
   SaveMediaItemInput,
 } from "./catalog-review-model";
 
@@ -129,6 +131,8 @@ export function useCatalogReviewState({
   const [discSelectionOffset, setDiscSelectionOffset] = useState(0);
   const [selectionKind, setSelectionKind] =
     useState<DiscSelectionKind>("main_feature");
+  const [activeMappingProposal, setActiveMappingProposal] =
+    useState<MappingProposal | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [requestError, setRequestError] = useState<string | null>(null);
   const requestScope = useRef<
@@ -172,12 +176,18 @@ export function useCatalogReviewState({
     void load();
   }, [load]);
 
+  useEffect(() => setActiveMappingProposal(null), [archiveId]);
+
   useEffect(
     () => () => requestScope.current?.deactivate(archiveId),
     [archiveId],
   );
 
-  async function mutate(command: CatalogReviewCommand, complete = false) {
+  async function mutate(
+    command: CatalogReviewCommand,
+    complete = false,
+    afterMutation?: () => void,
+  ) {
     if (isSaving) {
       return;
     }
@@ -186,6 +196,7 @@ export function useCatalogReviewState({
     try {
       await mutateCatalogReview(archiveId, command);
       setEditingMediaItemId(null);
+      afterMutation?.();
       if (complete) {
         onCompleted();
       } else {
@@ -248,8 +259,20 @@ export function useCatalogReviewState({
     );
   }
 
+  function createMappingProposal(input: CreateMappingProposalInput) {
+    if (state.status !== "loaded") {
+      return;
+    }
+    void mutate({
+      action: "create_mapping_proposal",
+      catalogRevision: state.review.catalogRevision,
+      ...input,
+    }, false, () => setActiveMappingProposal(null));
+  }
+
   return {
     state,
+    activeMappingProposal,
     editingMediaItemId,
     isSaving,
     requestError,
@@ -260,6 +283,15 @@ export function useCatalogReviewState({
     changeMediaItemOffset,
     changeDiscSelectionOffset,
     changeSelectionKind: setSelectionKind,
+    startMappingProposal: (proposal: MappingProposal) => {
+      setRequestError(null);
+      setActiveMappingProposal(proposal);
+    },
+    cancelMappingProposal: () => {
+      setRequestError(null);
+      setActiveMappingProposal(null);
+    },
+    createMappingProposal,
     saveMediaItem,
     createDiscSelection,
     deleteDiscSelection: (discSelectionId: string) =>

@@ -673,6 +673,170 @@ describe("data-access facade", () => {
     access.close();
   });
 
+  it("creates a Mapping Proposal atomically against the current catalog revision", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const contentId = `sha256:${"b".repeat(64)}`;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: contentId,
+      scanData: {
+        schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+        contentId,
+        titles: [2, 3, 4].map((number) => ({
+          number,
+          durationSeconds: 2_400,
+          chapters: 8,
+          audioStreams: [],
+          subtitles: [],
+        })),
+      },
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Atomic Proposal.iso",
+      fingerprint: contentId,
+    });
+
+    const created = access.catalog.createMappingProposal({
+      originalDiscArchiveId: archive.id,
+      catalogRevision: archive.updatedAt,
+      mediaItem: {
+        kind: "movie",
+        title: "Atomic Proposal",
+        year: 2005,
+      },
+      discSelection: {
+        sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+        label: "Disc two",
+      },
+    });
+
+    expect(created.mediaItem).toMatchObject({
+      kind: "movie",
+      title: "Atomic Proposal",
+      year: 2005,
+    });
+    expect(created.discSelection).toMatchObject({
+      mediaItemId: created.mediaItem.id,
+      originalDiscArchiveId: archive.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+      label: "Disc two",
+    });
+
+    const mediaItemsBeforeFailure = access.catalog.listMediaItems();
+    const selectionsBeforeFailure = access.catalog.listDiscSelections({
+      originalDiscArchiveId: archive.id,
+    });
+    expect(() =>
+      access.catalog.createMappingProposal({
+        originalDiscArchiveId: archive.id,
+        catalogRevision: archive.updatedAt,
+        mediaItem: { kind: "movie", title: "Stale Proposal" },
+        discSelection: {
+          sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+        },
+      })
+    ).toThrow("Catalog review changed; reload before saving Mapping Proposal");
+    expect(access.catalog.listMediaItems()).toEqual(mediaItemsBeforeFailure);
+    expect(access.catalog.listDiscSelections({
+      originalDiscArchiveId: archive.id,
+    })).toEqual(selectionsBeforeFailure);
+
+    const currentRevision = access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]!.updatedAt;
+    expect(() =>
+      access.catalog.createMappingProposal({
+        originalDiscArchiveId: archive.id,
+        catalogRevision: currentRevision,
+        mediaItem: { kind: "movie", title: "Duplicate Proposal" },
+        discSelection: {
+          sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+        },
+      })
+    ).toThrow();
+    expect(access.catalog.listMediaItems()).toEqual(mediaItemsBeforeFailure);
+    expect(access.catalog.listDiscSelections({
+      originalDiscArchiveId: archive.id,
+    })).toEqual(selectionsBeforeFailure);
+
+    const unconventionalParent = access.catalog.createMediaItem({
+      kind: "other",
+      title: "Imported unconventional parent",
+    });
+    expect(access.catalog.createMediaItem({
+      parentId: unconventionalParent.id,
+      kind: "bonus_feature",
+      title: "Flexible general-editor child",
+    })).toMatchObject({ parentId: unconventionalParent.id });
+    const catalogBeforeAssistedValidation = {
+      mediaItems: access.catalog.listMediaItems(),
+      discSelections: access.catalog.listDiscSelections({
+        originalDiscArchiveId: archive.id,
+      }),
+    };
+    expect(() => access.catalog.createMappingProposal({
+      originalDiscArchiveId: archive.id,
+      catalogRevision: currentRevision,
+      mediaItem: {
+        parentId: unconventionalParent.id,
+        kind: "bonus_feature",
+        title: "Invalid assisted child",
+      },
+      discSelection: {
+        sourceIdentity: { kind: "dvd_title", titleNumber: 3 },
+      },
+    })).toThrow(
+      "Assisted Mapping can attach a Trailer or Bonus Feature only",
+    );
+    expect(access.catalog.listMediaItems()).toEqual(
+      catalogBeforeAssistedValidation.mediaItems,
+    );
+    expect(access.catalog.listDiscSelections({
+      originalDiscArchiveId: archive.id,
+    })).toEqual(catalogBeforeAssistedValidation.discSelections);
+
+    const attachedExtra = access.catalog.createMappingProposal({
+      originalDiscArchiveId: archive.id,
+      catalogRevision: currentRevision,
+      mediaItem: {
+        parentId: created.mediaItem.id,
+        kind: "bonus_feature",
+        title: "Valid assisted child",
+      },
+      discSelection: {
+        sourceIdentity: { kind: "dvd_title", titleNumber: 3 },
+      },
+    });
+    expect(attachedExtra.mediaItem).toMatchObject({
+      parentId: created.mediaItem.id,
+      kind: "bonus_feature",
+    });
+    const revisionAfterExtra = access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]!.updatedAt;
+    expect(() => access.catalog.createMappingProposal({
+      originalDiscArchiveId: archive.id,
+      catalogRevision: revisionAfterExtra,
+      mediaItem: { kind: "season", title: "Unnumbered Season" },
+      discSelection: {
+        sourceIdentity: { kind: "dvd_title", titleNumber: 4 },
+      },
+    })).toThrow(
+      "Assisted Mapping requires a numbered Season beneath a TV Show",
+    );
+    access.close();
+  });
+
   it("applies bounded offset pagination consistently across catalog lists", () => {
     vi.useFakeTimers();
     const access = openTestDatabase();

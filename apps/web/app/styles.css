@@ -584,12 +584,104 @@ h1 {
 }
 
 .catalog-title-evidence {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.85rem;
   min-width: 0;
   padding: 0.85rem;
   overflow-wrap: anywhere;
   border: 1px solid #29483f;
   border-radius: 0.7rem;
   background: #10231e;
+}
+
+.catalog-title-evidence-active {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(18rem, 0.9fr);
+  align-items: start;
+}
+
+.catalog-title-evidence-content {
+  min-width: 0;
+}
+
+.catalog-archive-mapping-action {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem 0.75rem;
+  margin-top: 1rem;
+}
+
+.catalog-archive-mapping-action span {
+  color: #9fb0ab;
+  font-size: 0.7rem;
+  line-height: 1.4;
+}
+
+.catalog-title-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 0.8rem;
+  padding-top: 0.8rem;
+  border-top: 1px solid #29483f;
+}
+
+.catalog-title-actions button,
+.catalog-archive-mapping-action button,
+.catalog-mapping-proposal button {
+  min-height: 2.25rem;
+  padding: 0.45rem 0.65rem;
+  font-size: 0.7rem;
+}
+
+.catalog-mapping-proposal {
+  min-width: 0;
+  padding: 0.85rem;
+  border: 1px solid #796331;
+  border-radius: 0.65rem;
+  background: #152720;
+}
+
+.catalog-mapping-proposal .profile-form-heading {
+  align-items: flex-start;
+}
+
+.catalog-mapping-proposal h4 {
+  color: #eef4f1;
+  font-size: 0.86rem;
+}
+
+.catalog-mapping-proposal .catalog-form {
+  margin-top: 0.9rem;
+  padding-top: 0.9rem;
+}
+
+.catalog-mapping-proposal fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.catalog-mapping-proposal fieldset + fieldset {
+  margin-top: 0.9rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid #29483f;
+}
+
+.catalog-mapping-proposal legend {
+  color: #d2a14b;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.catalog-mapping-proposal .catalog-fields {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0.75rem 0;
 }
 
 .catalog-title-evidence-heading {
@@ -1602,6 +1694,18 @@ h3 {
   .catalog-title-evidence-heading {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .catalog-title-evidence-active {
+    grid-template-columns: 1fr;
+  }
+
+  .catalog-mapping-proposal .catalog-fields {
+    display: block;
+  }
+
+  .catalog-mapping-proposal .catalog-fields label + label {
+    margin-top: 0.8rem;
   }
 
   .catalog-title-badges {
