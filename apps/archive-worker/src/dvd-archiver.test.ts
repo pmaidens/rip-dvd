@@ -259,6 +259,7 @@ describe("DVD archive publication", () => {
       const runner: DvdCopyRunner = {
         copy: vi.fn(async ({ outputPath }) => writeFileSync(outputPath, content)),
         isActive: () => false,
+        waitForInactive: vi.fn(async () => undefined),
       };
 
       await expect(
@@ -305,6 +306,7 @@ describe("DVD archive publication", () => {
       const runner: DvdCopyRunner = {
         copy: vi.fn(),
         isActive: () => false,
+        waitForInactive: vi.fn(async () => undefined),
       };
 
       await expect(
@@ -344,6 +346,7 @@ describe("DVD archive publication", () => {
     const runner: DvdCopyRunner = {
       copy: vi.fn(),
       isActive: () => false,
+      waitForInactive: vi.fn(async () => undefined),
     };
 
     await expect(
@@ -505,9 +508,16 @@ describe("DVD archive publication", () => {
     expect(
       runner.isActive(request.devicePath, request.outputPath),
     ).toBe(true);
+    let inactive = false;
+    const closed = runner
+      .waitForInactive(request.devicePath, request.outputPath)
+      .then(() => {
+        inactive = true;
+      });
 
     await vi.advanceTimersByTimeAsync(10);
     expect(outcome).toEqual(new Error("DVD archive copy timed out"));
+    expect(inactive).toBe(false);
     expect(children[0]!.kill).toHaveBeenCalledWith("SIGKILL");
     expect(children[0]!.stderr.destroy).toHaveBeenCalledOnce();
     expect(children[0]!.unref).toHaveBeenCalledOnce();
@@ -517,6 +527,7 @@ describe("DVD archive publication", () => {
     expect(spawnProcess).toHaveBeenCalledOnce();
 
     children[0]!.emit("close", null, "SIGKILL");
+    await closed;
     await Promise.resolve();
     await Promise.resolve();
     expect(
@@ -575,6 +586,7 @@ describe("DVD archive publication", () => {
         onBytesCopied(content.byteLength);
       }),
       isActive: () => false,
+      waitForInactive: vi.fn(async () => undefined),
     };
     const verifySource = vi.fn(async () => undefined);
 
@@ -620,6 +632,7 @@ describe("DVD archive publication", () => {
         throw new Error("disc read failed");
       }),
       isActive: () => false,
+      waitForInactive: vi.fn(async () => undefined),
     };
 
     await expect(
@@ -666,6 +679,7 @@ describe("DVD archive publication", () => {
         writeFileSync(outputPath, content);
       }),
       isActive: vi.fn(() => active),
+      waitForInactive: vi.fn(async () => undefined),
     };
     const options = {
       devicePath: "/dev/sr0",
@@ -717,6 +731,7 @@ describe("DVD archive publication", () => {
           writeFileSync(outputPath, content);
         }),
         isActive: () => false,
+        waitForInactive: vi.fn(async () => undefined),
       };
 
       const result = await preserveDvdArchive({
@@ -746,6 +761,7 @@ describe("DVD archive publication", () => {
         symlinkSync(outsidePath, outputPath);
       }),
       isActive: () => false,
+      waitForInactive: vi.fn(async () => undefined),
     };
 
     await expect(
@@ -771,7 +787,11 @@ describe("DVD archive publication", () => {
     const digest = "e2cddf0cd7207e4492e0e3e66befe4b818247051391a48871d2d9a07eaa9524b";
     const archivePath = join(root, `${digest}.iso`);
     writeFileSync(archivePath, "complete");
-    const runner: DvdCopyRunner = { copy: vi.fn(), isActive: () => false };
+    const runner: DvdCopyRunner = {
+      copy: vi.fn(),
+      isActive: () => false,
+      waitForInactive: vi.fn(async () => undefined),
+    };
     const sync = vi.fn(async (_path: string) => undefined);
 
     await expect(
@@ -807,6 +827,7 @@ describe("DVD archive publication", () => {
         writeFileSync(archivePath, "other publisher");
       }),
       isActive: () => false,
+      waitForInactive: vi.fn(async () => undefined),
     };
 
     await expect(
@@ -834,6 +855,7 @@ describe("DVD archive publication", () => {
     const runner: DvdCopyRunner = {
       copy: vi.fn(async ({ outputPath }) => writeFileSync(outputPath, content)),
       isActive: () => false,
+      waitForInactive: vi.fn(async () => undefined),
     };
     const sync = vi
       .fn<(_path: string) => Promise<void>>()

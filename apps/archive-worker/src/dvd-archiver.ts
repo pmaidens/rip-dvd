@@ -53,6 +53,7 @@ export interface DvdCopyRequest {
 export interface DvdCopyRunner {
   copy(request: DvdCopyRequest): Promise<void>;
   isActive(devicePath: string, outputPath: string): boolean;
+  waitForInactive(devicePath: string, outputPath: string): Promise<void>;
 }
 
 interface DvdCopyChildProcess {
@@ -285,6 +286,11 @@ export function createNodeDvdCopyRunner({
     },
     isActive(devicePath, outputPath) {
       return coordinator.isActive(
+        copyKey(requireSafeOpticalDevicePath(devicePath), outputPath),
+      );
+    },
+    waitForInactive(devicePath, outputPath) {
+      return coordinator.waitForInactive(
         copyKey(requireSafeOpticalDevicePath(devicePath), outputPath),
       );
     },
@@ -701,6 +707,9 @@ export async function preserveDvdArchive({
     await unlink(partialPath);
     await sync(root);
   } catch (error) {
+    // A rejected operation is not proof that the helper exited. Do not return
+    // control until OS-level closure releases the copy tombstone.
+    await runner.waitForInactive(safeDevicePath, partialPath);
     if (finalPublished) {
       await quarantinePublishedArchive(archivePath);
       await movePartialAside(partialPath);

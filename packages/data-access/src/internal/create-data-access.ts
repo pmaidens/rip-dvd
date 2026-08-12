@@ -667,6 +667,9 @@ export function createDataAccessInternal(
   function reconcileLegacyDvdArchiveContentId(
     fingerprint: string,
     sizeBytes: number | undefined,
+    mutationFence?: (
+      querySource: Pick<typeof database, "select">,
+    ) => void,
   ): void {
     if (
       sizeBytes === undefined ||
@@ -734,6 +737,7 @@ export function createDataAccessInternal(
         candidateSizeBytes,
       );
       database.transaction((transaction) => {
+        mutationFence?.(transaction);
         const candidateSizeCondition = candidate.sizeBytes === null
           ? isNull(originalDiscArchives.sizeBytes)
           : eq(originalDiscArchives.sizeBytes, candidate.sizeBytes);
@@ -1340,6 +1344,8 @@ export function createDataAccessInternal(
     DiscInspectionId,
     {
       latestBytes: number;
+      latestBytesPerSecond: number | null;
+      latestEtaSeconds: number | null;
       persistedAt: number;
       persistedBytes: number;
       token: DiscInspectionClaimToken;
@@ -3316,6 +3322,8 @@ export function createDataAccessInternal(
             );
             inspectionProgress.set(current.id, {
               latestBytes: 0,
+              latestBytesPerSecond: null,
+              latestEtaSeconds: null,
               persistedAt: timestamp.getTime(),
               persistedBytes: 0,
               token: claim.claimToken,
@@ -3379,6 +3387,8 @@ export function createDataAccessInternal(
               inspectionProgress.set(current.id, {
                 ...previous,
                 latestBytes: bytesHashed,
+                latestBytesPerSecond: bytesPerSecond,
+                latestEtaSeconds: etaSeconds,
               });
               return {
                 ...current,
@@ -3413,6 +3423,8 @@ export function createDataAccessInternal(
             );
             inspectionProgress.set(current.id, {
               latestBytes: bytesHashed,
+              latestBytesPerSecond: bytesPerSecond,
+              latestEtaSeconds: etaSeconds,
               persistedAt: timestamp.getTime(),
               persistedBytes: bytesHashed,
               token: claim.claimToken,
@@ -3449,14 +3461,22 @@ export function createDataAccessInternal(
             );
             recordAttempt("failed", event.reasonCode);
             const terminal = failureCount >= 5;
-            inspectionProgress.delete(current.id);
-            return requireRow(
+            const cachedProgress = inspectionProgress.get(current.id);
+            const latestProgress = cachedProgress?.token === claim.claimToken
+              ? cachedProgress
+              : undefined;
+            const updated = requireRow(
               transaction
                 .update(discInspections)
                 .set({
                   status: terminal ? "failed" : "running",
                   phase: terminal ? current.phase : "retry_wait",
                   consecutiveFailureCount: failureCount,
+                  bytesHashed: latestProgress?.latestBytes ?? current.bytesHashed,
+                  bytesPerSecond:
+                    latestProgress?.latestBytesPerSecond ?? current.bytesPerSecond,
+                  etaSeconds:
+                    latestProgress?.latestEtaSeconds ?? current.etaSeconds,
                   retryAt: terminal ? null : event.retryAt,
                   reasonCode: event.reasonCode,
                   diagnostic,
@@ -3477,6 +3497,8 @@ export function createDataAccessInternal(
               "disc inspection",
               current.id,
             );
+            inspectionProgress.delete(current.id);
+            return updated;
           }
 
           if (event.type === "complete") {
@@ -3529,8 +3551,11 @@ export function createDataAccessInternal(
 
           if (event.type === "fail") {
             recordAttempt("failed", event.reasonCode);
-            inspectionProgress.delete(current.id);
-            return requireRow(
+            const cachedProgress = inspectionProgress.get(current.id);
+            const latestProgress = cachedProgress?.token === claim.claimToken
+              ? cachedProgress
+              : undefined;
+            const updated = requireRow(
               transaction
                 .update(discInspections)
                 .set({
@@ -3539,6 +3564,11 @@ export function createDataAccessInternal(
                     current.consecutiveFailureCount + 1,
                     5,
                   ),
+                  bytesHashed: latestProgress?.latestBytes ?? current.bytesHashed,
+                  bytesPerSecond:
+                    latestProgress?.latestBytesPerSecond ?? current.bytesPerSecond,
+                  etaSeconds:
+                    latestProgress?.latestEtaSeconds ?? current.etaSeconds,
                   retryAt: null,
                   reasonCode: event.reasonCode,
                   diagnostic,
@@ -3558,16 +3588,26 @@ export function createDataAccessInternal(
               "disc inspection",
               current.id,
             );
+            inspectionProgress.delete(current.id);
+            return updated;
           }
 
           recordAttempt("aborted", event.reasonCode);
-          inspectionProgress.delete(current.id);
-          return requireRow(
+          const cachedProgress = inspectionProgress.get(current.id);
+          const latestProgress = cachedProgress?.token === claim.claimToken
+            ? cachedProgress
+            : undefined;
+          const updated = requireRow(
             transaction
               .update(discInspections)
               .set({
                 isCurrent: false,
                 status: "aborted",
+                bytesHashed: latestProgress?.latestBytes ?? current.bytesHashed,
+                bytesPerSecond:
+                  latestProgress?.latestBytesPerSecond ?? current.bytesPerSecond,
+                etaSeconds:
+                  latestProgress?.latestEtaSeconds ?? current.etaSeconds,
                 retryAt: null,
                 reasonCode: event.reasonCode,
                 diagnostic,
@@ -3587,6 +3627,8 @@ export function createDataAccessInternal(
             "disc inspection",
             current.id,
           );
+          inspectionProgress.delete(current.id);
+          return updated;
         }, { behavior: "immediate" });
       },
 
@@ -4090,7 +4132,7 @@ export function createDataAccessInternal(
             .select({
               id: archiveJobs.id,
               archiveRequestId: archiveJobs.archiveRequestId,
-              requestStatus: archiveRequests.status,
+              claimToken: archiveJobs.claimToken,
             })
             .from(archiveJobs)
             .innerJoin(
@@ -4101,6 +4143,7 @@ export function createDataAccessInternal(
               and(
                 eq(archiveJobs.status, "running"),
                 lte(archiveJobs.updatedAt, expiredBefore),
+                ne(archiveRequests.status, "cancellation_requested"),
               ),
             )
             .orderBy(asc(archiveJobs.updatedAt), asc(archiveJobs.id))
@@ -4109,91 +4152,64 @@ export function createDataAccessInternal(
           if (expired.length === 0) {
             return [];
           }
-          const cancelled = expired.filter(
-            ({ requestStatus }) => requestStatus === "cancellation_requested",
-          );
-          const failed = expired.filter(
-            ({ requestStatus }) => requestStatus !== "cancellation_requested",
-          );
           const terminalJobs: ArchiveJob[] = [];
-          if (failed.length > 0) {
-            terminalJobs.push(...transaction
+          for (const candidate of expired) {
+            const cachedProgress = archiveProgress.get(candidate.id);
+            const latestProgress =
+              candidate.claimToken !== null &&
+              cachedProgress?.token === candidate.claimToken
+                ? cachedProgress
+                : undefined;
+            const failedJob = transaction
               .update(archiveJobs)
               .set({
                 status: "failed",
+                ...(latestProgress === undefined
+                  ? {}
+                  : {
+                      progressPhase: latestProgress.latestPhase,
+                      progressPercent: latestProgress.latestPercent,
+                    }),
                 completedAt: timestamp,
                 errorMessage: "Archive worker lease expired",
                 updatedAt: timestamp,
               })
               .where(
                 and(
-                  inArray(archiveJobs.id, failed.map(({ id }) => id)),
+                  eq(archiveJobs.id, candidate.id),
                   eq(archiveJobs.status, "running"),
                   lte(archiveJobs.updatedAt, expiredBefore),
                 ),
               )
               .returning()
-              .all());
-            transaction
+              .get();
+            if (failedJob === undefined) {
+              continue;
+            }
+            terminalJobs.push(failedJob);
+            requireRow(
+              transaction
               .update(archiveRequests)
               .set({ status: "needs_attention", updatedAt: timestamp })
               .where(
                 and(
-                  inArray(
-                    archiveRequests.id,
-                    failed.map(({ archiveRequestId }) => archiveRequestId),
-                  ),
+                  eq(archiveRequests.id, candidate.archiveRequestId),
                   eq(archiveRequests.status, "running"),
                 ),
               )
-              .run();
-          }
-          if (cancelled.length > 0) {
-            terminalJobs.push(...transaction
-              .update(archiveJobs)
-              .set({
-                status: "aborted",
-                completedAt: timestamp,
-                errorMessage: "Archive cancelled after worker lease expired",
-                updatedAt: timestamp,
-              })
-              .where(
-                and(
-                  inArray(archiveJobs.id, cancelled.map(({ id }) => id)),
-                  eq(archiveJobs.status, "running"),
-                  lte(archiveJobs.updatedAt, expiredBefore),
-                ),
-              )
-              .returning()
-              .all());
-            transaction
-              .update(archiveRequests)
-              .set({
-                status: "cancelled",
-                cancelledAt: timestamp,
-                updatedAt: timestamp,
-              })
-              .where(
-                and(
-                  inArray(
-                    archiveRequests.id,
-                    cancelled.map(
-                      ({ archiveRequestId }) => archiveRequestId,
-                    ),
-                  ),
-                  eq(archiveRequests.status, "cancellation_requested"),
-                ),
-              )
-              .run();
+                .returning({ id: archiveRequests.id })
+                .get(),
+              "archive request",
+              candidate.archiveRequestId,
+            );
           }
           const jobsById = new Map(terminalJobs.map((job) => [job.id, job]));
           const jobs = expired.flatMap(({ id }) => {
             const job = jobsById.get(id);
             return job === undefined ? [] : [job];
           });
-          const ids = expired.map(({ id }) => id);
-          for (const id of ids) {
-            archiveProgress.delete(id);
+          for (const job of terminalJobs) {
+            archiveProgress.delete(job.id);
           }
           return jobs;
         }, { behavior: "immediate" });
@@ -4324,61 +4340,67 @@ export function createDataAccessInternal(
       },
 
       publish(claim, input) {
-        const timestamp = now();
-        const currentDisc = requireRow(
-          database
+        const archivePath = requireNonEmpty(input.archivePath, "archivePath");
+        const sizeBytes = requirePositiveSafeInteger(input.sizeBytes, "sizeBytes");
+        const requireCurrentClaim = (
+          querySource: Pick<typeof database, "select">,
+        ) => {
+          const checkedAt = now();
+          const current = querySource
             .select({
+              detectedDiscId: archiveJobs.detectedDiscId,
               discKind: detectedDiscs.discKind,
               fingerprint: detectedDiscs.fingerprint,
             })
-            .from(detectedDiscs)
-            .where(eq(detectedDiscs.id, claim.detectedDiscId))
-            .get(),
-          "detected disc",
-          claim.detectedDiscId,
-        );
-        if (currentDisc.discKind === "dvd") {
-          reconcileLegacyDvdArchiveContentId(
-            currentDisc.fingerprint,
-            input.sizeBytes,
-          );
-        }
-        const archivePath = requireNonEmpty(input.archivePath, "archivePath");
-        const sizeBytes = requirePositiveSafeInteger(input.sizeBytes, "sizeBytes");
-        const completed = database.transaction((transaction) => {
-          const current = transaction
-            .select()
             .from(archiveJobs)
             .innerJoin(
               archiveRequests,
               eq(archiveRequests.id, archiveJobs.archiveRequestId),
             )
+            .innerJoin(
+              detectedDiscs,
+              eq(detectedDiscs.id, archiveJobs.detectedDiscId),
+            )
             .where(
               and(
                 eq(archiveJobs.id, claim.id),
+                eq(archiveJobs.detectedDiscId, claim.detectedDiscId),
                 eq(archiveJobs.status, "running"),
                 eq(archiveJobs.claimToken, claim.claimToken),
                 eq(archiveRequests.status, "running"),
                 gt(
                   archiveJobs.updatedAt,
                   new Date(
-                    timestamp.getTime() - ARCHIVE_JOB_LEASE_DURATION_MS,
+                    checkedAt.getTime() - ARCHIVE_JOB_LEASE_DURATION_MS,
                   ),
                 ),
               ),
             )
             .get();
-          if (!current) {
+          if (current === undefined) {
             throw new StaleJobAttemptError("archive job", claim.id);
           }
+          return current;
+        };
+        const currentDisc = requireCurrentClaim(database);
+        if (currentDisc.discKind === "dvd") {
+          reconcileLegacyDvdArchiveContentId(
+            currentDisc.fingerprint,
+            sizeBytes,
+            requireCurrentClaim,
+          );
+        }
+        const timestamp = now();
+        const completed = database.transaction((transaction) => {
+          const current = requireCurrentClaim(transaction);
           const disc = requireRow(
             transaction
               .select()
               .from(detectedDiscs)
-              .where(eq(detectedDiscs.id, current.archive_jobs.detectedDiscId))
+              .where(eq(detectedDiscs.id, current.detectedDiscId))
               .get(),
             "detected disc",
-            current.archive_jobs.detectedDiscId,
+            current.detectedDiscId,
           );
           if (
             findOriginalArchiveByFingerprintOrContentIdAlias(
@@ -4498,6 +4520,10 @@ export function createDataAccessInternal(
           "errorMessage",
         ).slice(0, 500);
         const failed = database.transaction((transaction) => {
+          const cachedProgress = archiveProgress.get(claim.id);
+          const latestProgress = cachedProgress?.token === claim.claimToken
+            ? cachedProgress
+            : undefined;
           const request = transaction
             .select({ status: archiveRequests.status })
             .from(archiveRequests)
@@ -4520,6 +4546,12 @@ export function createDataAccessInternal(
             .update(archiveJobs)
             .set({
               status: cancellationWins ? "aborted" : "failed",
+              ...(latestProgress === undefined
+                ? {}
+                : {
+                    progressPhase: latestProgress.latestPhase,
+                    progressPercent: latestProgress.latestPercent,
+                  }),
               completedAt: timestamp,
               errorMessage: cancellationWins
                 ? "Archive cancelled by operator"
@@ -4578,10 +4610,20 @@ export function createDataAccessInternal(
           "errorMessage",
         ).slice(0, 500);
         const aborted = database.transaction((transaction) => {
+          const cachedProgress = archiveProgress.get(claim.id);
+          const latestProgress = cachedProgress?.token === claim.claimToken
+            ? cachedProgress
+            : undefined;
           const job = transaction
             .update(archiveJobs)
             .set({
               status: "aborted",
+              ...(latestProgress === undefined
+                ? {}
+                : {
+                    progressPhase: latestProgress.latestPhase,
+                    progressPercent: latestProgress.latestPercent,
+                  }),
               completedAt: timestamp,
               errorMessage,
               updatedAt: timestamp,

@@ -14,6 +14,7 @@ import { Worker } from "node:worker_threads";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { completeCatalogReview } from "./catalog.test-support.js";
+import { createRawDvdContentIdHasher } from "./dvd-content-id.js";
 import {
   ARCHIVE_JOB_LEASE_DURATION_MS,
   DISC_INSPECTION_LEASE_DURATION_MS,
@@ -5330,6 +5331,25 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       bytesPerSecond: 100,
       etaSeconds: 4,
     });
+    expect(
+      access.discInspections.record(started.claim!, {
+        type: "hash_progress",
+        bytesHashed: 641,
+        bytesPerSecond: 101,
+        etaSeconds: 3,
+      }),
+    ).toMatchObject({
+      bytesHashed: 641,
+      bytesPerSecond: 101,
+      etaSeconds: 3,
+    });
+    expect(access.discInspections.list({ ids: [started.inspection.id] })).toEqual([
+      expect.objectContaining({
+        bytesHashed: 640,
+        bytesPerSecond: 100,
+        etaSeconds: 4,
+      }),
+    ]);
     expect(() =>
       access.discInspections.record(started.claim!, {
         type: "hash_progress",
@@ -5347,6 +5367,13 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         retryAt: new Date(Date.now() + 1_000),
       });
       expect(failed.consecutiveFailureCount).toBe(failure);
+      if (failure === 1) {
+        expect(failed).toMatchObject({
+          bytesHashed: 641,
+          bytesPerSecond: 101,
+          etaSeconds: 3,
+        });
+      }
       if (failure < 5) {
         expect(failed).toMatchObject({
           phase: "retry_wait",
@@ -5390,6 +5417,71 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       .toThrow(InvalidStatusTransitionError);
     access.close();
   });
+
+  it.each(["fail", "abort"] as const)(
+    "flushes the newest coalesced inspection progress before %s",
+    (terminalType) => {
+      const access = openTestDatabase();
+      const drive = access.catalog.upsertOpticalDrive({
+        devicePath: `/dev/inspection-progress-${terminalType}`,
+        isEnabled: true,
+        isPresent: true,
+      });
+      const started = access.discInspections.beginOrResume({
+        opticalDriveId: drive.id,
+        mediaGeneration: `inspection-progress-${terminalType}`,
+      });
+      access.discInspections.record(started.claim!, {
+        type: "metadata",
+        volumeLabel: null,
+        titleCount: 0,
+        chapterCount: 0,
+        audioStreamCount: 0,
+        subtitleStreamCount: 0,
+        totalBytes: 1_000,
+      });
+      access.discInspections.record(started.claim!, {
+        type: "hash_progress",
+        bytesHashed: 100,
+        bytesPerSecond: 50,
+        etaSeconds: 18,
+      });
+      access.discInspections.record(started.claim!, {
+        type: "hash_progress",
+        bytesHashed: 101,
+        bytesPerSecond: 51,
+        etaSeconds: 17,
+      });
+      expect(access.discInspections.list({ ids: [started.inspection.id] }))
+        .toEqual([
+          expect.objectContaining({
+            bytesHashed: 100,
+            bytesPerSecond: 50,
+            etaSeconds: 18,
+          }),
+        ]);
+
+      const terminal = access.discInspections.record(
+        started.claim!,
+        terminalType === "fail"
+          ? {
+              type: "fail",
+              reasonCode: "invalid_metadata",
+            }
+          : {
+              type: "abort",
+              reasonCode: "media_changed",
+            },
+      );
+      expect(terminal).toMatchObject({
+        status: terminalType === "fail" ? "failed" : "aborted",
+        bytesHashed: 101,
+        bytesPerSecond: 51,
+        etaSeconds: 17,
+      });
+      access.close();
+    },
+  );
 
   it("defers a manual inspection retry until current media evidence is verified", () => {
     const access = openTestDatabase();
@@ -5551,6 +5643,83 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     access.close();
   });
 
+  it("flushes coalesced Archive Job progress on failure, abort, and recovery", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-12T06:00:00.000Z"));
+    const access = openTestDatabase();
+    const startAttempt = (index: number) => {
+      const drive = access.catalog.upsertOpticalDrive({
+        devicePath: `/dev/archive-progress-${index}`,
+        isEnabled: true,
+        isPresent: true,
+      });
+      const { disc, inspection } = completeDiscInspection(access, {
+        opticalDriveId: drive.id,
+        mediaGeneration: `archive-progress-${index}`,
+        fingerprint: `archive-progress-${index}`,
+      });
+      const request = access.archiveRequests.create({ detectedDiscId: disc.id });
+      const claim = access.archiveJobs.startForInspection(
+        inspection.id,
+        `archive-progress-worker-${index}`,
+      )!;
+      return { claim, request };
+    };
+
+    const failed = startAttempt(1);
+    access.archiveJobs.updateProgress(failed.claim, {
+      phase: "copying",
+      progressPercent: 10,
+    });
+    access.archiveJobs.updateProgress(failed.claim, {
+      phase: "copying",
+      progressPercent: 11,
+    });
+    expect(access.archiveJobs.fail(failed.claim, "copy failed")).toMatchObject({
+      status: "failed",
+      progressPhase: "copying",
+      progressPercent: 11,
+    });
+
+    const aborted = startAttempt(2);
+    access.archiveJobs.updateProgress(aborted.claim, {
+      phase: "verifying",
+      progressPercent: 40,
+    });
+    access.archiveJobs.updateProgress(aborted.claim, {
+      phase: "verifying",
+      progressPercent: 41,
+    });
+    access.archiveRequests.cancel(aborted.request.id);
+    expect(
+      access.archiveJobs.abort(aborted.claim, "operator cancelled"),
+    ).toMatchObject({
+      status: "aborted",
+      progressPhase: "verifying",
+      progressPercent: 41,
+    });
+
+    const expired = startAttempt(3);
+    access.archiveJobs.updateProgress(expired.claim, {
+      phase: "copying",
+      progressPercent: 70,
+    });
+    access.archiveJobs.updateProgress(expired.claim, {
+      phase: "copying",
+      progressPercent: 71,
+    });
+    vi.advanceTimersByTime(ARCHIVE_JOB_LEASE_DURATION_MS + 1);
+    expect(access.archiveJobs.recoverExpiredClaims()).toEqual([
+      expect.objectContaining({
+        id: expired.claim.id,
+        status: "failed",
+        progressPhase: "copying",
+        progressPercent: 71,
+      }),
+    ]);
+    access.close();
+  });
+
   it("publishes archive provenance and fulfills matching request intent atomically", () => {
     const access = openTestDatabase();
     const drive = access.catalog.upsertOpticalDrive({
@@ -5602,6 +5771,79 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     access.close();
   });
 
+  it("fences stale publication before legacy provenance reconciliation", () => {
+    const databasePath = createTestDatabasePath();
+    const archiveDirectory = mkdtempSync(
+      join(tmpdir(), "rip-dvd-stale-publication-"),
+    );
+    temporaryDirectories.push(archiveDirectory);
+    const legacyArchivePath = join(archiveDirectory, "legacy.iso");
+    const archiveBytes = Buffer.from("legacy archive requiring reconciliation");
+    writeFileSync(legacyArchivePath, archiveBytes);
+    const hasher = createRawDvdContentIdHasher(archiveBytes.byteLength);
+    hasher.update(archiveBytes);
+    const contentId = hasher.digest();
+    const access = openTestDatabase(databasePath);
+
+    const currentDrive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/current-publication",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const { disc, inspection } = completeDiscInspection(access, {
+      opticalDriveId: currentDrive.id,
+      mediaGeneration: "stale-publication",
+      fingerprint: contentId,
+    });
+    const request = access.archiveRequests.create({ detectedDiscId: disc.id });
+    const claim = access.archiveJobs.startForInspection(
+      inspection.id,
+      "stale-publisher",
+    )!;
+
+    const legacyDrive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/legacy-provenance",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const legacyDisc = access.catalog.registerDetectedDisc({
+      opticalDriveId: legacyDrive.id,
+      discKind: "dvd",
+      fingerprint: "legacy-provenance-fingerprint",
+    });
+    access.catalog.updateDetectedDiscStatus(legacyDisc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(legacyDisc.id, "approved");
+    const legacyArchive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: legacyDisc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: legacyArchivePath,
+      fingerprint: legacyDisc.fingerprint,
+    });
+    expect(legacyArchive.sizeBytes).toBeNull();
+
+    access.archiveRequests.cancel(request.id);
+
+    expect(() =>
+      access.archiveJobs.publish(claim, {
+        archivePath: join(archiveDirectory, "current.iso"),
+        sizeBytes: archiveBytes.byteLength,
+      }),
+    ).toThrow(StaleJobAttemptError);
+    expect(access.catalog.listOriginalDiscArchives({ ids: [legacyArchive.id] }))
+      .toEqual([
+        expect.objectContaining({ id: legacyArchive.id, sizeBytes: null }),
+      ]);
+    const sqlite = new DatabaseSync(databasePath);
+    expect(
+      sqlite.prepare(
+        "select count(*) as count from original_disc_archive_content_ids",
+      ).get(),
+    ).toEqual({ count: 0 });
+    sqlite.close();
+    access.close();
+  });
+
   it("recovers expired Archive Job attempts into request attention state", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-11T02:00:00.000Z"));
@@ -5637,7 +5879,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     access.close();
   });
 
-  it("lets request cancellation win failure and expired-lease races", () => {
+  it("lets request cancellation win without treating an expired lease as helper closure", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-11T02:15:00.000Z"));
     const access = openTestDatabase();
@@ -5676,15 +5918,16 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     const recoveryRace = createAttempt(2);
     access.archiveRequests.cancel(recoveryRace.request.id);
     vi.advanceTimersByTime(ARCHIVE_JOB_LEASE_DURATION_MS + 1);
-    expect(access.archiveJobs.recoverExpiredClaims()).toEqual([
-      expect.objectContaining({ id: recoveryRace.claim.id, status: "aborted" }),
+    expect(access.archiveJobs.recoverExpiredClaims()).toEqual([]);
+    expect(access.archiveJobs.list(["running"])).toEqual([
+      expect.objectContaining({ id: recoveryRace.claim.id }),
     ]);
-    expect(access.archiveRequests.list(["cancelled"])).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ id: failureRace.request.id }),
-        expect.objectContaining({ id: recoveryRace.request.id }),
-      ]),
-    );
+    expect(access.archiveRequests.list(["cancellation_requested"])).toEqual([
+      expect.objectContaining({ id: recoveryRace.request.id }),
+    ]);
+    expect(access.archiveRequests.list(["cancelled"])).toEqual([
+      expect.objectContaining({ id: failureRace.request.id }),
+    ]);
 
     const publicationRace = createAttempt(3);
     access.archiveRequests.cancel(publicationRace.request.id);

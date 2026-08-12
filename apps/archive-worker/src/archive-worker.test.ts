@@ -25,6 +25,7 @@ import {
   type OpticalDriveHardware,
 } from "./archive-worker.js";
 import type { DvdCopyRunner } from "./dvd-archiver.js";
+import { DiscInspectionError } from "./disc-inspection-error.js";
 import {
   createLinuxOpticalDriveHardware,
   type CommandRunner,
@@ -190,6 +191,77 @@ describe("archive worker polling", () => {
     ]);
   });
 
+  it.each([
+    ["reading metadata", "metadata_read_failed"],
+    ["acquiring content size", "content_size_failed"],
+    ["confirming media", "drive_not_ready"],
+  ] as const)(
+    "aborts without retrying when the medium changes while %s",
+    async (boundary, reasonCode) => {
+      const access = openTestDataAccess();
+      const discoveredDrive = {
+        devicePath: "/dev/sr0",
+        serialNumber: `PHASE-REMOVAL-${reasonCode}`,
+      };
+      const observeMediaGeneration = vi
+        .fn()
+        .mockResolvedValueOnce("insertion-a")
+        .mockResolvedValue("insertion-b");
+      const scanDvd = vi.fn(async (_binding, _signal, options) => {
+        options?.onPhase?.("reading_metadata");
+        if (boundary === "confirming media") {
+          options?.onMetadata?.({
+            audioStreamCount: 0,
+            chapterCount: 1,
+            subtitleStreamCount: 0,
+            titleCount: 1,
+            totalBytes: 1_000,
+            volumeLabel: "REMOVED_DISC",
+          });
+          options?.onPhase?.("hashing_content");
+          options?.onBytesHashed?.(1_000);
+          options?.onPhase?.("confirming_media");
+        }
+        throw new DiscInspectionError(
+          "retry",
+          reasonCode,
+          `DVD medium disappeared while ${boundary}`,
+        );
+      });
+
+      await pollArchiveWorker({
+        access,
+        configuredDevicePath: "/dev/sr0",
+        hardware: {
+          ...stableDeviceBinding(),
+          discover: vi.fn().mockResolvedValue([discoveredDrive]),
+          observeMediaGeneration,
+          scanDvd,
+        },
+        log: vi.fn(),
+        signal: new AbortController().signal,
+      });
+
+      expect(observeMediaGeneration).toHaveBeenCalledTimes(2);
+      const [inspection] = access.discInspections.list();
+      expect(inspection).toMatchObject({
+        status: "aborted",
+        reasonCode: "media_changed",
+        consecutiveFailureCount: 0,
+        retryAt: null,
+        ...(boundary === "confirming media"
+          ? { phase: "confirming_media", bytesHashed: 1_000 }
+          : { phase: "reading_metadata" }),
+      });
+      expect(access.discInspections.listAttempts(inspection!.id)).toEqual([
+        expect.objectContaining({
+          outcome: "aborted",
+          reasonCode: "media_changed",
+        }),
+      ]);
+    },
+  );
+
   it("matches requested work, streams progress, and publishes the archive atomically", async () => {
     const access = openTestDataAccess();
     const originalsLibraryPath = mkdtempSync(
@@ -253,6 +325,7 @@ describe("archive worker polling", () => {
         onBytesCopied(9);
       }),
       isActive: () => false,
+      waitForInactive: vi.fn(async () => undefined),
     };
 
     await pollArchiveWorker({
@@ -455,6 +528,7 @@ describe("archive worker polling", () => {
         throw new Error("dd read failed");
       }),
       isActive: () => false,
+      waitForInactive: vi.fn(async () => undefined),
     };
 
     await pollArchiveWorker({
@@ -548,6 +622,7 @@ describe("archive worker polling", () => {
         controller.abort(interruption);
       }),
       isActive: () => false,
+      waitForInactive: vi.fn(async () => undefined),
     };
 
     await expect(
@@ -655,6 +730,7 @@ describe("archive worker polling", () => {
         });
       }),
       isActive: () => false,
+      waitForInactive: vi.fn(async () => undefined),
     };
     const polling = pollArchiveWorker({
       access,
@@ -679,7 +755,7 @@ describe("archive worker polling", () => {
     await expect(polling).rejects.toBe(interruption);
   });
 
-  it("cooperatively aborts active archive work after request cancellation", async () => {
+  it("does not finalize cancellation until the copy helper is closed", async () => {
     vi.useFakeTimers();
     const access = openTestDataAccess();
     const originalsLibraryPath = mkdtempSync(join(tmpdir(), "rip-dvd-cancel-"));
@@ -718,9 +794,19 @@ describe("archive worker polling", () => {
     };
     let copyStarted!: () => void;
     const started = new Promise<void>((resolve) => { copyStarted = resolve; });
+    let copyActive = false;
+    let confirmCopyClosed!: () => void;
+    const copyClosed = new Promise<void>((resolve) => {
+      confirmCopyClosed = () => {
+        copyActive = false;
+        resolve();
+      };
+    });
     const copyRunner: DvdCopyRunner = {
-      isActive: () => false,
+      isActive: () => copyActive,
+      waitForInactive: vi.fn(async () => copyClosed),
       copy: vi.fn(({ signal }) => {
+        copyActive = true;
         copyStarted();
         return new Promise<void>((_resolve, reject) => {
           signal.addEventListener("abort", () => reject(signal.reason), { once: true });
@@ -741,6 +827,18 @@ describe("archive worker polling", () => {
 
     expect(access.archiveRequests.cancel(request.id).status).toBe("cancellation_requested");
     await vi.advanceTimersByTimeAsync(1_000);
+
+    await vi.waitFor(() => {
+      expect(copyRunner.waitForInactive).toHaveBeenCalledOnce();
+    });
+    expect(access.archiveJobs.list(["running"])).toEqual([
+      expect.objectContaining({ archiveRequestId: request.id }),
+    ]);
+    expect(access.archiveRequests.list(["cancellation_requested"])).toEqual([
+      expect.objectContaining({ id: request.id }),
+    ]);
+
+    confirmCopyClosed();
     await polling;
 
     expect(access.archiveJobs.list(["aborted"])).toEqual([
