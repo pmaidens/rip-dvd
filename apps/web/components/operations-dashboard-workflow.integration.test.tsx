@@ -612,6 +612,26 @@ describe("end-to-end operations dashboard workflow", () => {
     const refreshedCoverage = await refreshedCoverageResponse.json() as
       CatalogReviewDto;
     expect(refreshedCoverage.discSelections).toHaveLength(7);
+    expect(refreshedCoverage.coverage).toMatchObject({
+      discSelectionCount: 7,
+      mediaItemsWithSelections: 2,
+      mappedTitles: 3,
+      partiallyMappedTitles: 0,
+      unmappedTitles: 2,
+      mainFeatureSelections: 1,
+    });
+    expect(refreshedCoverage.coverage.titles).toContainEqual({
+      titleNumber: 2,
+      status: "mapped",
+      hasOverlap: true,
+    });
+    const refreshedCoverageHtml = renderCatalogReview(refreshedCoverage);
+    expect(refreshedCoverageHtml).toContain(
+      "2 Media Items with Disc Selections",
+    );
+    expect(refreshedCoverageHtml).toContain("3 mapped titles");
+    expect(refreshedCoverageHtml).toContain("0 partially mapped titles");
+    expect(refreshedCoverageHtml).toContain("2 unmapped titles");
     expect((await catalogMutation({
       action: "complete_review",
       catalogRevision: refreshedCoverage.catalogRevision,

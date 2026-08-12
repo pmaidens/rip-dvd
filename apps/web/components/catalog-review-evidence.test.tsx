@@ -261,4 +261,63 @@ describe("CatalogReviewEvidence", () => {
     await act(async () => root.unmount());
     container.remove();
   });
+
+  it("keeps an active very-short Mapping Proposal visible across coverage filters", async () => {
+    (globalThis as typeof globalThis & {
+      IS_REACT_ACT_ENVIRONMENT: boolean;
+    }).IS_REACT_ACT_ENVIRONMENT = true;
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <CatalogReviewEvidence
+          volumeLabel="FILTER_DISC"
+          coverage={evidenceCoverage}
+          titles={[{
+            number: 2,
+            durationSeconds: 90,
+            chapters: 1,
+            audioStreams: [],
+            subtitles: [],
+          }]}
+          activeMappingProposal={{
+            action: "chapters",
+            sourceIdentity: {
+              kind: "dvd_chapters",
+              titleNumber: 2,
+              chapterStart: 1,
+              chapterEnd: 1,
+            },
+          }}
+          onStartMappingProposal={() => undefined}
+        />,
+      );
+    });
+    const mappedFilter = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Mapped",
+    );
+    if (!mappedFilter) {
+      throw new Error("Expected the Mapped filter");
+    }
+    await act(async () => mappedFilter.click());
+
+    const activeTitle = container.querySelector(
+      ".catalog-title-evidence-active",
+    );
+    expect(activeTitle?.textContent).toContain("Title 2");
+    expect(activeTitle?.textContent).toContain("Mapping Proposal");
+    expect(activeTitle?.querySelector('[name="titleNumber"]')?.getAttribute(
+      "value",
+    )).toBe("2");
+    expect(activeTitle?.querySelector('[name="chapterStart"]')).not.toBeNull();
+    expect(activeTitle?.querySelector('[name="chapterEnd"]')).not.toBeNull();
+    expect(activeTitle?.querySelector('[name="label"]')).not.toBeNull();
+    expect(activeTitle?.closest(".catalog-coverage-collapsed")).toBeNull();
+    expect(mappedFilter.getAttribute("aria-pressed")).toBe("true");
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
 });

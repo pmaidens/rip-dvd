@@ -221,16 +221,27 @@ export function CatalogReviewEvidence({
   );
   const statusForTitle = (title: DvdTitle) =>
     coverageByTitle.get(title.number)?.status ?? "unmapped";
+  const proposalSource = activeMappingProposal?.sourceIdentity;
+  const activeProposalTitleNumber = proposalSource?.kind === "dvd_title" ||
+      proposalSource?.kind === "dvd_chapters"
+    ? proposalSource.titleNumber
+    : null;
+  const isActiveProposalTitle = (title: DvdTitle) =>
+    title.number === activeProposalTitleNumber;
   const visibleTitles = titles.filter(
-    (title) => filter === "all" || statusForTitle(title) === filter,
+    (title) =>
+      isActiveProposalTitle(title) || filter === "all" ||
+      statusForTitle(title) === filter,
   );
   const collapsedVeryShortTitles = visibleTitles.filter(
     (title) =>
-      statusForTitle(title) === "unmapped" && title.durationSeconds < 120,
+      !isActiveProposalTitle(title) && statusForTitle(title) === "unmapped" &&
+      title.durationSeconds < 120,
   );
   const listedTitles = visibleTitles.filter(
     (title) =>
-      statusForTitle(title) !== "unmapped" || title.durationSeconds >= 120,
+      isActiveProposalTitle(title) || statusForTitle(title) !== "unmapped" ||
+      title.durationSeconds >= 120,
   );
   const longestDuration = Math.max(
     ...titles.map((title) => title.durationSeconds),
@@ -251,11 +262,7 @@ export function CatalogReviewEvidence({
       status: "unmapped" as const,
       hasOverlap: false,
     };
-    const proposalSource = activeMappingProposal?.sourceIdentity;
-    const activeTitleProposal = proposalSource?.kind === "dvd_title" ||
-        proposalSource?.kind === "dvd_chapters"
-      ? proposalSource.titleNumber === title.number
-      : false;
+    const activeTitleProposal = isActiveProposalTitle(title);
     return (
       <li
         key={title.number}
