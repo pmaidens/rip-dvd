@@ -105,6 +105,7 @@ import type {
   DetectedDiscListOptions,
   DetectedDiscStatus,
   DiscSelectionId,
+  DiscSelectionActionAvailability,
   EncodeJobClaimToken,
   EncodeJobCleanupClaimToken,
   EncodeJobId,
@@ -136,6 +137,7 @@ const JOB_RECOVERY_LIMIT = 100;
 const LEGACY_ARCHIVE_RECONCILIATION_LIMIT = 4;
 const LEGACY_ARCHIVE_RECONCILIATION_BYTES = 9_000_000_000;
 const DISC_SELECTION_REVIEW_BATCH_SIZE = 100;
+const DISC_SELECTION_ACTION_AVAILABILITY_LIMIT = 100;
 const DEFAULT_MIGRATIONS_FOLDER = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../drizzle",
@@ -1727,6 +1729,8 @@ export function createDataAccessInternal(
           listMediaItems: (options) => access.catalog.listMediaItems(options),
           listDiscSelections: (options) =>
             access.catalog.listDiscSelections(options),
+          listDiscSelectionActionAvailability: (options) =>
+            access.catalog.listDiscSelectionActionAvailability(options),
         },
         encodingProfiles: {
           list: (input) => access.encodingProfiles.list(input),
@@ -2940,6 +2944,113 @@ export function createDataAccessInternal(
           "Disc Selection",
         );
         return rows.map(toDiscSelection);
+      },
+
+      listDiscSelectionActionAvailability(options) {
+        if (options.ids.length === 0) {
+          return [];
+        }
+        if (options.ids.length > DISC_SELECTION_ACTION_AVAILABILITY_LIMIT) {
+          throw new DomainInvariantError(
+            `Disc Selection action availability is limited to ${DISC_SELECTION_ACTION_AVAILABILITY_LIMIT} records`,
+          );
+        }
+        const selectionStates = database
+          .select({
+            selection: discSelections,
+            scanData: detectedDiscs.scanData,
+            legacyCutoverPending:
+              originalDiscArchives.legacyCutoverPending,
+          })
+          .from(discSelections)
+          .innerJoin(
+            originalDiscArchives,
+            eq(
+              originalDiscArchives.id,
+              discSelections.originalDiscArchiveId,
+            ),
+          )
+          .innerJoin(
+            detectedDiscs,
+            eq(detectedDiscs.id, originalDiscArchives.detectedDiscId),
+          )
+          .where(and(
+            inArray(discSelections.id, [...options.ids]),
+            eq(discSelections.isCatalogActive, true),
+          ))
+          .orderBy(asc(discSelections.createdAt), asc(discSelections.id))
+          .all();
+
+        return selectionStates.map(({
+          selection,
+          scanData,
+          legacyCutoverPending,
+        }) => {
+          const relatedEncodeJob = database
+            .select({ id: encodeJobs.id, status: encodeJobs.status })
+            .from(encodeJobs)
+            .where(eq(encodeJobs.discSelectionId, selection.id))
+            .orderBy(
+              sql`case ${encodeJobs.status} when 'running' then 0 when 'queued' then 1 when 'completed' then 2 else 3 end`,
+              asc(encodeJobs.createdAt),
+              asc(encodeJobs.id),
+            )
+            .limit(1)
+            .get() ?? null;
+          const needsRepair = requiresLegacyDiscSelectionRepair(
+            selection,
+            createArchivedDvdSelectionValidator(scanData),
+          );
+          const activeJob = relatedEncodeJob?.status === "queued" ||
+              relatedEncodeJob?.status === "running"
+            ? relatedEncodeJob as {
+              id: EncodeJobId;
+              status: "queued" | "running";
+            }
+            : null;
+
+          if (legacyCutoverPending) {
+            return {
+              discSelectionId: selection.id,
+              state: "changes_unavailable",
+              availableActions: [],
+              reason:
+                "Disc Selection changes are unavailable while legacy cutover repair is pending",
+              relatedEncodeJob: null,
+            } satisfies DiscSelectionActionAvailability;
+          }
+          if (needsRepair) {
+            return {
+              discSelectionId: selection.id,
+              state: "needs_repair",
+              availableActions: activeJob === null
+                ? ["repair", "remove"]
+                : [],
+              reason: activeJob === null
+                ? "Unsafe legacy Disc Selection; repair or remove it before completing Catalog Review"
+                : `Encode Job ${activeJob.id} is ${activeJob.status}; this unsafe legacy Disc Selection needs repair, but direct mutation is unavailable while the job is active`,
+              relatedEncodeJob: activeJob,
+            } satisfies DiscSelectionActionAvailability;
+          }
+          if (relatedEncodeJob !== null) {
+            return {
+              discSelectionId: selection.id,
+              state: "locked_provenance",
+              availableActions: [],
+              reason: activeJob === null
+                ? `Encode Job ${relatedEncodeJob.id} is ${relatedEncodeJob.status}; this Disc Selection is locked provenance and cannot be changed directly`
+                : `Encode Job ${activeJob.id} is ${activeJob.status}; direct mutation is unavailable because its Disc Selection provenance must be preserved`,
+              relatedEncodeJob,
+            } satisfies DiscSelectionActionAvailability;
+          }
+          return {
+            discSelectionId: selection.id,
+            state: "editable",
+            availableActions: ["correct", "edit_label", "remove"],
+            reason: null,
+            relatedEncodeJob: null,
+          } satisfies DiscSelectionActionAvailability;
+        });
       },
     },
 

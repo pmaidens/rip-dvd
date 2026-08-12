@@ -109,6 +109,16 @@ Disc Selection mutation preserves two distinct identity paths:
 
 Job-free selections can still be removed normally.
 
+Catalog Review reads Disc Selection action availability through a dedicated
+facade query capped at 100 selection IDs. A job-free selection is editable and
+removable. Ordinary Encode Job history locks the selection as provenance;
+queued and running dependencies include their job ID and state in the reason.
+Unsafe legacy selections remain a distinct Needs repair state and expose only
+repair and removal when no active dependency blocks recovery. These reasons do
+not include encode output paths. While legacy cutover repair is pending, the
+archive fence suppresses every selection mutation action and explains that
+changes are unavailable.
+
 ## Queue attempts and progress
 
 Every claim returns a unique, queue-specific claim token. Progress, completion,
