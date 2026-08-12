@@ -805,7 +805,7 @@ describe("readDashboardSnapshot", () => {
     expect(dashboard.encodeJobs).toEqual({ status: "loaded", items: [] });
   });
 
-  it("marks Catalog Review unavailable when the Detected Disc read fails", () => {
+  it("keeps Catalog Review available when the general Detected Disc read fails", () => {
     const access = dataAccessFixture.create();
     const drive = access.catalog.upsertOpticalDrive({
       devicePath: "/dev/sr0",
@@ -816,6 +816,7 @@ describe("readDashboardSnapshot", () => {
       opticalDriveId: drive.id,
       discKind: "dvd",
       fingerprint: "catalog-enrichment-disc",
+      volumeLabel: "CATALOG_ENRICHMENT_DISC",
     });
     access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
     access.catalog.updateDetectedDiscStatus(disc.id, "approved");
@@ -835,7 +836,14 @@ describe("readDashboardSnapshot", () => {
       },
     }));
 
-    expect(dashboard.catalogReview).toEqual({ status: "error" });
+    expect(dashboard.catalogReview).toEqual({
+      status: "loaded",
+      items: [expect.objectContaining({
+        discLabel: "CATALOG_ENRICHMENT_DISC",
+        catalogReviewOutcome: "needs_review",
+      })],
+    });
+    expect(dashboard.detectedDiscs).toEqual({ status: "error" });
     expect(dashboard.opticalDrives.status).toBe("loaded");
     expect(dashboard.encodeJobs.status).toBe("loaded");
   });

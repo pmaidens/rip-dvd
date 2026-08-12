@@ -879,6 +879,49 @@ describe("end-to-end operations dashboard workflow", () => {
       outcome: "reviewed_with_selections",
     })).status).toBe(200);
 
+    const reviewedDiscovery = (await createDashboardResponse(
+      access,
+      undefined,
+      {
+        view: "reviewed",
+        query: "workflow disc",
+        outcome: "reviewed_with_selections",
+      },
+    ).json()) as DashboardSnapshot;
+    expect(reviewedDiscovery.catalogReview).toEqual(expect.objectContaining({
+      status: "loaded",
+      items: [expect.objectContaining({
+        id: archive.id,
+        discLabel: "WORKFLOW_DISC",
+        catalogReviewedAt: expect.any(String),
+        catalogReviewOutcome: "reviewed_with_selections",
+        mappedMediaItemCount: 2,
+        mappedMediaItemTitles: ["Workflow Movie"],
+      })],
+    }));
+    const reviewedDiscoveryHtml = renderToStaticMarkup(
+      <DashboardView
+        state={reviewedDiscovery}
+        section="catalog"
+        catalogReviewView="reviewed"
+        catalogReviewQuery="workflow disc"
+        catalogReviewOutcome="reviewed_with_selections"
+      />,
+    );
+    expect(reviewedDiscoveryHtml).toContain("Reviewed with selections");
+    expect(reviewedDiscoveryHtml).toContain("Open review");
+    expect(reviewedDiscoveryHtml).toContain("Workflow Movie");
+    const reopenedReviewResponse = await createCatalogReviewRoute(
+      new Request(`${trustedOrigin}/api/catalog-reviews/${archive.id}`),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    expect(reopenedReviewResponse.status).toBe(200);
+    expect(renderCatalogReview(
+      await reopenedReviewResponse.json() as CatalogReviewDto,
+    )).toContain("Technical stream details");
+
     const sharedFingerprint = "workflow-shared-media-item";
     const sharedDisc = access.catalog.registerDetectedDisc({
       opticalDriveId: detectedDisc.opticalDriveId,
@@ -988,6 +1031,29 @@ describe("end-to-end operations dashboard workflow", () => {
     await expect(removeMistakenSelection.json()).resolves.toMatchObject({
       message: "Mapping changed; review required",
     });
+    const reviewStatesAfterMappingChange = new Map(
+      access.catalog.listOriginalDiscArchives({
+        ids: [archive.id, sharedArchive.id],
+      }).map((candidate) => [candidate.id, candidate.catalogReviewedAt]),
+    );
+    expect(reviewStatesAfterMappingChange.get(archive.id)).toBeNull();
+    expect(reviewStatesAfterMappingChange.get(sharedArchive.id))
+      .toEqual(expect.any(Date));
+    const profile = access.encodingProfiles.create({
+      key: "workflow-dvd",
+      displayName: "Workflow DVD",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30", container: "mkv" },
+    });
+    const pendingQueueOptions = await createEncodeJobsRoute(
+      new Request(`${trustedOrigin}/api/encode-jobs`),
+      () => access,
+    );
+    expect((await pendingQueueOptions.json() as {
+      selections: Array<{ id: string }>;
+    }).selections).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: selection.id }),
+    ]));
     const deleteMistakenItem = await catalogMutation({
       action: "delete_media_item",
       mediaItemId: mistakenProposal.mediaItem.id,
@@ -1007,12 +1073,6 @@ describe("end-to-end operations dashboard workflow", () => {
       outcome: "reviewed_with_selections",
     })).status).toBe(200);
 
-    const profile = access.encodingProfiles.create({
-      key: "workflow-dvd",
-      displayName: "Workflow DVD",
-      mediaDomain: "dvd_video",
-      settings: { preset: "Fast 480p30", container: "mkv" },
-    });
     const queueOptions = await createEncodeJobsRoute(
       new Request(`${trustedOrigin}/api/encode-jobs`),
       () => access,

@@ -147,6 +147,13 @@ not include encode output paths. While legacy cutover repair is pending, the
 archive fence suppresses every selection mutation action and explains that
 changes are unavailable.
 
+Catalog Review archive discovery uses a separate facade query capped at 100
+rows. It selects either Needs review or Reviewed archives, pages on immutable
+archive time and identity, and optionally searches Reviewed disc labels or
+active mapped Media Item titles. Reviewed outcome filters distinguish reviewed
+selections from Archive-only Review. Returned mapped-item summaries expose a
+distinct count and at most three titles.
+
 ## Inspections, requests, and job attempts
 
 `discInspections.beginOrResume()` admits one current insertion per Optical

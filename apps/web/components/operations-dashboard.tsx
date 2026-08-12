@@ -2,6 +2,10 @@
 
 import Link from "next/link";
 import React, { useEffect, useState } from "react";
+import type {
+  CatalogReviewArchiveView,
+  CompletedCatalogReviewOutcome,
+} from "@rip-dvd/data-access";
 
 import type {
   ActionOverviewCategory,
@@ -835,6 +839,9 @@ export function ActionOverview({ state }: { state: ActionOverviewLoadState }) {
 export function DashboardView({
   state,
   section = "all",
+  catalogReviewView = "needs_review",
+  catalogReviewQuery = "",
+  catalogReviewOutcome,
   onApproveDetectedDisc = () => undefined,
   approvingDetectedDiscId = null,
   onCancelArchiveRequest = () => undefined,
@@ -847,11 +854,16 @@ export function DashboardView({
   cancellingEncodeJobId = null,
   onOpenCatalogReview = () => undefined,
   onCatalogReviewPage = () => undefined,
+  onCatalogReviewView = () => undefined,
+  onCatalogReviewSearch = () => undefined,
   onVerifyFilesystem = () => undefined,
   verifyingFilesystemTarget = null,
 }: {
   state: DashboardLoadState;
   section?: "all" | "discs" | "encoding" | "catalog";
+  catalogReviewView?: CatalogReviewArchiveView;
+  catalogReviewQuery?: string;
+  catalogReviewOutcome?: CompletedCatalogReviewOutcome;
   onApproveDetectedDisc?: (id: string) => void;
   approvingDetectedDiscId?: string | null;
   onCancelArchiveRequest?: (id: string) => void;
@@ -864,6 +876,11 @@ export function DashboardView({
   cancellingEncodeJobId?: DashboardEncodeJob["id"] | null;
   onOpenCatalogReview?: (id: string) => void;
   onCatalogReviewPage?: (cursor: string | null) => void;
+  onCatalogReviewView?: (view: CatalogReviewArchiveView) => void;
+  onCatalogReviewSearch?: (
+    query: string,
+    outcome?: CompletedCatalogReviewOutcome,
+  ) => void;
   onVerifyFilesystem?: (target: FilesystemVerificationTarget, id: string) => void;
   verifyingFilesystemTarget?: string | null;
 }) {
@@ -1075,12 +1092,81 @@ export function DashboardView({
 
       {section === "all" || section === "catalog" ? (
         <>
+          <div className="catalog-review-browse-controls wide-section">
+            <div
+              className="profile-actions"
+              role="group"
+              aria-label="Catalog Review view"
+            >
+              <button
+                type="button"
+                aria-pressed={catalogReviewView === "needs_review"}
+                onClick={() => onCatalogReviewView("needs_review")}
+              >
+                Needs review
+              </button>
+              <button
+                type="button"
+                aria-pressed={catalogReviewView === "reviewed"}
+                onClick={() => onCatalogReviewView("reviewed")}
+              >
+                Reviewed
+              </button>
+            </div>
+            {catalogReviewView === "reviewed" ? (
+              <form
+                className="catalog-review-search"
+                aria-label="Search reviewed archives"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  const form = new FormData(event.currentTarget);
+                  const query = String(form.get("query") ?? "").trim();
+                  const outcome = String(form.get("outcome") ?? "");
+                  onCatalogReviewSearch(
+                    query,
+                    outcome === "reviewed_with_selections" ||
+                        outcome === "archive_only"
+                      ? outcome
+                      : undefined,
+                  );
+                }}
+              >
+                <label>
+                  Disc label or mapped Media Item title
+                  <input
+                    type="search"
+                    name="query"
+                    maxLength={256}
+                    defaultValue={catalogReviewQuery}
+                  />
+                </label>
+                <label>
+                  Outcome
+                  <select
+                    name="outcome"
+                    defaultValue={catalogReviewOutcome ?? ""}
+                  >
+                    <option value="">All reviewed outcomes</option>
+                    <option value="reviewed_with_selections">
+                      Reviewed with selections
+                    </option>
+                    <option value="archive_only">Archive only</option>
+                  </select>
+                </label>
+                <button type="submit">Search reviewed archives</button>
+              </form>
+            ) : null}
+          </div>
           <DashboardSection
-            title="Catalog Review"
-        eyebrow="Needs attention"
+            title={catalogReviewView === "reviewed"
+              ? "Reviewed Catalog Reviews"
+              : "Catalog Review"}
+        eyebrow={catalogReviewView === "reviewed" ? "History" : "Needs attention"}
         className="wide-section"
         state={state.catalogReview}
-        emptyMessage="No Original Disc Archives need catalog review."
+        emptyMessage={catalogReviewView === "reviewed"
+          ? "No reviewed Original Disc Archives match these filters."
+          : "No Original Disc Archives need catalog review."}
         renderItem={(archive) => (
           <article className="operation-item review-item" key={archive.id}>
             <div className="item-heading">
@@ -1091,13 +1177,34 @@ export function DashboardView({
                   {archive.archiveFormat.toUpperCase()}
                 </p>
               </div>
-              <span className="attention-mark" aria-label="Needs review">
-                Review
+              <span
+                className="attention-mark"
+                aria-label={catalogReviewView === "reviewed"
+                  ? displayTerm(archive.catalogReviewOutcome)
+                  : "Needs review"}
+              >
+                {catalogReviewView === "reviewed"
+                  ? displayTerm(archive.catalogReviewOutcome)
+                  : "Review"}
               </span>
             </div>
             <p className="item-time">
-              Archived {formatTimestamp(archive.archivedAt)}
+              {catalogReviewView === "reviewed" && archive.catalogReviewedAt
+                ? `Reviewed ${formatTimestamp(archive.catalogReviewedAt)}`
+                : `Archived ${formatTimestamp(archive.archivedAt)}`}
             </p>
+            {catalogReviewView === "reviewed" ? (
+              <p className="catalog-review-summary">
+                {archive.mappedMediaItemTitles.length === 0
+                  ? "No mapped Media Items"
+                  : archive.mappedMediaItemTitles.join(" · ")}
+                {archive.mappedMediaItemCount >
+                    archive.mappedMediaItemTitles.length
+                  ? ` · ${archive.mappedMediaItemCount -
+                    archive.mappedMediaItemTitles.length} more`
+                  : ""}
+              </p>
+            ) : null}
             <FilesystemVerificationResult
               {...toFilesystemVerificationDisplay(archive)}
             />
@@ -1106,7 +1213,7 @@ export function DashboardView({
                 type="button"
                 onClick={() => onOpenCatalogReview(archive.id)}
               >
-                Review catalog
+                {catalogReviewView === "reviewed" ? "Open review" : "Review catalog"}
               </button>
               <button
                 type="button"
@@ -1135,14 +1242,18 @@ export function DashboardView({
             onClick={() =>
               onCatalogReviewPage(catalogReviewPage.previousCursor)}
           >
-            Previous pending reviews
+            {catalogReviewView === "reviewed"
+              ? "Previous reviewed archives"
+              : "Previous pending reviews"}
           </button>
           <button
             type="button"
             disabled={catalogReviewPage.nextCursor === null}
             onClick={() => onCatalogReviewPage(catalogReviewPage.nextCursor)}
           >
-            Next pending reviews
+            {catalogReviewView === "reviewed"
+              ? "Next reviewed archives"
+              : "Next pending reviews"}
           </button>
         </nav>
           ) : null}
@@ -1351,6 +1462,11 @@ export function OperationsDashboard({
   const [catalogReviewCursor, setCatalogReviewCursor] = useState<string | null>(
     null,
   );
+  const [catalogReviewView, setCatalogReviewView] =
+    useState<CatalogReviewArchiveView>("needs_review");
+  const [catalogReviewQuery, setCatalogReviewQuery] = useState("");
+  const [catalogReviewOutcome, setCatalogReviewOutcome] =
+    useState<CompletedCatalogReviewOutcome | undefined>(undefined);
   const [verifyingFilesystemTarget, setVerifyingFilesystemTarget] = useState<
     string | null
   >(null);
@@ -1407,11 +1523,25 @@ export function OperationsDashboard({
     setStreamStatus("connecting");
     return watchDashboardActivity({
       catalogReviewCursor,
+      catalogReviewView,
+      ...(catalogReviewView === "reviewed" && catalogReviewQuery !== ""
+        ? { catalogReviewQuery }
+        : {}),
+      ...(catalogReviewView === "reviewed" && catalogReviewOutcome !== undefined
+        ? { catalogReviewOutcome }
+        : {}),
       onSnapshot: setState,
       onInitialLoadError: () => setState(dashboardState("error")),
       onStreamStatus: setStreamStatus,
     });
-  }, [page, requestNumber, catalogReviewCursor]);
+  }, [
+    page,
+    requestNumber,
+    catalogReviewCursor,
+    catalogReviewView,
+    catalogReviewQuery,
+    catalogReviewOutcome,
+  ]);
 
   useEffect(() => {
     if (page !== "overview") {
@@ -1599,6 +1729,18 @@ export function OperationsDashboard({
           cancellingEncodeJobId={cancellingEncodeJobId}
           onOpenCatalogReview={setCatalogReviewArchiveId}
           onCatalogReviewPage={setCatalogReviewCursor}
+          catalogReviewView={catalogReviewView}
+          catalogReviewQuery={catalogReviewQuery}
+          catalogReviewOutcome={catalogReviewOutcome}
+          onCatalogReviewView={(view) => {
+            setCatalogReviewCursor(null);
+            setCatalogReviewView(view);
+          }}
+          onCatalogReviewSearch={(query, outcome) => {
+            setCatalogReviewCursor(null);
+            setCatalogReviewQuery(query);
+            setCatalogReviewOutcome(outcome);
+          }}
           onVerifyFilesystem={(target, id) =>
             void verifyFilesystem(target, id)
           }
