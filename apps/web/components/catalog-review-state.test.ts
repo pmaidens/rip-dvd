@@ -6,17 +6,17 @@ import {
 } from "./catalog-review-state";
 
 describe("catalog review request state", () => {
-  it("requests the edited Media Item as context while paging parent choices", async () => {
+  it("requests only the bounded Disc Selection page", async () => {
     let requestedUrl = "";
     const fetcher = async (input: RequestInfo | URL) => {
       requestedUrl = String(input);
       return Response.json({});
     };
 
-    await requestCatalogReview("archive-1", 100, 200, "episode-1", fetcher);
+    await requestCatalogReview("archive-1", 200, fetcher);
 
     expect(requestedUrl).toBe(
-      "/api/catalog-reviews/archive-1?mediaOffset=100&selectionOffset=200&editingMediaItemId=episode-1",
+      "/api/catalog-reviews/archive-1?selectionOffset=200",
     );
   });
 

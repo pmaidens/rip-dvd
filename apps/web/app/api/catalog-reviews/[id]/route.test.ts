@@ -94,13 +94,6 @@ describe("Catalog Review API", () => {
         }],
       },
       mediaItems: [],
-      mediaItemsPage: {
-        offset: 0,
-        limit: 100,
-        hasPrevious: false,
-        hasNext: false,
-        itemIds: [],
-      },
       discSelections: [],
       discSelectionsPage: {
         offset: 0,
@@ -109,6 +102,104 @@ describe("Catalog Review API", () => {
         hasNext: false,
       },
     });
+  });
+
+  it.each([
+    "?selectionOffset=-1",
+    "?selectionOffset=1&selectionOffset=2",
+    "?mediaOffset=0",
+    "?editingMediaItemId=unrelated-item",
+  ])("fails closed on malformed review query input: %s", async (query) => {
+    const getAccess = vi.fn();
+    const response = await createCatalogReviewRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/archive-1${query}`),
+      "archive-1",
+      getAccess,
+      () => "http://localhost:3000",
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(getAccess).not.toHaveBeenCalled();
+  });
+
+  it("limits the main hierarchy to mapped Media Items and their ancestors", async () => {
+    const access = dataAccessFixture.create();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const contentId = `sha256:${"7".repeat(64)}`;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: contentId,
+      scanData: {
+        schemaVersion: 2,
+        contentId,
+        titles: [{
+          number: 1,
+          durationSeconds: 2_400,
+          chapters: 8,
+          audioStreams: [],
+          subtitles: [],
+        }],
+      },
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Scoped Hierarchy.iso",
+      fingerprint: contentId,
+    });
+    const unrelated = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Unrelated global item",
+    });
+    const show = access.catalog.createMediaItem({
+      kind: "tv_show",
+      title: "Mapped Show",
+    });
+    const season = access.catalog.createMediaItem({
+      parentId: show.id,
+      kind: "season",
+      title: "Mapped Season",
+      seasonNumber: 1,
+    });
+    const episode = access.catalog.createMediaItem({
+      parentId: season.id,
+      kind: "episode",
+      title: "Mapped Episode",
+      episodeNumber: 1,
+    });
+    access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: episode.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    });
+
+    const response = await createCatalogReviewRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`),
+      archive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+
+    expect(response.status).toBe(200);
+    const review = await response.json();
+    const reviewMediaItemIds = review.mediaItems.map(
+      (item: MediaItem) => item.id,
+    );
+    expect(reviewMediaItemIds).toHaveLength(3);
+    expect(reviewMediaItemIds).toEqual(expect.arrayContaining([
+      show.id,
+      season.id,
+      episode.id,
+    ]));
+    expect(reviewMediaItemIds).not.toContain(unrelated.id);
   });
 
   it("offers direct actions for a job-free selection unless legacy cutover repair blocks mutation", async () => {
@@ -645,7 +736,7 @@ describe("Catalog Review API", () => {
       .toEqual([expect.objectContaining({ catalogReviewedAt: expect.any(Date) })]);
   });
 
-  it("pages a large Media Item catalog without blocking review", async () => {
+  it("does not leak a large unrelated Media Item catalog into review", async () => {
     const access = dataAccessFixture.create();
     const drive = access.catalog.upsertOpticalDrive({
       devicePath: "/dev/sr0",
@@ -672,7 +763,7 @@ describe("Catalog Review API", () => {
       });
     }
 
-    const firstResponse = await createCatalogReviewRoute(
+    const response = await createCatalogReviewRoute(
       new Request(
         `http://localhost:3000/api/catalog-reviews/${archive.id}`,
       ),
@@ -680,191 +771,11 @@ describe("Catalog Review API", () => {
       () => access,
       () => "http://localhost:3000",
     );
-    expect(firstResponse.status).toBe(200);
-    const firstPage = await firstResponse.json();
-    expect(firstPage.mediaItems).toHaveLength(100);
-    expect(firstPage.mediaItemsPage).toMatchObject({
-      offset: 0,
-      limit: 100,
-      hasPrevious: false,
-      hasNext: true,
-    });
-    expect(firstPage.mediaItemsPage.itemIds).toHaveLength(100);
-
-    const lastResponse = await createCatalogReviewRoute(
-      new Request(
-        `http://localhost:3000/api/catalog-reviews/${archive.id}?mediaOffset=500`,
-      ),
-      archive.id,
-      () => access,
-      () => "http://localhost:3000",
-    );
-    expect(lastResponse.status).toBe(200);
-    const lastPage = await lastResponse.json();
-    expect(lastPage.mediaItems).toHaveLength(1);
-    expect(lastPage.mediaItemsPage).toMatchObject({
-      offset: 500,
-      limit: 100,
-      hasPrevious: true,
-      hasNext: false,
-    });
-    expect(lastPage.mediaItemsPage.itemIds).toEqual([
-      lastPage.mediaItems[0].id,
-    ]);
-  });
-
-  it("includes a cross-page parent without making context-only items editable", async () => {
-    const access = dataAccessFixture.create();
-    const drive = access.catalog.upsertOpticalDrive({
-      devicePath: "/dev/sr0",
-      isPresent: true,
-    });
-    const disc = access.catalog.registerDetectedDisc({
-      opticalDriveId: drive.id,
-      discKind: "dvd",
-      fingerprint: "cross-page-parent",
-    });
-    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
-    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
-    const archive = access.catalog.createOriginalDiscArchive({
-      detectedDiscId: disc.id,
-      discKind: "dvd",
-      archiveFormat: "iso",
-      archivePath: "/media/originals/Cross Page Parent.iso",
-      fingerprint: "cross-page-parent",
-    });
-    const parent = access.catalog.createMediaItem({
-      kind: "tv_show",
-      title: "Parent Show",
-    });
-    for (let index = 1; index < 100; index += 1) {
-      access.catalog.createMediaItem({
-        kind: "movie",
-        title: `Root Movie ${index}`,
-      });
-    }
-    const child = access.catalog.createMediaItem({
-      parentId: parent.id,
-      kind: "season",
-      title: "Child Season",
-      seasonNumber: 1,
-    });
-
-    const response = await createCatalogReviewRoute(
-      new Request(
-        `http://localhost:3000/api/catalog-reviews/${archive.id}?mediaOffset=100`,
-      ),
-      archive.id,
-      () => access,
-      () => "http://localhost:3000",
-    );
     expect(response.status).toBe(200);
-    const review = await response.json();
-    expect(review.mediaItems).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ id: parent.id, parentId: null }),
-        expect.objectContaining({ id: child.id, parentId: parent.id }),
-      ]),
-    );
-    expect(review.mediaItemsPage).toEqual({
-      offset: 100,
-      limit: 100,
-      hasPrevious: true,
-      hasNext: false,
-      itemIds: [child.id],
-    });
+    await expect(response.json()).resolves.toMatchObject({ mediaItems: [] });
   });
 
-  it("hydrates selection targets and complete ancestor context across Media Item pages", async () => {
-    const access = dataAccessFixture.create();
-    const drive = access.catalog.upsertOpticalDrive({
-      devicePath: "/dev/sr0",
-      isPresent: true,
-    });
-    const contentId = `sha256:${"f".repeat(64)}`;
-    const disc = access.catalog.registerDetectedDisc({
-      opticalDriveId: drive.id,
-      discKind: "dvd",
-      fingerprint: contentId,
-      scanData: {
-        schemaVersion: 2,
-        contentId,
-        titles: [{
-          number: 1,
-          durationSeconds: 1_800,
-          chapters: 4,
-          audioStreams: [],
-          subtitles: [],
-        }],
-      },
-    });
-    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
-    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
-    const archive = access.catalog.createOriginalDiscArchive({
-      detectedDiscId: disc.id,
-      discKind: "dvd",
-      archiveFormat: "iso",
-      archivePath: "/media/originals/Selection Context.iso",
-      fingerprint: contentId,
-    });
-    const reparentTarget = access.catalog.createMediaItem({
-      kind: "movie",
-      title: "Cross-page parent target",
-    });
-    for (let index = 1; index < 100; index += 1) {
-      access.catalog.createMediaItem({
-        kind: "movie",
-        title: `Page root ${index}`,
-      });
-    }
-    const show = access.catalog.createMediaItem({
-      kind: "tv_show",
-      title: "Context Show",
-    });
-    const season = access.catalog.createMediaItem({
-      parentId: show.id,
-      kind: "season",
-      title: "Context Season",
-      seasonNumber: 1,
-    });
-    const episode = access.catalog.createMediaItem({
-      parentId: season.id,
-      kind: "episode",
-      title: "Context Episode",
-      episodeNumber: 1,
-    });
-    const selection = access.catalog.createDiscSelection({
-      originalDiscArchiveId: archive.id,
-      mediaItemId: episode.id,
-      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
-    });
-
-    const response = await createCatalogReviewRoute(
-      new Request(
-        `http://localhost:3000/api/catalog-reviews/${archive.id}?mediaOffset=0&editingMediaItemId=${episode.id}`,
-      ),
-      archive.id,
-      () => access,
-      () => "http://localhost:3000",
-    );
-    expect(response.status).toBe(200);
-    const review = await response.json();
-    expect(review.mediaItemsPage.itemIds).toHaveLength(100);
-    expect(review.mediaItemsPage.itemIds).toContain(reparentTarget.id);
-    expect(review.mediaItemsPage.itemIds).not.toContain(episode.id);
-    expect(review.mediaItems).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ id: show.id, parentId: null }),
-        expect.objectContaining({ id: season.id, parentId: show.id }),
-        expect.objectContaining({ id: episode.id, parentId: season.id }),
-      ]),
-    );
-    expect(review.discSelections).toEqual([
-      expect.objectContaining({ id: selection.id, mediaItemId: episode.id }),
-    ]);
-  });
-
-  it("fails closed for over-depth page and edit-context ancestor chains", async () => {
+  it("fails closed for an over-depth mapped ancestor chain", async () => {
     const access = dataAccessFixture.create();
     const drive = access.catalog.upsertOpticalDrive({
       devicePath: "/dev/sr0",
@@ -884,11 +795,22 @@ describe("Catalog Review API", () => {
       archivePath: "/media/originals/Deep Hierarchy.iso",
       fingerprint: "deep-hierarchy",
     });
+    const mappedItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Mapped deep leaf",
+    });
+    access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: mappedItem.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
     const timestamp = new Date("2026-08-03T20:00:00.000Z");
     const items: MediaItem[] = Array.from({
       length: MAX_MEDIA_ITEM_HIERARCHY_DEPTH + 1,
     }, (_, index) => ({
-      id: `deep-${index}` as MediaItemId,
+      id: index === MAX_MEDIA_ITEM_HIERARCHY_DEPTH
+        ? mappedItem.id
+        : `deep-${index}` as MediaItemId,
       parentId: index === 0 ? null : `deep-${index - 1}` as MediaItemId,
       kind: "movie",
       title: `Deep item ${index}`,
@@ -898,42 +820,29 @@ describe("Catalog Review API", () => {
       createdAt: timestamp,
       updatedAt: timestamp,
     }));
-    const withDeepHierarchy = (includeLeafOnPage: boolean) =>
-      withSnapshotOverrides(access, {
-        catalog: {
-          listMediaItems(options) {
-            if (options?.ids) {
-              const ids = new Set(options.ids);
-              return items.filter((item) => ids.has(item.id));
-            }
-            return includeLeafOnPage ? [items.at(-1)!] : [];
-          },
+    const withDeepHierarchy = withSnapshotOverrides(access, {
+      catalog: {
+        listMediaItems(options) {
+          if (options?.ids) {
+            const ids = new Set(options.ids);
+            return items.filter((item) => ids.has(item.id));
+          }
+          return [];
         },
-      });
+      },
+    });
 
-    const responses = await Promise.all([
-      createCatalogReviewRoute(
-        new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`),
-        archive.id,
-        () => withDeepHierarchy(true),
-        () => "http://localhost:3000",
-      ),
-      createCatalogReviewRoute(
-        new Request(
-          `http://localhost:3000/api/catalog-reviews/${archive.id}?editingMediaItemId=${items.at(-1)!.id}`,
-        ),
-        archive.id,
-        () => withDeepHierarchy(false),
-        () => "http://localhost:3000",
-      ),
-    ]);
+    const response = await createCatalogReviewRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`),
+      archive.id,
+      () => withDeepHierarchy,
+      () => "http://localhost:3000",
+    );
 
-    for (const response of responses) {
-      expect(response.status).toBe(409);
-      await expect(response.json()).resolves.toEqual({
-        error: "Media Item hierarchy exceeds the supported depth",
-      });
-    }
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "Media Item hierarchy exceeds the supported depth",
+    });
   });
 
   it("pages more than 500 valid Disc Selections without blocking review", async () => {
@@ -1134,13 +1043,13 @@ describe("Catalog Review API", () => {
       scanData: {
         schemaVersion: 2,
         contentId,
-        titles: [{
-          number: 4,
+        titles: [4, 5].map((number) => ({
+          number,
           durationSeconds: 600,
           chapters: 6,
           audioStreams: [],
           subtitles: [],
-        }],
+        })),
       },
     });
     access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
@@ -1166,13 +1075,20 @@ describe("Catalog Review API", () => {
       () => access,
       () => "http://localhost:3000",
     );
+    const exactTitleMatch = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Route Proposal Disc 2",
+    });
 
     const response = await mutation({
       action: "create_mapping_proposal",
       catalogRevision: archive.updatedAt.toISOString(),
-      mediaItem: {
-        kind: "bonus_feature",
-        title: "Route Proposal Disc 2",
+      target: {
+        choice: "create_new",
+        mediaItem: {
+          kind: "bonus_feature",
+          title: "Route Proposal Disc 2",
+        },
       },
       discSelection: {
         sourceIdentity: { kind: "dvd_title", titleNumber: 4 },
@@ -1181,7 +1097,8 @@ describe("Catalog Review API", () => {
     });
 
     expect(response.status).toBe(201);
-    await expect(response.json()).resolves.toEqual({
+    const responseBody = await response.json();
+    expect(responseBody).toEqual({
       mediaItem: expect.objectContaining({
         kind: "bonus_feature",
         title: "Route Proposal Disc 2",
@@ -1191,24 +1108,51 @@ describe("Catalog Review API", () => {
         label: "Deleted scene",
       }),
     });
-    expect(access.catalog.listMediaItems()).toHaveLength(1);
+    expect(access.catalog.listMediaItems()).toHaveLength(2);
+    expect(responseBody.mediaItem.id).not.toBe(exactTitleMatch.id);
     expect(access.catalog.listDiscSelections({
       originalDiscArchiveId: archive.id,
     })).toHaveLength(1);
 
+    const reuseResponse = await mutation({
+      action: "create_mapping_proposal",
+      catalogRevision: access.catalog.listOriginalDiscArchives({
+        ids: [archive.id],
+      })[0]!.updatedAt.toISOString(),
+      target: {
+        choice: "use_existing",
+        mediaItemId: exactTitleMatch.id,
+      },
+      discSelection: {
+        sourceIdentity: { kind: "dvd_title", titleNumber: 5 },
+      },
+    });
+    expect(reuseResponse.status).toBe(201);
+    await expect(reuseResponse.json()).resolves.toEqual({
+      mediaItem: expect.objectContaining({ id: exactTitleMatch.id }),
+      discSelection: expect.objectContaining({
+        mediaItemId: exactTitleMatch.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 5 },
+      }),
+    });
+    expect(access.catalog.listMediaItems()).toHaveLength(2);
+
     const staleResponse = await mutation({
       action: "create_mapping_proposal",
       catalogRevision: archive.updatedAt.toISOString(),
-      mediaItem: { kind: "movie", title: "Orphaned stale item" },
+      target: {
+        choice: "create_new",
+        mediaItem: { kind: "movie", title: "Orphaned stale item" },
+      },
       discSelection: {
         sourceIdentity: { kind: "dvd_title", titleNumber: 4 },
       },
     });
     expect(staleResponse.status).toBe(409);
-    expect(access.catalog.listMediaItems()).toHaveLength(1);
+    expect(access.catalog.listMediaItems()).toHaveLength(2);
     expect(access.catalog.listDiscSelections({
       originalDiscArchiveId: archive.id,
-    })).toHaveLength(1);
+    })).toHaveLength(2);
   });
 
   it("creates and edits nested Media Items, maps episode ranges, and completes review", async () => {
@@ -1478,20 +1422,15 @@ describe("Catalog Review API", () => {
         expect.objectContaining({ id: season.id, parentId: show.id }),
         expect.objectContaining({ id: firstEpisode.id, parentId: season.id }),
         expect.objectContaining({
-          parentId: show.id,
-          kind: "other",
-          title: "Edited Local Recording",
-          year: 1800,
-          seasonNumber: 0,
-          episodeNumber: 1,
-        }),
-        expect.objectContaining({
           id: secondEpisode.id,
           parentId: season.id,
           title: "Episode Two",
         }),
       ]),
     );
+    expect(body.mediaItems).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: localItemBody.mediaItem.id }),
+    ]));
     expect(body.discSelections).toEqual(
       expect.arrayContaining([
         expect.objectContaining({

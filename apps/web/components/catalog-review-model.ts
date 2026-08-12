@@ -8,6 +8,7 @@ import { MEDIA_ITEM_KINDS } from "@rip-dvd/data-access/catalog-kinds";
 
 import type {
   CatalogReviewDiscSelectionInput,
+  CatalogReviewMappingTarget,
   CatalogReviewMediaItemInput,
   CatalogReviewProposedDiscSelectionInput,
 } from "../lib/catalog-review-command";
@@ -80,13 +81,6 @@ export interface CatalogReviewDto {
   rawScan: { titles: DvdTitle[] };
   coverage: CatalogReviewCoverage;
   mediaItems: CatalogReviewMediaItem[];
-  mediaItemsPage: {
-    offset: number;
-    limit: number;
-    hasPrevious: boolean;
-    hasNext: boolean;
-    itemIds: string[];
-  };
   discSelections: CatalogReviewDiscSelection[];
   discSelectionsPage: {
     offset: number;
@@ -123,6 +117,22 @@ export interface MappingProposal {
 }
 
 export interface CreateMappingProposalInput {
-  mediaItem: CatalogReviewMediaItemInput;
+  target: CatalogReviewMappingTarget;
   discSelection: CatalogReviewProposedDiscSelectionInput;
+}
+
+export interface MediaItemSearchResult {
+  mediaItem: CatalogReviewMediaItem;
+  ancestors: CatalogReviewMediaItem[];
+  suggestion: "exact" | "normalized" | null;
+}
+
+export interface MediaItemSearchDto {
+  results: MediaItemSearchResult[];
+  page: {
+    offset: number;
+    limit: number;
+    hasPrevious: boolean;
+    hasNext: boolean;
+  };
 }
