@@ -20,6 +20,9 @@ import {
   parseCatalogReviewCommand,
   type CatalogReviewMediaItemInput,
 } from "../../../../lib/catalog-review-command";
+import {
+  calculateCatalogReviewCoverage,
+} from "../../../../lib/catalog-review-coverage";
 import { getDataAccess } from "../../../../lib/data-access";
 import {
   trustedMutationRequestProblem,
@@ -30,6 +33,7 @@ export const runtime = "nodejs";
 
 const CATALOG_REVIEW_MEDIA_PAGE_SIZE = 100;
 const CATALOG_REVIEW_SELECTION_PAGE_SIZE = 100;
+const CATALOG_REVIEW_COVERAGE_SELECTION_PAGE_SIZE = 500;
 
 function response(body: unknown, status = 200): Response {
   return Response.json(body, {
@@ -144,22 +148,34 @@ function readCatalogReview(
       limit: CATALOG_REVIEW_MEDIA_PAGE_SIZE + 1,
       offset: mediaItemOffset,
     });
-    const discSelections = snapshot.catalog.listDiscSelections({
-      originalDiscArchiveId: id,
-      limit: CATALOG_REVIEW_SELECTION_PAGE_SIZE + 1,
-      offset: discSelectionOffset,
-    });
+    const allDiscSelections: DiscSelection[] = [];
+    let coverageSelectionOffset = 0;
+    while (true) {
+      const coverageSelectionPage = snapshot.catalog.listDiscSelections({
+        originalDiscArchiveId: id,
+        limit: CATALOG_REVIEW_COVERAGE_SELECTION_PAGE_SIZE,
+        offset: coverageSelectionOffset,
+      });
+      allDiscSelections.push(...coverageSelectionPage);
+      if (
+        coverageSelectionPage.length <
+          CATALOG_REVIEW_COVERAGE_SELECTION_PAGE_SIZE
+      ) {
+        break;
+      }
+      coverageSelectionOffset += coverageSelectionPage.length;
+    }
     const hasNextMediaItems =
       mediaItems.length > CATALOG_REVIEW_MEDIA_PAGE_SIZE;
     const mediaItemsPage = mediaItems.slice(
       0,
       CATALOG_REVIEW_MEDIA_PAGE_SIZE,
     );
-    const hasNextDiscSelections =
-      discSelections.length > CATALOG_REVIEW_SELECTION_PAGE_SIZE;
-    const discSelectionsPage = discSelections.slice(
-      0,
-      CATALOG_REVIEW_SELECTION_PAGE_SIZE,
+    const hasNextDiscSelections = allDiscSelections.length >
+      discSelectionOffset + CATALOG_REVIEW_SELECTION_PAGE_SIZE;
+    const discSelectionsPage = allDiscSelections.slice(
+      discSelectionOffset,
+      discSelectionOffset + CATALOG_REVIEW_SELECTION_PAGE_SIZE,
     );
     const actionAvailability = snapshot.catalog
       .listDiscSelectionActionAvailability({
@@ -222,6 +238,7 @@ function readCatalogReview(
     const contextMediaItems = [...mediaItemsById.values()].filter(
       (item) => !mediaItemPageIds.has(item.id),
     );
+    const rawTitles = decodeArchivedDvdTitles(disc.scanData) ?? [];
     return {
       catalogRevision: archive.updatedAt.toISOString(),
       archive: {
@@ -235,8 +252,9 @@ function readCatalogReview(
       reviewStatus:
         archive.catalogReviewedAt === null ? "needs_review" : "reviewed",
       rawScan: {
-        titles: decodeArchivedDvdTitles(disc.scanData) ?? [],
+        titles: rawTitles,
       },
+      coverage: calculateCatalogReviewCoverage(rawTitles, allDiscSelections),
       mediaItems: [...contextMediaItems, ...mediaItemsPage].map(
         serializeMediaItem,
       ),

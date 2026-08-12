@@ -80,6 +80,20 @@ describe("Catalog Review API", () => {
           subtitles: [],
         }],
       },
+      coverage: {
+        discSelectionCount: 0,
+        mediaItemsWithSelections: 0,
+        mappedTitles: 0,
+        partiallyMappedTitles: 0,
+        unmappedTitles: 1,
+        mainFeatureSelections: 0,
+        titles: [{
+          titleNumber: 1,
+          durationSeconds: 2_400,
+          status: "unmapped",
+          hasOverlap: false,
+        }],
+      },
       mediaItems: [],
       mediaItemsPage: {
         offset: 0,
@@ -984,6 +998,15 @@ describe("Catalog Review API", () => {
       hasPrevious: false,
       hasNext: true,
     });
+    expect(first.coverage).toMatchObject({
+      discSelectionCount: 501,
+      mediaItemsWithSelections: 1,
+      mappedTitles: 501,
+      partiallyMappedTitles: 0,
+      unmappedTitles: 0,
+      mainFeatureSelections: 0,
+    });
+    expect(first.coverage.titles).toHaveLength(501);
 
     const lastResponse = await createCatalogReviewRoute(
       new Request(
@@ -1002,6 +1025,7 @@ describe("Catalog Review API", () => {
       hasPrevious: true,
       hasNext: false,
     });
+    expect(last.coverage).toEqual(first.coverage);
   });
 
   it("reports preserved completed Encode Job history when selection removal is refused", async () => {

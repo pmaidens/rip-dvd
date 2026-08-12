@@ -1,3 +1,7 @@
+// @vitest-environment happy-dom
+
+import { act } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
@@ -8,6 +12,29 @@ import {
   formatVolumeLabel,
   titleSuggestion,
 } from "./catalog-review-evidence";
+
+const evidenceCoverage = {
+  discSelectionCount: 2,
+  mediaItemsWithSelections: 2,
+  mappedTitles: 0,
+  partiallyMappedTitles: 1,
+  unmappedTitles: 1,
+  mainFeatureSelections: 0,
+  titles: [
+    {
+      titleNumber: 1,
+      durationSeconds: 3_600,
+      status: "partially_mapped" as const,
+      hasOverlap: true,
+    },
+    {
+      titleNumber: 2,
+      durationSeconds: 90,
+      status: "unmapped" as const,
+      hasOverlap: false,
+    },
+  ],
+};
 
 describe("Catalog Review Title Suggestions", () => {
   it.each(titleSuggestionPolicy.cases)(
@@ -41,6 +68,7 @@ describe("CatalogReviewEvidence", () => {
     const html = renderToStaticMarkup(
       <CatalogReviewEvidence
         volumeLabel="FEATURE_DISC_2_2005_SPECIAL_EDITION"
+        coverage={evidenceCoverage}
         titles={[
           {
             number: 1,
@@ -68,7 +96,7 @@ describe("CatalogReviewEvidence", () => {
           },
           {
             number: 2,
-            durationSeconds: 1_199,
+            durationSeconds: 90,
             chapters: 1,
             audioStreams: [],
             subtitles: [],
@@ -101,9 +129,14 @@ describe("CatalogReviewEvidence", () => {
     expect(html).toContain("English · AC3 · 6 channels");
     expect(html).toContain("Subtitle stream 0x20");
     expect(html).toContain("English · Normal");
-    expect(html).toContain("Short or extra candidate");
+    expect(html).toContain("Very short or menu candidate");
     expect(html).toContain("Audio: None");
     expect(html).toContain("Subtitles: None");
+    expect(html).toContain("Partially mapped");
+    expect(html).toContain("Overlapping Disc Selections");
+    expect(html).toContain("counted once and remain valid");
+    expect(html).toContain("1 very-short unmapped title");
+    expect(html).not.toContain('<details open=""');
     expect(html).toContain("<details");
     expect(html).toContain("<summary>Technical stream details</summary>");
     expect(html).not.toContain("<input");
@@ -114,6 +147,7 @@ describe("CatalogReviewEvidence", () => {
     const html = renderToStaticMarkup(
       <CatalogReviewEvidence
         volumeLabel="FEATURE_DISC_2_2005_SPECIAL_EDITION"
+        coverage={evidenceCoverage}
         titles={[{
           number: 2,
           durationSeconds: 1_200,
@@ -168,5 +202,65 @@ describe("CatalogReviewEvidence", () => {
     expect(html).toContain('name="chapterEnd"');
     expect(html).toContain('name="label"');
     expect(html).toContain("Create Media Item and Disc Selection");
+  });
+
+  it("filters the evidence cards while keeping very-short unmapped titles expandable", async () => {
+    (globalThis as typeof globalThis & {
+      IS_REACT_ACT_ENVIRONMENT: boolean;
+    }).IS_REACT_ACT_ENVIRONMENT = true;
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const titles = [
+      {
+        number: 1,
+        durationSeconds: 3_600,
+        chapters: 12,
+        audioStreams: [],
+        subtitles: [],
+      },
+      {
+        number: 2,
+        durationSeconds: 90,
+        chapters: 1,
+        audioStreams: [],
+        subtitles: [],
+      },
+    ];
+
+    await act(async () => {
+      root.render(
+        <CatalogReviewEvidence
+          volumeLabel="FILTER_DISC"
+          coverage={evidenceCoverage}
+          titles={titles}
+        />,
+      );
+    });
+    const collapsedTitles = container.querySelector<HTMLDetailsElement>(
+      ".catalog-coverage-collapsed",
+    );
+    expect(collapsedTitles?.open).toBe(false);
+    expect(collapsedTitles?.textContent).toContain("Title 2");
+    expect(collapsedTitles?.textContent).not.toContain("Title 1");
+
+    const unmappedFilter = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Unmapped",
+    );
+    if (!unmappedFilter) {
+      throw new Error("Expected the Unmapped filter");
+    }
+    await act(async () => unmappedFilter.click());
+
+    const visibleCards = [...container.querySelectorAll(
+      ".catalog-title-evidence",
+    )].map((element) => element.textContent);
+    expect(visibleCards).toHaveLength(1);
+    expect(visibleCards[0]).toContain("Title 2");
+    expect(container.textContent).not.toContain("Title 1");
+    expect(unmappedFilter.getAttribute("aria-pressed")).toBe("true");
+
+    await act(async () => root.unmount());
+    container.remove();
   });
 });

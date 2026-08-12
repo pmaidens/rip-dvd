@@ -87,6 +87,15 @@ function catalogReview({
     },
     reviewStatus: "needs_review",
     rawScan: { titles: [] },
+    coverage: {
+      discSelectionCount: 1,
+      mediaItemsWithSelections: 1,
+      mappedTitles: 0,
+      partiallyMappedTitles: 0,
+      unmappedTitles: 0,
+      mainFeatureSelections: 0,
+      titles: [],
+    },
     mediaItems: [{
       id: mediaItemId,
       parentId: null,
@@ -526,6 +535,28 @@ describe("CatalogReviewView", () => {
                 subtitles: [],
               }],
             },
+            coverage: {
+              discSelectionCount: 1,
+              mediaItemsWithSelections: 1,
+              mappedTitles: 0,
+              partiallyMappedTitles: 1,
+              unmappedTitles: 1,
+              mainFeatureSelections: 0,
+              titles: [
+                {
+                  titleNumber: 1,
+                  durationSeconds: 2_400,
+                  status: "partially_mapped",
+                  hasOverlap: false,
+                },
+                {
+                  titleNumber: 2,
+                  durationSeconds: 3_600,
+                  status: "unmapped",
+                  hasOverlap: false,
+                },
+              ],
+            },
             mediaItems: [
               {
                 id: "show-1",
@@ -672,6 +703,15 @@ describe("CatalogReviewView", () => {
             },
             reviewStatus: "needs_review",
             rawScan: { titles: [] },
+            coverage: {
+              discSelectionCount: 1,
+              mediaItemsWithSelections: 1,
+              mappedTitles: 0,
+              partiallyMappedTitles: 0,
+              unmappedTitles: 0,
+              mainFeatureSelections: 0,
+              titles: [],
+            },
             mediaItems: [
               {
                 id: "parent-1",

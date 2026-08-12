@@ -1,9 +1,17 @@
+"use client";
+
+import { useState } from "react";
+
 import type {
   DvdAudioStream,
   DvdSubtitleStream,
   DvdTitle,
 } from "@rip-dvd/data-access/dvd-scan";
 
+import type {
+  CatalogReviewCoverage,
+  CatalogReviewTitleCoverageStatus,
+} from "../lib/catalog-review-coverage";
 import { CatalogReviewMappingProposal } from "./catalog-review-mapping-proposal";
 import type {
   CatalogReviewMediaItem,
@@ -171,7 +179,23 @@ function TechnicalStreamDetails({ title }: { title: DvdTitle }) {
   );
 }
 
+type CoverageFilter = "all" | CatalogReviewTitleCoverageStatus;
+
+const coverageFilters = [
+  { value: "all", label: "All" },
+  { value: "unmapped", label: "Unmapped" },
+  { value: "mapped", label: "Mapped" },
+  { value: "partially_mapped", label: "Partially mapped" },
+] as const satisfies readonly { value: CoverageFilter; label: string }[];
+
+const coverageStatusLabels = {
+  mapped: "Mapped",
+  partially_mapped: "Partially mapped",
+  unmapped: "Unmapped",
+} satisfies Record<CatalogReviewTitleCoverageStatus, string>;
+
 export function CatalogReviewEvidence({
+  coverage,
   volumeLabel,
   titles,
   mediaItems = [],
@@ -182,6 +206,7 @@ export function CatalogReviewEvidence({
   onCancelMappingProposal = () => undefined,
   onCreateMappingProposal = () => undefined,
 }: {
+  coverage: CatalogReviewCoverage;
   volumeLabel: string;
   titles: readonly DvdTitle[];
   mediaItems?: CatalogReviewMediaItem[];
@@ -192,6 +217,23 @@ export function CatalogReviewEvidence({
   onCancelMappingProposal?(): void;
   onCreateMappingProposal?(input: CreateMappingProposalInput): void;
 }) {
+  const [filter, setFilter] = useState<CoverageFilter>("all");
+  const coverageByTitle = new Map(
+    coverage.titles.map((title) => [title.titleNumber, title]),
+  );
+  const statusForTitle = (title: DvdTitle) =>
+    coverageByTitle.get(title.number)?.status ?? "unmapped";
+  const visibleTitles = titles.filter(
+    (title) => filter === "all" || statusForTitle(title) === filter,
+  );
+  const collapsedVeryShortTitles = visibleTitles.filter(
+    (title) =>
+      statusForTitle(title) === "unmapped" && title.durationSeconds < 120,
+  );
+  const listedTitles = visibleTitles.filter(
+    (title) =>
+      statusForTitle(title) !== "unmapped" || title.durationSeconds >= 120,
+  );
   const longestDuration = Math.max(
     ...titles.map((title) => title.durationSeconds),
   );
@@ -204,6 +246,130 @@ export function CatalogReviewEvidence({
       action,
       sourceIdentity: { kind: "dvd_title", titleNumber },
     });
+  }
+  function renderTitleEvidence(title: DvdTitle) {
+    const titleCoverage = coverageByTitle.get(title.number) ?? {
+      titleNumber: title.number,
+      durationSeconds: title.durationSeconds,
+      status: "unmapped" as const,
+      hasOverlap: false,
+    };
+    const proposalSource = activeMappingProposal?.sourceIdentity;
+    const activeTitleProposal = proposalSource?.kind === "dvd_title" ||
+        proposalSource?.kind === "dvd_chapters"
+      ? proposalSource.titleNumber === title.number
+      : false;
+    return (
+      <li
+        key={title.number}
+        className={activeTitleProposal
+          ? "catalog-title-evidence catalog-title-evidence-active"
+          : "catalog-title-evidence"}
+      >
+        <div className="catalog-title-evidence-content">
+          <header className="catalog-title-evidence-heading">
+            <div>
+              <h4>Title {title.number}</h4>
+              <p>
+                {formatDuration(title.durationSeconds)} · {countLabel(
+                  title.chapters,
+                  "chapter",
+                )}
+              </p>
+            </div>
+            <div className="catalog-title-badges">
+              <span
+                className={`catalog-coverage-state is-${titleCoverage.status}`}
+              >
+                {coverageStatusLabels[titleCoverage.status]}
+              </span>
+              {title.durationSeconds === longestDuration ? (
+                <span className="catalog-factual-badge">Longest title</span>
+              ) : null}
+              <span className="catalog-title-suggestion">
+                <span>Title Suggestion</span>
+                <strong>{titleSuggestion(title.durationSeconds)}</strong>
+              </span>
+            </div>
+          </header>
+          {titleCoverage.hasOverlap ? (
+            <p className="catalog-coverage-warning" role="status">
+              <strong>Overlapping Disc Selections</strong>
+              <span>Ranges are counted once and remain valid.</span>
+            </p>
+          ) : null}
+          <p className="catalog-language-summary">
+            <span>Audio: {languageSummary(title.audioStreams)}</span>
+            <span>Subtitles: {languageSummary(title.subtitles)}</span>
+          </p>
+          <TechnicalStreamDetails title={title} />
+          {onStartMappingProposal ? (
+            <div
+              className="catalog-title-actions"
+              role="group"
+              aria-label={`Map Title ${title.number}`}
+            >
+              <button
+                type="button"
+                disabled={isSaving}
+                onClick={() => startWholeTitleProposal(title.number, "movie")}
+              >
+                Map as movie
+              </button>
+              <button
+                type="button"
+                disabled={isSaving}
+                onClick={() =>
+                  startWholeTitleProposal(title.number, "bonus_feature")}
+              >
+                Map as bonus feature
+              </button>
+              <button
+                type="button"
+                disabled={isSaving}
+                onClick={() => startWholeTitleProposal(title.number, "trailer")}
+              >
+                Map as trailer
+              </button>
+              <button
+                type="button"
+                disabled={isSaving}
+                onClick={() => onStartMappingProposal({
+                  action: "chapters",
+                  sourceIdentity: {
+                    kind: "dvd_chapters",
+                    titleNumber: title.number,
+                    chapterStart: 1,
+                    chapterEnd: title.chapters,
+                  },
+                })}
+              >
+                Map chapters
+              </button>
+              <button
+                type="button"
+                disabled={isSaving}
+                onClick={() => startWholeTitleProposal(title.number, "other")}
+              >
+                Map as other
+              </button>
+            </div>
+          ) : null}
+        </div>
+        {activeTitleProposal && activeMappingProposal ? (
+          <CatalogReviewMappingProposal
+            key={mappingProposalIdentity(activeMappingProposal)}
+            proposal={activeMappingProposal}
+            proposedTitle={proposedTitle}
+            mediaItems={mediaItems}
+            isSaving={isSaving}
+            error={mappingProposalError}
+            onCancel={onCancelMappingProposal}
+            onCreate={onCreateMappingProposal}
+          />
+        ) : null}
+      </li>
+    );
   }
   return (
     <section
@@ -266,128 +432,45 @@ export function CatalogReviewEvidence({
           No reviewable DVD titles were recorded.
         </p>
       ) : (
-        <ol className="catalog-title-evidence-list">
-          {titles.map((title) => {
-            const proposalSource = activeMappingProposal?.sourceIdentity;
-            const activeTitleProposal = proposalSource?.kind === "dvd_title" ||
-                proposalSource?.kind === "dvd_chapters"
-              ? proposalSource.titleNumber === title.number
-              : false;
-            return (
-              <li
-                key={title.number}
-                className={activeTitleProposal
-                  ? "catalog-title-evidence catalog-title-evidence-active"
-                  : "catalog-title-evidence"}
+        <>
+          <div
+            className="catalog-coverage-filters"
+            role="group"
+            aria-label="Title coverage filter"
+          >
+            {coverageFilters.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                aria-pressed={filter === option.value}
+                onClick={() => setFilter(option.value)}
               >
-                <div className="catalog-title-evidence-content">
-                  <header className="catalog-title-evidence-heading">
-                    <div>
-                      <h4>Title {title.number}</h4>
-                      <p>
-                        {formatDuration(title.durationSeconds)} · {countLabel(
-                          title.chapters,
-                          "chapter",
-                        )}
-                      </p>
-                    </div>
-                    <div className="catalog-title-badges">
-                      {title.durationSeconds === longestDuration ? (
-                        <span className="catalog-factual-badge">
-                          Longest title
-                        </span>
-                      ) : null}
-                      <span className="catalog-title-suggestion">
-                        <span>Title Suggestion</span>
-                        <strong>{titleSuggestion(title.durationSeconds)}</strong>
-                      </span>
-                    </div>
-                  </header>
-                  <p className="catalog-language-summary">
-                    <span>Audio: {languageSummary(title.audioStreams)}</span>
-                    <span>Subtitles: {languageSummary(title.subtitles)}</span>
-                  </p>
-                  <TechnicalStreamDetails title={title} />
-                  {onStartMappingProposal ? (
-                    <div
-                      className="catalog-title-actions"
-                      role="group"
-                      aria-label={`Map Title ${title.number}`}
-                    >
-                      <button
-                        type="button"
-                        disabled={isSaving}
-                        onClick={() => startWholeTitleProposal(
-                          title.number,
-                          "movie",
-                        )}
-                      >
-                        Map as movie
-                      </button>
-                      <button
-                        type="button"
-                        disabled={isSaving}
-                        onClick={() => startWholeTitleProposal(
-                          title.number,
-                          "bonus_feature",
-                        )}
-                      >
-                        Map as bonus feature
-                      </button>
-                      <button
-                        type="button"
-                        disabled={isSaving}
-                        onClick={() => startWholeTitleProposal(
-                          title.number,
-                          "trailer",
-                        )}
-                      >
-                        Map as trailer
-                      </button>
-                      <button
-                        type="button"
-                        disabled={isSaving}
-                        onClick={() => onStartMappingProposal({
-                          action: "chapters",
-                          sourceIdentity: {
-                            kind: "dvd_chapters",
-                            titleNumber: title.number,
-                            chapterStart: 1,
-                            chapterEnd: title.chapters,
-                          },
-                        })}
-                      >
-                        Map chapters
-                      </button>
-                      <button
-                        type="button"
-                        disabled={isSaving}
-                        onClick={() => startWholeTitleProposal(
-                          title.number,
-                          "other",
-                        )}
-                      >
-                        Map as other
-                      </button>
-                    </div>
-                  ) : null}
-                </div>
-                {activeTitleProposal && activeMappingProposal ? (
-                  <CatalogReviewMappingProposal
-                    key={mappingProposalIdentity(activeMappingProposal)}
-                    proposal={activeMappingProposal}
-                    proposedTitle={proposedTitle}
-                    mediaItems={mediaItems}
-                    isSaving={isSaving}
-                    error={mappingProposalError}
-                    onCancel={onCancelMappingProposal}
-                    onCreate={onCreateMappingProposal}
-                  />
-                ) : null}
-              </li>
-            );
-          })}
-        </ol>
+                {option.label}
+              </button>
+            ))}
+          </div>
+          {listedTitles.length > 0 ? (
+            <ol className="catalog-title-evidence-list">
+              {listedTitles.map(renderTitleEvidence)}
+            </ol>
+          ) : null}
+          {collapsedVeryShortTitles.length > 0 ? (
+            <details className="catalog-coverage-collapsed">
+              <summary>
+                {countLabel(
+                  collapsedVeryShortTitles.length,
+                  "very-short unmapped title",
+                )}
+              </summary>
+              <ol className="catalog-title-evidence-list">
+                {collapsedVeryShortTitles.map(renderTitleEvidence)}
+              </ol>
+            </details>
+          ) : null}
+          {visibleTitles.length === 0 ? (
+            <p className="catalog-empty">No titles match this filter.</p>
+          ) : null}
+        </>
       )}
     </section>
   );

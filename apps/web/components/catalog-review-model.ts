@@ -11,6 +11,7 @@ import type {
   CatalogReviewMediaItemInput,
   CatalogReviewProposedDiscSelectionInput,
 } from "../lib/catalog-review-command";
+import type { CatalogReviewCoverage } from "../lib/catalog-review-coverage";
 
 export const mediaItemKinds = MEDIA_ITEM_KINDS;
 export type { DiscSelectionKind, MediaItemKind };
@@ -77,6 +78,7 @@ export interface CatalogReviewDto {
   };
   reviewStatus: "needs_review" | "reviewed";
   rawScan: { titles: DvdTitle[] };
+  coverage: CatalogReviewCoverage;
   mediaItems: CatalogReviewMediaItem[];
   mediaItemsPage: {
     offset: number;
