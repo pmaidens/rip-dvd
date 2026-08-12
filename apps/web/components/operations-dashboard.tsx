@@ -273,6 +273,141 @@ function DashboardSection<T>({
   );
 }
 
+function archivedDetectedDiscsLast(
+  state: DashboardSectionLoadState<DashboardDetectedDisc>,
+): DashboardSectionLoadState<DashboardDetectedDisc> {
+  if (state.status !== "loaded") {
+    return state;
+  }
+  return {
+    ...state,
+    items: [
+      ...state.items.filter((disc) => disc.status !== "archived"),
+      ...state.items.filter((disc) => disc.status === "archived"),
+    ],
+  };
+}
+
+function DetectedDiscDetails({ disc }: { disc: DashboardDetectedDisc }) {
+  return (
+    <>
+      <div className="item-footer">
+        <span>{displayTerm(disc.discKind)}</span>
+        <span>{formatTimestamp(disc.detectedAt)}</span>
+      </div>
+      <div className="disc-scan">
+        <p className="disc-fingerprint">
+          <span>Fingerprint</span>
+          <code>{disc.fingerprint}</code>
+        </p>
+        {disc.titles.length > 0 ? (
+          <ol className="dvd-title-map" aria-label="DVD title map">
+            {disc.titles.map((title) => (
+              <li key={title.number}>
+                <div>
+                  <strong>Title {title.number}</strong>
+                  <span>{formatDuration(title.durationSeconds)}</span>
+                </div>
+                <p>
+                  {countLabel(title.chapters, "chapter")} ·{" "}
+                  {countLabel(title.audioStreams.length, "audio", "audio")} ·{" "}
+                  {countLabel(title.subtitles.length, "subtitle")}
+                </p>
+                {title.audioStreams.length > 0 ? (
+                  <ul className="dvd-stream-list" aria-label="Audio streams">
+                    {title.audioStreams.map((stream) => (
+                      <li key={stream.id}>
+                        {[
+                          streamLanguage(stream),
+                          stream.format,
+                          stream.channels
+                            ? countLabel(stream.channels, "channel")
+                            : undefined,
+                          formatStreamId(stream.id),
+                        ]
+                          .filter(Boolean)
+                          .join(" · ")}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+                {title.subtitles.length > 0 ? (
+                  <ul className="dvd-stream-list" aria-label="Subtitle streams">
+                    {title.subtitles.map((stream) => (
+                      <li key={stream.id}>
+                        {[
+                          streamLanguage(stream),
+                          stream.content,
+                          formatStreamId(stream.id),
+                        ]
+                          .filter(Boolean)
+                          .join(" · ")}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </li>
+            ))}
+          </ol>
+        ) : null}
+      </div>
+    </>
+  );
+}
+
+function DetectedDiscItem({
+  disc,
+  approvingDetectedDiscId,
+  onApproveDetectedDisc,
+}: {
+  disc: DashboardDetectedDisc;
+  approvingDetectedDiscId: string | null;
+  onApproveDetectedDisc: (id: string) => void;
+}) {
+  if (disc.status === "archived") {
+    return (
+      <article className="operation-item archived-disc-item">
+        <details className="archived-disc">
+          <summary className="archived-disc-summary">
+            <span className="archived-disc-identity">
+              <strong>{disc.volumeLabel}</strong>
+              <span>{disc.opticalDriveName}</span>
+            </span>
+            <StatusBadge value={disc.status} />
+          </summary>
+          <div className="archived-disc-details">
+            <DetectedDiscDetails disc={disc} />
+          </div>
+        </details>
+      </article>
+    );
+  }
+
+  return (
+    <article className="operation-item">
+      <div className="item-heading">
+        <div>
+          <h3>{disc.volumeLabel}</h3>
+          <p>{disc.opticalDriveName}</p>
+        </div>
+        <StatusBadge value={disc.status} />
+      </div>
+      <DetectedDiscDetails disc={disc} />
+      {disc.status === "scanned" ? (
+        <button
+          type="button"
+          disabled={approvingDetectedDiscId !== null}
+          onClick={() => onApproveDetectedDisc(disc.id)}
+        >
+          {approvingDetectedDiscId === disc.id
+            ? "Approving…"
+            : "Approve archive"}
+        </button>
+      ) : null}
+    </article>
+  );
+}
+
 type AttentionState =
   | { status: "loading" }
   | { status: "error" }
@@ -489,100 +624,19 @@ export function DashboardView({
       />
 
           <DashboardSection
-        title="Detected Discs"
-        eyebrow="Intake"
-        state={state.detectedDiscs}
-        emptyMessage="No Detected Discs are currently known."
-        renderItem={(disc) => (
-          <article className="operation-item" key={disc.id}>
-            <div className="item-heading">
-              <div>
-                <h3>{disc.volumeLabel}</h3>
-                <p>{disc.opticalDriveName}</p>
-              </div>
-              <StatusBadge value={disc.status} />
-            </div>
-            <div className="item-footer">
-              <span>{displayTerm(disc.discKind)}</span>
-              <span>{formatTimestamp(disc.detectedAt)}</span>
-            </div>
-            <div className="disc-scan">
-              <p className="disc-fingerprint">
-                <span>Fingerprint</span>
-                <code>{disc.fingerprint}</code>
-              </p>
-              {disc.titles.length > 0 ? (
-                <ol className="dvd-title-map" aria-label="DVD title map">
-                  {disc.titles.map((title) => (
-                    <li key={title.number}>
-                      <div>
-                        <strong>Title {title.number}</strong>
-                        <span>{formatDuration(title.durationSeconds)}</span>
-                      </div>
-                      <p>
-                        {countLabel(title.chapters, "chapter")} ·{" "}
-                        {countLabel(
-                          title.audioStreams.length,
-                          "audio",
-                          "audio",
-                        )} ·{" "}
-                        {countLabel(title.subtitles.length, "subtitle")}
-                      </p>
-                      {title.audioStreams.length > 0 ? (
-                        <ul className="dvd-stream-list" aria-label="Audio streams">
-                          {title.audioStreams.map((stream) => (
-                            <li key={stream.id}>
-                              {[
-                                streamLanguage(stream),
-                                stream.format,
-                                stream.channels
-                                  ? countLabel(stream.channels, "channel")
-                                  : undefined,
-                                formatStreamId(stream.id),
-                              ]
-                                .filter(Boolean)
-                                .join(" · ")}
-                            </li>
-                          ))}
-                        </ul>
-                      ) : null}
-                      {title.subtitles.length > 0 ? (
-                        <ul
-                          className="dvd-stream-list"
-                          aria-label="Subtitle streams"
-                        >
-                          {title.subtitles.map((stream) => (
-                            <li key={stream.id}>
-                              {[
-                                streamLanguage(stream),
-                                stream.content,
-                                formatStreamId(stream.id),
-                              ]
-                                .filter(Boolean)
-                                .join(" · ")}
-                            </li>
-                          ))}
-                        </ul>
-                      ) : null}
-                    </li>
-                  ))}
-                </ol>
-              ) : null}
-            </div>
-            {disc.status === "scanned" ? (
-              <button
-                type="button"
-                disabled={approvingDetectedDiscId !== null}
-                onClick={() => onApproveDetectedDisc(disc.id)}
-              >
-                {approvingDetectedDiscId === disc.id
-                  ? "Approving…"
-                  : "Approve archive"}
-              </button>
-            ) : null}
-          </article>
-        )}
-      />
+            title="Detected Discs"
+            eyebrow="Intake"
+            state={archivedDetectedDiscsLast(state.detectedDiscs)}
+            emptyMessage="No Detected Discs are currently known."
+            renderItem={(disc) => (
+              <DetectedDiscItem
+                key={disc.id}
+                disc={disc}
+                approvingDetectedDiscId={approvingDetectedDiscId}
+                onApproveDetectedDisc={onApproveDetectedDisc}
+              />
+            )}
+          />
 
           <DashboardSection
         title="Archive Jobs"

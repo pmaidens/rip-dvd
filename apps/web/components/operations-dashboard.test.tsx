@@ -261,6 +261,71 @@ describe("DashboardView", () => {
     expect(html).not.toContain("/media/");
   });
 
+  it("compacts already archived discs at the bottom in expandable rows", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const detectedDisc = (
+      id: string,
+      volumeLabel: string,
+      status: "archived" | "scanned" | "rejected",
+    ) => ({
+      id,
+      volumeLabel,
+      discKind: "dvd" as const,
+      status,
+      opticalDriveName: "Upper drive",
+      fingerprint: `sha256:${id}`,
+      titles: [],
+      detectedAt: "2026-07-22T07:58:00.000Z",
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <DashboardView
+          section="discs"
+          state={{
+            opticalDrives: { status: "loaded", items: [] },
+            detectedDiscs: {
+              status: "loaded",
+              items: [
+                detectedDisc("archived-a", "ARCHIVED_A", "archived"),
+                detectedDisc("scanned", "SCANNED", "scanned"),
+                detectedDisc("archived-b", "ARCHIVED_B", "archived"),
+                detectedDisc("rejected", "REJECTED", "rejected"),
+              ],
+            },
+            archiveJobs: { status: "loaded", items: [] },
+            encodeJobs: { status: "loaded", items: [] },
+            catalogReview: { status: "loaded", items: [] },
+          }}
+        />,
+      );
+    });
+
+    const rows = [...container.querySelectorAll(".item-list > article")];
+    expect(
+      rows.map(
+        (row) => row.querySelector("h3, summary strong")?.textContent,
+      ),
+    ).toEqual(["SCANNED", "REJECTED", "ARCHIVED_A", "ARCHIVED_B"]);
+
+    const disclosures = container.querySelectorAll<HTMLDetailsElement>(
+      "details.archived-disc",
+    );
+    expect(disclosures).toHaveLength(2);
+    expect(disclosures[0].open).toBe(false);
+    expect(disclosures[0].textContent).toContain("sha256:archived-a");
+
+    await act(async () => {
+      disclosures[0].querySelector("summary")?.click();
+    });
+    expect(disclosures[0].open).toBe(true);
+
+    await act(async () => root.unmount());
+  });
+
   it("expands a worker failure when its summary is clicked", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     const container = document.createElement("div");
