@@ -1015,6 +1015,188 @@ describe("data-access facade", () => {
     access.close();
   });
 
+  it("creates one numbered Episode and whole-title Disc Selection per episodic proposal entry", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const contentId = `sha256:${"6".repeat(64)}`;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: contentId,
+      scanData: {
+        schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+        contentId,
+        titles: [2, 4, 7].map((number) => ({
+          number,
+          durationSeconds: 2_400,
+          chapters: 8,
+          audioStreams: [],
+          subtitles: [],
+        })),
+      },
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Episodic Proposal.iso",
+      fingerprint: contentId,
+    });
+
+    const created = access.catalog.createEpisodicMappingProposal({
+      originalDiscArchiveId: archive.id,
+      catalogRevision: archive.updatedAt,
+      tvShow: {
+        choice: "create_new",
+        title: "Example Show",
+        year: 2004,
+      },
+      season: {
+        choice: "create_new",
+        title: "Example Show Season 2",
+        seasonNumber: 2,
+      },
+      episodes: [
+        { titleNumber: 2, title: "Arrival", episodeNumber: 7 },
+        { titleNumber: 4, title: "Departure", episodeNumber: 9 },
+        { titleNumber: 7, title: "Return", episodeNumber: 8 },
+      ],
+    });
+
+    expect(created).toMatchObject({
+      tvShow: {
+        kind: "tv_show",
+        parentId: null,
+        title: "Example Show",
+        year: 2004,
+      },
+      season: {
+        kind: "season",
+        title: "Example Show Season 2",
+        seasonNumber: 2,
+      },
+      episodes: [
+        {
+          mediaItem: { kind: "episode", title: "Arrival", episodeNumber: 7 },
+          discSelection: {
+            sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+          },
+        },
+        {
+          mediaItem: { kind: "episode", title: "Departure", episodeNumber: 9 },
+          discSelection: {
+            sourceIdentity: { kind: "dvd_title", titleNumber: 4 },
+          },
+        },
+        {
+          mediaItem: { kind: "episode", title: "Return", episodeNumber: 8 },
+          discSelection: {
+            sourceIdentity: { kind: "dvd_title", titleNumber: 7 },
+          },
+        },
+      ],
+    });
+    expect(created.season.parentId).toBe(created.tvShow.id);
+    expect(created.episodes.every(({ mediaItem, discSelection }) =>
+      mediaItem.parentId === created.season.id &&
+      discSelection.mediaItemId === mediaItem.id
+    )).toBe(true);
+    expect(access.catalog.listMediaItems()).toHaveLength(5);
+    expect(access.catalog.listDiscSelections({
+      originalDiscArchiveId: archive.id,
+    })).toHaveLength(3);
+    access.close();
+  });
+
+  it("reuses an explicit TV Show and can create or reuse its numbered Season", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const contentId = `sha256:${"7".repeat(64)}`;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: contentId,
+      scanData: {
+        schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+        contentId,
+        titles: [1, 2].map((number) => ({
+          number,
+          durationSeconds: 2_400,
+          chapters: 8,
+          audioStreams: [],
+          subtitles: [],
+        })),
+      },
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Reused Episodic Hierarchy.iso",
+      fingerprint: contentId,
+    });
+    const show = access.catalog.createMediaItem({
+      kind: "tv_show",
+      title: "Existing Show",
+    });
+    const firstSeason = access.catalog.createMediaItem({
+      parentId: show.id,
+      kind: "season",
+      title: "Existing Season",
+      seasonNumber: 1,
+    });
+
+    const reused = access.catalog.createEpisodicMappingProposal({
+      originalDiscArchiveId: archive.id,
+      catalogRevision: archive.updatedAt,
+      tvShow: { choice: "use_existing", mediaItemId: show.id },
+      season: { choice: "use_existing", mediaItemId: firstSeason.id },
+      episodes: [{ titleNumber: 1, title: "First", episodeNumber: 1 }],
+    });
+    const revision = access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]!.updatedAt;
+    const createdSeason = access.catalog.createEpisodicMappingProposal({
+      originalDiscArchiveId: archive.id,
+      catalogRevision: revision,
+      tvShow: { choice: "use_existing", mediaItemId: show.id },
+      season: {
+        choice: "create_new",
+        title: "Existing Show Season 2",
+        seasonNumber: 2,
+      },
+      episodes: [{ titleNumber: 2, title: "Second", episodeNumber: 1 }],
+    });
+
+    expect(reused).toMatchObject({
+      tvShow: { id: show.id },
+      season: { id: firstSeason.id },
+    });
+    expect(createdSeason).toMatchObject({
+      tvShow: { id: show.id },
+      season: {
+        parentId: show.id,
+        kind: "season",
+        seasonNumber: 2,
+      },
+    });
+    expect(access.catalog.listMediaItems()).toHaveLength(5);
+    expect(access.catalog.listDiscSelections({
+      originalDiscArchiveId: archive.id,
+    })).toHaveLength(2);
+    access.close();
+  });
+
   it("applies bounded offset pagination consistently across catalog lists", () => {
     vi.useFakeTimers();
     const access = openTestDatabase();

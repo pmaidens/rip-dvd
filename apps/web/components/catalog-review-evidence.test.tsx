@@ -202,6 +202,59 @@ describe("CatalogReviewEvidence", () => {
     expect(html).toContain("Create Media Item and Disc Selection");
   });
 
+  it("groups an episodic proposal after its selected title evidence", () => {
+    const titles = [8, 3, 5].map((number) => ({
+      number,
+      durationSeconds: 2_400,
+      chapters: 8,
+      audioStreams: [],
+      subtitles: [],
+    }));
+    const html = renderToStaticMarkup(
+      <CatalogReviewEvidence
+        volumeLabel="EXAMPLE_SHOW_DISC_2"
+        coverage={{
+          discSelectionCount: 0,
+          mediaItemsWithSelections: 0,
+          mappedTitles: 0,
+          partiallyMappedTitles: 0,
+          unmappedTitles: 3,
+          mainFeatureSelections: 0,
+          titles: titles.map(({ number }) => ({
+            titleNumber: number,
+            status: "unmapped" as const,
+            hasOverlap: false,
+          })),
+        }}
+        titles={titles}
+        activeEpisodicMappingProposal={{
+          episodes: [3, 8].map((titleNumber, index) => ({
+            titleNumber,
+            title: `Episode ${index + 4}`,
+            episodeNumber: index + 4,
+          })),
+        }}
+        onStartEpisodicMappingProposal={() => undefined}
+        onCancelEpisodicMappingProposal={() => undefined}
+        onCreateEpisodicMappingProposal={() => undefined}
+      />,
+    );
+    const rendered = document.createElement("div");
+    rendered.innerHTML = html;
+    const workspace = rendered.querySelector(".catalog-episodic-workspace");
+
+    expect(workspace).not.toBeNull();
+    expect([...workspace!.querySelectorAll(".catalog-title-evidence h4")]
+      .map((heading) => heading.textContent)).toEqual(["Title 3", "Title 8"]);
+    expect(workspace!.querySelector(
+      ".catalog-episodic-mapping-proposal",
+    )).not.toBeNull();
+    expect(workspace!.textContent).not.toContain("Title 5");
+    expect(html.indexOf("Title 3")).toBeLessThan(
+      html.indexOf("Episodic Mapping Proposal"),
+    );
+  });
+
   it("does not automatically propose sources that overlap existing coverage", async () => {
     (globalThis as typeof globalThis & {
       IS_REACT_ACT_ENVIRONMENT: boolean;
