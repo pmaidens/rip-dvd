@@ -1,12 +1,16 @@
 import { describe, expectTypeOf, it } from "vitest";
 
 import type {
+  ArchiveJob,
+  ArchiveJobStatus,
   ArchiveJobId,
   BoundedListPolicy,
   DataAccess,
   DetectedDiscId,
   DiscSelectionId,
+  EncodeJob,
   EncodeJobId,
+  EncodeJobStatus,
   EncodeOutputFilesystemIdentity,
   EncodingProfileId,
   MediaItemId,
@@ -80,6 +84,18 @@ describe("data-access domain identifiers", () => {
     expectTypeOf<MediaItemId>().not.toEqualTypeOf<DiscSelectionId>();
     expectTypeOf<EncodingProfileId>().not.toEqualTypeOf<EncodeJobId>();
     expectTypeOf<ArchiveJobId>().not.toEqualTypeOf<EncodeJobId>();
+  });
+
+  it("keeps Cancelled specific to Encode Job outcomes", () => {
+    expectTypeOf<ArchiveJob["status"]>().toEqualTypeOf<ArchiveJobStatus>();
+    expectTypeOf<EncodeJob["status"]>().toEqualTypeOf<EncodeJobStatus>();
+
+    if (false) {
+      const access = undefined as unknown as DataAccess;
+      access.encodeJobs.list(["cancelled"]);
+      // @ts-expect-error Archive Jobs do not have a cancelled outcome.
+      access.archiveJobs.list(["cancelled"]);
+    }
   });
 
   it("keeps Encode output filesystem identities opaque", () => {

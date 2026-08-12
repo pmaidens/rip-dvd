@@ -3,6 +3,7 @@ import { parentPort, workerData } from "node:worker_threads";
 import {
   createDataAccess,
   DomainInvariantError,
+  InvalidStatusTransitionError,
 } from "../dist/index.js";
 import { createLegacySidecarDataAccess } from "../dist/legacy-sidecars.js";
 
@@ -115,6 +116,30 @@ try {
         value: { outcome: "rejected" },
       });
     }
+  } else if (workerData.operation === "cancel-encode") {
+    try {
+      const job = access.encodeJobs.cancelQueued(workerData.encodeJobId);
+      parentPort.postMessage({
+        type: "result",
+        value: { outcome: "cancelled", id: job.id },
+      });
+    } catch (error) {
+      if (!(error instanceof InvalidStatusTransitionError)) {
+        throw error;
+      }
+      parentPort.postMessage({
+        type: "result",
+        value: { outcome: "rejected" },
+      });
+    }
+  } else if (workerData.operation === "claim-encode") {
+    const claim = access.encodeJobs.claimNext(workerData.workerId);
+    parentPort.postMessage({
+      type: "result",
+      value: claim
+        ? { outcome: "claimed", id: claim.id }
+        : { outcome: "rejected" },
+    });
   } else if (workerData.operation === "complete-catalog-review") {
     try {
       const archive = access.catalog.completeCatalogReview(

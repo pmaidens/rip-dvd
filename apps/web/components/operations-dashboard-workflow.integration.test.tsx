@@ -386,6 +386,65 @@ describe("end-to-end operations dashboard workflow", () => {
       mediaTitle: "Workflow Movie",
       status: "queued",
     });
+    expect(
+      renderToStaticMarkup(<DashboardView state={queuedEncodeSnapshot} />),
+    ).toContain("Cancel queued encode");
+
+    const cancelResponse = await createEncodeJobsRoute(
+      new Request(`${trustedOrigin}/api/encode-jobs`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: trustedOrigin,
+          "Sec-Fetch-Site": "same-origin",
+        },
+        body: JSON.stringify({
+          action: "cancel",
+          encodeJobId: queuedEncodeJob.id,
+        }),
+      }),
+      () => access,
+      runtimeConfig,
+    );
+    expect(cancelResponse.status).toBe(200);
+    expect((await cancelResponse.json()).job).toMatchObject({
+      id: queuedEncodeJob.id,
+      status: "cancelled",
+    });
+    const cancelledEncodeSnapshot = await events.next(
+      (snapshot) => encodeJob(snapshot).status === "cancelled",
+    );
+    const cancelledHtml = renderToStaticMarkup(
+      <DashboardView state={cancelledEncodeSnapshot} />,
+    );
+    expect(cancelledHtml).toContain("Cancelled");
+    expect(cancelledHtml).toContain("Requeue encode");
+    expect(cancelledHtml).not.toContain("Worker reported a failure");
+
+    const cancelledRequeueResponse = await createEncodeJobsRoute(
+      new Request(`${trustedOrigin}/api/encode-jobs`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: trustedOrigin,
+          "Sec-Fetch-Site": "same-origin",
+        },
+        body: JSON.stringify({
+          action: "requeue",
+          encodeJobId: queuedEncodeJob.id,
+        }),
+      }),
+      () => access,
+      runtimeConfig,
+    );
+    expect(cancelledRequeueResponse.status).toBe(200);
+    expect((await cancelledRequeueResponse.json()).job).toMatchObject({
+      id: queuedEncodeJob.id,
+      status: "queued",
+    });
+    await events.next((snapshot) => encodeJob(snapshot).status === "queued");
 
     const failedEncodeGate = createGate();
     const failingRunner: HandBrakeRunner = {
@@ -435,7 +494,10 @@ describe("end-to-end operations dashboard workflow", () => {
           Origin: trustedOrigin,
           "Sec-Fetch-Site": "same-origin",
         },
-        body: JSON.stringify({ encodeJobId: queuedEncodeJob.id }),
+        body: JSON.stringify({
+          action: "requeue",
+          encodeJobId: queuedEncodeJob.id,
+        }),
       }),
       () => access,
       runtimeConfig,

@@ -1100,6 +1100,12 @@ h3 {
   color: #e89a90;
 }
 
+.status-cancelled {
+  border-color: #53686f;
+  background: rgba(85, 113, 122, 0.14);
+  color: #a9c4cd;
+}
+
 .progress-row {
   margin-top: 1rem;
   color: #b8c8c3;

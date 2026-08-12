@@ -348,6 +348,95 @@ describe("Encode Jobs API", () => {
     expect(access.encodeJobs.list()).toHaveLength(1);
   });
 
+  it("cancels only queued Encode Jobs through a trusted explicit command", async () => {
+    const access = dataAccessFixture.create();
+    const reviewed = createSelection(access, "cancel");
+    completeCatalogReview(access, reviewed.archive.id);
+    const profile = access.encodingProfiles.create({
+      key: "cancel-profile",
+      displayName: "Cancel profile",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const queued = access.encodeJobs.enqueue({
+      discSelectionId: reviewed.selection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Encode API cancel.mkv",
+    });
+    const config = () => ({
+      mediaLibraryPath: "/media/movies",
+      webTrustedOrigin: "http://localhost:3000",
+    });
+    const cancel = (encodeJobId: string, origin = "http://localhost:3000") =>
+      createEncodeJobsRoute(
+        new Request("http://localhost:3000/api/encode-jobs", {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            Host: "localhost:3000",
+            Origin: origin,
+            "Sec-Fetch-Site": origin === "http://localhost:3000"
+              ? "same-origin"
+              : "cross-site",
+          },
+          body: JSON.stringify({ action: "cancel", encodeJobId }),
+        }),
+        () => access,
+        config,
+      );
+
+    const cancelled = await cancel(queued.id);
+    expect(cancelled.status).toBe(200);
+    expect((await cancelled.json()).job).toMatchObject({
+      id: queued.id,
+      status: "cancelled",
+      progressPercent: 0,
+      completedAt: null,
+    });
+    expect((await cancel(queued.id)).status).toBe(409);
+
+    const runningProfile = access.encodingProfiles.create({
+      key: "running-cancel-profile",
+      displayName: "Running cancel profile",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const runningJob = access.encodeJobs.enqueue({
+      discSelectionId: reviewed.selection.id,
+      encodingProfileId: runningProfile.id,
+      outputPath: "/media/movies/Encode API running cancel.mkv",
+    });
+    expect(access.encodeJobs.claimNext("route-running-cancel")?.id).toBe(
+      runningJob.id,
+    );
+    expect((await cancel(runningJob.id)).status).toBe(409);
+    expect((await cancel("missing-job")).status).toBe(404);
+    expect((await cancel(queued.id, "https://attacker.example")).status).toBe(
+      403,
+    );
+
+    const malformed = await createEncodeJobsRoute(
+      new Request("http://localhost:3000/api/encode-jobs", {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+        },
+        body: JSON.stringify({ action: "cancel", encodeJobId: "" }),
+      }),
+      () => access,
+      config,
+    );
+    expect(malformed.status).toBe(400);
+    expect(access.encodeJobs.list().map((job) => [job.id, job.status])).toEqual(
+      expect.arrayContaining([
+        [runningJob.id, "running"],
+        [queued.id, "cancelled"],
+      ]),
+    );
+  });
+
   it("rejects unreviewed selections and inactive profile versions without queueing", async () => {
     const access = dataAccessFixture.create();
     const unreviewed = createSelection(access, "blocked");

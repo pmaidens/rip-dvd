@@ -45,6 +45,8 @@ type ConcurrentWorkerResult =
       outcome:
         | "activated"
         | "archived"
+        | "cancelled"
+        | "claimed"
         | "created"
         | "enqueued"
         | "rejected"
@@ -81,6 +83,8 @@ type ConcurrentOperation =
       encodingProfileId: EncodingProfileId;
       outputPath: string;
     }
+  | { operation: "cancel-encode"; encodeJobId: EncodeJobId }
+  | { operation: "claim-encode" }
   | {
       operation: "complete-catalog-review";
       originalDiscArchiveId: OriginalDiscArchiveId;
@@ -3127,6 +3131,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
+        name: "20260812142359_even_human_robot",
+      },
+      {
         name: "20260812011518_optical_drive_present_path_identity",
       },
       {
@@ -3144,9 +3151,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       {
         name: "20260805163203_unique_gideon",
       },
-      {
-        name: "20260805142313_glamorous_rage",
-      },
     ]);
     expect(
       sqlite
@@ -3156,6 +3160,160 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .get(),
     ).toEqual({ resolved: 1 });
     sqlite.close();
+  });
+
+  it("migrates existing Encode Job outcomes before accepting Cancelled", () => {
+    const databasePath = createTestDatabasePath();
+    const sqlite = new DatabaseSync(databasePath);
+    const precedingMigrations = [
+      "20260722045326_core-catalog-and-queues",
+      "20260726160810_encoding-profile-active-state",
+      "20260802150655_optical-drive-configuration-default",
+      "20260802190921_optical-drive-configuration-default-resolved",
+      "20260803050348_pretty_living_mummy",
+      "20260803175923_gorgeous_wendell_rand",
+      "20260803213207_catalog-review-upgrade-guard",
+      "20260804011718_catalog-item-other-kind",
+      "20260804051834_legacy-cutover-fence",
+      "20260804143147_durable-legacy-cutover-staging",
+      "20260804182121_dizzy_wither",
+      "20260804184603_tense_zzzax",
+      "20260805005453_outstanding_texas_twister",
+      "20260805015911_heavy_franklin_richards",
+      "20260805022523_far_archangel",
+      "20260805142313_glamorous_rage",
+      "20260805163203_unique_gideon",
+      "20260806204012_burly_johnny_storm",
+      "20260807000001_explicit-filesystem-verification",
+      "20260811051606_blue_oracle",
+      "20260811214753_archive-job-progress-phase",
+      "20260812011518_optical_drive_present_path_identity",
+    ];
+    for (const migrationName of precedingMigrations) {
+      const migration = readFileSync(
+        new URL(`../drizzle/${migrationName}/migration.sql`, import.meta.url),
+        "utf8",
+      );
+      for (const statement of migration.split("--> statement-breakpoint")) {
+        if (statement.trim()) {
+          sqlite.exec(statement);
+        }
+      }
+    }
+    sqlite.exec(`
+      create table __drizzle_migrations (
+        id integer primary key,
+        hash text not null,
+        created_at numeric,
+        name text,
+        applied_at text
+      );
+    `);
+    const recordMigration = sqlite.prepare(`
+      insert into __drizzle_migrations (hash, created_at, name)
+      values (?, 0, ?)
+    `);
+    for (const migrationName of precedingMigrations) {
+      recordMigration.run(`pre-cancel-${migrationName}`, migrationName);
+    }
+    sqlite.exec(`
+      insert into optical_drives (
+        id, device_path, is_present, last_seen_at, created_at, updated_at
+      ) values ('pre-cancel-drive', '/dev/pre-cancel', 1, 1, 1, 1);
+      insert into detected_discs (
+        id, optical_drive_id, disc_kind, fingerprint, status, detected_at,
+        created_at, updated_at
+      ) values (
+        'pre-cancel-disc', 'pre-cancel-drive', 'dvd', 'pre-cancel-disc',
+        'archived', 1, 1, 1
+      );
+      insert into original_disc_archives (
+        id, detected_disc_id, disc_kind, archive_format, archive_path,
+        fingerprint, archived_at, catalog_reviewed_at, created_at, updated_at
+      ) values (
+        'pre-cancel-archive', 'pre-cancel-disc', 'dvd', 'iso',
+        '/media/originals/pre-cancel.iso', 'pre-cancel-disc', 1, 1, 1, 1
+      );
+      insert into media_items (
+        id, kind, title, created_at, updated_at
+      ) values ('pre-cancel-movie', 'movie', 'Pre-cancel Movie', 1, 1);
+      insert into disc_selections (
+        id, original_disc_archive_id, media_item_id, source_key, kind,
+        created_at, updated_at
+      ) values (
+        'pre-cancel-selection', 'pre-cancel-archive', 'pre-cancel-movie',
+        'dvd:main-feature', 'main_feature', 1, 1
+      );
+      insert into archive_jobs (
+        id, detected_disc_id, original_disc_archive_id, status,
+        progress_phase, progress_percent, created_at, updated_at
+      ) values (
+        'pre-cancel-archive-job', 'pre-cancel-disc', 'pre-cancel-archive',
+        'completed', 'finalizing', 100, 1, 1
+      );
+    `);
+    const insertProfile = sqlite.prepare(`
+      insert into encoding_profiles (
+        id, key, display_name, media_domain, version, is_active, settings,
+        created_at, updated_at
+      ) values (?, ?, ?, 'dvd_video', 1, 1, '{}', 1, 1)
+    `);
+    const insertJob = sqlite.prepare(`
+      insert into encode_jobs (
+        id, disc_selection_id, encoding_profile_id, output_path,
+        reserves_output_path, status, progress_percent, created_at, updated_at
+      ) values (?, 'pre-cancel-selection', ?, ?, ?, ?, ?, 1, 1)
+    `);
+    for (const [index, status] of [
+      "queued",
+      "running",
+      "completed",
+      "failed",
+    ].entries()) {
+      const profileId = `pre-cancel-profile-${status}`;
+      insertProfile.run(profileId, profileId, `Pre-cancel ${status}`);
+      insertJob.run(
+        `pre-cancel-job-${status}`,
+        profileId,
+        `/media/movies/pre-cancel-${status}.mkv`,
+        status === "failed" ? 0 : 1,
+        status,
+        status === "completed" ? 100 : index,
+      );
+    }
+    sqlite.close();
+
+    const migrated = openTestDatabase(databasePath);
+    expect(
+      migrated.encodeJobs.list().map((job) => ({
+        id: job.id,
+        status: job.status,
+      })),
+    ).toEqual(expect.arrayContaining([
+      { id: "pre-cancel-job-queued", status: "queued" },
+      { id: "pre-cancel-job-running", status: "running" },
+      { id: "pre-cancel-job-completed", status: "completed" },
+      { id: "pre-cancel-job-failed", status: "failed" },
+    ]));
+    expect(
+      migrated.encodeJobs.cancelQueued(
+        "pre-cancel-job-queued" as EncodeJobId,
+      ),
+    ).toMatchObject({ status: "cancelled" });
+    migrated.close();
+
+    const migratedSqlite = new DatabaseSync(databasePath);
+    expect(() =>
+      migratedSqlite.prepare(`
+        update encode_jobs set status = 'unsupported' where id = ?
+      `).run("pre-cancel-job-queued")
+    ).toThrow(/encode_jobs_status_check/);
+    expect(() =>
+      migratedSqlite.prepare(`
+        update archive_jobs set status = 'cancelled' where id = ?
+      `).run("pre-cancel-archive-job")
+    ).toThrow(/archive_jobs_status_check/);
+    migratedSqlite.close();
   });
 
   it("backfills tentative completion authority from the immediate predecessor", () => {
@@ -6036,6 +6194,315 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       encodingProfileId: activeDvdProfile.id,
       status: "queued",
     });
+    access.close();
+  });
+
+  it("cancels queued Encode Jobs as retained history and releases their output reservation", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/cancel-queued",
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "cancel-queued-encode-disc",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Cancel Queued.iso",
+      fingerprint: "cancel-queued-encode-disc",
+    });
+    const item = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Cancel Queued",
+    });
+    const selection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: item.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    completeCatalogReview(access, archive.id);
+    const firstProfile = access.encodingProfiles.create({
+      key: "cancel-queued-first",
+      displayName: "Cancel queued first",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const secondProfile = access.encodingProfiles.create({
+      key: "cancel-queued-second",
+      displayName: "Cancel queued second",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const outputPath = "/media/movies/Cancel Queued.mkv";
+    const queued = access.encodeJobs.enqueue({
+      discSelectionId: selection.id,
+      encodingProfileId: firstProfile.id,
+      outputPath,
+    });
+
+    expect(access.encodeJobs.cancelQueued(queued.id)).toMatchObject({
+      id: queued.id,
+      status: "cancelled",
+      progressPercent: 0,
+    });
+    expect(access.encodeJobs.list(["cancelled"])).toEqual([
+      expect.objectContaining({ id: queued.id, status: "cancelled" }),
+    ]);
+    expect(access.encodeJobs.claimNext("cancelled-job-worker")).toBeNull();
+    expect(() => access.encodeJobs.cancelQueued(queued.id)).toThrow(
+      InvalidStatusTransitionError,
+    );
+    expect(
+      access.encodeJobs.enqueue({
+        discSelectionId: selection.id,
+        encodingProfileId: secondProfile.id,
+        outputPath,
+      }),
+    ).toMatchObject({ status: "queued", outputPath });
+    expect(() => access.encodeJobs.requeue(queued.id)).toThrow(
+      `Encode Job output is already assigned: ${outputPath}`,
+    );
+    access.close();
+  });
+
+  it("requeues a cancelled Encode Job only while its Disc Selection remains reviewed", () => {
+    const access = openTestDatabase();
+    const contentId = `sha256:${"d".repeat(64)}`;
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/requeue-cancelled",
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: contentId,
+      scanData: {
+        schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+        contentId,
+        titles: [{
+          number: 1,
+          durationSeconds: 2_400,
+          chapters: 8,
+          audioStreams: [],
+          subtitles: [],
+        }],
+      },
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Requeue Cancelled.iso",
+      fingerprint: contentId,
+    });
+    const item = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Requeue Cancelled",
+    });
+    const selection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: item.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    const profile = access.encodingProfiles.create({
+      key: "requeue-cancelled",
+      displayName: "Requeue cancelled",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    completeCatalogReview(access, archive.id);
+    const job = access.encodeJobs.enqueue({
+      discSelectionId: selection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Requeue Cancelled.mkv",
+    });
+
+    access.encodeJobs.cancelQueued(job.id);
+    expect(access.encodeJobs.requeue(job.id)).toMatchObject({
+      id: job.id,
+      status: "queued",
+    });
+    access.encodeJobs.cancelQueued(job.id);
+
+    const extraItem = access.catalog.createMediaItem({
+      kind: "bonus_feature",
+      title: "Requeue Cancelled Extra",
+    });
+    access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: extraItem.id,
+      sourceIdentity: {
+        kind: "dvd_chapters",
+        titleNumber: 1,
+        chapterStart: 1,
+        chapterEnd: 1,
+      },
+    });
+    expect(() => access.encodeJobs.requeue(job.id)).toThrow(
+      InvalidStatusTransitionError,
+    );
+    expect(access.encodeJobs.list(["cancelled"])).toEqual([
+      expect.objectContaining({ id: job.id, status: "cancelled" }),
+    ]);
+
+    completeCatalogReview(access, archive.id);
+    expect(access.encodeJobs.requeue(job.id)).toMatchObject({
+      id: job.id,
+      status: "queued",
+    });
+    access.close();
+  });
+
+  it("keeps a retained final reserved when its queued re-encode is cancelled", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/cancel-reencode",
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "cancel-reencode-disc",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Cancel Reencode.iso",
+      fingerprint: "cancel-reencode-disc",
+    });
+    const item = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Cancel Reencode",
+    });
+    const selection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: item.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    completeCatalogReview(access, archive.id);
+    const originalProfile = access.encodingProfiles.create({
+      key: "cancel-reencode-original",
+      displayName: "Cancel reencode original",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const competingProfile = access.encodingProfiles.create({
+      key: "cancel-reencode-competing",
+      displayName: "Cancel reencode competing",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const outputPath = "/media/movies/Cancel Reencode.mkv";
+    const job = access.encodeJobs.enqueue({
+      discSelectionId: selection.id,
+      encodingProfileId: originalProfile.id,
+      outputPath,
+    });
+    const claim = access.encodeJobs.claimNext("completed-before-cancel");
+    if (!claim) {
+      throw new Error("Expected Encode Job claim");
+    }
+    access.encodeJobs.complete(claim);
+    access.encodeJobs.requeue(job.id);
+
+    expect(access.encodeJobs.cancelQueued(job.id)).toMatchObject({
+      id: job.id,
+      status: "cancelled",
+      replaceExistingOutput: true,
+    });
+    expect(() =>
+      access.encodeJobs.enqueue({
+        discSelectionId: selection.id,
+        encodingProfileId: competingProfile.id,
+        outputPath,
+      })
+    ).toThrow(`Encode Job output is already assigned: ${outputPath}`);
+    expect(access.encodeJobs.requeue(job.id)).toMatchObject({
+      id: job.id,
+      status: "queued",
+      replaceExistingOutput: true,
+      outputPath,
+    });
+    access.close();
+  });
+
+  it("atomically resolves queued Encode Job cancellation against claiming", async () => {
+    const databasePath = createTestDatabasePath();
+    const access = openTestDatabase(databasePath);
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/cancel-claim-race",
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "cancel-claim-race-disc",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Cancel Claim Race.iso",
+      fingerprint: "cancel-claim-race-disc",
+    });
+    const item = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Cancel Claim Race",
+    });
+    const selection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: item.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    completeCatalogReview(access, archive.id);
+    const profile = access.encodingProfiles.create({
+      key: "cancel-claim-race",
+      displayName: "Cancel claim race",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const job = access.encodeJobs.enqueue({
+      discSelectionId: selection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Cancel Claim Race.mkv",
+    });
+
+    const results = await runBarrierWorkers({
+      databasePath,
+      mode: "operation",
+      operations: [
+        { operation: "cancel-encode", encodeJobId: job.id },
+        { operation: "claim-encode" },
+      ],
+    });
+    const winners = results.filter(
+      (result): result is { outcome: "cancelled" | "claimed"; id: string } =>
+        typeof result === "object" &&
+        result !== null &&
+        "outcome" in result &&
+        (result.outcome === "cancelled" || result.outcome === "claimed"),
+    );
+    expect(winners).toHaveLength(1);
+    expect(winners[0]?.id).toBe(job.id);
+    expect(access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: job.id,
+        status: winners[0]?.outcome === "cancelled" ? "cancelled" : "running",
+      }),
+    ]);
     access.close();
   });
 
