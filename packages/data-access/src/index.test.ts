@@ -5988,6 +5988,44 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     access.close();
   });
 
+  it("rotates bounded expired-cancellation recovery so later rows are not starved", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-12T08:00:00.000Z"));
+    const access = openTestDatabase();
+    const claimIds: string[] = [];
+    for (let index = 0; index < 101; index += 1) {
+      const drive = access.catalog.upsertOpticalDrive({
+        devicePath: `/dev/bounded-cancellation-${index}`,
+        isEnabled: true,
+        isPresent: true,
+      });
+      const { disc, inspection } = completeDiscInspection(access, {
+        opticalDriveId: drive.id,
+        mediaGeneration: `bounded-cancellation-${index}`,
+        fingerprint: `bounded-cancellation-${index}`,
+      });
+      const request = access.archiveRequests.create({ detectedDiscId: disc.id });
+      const claim = access.archiveJobs.startForInspection(
+        inspection.id,
+        `bounded-cancellation-worker-${index}`,
+      )!;
+      claimIds.push(claim.id);
+      access.archiveRequests.cancel(request.id);
+      vi.advanceTimersByTime(1);
+    }
+
+    vi.advanceTimersByTime(ARCHIVE_JOB_LEASE_DURATION_MS + 1);
+    const firstPage = access.archiveJobs.listExpiredCancellations();
+    const secondPage = access.archiveJobs.listExpiredCancellations();
+    expect(firstPage).toHaveLength(100);
+    expect(secondPage).toHaveLength(1);
+    expect(new Set([...firstPage, ...secondPage].map(({ id }) => id))).toEqual(
+      new Set(claimIds),
+    );
+    expect(access.archiveJobs.listExpiredCancellations()).toHaveLength(100);
+    access.close();
+  });
+
   it("excludes simultaneous multi-process starts for the same fingerprint or Optical Drive", async () => {
     const databasePath = createTestDatabasePath();
     const access = openTestDatabase(databasePath);

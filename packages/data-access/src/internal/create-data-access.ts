@@ -1351,6 +1351,9 @@ export function createDataAccessInternal(
       token: DiscInspectionClaimToken;
     }
   >();
+  let expiredCancellationCursor:
+    | { id: ArchiveJobId; updatedAt: Date }
+    | undefined;
 
   const access: LegacySidecarDataAccess = {
     readConsistentSnapshot(read) {
@@ -4225,24 +4228,46 @@ export function createDataAccessInternal(
         const expiredBefore = new Date(
           now().getTime() - ARCHIVE_JOB_LEASE_DURATION_MS,
         );
-        return database
-          .select({ job: archiveJobs })
-          .from(archiveJobs)
-          .innerJoin(
-            archiveRequests,
-            eq(archiveRequests.id, archiveJobs.archiveRequestId),
-          )
-          .where(
-            and(
-              eq(archiveJobs.status, "running"),
-              eq(archiveRequests.status, "cancellation_requested"),
-              lte(archiveJobs.updatedAt, expiredBefore),
-            ),
-          )
-          .orderBy(asc(archiveJobs.updatedAt), asc(archiveJobs.id))
-          .limit(JOB_RECOVERY_LIMIT)
-          .all()
-          .map(({ job }) => asRunningArchiveJob(job));
+        const listAfter = (
+          cursor: typeof expiredCancellationCursor,
+        ) => database
+            .select({ job: archiveJobs })
+            .from(archiveJobs)
+            .innerJoin(
+              archiveRequests,
+              eq(archiveRequests.id, archiveJobs.archiveRequestId),
+            )
+            .where(
+              and(
+                eq(archiveJobs.status, "running"),
+                eq(archiveRequests.status, "cancellation_requested"),
+                lte(archiveJobs.updatedAt, expiredBefore),
+                cursor === undefined
+                  ? undefined
+                  : or(
+                      gt(archiveJobs.updatedAt, cursor.updatedAt),
+                      and(
+                        eq(archiveJobs.updatedAt, cursor.updatedAt),
+                        gt(archiveJobs.id, cursor.id),
+                      ),
+                    ),
+              ),
+            )
+            .orderBy(asc(archiveJobs.updatedAt), asc(archiveJobs.id))
+            .limit(JOB_RECOVERY_LIMIT)
+            .all()
+            .map(({ job }) => asRunningArchiveJob(job));
+        let jobs = listAfter(expiredCancellationCursor);
+        if (jobs.length === 0 && expiredCancellationCursor !== undefined) {
+          expiredCancellationCursor = undefined;
+          jobs = listAfter(undefined);
+        }
+        const last = jobs.at(-1);
+        expiredCancellationCursor =
+          jobs.length === JOB_RECOVERY_LIMIT && last !== undefined
+            ? { id: last.id, updatedAt: last.updatedAt }
+            : undefined;
+        return jobs;
       },
 
       finalizeExpiredCancellation(claim) {
