@@ -658,6 +658,20 @@ h1 {
   padding-top: 0.9rem;
 }
 
+.catalog-mapping-proposal-error {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  min-height: 0;
+  margin-top: 0.8rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid #713d37;
+  border-radius: 0.55rem;
+  background: rgba(164, 71, 60, 0.1);
+  font-size: 0.75rem;
+  text-align: left;
+}
+
 .catalog-mapping-proposal fieldset {
   min-width: 0;
   margin: 0;

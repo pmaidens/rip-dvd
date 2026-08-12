@@ -313,6 +313,12 @@ describe("CatalogReviewEditor", () => {
     await act(async () => submit.click());
     expect(container.textContent).toContain("Correct the proposed title");
     expect(container.textContent).toContain("Mapping Proposal");
+    expect(container.querySelector(
+      '.catalog-mapping-proposal [role="alert"]',
+    )?.textContent).toContain("Correct the proposed title");
+    expect(container.querySelector(
+      '.catalog-editor > [role="alert"]',
+    )).toBeNull();
     expect(container.querySelector<HTMLInputElement>(
       '.catalog-mapping-proposal input[name="title"]',
     )?.value).toBe("Corrected Proposal Title");
@@ -537,6 +543,7 @@ describe("CatalogReviewView", () => {
         requestError={
           "Disc Selection selection-1 cannot be deleted because Encode Job history must be preserved"
         }
+        mappingProposalError={null}
         selectionKind="main_feature"
         activeMappingProposal={null}
         onClose={() => undefined}
@@ -683,6 +690,7 @@ describe("CatalogReviewView", () => {
         editingMediaItemId="episode-1"
         isSaving={false}
         requestError={null}
+        mappingProposalError={null}
         selectionKind="main_feature"
         activeMappingProposal={null}
         onClose={() => undefined}

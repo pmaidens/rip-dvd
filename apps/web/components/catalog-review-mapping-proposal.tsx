@@ -36,6 +36,7 @@ export function CatalogReviewMappingProposal({
   proposedTitle,
   mediaItems,
   isSaving,
+  error,
   onCancel,
   onCreate,
 }: {
@@ -43,6 +44,7 @@ export function CatalogReviewMappingProposal({
   proposedTitle: string;
   mediaItems: CatalogReviewMediaItem[];
   isSaving: boolean;
+  error: string | null;
   onCancel(): void;
   onCreate(input: CreateMappingProposalInput): void;
 }) {
@@ -97,6 +99,14 @@ export function CatalogReviewMappingProposal({
           proposal,
         )}. Nothing is created until you submit both together.
       </p>
+      {error ? (
+        <div
+          className="catalog-mapping-proposal-error section-error"
+          role="alert"
+        >
+          {error}
+        </div>
+      ) : null}
       <form className="catalog-form" onSubmit={createProposal}>
         <fieldset>
           <legend>Proposed Media Item</legend>

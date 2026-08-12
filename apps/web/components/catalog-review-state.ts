@@ -135,6 +135,9 @@ export function useCatalogReviewState({
     useState<MappingProposal | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [requestError, setRequestError] = useState<string | null>(null);
+  const [mappingProposalError, setMappingProposalError] = useState<
+    string | null
+  >(null);
   const requestScope = useRef<
     ReturnType<typeof createCatalogReviewRequestScope> | null
   >(null);
@@ -187,12 +190,16 @@ export function useCatalogReviewState({
     command: CatalogReviewCommand,
     complete = false,
     afterMutation?: () => void,
+    errorTarget: "editor" | "mapping_proposal" = "editor",
   ) {
     if (isSaving) {
       return;
     }
     setIsSaving(true);
     setRequestError(null);
+    if (errorTarget === "mapping_proposal") {
+      setMappingProposalError(null);
+    }
     try {
       await mutateCatalogReview(archiveId, command);
       setEditingMediaItemId(null);
@@ -203,11 +210,14 @@ export function useCatalogReviewState({
         await load();
       }
     } catch (error) {
-      setRequestError(
-        error instanceof Error
-          ? error.message
-          : "Catalog review mutation failed",
-      );
+      const message = error instanceof Error
+        ? error.message
+        : "Catalog review mutation failed";
+      if (errorTarget === "mapping_proposal") {
+        setMappingProposalError(message);
+      } else {
+        setRequestError(message);
+      }
     } finally {
       setIsSaving(false);
     }
@@ -267,7 +277,10 @@ export function useCatalogReviewState({
       action: "create_mapping_proposal",
       catalogRevision: state.review.catalogRevision,
       ...input,
-    }, false, () => setActiveMappingProposal(null));
+    }, false, () => {
+      setMappingProposalError(null);
+      setActiveMappingProposal(null);
+    }, "mapping_proposal");
   }
 
   return {
@@ -276,6 +289,7 @@ export function useCatalogReviewState({
     editingMediaItemId,
     isSaving,
     requestError,
+    mappingProposalError,
     selectionKind,
     retry: () => void load(),
     editMediaItem: (id: string) => changeEditingMediaItem(id),
@@ -285,10 +299,12 @@ export function useCatalogReviewState({
     changeSelectionKind: setSelectionKind,
     startMappingProposal: (proposal: MappingProposal) => {
       setRequestError(null);
+      setMappingProposalError(null);
       setActiveMappingProposal(proposal);
     },
     cancelMappingProposal: () => {
       setRequestError(null);
+      setMappingProposalError(null);
       setActiveMappingProposal(null);
     },
     createMappingProposal,

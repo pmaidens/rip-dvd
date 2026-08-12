@@ -23,6 +23,7 @@ interface CatalogReviewViewProps {
   editingMediaItemId: string | null;
   isSaving: boolean;
   requestError: string | null;
+  mappingProposalError: string | null;
   selectionKind: DiscSelectionKind;
   activeMappingProposal: MappingProposal | null;
   onClose(): void;
@@ -46,6 +47,7 @@ export function CatalogReviewView({
   editingMediaItemId,
   isSaving,
   requestError,
+  mappingProposalError,
   selectionKind,
   activeMappingProposal,
   onClose,
@@ -119,6 +121,7 @@ export function CatalogReviewView({
           mediaItems={review.mediaItems}
           activeMappingProposal={activeMappingProposal}
           isSaving={isSaving}
+          mappingProposalError={mappingProposalError}
           onStartMappingProposal={onStartMappingProposal}
           onCancelMappingProposal={onCancelMappingProposal}
           onCreateMappingProposal={onCreateMappingProposal}
@@ -180,6 +183,7 @@ export function CatalogReviewEditor({
       editingMediaItemId={review.editingMediaItemId}
       isSaving={review.isSaving}
       requestError={review.requestError}
+      mappingProposalError={review.mappingProposalError}
       selectionKind={review.selectionKind}
       activeMappingProposal={review.activeMappingProposal}
       onClose={onClose}
