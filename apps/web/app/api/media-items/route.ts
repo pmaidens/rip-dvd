@@ -1,5 +1,6 @@
 import {
   DomainInvariantError,
+  normalizeMediaItemSearchTitle,
   type DataAccess,
   type MediaItem,
   type MediaItemId,
@@ -32,15 +33,6 @@ function serializeMediaItem(item: MediaItem) {
   };
 }
 
-function normalizeTitle(value: string): string {
-  return value
-    .normalize("NFKC")
-    .toLocaleLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, " ")
-    .trim()
-    .replace(/\s+/g, " ");
-}
-
 function recordOffset(parameters: URLSearchParams): number | null {
   const values = parameters.getAll("offset");
   if (values.length === 0) {
@@ -68,7 +60,7 @@ export async function createMediaItemSearchRoute(
   const parameters = new URL(request.url).searchParams;
   const queryValues = parameters.getAll("query");
   const query = queryValues[0]?.trim() ?? "";
-  const normalizedQuery = normalizeTitle(query);
+  const normalizedQuery = normalizeMediaItemSearchTitle(query);
   const offset = recordOffset(parameters);
   if (
     [...parameters.keys()].some((key) => key !== "query" && key !== "offset") ||
@@ -112,7 +104,8 @@ export async function createMediaItemSearchRoute(
             ancestors: ancestors.map(serializeMediaItem),
             suggestion: mediaItem.title === query
               ? "exact"
-              : normalizeTitle(mediaItem.title) === normalizedQuery
+              : normalizeMediaItemSearchTitle(mediaItem.title) ===
+                  normalizedQuery
               ? "normalized"
               : null,
           };

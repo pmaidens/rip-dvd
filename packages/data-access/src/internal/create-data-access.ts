@@ -99,6 +99,7 @@ import {
   StaleJobAttemptError,
 } from "../errors.js";
 import type { LegacySidecarDataAccess } from "../legacy-sidecar-types.js";
+import { normalizeMediaItemSearchTitle } from "../media-item-title-search.js";
 import type {
   ArchiveJobClaimToken,
   ArchiveJobId,
@@ -304,6 +305,14 @@ function openMigratedDatabase(
 
   try {
     sqlite = new DatabaseSync(databasePath);
+    sqlite.function(
+      "rip_dvd_normalize_media_item_title",
+      { deterministic: true },
+      (value) =>
+        typeof value === "string"
+          ? normalizeMediaItemSearchTitle(value)
+          : null,
+    );
     sqlite.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
     sqlite.exec("PRAGMA foreign_keys = ON");
     if (sqlite.prepare("PRAGMA foreign_key_check").get() !== undefined) {
@@ -2507,25 +2516,25 @@ export function createDataAccessInternal(
             `Media Item search limit must be a safe integer between 1 and ${MEDIA_ITEM_SEARCH_LIMIT}`,
           );
         }
-        const normalizedTerms = searchQuery
-          .normalize("NFKC")
-          .toLocaleLowerCase()
-          .replace(/[^\p{L}\p{N}]+/gu, " ")
-          .trim()
-          .split(/\s+/)
-          .filter(Boolean);
-        if (normalizedTerms.length === 0) {
+        const normalizedQuery = normalizeMediaItemSearchTitle(searchQuery);
+        if (normalizedQuery.length === 0) {
           throw new DomainInvariantError(
             "Media Item search query must contain a letter or number",
           );
         }
-        const pattern = `%${normalizedTerms.join("%")}%`;
+        const pattern = `%${normalizedQuery.replaceAll(" ", "%")}%`;
+        const normalizedTitle =
+          sql`rip_dvd_normalize_media_item_title(${mediaItems.title})`;
         const query = database
           .select()
           .from(mediaItems)
-          .where(sql`lower(${mediaItems.title}) like ${pattern}`)
+          .where(sql`${normalizedTitle} like ${pattern}`)
           .orderBy(
-            sql`case when lower(${mediaItems.title}) = ${searchQuery.toLocaleLowerCase()} then 0 else 1 end`,
+            sql`case
+              when ${mediaItems.title} = ${searchQuery} then 0
+              when ${normalizedTitle} = ${normalizedQuery} then 1
+              else 2
+            end`,
             asc(mediaItems.title),
             asc(mediaItems.id),
           );
