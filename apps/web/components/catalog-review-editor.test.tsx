@@ -153,13 +153,13 @@ describe("CatalogReviewEditor", () => {
       requests[1]!,
       catalogReview({ archiveId: "archive-b", discLabel: "CURRENT_ARCHIVE" }),
     );
-    expect(container.textContent).toContain("Catalog CURRENT_ARCHIVE");
+    expect(container.textContent).toContain("Catalog Current Archive");
 
     await resolveRequest(
       requests[0]!,
       catalogReview({ archiveId: "archive-a", discLabel: "STALE_ARCHIVE" }),
     );
-    expect(container.textContent).toContain("Catalog CURRENT_ARCHIVE");
+    expect(container.textContent).toContain("Catalog Current Archive");
     expect(container.textContent).not.toContain("STALE_ARCHIVE");
   });
 
@@ -285,7 +285,7 @@ describe("CatalogReviewView", () => {
     ));
   });
 
-  it("shows raw DVD coordinates separately from editable hierarchy and reviewed mappings", () => {
+  it("shows archived DVD evidence separately from editable hierarchy and reviewed mappings", () => {
     const html = renderToStaticMarkup(
       <CatalogReviewView
         state={{
@@ -294,7 +294,7 @@ describe("CatalogReviewView", () => {
             catalogRevision: "2026-08-03T18:00:00.000Z",
             archive: {
               id: "archive-1",
-              discLabel: "EPISODE_DISC",
+              discLabel: "EPISODE_DISC_2_2005",
               discKind: "dvd",
               archiveFormat: "iso",
               archivedAt: "2026-08-03T18:00:00.000Z",
@@ -306,6 +306,22 @@ describe("CatalogReviewView", () => {
                 number: 1,
                 durationSeconds: 2_400,
                 chapters: 8,
+                audioStreams: [{
+                  id: 128,
+                  language: "English",
+                  format: "AC3",
+                  channels: 6,
+                }],
+                subtitles: [{
+                  id: 32,
+                  language: "English",
+                  content: "Normal",
+                }],
+              },
+              {
+                number: 2,
+                durationSeconds: 3_600,
+                chapters: 12,
                 audioStreams: [],
                 subtitles: [],
               }],
@@ -385,13 +401,24 @@ describe("CatalogReviewView", () => {
       />,
     );
 
-    expect(html).toContain("Catalog EPISODE_DISC");
+    expect(html).toContain("Catalog Episode Disc 2 2005");
     expect(html).toContain(
       "Disc Selection selection-1 cannot be deleted because Encode Job history must be preserved",
     );
-    expect(html).toContain("Raw DVD title map");
+    expect(html).toContain("Archived Scan Evidence");
+    expect(html).toContain("Original volume label");
+    expect(html).toContain("EPISODE_DISC_2_2005");
     expect(html).toContain("Title 1");
+    expect(html).toContain("40m 0s");
     expect(html).toContain("8 chapters");
+    expect(html).toContain("Audio: English");
+    expect(html).toContain("Subtitles: English");
+    expect(html).toContain("Episode or long-extra candidate");
+    expect(html).toContain("Title 2");
+    expect(html).toContain("Feature-length candidate");
+    expect(html).toContain("Longest title");
+    expect(html).toContain("Audio stream 0x80");
+    expect(html).toContain("Subtitle stream 0x20");
     expect(html).toContain("Media Item hierarchy");
     expect(html).toContain("Chapter Show");
     expect(html).toContain("Parent context");

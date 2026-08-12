@@ -206,13 +206,17 @@ class EncodeQueueDiscoveryTests(unittest.TestCase):
                 "--originals-library",
                 str(originals),
             ]
+            messages = []
 
             with patch.object(sys, "argv", argv):
-                with patch("rip_dvd.cli.scan_dvd_titles", return_value=sample_scan()) as scan:
-                    code = main()
+                with patch("rip_dvd.cli.log", side_effect=messages.append):
+                    with patch("rip_dvd.cli.scan_dvd_titles", return_value=sample_scan()) as scan:
+                        code = main()
 
             self.assertEqual(code, 0)
             scan.assert_called_once_with(str(device))
+            self.assertIn("Feature-length candidate", "\n".join(messages))
+            self.assertIn("Short or extra candidate", "\n".join(messages))
 
     def test_failed_output_path_does_not_overwrite_existing_failed_file(self):
         with tempfile.TemporaryDirectory() as temp:
