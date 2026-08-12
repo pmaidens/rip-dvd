@@ -5906,7 +5906,7 @@ describe("node HandBrake runner", () => {
     expect(runner.isActive?.("/partial.mkv")).toBe(false);
   });
 
-  it("retains output ownership after timeout until the child closes", async () => {
+  it("retains the child and output ownership after timeout until close", async () => {
     vi.useFakeTimers();
     const child = Object.assign(new EventEmitter(), {
       stdout: new PassThrough(),
@@ -5931,7 +5931,7 @@ describe("node HandBrake runner", () => {
     expect(child.kill).toHaveBeenCalledWith("SIGKILL");
     expect(child.stdout.destroyed).toBe(true);
     expect(child.stderr.destroyed).toBe(true);
-    expect(child.unref).toHaveBeenCalledOnce();
+    expect(child.unref).not.toHaveBeenCalled();
     expect(runner.isActive?.("/partial.mkv")).toBe(true);
     child.emit("close", null, "SIGKILL");
     expect(runner.isActive?.("/partial.mkv")).toBe(false);
@@ -6011,4 +6011,95 @@ describe("node HandBrake runner", () => {
     expect(runner.isActive?.("/partial.mkv")).toBe(false);
     vi.useRealTimers();
   });
+
+  it.runIf(process.platform !== "win32")(
+    "keeps a real uncooperative child referenced until SIGKILL closure",
+    async () => {
+      const runnerModuleUrl = new URL(
+        "./handbrake-runner.ts",
+        import.meta.url,
+      ).href;
+      const stubbornChildSource = String.raw`
+        process.on("SIGTERM", () => {});
+        process.stdout.write("READY\n");
+        setInterval(() => {}, 1_000);
+      `;
+      const harnessSource = String.raw`
+        import { spawn } from "node:child_process";
+        import { createNodeHandBrakeRunner } from ${JSON.stringify(runnerModuleUrl)};
+
+        const abortController = new AbortController();
+        const outputPath = "/controlled-uncooperative-partial.mkv";
+        const runner = createNodeHandBrakeRunner({
+          terminationGraceMs: 25,
+          spawnProcess() {
+            const child = spawn(
+              process.execPath,
+              ["--input-type=module", "--eval", ${JSON.stringify(stubbornChildSource)}],
+              { stdio: ["ignore", "pipe", "pipe"] },
+            );
+            const kill = child.kill.bind(child);
+            child.kill = (signal) => {
+              process.stdout.write("KILL:" + String(signal) + "\n");
+              return kill(signal);
+            };
+            return child;
+          },
+        });
+        let cancellationRequested = false;
+        const running = runner.run({
+          arguments_: [],
+          onOutput(text) {
+            if (!cancellationRequested && text.includes("READY")) {
+              cancellationRequested = true;
+              abortController.abort(new Error("cancel controlled encode"));
+            }
+          },
+          outputPath,
+          signal: abortController.signal,
+        });
+        await running.catch(() => process.stdout.write("RUN_REJECTED\n"));
+        await runner.whenInactive(outputPath);
+        process.stdout.write("CLOSE_OBSERVED\n");
+      `;
+      const harness = spawnProcess(
+        process.execPath,
+        [
+          "--no-warnings",
+          "--experimental-strip-types",
+          "--input-type=module",
+          "--eval",
+          harnessSource,
+        ],
+        { stdio: ["ignore", "pipe", "pipe"] },
+      );
+      if (harness.pid === undefined) {
+        throw new Error("HandBrake liveness harness did not start");
+      }
+      controlledProcessIds.add(harness.pid);
+      let stdout = "";
+      let stderr = "";
+      harness.stdout.setEncoding("utf8");
+      harness.stderr.setEncoding("utf8");
+      harness.stdout.on("data", (chunk: string) => {
+        stdout += chunk;
+      });
+      harness.stderr.on("data", (chunk: string) => {
+        stderr += chunk;
+      });
+
+      const [code, signal] = await once(harness, "close");
+      controlledProcessIds.delete(harness.pid);
+
+      expect({ code, signal, stderr }).toEqual({
+        code: 0,
+        signal: null,
+        stderr: "",
+      });
+      expect(stdout).toContain("KILL:SIGTERM\n");
+      expect(stdout).toContain("RUN_REJECTED\n");
+      expect(stdout).toContain("KILL:SIGKILL\n");
+      expect(stdout).toContain("CLOSE_OBSERVED\n");
+    },
+  );
 });

@@ -33,7 +33,6 @@ interface HandBrakeChildProcess {
   stderr: Readable;
   stdout: Readable;
   kill(signal: NodeJS.Signals): boolean;
-  unref(): void;
   once(event: "error", listener: (error: Error) => void): void;
   once(
     event: "close",
@@ -186,13 +185,21 @@ function requireLinuxOutputInactive(outputPath: string): void {
 
 export function createNodeHandBrakeRunner({
   spawnProcess = spawn as SpawnHandBrake,
+  terminationGraceMs = HANDBRAKE_TERMINATION_GRACE_MS,
   timeoutMs = HANDBRAKE_TIMEOUT_MS,
 }: {
   spawnProcess?: SpawnHandBrake;
+  terminationGraceMs?: number;
   timeoutMs?: number;
 } = {}): HandBrakeRunner {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
     throw new Error("HandBrake timeout is invalid");
+  }
+  if (
+    !Number.isSafeInteger(terminationGraceMs) ||
+    terminationGraceMs <= 0
+  ) {
+    throw new Error("HandBrake termination grace is invalid");
   }
   const activeOutputs = new Set<string>();
   const inactiveWaiters = new Map<
@@ -282,7 +289,6 @@ export function createNodeHandBrakeRunner({
           }
           child.stdout.destroy();
           child.stderr.destroy();
-          child.unref();
           finish(error);
         };
         const capture = (chunk: Buffer) => {
@@ -308,7 +314,7 @@ export function createNodeHandBrakeRunner({
             } catch {
               // Process closure remains the ownership boundary.
             }
-          }, HANDBRAKE_TERMINATION_GRACE_MS);
+          }, terminationGraceMs);
         };
         const timeout = setTimeout(() => {
           cancel(new Error("HandBrake timed out"));
