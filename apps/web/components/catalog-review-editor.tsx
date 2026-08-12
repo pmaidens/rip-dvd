@@ -27,6 +27,7 @@ interface CatalogReviewViewProps {
   editingMediaItemId: string | null;
   isSaving: boolean;
   requestError: string | null;
+  mutationNotice?: string | null;
   mappingProposalError: string | null;
   selectionKind: DiscSelectionKind;
   activeMappingProposal: MappingProposal | null;
@@ -48,6 +49,7 @@ interface CatalogReviewViewProps {
     input: CreateEpisodicMappingProposalInput,
   ): void;
   onSaveMediaItem(input: SaveMediaItemInput): void;
+  onDeleteMediaItem(id: string): void;
   onCreateDiscSelection(input: CreateDiscSelectionInput): void;
   onDeleteDiscSelection(id: string): void;
   onCompleteReview(outcome: CompletedCatalogReviewOutcome): void;
@@ -58,6 +60,7 @@ export function CatalogReviewView({
   editingMediaItemId,
   isSaving,
   requestError,
+  mutationNotice,
   mappingProposalError,
   selectionKind,
   activeMappingProposal,
@@ -77,6 +80,7 @@ export function CatalogReviewView({
   onCancelEpisodicMappingProposal,
   onCreateEpisodicMappingProposal,
   onSaveMediaItem,
+  onDeleteMediaItem,
   onCreateDiscSelection,
   onDeleteDiscSelection,
   onCompleteReview,
@@ -133,6 +137,11 @@ export function CatalogReviewView({
           {requestError}
         </div>
       ) : null}
+      {mutationNotice ? (
+        <div className="section-message" role="status" aria-live="polite">
+          {mutationNotice}
+        </div>
+      ) : null}
 
       <div className="catalog-editor-grid">
         <CatalogReviewEvidence
@@ -153,6 +162,7 @@ export function CatalogReviewView({
         />
 
         <CatalogReviewMediaItems
+          archiveId={review.archive.id}
           mediaItems={review.mediaItems}
           mappedMediaItemIds={review.discSelections.map(
             (selection) => selection.mediaItemId,
@@ -162,6 +172,7 @@ export function CatalogReviewView({
           onEdit={onEditMediaItem}
           onCancelEdit={onCancelEdit}
           onSave={onSaveMediaItem}
+          onDelete={onDeleteMediaItem}
         />
 
         <section
@@ -211,6 +222,7 @@ export function CatalogReviewEditor({
       editingMediaItemId={review.editingMediaItemId}
       isSaving={review.isSaving}
       requestError={review.requestError}
+      mutationNotice={review.mutationNotice}
       mappingProposalError={review.mappingProposalError}
       selectionKind={review.selectionKind}
       activeMappingProposal={review.activeMappingProposal}
@@ -230,6 +242,7 @@ export function CatalogReviewEditor({
       onCancelEpisodicMappingProposal={review.cancelEpisodicMappingProposal}
       onCreateEpisodicMappingProposal={review.createEpisodicMappingProposal}
       onSaveMediaItem={review.saveMediaItem}
+      onDeleteMediaItem={review.deleteMediaItem}
       onCreateDiscSelection={review.createDiscSelection}
       onDeleteDiscSelection={review.deleteDiscSelection}
       onCompleteReview={review.completeReview}

@@ -1051,6 +1051,80 @@ describe("Catalog Review API", () => {
     expect(last.coverage).toEqual(first.coverage);
   });
 
+  it("bounds maintenance reads for a full selection page plus ancestors", async () => {
+    const access = dataAccessFixture.create();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const contentId = `sha256:${"6".repeat(64)}`;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: contentId,
+      scanData: {
+        schemaVersion: 2,
+        contentId,
+        titles: Array.from({ length: 101 }, (_, index) => ({
+          number: index + 1,
+          durationSeconds: 60,
+          chapters: 1,
+          audioStreams: [],
+          subtitles: [],
+        })),
+      },
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Many Items.iso",
+      fingerprint: contentId,
+    });
+    const show = access.catalog.createMediaItem({
+      kind: "tv_show",
+      title: "Many Items Show",
+    });
+    const season = access.catalog.createMediaItem({
+      parentId: show.id,
+      kind: "season",
+      title: "Many Items Season",
+      seasonNumber: 1,
+    });
+    const episodes = Array.from({ length: 101 }, (_, index) =>
+      access.catalog.createMediaItem({
+        parentId: season.id,
+        kind: "episode",
+        title: `Many Items Episode ${index + 1}`,
+        episodeNumber: index + 1,
+      }));
+    episodes.forEach((episode, index) =>
+      access.catalog.createDiscSelection({
+        originalDiscArchiveId: archive.id,
+        mediaItemId: episode.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: index + 1 },
+      }));
+
+    const response = await createCatalogReviewRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`),
+      archive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+
+    expect(response.status).toBe(200);
+    const review = await response.json();
+    expect(review.discSelections).toHaveLength(100);
+    expect(review.mediaItems).toHaveLength(102);
+    expect(review.mediaItems).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: show.id }),
+      expect.objectContaining({ id: season.id }),
+    ]));
+    expect(review.discSelectionsPage.hasNext).toBe(true);
+  });
+
   it("reports preserved completed Encode Job history when selection removal is refused", async () => {
     const access = dataAccessFixture.create();
     const drive = access.catalog.upsertOpticalDrive({
@@ -1214,6 +1288,7 @@ describe("Catalog Review API", () => {
     expect(response.status).toBe(201);
     const responseBody = await response.json();
     expect(responseBody).toEqual({
+      message: "Mapping changed; review required",
       mediaItem: expect.objectContaining({
         kind: "bonus_feature",
         title: "Route Proposal Disc 2",
@@ -1244,6 +1319,7 @@ describe("Catalog Review API", () => {
     });
     expect(reuseResponse.status).toBe(201);
     await expect(reuseResponse.json()).resolves.toEqual({
+      message: "Mapping changed; review required",
       mediaItem: expect.objectContaining({ id: exactTitleMatch.id }),
       discSelection: expect.objectContaining({
         mediaItemId: exactTitleMatch.id,
@@ -1268,6 +1344,193 @@ describe("Catalog Review API", () => {
     expect(access.catalog.listDiscSelections({
       originalDiscArchiveId: archive.id,
     })).toHaveLength(2);
+  });
+
+  it("warns about shared metadata edits without reopening reviews and blocks unsafe deletion", async () => {
+    const access = dataAccessFixture.create();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const sharedItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Shared title",
+    });
+    const correctedParent = access.catalog.createMediaItem({
+      kind: "other",
+      title: "Corrected hierarchy parent",
+    });
+    const archives = ["first", "second"].map((suffix) => {
+      const fingerprint = `shared-route-${suffix}`;
+      const disc = access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint,
+        volumeLabel: `SHARED_${suffix.toUpperCase()}`,
+      });
+      access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+      access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+      const archive = access.catalog.createOriginalDiscArchive({
+        detectedDiscId: disc.id,
+        discKind: "dvd",
+        archiveFormat: "iso",
+        archivePath: `/sensitive/originals/${suffix}.iso`,
+        fingerprint,
+      });
+      access.catalog.createDiscSelection({
+        originalDiscArchiveId: archive.id,
+        mediaItemId: sharedItem.id,
+        sourceIdentity: { kind: "main_feature" },
+      });
+      completeCatalogReview(access, archive.id);
+      return archive;
+    });
+    const mutation = (body: unknown) => createCatalogReviewRoute(
+      new Request(
+        `http://localhost:3000/api/catalog-reviews/${archives[0]!.id}`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Host: "localhost:3000",
+            Origin: "http://localhost:3000",
+          },
+          body: JSON.stringify(body),
+        },
+      ),
+      archives[0]!.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+
+    const readResponse = await createCatalogReviewRoute(
+      new Request(
+        `http://localhost:3000/api/catalog-reviews/${archives[0]!.id}`,
+      ),
+      archives[0]!.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+    const review = await readResponse.json();
+    expect(review.mediaItems).toEqual([expect.objectContaining({
+      id: sharedItem.id,
+      maintenance: {
+        childCount: 0,
+        discSelectionReferenceCount: 2,
+        referencedArchiveCount: 2,
+        otherArchiveCount: 1,
+        deletionAvailability: {
+          state: "unavailable",
+          reason: "2 Disc Selection references",
+        },
+      },
+    })]);
+
+    const updateResponse = await mutation({
+      action: "update_media_item",
+      mediaItemId: sharedItem.id,
+      changes: {
+        parentId: correctedParent.id,
+        title: "Corrected shared title",
+      },
+    });
+    expect(updateResponse.status).toBe(200);
+    await expect(updateResponse.json()).resolves.toMatchObject({
+      message: "Metadata saved",
+      mediaItem: {
+        id: sharedItem.id,
+        parentId: correctedParent.id,
+        title: "Corrected shared title",
+      },
+    });
+    expect(archives.map((archive) =>
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+        .catalogReviewedAt
+    )).toEqual([expect.any(Date), expect.any(Date)]);
+
+    const deleteResponse = await mutation({
+      action: "delete_media_item",
+      mediaItemId: sharedItem.id,
+    });
+    expect(deleteResponse.status).toBe(409);
+    const deleteBody = await deleteResponse.json();
+    expect(deleteBody).toEqual({
+      error:
+        "Media Item deletion is unavailable: 2 Disc Selection references",
+    });
+    expect(JSON.stringify(deleteBody)).not.toContain("/sensitive/");
+    expect(access.catalog.listMediaItems({ ids: [sharedItem.id] }))
+      .toHaveLength(1);
+  });
+
+  it("rolls back a job-free Assisted Mapping by removing its selection and unused leaf item", async () => {
+    const access = dataAccessFixture.create();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "job-free-route-rollback",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Job-free rollback.iso",
+      fingerprint: "job-free-route-rollback",
+    });
+    const item = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Mistaken mapping",
+    });
+    const selection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: item.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    completeCatalogReview(access, archive.id);
+    const mutate = (body: unknown) => createCatalogReviewRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+        },
+        body: JSON.stringify(body),
+      }),
+      archive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+    const removeSelectionResponse = await mutate({
+      action: "delete_disc_selection",
+      discSelectionId: selection.id,
+    });
+    expect(removeSelectionResponse.status).toBe(200);
+    await expect(removeSelectionResponse.json()).resolves.toMatchObject({
+      message: "Mapping changed; review required",
+      discSelection: { id: selection.id },
+    });
+    expect(access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+      .catalogReviewedAt).toBeNull();
+
+    const deleteItemResponse = await mutate({
+      action: "delete_media_item",
+      mediaItemId: item.id,
+    });
+    expect(deleteItemResponse.status).toBe(200);
+    await expect(deleteItemResponse.json()).resolves.toMatchObject({
+      message: "Media Item deleted",
+      mediaItem: { id: item.id },
+    });
+    expect(access.catalog.listMediaItems({ ids: [item.id] })).toEqual([]);
+    expect(access.catalog.listDiscSelections({ ids: [selection.id] }))
+      .toEqual([]);
   });
 
   it("commits an episodic hierarchy and its whole-title Disc Selections atomically", async () => {
@@ -1354,6 +1617,7 @@ describe("Catalog Review API", () => {
 
     expect(response.status).toBe(201);
     await expect(response.json()).resolves.toMatchObject({
+      message: "Mapping changed; review required",
       tvShow: { kind: "tv_show", title: "Route Show" },
       season: { kind: "season", seasonNumber: 2 },
       episodes: [
@@ -1455,6 +1719,7 @@ describe("Catalog Review API", () => {
     expect(localItemResponse.status).toBe(201);
     const localItemBody = await localItemResponse.json();
     expect(localItemBody).toEqual({
+      message: "Media Item created",
       mediaItem: expect.objectContaining({
         kind: "other",
         title: "Local Recording",
@@ -1505,6 +1770,7 @@ describe("Catalog Review API", () => {
     });
     expect(localItemUpdateResponse.status).toBe(200);
     await expect(localItemUpdateResponse.json()).resolves.toEqual({
+      message: "Metadata saved",
       mediaItem: expect.objectContaining({
         parentId: show.id,
         kind: "other",
@@ -1522,6 +1788,7 @@ describe("Catalog Review API", () => {
     });
     expect(editedResponse.status).toBe(200);
     await expect(editedResponse.json()).resolves.toEqual({
+      message: "Metadata saved",
       mediaItem: expect.objectContaining({
         id: secondEpisode.id,
         parentId: season.id,
@@ -1571,6 +1838,7 @@ describe("Catalog Review API", () => {
     });
     expect(repairSelectionResponse.status).toBe(200);
     await expect(repairSelectionResponse.json()).resolves.toEqual({
+      message: "Mapping changed; review required",
       discSelection: expect.objectContaining({
         id: firstSelection.id,
         mediaItemId: firstEpisode.id,
@@ -1607,6 +1875,7 @@ describe("Catalog Review API", () => {
     });
     expect(deleteResponse.status).toBe(200);
     await expect(deleteResponse.json()).resolves.toEqual({
+      message: "Mapping changed; review required",
       discSelection: expect.objectContaining({ id: firstSelection.id }),
       deletedEncodeJobs: 0,
       deletionComplete: true,

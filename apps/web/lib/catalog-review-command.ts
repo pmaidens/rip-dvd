@@ -14,6 +14,7 @@ export const CATALOG_REVIEW_COMMAND_ACTIONS = [
   "create_mapping_proposal",
   "create_media_item",
   "update_media_item",
+  "delete_media_item",
   "create_disc_selection",
   "repair_disc_selection",
   "delete_disc_selection",
@@ -116,6 +117,10 @@ export type CatalogReviewCommand =
       action: "update_media_item";
       mediaItemId: string;
       changes: CatalogReviewMediaItemChanges;
+    }
+  | {
+      action: "delete_media_item";
+      mediaItemId: string;
     }
   | {
       action: "create_disc_selection";
@@ -595,6 +600,12 @@ export function parseCatalogReviewCommand(
             command: { action, mediaItemId, changes: parsedChanges.changes },
           }
         : invalid(parsedChanges.error);
+    }
+    case "delete_media_item": {
+      const mediaItemId = boundedString(body.mediaItemId);
+      return mediaItemId
+        ? { ok: true, command: { action, mediaItemId } }
+        : invalid("Invalid Media Item");
     }
     case "create_disc_selection": {
       const parsedSelection = parseDiscSelectionInput(body.selection);
