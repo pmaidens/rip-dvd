@@ -4074,6 +4074,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
+        name: "20260812170422_furry_gateway",
+      },
+      {
         name: "20260812160800_explicit-archive-only-review",
       },
       {
@@ -4094,9 +4097,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       {
         name: "20260807000001_explicit-filesystem-verification",
       },
-      {
-        name: "20260806204012_burly_johnny_storm",
-      },
     ]);
     expect(
       sqlite
@@ -4115,7 +4115,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     const archiveOnlyMigration =
       "20260812160800_explicit-archive-only-review";
     const predecessorNames = readdirSync(migrationsRoot)
-      .filter((name) => /^\d/.test(name) && name !== archiveOnlyMigration)
+      .filter((name) => /^\d/.test(name) && name < archiveOnlyMigration)
       .sort();
     for (const migrationName of predecessorNames) {
       const migration = readFileSync(
@@ -4200,7 +4200,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     migratedSqlite.close();
   });
 
-  it("migrates existing Encode Job outcomes before accepting Cancelled", () => {
+  it("migrates existing Encode Job outcomes before accepting cancellation states", () => {
     const databasePath = createTestDatabasePath();
     const sqlite = new DatabaseSync(databasePath);
     const precedingMigrations = [
