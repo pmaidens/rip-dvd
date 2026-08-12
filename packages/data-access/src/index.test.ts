@@ -2302,6 +2302,14 @@ describe("data-access facade", () => {
       discSelectionId: repaired.id,
       state: "editable",
     })]);
+    access.catalog.deleteDiscSelection(repaired.id);
+    expect(() => access.catalog.deleteMediaItem(movie.id)).toThrow(
+      "Media Item deletion is unavailable: 1 Disc Selection reference",
+    );
+    expect(access.catalog.listDiscSelections({ ids: [selection.id] }))
+      .toEqual([expect.objectContaining({ id: selection.id })]);
+    expect(access.encodeJobs.list(["completed"]))
+      .toEqual([expect.objectContaining({ id: completedJob.id })]);
     access.close();
   });
 
@@ -2435,6 +2443,141 @@ describe("data-access facade", () => {
     expect(
       access.catalog.updateMediaItem(item.id, { title: "  Updated title  " }),
     ).toMatchObject({ title: "Updated title" });
+    access.close();
+  });
+
+  it("deletes an unused leaf Media Item", () => {
+    const access = openTestDatabase();
+    const item = access.catalog.createMediaItem({
+      kind: "other",
+      title: "Mistaken unused item",
+    });
+
+    expect(access.catalog.deleteMediaItem(item.id)).toEqual(item);
+    expect(access.catalog.listMediaItems({ ids: [item.id] })).toEqual([]);
+    access.close();
+  });
+
+  it("explains why a Media Item with children cannot be deleted", () => {
+    const access = openTestDatabase();
+    const parent = access.catalog.createMediaItem({
+      kind: "tv_show",
+      title: "Referenced parent",
+    });
+    const child = access.catalog.createMediaItem({
+      parentId: parent.id,
+      kind: "season",
+      title: "Referenced child",
+      seasonNumber: 1,
+    });
+
+    expect(() => access.catalog.deleteMediaItem(parent.id)).toThrow(
+      "Media Item deletion is unavailable: 1 child Media Item",
+    );
+    expect(access.catalog.listMediaItems({ ids: [parent.id, child.id] }))
+      .toHaveLength(2);
+    access.close();
+  });
+
+  it("preserves active Disc Selection references when deleting a Media Item", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "active-media-item-reference",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Active Reference.iso",
+      fingerprint: "active-media-item-reference",
+    });
+    const item = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Referenced movie",
+    });
+    const selection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: item.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+
+    expect(() => access.catalog.deleteMediaItem(item.id)).toThrow(
+      "Media Item deletion is unavailable: 1 Disc Selection reference",
+    );
+    expect(access.catalog.listMediaItems({ ids: [item.id] })).toHaveLength(1);
+    expect(access.catalog.listDiscSelections({ ids: [selection.id] }))
+      .toHaveLength(1);
+    expect(access.catalog.listMediaItemMaintenance({
+      ids: [item.id],
+      currentArchiveId: archive.id,
+    })).toEqual([{
+      mediaItemId: item.id,
+      childCount: 0,
+      discSelectionReferenceCount: 1,
+      referencedArchiveCount: 1,
+      otherArchiveCount: 0,
+      deletionAvailability: {
+        state: "unavailable",
+        reason: "1 Disc Selection reference",
+      },
+    }]);
+    access.close();
+  });
+
+  it("reports the other archives affected by a shared Media Item edit", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const item = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Shared movie",
+    });
+    const archives = ["first", "second"].map((suffix) => {
+      const fingerprint = `shared-media-item-${suffix}`;
+      const disc = access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint,
+      });
+      access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+      access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+      const archive = access.catalog.createOriginalDiscArchive({
+        detectedDiscId: disc.id,
+        discKind: "dvd",
+        archiveFormat: "iso",
+        archivePath: `/media/originals/Shared ${suffix}.iso`,
+        fingerprint,
+      });
+      access.catalog.createDiscSelection({
+        originalDiscArchiveId: archive.id,
+        mediaItemId: item.id,
+        sourceIdentity: { kind: "main_feature" },
+      });
+      return archive;
+    });
+
+    expect(access.catalog.listMediaItemMaintenance({
+      ids: [item.id],
+      currentArchiveId: archives[0]!.id,
+    })[0]).toMatchObject({
+      discSelectionReferenceCount: 2,
+      referencedArchiveCount: 2,
+      otherArchiveCount: 1,
+      deletionAvailability: {
+        state: "unavailable",
+        reason: "2 Disc Selection references",
+      },
+    });
     access.close();
   });
 

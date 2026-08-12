@@ -77,7 +77,7 @@ export async function mutateCatalogReview(
   archiveId: string,
   command: CatalogReviewCommand,
   fetcher: CatalogReviewFetch = fetch,
-): Promise<void> {
+): Promise<{ message: string | null }> {
   const response = await fetcher(
     `/api/catalog-reviews/${encodeURIComponent(archiveId)}`,
     {
@@ -107,6 +107,18 @@ export async function mutateCatalogReview(
     }
     throw new Error(message);
   }
+  try {
+    const body: unknown = await response.json();
+    return {
+      message:
+        typeof body === "object" && body !== null && "message" in body &&
+          typeof body.message === "string" && body.message.trim() !== ""
+          ? body.message.trim().slice(0, 512)
+          : null,
+    };
+  } catch {
+    return { message: null };
+  }
 }
 
 interface UseCatalogReviewStateOptions {
@@ -134,6 +146,7 @@ export function useCatalogReviewState({
     useState<EpisodicMappingProposal | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [requestError, setRequestError] = useState<string | null>(null);
+  const [mutationNotice, setMutationNotice] = useState<string | null>(null);
   const [mappingProposalError, setMappingProposalError] = useState<
     string | null
   >(null);
@@ -207,11 +220,13 @@ export function useCatalogReviewState({
     }
     setIsSaving(true);
     setRequestError(null);
+    setMutationNotice(null);
     if (errorTarget === "mapping_proposal") {
       setMappingProposalError(null);
     }
     try {
-      await mutateCatalogReview(archiveId, command);
+      const result = await mutateCatalogReview(archiveId, command);
+      setMutationNotice(result.message);
       setEditingMediaItemId(null);
       afterMutation?.();
       if (complete) {
@@ -311,6 +326,7 @@ export function useCatalogReviewState({
     editingMediaItemId,
     isSaving,
     requestError,
+    mutationNotice,
     mappingProposalError,
     selectionKind,
     retry: () => void load(),
@@ -344,6 +360,8 @@ export function useCatalogReviewState({
     createEpisodicMappingProposal,
     createMappingProposal,
     saveMediaItem,
+    deleteMediaItem: (mediaItemId: string) =>
+      void mutate({ action: "delete_media_item", mediaItemId }),
     createDiscSelection,
     deleteDiscSelection: (discSelectionId: string) =>
       void mutate({ action: "delete_disc_selection", discSelectionId }),

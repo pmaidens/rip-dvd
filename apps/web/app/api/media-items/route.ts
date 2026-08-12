@@ -4,6 +4,7 @@ import {
   type DataAccess,
   type MediaItem,
   type MediaItemId,
+  type OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
 
 import { getDataAccess } from "../../../lib/data-access";
@@ -59,12 +60,19 @@ export async function createMediaItemSearchRoute(
   }
   const parameters = new URL(request.url).searchParams;
   const queryValues = parameters.getAll("query");
+  const archiveIdValues = parameters.getAll("archiveId");
+  const archiveId = archiveIdValues[0]?.trim();
   const query = queryValues[0]?.trim() ?? "";
   const normalizedQuery = normalizeMediaItemSearchTitle(query);
   const offset = recordOffset(parameters);
   if (
-    [...parameters.keys()].some((key) => key !== "query" && key !== "offset") ||
+    [...parameters.keys()].some((key) =>
+      key !== "query" && key !== "offset" && key !== "archiveId"
+    ) ||
     queryValues.length !== 1 ||
+    archiveIdValues.length > 1 ||
+    (archiveId !== undefined &&
+      (archiveId.length === 0 || archiveId.length > 256)) ||
     query.length === 0 ||
     query.length > 256 ||
     normalizedQuery.length === 0 ||
@@ -87,6 +95,14 @@ export async function createMediaItemSearchRoute(
         page.map((item) => item.id),
       );
       const mediaItemsById = new Map(context.map((item) => [item.id, item]));
+      const maintenanceByMediaItemId = new Map(
+        snapshot.catalog.listMediaItemMaintenance({
+          ids: page.map((item) => item.id),
+          ...(archiveId === undefined
+            ? {}
+            : { currentArchiveId: archiveId as OriginalDiscArchiveId }),
+        }).map((maintenance) => [maintenance.mediaItemId, maintenance]),
+      );
       return {
         results: page.map((mediaItem) => {
           const ancestors: MediaItem[] = [];
@@ -102,6 +118,16 @@ export async function createMediaItemSearchRoute(
           return {
             mediaItem: serializeMediaItem(mediaItem),
             ancestors: ancestors.map(serializeMediaItem),
+            maintenance: (() => {
+              const maintenance = maintenanceByMediaItemId.get(mediaItem.id);
+              if (!maintenance) {
+                throw new DomainInvariantError(
+                  `Media Item ${mediaItem.id} is missing maintenance state`,
+                );
+              }
+              const { mediaItemId: _mediaItemId, ...state } = maintenance;
+              return state;
+            })(),
             suggestion: mediaItem.title === query
               ? "exact"
               : normalizeMediaItemSearchTitle(mediaItem.title) ===

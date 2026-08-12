@@ -252,7 +252,9 @@ describe("CatalogReviewEditor", () => {
           ? Response.json({ error: "Correct the proposed title" }, {
               status: 409,
             })
-          : Response.json({}, { status: 201 });
+          : Response.json({
+              message: "Mapping changed; review required",
+            }, { status: 201 });
       }
       return Response.json(
         mutationAttempts === 0 ? initialReview : refreshedReview,
@@ -297,6 +299,9 @@ describe("CatalogReviewEditor", () => {
     expect(container.querySelector(".catalog-mapping-proposal")).toBeNull();
     expect(container.textContent).toContain("Corrected Proposal Title");
     expect(container.textContent).toContain("Title 3");
+    expect(container.textContent).toContain(
+      "Mapping changed; review required",
+    );
     expect(postedCommands).toEqual([
       {
         action: "create_mapping_proposal",
@@ -1004,6 +1009,93 @@ describe("CatalogReviewEditor", () => {
     );
     expect(onCompleted).not.toHaveBeenCalled();
   });
+
+  it("finds and deletes an unused Media Item through maintenance search", async () => {
+    const review = catalogReview({
+      archiveId: "archive-a",
+      discLabel: "MAINTENANCE_SEARCH",
+    });
+    review.mediaItems = [];
+    review.discSelections = [];
+    const postedCommands: unknown[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const url = String(input);
+      if (url.startsWith("/api/media-items?")) {
+        return Response.json({
+          results: [{
+            mediaItem: {
+              id: "unused-movie",
+              parentId: null,
+              kind: "movie",
+              title: "Unused Movie",
+              year: null,
+              seasonNumber: null,
+              episodeNumber: null,
+            },
+            ancestors: [],
+            suggestion: "exact",
+            maintenance: {
+              childCount: 0,
+              discSelectionReferenceCount: 0,
+              referencedArchiveCount: 0,
+              otherArchiveCount: 0,
+              deletionAvailability: { state: "available", reason: null },
+            },
+          }],
+          page: {
+            offset: 0,
+            limit: 20,
+            hasPrevious: false,
+            hasNext: false,
+          },
+        });
+      }
+      if (init?.method === "POST") {
+        postedCommands.push(JSON.parse(String(init.body)) as unknown);
+        return Response.json({ message: "Media Item deleted" });
+      }
+      return Response.json(review);
+    }));
+
+    await act(async () => renderCatalogReviewEditor("archive-a"));
+    const input = container.querySelector<HTMLInputElement>(
+      'input[name="mediaItemMaintenanceSearch"]',
+    );
+    if (!input) {
+      throw new Error("Expected Media Item maintenance search input");
+    }
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )?.set?.call(input, "Unused Movie");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const search = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Search full catalog",
+    );
+    if (!search) {
+      throw new Error("Expected Media Item maintenance search action");
+    }
+    await act(async () => search.click());
+    expect(container.textContent).toContain("Unused Media Item");
+    const remove = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Delete Media Item" && !button.disabled,
+    );
+    if (!remove) {
+      throw new Error("Expected safe Media Item deletion action");
+    }
+    await act(async () => remove.click());
+
+    expect(postedCommands).toEqual([{
+      action: "delete_media_item",
+      mediaItemId: "unused-movie",
+    }]);
+    expect(container.textContent).toContain("Media Item deleted");
+  });
 });
 
 function selectOptionValues(html: string, name: string): string[] {
@@ -1019,6 +1111,45 @@ function selectOptionValues(html: string, name: string): string[] {
 }
 
 describe("CatalogReviewView", () => {
+  it("announces a metadata-only save distinctly", () => {
+    const review = catalogReview({
+      archiveId: "archive-a",
+      discLabel: "METADATA_NOTICE",
+    });
+    const html = renderToStaticMarkup(
+      <CatalogReviewView
+        state={{ status: "loaded", review }}
+        editingMediaItemId={null}
+        isSaving={false}
+        requestError={null}
+        mutationNotice="Metadata saved"
+        mappingProposalError={null}
+        selectionKind="main_feature"
+        activeMappingProposal={null}
+        archiveOnlySelected={false}
+        onClose={() => undefined}
+        onRetry={() => undefined}
+        onEditMediaItem={() => undefined}
+        onCancelEdit={() => undefined}
+        onDiscSelectionsPage={() => undefined}
+        onSelectionKindChange={() => undefined}
+        onArchiveOnlyChange={() => undefined}
+        onStartMappingProposal={() => undefined}
+        onCancelMappingProposal={() => undefined}
+        onCreateMappingProposal={() => undefined}
+        onSaveMediaItem={() => undefined}
+        onDeleteMediaItem={() => undefined}
+        onCreateDiscSelection={() => undefined}
+        onDeleteDiscSelection={() => undefined}
+        onCompleteReview={() => undefined}
+      />,
+    );
+
+    expect(html).toContain('role="status"');
+    expect(html).toContain("Metadata saved");
+    expect(html).not.toContain("Mapping changed; review required");
+  });
+
   it("posts every shared catalog review command variant", async () => {
     expectTypeOf(mutateCatalogReview).parameter(1)
       .toEqualTypeOf<CatalogReviewCommand>();
@@ -1057,6 +1188,10 @@ describe("CatalogReviewView", () => {
         action: "update_media_item",
         mediaItemId: "media-item-1",
         changes: { title: "Updated Movie" },
+      },
+      delete_media_item: {
+        action: "delete_media_item",
+        mediaItemId: "media-item-1",
       },
       create_disc_selection: {
         action: "create_disc_selection",
@@ -1235,6 +1370,7 @@ describe("CatalogReviewView", () => {
         onCancelMappingProposal={() => undefined}
         onCreateMappingProposal={() => undefined}
         onSaveMediaItem={() => undefined}
+        onDeleteMediaItem={() => undefined}
         onCreateDiscSelection={() => undefined}
         onDeleteDiscSelection={() => undefined}
         onCompleteReview={() => undefined}
@@ -1375,6 +1511,7 @@ describe("CatalogReviewView", () => {
         onCancelMappingProposal={() => undefined}
         onCreateMappingProposal={() => undefined}
         onSaveMediaItem={() => undefined}
+        onDeleteMediaItem={() => undefined}
         onCreateDiscSelection={() => undefined}
         onDeleteDiscSelection={() => undefined}
         onCompleteReview={() => undefined}
