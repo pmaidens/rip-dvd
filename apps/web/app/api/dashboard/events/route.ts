@@ -6,6 +6,8 @@ import type {
 import { getDataAccess } from "../../../../lib/data-access";
 import { DASHBOARD_ACTIVITY_HISTORY_LIMIT } from "../../../../lib/dashboard-bounds";
 import {
+  type DashboardCatalogReviewFilters,
+  parseDashboardCatalogReviewFilters,
   parseDashboardCatalogReviewCursor,
   readDashboardSnapshot,
   type DashboardSnapshot,
@@ -20,6 +22,7 @@ const RECONNECT_DELAY_MS = 3_000;
 interface DashboardEventResponseOptions {
   signal: AbortSignal;
   catalogReviewCursor?: OriginalDiscArchiveListCursor;
+  catalogReviewFilters?: DashboardCatalogReviewFilters;
   pollIntervalMs?: number;
 }
 
@@ -38,6 +41,7 @@ export function createDashboardEventResponse(
   {
     signal,
     catalogReviewCursor,
+    catalogReviewFilters = { view: "needs_review" },
     pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
   }: DashboardEventResponseOptions,
 ): Response {
@@ -84,6 +88,9 @@ export function createDashboardEventResponse(
         const snapshot = readDashboardSnapshot(access, {
           activityLimit: DASHBOARD_ACTIVITY_HISTORY_LIMIT,
           catalogReviewCursor,
+          catalogReviewView: catalogReviewFilters.view,
+          catalogReviewQuery: catalogReviewFilters.query,
+          catalogReviewOutcome: catalogReviewFilters.outcome,
           includeDetectedDiscDetails: false,
         });
         controller.enqueue(
@@ -135,9 +142,17 @@ export function createDashboardEventRoute(
         status: 400,
       });
     }
+    const catalogReviewFilters = parseDashboardCatalogReviewFilters(request);
+    if (catalogReviewFilters === null) {
+      return new Response(null, {
+        headers: { "Cache-Control": "no-store" },
+        status: 400,
+      });
+    }
     return createDashboardEventResponse(getAccess(), {
       signal: request.signal,
       catalogReviewCursor,
+      catalogReviewFilters,
     });
   } catch {
     return new Response(null, {

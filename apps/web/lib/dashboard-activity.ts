@@ -2,6 +2,10 @@ import type {
   DashboardDetectedDiscDetails,
   DashboardSnapshot,
 } from "./dashboard";
+import type {
+  CatalogReviewArchiveView,
+  CompletedCatalogReviewOutcome,
+} from "@rip-dvd/data-access";
 import { DASHBOARD_ACTIVITY_DETECTED_DISC_LIMIT } from "./dashboard-bounds";
 
 export interface DashboardEventSource {
@@ -16,6 +20,9 @@ export interface DashboardEventSource {
 
 interface WatchDashboardActivityOptions {
   catalogReviewCursor?: string | null;
+  catalogReviewView?: CatalogReviewArchiveView;
+  catalogReviewQuery?: string;
+  catalogReviewOutcome?: CompletedCatalogReviewOutcome;
   loadSnapshot?: (
     catalogReviewCursor: string | null,
   ) => Promise<DashboardSnapshot>;
@@ -112,17 +119,41 @@ function mergeDiscDetails(
 function dashboardActivityUrl(
   path: "/api/dashboard" | "/api/dashboard/events",
   catalogReviewCursor: string | null,
+  catalogReviewView: CatalogReviewArchiveView,
+  catalogReviewQuery?: string,
+  catalogReviewOutcome?: CompletedCatalogReviewOutcome,
 ): string {
-  return catalogReviewCursor
-    ? `${path}?catalogReviewCursor=${encodeURIComponent(catalogReviewCursor)}`
-    : path;
+  const parameters = new URLSearchParams();
+  if (catalogReviewCursor) {
+    parameters.set("catalogReviewCursor", catalogReviewCursor);
+  }
+  if (catalogReviewView !== "needs_review") {
+    parameters.set("catalogReviewView", catalogReviewView);
+  }
+  if (catalogReviewQuery) {
+    parameters.set("catalogReviewQuery", catalogReviewQuery);
+  }
+  if (catalogReviewOutcome) {
+    parameters.set("catalogReviewOutcome", catalogReviewOutcome);
+  }
+  const query = parameters.toString();
+  return query === "" ? path : `${path}?${query}`;
 }
 
 async function loadDashboardSnapshot(
   catalogReviewCursor: string | null,
+  catalogReviewView: CatalogReviewArchiveView,
+  catalogReviewQuery?: string,
+  catalogReviewOutcome?: CompletedCatalogReviewOutcome,
 ): Promise<DashboardSnapshot> {
   const response = await fetch(
-    dashboardActivityUrl("/api/dashboard", catalogReviewCursor),
+    dashboardActivityUrl(
+      "/api/dashboard",
+      catalogReviewCursor,
+      catalogReviewView,
+      catalogReviewQuery,
+      catalogReviewOutcome,
+    ),
     {
       cache: "no-store",
       headers: { Accept: "application/json" },
@@ -155,9 +186,18 @@ async function loadDashboardDiscDetails(
 
 function openDashboardEventSource(
   catalogReviewCursor: string | null,
+  catalogReviewView: CatalogReviewArchiveView,
+  catalogReviewQuery?: string,
+  catalogReviewOutcome?: CompletedCatalogReviewOutcome,
 ): DashboardEventSource {
   const source = new EventSource(
-    dashboardActivityUrl("/api/dashboard/events", catalogReviewCursor),
+    dashboardActivityUrl(
+      "/api/dashboard/events",
+      catalogReviewCursor,
+      catalogReviewView,
+      catalogReviewQuery,
+      catalogReviewOutcome,
+    ),
   );
   const adapter: DashboardEventSource = {
     onerror: null,
@@ -176,13 +216,30 @@ function openDashboardEventSource(
 
 export function watchDashboardActivity({
   catalogReviewCursor = null,
-  loadSnapshot = loadDashboardSnapshot,
+  catalogReviewView = "needs_review",
+  catalogReviewQuery,
+  catalogReviewOutcome,
+  loadSnapshot,
   loadDiscDetails = loadDashboardDiscDetails,
-  openEventSource = openDashboardEventSource,
+  openEventSource,
   onSnapshot,
   onInitialLoadError,
   onStreamStatus = () => undefined,
 }: WatchDashboardActivityOptions): () => void {
+  const snapshotLoader = loadSnapshot ?? ((cursor) =>
+    loadDashboardSnapshot(
+      cursor,
+      catalogReviewView,
+      catalogReviewQuery,
+      catalogReviewOutcome,
+    ));
+  const eventSourceFactory = openEventSource ?? ((cursor) =>
+    openDashboardEventSource(
+      cursor,
+      catalogReviewView,
+      catalogReviewQuery,
+      catalogReviewOutcome,
+    ));
   let active = true;
   let eventSource: DashboardEventSource | undefined;
   let latestSnapshot: DashboardSnapshot | undefined;
@@ -318,7 +375,7 @@ export function watchDashboardActivity({
     startNextDetailRefresh();
   };
 
-  void loadSnapshot(catalogReviewCursor)
+  void snapshotLoader(catalogReviewCursor)
     .then((snapshot) => {
       if (!active) {
         return;
@@ -332,7 +389,7 @@ export function watchDashboardActivity({
       onSnapshot(snapshot);
       try {
         onStreamStatus("connecting");
-        eventSource = openEventSource(catalogReviewCursor);
+        eventSource = eventSourceFactory(catalogReviewCursor);
         eventSource.onopen = () => {
           if (active) {
             onStreamStatus("live");

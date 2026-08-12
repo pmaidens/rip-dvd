@@ -162,6 +162,8 @@ const LEGACY_ARCHIVE_RECONCILIATION_BYTES = 9_000_000_000;
 const DISC_SELECTION_REVIEW_BATCH_SIZE = 100;
 const DISC_SELECTION_ACTION_AVAILABILITY_LIMIT = 100;
 const MEDIA_ITEM_SEARCH_LIMIT = 100;
+const CATALOG_REVIEW_ARCHIVE_LIMIT = 100;
+const CATALOG_REVIEW_MAPPED_TITLE_SUMMARY_LIMIT = 3;
 const DEFAULT_MIGRATIONS_FOLDER = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../drizzle",
@@ -1698,6 +1700,8 @@ export function createDataAccessInternal(
             access.catalog.listDetectedDiscs(statuses, options),
           listOriginalDiscArchives: (options) =>
             access.catalog.listOriginalDiscArchives(options),
+          listCatalogReviewArchives: (options) =>
+            access.catalog.listCatalogReviewArchives(options),
           listMediaItems: (options) => access.catalog.listMediaItems(options),
           listMediaItemMaintenance: (options) =>
             access.catalog.listMediaItemMaintenance(options),
@@ -2420,6 +2424,149 @@ export function createDataAccessInternal(
           "Original Disc Archive",
         );
         return isBounded && !readsNewer ? rows.reverse() : rows;
+      },
+
+      listCatalogReviewArchives(options) {
+        if (
+          !Number.isSafeInteger(options.limit) ||
+          options.limit < 1 ||
+          options.limit > CATALOG_REVIEW_ARCHIVE_LIMIT
+        ) {
+          throw new DomainInvariantError(
+            `Catalog Review archive limit must be between 1 and ${CATALOG_REVIEW_ARCHIVE_LIMIT}`,
+          );
+        }
+        if (options.outcome !== undefined && options.view !== "reviewed") {
+          throw new DomainInvariantError(
+            "Catalog Review outcome filter requires the Reviewed view",
+          );
+        }
+        const normalizedQuery = options.query === undefined
+          ? undefined
+          : normalizeMediaItemSearchTitle(
+              requireNonEmpty(options.query, "query"),
+            );
+        if (normalizedQuery !== undefined && normalizedQuery.length === 0) {
+          throw new DomainInvariantError(
+            "Catalog Review search query must contain a letter or number",
+          );
+        }
+        if (normalizedQuery !== undefined && options.query!.length > 256) {
+          throw new DomainInvariantError(
+            "Catalog Review search query must be at most 256 characters",
+          );
+        }
+        const searchPattern = normalizedQuery === undefined
+          ? undefined
+          : `%${normalizedQuery.replaceAll(" ", "%")}%`;
+        const normalizedDiscLabel =
+          sql`rip_dvd_normalize_media_item_title(${detectedDiscs.volumeLabel})`;
+        const normalizedMediaTitle =
+          sql`rip_dvd_normalize_media_item_title(${mediaItems.title})`;
+        const conditions = [
+          options.view === "needs_review"
+            ? eq(originalDiscArchives.catalogReviewOutcome, "needs_review")
+            : ne(originalDiscArchives.catalogReviewOutcome, "needs_review"),
+          options.outcome === undefined
+            ? undefined
+            : eq(originalDiscArchives.catalogReviewOutcome, options.outcome),
+          searchPattern === undefined
+            ? undefined
+            : or(
+                sql`${normalizedDiscLabel} like ${searchPattern}`,
+                exists(
+                  database
+                    .select({ id: discSelections.id })
+                    .from(discSelections)
+                    .innerJoin(
+                      mediaItems,
+                      eq(mediaItems.id, discSelections.mediaItemId),
+                    )
+                    .where(and(
+                      eq(
+                        discSelections.originalDiscArchiveId,
+                        originalDiscArchives.id,
+                      ),
+                      eq(discSelections.isCatalogActive, true),
+                      sql`${normalizedMediaTitle} like ${searchPattern}`,
+                    )),
+                ),
+              ),
+          options.cursor
+            ? or(
+                options.cursor.direction === "older"
+                  ? lt(
+                      originalDiscArchives.archivedAt,
+                      options.cursor.archivedAt,
+                    )
+                  : gt(
+                      originalDiscArchives.archivedAt,
+                      options.cursor.archivedAt,
+                    ),
+                and(
+                  eq(
+                    originalDiscArchives.archivedAt,
+                    options.cursor.archivedAt,
+                  ),
+                  options.cursor.direction === "older"
+                    ? lt(originalDiscArchives.id, options.cursor.id)
+                    : gt(originalDiscArchives.id, options.cursor.id),
+                ),
+              )
+            : undefined,
+        ].filter((condition) => condition !== undefined);
+        const readsNewer = options.cursor?.direction === "newer";
+        const rows = database
+          .select({
+            archive: originalDiscArchives,
+            discLabel: detectedDiscs.volumeLabel,
+          })
+          .from(originalDiscArchives)
+          .innerJoin(
+            detectedDiscs,
+            eq(detectedDiscs.id, originalDiscArchives.detectedDiscId),
+          )
+          .where(and(...conditions))
+          .orderBy(
+            ...(readsNewer
+              ? [
+                  asc(originalDiscArchives.archivedAt),
+                  asc(originalDiscArchives.id),
+                ]
+              : [
+                  desc(originalDiscArchives.archivedAt),
+                  desc(originalDiscArchives.id),
+                ]),
+          )
+          .limit(options.limit)
+          .all();
+        const orderedRows = readsNewer ? rows : rows.reverse();
+        return orderedRows.map(({ archive, discLabel }) => {
+          const activeSelectionCondition = and(
+            eq(discSelections.originalDiscArchiveId, archive.id),
+            eq(discSelections.isCatalogActive, true),
+          );
+          const mappedMediaItemCount = database
+            .select({ count: countDistinct(discSelections.mediaItemId) })
+            .from(discSelections)
+            .where(activeSelectionCondition)
+            .get()?.count ?? 0;
+          const mappedMediaItemTitles = database
+            .selectDistinct({ title: mediaItems.title })
+            .from(discSelections)
+            .innerJoin(mediaItems, eq(mediaItems.id, discSelections.mediaItemId))
+            .where(activeSelectionCondition)
+            .orderBy(asc(mediaItems.title), asc(mediaItems.id))
+            .limit(CATALOG_REVIEW_MAPPED_TITLE_SUMMARY_LIMIT)
+            .all()
+            .map(({ title }) => title);
+          return {
+            ...archive,
+            discLabel: discLabel ?? "Unlabeled disc",
+            mappedMediaItemCount,
+            mappedMediaItemTitles,
+          };
+        });
       },
 
       completeCatalogReview(id, catalogRevision, outcome) {

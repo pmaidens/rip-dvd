@@ -3,6 +3,8 @@ import type {
   ArchiveJobStatus,
   ArchiveProgressPhase,
   ArchiveRequestStatus,
+  CatalogReviewArchiveView,
+  CompletedCatalogReviewOutcome,
   ConsistentReadAccess,
   DataAccess,
   DetectedDiscId,
@@ -125,6 +127,10 @@ export interface DashboardCatalogReviewItem {
   discKind: DiscKind;
   archiveFormat: ArchiveFormat;
   archivedAt: string;
+  catalogReviewedAt?: string | null;
+  catalogReviewOutcome?: "needs_review" | CompletedCatalogReviewOutcome;
+  mappedMediaItemCount?: number;
+  mappedMediaItemTitles?: readonly string[];
   verificationStatus?: FilesystemVerificationStatus | null;
   verificationMessage?: string | null;
   verifiedAt?: string | null;
@@ -160,7 +166,16 @@ export interface DashboardSnapshot {
 export interface DashboardSnapshotOptions {
   activityLimit?: number;
   catalogReviewCursor?: OriginalDiscArchiveListCursor;
+  catalogReviewView?: CatalogReviewArchiveView;
+  catalogReviewQuery?: string;
+  catalogReviewOutcome?: CompletedCatalogReviewOutcome;
   includeDetectedDiscDetails?: boolean;
+}
+
+export interface DashboardCatalogReviewFilters {
+  view: CatalogReviewArchiveView;
+  query?: string;
+  outcome?: CompletedCatalogReviewOutcome;
 }
 
 const CATALOG_REVIEW_CURSOR_PATTERN =
@@ -199,6 +214,43 @@ export function parseDashboardCatalogReviewCursor(
   };
 }
 
+export function parseDashboardCatalogReviewFilters(
+  request: Request,
+): DashboardCatalogReviewFilters | null {
+  const parameters = new URL(request.url).searchParams;
+  const viewValue = parameters.get("catalogReviewView") ?? "needs_review";
+  if (viewValue !== "needs_review" && viewValue !== "reviewed") {
+    return null;
+  }
+  const outcomeValue = parameters.get("catalogReviewOutcome");
+  if (
+    outcomeValue !== null &&
+    outcomeValue !== "reviewed_with_selections" &&
+    outcomeValue !== "archive_only"
+  ) {
+    return null;
+  }
+  const queryValue = parameters.get("catalogReviewQuery");
+  if (
+    (outcomeValue !== null || queryValue !== null) &&
+    viewValue !== "reviewed"
+  ) {
+    return null;
+  }
+  const query = queryValue?.trim();
+  if (
+    queryValue !== null &&
+    (query === "" || queryValue.length > 256)
+  ) {
+    return null;
+  }
+  return {
+    view: viewValue,
+    ...(query === undefined ? {} : { query }),
+    ...(outcomeValue === null ? {} : { outcome: outcomeValue }),
+  };
+}
+
 type SourceResult<T> =
   | { status: "loaded"; value: T }
   | { status: "error" };
@@ -232,6 +284,9 @@ function readDashboardSnapshotRecords(
   {
     activityLimit,
     catalogReviewCursor,
+    catalogReviewView = "needs_review",
+    catalogReviewQuery,
+    catalogReviewOutcome,
     includeDetectedDiscDetails = true,
   }: DashboardSnapshotOptions = {},
 ): DashboardSnapshot {
@@ -314,15 +369,19 @@ function readDashboardSnapshotRecords(
     ),
   );
   const archiveSource = readSource(() =>
-    access.catalog.listOriginalDiscArchives(
-      activityLimit === undefined
-        ? { needsCatalogReviewOnly: true }
-        : {
-            limit: activityLimit + 1,
-            cursor: catalogReviewCursor,
-            needsCatalogReviewOnly: true,
-          },
-    ),
+    access.catalog.listCatalogReviewArchives({
+      view: catalogReviewView,
+      limit: activityLimit === undefined ? 100 : activityLimit + 1,
+      ...(catalogReviewCursor === undefined
+        ? {}
+        : { cursor: catalogReviewCursor }),
+      ...(catalogReviewQuery === undefined
+        ? {}
+        : { query: catalogReviewQuery }),
+      ...(catalogReviewOutcome === undefined
+        ? {}
+        : { outcome: catalogReviewOutcome }),
+    }),
   );
   const catalogReviewArchives =
     archiveSource.status === "loaded" && activityLimit !== undefined
@@ -687,18 +746,22 @@ function readDashboardSnapshotRecords(
           status: "loaded" as const,
           items: catalogReviewArchives.map((archive) => ({
             id: archive.id,
-            discLabel:
-              discsById.get(archive.detectedDiscId)?.volumeLabel ??
-              "Unlabeled disc",
+            discLabel: archive.discLabel,
             discKind: archive.discKind,
             archiveFormat: archive.archiveFormat,
             archivedAt: archive.archivedAt.toISOString(),
+            catalogReviewedAt:
+              archive.catalogReviewedAt?.toISOString() ?? null,
+            catalogReviewOutcome: archive.catalogReviewOutcome,
+            mappedMediaItemCount: archive.mappedMediaItemCount,
+            mappedMediaItemTitles: archive.mappedMediaItemTitles,
             verificationStatus: archive.verificationStatus,
             verificationMessage: archive.verificationMessage,
             verifiedAt: archive.verifiedAt?.toISOString() ?? null,
           })),
           ...(activityLimit !== undefined &&
-          (catalogReviewCursor !== undefined ||
+          (catalogReviewView === "reviewed" ||
+            catalogReviewCursor !== undefined ||
             archiveSource.value.length > activityLimit)
             ? {
                 page: {

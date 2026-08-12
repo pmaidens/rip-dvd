@@ -146,6 +146,88 @@ describe("GET /api/dashboard", () => {
     });
   });
 
+  it("returns searchable Reviewed Catalog Reviews with outcome summaries", async () => {
+    const access = dataAccessFixture.create();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const createArchive = (suffix: string, volumeLabel: string) => {
+      const fingerprint = `reviewed-dashboard-${suffix}`;
+      const disc = access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint,
+        volumeLabel,
+      });
+      access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+      access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+      return access.catalog.createOriginalDiscArchive({
+        detectedDiscId: disc.id,
+        discKind: "dvd",
+        archiveFormat: "iso",
+        archivePath: `/media/originals/${suffix}.iso`,
+        fingerprint,
+      });
+    };
+    const reviewed = createArchive("selected", "DIFFERENT_LABEL");
+    const archiveOnly = createArchive("archive-only", "ARCHIVE_ONLY_DISC");
+    const item = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Needle Feature",
+    });
+    access.catalog.createDiscSelection({
+      originalDiscArchiveId: reviewed.id,
+      mediaItemId: item.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    completeCatalogReview(access, reviewed.id);
+    access.catalog.completeCatalogReview(
+      archiveOnly.id,
+      archiveOnly.updatedAt,
+      "archive_only",
+    );
+
+    const response = createDashboardRoute(
+      () => access,
+      new Request(
+        "http://localhost:3000/api/dashboard?catalogReviewView=reviewed&catalogReviewQuery=needle&catalogReviewOutcome=reviewed_with_selections",
+      ),
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body.catalogReview.items).toEqual([
+      expect.objectContaining({
+        id: reviewed.id,
+        discLabel: "DIFFERENT_LABEL",
+        catalogReviewedAt: expect.any(String),
+        catalogReviewOutcome: "reviewed_with_selections",
+        mappedMediaItemCount: 1,
+        mappedMediaItemTitles: ["Needle Feature"],
+      }),
+    ]);
+    expect(body.catalogReview.page).toEqual({
+      limit: 20,
+      previousCursor: null,
+      nextCursor: null,
+    });
+  });
+
+  it("rejects Reviewed filters on the default Needs review view", async () => {
+    const response = createDashboardRoute(
+      () => dataAccessFixture.create(),
+      new Request(
+        "http://localhost:3000/api/dashboard?catalogReviewOutcome=archive_only",
+      ),
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "Invalid catalog review filters",
+    });
+  });
+
   it("returns facade-backed SQLite state over a non-cacheable HTTP response", async () => {
     const access = dataAccessFixture.create();
     access.catalog.upsertOpticalDrive({

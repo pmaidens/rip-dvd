@@ -188,6 +188,14 @@ export interface OriginalDiscArchive {
   updatedAt: Date;
 }
 
+export type CatalogReviewArchiveView = "needs_review" | "reviewed";
+
+export interface CatalogReviewArchive extends OriginalDiscArchive {
+  discLabel: string;
+  mappedMediaItemCount: number;
+  mappedMediaItemTitles: readonly string[];
+}
+
 export interface MediaItem {
   id: MediaItemId;
   parentId: MediaItemId | null;
@@ -587,6 +595,13 @@ export interface CatalogAccess {
     uncatalogedOnly?: boolean;
     needsCatalogReviewOnly?: boolean;
   }): OriginalDiscArchive[];
+  listCatalogReviewArchives(options: {
+    view: CatalogReviewArchiveView;
+    cursor?: OriginalDiscArchiveListCursor;
+    limit: number;
+    query?: string;
+    outcome?: CompletedCatalogReviewOutcome;
+  }): CatalogReviewArchive[];
   completeCatalogReview(
     id: OriginalDiscArchiveId,
     catalogRevision: Date,
@@ -835,6 +850,7 @@ export type SnapshotCatalogAccess = Pick<
   | "listOpticalDrives"
   | "listDetectedDiscs"
   | "listOriginalDiscArchives"
+  | "listCatalogReviewArchives"
   | "listMediaItems"
   | "listMediaItemMaintenance"
   | "searchMediaItems"

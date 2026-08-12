@@ -406,6 +406,52 @@ describe("DashboardView", () => {
     }
   });
 
+  it("renders Reviewed discovery controls and review summaries", () => {
+    const html = renderToStaticMarkup(
+      <DashboardView
+        section="catalog"
+        catalogReviewView="reviewed"
+        catalogReviewQuery="needle"
+        catalogReviewOutcome="reviewed_with_selections"
+        state={{
+          opticalDrives: { status: "loaded", items: [] },
+          detectedDiscs: { status: "loaded", items: [] },
+          archiveJobs: { status: "loaded", items: [] },
+          encodeJobs: { status: "loaded", items: [] },
+          catalogReview: {
+            status: "loaded",
+            items: [{
+              id: "reviewed-archive",
+              discLabel: "REVIEWED_DISC",
+              discKind: "dvd",
+              archiveFormat: "iso",
+              archivedAt: "2026-08-10T12:00:00.000Z",
+              catalogReviewedAt: "2026-08-11T12:00:00.000Z",
+              catalogReviewOutcome: "reviewed_with_selections",
+              mappedMediaItemCount: 2,
+              mappedMediaItemTitles: ["Needle Movie", "Needle Extra"],
+            }],
+            page: {
+              limit: 20,
+              previousCursor: null,
+              nextCursor: null,
+            },
+          },
+        }}
+      />,
+    );
+
+    expect(html).toContain("Needs review");
+    expect(html).toContain("Reviewed");
+    expect(html).toContain('aria-label="Search reviewed archives"');
+    expect(html).toContain("Reviewed with selections");
+    expect(html).toContain("Reviewed Aug");
+    expect(html).toContain("Needle Movie");
+    expect(html).toContain("Needle Extra");
+    expect(html).toContain("Open review");
+    expect(html).not.toContain("Review catalog");
+  });
+
   it("renders populated operations with path-free worker failure details", () => {
     const html = render({
       generatedAt: "2026-07-22T08:00:00.000Z",
