@@ -147,6 +147,11 @@ has its own ordinal and claim token. Publication inserts Original Disc Archive
 provenance, archives matching observations, completes the attempt, and fulfills
 matching requests in one immediate transaction. Failure and abortion update the
 attempt and request together. A stale attempt cannot mutate a later attempt.
+Each recovery pass bounds ordinary expired claims to 100 visible failures.
+Expired cancellation claims remain separately discoverable: the archive worker
+must prove the copy runner and every matching partial inactive before calling
+the fenced finalization that aborts the attempt and completes cancellation.
+Lease expiry by itself is never treated as proof that a helper process closed.
 
 DVD title/chapter coordinates and Encoding Profile versions must be positive
 safe integers at the facade. SQLite CHECK constraints also require integer

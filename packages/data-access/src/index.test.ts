@@ -5449,8 +5449,8 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       access.discInspections.record(started.claim!, {
         type: "hash_progress",
         bytesHashed: 101,
-        bytesPerSecond: 51,
-        etaSeconds: 17,
+        bytesPerSecond: null,
+        etaSeconds: null,
       });
       expect(access.discInspections.list({ ids: [started.inspection.id] }))
         .toEqual([
@@ -5476,8 +5476,8 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       expect(terminal).toMatchObject({
         status: terminalType === "fail" ? "failed" : "aborted",
         bytesHashed: 101,
-        bytesPerSecond: 51,
-        etaSeconds: 17,
+        bytesPerSecond: null,
+        etaSeconds: null,
       });
       access.close();
     },
@@ -5919,6 +5919,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     access.archiveRequests.cancel(recoveryRace.request.id);
     vi.advanceTimersByTime(ARCHIVE_JOB_LEASE_DURATION_MS + 1);
     expect(access.archiveJobs.recoverExpiredClaims()).toEqual([]);
+    expect(access.archiveJobs.listExpiredCancellations()).toEqual([
+      expect.objectContaining({ id: recoveryRace.claim.id }),
+    ]);
     expect(access.archiveJobs.list(["running"])).toEqual([
       expect.objectContaining({ id: recoveryRace.claim.id }),
     ]);
@@ -5928,6 +5931,15 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(access.archiveRequests.list(["cancelled"])).toEqual([
       expect.objectContaining({ id: failureRace.request.id }),
     ]);
+    expect(
+      access.archiveJobs.finalizeExpiredCancellation(recoveryRace.claim),
+    ).toMatchObject({ id: recoveryRace.claim.id, status: "aborted" });
+    expect(access.archiveRequests.list(["cancelled"])).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: failureRace.request.id }),
+        expect.objectContaining({ id: recoveryRace.request.id }),
+      ]),
+    );
 
     const publicationRace = createAttempt(3);
     access.archiveRequests.cancel(publicationRace.request.id);

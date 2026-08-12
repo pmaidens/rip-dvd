@@ -573,6 +573,8 @@ export interface ArchiveJobAccess {
   ): RunningArchiveJob | null;
   renewClaim(claim: RunningArchiveJob): RunningArchiveJob;
   recoverExpiredClaims(): ArchiveJob[];
+  listExpiredCancellations(): RunningArchiveJob[];
+  finalizeExpiredCancellation(claim: RunningArchiveJob): ArchiveJob;
   list(
     statuses?: ArchiveJobStatus[],
     options?: ChronologicalListOptions,

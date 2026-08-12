@@ -52,7 +52,7 @@ export interface DvdCopyRequest {
 
 export interface DvdCopyRunner {
   copy(request: DvdCopyRequest): Promise<void>;
-  isActive(devicePath: string, outputPath: string): boolean;
+  isActive(devicePath: string, outputPath?: string): boolean;
   waitForInactive(devicePath: string, outputPath: string): Promise<void>;
 }
 
@@ -285,6 +285,10 @@ export function createNodeDvdCopyRunner({
       });
     },
     isActive(devicePath, outputPath) {
+      if (outputPath === undefined) {
+        requireSafeOpticalDevicePath(devicePath);
+        return coordinator.hasActive();
+      }
       return coordinator.isActive(
         copyKey(requireSafeOpticalDevicePath(devicePath), outputPath),
       );
@@ -465,6 +469,38 @@ function discoverAttemptPartialPaths(root: string, digest: string): string[] {
 }
 
 export const nodeDvdCopyRunner = createNodeDvdCopyRunner();
+
+export async function requireCancelledDvdArchiveInactive({
+  devicePath,
+  fingerprint,
+  originalsLibraryPath,
+  runner,
+}: {
+  devicePath: string;
+  fingerprint: string;
+  originalsLibraryPath: string;
+  runner: DvdCopyRunner;
+}): Promise<void> {
+  const safeDevicePath = requireSafeOpticalDevicePath(devicePath);
+  if (runner.isActive(safeDevicePath)) {
+    throw new Error("DVD archive copy is still active");
+  }
+  if (!isDvdContentId(fingerprint)) {
+    throw new Error("Detected Disc fingerprint is invalid");
+  }
+  const root = await requireSafeArchiveRoot(originalsLibraryPath);
+  const digest = fingerprint.slice("sha256:".length);
+  const partialPaths = [
+    join(root, `.${digest}.iso.rip-dvd-partial`),
+    ...discoverAttemptPartialPaths(root, digest),
+  ];
+  for (const partialPath of partialPaths) {
+    if (runner.isActive(safeDevicePath, partialPath)) {
+      throw new Error("DVD archive copy is still active");
+    }
+    requirePartialInactive(partialPath);
+  }
+}
 
 export interface PreserveDvdArchiveOptions {
   devicePath: string;
