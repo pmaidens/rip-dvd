@@ -115,7 +115,7 @@ unsafe or newly added mappings leave the archive awaiting explicit review and
 their queued jobs remain unclaimable. Bounded legacy title evidence is also
 normalized for the review response and for title/chapter selection validation,
 so archive-only imports can be reviewed without weakening current scan writes.
-Disc Selection mutation preserves two distinct identity paths:
+Disc Selection mutation preserves three distinct identity paths:
 
 - **Ordinary retry identity.** A current-valid Disc Selection with any dependent
   Encode Job history cannot be repaired or removed. Every dependent job remains
