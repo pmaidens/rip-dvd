@@ -274,6 +274,68 @@ function completeDiscInspection(
   return { claim: started.claim, disc: scanned, inspection };
 }
 
+function createDiscSelectionCorrectionFixture(input: {
+  key: string;
+  databasePath?: string;
+  correctedItemCount?: number;
+}) {
+  const access = openTestDatabase(input.databasePath);
+  const drive = access.catalog.upsertOpticalDrive({
+    devicePath: `/dev/${input.key}`,
+    isPresent: true,
+  });
+  const contentId = `sha256:${"4".repeat(64)}`;
+  const disc = access.catalog.registerDetectedDisc({
+    opticalDriveId: drive.id,
+    discKind: "dvd",
+    fingerprint: contentId,
+    scanData: {
+      schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+      contentId,
+      titles: [{
+        number: 1,
+        durationSeconds: 5_400,
+        chapters: 12,
+        audioStreams: [],
+        subtitles: [],
+      }],
+    },
+  });
+  access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+  access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+  const archive = access.catalog.createOriginalDiscArchive({
+    detectedDiscId: disc.id,
+    discKind: "dvd",
+    archiveFormat: "iso",
+    archivePath: `/media/originals/${input.key}.iso`,
+    fingerprint: contentId,
+  });
+  const mistakenItem = access.catalog.createMediaItem({
+    kind: "movie",
+    title: `Mistaken ${input.key}`,
+  });
+  const correctedItems = Array.from(
+    { length: input.correctedItemCount ?? 1 },
+    (_, index) => access.catalog.createMediaItem({
+      kind: "movie",
+      title: `Corrected ${input.key} ${index + 1}`,
+    }),
+  );
+  const mistakenSelection = access.catalog.createDiscSelection({
+    originalDiscArchiveId: archive.id,
+    mediaItemId: mistakenItem.id,
+    sourceIdentity: { kind: "main_feature" },
+  });
+  completeCatalogReview(access, archive.id);
+  return {
+    access,
+    archive,
+    mistakenItem,
+    correctedItems,
+    mistakenSelection,
+  };
+}
+
 const invalidMediaItemFields = [
   ["blank title", "title", "   "],
   ["non-string title", "title", 42],
@@ -2384,51 +2446,18 @@ describe("data-access facade", () => {
   });
 
   it("corrects completed Encode Job provenance by superseding its Disc Selection", () => {
-    const access = openTestDatabase();
-    const drive = access.catalog.upsertOpticalDrive({
-      devicePath: "/dev/completed-selection-correction",
-      isPresent: true,
+    const {
+      access,
+      archive,
+      mistakenItem,
+      correctedItems: [correctedItem],
+      mistakenSelection,
+    } = createDiscSelectionCorrectionFixture({
+      key: "completed-selection-correction",
     });
-    const contentId = `sha256:${"4".repeat(64)}`;
-    const disc = access.catalog.registerDetectedDisc({
-      opticalDriveId: drive.id,
-      discKind: "dvd",
-      fingerprint: contentId,
-      scanData: {
-        schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
-        contentId,
-        titles: [{
-          number: 1,
-          durationSeconds: 5_400,
-          chapters: 12,
-          audioStreams: [],
-          subtitles: [],
-        }],
-      },
-    });
-    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
-    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
-    const archive = access.catalog.createOriginalDiscArchive({
-      detectedDiscId: disc.id,
-      discKind: "dvd",
-      archiveFormat: "iso",
-      archivePath: "/media/originals/Completed Selection Correction.iso",
-      fingerprint: contentId,
-    });
-    const mistakenItem = access.catalog.createMediaItem({
-      kind: "movie",
-      title: "Mistaken Movie",
-    });
-    const correctedItem = access.catalog.createMediaItem({
-      kind: "movie",
-      title: "Correct Movie",
-    });
-    const mistakenSelection = access.catalog.createDiscSelection({
-      originalDiscArchiveId: archive.id,
-      mediaItemId: mistakenItem.id,
-      sourceIdentity: { kind: "main_feature" },
-    });
-    completeCatalogReview(access, archive.id);
+    if (!correctedItem) {
+      throw new Error("Expected completed correction target");
+    }
     const profile = access.encodingProfiles.create({
       key: "completed-selection-correction",
       displayName: "Completed selection correction",
@@ -2522,51 +2551,17 @@ describe("data-access facade", () => {
   });
 
   it("requests general cancellation for queued and running jobs during correction", () => {
-    const access = openTestDatabase();
-    const drive = access.catalog.upsertOpticalDrive({
-      devicePath: "/dev/active-selection-correction",
-      isPresent: true,
+    const {
+      access,
+      archive,
+      correctedItems: [correctedItem],
+      mistakenSelection,
+    } = createDiscSelectionCorrectionFixture({
+      key: "active-selection-correction",
     });
-    const contentId = `sha256:${"5".repeat(64)}`;
-    const disc = access.catalog.registerDetectedDisc({
-      opticalDriveId: drive.id,
-      discKind: "dvd",
-      fingerprint: contentId,
-      scanData: {
-        schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
-        contentId,
-        titles: [{
-          number: 1,
-          durationSeconds: 5_400,
-          chapters: 12,
-          audioStreams: [],
-          subtitles: [],
-        }],
-      },
-    });
-    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
-    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
-    const archive = access.catalog.createOriginalDiscArchive({
-      detectedDiscId: disc.id,
-      discKind: "dvd",
-      archiveFormat: "iso",
-      archivePath: "/media/originals/Active Selection Correction.iso",
-      fingerprint: contentId,
-    });
-    const mistakenItem = access.catalog.createMediaItem({
-      kind: "movie",
-      title: "Active Mistake",
-    });
-    const correctedItem = access.catalog.createMediaItem({
-      kind: "movie",
-      title: "Active Correction",
-    });
-    const mistakenSelection = access.catalog.createDiscSelection({
-      originalDiscArchiveId: archive.id,
-      mediaItemId: mistakenItem.id,
-      sourceIdentity: { kind: "main_feature" },
-    });
-    completeCatalogReview(access, archive.id);
+    if (!correctedItem) {
+      throw new Error("Expected active correction target");
+    }
     const runningProfile = access.encodingProfiles.create({
       key: "active-correction-running",
       displayName: "Active correction running",
@@ -2631,39 +2626,17 @@ describe("data-access facade", () => {
   });
 
   it("preserves failed and cancelled outcomes when their selection is corrected", () => {
-    const access = openTestDatabase();
-    const drive = access.catalog.upsertOpticalDrive({
-      devicePath: "/dev/terminal-selection-correction",
-      isPresent: true,
+    const {
+      access,
+      archive,
+      correctedItems: [correctedItem],
+      mistakenSelection,
+    } = createDiscSelectionCorrectionFixture({
+      key: "terminal-selection-correction",
     });
-    const disc = access.catalog.registerDetectedDisc({
-      opticalDriveId: drive.id,
-      discKind: "dvd",
-      fingerprint: "terminal-selection-correction",
-    });
-    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
-    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
-    const archive = access.catalog.createOriginalDiscArchive({
-      detectedDiscId: disc.id,
-      discKind: "dvd",
-      archiveFormat: "iso",
-      archivePath: "/media/originals/Terminal Selection Correction.iso",
-      fingerprint: "terminal-selection-correction",
-    });
-    const mistakenItem = access.catalog.createMediaItem({
-      kind: "movie",
-      title: "Terminal Mistake",
-    });
-    const correctedItem = access.catalog.createMediaItem({
-      kind: "movie",
-      title: "Terminal Correction",
-    });
-    const mistakenSelection = access.catalog.createDiscSelection({
-      originalDiscArchiveId: archive.id,
-      mediaItemId: mistakenItem.id,
-      sourceIdentity: { kind: "main_feature" },
-    });
-    completeCatalogReview(access, archive.id);
+    if (!correctedItem) {
+      throw new Error("Expected terminal correction target");
+    }
     const failedProfile = access.encodingProfiles.create({
       key: "terminal-correction-failed",
       displayName: "Terminal correction failed",
@@ -2731,43 +2704,20 @@ describe("data-access facade", () => {
 
   it("commits one complete supersession when corrections race across connections", async () => {
     const databasePath = createTestDatabasePath();
-    const access = openTestDatabase(databasePath);
-    const drive = access.catalog.upsertOpticalDrive({
-      devicePath: "/dev/concurrent-selection-correction",
-      isPresent: true,
+    const {
+      access,
+      archive,
+      mistakenItem,
+      correctedItems: [firstCorrectedItem, secondCorrectedItem],
+      mistakenSelection,
+    } = createDiscSelectionCorrectionFixture({
+      key: "concurrent-selection-correction",
+      databasePath,
+      correctedItemCount: 2,
     });
-    const disc = access.catalog.registerDetectedDisc({
-      opticalDriveId: drive.id,
-      discKind: "dvd",
-      fingerprint: "concurrent-selection-correction",
-    });
-    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
-    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
-    const archive = access.catalog.createOriginalDiscArchive({
-      detectedDiscId: disc.id,
-      discKind: "dvd",
-      archiveFormat: "iso",
-      archivePath: "/media/originals/Concurrent Selection Correction.iso",
-      fingerprint: "concurrent-selection-correction",
-    });
-    const mistakenItem = access.catalog.createMediaItem({
-      kind: "movie",
-      title: "Concurrent Mistake",
-    });
-    const firstCorrectedItem = access.catalog.createMediaItem({
-      kind: "movie",
-      title: "First Concurrent Correction",
-    });
-    const secondCorrectedItem = access.catalog.createMediaItem({
-      kind: "movie",
-      title: "Second Concurrent Correction",
-    });
-    const mistakenSelection = access.catalog.createDiscSelection({
-      originalDiscArchiveId: archive.id,
-      mediaItemId: mistakenItem.id,
-      sourceIdentity: { kind: "main_feature" },
-    });
-    completeCatalogReview(access, archive.id);
+    if (!firstCorrectedItem || !secondCorrectedItem) {
+      throw new Error("Expected concurrent correction targets");
+    }
     const profile = access.encodingProfiles.create({
       key: "concurrent-selection-correction",
       displayName: "Concurrent selection correction",
@@ -2845,39 +2795,18 @@ describe("data-access facade", () => {
   });
 
   it("rejects a stale correction without partially superseding or cancelling", () => {
-    const access = openTestDatabase();
-    const drive = access.catalog.upsertOpticalDrive({
-      devicePath: "/dev/stale-selection-correction",
-      isPresent: true,
+    const {
+      access,
+      archive,
+      mistakenItem,
+      correctedItems: [correctedItem],
+      mistakenSelection,
+    } = createDiscSelectionCorrectionFixture({
+      key: "stale-selection-correction",
     });
-    const disc = access.catalog.registerDetectedDisc({
-      opticalDriveId: drive.id,
-      discKind: "dvd",
-      fingerprint: "stale-selection-correction",
-    });
-    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
-    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
-    const archive = access.catalog.createOriginalDiscArchive({
-      detectedDiscId: disc.id,
-      discKind: "dvd",
-      archiveFormat: "iso",
-      archivePath: "/media/originals/Stale Selection Correction.iso",
-      fingerprint: "stale-selection-correction",
-    });
-    const mistakenItem = access.catalog.createMediaItem({
-      kind: "movie",
-      title: "Stale Correction Mistake",
-    });
-    const correctedItem = access.catalog.createMediaItem({
-      kind: "movie",
-      title: "Stale Correction Target",
-    });
-    const mistakenSelection = access.catalog.createDiscSelection({
-      originalDiscArchiveId: archive.id,
-      mediaItemId: mistakenItem.id,
-      sourceIdentity: { kind: "main_feature" },
-    });
-    completeCatalogReview(access, archive.id);
+    if (!correctedItem) {
+      throw new Error("Expected stale correction target");
+    }
     const profile = access.encodingProfiles.create({
       key: "stale-selection-correction",
       displayName: "Stale selection correction",

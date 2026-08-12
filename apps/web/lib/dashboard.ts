@@ -30,6 +30,7 @@ import {
   DASHBOARD_ACTIVE_DISC_LIMIT,
   DASHBOARD_ACTIVE_JOB_LIMIT,
 } from "./dashboard-bounds";
+import { isTerminalEncodeJobStatus } from "./encode-job-status";
 import { formatFailureDetail } from "./failure-detail";
 
 export interface DashboardOpticalDrive {
@@ -476,11 +477,7 @@ function readDashboardSnapshotRecords(
   const terminalSelectionIds =
     encodeJobSource.status === "loaded"
       ? encodeJobSource.value
-          .filter((job) =>
-            job.status === "completed" ||
-            job.status === "failed" ||
-            job.status === "cancelled"
-          )
+          .filter((job) => isTerminalEncodeJobStatus(job.status))
           .map((job) => job.discSelectionId)
       : [];
   const terminalRequeueSelectionSource = readSource(() =>
@@ -781,9 +778,7 @@ function readDashboardSnapshotRecords(
                         reason: supersession.reason,
                       },
                     }),
-                ...(job.status === "completed" ||
-                    job.status === "failed" ||
-                    job.status === "cancelled"
+                ...(isTerminalEncodeJobStatus(job.status)
                   ? {
                       requeueable: terminalRequeueSelectionIds.has(
                         job.discSelectionId,

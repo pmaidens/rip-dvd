@@ -26,6 +26,7 @@ import {
   type DashboardStreamStatus,
 } from "../lib/dashboard-activity";
 import { displayTerm } from "../lib/display-term";
+import { isTerminalEncodeJobStatus } from "../lib/encode-job-status";
 import { CatalogReviewEditor } from "./catalog-review-editor";
 import {
   cancelEncodeJob,
@@ -1061,9 +1062,7 @@ export function DashboardView({
                         : "Cancel queued encode"}
                   </button>
                 ) : null}
-                {(job.status === "failed" ||
-                    job.status === "completed" ||
-                    job.status === "cancelled") &&
+                {isTerminalEncodeJobStatus(job.status) &&
                     job.requeueable !== false ? (
                   <button
                     type="button"
@@ -1086,9 +1085,7 @@ export function DashboardView({
                           : "Requeue encode"}
                   </button>
                 ) : null}
-                {(job.status === "failed" ||
-                    job.status === "completed" ||
-                    job.status === "cancelled") &&
+                {isTerminalEncodeJobStatus(job.status) &&
                     job.requeueable === false ? (
                   <p className="job-progress-detail">
                     Requeue requires an active Disc Selection with completed
