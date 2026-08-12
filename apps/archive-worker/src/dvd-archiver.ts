@@ -40,16 +40,12 @@ const MAX_COPY_DIAGNOSTIC_BYTES = 65_536;
 const MAX_PROC_ENTRIES = 4_096;
 const MAX_PROC_FILE_DESCRIPTORS = 65_536;
 const COPY_TIMEOUT_MS = 12 * 60 * 60_000;
+const COPY_AUTHORIZATION_TIMEOUT_MS = 5_000;
 const DEVICE_RECOVERY_LOCK_TIMEOUT_MS = 5_000;
 const FLOCK_CONFLICT_EXIT_CODE = 75;
-const DEVICE_RECOVERY_LOCK_READY = "rip-dvd-device-lock-ready";
-const DEVICE_RECOVERY_LOCK_HOLDER = `
-process.stdout.write(${JSON.stringify(`${DEVICE_RECOVERY_LOCK_READY}\n`)});
-process.stdin.resume();
-await new Promise((resolve) => process.stdin.once("end", resolve));
-`;
 
 export interface DvdCopyRequest {
+  authorizeStart?(): void;
   devicePath: string;
   outputPath: string;
   sizeBytes: number;
@@ -60,15 +56,23 @@ export interface DvdCopyRequest {
 export interface DvdCopyRunner {
   copy(request: DvdCopyRequest): Promise<void>;
   isActive(devicePath: string, outputPath: string): boolean;
-  withDeviceInactive<Result>(
+  withDeviceInactive(
     devicePath: string,
-    mutation: () => Promise<Result> | Result,
-  ): Promise<Result>;
+    mutation: () => undefined,
+  ): Promise<void>;
   waitForInactive(devicePath: string, outputPath: string): Promise<void>;
 }
 
 interface DvdCopyChildProcess {
   pid?: number;
+  stdio: [
+    null,
+    null,
+    DvdCopyReadablePipe,
+    null,
+    DvdCopyReadablePipe,
+    DvdCopyWritablePipe,
+  ];
   stderr: {
     destroy(): void;
     on(event: "data", listener: (chunk: Buffer) => void): void;
@@ -82,12 +86,22 @@ interface DvdCopyChildProcess {
   unref(): void;
 }
 
+interface DvdCopyReadablePipe {
+  destroy(): void;
+  on(event: "data", listener: (chunk: Buffer) => void): void;
+}
+
+interface DvdCopyWritablePipe {
+  destroy(): void;
+  end(chunk?: string): void;
+}
+
 type SpawnDvdCopyProcess = (
   executable: string,
   arguments_: readonly string[],
   options: {
     shell: false;
-    stdio: ["ignore", "ignore", "pipe", number];
+    stdio: ["ignore", "ignore", "pipe", number, "pipe", "pipe"];
   },
 ) => DvdCopyChildProcess;
 
@@ -119,7 +133,7 @@ function openDeviceLock(devicePath: string): number {
 
 export function createNodeDvdCopyRunner({
   requireInactive = requireDeviceInactive,
-  spawnProcess = spawn as SpawnDvdCopyProcess,
+  spawnProcess = spawn as unknown as SpawnDvdCopyProcess,
   timeoutMs = COPY_TIMEOUT_MS,
 }: {
   requireInactive?: (devicePath: string) => void;
@@ -155,14 +169,21 @@ export function createNodeDvdCopyRunner({
             String(FLOCK_CONFLICT_EXIT_CODE),
             "/proc/self/fd/3",
             "rip-dvd-dvdcss-reader",
-            "copy",
+            "copy-authorized",
             requireSafeOpticalDevicePath(request.devicePath),
             request.outputPath,
             String(requireDvdContentSize(request.sizeBytes)),
           ],
           {
             shell: false,
-            stdio: ["ignore", "ignore", "pipe", lockDescriptor],
+            stdio: [
+              "ignore",
+              "ignore",
+              "pipe",
+              lockDescriptor,
+              "pipe",
+              "pipe",
+            ],
           },
         );
       } finally {
@@ -171,6 +192,8 @@ export function createNodeDvdCopyRunner({
       let operationSettled = false;
       let processClosed = false;
       let cancellationRequested = false;
+      let authorizationSettled = false;
+      let authorizationBuffer = "";
       let progressBuffer = "";
       let diagnostics = "";
       let resolveResult!: () => void;
@@ -207,6 +230,8 @@ export function createNodeDvdCopyRunner({
         }
         cancellationRequested = true;
         child.stderr.destroy();
+        child.stdio[4].destroy();
+        child.stdio[5].destroy();
         try {
           child.kill("SIGKILL");
         } finally {
@@ -216,6 +241,33 @@ export function createNodeDvdCopyRunner({
           child.unref();
         }
       };
+      const authorizationTimeout = setTimeout(() => {
+        if (!authorizationSettled) {
+          authorizationSettled = true;
+          rejectOperation(new Error("DVD archive copy authorization timed out"));
+          cancel();
+        }
+      }, COPY_AUTHORIZATION_TIMEOUT_MS);
+      authorizationTimeout.unref();
+      child.stdio[4].on("data", (chunk) => {
+        if (authorizationSettled || cancellationRequested) {
+          return;
+        }
+        authorizationBuffer = `${authorizationBuffer}${chunk.toString("utf8")}`
+          .slice(-128);
+        if (!authorizationBuffer.includes("rip-dvd-copy-authorization-ready\n")) {
+          return;
+        }
+        authorizationSettled = true;
+        clearTimeout(authorizationTimeout);
+        try {
+          request.authorizeStart?.();
+          child.stdio[5].end("1");
+        } catch (error) {
+          rejectOperation(error);
+          cancel();
+        }
+      });
       const parseProgress = (text: string, flush = false) => {
         progressBuffer += text;
         if (progressBuffer.length > MAX_COPY_DIAGNOSTIC_BYTES) {
@@ -254,6 +306,7 @@ export function createNodeDvdCopyRunner({
         }
       });
       child.once("close", (code, signal) => {
+        clearTimeout(authorizationTimeout);
         confirmClosed();
         if (cancellationRequested) {
           rejectOperation(new Error("DVD archive copy was cancelled"));
@@ -418,105 +471,98 @@ function requireDeviceInactive(devicePath: string): void {
   );
 }
 
-async function withExclusiveDeviceInactivity<Result>(
+async function withExclusiveDeviceInactivity(
   devicePath: string,
-  mutation: () => Promise<Result> | Result,
-): Promise<Result> {
+  mutation: () => undefined,
+): Promise<void> {
   // The scan catches pre-lock and pre-upgrade readers. Acquiring the same
   // inode flock used by copy then closes the gap through the mutation.
   requireDeviceInactive(devicePath);
   const lockDescriptor = openDeviceLock(devicePath);
-  const child = (() => {
-    try {
-      return spawn(
-        "flock",
-        [
-          "--exclusive",
-          "--nonblock",
-          "--no-fork",
-          "--conflict-exit-code",
-          String(FLOCK_CONFLICT_EXIT_CODE),
-          "/proc/self/fd/3",
-          process.execPath,
-          "--input-type=module",
-          "--eval",
-          DEVICE_RECOVERY_LOCK_HOLDER,
-        ],
-        {
-          shell: false,
-          stdio: ["pipe", "pipe", "pipe", lockDescriptor] as const,
-        },
-      );
-    } finally {
-      closeSync(lockDescriptor);
-    }
-  })();
+  let child: ReturnType<typeof spawn>;
+  try {
+    child = spawn(
+      "flock",
+      [
+        "--exclusive",
+        "--nonblock",
+        "--conflict-exit-code",
+        String(FLOCK_CONFLICT_EXIT_CODE),
+        "3",
+      ],
+      {
+        shell: false,
+        stdio: ["ignore", "ignore", "pipe", lockDescriptor] as const,
+      },
+    );
+  } catch (error) {
+    closeSync(lockDescriptor);
+    throw error;
+  }
   const closed = new Promise<{
     code: number | null;
     signal: NodeJS.Signals | null;
   }>((resolveClosed) => {
     child.once("close", (code, signal) => resolveClosed({ code, signal }));
   });
-  const childInput = child.stdin;
-  const childOutput = child.stdout;
   const childDiagnostics = child.stderr;
-  if (childInput === null || childOutput === null || childDiagnostics === null) {
+  if (childDiagnostics === null) {
     child.kill("SIGKILL");
     await closed;
+    closeSync(lockDescriptor);
     throw new Error("DVD archive device lock streams are unavailable");
   }
-  let stdout = "";
   let stderr = "";
-  const ready = new Promise<void>((resolveReady, rejectReady) => {
-    let settled = false;
-    const settle = (outcome: () => void) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      clearTimeout(timeout);
-      outcome();
-    };
-    const timeout = setTimeout(() => {
-      child.kill("SIGKILL");
-      settle(() => rejectReady(new Error("DVD archive device lock timed out")));
-    }, DEVICE_RECOVERY_LOCK_TIMEOUT_MS);
-    timeout.unref();
-    child.once("error", (error) => settle(() => rejectReady(error)));
-    childOutput.on("data", (chunk: Buffer) => {
-      stdout = `${stdout}${chunk.toString("utf8")}`.slice(-1_024);
-      if (stdout.includes(`${DEVICE_RECOVERY_LOCK_READY}\n`)) {
-        settle(resolveReady);
-      }
-    });
-    childDiagnostics.on("data", (chunk: Buffer) => {
-      stderr = `${stderr}${chunk.toString("utf8")}`.slice(-1_024);
-    });
-    void closed.then(({ code, signal }) => {
-      const detail = optionalBoundedText(stderr, 500);
-      settle(() => rejectReady(
-        code === FLOCK_CONFLICT_EXIT_CODE
-          ? new Error("DVD archive device is still active")
-          : new Error(
-              `DVD archive device lock failed${
-                detail ? `: ${detail}` : ` with ${signal ?? `status ${code}`}`
-              }`,
-            ),
-      ));
-    });
+  let spawnError: unknown;
+  child.once("error", (error) => {
+    spawnError = error;
   });
-  try {
-    await ready;
-  } catch (error) {
-    child.kill("SIGKILL");
+  childDiagnostics.on("data", (chunk: Buffer) => {
+    stderr = `${stderr}${chunk.toString("utf8")}`.slice(-1_024);
+  });
+  let acquisitionTimedOut = false;
+  let acquisitionTimeout: NodeJS.Timeout | undefined;
+  const outcome = await Promise.race([
+    closed,
+    new Promise<undefined>((resolveTimeout) => {
+      acquisitionTimeout = setTimeout(() => {
+        acquisitionTimedOut = true;
+        child.kill("SIGKILL");
+        resolveTimeout(undefined);
+      }, DEVICE_RECOVERY_LOCK_TIMEOUT_MS);
+      acquisitionTimeout.unref();
+    }),
+  ]);
+  clearTimeout(acquisitionTimeout);
+  if (acquisitionTimedOut || outcome === undefined) {
     await closed;
-    throw error;
+    closeSync(lockDescriptor);
+    throw new Error("DVD archive device lock timed out");
+  }
+  if (spawnError !== undefined || outcome.code !== 0) {
+    closeSync(lockDescriptor);
+    if (outcome.code === FLOCK_CONFLICT_EXIT_CODE) {
+      throw new Error("DVD archive device is still active");
+    }
+    if (spawnError !== undefined) {
+      throw spawnError;
+    }
+    const detail = optionalBoundedText(stderr, 500);
+    throw new Error(
+      `DVD archive device lock failed${
+        detail
+          ? `: ${detail}`
+          : ` with ${outcome.signal ?? `status ${outcome.code}`}`
+      }`,
+    );
   }
   try {
-    return await mutation();
+    mutation();
   } finally {
-    childInput.end();
-    await closed;
+    // Descriptor-mode `flock(1)` locks the inherited open-file description.
+    // Retaining the parent's descriptor after that short process exits keeps
+    // exclusion authoritative for the whole synchronous mutation.
+    closeSync(lockDescriptor);
   }
 }
 
@@ -586,7 +632,7 @@ function discoverAttemptPartialPaths(root: string, digest: string): string[] {
 
 export const nodeDvdCopyRunner = createNodeDvdCopyRunner();
 
-export async function withCancelledDvdArchiveInactive<Result>({
+export async function withCancelledDvdArchiveInactive({
   devicePath,
   fingerprint,
   mutation,
@@ -595,17 +641,17 @@ export async function withCancelledDvdArchiveInactive<Result>({
 }: {
   devicePath: string;
   fingerprint: string;
-  mutation: () => Promise<Result> | Result;
+  mutation: () => undefined;
   originalsLibraryPath: string;
   runner: DvdCopyRunner;
-}): Promise<Result> {
+}): Promise<void> {
   const safeDevicePath = requireSafeOpticalDevicePath(devicePath);
-  return runner.withDeviceInactive(safeDevicePath, async () => {
-    if (!isDvdContentId(fingerprint)) {
-      throw new Error("Detected Disc fingerprint is invalid");
-    }
-    const root = await requireSafeArchiveRoot(originalsLibraryPath);
-    const digest = fingerprint.slice("sha256:".length);
+  if (!isDvdContentId(fingerprint)) {
+    throw new Error("Detected Disc fingerprint is invalid");
+  }
+  const root = await requireSafeArchiveRoot(originalsLibraryPath);
+  const digest = fingerprint.slice("sha256:".length);
+  return runner.withDeviceInactive(safeDevicePath, () => {
     const partialPaths = [
       join(root, `.${digest}.iso.rip-dvd-partial`),
       ...discoverAttemptPartialPaths(root, digest),
@@ -616,11 +662,13 @@ export async function withCancelledDvdArchiveInactive<Result>({
       }
       requirePartialInactive(partialPath);
     }
-    return mutation();
+    mutation();
+    return undefined;
   });
 }
 
 export interface PreserveDvdArchiveOptions {
+  authorizeCopy?(): void;
   devicePath: string;
   fingerprint: string;
   originalsLibraryPath: string;
@@ -735,6 +783,7 @@ async function requireSafeArchiveRoot(path: string): Promise<string> {
 }
 
 export async function preserveDvdArchive({
+  authorizeCopy,
   devicePath,
   fingerprint,
   originalsLibraryPath,
@@ -817,6 +866,7 @@ export async function preserveDvdArchive({
   try {
     onProgress({ phase: "copying", progressPercent: 0 });
     await runner.copy({
+      authorizeStart: authorizeCopy,
       devicePath: safeDevicePath,
       outputPath: partialPath,
       sizeBytes: safeSizeBytes,

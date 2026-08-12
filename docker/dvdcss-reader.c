@@ -236,9 +236,29 @@ static int run_copy(dvdcss_t dvdcss, const char *output_path,
     return status;
 }
 
+static int await_copy_authorization(void)
+{
+    static const char ready[] = "rip-dvd-copy-authorization-ready\n";
+    if (write(4, ready, sizeof(ready) - 1) != (ssize_t)(sizeof(ready) - 1)) {
+        return fail_errno("DVD copy authorization readiness failed");
+    }
+    char authorized = 0;
+    ssize_t bytes_read;
+    do {
+        bytes_read = read(5, &authorized, 1);
+    } while (bytes_read < 0 && errno == EINTR);
+    if (bytes_read != 1 || authorized != '1') {
+        fprintf(stderr, "DVD copy authorization was denied\n");
+        return 1;
+    }
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
-    if (argc < 4 || (strcmp(argv[1], "hash") != 0 && strcmp(argv[1], "copy") != 0)) {
+    int authorized_copy = argc > 1 && strcmp(argv[1], "copy-authorized") == 0;
+    if (argc < 4 || (strcmp(argv[1], "hash") != 0 &&
+                     strcmp(argv[1], "copy") != 0 && !authorized_copy)) {
         fprintf(stderr, "usage: %s hash DEVICE SIZE | copy DEVICE OUTPUT SIZE\n", argv[0]);
         return 2;
     }
@@ -253,6 +273,9 @@ int main(int argc, char **argv)
     uint64_t size_bytes = 0;
     if (parse_size(argv[operation == OPERATION_HASH ? 3 : 4], &size_bytes) != 0) {
         return 2;
+    }
+    if (authorized_copy && await_copy_authorization() != 0) {
+        return 1;
     }
     dvdcss_t dvdcss = dvdcss_open(argv[2]);
     if (dvdcss == NULL) {

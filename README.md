@@ -762,6 +762,11 @@ retrying, the worker examines at most 4,096 entries in the canonical originals
 directory for exact same-fingerprint attempt-unique partials, fails closed if
 discovery or inode ownership is ambiguous, and quarantines every inactive match
 before starting a new copy.
+The copy launcher acquires that same device-inode lock before asking data access
+to renew the current claim and recheck cancellation. The native reader cannot
+open the optical device or create its partial until that under-lock
+authorization succeeds, so a stale worker cannot restart external work after
+recovery finalizes cancellation.
 
 A fingerprint already stored by an Original Disc Archive, or recorded as a
 current content-ID alias for its legacy fingerprint, is shown as **Already
@@ -828,7 +833,10 @@ be explicitly retried. Expired cancellations use a separately bounded,
 cursor-rotated recovery pass: they remain pending until cross-process device and
 partial ownership checks prove external work inactive; the worker holds the
 same device-inode exclusion through the fenced transition that records an
-aborted job and cancelled request. A stale worker cannot renew,
+aborted job and cancelled request. Recovery acquires `flock` on the exact
+inherited descriptor and retains that descriptor through the synchronous
+transition, so acquisition-helper exit cannot silently release the exclusion.
+A stale worker cannot renew,
 report, fail, or publish a recovered attempt. A timed-out or cancelled DVD read returns control
 at its deadline, kills and detaches the child, and retains a device/output
 tombstone until the operating system reports the child closed. While that

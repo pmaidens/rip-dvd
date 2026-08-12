@@ -83,8 +83,10 @@ export async function pollArchiveWorker({
         await withCancelledDvdArchiveInactive({
           devicePath: drive.devicePath,
           fingerprint: disc.fingerprint,
-          mutation: () =>
-            access.archiveJobs.finalizeExpiredCancellation(claim),
+          mutation: () => {
+            access.archiveJobs.finalizeExpiredCancellation(claim);
+            return undefined;
+          },
           originalsLibraryPath,
           runner: copyRunner,
         });

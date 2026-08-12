@@ -151,8 +151,11 @@ Each recovery pass bounds ordinary expired claims to 100 visible failures.
 Expired cancellation claims remain separately discoverable: the archive worker
 must prove the copy runner and every matching partial inactive, then hold the
 shared device-inode exclusion while calling the fenced finalization that aborts
-the attempt and completes cancellation. Lease expiry by itself is never treated
-as proof that a helper process closed.
+the attempt and completes cancellation. The copy path takes the same exclusion
+and renews its claim plus rechecks cancellation before authorizing any native
+device or output I/O. The recovery path retains the exact locked open-file
+description through its synchronous finalization. Lease expiry by itself is
+never treated as proof that a helper process closed.
 
 DVD title/chapter coordinates and Encoding Profile versions must be positive
 safe integers at the facade. SQLite CHECK constraints also require integer
