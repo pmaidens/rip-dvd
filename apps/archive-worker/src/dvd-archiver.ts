@@ -52,7 +52,8 @@ export interface DvdCopyRequest {
 
 export interface DvdCopyRunner {
   copy(request: DvdCopyRequest): Promise<void>;
-  isActive(devicePath: string, outputPath?: string): boolean;
+  isActive(devicePath: string, outputPath: string): boolean;
+  requireDeviceInactive(devicePath: string): void;
   waitForInactive(devicePath: string, outputPath: string): Promise<void>;
 }
 
@@ -285,13 +286,16 @@ export function createNodeDvdCopyRunner({
       });
     },
     isActive(devicePath, outputPath) {
-      if (outputPath === undefined) {
-        requireSafeOpticalDevicePath(devicePath);
-        return coordinator.hasActive();
-      }
       return coordinator.isActive(
         copyKey(requireSafeOpticalDevicePath(devicePath), outputPath),
       );
+    },
+    requireDeviceInactive(devicePath) {
+      const safeDevicePath = requireSafeOpticalDevicePath(devicePath);
+      if (coordinator.hasActive()) {
+        throw new Error("DVD archive copy is still active");
+      }
+      requireInactive(safeDevicePath);
     },
     waitForInactive(devicePath, outputPath) {
       return coordinator.waitForInactive(
@@ -482,9 +486,7 @@ export async function requireCancelledDvdArchiveInactive({
   runner: DvdCopyRunner;
 }): Promise<void> {
   const safeDevicePath = requireSafeOpticalDevicePath(devicePath);
-  if (runner.isActive(safeDevicePath)) {
-    throw new Error("DVD archive copy is still active");
-  }
+  runner.requireDeviceInactive(safeDevicePath);
   if (!isDvdContentId(fingerprint)) {
     throw new Error("Detected Disc fingerprint is invalid");
   }

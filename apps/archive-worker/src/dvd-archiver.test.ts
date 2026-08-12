@@ -21,6 +21,7 @@ import type { ArchiveJobProgress } from "@rip-dvd/data-access";
 import {
   preserveDvdArchive,
   createNodeDvdCopyRunner,
+  requireCancelledDvdArchiveInactive,
   type DvdCopyRunner,
 } from "./dvd-archiver.js";
 
@@ -112,6 +113,44 @@ async function stopOrphanedWriter(
 }
 
 describe("DVD archive publication", () => {
+  it.runIf(supportsLinuxWriterOwnership)(
+    "keeps restart cancellation pending while an orphan holds only the device",
+    async () => {
+      const originalsLibraryPath = createOriginalsLibrary();
+      const devicePath = "/dev/zero";
+      const readyPath = join(originalsLibraryPath, ".device-only-writer-ready");
+      const writerPid = await startOrphanedWriter(
+        "-",
+        "-",
+        readyPath,
+        devicePath,
+      );
+      const options = {
+        devicePath,
+        fingerprint: `sha256:${"a".repeat(64)}`,
+        originalsLibraryPath,
+        runner: createNodeDvdCopyRunner({ timeoutMs: 1_000 }),
+      };
+
+      await expect(
+        requireCancelledDvdArchiveInactive(options),
+      ).rejects.toThrow("DVD archive device is still active");
+      expect(
+        readdirSync(realpathSync(originalsLibraryPath)),
+      ).toEqual([basename(readyPath)]);
+
+      await stopOrphanedWriter(writerPid, () => {
+        const descriptorPath = `/proc/${writerPid}/fd`;
+        return (
+          !existsSync(descriptorPath) || readdirSync(descriptorPath).length === 0
+        );
+      });
+      await expect(
+        requireCancelledDvdArchiveInactive(options),
+      ).resolves.toBeUndefined();
+    },
+  );
+
   it.runIf(supportsLinuxWriterOwnership)(
     "excludes a pre-fix writer for another fingerprint and originals root",
     async () => {
@@ -259,6 +298,7 @@ describe("DVD archive publication", () => {
       const runner: DvdCopyRunner = {
         copy: vi.fn(async ({ outputPath }) => writeFileSync(outputPath, content)),
         isActive: () => false,
+        requireDeviceInactive: vi.fn(),
         waitForInactive: vi.fn(async () => undefined),
       };
 
@@ -306,6 +346,7 @@ describe("DVD archive publication", () => {
       const runner: DvdCopyRunner = {
         copy: vi.fn(),
         isActive: () => false,
+        requireDeviceInactive: vi.fn(),
         waitForInactive: vi.fn(async () => undefined),
       };
 
@@ -346,6 +387,7 @@ describe("DVD archive publication", () => {
     const runner: DvdCopyRunner = {
       copy: vi.fn(),
       isActive: () => false,
+      requireDeviceInactive: vi.fn(),
       waitForInactive: vi.fn(async () => undefined),
     };
 
@@ -586,6 +628,7 @@ describe("DVD archive publication", () => {
         onBytesCopied(content.byteLength);
       }),
       isActive: () => false,
+      requireDeviceInactive: vi.fn(),
       waitForInactive: vi.fn(async () => undefined),
     };
     const verifySource = vi.fn(async () => undefined);
@@ -632,6 +675,7 @@ describe("DVD archive publication", () => {
         throw new Error("disc read failed");
       }),
       isActive: () => false,
+      requireDeviceInactive: vi.fn(),
       waitForInactive: vi.fn(async () => undefined),
     };
 
@@ -679,6 +723,7 @@ describe("DVD archive publication", () => {
         writeFileSync(outputPath, content);
       }),
       isActive: vi.fn(() => active),
+      requireDeviceInactive: vi.fn(),
       waitForInactive: vi.fn(async () => undefined),
     };
     const options = {
@@ -731,6 +776,7 @@ describe("DVD archive publication", () => {
           writeFileSync(outputPath, content);
         }),
         isActive: () => false,
+        requireDeviceInactive: vi.fn(),
         waitForInactive: vi.fn(async () => undefined),
       };
 
@@ -761,6 +807,7 @@ describe("DVD archive publication", () => {
         symlinkSync(outsidePath, outputPath);
       }),
       isActive: () => false,
+      requireDeviceInactive: vi.fn(),
       waitForInactive: vi.fn(async () => undefined),
     };
 
@@ -790,6 +837,7 @@ describe("DVD archive publication", () => {
     const runner: DvdCopyRunner = {
       copy: vi.fn(),
       isActive: () => false,
+      requireDeviceInactive: vi.fn(),
       waitForInactive: vi.fn(async () => undefined),
     };
     const sync = vi.fn(async (_path: string) => undefined);
@@ -827,6 +875,7 @@ describe("DVD archive publication", () => {
         writeFileSync(archivePath, "other publisher");
       }),
       isActive: () => false,
+      requireDeviceInactive: vi.fn(),
       waitForInactive: vi.fn(async () => undefined),
     };
 
@@ -855,6 +904,7 @@ describe("DVD archive publication", () => {
     const runner: DvdCopyRunner = {
       copy: vi.fn(async ({ outputPath }) => writeFileSync(outputPath, content)),
       isActive: () => false,
+      requireDeviceInactive: vi.fn(),
       waitForInactive: vi.fn(async () => undefined),
     };
     const sync = vi
