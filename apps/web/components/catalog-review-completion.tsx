@@ -1,18 +1,11 @@
 import type { CatalogReviewCoverage } from "../lib/catalog-review-coverage";
+import { formatCountLabel } from "../lib/format-count-label";
 
 interface CatalogReviewCompletionProps {
   isSaving: boolean;
   coverage: CatalogReviewCoverage;
   reviewStatus: "needs_review" | "reviewed";
   onComplete(): void;
-}
-
-function countLabel(
-  count: number,
-  singular: string,
-  plural = `${singular}s`,
-): string {
-  return `${count} ${count === 1 ? singular : plural}`;
 }
 
 export function CatalogReviewCompletion({
@@ -35,7 +28,7 @@ export function CatalogReviewCompletion({
         <div>
           <dt>Cataloged output</dt>
           <dd>
-            {countLabel(
+            {formatCountLabel(
               coverage.mediaItemsWithSelections,
               "Media Item with Disc Selections",
               "Media Items with Disc Selections",
@@ -44,19 +37,21 @@ export function CatalogReviewCompletion({
         </div>
         <div>
           <dt>Scanned-title coverage</dt>
-          <dd>{countLabel(coverage.mappedTitles, "mapped title")}</dd>
+          <dd>{formatCountLabel(coverage.mappedTitles, "mapped title")}</dd>
           <dd>
-            {countLabel(
+            {formatCountLabel(
               coverage.partiallyMappedTitles,
               "partially mapped title",
             )}
           </dd>
-          <dd>{countLabel(coverage.unmappedTitles, "unmapped title")}</dd>
+          <dd>
+            {formatCountLabel(coverage.unmappedTitles, "unmapped title")}
+          </dd>
         </div>
         <div>
           <dt>Separate archive-level source</dt>
           <dd>
-            {countLabel(
+            {formatCountLabel(
               coverage.mainFeatureSelections,
               "main-feature selection",
             )}

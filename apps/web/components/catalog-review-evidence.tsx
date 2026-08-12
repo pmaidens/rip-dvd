@@ -12,6 +12,7 @@ import type {
   CatalogReviewCoverage,
   CatalogReviewTitleCoverageStatus,
 } from "../lib/catalog-review-coverage";
+import { formatCountLabel } from "../lib/format-count-label";
 import { CatalogReviewMappingProposal } from "./catalog-review-mapping-proposal";
 import type {
   CatalogReviewMediaItem,
@@ -92,10 +93,6 @@ function formatDuration(totalSeconds: number): string {
   ].join(" ");
 }
 
-function countLabel(count: number, singular: string): string {
-  return `${count} ${count === 1 ? singular : `${singular}s`}`;
-}
-
 function streamLanguage(stream: {
   language?: string;
   languageCode?: string;
@@ -146,7 +143,7 @@ function TechnicalStreamDetails({ title }: { title: DvdTitle }) {
                         stream.format,
                         stream.channels === undefined
                           ? undefined
-                          : countLabel(stream.channels, "channel"),
+                          : formatCountLabel(stream.channels, "channel"),
                       ]
                         .filter(Boolean)
                         .join(" · ")}
@@ -271,7 +268,7 @@ export function CatalogReviewEvidence({
             <div>
               <h4>Title {title.number}</h4>
               <p>
-                {formatDuration(title.durationSeconds)} · {countLabel(
+                {formatDuration(title.durationSeconds)} · {formatCountLabel(
                   title.chapters,
                   "chapter",
                 )}
@@ -457,7 +454,7 @@ export function CatalogReviewEvidence({
           {collapsedVeryShortTitles.length > 0 ? (
             <details className="catalog-coverage-collapsed">
               <summary>
-                {countLabel(
+                {formatCountLabel(
                   collapsedVeryShortTitles.length,
                   "very-short unmapped title",
                 )}
