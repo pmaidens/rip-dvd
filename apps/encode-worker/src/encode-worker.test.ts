@@ -5578,6 +5578,83 @@ describe("encode worker polling", () => {
     fixture.access.close();
   });
 
+  it.each([
+    { winner: "cancellation" as const },
+    { winner: "completion" as const },
+  ])("fences the $winner winner at the worker completion boundary", async ({
+    winner,
+  }) => {
+    const fixture = createQueuedJob();
+    const completePublishedClaim =
+      fixture.access.encodeJobs.completePublishedClaim.bind(
+        fixture.access.encodeJobs,
+      );
+    let cancellationOutcome: "requested" | "rejected" | undefined;
+    const racingAccess: DataAccess = {
+      ...fixture.access,
+      encodeJobs: {
+        ...fixture.access.encodeJobs,
+        completePublishedClaim(claim, cleanup, publicationMatches) {
+          if (winner === "cancellation") {
+            fixture.access.encodeJobs.requestCancellation(claim.id);
+            cancellationOutcome = "requested";
+            return completePublishedClaim(
+              claim,
+              cleanup,
+              publicationMatches,
+            );
+          }
+          const completed = completePublishedClaim(
+            claim,
+            cleanup,
+            publicationMatches,
+          );
+          try {
+            fixture.access.encodeJobs.requestCancellation(claim.id);
+          } catch {
+            cancellationOutcome = "rejected";
+          }
+          return completed;
+        },
+      },
+    };
+    let partialPath = "";
+    const attemptedOutput = `${winner} boundary output`;
+
+    await pollEncodeWorker({
+      access: racingAccess,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          partialPath = outputPath;
+          writeFileSync(outputPath, attemptedOutput, { flag: "wx" });
+        }),
+      },
+      signal: new AbortController().signal,
+      workerId: `${winner}-boundary-worker`,
+    });
+
+    expect(cancellationOutcome).toBe(
+      winner === "cancellation" ? "requested" : "rejected",
+    );
+    expect(fixture.access.encodeJobs.list()[0]).toMatchObject({
+      id: fixture.job.id,
+      status: winner === "cancellation" ? "cancelled" : "completed",
+    });
+    expect(existsSync(partialPath)).toBe(false);
+    if (winner === "cancellation") {
+      expect(existsSync(fixture.outputPath)).toBe(false);
+      expect(quarantinedContents(partialPath)).toContain(attemptedOutput);
+    } else {
+      expect(readFileSync(fixture.outputPath, "utf8")).toBe(attemptedOutput);
+      expect(quarantinedContents(partialPath)).toEqual([]);
+    }
+    fixture.access.close();
+  });
+
   it.runIf(supportsLinuxProcessInspection)(
     "keeps restart cancellation pending until the orphaned HandBrake output closes",
     async () => {
@@ -5891,6 +5968,17 @@ describe("node HandBrake runner", () => {
 
   it("escalates cooperative cancellation only when the child does not close", async () => {
     vi.useFakeTimers();
+    const scheduledTimeouts: Array<{ hasRef(): boolean }> = [];
+    const scheduleTimeout = setTimeout;
+    vi.spyOn(globalThis, "setTimeout").mockImplementation(
+      ((callback: TimerHandler, delay?: number, ...arguments_: unknown[]) => {
+        const timeout = scheduleTimeout(callback, delay, ...arguments_);
+        scheduledTimeouts.push(
+          timeout as unknown as { hasRef(): boolean },
+        );
+        return timeout;
+      }) as typeof setTimeout,
+    );
     const abortController = new AbortController();
     const child = Object.assign(new EventEmitter(), {
       stdout: new PassThrough(),
@@ -5912,6 +6000,9 @@ describe("node HandBrake runner", () => {
     await expect(running).rejects.toThrow("cancel encode");
     expect(child.kill).toHaveBeenCalledTimes(1);
     expect(child.kill).toHaveBeenLastCalledWith("SIGTERM");
+    expect(scheduledTimeouts).toHaveLength(2);
+    expect(scheduledTimeouts[0]?.hasRef()).toBe(false);
+    expect(scheduledTimeouts[1]?.hasRef()).toBe(true);
     await vi.advanceTimersByTimeAsync(10_000);
     expect(child.kill).toHaveBeenLastCalledWith("SIGKILL");
     expect(runner.isActive?.("/partial.mkv")).toBe(true);
