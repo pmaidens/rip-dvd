@@ -1,4 +1,5 @@
 import type {
+  CompletedCatalogReviewOutcome,
   DiscSelectionSourceIdentityInput,
   MediaItemKind,
 } from "@rip-dvd/data-access";
@@ -129,7 +130,11 @@ export type CatalogReviewCommand =
       action: "delete_disc_selection";
       discSelectionId: string;
     }
-  | { action: "complete_review"; catalogRevision: string };
+  | {
+      action: "complete_review";
+      catalogRevision: string;
+      outcome: CompletedCatalogReviewOutcome;
+    };
 
 export type CatalogReviewCommandValidationError =
   | "Invalid catalog review mutation"
@@ -145,7 +150,8 @@ export type CatalogReviewCommandValidationError =
   | "Invalid Media Item seasonNumber"
   | "Invalid Media Item episodeNumber"
   | "Invalid Disc Selection"
-  | "Invalid catalog review revision";
+  | "Invalid catalog review revision"
+  | "Invalid catalog review outcome";
 
 export type CatalogReviewCommandParseResult =
   | { ok: true; command: CatalogReviewCommand }
@@ -187,6 +193,14 @@ function catalogRevision(value: unknown): string | null {
   return Number.isSafeInteger(revision.getTime()) &&
       revision.toISOString() === serialized
     ? serialized
+    : null;
+}
+
+function completedCatalogReviewOutcome(
+  value: unknown,
+): CompletedCatalogReviewOutcome | null {
+  return value === "reviewed_with_selections" || value === "archive_only"
+    ? value
     : null;
 }
 
@@ -616,9 +630,16 @@ export function parseCatalogReviewCommand(
     }
     case "complete_review": {
       const revision = catalogRevision(body.catalogRevision);
-      return revision
-        ? { ok: true, command: { action, catalogRevision: revision } }
-        : invalid("Invalid catalog review revision");
+      if (!revision) {
+        return invalid("Invalid catalog review revision");
+      }
+      const outcome = completedCatalogReviewOutcome(body.outcome);
+      return outcome
+        ? {
+            ok: true,
+            command: { action, catalogRevision: revision, outcome },
+          }
+        : invalid("Invalid catalog review outcome");
     }
     default:
       return invalid("Unknown catalog review mutation");

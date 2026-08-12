@@ -56,7 +56,11 @@ function completeCatalogReview(
   const archive = access.catalog.listOriginalDiscArchives({
     ids: [archiveId],
   })[0]!;
-  return access.catalog.completeCatalogReview(archiveId, archive.updatedAt);
+  return access.catalog.completeCatalogReview(
+    archiveId,
+    archive.updatedAt,
+    "reviewed_with_selections",
+  );
 }
 
 const preQuarantineRace = vi.hoisted(() => ({

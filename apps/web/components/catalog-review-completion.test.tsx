@@ -37,16 +37,37 @@ const coverage = {
 
 describe("CatalogReviewCompletion", () => {
   it.each([
-    { isSaving: true, coverage, reviewStatus: "needs_review" as const },
+    {
+      isSaving: true,
+      coverage,
+      reviewOutcome: "needs_review" as const,
+      archiveOnlySelected: false,
+    },
     {
       isSaving: false,
       coverage: { ...coverage, discSelectionCount: 0 },
-      reviewStatus: "needs_review" as const,
+      reviewOutcome: "needs_review" as const,
+      archiveOnlySelected: false,
     },
-    { isSaving: false, coverage, reviewStatus: "reviewed" as const },
+    {
+      isSaving: false,
+      coverage,
+      reviewOutcome: "reviewed_with_selections" as const,
+      archiveOnlySelected: false,
+    },
+    {
+      isSaving: false,
+      coverage: { ...coverage, discSelectionCount: 0 },
+      reviewOutcome: "archive_only" as const,
+      archiveOnlySelected: true,
+    },
   ])("disables completion when review cannot complete", (props) => {
     const html = renderToStaticMarkup(
-      <CatalogReviewCompletion {...props} onComplete={() => undefined} />,
+      <CatalogReviewCompletion
+        {...props}
+        onArchiveOnlyChange={() => undefined}
+        onComplete={() => undefined}
+      />,
     );
 
     expect(html).toContain("Completing review removes this archive");
@@ -58,7 +79,9 @@ describe("CatalogReviewCompletion", () => {
       <CatalogReviewCompletion
         isSaving={false}
         coverage={coverage}
-        reviewStatus="needs_review"
+        reviewOutcome="needs_review"
+        archiveOnlySelected={false}
+        onArchiveOnlyChange={() => undefined}
         onComplete={() => undefined}
       />,
     );
@@ -71,6 +94,42 @@ describe("CatalogReviewCompletion", () => {
     expect(html).toContain("1 main-feature selection");
     expect(html).toContain("Coverage always includes the complete archive");
     expect(html).toContain("Complete review");
-    expect(html).not.toContain('disabled=""');
+    expect(html).toContain('<button type="button">Complete review</button>');
+    expect(html).toContain("Archive only");
+    expect(html).toContain(
+      "Archive only is unavailable while Disc Selections are active",
+    );
+  });
+
+  it("enables zero-selection completion only after the inline Archive-only choice is selected", () => {
+    const zeroSelectionCoverage = {
+      ...coverage,
+      discSelectionCount: 0,
+      mediaItemsWithSelections: 0,
+      mappedTitles: 0,
+      partiallyMappedTitles: 0,
+      unmappedTitles: 4,
+      mainFeatureSelections: 0,
+    };
+    const html = renderToStaticMarkup(
+      <CatalogReviewCompletion
+        isSaving={false}
+        coverage={zeroSelectionCoverage}
+        reviewOutcome="needs_review"
+        archiveOnlySelected
+        onArchiveOnlyChange={() => undefined}
+        onComplete={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("Archive only");
+    expect(html).toContain('type="checkbox"');
+    expect(html).toContain('checked=""');
+    expect(html).toContain(
+      "I intentionally want no content from this archive encoded",
+    );
+    expect(html).toContain("Complete review");
+    expect(html).not.toContain('type="button" disabled=""');
+    expect(html).not.toContain("dialog");
   });
 });

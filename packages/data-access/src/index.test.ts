@@ -97,6 +97,12 @@ type ConcurrentOperation =
       operation: "complete-catalog-review";
       originalDiscArchiveId: OriginalDiscArchiveId;
       catalogRevision: Date;
+      catalogReviewOutcome?: "reviewed_with_selections" | "archive_only";
+    }
+  | {
+      operation: "create-disc-selection";
+      originalDiscArchiveId: OriginalDiscArchiveId;
+      mediaItemId: MediaItemId;
     }
   | {
       operation: "create-media-item";
@@ -1326,6 +1332,160 @@ describe("data-access facade", () => {
     access.close();
   });
 
+  it("persists an explicit Archive-only Review and reopens it when a Disc Selection is added", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "archive-only-review-disc",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Archive Only Review.iso",
+      fingerprint: "archive-only-review-disc",
+    });
+    const completeReview = access.catalog.completeCatalogReview as unknown as (
+      id: OriginalDiscArchiveId,
+      revision: Date,
+      outcome: "reviewed_with_selections" | "archive_only",
+    ) => ReturnType<typeof access.catalog.completeCatalogReview> & {
+      catalogReviewOutcome: string;
+    };
+
+    expect(archive).toMatchObject({
+      catalogReviewedAt: null,
+      catalogReviewOutcome: "needs_review",
+    });
+    expect(() =>
+      completeReview(archive.id, archive.updatedAt, "reviewed_with_selections")
+    ).toThrow("Catalog review requires at least one Disc Selection");
+
+    const archiveOnly = completeReview(
+      archive.id,
+      archive.updatedAt,
+      "archive_only",
+    );
+    expect(archiveOnly).toMatchObject({
+      catalogReviewedAt: expect.any(Date),
+      catalogReviewOutcome: "archive_only",
+    });
+    expect(access.catalog.listOriginalDiscArchives({
+      needsCatalogReviewOnly: true,
+    })).toEqual([]);
+    expect(access.catalog.listDiscSelections({ encodeEligibleOnly: true }))
+      .toEqual([]);
+
+    const mediaItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Archive-only Review Reopened",
+    });
+    access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: mediaItem.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    const reopened = access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]! as typeof archive & { catalogReviewOutcome: string };
+    expect(reopened).toMatchObject({
+      catalogReviewedAt: null,
+      catalogReviewOutcome: "needs_review",
+    });
+    expect(reopened.updatedAt.getTime()).toBeGreaterThan(
+      archiveOnly.updatedAt.getTime(),
+    );
+    expect(() =>
+      completeReview(reopened.id, reopened.updatedAt, "archive_only")
+    ).toThrow("Archive-only Review cannot contain Disc Selections");
+
+    const reviewedWithSelections = completeReview(
+      reopened.id,
+      reopened.updatedAt,
+      "reviewed_with_selections",
+    );
+    expect(reviewedWithSelections).toMatchObject({
+      catalogReviewedAt: expect.any(Date),
+      catalogReviewOutcome: "reviewed_with_selections",
+    });
+    expect(access.catalog.listDiscSelections({ encodeEligibleOnly: true }))
+      .toHaveLength(1);
+    access.close();
+  });
+
+  it("never leaves Archive-only Review approved after a concurrent Disc Selection is created", async () => {
+    const databasePath = createTestDatabasePath();
+    const access = openTestDatabase(databasePath);
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "concurrent-archive-only-disc",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Concurrent Archive Only.iso",
+      fingerprint: "concurrent-archive-only-disc",
+    });
+    const mediaItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Concurrent Archive-only Selection",
+    });
+
+    const results = await runBarrierWorkers({
+      databasePath,
+      mode: "operation",
+      operations: [
+        {
+          operation: "complete-catalog-review",
+          originalDiscArchiveId: archive.id,
+          catalogRevision: archive.updatedAt,
+          catalogReviewOutcome: "archive_only",
+        },
+        {
+          operation: "create-disc-selection",
+          originalDiscArchiveId: archive.id,
+          mediaItemId: mediaItem.id,
+        },
+      ],
+    });
+
+    const outcomes = results.map((result) =>
+      typeof result === "object" && result !== null
+        ? result.outcome
+        : result,
+    );
+    expect(outcomes).toContain("created");
+    expect(outcomes.every((outcome) =>
+      outcome === "created" || outcome === "reviewed" || outcome === "rejected"
+    )).toBe(true);
+    expect(access.catalog.listDiscSelections({
+      originalDiscArchiveId: archive.id,
+    })).toHaveLength(1);
+    expect(access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0])
+      .toMatchObject({
+        catalogReviewedAt: null,
+        catalogReviewOutcome: "needs_review",
+      });
+    expect(access.catalog.listDiscSelections({ encodeEligibleOnly: true }))
+      .toEqual([]);
+    access.close();
+  });
+
   it("reopens catalog review when a Disc Selection is added after completion", () => {
     const access = openTestDatabase();
     const drive = access.catalog.upsertOpticalDrive({
@@ -2242,7 +2402,9 @@ describe("data-access facade", () => {
           );
           concurrentSqlite.prepare(`
             update original_disc_archives
-            set catalog_reviewed_at = null, updated_at = ?
+            set catalog_reviewed_at = null,
+                catalog_review_outcome = 'needs_review',
+                updated_at = ?
             where id = ?
           `).run(timestamp, archive.id);
           concurrentSqlite.exec("commit");
@@ -3679,6 +3841,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
+        name: "20260812160800_explicit-archive-only-review",
+      },
+      {
         name: "20260812151540_disc-inspection-archive-requests",
       },
       {
@@ -3699,9 +3864,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       {
         name: "20260806204012_burly_johnny_storm",
       },
-      {
-        name: "20260805163203_unique_gideon",
-      },
     ]);
     expect(
       sqlite
@@ -3711,6 +3873,98 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .get(),
     ).toEqual({ resolved: 1 });
     sqlite.close();
+  });
+
+  it("migrates existing Catalog Review state without inferring Archive only", () => {
+    const databasePath = createTestDatabasePath();
+    const sqlite = new DatabaseSync(databasePath);
+    const migrationsRoot = new URL("../drizzle/", import.meta.url);
+    const archiveOnlyMigration =
+      "20260812160800_explicit-archive-only-review";
+    const predecessorNames = readdirSync(migrationsRoot)
+      .filter((name) => /^\d/.test(name) && name !== archiveOnlyMigration)
+      .sort();
+    for (const migrationName of predecessorNames) {
+      const migration = readFileSync(
+        new URL(`../drizzle/${migrationName}/migration.sql`, import.meta.url),
+        "utf8",
+      );
+      for (const statement of migration.split("--> statement-breakpoint")) {
+        if (statement.trim()) {
+          sqlite.exec(statement);
+        }
+      }
+    }
+    sqlite.exec(`
+      create table __drizzle_migrations (
+        id integer primary key,
+        hash text not null,
+        created_at numeric,
+        name text,
+        applied_at text
+      );
+    `);
+    const recordMigration = sqlite.prepare(`
+      insert into __drizzle_migrations (hash, created_at, name)
+      values (?, 0, ?)
+    `);
+    for (const migrationName of predecessorNames) {
+      recordMigration.run(`pre-archive-only-${migrationName}`, migrationName);
+    }
+    sqlite.exec(`
+      insert into optical_drives (
+        id, device_path, is_present, last_seen_at, created_at, updated_at
+      ) values ('review-migration-drive', '/dev/review-migration', 1, 1, 1, 1);
+      insert into detected_discs (
+        id, optical_drive_id, disc_kind, fingerprint, status, detected_at,
+        created_at, updated_at
+      ) values
+        ('pending-review-disc', 'review-migration-drive', 'dvd',
+          'pending-review-fingerprint', 'archived', 1, 1, 1),
+        ('completed-review-disc', 'review-migration-drive', 'dvd',
+          'completed-review-fingerprint', 'archived', 2, 2, 2);
+      insert into original_disc_archives (
+        id, detected_disc_id, disc_kind, archive_format, archive_path,
+        fingerprint, archived_at, catalog_reviewed_at, created_at, updated_at
+      ) values
+        ('pending-review-archive', 'pending-review-disc', 'dvd', 'iso',
+          '/media/originals/Pending Review.iso', 'pending-review-fingerprint',
+          1, null, 1, 1),
+        ('completed-review-archive', 'completed-review-disc', 'dvd', 'iso',
+          '/media/originals/Completed Review.iso',
+          'completed-review-fingerprint', 2, 3, 2, 3);
+    `);
+    sqlite.close();
+
+    const access = openTestDatabase(databasePath);
+    expect(access.catalog.listOriginalDiscArchives()).toEqual([
+      expect.objectContaining({
+        id: "pending-review-archive",
+        catalogReviewedAt: null,
+        catalogReviewOutcome: "needs_review",
+      }),
+      expect.objectContaining({
+        id: "completed-review-archive",
+        catalogReviewedAt: new Date(3),
+        catalogReviewOutcome: "reviewed_with_selections",
+      }),
+    ]);
+    expect(access.catalog.listOriginalDiscArchives()).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ catalogReviewOutcome: "archive_only" }),
+      ]),
+    );
+    access.close();
+
+    const migratedSqlite = new DatabaseSync(databasePath);
+    expect(() =>
+      migratedSqlite.prepare(`
+        update original_disc_archives
+        set catalog_review_outcome = 'archive_only'
+        where id = 'pending-review-archive'
+      `).run()
+    ).toThrow(/original_disc_archives_catalog_review_outcome_check/);
+    migratedSqlite.close();
   });
 
   it("migrates existing Encode Job outcomes before accepting Cancelled", () => {

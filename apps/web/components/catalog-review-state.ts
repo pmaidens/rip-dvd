@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { CompletedCatalogReviewOutcome } from "@rip-dvd/data-access";
 
 import type { CatalogReviewCommand } from "../lib/catalog-review-command";
 import type {
@@ -126,6 +127,7 @@ export function useCatalogReviewState({
   const [discSelectionOffset, setDiscSelectionOffset] = useState(0);
   const [selectionKind, setSelectionKind] =
     useState<DiscSelectionKind>("main_feature");
+  const [archiveOnlySelected, setArchiveOnlySelected] = useState(false);
   const [activeMappingProposal, setActiveMappingProposal] =
     useState<MappingProposal | null>(null);
   const [activeEpisodicMappingProposal, setActiveEpisodicMappingProposal] =
@@ -177,6 +179,18 @@ export function useCatalogReviewState({
     setActiveEpisodicMappingProposal(null);
   }, [archiveId]);
 
+  useEffect(() => setArchiveOnlySelected(false), [archiveId]);
+
+  useEffect(() => {
+    if (
+      state.status === "loaded" &&
+      (state.review.coverage.discSelectionCount > 0 ||
+        state.review.reviewOutcome !== "needs_review")
+    ) {
+      setArchiveOnlySelected(false);
+    }
+  }, [state]);
+
   useEffect(
     () => () => requestScope.current?.deactivate(archiveId),
     [archiveId],
@@ -209,6 +223,9 @@ export function useCatalogReviewState({
       const message = error instanceof Error
         ? error.message
         : "Catalog review mutation failed";
+      if (complete) {
+        await load();
+      }
       if (errorTarget === "mapping_proposal") {
         setMappingProposalError(message);
       } else {
@@ -290,6 +307,7 @@ export function useCatalogReviewState({
     state,
     activeMappingProposal,
     activeEpisodicMappingProposal,
+    archiveOnlySelected,
     editingMediaItemId,
     isSaving,
     requestError,
@@ -300,6 +318,7 @@ export function useCatalogReviewState({
     cancelEdit: () => changeEditingMediaItem(null),
     changeDiscSelectionOffset,
     changeSelectionKind: setSelectionKind,
+    changeArchiveOnlySelected: setArchiveOnlySelected,
     startMappingProposal: (proposal: MappingProposal) => {
       setRequestError(null);
       setMappingProposalError(null);
@@ -328,11 +347,12 @@ export function useCatalogReviewState({
     createDiscSelection,
     deleteDiscSelection: (discSelectionId: string) =>
       void mutate({ action: "delete_disc_selection", discSelectionId }),
-    completeReview: () => {
+    completeReview: (outcome: CompletedCatalogReviewOutcome) => {
       if (state.status === "loaded") {
         void mutate({
           action: "complete_review",
           catalogRevision: state.review.catalogRevision,
+          outcome,
         }, true);
       }
     },

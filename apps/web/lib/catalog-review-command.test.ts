@@ -114,6 +114,7 @@ const validCommands = {
   complete_review: {
     action: "complete_review",
     catalogRevision: "2026-08-11T06:00:00.000Z",
+    outcome: "reviewed_with_selections",
   },
 } satisfies Record<CatalogReviewCommand["action"], CatalogReviewCommand>;
 
@@ -155,6 +156,16 @@ describe("catalog review command contract", () => {
         },
       },
     });
+  });
+
+  it("parses the explicit Archive-only Review outcome", () => {
+    const command = {
+      action: "complete_review",
+      catalogRevision: "2026-08-11T06:00:00.000Z",
+      outcome: "archive_only",
+    } as const;
+
+    expect(parseCommand(command)).toEqual({ ok: true, command });
   });
 
   it.each([
@@ -278,6 +289,21 @@ describe("catalog review command contract", () => {
     [
       { action: "complete_review", catalogRevision: "2026-08-11" },
       "Invalid catalog review revision",
+    ],
+    [
+      {
+        action: "complete_review",
+        catalogRevision: "2026-08-11T06:00:00.000Z",
+      },
+      "Invalid catalog review outcome",
+    ],
+    [
+      {
+        action: "complete_review",
+        catalogRevision: "2026-08-11T06:00:00.000Z",
+        outcome: "zero_selections",
+      },
+      "Invalid catalog review outcome",
     ],
   ])("rejects invalid body %#", (body, error) => {
     expect(parseCommand(body)).toEqual({ ok: false, error });

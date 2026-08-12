@@ -176,9 +176,9 @@ function readCatalogReview(
         archiveFormat: archive.archiveFormat,
         archivedAt: archive.archivedAt.toISOString(),
         catalogReviewedAt: archive.catalogReviewedAt?.toISOString() ?? null,
+        catalogReviewOutcome: archive.catalogReviewOutcome,
       },
-      reviewStatus:
-        archive.catalogReviewedAt === null ? "needs_review" : "reviewed",
+      reviewOutcome: archive.catalogReviewOutcome,
       rawScan: {
         titles: rawTitles,
       },
@@ -419,12 +419,14 @@ export async function createCatalogReviewRoute(
         const archive = access.catalog.completeCatalogReview(
           archiveId,
           new Date(command.catalogRevision),
+          command.outcome,
         );
         return response({
           archive: {
             id: archive.id,
             catalogReviewedAt:
               archive.catalogReviewedAt?.toISOString() ?? null,
+            catalogReviewOutcome: archive.catalogReviewOutcome,
           },
         });
       }

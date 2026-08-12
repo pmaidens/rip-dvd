@@ -126,10 +126,31 @@ try {
       const archive = access.catalog.completeCatalogReview(
         workerData.originalDiscArchiveId,
         workerData.catalogRevision,
+        workerData.catalogReviewOutcome ?? "reviewed_with_selections",
       );
       parentPort.postMessage({
         type: "result",
         value: { outcome: "reviewed", id: archive.id },
+      });
+    } catch (error) {
+      if (!(error instanceof DomainInvariantError)) {
+        throw error;
+      }
+      parentPort.postMessage({
+        type: "result",
+        value: { outcome: "rejected" },
+      });
+    }
+  } else if (workerData.operation === "create-disc-selection") {
+    try {
+      const selection = access.catalog.createDiscSelection({
+        originalDiscArchiveId: workerData.originalDiscArchiveId,
+        mediaItemId: workerData.mediaItemId,
+        sourceIdentity: { kind: "main_feature" },
+      });
+      parentPort.postMessage({
+        type: "result",
+        value: { outcome: "created", id: selection.id },
       });
     } catch (error) {
       if (!(error instanceof DomainInvariantError)) {
