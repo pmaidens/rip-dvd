@@ -1339,6 +1339,12 @@ export async function executeEncodeClaim(
       "--preset",
       input.preset,
     ];
+    mutationLockHandle = options.mutationLock.tryAcquire(
+      paths.mutationLockPath,
+    );
+    if (mutationLockHandle === null) {
+      throw new Error("Encode output ownership is already active");
+    }
     renewClaim();
     await options.runner.run({
       arguments_,
@@ -1375,12 +1381,6 @@ export async function executeEncodeClaim(
     }
     renewClaim();
     signal.throwIfAborted();
-    mutationLockHandle = options.mutationLock.tryAcquire(
-      paths.mutationLockPath,
-    );
-    if (mutationLockHandle === null) {
-      throw new Error("Encode publication mutation is already active");
-    }
     pendingPartialCleanup =
       options.access.encodeJobs.beginPublicationMutation(
         claim,
