@@ -1540,6 +1540,38 @@ describe("data-access facade", () => {
       "Disc Selection action availability is limited to 100 records",
     );
 
+    const cutoverSqlite = new DatabaseSync(databasePath);
+    cutoverSqlite.prepare(`
+      update original_disc_archives
+      set legacy_cutover_pending = 1
+      where id = ?
+    `).run(archive.id);
+    expect(access.catalog.listDiscSelectionActionAvailability({
+      ids: [selection.id],
+    })).toEqual([{
+      discSelectionId: selection.id,
+      state: "changes_unavailable",
+      availableActions: [],
+      reason:
+        "Disc Selection changes are unavailable while legacy cutover repair is pending",
+      relatedEncodeJob: null,
+    }]);
+    expect(() =>
+      access.catalog.repairDiscSelection(selection.id, {
+        originalDiscArchiveId: archive.id,
+        mediaItemId: movie.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      })
+    ).toThrow(
+      "Disc Selections cannot be changed while legacy cutover repair is pending",
+    );
+    cutoverSqlite.prepare(`
+      update original_disc_archives
+      set legacy_cutover_pending = 0
+      where id = ?
+    `).run(archive.id);
+    cutoverSqlite.close();
+
     const repaired = access.catalog.repairDiscSelection(selection.id, {
       originalDiscArchiveId: archive.id,
       mediaItemId: movie.id,

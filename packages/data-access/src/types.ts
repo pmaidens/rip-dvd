@@ -165,6 +165,13 @@ export type DiscSelectionActionAvailability =
       id: EncodeJobId;
       status: "queued" | "running";
     } | null;
+  }
+  | {
+    discSelectionId: DiscSelectionId;
+    state: "changes_unavailable";
+    availableActions: readonly [];
+    reason: string;
+    relatedEncodeJob: null;
   };
 
 export type DeleteDiscSelectionResult = DiscSelection & {

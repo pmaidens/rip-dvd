@@ -2959,6 +2959,8 @@ export function createDataAccessInternal(
           .select({
             selection: discSelections,
             scanData: detectedDiscs.scanData,
+            legacyCutoverPending:
+              originalDiscArchives.legacyCutoverPending,
           })
           .from(discSelections)
           .innerJoin(
@@ -2978,35 +2980,23 @@ export function createDataAccessInternal(
           ))
           .orderBy(asc(discSelections.createdAt), asc(discSelections.id))
           .all();
-        const relatedEncodeJobs = database
-          .select({
-            discSelectionId: encodeJobs.discSelectionId,
-            id: encodeJobs.id,
-            status: encodeJobs.status,
-          })
-          .from(encodeJobs)
-          .where(inArray(encodeJobs.discSelectionId, [...options.ids]))
-          .orderBy(
-            asc(encodeJobs.discSelectionId),
-            sql`case ${encodeJobs.status} when 'running' then 0 when 'queued' then 1 when 'completed' then 2 else 3 end`,
-            asc(encodeJobs.createdAt),
-            asc(encodeJobs.id),
-          )
-          .all();
-        const relatedEncodeJobBySelectionId = new Map<
-          DiscSelectionId,
-          (typeof relatedEncodeJobs)[number]
-        >();
-        for (const job of relatedEncodeJobs) {
-          if (!relatedEncodeJobBySelectionId.has(job.discSelectionId)) {
-            relatedEncodeJobBySelectionId.set(job.discSelectionId, job);
-          }
-        }
 
-        return selectionStates.map(({ selection, scanData }) => {
-          const relatedEncodeJob = relatedEncodeJobBySelectionId.get(
-            selection.id,
-          ) ?? null;
+        return selectionStates.map(({
+          selection,
+          scanData,
+          legacyCutoverPending,
+        }) => {
+          const relatedEncodeJob = database
+            .select({ id: encodeJobs.id, status: encodeJobs.status })
+            .from(encodeJobs)
+            .where(eq(encodeJobs.discSelectionId, selection.id))
+            .orderBy(
+              sql`case ${encodeJobs.status} when 'running' then 0 when 'queued' then 1 when 'completed' then 2 else 3 end`,
+              asc(encodeJobs.createdAt),
+              asc(encodeJobs.id),
+            )
+            .limit(1)
+            .get() ?? null;
           const needsRepair = requiresLegacyDiscSelectionRepair(
             selection,
             createArchivedDvdSelectionValidator(scanData),
@@ -3019,6 +3009,16 @@ export function createDataAccessInternal(
             }
             : null;
 
+          if (legacyCutoverPending) {
+            return {
+              discSelectionId: selection.id,
+              state: "changes_unavailable",
+              availableActions: [],
+              reason:
+                "Disc Selection changes are unavailable while legacy cutover repair is pending",
+              relatedEncodeJob: null,
+            } satisfies DiscSelectionActionAvailability;
+          }
           if (needsRepair) {
             return {
               discSelectionId: selection.id,
