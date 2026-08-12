@@ -6209,6 +6209,7 @@ export function createDataAccessInternal(
               partialCleanupOutputPath: sql`${encodeJobs.outputPath}`,
               partialCleanupClaimToken: sql`${encodeJobs.claimToken}`,
               partialCleanupLeaseToken: null,
+              publicationPending: sql`case when ${encodeJobs.status} = 'cancellation_requested' then 0 else ${encodeJobs.publicationPending} end`,
               errorMessage: sql`case when ${encodeJobs.status} = 'cancellation_requested' then null else 'Encode worker lease expired' end`,
               claimedBy: sql`case when ${encodeJobs.status} = 'cancellation_requested' then null else ${encodeJobs.claimedBy} end`,
               claimToken: sql`case when ${encodeJobs.status} = 'cancellation_requested' then null else ${encodeJobs.claimToken} end`,
