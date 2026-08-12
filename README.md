@@ -702,12 +702,17 @@ activation are host-local configuration and must not be committed. The archive
 worker can discover and use each explicitly mapped drive while the web and
 encode containers retain no device access. This worker does not eject media.
 
-The worker checks for newly approved Archive Jobs at least once per second and
-runs drive discovery at the configured poll interval capped at five seconds. An
-empty drive is a normal state. A long-running scan holds only its own drive and
-one configured concurrency slot, so idle capacity continues polling other
-drives. Scanner failures are logged per drive without hiding other drives, and
-a failed discovery does not mark every known drive missing. Successful DVD
+The worker checks for completed current Disc Inspections that match pending
+Archive Requests at the configured poll interval capped at five seconds. An
+empty drive is a normal state. A long-running inspection or archive holds only
+its own drive and one configured concurrency slot, so idle capacity continues
+polling other drives. Scanner failures are logged per drive without hiding other
+drives. Eligible completed inspections are considered in Archive Request
+priority order before a configured concurrency slot starts work. Native copy
+capacity matches that worker concurrency, while device-inode locks and durable
+job fences prevent overlapping work for the same drive or stale attempt. A
+failed discovery does not mark every known drive missing.
+Successful DVD
 scans store title numbers, durations, chapter counts, bounded per-stream
 language/format/channel/source-ID metadata, and a deterministic SHA-256 content
 identity over every declared raw-disc byte. The scanner authenticates through

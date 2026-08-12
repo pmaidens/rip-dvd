@@ -75,7 +75,6 @@ interface BoundedProcessWaitOptions {
 }
 
 export interface BoundedSingleFlightCoordinator<Request, Result> {
-  hasActive(): boolean;
   isActive(key: string): boolean;
   /** Resolves only when the OS-level close signal releases the tombstone. */
   waitForInactive(key: string): Promise<void>;
@@ -110,9 +109,6 @@ export function createBoundedSingleFlightCoordinator<Request, Result>({
   >();
 
   return {
-    hasActive() {
-      return activeProcesses.size > 0;
-    },
     isActive(key) {
       return activeProcesses.has(key);
     },

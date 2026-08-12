@@ -603,6 +603,162 @@ describe("DVD archive publication", () => {
     expect(copied).toEqual([4, 9]);
   });
 
+  it("matches native reader capacity to configured drive concurrency", async () => {
+    const originalsLibraryPath = createOriginalsLibrary();
+    const children = Array.from({ length: 2 }, () => {
+      const stderr = Object.assign(new EventEmitter(), { destroy: vi.fn() });
+      const authorizationReady = Object.assign(new EventEmitter(), {
+        destroy: vi.fn(),
+      });
+      const authorizationStart = { destroy: vi.fn(), end: vi.fn() };
+      return Object.assign(new EventEmitter(), {
+        stderr,
+        stdio: [
+          null,
+          null,
+          stderr,
+          null,
+          authorizationReady,
+          authorizationStart,
+        ] as [
+          null,
+          null,
+          typeof stderr,
+          null,
+          typeof authorizationReady,
+          typeof authorizationStart,
+        ],
+        kill: vi.fn(() => true),
+        unref: vi.fn(),
+      });
+    });
+    const spawnProcess = vi
+      .fn()
+      .mockReturnValueOnce(children[0])
+      .mockReturnValueOnce(children[1]);
+    const runner = createNodeDvdCopyRunner({
+      maxActiveCopies: 2,
+      requireInactive: () => undefined,
+      spawnProcess,
+    });
+    const controller = new AbortController();
+    const copies = [
+      runner.copy({
+        devicePath: "/dev/zero",
+        outputPath: join(originalsLibraryPath, ".first.iso.rip-dvd-partial"),
+        sizeBytes: 9,
+        signal: controller.signal,
+        onBytesCopied: () => undefined,
+      }),
+      runner.copy({
+        devicePath: "/dev/null",
+        outputPath: join(originalsLibraryPath, ".second.iso.rip-dvd-partial"),
+        sizeBytes: 9,
+        signal: controller.signal,
+        onBytesCopied: () => undefined,
+      }),
+    ];
+
+    expect(spawnProcess).toHaveBeenCalledTimes(2);
+    for (const child of children) {
+      child.stdio[4].emit(
+        "data",
+        Buffer.from("rip-dvd-copy-authorization-ready\n"),
+      );
+      child.emit("close", 0, null);
+    }
+    await expect(Promise.all(copies)).resolves.toEqual([undefined, undefined]);
+  });
+
+  it("scopes cancellation-recovery exclusion to the matching device tombstone", async () => {
+    vi.useFakeTimers();
+    const originalsLibraryPath = createOriginalsLibrary();
+    const stderr = Object.assign(new EventEmitter(), { destroy: vi.fn() });
+    const authorizationReady = Object.assign(new EventEmitter(), {
+      destroy: vi.fn(),
+    });
+    const authorizationStart = { destroy: vi.fn(), end: vi.fn() };
+    const child = Object.assign(new EventEmitter(), {
+      stderr,
+      stdio: [
+        null,
+        null,
+        stderr,
+        null,
+        authorizationReady,
+        authorizationStart,
+      ] as [
+        null,
+        null,
+        typeof stderr,
+        null,
+        typeof authorizationReady,
+        typeof authorizationStart,
+      ],
+      kill: vi.fn(() => true),
+      unref: vi.fn(),
+    });
+    const spawnLockProcess = vi.fn(() => {
+      const lockChild = Object.assign(new EventEmitter(), {
+        stderr: Object.assign(new EventEmitter(), { destroy: vi.fn() }),
+        kill: vi.fn(() => true),
+        unref: vi.fn(),
+      });
+      queueMicrotask(() => lockChild.emit("close", 0, null));
+      return lockChild;
+    });
+    const runner = createNodeDvdCopyRunner({
+      maxActiveCopies: 2,
+      requireInactive: () => undefined,
+      spawnLockProcess,
+      spawnProcess: vi.fn(() => child),
+      timeoutMs: 10,
+    });
+    const activeOutputPath = join(
+      originalsLibraryPath,
+      ".active.iso.rip-dvd-partial",
+    );
+    const activeCopy = runner.copy({
+      devicePath: "/dev/zero",
+      outputPath: activeOutputPath,
+      sizeBytes: 9,
+      signal: new AbortController().signal,
+      onBytesCopied: () => undefined,
+    });
+    const activeCopyOutcome = activeCopy.catch((error: unknown) => error);
+    const sameDeviceMutation = vi.fn(() => undefined);
+    const otherDeviceMutation = vi.fn(() => undefined);
+
+    expect(() =>
+      runner.withDeviceInactive("/dev/zero", sameDeviceMutation),
+    ).toThrow("DVD archive copy is still active");
+    await expect(
+      runner.withDeviceInactive("/dev/null", otherDeviceMutation),
+    ).resolves.toBeUndefined();
+    expect(sameDeviceMutation).not.toHaveBeenCalled();
+    expect(otherDeviceMutation).toHaveBeenCalledOnce();
+
+    await vi.advanceTimersByTimeAsync(10);
+    await expect(activeCopyOutcome).resolves.toEqual(
+      new Error("DVD archive copy timed out"),
+    );
+    expect(() =>
+      runner.withDeviceInactive("/dev/zero", sameDeviceMutation),
+    ).toThrow("DVD archive copy is still active");
+    child.emit("close", null, "SIGKILL");
+    await runner.waitForInactive("/dev/zero", activeOutputPath);
+    await expect(
+      runner.withDeviceInactive("/dev/zero", sameDeviceMutation),
+    ).resolves.toBeUndefined();
+    expect(sameDeviceMutation).toHaveBeenCalledOnce();
+  });
+
+  it("rejects invalid native reader capacity", () => {
+    expect(() =>
+      createNodeDvdCopyRunner({ maxActiveCopies: 0 }),
+    ).toThrow("DVD archive copy capacity is invalid");
+  });
+
   it("rejects a stale copy after the device lock but before device I/O", async () => {
     const originalsLibraryPath = createOriginalsLibrary();
     const stderr = Object.assign(new EventEmitter(), { destroy: vi.fn() });

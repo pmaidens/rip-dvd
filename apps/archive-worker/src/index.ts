@@ -4,7 +4,7 @@ import { createDataAccess } from "@rip-dvd/data-access";
 import { runConfiguredAsyncWorker } from "@rip-dvd/worker-runtime";
 
 import { runArchiveWorker } from "./archive-worker.js";
-import { nodeDvdCopyRunner } from "./dvd-archiver.js";
+import { createNodeDvdCopyRunner } from "./dvd-archiver.js";
 import { createLinuxOpticalDriveHardware } from "./optical-drive-hardware.js";
 
 await runConfiguredAsyncWorker(
@@ -23,7 +23,9 @@ await runConfiguredAsyncWorker(
         access,
         concurrency: config.archiveWorkerConcurrency,
         configuredDevicePath: config.archiveDevicePath,
-        copyRunner: nodeDvdCopyRunner,
+        copyRunner: createNodeDvdCopyRunner({
+          maxActiveCopies: config.archiveWorkerConcurrency,
+        }),
         hardware: createLinuxOpticalDriveHardware(),
         log,
         originalsLibraryPath: config.originalsLibraryPath,

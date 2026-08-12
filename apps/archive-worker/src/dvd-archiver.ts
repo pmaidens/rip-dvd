@@ -153,12 +153,14 @@ function openDeviceLock(devicePath: string): number {
 
 export function createNodeDvdCopyRunner({
   deviceLockTimeoutMs = DEVICE_RECOVERY_LOCK_TIMEOUT_MS,
+  maxActiveCopies = 1,
   requireInactive = requireDeviceInactive,
   spawnLockProcess = spawn as unknown as SpawnDvdDeviceLockProcess,
   spawnProcess = spawn as unknown as SpawnDvdCopyProcess,
   timeoutMs = COPY_TIMEOUT_MS,
 }: {
   deviceLockTimeoutMs?: number;
+  maxActiveCopies?: number;
   requireInactive?: (devicePath: string) => void;
   spawnLockProcess?: SpawnDvdDeviceLockProcess;
   spawnProcess?: SpawnDvdCopyProcess;
@@ -175,13 +177,14 @@ export function createNodeDvdCopyRunner({
   }
   const copyKey = (devicePath: string, outputPath: string) =>
     JSON.stringify([devicePath, outputPath]);
+  const activeCopiesByDevicePath = new Map<string, number>();
   const coordinator = createBoundedSingleFlightCoordinator<
     DvdCopyRequest,
     void
   >({
     exhaustedCapacityError: "A DVD archive copy is already active",
     invalidCapacityError: "DVD archive copy capacity is invalid",
-    maxActiveProcesses: 1,
+    maxActiveProcesses: maxActiveCopies,
     validateReuse() {
       throw new Error("DVD archive copy is still active");
     },
@@ -364,6 +367,18 @@ export function createNodeDvdCopyRunner({
         );
       });
 
+      const activeCopies = activeCopiesByDevicePath.get(request.devicePath) ?? 0;
+      activeCopiesByDevicePath.set(request.devicePath, activeCopies + 1);
+      void closed.then(() => {
+        const remainingCopies =
+          (activeCopiesByDevicePath.get(request.devicePath) ?? 1) - 1;
+        if (remainingCopies === 0) {
+          activeCopiesByDevicePath.delete(request.devicePath);
+        } else {
+          activeCopiesByDevicePath.set(request.devicePath, remainingCopies);
+        }
+      });
+
       return { result, closed, cancel };
     },
   });
@@ -385,7 +400,7 @@ export function createNodeDvdCopyRunner({
     },
     withDeviceInactive(devicePath, mutation) {
       const safeDevicePath = requireSafeOpticalDevicePath(devicePath);
-      if (coordinator.hasActive()) {
+      if (activeCopiesByDevicePath.has(safeDevicePath)) {
         throw new Error("DVD archive copy is still active");
       }
       return withExclusiveDeviceInactivity(
@@ -669,8 +684,6 @@ function discoverAttemptPartialPaths(root: string, digest: string): string[] {
   }
   return partialPaths.sort();
 }
-
-export const nodeDvdCopyRunner = createNodeDvdCopyRunner();
 
 export async function withCancelledDvdArchiveInactive({
   devicePath,
