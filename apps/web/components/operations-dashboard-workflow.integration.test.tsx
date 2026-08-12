@@ -289,6 +289,7 @@ describe("end-to-end operations dashboard workflow", () => {
     const archiveGate = createGate();
     const copyRunner: DvdCopyRunner = {
       isActive: () => false,
+      waitForInactive: vi.fn(async () => undefined),
       async copy({ outputPath, onBytesCopied }) {
         onBytesCopied(4);
         await archiveGate.wait();
