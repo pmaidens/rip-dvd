@@ -77,6 +77,17 @@ export async function runArchiveJob({
   let publishedArchivePath: string | undefined;
   try {
     const preserved = await preserveDvdArchive({
+      authorizeCopy: () => {
+        archiveSignal.throwIfAborted();
+        if (access.archiveJobs.isCancellationRequested(claim)) {
+          const cancellation = new Error(
+            "Archive Request cancellation requested",
+          );
+          claimController.abort(cancellation);
+          archiveSignal.throwIfAborted();
+        }
+        access.archiveJobs.renewClaim(claim);
+      },
       devicePath: binding.drive.devicePath,
       fingerprint: disc.fingerprint,
       originalsLibraryPath,
