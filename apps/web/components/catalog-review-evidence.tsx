@@ -260,23 +260,41 @@ export function CatalogReviewEvidence({
       proposalSource?.kind === "dvd_chapters"
     ? proposalSource.titleNumber
     : null;
+  const activeEpisodicTitleNumbers = new Set(
+    activeEpisodicMappingProposal?.episodes.map(({ titleNumber }) =>
+      titleNumber
+    ) ?? [],
+  );
   const isActiveProposalTitle = (title: DvdTitle) =>
     title.number === activeProposalTitleNumber;
+  const isActiveEpisodicTitle = (title: DvdTitle) =>
+    activeEpisodicTitleNumbers.has(title.number);
+  const isActiveEvidenceTitle = (title: DvdTitle) =>
+    isActiveProposalTitle(title) || isActiveEpisodicTitle(title);
   const visibleTitles = titles.filter(
     (title) =>
-      isActiveProposalTitle(title) || filter === "all" ||
+      isActiveEvidenceTitle(title) || filter === "all" ||
       statusForTitle(title) === filter,
   );
   const collapsedVeryShortTitles = visibleTitles.filter(
     (title) =>
-      !isActiveProposalTitle(title) && statusForTitle(title) === "unmapped" &&
+      !isActiveEvidenceTitle(title) && statusForTitle(title) === "unmapped" &&
       title.durationSeconds < 120,
   );
   const listedTitles = visibleTitles.filter(
     (title) =>
-      isActiveProposalTitle(title) || statusForTitle(title) !== "unmapped" ||
+      isActiveEvidenceTitle(title) || statusForTitle(title) !== "unmapped" ||
       title.durationSeconds >= 120,
   );
+  const listedTitlesByNumber = new Map(
+    listedTitles.map((title) => [title.number, title]),
+  );
+  const activeEpisodicTitles = activeEpisodicMappingProposal?.episodes
+    .map(({ titleNumber }) => listedTitlesByNumber.get(titleNumber))
+    .filter((title): title is DvdTitle => title !== undefined) ?? [];
+  const otherListedTitles = activeEpisodicMappingProposal === null
+    ? listedTitles
+    : listedTitles.filter((title) => !isActiveEpisodicTitle(title));
   const longestDuration = Math.max(
     ...titles.map((title) => title.durationSeconds),
   );
@@ -588,18 +606,6 @@ export function CatalogReviewEvidence({
           ) : null}
         </section>
       ) : null}
-      {activeEpisodicMappingProposal ? (
-        <CatalogReviewEpisodicMappingProposal
-          key={activeEpisodicMappingProposal.episodes
-            .map((episode) => episode.titleNumber).join("-")}
-          proposal={activeEpisodicMappingProposal}
-          proposedTitle={proposedTitle}
-          isSaving={isSaving}
-          error={mappingProposalError}
-          onCancel={onCancelEpisodicMappingProposal}
-          onCreate={onCreateEpisodicMappingProposal}
-        />
-      ) : null}
       {titles.length === 0 ? (
         <p className="catalog-empty">
           No reviewable DVD titles were recorded.
@@ -622,9 +628,26 @@ export function CatalogReviewEvidence({
               </button>
             ))}
           </div>
-          {listedTitles.length > 0 ? (
+          {activeEpisodicMappingProposal ? (
+            <div className="catalog-episodic-workspace">
+              <ol className="catalog-title-evidence-list">
+                {activeEpisodicTitles.map(renderTitleEvidence)}
+              </ol>
+              <CatalogReviewEpisodicMappingProposal
+                key={activeEpisodicMappingProposal.episodes
+                  .map((episode) => episode.titleNumber).join("-")}
+                proposal={activeEpisodicMappingProposal}
+                proposedTitle={proposedTitle}
+                isSaving={isSaving}
+                error={mappingProposalError}
+                onCancel={onCancelEpisodicMappingProposal}
+                onCreate={onCreateEpisodicMappingProposal}
+              />
+            </div>
+          ) : null}
+          {otherListedTitles.length > 0 ? (
             <ol className="catalog-title-evidence-list">
-              {listedTitles.map(renderTitleEvidence)}
+              {otherListedTitles.map(renderTitleEvidence)}
             </ol>
           ) : null}
           {collapsedVeryShortTitles.length > 0 ? (

@@ -203,6 +203,18 @@ describe("Catalog Review Mapping Proposal layout", () => {
       /@media \(max-width: 47rem\).*\.catalog-episodic-selection \{ grid-template-columns: 1fr;/,
     );
   });
+
+  it("places the episodic proposal beside selected evidence and below it on mobile", () => {
+    expect(selectorDeclarations(".catalog-episodic-workspace")).toMatch(
+      /display:\s*grid/,
+    );
+    expect(selectorDeclarations(".catalog-episodic-workspace")).toMatch(
+      /grid-template-columns:\s*minmax\(0,\s*1fr\)\s+minmax\(18rem,\s*0\.9fr\)/,
+    );
+    expect(styles.replace(/\s+/g, " ")).toMatch(
+      /@media \(max-width: 47rem\).*\.catalog-episodic-workspace \{ grid-template-columns: 1fr;/,
+    );
+  });
 });
 
 describe("Catalog Review evidence presentation", () => {
