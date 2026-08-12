@@ -309,7 +309,6 @@ export function createNodeHandBrakeRunner({
               // Process closure remains the ownership boundary.
             }
           }, HANDBRAKE_TERMINATION_GRACE_MS);
-          terminationTimeout.unref();
         };
         const timeout = setTimeout(() => {
           cancel(new Error("HandBrake timed out"));
