@@ -959,7 +959,10 @@ both states through its existing live event stream. Cancellation and completion
 compare the running attempt token and status so only one outcome can win, and a
 stale attempt cannot publish afterward. Cancelled is rendered separately from
 Failed. Cancellation retains the job as history and releases an ordinary job's
-output reservation.
+output reservation. After a worker restart, an expired cancellation remains
+nonterminal until Linux process and open-inode inspection confirms the prior
+HandBrake output is inactive; cleanup and ownership release then proceed through
+the same token-fenced cancellation transition.
 A cancelled re-encode keeps the reservation when it protects an existing final.
 Cancelled jobs expose deliberate requeue only while their Disc Selection remains
 active and its Catalog Review is complete. The dashboard also exposes explicit

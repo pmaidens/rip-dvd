@@ -1307,16 +1307,6 @@ export function createDataAccessInternal(
       ),
     );
 
-  const encodeExpiredAttemptAssignments = (failureMessage: string) => ({
-    status: sql<EncodeJobStatus>`case when ${encodeJobs.status} = 'cancellation_requested' then 'cancelled' else 'failed' end`,
-    reservesOutputPath: sql<boolean>`case when ${encodeJobs.status} = 'cancellation_requested' then ${encodeJobs.replaceExistingOutput} else ${encodeJobs.reservesOutputPath} end`,
-    publicationPending: sql<boolean>`case when ${encodeJobs.status} = 'cancellation_requested' then 0 else ${encodeJobs.publicationPending} end`,
-    errorMessage: sql<string | null>`case when ${encodeJobs.status} = 'cancellation_requested' then null else ${failureMessage} end`,
-    claimedBy: sql<string | null>`case when ${encodeJobs.status} = 'cancellation_requested' then null else ${encodeJobs.claimedBy} end`,
-    claimToken: sql<EncodeJobClaimToken | null>`case when ${encodeJobs.status} = 'cancellation_requested' then null else ${encodeJobs.claimToken} end`,
-    claimedAt: sql<Date | null>`case when ${encodeJobs.status} = 'cancellation_requested' then null else ${encodeJobs.claimedAt} end`,
-  });
-
   const encodeJobAdapter = {
     recordType: "encode job",
     find: (id) =>
@@ -6013,10 +6003,7 @@ export function createDataAccessInternal(
           })
           .from(encodeJobs)
           .where(and(
-            inArray(encodeJobs.status, [
-              "running",
-              "cancellation_requested",
-            ]),
+            eq(encodeJobs.status, "running"),
             isNotNull(encodeJobs.partialCleanupOutputPath),
             isNotNull(encodeJobs.partialCleanupClaimToken),
             isNotNull(encodeJobs.partialCleanupLeaseToken),
@@ -6149,18 +6136,14 @@ export function createDataAccessInternal(
         const updated = database
           .update(encodeJobs)
           .set({
-            ...encodeExpiredAttemptAssignments(
-              "Encode publication mutation was abandoned",
-            ),
+            status: "failed",
             partialCleanupLeaseToken: null,
+            errorMessage: "Encode publication mutation was abandoned",
             updatedAt: timestamp,
           })
           .where(and(
             eq(encodeJobs.id, cleanup.jobId),
-            inArray(encodeJobs.status, [
-              "running",
-              "cancellation_requested",
-            ]),
+            eq(encodeJobs.status, "running"),
             eq(
               encodeJobs.publicationPending,
               cleanup.publicationPending,
@@ -6180,6 +6163,59 @@ export function createDataAccessInternal(
         }
         return updated;
       },
+      listExpiredCancellationClaims() {
+        const expiredBefore = new Date(
+          now().getTime() - ENCODE_JOB_LEASE_DURATION_MS,
+        );
+        return database
+          .select()
+          .from(encodeJobs)
+          .where(and(
+            eq(encodeJobs.status, "cancellation_requested"),
+            lte(encodeJobs.updatedAt, expiredBefore),
+          ))
+          .orderBy(asc(encodeJobs.updatedAt), asc(encodeJobs.id))
+          .limit(JOB_RECOVERY_LIMIT)
+          .all()
+          .map(asClaimedEncodeJob);
+      },
+      completeExpiredCancellation(claim, processInactive) {
+        processInactive();
+        const timestamp = now();
+        const expiredBefore = new Date(
+          timestamp.getTime() - ENCODE_JOB_LEASE_DURATION_MS,
+        );
+        const recovered = database
+          .update(encodeJobs)
+          .set({
+            status: "cancelled",
+            reservesOutputPath: claim.replaceExistingOutput,
+            partialCleanupOutputPath: claim.outputPath,
+            partialCleanupClaimToken: claim.claimToken,
+            partialCleanupLeaseToken: null,
+            publicationPending: false,
+            publicationCompletionPending: false,
+            progressEtaSeconds: null,
+            claimedBy: null,
+            claimToken: null,
+            claimedAt: null,
+            completedAt: null,
+            errorMessage: null,
+            updatedAt: timestamp,
+          })
+          .where(and(
+            eq(encodeJobs.id, claim.id),
+            eq(encodeJobs.status, "cancellation_requested"),
+            eq(encodeJobs.claimToken, claim.claimToken),
+            lte(encodeJobs.updatedAt, expiredBefore),
+          ))
+          .returning()
+          .get();
+        if (!recovered) {
+          throw new StaleJobAttemptError("encode job", claim.id);
+        }
+        return recovered;
+      },
       recoverExpiredClaims() {
         const timestamp = now();
         const expiredBefore = new Date(
@@ -6191,10 +6227,7 @@ export function createDataAccessInternal(
             .from(encodeJobs)
             .where(
               and(
-                inArray(encodeJobs.status, [
-                  "running",
-                  "cancellation_requested",
-                ]),
+                eq(encodeJobs.status, "running"),
                 isNull(encodeJobs.partialCleanupLeaseToken),
                 lte(encodeJobs.updatedAt, expiredBefore),
               ),
@@ -6209,22 +6242,18 @@ export function createDataAccessInternal(
           return transaction
             .update(encodeJobs)
             .set({
-              ...encodeExpiredAttemptAssignments(
-                "Encode worker lease expired",
-              ),
+              status: "failed",
               progressEtaSeconds: null,
               partialCleanupOutputPath: sql`${encodeJobs.outputPath}`,
               partialCleanupClaimToken: sql`${encodeJobs.claimToken}`,
               partialCleanupLeaseToken: null,
+              errorMessage: "Encode worker lease expired",
               updatedAt: timestamp,
             })
             .where(
               and(
                 inArray(encodeJobs.id, expiredIds),
-                inArray(encodeJobs.status, [
-                  "running",
-                  "cancellation_requested",
-                ]),
+                eq(encodeJobs.status, "running"),
                 isNull(encodeJobs.partialCleanupLeaseToken),
                 lte(encodeJobs.updatedAt, expiredBefore),
               ),
