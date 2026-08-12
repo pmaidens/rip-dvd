@@ -37,12 +37,10 @@ describe("Catalog Review Coverage", () => {
       ],
       [
         {
-          id: "whole-title",
           mediaItemId: "movie",
           sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
         },
         {
-          id: "partial-a",
           mediaItemId: "episode-a",
           sourceIdentity: {
             kind: "dvd_chapters",
@@ -52,7 +50,6 @@ describe("Catalog Review Coverage", () => {
           },
         },
         {
-          id: "partial-b",
           mediaItemId: "episode-b",
           sourceIdentity: {
             kind: "dvd_chapters",
@@ -62,7 +59,6 @@ describe("Catalog Review Coverage", () => {
           },
         },
         {
-          id: "complete-a",
           mediaItemId: "episode-a",
           sourceIdentity: {
             kind: "dvd_chapters",
@@ -72,7 +68,6 @@ describe("Catalog Review Coverage", () => {
           },
         },
         {
-          id: "complete-b",
           mediaItemId: "episode-b",
           sourceIdentity: {
             kind: "dvd_chapters",
@@ -82,7 +77,6 @@ describe("Catalog Review Coverage", () => {
           },
         },
         {
-          id: "main-feature",
           mediaItemId: "movie",
           sourceIdentity: { kind: "main_feature" },
         },
@@ -99,25 +93,21 @@ describe("Catalog Review Coverage", () => {
       titles: [
         {
           titleNumber: 1,
-          durationSeconds: 5_400,
           status: "mapped",
           hasOverlap: false,
         },
         {
           titleNumber: 2,
-          durationSeconds: 2_400,
           status: "partially_mapped",
           hasOverlap: true,
         },
         {
           titleNumber: 3,
-          durationSeconds: 1_800,
           status: "mapped",
           hasOverlap: false,
         },
         {
           titleNumber: 4,
-          durationSeconds: 90,
           status: "unmapped",
           hasOverlap: false,
         },
@@ -136,12 +126,10 @@ describe("Catalog Review Coverage", () => {
       }],
       [
         {
-          id: "whole-title",
           mediaItemId: "concert",
           sourceIdentity: { kind: "dvd_title", titleNumber: 7 },
         },
         {
-          id: "song-excerpt",
           mediaItemId: "song",
           sourceIdentity: {
             kind: "dvd_chapters",

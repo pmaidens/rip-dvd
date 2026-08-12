@@ -545,13 +545,11 @@ describe("CatalogReviewView", () => {
               titles: [
                 {
                   titleNumber: 1,
-                  durationSeconds: 2_400,
                   status: "partially_mapped",
                   hasOverlap: false,
                 },
                 {
                   titleNumber: 2,
-                  durationSeconds: 3_600,
                   status: "unmapped",
                   hasOverlap: false,
                 },

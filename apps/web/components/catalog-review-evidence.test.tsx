@@ -23,13 +23,11 @@ const evidenceCoverage = {
   titles: [
     {
       titleNumber: 1,
-      durationSeconds: 3_600,
       status: "partially_mapped" as const,
       hasOverlap: true,
     },
     {
       titleNumber: 2,
-      durationSeconds: 90,
       status: "unmapped" as const,
       hasOverlap: false,
     },

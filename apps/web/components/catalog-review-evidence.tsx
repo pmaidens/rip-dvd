@@ -247,7 +247,6 @@ export function CatalogReviewEvidence({
   function renderTitleEvidence(title: DvdTitle) {
     const titleCoverage = coverageByTitle.get(title.number) ?? {
       titleNumber: title.number,
-      durationSeconds: title.durationSeconds,
       status: "unmapped" as const,
       hasOverlap: false,
     };

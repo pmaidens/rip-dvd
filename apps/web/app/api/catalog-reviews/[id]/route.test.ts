@@ -89,7 +89,6 @@ describe("Catalog Review API", () => {
         mainFeatureSelections: 0,
         titles: [{
           titleNumber: 1,
-          durationSeconds: 2_400,
           status: "unmapped",
           hasOverlap: false,
         }],

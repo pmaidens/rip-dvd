@@ -544,31 +544,26 @@ describe("end-to-end operations dashboard workflow", () => {
       titles: [
         {
           titleNumber: 1,
-          durationSeconds: 5_711,
           status: "mapped",
           hasOverlap: false,
         },
         {
           titleNumber: 2,
-          durationSeconds: 2_400,
           status: "partially_mapped",
           hasOverlap: true,
         },
         {
           titleNumber: 3,
-          durationSeconds: 1_800,
           status: "mapped",
           hasOverlap: false,
         },
         {
           titleNumber: 4,
-          durationSeconds: 300,
           status: "unmapped",
           hasOverlap: false,
         },
         {
           titleNumber: 5,
-          durationSeconds: 119,
           status: "unmapped",
           hasOverlap: false,
         },

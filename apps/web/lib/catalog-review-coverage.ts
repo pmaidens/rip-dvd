@@ -10,7 +10,6 @@ export type CatalogReviewTitleCoverageStatus =
 
 export interface CatalogReviewTitleCoverage {
   titleNumber: number;
-  durationSeconds: number;
   status: CatalogReviewTitleCoverageStatus;
   hasOverlap: boolean;
 }
@@ -26,7 +25,6 @@ export interface CatalogReviewCoverage {
 }
 
 interface CoverageDiscSelection {
-  id: string;
   mediaItemId: string;
   sourceIdentity: DiscSelectionSourceIdentityInput;
 }
@@ -127,7 +125,6 @@ export function calculateCatalogReviewCoverage(
       : "unmapped";
     return {
       titleNumber: title.number,
-      durationSeconds: title.durationSeconds,
       status,
       hasOverlap,
     };
