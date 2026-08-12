@@ -64,7 +64,13 @@ Invalid source coordinates, missing reuse targets, duplicate source slices,
 assisted-hierarchy violations, and stale revisions therefore leave no partial
 mapping behind. `catalog.searchMediaItems()` is an explicitly bounded,
 offset-paged title search used by the separate full-catalog reuse surface. The
-Assisted Mapping contract requires numbered Season/TV Show and Episode/Season
+`catalog.createEpisodicMappingProposal()` transaction creates or explicitly
+reuses a TV Show and its numbered Season, then creates one numbered Episode and
+one whole-title Disc Selection for each of up to 512 proposal entries. Existing
+hierarchy targets must already have the conventional TV Show/Season shape;
+invalid entries, mismatched reuse targets, duplicate titles, and stale catalog
+revisions roll back the entire hierarchy and every selection.
+The Assisted Mapping contract requires numbered Season/TV Show and Episode/Season
 shapes and limits Trailer or Bonus Feature parents to a Movie, TV Show, Season,
 or Episode; ordinary `createMediaItem()` and `updateMediaItem()` remain flexible
 for imported and unusual hierarchies.

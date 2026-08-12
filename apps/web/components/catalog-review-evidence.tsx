@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type {
   DvdAudioStream,
@@ -13,10 +13,13 @@ import type {
   CatalogReviewTitleCoverageStatus,
 } from "../lib/catalog-review-coverage";
 import { formatCountLabel } from "../lib/format-count-label";
+import { CatalogReviewEpisodicMappingProposal } from "./catalog-review-episodic-mapping-proposal";
 import { CatalogReviewMappingProposal } from "./catalog-review-mapping-proposal";
 import type {
   CatalogReviewMediaItem,
+  CreateEpisodicMappingProposalInput,
   CreateMappingProposalInput,
+  EpisodicMappingProposal,
   MappingProposal,
   MappingProposalAction,
 } from "./catalog-review-model";
@@ -198,27 +201,58 @@ export function CatalogReviewEvidence({
   titles,
   mediaItems = [],
   activeMappingProposal = null,
+  activeEpisodicMappingProposal = null,
   isSaving = false,
   mappingProposalError = null,
   onStartMappingProposal,
   onCancelMappingProposal = () => undefined,
   onCreateMappingProposal = () => undefined,
+  onStartEpisodicMappingProposal,
+  onCancelEpisodicMappingProposal = () => undefined,
+  onCreateEpisodicMappingProposal = () => undefined,
 }: {
   coverage: CatalogReviewCoverage;
   volumeLabel: string;
   titles: readonly DvdTitle[];
   mediaItems?: CatalogReviewMediaItem[];
   activeMappingProposal?: MappingProposal | null;
+  activeEpisodicMappingProposal?: EpisodicMappingProposal | null;
   isSaving?: boolean;
   mappingProposalError?: string | null;
   onStartMappingProposal?(proposal: MappingProposal): void;
   onCancelMappingProposal?(): void;
   onCreateMappingProposal?(input: CreateMappingProposalInput): void;
+  onStartEpisodicMappingProposal?(proposal: EpisodicMappingProposal): void;
+  onCancelEpisodicMappingProposal?(): void;
+  onCreateEpisodicMappingProposal?(
+    input: CreateEpisodicMappingProposalInput,
+  ): void;
 }) {
   const [filter, setFilter] = useState<CoverageFilter>("all");
+  const [selectedEpisodicTitleNumbers, setSelectedEpisodicTitleNumbers] =
+    useState<Set<number>>(() => new Set());
+  const [episodicSelectionError, setEpisodicSelectionError] = useState<
+    string | null
+  >(null);
+  const startingEpisodeNumberInput = useRef<HTMLInputElement>(null);
   const coverageByTitle = new Map(
     coverage.titles.map((title) => [title.titleNumber, title]),
   );
+  useEffect(() => {
+    const unmappedTitleNumbers = new Set(
+      coverage.titles
+        .filter((title) => title.status === "unmapped")
+        .map((title) => title.titleNumber),
+    );
+    setSelectedEpisodicTitleNumbers((current) => {
+      const retained = new Set(
+        [...current].filter((titleNumber) =>
+          unmappedTitleNumbers.has(titleNumber)
+        ),
+      );
+      return retained.size === current.size ? current : retained;
+    });
+  }, [coverage.titles]);
   const statusForTitle = (title: DvdTitle) =>
     coverageByTitle.get(title.number)?.status ?? "unmapped";
   const proposalSource = activeMappingProposal?.sourceIdentity;
@@ -247,6 +281,55 @@ export function CatalogReviewEvidence({
     ...titles.map((title) => title.durationSeconds),
   );
   const proposedTitle = formatVolumeLabel(volumeLabel);
+  function toggleEpisodicTitle(titleNumber: number) {
+    setSelectedEpisodicTitleNumbers((current) => {
+      const next = new Set(current);
+      if (next.has(titleNumber)) {
+        next.delete(titleNumber);
+      } else {
+        next.add(titleNumber);
+      }
+      return next;
+    });
+  }
+  function startEpisodicProposal() {
+    const firstEpisodeNumber = Number(startingEpisodeNumberInput.current?.value);
+    if (
+      !Number.isSafeInteger(firstEpisodeNumber) ||
+      firstEpisodeNumber < 1
+    ) {
+      setEpisodicSelectionError(
+        "Starting episode number must be a positive whole number.",
+      );
+      return;
+    }
+    if (
+      firstEpisodeNumber >
+        Number.MAX_SAFE_INTEGER - selectedEpisodicTitleNumbers.size + 1
+    ) {
+      setEpisodicSelectionError(
+        "Starting episode number must leave room for every selected title.",
+      );
+      return;
+    }
+    if (selectedEpisodicTitleNumbers.size === 0) {
+      return;
+    }
+    setEpisodicSelectionError(null);
+    const selectedTitles = titles
+      .filter((title) => selectedEpisodicTitleNumbers.has(title.number))
+      .sort((left, right) => left.number - right.number);
+    onStartEpisodicMappingProposal?.({
+      episodes: selectedTitles.map((title, index) => {
+        const episodeNumber = firstEpisodeNumber + index;
+        return {
+          titleNumber: title.number,
+          title: `Episode ${episodeNumber}`,
+          episodeNumber,
+        };
+      }),
+    });
+  }
   function startWholeTitleProposal(
     titleNumber: number,
     action: Exclude<MappingProposalAction, "chapters" | "main_feature">,
@@ -264,7 +347,8 @@ export function CatalogReviewEvidence({
     };
     const activeTitleProposal = isActiveProposalTitle(title);
     const hasExistingCoverage = titleCoverage.status !== "unmapped";
-    const assistedMappingDisabled = isSaving || hasExistingCoverage;
+    const assistedMappingDisabled = isSaving || hasExistingCoverage ||
+      activeEpisodicMappingProposal !== null;
     return (
       <li
         key={title.number}
@@ -309,6 +393,19 @@ export function CatalogReviewEvidence({
             <span>Subtitles: {languageSummary(title.subtitles)}</span>
           </p>
           <TechnicalStreamDetails title={title} />
+          {onStartEpisodicMappingProposal && !hasExistingCoverage ? (
+            <label className="catalog-episodic-title-choice">
+              <input
+                type="checkbox"
+                name="episodicTitleNumbers"
+                value={title.number}
+                checked={selectedEpisodicTitleNumbers.has(title.number)}
+                disabled={isSaving || activeEpisodicMappingProposal !== null}
+                onChange={() => toggleEpisodicTitle(title.number)}
+              />
+              Select Title {title.number} for episodic mapping
+            </label>
+          ) : null}
           {onStartMappingProposal ? (
             <div className="catalog-title-mapping-controls">
               <div
@@ -442,6 +539,67 @@ export function CatalogReviewEvidence({
         Title Suggestions use duration only. They do not identify content,
         select a source, or create a Disc Selection.
       </p>
+      {onStartEpisodicMappingProposal && titles.length > 0 ? (
+        <section
+          className="catalog-episodic-selection"
+          aria-labelledby="episodic-title-selection"
+        >
+          <div>
+            <h4 id="episodic-title-selection">Bulk episode mapping</h4>
+            <p className="catalog-help">
+              Select whole DVD titles, then provide the required starting
+              episode number. The initial proposal follows DVD title order.
+            </p>
+          </div>
+          <label>
+            Starting episode number
+            <input
+              name="episodicStartingEpisodeNumber"
+              type="number"
+              min="1"
+              required
+              defaultValue="1"
+              ref={startingEpisodeNumberInput}
+              disabled={isSaving || activeEpisodicMappingProposal !== null}
+            />
+          </label>
+          <button
+            type="button"
+            disabled={
+              isSaving ||
+              activeMappingProposal !== null ||
+              activeEpisodicMappingProposal !== null ||
+              selectedEpisodicTitleNumbers.size === 0
+            }
+            onClick={startEpisodicProposal}
+          >
+            Create episodic proposal
+          </button>
+          <span aria-live="polite">
+            {formatCountLabel(
+              selectedEpisodicTitleNumbers.size,
+              "selected title",
+            )}
+          </span>
+          {episodicSelectionError ? (
+            <p className="catalog-episodic-selection-error" role="alert">
+              {episodicSelectionError}
+            </p>
+          ) : null}
+        </section>
+      ) : null}
+      {activeEpisodicMappingProposal ? (
+        <CatalogReviewEpisodicMappingProposal
+          key={activeEpisodicMappingProposal.episodes
+            .map((episode) => episode.titleNumber).join("-")}
+          proposal={activeEpisodicMappingProposal}
+          proposedTitle={proposedTitle}
+          isSaving={isSaving}
+          error={mappingProposalError}
+          onCancel={onCancelEpisodicMappingProposal}
+          onCreate={onCreateEpisodicMappingProposal}
+        />
+      ) : null}
       {titles.length === 0 ? (
         <p className="catalog-empty">
           No reviewable DVD titles were recorded.

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  MAX_DVD_TITLES,
   MEDIA_ITEM_KINDS,
 } from "@rip-dvd/data-access";
 
@@ -18,6 +19,33 @@ function parseCommand(value: unknown) {
 }
 
 const validCommands = {
+  create_episodic_mapping_proposal: {
+    action: "create_episodic_mapping_proposal",
+    catalogRevision: "2026-08-11T06:00:00.000Z",
+    tvShow: {
+      choice: "create_new",
+      title: "Example Show",
+      year: 2004,
+    },
+    season: {
+      choice: "create_new",
+      title: "Example Show Season 2",
+      seasonNumber: 2,
+    },
+    episodes: [
+      {
+        titleNumber: 2,
+        title: "Arrival",
+        episodeNumber: 7,
+        label: "Disc one",
+      },
+      {
+        titleNumber: 4,
+        title: "Departure",
+        episodeNumber: 9,
+      },
+    ],
+  },
   create_mapping_proposal: {
     action: "create_mapping_proposal",
     catalogRevision: "2026-08-11T06:00:00.000Z",
@@ -152,6 +180,53 @@ describe("catalog review command contract", () => {
         },
       },
       "Invalid Mapping Proposal",
+    ],
+    [
+      {
+        action: "create_episodic_mapping_proposal",
+        catalogRevision: "2026-08-11T06:00:00.000Z",
+        tvShow: { choice: "create_new", title: "Example Show" },
+        season: {
+          choice: "create_new",
+          title: "Unnumbered Season",
+        },
+        episodes: [{
+          titleNumber: 1,
+          title: "Episode 1",
+          episodeNumber: 1,
+        }],
+      },
+      "Invalid Episodic Mapping Proposal",
+    ],
+    [
+      {
+        action: "create_episodic_mapping_proposal",
+        catalogRevision: "2026-08-11T06:00:00.000Z",
+        tvShow: { choice: "use_existing", mediaItemId: "show-1" },
+        season: { choice: "use_existing", mediaItemId: "season-1" },
+        episodes: [
+          { titleNumber: 1, title: "Episode 1", episodeNumber: 1 },
+          { titleNumber: 1, title: "Episode 2", episodeNumber: 2 },
+        ],
+      },
+      "Invalid Episodic Mapping Proposal",
+    ],
+    [
+      {
+        action: "create_episodic_mapping_proposal",
+        catalogRevision: "2026-08-11T06:00:00.000Z",
+        tvShow: { choice: "use_existing", mediaItemId: "show-1" },
+        season: { choice: "use_existing", mediaItemId: "season-1" },
+        episodes: Array.from(
+          { length: MAX_DVD_TITLES + 1 },
+          (_, index) => ({
+            titleNumber: index + 1,
+            title: `Episode ${index + 1}`,
+            episodeNumber: index + 1,
+          }),
+        ),
+      },
+      "Invalid Episodic Mapping Proposal",
     ],
     [
       {

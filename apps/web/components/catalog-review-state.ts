@@ -7,8 +7,10 @@ import type {
   CatalogReviewDto,
   CatalogReviewLoadState,
   CreateDiscSelectionInput,
+  CreateEpisodicMappingProposalInput,
   CreateMappingProposalInput,
   DiscSelectionKind,
+  EpisodicMappingProposal,
   MappingProposal,
   SaveMediaItemInput,
 } from "./catalog-review-model";
@@ -126,6 +128,8 @@ export function useCatalogReviewState({
     useState<DiscSelectionKind>("main_feature");
   const [activeMappingProposal, setActiveMappingProposal] =
     useState<MappingProposal | null>(null);
+  const [activeEpisodicMappingProposal, setActiveEpisodicMappingProposal] =
+    useState<EpisodicMappingProposal | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [requestError, setRequestError] = useState<string | null>(null);
   const [mappingProposalError, setMappingProposalError] = useState<
@@ -168,7 +172,10 @@ export function useCatalogReviewState({
     void load();
   }, [load]);
 
-  useEffect(() => setActiveMappingProposal(null), [archiveId]);
+  useEffect(() => {
+    setActiveMappingProposal(null);
+    setActiveEpisodicMappingProposal(null);
+  }, [archiveId]);
 
   useEffect(
     () => () => requestScope.current?.deactivate(archiveId),
@@ -263,9 +270,26 @@ export function useCatalogReviewState({
     }, "mapping_proposal");
   }
 
+  function createEpisodicMappingProposal(
+    input: CreateEpisodicMappingProposalInput,
+  ) {
+    if (state.status !== "loaded") {
+      return;
+    }
+    void mutate({
+      action: "create_episodic_mapping_proposal",
+      catalogRevision: state.review.catalogRevision,
+      ...input,
+    }, false, () => {
+      setMappingProposalError(null);
+      setActiveEpisodicMappingProposal(null);
+    }, "mapping_proposal");
+  }
+
   return {
     state,
     activeMappingProposal,
+    activeEpisodicMappingProposal,
     editingMediaItemId,
     isSaving,
     requestError,
@@ -279,6 +303,7 @@ export function useCatalogReviewState({
     startMappingProposal: (proposal: MappingProposal) => {
       setRequestError(null);
       setMappingProposalError(null);
+      setActiveEpisodicMappingProposal(null);
       setActiveMappingProposal(proposal);
     },
     cancelMappingProposal: () => {
@@ -286,6 +311,18 @@ export function useCatalogReviewState({
       setMappingProposalError(null);
       setActiveMappingProposal(null);
     },
+    startEpisodicMappingProposal: (proposal: EpisodicMappingProposal) => {
+      setRequestError(null);
+      setMappingProposalError(null);
+      setActiveMappingProposal(null);
+      setActiveEpisodicMappingProposal(proposal);
+    },
+    cancelEpisodicMappingProposal: () => {
+      setRequestError(null);
+      setMappingProposalError(null);
+      setActiveEpisodicMappingProposal(null);
+    },
+    createEpisodicMappingProposal,
     createMappingProposal,
     saveMediaItem,
     createDiscSelection,

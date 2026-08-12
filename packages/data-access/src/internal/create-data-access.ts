@@ -87,7 +87,7 @@ import {
   type ValidatedMediaItem,
 } from "./media-item-validation.js";
 import { serializeDiscSelectionSourceIdentity } from "../disc-selection-source-identity.js";
-import { isDvdContentId } from "../dvd-scan.js";
+import { isDvdContentId, MAX_DVD_TITLES } from "../dvd-scan.js";
 import {
   ARCHIVE_RUNNING_PROGRESS_PHASES,
   ENCODE_PROGRESS_PHASES,
@@ -2419,6 +2419,156 @@ export function createDataAccessInternal(
             input.catalogRevision,
           );
           return { mediaItem, discSelection };
+        }, { behavior: "immediate" });
+      },
+
+      createEpisodicMappingProposal(input) {
+        if (
+          !(input.catalogRevision instanceof Date) ||
+          !Number.isSafeInteger(input.catalogRevision.getTime())
+        ) {
+          throw new DomainInvariantError(
+            "Episodic Mapping Proposal catalog revision must be a valid timestamp",
+          );
+        }
+        if (
+          !Array.isArray(input.episodes) ||
+          input.episodes.length === 0 ||
+          input.episodes.length > MAX_DVD_TITLES
+        ) {
+          throw new DomainInvariantError(
+            `Episodic Mapping Proposal requires between 1 and ${MAX_DVD_TITLES} Episodes`,
+          );
+        }
+        const timestamp = now();
+        return database.transaction((transaction) => {
+          const currentArchive = requireRow(
+            transaction
+              .select({ updatedAt: originalDiscArchives.updatedAt })
+              .from(originalDiscArchives)
+              .where(eq(
+                originalDiscArchives.id,
+                input.originalDiscArchiveId,
+              ))
+              .get(),
+            "original disc archive",
+            input.originalDiscArchiveId,
+          );
+          if (
+            currentArchive.updatedAt.getTime() !==
+              input.catalogRevision.getTime()
+          ) {
+            throw new DomainInvariantError(
+              "Catalog review changed; reload before saving Episodic Mapping Proposal",
+            );
+          }
+
+          const createMediaItem = (
+            candidate: Omit<Parameters<typeof validateMediaItem>[0], "id">,
+          ) => {
+            const id = newId<MediaItemId>();
+            const values = validateMediaItem(
+              { ...candidate, id },
+              transaction,
+              { titleNormalization: "trim" },
+            );
+            return requireRow(
+              transaction
+                .insert(mediaItems)
+                .values({
+                  id,
+                  ...values,
+                  createdAt: timestamp,
+                  updatedAt: timestamp,
+                })
+                .returning()
+                .get(),
+              "media item",
+              id,
+            );
+          };
+          const readMediaItem = (id: MediaItemId) => requireRow(
+            transaction
+              .select()
+              .from(mediaItems)
+              .where(eq(mediaItems.id, id))
+              .get(),
+            "media item",
+            id,
+          );
+
+          const tvShow = input.tvShow.choice === "create_new"
+            ? createMediaItem({
+                kind: "tv_show",
+                title: input.tvShow.title,
+                year: input.tvShow.year,
+              })
+            : readMediaItem(input.tvShow.mediaItemId);
+          if (tvShow.kind !== "tv_show") {
+            throw new DomainInvariantError(
+              "Episodic Mapping Proposal requires a TV Show",
+            );
+          }
+
+          const season = input.season.choice === "create_new"
+            ? createMediaItem({
+                parentId: tvShow.id,
+                kind: "season",
+                title: input.season.title,
+                seasonNumber: input.season.seasonNumber,
+              })
+            : readMediaItem(input.season.mediaItemId);
+          if (
+            season.kind !== "season" ||
+            season.seasonNumber === null ||
+            season.parentId !== tvShow.id
+          ) {
+            throw new DomainInvariantError(
+              "Episodic Mapping Proposal requires a numbered Season beneath the selected TV Show",
+            );
+          }
+
+          const episodes = input.episodes.map((episode) => {
+            const mediaItem = createMediaItem({
+              parentId: season.id,
+              kind: "episode",
+              title: episode.title,
+              episodeNumber: episode.episodeNumber,
+            });
+            validateAssistedMappingShape(transaction, {
+              parentId: mediaItem.parentId,
+              kind: mediaItem.kind,
+              title: mediaItem.title,
+              year: mediaItem.year,
+              seasonNumber: mediaItem.seasonNumber,
+              episodeNumber: mediaItem.episodeNumber,
+            });
+            const label = episode.label === undefined
+              ? undefined
+              : requireNonEmpty(episode.label, "label");
+            const discSelection = insertDiscSelection(
+              transaction,
+              {
+                originalDiscArchiveId: input.originalDiscArchiveId,
+                mediaItemId: mediaItem.id,
+                sourceIdentity: {
+                  kind: "dvd_title",
+                  titleNumber: episode.titleNumber,
+                },
+                ...(label === undefined ? {} : { label }),
+              },
+              newId<DiscSelectionId>(),
+              timestamp,
+            );
+            return { mediaItem, discSelection };
+          });
+          reopenCatalogReview(
+            transaction,
+            input.originalDiscArchiveId,
+            timestamp,
+            input.catalogRevision,
+          );
+          return { tvShow, season, episodes };
         }, { behavior: "immediate" });
       },
 

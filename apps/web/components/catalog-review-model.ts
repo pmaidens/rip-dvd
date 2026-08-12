@@ -7,6 +7,9 @@ import type {
 import { MEDIA_ITEM_KINDS } from "@rip-dvd/data-access/catalog-kinds";
 
 import type {
+  CatalogReviewEpisodicEpisodeInput,
+  CatalogReviewEpisodicSeasonTarget,
+  CatalogReviewEpisodicTvShowTarget,
   CatalogReviewDiscSelectionInput,
   CatalogReviewMappingTarget,
   CatalogReviewMediaItemInput,
@@ -119,6 +122,16 @@ export interface MappingProposal {
 export interface CreateMappingProposalInput {
   target: CatalogReviewMappingTarget;
   discSelection: CatalogReviewProposedDiscSelectionInput;
+}
+
+export interface EpisodicMappingProposal {
+  episodes: CatalogReviewEpisodicEpisodeInput[];
+}
+
+export interface CreateEpisodicMappingProposalInput {
+  tvShow: CatalogReviewEpisodicTvShowTarget;
+  season: CatalogReviewEpisodicSeasonTarget;
+  episodes: CatalogReviewEpisodicEpisodeInput[];
 }
 
 export interface MediaItemSearchResult {

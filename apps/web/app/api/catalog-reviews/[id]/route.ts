@@ -278,6 +278,41 @@ export async function createCatalogReviewRoute(
     const command = parsedCommand.command;
 
     switch (command.action) {
+      case "create_episodic_mapping_proposal": {
+        const proposal = access.catalog.createEpisodicMappingProposal({
+          originalDiscArchiveId: archiveId,
+          catalogRevision: new Date(command.catalogRevision),
+          tvShow: command.tvShow.choice === "create_new"
+            ? {
+                choice: "create_new",
+                title: command.tvShow.title,
+                ...(command.tvShow.year === null ||
+                    command.tvShow.year === undefined
+                  ? {}
+                  : { year: command.tvShow.year }),
+              }
+            : {
+                choice: "use_existing",
+                mediaItemId: command.tvShow.mediaItemId as MediaItemId,
+              },
+          season: command.season.choice === "create_new"
+            ? command.season
+            : {
+                choice: "use_existing",
+                mediaItemId: command.season.mediaItemId as MediaItemId,
+              },
+          episodes: command.episodes,
+        });
+        return response({
+          tvShow: serializeMediaItem(proposal.tvShow),
+          season: serializeMediaItem(proposal.season),
+          episodes: proposal.episodes.map((episode) => ({
+            mediaItem: serializeMediaItem(episode.mediaItem),
+            discSelection: serializeDiscSelection(episode.discSelection),
+          })),
+        }, 201);
+      }
+
       case "create_mapping_proposal": {
         const proposal = access.catalog.createMappingProposal({
           originalDiscArchiveId: archiveId,

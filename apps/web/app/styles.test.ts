@@ -188,6 +188,21 @@ describe("Catalog Review Mapping Proposal layout", () => {
       /@media \(max-width: 47rem\).*\.catalog-title-evidence-active \{ grid-template-columns: 1fr;/,
     );
   });
+
+  it("stacks the bulk episodic controls and keeps episode cards wrap-safe on mobile", () => {
+    expect(selectorDeclarations(".catalog-episodic-selection")).toMatch(
+      /grid-template-columns:\s*minmax\(0,\s*1fr\)/,
+    );
+    expect(selectorDeclarations(".catalog-episodic-episode")).toMatch(
+      /min-width:\s*0/,
+    );
+    expect(selectorDeclarations(".catalog-episodic-episode")).toMatch(
+      /overflow-wrap:\s*anywhere/,
+    );
+    expect(styles.replace(/\s+/g, " ")).toMatch(
+      /@media \(max-width: 47rem\).*\.catalog-episodic-selection \{ grid-template-columns: 1fr;/,
+    );
+  });
 });
 
 describe("Catalog Review evidence presentation", () => {

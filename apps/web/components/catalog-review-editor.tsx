@@ -11,8 +11,10 @@ import { CatalogReviewMediaItems } from "./catalog-review-media-items";
 import type {
   CatalogReviewLoadState,
   CreateDiscSelectionInput,
+  CreateEpisodicMappingProposalInput,
   CreateMappingProposalInput,
   DiscSelectionKind,
+  EpisodicMappingProposal,
   MappingProposal,
   SaveMediaItemInput,
 } from "./catalog-review-model";
@@ -26,6 +28,7 @@ interface CatalogReviewViewProps {
   mappingProposalError: string | null;
   selectionKind: DiscSelectionKind;
   activeMappingProposal: MappingProposal | null;
+  activeEpisodicMappingProposal?: EpisodicMappingProposal | null;
   onClose(): void;
   onRetry(): void;
   onEditMediaItem(id: string): void;
@@ -35,6 +38,11 @@ interface CatalogReviewViewProps {
   onStartMappingProposal(proposal: MappingProposal): void;
   onCancelMappingProposal(): void;
   onCreateMappingProposal(input: CreateMappingProposalInput): void;
+  onStartEpisodicMappingProposal?(proposal: EpisodicMappingProposal): void;
+  onCancelEpisodicMappingProposal?(): void;
+  onCreateEpisodicMappingProposal?(
+    input: CreateEpisodicMappingProposalInput,
+  ): void;
   onSaveMediaItem(input: SaveMediaItemInput): void;
   onCreateDiscSelection(input: CreateDiscSelectionInput): void;
   onDeleteDiscSelection(id: string): void;
@@ -49,6 +57,7 @@ export function CatalogReviewView({
   mappingProposalError,
   selectionKind,
   activeMappingProposal,
+  activeEpisodicMappingProposal = null,
   onClose,
   onRetry,
   onEditMediaItem,
@@ -58,6 +67,9 @@ export function CatalogReviewView({
   onStartMappingProposal,
   onCancelMappingProposal,
   onCreateMappingProposal,
+  onStartEpisodicMappingProposal,
+  onCancelEpisodicMappingProposal,
+  onCreateEpisodicMappingProposal,
   onSaveMediaItem,
   onCreateDiscSelection,
   onDeleteDiscSelection,
@@ -119,11 +131,15 @@ export function CatalogReviewView({
           titles={review.rawScan.titles}
           mediaItems={review.mediaItems}
           activeMappingProposal={activeMappingProposal}
+          activeEpisodicMappingProposal={activeEpisodicMappingProposal}
           isSaving={isSaving}
           mappingProposalError={mappingProposalError}
           onStartMappingProposal={onStartMappingProposal}
           onCancelMappingProposal={onCancelMappingProposal}
           onCreateMappingProposal={onCreateMappingProposal}
+          onStartEpisodicMappingProposal={onStartEpisodicMappingProposal}
+          onCancelEpisodicMappingProposal={onCancelEpisodicMappingProposal}
+          onCreateEpisodicMappingProposal={onCreateEpisodicMappingProposal}
         />
 
         <CatalogReviewMediaItems
@@ -186,6 +202,7 @@ export function CatalogReviewEditor({
       mappingProposalError={review.mappingProposalError}
       selectionKind={review.selectionKind}
       activeMappingProposal={review.activeMappingProposal}
+      activeEpisodicMappingProposal={review.activeEpisodicMappingProposal}
       onClose={onClose}
       onRetry={review.retry}
       onEditMediaItem={review.editMediaItem}
@@ -195,6 +212,9 @@ export function CatalogReviewEditor({
       onStartMappingProposal={review.startMappingProposal}
       onCancelMappingProposal={review.cancelMappingProposal}
       onCreateMappingProposal={review.createMappingProposal}
+      onStartEpisodicMappingProposal={review.startEpisodicMappingProposal}
+      onCancelEpisodicMappingProposal={review.cancelEpisodicMappingProposal}
+      onCreateEpisodicMappingProposal={review.createEpisodicMappingProposal}
       onSaveMediaItem={review.saveMediaItem}
       onCreateDiscSelection={review.createDiscSelection}
       onDeleteDiscSelection={review.deleteDiscSelection}
