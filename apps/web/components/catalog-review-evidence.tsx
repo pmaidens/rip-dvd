@@ -166,6 +166,7 @@ export function CatalogReviewEvidence({
   mediaItems = [],
   activeMappingProposal = null,
   isSaving = false,
+  mappingProposalError = null,
   onStartMappingProposal,
   onCancelMappingProposal = () => undefined,
   onCreateMappingProposal = () => undefined,
@@ -175,6 +176,7 @@ export function CatalogReviewEvidence({
   mediaItems?: CatalogReviewMediaItem[];
   activeMappingProposal?: MappingProposal | null;
   isSaving?: boolean;
+  mappingProposalError?: string | null;
   onStartMappingProposal?(proposal: MappingProposal): void;
   onCancelMappingProposal?(): void;
   onCreateMappingProposal?(input: CreateMappingProposalInput): void;
@@ -238,6 +240,7 @@ export function CatalogReviewEvidence({
           proposedTitle={proposedTitle}
           mediaItems={mediaItems}
           isSaving={isSaving}
+          error={mappingProposalError}
           onCancel={onCancelMappingProposal}
           onCreate={onCreateMappingProposal}
         />
@@ -363,6 +366,7 @@ export function CatalogReviewEvidence({
                     proposedTitle={proposedTitle}
                     mediaItems={mediaItems}
                     isSaving={isSaving}
+                    error={mappingProposalError}
                     onCancel={onCancelMappingProposal}
                     onCreate={onCreateMappingProposal}
                   />

@@ -341,6 +341,7 @@ describe("end-to-end operations dashboard workflow", () => {
         editingMediaItemId={null}
         isSaving={false}
         requestError={null}
+        mappingProposalError={null}
         selectionKind="main_feature"
         activeMappingProposal={null}
         onClose={() => undefined}
