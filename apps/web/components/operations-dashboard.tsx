@@ -310,8 +310,8 @@ function DiscInspectionItem({
     ? "Calculating speed and time remaining…"
     : `${formatBytes(inspection.bytesPerSecond)}/s · about ${formatDuration(inspection.etaSeconds ?? 0)} remaining`;
   const retryAttempt = inspection.consecutiveFailureCount === 0
-    ? `Manual retry queued after ${inspection.attemptCount} attempts`
-    : `Attempt ${inspection.attemptCount + 1} of 5`;
+    ? "Manual retry queued"
+    : `Attempt ${inspection.consecutiveFailureCount + 1} of 5`;
   const retrySeconds = Math.max(
     0,
     Math.ceil(
@@ -320,13 +320,18 @@ function DiscInspectionItem({
         : now) - now) / 1_000,
     ),
   );
-  const findings = inspection.titleCount === null ? null : [
-    inspection.volumeLabel,
-    countLabel(inspection.titleCount, "title"),
-    countLabel(inspection.chapterCount ?? 0, "chapter"),
-    `${inspection.audioStreamCount ?? 0} audio`,
-    countLabel(inspection.subtitleStreamCount ?? 0, "subtitle"),
-  ].filter(Boolean).join(" · ");
+  const findings =
+    inspection.archiveWorkFulfilled || inspection.titleCount === null
+      ? null
+      : [
+          inspection.volumeLabel,
+          countLabel(inspection.titleCount, "title"),
+          countLabel(inspection.chapterCount ?? 0, "chapter"),
+          `${inspection.audioStreamCount ?? 0} audio`,
+          countLabel(inspection.subtitleStreamCount ?? 0, "subtitle"),
+        ]
+          .filter(Boolean)
+          .join(" · ");
   return (
     <section
       className="nested-operation disc-inspection"
@@ -370,11 +375,25 @@ function DiscInspectionItem({
           </p>
         ) : inspection.status === "running" ? (
           <p>Confirming the inserted disc…</p>
-        ) : inspection.status === "completed" ? <p>Inspection complete</p> : (
+        ) : inspection.status === "completed" &&
+          !inspection.archiveWorkFulfilled ? (
+          <>
+            <div className="progress-row">
+              <Progress value={100} label="DVD content inspected" />
+              <strong>100%</strong>
+            </div>
+            <p>Inspection complete · ready for archive work</p>
+          </>
+        ) : inspection.status === "completed" ? (
+          <p>Inspection complete</p>
+        ) : inspection.status === "failed" &&
+          inspection.manualRetryRequested ? (
+          <p>Retry requested · waiting for the worker to verify this insertion</p>
+        ) : (
           <p>{inspectionReason(inspection.reasonCode)}</p>
         )}
       </div>
-      {inspection.status === "failed" ? (
+      {inspection.status === "failed" && !inspection.manualRetryRequested ? (
         <button
           type="button"
           disabled={busy}

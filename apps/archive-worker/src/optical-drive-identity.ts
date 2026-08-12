@@ -1,6 +1,7 @@
 import type { DiscoveredOpticalDrive } from "@rip-dvd/data-access";
 
 import type { BoundOpticalDrive } from "./archive-worker.js";
+import { DiscInspectionError } from "./disc-inspection-error.js";
 import {
   requireSafeOpticalDevicePath,
   type MediaGenerationObserver,
@@ -42,7 +43,11 @@ export function createBoundOpticalDriveIdentity(
       );
       const observedToken = await observer.observe(safeDevicePath, signal);
       if (observedToken !== binding.deviceInstanceToken) {
-        throw new Error(`Optical Drive instance changed ${phase}`);
+        throw new DiscInspectionError(
+          "abort",
+          "drive_identity_changed",
+          `Optical Drive instance changed ${phase}`,
+        );
       }
       return safeDevicePath;
     },

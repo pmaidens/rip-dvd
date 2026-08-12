@@ -740,6 +740,10 @@ It is resumed only while drive identity and Linux media-generation evidence
 prove the same insertion. The dashboard nests its indeterminate metadata phase,
 determinate byte progress, stabilized rate/ETA, retry state, and safe failure
 reason under the Optical Drive.
+Manual inspection retry is durable intent: the route leaves the inspection
+failed until the worker independently observes the drive again. Matching
+media-generation evidence reopens the same inspection and resets only its
+consecutive failure budget; changed or removed media never consumes that retry.
 
 Requesting preservation atomically marks a scanned disc approved and creates a
 pending Archive Request, not an Archive Job. A completed current inspection is

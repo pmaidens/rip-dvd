@@ -5364,27 +5364,75 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     }
     expect(access.discInspections.listAttempts(started.inspection.id)).toHaveLength(5);
 
-    const reset = access.discInspections.retry(
+    const requested = access.discInspections.requestRetry(
       started.inspection.id,
-      "201",
     );
-    expect(reset).toMatchObject({
+    expect(requested).toMatchObject({
       attemptCount: 5,
-      consecutiveFailureCount: 0,
-      phase: "retry_wait",
-      status: "running",
+      consecutiveFailureCount: 5,
+      manualRetryRequestedAt: expect.any(Date),
+      status: "failed",
     });
     const manualAttempt = access.discInspections.beginOrResume({
       opticalDriveId: drive.id,
       mediaGeneration: "201",
     });
     expect(manualAttempt).toMatchObject({
-      inspection: { attemptCount: 6 },
+      inspection: {
+        attemptCount: 6,
+        consecutiveFailureCount: 0,
+        manualRetryRequestedAt: null,
+        status: "running",
+      },
       claim: { id: started.inspection.id },
     });
-    expect(() =>
-      access.discInspections.retry(started.inspection.id, "different"),
-    ).toThrow(InvalidStatusTransitionError);
+    expect(() => access.discInspections.requestRetry(started.inspection.id))
+      .toThrow(InvalidStatusTransitionError);
+    access.close();
+  });
+
+  it("defers a manual inspection retry until current media evidence is verified", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const started = access.discInspections.beginOrResume({
+      opticalDriveId: drive.id,
+      mediaGeneration: "failed-insertion",
+    });
+    access.discInspections.record(started.claim!, {
+      type: "fail",
+      reasonCode: "invalid_metadata",
+    });
+
+    expect(access.discInspections.requestRetry(started.inspection.id))
+      .toMatchObject({
+        manualRetryRequestedAt: expect.any(Date),
+        status: "failed",
+      });
+
+    const replacement = access.discInspections.beginOrResume({
+      opticalDriveId: drive.id,
+      mediaGeneration: "replacement-insertion",
+    });
+    expect(replacement).toMatchObject({
+      inspection: {
+        mediaGeneration: "replacement-insertion",
+        status: "running",
+      },
+      claim: { id: replacement.inspection.id },
+    });
+    expect(replacement.inspection.id).not.toBe(started.inspection.id);
+    expect(access.discInspections.list({ ids: [started.inspection.id] }))
+      .toEqual([
+        expect.objectContaining({
+          isCurrent: false,
+          manualRetryRequestedAt: null,
+          status: "failed",
+        }),
+      ]);
     access.close();
   });
 
@@ -5427,6 +5475,8 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     });
     expect(replacement.id).not.toBe(request.id);
     expect(replacement.status).toBe("pending");
+    expect(access.archiveRequests.listRelevantForDetectedDiscs([disc.id]))
+      .toEqual([expect.objectContaining({ id: replacement.id })]);
     access.close();
   });
 
@@ -5484,6 +5534,13 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       attemptOrdinal: 2,
       status: "aborted",
     });
+    expect(access.archiveJobs.listLatestForRequests([request.id])).toEqual([
+      expect.objectContaining({
+        id: second!.id,
+        attemptOrdinal: 2,
+        status: "aborted",
+      }),
+    ]);
     expect(access.archiveRequests.list(["cancelled"])).toEqual([
       expect.objectContaining({ id: request.id }),
     ]);

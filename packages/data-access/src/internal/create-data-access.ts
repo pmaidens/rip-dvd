@@ -147,6 +147,7 @@ const MIGRATION_LOCK_TIMEOUT_MS = 15_000;
 const MIGRATION_LOCK_STALE_MS = 300_000;
 const MIGRATION_LOCK_POLL_MS = 10;
 const JOB_RECOVERY_LIMIT = 100;
+const RELATED_ACTIVITY_ROOT_LIMIT = 256;
 const LEGACY_ARCHIVE_RECONCILIATION_LIMIT = 4;
 const LEGACY_ARCHIVE_RECONCILIATION_BYTES = 9_000_000_000;
 const DISC_SELECTION_REVIEW_BATCH_SIZE = 100;
@@ -1367,12 +1368,18 @@ export function createDataAccessInternal(
         discInspections: {
           list: (options) => access.discInspections.list(options),
         },
-        archiveRequests: {
+      archiveRequests: {
           list: (statuses, options) =>
             access.archiveRequests.list(statuses, options),
+          listRelevantForDetectedDiscs: (detectedDiscIds) =>
+            access.archiveRequests.listRelevantForDetectedDiscs(
+              detectedDiscIds,
+            ),
         },
         archiveJobs: {
           list: (statuses, options) => access.archiveJobs.list(statuses, options),
+          listLatestForRequests: (archiveRequestIds) =>
+            access.archiveJobs.listLatestForRequests(archiveRequestIds),
         },
         encodeJobs: {
           list: (statuses, options) => access.encodeJobs.list(statuses, options),
@@ -3017,7 +3024,11 @@ export function createDataAccessInternal(
             } else {
               transaction
                 .update(discInspections)
-                .set({ isCurrent: false, updatedAt: timestamp })
+                .set({
+                  isCurrent: false,
+                  manualRetryRequestedAt: null,
+                  updatedAt: timestamp,
+                })
                 .where(
                   and(
                     eq(discInspections.id, current.id),
@@ -3031,6 +3042,39 @@ export function createDataAccessInternal(
           }
 
           if (current) {
+            if (
+              current.status === "failed" &&
+              current.manualRetryRequestedAt !== null
+            ) {
+              current = requireRow(
+                transaction
+                  .update(discInspections)
+                  .set({
+                    status: "running",
+                    phase: "retry_wait",
+                    consecutiveFailureCount: 0,
+                    retryAt: timestamp,
+                    manualRetryRequestedAt: null,
+                    reasonCode: null,
+                    diagnostic: null,
+                    completedAt: null,
+                    phaseStartedAt: timestamp,
+                    updatedAt: timestamp,
+                  })
+                  .where(
+                    and(
+                      eq(discInspections.id, current.id),
+                      eq(discInspections.status, "failed"),
+                      eq(discInspections.isCurrent, true),
+                      isNotNull(discInspections.manualRetryRequestedAt),
+                    ),
+                  )
+                  .returning()
+                  .get(),
+                "disc inspection",
+                current.id,
+              );
+            }
             if (current.status !== "running") {
               return { inspection: current, claim: null };
             }
@@ -3546,25 +3590,12 @@ export function createDataAccessInternal(
         }, { behavior: "immediate" });
       },
 
-      retry(id, mediaGenerationInput) {
+      requestRetry(id) {
         const timestamp = now();
-        const mediaGeneration = requireNonEmpty(
-          mediaGenerationInput,
-          "mediaGeneration",
-        );
-        const retried = database
+        const requested = database
           .update(discInspections)
           .set({
-            status: "running",
-            phase: "retry_wait",
-            consecutiveFailureCount: 0,
-            retryAt: timestamp,
-            reasonCode: null,
-            diagnostic: null,
-            claimToken: null,
-            claimUpdatedAt: null,
-            phaseStartedAt: timestamp,
-            completedAt: null,
+            manualRetryRequestedAt: timestamp,
             updatedAt: timestamp,
           })
           .where(
@@ -3572,12 +3603,12 @@ export function createDataAccessInternal(
               eq(discInspections.id, id),
               eq(discInspections.status, "failed"),
               eq(discInspections.isCurrent, true),
-              eq(discInspections.mediaGeneration, mediaGeneration),
+              isNull(discInspections.manualRetryRequestedAt),
             ),
           )
           .returning()
           .get();
-        if (!retried) {
+        if (!requested) {
           const current = database
             .select()
             .from(discInspections)
@@ -3586,13 +3617,20 @@ export function createDataAccessInternal(
           if (!current) {
             throw new RecordNotFoundError("disc inspection", id);
           }
+          if (
+            current.status === "failed" &&
+            current.isCurrent &&
+            current.manualRetryRequestedAt !== null
+          ) {
+            return current;
+          }
           throw new InvalidStatusTransitionError(
             "disc inspection",
             current.status,
-            "running",
+            "retry requested",
           );
         }
-        return retried;
+        return requested;
       },
 
       clearCurrent(input) {
@@ -3622,7 +3660,11 @@ export function createDataAccessInternal(
             return requireRow(
               transaction
                 .update(discInspections)
-                .set({ isCurrent: false, updatedAt: timestamp })
+                .set({
+                  isCurrent: false,
+                  manualRetryRequestedAt: null,
+                  updatedAt: timestamp,
+                })
                 .where(
                   and(
                     eq(discInspections.id, current.id),
@@ -3803,10 +3845,33 @@ export function createDataAccessInternal(
         return retried;
       },
 
-      list: listArchiveRequests,
-    },
+        list: listArchiveRequests,
 
-    archiveJobs: {
+        listRelevantForDetectedDiscs(detectedDiscIds) {
+          const uniqueIds = [...new Set(detectedDiscIds)];
+          if (uniqueIds.length > RELATED_ACTIVITY_ROOT_LIMIT) {
+            throw new DomainInvariantError(
+              `related Detected Disc reads are limited to ${RELATED_ACTIVITY_ROOT_LIMIT} roots`,
+            );
+          }
+          return uniqueIds.flatMap((detectedDiscId) => {
+            const request = database
+              .select()
+              .from(archiveRequests)
+              .where(eq(archiveRequests.detectedDiscId, detectedDiscId))
+              .orderBy(
+                sql`case when ${archiveRequests.status} in ('pending', 'running', 'needs_attention', 'cancellation_requested') then 0 else 1 end`,
+                desc(archiveRequests.updatedAt),
+                desc(archiveRequests.id),
+              )
+              .limit(1)
+              .get();
+            return request === undefined ? [] : [request];
+          });
+        },
+      },
+
+      archiveJobs: {
       startForInspection(inspectionId, workerIdInput) {
         const timestamp = now();
         const workerId = requireNonEmpty(workerIdInput, "workerId");
@@ -4134,9 +4199,31 @@ export function createDataAccessInternal(
         }, { behavior: "immediate" });
       },
 
-      list: listArchiveJobs,
+        list: listArchiveJobs,
 
-      isCancellationRequested(claim) {
+        listLatestForRequests(archiveRequestIds) {
+          const uniqueIds = [...new Set(archiveRequestIds)];
+          if (uniqueIds.length > RELATED_ACTIVITY_ROOT_LIMIT) {
+            throw new DomainInvariantError(
+              `related Archive Request reads are limited to ${RELATED_ACTIVITY_ROOT_LIMIT} roots`,
+            );
+          }
+          return uniqueIds.flatMap((archiveRequestId) => {
+            const job = database
+              .select()
+              .from(archiveJobs)
+              .where(eq(archiveJobs.archiveRequestId, archiveRequestId))
+              .orderBy(
+                desc(archiveJobs.attemptOrdinal),
+                desc(archiveJobs.id),
+              )
+              .limit(1)
+              .get();
+            return job === undefined ? [] : [job];
+          });
+        },
+
+        isCancellationRequested(claim) {
         const current = database
           .select({ status: archiveRequests.status })
           .from(archiveJobs)

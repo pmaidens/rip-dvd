@@ -77,7 +77,7 @@ describe("Disc Inspection and Archive Request mutation routes", () => {
     ]);
   });
 
-  it("retries only the same current failed Disc Inspection", async () => {
+  it("requests retry of the same current failed Disc Inspection", async () => {
     const { access, drive } = scannedDisc();
     const started = access.discInspections.beginOrResume({
       opticalDriveId: drive.id,
@@ -97,7 +97,13 @@ describe("Disc Inspection and Archive Request mutation routes", () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
-      inspection: { id: failed.id, status: "running", phase: "retry_wait" },
+      inspection: {
+        id: failed.id,
+        status: "failed",
+        phase: "reading_metadata",
+      },
     });
+    expect(access.discInspections.list({ ids: [failed.id] })[0])
+      .toMatchObject({ manualRetryRequestedAt: expect.any(Date) });
   });
 });

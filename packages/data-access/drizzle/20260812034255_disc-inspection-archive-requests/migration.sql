@@ -34,6 +34,7 @@ CREATE TABLE `disc_inspections` (
 	`bytes_per_second` integer,
 	`eta_seconds` integer,
 	`retry_at` integer,
+	`manual_retry_requested_at` integer,
 	`reason_code` text,
 	`diagnostic` text,
 	`claim_token` text,
@@ -57,7 +58,7 @@ CREATE TABLE `disc_inspections` (
 	CONSTRAINT "disc_inspections_estimate_check" CHECK(("bytes_per_second" is null) = ("eta_seconds" is null) and ("bytes_per_second" is null or (typeof("bytes_per_second") = 'integer' and "bytes_per_second" > 0 and typeof("eta_seconds") = 'integer' and "eta_seconds" >= 0))),
 	CONSTRAINT "disc_inspections_claim_check" CHECK(("claim_token" is null) = ("claim_updated_at" is null) and ("claim_token" is null or "status" = 'running')),
 	CONSTRAINT "disc_inspections_terminal_check" CHECK(("status" = 'running') = ("completed_at" is null) and ("status" = 'completed') = ("detected_disc_id" is not null)),
-	CONSTRAINT "disc_inspections_retry_check" CHECK("retry_at" is null or ("status" = 'running' and "phase" = 'retry_wait'))
+	CONSTRAINT "disc_inspections_retry_check" CHECK(("retry_at" is null or ("status" = 'running' and "phase" = 'retry_wait')) and ("manual_retry_requested_at" is null or ("status" = 'failed' and "is_current" = 1)))
 );;
 --> statement-breakpoint
 CREATE TABLE `disc_inspection_attempts` (

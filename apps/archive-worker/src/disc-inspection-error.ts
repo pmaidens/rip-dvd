@@ -8,43 +8,30 @@ export interface ClassifiedDiscInspectionError {
   reasonCode: DiscInspectionReasonCode;
 }
 
+export class DiscInspectionError extends Error {
+  override readonly name = "DiscInspectionError";
+
+  constructor(
+    readonly kind: ClassifiedDiscInspectionError["kind"],
+    readonly reasonCode: DiscInspectionReasonCode,
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+  }
+}
+
 export function classifyDiscInspectionError(error: unknown): ClassifiedDiscInspectionError {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = error instanceof Error
+    ? error.message
+    : typeof error === "string"
+      ? error
+      : undefined;
   const diagnostic = optionalBoundedText(message, 500);
-  const result = (
-    kind: ClassifiedDiscInspectionError["kind"],
-    reasonCode: DiscInspectionReasonCode,
-  ): ClassifiedDiscInspectionError => ({
-    kind,
-    reasonCode,
+  const structured = error instanceof DiscInspectionError ? error : undefined;
+  return {
+    kind: structured?.kind ?? "retry",
+    reasonCode: structured?.reasonCode ?? "unknown",
     ...(diagnostic ? { diagnostic } : {}),
-  });
-  if (/medium changed|media changed/i.test(message)) {
-    return result("abort", "media_changed");
-  }
-  if (/no medium|medium not present/i.test(message)) {
-    return result("abort", "no_medium");
-  }
-  if (/identity changed|device instance changed/i.test(message)) {
-    return result("abort", "drive_identity_changed");
-  }
-  if (/invalid DVD title map|invalid DVD size|invalid content identity|invalid metadata/i.test(message)) {
-    return result("fail", /content|size/i.test(message) ? "invalid_content" : "invalid_metadata");
-  }
-  if (/not enabled|unavailable|not present/i.test(message)) {
-    return result("retry", "drive_unavailable");
-  }
-  if (/not ready/i.test(message)) {
-    return result("retry", "drive_not_ready");
-  }
-  if (/lsdvd|metadata/i.test(message)) {
-    return result("retry", "metadata_read_failed");
-  }
-  if (/blockdev|content size/i.test(message)) {
-    return result("retry", "content_size_failed");
-  }
-  if (/hash|content read|dvdcss/i.test(message)) {
-    return result("retry", "content_read_failed");
-  }
-  return result("retry", "unknown");
+  };
 }

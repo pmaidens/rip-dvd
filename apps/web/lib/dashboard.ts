@@ -55,7 +55,9 @@ export interface DashboardDiscInspection {
   bytesPerSecond: number | null;
   etaSeconds: number | null;
   retryAt: string | null;
+  manualRetryRequested: boolean;
   reasonCode: DiscInspectionReasonCode | null;
+  archiveWorkFulfilled: boolean;
   phaseStartedAt: string;
   startedAt: string;
   completedAt: string | null;
@@ -257,20 +259,6 @@ function readDashboardSnapshotRecords(
   const discInspectionSource = readSource(() =>
     access.discInspections.list({ currentOnly: true }),
   );
-  const archiveRequestSource = readSource(() =>
-    access.archiveRequests.list(
-      undefined,
-      activityLimit === undefined
-        ? undefined
-        : {
-            policy: {
-              mode: "active-and-history",
-              activeLimit: DASHBOARD_ACTIVE_JOB_LIMIT,
-              historyLimit: activityLimit,
-            },
-          },
-    ),
-  );
   const archiveJobSource = readSource(() =>
     access.archiveJobs.list(
       undefined,
@@ -282,8 +270,34 @@ function readDashboardSnapshotRecords(
               activeLimit: DASHBOARD_ACTIVE_JOB_LIMIT,
               historyLimit: activityLimit,
             },
-          },
+      },
     ),
+  );
+  const displayedDetectedDiscIds = [
+    ...(detectedDiscSource.status === "loaded"
+      ? detectedDiscSource.value.map((disc) => disc.id)
+      : []),
+    ...(discInspectionSource.status === "loaded"
+      ? discInspectionSource.value.flatMap((inspection) =>
+          inspection.detectedDiscId === null
+            ? []
+            : [inspection.detectedDiscId],
+        )
+      : []),
+  ];
+  const archiveRequestSource = readSource(() =>
+    activityLimit === undefined
+      ? access.archiveRequests.list()
+      : access.archiveRequests.listRelevantForDetectedDiscs(
+          [...new Set(displayedDetectedDiscIds)],
+        ),
+  );
+  const latestRequestJobSource = readSource(() =>
+    activityLimit === undefined || archiveRequestSource.status === "error"
+      ? []
+      : access.archiveJobs.listLatestForRequests(
+          archiveRequestSource.value.map((request) => request.id),
+        ),
   );
   const encodeJobSource = readSource(() =>
     access.encodeJobs.list(
@@ -441,8 +455,13 @@ function readDashboardSnapshotRecords(
           linkedDetectedDiscSource.value.map((disc) => [disc.id, disc]),
         )
       : null;
-  const jobsByRequestId = archiveJobSource.status === "loaded"
-    ? archiveJobSource.value.reduce((grouped, job) => {
+  const jobsByRequestId =
+    archiveJobSource.status === "loaded" &&
+    latestRequestJobSource.status === "loaded"
+    ? [...new Map(
+        [...archiveJobSource.value, ...latestRequestJobSource.value]
+          .map((job) => [job.id, job]),
+      ).values()].reduce((grouped, job) => {
         const jobs = grouped.get(job.archiveRequestId) ?? [];
         jobs.push(job);
         grouped.set(job.archiveRequestId, jobs);
@@ -477,7 +496,8 @@ function readDashboardSnapshotRecords(
     : null;
 
   const opticalDrives =
-    opticalDriveSource.status === "error" || currentInspectionByDrive === null
+    opticalDriveSource.status === "error" ||
+    currentInspectionByDrive === null
       ? unavailable<DashboardOpticalDrive>()
       : loaded(
           opticalDriveSource.value.map((drive): DashboardOpticalDrive => {
@@ -509,7 +529,13 @@ function readDashboardSnapshotRecords(
                 bytesPerSecond: inspection.bytesPerSecond,
                 etaSeconds: inspection.etaSeconds,
                 retryAt: inspection.retryAt?.toISOString() ?? null,
+                manualRetryRequested:
+                  inspection.manualRetryRequestedAt !== null,
                 reasonCode: inspection.reasonCode,
+                archiveWorkFulfilled:
+                  inspection.detectedDiscId !== null &&
+                  requestByDiscId?.get(inspection.detectedDiscId)?.status ===
+                    "fulfilled",
                 phaseStartedAt: inspection.phaseStartedAt.toISOString(),
                 startedAt: inspection.startedAt.toISOString(),
                 completedAt: inspection.completedAt?.toISOString() ?? null,

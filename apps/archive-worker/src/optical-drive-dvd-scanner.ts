@@ -5,6 +5,7 @@ import {
 } from "@rip-dvd/data-access/dvd-scan";
 
 import type { BoundOpticalDrive, ScannedDvd } from "./archive-worker.js";
+import { DiscInspectionError } from "./disc-inspection-error.js";
 import { requireDvdContentSize } from "./dvd-content-policy.js";
 import { decodeLsdvdMetadata } from "./dvd-metadata.js";
 import {
@@ -50,6 +51,10 @@ export interface DiscInspectionScanOptions {
   onPhase?(phase: "reading_metadata" | "hashing_content" | "confirming_media"): void;
 }
 
+function mediaChanged(message: string): DiscInspectionError {
+  return new DiscInspectionError("abort", "media_changed", message);
+}
+
 async function inspectDvd(
   devicePath: string,
   signal: AbortSignal,
@@ -67,14 +72,40 @@ async function inspectDvd(
   if (result.exitCode !== 0) {
     const output = `${result.stdout}\n${result.stderr}`;
     if (/no medium found|medium not present/i.test(output)) {
-      return null;
+      throw new DiscInspectionError(
+        "abort",
+        "no_medium",
+        "No medium is present in the Optical Drive",
+      );
     }
     if (/device not ready/i.test(output)) {
-      throw new Error("Optical Drive is temporarily not ready");
+      throw new DiscInspectionError(
+        "retry",
+        "drive_not_ready",
+        "Optical Drive is temporarily not ready",
+      );
     }
-    throw commandFailure("lsdvd", result);
+    const failure = commandFailure("lsdvd", result);
+    throw new DiscInspectionError(
+      "retry",
+      "metadata_read_failed",
+      failure.message,
+      { cause: failure },
+    );
   }
-  return decodeLsdvdMetadata(`${result.stdout}\n${result.stderr}`);
+  try {
+    return decodeLsdvdMetadata(`${result.stdout}\n${result.stderr}`);
+  } catch (error) {
+    const message = error instanceof Error
+      ? error.message
+      : "lsdvd returned invalid metadata";
+    throw new DiscInspectionError(
+      "fail",
+      "invalid_metadata",
+      message,
+      { cause: error },
+    );
+  }
 }
 
 async function readDvdContentIdentity(
@@ -95,13 +126,24 @@ async function readDvdContentIdentity(
     },
   );
   if (sizeResult.exitCode !== 0) {
-    throw commandFailure("blockdev", sizeResult);
+    const failure = commandFailure("blockdev", sizeResult);
+    throw new DiscInspectionError(
+      "retry",
+      "content_size_failed",
+      failure.message,
+      { cause: failure },
+    );
   }
   let sizeBytes: number;
   try {
     sizeBytes = requireDvdContentSize(Number(sizeResult.stdout.trim()));
-  } catch {
-    throw new Error("blockdev returned an invalid DVD size");
+  } catch (error) {
+    throw new DiscInspectionError(
+      "fail",
+      "invalid_content",
+      "blockdev returned an invalid DVD size",
+      { cause: error },
+    );
   }
   options.onMetadata?.({
     audioStreamCount: metadata.titles.reduce(
@@ -121,16 +163,37 @@ async function readDvdContentIdentity(
     volumeLabel: metadata.volumeLabel ?? null,
   });
   options.onPhase?.("hashing_content");
-  const contentId = options.onBytesHashed === undefined
-    ? await contentReader.hash(devicePath, sizeBytes, signal)
-    : await contentReader.hash(
-        devicePath,
-        sizeBytes,
-        signal,
-        options.onBytesHashed,
-      );
+  let contentId: string;
+  try {
+    contentId = options.onBytesHashed === undefined
+      ? await contentReader.hash(devicePath, sizeBytes, signal)
+      : await contentReader.hash(
+          devicePath,
+          sizeBytes,
+          signal,
+          options.onBytesHashed,
+        );
+  } catch (error) {
+    signal.throwIfAborted();
+    if (error instanceof DiscInspectionError) {
+      throw error;
+    }
+    const message = error instanceof Error
+      ? error.message
+      : "DVD content reader failed";
+    throw new DiscInspectionError(
+      "retry",
+      "content_read_failed",
+      message,
+      { cause: error },
+    );
+  }
   if (!isDvdContentId(contentId)) {
-    throw new Error("DVD content reader returned an invalid content identity");
+    throw new DiscInspectionError(
+      "fail",
+      "invalid_content",
+      "DVD content reader returned an invalid content identity",
+    );
   }
   return { contentId, sizeBytes };
 }
@@ -157,29 +220,42 @@ export function createOpticalDriveDvdScanner({
         options.expectedMediaGeneration !== undefined &&
         options.expectedMediaGeneration !== generationBefore
       ) {
-        throw new Error("DVD medium changed before scanning");
+        throw mediaChanged("DVD medium changed before scanning");
       }
       const cached = cache.find(safeDevicePath, generationBefore);
       if (cached !== undefined) {
         await identity.requireCurrent(binding, "during DVD scanning", signal);
-        return cached.result === null
-          ? null
-          : { ...cached.result, isNewMediumObservation: false };
+        if (cached.result === null) {
+          throw new DiscInspectionError(
+            "abort",
+            "no_medium",
+            "No medium is present in the Optical Drive",
+          );
+        }
+        return { ...cached.result, isNewMediumObservation: false };
       }
 
       options.onPhase?.("reading_metadata");
-      const metadata = await inspectDvd(safeDevicePath, signal, runner);
-      if (metadata === null) {
+      let metadata: Awaited<ReturnType<typeof inspectDvd>>;
+      try {
+        metadata = await inspectDvd(safeDevicePath, signal, runner);
+      } catch (error) {
+        if (
+          !(error instanceof DiscInspectionError) ||
+          error.reasonCode !== "no_medium"
+        ) {
+          throw error;
+        }
         const generationAfter = await mediaGenerationObserver.observe(
           safeDevicePath,
           signal,
         );
         if (generationBefore !== generationAfter) {
-          throw new Error("DVD medium changed during scanning");
+          throw mediaChanged("DVD medium changed during scanning");
         }
         await identity.requireCurrent(binding, "during DVD scanning", signal);
         cache.remember(safeDevicePath, generationAfter, null);
-        return null;
+        throw error;
       }
 
       const { contentId, sizeBytes } = await readDvdContentIdentity(
@@ -196,7 +272,7 @@ export function createOpticalDriveDvdScanner({
         signal,
       );
       if (generationBefore !== generationAfter) {
-        throw new Error("DVD medium changed during scanning");
+        throw mediaChanged("DVD medium changed during scanning");
       }
       await identity.requireCurrent(binding, "during DVD scanning", signal);
       const scanData = decodeDvdTitleMap({
@@ -205,7 +281,11 @@ export function createOpticalDriveDvdScanner({
         titles: metadata.titles,
       });
       if (scanData === null) {
-        throw new Error("lsdvd returned an invalid DVD title map");
+        throw new DiscInspectionError(
+          "fail",
+          "invalid_metadata",
+          "lsdvd returned an invalid DVD title map",
+        );
       }
       const result = {
         fingerprint: contentId,

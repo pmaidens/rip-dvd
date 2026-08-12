@@ -80,7 +80,9 @@ describe("DashboardView", () => {
       bytesPerSecond: null,
       etaSeconds: null,
       retryAt: null,
+      manualRetryRequested: false,
       reasonCode: null,
+      archiveWorkFulfilled: false,
       phaseStartedAt: new Date().toISOString(),
       startedAt: new Date().toISOString(),
       completedAt: null,
@@ -128,6 +130,166 @@ describe("DashboardView", () => {
     expect(hashHtml).toContain('aria-label="Hashing DVD content"');
     expect(hashHtml).toContain('aria-valuenow="44"');
     expect(hashHtml).toContain("Calculating speed and time remaining");
+  });
+
+  it("uses the automatic failure streak for retry-wait copy", () => {
+    const inspection = {
+      id: "inspection-with-interruptions",
+      status: "running" as const,
+      phase: "retry_wait" as const,
+      attemptCount: 8,
+      consecutiveFailureCount: 2,
+      volumeLabel: "INTERRUPTED_DISC",
+      titleCount: 1,
+      chapterCount: 8,
+      audioStreamCount: 2,
+      subtitleStreamCount: 1,
+      totalBytes: 1_000,
+      bytesHashed: 400,
+      bytesPerSecond: null,
+      etaSeconds: null,
+      retryAt: new Date(Date.now() + 30_000).toISOString(),
+      manualRetryRequested: false,
+      reasonCode: "content_read_failed" as const,
+      archiveWorkFulfilled: false,
+      phaseStartedAt: new Date().toISOString(),
+      startedAt: new Date().toISOString(),
+      completedAt: null,
+    };
+    const state = {
+      opticalDrives: {
+        status: "loaded" as const,
+        items: [{
+          id: "drive-1",
+          displayName: "Upper drive",
+          hardwareName: "Pioneer",
+          state: "ready" as const,
+          lastSeenAt: new Date().toISOString(),
+          currentInspection: inspection,
+        }],
+      },
+      detectedDiscs: { status: "loaded" as const, items: [] },
+      archiveJobs: { status: "loaded" as const, items: [] },
+      encodeJobs: { status: "loaded" as const, items: [] },
+      catalogReview: { status: "loaded" as const, items: [] },
+    };
+
+    const automaticRetryHtml = renderToStaticMarkup(
+      <DashboardView state={state} />,
+    );
+    expect(automaticRetryHtml).toContain("Attempt 3 of 5");
+    expect(automaticRetryHtml).not.toContain("Attempt 9 of 5");
+    expect(automaticRetryHtml).not.toContain("8 attempts");
+
+    const manualRetryHtml = renderToStaticMarkup(
+      <DashboardView state={{
+        ...state,
+        opticalDrives: {
+          ...state.opticalDrives,
+          items: [{
+            ...state.opticalDrives.items[0]!,
+            currentInspection: {
+              ...inspection,
+              consecutiveFailureCount: 0,
+            },
+          }],
+        },
+      }} />,
+    );
+    expect(manualRetryHtml).toContain("Manual retry queued");
+    expect(manualRetryHtml).not.toContain("8 attempts");
+
+    const awaitingEvidenceHtml = renderToStaticMarkup(
+      <DashboardView state={{
+        ...state,
+        opticalDrives: {
+          ...state.opticalDrives,
+          items: [{
+            ...state.opticalDrives.items[0]!,
+            currentInspection: {
+              ...inspection,
+              status: "failed",
+              phase: "hashing_content",
+              manualRetryRequested: true,
+              retryAt: null,
+            },
+          }],
+        },
+      }} />,
+    );
+    expect(awaitingEvidenceHtml).toContain(
+      "waiting for the worker to verify this insertion",
+    );
+    expect(awaitingEvidenceHtml).not.toContain("Retry inspection");
+  });
+
+  it("keeps completed inspection progress and findings until archive work is fulfilled", () => {
+    const completedInspection = {
+      id: "inspection-1",
+      status: "completed" as const,
+      phase: "confirming_media" as const,
+      attemptCount: 3,
+      consecutiveFailureCount: 0,
+      volumeLabel: "FEATURE_DISC",
+      titleCount: 2,
+      chapterCount: 18,
+      audioStreamCount: 3,
+      subtitleStreamCount: 1,
+      totalBytes: 1_000,
+      bytesHashed: 1_000,
+      bytesPerSecond: null,
+      etaSeconds: null,
+      retryAt: null,
+      manualRetryRequested: false,
+      reasonCode: null,
+      archiveWorkFulfilled: false,
+      phaseStartedAt: new Date().toISOString(),
+      startedAt: new Date().toISOString(),
+      completedAt: new Date().toISOString(),
+    };
+    const state = {
+      opticalDrives: {
+        status: "loaded" as const,
+        items: [{
+          id: "drive-1",
+          displayName: "Upper drive",
+          hardwareName: "Pioneer",
+          state: "ready" as const,
+          lastSeenAt: new Date().toISOString(),
+          currentInspection: completedInspection,
+        }],
+      },
+      detectedDiscs: { status: "loaded" as const, items: [] },
+      archiveJobs: { status: "loaded" as const, items: [] },
+      encodeJobs: { status: "loaded" as const, items: [] },
+      catalogReview: { status: "loaded" as const, items: [] },
+    };
+
+    const awaitingArchiveHtml = renderToStaticMarkup(
+      <DashboardView state={state} />,
+    );
+    expect(awaitingArchiveHtml).toContain("FEATURE_DISC · 2 titles");
+    expect(awaitingArchiveHtml).toContain('aria-valuenow="100"');
+    expect(awaitingArchiveHtml).toContain("100%");
+
+    const fulfilledHtml = renderToStaticMarkup(
+      <DashboardView state={{
+        ...state,
+        opticalDrives: {
+          ...state.opticalDrives,
+          items: [{
+            ...state.opticalDrives.items[0]!,
+            currentInspection: {
+              ...completedInspection,
+              archiveWorkFulfilled: true,
+            },
+          }],
+        },
+      }} />,
+    );
+    expect(fulfilledHtml).toContain("Inspection complete");
+    expect(fulfilledHtml).not.toContain("FEATURE_DISC · 2 titles");
+    expect(fulfilledHtml).not.toContain('aria-valuenow="100"');
   });
 
   it("shows an explicit loading state in every operations section", () => {
