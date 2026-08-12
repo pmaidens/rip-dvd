@@ -325,7 +325,7 @@ describe("archive worker polling", () => {
         onBytesCopied(9);
       }),
       isActive: () => false,
-      requireDeviceInactive: vi.fn(),
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
       waitForInactive: vi.fn(async () => undefined),
     };
 
@@ -529,7 +529,7 @@ describe("archive worker polling", () => {
         throw new Error("dd read failed");
       }),
       isActive: () => false,
-      requireDeviceInactive: vi.fn(),
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
       waitForInactive: vi.fn(async () => undefined),
     };
 
@@ -624,7 +624,7 @@ describe("archive worker polling", () => {
         controller.abort(interruption);
       }),
       isActive: () => false,
-      requireDeviceInactive: vi.fn(),
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
       waitForInactive: vi.fn(async () => undefined),
     };
 
@@ -733,7 +733,7 @@ describe("archive worker polling", () => {
         });
       }),
       isActive: () => false,
-      requireDeviceInactive: vi.fn(),
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
       waitForInactive: vi.fn(async () => undefined),
     };
     const polling = pollArchiveWorker({
@@ -808,10 +808,11 @@ describe("archive worker polling", () => {
     });
     const copyRunner: DvdCopyRunner = {
       isActive: () => copyActive,
-      requireDeviceInactive: vi.fn(() => {
+      withDeviceInactive: vi.fn(async (_path, mutation) => {
         if (copyActive) {
           throw new Error("DVD archive copy is still active");
         }
+        return mutation();
       }),
       waitForInactive: vi.fn(async () => copyClosed),
       copy: vi.fn(({ signal }) => {
@@ -900,10 +901,11 @@ describe("archive worker polling", () => {
     const copyRunner: DvdCopyRunner = {
       copy: vi.fn(),
       isActive: vi.fn(() => false),
-      requireDeviceInactive: vi.fn(() => {
+      withDeviceInactive: vi.fn(async (_path, mutation) => {
         if (active) {
           throw new Error("DVD archive copy is still active");
         }
+        return mutation();
       }),
       waitForInactive: vi.fn(async () => undefined),
     };
