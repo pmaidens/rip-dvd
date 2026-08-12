@@ -108,6 +108,12 @@ function catalogReview({
       mediaItemId,
       sourceIdentity: { kind: "dvd_title", titleNumber },
       label: null,
+      actionAvailability: {
+        state: "editable",
+        availableActions: ["correct", "edit_label", "remove"],
+        reason: null,
+        relatedEncodeJob: null,
+      },
     }],
     discSelectionsPage: {
       offset: discSelectionOffset,
@@ -356,6 +362,13 @@ describe("CatalogReviewView", () => {
                 chapterEnd: 4,
               },
               label: null,
+              actionAvailability: {
+                state: "locked_provenance",
+                availableActions: [],
+                reason:
+                  "Encode Job job-1 is completed; this Disc Selection is locked provenance and cannot be changed directly",
+                relatedEncodeJob: { id: "job-1", status: "completed" },
+              },
             }],
             discSelectionsPage: {
               offset: 0,
@@ -403,9 +416,11 @@ describe("CatalogReviewView", () => {
     expect(html).toContain("Create Media Item");
     expect(html).toContain("Next Media Items");
     expect(html).toContain("Add Disc Selection");
-    expect(html).toContain("Repair an existing Disc Selection");
     expect(html).toContain('name="replacesDiscSelectionId"');
-    expect(html).toContain("Remove Disc Selection");
+    expect(html).toContain("Locked provenance");
+    expect(html).toContain("Encode Job job-1 is completed");
+    expect(html).not.toContain("Repair an existing Disc Selection");
+    expect(html).not.toContain("Remove Disc Selection");
     expect(html).toContain("Next Disc Selections");
     expect(html).toContain("Complete review");
     expect(selectOptionValues(html, "kind")).toEqual(MEDIA_ITEM_KINDS);
@@ -481,6 +496,12 @@ describe("CatalogReviewView", () => {
               mediaItemId: "episode-1",
               sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
               label: null,
+              actionAvailability: {
+                state: "editable",
+                availableActions: ["correct", "edit_label", "remove"],
+                reason: null,
+                relatedEncodeJob: null,
+              },
             }],
             discSelectionsPage: {
               offset: 0,
