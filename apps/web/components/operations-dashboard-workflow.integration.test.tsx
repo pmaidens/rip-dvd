@@ -1373,6 +1373,72 @@ describe("end-to-end operations dashboard workflow", () => {
     });
     expect(readFileSync(outputPath, "utf8")).toBe("completed encode");
 
+    const correctedSourceItemResponse = await catalogMutation({
+      action: "create_media_item",
+      mediaItem: {
+        kind: "movie",
+        title: "Corrected Workflow Source",
+      },
+    });
+    const correctedSourceItem = (await correctedSourceItemResponse.json())
+      .mediaItem as { id: string };
+    const correctionResponse = await catalogMutation({
+      action: "correct_disc_selection",
+      discSelectionId: selection.id,
+      catalogRevision: access.catalog.listOriginalDiscArchives({
+        ids: [archive.id],
+      })[0]!.updatedAt.toISOString(),
+      correctionReason: "The completed encode used the wrong source mapping.",
+      selection: {
+        mediaItemId: correctedSourceItem.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      },
+    });
+    expect(correctionResponse.status).toBe(200);
+    await expect(correctionResponse.json()).resolves.toMatchObject({
+      message: "Mapping changed; review required",
+      discSelection: { mediaItemId: correctedSourceItem.id },
+      supersession: {
+        supersededDiscSelectionId: selection.id,
+        reason: "The completed encode used the wrong source mapping.",
+      },
+    });
+    const correctedSnapshot = await events.next(
+      (snapshot) =>
+        encodeJob(snapshot).discSelectionCorrection?.correctedMediaTitle ===
+          "Corrected Workflow Source",
+    );
+    expect(encodeJob(correctedSnapshot)).toMatchObject({
+      id: queuedEncodeJob.id,
+      mediaTitle: "Corrected Workflow Movie",
+      status: "completed",
+      requeueable: false,
+      discSelectionCorrection: {
+        correctedMediaTitle: "Corrected Workflow Source",
+        reason: "The completed encode used the wrong source mapping.",
+      },
+    });
+    const correctedDashboardHtml = renderToStaticMarkup(
+      <DashboardView state={correctedSnapshot} />,
+    );
+    expect(correctedDashboardHtml).toContain("Completed");
+    expect(correctedDashboardHtml).toContain("Disc Selection corrected");
+    expect(correctedDashboardHtml).not.toContain("Re-encode");
+    const correctedReviewResponse = await createCatalogReviewRoute(
+      new Request(`${trustedOrigin}/api/catalog-reviews/${archive.id}`),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    const correctedReview = await correctedReviewResponse.json() as CatalogReviewDto;
+    expect(correctedReview.reviewOutcome).toBe("needs_review");
+    const correctedReviewHtml = renderCatalogReview(correctedReview);
+    expect(correctedReviewHtml).toContain("Disc Selection Correction");
+    expect(correctedReviewHtml).toContain(
+      "The completed encode used the wrong source mapping.",
+    );
+    expect(readFileSync(outputPath, "utf8")).toBe("completed encode");
+
     expect(inspectPath).not.toHaveBeenCalled();
     await readDashboard(access);
     expect(inspectPath).not.toHaveBeenCalled();

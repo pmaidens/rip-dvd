@@ -231,6 +231,23 @@ interface DiscSelectionBase {
 
 export type DiscSelection = DiscSelectionBase;
 
+export interface DiscSelectionSupersession {
+  supersededDiscSelectionId: DiscSelectionId;
+  replacementDiscSelectionId: DiscSelectionId;
+  reason: string | null;
+  createdAt: Date;
+}
+
+export type CorrectDiscSelectionInput = CreateDiscSelectionInput & {
+  catalogRevision: Date;
+  reason?: string;
+};
+
+export interface DiscSelectionCorrection {
+  discSelection: DiscSelection;
+  supersession: DiscSelectionSupersession;
+}
+
 export type DiscSelectionAction =
   | "correct"
   | "edit_label"
@@ -248,7 +265,7 @@ export type DiscSelectionActionAvailability =
   | {
     discSelectionId: DiscSelectionId;
     state: "locked_provenance";
-    availableActions: readonly [];
+    availableActions: readonly ["correct"];
     reason: string;
     relatedEncodeJob: {
       id: EncodeJobId;
@@ -651,6 +668,10 @@ export interface CatalogAccess {
     offset?: number;
   }): MediaItem[];
   createDiscSelection(input: CreateDiscSelectionInput): DiscSelection;
+  correctDiscSelection(
+    id: DiscSelectionId,
+    input: CorrectDiscSelectionInput,
+  ): DiscSelectionCorrection;
   repairDiscSelection(
     id: DiscSelectionId,
     input: CreateDiscSelectionInput,
@@ -663,6 +684,9 @@ export interface CatalogAccess {
     limit?: number;
     offset?: number;
   }): DiscSelection[];
+  listDiscSelectionSupersessions(options: {
+    discSelectionIds: readonly DiscSelectionId[];
+  }): DiscSelectionSupersession[];
   listDiscSelectionActionAvailability(options: {
     ids: readonly DiscSelectionId[];
   }): DiscSelectionActionAvailability[];
@@ -871,6 +895,7 @@ export type SnapshotCatalogAccess = Pick<
   | "listMediaItemMaintenance"
   | "searchMediaItems"
   | "listDiscSelections"
+  | "listDiscSelectionSupersessions"
   | "listDiscSelectionActionAvailability"
 >;
 

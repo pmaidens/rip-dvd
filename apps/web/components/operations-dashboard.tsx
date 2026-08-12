@@ -159,6 +159,7 @@ interface DashboardJobItemProps {
   progressPercent: number;
   progressDetail?: string | null;
   failureDetail?: string | null;
+  annotation?: React.ReactNode;
   action?: React.ReactNode;
   verification?: FilesystemVerificationDisplay;
 }
@@ -170,6 +171,7 @@ function DashboardJobItem({
   progressPercent,
   progressDetail,
   failureDetail,
+  annotation,
   action,
   verification,
 }: DashboardJobItemProps) {
@@ -200,6 +202,7 @@ function DashboardJobItem({
           </div>
         </details>
       ) : null}
+      {annotation}
       {verification ? <FilesystemVerificationResult {...verification} /> : null}
       {action}
     </article>
@@ -1028,6 +1031,17 @@ export function DashboardView({
             progressPercent={job.progressPercent}
             progressDetail={encodeProgressDetail(job)}
             failureDetail={job.failureDetail}
+            annotation={job.discSelectionCorrection ? (
+              <div className="selection-correction-history">
+                <strong>Disc Selection corrected</strong>
+                <p>
+                  Superseded by {job.discSelectionCorrection.correctedMediaTitle}
+                </p>
+                {job.discSelectionCorrection.reason ? (
+                  <p>{job.discSelectionCorrection.reason}</p>
+                ) : null}
+              </div>
+            ) : null}
             verification={toFilesystemVerificationDisplay(job)}
             action={
               <div className="operation-actions">
@@ -1047,9 +1061,10 @@ export function DashboardView({
                         : "Cancel queued encode"}
                   </button>
                 ) : null}
-                {job.status === "failed" ||
+                {(job.status === "failed" ||
                     job.status === "completed" ||
-                    (job.status === "cancelled" && job.requeueable !== false) ? (
+                    job.status === "cancelled") &&
+                    job.requeueable !== false ? (
                   <button
                     type="button"
                     disabled={
@@ -1071,7 +1086,10 @@ export function DashboardView({
                           : "Requeue encode"}
                   </button>
                 ) : null}
-                {job.status === "cancelled" && job.requeueable === false ? (
+                {(job.status === "failed" ||
+                    job.status === "completed" ||
+                    job.status === "cancelled") &&
+                    job.requeueable === false ? (
                   <p className="job-progress-detail">
                     Requeue requires an active Disc Selection with completed
                     Catalog Review.

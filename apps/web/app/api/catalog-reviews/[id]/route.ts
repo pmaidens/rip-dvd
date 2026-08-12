@@ -9,6 +9,7 @@ import {
   type DiscSelection,
   type DiscSelectionActionAvailability,
   type DiscSelectionId,
+  type DiscSelectionSupersession,
   type MediaItem,
   type MediaItemId,
   type MediaItemMaintenance,
@@ -119,12 +120,27 @@ function serializeDiscSelection(selection: DiscSelection) {
 function serializeReviewDiscSelection(
   selection: DiscSelection,
   availability: DiscSelectionActionAvailability,
+  correction?: {
+    supersededDiscSelection: DiscSelection;
+    supersession: DiscSelectionSupersession;
+  },
 ) {
   const { discSelectionId: _discSelectionId, ...actionAvailability } =
     availability;
   return {
     ...serializeDiscSelection(selection),
     actionAvailability,
+    ...(correction === undefined
+      ? {}
+      : {
+        correction: {
+          supersededDiscSelection: serializeDiscSelection(
+            correction.supersededDiscSelection,
+          ),
+          reason: correction.supersession.reason,
+          correctedAt: correction.supersession.createdAt.toISOString(),
+        },
+      }),
   };
 }
 
@@ -169,6 +185,33 @@ function readCatalogReview(
       discSelectionOffset,
       discSelectionOffset + CATALOG_REVIEW_SELECTION_PAGE_SIZE,
     );
+    const supersessions = snapshot.catalog.listDiscSelectionSupersessions({
+      discSelectionIds: discSelectionsPage.map((selection) => selection.id),
+    });
+    const supersededSelections = snapshot.catalog.listDiscSelections({
+      ids: supersessions.map(
+        (supersession) => supersession.supersededDiscSelectionId,
+      ),
+    });
+    const supersededSelectionsById = new Map(
+      supersededSelections.map((selection) => [selection.id, selection]),
+    );
+    const correctionByReplacementId = new Map(
+      supersessions.map((supersession) => {
+        const supersededDiscSelection = supersededSelectionsById.get(
+          supersession.supersededDiscSelectionId,
+        );
+        if (!supersededDiscSelection) {
+          throw new DomainInvariantError(
+            `Disc Selection supersession for ${supersession.replacementDiscSelectionId} is missing historical provenance`,
+          );
+        }
+        return [
+          supersession.replacementDiscSelectionId,
+          { supersededDiscSelection, supersession },
+        ];
+      }),
+    );
     const actionAvailability = snapshot.catalog
       .listDiscSelectionActionAvailability({
         ids: discSelectionsPage.map((selection) => selection.id),
@@ -181,7 +224,9 @@ function readCatalogReview(
     );
     const reviewMediaItems = readMediaItemsWithAncestors(
       snapshot.catalog,
-      discSelectionsPage.map((selection) => selection.mediaItemId),
+      [...discSelectionsPage, ...supersededSelections].map(
+        (selection) => selection.mediaItemId,
+      ),
     );
     const mediaItemMaintenance: MediaItemMaintenance[] = [];
     for (
@@ -232,7 +277,11 @@ function readCatalogReview(
             `Disc Selection ${selection.id} is missing action availability`,
           );
         }
-        return serializeReviewDiscSelection(selection, availability);
+        return serializeReviewDiscSelection(
+          selection,
+          availability,
+          correctionByReplacementId.get(selection.id),
+        );
       }),
       discSelectionsPage: {
         offset: discSelectionOffset,
@@ -299,14 +348,15 @@ export async function createCatalogReviewRoute(
         mediaItemKinds: MEDIA_ITEM_KINDS,
       },
     );
-    const repairDiscSelectionId = parsedCommand.ok
-      ? parsedCommand.command.action === "repair_disc_selection"
+    const targetedDiscSelectionId = parsedCommand.ok
+      ? parsedCommand.command.action === "repair_disc_selection" ||
+          parsedCommand.command.action === "correct_disc_selection"
         ? parsedCommand.command.discSelectionId
         : null
       : parsedCommand.repairDiscSelectionId ?? null;
-    if (repairDiscSelectionId !== null) {
+    if (targetedDiscSelectionId !== null) {
       const existing = access.catalog.listDiscSelections({
-        ids: [repairDiscSelectionId as DiscSelectionId],
+        ids: [targetedDiscSelectionId as DiscSelectionId],
         originalDiscArchiveId: archiveId,
       })[0];
       if (!existing) {
@@ -458,6 +508,31 @@ export async function createCatalogReviewRoute(
           },
           repairSelectionId === null ? 201 : 200,
         );
+      }
+
+      case "correct_disc_selection": {
+        const input = command.selection;
+        const correction = access.catalog.correctDiscSelection(
+          command.discSelectionId as DiscSelectionId,
+          {
+            originalDiscArchiveId: archiveId,
+            catalogRevision: new Date(command.catalogRevision),
+            mediaItemId: input.mediaItemId as MediaItemId,
+            sourceIdentity: input.sourceIdentity,
+            ...(input.label ? { label: input.label } : {}),
+            ...(command.correctionReason
+              ? { reason: command.correctionReason }
+              : {}),
+          },
+        );
+        return response({
+          message: "Mapping changed; review required",
+          discSelection: serializeDiscSelection(correction.discSelection),
+          supersession: {
+            ...correction.supersession,
+            createdAt: correction.supersession.createdAt.toISOString(),
+          },
+        });
       }
 
       case "delete_disc_selection": {

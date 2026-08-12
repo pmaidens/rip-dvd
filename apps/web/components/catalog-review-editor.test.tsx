@@ -1208,6 +1208,16 @@ describe("CatalogReviewView", () => {
           sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
         },
       },
+      correct_disc_selection: {
+        action: "correct_disc_selection",
+        discSelectionId: "selection-1",
+        catalogRevision: "2026-08-11T06:00:00.000Z",
+        correctionReason: "Wrong source",
+        selection: {
+          mediaItemId: "media-item-2",
+          sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+        },
+      },
       delete_disc_selection: {
         action: "delete_disc_selection",
         discSelectionId: "selection-1",
@@ -1336,9 +1346,9 @@ describe("CatalogReviewView", () => {
               label: null,
               actionAvailability: {
                 state: "locked_provenance",
-                availableActions: [],
+                availableActions: ["correct"],
                 reason:
-                  "Encode Job job-1 is completed; this Disc Selection is locked provenance and cannot be changed directly",
+                  "Encode Job job-1 is completed; correct this Disc Selection by supersession to preserve its provenance",
                 relatedEncodeJob: { id: "job-1", status: "completed" },
               },
             }],

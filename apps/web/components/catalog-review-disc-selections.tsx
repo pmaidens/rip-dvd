@@ -51,7 +51,7 @@ function hasAction(
 }
 
 function discSelectionDescription(
-  selection: CatalogReviewDiscSelection,
+  selection: Pick<CatalogReviewDiscSelection, "sourceIdentity">,
 ): string {
   const sourceIdentity = selection.sourceIdentity;
   if (sourceIdentity.kind === "main_feature") {
@@ -85,8 +85,12 @@ export function CatalogReviewDiscSelections({
     const replacesDiscSelectionId = String(
       form.get("replacesDiscSelectionId") ?? "",
     ).trim();
+    const correctionReason = String(
+      form.get("correctionReason") ?? "",
+    ).trim();
     const common = {
       ...(replacesDiscSelectionId ? { replacesDiscSelectionId } : {}),
+      ...(correctionReason ? { correctionReason } : {}),
       mediaItemId: String(form.get("mediaItemId")),
       ...(label ? { label } : {}),
     };
@@ -124,6 +128,12 @@ export function CatalogReviewDiscSelections({
     });
   }
 
+  const hasJobBackedCorrection = discSelections.some(
+    (selection) =>
+      selection.actionAvailability.state === "locked_provenance" &&
+      hasAction(selection, "correct"),
+  );
+
   return (
     <>
       <h3 id="reviewed-selections">Reviewed Disc Selections</h3>
@@ -157,6 +167,22 @@ export function CatalogReviewDiscSelections({
                     Remove Disc Selection
                   </button>
                 ) : null}
+                {selection.correction ? (
+                  <div className="selection-correction-history">
+                    <strong>Disc Selection Correction</strong>
+                    <p>
+                      Supersedes {itemsById.get(
+                        selection.correction.supersededDiscSelection
+                          .mediaItemId,
+                      )?.title ?? "Unknown Media Item"} · {discSelectionDescription(
+                        selection.correction.supersededDiscSelection,
+                      )}
+                    </p>
+                    {selection.correction.reason ? (
+                      <p>{selection.correction.reason}</p>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
             </li>
           ))}
@@ -173,6 +199,13 @@ export function CatalogReviewDiscSelections({
 
       <form className="catalog-form" onSubmit={createSelection}>
         <h3>Add Disc Selection</h3>
+        {hasJobBackedCorrection ? (
+          <p>
+            A job-backed Disc Selection Correction creates a new identity and
+            preserves prior Encode Job provenance. Queued work is cancelled;
+            running work will request cancellation without waiting here.
+          </p>
+        ) : null}
         <div className="catalog-fields">
           <label>
             Catalog action
@@ -187,7 +220,10 @@ export function CatalogReviewDiscSelections({
                   <option key={selection.id} value={selection.id}>
                     {hasAction(selection, "repair")
                       ? "Repair unsafe legacy Disc Selection: "
-                      : "Correct or edit label: "}
+                      : selection.actionAvailability.state ===
+                          "locked_provenance"
+                        ? "Correct by supersession: "
+                        : "Correct or edit label: "}
                     {discSelectionDescription(selection)}
                   </option>
                 ))}
@@ -250,6 +286,16 @@ export function CatalogReviewDiscSelections({
             Label
             <input name="label" maxLength={256} placeholder="Optional" />
           </label>
+          {hasJobBackedCorrection ? (
+            <label>
+              Correction note
+              <textarea
+                name="correctionReason"
+                maxLength={1_000}
+                placeholder="Optional human context for catalog and encode history"
+              />
+            </label>
+          ) : null}
         </div>
         <button
           type="submit"

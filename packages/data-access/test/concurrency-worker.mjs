@@ -177,6 +177,31 @@ try {
         value: { outcome: "rejected" },
       });
     }
+  } else if (workerData.operation === "correct-disc-selection") {
+    try {
+      const correction = access.catalog.correctDiscSelection(
+        workerData.discSelectionId,
+        {
+          originalDiscArchiveId: workerData.originalDiscArchiveId,
+          catalogRevision: new Date(workerData.catalogRevision),
+          mediaItemId: workerData.mediaItemId,
+          sourceIdentity: { kind: "main_feature" },
+          reason: workerData.reason,
+        },
+      );
+      parentPort.postMessage({
+        type: "result",
+        value: { outcome: "corrected", id: correction.discSelection.id },
+      });
+    } catch (error) {
+      if (!(error instanceof DomainInvariantError)) {
+        throw error;
+      }
+      parentPort.postMessage({
+        type: "result",
+        value: { outcome: "rejected" },
+      });
+    }
   } else if (workerData.operation === "create-media-item") {
     try {
       const item = access.catalog.createMediaItem({

@@ -276,14 +276,28 @@ export function useCatalogReviewState({
   }
 
   function createDiscSelection(selection: CreateDiscSelectionInput) {
-    const { replacesDiscSelectionId, ...values } = selection;
+    const { replacesDiscSelectionId, correctionReason, ...values } = selection;
+    const target = state.status === "loaded" && replacesDiscSelectionId
+      ? state.review.discSelections.find(
+          (candidate) => candidate.id === replacesDiscSelectionId,
+        )
+      : undefined;
     void mutate(
       replacesDiscSelectionId
-        ? {
-            action: "repair_disc_selection",
-            discSelectionId: replacesDiscSelectionId,
-            selection: values,
-          }
+        ? target?.actionAvailability.state === "locked_provenance" &&
+            state.status === "loaded"
+          ? {
+              action: "correct_disc_selection",
+              discSelectionId: replacesDiscSelectionId,
+              catalogRevision: state.review.catalogRevision,
+              ...(correctionReason ? { correctionReason } : {}),
+              selection: values,
+            }
+          : {
+              action: "repair_disc_selection",
+              discSelectionId: replacesDiscSelectionId,
+              selection: values,
+            }
         : { action: "create_disc_selection", selection: values },
     );
   }

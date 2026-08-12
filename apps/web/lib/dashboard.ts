@@ -114,6 +114,11 @@ export interface DashboardEncodeJob {
   progressPhase: EncodeProgressPhase | null;
   progressPercent: number;
   progressEtaSeconds: number | null;
+  discSelectionCorrection?: {
+    replacementDiscSelectionId: string;
+    correctedMediaTitle: string;
+    reason: string | null;
+  };
   requeueable?: boolean;
   failureDetail?: string | null;
   verificationStatus?: FilesystemVerificationStatus | null;
@@ -442,45 +447,61 @@ function readDashboardSnapshotRecords(
             ids: [...new Set(relevantOpticalDriveIds ?? [])],
           }),
         );
-  const relevantSelectionIds =
-    activityLimit === undefined
-      ? undefined
-      : encodeJobSource.status === "error"
-        ? []
-        : encodeJobSource.value.map((job) => job.discSelectionId);
+  const relevantSelectionIds = encodeJobSource.status === "error"
+    ? []
+    : encodeJobSource.value.map((job) => job.discSelectionId);
   const selectionSource = readSource(() =>
-    access.catalog.listDiscSelections(
-      relevantSelectionIds === undefined
-        ? undefined
-        : { ids: [...new Set(relevantSelectionIds)] },
-    ),
+    access.catalog.listDiscSelections({
+      ids: [...new Set(relevantSelectionIds)],
+    }),
   );
-  const cancelledSelectionIds =
-    encodeJobSource.status === "loaded"
-      ? encodeJobSource.value
-          .filter((job) => job.status === "cancelled")
-          .map((job) => job.discSelectionId)
-      : [];
-  const cancelledRequeueSelectionSource = readSource(() =>
-    cancelledSelectionIds.length === 0
+  const selectionSupersessionSource = readSource(() => {
+    const selectionIds = [...new Set(relevantSelectionIds)];
+    return Array.from(
+      { length: Math.ceil(selectionIds.length / 100) },
+      (_, page) => access.catalog.listDiscSelectionSupersessions({
+        discSelectionIds: selectionIds.slice(page * 100, (page + 1) * 100),
+      }),
+    ).flat();
+  });
+  const correctedSelectionSource = readSource(() =>
+    selectionSupersessionSource.status === "error"
       ? []
       : access.catalog.listDiscSelections({
-          ids: [...new Set(cancelledSelectionIds)],
+          ids: [...new Set(selectionSupersessionSource.value.map(
+            (supersession) => supersession.replacementDiscSelectionId,
+          ))],
+        }),
+  );
+  const terminalSelectionIds =
+    encodeJobSource.status === "loaded"
+      ? encodeJobSource.value
+          .filter((job) =>
+            job.status === "completed" ||
+            job.status === "failed" ||
+            job.status === "cancelled"
+          )
+          .map((job) => job.discSelectionId)
+      : [];
+  const terminalRequeueSelectionSource = readSource(() =>
+    terminalSelectionIds.length === 0
+      ? []
+      : access.catalog.listDiscSelections({
+          ids: [...new Set(terminalSelectionIds)],
           encodeEligibleOnly: true,
         }),
   );
   const relevantMediaItemIds =
-    activityLimit === undefined
-      ? undefined
-      : selectionSource.status === "error"
-        ? []
-        : selectionSource.value.map((selection) => selection.mediaItemId);
+    selectionSource.status === "error" ||
+      correctedSelectionSource.status === "error"
+      ? []
+      : [...selectionSource.value, ...correctedSelectionSource.value].map(
+          (selection) => selection.mediaItemId,
+        );
   const mediaItemSource = readSource(() =>
-    access.catalog.listMediaItems(
-      relevantMediaItemIds === undefined
-        ? undefined
-        : { ids: [...new Set(relevantMediaItemIds)] },
-    ),
+    access.catalog.listMediaItems({
+      ids: [...new Set(relevantMediaItemIds)],
+    }),
   );
   const relevantProfileIds =
     activityLimit === undefined
@@ -683,7 +704,9 @@ function readDashboardSnapshotRecords(
   const encodeJobs =
     encodeJobSource.status === "error" ||
     selectionSource.status === "error" ||
-    cancelledRequeueSelectionSource.status === "error" ||
+    selectionSupersessionSource.status === "error" ||
+    correctedSelectionSource.status === "error" ||
+    terminalRequeueSelectionSource.status === "error" ||
     mediaItemSource.status === "error" ||
     profileSource.status === "error"
       ? unavailable<DashboardEncodeJob>()
@@ -694,14 +717,26 @@ function readDashboardSnapshotRecords(
               selection,
             ]),
           );
+          const correctedSelectionsById = new Map(
+            correctedSelectionSource.value.map((selection) => [
+              selection.id,
+              selection,
+            ]),
+          );
+          const supersessionsBySelectionId = new Map(
+            selectionSupersessionSource.value.map((supersession) => [
+              supersession.supersededDiscSelectionId,
+              supersession,
+            ]),
+          );
           const mediaItemsById = new Map(
             mediaItemSource.value.map((item) => [item.id, item]),
           );
           const profilesById = new Map(
             profileSource.value.map((profile) => [profile.id, profile]),
           );
-          const cancelledRequeueSelectionIds = new Set(
-            cancelledRequeueSelectionSource.value.map(
+          const terminalRequeueSelectionIds = new Set(
+            terminalRequeueSelectionSource.value.map(
               (selection) => selection.id,
             ),
           );
@@ -712,6 +747,17 @@ function readDashboardSnapshotRecords(
                 ? mediaItemsById.get(selection.mediaItemId)
                 : undefined;
               const profile = profilesById.get(job.encodingProfileId);
+              const supersession = supersessionsBySelectionId.get(
+                job.discSelectionId,
+              );
+              const correctedSelection = supersession
+                ? correctedSelectionsById.get(
+                    supersession.replacementDiscSelectionId,
+                  )
+                : undefined;
+              const correctedMediaItem = correctedSelection
+                ? mediaItemsById.get(correctedSelection.mediaItemId)
+                : undefined;
               return {
                 id: job.id,
                 mediaTitle: mediaItem?.title ?? "Unknown Media Item",
@@ -724,9 +770,22 @@ function readDashboardSnapshotRecords(
                 progressPhase: job.progressPhase,
                 progressPercent: job.progressPercent,
                 progressEtaSeconds: job.progressEtaSeconds,
-                ...(job.status === "cancelled"
+                ...(supersession === undefined
+                  ? {}
+                  : {
+                      discSelectionCorrection: {
+                        replacementDiscSelectionId:
+                          supersession.replacementDiscSelectionId,
+                        correctedMediaTitle:
+                          correctedMediaItem?.title ?? "Unknown Media Item",
+                        reason: supersession.reason,
+                      },
+                    }),
+                ...(job.status === "completed" ||
+                    job.status === "failed" ||
+                    job.status === "cancelled"
                   ? {
-                      requeueable: cancelledRequeueSelectionIds.has(
+                      requeueable: terminalRequeueSelectionIds.has(
                         job.discSelectionId,
                       ),
                     }

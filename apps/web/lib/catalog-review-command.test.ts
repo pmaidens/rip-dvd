@@ -111,6 +111,16 @@ const validCommands = {
       },
     },
   },
+  correct_disc_selection: {
+    action: "correct_disc_selection",
+    discSelectionId: "selection-1",
+    catalogRevision: "2026-08-11T06:00:00.000Z",
+    correctionReason: "Mapped the theatrical cut instead of the director's cut.",
+    selection: {
+      mediaItemId: "media-item-2",
+      sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+    },
+  },
   delete_disc_selection: {
     action: "delete_disc_selection",
     discSelectionId: "selection-1",
@@ -285,6 +295,19 @@ describe("catalog review command contract", () => {
         },
       },
       "Invalid Disc Selection",
+    ],
+    [
+      {
+        action: "correct_disc_selection",
+        discSelectionId: "selection-1",
+        catalogRevision: "2026-08-11T06:00:00.000Z",
+        correctionReason: "x".repeat(1_001),
+        selection: {
+          mediaItemId: "media-item-2",
+          sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+        },
+      },
+      "Invalid Disc Selection Correction",
     ],
     [
       { action: "delete_disc_selection" },

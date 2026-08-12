@@ -1042,6 +1042,11 @@ describe("DashboardView", () => {
                 progressPhase: "encoding",
                 progressPercent: 100,
                 progressEtaSeconds: null,
+                discSelectionCorrection: {
+                  replacementDiscSelectionId: "corrected-selection",
+                  correctedMediaTitle: "Corrected title",
+                  reason: "The original source was the wrong cut.",
+                },
               },
               {
                 id: "failed-job" as EncodeJobId,
@@ -1071,6 +1076,9 @@ describe("DashboardView", () => {
       expect(html).toContain(title);
     }
     expect(html).toContain("Re-encode");
+    expect(html).toContain("Disc Selection corrected");
+    expect(html).toContain("Superseded by Corrected title");
+    expect(html).toContain("The original source was the wrong cut.");
     expect(html).toContain("Encoding · ETA 12m 3s");
     expect(html).toContain("Retrying…");
     expect(html).not.toContain("Retry encode");

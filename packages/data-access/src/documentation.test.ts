@@ -15,6 +15,9 @@ describe.each(readmes)("%s", (_name, readmeUrl) => {
       /\*\*Ordinary retry identity\.\*\*[\s\S]{0,500}cannot be repaired or removed[\s\S]{0,500}same logical Encode Job/i,
     );
     expect(readme).toMatch(
+      /\*\*Job-backed correction supersession\.\*\*[\s\S]{0,700}new active Disc Selection[\s\S]{0,700}original selection[\s\S]{0,700}cancellation/i,
+    );
+    expect(readme).toMatch(
       /\*\*Unsafe legacy quarantine\.\*\*[\s\S]{0,700}deactivates[\s\S]{0,700}rather than deleting[\s\S]{0,700}remain as history/i,
     );
     expect(readme).toMatch(
