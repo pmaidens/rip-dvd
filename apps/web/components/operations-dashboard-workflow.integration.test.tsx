@@ -31,6 +31,10 @@ import type {
   DashboardSnapshot,
 } from "../lib/dashboard";
 import {
+  CatalogReviewView,
+  type CatalogReviewDto,
+} from "./catalog-review-editor";
+import {
   FilesystemVerificationInventoryView,
   type FilesystemVerificationInventoryState,
 } from "./filesystem-verification-inventory";
@@ -212,6 +216,22 @@ describe("end-to-end operations dashboard workflow", () => {
           number: 1,
           durationSeconds: 5_711,
           chapters: 12,
+          audioStreams: [{
+            id: 128,
+            language: "English",
+            format: "AC3",
+            channels: 6,
+          }],
+          subtitles: [{
+            id: 32,
+            language: "English",
+            content: "Normal",
+          }],
+        },
+        {
+          number: 2,
+          durationSeconds: 119,
+          chapters: 1,
           audioStreams: [],
           subtitles: [],
         },
@@ -305,6 +325,49 @@ describe("end-to-end operations dashboard workflow", () => {
     expect(completedArchiveDashboard.html).toContain("Review catalog");
     const archive = access.catalog.listOriginalDiscArchives()[0]!;
     expect(existsSync(archive.archivePath)).toBe(true);
+
+    const catalogReviewResponse = await createCatalogReviewRoute(
+      new Request(`${trustedOrigin}/api/catalog-reviews/${archive.id}`),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    expect(catalogReviewResponse.status).toBe(200);
+    const catalogReview = await catalogReviewResponse.json() as
+      CatalogReviewDto;
+    const catalogReviewHtml = renderToStaticMarkup(
+      <CatalogReviewView
+        state={{ status: "loaded", review: catalogReview }}
+        editingMediaItemId={null}
+        isSaving={false}
+        requestError={null}
+        selectionKind="main_feature"
+        onClose={() => undefined}
+        onRetry={() => undefined}
+        onEditMediaItem={() => undefined}
+        onCancelEdit={() => undefined}
+        onMediaItemsPage={() => undefined}
+        onDiscSelectionsPage={() => undefined}
+        onSelectionKindChange={() => undefined}
+        onSaveMediaItem={() => undefined}
+        onCreateDiscSelection={() => undefined}
+        onDeleteDiscSelection={() => undefined}
+        onCompleteReview={() => undefined}
+      />,
+    );
+    expect(catalogReviewHtml).toContain("Catalog Workflow Disc");
+    expect(catalogReviewHtml).toContain("Original volume label");
+    expect(catalogReviewHtml).toContain("WORKFLOW_DISC");
+    expect(catalogReviewHtml).toContain("1h 35m 11s");
+    expect(catalogReviewHtml).toContain("12 chapters");
+    expect(catalogReviewHtml).toContain("Audio: English");
+    expect(catalogReviewHtml).toContain("Subtitles: English");
+    expect(catalogReviewHtml).toContain("Feature-length candidate");
+    expect(catalogReviewHtml).toContain("Very short or menu candidate");
+    expect(catalogReviewHtml).toContain("Longest title");
+    expect(catalogReviewHtml).toContain("Technical stream details");
+    expect(catalogReviewHtml).toContain("Audio stream 0x80");
+    expect(catalogReviewHtml).toContain("Subtitle stream 0x20");
 
     const catalogMutation = (body: unknown) =>
       createCatalogReviewRoute(
