@@ -7,6 +7,7 @@ import { requestMediaItemSearch } from "./catalog-review-media-item-search";
 import {
   mediaItemKinds,
   type CatalogReviewMediaItem,
+  type MediaItemMaintenance,
   type MediaItemSearchDto,
   type MediaItemSearchResult,
   type MediaItemKind,
@@ -25,6 +26,35 @@ interface CatalogReviewMediaItemsProps {
   onDelete(id: string): void;
 }
 
+function MediaItemDeletionAction({
+  mediaItemId,
+  maintenance,
+  isSaving,
+  onDelete,
+}: {
+  mediaItemId: string;
+  maintenance: MediaItemMaintenance;
+  isSaving: boolean;
+  onDelete(id: string): void;
+}) {
+  const reason = maintenance.deletionAvailability.reason;
+  return (
+    <>
+      <button
+        type="button"
+        disabled={isSaving || reason !== null}
+        title={reason ?? undefined}
+        onClick={() => onDelete(mediaItemId)}
+      >
+        Delete Media Item
+      </button>
+      {reason === null ? null : (
+        <span>{`Deletion unavailable: ${reason}`}</span>
+      )}
+    </>
+  );
+}
+
 export function CatalogReviewMediaItemMaintenanceResult({
   result,
   isSaving,
@@ -37,8 +67,6 @@ export function CatalogReviewMediaItemMaintenanceResult({
   onDelete(id: string): void;
 }) {
   const { maintenance, mediaItem } = result;
-  const deletionUnavailable =
-    maintenance.deletionAvailability.state === "unavailable";
   return (
     <li>
       <div>
@@ -54,11 +82,6 @@ export function CatalogReviewMediaItemMaintenanceResult({
             maintenance.referencedArchiveCount === 1 ? "archive" : "archives"
           }`}</span>
         )}
-        {deletionUnavailable ? (
-          <span>{`Deletion unavailable: ${
-            maintenance.deletionAvailability.reason
-          }`}</span>
-        ) : null}
       </div>
       <div className="profile-actions">
         <button
@@ -68,14 +91,12 @@ export function CatalogReviewMediaItemMaintenanceResult({
         >
           Edit
         </button>
-        <button
-          type="button"
-          disabled={isSaving || deletionUnavailable}
-          title={maintenance.deletionAvailability.reason ?? undefined}
-          onClick={() => onDelete(mediaItem.id)}
-        >
-          Delete Media Item
-        </button>
+        <MediaItemDeletionAction
+          mediaItemId={mediaItem.id}
+          maintenance={maintenance}
+          isSaving={isSaving}
+          onDelete={onDelete}
+        />
       </div>
     </li>
   );
@@ -175,28 +196,12 @@ export function CatalogReviewMediaItems({
                 Edit
               </button>
               {item.maintenance ? (
-                <>
-                  <button
-                    type="button"
-                    onClick={() => onDelete(item.id)}
-                    disabled={
-                      isSaving ||
-                      item.maintenance.deletionAvailability.state ===
-                        "unavailable"
-                    }
-                    title={
-                      item.maintenance.deletionAvailability.reason ?? undefined
-                    }
-                  >
-                    Delete Media Item
-                  </button>
-                  {item.maintenance.deletionAvailability.state ===
-                      "unavailable" ? (
-                    <span>{`Deletion unavailable: ${
-                      item.maintenance.deletionAvailability.reason
-                    }`}</span>
-                  ) : null}
-                </>
+                <MediaItemDeletionAction
+                  mediaItemId={item.id}
+                  maintenance={item.maintenance}
+                  isSaving={isSaving}
+                  onDelete={onDelete}
+                />
               ) : null}
             </li>
           ))}
@@ -352,26 +357,12 @@ export function CatalogReviewMediaItems({
           Save Media Item
         </button>
         {editingMaintenance ? (
-          <>
-            <button
-              type="button"
-              disabled={
-                isSaving ||
-                editingMaintenance.deletionAvailability.state === "unavailable"
-              }
-              title={editingMaintenance.deletionAvailability.reason ?? undefined}
-              onClick={() => onDelete(editing.id)}
-            >
-              Delete Media Item
-            </button>
-            {editingMaintenance.deletionAvailability.state === "unavailable"
-              ? (
-                <p>{`Deletion unavailable: ${
-                  editingMaintenance.deletionAvailability.reason
-                }`}</p>
-              )
-              : null}
-          </>
+          <MediaItemDeletionAction
+            mediaItemId={editing.id}
+            maintenance={editingMaintenance}
+            isSaving={isSaving}
+            onDelete={onDelete}
+          />
         ) : null}
         </form>
       ) : null}
