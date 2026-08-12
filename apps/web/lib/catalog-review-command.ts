@@ -17,6 +17,7 @@ export const CATALOG_REVIEW_COMMAND_ACTIONS = [
   "delete_media_item",
   "create_disc_selection",
   "repair_disc_selection",
+  "correct_disc_selection",
   "delete_disc_selection",
   "complete_review",
 ] as const;
@@ -132,6 +133,13 @@ export type CatalogReviewCommand =
       selection: CatalogReviewDiscSelectionInput;
     }
   | {
+      action: "correct_disc_selection";
+      discSelectionId: string;
+      catalogRevision: string;
+      correctionReason?: string;
+      selection: CatalogReviewDiscSelectionInput;
+    }
+  | {
       action: "delete_disc_selection";
       discSelectionId: string;
     }
@@ -155,6 +163,7 @@ export type CatalogReviewCommandValidationError =
   | "Invalid Media Item seasonNumber"
   | "Invalid Media Item episodeNumber"
   | "Invalid Disc Selection"
+  | "Invalid Disc Selection Correction"
   | "Invalid catalog review revision"
   | "Invalid catalog review outcome";
 
@@ -632,6 +641,30 @@ export function parseCatalogReviewCommand(
             },
           }
         : invalid(parsedSelection.error, discSelectionId);
+    }
+    case "correct_disc_selection": {
+      const discSelectionId = boundedString(body.discSelectionId);
+      const revision = catalogRevision(body.catalogRevision);
+      const correctionReason = body.correctionReason === undefined
+        ? undefined
+        : boundedString(body.correctionReason, 1_000);
+      const parsedSelection = parseDiscSelectionInput(body.selection);
+      return discSelectionId && revision &&
+          (body.correctionReason === undefined || correctionReason) &&
+          parsedSelection.ok
+        ? {
+            ok: true,
+            command: {
+              action,
+              discSelectionId,
+              catalogRevision: revision,
+              ...(typeof correctionReason === "string"
+                ? { correctionReason }
+                : {}),
+              selection: parsedSelection.selection,
+            },
+          }
+        : invalid("Invalid Disc Selection Correction");
     }
     case "delete_disc_selection": {
       const discSelectionId = boundedString(body.discSelectionId);

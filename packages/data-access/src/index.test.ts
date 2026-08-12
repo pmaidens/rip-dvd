@@ -54,6 +54,7 @@ type ConcurrentWorkerResult =
         | "cancellation_requested"
         | "claimed"
         | "completed"
+        | "corrected"
         | "created"
         | "enqueued"
         | "rejected"
@@ -107,6 +108,14 @@ type ConcurrentOperation =
       operation: "create-disc-selection";
       originalDiscArchiveId: OriginalDiscArchiveId;
       mediaItemId: MediaItemId;
+    }
+  | {
+      operation: "correct-disc-selection";
+      discSelectionId: DiscSelectionId;
+      originalDiscArchiveId: OriginalDiscArchiveId;
+      catalogRevision: Date;
+      mediaItemId: MediaItemId;
+      reason: string;
     }
   | {
       operation: "create-media-item";
@@ -492,9 +501,10 @@ describe("data-access facade", () => {
         "archive_requests",
         "disc_inspection_attempts",
         "disc_inspections",
+        "disc_selection_supersessions",
       ]),
     );
-    expect(identifierTables).toHaveLength(13);
+    expect(identifierTables).toHaveLength(14);
     expect(
       identifierTables.every(({ name, sql }) =>
         name === "legacy_cutover_staged_sidecars"
@@ -527,6 +537,128 @@ describe("data-access facade", () => {
       });
       expect(results).toEqual(Array.from({ length: 8 }, () => "ok"));
     }
+  });
+
+  it("adds supersession history without rewriting existing Encode Job provenance", () => {
+    const databasePath = createTestDatabasePath();
+    const sqlite = new DatabaseSync(databasePath);
+    const migrationsRoot = new URL("../drizzle/", import.meta.url);
+    const supersessionMigration =
+      "20260812180200_hard_smiling_tiger";
+    const predecessorNames = readdirSync(migrationsRoot)
+      .filter((name) => /^\d/.test(name) && name < supersessionMigration)
+      .sort();
+    for (const migrationName of predecessorNames) {
+      const migration = readFileSync(
+        new URL(`../drizzle/${migrationName}/migration.sql`, import.meta.url),
+        "utf8",
+      );
+      for (const statement of migration.split("--> statement-breakpoint")) {
+        if (statement.trim()) {
+          sqlite.exec(statement);
+        }
+      }
+    }
+    sqlite.exec(`
+      create table __drizzle_migrations (
+        id integer primary key,
+        hash text not null,
+        created_at numeric,
+        name text,
+        applied_at text
+      );
+    `);
+    const recordMigration = sqlite.prepare(`
+      insert into __drizzle_migrations (hash, created_at, name)
+      values (?, 0, ?)
+    `);
+    for (const migrationName of predecessorNames) {
+      recordMigration.run(`pre-supersession-${migrationName}`, migrationName);
+    }
+    sqlite.exec(`
+      insert into optical_drives (
+        id, device_path, is_present, last_seen_at, created_at, updated_at
+      ) values (
+        'pre-supersession-drive', '/dev/pre-supersession', 1, 1, 1, 1
+      );
+      insert into detected_discs (
+        id, optical_drive_id, disc_kind, fingerprint, status, detected_at,
+        created_at, updated_at
+      ) values (
+        'pre-supersession-disc', 'pre-supersession-drive', 'dvd',
+        'pre-supersession-fingerprint', 'archived', 1, 1, 1
+      );
+      insert into original_disc_archives (
+        id, detected_disc_id, disc_kind, archive_format, archive_path,
+        fingerprint, archived_at, catalog_reviewed_at,
+        catalog_review_outcome, created_at, updated_at
+      ) values (
+        'pre-supersession-archive', 'pre-supersession-disc', 'dvd', 'iso',
+        '/media/originals/pre-supersession.iso',
+        'pre-supersession-fingerprint', 1, 1, 'reviewed_with_selections',
+        1, 1
+      );
+      insert into media_items (
+        id, kind, title, created_at, updated_at
+      ) values (
+        'pre-supersession-movie', 'movie', 'Pre-supersession Movie', 1, 1
+      );
+      insert into disc_selections (
+        id, original_disc_archive_id, media_item_id, source_key, kind,
+        created_at, updated_at
+      ) values (
+        'pre-supersession-selection', 'pre-supersession-archive',
+        'pre-supersession-movie', 'dvd:main-feature', 'main_feature', 1, 1
+      );
+      insert into encoding_profiles (
+        id, key, display_name, media_domain, version, is_active, settings,
+        created_at, updated_at
+      ) values (
+        'pre-supersession-profile', 'pre-supersession-profile',
+        'Pre-supersession profile', 'dvd_video', 1, 1, '{}', 1, 1
+      );
+      insert into encode_jobs (
+        id, disc_selection_id, encoding_profile_id, output_path, status,
+        progress_percent, completed_at, created_at, updated_at
+      ) values (
+        'pre-supersession-job', 'pre-supersession-selection',
+        'pre-supersession-profile', '/media/movies/pre-supersession.mkv',
+        'completed', 100, 2, 1, 2
+      );
+    `);
+    sqlite.close();
+
+    const migrated = openTestDatabase(databasePath);
+    expect(migrated.catalog.listDiscSelections({
+      ids: ["pre-supersession-selection" as DiscSelectionId],
+    })).toEqual([expect.objectContaining({
+      id: "pre-supersession-selection",
+      mediaItemId: "pre-supersession-movie",
+      sourceIdentity: { kind: "main_feature" },
+    })]);
+    expect(migrated.encodeJobs.list()).toEqual([expect.objectContaining({
+      id: "pre-supersession-job",
+      discSelectionId: "pre-supersession-selection",
+      encodingProfileId: "pre-supersession-profile",
+      outputPath: "/media/movies/pre-supersession.mkv",
+      status: "completed",
+    })]);
+    expect(migrated.catalog.listDiscSelectionSupersessions({
+      discSelectionIds: ["pre-supersession-selection" as DiscSelectionId],
+    })).toEqual([]);
+    migrated.close();
+
+    const verified = new DatabaseSync(databasePath);
+    expect(verified.prepare("pragma foreign_key_check").all()).toEqual([]);
+    expect(() => verified.exec(`
+      insert into disc_selection_supersessions (
+        superseded_disc_selection_id, replacement_disc_selection_id,
+        created_at
+      ) values (
+        'pre-supersession-selection', 'pre-supersession-selection', 3
+      )
+    `)).toThrow(/disc_selection_supersessions_distinct_selections_check/);
+    verified.close();
   });
 
   it("migrates archive intent separately from started Archive Job attempts", () => {
@@ -2251,6 +2383,548 @@ describe("data-access facade", () => {
     access.close();
   });
 
+  it("corrects completed Encode Job provenance by superseding its Disc Selection", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/completed-selection-correction",
+      isPresent: true,
+    });
+    const contentId = `sha256:${"4".repeat(64)}`;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: contentId,
+      scanData: {
+        schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+        contentId,
+        titles: [{
+          number: 1,
+          durationSeconds: 5_400,
+          chapters: 12,
+          audioStreams: [],
+          subtitles: [],
+        }],
+      },
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Completed Selection Correction.iso",
+      fingerprint: contentId,
+    });
+    const mistakenItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Mistaken Movie",
+    });
+    const correctedItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Correct Movie",
+    });
+    const mistakenSelection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: mistakenItem.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    completeCatalogReview(access, archive.id);
+    const profile = access.encodingProfiles.create({
+      key: "completed-selection-correction",
+      displayName: "Completed selection correction",
+      mediaDomain: "dvd_video",
+      settings: { preset: "HQ" },
+    });
+    const queued = access.encodeJobs.enqueue({
+      discSelectionId: mistakenSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Mistaken Movie.mkv",
+    });
+    const claim = access.encodeJobs.claimNext("completed-correction-worker");
+    if (!claim) {
+      throw new Error("Expected completed correction Encode Job claim");
+    }
+    const completed = access.encodeJobs.complete(claim);
+    const catalogRevision = access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]!.updatedAt;
+    expect(access.catalog.listDiscSelectionActionAvailability({
+      ids: [mistakenSelection.id],
+    })).toEqual([{
+      discSelectionId: mistakenSelection.id,
+      state: "locked_provenance",
+      availableActions: ["correct"],
+      reason:
+        `Encode Job ${completed.id} is completed; correct this Disc Selection by supersession to preserve its provenance`,
+      relatedEncodeJob: { id: completed.id, status: "completed" },
+    }]);
+
+    const correction = access.catalog.correctDiscSelection(
+      mistakenSelection.id,
+      {
+        originalDiscArchiveId: archive.id,
+        catalogRevision,
+        mediaItemId: correctedItem.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+        reason: "The main-feature choice encoded the wrong cut.",
+      },
+    );
+
+    expect(correction.discSelection).toMatchObject({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: correctedItem.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    });
+    expect(correction.discSelection.id).not.toBe(mistakenSelection.id);
+    expect(correction.supersession).toMatchObject({
+      supersededDiscSelectionId: mistakenSelection.id,
+      replacementDiscSelectionId: correction.discSelection.id,
+      reason: "The main-feature choice encoded the wrong cut.",
+    });
+    expect(access.catalog.listDiscSelections({
+      originalDiscArchiveId: archive.id,
+    })).toEqual([expect.objectContaining({ id: correction.discSelection.id })]);
+    expect(access.catalog.listDiscSelections({ ids: [mistakenSelection.id] }))
+      .toEqual([expect.objectContaining({
+        id: mistakenSelection.id,
+        mediaItemId: mistakenItem.id,
+        sourceIdentity: { kind: "main_feature" },
+      })]);
+    expect(access.catalog.listDiscSelectionSupersessions({
+      discSelectionIds: [
+        mistakenSelection.id,
+        correction.discSelection.id,
+      ],
+    })).toEqual([correction.supersession]);
+    expect(() => access.catalog.listDiscSelectionSupersessions({
+      discSelectionIds: Array.from(
+        { length: 101 },
+        () => mistakenSelection.id,
+      ),
+    })).toThrow(
+      "Disc Selection supersession lookup is limited to 100 records",
+    );
+    expect(access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: queued.id,
+        discSelectionId: mistakenSelection.id,
+        encodingProfileId: profile.id,
+        outputPath: queued.outputPath,
+        status: completed.status,
+      }),
+    ]);
+    expect(access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0])
+      .toMatchObject({
+        catalogReviewOutcome: "needs_review",
+        catalogReviewedAt: null,
+      });
+    access.close();
+  });
+
+  it("requests general cancellation for queued and running jobs during correction", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/active-selection-correction",
+      isPresent: true,
+    });
+    const contentId = `sha256:${"5".repeat(64)}`;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: contentId,
+      scanData: {
+        schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+        contentId,
+        titles: [{
+          number: 1,
+          durationSeconds: 5_400,
+          chapters: 12,
+          audioStreams: [],
+          subtitles: [],
+        }],
+      },
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Active Selection Correction.iso",
+      fingerprint: contentId,
+    });
+    const mistakenItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Active Mistake",
+    });
+    const correctedItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Active Correction",
+    });
+    const mistakenSelection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: mistakenItem.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    completeCatalogReview(access, archive.id);
+    const runningProfile = access.encodingProfiles.create({
+      key: "active-correction-running",
+      displayName: "Active correction running",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const queuedProfile = access.encodingProfiles.create({
+      key: "active-correction-queued",
+      displayName: "Active correction queued",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const runningJob = access.encodeJobs.enqueue({
+      discSelectionId: mistakenSelection.id,
+      encodingProfileId: runningProfile.id,
+      outputPath: "/media/movies/Active Mistake running.mkv",
+    });
+    const runningClaim = access.encodeJobs.claimNext(
+      "active-correction-worker",
+    );
+    if (!runningClaim) {
+      throw new Error("Expected active correction Encode Job claim");
+    }
+    const queuedJob = access.encodeJobs.enqueue({
+      discSelectionId: mistakenSelection.id,
+      encodingProfileId: queuedProfile.id,
+      outputPath: "/media/movies/Active Mistake queued.mkv",
+    });
+    const catalogRevision = access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]!.updatedAt;
+
+    const correction = access.catalog.correctDiscSelection(
+      mistakenSelection.id,
+      {
+        originalDiscArchiveId: archive.id,
+        catalogRevision,
+        mediaItemId: correctedItem.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      },
+    );
+
+    expect(correction.discSelection.id).not.toBe(mistakenSelection.id);
+    expect(access.encodeJobs.list()).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: runningJob.id,
+        discSelectionId: mistakenSelection.id,
+        status: "cancellation_requested",
+      }),
+      expect.objectContaining({
+        id: queuedJob.id,
+        discSelectionId: mistakenSelection.id,
+        status: "cancelled",
+      }),
+    ]));
+    expect(access.encodeJobs.completeCancellation(runningClaim)).toMatchObject({
+      id: runningJob.id,
+      discSelectionId: mistakenSelection.id,
+      status: "cancelled",
+    });
+    access.close();
+  });
+
+  it("preserves failed and cancelled outcomes when their selection is corrected", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/terminal-selection-correction",
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "terminal-selection-correction",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Terminal Selection Correction.iso",
+      fingerprint: "terminal-selection-correction",
+    });
+    const mistakenItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Terminal Mistake",
+    });
+    const correctedItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Terminal Correction",
+    });
+    const mistakenSelection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: mistakenItem.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    completeCatalogReview(access, archive.id);
+    const failedProfile = access.encodingProfiles.create({
+      key: "terminal-correction-failed",
+      displayName: "Terminal correction failed",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const cancelledProfile = access.encodingProfiles.create({
+      key: "terminal-correction-cancelled",
+      displayName: "Terminal correction cancelled",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const failedJob = access.encodeJobs.enqueue({
+      discSelectionId: mistakenSelection.id,
+      encodingProfileId: failedProfile.id,
+      outputPath: "/media/movies/Terminal Mistake failed.mkv",
+    });
+    const failedClaim = access.encodeJobs.claimNext(
+      "terminal-correction-worker",
+    );
+    if (!failedClaim) {
+      throw new Error("Expected terminal correction Encode Job claim");
+    }
+    access.encodeJobs.fail(failedClaim, "Wrong source failed to encode");
+    const cancelledJob = access.encodeJobs.enqueue({
+      discSelectionId: mistakenSelection.id,
+      encodingProfileId: cancelledProfile.id,
+      outputPath: "/media/movies/Terminal Mistake cancelled.mkv",
+    });
+    access.encodeJobs.requestCancellation(cancelledJob.id);
+    const catalogRevision = access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]!.updatedAt;
+
+    const correction = access.catalog.correctDiscSelection(
+      mistakenSelection.id,
+      {
+        originalDiscArchiveId: archive.id,
+        catalogRevision,
+        mediaItemId: correctedItem.id,
+        sourceIdentity: { kind: "main_feature" },
+      },
+    );
+
+    expect(correction.supersession.reason).toBeNull();
+    expect(access.encodeJobs.list()).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: failedJob.id,
+        discSelectionId: mistakenSelection.id,
+        encodingProfileId: failedProfile.id,
+        outputPath: failedJob.outputPath,
+        status: "failed",
+        errorMessage: "Wrong source failed to encode",
+      }),
+      expect.objectContaining({
+        id: cancelledJob.id,
+        discSelectionId: mistakenSelection.id,
+        encodingProfileId: cancelledProfile.id,
+        outputPath: cancelledJob.outputPath,
+        status: "cancelled",
+      }),
+    ]));
+    access.close();
+  });
+
+  it("commits one complete supersession when corrections race across connections", async () => {
+    const databasePath = createTestDatabasePath();
+    const access = openTestDatabase(databasePath);
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/concurrent-selection-correction",
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "concurrent-selection-correction",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Concurrent Selection Correction.iso",
+      fingerprint: "concurrent-selection-correction",
+    });
+    const mistakenItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Concurrent Mistake",
+    });
+    const firstCorrectedItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "First Concurrent Correction",
+    });
+    const secondCorrectedItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Second Concurrent Correction",
+    });
+    const mistakenSelection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: mistakenItem.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    completeCatalogReview(access, archive.id);
+    const profile = access.encodingProfiles.create({
+      key: "concurrent-selection-correction",
+      displayName: "Concurrent selection correction",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const queuedJob = access.encodeJobs.enqueue({
+      discSelectionId: mistakenSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Concurrent Mistake.mkv",
+    });
+    const catalogRevision = access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]!.updatedAt;
+
+    const results = await runBarrierWorkers({
+      databasePath,
+      mode: "operation",
+      operations: [firstCorrectedItem, secondCorrectedItem].map(
+        (item, index) => ({
+          operation: "correct-disc-selection" as const,
+          discSelectionId: mistakenSelection.id,
+          originalDiscArchiveId: archive.id,
+          catalogRevision,
+          mediaItemId: item.id,
+          reason: `Concurrent correction ${index + 1}`,
+        }),
+      ),
+    });
+
+    const winner = results.find((result) =>
+      typeof result === "object" &&
+      result !== null &&
+      result.outcome === "corrected"
+    );
+    const winnerId = typeof winner === "object" && winner !== null
+      ? winner.id
+      : undefined;
+    expect(results).toEqual(expect.arrayContaining([
+      expect.objectContaining({ outcome: "corrected" }),
+      { outcome: "rejected" },
+    ]));
+    expect(winnerId).toEqual(expect.any(String));
+    const activeSelections = access.catalog.listDiscSelections({
+      originalDiscArchiveId: archive.id,
+    });
+    expect(activeSelections).toEqual([
+      expect.objectContaining({ id: winnerId }),
+    ]);
+    expect(access.catalog.listDiscSelectionSupersessions({
+      discSelectionIds: [mistakenSelection.id],
+    })).toEqual([
+      expect.objectContaining({
+        supersededDiscSelectionId: mistakenSelection.id,
+        replacementDiscSelectionId: activeSelections[0]!.id,
+        reason: expect.stringMatching(/^Concurrent correction [12]$/),
+      }),
+    ]);
+    expect(access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: queuedJob.id,
+        discSelectionId: mistakenSelection.id,
+        status: "cancelled",
+      }),
+    ]);
+    expect(() =>
+      access.catalog.correctDiscSelection(mistakenSelection.id, {
+        originalDiscArchiveId: archive.id,
+        catalogRevision,
+        mediaItemId: mistakenItem.id,
+        sourceIdentity: { kind: "main_feature" },
+      })
+    ).toThrow(/already been superseded or deactivated/);
+    access.close();
+  });
+
+  it("rejects a stale correction without partially superseding or cancelling", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/stale-selection-correction",
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "stale-selection-correction",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Stale Selection Correction.iso",
+      fingerprint: "stale-selection-correction",
+    });
+    const mistakenItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Stale Correction Mistake",
+    });
+    const correctedItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Stale Correction Target",
+    });
+    const mistakenSelection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: mistakenItem.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    completeCatalogReview(access, archive.id);
+    const profile = access.encodingProfiles.create({
+      key: "stale-selection-correction",
+      displayName: "Stale selection correction",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const queuedJob = access.encodeJobs.enqueue({
+      discSelectionId: mistakenSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Stale Correction Mistake.mkv",
+    });
+    const reviewedArchive = access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]!;
+    const staleRevision = new Date(reviewedArchive.updatedAt.getTime() - 1);
+
+    expect(() =>
+      access.catalog.correctDiscSelection(mistakenSelection.id, {
+        originalDiscArchiveId: archive.id,
+        catalogRevision: staleRevision,
+        mediaItemId: correctedItem.id,
+        sourceIdentity: { kind: "main_feature" },
+        reason: "This write lost the catalog revision race.",
+      })
+    ).toThrow(
+      "Catalog review changed; reload before saving Disc Selection correction",
+    );
+    expect(access.catalog.listDiscSelections({
+      originalDiscArchiveId: archive.id,
+    })).toEqual([expect.objectContaining({
+      id: mistakenSelection.id,
+      mediaItemId: mistakenItem.id,
+    })]);
+    expect(access.catalog.listDiscSelectionSupersessions({
+      discSelectionIds: [mistakenSelection.id],
+    })).toEqual([]);
+    expect(access.encodeJobs.list()).toEqual([expect.objectContaining({
+      id: queuedJob.id,
+      discSelectionId: mistakenSelection.id,
+      status: "queued",
+    })]);
+    expect(access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]).toEqual(reviewedArchive);
+    access.close();
+  });
+
   it("exposes only recovery actions for unsafe legacy Disc Selections and preserves quarantine history", () => {
     const databasePath = createTestDatabasePath();
     let access = openTestDatabase(databasePath);
@@ -2333,6 +3007,18 @@ describe("data-access facade", () => {
       relatedEncodeJob: null,
     }]);
     expect(JSON.stringify(availability)).not.toContain(completedJob.outputPath);
+    const legacyCatalogRevision = access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]!.updatedAt;
+    expect(() =>
+      access.catalog.correctDiscSelection(selection.id, {
+        originalDiscArchiveId: archive.id,
+        catalogRevision: legacyCatalogRevision,
+        mediaItemId: movie.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+        reason: "This is legacy repair, not an ordinary correction.",
+      })
+    ).toThrow("needs unsafe legacy repair, not ordinary correction");
     expect(() =>
       access.catalog.listDiscSelectionActionAvailability({
         ids: Array.from({ length: 101 }, () => selection.id),
@@ -2379,6 +3065,9 @@ describe("data-access facade", () => {
       sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
     });
     expect(repaired.id).not.toBe(selection.id);
+    expect(access.catalog.listDiscSelectionSupersessions({
+      discSelectionIds: [selection.id, repaired.id],
+    })).toEqual([]);
     expect(access.catalog.listDiscSelections({ ids: [selection.id] }))
       .toEqual([expect.objectContaining({ id: selection.id })]);
     expect(access.encodeJobs.list(["completed"]))
@@ -4074,6 +4763,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
+        name: "20260812180200_hard_smiling_tiger",
+      },
+      {
         name: "20260812170422_furry_gateway",
       },
       {
@@ -4093,9 +4785,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260811051606_blue_oracle",
-      },
-      {
-        name: "20260807000001_explicit-filesystem-verification",
       },
     ]);
     expect(

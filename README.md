@@ -607,6 +607,15 @@ keeps ordinary retry history separate from unsafe legacy recovery:
   Encode Job history, including completed or imported history, cannot be
   repaired or removed. Every job stays attached to that selection; retry or
   re-encode of a terminal row resets the same logical Encode Job.
+- **Job-backed correction supersession.** Correcting a current-valid locked
+  mapping atomically deactivates it, inserts a new active Disc Selection, and
+  records the immutable old-to-new relationship plus an optional operator
+  reason. Every historical job remains attached to the original selection with
+  its original profile, output, and actual outcome. Queued work is cancelled
+  immediately, while running work enters the general cancellation lifecycle;
+  completed, failed, and cancelled outcomes stay terminal. Both Catalog Review
+  and Encode Jobs display the correction history, and the changed catalog must
+  be reviewed again before the replacement can encode.
 - **Unsafe legacy quarantine.** Only a caller-era mapping that fails current
   canonical or archived-scan validation takes the recovery path. Repair or
   removal deactivates the old Disc Selection rather than deleting it; repair

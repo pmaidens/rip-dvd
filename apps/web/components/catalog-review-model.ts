@@ -47,6 +47,16 @@ export interface CatalogReviewDiscSelection {
   mediaItemId: string;
   sourceIdentity: DiscSelectionSourceIdentityInput;
   label: string | null;
+  correction?: {
+    supersededDiscSelection: {
+      id: string;
+      mediaItemId: string;
+      sourceIdentity: DiscSelectionSourceIdentityInput;
+      label: string | null;
+    };
+    reason: string | null;
+    correctedAt: string;
+  };
   actionAvailability: CatalogReviewDiscSelectionActionAvailability;
 }
 
@@ -59,7 +69,7 @@ export type CatalogReviewDiscSelectionActionAvailability =
   }
   | {
     state: "locked_provenance";
-    availableActions: readonly [];
+    availableActions: readonly ["correct"];
     reason: string;
     relatedEncodeJob: {
       id: string;
@@ -122,6 +132,7 @@ export type SaveMediaItemInput = CatalogReviewMediaItemInput & {
 
 export type CreateDiscSelectionInput = CatalogReviewDiscSelectionInput & {
   replacesDiscSelectionId?: string;
+  correctionReason?: string;
 };
 
 export type MappingProposalAction =

@@ -121,6 +121,13 @@ Disc Selection mutation preserves two distinct identity paths:
   Encode Job history cannot be repaired or removed. Every dependent job remains
   attached to the selection; `requeue()` of a terminal row resets the same
   logical Encode Job and preserves its retry identity.
+- **Job-backed correction supersession.** `correctDiscSelection()` atomically
+  deactivates the locked mapping, inserts a new active Disc Selection, records
+  its immutable predecessor/replacement relation and optional reason, and
+  reopens Catalog Review. Every job remains attached to the original selection
+  with its original profile, output, and actual outcome. Queued work is
+  cancelled immediately, running work follows the shared cancellation
+  lifecycle, and terminal outcomes remain terminal.
 - **Unsafe legacy quarantine.** A caller-era mapping that fails canonical-key or
   archived-scan validation is the only historical exception.
   `repairDiscSelection()` or `deleteDiscSelection()` deactivates the old Disc
