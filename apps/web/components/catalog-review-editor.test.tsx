@@ -360,6 +360,56 @@ describe("CatalogReviewEditor", () => {
       },
     ]);
   });
+
+  it("resets the proposal defaults when selecting another action for the same title", async () => {
+    const review = catalogReview({
+      archiveId: "archive-a",
+      discLabel: "ACTION_SWITCH_DISC",
+    });
+    review.rawScan.titles = [{
+      number: 3,
+      durationSeconds: 600,
+      chapters: 4,
+      audioStreams: [],
+      subtitles: [],
+    }];
+    review.mediaItems = [];
+    review.mediaItemsPage.itemIds = [];
+    review.discSelections = [];
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(review)));
+
+    await act(async () => renderCatalogReviewEditor("archive-a"));
+    const action = (label: string) => [...container.querySelectorAll("button")]
+      .find((button) => button.textContent === label);
+    const movieAction = action("Map as movie");
+    if (!movieAction) {
+      throw new Error("Expected movie mapping action");
+    }
+    await act(async () => movieAction.click());
+    const movieTitle = container.querySelector<HTMLInputElement>(
+      '.catalog-mapping-proposal input[name="title"]',
+    );
+    const movieKind = container.querySelector<HTMLSelectElement>(
+      '.catalog-mapping-proposal select[name="kind"]',
+    );
+    if (!movieTitle || !movieKind) {
+      throw new Error("Expected movie Mapping Proposal fields");
+    }
+    movieTitle.value = "Unsaved movie edits";
+    expect(movieKind.value).toBe("movie");
+
+    const trailerAction = action("Map as trailer");
+    if (!trailerAction) {
+      throw new Error("Expected trailer mapping action");
+    }
+    await act(async () => trailerAction.click());
+    expect(container.querySelector<HTMLSelectElement>(
+      '.catalog-mapping-proposal select[name="kind"]',
+    )?.value).toBe("trailer");
+    expect(container.querySelector<HTMLInputElement>(
+      '.catalog-mapping-proposal input[name="title"]',
+    )?.value).toBe("Action Switch Disc");
+  });
 });
 
 function selectOptionValues(html: string, name: string): string[] {
