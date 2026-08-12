@@ -57,6 +57,14 @@ time and advances the revision, so encoding remains blocked until the changed
 catalog is explicitly completed again. Media Item hierarchy mutations are
 serialized, reject cycles, and cap parent-child chains at 32 levels without
 limiting siblings or the total Media Item count.
+`catalog.createMappingProposal()` creates one proposed Media Item and its exact
+DVD Disc Selection in the same immediate transaction against that revision.
+Invalid source coordinates, duplicate source slices, assisted-hierarchy
+violations, and stale revisions therefore leave neither record behind. The
+Assisted Mapping contract requires numbered Season/TV Show and Episode/Season
+shapes and limits Trailer or Bonus Feature parents to a Movie, TV Show, Season,
+or Episode; ordinary `createMediaItem()` and `updateMediaItem()` remain flexible
+for imported and unusual hierarchies.
 The facade carries each DVD source as one immutable, validated
 `DiscSelectionSourceIdentity` value instead of exposing a source key beside
 parallel kind, title, and chapter fields. Its persistence codec alone flattens

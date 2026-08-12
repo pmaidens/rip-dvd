@@ -18,6 +18,27 @@ function parseCommand(value: unknown) {
 }
 
 const validCommands = {
+  create_mapping_proposal: {
+    action: "create_mapping_proposal",
+    catalogRevision: "2026-08-11T06:00:00.000Z",
+    mediaItem: {
+      parentId: null,
+      kind: "bonus_feature",
+      title: "Behind the Scenes",
+      year: null,
+      seasonNumber: null,
+      episodeNumber: null,
+    },
+    discSelection: {
+      sourceIdentity: {
+        kind: "dvd_chapters",
+        titleNumber: 2,
+        chapterStart: 1,
+        chapterEnd: 3,
+      },
+      label: "Featurette",
+    },
+  },
   create_media_item: {
     action: "create_media_item",
     mediaItem: {
@@ -87,6 +108,17 @@ describe("catalog review command contract", () => {
     [
       { action: "create_media_item", mediaItem: { kind: "movie" } },
       "Invalid Media Item",
+    ],
+    [
+      {
+        action: "create_mapping_proposal",
+        catalogRevision: "not-a-revision",
+        mediaItem: { kind: "movie", title: "Example" },
+        discSelection: {
+          sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+        },
+      },
+      "Invalid Mapping Proposal",
     ],
     [
       {

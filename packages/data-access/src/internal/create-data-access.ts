@@ -82,7 +82,10 @@ import {
   requireNonEmpty,
   requirePositiveSafeInteger,
 } from "./validation.js";
-import { validateMediaItem } from "./media-item-validation.js";
+import {
+  validateMediaItem,
+  type ValidatedMediaItem,
+} from "./media-item-validation.js";
 import { serializeDiscSelectionSourceIdentity } from "../disc-selection-source-identity.js";
 import { isDvdContentId } from "../dvd-scan.js";
 import {
@@ -106,6 +109,7 @@ import type {
   ArchiveRequestStatus,
   ChronologicalListOptions,
   ConsistentReadAccess,
+  CreateDiscSelectionInput,
   DataAccess,
   DetectedDiscId,
   DetectedDiscListOptions,
@@ -389,6 +393,157 @@ export function createDataAccessInternal(
 
   function now(): Date {
     return new Date();
+  }
+
+  type CatalogTransaction = Parameters<
+    Parameters<typeof database.transaction>[0]
+  >[0];
+
+  function insertDiscSelection(
+    transaction: CatalogTransaction,
+    input: CreateDiscSelectionInput,
+    id: DiscSelectionId,
+    timestamp: Date,
+  ) {
+    const source = requireRow(
+      transaction
+        .select({
+          discKind: originalDiscArchives.discKind,
+          scanData: detectedDiscs.scanData,
+        })
+        .from(originalDiscArchives)
+        .innerJoin(
+          detectedDiscs,
+          eq(detectedDiscs.id, originalDiscArchives.detectedDiscId),
+        )
+        .where(eq(originalDiscArchives.id, input.originalDiscArchiveId))
+        .get(),
+      "original disc archive",
+      input.originalDiscArchiveId,
+    );
+    requireRow(
+      transaction
+        .select({ id: mediaItems.id })
+        .from(mediaItems)
+        .where(eq(mediaItems.id, input.mediaItemId))
+        .get(),
+      "media item",
+      input.mediaItemId,
+    );
+    if (source.discKind !== "dvd") {
+      throw new DomainInvariantError(
+        "DVD Disc Selections require a DVD Original Disc Archive",
+      );
+    }
+    const sourceIdentity =
+      createArchivedDvdSelectionValidator(source.scanData).validate(
+        input.sourceIdentity,
+      );
+    const sourcePersistence =
+      serializeDiscSelectionSourceIdentity(sourceIdentity);
+    const duplicate = transaction
+      .select({ id: discSelections.id })
+      .from(discSelections)
+      .where(and(
+        eq(
+          discSelections.originalDiscArchiveId,
+          input.originalDiscArchiveId,
+        ),
+        eq(discSelections.sourceKey, sourcePersistence.sourceKey),
+        eq(discSelections.isCatalogActive, true),
+      ))
+      .get();
+    if (duplicate) {
+      throw new DomainInvariantError(
+        "A Disc Selection already maps this exact DVD source",
+      );
+    }
+    return toDiscSelection(requireRow(
+      transaction
+        .insert(discSelections)
+        .values({
+          id,
+          originalDiscArchiveId: input.originalDiscArchiveId,
+          mediaItemId: input.mediaItemId,
+          ...sourcePersistence,
+          label: input.label,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        })
+        .returning()
+        .get(),
+      "disc selection",
+      id,
+    ));
+  }
+
+  function reopenCatalogReview(
+    transaction: CatalogTransaction,
+    archiveId: OriginalDiscArchiveId,
+    timestamp: Date,
+    expectedRevision?: Date,
+  ): void {
+    const changedArchive = transaction
+      .update(originalDiscArchives)
+      .set({
+        catalogReviewedAt: null,
+        updatedAt: nextCatalogMutationTimestamp(timestamp),
+      })
+      .where(and(
+        eq(originalDiscArchives.id, archiveId),
+        expectedRevision === undefined
+          ? undefined
+          : eq(originalDiscArchives.updatedAt, expectedRevision),
+      ))
+      .returning({ id: originalDiscArchives.id })
+      .get();
+    if (expectedRevision !== undefined && !changedArchive) {
+      throw new DomainInvariantError(
+        "Catalog review changed; reload before saving Mapping Proposal",
+      );
+    }
+  }
+
+  function validateAssistedMappingShape(
+    transaction: CatalogTransaction,
+    mediaItem: ValidatedMediaItem,
+  ): void {
+    const parent = mediaItem.parentId === null
+      ? null
+      : requireRow(
+          transaction
+            .select({ kind: mediaItems.kind })
+            .from(mediaItems)
+            .where(eq(mediaItems.id, mediaItem.parentId))
+            .get(),
+          "media item",
+          mediaItem.parentId,
+        );
+    if (
+      mediaItem.kind === "season" &&
+      (mediaItem.seasonNumber === null || parent?.kind !== "tv_show")
+    ) {
+      throw new DomainInvariantError(
+        "Assisted Mapping requires a numbered Season beneath a TV Show",
+      );
+    }
+    if (
+      mediaItem.kind === "episode" &&
+      (mediaItem.episodeNumber === null || parent?.kind !== "season")
+    ) {
+      throw new DomainInvariantError(
+        "Assisted Mapping requires a numbered Episode beneath a Season",
+      );
+    }
+    if (
+      (mediaItem.kind === "trailer" || mediaItem.kind === "bonus_feature") &&
+      parent !== null &&
+      !["movie", "tv_show", "season", "episode"].includes(parent.kind)
+    ) {
+      throw new DomainInvariantError(
+        "Assisted Mapping can attach a Trailer or Bonus Feature only to a Movie, TV Show, Season, or Episode",
+      );
+    }
   }
 
   async function inspectFilesystemPath(
@@ -2164,6 +2319,85 @@ export function createDataAccessInternal(
         }, { behavior: "immediate" });
       },
 
+      createMappingProposal(input) {
+        if (
+          !(input.catalogRevision instanceof Date) ||
+          !Number.isSafeInteger(input.catalogRevision.getTime())
+        ) {
+          throw new DomainInvariantError(
+            "Mapping Proposal catalog revision must be a valid timestamp",
+          );
+        }
+        const timestamp = now();
+        const mediaItemId = newId<MediaItemId>();
+        const discSelectionId = newId<DiscSelectionId>();
+        return database.transaction((transaction) => {
+          const currentArchive = requireRow(
+            transaction
+              .select({ updatedAt: originalDiscArchives.updatedAt })
+              .from(originalDiscArchives)
+              .where(eq(
+                originalDiscArchives.id,
+                input.originalDiscArchiveId,
+              ))
+              .get(),
+            "original disc archive",
+            input.originalDiscArchiveId,
+          );
+          if (
+            currentArchive.updatedAt.getTime() !==
+              input.catalogRevision.getTime()
+          ) {
+            throw new DomainInvariantError(
+              "Catalog review changed; reload before saving Mapping Proposal",
+            );
+          }
+
+          const mediaItemValues = validateMediaItem(
+            { ...input.mediaItem, id: mediaItemId },
+            transaction,
+            { titleNormalization: "trim" },
+          );
+          validateAssistedMappingShape(transaction, mediaItemValues);
+          const label = input.discSelection.label === undefined
+            ? undefined
+            : requireNonEmpty(input.discSelection.label, "label");
+
+          const mediaItem = requireRow(
+            transaction
+              .insert(mediaItems)
+              .values({
+                id: mediaItemId,
+                ...mediaItemValues,
+                createdAt: timestamp,
+                updatedAt: timestamp,
+              })
+              .returning()
+              .get(),
+            "media item",
+            mediaItemId,
+          );
+          const discSelection = insertDiscSelection(
+            transaction,
+            {
+              originalDiscArchiveId: input.originalDiscArchiveId,
+              mediaItemId,
+              sourceIdentity: input.discSelection.sourceIdentity,
+              ...(label === undefined ? {} : { label }),
+            },
+            discSelectionId,
+            timestamp,
+          );
+          reopenCatalogReview(
+            transaction,
+            input.originalDiscArchiveId,
+            timestamp,
+            input.catalogRevision,
+          );
+          return { mediaItem, discSelection };
+        }, { behavior: "immediate" });
+      },
+
       updateMediaItem(id, input) {
         return database.transaction((transaction) => {
           const current = requireRow(
@@ -2247,69 +2481,17 @@ export function createDataAccessInternal(
         const id = newId<DiscSelectionId>();
         return database.transaction(
           (transaction) => {
-            const source = requireRow(
-              transaction
-                .select({
-                  discKind: originalDiscArchives.discKind,
-                  scanData: detectedDiscs.scanData,
-                })
-                .from(originalDiscArchives)
-                .innerJoin(
-                  detectedDiscs,
-                  eq(detectedDiscs.id, originalDiscArchives.detectedDiscId),
-                )
-                .where(eq(originalDiscArchives.id, input.originalDiscArchiveId))
-                .get(),
-              "original disc archive",
+            const selection = insertDiscSelection(
+              transaction,
+              input,
+              id,
+              timestamp,
+            );
+            reopenCatalogReview(
+              transaction,
               input.originalDiscArchiveId,
+              timestamp,
             );
-            requireRow(
-              transaction
-                .select({ id: mediaItems.id })
-                .from(mediaItems)
-                .where(eq(mediaItems.id, input.mediaItemId))
-                .get(),
-              "media item",
-              input.mediaItemId,
-            );
-            if (source.discKind !== "dvd") {
-              throw new DomainInvariantError(
-                "DVD Disc Selections require a DVD Original Disc Archive",
-              );
-            }
-            const sourceIdentity =
-              createArchivedDvdSelectionValidator(source.scanData).validate(
-              input.sourceIdentity,
-            );
-            const sourcePersistence =
-              serializeDiscSelectionSourceIdentity(sourceIdentity);
-            const selection = toDiscSelection(
-              requireRow(
-                transaction
-                  .insert(discSelections)
-                  .values({
-                    id,
-                    originalDiscArchiveId: input.originalDiscArchiveId,
-                    mediaItemId: input.mediaItemId,
-                    ...sourcePersistence,
-                    label: input.label,
-                    createdAt: timestamp,
-                    updatedAt: timestamp,
-                  })
-                  .returning()
-                  .get(),
-                "disc selection",
-                id,
-              ),
-            );
-            transaction
-              .update(originalDiscArchives)
-              .set({
-                catalogReviewedAt: null,
-                updatedAt: nextCatalogMutationTimestamp(timestamp),
-              })
-              .where(eq(originalDiscArchives.id, input.originalDiscArchiveId))
-              .run();
             return selection;
           },
           { behavior: "immediate" },

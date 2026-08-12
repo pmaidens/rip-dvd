@@ -7,7 +7,9 @@ import type {
   CatalogReviewDto,
   CatalogReviewLoadState,
   CreateDiscSelectionInput,
+  CreateMappingProposalInput,
   DiscSelectionKind,
+  MappingProposal,
   SaveMediaItemInput,
 } from "./catalog-review-model";
 
@@ -129,8 +131,13 @@ export function useCatalogReviewState({
   const [discSelectionOffset, setDiscSelectionOffset] = useState(0);
   const [selectionKind, setSelectionKind] =
     useState<DiscSelectionKind>("main_feature");
+  const [activeMappingProposal, setActiveMappingProposal] =
+    useState<MappingProposal | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [requestError, setRequestError] = useState<string | null>(null);
+  const [mappingProposalError, setMappingProposalError] = useState<
+    string | null
+  >(null);
   const requestScope = useRef<
     ReturnType<typeof createCatalogReviewRequestScope> | null
   >(null);
@@ -172,31 +179,45 @@ export function useCatalogReviewState({
     void load();
   }, [load]);
 
+  useEffect(() => setActiveMappingProposal(null), [archiveId]);
+
   useEffect(
     () => () => requestScope.current?.deactivate(archiveId),
     [archiveId],
   );
 
-  async function mutate(command: CatalogReviewCommand, complete = false) {
+  async function mutate(
+    command: CatalogReviewCommand,
+    complete = false,
+    afterMutation?: () => void,
+    errorTarget: "editor" | "mapping_proposal" = "editor",
+  ) {
     if (isSaving) {
       return;
     }
     setIsSaving(true);
     setRequestError(null);
+    if (errorTarget === "mapping_proposal") {
+      setMappingProposalError(null);
+    }
     try {
       await mutateCatalogReview(archiveId, command);
       setEditingMediaItemId(null);
+      afterMutation?.();
       if (complete) {
         onCompleted();
       } else {
         await load();
       }
     } catch (error) {
-      setRequestError(
-        error instanceof Error
-          ? error.message
-          : "Catalog review mutation failed",
-      );
+      const message = error instanceof Error
+        ? error.message
+        : "Catalog review mutation failed";
+      if (errorTarget === "mapping_proposal") {
+        setMappingProposalError(message);
+      } else {
+        setRequestError(message);
+      }
     } finally {
       setIsSaving(false);
     }
@@ -248,11 +269,27 @@ export function useCatalogReviewState({
     );
   }
 
+  function createMappingProposal(input: CreateMappingProposalInput) {
+    if (state.status !== "loaded") {
+      return;
+    }
+    void mutate({
+      action: "create_mapping_proposal",
+      catalogRevision: state.review.catalogRevision,
+      ...input,
+    }, false, () => {
+      setMappingProposalError(null);
+      setActiveMappingProposal(null);
+    }, "mapping_proposal");
+  }
+
   return {
     state,
+    activeMappingProposal,
     editingMediaItemId,
     isSaving,
     requestError,
+    mappingProposalError,
     selectionKind,
     retry: () => void load(),
     editMediaItem: (id: string) => changeEditingMediaItem(id),
@@ -260,6 +297,17 @@ export function useCatalogReviewState({
     changeMediaItemOffset,
     changeDiscSelectionOffset,
     changeSelectionKind: setSelectionKind,
+    startMappingProposal: (proposal: MappingProposal) => {
+      setRequestError(null);
+      setMappingProposalError(null);
+      setActiveMappingProposal(proposal);
+    },
+    cancelMappingProposal: () => {
+      setRequestError(null);
+      setMappingProposalError(null);
+      setActiveMappingProposal(null);
+    },
+    createMappingProposal,
     saveMediaItem,
     createDiscSelection,
     deleteDiscSelection: (discSelectionId: string) =>

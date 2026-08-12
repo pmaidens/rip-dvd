@@ -109,4 +109,64 @@ describe("CatalogReviewEvidence", () => {
     expect(html).not.toContain("<input");
     expect(html).not.toContain("<select");
   });
+
+  it("keeps exact-title Assisted Mapping actions and the editable Mapping Proposal beside its evidence", () => {
+    const html = renderToStaticMarkup(
+      <CatalogReviewEvidence
+        volumeLabel="FEATURE_DISC_2_2005_SPECIAL_EDITION"
+        titles={[{
+          number: 2,
+          durationSeconds: 1_200,
+          chapters: 8,
+          audioStreams: [],
+          subtitles: [],
+        }]}
+        mediaItems={[{
+          id: "movie-1",
+          parentId: null,
+          kind: "movie",
+          title: "Existing Movie",
+          year: null,
+          seasonNumber: null,
+          episodeNumber: null,
+        }]}
+        activeMappingProposal={{
+          action: "chapters",
+          sourceIdentity: {
+            kind: "dvd_chapters",
+            titleNumber: 2,
+            chapterStart: 1,
+            chapterEnd: 8,
+          },
+        }}
+        isSaving={false}
+        onStartMappingProposal={() => undefined}
+        onCancelMappingProposal={() => undefined}
+        onCreateMappingProposal={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("Map DVD main feature");
+    expect(html).toContain("Map as movie");
+    expect(html).toContain("Map as bonus feature");
+    expect(html).toContain("Map as trailer");
+    expect(html).toContain("Map chapters");
+    expect(html).toContain("Map as other");
+    expect(html).toContain("Mapping Proposal");
+    expect(html.indexOf("Title 2")).toBeLessThan(
+      html.indexOf("Mapping Proposal"),
+    );
+    expect(html).toContain('name="title"');
+    expect(html).toContain(
+      'value="Feature Disc 2 2005 Special Edition"',
+    );
+    expect(html).toContain('name="kind"');
+    expect(html).toContain('name="parentId"');
+    expect(html).toMatch(/name="titleNumber" value="2"/);
+    expect(html).toContain('readOnly=""');
+    expect(html).toContain('name="chapterStart"');
+    expect(html).toContain('name="chapterEnd"');
+    expect(html).toContain('name="label"');
+    expect(html).toContain("Create Media Item and Disc Selection");
+  });
 });

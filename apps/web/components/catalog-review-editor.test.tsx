@@ -224,6 +224,192 @@ describe("CatalogReviewEditor", () => {
     expect(container.textContent).toContain("Title 2");
     expect(container.textContent).not.toContain("STALE_PAGE");
   });
+
+  it("keeps a failed Mapping Proposal editable and refreshes the exact-source mapping after success", async () => {
+    const initialReview = catalogReview({
+      archiveId: "archive-a",
+      discLabel: "MAPPING_PROPOSAL_DISC_2",
+    });
+    initialReview.rawScan.titles = [{
+      number: 3,
+      durationSeconds: 600,
+      chapters: 4,
+      audioStreams: [],
+      subtitles: [],
+    }];
+    initialReview.mediaItems = [];
+    initialReview.mediaItemsPage.itemIds = [];
+    initialReview.discSelections = [];
+    const refreshedReview: CatalogReviewDto = {
+      ...initialReview,
+      catalogRevision: "2026-08-11T06:00:01.000Z",
+      mediaItems: [{
+        id: "created-movie",
+        parentId: null,
+        kind: "movie",
+        title: "Corrected Proposal Title",
+        year: null,
+        seasonNumber: null,
+        episodeNumber: null,
+      }],
+      mediaItemsPage: {
+        ...initialReview.mediaItemsPage,
+        itemIds: ["created-movie"],
+      },
+      discSelections: [{
+        id: "created-selection",
+        mediaItemId: "created-movie",
+        sourceIdentity: { kind: "dvd_title", titleNumber: 3 },
+        label: null,
+        actionAvailability: {
+          state: "editable",
+          availableActions: ["correct", "edit_label", "remove"],
+          reason: null,
+          relatedEncodeJob: null,
+        },
+      }],
+    };
+    const postedCommands: unknown[] = [];
+    let mutationAttempts = 0;
+    vi.stubGlobal("fetch", vi.fn(async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (init?.method === "POST") {
+        mutationAttempts += 1;
+        postedCommands.push(JSON.parse(String(init.body)) as unknown);
+        return mutationAttempts === 1
+          ? Response.json({ error: "Correct the proposed title" }, {
+              status: 409,
+            })
+          : Response.json({}, { status: 201 });
+      }
+      return Response.json(
+        mutationAttempts === 0 ? initialReview : refreshedReview,
+      );
+    }));
+
+    await act(async () => renderCatalogReviewEditor("archive-a"));
+    const mapMovie = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Map as movie",
+    );
+    if (!mapMovie) {
+      throw new Error("Expected a title-row movie mapping action");
+    }
+    await act(async () => mapMovie.click());
+    const proposal = container.querySelector(".catalog-mapping-proposal");
+    const titleInput = proposal?.querySelector<HTMLInputElement>(
+      'input[name="title"]',
+    );
+    const submit = [...(proposal?.querySelectorAll("button") ?? [])].find(
+      (button) =>
+        button.textContent === "Create Media Item and Disc Selection",
+    );
+    if (!titleInput || !submit) {
+      throw new Error("Expected an editable Mapping Proposal");
+    }
+    titleInput.value = "Corrected Proposal Title";
+
+    await act(async () => submit.click());
+    expect(container.textContent).toContain("Correct the proposed title");
+    expect(container.textContent).toContain("Mapping Proposal");
+    expect(container.querySelector(
+      '.catalog-mapping-proposal [role="alert"]',
+    )?.textContent).toContain("Correct the proposed title");
+    expect(container.querySelector(
+      '.catalog-editor > [role="alert"]',
+    )).toBeNull();
+    expect(container.querySelector<HTMLInputElement>(
+      '.catalog-mapping-proposal input[name="title"]',
+    )?.value).toBe("Corrected Proposal Title");
+
+    await act(async () => submit.click());
+    expect(container.querySelector(".catalog-mapping-proposal")).toBeNull();
+    expect(container.textContent).toContain("Corrected Proposal Title");
+    expect(container.textContent).toContain("Title 3");
+    expect(postedCommands).toEqual([
+      {
+        action: "create_mapping_proposal",
+        catalogRevision: initialReview.catalogRevision,
+        mediaItem: {
+          parentId: null,
+          kind: "movie",
+          title: "Corrected Proposal Title",
+          year: null,
+          seasonNumber: null,
+          episodeNumber: null,
+        },
+        discSelection: {
+          sourceIdentity: { kind: "dvd_title", titleNumber: 3 },
+        },
+      },
+      {
+        action: "create_mapping_proposal",
+        catalogRevision: initialReview.catalogRevision,
+        mediaItem: {
+          parentId: null,
+          kind: "movie",
+          title: "Corrected Proposal Title",
+          year: null,
+          seasonNumber: null,
+          episodeNumber: null,
+        },
+        discSelection: {
+          sourceIdentity: { kind: "dvd_title", titleNumber: 3 },
+        },
+      },
+    ]);
+  });
+
+  it("resets the proposal defaults when selecting another action for the same title", async () => {
+    const review = catalogReview({
+      archiveId: "archive-a",
+      discLabel: "ACTION_SWITCH_DISC",
+    });
+    review.rawScan.titles = [{
+      number: 3,
+      durationSeconds: 600,
+      chapters: 4,
+      audioStreams: [],
+      subtitles: [],
+    }];
+    review.mediaItems = [];
+    review.mediaItemsPage.itemIds = [];
+    review.discSelections = [];
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json(review)));
+
+    await act(async () => renderCatalogReviewEditor("archive-a"));
+    const action = (label: string) => [...container.querySelectorAll("button")]
+      .find((button) => button.textContent === label);
+    const movieAction = action("Map as movie");
+    if (!movieAction) {
+      throw new Error("Expected movie mapping action");
+    }
+    await act(async () => movieAction.click());
+    const movieTitle = container.querySelector<HTMLInputElement>(
+      '.catalog-mapping-proposal input[name="title"]',
+    );
+    const movieKind = container.querySelector<HTMLSelectElement>(
+      '.catalog-mapping-proposal select[name="kind"]',
+    );
+    if (!movieTitle || !movieKind) {
+      throw new Error("Expected movie Mapping Proposal fields");
+    }
+    movieTitle.value = "Unsaved movie edits";
+    expect(movieKind.value).toBe("movie");
+
+    const trailerAction = action("Map as trailer");
+    if (!trailerAction) {
+      throw new Error("Expected trailer mapping action");
+    }
+    await act(async () => trailerAction.click());
+    expect(container.querySelector<HTMLSelectElement>(
+      '.catalog-mapping-proposal select[name="kind"]',
+    )?.value).toBe("trailer");
+    expect(container.querySelector<HTMLInputElement>(
+      '.catalog-mapping-proposal input[name="title"]',
+    )?.value).toBe("Action Switch Disc");
+  });
 });
 
 function selectOptionValues(html: string, name: string): string[] {
@@ -243,6 +429,14 @@ describe("CatalogReviewView", () => {
     expectTypeOf(mutateCatalogReview).parameter(1)
       .toEqualTypeOf<CatalogReviewCommand>();
     const commands = {
+      create_mapping_proposal: {
+        action: "create_mapping_proposal",
+        catalogRevision: "2026-08-11T06:00:00.000Z",
+        mediaItem: { kind: "movie", title: "Proposed Movie" },
+        discSelection: {
+          sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+        },
+      },
       create_media_item: {
         action: "create_media_item",
         mediaItem: { kind: "movie", title: "Example Movie" },
@@ -399,7 +593,9 @@ describe("CatalogReviewView", () => {
         requestError={
           "Disc Selection selection-1 cannot be deleted because Encode Job history must be preserved"
         }
+        mappingProposalError={null}
         selectionKind="main_feature"
+        activeMappingProposal={null}
         onClose={() => undefined}
         onRetry={() => undefined}
         onEditMediaItem={() => undefined}
@@ -407,6 +603,9 @@ describe("CatalogReviewView", () => {
         onMediaItemsPage={() => undefined}
         onDiscSelectionsPage={() => undefined}
         onSelectionKindChange={() => undefined}
+        onStartMappingProposal={() => undefined}
+        onCancelMappingProposal={() => undefined}
+        onCreateMappingProposal={() => undefined}
         onSaveMediaItem={() => undefined}
         onCreateDiscSelection={() => undefined}
         onDeleteDiscSelection={() => undefined}
@@ -541,7 +740,9 @@ describe("CatalogReviewView", () => {
         editingMediaItemId="episode-1"
         isSaving={false}
         requestError={null}
+        mappingProposalError={null}
         selectionKind="main_feature"
+        activeMappingProposal={null}
         onClose={() => undefined}
         onRetry={() => undefined}
         onEditMediaItem={() => undefined}
@@ -549,6 +750,9 @@ describe("CatalogReviewView", () => {
         onMediaItemsPage={() => undefined}
         onDiscSelectionsPage={() => undefined}
         onSelectionKindChange={() => undefined}
+        onStartMappingProposal={() => undefined}
+        onCancelMappingProposal={() => undefined}
+        onCreateMappingProposal={() => undefined}
         onSaveMediaItem={() => undefined}
         onCreateDiscSelection={() => undefined}
         onDeleteDiscSelection={() => undefined}
