@@ -46,4 +46,39 @@ describe("lsblk Optical Drive discovery decoder", () => {
       },
     ]);
   });
+
+  it("excludes virtual QEMU CD-ROMs and non-optical SCSI devices", () => {
+    const output = JSON.stringify({
+      blockdevices: [
+        {
+          path: "/dev/sr0",
+          type: "rom",
+          vendor: "QEMU",
+          model: "QEMU DVD-ROM",
+          serial: "QM00001",
+        },
+        {
+          path: "/dev/sda",
+          type: "disk",
+          vendor: "SanDisk",
+          model: "Cruzer",
+          serial: "USB-DISK",
+        },
+        {
+          path: "/dev/sr1",
+          type: "rom",
+          vendor: "Optiarc",
+          model: "DVD RW AD-7580S",
+          serial: "PHYSICAL-DVD",
+        },
+      ],
+    });
+
+    expect(decodeLsblkOpticalDrives(output)).toEqual([
+      expect.objectContaining({
+        devicePath: "/dev/sr1",
+        serialNumber: "PHYSICAL-DVD",
+      }),
+    ]);
+  });
 });

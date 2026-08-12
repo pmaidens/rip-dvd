@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import { DomainInvariantError } from "../errors.js";
+import type { OpticalDriveId } from "../types.js";
 import { planOpticalDriveReconciliation } from "./optical-drive-reconciliation.js";
+
+const storedDriveId = "stored-drive" as OpticalDriveId;
 
 describe("optical drive reconciliation policy", () => {
   it("rejects ambiguous discovery snapshots before persistence", () => {
@@ -39,6 +42,7 @@ describe("optical drive reconciliation policy", () => {
       ],
       [
         {
+          id: storedDriveId,
           devicePath: "/dev/sr0",
           configurationDefaultResolved: true,
           isConfiguredTarget: false,
@@ -53,11 +57,61 @@ describe("optical drive reconciliation policy", () => {
     expect(plan.drives[0]?.authorizationUpdate).toEqual({});
   });
 
+  it("matches a configured drive by stable serial after its device path changes", () => {
+    const plan = planOpticalDriveReconciliation(
+      [
+        {
+          devicePath: "/dev/sr1",
+          isConfiguredDevice: true,
+          serialNumber: "STABLE-1",
+        },
+      ],
+      [
+        {
+          id: storedDriveId,
+          devicePath: "/dev/sr2",
+          configurationDefaultResolved: true,
+          isConfiguredTarget: true,
+          isPresent: false,
+          product: "DVD RW",
+          serialNumber: "STABLE-1",
+          vendor: "Optiarc",
+        },
+      ],
+    );
+
+    expect(plan.drives[0]).toMatchObject({
+      existingId: storedDriveId,
+      authorizationUpdate: {},
+    });
+  });
+
+  it("rejects duplicate discovered serial evidence", () => {
+    expect(() =>
+      planOpticalDriveReconciliation(
+        [
+          {
+            devicePath: "/dev/sr0",
+            isConfiguredDevice: false,
+            serialNumber: "DUPLICATE",
+          },
+          {
+            devicePath: "/dev/sr1",
+            isConfiguredDevice: false,
+            serialNumber: "DUPLICATE",
+          },
+        ],
+        [],
+      ),
+    ).toThrow("Discovered Optical Drive serial numbers must be unique");
+  });
+
   it("disables same-path hardware when continuity is unproven after disappearance", () => {
     const plan = planOpticalDriveReconciliation(
       [{ devicePath: "/dev/sr0", isConfiguredDevice: false }],
       [
         {
+          id: storedDriveId,
           devicePath: "/dev/sr0",
           configurationDefaultResolved: true,
           isConfiguredTarget: false,
@@ -80,6 +134,7 @@ describe("optical drive reconciliation policy", () => {
       [{ devicePath: "/dev/sr1", isConfiguredDevice: true }],
       [
         {
+          id: storedDriveId,
           devicePath: "/dev/sr0",
           configurationDefaultResolved: true,
           isConfiguredTarget: true,

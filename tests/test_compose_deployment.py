@@ -260,7 +260,7 @@ class ComposeDeploymentTests(unittest.TestCase):
 
         self.assertEqual(services["archive-worker"]["group_add"], ["24"])
 
-    def test_reviewed_hardware_override_can_expose_multiple_optical_drives(
+    def test_reviewed_hardware_override_replaces_stale_base_device_mappings(
         self,
     ) -> None:
         archive = compose_config(
@@ -270,12 +270,6 @@ class ComposeDeploymentTests(unittest.TestCase):
         self.assertEqual(
             archive["devices"],
             [
-                {"source": "/dev/sr0", "target": "/dev/sr0", "permissions": "r"},
-                {
-                    "source": "/dev/sg1",
-                    "target": "/dev/sg1",
-                    "permissions": "r",
-                },
                 {"source": "/dev/sr1", "target": "/dev/sr1", "permissions": "r"},
                 {
                     "source": "/dev/sg2",
@@ -283,6 +277,13 @@ class ComposeDeploymentTests(unittest.TestCase):
                     "permissions": "r",
                 },
             ],
+        )
+        self.assertEqual(
+            archive["environment"]["RIP_DVD_ARCHIVE_DEVICE_PATH"], "/dev/sr1"
+        )
+        self.assertEqual(
+            archive["environment"]["RIP_DVD_ARCHIVE_CSS_DEVICE_PATH"],
+            "/dev/sg2",
         )
         self.assertEqual(archive["group_add"], ["24"])
 
@@ -295,6 +296,15 @@ class ComposeDeploymentTests(unittest.TestCase):
             [
                 f"{ROOT}||compose --profile maintenance build migrate backup web archive-worker encode-worker"
             ],
+        )
+
+    def test_start_resolves_local_hardware_before_migration(self) -> None:
+        start_script = (ROOT / "scripts" / "compose-start.sh").read_text()
+
+        self.assertIn('.local/optical-drives.json', start_script)
+        self.assertLess(
+            start_script.index('optical-drive-mapping.mjs'),
+            start_script.index('compose-migrate.sh'),
         )
 
     def test_update_script_backs_up_pulls_builds_starts_and_verifies(self) -> None:
@@ -773,6 +783,7 @@ class ComposeDeploymentTests(unittest.TestCase):
             "scripts/compose-start.sh",
             "scripts/compose-stop.sh",
             "scripts/compose-backup.sh",
+            "scripts/optical-drive-mapping.mjs",
         ):
             self.assertIn(script, readme)
         for expectation in (
@@ -784,6 +795,8 @@ class ComposeDeploymentTests(unittest.TestCase):
             "`/dev/sr0`",
             "`/dev/sg1`",
             "compose.hardware.example.yaml",
+            "optical-drives.example.json",
+            ".local/optical-drives.json",
             "RIP_DVD_OPTICAL_DEVICE_GID",
             "read-only",
             "`cpu_shares`",
