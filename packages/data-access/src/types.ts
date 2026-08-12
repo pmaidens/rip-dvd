@@ -268,15 +268,25 @@ export interface CreateMediaItemInput {
   episodeNumber?: number;
 }
 
-export interface CreateMappingProposalInput {
+interface CreateMappingProposalBaseInput {
   originalDiscArchiveId: OriginalDiscArchiveId;
   catalogRevision: Date;
-  mediaItem: CreateMediaItemInput;
   discSelection: {
     sourceIdentity: DiscSelectionSourceIdentityInput;
     label?: string;
   };
 }
+
+export type CreateMappingProposalInput = CreateMappingProposalBaseInput & (
+  | {
+    mediaItem: CreateMediaItemInput;
+    existingMediaItemId?: never;
+  }
+  | {
+    mediaItem?: never;
+    existingMediaItemId: MediaItemId;
+  }
+);
 
 export interface CreatedMappingProposal {
   mediaItem: MediaItem;
@@ -537,6 +547,11 @@ export interface CatalogAccess {
     limit?: number;
     offset?: number;
   }): MediaItem[];
+  searchMediaItems(options: {
+    query: string;
+    limit: number;
+    offset?: number;
+  }): MediaItem[];
   createDiscSelection(input: CreateDiscSelectionInput): DiscSelection;
   repairDiscSelection(
     id: DiscSelectionId,
@@ -748,6 +763,7 @@ export type SnapshotCatalogAccess = Pick<
   | "listDetectedDiscs"
   | "listOriginalDiscArchives"
   | "listMediaItems"
+  | "searchMediaItems"
   | "listDiscSelections"
   | "listDiscSelectionActionAvailability"
 >;

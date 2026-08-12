@@ -49,11 +49,21 @@ export interface CatalogReviewProposedDiscSelectionInput {
   label?: string;
 }
 
+export type CatalogReviewMappingTarget =
+  | {
+    choice: "create_new";
+    mediaItem: CatalogReviewMediaItemInput;
+  }
+  | {
+    choice: "use_existing";
+    mediaItemId: string;
+  };
+
 export type CatalogReviewCommand =
   | {
       action: "create_mapping_proposal";
       catalogRevision: string;
-      mediaItem: CatalogReviewMediaItemInput;
+      target: CatalogReviewMappingTarget;
       discSelection: CatalogReviewProposedDiscSelectionInput;
     }
   | {
@@ -298,6 +308,36 @@ function parseProposedDiscSelectionInput(
   }
 }
 
+function parseMappingTarget(
+  value: unknown,
+  domainValues: CatalogReviewCommandDomainValues,
+): CatalogReviewMappingTarget | null {
+  const target = asRecord(value);
+  const choice = boundedString(target?.choice, 32);
+  if (!target || choice === null) {
+    return null;
+  }
+  if (choice === "create_new") {
+    const mediaItem = parseMediaItemInput(target.mediaItem, domainValues);
+    return mediaItem &&
+        Object.keys(target).every((field) =>
+          field === "choice" || field === "mediaItem"
+        )
+      ? { choice, mediaItem }
+      : null;
+  }
+  if (choice === "use_existing") {
+    const mediaItemId = boundedString(target.mediaItemId);
+    return mediaItemId &&
+        Object.keys(target).every((field) =>
+          field === "choice" || field === "mediaItemId"
+        )
+      ? { choice, mediaItemId }
+      : null;
+  }
+  return null;
+}
+
 function parseDiscSelectionInput(
   value: unknown,
 ):
@@ -331,17 +371,17 @@ export function parseCatalogReviewCommand(
   switch (action) {
     case "create_mapping_proposal": {
       const revision = catalogRevision(body.catalogRevision);
-      const mediaItem = parseMediaItemInput(body.mediaItem, domainValues);
+      const target = parseMappingTarget(body.target, domainValues);
       const discSelection = parseProposedDiscSelectionInput(
         body.discSelection,
       );
-      return revision && mediaItem && discSelection
+      return revision && target && discSelection
         ? {
             ok: true,
             command: {
               action,
               catalogRevision: revision,
-              mediaItem,
+              target,
               discSelection,
             },
           }

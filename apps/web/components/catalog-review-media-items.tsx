@@ -5,36 +5,32 @@ import { integerFormValue } from "./catalog-review-form";
 import { orderMediaItemHierarchy } from "./catalog-review-hierarchy";
 import {
   mediaItemKinds,
-  type CatalogReviewDto,
   type CatalogReviewMediaItem,
   type MediaItemKind,
   type SaveMediaItemInput,
 } from "./catalog-review-model";
-import { CatalogReviewPagination } from "./catalog-review-pagination";
 
 interface CatalogReviewMediaItemsProps {
   mediaItems: CatalogReviewMediaItem[];
-  page: CatalogReviewDto["mediaItemsPage"];
+  mappedMediaItemIds: readonly string[];
   editingMediaItemId: string | null;
   isSaving: boolean;
   onEdit(id: string): void;
   onCancelEdit(): void;
-  onPage(offset: number): void;
   onSave(input: SaveMediaItemInput): void;
 }
 
 export function CatalogReviewMediaItems({
   mediaItems,
-  page,
+  mappedMediaItemIds,
   editingMediaItemId,
   isSaving,
   onEdit,
   onCancelEdit,
-  onPage,
   onSave,
 }: CatalogReviewMediaItemsProps) {
   const hierarchy = orderMediaItemHierarchy(mediaItems);
-  const editableMediaItemIds = new Set(page.itemIds);
+  const mappedIds = new Set(mappedMediaItemIds);
   const editing = mediaItems.find((item) => item.id === editingMediaItemId);
 
   function saveMediaItem(event: React.FormEvent<HTMLFormElement>) {
@@ -56,7 +52,9 @@ export function CatalogReviewMediaItems({
     <section className="catalog-pane" aria-labelledby="media-hierarchy">
       <h3 id="media-hierarchy">Media Item hierarchy</h3>
       {hierarchy.length === 0 ? (
-        <p className="catalog-empty">No Media Items exist yet.</p>
+        <p className="catalog-empty">
+          No Media Items are mapped to this archive yet.
+        </p>
       ) : (
         <ul className="media-hierarchy-list">
           {hierarchy.map(({ item, depth }) => (
@@ -64,42 +62,31 @@ export function CatalogReviewMediaItems({
               <div>
                 <strong>{item.title}</strong>
                 <span>{displayTerm(item.kind)}</span>
-                {!editableMediaItemIds.has(item.id) ? (
+                {!mappedIds.has(item.id) ? (
                   <span>Parent context</span>
                 ) : null}
               </div>
-              {editableMediaItemIds.has(item.id) ? (
-                <button
-                  type="button"
-                  onClick={() => onEdit(item.id)}
-                  disabled={isSaving}
-                >
-                  Edit
-                </button>
-              ) : null}
+              <button
+                type="button"
+                onClick={() => onEdit(item.id)}
+                disabled={isSaving}
+              >
+                Edit
+              </button>
             </li>
           ))}
         </ul>
       )}
 
-      <CatalogReviewPagination
-        ariaLabel="Media Item pages"
-        itemLabel="Media Items"
-        page={page}
-        isSaving={isSaving}
-        onPage={onPage}
-      />
-
-      <form
-        className="catalog-form"
-        key={editing?.id ?? "create-media-item"}
-        onSubmit={saveMediaItem}
-      >
+      {editing ? (
+        <form
+          className="catalog-form"
+          key={editing.id}
+          onSubmit={saveMediaItem}
+        >
         <div className="profile-form-heading">
-          <h3>{editing ? `Edit ${editing.title}` : "Create Media Item"}</h3>
-          {editing ? (
-            <button type="button" onClick={onCancelEdit}>Cancel</button>
-          ) : null}
+          <h3>{`Edit ${editing.title}`}</h3>
+          <button type="button" onClick={onCancelEdit}>Cancel</button>
         </div>
         <div className="catalog-fields">
           <label>
@@ -108,12 +95,12 @@ export function CatalogReviewMediaItems({
               name="title"
               required
               maxLength={256}
-              defaultValue={editing?.title}
+              defaultValue={editing.title}
             />
           </label>
           <label>
             Kind
-            <select name="kind" defaultValue={editing?.kind ?? "movie"}>
+            <select name="kind" defaultValue={editing.kind}>
               {mediaItemKinds.map((kind) => (
                 <option key={kind} value={kind}>{displayTerm(kind)}</option>
               ))}
@@ -121,10 +108,10 @@ export function CatalogReviewMediaItems({
           </label>
           <label>
             Parent
-            <select name="parentId" defaultValue={editing?.parentId ?? ""}>
+            <select name="parentId" defaultValue={editing.parentId ?? ""}>
               <option value="">No parent</option>
               {hierarchy
-                .filter(({ item }) => item.id !== editing?.id)
+                .filter(({ item }) => item.id !== editing.id)
                 .map(({ item, depth }) => (
                   <option key={item.id} value={item.id}>
                     {`${"— ".repeat(depth)}${item.title}`}
@@ -139,7 +126,7 @@ export function CatalogReviewMediaItems({
               type="number"
               min="1800"
               max="9999"
-              defaultValue={editing?.year ?? ""}
+              defaultValue={editing.year ?? ""}
             />
           </label>
           <label>
@@ -148,7 +135,7 @@ export function CatalogReviewMediaItems({
               name="seasonNumber"
               type="number"
               min="0"
-              defaultValue={editing?.seasonNumber ?? ""}
+              defaultValue={editing.seasonNumber ?? ""}
             />
           </label>
           <label>
@@ -157,14 +144,15 @@ export function CatalogReviewMediaItems({
               name="episodeNumber"
               type="number"
               min="1"
-              defaultValue={editing?.episodeNumber ?? ""}
+              defaultValue={editing.episodeNumber ?? ""}
             />
           </label>
         </div>
         <button type="submit" disabled={isSaving}>
-          {editing ? "Save Media Item" : "Create Media Item"}
+          Save Media Item
         </button>
-      </form>
+        </form>
+      ) : null}
     </section>
   );
 }

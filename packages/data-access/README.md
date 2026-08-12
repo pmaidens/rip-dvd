@@ -57,10 +57,13 @@ time and advances the revision, so encoding remains blocked until the changed
 catalog is explicitly completed again. Media Item hierarchy mutations are
 serialized, reject cycles, and cap parent-child chains at 32 levels without
 limiting siblings or the total Media Item count.
-`catalog.createMappingProposal()` creates one proposed Media Item and its exact
-DVD Disc Selection in the same immediate transaction against that revision.
-Invalid source coordinates, duplicate source slices, assisted-hierarchy
-violations, and stale revisions therefore leave neither record behind. The
+`catalog.createMappingProposal()` either creates one proposed Media Item or
+reuses one explicitly selected existing Media Item, then creates its exact DVD
+Disc Selection in the same immediate transaction against that revision.
+Invalid source coordinates, missing reuse targets, duplicate source slices,
+assisted-hierarchy violations, and stale revisions therefore leave no partial
+mapping behind. `catalog.searchMediaItems()` is an explicitly bounded,
+offset-paged title search used by the separate full-catalog reuse surface. The
 Assisted Mapping contract requires numbered Season/TV Show and Episode/Season
 shapes and limits Trailer or Bonus Feature parents to a Movie, TV Show, Season,
 or Episode; ordinary `createMediaItem()` and `updateMediaItem()` remain flexible

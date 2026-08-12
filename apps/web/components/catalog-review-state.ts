@@ -54,18 +54,12 @@ function createCatalogReviewRequestScope(initialArchiveId: string) {
 
 export async function requestCatalogReview(
   archiveId: string,
-  mediaItemOffset: number,
   discSelectionOffset: number,
-  editingMediaItemId: string | null,
   fetcher: CatalogReviewFetch = fetch,
 ): Promise<CatalogReviewDto> {
   const query = new URLSearchParams({
-    mediaOffset: String(mediaItemOffset),
     selectionOffset: String(discSelectionOffset),
   });
-  if (editingMediaItemId !== null) {
-    query.set("editingMediaItemId", editingMediaItemId);
-  }
   const response = await fetcher(
     `/api/catalog-reviews/${encodeURIComponent(archiveId)}?${query.toString()}`,
     { cache: "no-store", headers: { Accept: "application/json" } },
@@ -127,7 +121,6 @@ export function useCatalogReviewState({
   const [editingMediaItemId, setEditingMediaItemId] = useState<string | null>(
     null,
   );
-  const [mediaItemOffset, setMediaItemOffset] = useState(0);
   const [discSelectionOffset, setDiscSelectionOffset] = useState(0);
   const [selectionKind, setSelectionKind] =
     useState<DiscSelectionKind>("main_feature");
@@ -152,9 +145,7 @@ export function useCatalogReviewState({
     try {
       const review = await requestCatalogReview(
         archiveId,
-        mediaItemOffset,
         discSelectionOffset,
-        editingMediaItemId,
       );
       if (!requestScope.current?.isCurrent(archiveId, request)) {
         return;
@@ -170,8 +161,6 @@ export function useCatalogReviewState({
   }, [
     archiveId,
     discSelectionOffset,
-    editingMediaItemId,
-    mediaItemOffset,
   ]);
 
   useEffect(() => {
@@ -227,16 +216,7 @@ export function useCatalogReviewState({
     if (editingMediaItemId === id) {
       return;
     }
-    requestScope.current?.invalidate(archiveId);
     setEditingMediaItemId(id);
-  }
-
-  function changeMediaItemOffset(offset: number) {
-    if (mediaItemOffset === offset) {
-      return;
-    }
-    requestScope.current?.invalidate(archiveId);
-    setMediaItemOffset(offset);
   }
 
   function changeDiscSelectionOffset(offset: number) {
@@ -294,7 +274,6 @@ export function useCatalogReviewState({
     retry: () => void load(),
     editMediaItem: (id: string) => changeEditingMediaItem(id),
     cancelEdit: () => changeEditingMediaItem(null),
-    changeMediaItemOffset,
     changeDiscSelectionOffset,
     changeSelectionKind: setSelectionKind,
     startMappingProposal: (proposal: MappingProposal) => {

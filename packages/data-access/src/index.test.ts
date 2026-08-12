@@ -841,7 +841,7 @@ describe("data-access facade", () => {
       scanData: {
         schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
         contentId,
-        titles: [2, 3, 4].map((number) => ({
+        titles: [2, 3, 4, 5].map((number) => ({
           number,
           durationSeconds: 2_400,
           chapters: 8,
@@ -978,12 +978,36 @@ describe("data-access facade", () => {
     const revisionAfterExtra = access.catalog.listOriginalDiscArchives({
       ids: [archive.id],
     })[0]!.updatedAt;
-    expect(() => access.catalog.createMappingProposal({
+    const existingItem = access.catalog.createMediaItem({
+      kind: "other",
+      title: "Existing catalog identity",
+    });
+    const itemCountBeforeReuse = access.catalog.listMediaItems().length;
+    const reused = access.catalog.createMappingProposal({
       originalDiscArchiveId: archive.id,
       catalogRevision: revisionAfterExtra,
-      mediaItem: { kind: "season", title: "Unnumbered Season" },
+      existingMediaItemId: existingItem.id,
       discSelection: {
         sourceIdentity: { kind: "dvd_title", titleNumber: 4 },
+      },
+    });
+    expect(reused).toMatchObject({
+      mediaItem: { id: existingItem.id, title: "Existing catalog identity" },
+      discSelection: {
+        mediaItemId: existingItem.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 4 },
+      },
+    });
+    expect(access.catalog.listMediaItems()).toHaveLength(itemCountBeforeReuse);
+    const revisionAfterReuse = access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]!.updatedAt;
+    expect(() => access.catalog.createMappingProposal({
+      originalDiscArchiveId: archive.id,
+      catalogRevision: revisionAfterReuse,
+      mediaItem: { kind: "season", title: "Unnumbered Season" },
+      discSelection: {
+        sourceIdentity: { kind: "dvd_title", titleNumber: 5 },
       },
     })).toThrow(
       "Assisted Mapping requires a numbered Season beneath a TV Show",
@@ -1032,6 +1056,23 @@ describe("data-access facade", () => {
     expect(access.catalog.listMediaItems({ limit: 1, offset: 1 })).toEqual([
       expect.objectContaining({ id: catalogEntries[1]!.mediaItem.id }),
     ]);
+    expect(access.catalog.searchMediaItems({
+      query: "Bounded_Catalog",
+      limit: 1,
+      offset: 1,
+    })).toEqual([
+      expect.objectContaining({ id: catalogEntries[1]!.mediaItem.id }),
+    ]);
+    const unicodeMediaItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Été à Montréal",
+    });
+    expect(access.catalog.searchMediaItems({
+      query: "ÉTÉ_MONTRÉAL",
+      limit: 1,
+    })).toEqual([
+      expect.objectContaining({ id: unicodeMediaItem.id }),
+    ]);
     expect(access.catalog.listDiscSelections({ limit: 1, offset: 1 })).toEqual([
       expect.objectContaining({ id: catalogEntries[1]!.discSelection.id }),
     ]);
@@ -1040,6 +1081,12 @@ describe("data-access facade", () => {
       .toThrow("Original Disc Archive offset requires a bounded limit");
     expect(() => access.catalog.listMediaItems({ offset: 1 }))
       .toThrow("Media Item offset requires a bounded limit");
+    expect(() => access.catalog.searchMediaItems({
+      query: "Bounded",
+      limit: 101,
+    })).toThrow(
+      "Media Item search limit must be a safe integer between 1 and 100",
+    );
     expect(() => access.catalog.listDiscSelections({ offset: 1 }))
       .toThrow("Disc Selection offset requires a bounded limit");
     access.close();

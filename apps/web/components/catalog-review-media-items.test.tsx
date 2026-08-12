@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { CatalogReviewMediaItems } from "./catalog-review-media-items";
 
 describe("CatalogReviewMediaItems", () => {
-  it("keeps hierarchy context while limiting editing to the current page", () => {
+  it("keeps mapped hierarchy and ancestor context editable", () => {
     const html = renderToStaticMarkup(
       <CatalogReviewMediaItems
         mediaItems={[
@@ -27,26 +27,19 @@ describe("CatalogReviewMediaItems", () => {
             episodeNumber: 1,
           },
         ]}
-        page={{
-          offset: 100,
-          limit: 100,
-          hasPrevious: true,
-          hasNext: false,
-          itemIds: ["episode-1"],
-        }}
+        mappedMediaItemIds={["episode-1"]}
         editingMediaItemId="episode-1"
         isSaving={false}
         onEdit={() => undefined}
         onCancelEdit={() => undefined}
-        onPage={() => undefined}
         onSave={() => undefined}
       />,
     );
 
     expect(html).toContain("Parent context");
-    expect(html.match(/>Edit<\/button>/g)).toHaveLength(1);
+    expect(html.match(/>Edit<\/button>/g)).toHaveLength(2);
     expect(html).toContain('value="show-1" selected="">Parent Show');
-    expect(html).toContain("Previous Media Items");
+    expect(html).not.toContain("Previous Media Items");
     expect(html).toContain("Edit Current Episode");
   });
 });

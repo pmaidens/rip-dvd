@@ -698,6 +698,98 @@ h1 {
   margin: 0.75rem 0;
 }
 
+.catalog-mapping-target-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-top: 0.75rem;
+}
+
+.catalog-mapping-target-choices label,
+.catalog-media-item-search-results label {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  color: #dbe6e2;
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.catalog-mapping-target-choices label {
+  padding: 0.55rem 0.65rem;
+  border: 1px solid #365149;
+  border-radius: 0.5rem;
+  background: #10231e;
+}
+
+.catalog-media-item-search-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 0.65rem;
+  margin-top: 0.75rem;
+}
+
+.catalog-media-item-search-controls label {
+  display: grid;
+  gap: 0.35rem;
+  color: #b8c8c3;
+  font-size: 0.72rem;
+}
+
+.catalog-media-item-search-controls input {
+  min-width: 0;
+  min-height: 2.45rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid #365149;
+  border-radius: 0.5rem;
+  background: #0d1d19;
+  color: #eef4f1;
+}
+
+.catalog-media-item-search-error {
+  margin: 0.65rem 0 0;
+  color: #e7a29a;
+  font-size: 0.72rem;
+}
+
+.catalog-media-item-search-results {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0.75rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.catalog-media-item-search-results li {
+  padding: 0.65rem;
+  border-radius: 0.5rem;
+  background: #10231e;
+}
+
+.catalog-media-item-search-results strong,
+.catalog-media-item-search-results span {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.catalog-media-item-search-results span span {
+  margin-top: 0.2rem;
+  color: #9fb0ab;
+  font-size: 0.68rem;
+}
+
+.catalog-media-item-search-results .catalog-search-suggestion {
+  color: #e1b765;
+}
+
+.catalog-media-item-search-pages {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.65rem;
+}
+
 .catalog-title-evidence-heading {
   display: flex;
   min-width: 0;
@@ -1873,6 +1965,10 @@ h3 {
 
   .catalog-mapping-proposal .catalog-fields label + label {
     margin-top: 0.8rem;
+  }
+
+  .catalog-media-item-search-controls {
+    grid-template-columns: 1fr;
   }
 
   .catalog-title-badges {
