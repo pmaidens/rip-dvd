@@ -66,6 +66,11 @@ export interface RunArchiveWorkerOptions extends PollArchiveWorkerOptions {
   ) => Promise<void>;
 }
 
+interface DrivePollAdmission {
+  release(devicePath: string): void;
+  tryAcquire(devicePath: string): boolean;
+}
+
 function resolveConfiguredDevicePath(devicePath: string): string {
   try {
     return realpathSync(devicePath);
@@ -152,7 +157,7 @@ async function confirmAuthorizedDrive({
   return { discovered: observed, persisted: confirmed };
 }
 
-export async function pollArchiveWorker({
+async function pollArchiveWorkerWithDriveAdmission({
   access,
   concurrency = 1,
   configuredDevicePath,
@@ -162,7 +167,7 @@ export async function pollArchiveWorker({
   originalsLibraryPath,
   signal,
   workerId = "archive-worker",
-}: PollArchiveWorkerOptions): Promise<void> {
+}: PollArchiveWorkerOptions, admission?: DrivePollAdmission): Promise<void> {
   signal.throwIfAborted();
   if (!Number.isSafeInteger(concurrency) || concurrency <= 0) {
     throw new Error("Archive worker concurrency is invalid");
@@ -186,6 +191,9 @@ export async function pollArchiveWorker({
     drive: (typeof drives)[number],
   ): Promise<void> => {
     if (!drive.isPresent || !drive.isEnabled) {
+      return;
+    }
+    if (admission !== undefined && !admission.tryAcquire(drive.devicePath)) {
       return;
     }
 
@@ -368,6 +376,8 @@ export async function pollArchiveWorker({
       }
       const message = error instanceof Error ? error.message : String(error);
       log(`DVD scan failed for ${drive.devicePath}: ${message}`);
+    } finally {
+      admission?.release(drive.devicePath);
     }
   };
 
@@ -395,6 +405,12 @@ export async function pollArchiveWorker({
   }
 }
 
+export async function pollArchiveWorker(
+  options: PollArchiveWorkerOptions,
+): Promise<void> {
+  await pollArchiveWorkerWithDriveAdmission(options);
+}
+
 async function waitForNextPoll(
   intervalMs: number,
   signal: AbortSignal,
@@ -407,16 +423,55 @@ export async function runArchiveWorker({
   waitForNextPoll: wait = waitForNextPoll,
   ...pollOptions
 }: RunArchiveWorkerOptions): Promise<void> {
-  while (!pollOptions.signal.aborted) {
-    try {
-      await pollArchiveWorker(pollOptions);
-    } catch (error) {
-      if (pollOptions.signal.aborted) {
-        break;
+  const concurrency = pollOptions.concurrency ?? 1;
+  if (!Number.isSafeInteger(concurrency) || concurrency <= 0) {
+    throw new Error("Archive worker concurrency is invalid");
+  }
+  // A long operation owns only its physical drive and one concurrency slot.
+  // Later scheduler ticks can still poll other drives without overlapping it.
+  const activeDevicePaths = new Set<string>();
+  const admission: DrivePollAdmission = {
+    release(devicePath) {
+      activeDevicePaths.delete(devicePath);
+    },
+    tryAcquire(devicePath) {
+      if (
+        activeDevicePaths.has(devicePath) ||
+        activeDevicePaths.size >= concurrency
+      ) {
+        return false;
       }
-      const message = error instanceof Error ? error.message : String(error);
-      pollOptions.log(`Archive worker poll failed: ${message}`);
+      activeDevicePaths.add(devicePath);
+      return true;
+    },
+  };
+  const inFlightPolls = new Set<Promise<void>>();
+  const startAvailableDrivePolls = () => {
+    if (
+      activeDevicePaths.size >= concurrency ||
+      inFlightPolls.size >= concurrency
+    ) {
+      return;
     }
+    let polling!: Promise<void>;
+    polling = pollArchiveWorkerWithDriveAdmission(
+      pollOptions,
+      admission,
+    )
+      .catch((error: unknown) => {
+        if (!pollOptions.signal.aborted) {
+          const message = error instanceof Error ? error.message : String(error);
+          pollOptions.log(`Archive worker poll failed: ${message}`);
+        }
+      })
+      .finally(() => {
+        inFlightPolls.delete(polling);
+      });
+    inFlightPolls.add(polling);
+  };
+
+  while (!pollOptions.signal.aborted) {
+    startAvailableDrivePolls();
     if (pollOptions.signal.aborted) {
       break;
     }
@@ -428,4 +483,5 @@ export async function runArchiveWorker({
       }
     }
   }
+  await Promise.allSettled(inFlightPolls);
 }

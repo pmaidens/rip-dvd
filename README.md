@@ -703,8 +703,11 @@ worker can discover and use each explicitly mapped drive while the web and
 encode containers retain no device access. This worker does not eject media.
 
 The worker runs discovery on each configured poll interval. An empty drive is a
-normal state. Scanner failures are logged per drive without hiding other drives,
-and a failed discovery does not mark every known drive missing. Successful DVD
+normal state. A long-running scan holds only its own drive and one configured
+concurrency slot, so idle capacity continues polling other drives and can start
+newly approved work within the next interval. Scanner failures are logged per
+drive without hiding other drives, and a failed discovery does not mark every
+known drive missing. Successful DVD
 scans store title numbers, durations, chapter counts, bounded per-stream
 language/format/channel/source-ID metadata, and a deterministic SHA-256 content
 identity over every declared raw-disc byte. The scanner authenticates through
