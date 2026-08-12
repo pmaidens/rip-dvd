@@ -19,6 +19,7 @@ import {
   eq,
   exists,
   gt,
+  gte,
   inArray,
   isNotNull,
   isNull,
@@ -2441,19 +2442,20 @@ export function createDataAccessInternal(
             "Catalog Review outcome filter requires the Reviewed view",
           );
         }
-        const normalizedQuery = options.query === undefined
+        const searchQuery = options.query === undefined
           ? undefined
-          : normalizeMediaItemSearchTitle(
-              requireNonEmpty(options.query, "query"),
-            );
+          : requireNonEmpty(options.query, "query");
+        if (searchQuery !== undefined && searchQuery.length > 256) {
+          throw new DomainInvariantError(
+            "Catalog Review search query must be at most 256 characters",
+          );
+        }
+        const normalizedQuery = searchQuery === undefined
+          ? undefined
+          : normalizeMediaItemSearchTitle(searchQuery);
         if (normalizedQuery !== undefined && normalizedQuery.length === 0) {
           throw new DomainInvariantError(
             "Catalog Review search query must contain a letter or number",
-          );
-        }
-        if (normalizedQuery !== undefined && options.query!.length > 256) {
-          throw new DomainInvariantError(
-            "Catalog Review search query must be at most 256 characters",
           );
         }
         const searchPattern = normalizedQuery === undefined
@@ -2509,8 +2511,12 @@ export function createDataAccessInternal(
                     options.cursor.archivedAt,
                   ),
                   options.cursor.direction === "older"
-                    ? lt(originalDiscArchives.id, options.cursor.id)
-                    : gt(originalDiscArchives.id, options.cursor.id),
+                    ? options.cursor.inclusive
+                      ? lte(originalDiscArchives.id, options.cursor.id)
+                      : lt(originalDiscArchives.id, options.cursor.id)
+                    : options.cursor.inclusive
+                      ? gte(originalDiscArchives.id, options.cursor.id)
+                      : gt(originalDiscArchives.id, options.cursor.id),
                 ),
               )
             : undefined,

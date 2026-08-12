@@ -3,6 +3,7 @@ import type {
   ArchiveJobStatus,
   ArchiveProgressPhase,
   ArchiveRequestStatus,
+  CatalogReviewArchiveListCursor,
   CatalogReviewArchiveView,
   CompletedCatalogReviewOutcome,
   ConsistentReadAccess,
@@ -19,7 +20,6 @@ import type {
   FilesystemVerificationStatus,
   OriginalDiscArchive,
   OriginalDiscArchiveId,
-  OriginalDiscArchiveListCursor,
 } from "@rip-dvd/data-access";
 import {
   decodeDvdTitleMap,
@@ -127,10 +127,10 @@ export interface DashboardCatalogReviewItem {
   discKind: DiscKind;
   archiveFormat: ArchiveFormat;
   archivedAt: string;
-  catalogReviewedAt?: string | null;
-  catalogReviewOutcome?: "needs_review" | CompletedCatalogReviewOutcome;
-  mappedMediaItemCount?: number;
-  mappedMediaItemTitles?: readonly string[];
+  catalogReviewedAt: string | null;
+  catalogReviewOutcome: "needs_review" | CompletedCatalogReviewOutcome;
+  mappedMediaItemCount: number;
+  mappedMediaItemTitles: readonly string[];
   verificationStatus?: FilesystemVerificationStatus | null;
   verificationMessage?: string | null;
   verifiedAt?: string | null;
@@ -165,7 +165,7 @@ export interface DashboardSnapshot {
 
 export interface DashboardSnapshotOptions {
   activityLimit?: number;
-  catalogReviewCursor?: OriginalDiscArchiveListCursor;
+  catalogReviewCursor?: CatalogReviewArchiveListCursor;
   catalogReviewView?: CatalogReviewArchiveView;
   catalogReviewQuery?: string;
   catalogReviewOutcome?: CompletedCatalogReviewOutcome;
@@ -179,18 +179,19 @@ export interface DashboardCatalogReviewFilters {
 }
 
 const CATALOG_REVIEW_CURSOR_PATTERN =
-  /^v1\.(newer|older)\.(\d{1,16})\.([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+  /^v1\.(newer|older)(-inclusive)?\.(\d{1,16})\.([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 
 function encodeCatalogReviewCursor(
-  direction: OriginalDiscArchiveListCursor["direction"],
+  direction: CatalogReviewArchiveListCursor["direction"],
   archive: Pick<OriginalDiscArchive, "archivedAt" | "id">,
+  inclusive = false,
 ): string {
-  return `v1.${direction}.${archive.archivedAt.getTime()}.${archive.id}`;
+  return `v1.${direction}${inclusive ? "-inclusive" : ""}.${archive.archivedAt.getTime()}.${archive.id}`;
 }
 
 export function parseDashboardCatalogReviewCursor(
   request: Request,
-): OriginalDiscArchiveListCursor | null | undefined {
+): CatalogReviewArchiveListCursor | null | undefined {
   const value = new URL(request.url).searchParams.get("catalogReviewCursor");
   if (value === null) {
     return undefined;
@@ -199,7 +200,7 @@ export function parseDashboardCatalogReviewCursor(
   if (!match) {
     return null;
   }
-  const archivedAtMilliseconds = Number(match[2]);
+  const archivedAtMilliseconds = Number(match[3]);
   const archivedAt = new Date(archivedAtMilliseconds);
   if (
     !Number.isSafeInteger(archivedAtMilliseconds) ||
@@ -208,9 +209,10 @@ export function parseDashboardCatalogReviewCursor(
     return null;
   }
   return {
-    direction: match[1] as OriginalDiscArchiveListCursor["direction"],
+    direction: match[1] as CatalogReviewArchiveListCursor["direction"],
     archivedAt,
-    id: match[3] as OriginalDiscArchiveId,
+    id: match[4] as OriginalDiscArchiveId,
+    ...(match[2] === undefined ? {} : { inclusive: true }),
   };
 }
 
@@ -739,8 +741,7 @@ function readDashboardSnapshotRecords(
         })();
 
   const catalogReview =
-    archiveSource.status === "error" ||
-    discsById === null
+    archiveSource.status === "error"
       ? unavailable<DashboardCatalogReviewItem>()
       : {
           status: "loaded" as const,
@@ -774,6 +775,7 @@ function readDashboardSnapshotRecords(
                       ? encodeCatalogReviewCursor(
                           "newer",
                           previousCatalogReviewBoundary,
+                          catalogReviewArchives.length === 0,
                         )
                       : null,
                   nextCursor:
@@ -784,6 +786,7 @@ function readDashboardSnapshotRecords(
                       ? encodeCatalogReviewCursor(
                           "older",
                           nextCatalogReviewBoundary,
+                          catalogReviewArchives.length === 0,
                         )
                       : null,
                 },

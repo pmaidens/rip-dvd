@@ -132,6 +132,90 @@ describe("GET /api/dashboard", () => {
     );
   });
 
+  it("keeps Reviewed paging stable when an archive returns to Needs review", async () => {
+    const access = dataAccessFixture.create();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const archives = [];
+    for (let index = 0; index < 21; index += 1) {
+      const fingerprint = `reviewed-page-${index}`;
+      const disc = access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint,
+        volumeLabel: `REVIEWED_${index}`,
+      });
+      access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+      access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+      const archive = access.catalog.createOriginalDiscArchive({
+        detectedDiscId: disc.id,
+        discKind: "dvd",
+        archiveFormat: "iso",
+        archivePath: `/media/originals/Reviewed ${index}.iso`,
+        fingerprint,
+      });
+      access.catalog.completeCatalogReview(
+        archive.id,
+        archive.updatedAt,
+        "archive_only",
+      );
+      archives.push(archive);
+    }
+    const reviewedUrl =
+      "http://localhost:3000/api/dashboard?catalogReviewView=reviewed&catalogReviewOutcome=archive_only";
+    const first = await createDashboardRoute(
+      () => access,
+      new Request(reviewedUrl),
+    ).json();
+    const second = await createDashboardRoute(
+      () => access,
+      new Request(
+        `${reviewedUrl}&catalogReviewCursor=${encodeURIComponent(first.catalogReview.page.nextCursor)}`,
+      ),
+    ).json();
+    const reopenedArchive = archives.find(
+      (archive) => archive.id === second.catalogReview.items[0].id,
+    )!;
+    const item = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "New mapping after review",
+    });
+    access.catalog.createDiscSelection({
+      originalDiscArchiveId: reopenedArchive.id,
+      mediaItemId: item.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+
+    const refreshedSecond = await createDashboardRoute(
+      () => access,
+      new Request(
+        `${reviewedUrl}&catalogReviewCursor=${encodeURIComponent(first.catalogReview.page.nextCursor)}`,
+      ),
+    ).json();
+    const previous = await createDashboardRoute(
+      () => access,
+      new Request(
+        `${reviewedUrl}&catalogReviewCursor=${encodeURIComponent(refreshedSecond.catalogReview.page.previousCursor)}`,
+      ),
+    ).json();
+
+    expect(first.catalogReview.items).toHaveLength(20);
+    expect(second.catalogReview.items).toHaveLength(1);
+    expect(refreshedSecond.catalogReview).toEqual({
+      status: "loaded",
+      items: [],
+      page: {
+        limit: 20,
+        previousCursor: expect.any(String),
+        nextCursor: null,
+      },
+    });
+    expect(previous.catalogReview.items.map((item: { id: string }) => item.id))
+      .toEqual(first.catalogReview.items.map((item: { id: string }) => item.id));
+  });
+
   it("rejects malformed catalog review cursors", async () => {
     const response = createDashboardRoute(
       () => dataAccessFixture.create(),

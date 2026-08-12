@@ -1,6 +1,6 @@
 import type {
+  CatalogReviewArchiveListCursor,
   DataAccess,
-  OriginalDiscArchiveListCursor,
 } from "@rip-dvd/data-access";
 
 import { getDataAccess } from "../../../lib/data-access";
@@ -16,7 +16,7 @@ export const dynamic = "force-dynamic";
 
 export function createDashboardResponse(
   access: DataAccess,
-  catalogReviewCursor?: OriginalDiscArchiveListCursor,
+  catalogReviewCursor?: CatalogReviewArchiveListCursor,
   catalogReviewFilters: DashboardCatalogReviewFilters = {
     view: "needs_review",
   },

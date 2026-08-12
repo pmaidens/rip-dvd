@@ -547,6 +547,11 @@ export interface OriginalDiscArchiveListCursor {
   id: OriginalDiscArchiveId;
 }
 
+export interface CatalogReviewArchiveListCursor
+  extends OriginalDiscArchiveListCursor {
+  inclusive?: boolean;
+}
+
 export interface OpticalDriveReconciliationInput
   extends DiscoveredOpticalDrive {
   isConfiguredDevice: boolean;
@@ -597,7 +602,7 @@ export interface CatalogAccess {
   }): OriginalDiscArchive[];
   listCatalogReviewArchives(options: {
     view: CatalogReviewArchiveView;
-    cursor?: OriginalDiscArchiveListCursor;
+    cursor?: CatalogReviewArchiveListCursor;
     limit: number;
     query?: string;
     outcome?: CompletedCatalogReviewOutcome;

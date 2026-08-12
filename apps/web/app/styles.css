@@ -230,6 +230,60 @@ h1 {
   grid-column: 1 / -1;
 }
 
+.dashboard-grid-catalog > .catalog-review-browse-controls {
+  grid-column: 1 / -1;
+}
+
+.catalog-review-browse-controls {
+  display: grid;
+  gap: 1rem;
+  padding: 1rem 1.1rem;
+  border: 1px solid #203b34;
+  border-radius: 1rem;
+  background: rgba(12, 27, 24, 0.88);
+}
+
+.catalog-review-search {
+  display: grid;
+  grid-template-columns: minmax(12rem, 2fr) minmax(12rem, 1fr) auto;
+  align-items: end;
+  gap: 0.75rem;
+}
+
+.catalog-review-search label {
+  display: grid;
+  gap: 0.4rem;
+  color: #b8c8c3;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.catalog-review-search input,
+.catalog-review-search select {
+  width: 100%;
+  min-width: 0;
+  min-height: 2.75rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid #365149;
+  border-radius: 0.55rem;
+  background: #091713;
+  color: #eef4f1;
+}
+
+.catalog-review-search input:focus-visible,
+.catalog-review-search select:focus-visible {
+  outline: 3px solid #d2a14b;
+  outline-offset: 2px;
+}
+
+.catalog-review-summary {
+  margin: 0.55rem 0 0;
+  color: #b8c8c3;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
 .attention-overview {
   overflow: hidden;
   border: 1px solid #29483f;
@@ -2018,6 +2072,20 @@ h3 {
 
   .dashboard-grid {
     display: block;
+  }
+
+  .catalog-review-browse-controls {
+    margin-bottom: 0.85rem;
+    border-radius: 0.85rem;
+  }
+
+  .catalog-review-search {
+    display: block;
+  }
+
+  .catalog-review-search label + label,
+  .catalog-review-search button {
+    margin-top: 0.8rem;
   }
 
   .attention-overview-header {

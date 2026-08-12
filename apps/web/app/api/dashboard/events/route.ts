@@ -1,6 +1,6 @@
 import type {
+  CatalogReviewArchiveListCursor,
   DataAccess,
-  OriginalDiscArchiveListCursor,
 } from "@rip-dvd/data-access";
 
 import { getDataAccess } from "../../../../lib/data-access";
@@ -21,7 +21,7 @@ const RECONNECT_DELAY_MS = 3_000;
 
 interface DashboardEventResponseOptions {
   signal: AbortSignal;
-  catalogReviewCursor?: OriginalDiscArchiveListCursor;
+  catalogReviewCursor?: CatalogReviewArchiveListCursor;
   catalogReviewFilters?: DashboardCatalogReviewFilters;
   pollIntervalMs?: number;
 }

@@ -1180,11 +1180,11 @@ export function DashboardView({
               <span
                 className="attention-mark"
                 aria-label={catalogReviewView === "reviewed"
-                  ? displayTerm(archive.catalogReviewOutcome ?? "needs_review")
+                  ? displayTerm(archive.catalogReviewOutcome)
                   : "Needs review"}
               >
                 {catalogReviewView === "reviewed"
-                  ? displayTerm(archive.catalogReviewOutcome ?? "needs_review")
+                  ? displayTerm(archive.catalogReviewOutcome)
                   : "Review"}
               </span>
             </div>
@@ -1195,13 +1195,13 @@ export function DashboardView({
             </p>
             {catalogReviewView === "reviewed" ? (
               <p className="catalog-review-summary">
-                {(archive.mappedMediaItemTitles ?? []).length === 0
+                {archive.mappedMediaItemTitles.length === 0
                   ? "No mapped Media Items"
-                  : (archive.mappedMediaItemTitles ?? []).join(" · ")}
-                {(archive.mappedMediaItemCount ?? 0) >
-                    (archive.mappedMediaItemTitles ?? []).length
-                  ? ` · ${(archive.mappedMediaItemCount ?? 0) -
-                    (archive.mappedMediaItemTitles ?? []).length} more`
+                  : archive.mappedMediaItemTitles.join(" · ")}
+                {archive.mappedMediaItemCount >
+                    archive.mappedMediaItemTitles.length
+                  ? ` · ${archive.mappedMediaItemCount -
+                    archive.mappedMediaItemTitles.length} more`
                   : ""}
               </p>
             ) : null}

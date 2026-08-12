@@ -1,11 +1,12 @@
 import type {
-  DashboardDetectedDiscDetails,
-  DashboardSnapshot,
-} from "./dashboard";
-import type {
   CatalogReviewArchiveView,
   CompletedCatalogReviewOutcome,
 } from "@rip-dvd/data-access";
+
+import type {
+  DashboardDetectedDiscDetails,
+  DashboardSnapshot,
+} from "./dashboard";
 import { DASHBOARD_ACTIVITY_DETECTED_DISC_LIMIT } from "./dashboard-bounds";
 
 export interface DashboardEventSource {
