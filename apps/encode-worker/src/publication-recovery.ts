@@ -1285,6 +1285,12 @@ export async function executeEncodeClaim(
     partialPath = paths.partialPath;
     replacementPath = paths.replacementPath;
     cleanupQuarantinePath = paths.cleanupQuarantinePath;
+    mutationLockHandle = options.mutationLock.tryAcquire(
+      paths.mutationLockPath,
+    );
+    if (mutationLockHandle === null) {
+      throw new Error("Encode output ownership is already active");
+    }
     const existingFinal = await optionalMetadata(finalPath);
     if (
       existingFinal !== null &&
@@ -1339,12 +1345,6 @@ export async function executeEncodeClaim(
       "--preset",
       input.preset,
     ];
-    mutationLockHandle = options.mutationLock.tryAcquire(
-      paths.mutationLockPath,
-    );
-    if (mutationLockHandle === null) {
-      throw new Error("Encode output ownership is already active");
-    }
     renewClaim();
     await options.runner.run({
       arguments_,

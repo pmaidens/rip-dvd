@@ -5742,6 +5742,43 @@ describe("encode worker polling", () => {
     recoveryAccess.close();
     fixture.access.close();
   });
+
+  it("leaves a competing live partial untouched when output ownership is unavailable", async () => {
+    const fixture = createQueuedJob();
+    mkdirSync(fixture.mediaLibraryPath, { recursive: true });
+    const competingPartialPath = claimPartialPath(
+      fixture.outputPath,
+      "competing-live-claim",
+    );
+    writeFileSync(competingPartialPath, "competing live partial", {
+      flag: "wx",
+    });
+    const mutationLock = {
+      release: vi.fn(),
+      tryAcquire: vi.fn(() => null),
+    };
+    const run = vi.fn();
+
+    await pollEncodeWorker({
+      access: fixture.access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      mutationLock,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      runner: { run },
+      signal: new AbortController().signal,
+      workerId: "stale-worker-without-output-ownership",
+    });
+
+    expect(mutationLock.tryAcquire).toHaveBeenCalledTimes(1);
+    expect(run).not.toHaveBeenCalled();
+    expect(readFileSync(competingPartialPath, "utf8")).toBe(
+      "competing live partial",
+    );
+    expect(quarantinedContents(competingPartialPath)).toEqual([]);
+    fixture.access.close();
+  });
 });
 
 describe("node HandBrake runner", () => {
