@@ -22,7 +22,11 @@ import {
 } from "../lib/dashboard-activity";
 import { displayTerm } from "../lib/display-term";
 import { CatalogReviewEditor } from "./catalog-review-editor";
-import { EncodeJobsManager, retryEncodeJob } from "./encode-jobs";
+import {
+  cancelEncodeJob,
+  EncodeJobsManager,
+  retryEncodeJob,
+} from "./encode-jobs";
 import { EncodingProfilesManager } from "./encoding-profiles";
 import { FilesystemVerificationInventory } from "./filesystem-verification-inventory";
 import {
@@ -131,7 +135,7 @@ function toFilesystemVerificationDisplay({
 interface DashboardJobItemProps {
   title: React.ReactNode;
   subtitle: string;
-  status: DashboardArchiveJob["status"];
+  status: DashboardStatus;
   progressPercent: number;
   progressDetail?: string | null;
   failureDetail?: string | null;
@@ -578,6 +582,8 @@ export function DashboardView({
   approvingDetectedDiscId = null,
   onRequeueEncodeJob = () => undefined,
   requeueingEncodeJobId = null,
+  onCancelEncodeJob = () => undefined,
+  cancellingEncodeJobId = null,
   onOpenCatalogReview = () => undefined,
   onCatalogReviewPage = () => undefined,
   onVerifyFilesystem = () => undefined,
@@ -589,6 +595,8 @@ export function DashboardView({
   approvingDetectedDiscId?: string | null;
   onRequeueEncodeJob?: (id: DashboardEncodeJob["id"]) => void;
   requeueingEncodeJobId?: DashboardEncodeJob["id"] | null;
+  onCancelEncodeJob?: (id: DashboardEncodeJob["id"]) => void;
+  cancellingEncodeJobId?: DashboardEncodeJob["id"] | null;
   onOpenCatalogReview?: (id: string) => void;
   onCatalogReviewPage?: (cursor: string | null) => void;
   onVerifyFilesystem?: (target: FilesystemVerificationTarget, id: string) => void;
@@ -691,20 +699,49 @@ export function DashboardView({
             verification={toFilesystemVerificationDisplay(job)}
             action={
               <div className="operation-actions">
-                {job.status === "failed" || job.status === "completed" ? (
+                {job.status === "queued" ? (
                   <button
                     type="button"
-                    disabled={requeueingEncodeJobId !== null}
+                    disabled={
+                      cancellingEncodeJobId !== null ||
+                      requeueingEncodeJobId !== null
+                    }
+                    onClick={() => onCancelEncodeJob(job.id)}
+                  >
+                    {cancellingEncodeJobId === job.id
+                      ? "Cancelling…"
+                      : "Cancel queued encode"}
+                  </button>
+                ) : null}
+                {job.status === "failed" ||
+                    job.status === "completed" ||
+                    (job.status === "cancelled" && job.requeueable !== false) ? (
+                  <button
+                    type="button"
+                    disabled={
+                      requeueingEncodeJobId !== null ||
+                      cancellingEncodeJobId !== null
+                    }
                     onClick={() => onRequeueEncodeJob(job.id)}
                   >
                     {requeueingEncodeJobId === job.id
                       ? job.status === "failed"
                         ? "Retrying…"
-                        : "Re-encoding…"
+                        : job.status === "completed"
+                          ? "Re-encoding…"
+                          : "Requeueing…"
                       : job.status === "failed"
                         ? "Retry encode"
-                        : "Re-encode"}
+                        : job.status === "completed"
+                          ? "Re-encode"
+                          : "Requeue encode"}
                   </button>
+                ) : null}
+                {job.status === "cancelled" && job.requeueable === false ? (
+                  <p className="job-progress-detail">
+                    Requeue requires an active Disc Selection with completed
+                    Catalog Review.
+                  </p>
                 ) : null}
                 <button
                   type="button"
@@ -968,6 +1005,11 @@ export function OperationsDashboard({
     DashboardEncodeJob["id"] | null
   >(null);
   const [encodeRetryFailed, setEncodeRetryFailed] = useState(false);
+  const [cancellingEncodeJobId, setCancellingEncodeJobId] = useState<
+    DashboardEncodeJob["id"] | null
+  >(null);
+  const [encodeCancellationFailed, setEncodeCancellationFailed] =
+    useState(false);
   const [catalogReviewArchiveId, setCatalogReviewArchiveId] = useState<
     string | null
   >(null);
@@ -992,6 +1034,14 @@ export function OperationsDashboard({
       request: retryEncodeJob,
       setBusyId: setRequeueingEncodeJobId,
       setFailed: setEncodeRetryFailed,
+      refresh: () => setRequestNumber((value) => value + 1),
+    }),
+  );
+  const [cancelQueuedEncodeJob] = useState(() =>
+    createDashboardMutationRunner<DashboardEncodeJob["id"]>({
+      request: cancelEncodeJob,
+      setBusyId: setCancellingEncodeJobId,
+      setFailed: setEncodeCancellationFailed,
       refresh: () => setRequestNumber((value) => value + 1),
     }),
   );
@@ -1148,6 +1198,12 @@ export function OperationsDashboard({
         </p>
       ) : null}
 
+      {encodeCancellationFailed ? (
+        <p className="job-error" role="status">
+          Encode Job cancellation failed. Refresh the queue and try again.
+        </p>
+      ) : null}
+
       {filesystemVerificationFailed ? (
         <p className="job-error" role="status">
           Filesystem verification could not be recorded. Try again.
@@ -1170,6 +1226,8 @@ export function OperationsDashboard({
           approvingDetectedDiscId={approvingDetectedDiscId}
           onRequeueEncodeJob={(id) => void requeueEncodeJob(id)}
           requeueingEncodeJobId={requeueingEncodeJobId}
+          onCancelEncodeJob={(id) => void cancelQueuedEncodeJob(id)}
+          cancellingEncodeJobId={cancellingEncodeJobId}
           onOpenCatalogReview={setCatalogReviewArchiveId}
           onCatalogReviewPage={setCatalogReviewCursor}
           onVerifyFilesystem={(target, id) =>

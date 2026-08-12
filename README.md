@@ -842,8 +842,9 @@ The canonical catalog terms are:
   mapped to a Media Item.
 - **Encoding Profile**: immutable versioned encoding settings within a media
   domain.
-- **Archive Job** and **Encode Job**: separate mutable queue records with
-  queued, running, completed, and failed lifecycles.
+- **Archive Job** and **Encode Job**: separate mutable queue records. Both use
+  queued, running, completed, and failed states; Encode Jobs also retain
+  Cancelled as a distinct terminal outcome.
 
 ### Encoding Profiles
 
@@ -867,26 +868,34 @@ The operations dashboard's Queue Encode Jobs workspace lists only active Disc
 Selections from completed catalog reviews and active DVD video Encoding Profile
 versions. Choose one of each and an absolute final `.mkv` path inside
 `RIP_DVD_MEDIA_LIBRARY_PATH`. Queueing the same Disc Selection and profile
-version again returns the existing logical Encode Job. If that job is failed or
- completed, the same request leaves its terminal state and recorded output
- unchanged, so a delayed submission retry cannot trigger another encode. The
- Encode Jobs dashboard exposes explicit Retry encode and Re-encode actions for
- those terminal states. An explicit requeue of a completed job, or of a failed
- replacement that still owns its prior final, keeps its authoritative output
- path and path reservation even if the retry supplies a different path. A
- failed job without a retained output may move to the requested path. Repeated
- submissions also leave queued and running rows unchanged.
+version again returns the existing logical Encode Job. If that job is failed,
+completed, or cancelled, the same request leaves its terminal state and
+recorded output unchanged, so a delayed submission retry cannot trigger another
+encode. The Encode Jobs dashboard exposes Cancel queued encode for work that has
+not started and renders Cancelled separately from Failed. Cancellation retains
+the job as history and releases an ordinary queued job's output reservation.
+A cancelled re-encode keeps the reservation when it protects an existing final.
+Cancelled jobs expose deliberate requeue only while their Disc Selection remains
+active and its Catalog Review is complete. The dashboard also exposes explicit
+Retry encode and Re-encode actions for failed and completed jobs. An explicit
+requeue of a completed job, or of a failed replacement that still owns its prior
+final, keeps its authoritative output path and path reservation even if the
+retry supplies a different path. A failed job without a retained output may
+move to the requested path. Repeated submissions also leave queued and running
+rows unchanged.
 
 The queue reserves each final output path for one logical job and keeps the
 database uniqueness constraint on Disc Selection plus Encoding Profile version.
 The dashboard shows the referenced profile version with queued, running,
-completed, and failed state. `GET /api/encode-jobs` independently pages up to
-100 eligible Disc Selections with `selectionOffset` and 100 active DVD video
-Encoding Profile versions with `profileOffset`; its `page` and `profilePage`
-metadata keep every option reachable without an unbounded response.
-`POST /api/encode-jobs` queues or returns the logical job, and
-`PATCH /api/encode-jobs` retries a terminal job. Mutations require the same
-trusted Origin and Host checks as archive approval.
+completed, failed, and cancelled state. `GET /api/encode-jobs` independently
+pages up to 100 eligible Disc Selections with `selectionOffset` and 100 active
+DVD video Encoding Profile versions with `profileOffset`; its `page` and
+`profilePage` metadata keep every option reachable without an unbounded
+response.
+`POST /api/encode-jobs` queues or returns the logical job. A trusted
+`PATCH /api/encode-jobs` command explicitly cancels queued work or requeues an
+eligible terminal job. Mutations require the same trusted Origin and Host checks
+as archive approval.
 
 The encode worker atomically claims up to
 `RIP_DVD_ENCODE_WORKER_CONCURRENCY` queued jobs, resolves each job's immutable

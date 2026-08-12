@@ -8,6 +8,7 @@ import type {
 } from "@rip-dvd/data-access";
 
 import {
+  cancelEncodeJob,
   EncodeJobsView,
   queueEncodeJob,
   requestEncodeJobOptions,
@@ -39,12 +40,15 @@ describe("EncodeJobsView", () => {
         outputPath: "/media/movies/Queue Me (2001).mkv",
       };
       void queueEncodeJob(input);
+      void cancelEncodeJob(jobId);
       void retryEncodeJob(jobId);
 
       // @ts-expect-error Encoding Profile IDs cannot identify Disc Selections.
       input.discSelectionId = profileId;
       // @ts-expect-error Disc Selection IDs cannot identify Encoding Profiles.
       input.encodingProfileId = selectionId;
+      // @ts-expect-error Disc Selection IDs cannot identify Encode Jobs.
+      void cancelEncodeJob(selectionId);
       // @ts-expect-error Disc Selection IDs cannot identify Encode Jobs.
       void retryEncodeJob(selectionId);
     }
@@ -116,6 +120,7 @@ describe("EncodeJobsView", () => {
       encodingProfileId: profileId,
       outputPath: "/media/movies/Queue Me (2001).mkv",
     }, fetcher);
+    await cancelEncodeJob(jobId, fetcher);
     await retryEncodeJob(jobId, fetcher);
 
     expect(fetcher).toHaveBeenNthCalledWith(
@@ -141,7 +146,15 @@ describe("EncodeJobsView", () => {
         Accept: "application/json",
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ encodeJobId: "job-1" }),
+      body: JSON.stringify({ action: "cancel", encodeJobId: "job-1" }),
+    });
+    expect(fetcher).toHaveBeenNthCalledWith(4, "/api/encode-jobs", {
+      method: "PATCH",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ action: "requeue", encodeJobId: "job-1" }),
     });
   });
 });

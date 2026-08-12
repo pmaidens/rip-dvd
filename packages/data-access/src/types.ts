@@ -1,11 +1,13 @@
 import type {
   ARCHIVE_PROGRESS_PHASES,
   ARCHIVE_RUNNING_PROGRESS_PHASES,
+  ARCHIVE_JOB_STATUSES,
   ARCHIVE_FORMATS,
   DETECTED_DISC_STATUSES,
   DISC_KINDS,
   DISC_SELECTION_KINDS,
   ENCODE_PROGRESS_PHASES,
+  ENCODE_JOB_STATUSES,
   FILESYSTEM_VERIFICATION_STATUSES,
   JOB_STATUSES,
   MEDIA_DOMAINS,
@@ -23,6 +25,8 @@ export type MediaItemKind = (typeof MEDIA_ITEM_KINDS)[number];
 export type DiscSelectionKind = (typeof DISC_SELECTION_KINDS)[number];
 export type MediaDomain = (typeof MEDIA_DOMAINS)[number];
 export type JobStatus = (typeof JOB_STATUSES)[number];
+export type ArchiveJobStatus = (typeof ARCHIVE_JOB_STATUSES)[number];
+export type EncodeJobStatus = (typeof ENCODE_JOB_STATUSES)[number];
 export type ArchiveProgressPhase = (typeof ARCHIVE_PROGRESS_PHASES)[number];
 export type ArchiveRunningProgressPhase =
   (typeof ARCHIVE_RUNNING_PROGRESS_PHASES)[number];
@@ -160,7 +164,7 @@ export interface ArchiveJob {
   id: ArchiveJobId;
   detectedDiscId: DetectedDiscId;
   originalDiscArchiveId: OriginalDiscArchiveId | null;
-  status: JobStatus;
+  status: ArchiveJobStatus;
   priority: number;
   progressPhase: ArchiveProgressPhase;
   progressPercent: number;
@@ -181,7 +185,7 @@ export interface EncodeJob {
   discSelectionId: DiscSelectionId;
   encodingProfileId: EncodingProfileId;
   outputPath: string;
-  status: JobStatus;
+  status: EncodeJobStatus;
   priority: number;
   replaceExistingOutput: boolean;
   replacementOutputIdentity: EncodeOutputFilesystemIdentity | null;
@@ -424,7 +428,7 @@ export interface ArchiveJobAccess {
   renewClaim(claim: RunningArchiveJob): RunningArchiveJob;
   recoverExpiredClaims(): ArchiveJob[];
   list(
-    statuses?: JobStatus[],
+    statuses?: ArchiveJobStatus[],
     options?: ChronologicalListOptions,
   ): ArchiveJob[];
   updateProgress(
@@ -446,6 +450,7 @@ export interface EncodeJobAccess {
     outputPath: string;
     priority?: number;
   }): EncodeJob;
+  cancelQueued(id: EncodeJobId): EncodeJob;
   claimNext(workerId: string): RunningEncodeJob | null;
   renewClaim(claim: RunningEncodeJob): RunningEncodeJob;
   beginPublicationMutation(
@@ -500,7 +505,7 @@ export interface EncodeJobAccess {
   ): EncodeJob;
   completePartialCleanup(cleanup: EncodeJobPartialCleanup): EncodeJob;
   list(
-    statuses?: JobStatus[],
+    statuses?: EncodeJobStatus[],
     options?: ChronologicalListOptions,
   ): EncodeJob[];
   updateProgress(

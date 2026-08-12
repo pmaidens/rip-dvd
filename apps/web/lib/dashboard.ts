@@ -1,5 +1,6 @@
 import type {
   ArchiveFormat,
+  ArchiveJobStatus,
   ArchiveProgressPhase,
   ConsistentReadAccess,
   DataAccess,
@@ -7,9 +8,9 @@ import type {
   DetectedDiscStatus,
   DiscKind,
   EncodeJobId,
+  EncodeJobStatus,
   EncodeProgressPhase,
   FilesystemVerificationStatus,
-  JobStatus,
   OriginalDiscArchive,
   OriginalDiscArchiveId,
   OriginalDiscArchiveListCursor,
@@ -56,7 +57,7 @@ export interface DashboardArchiveJob {
   detectedDiscId: string;
   discLabel: string;
   opticalDriveName: string;
-  status: JobStatus;
+  status: ArchiveJobStatus;
   progressPhase: ArchiveProgressPhase;
   progressPercent: number;
   failureDetail?: string | null;
@@ -68,10 +69,11 @@ export interface DashboardEncodeJob {
   mediaTitle: string;
   mediaYear: number | null;
   encodingProfileName: string;
-  status: JobStatus;
+  status: EncodeJobStatus;
   progressPhase: EncodeProgressPhase | null;
   progressPercent: number;
   progressEtaSeconds: number | null;
+  requeueable?: boolean;
   failureDetail?: string | null;
   verificationStatus?: FilesystemVerificationStatus | null;
   verificationMessage?: string | null;
@@ -98,7 +100,8 @@ export interface DashboardPage {
 export type DashboardStatus =
   | DashboardOpticalDrive["state"]
   | DetectedDiscStatus
-  | JobStatus;
+  | ArchiveJobStatus
+  | EncodeJobStatus;
 
 export type DashboardSectionResult<T> =
   | { status: "loaded"; items: T[]; page?: DashboardPage }
@@ -321,6 +324,20 @@ function readDashboardSnapshotRecords(
         : { ids: [...new Set(relevantSelectionIds)] },
     ),
   );
+  const cancelledSelectionIds =
+    encodeJobSource.status === "loaded"
+      ? encodeJobSource.value
+          .filter((job) => job.status === "cancelled")
+          .map((job) => job.discSelectionId)
+      : [];
+  const cancelledRequeueSelectionSource = readSource(() =>
+    cancelledSelectionIds.length === 0
+      ? []
+      : access.catalog.listDiscSelections({
+          ids: [...new Set(cancelledSelectionIds)],
+          encodeEligibleOnly: true,
+        }),
+  );
   const relevantMediaItemIds =
     activityLimit === undefined
       ? undefined
@@ -435,6 +452,7 @@ function readDashboardSnapshotRecords(
   const encodeJobs =
     encodeJobSource.status === "error" ||
     selectionSource.status === "error" ||
+    cancelledRequeueSelectionSource.status === "error" ||
     mediaItemSource.status === "error" ||
     profileSource.status === "error"
       ? unavailable<DashboardEncodeJob>()
@@ -450,6 +468,11 @@ function readDashboardSnapshotRecords(
           );
           const profilesById = new Map(
             profileSource.value.map((profile) => [profile.id, profile]),
+          );
+          const cancelledRequeueSelectionIds = new Set(
+            cancelledRequeueSelectionSource.value.map(
+              (selection) => selection.id,
+            ),
           );
           return loaded(
             encodeJobSource.value.map((job) => {
@@ -470,6 +493,13 @@ function readDashboardSnapshotRecords(
                 progressPhase: job.progressPhase,
                 progressPercent: job.progressPercent,
                 progressEtaSeconds: job.progressEtaSeconds,
+                ...(job.status === "cancelled"
+                  ? {
+                      requeueable: cancelledRequeueSelectionIds.has(
+                        job.discSelectionId,
+                      ),
+                    }
+                  : {}),
                 failureDetail: formatFailureDetail(job.errorMessage),
                 verificationStatus: job.verificationStatus,
                 verificationMessage: job.verificationMessage,
