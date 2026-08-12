@@ -1,7 +1,6 @@
 import {
   decodeArchivedDvdTitles,
   DomainInvariantError,
-  MAX_MEDIA_ITEM_HIERARCHY_DEPTH,
   MEDIA_ITEM_KINDS,
   RecordNotFoundError,
   type DataAccess,
@@ -24,6 +23,7 @@ import {
   calculateCatalogReviewCoverage,
 } from "../../../../lib/catalog-review-coverage";
 import { getDataAccess } from "../../../../lib/data-access";
+import { readMediaItemsWithAncestors } from "../../../../lib/media-item-ancestor-context";
 import {
   trustedMutationRequestProblem,
 } from "../../../../lib/server/trusted-mutation-request";
@@ -31,7 +31,6 @@ import {
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-const CATALOG_REVIEW_MEDIA_PAGE_SIZE = 100;
 const CATALOG_REVIEW_SELECTION_PAGE_SIZE = 100;
 const CATALOG_REVIEW_COVERAGE_SELECTION_PAGE_SIZE = 500;
 
@@ -42,32 +41,20 @@ function response(body: unknown, status = 200): Response {
   });
 }
 
-function boundedString(value: unknown, maximum = 256): string | null {
-  if (typeof value !== "string") {
-    return null;
-  }
-  const trimmed = value.trim();
-  return trimmed.length > 0 && trimmed.length <= maximum ? trimmed : null;
-}
-
 function recordOffset(request: Request, parameter: string): number | null {
-  const value = new URL(request.url).searchParams.get(parameter);
-  if (value === null) {
+  const values = new URL(request.url).searchParams.getAll(parameter);
+  if (values.length === 0) {
     return 0;
+  }
+  const value = values[0]!;
+  if (values.length !== 1) {
+    return null;
   }
   if (!/^(0|[1-9]\d*)$/.test(value) || value.length > 16) {
     return null;
   }
   const offset = Number(value);
   return Number.isSafeInteger(offset) ? offset : null;
-}
-
-function optionalRecordId(
-  request: Request,
-  parameter: string,
-): string | null | undefined {
-  const value = new URL(request.url).searchParams.get(parameter);
-  return value === null ? undefined : boundedString(value);
 }
 
 function serializeMediaItem(item: MediaItem) {
@@ -127,9 +114,7 @@ function serializeReviewDiscSelection(
 function readCatalogReview(
   access: DataAccess,
   id: OriginalDiscArchiveId,
-  mediaItemOffset: number,
   discSelectionOffset: number,
-  editingMediaItemId?: MediaItemId,
 ) {
   return access.readConsistentSnapshot((snapshot) => {
     const archive = snapshot.catalog.listOriginalDiscArchives({ ids: [id] })[0];
@@ -144,10 +129,6 @@ function readCatalogReview(
         "Original Disc Archive is missing its Detected Disc provenance",
       );
     }
-    const mediaItems = snapshot.catalog.listMediaItems({
-      limit: CATALOG_REVIEW_MEDIA_PAGE_SIZE + 1,
-      offset: mediaItemOffset,
-    });
     const allDiscSelections: DiscSelection[] = [];
     let coverageSelectionOffset = 0;
     while (true) {
@@ -165,12 +146,6 @@ function readCatalogReview(
       }
       coverageSelectionOffset += coverageSelectionPage.length;
     }
-    const hasNextMediaItems =
-      mediaItems.length > CATALOG_REVIEW_MEDIA_PAGE_SIZE;
-    const mediaItemsPage = mediaItems.slice(
-      0,
-      CATALOG_REVIEW_MEDIA_PAGE_SIZE,
-    );
     const hasNextDiscSelections = allDiscSelections.length >
       discSelectionOffset + CATALOG_REVIEW_SELECTION_PAGE_SIZE;
     const discSelectionsPage = allDiscSelections.slice(
@@ -187,56 +162,9 @@ function readCatalogReview(
         availability,
       ]),
     );
-    const mediaItemPageIds = new Set(mediaItemsPage.map((item) => item.id));
-    const mediaItemsById = new Map(
-      mediaItemsPage.map((item) => [item.id, item]),
-    );
-    const seedIds = [
-      ...mediaItemsPage.map((item) => item.id),
-      ...discSelectionsPage.map((selection) => selection.mediaItemId),
-      editingMediaItemId,
-    ].filter(
-      (itemId): itemId is MediaItemId =>
-        itemId !== null && itemId !== undefined,
-    );
-    const processedDepths = new Map<MediaItemId, number>();
-    let pendingDepths = new Map(seedIds.map((itemId) => [itemId, 1]));
-    while (pendingDepths.size > 0) {
-      const currentDepths = pendingDepths;
-      pendingDepths = new Map();
-      const missingIds = [...currentDepths.keys()].filter(
-        (itemId) => !mediaItemsById.has(itemId),
-      );
-      const contextItems = missingIds.length === 0
-        ? []
-        : snapshot.catalog.listMediaItems({ ids: missingIds });
-      for (const item of contextItems) {
-        mediaItemsById.set(item.id, item);
-      }
-      for (const [itemId, depth] of currentDepths) {
-        if ((processedDepths.get(itemId) ?? 0) >= depth) {
-          continue;
-        }
-        processedDepths.set(itemId, depth);
-        const item = mediaItemsById.get(itemId);
-        if (item?.parentId !== null && item?.parentId !== undefined) {
-          const parentDepth = depth + 1;
-          if (parentDepth > MAX_MEDIA_ITEM_HIERARCHY_DEPTH) {
-            throw new DomainInvariantError(
-              "Media Item hierarchy exceeds the supported depth",
-            );
-          }
-          if (
-            (processedDepths.get(item.parentId) ?? 0) < parentDepth &&
-            (pendingDepths.get(item.parentId) ?? 0) < parentDepth
-          ) {
-            pendingDepths.set(item.parentId, parentDepth);
-          }
-        }
-      }
-    }
-    const contextMediaItems = [...mediaItemsById.values()].filter(
-      (item) => !mediaItemPageIds.has(item.id),
+    const reviewMediaItems = readMediaItemsWithAncestors(
+      snapshot.catalog,
+      discSelectionsPage.map((selection) => selection.mediaItemId),
     );
     const rawTitles = decodeArchivedDvdTitles(disc.scanData) ?? [];
     return {
@@ -255,16 +183,7 @@ function readCatalogReview(
         titles: rawTitles,
       },
       coverage: calculateCatalogReviewCoverage(rawTitles, allDiscSelections),
-      mediaItems: [...contextMediaItems, ...mediaItemsPage].map(
-        serializeMediaItem,
-      ),
-      mediaItemsPage: {
-        offset: mediaItemOffset,
-        limit: CATALOG_REVIEW_MEDIA_PAGE_SIZE,
-        hasPrevious: mediaItemOffset > 0,
-        hasNext: hasNextMediaItems,
-        itemIds: mediaItemsPage.map((item) => item.id),
-      },
+      mediaItems: reviewMediaItems.map(serializeMediaItem),
       discSelections: discSelectionsPage.map((selection) => {
         const availability = actionAvailabilityById.get(selection.id);
         if (!availability) {
@@ -299,25 +218,18 @@ export async function createCatalogReviewRoute(
   try {
     const archiveId = id as OriginalDiscArchiveId;
     if (request.method === "GET") {
-      const mediaItemOffset = recordOffset(request, "mediaOffset");
+      const parameters = new URL(request.url).searchParams;
       const discSelectionOffset = recordOffset(request, "selectionOffset");
-      const editingMediaItemId = optionalRecordId(
-        request,
-        "editingMediaItemId",
-      );
       if (
-        mediaItemOffset === null ||
-        discSelectionOffset === null ||
-        editingMediaItemId === null
+        [...parameters.keys()].some((key) => key !== "selectionOffset") ||
+        discSelectionOffset === null
       ) {
-        return response({ error: "Invalid Media Item offset" }, 400);
+        return response({ error: "Invalid Catalog Review query" }, 400);
       }
       const review = readCatalogReview(
         getAccess(),
         archiveId,
-        mediaItemOffset,
         discSelectionOffset,
-        editingMediaItemId as MediaItemId | undefined,
       );
       return review === null
         ? response({ error: "Original Disc Archive not found" }, 404)
@@ -370,7 +282,12 @@ export async function createCatalogReviewRoute(
         const proposal = access.catalog.createMappingProposal({
           originalDiscArchiveId: archiveId,
           catalogRevision: new Date(command.catalogRevision),
-          mediaItem: createMediaItemInput(command.mediaItem),
+          ...(command.target.choice === "create_new"
+            ? { mediaItem: createMediaItemInput(command.target.mediaItem) }
+            : {
+              existingMediaItemId:
+                command.target.mediaItemId as MediaItemId,
+            }),
           discSelection: command.discSelection,
         });
         return response({

@@ -561,9 +561,14 @@ adding another selection reopens review before any new encode can be enqueued.
 Each archived title exposes Assisted Mapping actions for a movie, bonus
 feature, trailer, chapter range, or other content. The editable Mapping
 Proposal remains next to that title on desktop and follows it on narrow screens;
-it preserves the initiating title while showing Media Item fields, source
-coordinates, and an optional Disc Selection label before saving both records
-atomically. DVD main feature mapping remains a separate archive-level action.
+it preserves the initiating title while making **Create new Media Item** and
+**Use existing Media Item** explicit choices. New-item fields, the chosen
+existing identity, source coordinates, and an optional Disc Selection label
+remain visible before the Disc Selection is saved atomically. Existing-item
+search is a separate non-cacheable, bounded, paged full-catalog read. It shows
+ancestor context and may label exact or normalized title suggestions, but never
+selects or merges a Media Item automatically. DVD main feature mapping remains
+a separate archive-level action.
 New-item titles begin with formatting-only volume-label cleanup: separators
 become spaces, whitespace is normalized, and uniformly cased labels receive
 conservative title case without removing years, disc identifiers, seasons, or
@@ -599,13 +604,13 @@ evidence is immutable, while rediscovery may still refresh observation metadata
 such as the volume label. Legacy sidecar import cannot restore review across an
 unsafe or newly added mapping, and bounded legacy title evidence remains usable
 for explicit title/chapter review. The same-origin, non-cacheable workflow pages
-large Media Item and Disc Selection catalogs while carrying mapped items and
-bounded ancestor chains as read-only context. Media Item mutations cap
-parent-child chains at 32 levels without limiting siblings or the total Media
-Item count, and reads fail closed instead of presenting a truncated chain. An
-active Media Item edit survives page changes, allowing a different bounded page
-to supply parent choices. The workflow is exposed at `GET`/`POST
-/api/catalog-reviews/:archiveId`.
+large Disc Selection sets while limiting its principal Media Item hierarchy to
+mappings for the visible archive plus their bounded ancestor context. Unmapped
+global items stay out of the workbench hierarchy but remain discoverable through
+`GET /api/media-items`. Media Item mutations cap parent-child chains at 32
+levels without limiting siblings or the total Media Item count, and reads fail
+closed instead of presenting a truncated chain. The review workflow is exposed
+at `GET`/`POST /api/catalog-reviews/:archiveId`.
 
 To use host libraries instead, set `RIP_DVD_MEDIA_LIBRARY_HOST_PATH` and
 `RIP_DVD_ORIGINALS_LIBRARY_HOST_PATH`. On native Linux, create new bind-source

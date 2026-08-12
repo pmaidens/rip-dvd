@@ -21,13 +21,16 @@ const validCommands = {
   create_mapping_proposal: {
     action: "create_mapping_proposal",
     catalogRevision: "2026-08-11T06:00:00.000Z",
-    mediaItem: {
-      parentId: null,
-      kind: "bonus_feature",
-      title: "Behind the Scenes",
-      year: null,
-      seasonNumber: null,
-      episodeNumber: null,
+    target: {
+      choice: "create_new",
+      mediaItem: {
+        parentId: null,
+        kind: "bonus_feature",
+        title: "Behind the Scenes",
+        year: null,
+        seasonNumber: null,
+        episodeNumber: null,
+      },
     },
     discSelection: {
       sourceIdentity: {
@@ -99,6 +102,33 @@ describe("catalog review command contract", () => {
     }
   });
 
+  it("parses an explicit existing Media Item target without selecting one implicitly", () => {
+    expect(parseCommand({
+      action: "create_mapping_proposal",
+      catalogRevision: "2026-08-11T06:00:00.000Z",
+      target: {
+        choice: "use_existing",
+        mediaItemId: "media-item-1",
+      },
+      discSelection: {
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      },
+    })).toEqual({
+      ok: true,
+      command: {
+        action: "create_mapping_proposal",
+        catalogRevision: "2026-08-11T06:00:00.000Z",
+        target: {
+          choice: "use_existing",
+          mediaItemId: "media-item-1",
+        },
+        discSelection: {
+          sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+        },
+      },
+    });
+  });
+
   it.each([
     [null, "Invalid catalog review mutation"],
     [[], "Invalid catalog review mutation"],
@@ -113,7 +143,21 @@ describe("catalog review command contract", () => {
       {
         action: "create_mapping_proposal",
         catalogRevision: "not-a-revision",
-        mediaItem: { kind: "movie", title: "Example" },
+        target: {
+          choice: "create_new",
+          mediaItem: { kind: "movie", title: "Example" },
+        },
+        discSelection: {
+          sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+        },
+      },
+      "Invalid Mapping Proposal",
+    ],
+    [
+      {
+        action: "create_mapping_proposal",
+        catalogRevision: "2026-08-11T06:00:00.000Z",
+        target: { mediaItemId: "media-item-1" },
         discSelection: {
           sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
         },
