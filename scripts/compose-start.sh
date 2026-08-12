@@ -6,6 +6,18 @@ script_directory="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 repository_root="$(CDPATH= cd -- "$script_directory/.." && pwd)"
 cd "$repository_root"
 
+hardware_identity_config=".local/optical-drives.json"
+if [ -f "$hardware_identity_config" ]; then
+  if ! command -v node >/dev/null 2>&1; then
+    printf 'Node.js is required to resolve configured optical-drive identities.\n' >&2
+    exit 1
+  fi
+  printf 'Resolving configured optical-drive identities before startup...\n'
+  node "$script_directory/optical-drive-mapping.mjs" \
+    --config "$hardware_identity_config" \
+    --output compose.override.yaml
+fi
+
 compose_environment="$(docker compose config --environment)"
 
 web_bind_address="$(

@@ -144,7 +144,7 @@ async function confirmAuthorizedDrive({
     throw new Error(`Optical Drive identity changed before ${phase}`);
   }
   const confirmed = drives.find(
-    (drive) => drive.devicePath === expected.devicePath,
+    (drive) => drive.devicePath === expected.devicePath && drive.isPresent,
   );
   if (confirmed === undefined || !confirmed.isPresent || !confirmed.isEnabled) {
     throw new Error(`Optical Drive is not enabled before ${phase}`);
