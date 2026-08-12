@@ -1307,6 +1307,16 @@ export function createDataAccessInternal(
       ),
     );
 
+  const encodeExpiredAttemptAssignments = (failureMessage: string) => ({
+    status: sql<EncodeJobStatus>`case when ${encodeJobs.status} = 'cancellation_requested' then 'cancelled' else 'failed' end`,
+    reservesOutputPath: sql<boolean>`case when ${encodeJobs.status} = 'cancellation_requested' then ${encodeJobs.replaceExistingOutput} else ${encodeJobs.reservesOutputPath} end`,
+    publicationPending: sql<boolean>`case when ${encodeJobs.status} = 'cancellation_requested' then 0 else ${encodeJobs.publicationPending} end`,
+    errorMessage: sql<string | null>`case when ${encodeJobs.status} = 'cancellation_requested' then null else ${failureMessage} end`,
+    claimedBy: sql<string | null>`case when ${encodeJobs.status} = 'cancellation_requested' then null else ${encodeJobs.claimedBy} end`,
+    claimToken: sql<EncodeJobClaimToken | null>`case when ${encodeJobs.status} = 'cancellation_requested' then null else ${encodeJobs.claimToken} end`,
+    claimedAt: sql<Date | null>`case when ${encodeJobs.status} = 'cancellation_requested' then null else ${encodeJobs.claimedAt} end`,
+  });
+
   const encodeJobAdapter = {
     recordType: "encode job",
     find: (id) =>
@@ -6139,14 +6149,10 @@ export function createDataAccessInternal(
         const updated = database
           .update(encodeJobs)
           .set({
-            status: sql`case when ${encodeJobs.status} = 'cancellation_requested' then 'cancelled' else 'failed' end`,
-            reservesOutputPath: sql`case when ${encodeJobs.status} = 'cancellation_requested' then ${encodeJobs.replaceExistingOutput} else ${encodeJobs.reservesOutputPath} end`,
+            ...encodeExpiredAttemptAssignments(
+              "Encode publication mutation was abandoned",
+            ),
             partialCleanupLeaseToken: null,
-            publicationPending: sql`case when ${encodeJobs.status} = 'cancellation_requested' then 0 else ${encodeJobs.publicationPending} end`,
-            errorMessage: sql`case when ${encodeJobs.status} = 'cancellation_requested' then null else 'Encode publication mutation was abandoned' end`,
-            claimedBy: sql`case when ${encodeJobs.status} = 'cancellation_requested' then null else ${encodeJobs.claimedBy} end`,
-            claimToken: sql`case when ${encodeJobs.status} = 'cancellation_requested' then null else ${encodeJobs.claimToken} end`,
-            claimedAt: sql`case when ${encodeJobs.status} = 'cancellation_requested' then null else ${encodeJobs.claimedAt} end`,
             updatedAt: timestamp,
           })
           .where(and(
@@ -6203,17 +6209,13 @@ export function createDataAccessInternal(
           return transaction
             .update(encodeJobs)
             .set({
-              status: sql`case when ${encodeJobs.status} = 'cancellation_requested' then 'cancelled' else 'failed' end`,
-              reservesOutputPath: sql`case when ${encodeJobs.status} = 'cancellation_requested' then ${encodeJobs.replaceExistingOutput} else ${encodeJobs.reservesOutputPath} end`,
+              ...encodeExpiredAttemptAssignments(
+                "Encode worker lease expired",
+              ),
               progressEtaSeconds: null,
               partialCleanupOutputPath: sql`${encodeJobs.outputPath}`,
               partialCleanupClaimToken: sql`${encodeJobs.claimToken}`,
               partialCleanupLeaseToken: null,
-              publicationPending: sql`case when ${encodeJobs.status} = 'cancellation_requested' then 0 else ${encodeJobs.publicationPending} end`,
-              errorMessage: sql`case when ${encodeJobs.status} = 'cancellation_requested' then null else 'Encode worker lease expired' end`,
-              claimedBy: sql`case when ${encodeJobs.status} = 'cancellation_requested' then null else ${encodeJobs.claimedBy} end`,
-              claimToken: sql`case when ${encodeJobs.status} = 'cancellation_requested' then null else ${encodeJobs.claimToken} end`,
-              claimedAt: sql`case when ${encodeJobs.status} = 'cancellation_requested' then null else ${encodeJobs.claimedAt} end`,
               updatedAt: timestamp,
             })
             .where(
