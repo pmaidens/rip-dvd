@@ -3,7 +3,7 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import titleSuggestionPolicy from "../../../fixtures/title-suggestion-policy.json";
 
@@ -200,6 +200,51 @@ describe("CatalogReviewEvidence", () => {
     expect(html).toContain('name="chapterEnd"');
     expect(html).toContain('name="label"');
     expect(html).toContain("Create Media Item and Disc Selection");
+  });
+
+  it("does not automatically propose sources that overlap existing coverage", async () => {
+    (globalThis as typeof globalThis & {
+      IS_REACT_ACT_ENVIRONMENT: boolean;
+    }).IS_REACT_ACT_ENVIRONMENT = true;
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const onStartMappingProposal = vi.fn();
+
+    await act(async () => {
+      root.render(
+        <CatalogReviewEvidence
+          volumeLabel="PARTIAL_DISC"
+          coverage={{
+            ...evidenceCoverage,
+            titles: [evidenceCoverage.titles[0]!],
+          }}
+          titles={[{
+            number: 1,
+            durationSeconds: 3_600,
+            chapters: 12,
+            audioStreams: [],
+            subtitles: [],
+          }]}
+          onStartMappingProposal={onStartMappingProposal}
+        />,
+      );
+    });
+    const assistedActions = [...container.querySelectorAll<HTMLButtonElement>(
+      ".catalog-title-actions button",
+    )];
+    expect(assistedActions).toHaveLength(5);
+    expect(assistedActions.every((button) => button.disabled)).toBe(true);
+    expect(container.textContent).toContain(
+      "Use manual Disc Selection controls for intentional overlaps",
+    );
+    for (const button of assistedActions) {
+      await act(async () => button.click());
+    }
+    expect(onStartMappingProposal).not.toHaveBeenCalled();
+
+    await act(async () => root.unmount());
+    container.remove();
   });
 
   it("filters the evidence cards while keeping very-short unmapped titles expandable", async () => {

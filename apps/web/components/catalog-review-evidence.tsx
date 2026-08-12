@@ -263,6 +263,8 @@ export function CatalogReviewEvidence({
       hasOverlap: false,
     };
     const activeTitleProposal = isActiveProposalTitle(title);
+    const assistedMappingDisabled = isSaving ||
+      titleCoverage.status !== "unmapped";
     return (
       <li
         key={title.number}
@@ -308,55 +310,64 @@ export function CatalogReviewEvidence({
           </p>
           <TechnicalStreamDetails title={title} />
           {onStartMappingProposal ? (
-            <div
-              className="catalog-title-actions"
-              role="group"
-              aria-label={`Map Title ${title.number}`}
-            >
-              <button
-                type="button"
-                disabled={isSaving}
-                onClick={() => startWholeTitleProposal(title.number, "movie")}
+            <div className="catalog-title-mapping-controls">
+              <div
+                className="catalog-title-actions"
+                role="group"
+                aria-label={`Map Title ${title.number}`}
               >
-                Map as movie
-              </button>
-              <button
-                type="button"
-                disabled={isSaving}
-                onClick={() =>
-                  startWholeTitleProposal(title.number, "bonus_feature")}
-              >
-                Map as bonus feature
-              </button>
-              <button
-                type="button"
-                disabled={isSaving}
-                onClick={() => startWholeTitleProposal(title.number, "trailer")}
-              >
-                Map as trailer
-              </button>
-              <button
-                type="button"
-                disabled={isSaving}
-                onClick={() => onStartMappingProposal({
-                  action: "chapters",
-                  sourceIdentity: {
-                    kind: "dvd_chapters",
-                    titleNumber: title.number,
-                    chapterStart: 1,
-                    chapterEnd: title.chapters,
-                  },
-                })}
-              >
-                Map chapters
-              </button>
-              <button
-                type="button"
-                disabled={isSaving}
-                onClick={() => startWholeTitleProposal(title.number, "other")}
-              >
-                Map as other
-              </button>
+                <button
+                  type="button"
+                  disabled={assistedMappingDisabled}
+                  onClick={() => startWholeTitleProposal(title.number, "movie")}
+                >
+                  Map as movie
+                </button>
+                <button
+                  type="button"
+                  disabled={assistedMappingDisabled}
+                  onClick={() =>
+                    startWholeTitleProposal(title.number, "bonus_feature")}
+                >
+                  Map as bonus feature
+                </button>
+                <button
+                  type="button"
+                  disabled={assistedMappingDisabled}
+                  onClick={() =>
+                    startWholeTitleProposal(title.number, "trailer")}
+                >
+                  Map as trailer
+                </button>
+                <button
+                  type="button"
+                  disabled={assistedMappingDisabled}
+                  onClick={() => onStartMappingProposal({
+                    action: "chapters",
+                    sourceIdentity: {
+                      kind: "dvd_chapters",
+                      titleNumber: title.number,
+                      chapterStart: 1,
+                      chapterEnd: title.chapters,
+                    },
+                  })}
+                >
+                  Map chapters
+                </button>
+                <button
+                  type="button"
+                  disabled={assistedMappingDisabled}
+                  onClick={() => startWholeTitleProposal(title.number, "other")}
+                >
+                  Map as other
+                </button>
+              </div>
+              {titleCoverage.status !== "unmapped" ? (
+                <p className="catalog-help">
+                  Assisted Mapping is unavailable for covered titles. Use
+                  manual Disc Selection controls for intentional overlaps.
+                </p>
+              ) : null}
             </div>
           ) : null}
         </div>
