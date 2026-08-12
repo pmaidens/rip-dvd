@@ -178,18 +178,19 @@ function TechnicalStreamDetails({ title }: { title: DvdTitle }) {
 
 type CoverageFilter = "all" | CatalogReviewTitleCoverageStatus;
 
-const coverageFilters = [
-  { value: "all", label: "All" },
-  { value: "unmapped", label: "Unmapped" },
-  { value: "mapped", label: "Mapped" },
-  { value: "partially_mapped", label: "Partially mapped" },
-] as const satisfies readonly { value: CoverageFilter; label: string }[];
-
 const coverageStatusLabels = {
   mapped: "Mapped",
   partially_mapped: "Partially mapped",
   unmapped: "Unmapped",
 } satisfies Record<CatalogReviewTitleCoverageStatus, string>;
+
+const coverageFilters: readonly { value: CoverageFilter; label: string }[] = [
+  { value: "all", label: "All" },
+  ...(["unmapped", "mapped", "partially_mapped"] as const).map((value) => ({
+    value,
+    label: coverageStatusLabels[value],
+  })),
+];
 
 export function CatalogReviewEvidence({
   coverage,
