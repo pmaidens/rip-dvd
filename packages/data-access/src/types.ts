@@ -293,6 +293,52 @@ export interface CreatedMappingProposal {
   discSelection: DiscSelection;
 }
 
+export type EpisodicMappingTvShowTarget =
+  | {
+    choice: "create_new";
+    title: string;
+    year?: number;
+  }
+  | {
+    choice: "use_existing";
+    mediaItemId: MediaItemId;
+  };
+
+export type EpisodicMappingSeasonTarget =
+  | {
+    choice: "create_new";
+    title: string;
+    seasonNumber: number;
+  }
+  | {
+    choice: "use_existing";
+    mediaItemId: MediaItemId;
+  };
+
+export interface EpisodicMappingEpisodeInput {
+  titleNumber: number;
+  title: string;
+  episodeNumber: number;
+  label?: string;
+}
+
+export interface CreateEpisodicMappingProposalInput {
+  originalDiscArchiveId: OriginalDiscArchiveId;
+  catalogRevision: Date;
+  tvShow: EpisodicMappingTvShowTarget;
+  season: EpisodicMappingSeasonTarget;
+  episodes: readonly EpisodicMappingEpisodeInput[];
+}
+
+export interface CreatedEpisodicMappingProposal {
+  tvShow: MediaItem;
+  season: MediaItem;
+  episodes: Array<{
+    mediaItem: MediaItem;
+    discSelection: DiscSelection;
+  }>;
+}
+
 export interface EncodingProfile {
   id: EncodingProfileId;
   key: string;
@@ -531,6 +577,9 @@ export interface CatalogAccess {
   createMappingProposal(
     input: CreateMappingProposalInput,
   ): CreatedMappingProposal;
+  createEpisodicMappingProposal(
+    input: CreateEpisodicMappingProposalInput,
+  ): CreatedEpisodicMappingProposal;
   updateMediaItem(
     id: MediaItemId,
     input: {

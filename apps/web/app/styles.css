@@ -636,6 +636,65 @@ h1 {
   font-size: 0.7rem;
 }
 
+.catalog-episodic-selection {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(9rem, auto) auto auto;
+  align-items: end;
+  gap: 0.7rem;
+  margin-top: 1rem;
+  padding: 0.8rem;
+  border: 1px solid #365149;
+  border-radius: 0.65rem;
+  background: #10231e;
+}
+
+.catalog-episodic-selection h4 {
+  margin: 0;
+  color: #eef4f1;
+  font-size: 0.82rem;
+}
+
+.catalog-episodic-selection label {
+  display: grid;
+  gap: 0.35rem;
+  color: #b8c8c3;
+  font-size: 0.72rem;
+}
+
+.catalog-episodic-selection input {
+  min-width: 0;
+  min-height: 2.4rem;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid #365149;
+  border-radius: 0.5rem;
+  background: #0d1d19;
+  color: #eef4f1;
+}
+
+.catalog-episodic-selection > span {
+  padding-bottom: 0.55rem;
+  color: #9fb0ab;
+  font-size: 0.7rem;
+  white-space: nowrap;
+}
+
+.catalog-episodic-selection-error {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: #e7a29a;
+  font-size: 0.72rem;
+}
+
+.catalog-episodic-title-choice {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: fit-content;
+  margin-top: 0.8rem;
+  color: #dbe6e2;
+  font-size: 0.72rem;
+}
+
 .catalog-mapping-proposal {
   min-width: 0;
   padding: 0.85rem;
@@ -696,6 +755,33 @@ h1 {
 .catalog-mapping-proposal .catalog-fields {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   margin: 0.75rem 0;
+}
+
+.catalog-episodic-episodes {
+  display: grid;
+  gap: 0.7rem;
+  margin: 0.75rem 0;
+  padding: 0;
+  list-style: none;
+}
+
+.catalog-episodic-episode {
+  min-width: 0;
+  padding: 0.75rem;
+  border: 1px solid #29483f;
+  border-radius: 0.55rem;
+  background: #10231e;
+  overflow-wrap: anywhere;
+}
+
+.catalog-episodic-episode > strong {
+  color: #d2a14b;
+  font-size: 0.72rem;
+}
+
+.catalog-episodic-existing-search > [role="alert"] {
+  color: #e7a29a;
+  font-size: 0.72rem;
 }
 
 .catalog-mapping-target-choices {
@@ -1969,6 +2055,16 @@ h3 {
 
   .catalog-media-item-search-controls {
     grid-template-columns: 1fr;
+  }
+
+  .catalog-episodic-selection {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .catalog-episodic-selection > span {
+    padding-bottom: 0;
+    white-space: normal;
   }
 
   .catalog-title-badges {

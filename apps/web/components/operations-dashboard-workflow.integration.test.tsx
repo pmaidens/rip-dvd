@@ -211,6 +211,120 @@ function createGate(): {
 }
 
 describe("end-to-end operations dashboard workflow", () => {
+  it("reopens review and reports resulting coverage after an episodic batch", async () => {
+    const root = mkdtempSync(join(tmpdir(), "rip-dvd-episodic-workflow-"));
+    temporaryDirectories.push(root);
+    const access = createLegacySidecarDataAccess({
+      databasePath: join(root, "rip-dvd.sqlite"),
+    });
+    openAccess.push(access);
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const contentId = `sha256:${"d".repeat(64)}`;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: contentId,
+      volumeLabel: "EPISODIC_WORKFLOW",
+      scanData: {
+        schemaVersion: 2,
+        contentId,
+        titles: [1, 3, 5].map((number) => ({
+          number,
+          durationSeconds: 2_400,
+          chapters: 8,
+          audioStreams: [],
+          subtitles: [],
+        })),
+      },
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Episodic Workflow.iso",
+      fingerprint: contentId,
+    });
+    const show = access.catalog.createMediaItem({
+      kind: "tv_show",
+      title: "Workflow Show",
+    });
+    const season = access.catalog.createMediaItem({
+      parentId: show.id,
+      kind: "season",
+      title: "Workflow Show Season 1",
+      seasonNumber: 1,
+    });
+    const existingEpisode = access.catalog.createMediaItem({
+      parentId: season.id,
+      kind: "episode",
+      title: "Episode 1",
+      episodeNumber: 1,
+    });
+    access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: existingEpisode.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    });
+    const reviewRevision = access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]!.updatedAt;
+    access.catalog.completeCatalogReview(archive.id, reviewRevision);
+    const reviewedArchive = access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]!;
+
+    const response = await createCatalogReviewRoute(
+      createMutationRequest(`/api/catalog-reviews/${archive.id}`, {
+        action: "create_episodic_mapping_proposal",
+        catalogRevision: reviewedArchive.updatedAt.toISOString(),
+        tvShow: { choice: "use_existing", mediaItemId: show.id },
+        season: { choice: "use_existing", mediaItemId: season.id },
+        episodes: [
+          { titleNumber: 3, title: "Episode 2", episodeNumber: 2 },
+          { titleNumber: 5, title: "Episode 3", episodeNumber: 3 },
+        ],
+      }),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+
+    expect(response.status).toBe(201);
+    expect(access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]!.catalogReviewedAt).toBeNull();
+    const refreshedResponse = await createCatalogReviewRoute(
+      new Request(`${trustedOrigin}/api/catalog-reviews/${archive.id}`),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    expect(refreshedResponse.status).toBe(200);
+    const refreshed = await refreshedResponse.json() as CatalogReviewDto;
+    expect(refreshed.reviewStatus).toBe("needs_review");
+    expect(refreshed.coverage).toMatchObject({
+      discSelectionCount: 3,
+      mediaItemsWithSelections: 3,
+      mappedTitles: 3,
+      partiallyMappedTitles: 0,
+      unmappedTitles: 0,
+    });
+    expect(refreshed.mediaItems).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: show.id }),
+      expect.objectContaining({ id: season.id }),
+      expect.objectContaining({ title: "Episode 2", episodeNumber: 2 }),
+      expect.objectContaining({ title: "Episode 3", episodeNumber: 3 }),
+    ]));
+    const html = renderCatalogReview(refreshed);
+    expect(html).toContain("3 Media Items with Disc Selections");
+    expect(html).toContain("3 mapped titles");
+  });
+
   it("runs the public dashboard workflow through explicit verification", async () => {
     const root = mkdtempSync(join(tmpdir(), "rip-dvd-operations-workflow-"));
     temporaryDirectories.push(root);
