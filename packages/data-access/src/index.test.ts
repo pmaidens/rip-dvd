@@ -7495,6 +7495,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     if (!claim) {
       throw new Error("Expected abandoned cancellation claim");
     }
+    access.encodeJobs.registerPartialCleanup(claim, {
+      publicationPending: true,
+    });
     access.encodeJobs.requestCancellation(job.id);
     vi.advanceTimersByTime(ENCODE_JOB_LEASE_DURATION_MS + 1);
 
@@ -7507,6 +7510,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         errorMessage: null,
         partialCleanupOutputPath: job.outputPath,
         partialCleanupClaimToken: claim.claimToken,
+        publicationPending: false,
       }),
     ]);
     expect(() => access.encodeJobs.requeue(job.id)).toThrow(
