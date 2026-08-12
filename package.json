@@ -12,7 +12,7 @@
     "db:check": "pnpm --filter @rip-dvd/data-access db:check",
     "dev": "pnpm --filter @rip-dvd/web dev",
     "import:legacy-sidecars": "pnpm --filter @rip-dvd/data-access build && node scripts/import-legacy-sidecars.mjs",
-    "test": "pnpm --filter @rip-dvd/config --filter @rip-dvd/data-access --filter @rip-dvd/worker-runtime --filter @rip-dvd/archive-worker --filter @rip-dvd/encode-worker --filter @rip-dvd/web test",
+    "test": "node --test scripts/optical-drive-mapping.test.mjs && pnpm --filter @rip-dvd/config --filter @rip-dvd/data-access --filter @rip-dvd/worker-runtime --filter @rip-dvd/archive-worker --filter @rip-dvd/encode-worker --filter @rip-dvd/web test",
     "test:compose-workers": "sh scripts/smoke-compose-workers.sh",
     "typecheck": "pnpm -r --if-present typecheck"
   },

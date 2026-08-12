@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "primarySerialNumber": "REPLACE-WITH-PRIMARY-DRIVE-SERIAL",
+  "opticalDriveSerialNumbers": [
+    "REPLACE-WITH-PRIMARY-DRIVE-SERIAL",
+    "REPLACE-WITH-SECONDARY-DRIVE-SERIAL"
+  ]
+}

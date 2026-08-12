@@ -1,0 +1,2 @@
+DROP INDEX IF EXISTS `optical_drives_device_path_unique`;--> statement-breakpoint
+CREATE UNIQUE INDEX `optical_drives_present_device_path_unique` ON `optical_drives` (`device_path`) WHERE "optical_drives"."is_present" = true;

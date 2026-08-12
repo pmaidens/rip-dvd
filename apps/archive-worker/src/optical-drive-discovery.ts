@@ -41,6 +41,14 @@ function flattenBlockDevices(value: unknown): UnknownRecord[] {
   return records;
 }
 
+function isVirtualQemuOpticalDevice(record: UnknownRecord): boolean {
+  const vendor = optionalBoundedText(record.vendor, MAX_LABEL_LENGTH)
+    ?.toLowerCase();
+  const product = optionalBoundedText(record.model, MAX_LABEL_LENGTH)
+    ?.toLowerCase();
+  return vendor === "qemu" || product?.startsWith("qemu ") === true;
+}
+
 export function decodeLsblkOpticalDrives(
   output: string,
 ): DiscoveredOpticalDrive[] {
@@ -57,7 +65,9 @@ export function decodeLsblkOpticalDrives(
     throw new Error("lsblk returned a malformed result");
   }
   const drives = flattenBlockDevices(parsed.blockdevices)
-    .filter((record) => record.type === "rom")
+    .filter(
+      (record) => record.type === "rom" && !isVirtualQemuOpticalDevice(record),
+    )
     .map((record): DiscoveredOpticalDrive => {
       const vendor = optionalBoundedText(record.vendor, MAX_LABEL_LENGTH);
       const product = optionalBoundedText(record.model, MAX_LABEL_LENGTH);

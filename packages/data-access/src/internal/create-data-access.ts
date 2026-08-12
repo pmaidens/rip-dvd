@@ -1778,6 +1778,7 @@ export function createDataAccessInternal(
         return database.transaction((transaction) => {
           const existingDrives = transaction
             .select({
+              id: opticalDrives.id,
               devicePath: opticalDrives.devicePath,
               configurationDefaultResolved:
                 opticalDrives.configurationDefaultResolved,
@@ -1808,9 +1809,27 @@ export function createDataAccessInternal(
 
           for (const decision of plan.drives) {
             const { drive } = decision;
-            transaction
-              .insert(opticalDrives)
-              .values({
+            if (decision.existingId !== undefined) {
+              transaction
+                .update(opticalDrives)
+                .set({
+                  devicePath: drive.devicePath,
+                  displayName: drive.displayName,
+                  vendor: drive.vendor ?? null,
+                  product: drive.product ?? null,
+                  serialNumber: drive.serialNumber ?? null,
+                  ...(drive.isConfiguredDevice
+                    ? { isConfiguredTarget: true }
+                    : {}),
+                  ...decision.authorizationUpdate,
+                  isPresent: true,
+                  lastSeenAt: timestamp,
+                  updatedAt: timestamp,
+                })
+                .where(eq(opticalDrives.id, decision.existingId))
+                .run();
+            } else {
+              transaction.insert(opticalDrives).values({
                 id: newId<OpticalDriveId>(),
                 devicePath: drive.devicePath,
                 displayName: drive.displayName,
@@ -1823,24 +1842,8 @@ export function createDataAccessInternal(
                 lastSeenAt: timestamp,
                 createdAt: timestamp,
                 updatedAt: timestamp,
-              })
-              .onConflictDoUpdate({
-                target: opticalDrives.devicePath,
-                set: {
-                  displayName: drive.displayName,
-                  vendor: drive.vendor ?? null,
-                  product: drive.product ?? null,
-                  serialNumber: drive.serialNumber ?? null,
-                  ...(drive.isConfiguredDevice
-                    ? { isConfiguredTarget: true }
-                    : {}),
-                  ...decision.authorizationUpdate,
-                  isPresent: true,
-                  lastSeenAt: timestamp,
-                  updatedAt: timestamp,
-                },
-              })
-              .run();
+              }).run();
+            }
           }
 
           return transaction
@@ -1854,41 +1857,58 @@ export function createDataAccessInternal(
       upsertOpticalDrive(input) {
         const timestamp = now();
         const devicePath = requireNonEmpty(input.devicePath, "devicePath");
-        const inserted = database
-          .insert(opticalDrives)
-          .values({
-            id: newId<OpticalDriveId>(),
-            devicePath,
-            displayName: input.displayName,
-            vendor: input.vendor,
-            product: input.product,
-            serialNumber: input.serialNumber,
-            isEnabled: input.isEnabled ?? false,
-            configurationDefaultResolved: true,
-            isPresent: input.isPresent,
-            lastSeenAt: timestamp,
-            createdAt: timestamp,
-            updatedAt: timestamp,
-          })
-          .onConflictDoUpdate({
-            target: opticalDrives.devicePath,
-            set: {
+        return database.transaction((transaction) => {
+          const existing = transaction
+            .select({ id: opticalDrives.id })
+            .from(opticalDrives)
+            .where(eq(opticalDrives.devicePath, devicePath))
+            .orderBy(
+              desc(opticalDrives.isPresent),
+              desc(opticalDrives.lastSeenAt),
+            )
+            .limit(1)
+            .get();
+          if (existing !== undefined) {
+            const updated = transaction
+              .update(opticalDrives)
+              .set({
+                displayName: input.displayName,
+                vendor: input.vendor,
+                product: input.product,
+                serialNumber: input.serialNumber,
+                isEnabled: input.isEnabled,
+                ...(input.isEnabled !== undefined
+                  ? { configurationDefaultResolved: true }
+                  : {}),
+                isPresent: input.isPresent,
+                lastSeenAt: timestamp,
+                updatedAt: timestamp,
+              })
+              .where(eq(opticalDrives.id, existing.id))
+              .returning(opticalDriveSelection)
+              .get();
+            return requireRow(updated, "optical drive", devicePath);
+          }
+          const inserted = transaction
+            .insert(opticalDrives)
+            .values({
+              id: newId<OpticalDriveId>(),
+              devicePath,
               displayName: input.displayName,
               vendor: input.vendor,
               product: input.product,
               serialNumber: input.serialNumber,
-              isEnabled: input.isEnabled,
-              ...(input.isEnabled !== undefined
-                ? { configurationDefaultResolved: true }
-                : {}),
+              isEnabled: input.isEnabled ?? false,
+              configurationDefaultResolved: true,
               isPresent: input.isPresent,
               lastSeenAt: timestamp,
+              createdAt: timestamp,
               updatedAt: timestamp,
-            },
-          })
-          .returning(opticalDriveSelection)
-          .get();
-        return requireRow(inserted, "optical drive", devicePath);
+            })
+            .returning(opticalDriveSelection)
+            .get();
+          return requireRow(inserted, "optical drive", devicePath);
+        }, { behavior: "immediate" });
       },
 
       listOpticalDrives(options) {
