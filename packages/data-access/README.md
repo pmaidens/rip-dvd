@@ -154,8 +154,10 @@ shared device-inode exclusion while calling the fenced finalization that aborts
 the attempt and completes cancellation. The copy path takes the same exclusion
 and renews its claim plus rechecks cancellation before authorizing any native
 device or output I/O. The recovery path retains the exact locked open-file
-description through its synchronous finalization. Lease expiry by itself is
-never treated as proof that a helper process closed.
+description through its synchronous finalization. Lock acquisition is bounded;
+a helper that still does not close after cancellation is detached, and its
+inherited device descriptor keeps later cross-process inactivity proofs closed.
+Lease expiry by itself is never treated as proof that a helper process closed.
 
 DVD title/chapter coordinates and Encoding Profile versions must be positive
 safe integers at the facade. SQLite CHECK constraints also require integer

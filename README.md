@@ -836,6 +836,10 @@ same device-inode exclusion through the fenced transition that records an
 aborted job and cancelled request. Recovery acquires `flock` on the exact
 inherited descriptor and retains that descriptor through the synchronous
 transition, so acquisition-helper exit cannot silently release the exclusion.
+Lock acquisition itself has a bounded deadline. If its helper does not close
+after cancellation, the worker destroys and unreferences its handles and
+returns the poll; any still-live inherited device descriptor remains visible to
+the same-UID `/proc` proof, so later recovery continues to fail closed.
 A stale worker cannot renew,
 report, fail, or publish a recovered attempt. A timed-out or cancelled DVD read returns control
 at its deadline, kills and detaches the child, and retains a device/output
