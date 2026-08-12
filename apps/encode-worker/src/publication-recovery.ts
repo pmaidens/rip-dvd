@@ -1074,6 +1074,49 @@ async function recoverAbandonedPublicationMutations(
   }
 }
 
+async function recoverAbandonedCancellations(
+  options: EncodePublicationOptions,
+): Promise<void> {
+  const claims = options.access.encodeJobs.listExpiredCancellationClaims();
+  if (claims.length === 0) {
+    return;
+  }
+  const mediaRoot = await requireLibraryRoot(options.mediaLibraryPath, {
+    create: true,
+  });
+  for (const claim of claims) {
+    let mutationLockHandle: number | null = null;
+    try {
+      const { mutationLockPath, partialPath } = await requireOutputPaths(
+        mediaRoot,
+        claim.outputPath,
+        claim.claimToken,
+      );
+      mutationLockHandle = options.mutationLock.tryAcquire(mutationLockPath);
+      if (mutationLockHandle === null) {
+        continue;
+      }
+      if (options.runner.requireInactive === undefined) {
+        throw new Error("HandBrake process closure cannot be confirmed");
+      }
+      options.access.encodeJobs.completeExpiredCancellation(
+        claim,
+        () => options.runner.requireInactive?.(partialPath),
+      );
+    } catch (error) {
+      options.log(
+        `Encode Job ${claim.id} cancellation recovery is waiting for process closure: ${
+          normalizeErrorMessage(error)
+        }`,
+      );
+    } finally {
+      if (mutationLockHandle !== null) {
+        options.mutationLock.release(mutationLockHandle);
+      }
+    }
+  }
+}
+
 async function reconcileActivePublicationMutations(
   options: EncodePublicationOptions,
 ): Promise<void> {
@@ -1638,6 +1681,7 @@ export async function reconcileEncodePublications(
   await reconcileActivePublicationMutations(options);
   await recoverAbandonedPublicationMutations(options);
   options.access.encodeJobs.recoverExpiredClaims();
+  await recoverAbandonedCancellations(options);
   await reconcilePendingPublications(
     options.access.encodeJobs.listPendingPartialCleanups(),
     options,

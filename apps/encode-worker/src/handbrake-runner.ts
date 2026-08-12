@@ -1,9 +1,19 @@
 import { spawn } from "node:child_process";
+import {
+  lstatSync,
+  opendirSync,
+  readFileSync,
+  statSync,
+  type Stats,
+} from "node:fs";
 import type { Readable } from "node:stream";
 
 const HANDBRAKE_TIMEOUT_MS = 24 * 60 * 60_000;
 const HANDBRAKE_TERMINATION_GRACE_MS = 10_000;
 const MAX_DIAGNOSTIC_BYTES = 65_536;
+const MAX_PROC_ENTRIES = 4_096;
+const MAX_PROC_FILE_DESCRIPTORS = 65_536;
+const MAX_PROC_COMMAND_BYTES = 65_536;
 
 export interface HandBrakeRunRequest {
   arguments_: readonly string[];
@@ -15,6 +25,7 @@ export interface HandBrakeRunRequest {
 export interface HandBrakeRunner {
   run(request: HandBrakeRunRequest): Promise<void>;
   isActive?(outputPath: string): boolean;
+  requireInactive?(outputPath: string): void;
   whenInactive?(outputPath: string): Promise<void>;
 }
 
@@ -41,6 +52,136 @@ function boundedDiagnostic(value: string): string {
     .subarray(-MAX_DIAGNOSTIC_BYTES)
     .toString("utf8")
     .trim();
+}
+
+function isVanishedProcEntry(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException).code === "ENOENT";
+}
+
+function optionalOutputMetadata(outputPath: string): Stats | null {
+  try {
+    return lstatSync(outputPath);
+  } catch (error) {
+    if (isVanishedProcEntry(error)) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+function requireLinuxOutputInactive(outputPath: string): void {
+  const target = optionalOutputMetadata(outputPath);
+  if (target !== null && (!target.isFile() || target.isSymbolicLink())) {
+    throw new Error("HandBrake output path is unsafe");
+  }
+  const ownerUid = target?.uid ?? process.geteuid?.();
+  if (ownerUid === undefined) {
+    throw new Error("Could not prove the HandBrake process is inactive");
+  }
+  let processDirectory;
+  try {
+    processDirectory = opendirSync("/proc");
+  } catch {
+    throw new Error("Could not prove the HandBrake process is inactive");
+  }
+  let processCount = 0;
+  let descriptorCount = 0;
+  try {
+    let processEntry;
+    while ((processEntry = processDirectory.readSync()) !== null) {
+      if (!processEntry.isDirectory() || !/^\d+$/.test(processEntry.name)) {
+        continue;
+      }
+      processCount += 1;
+      if (processCount > MAX_PROC_ENTRIES) {
+        throw new Error("Could not prove the HandBrake process is inactive");
+      }
+      const processPath = `/proc/${processEntry.name}`;
+      let processMetadata;
+      try {
+        processMetadata = statSync(processPath);
+      } catch (error) {
+        if (isVanishedProcEntry(error)) {
+          continue;
+        }
+        throw new Error("Could not prove the HandBrake process is inactive");
+      }
+      if (processMetadata.uid !== ownerUid) {
+        continue;
+      }
+      try {
+        const command = readFileSync(`${processPath}/cmdline`);
+        if (command.byteLength > MAX_PROC_COMMAND_BYTES) {
+          throw new Error("Could not prove the HandBrake process is inactive");
+        }
+        if (
+          command
+            .toString("utf8")
+            .split("\0")
+            .some((argument) => argument === outputPath)
+        ) {
+          throw new Error("HandBrake output is still active");
+        }
+      } catch (error) {
+        if (isVanishedProcEntry(error)) {
+          continue;
+        }
+        if (
+          error instanceof Error &&
+          (error.message === "HandBrake output is still active" ||
+            error.message ===
+              "Could not prove the HandBrake process is inactive")
+        ) {
+          throw error;
+        }
+        throw new Error("Could not prove the HandBrake process is inactive");
+      }
+      if (target === null) {
+        continue;
+      }
+      let descriptorDirectory;
+      try {
+        descriptorDirectory = opendirSync(`${processPath}/fd`);
+      } catch (error) {
+        if (isVanishedProcEntry(error)) {
+          continue;
+        }
+        throw new Error("Could not prove the HandBrake process is inactive");
+      }
+      try {
+        let descriptorEntry;
+        while ((descriptorEntry = descriptorDirectory.readSync()) !== null) {
+          descriptorCount += 1;
+          if (descriptorCount > MAX_PROC_FILE_DESCRIPTORS) {
+            throw new Error("Could not prove the HandBrake process is inactive");
+          }
+          try {
+            const opened = statSync(
+              `${processPath}/fd/${descriptorEntry.name}`,
+            );
+            if (opened.dev === target.dev && opened.ino === target.ino) {
+              throw new Error("HandBrake output is still active");
+            }
+          } catch (error) {
+            if (isVanishedProcEntry(error)) {
+              continue;
+            }
+            if (
+              error instanceof Error &&
+              error.message === "HandBrake output is still active"
+            ) {
+              throw error;
+            }
+            throw new Error("Could not prove the HandBrake process is inactive");
+          }
+        }
+      } finally {
+        descriptorDirectory.closeSync();
+      }
+    }
+  } finally {
+    processDirectory.closeSync();
+  }
 }
 
 export function createNodeHandBrakeRunner({
@@ -78,6 +219,12 @@ export function createNodeHandBrakeRunner({
   return {
     isActive(outputPath) {
       return activeOutputs.has(outputPath);
+    },
+    requireInactive(outputPath) {
+      if (activeOutputs.has(outputPath)) {
+        throw new Error("HandBrake output is still active");
+      }
+      requireLinuxOutputInactive(outputPath);
     },
     whenInactive(outputPath) {
       return inactiveWaiters.get(outputPath)?.promise ?? Promise.resolve();

@@ -617,8 +617,18 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 });
 
 const temporaryDirectories: string[] = [];
+const controlledProcessIds = new Set<number>();
+const supportsLinuxProcessInspection = existsSync("/proc/self/cmdline");
 
 afterEach(() => {
+  for (const pid of controlledProcessIds) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // The controlled process already closed.
+    }
+  }
+  controlledProcessIds.clear();
   vi.restoreAllMocks();
   vi.useRealTimers();
   cleanupRollbackRace.resume?.();
@@ -5567,6 +5577,91 @@ describe("encode worker polling", () => {
     expect(quarantinedContents(partialPath)).toContain("race loser output");
     fixture.access.close();
   });
+
+  it.runIf(supportsLinuxProcessInspection)(
+    "keeps restart cancellation pending until the orphaned HandBrake output closes",
+    async () => {
+      const fixture = createQueuedJob();
+      mkdirSync(fixture.mediaLibraryPath, { recursive: true });
+      const claim = fixture.access.encodeJobs.claimNext(
+        "orphaned-cancellation-worker",
+      );
+      if (!claim) {
+        throw new Error("Expected orphaned cancellation claim");
+      }
+      const partialPath = claimPartialPath(
+        fixture.outputPath,
+        claim.claimToken,
+      );
+      const writerSource = String.raw`
+        import { fsyncSync, openSync, writeSync } from "node:fs";
+        const partialPath = process.argv[1];
+        const descriptor = openSync(partialPath, "w", 0o600);
+        writeSync(descriptor, Buffer.from("live cancelled partial"));
+        fsyncSync(descriptor);
+        process.stdout.write("ready\n");
+        process.on("SIGTERM", () => {});
+        setInterval(() => {}, 1_000);
+        await new Promise(() => {});
+      `;
+      const writer = spawnProcess(
+        process.execPath,
+        ["--input-type=module", "--eval", writerSource, partialPath],
+        { stdio: ["ignore", "pipe", "pipe"] },
+      );
+      if (writer.pid === undefined) {
+        throw new Error("Controlled HandBrake writer did not start");
+      }
+      controlledProcessIds.add(writer.pid);
+      await once(writer.stdout, "data");
+
+      fixture.access.encodeJobs.requestCancellation(claim.id);
+      vi.useFakeTimers();
+      vi.setSystemTime(Date.now() + ENCODE_JOB_LEASE_DURATION_MS + 1);
+      const log = vi.fn();
+      const options = {
+        access: fixture.access,
+        concurrency: 1,
+        log,
+        mediaLibraryPath: fixture.mediaLibraryPath,
+        originalsLibraryPath: fixture.originalsLibraryPath,
+        runner: createNodeHandBrakeRunner(),
+        signal: new AbortController().signal,
+        workerId: "replacement-cancellation-worker",
+      };
+
+      await pollEncodeWorker(options);
+
+      expect(fixture.access.encodeJobs.list()[0]).toMatchObject({
+        id: claim.id,
+        status: "cancellation_requested",
+        claimToken: claim.claimToken,
+      });
+      expect(readFileSync(partialPath, "utf8")).toBe(
+        "live cancelled partial",
+      );
+      expect(log).toHaveBeenCalledWith(
+        expect.stringContaining("waiting for process closure"),
+      );
+
+      const closed = once(writer, "close");
+      writer.kill("SIGKILL");
+      await closed;
+      controlledProcessIds.delete(writer.pid);
+      await pollEncodeWorker(options);
+
+      expect(fixture.access.encodeJobs.list()[0]).toMatchObject({
+        id: claim.id,
+        status: "cancelled",
+        claimToken: null,
+      });
+      expect(existsSync(partialPath)).toBe(false);
+      expect(quarantinedContents(partialPath)).toContain(
+        "live cancelled partial",
+      );
+      fixture.access.close();
+    },
+  );
 });
 
 describe("node HandBrake runner", () => {

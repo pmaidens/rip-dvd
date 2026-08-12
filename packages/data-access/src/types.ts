@@ -789,6 +789,11 @@ export interface EncodeJobAccess {
   recoverExpiredPublicationMutation(
     cleanup: EncodeJobPartialCleanup,
   ): EncodeJob;
+  listExpiredCancellationClaims(): ClaimedEncodeJob[];
+  completeExpiredCancellation(
+    claim: ClaimedEncodeJob,
+    processInactive: () => void,
+  ): EncodeJob;
   recoverExpiredClaims(): EncodeJob[];
   recordReplacementOutputIdentity(
     claim: RunningEncodeJob,

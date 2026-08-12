@@ -7448,7 +7448,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     access.close();
   });
 
-  it("recovers an abandoned cancellation request as Cancelled with cleanup provenance", () => {
+  it("requires worker-confirmed closure before recovering an abandoned cancellation", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-12T15:00:00.000Z"));
     const access = openTestDatabase();
@@ -7501,18 +7501,44 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     access.encodeJobs.requestCancellation(job.id);
     vi.advanceTimersByTime(ENCODE_JOB_LEASE_DURATION_MS + 1);
 
-    expect(access.encodeJobs.recoverExpiredClaims()).toEqual([
+    expect(access.encodeJobs.recoverExpiredClaims()).toEqual([]);
+    expect(access.encodeJobs.list(["cancellation_requested"])).toEqual([
       expect.objectContaining({
         id: job.id,
-        status: "cancelled",
-        claimedBy: null,
-        claimToken: null,
-        errorMessage: null,
-        partialCleanupOutputPath: job.outputPath,
-        partialCleanupClaimToken: claim.claimToken,
-        publicationPending: false,
+        status: "cancellation_requested",
+        claimedBy: "abandoned-cancellation-worker",
+        claimToken: claim.claimToken,
       }),
     ]);
+    const expiredCancellation =
+      access.encodeJobs.listExpiredCancellationClaims()[0];
+    if (!expiredCancellation) {
+      throw new Error("Expected expired cancellation claim");
+    }
+    expect(() =>
+      access.encodeJobs.completeExpiredCancellation(
+        expiredCancellation,
+        () => {
+          throw new Error("HandBrake output is still active");
+        },
+      )
+    ).toThrow("HandBrake output is still active");
+    expect(access.encodeJobs.list(["cancellation_requested"])).toHaveLength(1);
+    expect(
+      access.encodeJobs.completeExpiredCancellation(
+        expiredCancellation,
+        () => undefined,
+      ),
+    ).toMatchObject({
+      id: job.id,
+      status: "cancelled",
+      claimedBy: null,
+      claimToken: null,
+      errorMessage: null,
+      partialCleanupOutputPath: job.outputPath,
+      partialCleanupClaimToken: claim.claimToken,
+      publicationPending: false,
+    });
     expect(() => access.encodeJobs.requeue(job.id)).toThrow(
       InvalidStatusTransitionError,
     );
