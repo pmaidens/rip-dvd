@@ -21,7 +21,7 @@ import type { ArchiveJobProgress } from "@rip-dvd/data-access";
 import {
   preserveDvdArchive,
   createNodeDvdCopyRunner,
-  requireCancelledDvdArchiveInactive,
+  withCancelledDvdArchiveInactive,
   type DvdCopyRunner,
 } from "./dvd-archiver.js";
 
@@ -128,12 +128,13 @@ describe("DVD archive publication", () => {
       const options = {
         devicePath,
         fingerprint: `sha256:${"a".repeat(64)}`,
+        mutation: vi.fn(async () => undefined),
         originalsLibraryPath,
         runner: createNodeDvdCopyRunner({ timeoutMs: 1_000 }),
       };
 
       await expect(
-        requireCancelledDvdArchiveInactive(options),
+        withCancelledDvdArchiveInactive(options),
       ).rejects.toThrow("DVD archive device is still active");
       expect(
         readdirSync(realpathSync(originalsLibraryPath)),
@@ -146,8 +147,40 @@ describe("DVD archive publication", () => {
         );
       });
       await expect(
-        requireCancelledDvdArchiveInactive(options),
+        withCancelledDvdArchiveInactive(options),
       ).resolves.toBeUndefined();
+    },
+  );
+
+  it.runIf(supportsLinuxWriterOwnership)(
+    "holds device exclusion through cancellation finalization",
+    async () => {
+      const originalsLibraryPath = createOriginalsLibrary();
+      const outputPath = join(
+        realpathSync(originalsLibraryPath),
+        ".stale-worker.iso.rip-dvd-partial",
+      );
+      const staleRunner = createNodeDvdCopyRunner({ timeoutMs: 1_000 });
+      const mutation = vi.fn(async () => {
+        await expect(staleRunner.copy({
+          devicePath: "/dev/zero",
+          outputPath,
+          sizeBytes: 9,
+          signal: new AbortController().signal,
+          onBytesCopied: () => undefined,
+        })).rejects.toThrow("DVD archive device is still active");
+        expect(existsSync(outputPath)).toBe(false);
+      });
+
+      await withCancelledDvdArchiveInactive({
+        devicePath: "/dev/zero",
+        fingerprint: `sha256:${"b".repeat(64)}`,
+        mutation,
+        originalsLibraryPath,
+        runner: createNodeDvdCopyRunner({ timeoutMs: 1_000 }),
+      });
+
+      expect(mutation).toHaveBeenCalledOnce();
     },
   );
 
@@ -298,7 +331,7 @@ describe("DVD archive publication", () => {
       const runner: DvdCopyRunner = {
         copy: vi.fn(async ({ outputPath }) => writeFileSync(outputPath, content)),
         isActive: () => false,
-        requireDeviceInactive: vi.fn(),
+        withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
         waitForInactive: vi.fn(async () => undefined),
       };
 
@@ -346,7 +379,7 @@ describe("DVD archive publication", () => {
       const runner: DvdCopyRunner = {
         copy: vi.fn(),
         isActive: () => false,
-        requireDeviceInactive: vi.fn(),
+        withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
         waitForInactive: vi.fn(async () => undefined),
       };
 
@@ -387,7 +420,7 @@ describe("DVD archive publication", () => {
     const runner: DvdCopyRunner = {
       copy: vi.fn(),
       isActive: () => false,
-      requireDeviceInactive: vi.fn(),
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
       waitForInactive: vi.fn(async () => undefined),
     };
 
@@ -628,7 +661,7 @@ describe("DVD archive publication", () => {
         onBytesCopied(content.byteLength);
       }),
       isActive: () => false,
-      requireDeviceInactive: vi.fn(),
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
       waitForInactive: vi.fn(async () => undefined),
     };
     const verifySource = vi.fn(async () => undefined);
@@ -675,7 +708,7 @@ describe("DVD archive publication", () => {
         throw new Error("disc read failed");
       }),
       isActive: () => false,
-      requireDeviceInactive: vi.fn(),
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
       waitForInactive: vi.fn(async () => undefined),
     };
 
@@ -723,7 +756,7 @@ describe("DVD archive publication", () => {
         writeFileSync(outputPath, content);
       }),
       isActive: vi.fn(() => active),
-      requireDeviceInactive: vi.fn(),
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
       waitForInactive: vi.fn(async () => undefined),
     };
     const options = {
@@ -776,7 +809,7 @@ describe("DVD archive publication", () => {
           writeFileSync(outputPath, content);
         }),
         isActive: () => false,
-        requireDeviceInactive: vi.fn(),
+        withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
         waitForInactive: vi.fn(async () => undefined),
       };
 
@@ -807,7 +840,7 @@ describe("DVD archive publication", () => {
         symlinkSync(outsidePath, outputPath);
       }),
       isActive: () => false,
-      requireDeviceInactive: vi.fn(),
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
       waitForInactive: vi.fn(async () => undefined),
     };
 
@@ -837,7 +870,7 @@ describe("DVD archive publication", () => {
     const runner: DvdCopyRunner = {
       copy: vi.fn(),
       isActive: () => false,
-      requireDeviceInactive: vi.fn(),
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
       waitForInactive: vi.fn(async () => undefined),
     };
     const sync = vi.fn(async (_path: string) => undefined);
@@ -875,7 +908,7 @@ describe("DVD archive publication", () => {
         writeFileSync(archivePath, "other publisher");
       }),
       isActive: () => false,
-      requireDeviceInactive: vi.fn(),
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
       waitForInactive: vi.fn(async () => undefined),
     };
 
@@ -904,7 +937,7 @@ describe("DVD archive publication", () => {
     const runner: DvdCopyRunner = {
       copy: vi.fn(async ({ outputPath }) => writeFileSync(outputPath, content)),
       isActive: () => false,
-      requireDeviceInactive: vi.fn(),
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
       waitForInactive: vi.fn(async () => undefined),
     };
     const sync = vi

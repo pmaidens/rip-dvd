@@ -826,8 +826,9 @@ it with the same attempt-token compare-and-set guard while copying. Each poll
 recovers at most 100 ordinary expired claims into visible failed jobs that must
 be explicitly retried. Expired cancellations use a separately bounded,
 cursor-rotated recovery pass: they remain pending until cross-process device and
-partial ownership checks prove external work inactive, then become aborted jobs
-and cancelled requests through a fenced transition. A stale worker cannot renew,
+partial ownership checks prove external work inactive; the worker holds the
+same device-inode exclusion through the fenced transition that records an
+aborted job and cancelled request. A stale worker cannot renew,
 report, fail, or publish a recovered attempt. A timed-out or cancelled DVD read returns control
 at its deadline, kills and detaches the child, and retains a device/output
 tombstone until the operating system reports the child closed. While that

@@ -10,7 +10,7 @@ import { DiscInspectionError } from "./disc-inspection-error.js";
 import { runDiscInspection } from "./disc-inspection-runner.js";
 import {
   type DvdCopyRunner,
-  requireCancelledDvdArchiveInactive,
+  withCancelledDvdArchiveInactive,
 } from "./dvd-archiver.js";
 
 export type {
@@ -80,13 +80,14 @@ export async function pollArchiveWorker({
         if (drive === undefined) {
           throw new Error("Cancelled Archive Job has no Optical Drive");
         }
-        await requireCancelledDvdArchiveInactive({
+        await withCancelledDvdArchiveInactive({
           devicePath: drive.devicePath,
           fingerprint: disc.fingerprint,
+          mutation: () =>
+            access.archiveJobs.finalizeExpiredCancellation(claim),
           originalsLibraryPath,
           runner: copyRunner,
         });
-        access.archiveJobs.finalizeExpiredCancellation(claim);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         log(
