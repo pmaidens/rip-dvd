@@ -115,7 +115,9 @@ removable. Ordinary Encode Job history locks the selection as provenance;
 queued and running dependencies include their job ID and state in the reason.
 Unsafe legacy selections remain a distinct Needs repair state and expose only
 repair and removal when no active dependency blocks recovery. These reasons do
-not include encode output paths.
+not include encode output paths. While legacy cutover repair is pending, the
+archive fence suppresses every selection mutation action and explains that
+changes are unavailable.
 
 ## Queue attempts and progress
 

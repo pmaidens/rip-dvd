@@ -98,8 +98,9 @@ describe("Catalog Review API", () => {
     });
   });
 
-  it("offers direct correction, label editing, and removal for a job-free Disc Selection", async () => {
-    const access = dataAccessFixture.create();
+  it("offers direct actions for a job-free selection unless legacy cutover repair blocks mutation", async () => {
+    const { access, databasePath } =
+      dataAccessFixture.createWithDatabasePath();
     const drive = access.catalog.upsertOpticalDrive({
       devicePath: "/dev/sr0",
       isPresent: true,
@@ -157,6 +158,35 @@ describe("Catalog Review API", () => {
           state: "editable",
           availableActions: ["correct", "edit_label", "remove"],
           reason: null,
+          relatedEncodeJob: null,
+        },
+      }),
+    ]);
+
+    const sqlite = new DatabaseSync(databasePath);
+    sqlite.prepare(`
+      update original_disc_archives
+      set legacy_cutover_pending = 1
+      where id = ?
+    `).run(archive.id);
+    sqlite.close();
+
+    const cutoverResponse = await createCatalogReviewRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`),
+      archive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+    expect(cutoverResponse.status).toBe(200);
+    const cutoverBody = await cutoverResponse.json();
+    expect(cutoverBody.discSelections).toEqual([
+      expect.objectContaining({
+        id: selection.id,
+        actionAvailability: {
+          state: "changes_unavailable",
+          availableActions: [],
+          reason:
+            "Disc Selection changes are unavailable while legacy cutover repair is pending",
           relatedEncodeJob: null,
         },
       }),
@@ -325,6 +355,20 @@ describe("Catalog Review API", () => {
       mediaItemId: movie.id,
       sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
     });
+    const queuedMovie = access.catalog.createMediaItem({
+      kind: "bonus_feature",
+      title: "Legacy Recovery queued dependency",
+    });
+    const queuedSelection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: queuedMovie.id,
+      sourceIdentity: {
+        kind: "dvd_chapters",
+        titleNumber: 1,
+        chapterStart: 1,
+        chapterEnd: 1,
+      },
+    });
     completeCatalogReview(access, archive.id);
     const profile = access.encodingProfiles.create({
       key: "legacy-recovery",
@@ -342,12 +386,22 @@ describe("Catalog Review API", () => {
       throw new Error("Expected legacy recovery Encode Job claim");
     }
     const completedJob = access.encodeJobs.complete(claim);
+    const queuedJob = access.encodeJobs.enqueue({
+      discSelectionId: queuedSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Legacy Recovery queued.mkv",
+    });
     const sqlite = new DatabaseSync(databasePath);
     sqlite.prepare(`
       update disc_selections
       set source_key = 'caller:title-one'
       where id = ?
     `).run(selection.id);
+    sqlite.prepare(`
+      update disc_selections
+      set source_key = 'caller:title-one-chapter-one'
+      where id = ?
+    `).run(queuedSelection.id);
     sqlite.close();
 
     const response = await createCatalogReviewRoute(
@@ -359,7 +413,7 @@ describe("Catalog Review API", () => {
 
     expect(response.status).toBe(200);
     const body = await response.json();
-    expect(body.discSelections).toEqual([
+    expect(body.discSelections).toEqual(expect.arrayContaining([
       expect.objectContaining({
         id: selection.id,
         actionAvailability: {
@@ -370,7 +424,16 @@ describe("Catalog Review API", () => {
           relatedEncodeJob: null,
         },
       }),
-    ]);
+      expect.objectContaining({
+        id: queuedSelection.id,
+        actionAvailability: {
+          state: "needs_repair",
+          availableActions: [],
+          reason: expect.stringContaining("is queued"),
+          relatedEncodeJob: { id: queuedJob.id, status: "queued" },
+        },
+      }),
+    ]));
 
     const repairResponse = await createCatalogReviewRoute(
       new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`, {

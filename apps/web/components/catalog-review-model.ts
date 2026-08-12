@@ -56,6 +56,12 @@ export type CatalogReviewDiscSelectionActionAvailability =
       id: string;
       status: "queued" | "running";
     } | null;
+  }
+  | {
+    state: "changes_unavailable";
+    availableActions: readonly [];
+    reason: string;
+    relatedEncodeJob: null;
   };
 
 export interface CatalogReviewDto {

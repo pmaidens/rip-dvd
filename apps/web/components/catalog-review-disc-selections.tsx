@@ -38,6 +38,7 @@ const actionStateLabels = {
   editable: "Editable",
   locked_provenance: "Locked provenance",
   needs_repair: "Needs repair",
+  changes_unavailable: "Changes unavailable",
 } as const;
 
 function hasAction(
