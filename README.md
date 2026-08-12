@@ -959,8 +959,10 @@ both states through its existing live event stream. Cancellation and completion
 compare the running attempt token and status so only one outcome can win, and a
 stale attempt cannot publish afterward. Cancelled is rendered separately from
 Failed. Cancellation retains the job as history and releases an ordinary job's
-output reservation. After a worker restart, an expired cancellation remains
-nonterminal until Linux process and open-inode inspection confirms the prior
+output reservation. The worker holds a recoverable per-output OS lock from its
+final pre-start lease check through HandBrake closure and publication. After a
+worker restart, an expired cancellation remains nonterminal until recovery owns
+that same lock and Linux process and open-inode inspection confirms the prior
 HandBrake output is inactive; cleanup and ownership release then proceed through
 the same token-fenced cancellation transition.
 A cancelled re-encode keeps the reservation when it protects an existing final.

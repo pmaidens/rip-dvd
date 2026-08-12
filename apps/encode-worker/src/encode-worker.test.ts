@@ -5662,6 +5662,86 @@ describe("encode worker polling", () => {
       fixture.access.close();
     },
   );
+
+  it("retains output ownership across a paused final lease check and HandBrake start", async () => {
+    vi.useFakeTimers();
+    const fixture = createQueuedJob();
+    const recoveryAccess = createLegacySidecarDataAccess({
+      databasePath: fixture.databasePath,
+    });
+    let reachedStart!: () => void;
+    const startReached = new Promise<void>((resolve) => {
+      reachedStart = resolve;
+    });
+    let resumeStart!: () => void;
+    const startResumed = new Promise<void>((resolve) => {
+      resumeStart = resolve;
+    });
+    let statusAtWrite: string | undefined;
+    let partialPath = "";
+    const firstPoll = pollEncodeWorker({
+      access: fixture.access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      runner: {
+        async run({ outputPath }) {
+          partialPath = outputPath;
+          reachedStart();
+          await startResumed;
+          statusAtWrite = recoveryAccess.encodeJobs.list()[0]?.status;
+          writeFileSync(outputPath, "controlled stale worker output", {
+            flag: "wx",
+          });
+        },
+      },
+      signal: new AbortController().signal,
+      workerId: "paused-before-handbrake-start",
+    });
+    await startReached;
+
+    const running = recoveryAccess.encodeJobs.list()[0];
+    if (!running) {
+      throw new Error("Expected running Encode Job");
+    }
+    recoveryAccess.encodeJobs.requestCancellation(running.id);
+    vi.setSystemTime(Date.now() + ENCODE_JOB_LEASE_DURATION_MS + 1);
+    const recoveryOptions = {
+      access: recoveryAccess,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      runner: {
+        requireInactive() {},
+        run: vi.fn(),
+      },
+      signal: new AbortController().signal,
+      workerId: "restart-recovery-during-start-gap",
+    };
+    await pollEncodeWorker(recoveryOptions);
+
+    expect(recoveryAccess.encodeJobs.list()[0]).toMatchObject({
+      id: running.id,
+      status: "cancellation_requested",
+    });
+    resumeStart();
+    await firstPoll;
+    await pollEncodeWorker(recoveryOptions);
+
+    expect(statusAtWrite).toBe("cancellation_requested");
+    expect(recoveryAccess.encodeJobs.list()[0]).toMatchObject({
+      id: running.id,
+      status: "cancelled",
+    });
+    expect(existsSync(partialPath)).toBe(false);
+    expect(quarantinedContents(partialPath)).toContain(
+      "controlled stale worker output",
+    );
+    recoveryAccess.close();
+    fixture.access.close();
+  });
 });
 
 describe("node HandBrake runner", () => {
