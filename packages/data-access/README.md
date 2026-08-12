@@ -172,6 +172,15 @@ indefinitely. Failure moves a request to `needs_attention`; manual retry returns
 it to `pending`; cancellation either completes immediately or enters
 `cancellation_requested` until active external work stops.
 
+Running Encode Job cancellation first persists Cancellation requested while
+retaining the active attempt token. Lease renewal returns that state to the
+worker, which stops HandBrake and confirms closure before quarantining the
+attempt partial. Cancellation finalization and publication completion both
+compare status and token, so exactly one terminal outcome wins. Finalization
+releases claim ownership and the output reservation unless a retained final is
+still protected. An abandoned cancellation request becomes Cancelled with
+durable partial-cleanup provenance when its lease expires.
+
 `archiveJobs.startForInspection()` atomically rechecks a completed current
 inspection, matching pending request, approved disc, enabled/present drive,
 legacy identity barrier, existing provenance, and same-fingerprint/same-drive

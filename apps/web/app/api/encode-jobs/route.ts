@@ -241,7 +241,7 @@ export async function createEncodeJobsRoute(
         return response({ error: "Invalid Encode Job command" }, 400);
       }
       const job = action === "cancel"
-        ? getAccess().encodeJobs.cancelQueued(encodeJobId as EncodeJobId)
+        ? getAccess().encodeJobs.requestCancellation(encodeJobId as EncodeJobId)
         : getAccess().encodeJobs.requeue(encodeJobId as EncodeJobId);
       return response({ job: serializeJob(job) });
     }

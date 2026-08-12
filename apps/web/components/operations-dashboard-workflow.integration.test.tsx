@@ -1172,6 +1172,102 @@ describe("end-to-end operations dashboard workflow", () => {
     });
     await events.next((snapshot) => encodeJob(snapshot).status === "queued");
 
+    const cancellationGate = createGate();
+    const cancellableRunner: HandBrakeRunner = {
+      async run({ onOutput, outputPath: partialPath }) {
+        writeFileSync(partialPath, "cancelled workflow partial", {
+          flag: "wx",
+        });
+        onOutput(
+          "Encoding: task 1 of 1, 21.00 % (128.00 fps, avg 90.00 fps, ETA 0h09m00s)\r",
+        );
+        await cancellationGate.wait();
+        onOutput("Encoding: task 1 of 1, 22.00 %\r");
+      },
+    };
+    const cancellationPoll = pollEncodeWorker({
+      access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath,
+      originalsLibraryPath,
+      runner: cancellableRunner,
+      signal,
+      workerId: "workflow-encode-worker-cancellation",
+    });
+    await cancellationGate.entered;
+    const cancellableSnapshot = await events.next(
+      (snapshot) =>
+        encodeJob(snapshot).status === "running" &&
+        encodeJob(snapshot).progressPercent === 21,
+    );
+    expect(
+      renderToStaticMarkup(<DashboardView state={cancellableSnapshot} />),
+    ).toContain("Request cancellation");
+
+    const runningCancelResponse = await createEncodeJobsRoute(
+      new Request(`${trustedOrigin}/api/encode-jobs`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: trustedOrigin,
+          "Sec-Fetch-Site": "same-origin",
+        },
+        body: JSON.stringify({
+          action: "cancel",
+          encodeJobId: queuedEncodeJob.id,
+        }),
+      }),
+      () => access,
+      runtimeConfig,
+    );
+    expect(runningCancelResponse.status).toBe(200);
+    expect((await runningCancelResponse.json()).job).toMatchObject({
+      id: queuedEncodeJob.id,
+      status: "cancellation_requested",
+    });
+    const cancellationRequestedSnapshot = await events.next(
+      (snapshot) => encodeJob(snapshot).status === "cancellation_requested",
+    );
+    const cancellationRequestedHtml = renderToStaticMarkup(
+      <DashboardView state={cancellationRequestedSnapshot} />,
+    );
+    expect(cancellationRequestedHtml).toContain("Cancellation requested");
+    expect(cancellationRequestedHtml).toContain(
+      "Waiting for HandBrake to stop safely",
+    );
+
+    cancellationGate.release();
+    await cancellationPoll;
+    const runningCancelledSnapshot = await events.next(
+      (snapshot) => encodeJob(snapshot).status === "cancelled",
+    );
+    expect(
+      renderToStaticMarkup(<DashboardView state={runningCancelledSnapshot} />),
+    ).toContain("Requeue encode");
+    expect(existsSync(outputPath)).toBe(false);
+
+    const runningCancelledRequeueResponse = await createEncodeJobsRoute(
+      new Request(`${trustedOrigin}/api/encode-jobs`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: trustedOrigin,
+          "Sec-Fetch-Site": "same-origin",
+        },
+        body: JSON.stringify({
+          action: "requeue",
+          encodeJobId: queuedEncodeJob.id,
+        }),
+      }),
+      () => access,
+      runtimeConfig,
+    );
+    expect(runningCancelledRequeueResponse.status).toBe(200);
+    await events.next((snapshot) => encodeJob(snapshot).status === "queued");
+
     const failedEncodeGate = createGate();
     const failingRunner: HandBrakeRunner = {
       async run({ onOutput, outputPath: partialPath }) {

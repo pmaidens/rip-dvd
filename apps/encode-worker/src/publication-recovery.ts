@@ -51,6 +51,7 @@ const ATOMIC_EXCHANGE_PATH = fileURLToPath(
 );
 
 class PendingPublicationRecoveryError extends Error {}
+class EncodeCancellationRequestedError extends Error {}
 
 export interface AtomicPathExchange {
   exchange(firstPath: string, secondPath: string): void;
@@ -1188,9 +1189,20 @@ export async function executeEncodeClaim(
 ): Promise<void> {
   const claimController = new AbortController();
   const signal = AbortSignal.any([options.signal, claimController.signal]);
+  const renewClaim = () => {
+    const renewed = options.access.encodeJobs.renewClaim(claim);
+    if (renewed.status === "cancellation_requested") {
+      const cancellation = new EncodeCancellationRequestedError(
+        "Encode Job cancellation was requested",
+      );
+      claimController.abort(cancellation);
+      throw cancellation;
+    }
+    return renewed;
+  };
   const heartbeat = setInterval(() => {
     try {
-      options.access.encodeJobs.renewClaim(claim);
+      renewClaim();
     } catch (error) {
       claimController.abort(error);
     }
@@ -1273,6 +1285,7 @@ export async function executeEncodeClaim(
       "--preset",
       input.preset,
     ];
+    renewClaim();
     await options.runner.run({
       arguments_,
       onOutput: parseProgress,
@@ -1306,7 +1319,7 @@ export async function executeEncodeClaim(
     ) {
       throw new Error("Encode Job final output changed during encoding");
     }
-    options.access.encodeJobs.renewClaim(claim);
+    renewClaim();
     signal.throwIfAborted();
     mutationLockHandle = options.mutationLock.tryAcquire(
       paths.mutationLockPath,
@@ -1378,6 +1391,26 @@ export async function executeEncodeClaim(
         `Encode publication mutation requires reconciliation: ${error.message}`,
       );
       return;
+    }
+    let cancellationRequested =
+      claimController.signal.reason instanceof EncodeCancellationRequestedError;
+    if (!cancellationRequested && !options.signal.aborted) {
+      try {
+        cancellationRequested =
+          options.access.encodeJobs.renewClaim(claim).status ===
+            "cancellation_requested";
+      } catch {
+        // A competing terminal transition remains authoritative.
+      }
+    }
+    if (cancellationRequested && partialPath !== undefined) {
+      await options.runner.whenInactive?.(partialPath);
+      if (options.runner.isActive?.(partialPath) ?? false) {
+        options.log(
+          `Encode Job ${claim.id} cancellation is waiting for HandBrake closure`,
+        );
+        return;
+      }
     }
     const cleanupFailures: string[] = [];
     let replacementCleanupFailed = false;
@@ -1497,6 +1530,44 @@ export async function executeEncodeClaim(
           cleanupFailures.push(normalizeErrorMessage(cleanupError));
         }
       }
+    }
+    if (cancellationRequested) {
+      if (
+        partialPath !== undefined &&
+        pendingPartialCleanup !== undefined &&
+        !replacementCleanupFailed
+      ) {
+        const cleanup = pendingPartialCleanup;
+        try {
+          await quarantinePartial(
+            partialPath,
+            options.runner,
+            options.log,
+            () => options.access.encodeJobs.completePartialCleanup(cleanup),
+          );
+        } catch (cleanupError) {
+          cleanupFailures.push(normalizeErrorMessage(cleanupError));
+        }
+      }
+      if (cleanupFailures.length > 0) {
+        options.log(
+          `Encode Job ${claim.id} cancellation cleanup failed: ${
+            cleanupFailures.join("; ")
+          }`,
+        );
+        return;
+      }
+      try {
+        options.access.encodeJobs.completeCancellation(claim);
+        options.log(`Encode Job ${claim.id} cancelled`);
+      } catch (cancellationError) {
+        options.log(
+          `Encode Job cancellation state could not be persisted: ${
+            normalizeErrorMessage(cancellationError)
+          }`,
+        );
+      }
+      return;
     }
     const failureMessage = signal.aborted
       ? "Encode interrupted"

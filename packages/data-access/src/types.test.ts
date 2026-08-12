@@ -108,7 +108,12 @@ describe("data-access domain identifiers", () => {
       .toEqualTypeOf<"running" | "completed" | "failed" | "aborted">();
     expectTypeOf<EncodeJobStatus>()
       .toEqualTypeOf<
-        "queued" | "running" | "completed" | "failed" | "cancelled"
+        | "queued"
+        | "running"
+        | "cancellation_requested"
+        | "completed"
+        | "failed"
+        | "cancelled"
       >();
   });
 
@@ -118,6 +123,7 @@ describe("data-access domain identifiers", () => {
 
     if (false) {
       const access = undefined as unknown as DataAccess;
+      access.encodeJobs.list(["cancellation_requested"]);
       access.encodeJobs.list(["cancelled"]);
       // @ts-expect-error Archive Jobs do not have a cancelled outcome.
       access.archiveJobs.list(["cancelled"]);

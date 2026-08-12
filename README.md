@@ -952,8 +952,14 @@ version again returns the existing logical Encode Job. If that job is failed,
 completed, or cancelled, the same request leaves its terminal state and
 recorded output unchanged, so a delayed submission retry cannot trigger another
 encode. The Encode Jobs dashboard exposes Cancel queued encode for work that has
-not started and renders Cancelled separately from Failed. Cancellation retains
-the job as history and releases an ordinary queued job's output reservation.
+not started and Request cancellation for running HandBrake work. A running
+request is stored and displayed as Cancellation requested until the worker has
+stopped the process and quarantined its attempt partial. The dashboard receives
+both states through its existing live event stream. Cancellation and completion
+compare the running attempt token and status so only one outcome can win, and a
+stale attempt cannot publish afterward. Cancelled is rendered separately from
+Failed. Cancellation retains the job as history and releases an ordinary job's
+output reservation.
 A cancelled re-encode keeps the reservation when it protects an existing final.
 Cancelled jobs expose deliberate requeue only while their Disc Selection remains
 active and its Catalog Review is complete. The dashboard also exposes explicit
@@ -967,15 +973,16 @@ rows unchanged.
 The queue reserves each final output path for one logical job and keeps the
 database uniqueness constraint on Disc Selection plus Encoding Profile version.
 The dashboard shows the referenced profile version with queued, running,
-completed, failed, and cancelled state. `GET /api/encode-jobs` independently
+cancellation-requested, completed, failed, and cancelled state.
+`GET /api/encode-jobs` independently
 pages up to 100 eligible Disc Selections with `selectionOffset` and 100 active
 DVD video Encoding Profile versions with `profileOffset`; its `page` and
 `profilePage` metadata keep every option reachable without an unbounded
 response.
 `POST /api/encode-jobs` queues or returns the logical job. A trusted
-`PATCH /api/encode-jobs` command explicitly cancels queued work or requeues an
-eligible terminal job. Mutations require the same trusted Origin and Host checks
-as archive approval.
+`PATCH /api/encode-jobs` command explicitly cancels queued work, requests safe
+cancellation of running work, or requeues an eligible terminal job. Mutations
+require the same trusted Origin and Host checks as archive approval.
 
 The encode worker atomically claims up to
 `RIP_DVD_ENCODE_WORKER_CONCURRENCY` queued jobs, resolves each job's immutable

@@ -32,6 +32,7 @@ export const MEDIA_DOMAINS = ["dvd_video", "audio"] as const;
 export const ENCODE_JOB_STATUSES = [
   "queued",
   "running",
+  "cancellation_requested",
   "completed",
   "failed",
   "cancelled",
