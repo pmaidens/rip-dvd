@@ -178,12 +178,12 @@ worker, which stops HandBrake and confirms closure before quarantining the
 attempt partial. Cancellation finalization and publication completion both
 compare status and token, so exactly one terminal outcome wins. Finalization
 releases claim ownership and the output reservation unless a retained final is
-still protected. The Encode Worker holds a recoverable per-output OS lock from
-the final pre-start lease check through HandBrake closure and publication. An
-expired cancellation request remains nonterminal until recovery owns that lock
-and proves through Linux process and open-inode inspection that no HandBrake
-process still owns the attempt output; only then does the token-fenced recovery
-record Cancelled with durable partial-cleanup provenance.
+still protected. The Encode Worker holds a recoverable per-output OS lock before
+startup cleanup and final inspection and through HandBrake closure and
+publication. An expired cancellation request remains nonterminal until recovery
+owns that lock and proves through Linux process and open-inode inspection that
+no HandBrake process still owns the attempt output; only then does the
+token-fenced recovery record Cancelled with durable partial-cleanup provenance.
 
 `archiveJobs.startForInspection()` atomically rechecks a completed current
 inspection, matching pending request, approved disc, enabled/present drive,
