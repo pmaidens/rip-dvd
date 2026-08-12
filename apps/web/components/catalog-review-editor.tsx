@@ -1,5 +1,7 @@
 "use client";
 
+import type { CompletedCatalogReviewOutcome } from "@rip-dvd/data-access";
+
 import { displayTerm } from "../lib/display-term";
 import { CatalogReviewCompletion } from "./catalog-review-completion";
 import { CatalogReviewDiscSelections } from "./catalog-review-disc-selections";
@@ -29,12 +31,14 @@ interface CatalogReviewViewProps {
   selectionKind: DiscSelectionKind;
   activeMappingProposal: MappingProposal | null;
   activeEpisodicMappingProposal?: EpisodicMappingProposal | null;
+  archiveOnlySelected: boolean;
   onClose(): void;
   onRetry(): void;
   onEditMediaItem(id: string): void;
   onCancelEdit(): void;
   onDiscSelectionsPage(offset: number): void;
   onSelectionKindChange(kind: DiscSelectionKind): void;
+  onArchiveOnlyChange(selected: boolean): void;
   onStartMappingProposal(proposal: MappingProposal): void;
   onCancelMappingProposal(): void;
   onCreateMappingProposal(input: CreateMappingProposalInput): void;
@@ -46,7 +50,7 @@ interface CatalogReviewViewProps {
   onSaveMediaItem(input: SaveMediaItemInput): void;
   onCreateDiscSelection(input: CreateDiscSelectionInput): void;
   onDeleteDiscSelection(id: string): void;
-  onCompleteReview(): void;
+  onCompleteReview(outcome: CompletedCatalogReviewOutcome): void;
 }
 
 export function CatalogReviewView({
@@ -58,12 +62,14 @@ export function CatalogReviewView({
   selectionKind,
   activeMappingProposal,
   activeEpisodicMappingProposal = null,
+  archiveOnlySelected,
   onClose,
   onRetry,
   onEditMediaItem,
   onCancelEdit,
   onDiscSelectionsPage,
   onSelectionKindChange,
+  onArchiveOnlyChange,
   onStartMappingProposal,
   onCancelMappingProposal,
   onCreateMappingProposal,
@@ -112,7 +118,11 @@ export function CatalogReviewView({
         </div>
         <div className="profile-actions">
           <span className="attention-mark">
-            {review.reviewStatus === "reviewed" ? "Reviewed" : "Needs review"}
+            {review.reviewOutcome === "reviewed_with_selections"
+              ? "Reviewed with selections"
+              : review.reviewOutcome === "archive_only"
+              ? "Archive only"
+              : "Needs review"}
           </span>
           <button type="button" onClick={onClose}>Close review</button>
         </div>
@@ -173,7 +183,9 @@ export function CatalogReviewView({
           <CatalogReviewCompletion
             isSaving={isSaving}
             coverage={review.coverage}
-            reviewStatus={review.reviewStatus}
+            reviewOutcome={review.reviewOutcome}
+            archiveOnlySelected={archiveOnlySelected}
+            onArchiveOnlyChange={onArchiveOnlyChange}
             onComplete={onCompleteReview}
           />
         </section>
@@ -203,12 +215,14 @@ export function CatalogReviewEditor({
       selectionKind={review.selectionKind}
       activeMappingProposal={review.activeMappingProposal}
       activeEpisodicMappingProposal={review.activeEpisodicMappingProposal}
+      archiveOnlySelected={review.archiveOnlySelected}
       onClose={onClose}
       onRetry={review.retry}
       onEditMediaItem={review.editMediaItem}
       onCancelEdit={review.cancelEdit}
       onDiscSelectionsPage={review.changeDiscSelectionOffset}
       onSelectionKindChange={review.changeSelectionKind}
+      onArchiveOnlyChange={review.changeArchiveOnlySelected}
       onStartMappingProposal={review.startMappingProposal}
       onCancelMappingProposal={review.cancelMappingProposal}
       onCreateMappingProposal={review.createMappingProposal}

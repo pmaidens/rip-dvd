@@ -3,6 +3,7 @@ import type {
   ARCHIVE_REQUEST_STATUSES,
   ARCHIVE_RUNNING_PROGRESS_PHASES,
   ARCHIVE_FORMATS,
+  CATALOG_REVIEW_OUTCOMES,
   DETECTED_DISC_STATUSES,
   DISC_KINDS,
   DISC_INSPECTION_ATTEMPT_OUTCOMES,
@@ -22,6 +23,11 @@ import type {
 } from "./disc-selection-source-identity.js";
 
 export type ArchiveFormat = (typeof ARCHIVE_FORMATS)[number];
+export type CatalogReviewOutcome = (typeof CATALOG_REVIEW_OUTCOMES)[number];
+export type CompletedCatalogReviewOutcome = Exclude<
+  CatalogReviewOutcome,
+  "needs_review"
+>;
 export type DiscKind = (typeof DISC_KINDS)[number];
 export type DetectedDiscStatus = (typeof DETECTED_DISC_STATUSES)[number];
 export type MediaItemKind = (typeof MEDIA_ITEM_KINDS)[number];
@@ -174,6 +180,7 @@ export interface OriginalDiscArchive {
   sizeBytes: number | null;
   archivedAt: Date;
   catalogReviewedAt: Date | null;
+  catalogReviewOutcome: CatalogReviewOutcome;
   verificationStatus: FilesystemVerificationStatus | null;
   verificationMessage: string | null;
   verifiedAt: Date | null;
@@ -572,6 +579,7 @@ export interface CatalogAccess {
   completeCatalogReview(
     id: OriginalDiscArchiveId,
     catalogRevision: Date,
+    outcome: CompletedCatalogReviewOutcome,
   ): OriginalDiscArchive;
   createMediaItem(input: CreateMediaItemInput): MediaItem;
   createMappingProposal(

@@ -69,8 +69,9 @@ describe("Catalog Review API", () => {
         archiveFormat: "iso",
         archivedAt: archive.archivedAt.toISOString(),
         catalogReviewedAt: null,
+        catalogReviewOutcome: "needs_review",
       },
-      reviewStatus: "needs_review",
+      reviewOutcome: "needs_review",
       rawScan: {
         titles: [{
           number: 1,
@@ -200,6 +201,118 @@ describe("Catalog Review API", () => {
       episode.id,
     ]));
     expect(reviewMediaItemIds).not.toContain(unrelated.id);
+  });
+
+  it("completes Archive-only Review explicitly and rejects stale or contradictory outcomes", async () => {
+    const access = dataAccessFixture.create();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "route-archive-only-review",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Route Archive Only.iso",
+      fingerprint: "route-archive-only-review",
+    });
+    const getReview = async () => {
+      const response = await createCatalogReviewRoute(
+        new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`),
+        archive.id,
+        () => access,
+        () => "http://localhost:3000",
+      );
+      expect(response.status).toBe(200);
+      return response.json();
+    };
+    const mutate = (body: unknown) => createCatalogReviewRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+        },
+        body: JSON.stringify(body),
+      }),
+      archive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+
+    const pending = await getReview();
+    expect(pending.reviewOutcome).toBe("needs_review");
+    const contradictorySelections = await mutate({
+      action: "complete_review",
+      catalogRevision: pending.catalogRevision,
+      outcome: "reviewed_with_selections",
+    });
+    expect(contradictorySelections.status).toBe(409);
+    await expect(contradictorySelections.json()).resolves.toEqual({
+      error: "Catalog review requires at least one Disc Selection",
+    });
+
+    const completed = await mutate({
+      action: "complete_review",
+      catalogRevision: pending.catalogRevision,
+      outcome: "archive_only",
+    });
+    expect(completed.status).toBe(200);
+    await expect(completed.json()).resolves.toEqual({
+      archive: {
+        id: archive.id,
+        catalogReviewedAt: expect.any(String),
+        catalogReviewOutcome: "archive_only",
+      },
+    });
+    expect((await getReview()).reviewOutcome).toBe("archive_only");
+
+    const mediaItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Review Reopened",
+    });
+    access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: mediaItem.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    const reopened = await getReview();
+    expect(reopened).toMatchObject({
+      reviewOutcome: "needs_review",
+      archive: {
+        catalogReviewedAt: null,
+        catalogReviewOutcome: "needs_review",
+      },
+    });
+    expect(reopened.catalogRevision).not.toBe(pending.catalogRevision);
+
+    const staleCompletion = await mutate({
+      action: "complete_review",
+      catalogRevision: pending.catalogRevision,
+      outcome: "archive_only",
+    });
+    expect(staleCompletion.status).toBe(409);
+    expect((await getReview()).reviewOutcome).toBe("needs_review");
+    const currentArchive = access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]!;
+    const activeSelectionContradiction = await mutate({
+      action: "complete_review",
+      catalogRevision: currentArchive.updatedAt.toISOString(),
+      outcome: "archive_only",
+    });
+    expect(activeSelectionContradiction.status).toBe(409);
+    await expect(activeSelectionContradiction.json()).resolves.toEqual({
+      error: "Archive-only Review cannot contain Disc Selections",
+    });
   });
 
   it("offers direct actions for a job-free selection unless legacy cutover repair blocks mutation", async () => {
@@ -718,6 +831,7 @@ describe("Catalog Review API", () => {
     const staleCompletion = await mutate(firstClient, {
       action: "complete_review",
       catalogRevision: staleReview.catalogRevision,
+      outcome: "reviewed_with_selections",
     });
     expect(staleCompletion.status).toBe(409);
     await expect(staleCompletion.json()).resolves.toEqual({
@@ -731,6 +845,7 @@ describe("Catalog Review API", () => {
     expect((await mutate(firstClient, {
       action: "complete_review",
       catalogRevision: currentReview.catalogRevision,
+      outcome: "reviewed_with_selections",
     })).status).toBe(200);
     expect(firstClient.catalog.listOriginalDiscArchives({ ids: [archive.id] }))
       .toEqual([expect.objectContaining({ catalogReviewedAt: expect.any(Date) })]);
@@ -1484,6 +1599,7 @@ describe("Catalog Review API", () => {
       catalogRevision: access.catalog.listOriginalDiscArchives({
         ids: [archive.id],
       })[0]!.updatedAt.toISOString(),
+      outcome: "reviewed_with_selections",
     })).status).toBe(200);
     const deleteResponse = await mutate({
       action: "delete_disc_selection",
@@ -1515,6 +1631,7 @@ describe("Catalog Review API", () => {
       catalogRevision: access.catalog.listOriginalDiscArchives({
         ids: [archive.id],
       })[0]!.updatedAt.toISOString(),
+      outcome: "reviewed_with_selections",
     })).status).toBe(200);
 
     const reviewed = await createCatalogReviewRoute(
@@ -1524,7 +1641,7 @@ describe("Catalog Review API", () => {
       () => "http://localhost:3000",
     );
     const body = await reviewed.json();
-    expect(body.reviewStatus).toBe("reviewed");
+    expect(body.reviewOutcome).toBe("reviewed_with_selections");
     expect(body.archive.catalogReviewedAt).not.toBeNull();
     expect(body.rawScan.titles).toEqual([
       expect.objectContaining({ number: 1, chapters: 8 }),

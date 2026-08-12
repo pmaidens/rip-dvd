@@ -15,6 +15,7 @@ import {
   ARCHIVE_REQUEST_STATUSES,
   ARCHIVE_RUNNING_PROGRESS_PHASES,
   ARCHIVE_FORMATS,
+  CATALOG_REVIEW_OUTCOMES,
   DETECTED_DISC_STATUSES,
   DISC_INSPECTION_ATTEMPT_OUTCOMES,
   DISC_INSPECTION_PHASES,
@@ -332,6 +333,11 @@ export const originalDiscArchives = sqliteTable(
     catalogReviewedAt: integer("catalog_reviewed_at", {
       mode: "timestamp_ms",
     }),
+    catalogReviewOutcome: text("catalog_review_outcome", {
+      enum: CATALOG_REVIEW_OUTCOMES,
+    })
+      .notNull()
+      .default("needs_review"),
     legacyCutoverPending: integer("legacy_cutover_pending", {
       mode: "boolean",
     })
@@ -363,6 +369,10 @@ export const originalDiscArchives = sqliteTable(
     check(
       "original_disc_archives_size_check",
       sql`${table.sizeBytes} is null or ${table.sizeBytes} >= 0`,
+    ),
+    check(
+      "original_disc_archives_catalog_review_outcome_check",
+      sql`${table.catalogReviewOutcome} in (${sqliteStringLiterals(CATALOG_REVIEW_OUTCOMES)}) and (${table.catalogReviewOutcome} = 'needs_review') = (${table.catalogReviewedAt} is null)`,
     ),
     check(
       "original_disc_archives_verification_check",

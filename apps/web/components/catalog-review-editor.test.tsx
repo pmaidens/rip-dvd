@@ -81,8 +81,9 @@ function catalogReview({
       archiveFormat: "iso",
       archivedAt: "2026-08-03T18:00:00.000Z",
       catalogReviewedAt: null,
+      catalogReviewOutcome: "needs_review",
     },
-    reviewStatus: "needs_review",
+    reviewOutcome: "needs_review",
     rawScan: { titles: [] },
     coverage: {
       discSelectionCount: 1,
@@ -860,6 +861,67 @@ describe("CatalogReviewEditor", () => {
       },
     }]);
   });
+
+  it("posts Archive-only completion only after the inline choice is selected", async () => {
+    const review = catalogReview({
+      archiveId: "archive-a",
+      discLabel: "ARCHIVE_ONLY_DISC",
+    });
+    review.coverage = {
+      discSelectionCount: 0,
+      mediaItemsWithSelections: 0,
+      mappedTitles: 0,
+      partiallyMappedTitles: 0,
+      unmappedTitles: 0,
+      mainFeatureSelections: 0,
+      titles: [],
+    };
+    review.discSelections = [];
+    const postedCommands: unknown[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (init?.method === "POST") {
+        postedCommands.push(JSON.parse(String(init.body)) as unknown);
+        return Response.json({});
+      }
+      return Response.json(review);
+    }));
+    const onCompleted = vi.fn();
+
+    await act(async () => {
+      root.render(
+        <CatalogReviewEditor
+          archiveId="archive-a"
+          onClose={() => undefined}
+          onCompleted={onCompleted}
+        />,
+      );
+    });
+    const archiveOnly = container.querySelector<HTMLInputElement>(
+      '.catalog-complete-action input[type="checkbox"]',
+    );
+    const complete = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Complete review",
+    );
+    if (!archiveOnly || !complete) {
+      throw new Error("Expected inline Archive-only completion controls");
+    }
+    expect(complete.disabled).toBe(true);
+
+    await act(async () => archiveOnly.click());
+    expect(archiveOnly.checked).toBe(true);
+    expect(complete.disabled).toBe(false);
+    await act(async () => complete.click());
+
+    expect(postedCommands).toEqual([{
+      action: "complete_review",
+      catalogRevision: review.catalogRevision,
+      outcome: "archive_only",
+    }]);
+    expect(onCompleted).toHaveBeenCalledOnce();
+  });
 });
 
 function selectOptionValues(html: string, name: string): string[] {
@@ -936,6 +998,7 @@ describe("CatalogReviewView", () => {
       complete_review: {
         action: "complete_review",
         catalogRevision: "2026-08-11T06:00:00.000Z",
+        outcome: "reviewed_with_selections",
       },
     } satisfies Record<CatalogReviewCommand["action"], CatalogReviewCommand>;
     const postedBodies: unknown[] = [];
@@ -967,8 +1030,9 @@ describe("CatalogReviewView", () => {
               archiveFormat: "iso",
               archivedAt: "2026-08-03T18:00:00.000Z",
               catalogReviewedAt: null,
+              catalogReviewOutcome: "needs_review",
             },
-            reviewStatus: "needs_review",
+            reviewOutcome: "needs_review",
             rawScan: {
               titles: [{
                 number: 1,
@@ -1077,12 +1141,14 @@ describe("CatalogReviewView", () => {
         mappingProposalError={null}
         selectionKind="main_feature"
         activeMappingProposal={null}
+        archiveOnlySelected={false}
         onClose={() => undefined}
         onRetry={() => undefined}
         onEditMediaItem={() => undefined}
         onCancelEdit={() => undefined}
         onDiscSelectionsPage={() => undefined}
         onSelectionKindChange={() => undefined}
+        onArchiveOnlyChange={() => undefined}
         onStartMappingProposal={() => undefined}
         onCancelMappingProposal={() => undefined}
         onCreateMappingProposal={() => undefined}
@@ -1147,8 +1213,9 @@ describe("CatalogReviewView", () => {
               archiveFormat: "iso",
               archivedAt: "2026-08-03T19:00:00.000Z",
               catalogReviewedAt: null,
+              catalogReviewOutcome: "needs_review",
             },
-            reviewStatus: "needs_review",
+            reviewOutcome: "needs_review",
             rawScan: { titles: [] },
             coverage: {
               discSelectionCount: 1,
@@ -1214,12 +1281,14 @@ describe("CatalogReviewView", () => {
         mappingProposalError={null}
         selectionKind="main_feature"
         activeMappingProposal={null}
+        archiveOnlySelected={false}
         onClose={() => undefined}
         onRetry={() => undefined}
         onEditMediaItem={() => undefined}
         onCancelEdit={() => undefined}
         onDiscSelectionsPage={() => undefined}
         onSelectionKindChange={() => undefined}
+        onArchiveOnlyChange={() => undefined}
         onStartMappingProposal={() => undefined}
         onCancelMappingProposal={() => undefined}
         onCreateMappingProposal={() => undefined}

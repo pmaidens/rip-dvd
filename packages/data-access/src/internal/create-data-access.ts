@@ -111,6 +111,7 @@ import type {
   ChronologicalListOptions,
   ConsistentReadAccess,
   CreateDiscSelectionInput,
+  CompletedCatalogReviewOutcome,
   DataAccess,
   DetectedDiscId,
   DetectedDiscListOptions,
@@ -497,6 +498,7 @@ export function createDataAccessInternal(
       .update(originalDiscArchives)
       .set({
         catalogReviewedAt: null,
+        catalogReviewOutcome: "needs_review",
         updatedAt: nextCatalogMutationTimestamp(timestamp),
       })
       .where(and(
@@ -773,6 +775,42 @@ export function createDataAccessInternal(
         requireReviewableDiscSelections(archiveId, transaction),
       { behavior: "deferred" },
     );
+  }
+
+  function validateArchiveOnlyOutsideWriter(
+    archiveId: OriginalDiscArchiveId,
+  ): typeof originalDiscArchives.$inferSelect {
+    return database.transaction((transaction) => {
+      const archive = requireRow(
+        transaction
+          .select()
+          .from(originalDiscArchives)
+          .where(eq(originalDiscArchives.id, archiveId))
+          .get(),
+        "original disc archive",
+        archiveId,
+      );
+      if (archive.discKind !== "dvd") {
+        throw new DomainInvariantError(
+          "Catalog review currently requires a DVD Original Disc Archive",
+        );
+      }
+      const activeSelection = transaction
+        .select({ id: discSelections.id })
+        .from(discSelections)
+        .where(and(
+          eq(discSelections.originalDiscArchiveId, archiveId),
+          eq(discSelections.isCatalogActive, true),
+        ))
+        .limit(1)
+        .get();
+      if (activeSelection) {
+        throw new DomainInvariantError(
+          "Archive-only Review cannot contain Disc Selections",
+        );
+      }
+      return archive;
+    }, { behavior: "deferred" });
   }
 
   function requireCurrentCatalogValidation(
@@ -1189,7 +1227,10 @@ export function createDataAccessInternal(
             isNull(encodeJobs.partialCleanupOutputPath),
             isNull(encodeJobs.partialCleanupLeaseToken),
             eq(discSelections.isCatalogActive, true),
-            isNotNull(originalDiscArchives.catalogReviewedAt),
+            eq(
+              originalDiscArchives.catalogReviewOutcome,
+              "reviewed_with_selections",
+            ),
             eq(originalDiscArchives.legacyCutoverPending, false),
           ),
         )
@@ -1345,7 +1386,10 @@ export function createDataAccessInternal(
                     and(
                       eq(discSelections.id, encodeJobs.discSelectionId),
                       eq(discSelections.isCatalogActive, true),
-                      isNotNull(originalDiscArchives.catalogReviewedAt),
+                      eq(
+                        originalDiscArchives.catalogReviewOutcome,
+                        "reviewed_with_selections",
+                      ),
                       eq(originalDiscArchives.legacyCutoverPending, false),
                     ),
                   ),
@@ -2228,7 +2272,7 @@ export function createDataAccessInternal(
               )
             : undefined,
           options?.needsCatalogReviewOnly
-            ? isNull(originalDiscArchives.catalogReviewedAt)
+            ? eq(originalDiscArchives.catalogReviewOutcome, "needs_review")
             : undefined,
           options?.cursor
             ? or(
@@ -2282,7 +2326,7 @@ export function createDataAccessInternal(
         return isBounded && !readsNewer ? rows.reverse() : rows;
       },
 
-      completeCatalogReview(id, catalogRevision) {
+      completeCatalogReview(id, catalogRevision, outcome) {
         if (
           !(catalogRevision instanceof Date) ||
           !Number.isSafeInteger(catalogRevision.getTime())
@@ -2291,8 +2335,18 @@ export function createDataAccessInternal(
             "Catalog review revision must be a valid timestamp",
           );
         }
+        if (
+          outcome !== "reviewed_with_selections" &&
+          outcome !== "archive_only"
+        ) {
+          throw new DomainInvariantError(
+            "Catalog review outcome must be reviewed with selections or Archive only",
+          );
+        }
         const timestamp = now();
-        const validatedArchive = validateDiscSelectionsOutsideWriter(id);
+        const validatedArchive = outcome === "reviewed_with_selections"
+          ? validateDiscSelectionsOutsideWriter(id)
+          : validateArchiveOnlyOutsideWriter(id);
         return database.transaction((transaction) => {
           const archive = requireCurrentCatalogValidation(
             validatedArchive,
@@ -2309,12 +2363,18 @@ export function createDataAccessInternal(
             );
           }
           if (archive.catalogReviewedAt !== null) {
-            return archive;
+            if (archive.catalogReviewOutcome === outcome) {
+              return archive;
+            }
+            throw new DomainInvariantError(
+              "Catalog review already has a different completed outcome",
+            );
           }
           const completed = transaction
             .update(originalDiscArchives)
             .set({
               catalogReviewedAt: timestamp,
+              catalogReviewOutcome: outcome,
               updatedAt: nextCatalogMutationTimestamp(timestamp),
             })
             .where(
@@ -2322,6 +2382,7 @@ export function createDataAccessInternal(
                 eq(originalDiscArchives.id, id),
                 eq(originalDiscArchives.updatedAt, catalogRevision),
                 isNull(originalDiscArchives.catalogReviewedAt),
+                eq(originalDiscArchives.catalogReviewOutcome, "needs_review"),
               ),
             )
             .returning()
@@ -2867,6 +2928,7 @@ export function createDataAccessInternal(
               .update(originalDiscArchives)
               .set({
                 catalogReviewedAt: null,
+                catalogReviewOutcome: "needs_review",
                 updatedAt: nextCatalogMutationTimestamp(timestamp),
               })
               .where(eq(originalDiscArchives.id, input.originalDiscArchiveId))
@@ -2969,6 +3031,7 @@ export function createDataAccessInternal(
               .update(originalDiscArchives)
               .set({
                 catalogReviewedAt: null,
+                catalogReviewOutcome: "needs_review",
                 updatedAt: nextCatalogMutationTimestamp(timestamp),
               })
               .where(
@@ -3016,7 +3079,10 @@ export function createDataAccessInternal(
                         originalDiscArchives.id,
                         discSelections.originalDiscArchiveId,
                       ),
-                      isNotNull(originalDiscArchives.catalogReviewedAt),
+                      eq(
+                        originalDiscArchives.catalogReviewOutcome,
+                        "reviewed_with_selections",
+                      ),
                       eq(originalDiscArchives.legacyCutoverPending, false),
                     ),
                   ),
@@ -5271,6 +5337,8 @@ export function createDataAccessInternal(
             querySource
               .select({
                 catalogReviewedAt: originalDiscArchives.catalogReviewedAt,
+                catalogReviewOutcome:
+                  originalDiscArchives.catalogReviewOutcome,
                 legacyCutoverPending:
                   originalDiscArchives.legacyCutoverPending,
                 originalDiscArchiveId: originalDiscArchives.id,
@@ -5295,7 +5363,8 @@ export function createDataAccessInternal(
           selectionReview: ReturnType<typeof selectReviewState>,
         ) => {
           if (
-            selectionReview.catalogReviewedAt === null ||
+            selectionReview.catalogReviewOutcome !==
+              "reviewed_with_selections" ||
             selectionReview.legacyCutoverPending
           ) {
             throw new DomainInvariantError(
