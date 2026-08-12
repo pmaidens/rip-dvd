@@ -1,9 +1,9 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "92e66bab-112e-419f-b28b-116f3429002d",
+  "id": "0acf7433-4627-468b-a2c7-e6d7512f89a2",
   "prevIds": [
-    "df5bee7e-4385-4c8a-a28b-382518c54354"
+    "1d8981d1-865f-41d5-bb0d-967440eb8a15"
   ],
   "ddl": [
     {
@@ -2401,9 +2401,9 @@
         }
       ],
       "isUnique": true,
-      "where": null,
+      "where": "\"optical_drives\".\"is_present\" = true",
       "origin": "manual",
-      "name": "optical_drives_device_path_unique",
+      "name": "optical_drives_present_device_path_unique",
       "entityType": "indexes",
       "table": "optical_drives"
     },
@@ -2662,7 +2662,7 @@
       "table": "encode_jobs"
     },
     {
-      "value": "\"status\" in ('queued', 'running', 'completed', 'failed')",
+      "value": "\"status\" in ('queued', 'running', 'completed', 'failed', 'cancelled')",
       "name": "encode_jobs_status_check",
       "entityType": "checks",
       "table": "encode_jobs"
@@ -2686,7 +2686,7 @@
       "table": "encode_jobs"
     },
     {
-      "value": "\"reserves_output_path\" = 1 or \"status\" = 'failed'",
+      "value": "\"reserves_output_path\" = 1 or \"status\" in ('failed', 'cancelled')",
       "name": "encode_jobs_output_reservation_check",
       "entityType": "checks",
       "table": "encode_jobs"

@@ -526,7 +526,7 @@ describe("data-access facade", () => {
     const predecessorNames = readdirSync(migrationsRoot)
       .filter((name) => /^\d/.test(name))
       .filter(
-        (name) => name !== "20260812034255_disc-inspection-archive-requests",
+        (name) => name !== "20260812151540_disc-inspection-archive-requests",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -3286,10 +3286,10 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
-        name: "20260812142359_even_human_robot",
+        name: "20260812151540_disc-inspection-archive-requests",
       },
       {
-        name: "20260812034255_disc-inspection-archive-requests",
+        name: "20260812142359_even_human_robot",
       },
       {
         name: "20260812011518_optical_drive_present_path_identity",
