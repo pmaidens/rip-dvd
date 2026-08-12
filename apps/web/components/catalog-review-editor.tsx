@@ -49,7 +49,7 @@ interface CatalogReviewViewProps {
     input: CreateEpisodicMappingProposalInput,
   ): void;
   onSaveMediaItem(input: SaveMediaItemInput): void;
-  onDeleteMediaItem?(id: string): void;
+  onDeleteMediaItem(id: string): void;
   onCreateDiscSelection(input: CreateDiscSelectionInput): void;
   onDeleteDiscSelection(id: string): void;
   onCompleteReview(outcome: CompletedCatalogReviewOutcome): void;
@@ -172,7 +172,7 @@ export function CatalogReviewView({
           onEdit={onEditMediaItem}
           onCancelEdit={onCancelEdit}
           onSave={onSaveMediaItem}
-          onDelete={onDeleteMediaItem ?? (() => undefined)}
+          onDelete={onDeleteMediaItem}
         />
 
         <section

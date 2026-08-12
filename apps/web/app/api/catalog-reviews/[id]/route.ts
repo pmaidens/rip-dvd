@@ -34,6 +34,7 @@ export const runtime = "nodejs";
 
 const CATALOG_REVIEW_SELECTION_PAGE_SIZE = 100;
 const CATALOG_REVIEW_COVERAGE_SELECTION_PAGE_SIZE = 500;
+const CATALOG_REVIEW_MEDIA_ITEM_MAINTENANCE_BATCH_SIZE = 100;
 
 function response(body: unknown, status = 200): Response {
   return Response.json(body, {
@@ -182,11 +183,27 @@ function readCatalogReview(
       snapshot.catalog,
       discSelectionsPage.map((selection) => selection.mediaItemId),
     );
+    const mediaItemMaintenance: MediaItemMaintenance[] = [];
+    for (
+      let offset = 0;
+      offset < reviewMediaItems.length;
+      offset += CATALOG_REVIEW_MEDIA_ITEM_MAINTENANCE_BATCH_SIZE
+    ) {
+      mediaItemMaintenance.push(
+        ...snapshot.catalog.listMediaItemMaintenance({
+          ids: reviewMediaItems.slice(
+            offset,
+            offset + CATALOG_REVIEW_MEDIA_ITEM_MAINTENANCE_BATCH_SIZE,
+          ).map((item) => item.id),
+          currentArchiveId: id,
+        }),
+      );
+    }
     const maintenanceByMediaItemId = new Map(
-      snapshot.catalog.listMediaItemMaintenance({
-        ids: reviewMediaItems.map((item) => item.id),
-        currentArchiveId: id,
-      }).map((maintenance) => [maintenance.mediaItemId, maintenance]),
+      mediaItemMaintenance.map((maintenance) => [
+        maintenance.mediaItemId,
+        maintenance,
+      ]),
     );
     const rawTitles = decodeArchivedDvdTitles(disc.scanData) ?? [];
     return {

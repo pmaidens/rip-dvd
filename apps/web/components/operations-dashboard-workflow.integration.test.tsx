@@ -104,6 +104,7 @@ function renderCatalogReview(review: CatalogReviewDto): string {
       onCancelMappingProposal={() => undefined}
       onCreateMappingProposal={() => undefined}
       onSaveMediaItem={() => undefined}
+      onDeleteMediaItem={() => undefined}
       onCreateDiscSelection={() => undefined}
       onDeleteDiscSelection={() => undefined}
       onCompleteReview={() => undefined}

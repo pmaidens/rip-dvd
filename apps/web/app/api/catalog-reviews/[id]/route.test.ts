@@ -960,7 +960,7 @@ describe("Catalog Review API", () => {
     });
   });
 
-  it("pages more than 500 valid Disc Selections without blocking review", async () => {
+  it("pages more than 500 selections and bounds maintenance reads with hierarchy context", async () => {
     const access = dataAccessFixture.create();
     const drive = access.catalog.upsertOpticalDrive({
       devicePath: "/dev/sr0",
@@ -992,14 +992,27 @@ describe("Catalog Review API", () => {
       archivePath: "/media/originals/Many Selections.iso",
       fingerprint: contentId,
     });
-    const mediaItem = access.catalog.createMediaItem({
-      kind: "bonus_feature",
-      title: "Disc feature",
+    const show = access.catalog.createMediaItem({
+      kind: "tv_show",
+      title: "Many Selections Show",
     });
+    const season = access.catalog.createMediaItem({
+      parentId: show.id,
+      kind: "season",
+      title: "Many Selections Season",
+      seasonNumber: 1,
+    });
+    const episodes = Array.from({ length: 100 }, (_, index) =>
+      access.catalog.createMediaItem({
+        parentId: season.id,
+        kind: "episode",
+        title: `Episode ${index + 1}`,
+        episodeNumber: index + 1,
+      }));
     for (let titleNumber = 1; titleNumber <= 501; titleNumber += 1) {
       access.catalog.createDiscSelection({
         originalDiscArchiveId: archive.id,
-        mediaItemId: mediaItem.id,
+        mediaItemId: episodes[(titleNumber - 1) % episodes.length]!.id,
         sourceIdentity: { kind: "dvd_title", titleNumber },
       });
     }
@@ -1015,6 +1028,7 @@ describe("Catalog Review API", () => {
     expect(firstResponse.status).toBe(200);
     const first = await firstResponse.json();
     expect(first.discSelections).toHaveLength(100);
+    expect(first.mediaItems).toHaveLength(102);
     expect(first.discSelectionsPage).toEqual({
       offset: 0,
       limit: 100,
@@ -1023,7 +1037,7 @@ describe("Catalog Review API", () => {
     });
     expect(first.coverage).toMatchObject({
       discSelectionCount: 501,
-      mediaItemsWithSelections: 1,
+      mediaItemsWithSelections: 100,
       mappedTitles: 501,
       partiallyMappedTitles: 0,
       unmappedTitles: 0,
