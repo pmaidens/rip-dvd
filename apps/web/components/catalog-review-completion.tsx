@@ -1,19 +1,33 @@
+import type {
+  CatalogReviewOutcome,
+  CompletedCatalogReviewOutcome,
+} from "@rip-dvd/data-access";
+
 import type { CatalogReviewCoverage } from "../lib/catalog-review-coverage";
 import { formatCountLabel } from "../lib/format-count-label";
 
 interface CatalogReviewCompletionProps {
   isSaving: boolean;
   coverage: CatalogReviewCoverage;
-  reviewStatus: "needs_review" | "reviewed";
-  onComplete(): void;
+  reviewOutcome: CatalogReviewOutcome;
+  archiveOnlySelected: boolean;
+  onArchiveOnlyChange(selected: boolean): void;
+  onComplete(outcome: CompletedCatalogReviewOutcome): void;
 }
 
 export function CatalogReviewCompletion({
   isSaving,
   coverage,
-  reviewStatus,
+  reviewOutcome,
+  archiveOnlySelected,
+  onArchiveOnlyChange,
   onComplete,
 }: CatalogReviewCompletionProps) {
+  const hasSelections = coverage.discSelectionCount > 0;
+  const isPending = reviewOutcome === "needs_review";
+  const completionOutcome: CompletedCatalogReviewOutcome = hasSelections
+    ? "reviewed_with_selections"
+    : "archive_only";
   return (
     <section
       className="catalog-complete"
@@ -60,18 +74,44 @@ export function CatalogReviewCompletion({
       </dl>
 
       <div className="catalog-complete-action">
-        <p>Completing review removes this archive from the dashboard queue.</p>
-        <button
-          type="button"
-          onClick={onComplete}
-          disabled={
-            isSaving ||
-            coverage.discSelectionCount === 0 ||
-            reviewStatus === "reviewed"
-          }
-        >
-          Complete review
-        </button>
+        <div className="catalog-archive-only-choice">
+          <label>
+            <input
+              type="checkbox"
+              checked={!hasSelections && archiveOnlySelected}
+              disabled={isSaving || hasSelections || !isPending}
+              onChange={(event) => onArchiveOnlyChange(event.target.checked)}
+            />
+            <span>
+              Archive only — I intentionally want no content from this archive
+              encoded
+            </span>
+          </label>
+          {hasSelections ? (
+            <p className="catalog-help">
+              Archive only is unavailable while Disc Selections are active.
+            </p>
+          ) : (
+            <p className="catalog-help">
+              Select Archive only explicitly to distinguish this outcome from
+              an incomplete review.
+            </p>
+          )}
+        </div>
+        <div className="catalog-complete-submit">
+          <p>Completing review removes this archive from the dashboard queue.</p>
+          <button
+            type="button"
+            onClick={() => onComplete(completionOutcome)}
+            disabled={
+              isSaving ||
+              !isPending ||
+              (!hasSelections && !archiveOnlySelected)
+            }
+          >
+            Complete review
+          </button>
+        </div>
       </div>
     </section>
   );

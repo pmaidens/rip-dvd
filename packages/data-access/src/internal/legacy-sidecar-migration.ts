@@ -305,6 +305,7 @@ export function createLegacySidecarImportAccess(
                 .update(originalDiscArchives)
                 .set({
                   catalogReviewedAt: null,
+                  catalogReviewOutcome: "needs_review",
                   legacyCutoverPending: true,
                 })
                 .where(eq(originalDiscArchives.id, archive.id))
@@ -1368,7 +1369,10 @@ export function createLegacySidecarImportAccess(
                 if (archive.catalogReviewedAt !== null) {
                   transaction
                     .update(originalDiscArchives)
-                    .set({ catalogReviewedAt: null })
+                    .set({
+                      catalogReviewedAt: null,
+                      catalogReviewOutcome: "needs_review",
+                    })
                     .where(eq(originalDiscArchives.id, archive.id))
                     .run();
                 }
@@ -1392,7 +1396,10 @@ export function createLegacySidecarImportAccess(
           database.transaction((transaction) => {
             transaction
               .update(originalDiscArchives)
-              .set({ catalogReviewedAt: null })
+              .set({
+                catalogReviewedAt: null,
+                catalogReviewOutcome: "needs_review",
+              })
               .where(
                 or(
                   eq(
@@ -1592,7 +1599,10 @@ export function createLegacySidecarImportAccess(
             database.transaction((transaction) => {
               transaction
                 .update(originalDiscArchives)
-                .set({ catalogReviewedAt: null })
+                .set({
+                  catalogReviewedAt: null,
+                  catalogReviewOutcome: "needs_review",
+                })
                 .where(eq(originalDiscArchives.fingerprint, fingerprint))
                 .run();
             }, { behavior: "immediate" });
@@ -1657,7 +1667,10 @@ export function createLegacySidecarImportAccess(
               }
               transaction
                 .update(originalDiscArchives)
-                .set({ catalogReviewedAt: candidate.reviewedAt })
+                .set({
+                  catalogReviewedAt: candidate.reviewedAt,
+                  catalogReviewOutcome: "reviewed_with_selections",
+                })
                 .where(
                   and(
                     eq(originalDiscArchives.id, candidate.archiveId),

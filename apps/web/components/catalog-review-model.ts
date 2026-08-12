@@ -1,5 +1,6 @@
 import type { DvdTitle } from "@rip-dvd/data-access/dvd-scan";
 import type {
+  CatalogReviewOutcome,
   DiscSelectionSourceIdentityInput,
   DiscSelectionKind,
   MediaItemKind,
@@ -79,8 +80,9 @@ export interface CatalogReviewDto {
     archiveFormat: string;
     archivedAt: string;
     catalogReviewedAt: string | null;
+    catalogReviewOutcome: CatalogReviewOutcome;
   };
-  reviewStatus: "needs_review" | "reviewed";
+  reviewOutcome: CatalogReviewOutcome;
   rawScan: { titles: DvdTitle[] };
   coverage: CatalogReviewCoverage;
   mediaItems: CatalogReviewMediaItem[];

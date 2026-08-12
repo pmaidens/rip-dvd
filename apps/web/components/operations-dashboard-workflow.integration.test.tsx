@@ -92,12 +92,14 @@ function renderCatalogReview(review: CatalogReviewDto): string {
       mappingProposalError={null}
       selectionKind="main_feature"
       activeMappingProposal={null}
+      archiveOnlySelected={false}
       onClose={() => undefined}
       onRetry={() => undefined}
       onEditMediaItem={() => undefined}
       onCancelEdit={() => undefined}
       onDiscSelectionsPage={() => undefined}
       onSelectionKindChange={() => undefined}
+      onArchiveOnlyChange={() => undefined}
       onStartMappingProposal={() => undefined}
       onCancelMappingProposal={() => undefined}
       onCreateMappingProposal={() => undefined}
@@ -571,6 +573,7 @@ describe("end-to-end operations dashboard workflow", () => {
         hasNext: false,
       },
     });
+    expect(catalogReviewHtml).toContain("Archive only");
 
     const catalogMutation = (body: unknown) =>
       createCatalogReviewRoute(
@@ -579,9 +582,40 @@ describe("end-to-end operations dashboard workflow", () => {
         () => access,
         () => trustedOrigin,
       );
+    const archiveOnlyCompletion = await catalogMutation({
+      action: "complete_review",
+      catalogRevision: catalogReview.catalogRevision,
+      outcome: "archive_only",
+    });
+    expect(archiveOnlyCompletion.status).toBe(200);
+    await expect(archiveOnlyCompletion.json()).resolves.toEqual({
+      archive: {
+        id: archive.id,
+        catalogReviewedAt: expect.any(String),
+        catalogReviewOutcome: "archive_only",
+      },
+    });
+    expect(access.catalog.listDiscSelections({ encodeEligibleOnly: true }))
+      .toEqual([]);
+    const archiveOnlyDashboard = await readDashboard(access);
+    expect(archiveOnlyDashboard.snapshot.catalogReview).toEqual({
+      status: "loaded",
+      items: [],
+    });
+    const archiveOnlyReviewResponse = await createCatalogReviewRoute(
+      new Request(`${trustedOrigin}/api/catalog-reviews/${archive.id}`),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    const archiveOnlyReview = await archiveOnlyReviewResponse.json() as
+      CatalogReviewDto;
+    expect(archiveOnlyReview.reviewOutcome).toBe("archive_only");
+    expect(renderCatalogReview(archiveOnlyReview)).toContain("Archive only");
+
     const failedProposal = await catalogMutation({
       action: "create_mapping_proposal",
-      catalogRevision: catalogReview.catalogRevision,
+      catalogRevision: archiveOnlyReview.catalogRevision,
       target: {
         choice: "create_new",
         mediaItem: { kind: "movie", title: "Orphaned Workflow Movie" },
@@ -598,7 +632,7 @@ describe("end-to-end operations dashboard workflow", () => {
 
     const proposalResponse = await catalogMutation({
       action: "create_mapping_proposal",
-      catalogRevision: catalogReview.catalogRevision,
+      catalogRevision: archiveOnlyReview.catalogRevision,
       target: {
         choice: "create_new",
         mediaItem: { kind: "movie", title: "Workflow Movie", year: 2001 },
@@ -643,8 +677,9 @@ describe("end-to-end operations dashboard workflow", () => {
     const refreshedReview = await refreshedReviewResponse.json() as
       CatalogReviewDto;
     expect(refreshedReview.catalogRevision).not.toBe(
-      catalogReview.catalogRevision,
+      archiveOnlyReview.catalogRevision,
     );
+    expect(refreshedReview.reviewOutcome).toBe("needs_review");
     expect(refreshedReview.mediaItems).toEqual([
       expect.objectContaining({ id: proposal.mediaItem.id }),
     ]);
@@ -755,6 +790,7 @@ describe("end-to-end operations dashboard workflow", () => {
     const completedReview = await catalogMutation({
       action: "complete_review",
       catalogRevision: coveredReview.catalogRevision,
+      outcome: "reviewed_with_selections",
     });
     expect(completedReview.status).toBe(200);
     expect((await completedReview.json()).archive.catalogReviewedAt).toEqual(
@@ -825,6 +861,7 @@ describe("end-to-end operations dashboard workflow", () => {
     expect((await catalogMutation({
       action: "complete_review",
       catalogRevision: refreshedCoverage.catalogRevision,
+      outcome: "reviewed_with_selections",
     })).status).toBe(200);
 
     const profile = access.encodingProfiles.create({
