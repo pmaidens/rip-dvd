@@ -122,23 +122,39 @@ export function discoverPhysicalOpticalDrives({
         `--name=${device.blockDevicePath}`,
       ]),
     );
-    const model =
-      normalizeOpticalHardwareText(udev.get("ID_MODEL")) ?? device.model;
-    const vendor =
-      normalizeOpticalHardwareText(udev.get("ID_VENDOR")) ?? device.vendor;
-    if (isVirtualQemuOpticalDevice({ model, vendor })) {
+    const udevModel = normalizeOpticalHardwareText(udev.get("ID_MODEL"));
+    const udevVendor = normalizeOpticalHardwareText(udev.get("ID_VENDOR"));
+    if (
+      isVirtualQemuOpticalDevice({
+        model: device.model,
+        vendor: device.vendor,
+      }) ||
+      isVirtualQemuOpticalDevice({ model: udevModel, vendor: udevVendor })
+    ) {
       continue;
     }
+    const udevSerial = normalizeOpticalHardwareText(
+      udev.get("ID_SERIAL_SHORT"),
+    );
+    if (
+      udevSerial !== undefined &&
+      device.serialNumber !== undefined &&
+      udevSerial !== device.serialNumber
+    ) {
+      throw new Error(
+        `Optical block device ${device.blockDevicePath} has conflicting serial evidence`,
+      );
+    }
     const serialNumber =
-      normalizeOpticalHardwareText(udev.get("ID_SERIAL_SHORT")) ??
+      udevSerial ??
       device.serialNumber ??
       normalizeOpticalHardwareText(udev.get("ID_SERIAL"));
     discovered.push({
       blockDevicePath: device.blockDevicePath,
-      model,
+      model: udevModel ?? device.model,
       scsiGenericPath: pairScsiGenericDevice(device.kernelName, sysfsRoot),
       serialNumber,
-      vendor,
+      vendor: udevVendor ?? device.vendor,
     });
   }
   return discovered.sort((left, right) =>

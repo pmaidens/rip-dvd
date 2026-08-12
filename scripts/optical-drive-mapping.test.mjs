@@ -179,6 +179,78 @@ describe("optical-drive hardware mapping", () => {
     assert.equal(readFileSync(outputPath, "utf8"), "known-working-override\n");
   });
 
+  it("preserves a working override when lsblk and udev serials conflict", async () => {
+    const root = await mkdtemp(join(tmpdir(), "rip-dvd-conflicting-evidence-"));
+    const configPath = join(root, "optical-drives.json");
+    const outputPath = join(root, "compose.override.yaml");
+    mkdirSync(join(root, "sys/class/block/sr1/device/scsi_generic/sg2"), {
+      recursive: true,
+    });
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        version: 1,
+        primarySerialNumber: "UDEV-SERIAL",
+        opticalDriveSerialNumbers: ["UDEV-SERIAL"],
+      }),
+    );
+    writeFileSync(outputPath, "known-working-override\n");
+    const command = (executable) =>
+      executable === "lsblk"
+        ? JSON.stringify({
+            blockdevices: [
+              {
+                path: "/dev/sr1",
+                kname: "sr1",
+                type: "rom",
+                serial: "LSBLK-SERIAL",
+              },
+            ],
+          })
+        : "ID_SERIAL_SHORT=UDEV-SERIAL\n";
+
+    assert.throws(
+      () =>
+        generateHardwareOverride({
+          configPath,
+          outputPath,
+          discover: () =>
+            discoverPhysicalOpticalDrives({
+              command,
+              sysfsRoot: join(root, "sys"),
+            }),
+        }),
+      /conflicting serial evidence/,
+    );
+    assert.equal(readFileSync(outputPath, "utf8"), "known-working-override\n");
+  });
+
+  it("excludes a device when either discovery source identifies QEMU", async () => {
+    const root = await mkdtemp(join(tmpdir(), "rip-dvd-qemu-conflict-"));
+    mkdirSync(join(root, "class/block/sr0/device/scsi_generic/sg1"), {
+      recursive: true,
+    });
+    const command = (executable) =>
+      executable === "lsblk"
+        ? JSON.stringify({
+            blockdevices: [
+              {
+                path: "/dev/sr0",
+                kname: "sr0",
+                type: "rom",
+                vendor: "QEMU",
+                model: "QEMU DVD-ROM",
+              },
+            ],
+          })
+        : "ID_VENDOR=Optiarc\nID_MODEL=DVD_RW\nID_SERIAL_SHORT=MASKED\n";
+
+    assert.deepEqual(
+      discoverPhysicalOpticalDrives({ command, sysfsRoot: root }),
+      [],
+    );
+  });
+
   it("rejects malformed lsblk optical paths", () => {
     assert.throws(
       () =>
