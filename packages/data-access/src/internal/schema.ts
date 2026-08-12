@@ -15,12 +15,13 @@ import {
   ARCHIVE_QUEUED_PROGRESS_PHASES,
   ARCHIVE_RUNNING_PROGRESS_PHASES,
   ARCHIVE_FORMATS,
+  ARCHIVE_JOB_STATUSES,
   DETECTED_DISC_STATUSES,
   DISC_KINDS,
   DISC_SELECTION_KINDS,
+  ENCODE_JOB_STATUSES,
   ENCODE_PROGRESS_PHASES,
   FILESYSTEM_VERIFICATION_STATUSES,
-  JOB_STATUSES,
   MEDIA_DOMAINS,
   MEDIA_ITEM_KINDS,
 } from "../domain-values.js";
@@ -345,7 +346,9 @@ export const archiveJobs = sqliteTable(
     originalDiscArchiveId: text("original_disc_archive_id")
       .$type<OriginalDiscArchiveId>()
       .references(() => originalDiscArchives.id, { onDelete: "restrict" }),
-    status: text("status", { enum: JOB_STATUSES }).notNull().default("queued"),
+    status: text("status", { enum: ARCHIVE_JOB_STATUSES })
+      .notNull()
+      .default("queued"),
     priority: integer("priority").notNull().default(0),
     progressPhase: text("progress_phase", {
       enum: ARCHIVE_PROGRESS_PHASES,
@@ -372,7 +375,7 @@ export const archiveJobs = sqliteTable(
     index("archive_jobs_queue_idx").on(table.status, table.priority, table.createdAt),
     check(
       "archive_jobs_status_check",
-      sql`${table.status} in (${sqliteStringLiterals(JOB_STATUSES)})`,
+      sql`${table.status} in (${sqliteStringLiterals(ARCHIVE_JOB_STATUSES)})`,
     ),
     check(
       "archive_jobs_progress_check",
@@ -409,7 +412,9 @@ export const encodeJobs = sqliteTable(
     reservesOutputPath: integer("reserves_output_path", { mode: "boolean" })
       .notNull()
       .default(true),
-    status: text("status", { enum: JOB_STATUSES }).notNull().default("queued"),
+    status: text("status", { enum: ENCODE_JOB_STATUSES })
+      .notNull()
+      .default("queued"),
     priority: integer("priority").notNull().default(0),
     replaceExistingOutput: integer("replace_existing_output", {
       mode: "boolean",
@@ -463,7 +468,7 @@ export const encodeJobs = sqliteTable(
     index("encode_jobs_queue_idx").on(table.status, table.priority, table.createdAt),
     check(
       "encode_jobs_status_check",
-      sql`${table.status} in (${sqliteStringLiterals(JOB_STATUSES)})`,
+      sql`${table.status} in (${sqliteStringLiterals(ENCODE_JOB_STATUSES)})`,
     ),
     check(
       "encode_jobs_progress_check",
@@ -479,7 +484,7 @@ export const encodeJobs = sqliteTable(
     ),
     check(
       "encode_jobs_output_reservation_check",
-      sql`${table.reservesOutputPath} = 1 or ${table.status} = 'failed'`,
+      sql`${table.reservesOutputPath} = 1 or ${table.status} in ('failed', 'cancelled')`,
     ),
     check(
       "encode_jobs_replacement_identity_check",

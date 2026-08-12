@@ -318,10 +318,29 @@ export async function retryEncodeJob(
       Accept: "application/json",
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ encodeJobId }),
+    body: JSON.stringify({ action: "requeue", encodeJobId }),
   });
   if (!response.ok) {
     throw new Error(await errorMessage(response, "Encode Job retry failed"));
+  }
+}
+
+export async function cancelEncodeJob(
+  encodeJobId: EncodeJobId,
+  fetcher: EncodeJobsFetch = fetch,
+): Promise<void> {
+  const response = await fetcher("/api/encode-jobs", {
+    method: "PATCH",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ action: "cancel", encodeJobId }),
+  });
+  if (!response.ok) {
+    throw new Error(
+      await errorMessage(response, "Encode Job cancellation failed"),
+    );
   }
 }
 

@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import type {
   ArchiveFormat,
   DiscKind,
-  JobStatus,
+  EncodeJobStatus,
 } from "@rip-dvd/data-access";
 
 import { displayTerm } from "../lib/display-term";
@@ -29,7 +29,7 @@ export type FilesystemVerificationInventoryItem =
       mediaTitle: string;
       mediaYear: number | null;
       encodingProfileName: string;
-      jobStatus: JobStatus;
+      jobStatus: EncodeJobStatus;
       updatedAt: string;
     })
   | (FilesystemVerificationInventoryItemBase & {
