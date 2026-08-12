@@ -5075,6 +5075,11 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       isEnabled: true,
       isPresent: true,
     });
+    const thirdEnabledDrive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr4",
+      isEnabled: true,
+      isPresent: true,
+    });
     const approve = (
       opticalDriveId: typeof disabledDrive.id,
       fingerprint: string,
@@ -5097,6 +5102,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     const current = approve(firstEnabledDrive.id, "current-disc", 60);
     const sameDrive = approve(firstEnabledDrive.id, "same-drive-disc", 50);
     const otherDrive = approve(secondEnabledDrive.id, "other-drive-disc", 40);
+    const driveOnly = approve(thirdEnabledDrive.id, "drive-only-disc", 30);
 
     const currentClaim = access.archiveJobs.claimNext("current-worker", {
       opticalDriveId: firstEnabledDrive.id,
@@ -5121,6 +5127,11 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         fingerprint: otherDrive.disc.fingerprint,
       })?.id,
     ).toBe(otherDrive.job.id);
+    expect(
+      access.archiveJobs.claimNext("drive-only-worker", {
+        opticalDriveId: thirdEnabledDrive.id,
+      })?.id,
+    ).toBe(driveOnly.job.id);
 
     access.close();
   });

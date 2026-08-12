@@ -702,12 +702,12 @@ activation are host-local configuration and must not be committed. The archive
 worker can discover and use each explicitly mapped drive while the web and
 encode containers retain no device access. This worker does not eject media.
 
-The worker runs discovery on each configured poll interval. An empty drive is a
-normal state. A long-running scan holds only its own drive and one configured
-concurrency slot, so idle capacity continues polling other drives and can start
-newly approved work within the next interval. Scanner failures are logged per
-drive without hiding other drives, and a failed discovery does not mark every
-known drive missing. Successful DVD
+The worker checks for newly approved Archive Jobs at least once per second and
+runs drive discovery at the configured poll interval capped at five seconds. An
+empty drive is a normal state. A long-running scan holds only its own drive and
+one configured concurrency slot, so idle capacity continues polling other
+drives. Scanner failures are logged per drive without hiding other drives, and
+a failed discovery does not mark every known drive missing. Successful DVD
 scans store title numbers, durations, chapter counts, bounded per-stream
 language/format/channel/source-ID metadata, and a deterministic SHA-256 content
 identity over every declared raw-disc byte. The scanner authenticates through
@@ -733,10 +733,12 @@ cancellation-aware. The full-disc hash has an eight-hour ceiling so slow physica
 drives can complete while a permanently blocked read remains bounded.
 Repeated polls update the same Detected Disc. Dashboard approval atomically
 marks a scanned disc approved and creates its queued Archive Job; discovery
-never approves or queues work by itself. The archive worker claims only work
-for the current disc in an enabled, present drive, copies through a bounded
-hidden partial path, and publishes the fingerprint-named ISO and its Original
-Disc Archive record only after the source and completed image are reverified.
+never approves or queues work by itself. The archive worker claims approved
+work from an enabled, present drive before potentially long medium validation,
+then fails closed if the current physical disc no longer matches. Copying starts
+only after that validation succeeds. It copies through a bounded hidden partial
+path and publishes the fingerprint-named ISO and its Original Disc Archive
+record only after the source and completed image are reverified.
 Progress and terminal state are written to SQLite and reach the dashboard over
 SSE. Failed or interrupted copies are moved to a `.failed` recovery path and
 remain explicitly retryable from the dashboard unless another observation has

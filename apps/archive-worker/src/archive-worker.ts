@@ -4,6 +4,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import type {
   DataAccess,
   DiscoveredOpticalDrive,
+  OpticalDriveId,
+  RunningArchiveJob,
 } from "@rip-dvd/data-access";
 import {
   ARCHIVE_INSPECTION_LEASE_DURATION_MS,
@@ -69,6 +71,146 @@ export interface RunArchiveWorkerOptions extends PollArchiveWorkerOptions {
 interface DrivePollAdmission {
   release(devicePath: string): void;
   tryAcquire(devicePath: string): boolean;
+}
+
+interface ManagedArchiveClaim {
+  claim: RunningArchiveJob;
+  opticalDriveId: OpticalDriveId;
+  signal: AbortSignal;
+}
+
+interface ArchiveClaimLease {
+  signal: AbortSignal;
+  stop(): void;
+}
+
+interface ArchiveClaimCoordinator {
+  claimAvailable(): void;
+  failPending(errorMessage: string): void;
+  finish(claim: RunningArchiveJob): void;
+  forDrive(opticalDriveId: OpticalDriveId):
+    | ManagedArchiveClaim
+    | undefined;
+}
+
+const MAX_ARCHIVE_JOB_CLAIM_INTERVAL_MS = 1_000;
+const MAX_ARCHIVE_DRIVE_POLL_INTERVAL_MS = 5_000;
+
+function requireArchiveWorkerConcurrency(value: number): number {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error("Archive worker concurrency is invalid");
+  }
+  return value;
+}
+
+function boundedArchivePollIntervals(pollIntervalMs: number) {
+  if (!Number.isSafeInteger(pollIntervalMs) || pollIntervalMs <= 0) {
+    throw new Error("Archive worker poll interval is invalid");
+  }
+  return {
+    claimIntervalMs: Math.min(
+      pollIntervalMs,
+      MAX_ARCHIVE_JOB_CLAIM_INTERVAL_MS,
+    ),
+    driveIntervalMs: Math.min(
+      pollIntervalMs,
+      MAX_ARCHIVE_DRIVE_POLL_INTERVAL_MS,
+    ),
+  };
+}
+
+function startArchiveClaimLease(
+  access: DataAccess,
+  claim: RunningArchiveJob,
+  workerSignal: AbortSignal,
+): ArchiveClaimLease {
+  const claimController = new AbortController();
+  const signal = AbortSignal.any([workerSignal, claimController.signal]);
+  const heartbeat = setInterval(() => {
+    try {
+      access.archiveJobs.renewClaim(claim);
+    } catch (error) {
+      claimController.abort(error);
+    }
+  }, Math.floor(ARCHIVE_JOB_LEASE_DURATION_MS / 3));
+  heartbeat.unref();
+  return {
+    signal,
+    stop() {
+      clearInterval(heartbeat);
+    },
+  };
+}
+
+function createArchiveClaimCoordinator({
+  access,
+  concurrency,
+  log,
+  signal,
+  workerId,
+}: {
+  access: DataAccess;
+  concurrency: number;
+  log(message: string): void;
+  signal: AbortSignal;
+  workerId: string;
+}): ArchiveClaimCoordinator {
+  const managed = new Map<
+    RunningArchiveJob["id"],
+    ManagedArchiveClaim & Pick<ArchiveClaimLease, "stop">
+  >();
+  const finish = (claim: RunningArchiveJob) => {
+    const current = managed.get(claim.id);
+    if (current !== undefined) {
+      current.stop();
+      managed.delete(claim.id);
+    }
+  };
+  return {
+    claimAvailable() {
+      while (!signal.aborted && managed.size < concurrency) {
+        const claim = access.archiveJobs.claimNext(workerId);
+        if (claim === null) {
+          return;
+        }
+        const disc = access.catalog.listDetectedDiscs(["approved"], {
+          ids: [claim.detectedDiscId],
+        })[0];
+        if (disc === undefined) {
+          access.archiveJobs.fail(
+            claim,
+            "Approved DVD evidence disappeared before archiving",
+          );
+          continue;
+        }
+        const lease = startArchiveClaimLease(access, claim, signal);
+        managed.set(claim.id, {
+          claim,
+          opticalDriveId: disc.opticalDriveId,
+          signal: lease.signal,
+          stop: lease.stop,
+        });
+      }
+    },
+    failPending(errorMessage) {
+      for (const current of [...managed.values()]) {
+        try {
+          access.archiveJobs.fail(current.claim, errorMessage);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          log(`Archive Job failure state could not be persisted: ${message}`);
+        } finally {
+          finish(current.claim);
+        }
+      }
+    },
+    finish,
+    forDrive(opticalDriveId) {
+      return [...managed.values()].find(
+        (current) => current.opticalDriveId === opticalDriveId,
+      );
+    },
+  };
 }
 
 function resolveConfiguredDevicePath(devicePath: string): string {
@@ -159,7 +301,7 @@ async function confirmAuthorizedDrive({
 
 async function pollArchiveWorkerWithDriveAdmission({
   access,
-  concurrency = 1,
+  concurrency: requestedConcurrency = 1,
   configuredDevicePath,
   copyRunner,
   hardware,
@@ -167,11 +309,12 @@ async function pollArchiveWorkerWithDriveAdmission({
   originalsLibraryPath,
   signal,
   workerId = "archive-worker",
-}: PollArchiveWorkerOptions, admission?: DrivePollAdmission): Promise<void> {
+}: PollArchiveWorkerOptions,
+  admission?: DrivePollAdmission,
+  claimCoordinator?: ArchiveClaimCoordinator,
+): Promise<void> {
   signal.throwIfAborted();
-  if (!Number.isSafeInteger(concurrency) || concurrency <= 0) {
-    throw new Error("Archive worker concurrency is invalid");
-  }
+  const concurrency = requireArchiveWorkerConcurrency(requestedConcurrency);
   access.archiveJobs.recoverInterruptedInspections();
   access.archiveJobs.recoverExpiredClaims();
   const discovered = await hardware.discover(signal);
@@ -196,6 +339,17 @@ async function pollArchiveWorkerWithDriveAdmission({
     if (admission !== undefined && !admission.tryAcquire(drive.devicePath)) {
       return;
     }
+
+    const managedClaim = claimCoordinator?.forDrive(drive.id);
+    let archiveSignal = managedClaim?.signal ?? signal;
+    let claim: RunningArchiveJob | null = managedClaim?.claim ?? null;
+    let localClaimLease: ArchiveClaimLease | undefined;
+    let publishedArchivePath: string | undefined;
+    const startClaim = (nextClaim: RunningArchiveJob) => {
+      localClaimLease = startArchiveClaimLease(access, nextClaim, signal);
+      archiveSignal = localClaimLease.signal;
+      return nextClaim;
+    };
 
     try {
       const expected = discoveredByPath.get(drive.devicePath);
@@ -222,10 +376,22 @@ async function pollArchiveWorkerWithDriveAdmission({
         phase: "DVD scanning",
         signal,
       });
+      if (
+        claimCoordinator === undefined &&
+        copyRunner !== undefined &&
+        originalsLibraryPath !== undefined
+      ) {
+        const pendingClaim = access.archiveJobs.claimNext(workerId, {
+          opticalDriveId: drive.id,
+        });
+        if (pendingClaim !== null) {
+          claim = startClaim(pendingClaim);
+        }
+      }
       const inspection = access.archiveJobs.beginDriveInspection(drive.id);
       const inspectionController = new AbortController();
       const inspectionSignal = AbortSignal.any([
-        signal,
+        archiveSignal,
         inspectionController.signal,
       ]);
       const inspectionHeartbeat = inspection.jobIds.length > 0
@@ -247,8 +413,11 @@ async function pollArchiveWorkerWithDriveAdmission({
         }
         access.archiveJobs.finishDriveInspection(inspection);
       }
-      signal.throwIfAborted();
+      archiveSignal.throwIfAborted();
       if (scan === null) {
+        if (claim !== null) {
+          throw new Error("DVD medium is unavailable before archiving");
+        }
         return;
       }
       const confirmedBeforePersistence = await confirmAuthorizedDrive({
@@ -257,9 +426,9 @@ async function pollArchiveWorkerWithDriveAdmission({
         expected: confirmedBeforeScan.discovered,
         hardware,
         phase: "DVD persistence",
-        signal,
+        signal: archiveSignal,
       });
-      await hardware.confirmOpticalDrive(binding, signal);
+      await hardware.confirmOpticalDrive(binding, archiveSignal);
       const disc = access.catalog.registerDetectedDisc({
         opticalDriveId: confirmedBeforePersistence.persisted.id,
         discKind: "dvd",
@@ -272,78 +441,77 @@ async function pollArchiveWorkerWithDriveAdmission({
       if (disc.status === "detected") {
         access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
       }
-      if (
-        copyRunner === undefined ||
-        originalsLibraryPath === undefined ||
-        scan.sizeBytes === undefined
-      ) {
+      if (copyRunner === undefined || originalsLibraryPath === undefined) {
         return;
       }
-      const claim = access.archiveJobs.claimNext(workerId, {
-        opticalDriveId: confirmedBeforePersistence.persisted.id,
-        fingerprint: scan.fingerprint,
-      });
-      if (!claim) {
-        return;
-      }
-
-      const claimController = new AbortController();
-      const archiveSignal = AbortSignal.any([
-        signal,
-        claimController.signal,
-      ]);
-      const heartbeat = setInterval(() => {
-        try {
-          access.archiveJobs.renewClaim(claim);
-        } catch (error) {
-          claimController.abort(error);
+      if (scan.sizeBytes === undefined) {
+        if (claim !== null) {
+          throw new Error("DVD size is unavailable before archiving");
         }
-      }, Math.floor(ARCHIVE_JOB_LEASE_DURATION_MS / 3));
-      heartbeat.unref();
-      let publishedArchivePath: string | undefined;
-      try {
-        const preserved = await preserveDvdArchive({
-          devicePath: binding.drive.devicePath,
+        return;
+      }
+      if (claim === null) {
+        if (claimCoordinator !== undefined) {
+          return;
+        }
+        const lateClaim = access.archiveJobs.claimNext(workerId, {
+          opticalDriveId: confirmedBeforePersistence.persisted.id,
           fingerprint: scan.fingerprint,
-          originalsLibraryPath,
-          runner: copyRunner,
-          signal: archiveSignal,
-          sizeBytes: scan.sizeBytes,
-          onProgress: (progress) => {
-            access.archiveJobs.updateProgress(claim, progress);
-          },
-          verifySource: async () => {
-            await confirmAuthorizedDrive({
-              access,
-              configuredCanonicalPath,
-              expected: binding.drive,
-              hardware,
-              phase: "DVD persistence",
-              signal: archiveSignal,
-            });
-            await hardware.confirmOpticalDrive(binding, archiveSignal);
-            const verified = await hardware.scanDvd(binding, archiveSignal);
-            if (
-              verified === null ||
-              verified.fingerprint !== scan.fingerprint ||
-              verified.sizeBytes !== scan.sizeBytes
-            ) {
-              throw new Error("DVD medium changed during archiving");
-            }
-          },
         });
-        publishedArchivePath = preserved.archivePath;
-        try {
-          access.archiveJobs.publish(claim, {
-            archivePath: preserved.archivePath,
-            sizeBytes: preserved.sizeBytes,
-          });
-        } catch (error) {
-          await quarantinePublishedArchive(preserved.archivePath);
-          publishedArchivePath = undefined;
-          throw error;
+        if (lateClaim === null) {
+          return;
         }
+        claim = startClaim(lateClaim);
+      }
+      if (claim.detectedDiscId !== disc.id) {
+        throw new Error("DVD medium changed before archiving");
+      }
+      const activeClaim = claim;
+
+      const preserved = await preserveDvdArchive({
+        devicePath: binding.drive.devicePath,
+        fingerprint: scan.fingerprint,
+        originalsLibraryPath,
+        runner: copyRunner,
+        signal: archiveSignal,
+        sizeBytes: scan.sizeBytes,
+        onProgress: (progress) => {
+          access.archiveJobs.updateProgress(activeClaim, progress);
+        },
+        verifySource: async () => {
+          await confirmAuthorizedDrive({
+            access,
+            configuredCanonicalPath,
+            expected: binding.drive,
+            hardware,
+            phase: "DVD persistence",
+            signal: archiveSignal,
+          });
+          await hardware.confirmOpticalDrive(binding, archiveSignal);
+          const verified = await hardware.scanDvd(binding, archiveSignal);
+          if (
+            verified === null ||
+            verified.fingerprint !== scan.fingerprint ||
+            verified.sizeBytes !== scan.sizeBytes
+          ) {
+            throw new Error("DVD medium changed during archiving");
+          }
+        },
+      });
+      publishedArchivePath = preserved.archivePath;
+      try {
+        access.archiveJobs.publish(activeClaim, {
+          archivePath: preserved.archivePath,
+          sizeBytes: preserved.sizeBytes,
+        });
       } catch (error) {
+        await quarantinePublishedArchive(preserved.archivePath);
+        publishedArchivePath = undefined;
+        throw error;
+      }
+      claimCoordinator?.finish(activeClaim);
+    } catch (error) {
+      if (claim !== null) {
         const message = signal.aborted
           ? "Archive interrupted"
           : error instanceof Error
@@ -363,20 +531,20 @@ async function pollArchiveWorkerWithDriveAdmission({
         if (publishedArchivePath !== undefined) {
           await quarantinePublishedArchive(publishedArchivePath);
         }
+        claimCoordinator?.finish(claim);
         if (signal.aborted) {
           throw error;
         }
         log(`DVD archive failed for ${drive.devicePath}: ${message}`);
-      } finally {
-        clearInterval(heartbeat);
+        return;
       }
-    } catch (error) {
       if (signal.aborted) {
         throw error;
       }
       const message = error instanceof Error ? error.message : String(error);
       log(`DVD scan failed for ${drive.devicePath}: ${message}`);
     } finally {
+      localClaimLease?.stop();
       admission?.release(drive.devicePath);
     }
   };
@@ -423,13 +591,25 @@ export async function runArchiveWorker({
   waitForNextPoll: wait = waitForNextPoll,
   ...pollOptions
 }: RunArchiveWorkerOptions): Promise<void> {
-  const concurrency = pollOptions.concurrency ?? 1;
-  if (!Number.isSafeInteger(concurrency) || concurrency <= 0) {
-    throw new Error("Archive worker concurrency is invalid");
-  }
+  const concurrency = requireArchiveWorkerConcurrency(
+    pollOptions.concurrency ?? 1,
+  );
+  const { claimIntervalMs, driveIntervalMs } =
+    boundedArchivePollIntervals(pollIntervalMs);
   // A long operation owns only its physical drive and one concurrency slot.
   // Later scheduler ticks can still poll other drives without overlapping it.
   const activeDevicePaths = new Set<string>();
+  const claimCoordinator =
+    pollOptions.copyRunner !== undefined &&
+    pollOptions.originalsLibraryPath !== undefined
+      ? createArchiveClaimCoordinator({
+          access: pollOptions.access,
+          concurrency,
+          log: pollOptions.log,
+          signal: pollOptions.signal,
+          workerId: pollOptions.workerId ?? "archive-worker",
+        })
+      : undefined;
   const admission: DrivePollAdmission = {
     release(devicePath) {
       activeDevicePaths.delete(devicePath);
@@ -457,6 +637,7 @@ export async function runArchiveWorker({
     polling = pollArchiveWorkerWithDriveAdmission(
       pollOptions,
       admission,
+      claimCoordinator,
     )
       .catch((error: unknown) => {
         if (!pollOptions.signal.aborted) {
@@ -470,18 +651,28 @@ export async function runArchiveWorker({
     inFlightPolls.add(polling);
   };
 
-  while (!pollOptions.signal.aborted) {
-    startAvailableDrivePolls();
-    if (pollOptions.signal.aborted) {
-      break;
-    }
-    try {
-      await wait(pollIntervalMs, pollOptions.signal);
-    } catch (error) {
-      if (!pollOptions.signal.aborted) {
-        throw error;
+  let nextDrivePollAt = 0;
+  try {
+    while (!pollOptions.signal.aborted) {
+      claimCoordinator?.claimAvailable();
+      const currentTime = Date.now();
+      if (currentTime >= nextDrivePollAt) {
+        startAvailableDrivePolls();
+        nextDrivePollAt = currentTime + driveIntervalMs;
+      }
+      if (pollOptions.signal.aborted) {
+        break;
+      }
+      try {
+        await wait(claimIntervalMs, pollOptions.signal);
+      } catch (error) {
+        if (!pollOptions.signal.aborted) {
+          throw error;
+        }
       }
     }
+  } finally {
+    await Promise.allSettled(inFlightPolls);
+    claimCoordinator?.failPending("Archive interrupted");
   }
-  await Promise.allSettled(inFlightPolls);
 }
