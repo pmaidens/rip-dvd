@@ -570,8 +570,12 @@ existing identity, source coordinates, and an optional Disc Selection label
 remain visible before the Disc Selection is saved atomically. Existing-item
 search is a separate non-cacheable, bounded, paged full-catalog read. It shows
 ancestor context and may label exact or normalized title suggestions, but never
-selects or merges a Media Item automatically. DVD main feature mapping remains
-a separate archive-level action.
+selects or merges a Media Item automatically. The same bounded search exposes
+unused Media Items for maintenance. Before a metadata or hierarchy edit, the
+workbench reports how many other archives use that shared item; a successful
+edit reports **Metadata saved** and does not reopen any Catalog Review. Mapping
+mutations instead report **Mapping changed; review required**. DVD main feature
+mapping remains a separate archive-level action.
 Bulk episode mapping lets an operator select uncovered DVD titles and provide a
 required starting episode number. The initial proposal follows DVD title
 number, while every Episode name, Episode number, and optional Disc Selection
@@ -620,10 +624,15 @@ for explicit title/chapter review. The same-origin, non-cacheable workflow pages
 large Disc Selection sets while limiting its principal Media Item hierarchy to
 mappings for the visible archive plus their bounded ancestor context. Unmapped
 global items stay out of the workbench hierarchy but remain discoverable through
-`GET /api/media-items`. Media Item mutations cap parent-child chains at 32
-levels without limiting siblings or the total Media Item count, and reads fail
-closed instead of presenting a truncated chain. The review workflow is exposed
-at `GET`/`POST /api/catalog-reviews/:archiveId`.
+`GET /api/media-items`. A Media Item can be deleted only when it is a leaf with
+no active or historical Disc Selection references. Deletion never cascades into
+children, Disc Selections, or Encode Jobs, and unavailable reasons contain only
+bounded catalog counts rather than filesystem paths. Removing a mistaken
+job-free Assisted Mapping's selections therefore allows its unused leaves to be
+deleted explicitly from the bottom up. Media Item mutations cap parent-child
+chains at 32 levels without limiting siblings or the total Media Item count, and
+reads fail closed instead of presenting a truncated chain. The review workflow
+is exposed at `GET`/`POST /api/catalog-reviews/:archiveId`.
 
 To use host libraries instead, set `RIP_DVD_MEDIA_LIBRARY_HOST_PATH` and
 `RIP_DVD_ORIGINALS_LIBRARY_HOST_PATH`. On native Linux, create new bind-source

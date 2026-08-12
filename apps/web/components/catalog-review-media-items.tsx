@@ -3,14 +3,18 @@ import React from "react";
 import { displayTerm } from "../lib/display-term";
 import { integerFormValue } from "./catalog-review-form";
 import { orderMediaItemHierarchy } from "./catalog-review-hierarchy";
+import { requestMediaItemSearch } from "./catalog-review-media-item-search";
 import {
   mediaItemKinds,
   type CatalogReviewMediaItem,
+  type MediaItemSearchDto,
+  type MediaItemSearchResult,
   type MediaItemKind,
   type SaveMediaItemInput,
 } from "./catalog-review-model";
 
 interface CatalogReviewMediaItemsProps {
+  archiveId: string;
   mediaItems: CatalogReviewMediaItem[];
   mappedMediaItemIds: readonly string[];
   editingMediaItemId: string | null;
@@ -18,9 +22,67 @@ interface CatalogReviewMediaItemsProps {
   onEdit(id: string): void;
   onCancelEdit(): void;
   onSave(input: SaveMediaItemInput): void;
+  onDelete(id: string): void;
+}
+
+export function CatalogReviewMediaItemMaintenanceResult({
+  result,
+  isSaving,
+  onEdit,
+  onDelete,
+}: {
+  result: MediaItemSearchResult;
+  isSaving: boolean;
+  onEdit(item: CatalogReviewMediaItem): void;
+  onDelete(id: string): void;
+}) {
+  const { maintenance, mediaItem } = result;
+  const deletionUnavailable =
+    maintenance.deletionAvailability.state === "unavailable";
+  return (
+    <li>
+      <div>
+        <strong>{[
+          ...result.ancestors.map((item) => item.title),
+          mediaItem.title,
+        ].join(" › ")}</strong>
+        <span>{displayTerm(mediaItem.kind)}</span>
+        {maintenance.discSelectionReferenceCount === 0 ? (
+          <span>Unused Media Item</span>
+        ) : (
+          <span>{`Used by ${maintenance.referencedArchiveCount} ${
+            maintenance.referencedArchiveCount === 1 ? "archive" : "archives"
+          }`}</span>
+        )}
+        {deletionUnavailable ? (
+          <span>{`Deletion unavailable: ${
+            maintenance.deletionAvailability.reason
+          }`}</span>
+        ) : null}
+      </div>
+      <div className="profile-actions">
+        <button
+          type="button"
+          disabled={isSaving}
+          onClick={() => onEdit(mediaItem)}
+        >
+          Edit
+        </button>
+        <button
+          type="button"
+          disabled={isSaving || deletionUnavailable}
+          title={maintenance.deletionAvailability.reason ?? undefined}
+          onClick={() => onDelete(mediaItem.id)}
+        >
+          Delete Media Item
+        </button>
+      </div>
+    </li>
+  );
 }
 
 export function CatalogReviewMediaItems({
+  archiveId,
   mediaItems,
   mappedMediaItemIds,
   editingMediaItemId,
@@ -28,10 +90,49 @@ export function CatalogReviewMediaItems({
   onEdit,
   onCancelEdit,
   onSave,
+  onDelete,
 }: CatalogReviewMediaItemsProps) {
   const hierarchy = orderMediaItemHierarchy(mediaItems);
   const mappedIds = new Set(mappedMediaItemIds);
-  const editing = mediaItems.find((item) => item.id === editingMediaItemId);
+  const [searchQuery, setSearchQuery] = React.useState("");
+  const [searchResult, setSearchResult] = React.useState<
+    MediaItemSearchDto | null
+  >(null);
+  const [searchError, setSearchError] = React.useState<string | null>(null);
+  const [isSearching, setIsSearching] = React.useState(false);
+  const searchedEditing = searchResult?.results.find(
+    (result) => result.mediaItem.id === editingMediaItemId,
+  );
+  const editing = mediaItems.find((item) => item.id === editingMediaItemId) ??
+    searchedEditing?.mediaItem;
+  const editingMaintenance = editing?.maintenance ??
+    searchedEditing?.maintenance;
+  const parentContext = orderMediaItemHierarchy([
+    ...new Map([
+      ...mediaItems,
+      ...(searchedEditing?.ancestors ?? []),
+    ].map((item) => [item.id, item])).values(),
+  ]);
+
+  async function searchMediaItems(offset = 0) {
+    const query = searchQuery.trim();
+    if (query.length === 0) {
+      setSearchError("Enter a Media Item title to search.");
+      return;
+    }
+    setIsSearching(true);
+    setSearchError(null);
+    try {
+      setSearchResult(await requestMediaItemSearch(query, offset, {
+        archiveId,
+      }));
+    } catch {
+      setSearchResult(null);
+      setSearchError("Media Item maintenance search is unavailable.");
+    } finally {
+      setIsSearching(false);
+    }
+  }
 
   function saveMediaItem(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -73,10 +174,100 @@ export function CatalogReviewMediaItems({
               >
                 Edit
               </button>
+              {item.maintenance ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => onDelete(item.id)}
+                    disabled={
+                      isSaving ||
+                      item.maintenance.deletionAvailability.state ===
+                        "unavailable"
+                    }
+                    title={
+                      item.maintenance.deletionAvailability.reason ?? undefined
+                    }
+                  >
+                    Delete Media Item
+                  </button>
+                  {item.maintenance.deletionAvailability.state ===
+                      "unavailable" ? (
+                    <span>{`Deletion unavailable: ${
+                      item.maintenance.deletionAvailability.reason
+                    }`}</span>
+                  ) : null}
+                </>
+              ) : null}
             </li>
           ))}
         </ul>
       )}
+
+      <section aria-labelledby="media-item-maintenance-search">
+        <h4 id="media-item-maintenance-search">Find Media Items for maintenance</h4>
+        <p className="catalog-help">
+          Search the full catalog, including unused Media Items.
+        </p>
+        <div className="catalog-media-item-search-controls">
+          <label>
+            Search by title
+            <input
+              name="mediaItemMaintenanceSearch"
+              maxLength={256}
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.currentTarget.value)}
+            />
+          </label>
+          <button
+            type="button"
+            disabled={isSaving || isSearching}
+            onClick={() => void searchMediaItems()}
+          >
+            {isSearching ? "Searching…" : "Search full catalog"}
+          </button>
+        </div>
+        {searchError ? <p role="alert">{searchError}</p> : null}
+        {searchResult ? (
+          <>
+            {searchResult.results.length === 0 ? (
+              <p className="catalog-empty">No Media Items matched.</p>
+            ) : (
+              <ul className="catalog-media-item-search-results">
+                {searchResult.results.map((result) => (
+                  <CatalogReviewMediaItemMaintenanceResult
+                    key={result.mediaItem.id}
+                    result={result}
+                    isSaving={isSaving}
+                    onEdit={(item) => onEdit(item.id)}
+                    onDelete={onDelete}
+                  />
+                ))}
+              </ul>
+            )}
+            <div className="catalog-media-item-search-pages">
+              <button
+                type="button"
+                disabled={!searchResult.page.hasPrevious || isSearching}
+                onClick={() => void searchMediaItems(Math.max(
+                  0,
+                  searchResult.page.offset - searchResult.page.limit,
+                ))}
+              >
+                Previous maintenance results
+              </button>
+              <button
+                type="button"
+                disabled={!searchResult.page.hasNext || isSearching}
+                onClick={() => void searchMediaItems(
+                  searchResult.page.offset + searchResult.page.limit,
+                )}
+              >
+                Next maintenance results
+              </button>
+            </div>
+          </>
+        ) : null}
+      </section>
 
       {editing ? (
         <form
@@ -88,6 +279,15 @@ export function CatalogReviewMediaItems({
           <h3>{`Edit ${editing.title}`}</h3>
           <button type="button" onClick={onCancelEdit}>Cancel</button>
         </div>
+        {editingMaintenance && editingMaintenance.otherArchiveCount > 0 ? (
+          <div className="section-message" role="status">
+            {`Changes affect ${editingMaintenance.otherArchiveCount} other ${
+              editingMaintenance.otherArchiveCount === 1
+                ? "archive"
+                : "archives"
+            } that use this Media Item.`}
+          </div>
+        ) : null}
         <div className="catalog-fields">
           <label>
             Title
@@ -110,7 +310,7 @@ export function CatalogReviewMediaItems({
             Parent
             <select name="parentId" defaultValue={editing.parentId ?? ""}>
               <option value="">No parent</option>
-              {hierarchy
+              {parentContext
                 .filter(({ item }) => item.id !== editing.id)
                 .map(({ item, depth }) => (
                   <option key={item.id} value={item.id}>
@@ -151,6 +351,28 @@ export function CatalogReviewMediaItems({
         <button type="submit" disabled={isSaving}>
           Save Media Item
         </button>
+        {editingMaintenance ? (
+          <>
+            <button
+              type="button"
+              disabled={
+                isSaving ||
+                editingMaintenance.deletionAvailability.state === "unavailable"
+              }
+              title={editingMaintenance.deletionAvailability.reason ?? undefined}
+              onClick={() => onDelete(editing.id)}
+            >
+              Delete Media Item
+            </button>
+            {editingMaintenance.deletionAvailability.state === "unavailable"
+              ? (
+                <p>{`Deletion unavailable: ${
+                  editingMaintenance.deletionAvailability.reason
+                }`}</p>
+              )
+              : null}
+          </>
+        ) : null}
         </form>
       ) : null}
     </section>

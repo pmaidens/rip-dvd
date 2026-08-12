@@ -86,6 +86,10 @@ const validCommands = {
     mediaItemId: "media-item-1",
     changes: { title: "Updated Movie" },
   },
+  delete_media_item: {
+    action: "delete_media_item",
+    mediaItemId: "media-item-1",
+  },
   create_disc_selection: {
     action: "create_disc_selection",
     selection: {
@@ -257,6 +261,10 @@ describe("catalog review command contract", () => {
         changes: {},
       },
       "Invalid Media Item update",
+    ],
+    [
+      { action: "delete_media_item" },
+      "Invalid Media Item",
     ],
     [
       {

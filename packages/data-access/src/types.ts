@@ -200,6 +200,17 @@ export interface MediaItem {
   updatedAt: Date;
 }
 
+export interface MediaItemMaintenance {
+  mediaItemId: MediaItemId;
+  childCount: number;
+  discSelectionReferenceCount: number;
+  referencedArchiveCount: number;
+  otherArchiveCount: number;
+  deletionAvailability:
+    | { state: "available"; reason: null }
+    | { state: "unavailable"; reason: string };
+}
+
 interface DiscSelectionBase {
   id: DiscSelectionId;
   originalDiscArchiveId: OriginalDiscArchiveId;
@@ -599,6 +610,11 @@ export interface CatalogAccess {
       episodeNumber?: number | null;
     },
   ): MediaItem;
+  deleteMediaItem(id: MediaItemId): MediaItem;
+  listMediaItemMaintenance(options: {
+    ids: readonly MediaItemId[];
+    currentArchiveId?: OriginalDiscArchiveId;
+  }): MediaItemMaintenance[];
   listMediaItems(options?: {
     ids?: readonly MediaItemId[];
     limit?: number;
@@ -820,6 +836,7 @@ export type SnapshotCatalogAccess = Pick<
   | "listDetectedDiscs"
   | "listOriginalDiscArchives"
   | "listMediaItems"
+  | "listMediaItemMaintenance"
   | "searchMediaItems"
   | "listDiscSelections"
   | "listDiscSelectionActionAvailability"

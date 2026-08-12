@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { DataAccess } from "@rip-dvd/data-access";
+import type { DataAccess, MediaItemId } from "@rip-dvd/data-access";
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -568,6 +568,13 @@ describe("end-to-end operations dashboard workflow", () => {
           expect.objectContaining({ id: existingShow.id }),
           expect.objectContaining({ id: existingSeason.id }),
         ],
+        maintenance: {
+          childCount: 0,
+          discSelectionReferenceCount: 0,
+          referencedArchiveCount: 0,
+          otherArchiveCount: 0,
+          deletionAvailability: { state: "available", reason: null },
+        },
         suggestion: "exact",
       }],
       page: {
@@ -868,6 +875,134 @@ describe("end-to-end operations dashboard workflow", () => {
       outcome: "reviewed_with_selections",
     })).status).toBe(200);
 
+    const sharedFingerprint = "workflow-shared-media-item";
+    const sharedDisc = access.catalog.registerDetectedDisc({
+      opticalDriveId: detectedDisc.opticalDriveId,
+      discKind: "dvd",
+      fingerprint: sharedFingerprint,
+      volumeLabel: "SHARED_WORKFLOW_DISC",
+    });
+    access.catalog.updateDetectedDiscStatus(sharedDisc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(sharedDisc.id, "approved");
+    const sharedArchive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: sharedDisc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: join(originalsLibraryPath, "Shared Workflow Disc.iso"),
+      fingerprint: sharedFingerprint,
+    });
+    access.catalog.createDiscSelection({
+      originalDiscArchiveId: sharedArchive.id,
+      mediaItemId: proposal.mediaItem.id as MediaItemId,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    const sharedRevision = access.catalog.listOriginalDiscArchives({
+      ids: [sharedArchive.id],
+    })[0]!.updatedAt;
+    access.catalog.completeCatalogReview(
+      sharedArchive.id,
+      sharedRevision,
+      "reviewed_with_selections",
+    );
+    const reviewedBeforeMetadata = access.catalog.listOriginalDiscArchives({
+      ids: [archive.id, sharedArchive.id],
+    }).map((candidate) => [
+      candidate.id,
+      candidate.catalogReviewedAt?.toISOString(),
+    ]);
+
+    const sharedReviewResponse = await createCatalogReviewRoute(
+      new Request(`${trustedOrigin}/api/catalog-reviews/${archive.id}`),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    const sharedReview = await sharedReviewResponse.json() as CatalogReviewDto;
+    expect(sharedReview.mediaItems.find(
+      (item) => item.id === proposal.mediaItem.id,
+    )?.maintenance).toMatchObject({
+      otherArchiveCount: 1,
+      deletionAvailability: { state: "unavailable" },
+    });
+
+    const metadataResponse = await catalogMutation({
+      action: "update_media_item",
+      mediaItemId: proposal.mediaItem.id,
+      changes: { title: "Corrected Workflow Movie" },
+    });
+    expect(metadataResponse.status).toBe(200);
+    await expect(metadataResponse.json()).resolves.toMatchObject({
+      message: "Metadata saved",
+      mediaItem: { title: "Corrected Workflow Movie" },
+    });
+    expect(access.catalog.listOriginalDiscArchives({
+      ids: [archive.id, sharedArchive.id],
+    }).map((candidate) => [
+      candidate.id,
+      candidate.catalogReviewedAt?.toISOString(),
+    ])).toEqual(reviewedBeforeMetadata);
+
+    const unavailableDeletion = await catalogMutation({
+      action: "delete_media_item",
+      mediaItemId: proposal.mediaItem.id,
+    });
+    expect(unavailableDeletion.status).toBe(409);
+    const unavailableDeletionBody = await unavailableDeletion.json() as {
+      error: string;
+    };
+    expect(unavailableDeletionBody.error).toMatch(
+      /^Media Item deletion is unavailable: \d+ Disc Selection references$/,
+    );
+    expect(unavailableDeletionBody.error).not.toContain(originalsLibraryPath);
+
+    const mistakenProposalResponse = await catalogMutation({
+      action: "create_mapping_proposal",
+      catalogRevision: access.catalog.listOriginalDiscArchives({
+        ids: [archive.id],
+      })[0]!.updatedAt.toISOString(),
+      target: {
+        choice: "create_new",
+        mediaItem: {
+          parentId: proposal.mediaItem.id,
+          kind: "bonus_feature",
+          title: "Mistaken Assisted Mapping",
+        },
+      },
+      discSelection: {
+        sourceIdentity: { kind: "dvd_title", titleNumber: 4 },
+      },
+    });
+    expect(mistakenProposalResponse.status).toBe(201);
+    const mistakenProposal = await mistakenProposalResponse.json() as {
+      mediaItem: { id: string };
+      discSelection: { id: string };
+    };
+    const removeMistakenSelection = await catalogMutation({
+      action: "delete_disc_selection",
+      discSelectionId: mistakenProposal.discSelection.id,
+    });
+    await expect(removeMistakenSelection.json()).resolves.toMatchObject({
+      message: "Mapping changed; review required",
+    });
+    const deleteMistakenItem = await catalogMutation({
+      action: "delete_media_item",
+      mediaItemId: mistakenProposal.mediaItem.id,
+    });
+    expect(deleteMistakenItem.status).toBe(200);
+    await expect(deleteMistakenItem.json()).resolves.toMatchObject({
+      message: "Media Item deleted",
+    });
+    expect(access.catalog.listMediaItems({
+      ids: [mistakenProposal.mediaItem.id as MediaItemId],
+    })).toEqual([]);
+    expect((await catalogMutation({
+      action: "complete_review",
+      catalogRevision: access.catalog.listOriginalDiscArchives({
+        ids: [archive.id],
+      })[0]!.updatedAt.toISOString(),
+      outcome: "reviewed_with_selections",
+    })).status).toBe(200);
+
     const profile = access.encodingProfiles.create({
       key: "workflow-dvd",
       displayName: "Workflow DVD",
@@ -910,7 +1045,7 @@ describe("end-to-end operations dashboard workflow", () => {
     );
     expect(encodeJob(queuedEncodeSnapshot)).toMatchObject({
       id: queuedEncodeJob.id,
-      mediaTitle: "Workflow Movie",
+      mediaTitle: "Corrected Workflow Movie",
       status: "queued",
     });
     expect(

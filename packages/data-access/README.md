@@ -73,6 +73,12 @@ one whole-title Disc Selection for each of up to 512 proposal entries. Existing
 hierarchy targets must already have the conventional TV Show/Season shape;
 invalid entries, mismatched reuse targets, duplicate titles, and stale catalog
 revisions roll back the entire hierarchy and every selection.
+The bounded `catalog.listMediaItemMaintenance()` read reports child counts, active
+and historical Disc Selection reference counts, referenced-archive scope, and
+path-free deletion availability. `catalog.deleteMediaItem()` runs the same
+checks in an immediate transaction and deletes only an unused leaf; it never
+cascades into hierarchy children, Disc Selections, or Encode Jobs. Media Item
+metadata and hierarchy updates do not alter Original Disc Archive review state.
 The Assisted Mapping contract requires numbered Season/TV Show and Episode/Season
 shapes and limits Trailer or Bonus Feature parents to a Movie, TV Show, Season,
 or Episode; ordinary `createMediaItem()` and `updateMediaItem()` remain flexible
