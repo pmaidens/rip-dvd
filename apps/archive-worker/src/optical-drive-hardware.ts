@@ -9,7 +9,10 @@ import {
   type CommandRunner,
 } from "./optical-drive-command-runner.js";
 import { decodeLsblkOpticalDrives } from "./optical-drive-discovery.js";
-import { createOpticalDriveDvdScanner } from "./optical-drive-dvd-scanner.js";
+import {
+  createOpticalDriveDvdScanner,
+  type DiscInspectionScanOptions,
+} from "./optical-drive-dvd-scanner.js";
 import { createBoundOpticalDriveIdentity } from "./optical-drive-identity.js";
 import { createOpticalDriveScanCache } from "./optical-drive-scan-cache.js";
 import {
@@ -30,6 +33,7 @@ export {
 } from "./optical-drive-command-runner.js";
 
 export {
+  createHashProgressParser,
   createNodeDiscContentProbeLauncher,
   createNodeFileDiscContentProbeLauncher,
   createNodeDiscContentReader,
@@ -100,8 +104,17 @@ export function createLinuxOpticalDriveHardware({
       return identity.bind(drive, signal);
     },
 
-    scanDvd(binding, signal) {
-      return scanner.scan(binding, signal);
+    scanDvd(binding, signal, options?: DiscInspectionScanOptions) {
+      return scanner.scan(binding, signal, options);
+    },
+
+    async observeMediaGeneration(binding, signal) {
+      const safeDevicePath = await identity.requireCurrent(
+        binding,
+        "before DVD scanning",
+        signal,
+      );
+      return mediaGenerationObserver.observe(safeDevicePath, signal);
     },
 
     async confirmOpticalDrive(binding, signal) {

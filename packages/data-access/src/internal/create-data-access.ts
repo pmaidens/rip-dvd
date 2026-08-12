@@ -48,8 +48,11 @@ import {
 } from "./dvd-contract-provenance.js";
 import { assignDvdContentIdAlias } from "./dvd-content-id-alias.js";
 import {
+  archiveRequests,
   archiveJobs,
   detectedDiscs,
+  discInspectionAttempts,
+  discInspections,
   discSelections,
   encodeJobs,
   encodingProfiles,
@@ -96,15 +99,23 @@ import type { LegacySidecarDataAccess } from "../legacy-sidecar-types.js";
 import type {
   ArchiveJobClaimToken,
   ArchiveJobId,
-  ArchiveJobInspectionToken,
   ArchiveJob,
   ArchiveJobStatus,
   ArchiveJobProgress,
+  ArchiveRequestId,
+  ArchiveRequestStatus,
+  ChronologicalListOptions,
   ConsistentReadAccess,
   DataAccess,
   DetectedDiscId,
   DetectedDiscListOptions,
   DetectedDiscStatus,
+  DiscInspectionClaim,
+  DiscInspectionClaimToken,
+  DiscInspectionEvent,
+  DiscInspectionAttemptId,
+  DiscInspectionId,
+  DiscInspectionReasonCode,
   DiscSelectionId,
   DiscSelectionActionAvailability,
   EncodeJobClaimToken,
@@ -125,8 +136,8 @@ import type {
   RunningEncodeJob,
 } from "../types.js";
 import {
-  ARCHIVE_INSPECTION_LEASE_DURATION_MS,
   ARCHIVE_JOB_LEASE_DURATION_MS,
+  DISC_INSPECTION_LEASE_DURATION_MS,
   ENCODE_JOB_LEASE_DURATION_MS,
 } from "../types.js";
 import { newId, requireRow } from "./persistence.js";
@@ -136,6 +147,7 @@ const MIGRATION_LOCK_TIMEOUT_MS = 15_000;
 const MIGRATION_LOCK_STALE_MS = 300_000;
 const MIGRATION_LOCK_POLL_MS = 10;
 const JOB_RECOVERY_LIMIT = 100;
+const RELATED_ACTIVITY_ROOT_LIMIT = 256;
 const LEGACY_ARCHIVE_RECONCILIATION_LIMIT = 4;
 const LEGACY_ARCHIVE_RECONCILIATION_BYTES = 9_000_000_000;
 const DISC_SELECTION_REVIEW_BATCH_SIZE = 100;
@@ -180,15 +192,6 @@ function asRunningEncodeJob(job: EncodeJob): RunningEncodeJob {
     throw new DomainInvariantError("Claimed Encode Job is not running");
   }
   return job as RunningEncodeJob;
-}
-
-function queuedArchiveJobsForFingerprint(fingerprint: string) {
-  return sql`${archiveJobs.status} = 'queued'
-    and ${archiveJobs.detectedDiscId} in (
-      select ${detectedDiscs.id}
-      from ${detectedDiscs}
-      where ${detectedDiscs.fingerprint} = ${fingerprint}
-    )`;
 }
 
 const archiveUsesCurrentDvdContentId = sql<boolean>`
@@ -664,6 +667,9 @@ export function createDataAccessInternal(
   function reconcileLegacyDvdArchiveContentId(
     fingerprint: string,
     sizeBytes: number | undefined,
+    mutationFence?: (
+      querySource: Pick<typeof database, "select">,
+    ) => void,
   ): void {
     if (
       sizeBytes === undefined ||
@@ -731,6 +737,7 @@ export function createDataAccessInternal(
         candidateSizeBytes,
       );
       database.transaction((transaction) => {
+        mutationFence?.(transaction);
         const candidateSizeCondition = candidate.sizeBytes === null
           ? isNull(originalDiscArchives.sizeBytes)
           : eq(originalDiscArchives.sizeBytes, candidate.sizeBytes);
@@ -830,454 +837,76 @@ export function createDataAccessInternal(
     throw new RecordNotFoundError("encoding profile", id);
   }
 
-  const insertApprovedArchiveJob = sqlite.prepare(`
-    insert into archive_jobs (
-      id, detected_disc_id, priority, created_at, updated_at
-    )
-    select ?, detected_discs.id, ?, ?, ?
-    from detected_discs
-    where detected_discs.id = ?
-      and detected_discs.status = 'approved'
-      and not exists (
-        select 1
-        from original_disc_archives
-        where original_disc_archives.fingerprint = detected_discs.fingerprint
-          or exists (
-            select 1
-            from original_disc_archive_content_ids
-            where original_disc_archive_content_ids.original_disc_archive_id = original_disc_archives.id
-              and original_disc_archive_content_ids.content_id = detected_discs.fingerprint
-          )
-      )
-      and not (
-        detected_discs.disc_kind = 'dvd'
-        and length(detected_discs.fingerprint) = 71
-        and substr(detected_discs.fingerprint, 1, 7) = 'sha256:'
-        and substr(detected_discs.fingerprint, 8) not glob '*[^0-9a-f]*'
-        and exists (
-          select 1
-          from original_disc_archives as unresolved_legacy_archives
-          where unresolved_legacy_archives.disc_kind = 'dvd'
-            and not (
-              length(unresolved_legacy_archives.fingerprint) = 71
-              and substr(unresolved_legacy_archives.fingerprint, 1, 7) = 'sha256:'
-              and substr(unresolved_legacy_archives.fingerprint, 8) not glob '*[^0-9a-f]*'
-            )
-            and not exists (
-              select 1
-              from original_disc_archive_content_ids
-              where original_disc_archive_content_ids.original_disc_archive_id = unresolved_legacy_archives.id
-            )
-        )
-      )
-    on conflict (detected_disc_id) do nothing
-  `);
-
-  const listArchiveJobs = createJobList<ArchiveJob, ArchiveJobStatus>({
-    readQueue(statuses) {
+  const listArchiveJobs = createBoundedChronologicalList<
+    ArchiveJob,
+    ArchiveJobStatus,
+    ChronologicalListOptions
+  >({
+    activeStatuses: ["running"],
+    historyStatuses: ["completed", "failed", "aborted"],
+    chronologicalAt: (job) => job.updatedAt,
+    readAll(statuses) {
       return database
         .select()
         .from(archiveJobs)
-        .where(
-          statuses?.length
-            ? inArray(archiveJobs.status, statuses)
-            : undefined,
-        )
-        .orderBy(desc(archiveJobs.priority), asc(archiveJobs.createdAt))
+        .where(statuses?.length ? inArray(archiveJobs.status, statuses) : undefined)
+        .orderBy(asc(archiveJobs.createdAt), asc(archiveJobs.id))
         .all();
     },
     readNewest(statuses, limit) {
       return database
         .select()
         .from(archiveJobs)
-        .where(
-          statuses?.length
-            ? inArray(archiveJobs.status, statuses)
-            : undefined,
-        )
+        .where(statuses?.length ? inArray(archiveJobs.status, statuses) : undefined)
         .orderBy(desc(archiveJobs.updatedAt), desc(archiveJobs.id))
         .limit(limit)
         .all();
     },
   });
 
-  const queuedArchiveJobsForDrive = (opticalDriveId: OpticalDriveId) =>
-    and(
-      eq(archiveJobs.status, "queued"),
-      exists(
-        database
-          .select({ id: detectedDiscs.id })
-          .from(detectedDiscs)
-          .where(
-            and(
-              eq(detectedDiscs.id, archiveJobs.detectedDiscId),
-              eq(detectedDiscs.opticalDriveId, opticalDriveId),
-              eq(detectedDiscs.status, "approved"),
-            ),
-          ),
-      ),
-    );
-
-  type ArchiveJobCompletion =
-    | OriginalDiscArchiveId
-    | { archivePath: string; sizeBytes: number };
-
-  const archiveJobAdapter = {
-    recordType: "archive job",
-    find: (id) =>
-      database.select().from(archiveJobs).where(eq(archiveJobs.id, id)).get(),
-    list: listArchiveJobs,
-    claim: (workerId, token, timestamp, eligibility) => {
-      const eligibilityCondition = eligibility
-        ? and(
-            eq(detectedDiscs.opticalDriveId, eligibility.opticalDriveId),
-            eligibility.fingerprint === undefined
-              ? undefined
-              : eq(
-                  detectedDiscs.fingerprint,
-                  requireNonEmpty(eligibility.fingerprint, "fingerprint"),
-                ),
-          )
-        : sql`1`;
-      const nextApprovedJobId = sql<ArchiveJobId>`(
-        select ${archiveJobs.id}
-        from ${archiveJobs}
-        inner join ${detectedDiscs}
-          on ${detectedDiscs.id} = ${archiveJobs.detectedDiscId}
-        inner join ${opticalDrives}
-          on ${opticalDrives.id} = ${detectedDiscs.opticalDriveId}
-        where ${archiveJobs.status} = 'queued'
-          and ${detectedDiscs.status} = 'approved'
-          and ${opticalDrives.isEnabled} = true
-          and ${opticalDrives.isPresent} = true
-          and ${eligibilityCondition}
-          and (
-            ${detectedDiscs.discKind} <> 'dvd'
-            or not (${detectedDiscUsesCurrentDvdContentId})
-            or not exists (
-              select 1
-              from ${originalDiscArchives}
-              where ${unresolvedLegacyDvdArchiveIdentity}
-            )
-          )
-          and not exists (
-            select 1
-            from ${originalDiscArchives}
-            where ${originalDiscArchives.fingerprint} = ${detectedDiscs.fingerprint}
-              or exists (
-                select 1
-                from ${originalDiscArchiveContentIds}
-                where ${originalDiscArchiveContentIds.originalDiscArchiveId} = ${originalDiscArchives.id}
-                  and ${originalDiscArchiveContentIds.contentId} = ${detectedDiscs.fingerprint}
-              )
-          )
-          and not exists (
-            select 1
-            from archive_jobs as running_archive_jobs
-            inner join detected_discs as running_detected_discs
-              on running_detected_discs.id = running_archive_jobs.detected_disc_id
-            where running_archive_jobs.status = 'running'
-              and (
-                running_detected_discs.fingerprint = ${detectedDiscs.fingerprint}
-                or running_detected_discs.optical_drive_id = ${detectedDiscs.opticalDriveId}
-              )
-          )
-        order by ${archiveJobs.priority} desc,
-          ${archiveJobs.createdAt} asc,
-          ${archiveJobs.id} asc
-        limit 1
-      )`;
-      const claimed = database
-        .update(archiveJobs)
-        .set({
-          status: "running",
-          progressPhase: "preparing",
-          inspectionToken: null,
-          inspectionUpdatedAt: null,
-          claimedBy: workerId,
-          claimToken: token,
-          claimedAt: timestamp,
-          startedAt: timestamp,
-          errorMessage: null,
-          updatedAt: timestamp,
-        })
+  const listArchiveRequests = createBoundedChronologicalList<
+    typeof archiveRequests.$inferSelect,
+    ArchiveRequestStatus,
+    ChronologicalListOptions
+  >({
+    activeStatuses: [
+      "pending",
+      "running",
+      "needs_attention",
+      "cancellation_requested",
+    ],
+    historyStatuses: ["fulfilled", "cancelled"],
+    chronologicalAt: (request) => request.updatedAt,
+    readAll(statuses) {
+      return database
+        .select()
+        .from(archiveRequests)
         .where(
-          and(
-            eq(archiveJobs.status, "queued"),
-            eq(archiveJobs.id, nextApprovedJobId),
-          ),
+          statuses?.length
+            ? inArray(archiveRequests.status, statuses)
+            : undefined,
         )
-        .returning()
-        .get();
-      return claimed ? asRunningArchiveJob(claimed) : undefined;
+        .orderBy(
+          desc(archiveRequests.priority),
+          asc(archiveRequests.createdAt),
+          asc(archiveRequests.id),
+        )
+        .all();
     },
-    isAttemptCurrent: (current, _claim, timestamp) =>
-      current.updatedAt.getTime() >
-      timestamp.getTime() - ARCHIVE_JOB_LEASE_DURATION_MS,
-    updateAttempt: (claim, update, completion) => {
-      const attemptCondition = and(
-        eq(archiveJobs.id, claim.id),
-        eq(archiveJobs.status, "running"),
-        eq(archiveJobs.claimToken, claim.claimToken),
-        gt(
-          archiveJobs.updatedAt,
-          new Date(
-            update.updatedAt.getTime() - ARCHIVE_JOB_LEASE_DURATION_MS,
-          ),
-        ),
-      );
-      if (update.status !== "completed") {
-        return database
-          .update(archiveJobs)
-          .set(update)
-          .where(attemptCondition)
-          .returning()
-          .get();
-      }
-      if (!completion) {
-        throw new DomainInvariantError(
-          "Completing an Archive Job requires an Original Disc Archive",
-        );
-      }
-      if (typeof completion !== "string") {
-        const disc = requireRow(
-          database
-            .select({
-              discKind: detectedDiscs.discKind,
-              fingerprint: detectedDiscs.fingerprint,
-            })
-            .from(detectedDiscs)
-            .where(eq(detectedDiscs.id, claim.detectedDiscId))
-            .get(),
-          "detected disc",
-          claim.detectedDiscId,
-        );
-        if (disc.discKind === "dvd") {
-          reconcileLegacyDvdArchiveContentId(
-            disc.fingerprint,
-            completion.sizeBytes,
-          );
-        }
-      }
-
-      return database.transaction((transaction) => {
-        const current = transaction
-          .select()
-          .from(archiveJobs)
-          .where(attemptCondition)
-          .get();
-        if (!current) {
-          return undefined;
-        }
-        if (typeof completion !== "string") {
-          const disc = requireRow(
-            transaction
-              .select()
-              .from(detectedDiscs)
-              .where(eq(detectedDiscs.id, current.detectedDiscId))
-              .get(),
-            "detected disc",
-            current.detectedDiscId,
-          );
-          if (disc.status !== "approved") {
-            throw new InvalidStatusTransitionError(
-              "detected disc",
-              disc.status,
-              "archived",
-            );
-          }
-          if (
-            findOriginalArchiveByFingerprintOrContentIdAlias(
-              disc.fingerprint,
-              transaction,
-            )
-          ) {
-            throw new DomainInvariantError(
-              "DVD content already has Original Disc Archive provenance",
-            );
-          }
-          requireLegacyDvdArchiveIdentitiesResolved(
-            disc.discKind,
-            disc.fingerprint,
-            transaction,
-          );
-          const archivePath = requireNonEmpty(
-            completion.archivePath,
-            "archivePath",
-          );
-          const archive = requireRow(
-            transaction
-              .insert(originalDiscArchives)
-              .values({
-                id: newId<OriginalDiscArchiveId>(),
-                detectedDiscId: disc.id,
-                discKind: disc.discKind,
-                archiveFormat: "iso",
-                archivePath,
-                fingerprint: disc.fingerprint,
-                legacyCutoverPending:
-                  transaction
-                    .select({
-                      sidecarPath:
-                        legacyCutoverStagedSidecars.sidecarPath,
-                    })
-                    .from(legacyCutoverStagedSidecars)
-                    .where(legacyCutoverFenceCondition(
-                      disc.fingerprint,
-                      archivePath,
-                    ))
-                    .limit(1)
-                    .get() !== undefined,
-                sizeBytes: requirePositiveSafeInteger(
-                  completion.sizeBytes,
-                  "sizeBytes",
-                ),
-                archivedAt: update.updatedAt,
-                createdAt: update.updatedAt,
-                updatedAt: update.updatedAt,
-              })
-              .returning()
-              .get(),
-            "original disc archive",
-            disc.id,
-          );
-          transaction
-            .update(detectedDiscs)
-            .set({ status: "archived", updatedAt: update.updatedAt })
-            .where(eq(detectedDiscs.fingerprint, disc.fingerprint))
-            .run();
-          transaction
-            .delete(archiveJobs)
-            .where(queuedArchiveJobsForFingerprint(disc.fingerprint))
-            .run();
-          return transaction
-            .update(archiveJobs)
-            .set({ ...update, originalDiscArchiveId: archive.id })
-            .where(attemptCondition)
-            .returning()
-            .get();
-        }
-        const matchingArchive = transaction
-          .select({ id: originalDiscArchives.id })
-          .from(originalDiscArchives)
-          .where(
-            and(
-              eq(originalDiscArchives.id, completion),
-              eq(
-                originalDiscArchives.detectedDiscId,
-                current.detectedDiscId,
-              ),
-            ),
-          )
-          .get();
-        if (!matchingArchive) {
-          throw new DomainInvariantError(
-            "Archive Job result must belong to the job's Detected Disc",
-          );
-        }
-        return transaction
-          .update(archiveJobs)
-          .set({ ...update, originalDiscArchiveId: completion })
-          .where(attemptCondition)
-          .returning()
-          .get();
-      }, { behavior: "immediate" });
-    },
-    updateProgressAttempt: (claim, update, details) =>
-      database
-        .update(archiveJobs)
-        .set({ ...update, progressPhase: details.phase })
+    readNewest(statuses, limit) {
+      return database
+        .select()
+        .from(archiveRequests)
         .where(
-          and(
-            eq(archiveJobs.id, claim.id),
-            eq(archiveJobs.status, "running"),
-            eq(archiveJobs.claimToken, claim.claimToken),
-            gt(
-              archiveJobs.updatedAt,
-              new Date(
-                update.updatedAt.getTime() - ARCHIVE_JOB_LEASE_DURATION_MS,
-              ),
-            ),
-          ),
+          statuses?.length
+            ? inArray(archiveRequests.status, statuses)
+            : undefined,
         )
-        .returning()
-        .get(),
-    progressDetailsChanged: (current, previous) =>
-      current?.phase !== previous?.phase,
-    requeue: (id, expectedStatus, _current, update) =>
-      database
-        .update(archiveJobs)
-        .set({
-          ...update,
-          progressPhase: "waiting",
-          inspectionToken: null,
-          inspectionUpdatedAt: null,
-        })
-        .where(
-          and(
-            eq(archiveJobs.id, id),
-            eq(archiveJobs.status, expectedStatus),
-            exists(
-              database
-                .select({ id: detectedDiscs.id })
-                .from(detectedDiscs)
-                .where(
-                  and(
-                    eq(detectedDiscs.id, archiveJobs.detectedDiscId),
-                    eq(detectedDiscs.status, "approved"),
-                    notExists(
-                      database
-                        .select({ id: originalDiscArchives.id })
-                        .from(originalDiscArchives)
-                        .where(
-                          or(
-                            eq(
-                              originalDiscArchives.fingerprint,
-                              detectedDiscs.fingerprint,
-                            ),
-                            exists(
-                              database
-                                .select({
-                                  originalDiscArchiveId:
-                                    originalDiscArchiveContentIds.originalDiscArchiveId,
-                                })
-                                .from(originalDiscArchiveContentIds)
-                                .where(
-                                  and(
-                                    eq(
-                                      originalDiscArchiveContentIds.originalDiscArchiveId,
-                                      originalDiscArchives.id,
-                                    ),
-                                    eq(
-                                      originalDiscArchiveContentIds.contentId,
-                                      detectedDiscs.fingerprint,
-                                    ),
-                                  ),
-                                ),
-                            ),
-                          ),
-                        ),
-                    ),
-                  ),
-                ),
-            ),
-          ),
-        )
-        .returning()
-        .get(),
-  } satisfies JobQueueAdapter<
-    ArchiveJob,
-    RunningArchiveJob,
-    ArchiveJobId,
-    ArchiveJobClaimToken,
-    ArchiveJobCompletion,
-    void,
-    {
-      opticalDriveId: OpticalDriveId;
-      fingerprint?: string;
+        .orderBy(desc(archiveRequests.updatedAt), desc(archiveRequests.id))
+        .limit(limit)
+        .all();
     },
-    Pick<ArchiveJobProgress, "phase">
-  >;
+  });
 
   const listEncodeJobs = createJobList<EncodeJob, EncodeJobStatus>({
     activeStatuses: ["queued", "running"],
@@ -1544,12 +1173,6 @@ export function createDataAccessInternal(
     EncodeJobFailureOptions
   >;
 
-  const archiveJobQueue = createJobQueueController({
-    adapter: archiveJobAdapter,
-    createToken: () => newId<ArchiveJobClaimToken>(),
-    now,
-    requeueFrom: ["failed"],
-  });
   const encodeJobQueue = createJobQueueController({
     adapter: encodeJobAdapter,
     createToken: () => newId<EncodeJobClaimToken>(),
@@ -1594,10 +1217,9 @@ export function createDataAccessInternal(
     },
   });
 
-  function approveDetectedDisc(input: {
+  function createArchiveRequest(input: {
     detectedDiscId: DetectedDiscId;
     priority?: number;
-    allowAlreadyApproved: boolean;
   }) {
     const timestamp = now();
     return database.transaction((transaction) => {
@@ -1611,23 +1233,20 @@ export function createDataAccessInternal(
         input.detectedDiscId,
       );
       if (
-        disc.status !== "scanned" &&
-        !(input.allowAlreadyApproved && disc.status === "approved")
+        findOriginalArchiveByFingerprintOrContentIdAlias(
+          disc.fingerprint,
+          transaction,
+        )
       ) {
+        throw new DomainInvariantError(
+          "A Detected Disc with existing archive provenance cannot be requested",
+        );
+      }
+      if (disc.status !== "scanned" && disc.status !== "approved") {
         throw new InvalidStatusTransitionError(
           "detected disc",
           disc.status,
           "approved",
-        );
-      }
-      const contentIdentityArchive =
-        findOriginalArchiveByFingerprintOrContentIdAlias(
-          disc.fingerprint,
-          transaction,
-        );
-      if (contentIdentityArchive) {
-        throw new DomainInvariantError(
-          "A Detected Disc with existing archive provenance cannot be approved",
         );
       }
       requireLegacyDvdArchiveIdentitiesResolved(
@@ -1635,109 +1254,106 @@ export function createDataAccessInternal(
         disc.fingerprint,
         transaction,
       );
-      const approvedDisc = disc.status === "scanned"
-        ? requireRow(
+      if (disc.status === "scanned") {
+        requireRow(
+          transaction
+            .update(detectedDiscs)
+            .set({ status: "approved", updatedAt: timestamp })
+            .where(
+              and(
+                eq(detectedDiscs.id, disc.id),
+                eq(detectedDiscs.status, "scanned"),
+              ),
+            )
+            .returning({ id: detectedDiscs.id })
+            .get(),
+          "detected disc",
+          disc.id,
+        );
+      }
+
+      const existing = transaction
+        .select()
+        .from(archiveRequests)
+        .where(
+          and(
+            eq(archiveRequests.detectedDiscId, disc.id),
+            inArray(archiveRequests.status, [
+              "pending",
+              "running",
+              "needs_attention",
+              "cancellation_requested",
+            ]),
+          ),
+        )
+        .get();
+      if (existing) {
+        if (
+          input.priority !== undefined &&
+          existing.status === "pending" &&
+          input.priority !== existing.priority
+        ) {
+          return requireRow(
             transaction
-              .update(detectedDiscs)
-              .set({ status: "approved", updatedAt: timestamp })
+              .update(archiveRequests)
+              .set({ priority: input.priority, updatedAt: timestamp })
               .where(
                 and(
-                  eq(detectedDiscs.id, disc.id),
-                  eq(detectedDiscs.status, "scanned"),
+                  eq(archiveRequests.id, existing.id),
+                  eq(archiveRequests.status, "pending"),
                 ),
               )
               .returning()
               .get(),
-            "detected disc",
-            disc.id,
-          )
-        : disc;
-
-      const existing = transaction
-        .select()
-        .from(archiveJobs)
-        .where(eq(archiveJobs.detectedDiscId, disc.id))
-        .get();
-      if (!existing) {
-        const job = requireRow(
-          transaction
-            .insert(archiveJobs)
-            .values({
-              id: newId<ArchiveJobId>(),
-              detectedDiscId: disc.id,
-              priority: input.priority ?? 0,
-              createdAt: timestamp,
-              updatedAt: timestamp,
-            })
-            .returning()
-            .get(),
-          "archive job",
-          disc.id,
-        );
-        return { disc: approvedDisc, job };
+            "archive request",
+            existing.id,
+          );
+        }
+        return existing;
       }
-      if (existing.status === "failed") {
-        const job = requireRow(
-          transaction
-            .update(archiveJobs)
-            .set({
-              status: "queued",
-              priority: input.priority ?? existing.priority,
-              progressPhase: "waiting",
-              progressPercent: 0,
-              inspectionToken: null,
-              inspectionUpdatedAt: null,
-              claimedBy: null,
-              claimToken: null,
-              claimedAt: null,
-              startedAt: null,
-              completedAt: null,
-              errorMessage: null,
-              updatedAt: timestamp,
-            })
-            .where(
-              and(
-                eq(archiveJobs.id, existing.id),
-                eq(archiveJobs.status, "failed"),
-              ),
-            )
-            .returning()
-            .get(),
-          "archive job",
-          existing.id,
-        );
-        return { disc: approvedDisc, job };
-      }
-      if (existing.status === "completed") {
-        throw new DomainInvariantError(
-          "A completed Archive Job cannot be approved without archive provenance",
-        );
-      }
-      if (
-        input.priority !== undefined &&
-        existing.status === "queued" &&
-        input.priority !== existing.priority
-      ) {
-        const job = requireRow(
-          transaction
-            .update(archiveJobs)
-            .set({ priority: input.priority, updatedAt: timestamp })
-            .where(
-              and(
-                eq(archiveJobs.id, existing.id),
-                eq(archiveJobs.status, "queued"),
-              ),
-            )
-            .returning()
-            .get(),
-          "archive job",
-          existing.id,
-        );
-        return { disc: approvedDisc, job };
-      }
-      return { disc: approvedDisc, job: existing };
+      return requireRow(
+        transaction
+          .insert(archiveRequests)
+          .values({
+            id: newId<ArchiveRequestId>(),
+            detectedDiscId: disc.id,
+            priority: input.priority ?? 0,
+            createdAt: timestamp,
+            updatedAt: timestamp,
+          })
+          .returning()
+          .get(),
+        "archive request",
+        disc.id,
+      );
     }, { behavior: "immediate" });
   }
+
+  const archiveProgress = new Map<
+    ArchiveJobId,
+    {
+      token: ArchiveJobClaimToken;
+      latestPercent: number;
+      latestPhase: ArchiveJob["progressPhase"];
+      persistedPercent: number;
+      persistedPhase: ArchiveJob["progressPhase"];
+      persistedAt: number;
+    }
+  >();
+  const inspectionProgress = new Map<
+    DiscInspectionId,
+    {
+      latestBytes: number;
+      latestBytesPerSecond: number | null;
+      latestEtaSeconds: number | null;
+      persistedAt: number;
+      persistedBytes: number;
+      token: DiscInspectionClaimToken;
+    }
+  >();
+  let expiredCancellationCursor:
+    | { id: ArchiveJobId; updatedAt: Date }
+    | undefined;
 
   const access: LegacySidecarDataAccess = {
     readConsistentSnapshot(read) {
@@ -1758,8 +1374,21 @@ export function createDataAccessInternal(
         encodingProfiles: {
           list: (input) => access.encodingProfiles.list(input),
         },
+        discInspections: {
+          list: (options) => access.discInspections.list(options),
+        },
+      archiveRequests: {
+          list: (statuses, options) =>
+            access.archiveRequests.list(statuses, options),
+          listRelevantForDetectedDiscs: (detectedDiscIds) =>
+            access.archiveRequests.listRelevantForDetectedDiscs(
+              detectedDiscIds,
+            ),
+        },
         archiveJobs: {
           list: (statuses, options) => access.archiveJobs.list(statuses, options),
+          listLatestForRequests: (archiveRequestIds) =>
+            access.archiveJobs.listLatestForRequests(archiveRequestIds),
         },
         encodeJobs: {
           list: (statuses, options) => access.encodeJobs.list(statuses, options),
@@ -2126,8 +1755,31 @@ export function createDataAccessInternal(
           }
           if (contentIdentityArchive) {
             transaction
-              .delete(archiveJobs)
-              .where(queuedArchiveJobsForFingerprint(fingerprint))
+              .update(archiveRequests)
+              .set({
+                status: "fulfilled",
+                fulfilledAt: timestamp,
+                updatedAt: timestamp,
+              })
+              .where(
+                and(
+                  inArray(archiveRequests.status, [
+                    "pending",
+                    "needs_attention",
+                  ]),
+                  exists(
+                    transaction
+                      .select({ id: detectedDiscs.id })
+                      .from(detectedDiscs)
+                      .where(
+                        and(
+                          eq(detectedDiscs.id, archiveRequests.detectedDiscId),
+                          eq(detectedDiscs.fingerprint, fingerprint),
+                        ),
+                      ),
+                  ),
+                ),
+              )
               .run();
           }
           return registered;
@@ -2143,10 +1795,16 @@ export function createDataAccessInternal(
 
       updateDetectedDiscStatus(id, status) {
         if (status === "approved") {
-          return approveDetectedDisc({
-            detectedDiscId: id,
-            allowAlreadyApproved: false,
-          }).disc;
+          createArchiveRequest({ detectedDiscId: id });
+          return requireRow(
+            database
+              .select()
+              .from(detectedDiscs)
+              .where(eq(detectedDiscs.id, id))
+              .get(),
+            "detected disc",
+            id,
+          );
         }
         const allowedFrom = Object.entries(detectedDiscTransitions)
           .filter(([, targets]) => targets.includes(status))
@@ -2179,12 +1837,19 @@ export function createDataAccessInternal(
               status,
             );
           }
+          const timestamp = now();
           transaction
-            .delete(archiveJobs)
+            .update(archiveRequests)
+            .set({
+              status: "cancelled",
+              cancellationRequestedAt: timestamp,
+              cancelledAt: timestamp,
+              updatedAt: timestamp,
+            })
             .where(
               and(
-                eq(archiveJobs.detectedDiscId, id),
-                eq(archiveJobs.status, "queued"),
+                eq(archiveRequests.detectedDiscId, id),
+                inArray(archiveRequests.status, ["pending", "needs_attention"]),
               ),
             )
             .run();
@@ -2304,8 +1969,28 @@ export function createDataAccessInternal(
             .where(eq(detectedDiscs.fingerprint, fingerprint))
             .run();
           transaction
-            .delete(archiveJobs)
-            .where(queuedArchiveJobsForFingerprint(fingerprint))
+            .update(archiveRequests)
+            .set({
+              status: "fulfilled",
+              fulfilledAt: timestamp,
+              updatedAt: timestamp,
+            })
+            .where(
+              and(
+                inArray(archiveRequests.status, ["pending", "needs_attention"]),
+                exists(
+                  transaction
+                    .select({ id: detectedDiscs.id })
+                    .from(detectedDiscs)
+                    .where(
+                      and(
+                        eq(detectedDiscs.id, archiveRequests.detectedDiscId),
+                        eq(detectedDiscs.fingerprint, fingerprint),
+                      ),
+                    ),
+                ),
+              ),
+            )
             .run();
           return archive;
         });
@@ -3271,214 +2956,1171 @@ export function createDataAccessInternal(
       },
     },
 
-    archiveJobs: {
-      approve(input) {
-        return approveDetectedDisc({
-          ...input,
-          allowAlreadyApproved: true,
-        }).job;
-      },
-
-      enqueue(input) {
+    discInspections: {
+      beginOrResume(input) {
         const timestamp = now();
-        insertApprovedArchiveJob.run(
-          newId<ArchiveJobId>(),
-          input.priority ?? 0,
-          timestamp.getTime(),
-          timestamp.getTime(),
-          input.detectedDiscId,
+        const mediaGeneration = requireNonEmpty(
+          input.mediaGeneration,
+          "mediaGeneration",
         );
-        const eligible = database
-          .select({ job: archiveJobs })
-          .from(archiveJobs)
-          .innerJoin(
-            detectedDiscs,
-            eq(detectedDiscs.id, archiveJobs.detectedDiscId),
-          )
-          .where(
-            and(
-              eq(archiveJobs.detectedDiscId, input.detectedDiscId),
-              eq(detectedDiscs.status, "approved"),
-              or(
-                ne(detectedDiscs.discKind, "dvd"),
-                sql`not (${detectedDiscUsesCurrentDvdContentId})`,
-                notExists(
-                  database
-                    .select({ id: originalDiscArchives.id })
-                    .from(originalDiscArchives)
-                    .where(unresolvedLegacyDvdArchiveIdentity),
-                ),
+        if (mediaGeneration.length > 64) {
+          throw new DomainInvariantError(
+            "mediaGeneration must contain at most 64 characters",
+          );
+        }
+        return database.transaction((transaction) => {
+          const drive = requireRow(
+            transaction
+              .select()
+              .from(opticalDrives)
+              .where(eq(opticalDrives.id, input.opticalDriveId))
+              .get(),
+            "optical drive",
+            input.opticalDriveId,
+          );
+          if (!drive.isPresent || !drive.isEnabled) {
+            throw new DomainInvariantError(
+              "Disc Inspection requires an enabled, present Optical Drive",
+            );
+          }
+          let current = transaction
+            .select()
+            .from(discInspections)
+            .where(
+              and(
+                eq(discInspections.opticalDriveId, input.opticalDriveId),
+                eq(discInspections.isCurrent, true),
               ),
-              notExists(
-                database
-                  .select({ id: originalDiscArchives.id })
-                  .from(originalDiscArchives)
-                  .where(
-                    or(
-                      eq(
-                        originalDiscArchives.fingerprint,
-                        detectedDiscs.fingerprint,
-                      ),
-                      exists(
-                        database
-                          .select({
-                            originalDiscArchiveId:
-                              originalDiscArchiveContentIds.originalDiscArchiveId,
-                          })
-                          .from(originalDiscArchiveContentIds)
-                          .where(
-                            and(
-                              eq(
-                                originalDiscArchiveContentIds.originalDiscArchiveId,
-                                originalDiscArchives.id,
-                              ),
-                              eq(
-                                originalDiscArchiveContentIds.contentId,
-                                detectedDiscs.fingerprint,
-                              ),
-                            ),
-                          ),
-                      ),
-                    ),
+            )
+            .get();
+          if (current && current.mediaGeneration !== mediaGeneration) {
+            if (current.status === "running") {
+              transaction
+                .insert(discInspectionAttempts)
+                .values({
+                  id: newId<DiscInspectionAttemptId>(),
+                  discInspectionId: current.id,
+                  attemptNumber: current.attemptCount,
+                  outcome: "aborted",
+                  phase: current.phase,
+                  reasonCode: "media_changed",
+                  startedAt: current.attemptStartedAt,
+                  endedAt: timestamp,
+                })
+                .onConflictDoNothing()
+                .run();
+              transaction
+                .update(discInspections)
+                .set({
+                  isCurrent: false,
+                  status: "aborted",
+                  reasonCode: "media_changed",
+                  diagnostic: null,
+                  retryAt: null,
+                  claimToken: null,
+                  claimUpdatedAt: null,
+                  completedAt: timestamp,
+                  updatedAt: timestamp,
+                })
+                .where(
+                  and(
+                    eq(discInspections.id, current.id),
+                    eq(discInspections.isCurrent, true),
+                    eq(discInspections.status, "running"),
                   ),
-              ),
-            ),
-          )
-          .get()?.job;
-        if (eligible) {
-          return eligible;
-        }
-        requireRow(
-          database
-            .select({ id: detectedDiscs.id })
-            .from(detectedDiscs)
-            .where(eq(detectedDiscs.id, input.detectedDiscId))
-            .get(),
-          "detected disc",
-          input.detectedDiscId,
-        );
-        throw new DomainInvariantError(
-          "Only an approved, unarchived Detected Disc can be queued for archiving",
-        );
+                )
+                .run();
+            } else {
+              transaction
+                .update(discInspections)
+                .set({
+                  isCurrent: false,
+                  manualRetryRequestedAt: null,
+                  updatedAt: timestamp,
+                })
+                .where(
+                  and(
+                    eq(discInspections.id, current.id),
+                    eq(discInspections.isCurrent, true),
+                  ),
+                )
+                .run();
+            }
+            inspectionProgress.delete(current.id);
+            current = undefined;
+          }
+
+          if (current) {
+            if (
+              current.status === "failed" &&
+              current.manualRetryRequestedAt !== null
+            ) {
+              current = requireRow(
+                transaction
+                  .update(discInspections)
+                  .set({
+                    status: "running",
+                    phase: "retry_wait",
+                    consecutiveFailureCount: 0,
+                    retryAt: timestamp,
+                    manualRetryRequestedAt: null,
+                    reasonCode: null,
+                    diagnostic: null,
+                    completedAt: null,
+                    phaseStartedAt: timestamp,
+                    updatedAt: timestamp,
+                  })
+                  .where(
+                    and(
+                      eq(discInspections.id, current.id),
+                      eq(discInspections.status, "failed"),
+                      eq(discInspections.isCurrent, true),
+                      isNotNull(discInspections.manualRetryRequestedAt),
+                    ),
+                  )
+                  .returning()
+                  .get(),
+                "disc inspection",
+                current.id,
+              );
+            }
+            if (current.status !== "running") {
+              return { inspection: current, claim: null };
+            }
+            if (
+              current.retryAt !== null &&
+              current.retryAt.getTime() > timestamp.getTime()
+            ) {
+              return { inspection: current, claim: null };
+            }
+            const expiredBefore = new Date(
+              timestamp.getTime() - DISC_INSPECTION_LEASE_DURATION_MS,
+            );
+            if (
+              current.claimToken !== null &&
+              current.claimUpdatedAt !== null &&
+              current.claimUpdatedAt > expiredBefore
+            ) {
+              return { inspection: current, claim: null };
+            }
+            if (current.claimToken !== null) {
+              transaction
+                .insert(discInspectionAttempts)
+                .values({
+                  id: newId<DiscInspectionAttemptId>(),
+                  discInspectionId: current.id,
+                  attemptNumber: current.attemptCount,
+                  outcome: "interrupted",
+                  phase: current.phase,
+                  reasonCode: "worker_interrupted",
+                  startedAt: current.attemptStartedAt,
+                  endedAt: timestamp,
+                })
+                .onConflictDoNothing()
+                .run();
+            }
+            inspectionProgress.delete(current.id);
+            const claimToken = newId<DiscInspectionClaimToken>();
+            const resumed = requireRow(
+              transaction
+                .update(discInspections)
+                .set({
+                  phase: "reading_metadata",
+                  attemptCount: current.attemptCount + 1,
+                  bytesHashed: null,
+                  bytesPerSecond: null,
+                  etaSeconds: null,
+                  retryAt: null,
+                  reasonCode: null,
+                  diagnostic: null,
+                  claimToken,
+                  claimUpdatedAt: timestamp,
+                  phaseStartedAt: timestamp,
+                  attemptStartedAt: timestamp,
+                  updatedAt: timestamp,
+                })
+                .where(
+                  and(
+                    eq(discInspections.id, current.id),
+                    eq(discInspections.status, "running"),
+                    eq(discInspections.isCurrent, true),
+                    current.claimToken === null
+                      ? isNull(discInspections.claimToken)
+                      : eq(discInspections.claimToken, current.claimToken),
+                  ),
+                )
+                .returning()
+                .get(),
+              "disc inspection",
+              current.id,
+            );
+            return {
+              inspection: resumed,
+              claim: {
+                id: resumed.id,
+                opticalDriveId: resumed.opticalDriveId,
+                mediaGeneration: resumed.mediaGeneration,
+                claimToken,
+              },
+            };
+          }
+
+          const claimToken = newId<DiscInspectionClaimToken>();
+          const id = newId<DiscInspectionId>();
+          const inspection = requireRow(
+            transaction
+              .insert(discInspections)
+              .values({
+                id,
+                opticalDriveId: input.opticalDriveId,
+                mediaGeneration,
+                claimToken,
+                claimUpdatedAt: timestamp,
+                phaseStartedAt: timestamp,
+                attemptStartedAt: timestamp,
+                startedAt: timestamp,
+                createdAt: timestamp,
+                updatedAt: timestamp,
+              })
+              .returning()
+              .get(),
+            "disc inspection",
+            id,
+          );
+          return {
+            inspection,
+            claim: {
+              id,
+              opticalDriveId: input.opticalDriveId,
+              mediaGeneration,
+              claimToken,
+            },
+          };
+        }, { behavior: "immediate" });
       },
 
-      beginDriveInspection(opticalDriveId) {
+      renew(claim) {
         const timestamp = now();
-        const expiredBefore = new Date(
-          timestamp.getTime() - ARCHIVE_INSPECTION_LEASE_DURATION_MS,
-        );
-        const token = newId<ArchiveJobInspectionToken>();
-        const jobIds = database
-          .update(archiveJobs)
-          .set({
-            progressPhase: "inspecting_drive",
-            inspectionToken: token,
-            inspectionUpdatedAt: timestamp,
-            updatedAt: timestamp,
-          })
+        const renewed = database
+          .update(discInspections)
+          .set({ claimUpdatedAt: timestamp, updatedAt: timestamp })
           .where(
             and(
-              queuedArchiveJobsForDrive(opticalDriveId),
-              or(
-                eq(archiveJobs.progressPhase, "waiting"),
-                and(
-                  eq(archiveJobs.progressPhase, "inspecting_drive"),
-                  lte(archiveJobs.inspectionUpdatedAt, expiredBefore),
+              eq(discInspections.id, claim.id),
+              eq(discInspections.opticalDriveId, claim.opticalDriveId),
+              eq(discInspections.mediaGeneration, claim.mediaGeneration),
+              eq(discInspections.status, "running"),
+              eq(discInspections.isCurrent, true),
+              eq(discInspections.claimToken, claim.claimToken),
+              gt(
+                discInspections.claimUpdatedAt,
+                new Date(
+                  timestamp.getTime() - DISC_INSPECTION_LEASE_DURATION_MS,
                 ),
               ),
-            ),
-          )
-          .returning({ id: archiveJobs.id })
-          .all()
-          .map(({ id }) => id);
-        return { jobIds, opticalDriveId, token };
-      },
-
-      renewDriveInspection(inspection) {
-        if (inspection.jobIds.length === 0) {
-          return [];
-        }
-        const timestamp = now();
-        const expiredBefore = new Date(
-          timestamp.getTime() - ARCHIVE_INSPECTION_LEASE_DURATION_MS,
-        );
-        const renewed = database
-          .update(archiveJobs)
-          .set({ inspectionUpdatedAt: timestamp, updatedAt: timestamp })
-          .where(
-            and(
-              queuedArchiveJobsForDrive(inspection.opticalDriveId),
-              inArray(archiveJobs.id, [...inspection.jobIds]),
-              eq(archiveJobs.progressPhase, "inspecting_drive"),
-              eq(archiveJobs.inspectionToken, inspection.token),
-              gt(archiveJobs.inspectionUpdatedAt, expiredBefore),
             ),
           )
           .returning()
-          .all();
-        if (renewed.length !== inspection.jobIds.length) {
-          throw new StaleJobAttemptError(
-            "archive inspection",
-            inspection.opticalDriveId,
-          );
+          .get();
+        if (!renewed) {
+          throw new StaleJobAttemptError("disc inspection", claim.id);
         }
         return renewed;
       },
 
-      finishDriveInspection(inspection) {
-        if (inspection.jobIds.length === 0) {
-          return [];
-        }
-        return database
-          .update(archiveJobs)
-          .set({
-            progressPhase: "waiting",
-            inspectionToken: null,
-            inspectionUpdatedAt: null,
-            updatedAt: now(),
-          })
-          .where(
-            and(
-              queuedArchiveJobsForDrive(inspection.opticalDriveId),
-              inArray(archiveJobs.id, [...inspection.jobIds]),
-              eq(archiveJobs.progressPhase, "inspecting_drive"),
-              eq(archiveJobs.inspectionToken, inspection.token),
-            ),
-          )
-          .returning()
-          .all();
+      record(claim, event) {
+        const timestamp = now();
+        const diagnostic =
+          "diagnostic" in event && event.diagnostic !== undefined
+            ? event.diagnostic.trim().slice(0, 500) || null
+            : null;
+        return database.transaction((transaction) => {
+          const current = transaction
+            .select()
+            .from(discInspections)
+            .where(
+              and(
+                eq(discInspections.id, claim.id),
+                eq(discInspections.opticalDriveId, claim.opticalDriveId),
+                eq(discInspections.mediaGeneration, claim.mediaGeneration),
+                eq(discInspections.status, "running"),
+                eq(discInspections.isCurrent, true),
+                eq(discInspections.claimToken, claim.claimToken),
+                gt(
+                  discInspections.claimUpdatedAt,
+                  new Date(
+                    timestamp.getTime() - DISC_INSPECTION_LEASE_DURATION_MS,
+                  ),
+                ),
+              ),
+            )
+            .get();
+          if (!current) {
+            throw new StaleJobAttemptError("disc inspection", claim.id);
+          }
+          const recordAttempt = (
+            outcome: "completed" | "failed" | "aborted",
+            reasonCode: DiscInspectionReasonCode | null,
+          ) => {
+            transaction
+              .insert(discInspectionAttempts)
+              .values({
+                id: newId<DiscInspectionAttemptId>(),
+                discInspectionId: current.id,
+                attemptNumber: current.attemptCount,
+                outcome,
+                phase: current.phase,
+                reasonCode,
+                diagnostic,
+                startedAt: current.attemptStartedAt,
+                endedAt: timestamp,
+              })
+              .run();
+          };
+
+          if (event.type === "metadata") {
+            const update = {
+              phase: "hashing_content" as const,
+              volumeLabel: event.volumeLabel?.trim().slice(0, 255) || null,
+              titleCount: optionalSafeInteger(event.titleCount, "titleCount", 0),
+              chapterCount: optionalSafeInteger(
+                event.chapterCount,
+                "chapterCount",
+                0,
+              ),
+              audioStreamCount: optionalSafeInteger(
+                event.audioStreamCount,
+                "audioStreamCount",
+                0,
+              ),
+              subtitleStreamCount: optionalSafeInteger(
+                event.subtitleStreamCount,
+                "subtitleStreamCount",
+                0,
+              ),
+              totalBytes: requirePositiveSafeInteger(
+                event.totalBytes,
+                "totalBytes",
+              ),
+              bytesHashed: 0,
+              bytesPerSecond: null,
+              etaSeconds: null,
+              phaseStartedAt: timestamp,
+              updatedAt: timestamp,
+            };
+            const updated = requireRow(
+              transaction
+                .update(discInspections)
+                .set(update)
+                .where(
+                  and(
+                    eq(discInspections.id, current.id),
+                    eq(discInspections.claimToken, claim.claimToken),
+                  ),
+                )
+                .returning()
+                .get(),
+              "disc inspection",
+              current.id,
+            );
+            inspectionProgress.set(current.id, {
+              latestBytes: 0,
+              latestBytesPerSecond: null,
+              latestEtaSeconds: null,
+              persistedAt: timestamp.getTime(),
+              persistedBytes: 0,
+              token: claim.claimToken,
+            });
+            return updated;
+          }
+
+          if (event.type === "hash_progress") {
+            const bytesHashed = optionalSafeInteger(
+              event.bytesHashed,
+              "bytesHashed",
+              0,
+            );
+            if (
+              bytesHashed === null ||
+              bytesHashed === undefined ||
+              current.totalBytes === null ||
+              bytesHashed < (current.bytesHashed ?? 0) ||
+              bytesHashed > current.totalBytes
+            ) {
+              throw new DomainInvariantError(
+                "Disc Inspection hash progress must be monotonic and bounded by totalBytes",
+              );
+            }
+            const previous = inspectionProgress.get(current.id);
+            if (
+              previous?.token === claim.claimToken &&
+              bytesHashed < previous.latestBytes
+            ) {
+              throw new DomainInvariantError(
+                "Disc Inspection hash progress must be monotonic and bounded by totalBytes",
+              );
+            }
+            if (
+              (event.bytesPerSecond === null) !==
+              (event.etaSeconds === null)
+            ) {
+              throw new DomainInvariantError(
+                "Disc Inspection throughput and ETA must stabilize together",
+              );
+            }
+            const bytesPerSecond =
+              event.bytesPerSecond === null
+                ? null
+                : requirePositiveSafeInteger(
+                    event.bytesPerSecond,
+                    "bytesPerSecond",
+                  );
+            const etaSeconds =
+              event.etaSeconds === null
+                ? null
+                : (optionalSafeInteger(event.etaSeconds, "etaSeconds", 0) ?? null);
+            const shouldPersist =
+              previous === undefined ||
+              previous.token !== claim.claimToken ||
+              timestamp.getTime() - previous.persistedAt >= 1_000 ||
+              bytesHashed === current.totalBytes ||
+              (bytesHashed - previous.persistedBytes) * 100 >=
+                current.totalBytes * 5;
+            if (!shouldPersist) {
+              inspectionProgress.set(current.id, {
+                ...previous,
+                latestBytes: bytesHashed,
+                latestBytesPerSecond: bytesPerSecond,
+                latestEtaSeconds: etaSeconds,
+              });
+              return {
+                ...current,
+                bytesHashed,
+                bytesPerSecond,
+                etaSeconds,
+              };
+            }
+            const updated = requireRow(
+              transaction
+                .update(discInspections)
+                .set({
+                  bytesHashed,
+                  bytesPerSecond,
+                  etaSeconds,
+                  updatedAt: timestamp,
+                })
+                .where(
+                  and(
+                    eq(discInspections.id, current.id),
+                    eq(discInspections.claimToken, claim.claimToken),
+                    or(
+                      isNull(discInspections.bytesHashed),
+                      lte(discInspections.bytesHashed, bytesHashed),
+                    ),
+                  ),
+                )
+                .returning()
+                .get(),
+              "disc inspection",
+              current.id,
+            );
+            inspectionProgress.set(current.id, {
+              latestBytes: bytesHashed,
+              latestBytesPerSecond: bytesPerSecond,
+              latestEtaSeconds: etaSeconds,
+              persistedAt: timestamp.getTime(),
+              persistedBytes: bytesHashed,
+              token: claim.claimToken,
+            });
+            return updated;
+          }
+
+          if (event.type === "confirming_media") {
+            return requireRow(
+              transaction
+                .update(discInspections)
+                .set({
+                  phase: "confirming_media",
+                  phaseStartedAt: timestamp,
+                  updatedAt: timestamp,
+                })
+                .where(
+                  and(
+                    eq(discInspections.id, current.id),
+                    eq(discInspections.claimToken, claim.claimToken),
+                  ),
+                )
+                .returning()
+                .get(),
+              "disc inspection",
+              current.id,
+            );
+          }
+
+          if (event.type === "retry") {
+            const failureCount = Math.min(
+              current.consecutiveFailureCount + 1,
+              5,
+            );
+            recordAttempt("failed", event.reasonCode);
+            const terminal = failureCount >= 5;
+            const cachedProgress = inspectionProgress.get(current.id);
+            const latestProgress = cachedProgress?.token === claim.claimToken
+              ? cachedProgress
+              : undefined;
+            const updated = requireRow(
+              transaction
+                .update(discInspections)
+                .set({
+                  status: terminal ? "failed" : "running",
+                  phase: terminal ? current.phase : "retry_wait",
+                  consecutiveFailureCount: failureCount,
+                  bytesHashed: latestProgress?.latestBytes ?? current.bytesHashed,
+                  bytesPerSecond: latestProgress === undefined
+                    ? current.bytesPerSecond
+                    : latestProgress.latestBytesPerSecond,
+                  etaSeconds: latestProgress === undefined
+                    ? current.etaSeconds
+                    : latestProgress.latestEtaSeconds,
+                  retryAt: terminal ? null : event.retryAt,
+                  reasonCode: event.reasonCode,
+                  diagnostic,
+                  claimToken: null,
+                  claimUpdatedAt: null,
+                  phaseStartedAt: terminal ? current.phaseStartedAt : timestamp,
+                  completedAt: terminal ? timestamp : null,
+                  updatedAt: timestamp,
+                })
+                .where(
+                  and(
+                    eq(discInspections.id, current.id),
+                    eq(discInspections.claimToken, claim.claimToken),
+                  ),
+                )
+                .returning()
+                .get(),
+              "disc inspection",
+              current.id,
+            );
+            inspectionProgress.delete(current.id);
+            return updated;
+          }
+
+          if (event.type === "complete") {
+            const disc = requireRow(
+              transaction
+                .select()
+                .from(detectedDiscs)
+                .where(eq(detectedDiscs.id, event.detectedDiscId))
+                .get(),
+              "detected disc",
+              event.detectedDiscId,
+            );
+            if (disc.opticalDriveId !== current.opticalDriveId) {
+              throw new DomainInvariantError(
+                "Completed Disc Inspection must link to its Optical Drive observation",
+              );
+            }
+            recordAttempt("completed", null);
+            inspectionProgress.delete(current.id);
+            return requireRow(
+              transaction
+                .update(discInspections)
+                .set({
+                  detectedDiscId: disc.id,
+                  status: "completed",
+                  consecutiveFailureCount: 0,
+                  bytesHashed: current.totalBytes,
+                  bytesPerSecond: null,
+                  etaSeconds: null,
+                  retryAt: null,
+                  reasonCode: null,
+                  diagnostic: null,
+                  claimToken: null,
+                  claimUpdatedAt: null,
+                  completedAt: timestamp,
+                  updatedAt: timestamp,
+                })
+                .where(
+                  and(
+                    eq(discInspections.id, current.id),
+                    eq(discInspections.claimToken, claim.claimToken),
+                  ),
+                )
+                .returning()
+                .get(),
+              "disc inspection",
+              current.id,
+            );
+          }
+
+          if (event.type === "fail") {
+            recordAttempt("failed", event.reasonCode);
+            const cachedProgress = inspectionProgress.get(current.id);
+            const latestProgress = cachedProgress?.token === claim.claimToken
+              ? cachedProgress
+              : undefined;
+            const updated = requireRow(
+              transaction
+                .update(discInspections)
+                .set({
+                  status: "failed",
+                  consecutiveFailureCount: Math.min(
+                    current.consecutiveFailureCount + 1,
+                    5,
+                  ),
+                  bytesHashed: latestProgress?.latestBytes ?? current.bytesHashed,
+                  bytesPerSecond: latestProgress === undefined
+                    ? current.bytesPerSecond
+                    : latestProgress.latestBytesPerSecond,
+                  etaSeconds: latestProgress === undefined
+                    ? current.etaSeconds
+                    : latestProgress.latestEtaSeconds,
+                  retryAt: null,
+                  reasonCode: event.reasonCode,
+                  diagnostic,
+                  claimToken: null,
+                  claimUpdatedAt: null,
+                  completedAt: timestamp,
+                  updatedAt: timestamp,
+                })
+                .where(
+                  and(
+                    eq(discInspections.id, current.id),
+                    eq(discInspections.claimToken, claim.claimToken),
+                  ),
+                )
+                .returning()
+                .get(),
+              "disc inspection",
+              current.id,
+            );
+            inspectionProgress.delete(current.id);
+            return updated;
+          }
+
+          recordAttempt("aborted", event.reasonCode);
+          const cachedProgress = inspectionProgress.get(current.id);
+          const latestProgress = cachedProgress?.token === claim.claimToken
+            ? cachedProgress
+            : undefined;
+          const updated = requireRow(
+            transaction
+              .update(discInspections)
+              .set({
+                isCurrent: false,
+                status: "aborted",
+                bytesHashed: latestProgress?.latestBytes ?? current.bytesHashed,
+                bytesPerSecond: latestProgress === undefined
+                  ? current.bytesPerSecond
+                  : latestProgress.latestBytesPerSecond,
+                etaSeconds: latestProgress === undefined
+                  ? current.etaSeconds
+                  : latestProgress.latestEtaSeconds,
+                retryAt: null,
+                reasonCode: event.reasonCode,
+                diagnostic,
+                claimToken: null,
+                claimUpdatedAt: null,
+                completedAt: timestamp,
+                updatedAt: timestamp,
+              })
+              .where(
+                and(
+                  eq(discInspections.id, current.id),
+                  eq(discInspections.claimToken, claim.claimToken),
+                ),
+              )
+              .returning()
+              .get(),
+            "disc inspection",
+            current.id,
+          );
+          inspectionProgress.delete(current.id);
+          return updated;
+        }, { behavior: "immediate" });
       },
 
-      recoverInterruptedInspections() {
+      requestRetry(id) {
         const timestamp = now();
-        const expiredBefore = new Date(
-          timestamp.getTime() - ARCHIVE_INSPECTION_LEASE_DURATION_MS,
-        );
-        return database
-          .update(archiveJobs)
+        const requested = database
+          .update(discInspections)
           .set({
-            progressPhase: "waiting",
-            inspectionToken: null,
-            inspectionUpdatedAt: null,
+            manualRetryRequestedAt: timestamp,
             updatedAt: timestamp,
           })
           .where(
             and(
-              eq(archiveJobs.status, "queued"),
-              eq(archiveJobs.progressPhase, "inspecting_drive"),
-              lte(archiveJobs.inspectionUpdatedAt, expiredBefore),
+              eq(discInspections.id, id),
+              eq(discInspections.status, "failed"),
+              eq(discInspections.isCurrent, true),
+              isNull(discInspections.manualRetryRequestedAt),
             ),
           )
           .returning()
+          .get();
+        if (!requested) {
+          const current = database
+            .select()
+            .from(discInspections)
+            .where(eq(discInspections.id, id))
+            .get();
+          if (!current) {
+            throw new RecordNotFoundError("disc inspection", id);
+          }
+          if (
+            current.status === "failed" &&
+            current.isCurrent &&
+            current.manualRetryRequestedAt !== null
+          ) {
+            return current;
+          }
+          throw new InvalidStatusTransitionError(
+            "disc inspection",
+            current.status,
+            "retry requested",
+          );
+        }
+        return requested;
+      },
+
+      clearCurrent(input) {
+        const timestamp = now();
+        return database.transaction((transaction) => {
+          const current = transaction
+            .select()
+            .from(discInspections)
+            .where(
+              and(
+                eq(discInspections.opticalDriveId, input.opticalDriveId),
+                eq(discInspections.isCurrent, true),
+              ),
+            )
+            .get();
+          if (!current) {
+            return null;
+          }
+          if (
+            input.mediaGeneration !== undefined &&
+            input.mediaGeneration === current.mediaGeneration
+          ) {
+            return current;
+          }
+          inspectionProgress.delete(current.id);
+          if (current.status !== "running") {
+            return requireRow(
+              transaction
+                .update(discInspections)
+                .set({
+                  isCurrent: false,
+                  manualRetryRequestedAt: null,
+                  updatedAt: timestamp,
+                })
+                .where(
+                  and(
+                    eq(discInspections.id, current.id),
+                    eq(discInspections.isCurrent, true),
+                  ),
+                )
+                .returning()
+                .get(),
+              "disc inspection",
+              current.id,
+            );
+          }
+          const reasonCode = input.reasonCode ?? "no_medium";
+          transaction
+            .insert(discInspectionAttempts)
+            .values({
+              id: newId<DiscInspectionAttemptId>(),
+              discInspectionId: current.id,
+              attemptNumber: current.attemptCount,
+              outcome: "aborted",
+              phase: current.phase,
+              reasonCode,
+              startedAt: current.attemptStartedAt,
+              endedAt: timestamp,
+            })
+            .onConflictDoNothing()
+            .run();
+          return requireRow(
+            transaction
+              .update(discInspections)
+              .set({
+                isCurrent: false,
+                status: "aborted",
+                retryAt: null,
+                reasonCode,
+                claimToken: null,
+                claimUpdatedAt: null,
+                completedAt: timestamp,
+                updatedAt: timestamp,
+              })
+              .where(
+                and(
+                  eq(discInspections.id, current.id),
+                  eq(discInspections.status, "running"),
+                  eq(discInspections.isCurrent, true),
+                ),
+              )
+              .returning()
+              .get(),
+            "disc inspection",
+            current.id,
+          );
+        }, { behavior: "immediate" });
+      },
+
+      list(options = {}) {
+        if (options.ids !== undefined && options.ids.length === 0) {
+          return [];
+        }
+        const conditions = [
+          options.currentOnly ? eq(discInspections.isCurrent, true) : undefined,
+          options.ids ? inArray(discInspections.id, [...options.ids]) : undefined,
+        ].filter((condition) => condition !== undefined);
+        const query = database
+          .select()
+          .from(discInspections)
+          .where(conditions.length > 0 ? and(...conditions) : undefined)
+          .orderBy(desc(discInspections.updatedAt), desc(discInspections.id));
+        if (options.limit === undefined) {
+          return query.all();
+        }
+        return query
+          .limit(requirePositiveSafeInteger(options.limit, "limit"))
           .all();
       },
 
-      claimNext: archiveJobQueue.claimNext,
+      listAttempts(id) {
+        requireRow(
+          database
+            .select({ id: discInspections.id })
+            .from(discInspections)
+            .where(eq(discInspections.id, id))
+            .get(),
+          "disc inspection",
+          id,
+        );
+        return database
+          .select()
+          .from(discInspectionAttempts)
+          .where(eq(discInspectionAttempts.discInspectionId, id))
+          .orderBy(
+            asc(discInspectionAttempts.attemptNumber),
+            asc(discInspectionAttempts.id),
+          )
+          .all();
+      },
+    },
+
+    archiveRequests: {
+      create: createArchiveRequest,
+      cancel(id) {
+        const timestamp = now();
+        return database.transaction((transaction) => {
+          const current = requireRow(
+            transaction
+              .select()
+              .from(archiveRequests)
+              .where(eq(archiveRequests.id, id))
+              .get(),
+            "archive request",
+            id,
+          );
+          if (
+            current.status === "cancelled" ||
+            current.status === "fulfilled" ||
+            current.status === "cancellation_requested"
+          ) {
+            return current;
+          }
+          const active = current.status === "running";
+          const status = active ? "cancellation_requested" : "cancelled";
+          return requireRow(
+            transaction
+              .update(archiveRequests)
+              .set({
+                status,
+                cancellationRequestedAt: timestamp,
+                cancelledAt: active ? null : timestamp,
+                updatedAt: timestamp,
+              })
+              .where(
+                and(
+                  eq(archiveRequests.id, id),
+                  eq(archiveRequests.status, current.status),
+                ),
+              )
+              .returning()
+              .get(),
+            "archive request",
+            id,
+          );
+        }, { behavior: "immediate" });
+      },
+
+      retry(id) {
+        const retried = database
+          .update(archiveRequests)
+          .set({
+            status: "pending",
+            cancellationRequestedAt: null,
+            fulfilledAt: null,
+            cancelledAt: null,
+            updatedAt: now(),
+          })
+          .where(
+            and(
+              eq(archiveRequests.id, id),
+              eq(archiveRequests.status, "needs_attention"),
+            ),
+          )
+          .returning()
+          .get();
+        if (!retried) {
+          const current = database
+            .select()
+            .from(archiveRequests)
+            .where(eq(archiveRequests.id, id))
+            .get();
+          if (!current) {
+            throw new RecordNotFoundError("archive request", id);
+          }
+          throw new InvalidStatusTransitionError(
+            "archive request",
+            current.status,
+            "pending",
+          );
+        }
+        return retried;
+      },
+
+        list: listArchiveRequests,
+
+        listRelevantForDetectedDiscs(detectedDiscIds) {
+          const uniqueIds = [...new Set(detectedDiscIds)];
+          if (uniqueIds.length > RELATED_ACTIVITY_ROOT_LIMIT) {
+            throw new DomainInvariantError(
+              `related Detected Disc reads are limited to ${RELATED_ACTIVITY_ROOT_LIMIT} roots`,
+            );
+          }
+          return uniqueIds.flatMap((detectedDiscId) => {
+            const request = database
+              .select()
+              .from(archiveRequests)
+              .where(eq(archiveRequests.detectedDiscId, detectedDiscId))
+              .orderBy(
+                sql`case when ${archiveRequests.status} in ('pending', 'running', 'needs_attention', 'cancellation_requested') then 0 else 1 end`,
+                desc(archiveRequests.updatedAt),
+                desc(archiveRequests.id),
+              )
+              .limit(1)
+              .get();
+            return request === undefined ? [] : [request];
+          });
+        },
+      },
+
+      archiveJobs: {
+      startForInspection(inspectionId, workerIdInput) {
+        const timestamp = now();
+        const workerId = requireNonEmpty(workerIdInput, "workerId");
+        const preflight = database
+          .select({
+            discKind: detectedDiscs.discKind,
+            fingerprint: detectedDiscs.fingerprint,
+          })
+          .from(discInspections)
+          .innerJoin(
+            detectedDiscs,
+            eq(detectedDiscs.id, discInspections.detectedDiscId),
+          )
+          .innerJoin(
+            archiveRequests,
+            and(
+              eq(archiveRequests.detectedDiscId, detectedDiscs.id),
+              eq(archiveRequests.status, "pending"),
+            ),
+          )
+          .where(
+            and(
+              eq(discInspections.id, inspectionId),
+              eq(discInspections.isCurrent, true),
+              eq(discInspections.status, "completed"),
+            ),
+          )
+          .get();
+        if (preflight === undefined) {
+          return null;
+        }
+        if (preflight.discKind === "dvd") {
+          requireLegacyDvdArchiveIdentitiesResolved(
+            preflight.discKind,
+            preflight.fingerprint,
+          );
+        }
+        const claimToken = newId<ArchiveJobClaimToken>();
+        return database.transaction((transaction) => {
+          const inspection = transaction
+            .select()
+            .from(discInspections)
+            .innerJoin(
+              opticalDrives,
+              eq(opticalDrives.id, discInspections.opticalDriveId),
+            )
+            .where(
+              and(
+                eq(discInspections.id, inspectionId),
+                eq(discInspections.isCurrent, true),
+                eq(discInspections.status, "completed"),
+                isNotNull(discInspections.detectedDiscId),
+                eq(opticalDrives.isPresent, true),
+                eq(opticalDrives.isEnabled, true),
+              ),
+            )
+            .get();
+          if (!inspection || inspection.disc_inspections.detectedDiscId === null) {
+            return null;
+          }
+          const disc = requireRow(
+            transaction
+              .select()
+              .from(detectedDiscs)
+              .where(
+                and(
+                  eq(
+                    detectedDiscs.id,
+                    inspection.disc_inspections.detectedDiscId,
+                  ),
+                  eq(
+                    detectedDiscs.opticalDriveId,
+                    inspection.disc_inspections.opticalDriveId,
+                  ),
+                ),
+              )
+              .get(),
+            "detected disc",
+            inspection.disc_inspections.detectedDiscId,
+          );
+          const request = transaction
+            .select()
+            .from(archiveRequests)
+            .where(
+              and(
+                eq(archiveRequests.detectedDiscId, disc.id),
+                eq(archiveRequests.status, "pending"),
+              ),
+            )
+            .orderBy(
+              desc(archiveRequests.priority),
+              asc(archiveRequests.createdAt),
+              asc(archiveRequests.id),
+            )
+            .get();
+          if (!request) {
+            return null;
+          }
+          if (disc.status !== "approved") {
+            throw new DomainInvariantError(
+              `pending Archive Request references a ${disc.status} Detected Disc`,
+            );
+          }
+          if (
+            findOriginalArchiveByFingerprintOrContentIdAlias(
+              disc.fingerprint,
+              transaction,
+            )
+          ) {
+            transaction
+              .update(archiveRequests)
+              .set({
+                status: "fulfilled",
+                fulfilledAt: timestamp,
+                updatedAt: timestamp,
+              })
+              .where(
+                and(
+                  eq(archiveRequests.id, request.id),
+                  eq(archiveRequests.status, "pending"),
+                ),
+              )
+              .run();
+            return null;
+          }
+          const conflicting = transaction
+            .select({ id: archiveJobs.id })
+            .from(archiveJobs)
+            .innerJoin(
+              detectedDiscs,
+              eq(detectedDiscs.id, archiveJobs.detectedDiscId),
+            )
+            .where(
+              and(
+                eq(archiveJobs.status, "running"),
+                or(
+                  eq(detectedDiscs.fingerprint, disc.fingerprint),
+                  eq(detectedDiscs.opticalDriveId, disc.opticalDriveId),
+                ),
+              ),
+            )
+            .get();
+          if (conflicting) {
+            return null;
+          }
+          const attempt = transaction
+            .select({
+              value: sql<number>`coalesce(max(${archiveJobs.attemptOrdinal}), 0)`,
+            })
+            .from(archiveJobs)
+            .where(eq(archiveJobs.archiveRequestId, request.id))
+            .get()?.value ?? 0;
+          const id = newId<ArchiveJobId>();
+          const transitioned = transaction
+            .update(archiveRequests)
+            .set({ status: "running", updatedAt: timestamp })
+            .where(
+              and(
+                eq(archiveRequests.id, request.id),
+                eq(archiveRequests.status, "pending"),
+              ),
+            )
+            .returning({ id: archiveRequests.id })
+            .get();
+          if (!transitioned) {
+            return null;
+          }
+          const job = requireRow(
+            transaction
+              .insert(archiveJobs)
+              .values({
+                id,
+                archiveRequestId: request.id,
+                detectedDiscId: disc.id,
+                attemptOrdinal: attempt + 1,
+                status: "running",
+                priority: request.priority,
+                progressPhase: "preparing",
+                progressPercent: 0,
+                claimedBy: workerId,
+                claimToken,
+                claimedAt: timestamp,
+                startedAt: timestamp,
+                createdAt: timestamp,
+                updatedAt: timestamp,
+              })
+              .returning()
+              .get(),
+            "archive job",
+            id,
+          );
+          archiveProgress.delete(id);
+          return asRunningArchiveJob(job);
+        }, { behavior: "immediate" });
+      },
+
       renewClaim(claim) {
         const timestamp = now();
-        const expiredBefore = new Date(
-          timestamp.getTime() - ARCHIVE_JOB_LEASE_DURATION_MS,
-        );
         const renewed = database
           .update(archiveJobs)
           .set({ updatedAt: timestamp })
@@ -3487,7 +4129,12 @@ export function createDataAccessInternal(
               eq(archiveJobs.id, claim.id),
               eq(archiveJobs.status, "running"),
               eq(archiveJobs.claimToken, claim.claimToken),
-              gt(archiveJobs.updatedAt, expiredBefore),
+              gt(
+                archiveJobs.updatedAt,
+                new Date(
+                  timestamp.getTime() - ARCHIVE_JOB_LEASE_DURATION_MS,
+                ),
+              ),
             ),
           )
           .returning()
@@ -3497,66 +4144,738 @@ export function createDataAccessInternal(
         }
         return asRunningArchiveJob(renewed);
       },
+
       recoverExpiredClaims() {
         const timestamp = now();
         const expiredBefore = new Date(
           timestamp.getTime() - ARCHIVE_JOB_LEASE_DURATION_MS,
         );
         return database.transaction((transaction) => {
-          const expiredIds = transaction
-            .select({ id: archiveJobs.id })
+          const expired = transaction
+            .select({
+              id: archiveJobs.id,
+              archiveRequestId: archiveJobs.archiveRequestId,
+              claimToken: archiveJobs.claimToken,
+            })
             .from(archiveJobs)
+            .innerJoin(
+              archiveRequests,
+              eq(archiveRequests.id, archiveJobs.archiveRequestId),
+            )
             .where(
               and(
                 eq(archiveJobs.status, "running"),
                 lte(archiveJobs.updatedAt, expiredBefore),
+                ne(archiveRequests.status, "cancellation_requested"),
+              ),
+            )
+            .orderBy(asc(archiveJobs.updatedAt), asc(archiveJobs.id))
+            .limit(JOB_RECOVERY_LIMIT)
+            .all();
+          if (expired.length === 0) {
+            return [];
+          }
+          const terminalJobs: ArchiveJob[] = [];
+          for (const candidate of expired) {
+            const cachedProgress = archiveProgress.get(candidate.id);
+            const latestProgress =
+              candidate.claimToken !== null &&
+              cachedProgress?.token === candidate.claimToken
+                ? cachedProgress
+                : undefined;
+            const failedJob = transaction
+              .update(archiveJobs)
+              .set({
+                status: "failed",
+                ...(latestProgress === undefined
+                  ? {}
+                  : {
+                      progressPhase: latestProgress.latestPhase,
+                      progressPercent: latestProgress.latestPercent,
+                    }),
+                completedAt: timestamp,
+                errorMessage: "Archive worker lease expired",
+                updatedAt: timestamp,
+              })
+              .where(
+                and(
+                  eq(archiveJobs.id, candidate.id),
+                  eq(archiveJobs.status, "running"),
+                  lte(archiveJobs.updatedAt, expiredBefore),
+                ),
+              )
+              .returning()
+              .get();
+            if (failedJob === undefined) {
+              continue;
+            }
+            terminalJobs.push(failedJob);
+            requireRow(
+              transaction
+              .update(archiveRequests)
+              .set({ status: "needs_attention", updatedAt: timestamp })
+              .where(
+                and(
+                  eq(archiveRequests.id, candidate.archiveRequestId),
+                  eq(archiveRequests.status, "running"),
+                ),
+              )
+                .returning({ id: archiveRequests.id })
+                .get(),
+              "archive request",
+              candidate.archiveRequestId,
+            );
+          }
+          const jobsById = new Map(terminalJobs.map((job) => [job.id, job]));
+          const jobs = expired.flatMap(({ id }) => {
+            const job = jobsById.get(id);
+            return job === undefined ? [] : [job];
+          });
+          for (const job of terminalJobs) {
+            archiveProgress.delete(job.id);
+          }
+          return jobs;
+        }, { behavior: "immediate" });
+      },
+
+      listExpiredCancellations() {
+        const expiredBefore = new Date(
+          now().getTime() - ARCHIVE_JOB_LEASE_DURATION_MS,
+        );
+        const listAfter = (
+          cursor: typeof expiredCancellationCursor,
+        ) => database
+            .select({ job: archiveJobs })
+            .from(archiveJobs)
+            .innerJoin(
+              archiveRequests,
+              eq(archiveRequests.id, archiveJobs.archiveRequestId),
+            )
+            .where(
+              and(
+                eq(archiveJobs.status, "running"),
+                eq(archiveRequests.status, "cancellation_requested"),
+                lte(archiveJobs.updatedAt, expiredBefore),
+                cursor === undefined
+                  ? undefined
+                  : or(
+                      gt(archiveJobs.updatedAt, cursor.updatedAt),
+                      and(
+                        eq(archiveJobs.updatedAt, cursor.updatedAt),
+                        gt(archiveJobs.id, cursor.id),
+                      ),
+                    ),
               ),
             )
             .orderBy(asc(archiveJobs.updatedAt), asc(archiveJobs.id))
             .limit(JOB_RECOVERY_LIMIT)
             .all()
-            .map(({ id }) => id);
-          if (expiredIds.length === 0) {
-            return [];
-          }
-          return transaction
+            .map(({ job }) => asRunningArchiveJob(job));
+        let jobs = listAfter(expiredCancellationCursor);
+        if (jobs.length === 0 && expiredCancellationCursor !== undefined) {
+          expiredCancellationCursor = undefined;
+          jobs = listAfter(undefined);
+        }
+        const last = jobs.at(-1);
+        expiredCancellationCursor =
+          jobs.length === JOB_RECOVERY_LIMIT && last !== undefined
+            ? { id: last.id, updatedAt: last.updatedAt }
+            : undefined;
+        return jobs;
+      },
+
+      finalizeExpiredCancellation(claim) {
+        const timestamp = now();
+        const expiredBefore = new Date(
+          timestamp.getTime() - ARCHIVE_JOB_LEASE_DURATION_MS,
+        );
+        const completed = database.transaction((transaction) => {
+          const cachedProgress = archiveProgress.get(claim.id);
+          const latestProgress = cachedProgress?.token === claim.claimToken
+            ? cachedProgress
+            : undefined;
+          const job = transaction
             .update(archiveJobs)
             .set({
-              status: "failed",
-              errorMessage: "Archive worker lease expired",
+              status: "aborted",
+              ...(latestProgress === undefined
+                ? {}
+                : {
+                    progressPhase: latestProgress.latestPhase,
+                    progressPercent: latestProgress.latestPercent,
+                  }),
+              completedAt: timestamp,
+              errorMessage: "Archive cancelled after worker recovery",
               updatedAt: timestamp,
             })
             .where(
               and(
-                inArray(archiveJobs.id, expiredIds),
+                eq(archiveJobs.id, claim.id),
+                eq(archiveJobs.archiveRequestId, claim.archiveRequestId),
+                eq(archiveJobs.detectedDiscId, claim.detectedDiscId),
                 eq(archiveJobs.status, "running"),
+                eq(archiveJobs.claimToken, claim.claimToken),
                 lte(archiveJobs.updatedAt, expiredBefore),
+                exists(
+                  transaction
+                    .select({ id: archiveRequests.id })
+                    .from(archiveRequests)
+                    .where(
+                      and(
+                        eq(
+                          archiveRequests.id,
+                          archiveJobs.archiveRequestId,
+                        ),
+                        eq(
+                          archiveRequests.status,
+                          "cancellation_requested",
+                        ),
+                      ),
+                    ),
+                ),
               ),
             )
             .returning()
-            .all();
+            .get();
+          if (job === undefined) {
+            throw new StaleJobAttemptError("archive job", claim.id);
+          }
+          requireRow(
+            transaction
+              .update(archiveRequests)
+              .set({
+                status: "cancelled",
+                cancelledAt: timestamp,
+                updatedAt: timestamp,
+              })
+              .where(
+                and(
+                  eq(archiveRequests.id, job.archiveRequestId),
+                  eq(archiveRequests.status, "cancellation_requested"),
+                ),
+              )
+              .returning({ id: archiveRequests.id })
+              .get(),
+            "archive request",
+            job.archiveRequestId,
+          );
+          return job;
         }, { behavior: "immediate" });
+        archiveProgress.delete(claim.id);
+        return completed;
       },
-      list: archiveJobQueue.list,
-      updateProgress(claim, progress) {
-        if (typeof progress === "number") {
-          return archiveJobQueue.updateProgress(claim, progress);
+
+        list: listArchiveJobs,
+
+        listLatestForRequests(archiveRequestIds) {
+          const uniqueIds = [...new Set(archiveRequestIds)];
+          if (uniqueIds.length > RELATED_ACTIVITY_ROOT_LIMIT) {
+            throw new DomainInvariantError(
+              `related Archive Request reads are limited to ${RELATED_ACTIVITY_ROOT_LIMIT} roots`,
+            );
+          }
+          return uniqueIds.flatMap((archiveRequestId) => {
+            const job = database
+              .select()
+              .from(archiveJobs)
+              .where(eq(archiveJobs.archiveRequestId, archiveRequestId))
+              .orderBy(
+                desc(archiveJobs.attemptOrdinal),
+                desc(archiveJobs.id),
+              )
+              .limit(1)
+              .get();
+            return job === undefined ? [] : [job];
+          });
+        },
+
+        isCancellationRequested(claim) {
+        const current = database
+          .select({ status: archiveRequests.status })
+          .from(archiveJobs)
+          .innerJoin(
+            archiveRequests,
+            eq(archiveRequests.id, archiveJobs.archiveRequestId),
+          )
+          .where(
+            and(
+              eq(archiveJobs.id, claim.id),
+              eq(archiveJobs.status, "running"),
+              eq(archiveJobs.claimToken, claim.claimToken),
+            ),
+          )
+          .get();
+        if (!current) {
+          throw new StaleJobAttemptError("archive job", claim.id);
         }
+        return current.status === "cancellation_requested";
+      },
+
+      updateProgress(claim, progressInput) {
+        const timestamp = now();
+        const progress =
+          typeof progressInput === "number"
+            ? {
+                phase: claim.progressPhase,
+                progressPercent: progressInput,
+              }
+            : progressInput;
         if (!ARCHIVE_RUNNING_PROGRESS_PHASES.includes(progress.phase)) {
           throw new DomainInvariantError("Archive Job progress phase is invalid");
         }
-        return archiveJobQueue.updateProgress(
-          claim,
-          progress.progressPercent,
-          { phase: progress.phase },
-        );
+        if (
+          !Number.isInteger(progress.progressPercent) ||
+          progress.progressPercent < 0 ||
+          progress.progressPercent > 100
+        ) {
+          throw new DomainInvariantError(
+            "progressPercent must be an integer between 0 and 100",
+          );
+        }
+        const previous = archiveProgress.get(claim.id);
+        const shouldPersist =
+          previous === undefined ||
+          previous.token !== claim.claimToken ||
+          previous.persistedPhase !== progress.phase ||
+          timestamp.getTime() - previous.persistedAt >= 1_000 ||
+          Math.abs(
+            progress.progressPercent - (previous?.persistedPercent ?? 0),
+          ) >= 5;
+        if (!shouldPersist) {
+          archiveProgress.set(claim.id, {
+            ...previous,
+            latestPercent: progress.progressPercent,
+            latestPhase: progress.phase,
+          });
+          return {
+            ...claim,
+            progressPhase: progress.phase,
+            progressPercent: progress.progressPercent,
+          };
+        }
+        const updated = database
+          .update(archiveJobs)
+          .set({
+            progressPhase: progress.phase,
+            progressPercent: progress.progressPercent,
+            updatedAt: timestamp,
+          })
+          .where(
+            and(
+              eq(archiveJobs.id, claim.id),
+              eq(archiveJobs.status, "running"),
+              eq(archiveJobs.claimToken, claim.claimToken),
+              gt(
+                archiveJobs.updatedAt,
+                new Date(
+                  timestamp.getTime() - ARCHIVE_JOB_LEASE_DURATION_MS,
+                ),
+              ),
+            ),
+          )
+          .returning()
+          .get();
+        if (!updated) {
+          throw new StaleJobAttemptError("archive job", claim.id);
+        }
+        archiveProgress.set(claim.id, {
+          token: claim.claimToken,
+          latestPercent: progress.progressPercent,
+          latestPhase: progress.phase,
+          persistedPercent: progress.progressPercent,
+          persistedPhase: progress.phase,
+          persistedAt: timestamp.getTime(),
+        });
+        return updated;
       },
+
       publish(claim, input) {
-        return archiveJobQueue.complete(claim, input);
+        const archivePath = requireNonEmpty(input.archivePath, "archivePath");
+        const sizeBytes = requirePositiveSafeInteger(input.sizeBytes, "sizeBytes");
+        const requireCurrentClaim = (
+          querySource: Pick<typeof database, "select">,
+        ) => {
+          const checkedAt = now();
+          const current = querySource
+            .select({
+              detectedDiscId: archiveJobs.detectedDiscId,
+              discKind: detectedDiscs.discKind,
+              fingerprint: detectedDiscs.fingerprint,
+            })
+            .from(archiveJobs)
+            .innerJoin(
+              archiveRequests,
+              eq(archiveRequests.id, archiveJobs.archiveRequestId),
+            )
+            .innerJoin(
+              detectedDiscs,
+              eq(detectedDiscs.id, archiveJobs.detectedDiscId),
+            )
+            .where(
+              and(
+                eq(archiveJobs.id, claim.id),
+                eq(archiveJobs.detectedDiscId, claim.detectedDiscId),
+                eq(archiveJobs.status, "running"),
+                eq(archiveJobs.claimToken, claim.claimToken),
+                eq(archiveRequests.status, "running"),
+                gt(
+                  archiveJobs.updatedAt,
+                  new Date(
+                    checkedAt.getTime() - ARCHIVE_JOB_LEASE_DURATION_MS,
+                  ),
+                ),
+              ),
+            )
+            .get();
+          if (current === undefined) {
+            throw new StaleJobAttemptError("archive job", claim.id);
+          }
+          return current;
+        };
+        const currentDisc = requireCurrentClaim(database);
+        if (currentDisc.discKind === "dvd") {
+          reconcileLegacyDvdArchiveContentId(
+            currentDisc.fingerprint,
+            sizeBytes,
+            requireCurrentClaim,
+          );
+        }
+        const timestamp = now();
+        const completed = database.transaction((transaction) => {
+          const current = requireCurrentClaim(transaction);
+          const disc = requireRow(
+            transaction
+              .select()
+              .from(detectedDiscs)
+              .where(eq(detectedDiscs.id, current.detectedDiscId))
+              .get(),
+            "detected disc",
+            current.detectedDiscId,
+          );
+          if (
+            findOriginalArchiveByFingerprintOrContentIdAlias(
+              disc.fingerprint,
+              transaction,
+            )
+          ) {
+            throw new DomainInvariantError(
+              "DVD content already has Original Disc Archive provenance",
+            );
+          }
+          requireLegacyDvdArchiveIdentitiesResolved(
+            disc.discKind,
+            disc.fingerprint,
+            transaction,
+          );
+          const archive = requireRow(
+            transaction
+              .insert(originalDiscArchives)
+              .values({
+                id: newId<OriginalDiscArchiveId>(),
+                detectedDiscId: disc.id,
+                discKind: disc.discKind,
+                archiveFormat: "iso",
+                archivePath,
+                fingerprint: disc.fingerprint,
+                legacyCutoverPending:
+                  transaction
+                    .select({
+                      sidecarPath: legacyCutoverStagedSidecars.sidecarPath,
+                    })
+                    .from(legacyCutoverStagedSidecars)
+                    .where(
+                      legacyCutoverFenceCondition(
+                        disc.fingerprint,
+                        archivePath,
+                      ),
+                    )
+                    .limit(1)
+                    .get() !== undefined,
+                sizeBytes,
+                archivedAt: timestamp,
+                createdAt: timestamp,
+                updatedAt: timestamp,
+              })
+              .returning()
+              .get(),
+            "original disc archive",
+            disc.id,
+          );
+          transaction
+            .update(detectedDiscs)
+            .set({ status: "archived", updatedAt: timestamp })
+            .where(eq(detectedDiscs.fingerprint, disc.fingerprint))
+            .run();
+          transaction
+            .update(archiveRequests)
+            .set({
+              status: "fulfilled",
+              fulfilledAt: timestamp,
+              updatedAt: timestamp,
+            })
+            .where(
+              and(
+                inArray(archiveRequests.status, [
+                  "pending",
+                  "running",
+                  "needs_attention",
+                ]),
+                exists(
+                  transaction
+                    .select({ id: detectedDiscs.id })
+                    .from(detectedDiscs)
+                    .where(
+                      and(
+                        eq(detectedDiscs.id, archiveRequests.detectedDiscId),
+                        eq(detectedDiscs.fingerprint, disc.fingerprint),
+                      ),
+                    ),
+                ),
+              ),
+            )
+            .run();
+          return requireRow(
+            transaction
+              .update(archiveJobs)
+              .set({
+                originalDiscArchiveId: archive.id,
+                status: "completed",
+                progressPhase: "finalizing",
+                progressPercent: 100,
+                completedAt: timestamp,
+                errorMessage: null,
+                updatedAt: timestamp,
+              })
+              .where(
+                and(
+                  eq(archiveJobs.id, claim.id),
+                  eq(archiveJobs.status, "running"),
+                  eq(archiveJobs.claimToken, claim.claimToken),
+                ),
+              )
+              .returning()
+              .get(),
+            "archive job",
+            claim.id,
+          );
+        }, { behavior: "immediate" });
+        archiveProgress.delete(claim.id);
+        return completed;
       },
-      complete: archiveJobQueue.complete,
-      fail: archiveJobQueue.fail,
-      requeue: archiveJobQueue.requeue,
+
+      fail(claim, errorMessageInput) {
+        const timestamp = now();
+        const errorMessage = requireNonEmpty(
+          errorMessageInput,
+          "errorMessage",
+        ).slice(0, 500);
+        const failed = database.transaction((transaction) => {
+          const cachedProgress = archiveProgress.get(claim.id);
+          const latestProgress = cachedProgress?.token === claim.claimToken
+            ? cachedProgress
+            : undefined;
+          const request = transaction
+            .select({ status: archiveRequests.status })
+            .from(archiveRequests)
+            .where(
+              and(
+                eq(archiveRequests.id, claim.archiveRequestId),
+                inArray(archiveRequests.status, [
+                  "running",
+                  "cancellation_requested",
+                ]),
+              ),
+            )
+            .get();
+          if (!request) {
+            throw new StaleJobAttemptError("archive job", claim.id);
+          }
+          const cancellationWins =
+            request.status === "cancellation_requested";
+          const job = transaction
+            .update(archiveJobs)
+            .set({
+              status: cancellationWins ? "aborted" : "failed",
+              ...(latestProgress === undefined
+                ? {}
+                : {
+                    progressPhase: latestProgress.latestPhase,
+                    progressPercent: latestProgress.latestPercent,
+                  }),
+              completedAt: timestamp,
+              errorMessage: cancellationWins
+                ? "Archive cancelled by operator"
+                : errorMessage,
+              updatedAt: timestamp,
+            })
+            .where(
+              and(
+                eq(archiveJobs.id, claim.id),
+                eq(archiveJobs.status, "running"),
+                eq(archiveJobs.claimToken, claim.claimToken),
+                gt(
+                  archiveJobs.updatedAt,
+                  new Date(
+                    timestamp.getTime() - ARCHIVE_JOB_LEASE_DURATION_MS,
+                  ),
+                ),
+              ),
+            )
+            .returning()
+            .get();
+          if (!job) {
+            throw new StaleJobAttemptError("archive job", claim.id);
+          }
+          requireRow(
+            transaction
+              .update(archiveRequests)
+              .set(cancellationWins
+                ? {
+                    status: "cancelled",
+                    cancelledAt: timestamp,
+                    updatedAt: timestamp,
+                  }
+                : { status: "needs_attention", updatedAt: timestamp })
+              .where(
+                and(
+                  eq(archiveRequests.id, job.archiveRequestId),
+                  eq(archiveRequests.status, request.status),
+                ),
+              )
+              .returning({ id: archiveRequests.id })
+              .get(),
+            "archive request",
+            job.archiveRequestId,
+          );
+          return job;
+        }, { behavior: "immediate" });
+        archiveProgress.delete(claim.id);
+        return failed;
+      },
+
+      abort(claim, errorMessageInput) {
+        const timestamp = now();
+        const errorMessage = requireNonEmpty(
+          errorMessageInput,
+          "errorMessage",
+        ).slice(0, 500);
+        const aborted = database.transaction((transaction) => {
+          const cachedProgress = archiveProgress.get(claim.id);
+          const latestProgress = cachedProgress?.token === claim.claimToken
+            ? cachedProgress
+            : undefined;
+          const job = transaction
+            .update(archiveJobs)
+            .set({
+              status: "aborted",
+              ...(latestProgress === undefined
+                ? {}
+                : {
+                    progressPhase: latestProgress.latestPhase,
+                    progressPercent: latestProgress.latestPercent,
+                  }),
+              completedAt: timestamp,
+              errorMessage,
+              updatedAt: timestamp,
+            })
+            .where(
+              and(
+                eq(archiveJobs.id, claim.id),
+                eq(archiveJobs.status, "running"),
+                eq(archiveJobs.claimToken, claim.claimToken),
+                gt(
+                  archiveJobs.updatedAt,
+                  new Date(
+                    timestamp.getTime() - ARCHIVE_JOB_LEASE_DURATION_MS,
+                  ),
+                ),
+              ),
+            )
+            .returning()
+            .get();
+          if (!job) {
+            throw new StaleJobAttemptError("archive job", claim.id);
+          }
+          requireRow(
+            transaction
+              .update(archiveRequests)
+              .set({
+                status: "cancelled",
+                cancellationRequestedAt: timestamp,
+                cancelledAt: timestamp,
+                updatedAt: timestamp,
+              })
+              .where(
+                and(
+                  eq(archiveRequests.id, job.archiveRequestId),
+                  inArray(archiveRequests.status, [
+                    "running",
+                    "cancellation_requested",
+                  ]),
+                ),
+              )
+              .returning({ id: archiveRequests.id })
+              .get(),
+            "archive request",
+            job.archiveRequestId,
+          );
+          return job;
+        }, { behavior: "immediate" });
+        archiveProgress.delete(claim.id);
+        return aborted;
+      },
+
+      complete(claim, originalDiscArchiveId) {
+        const timestamp = now();
+        return database.transaction((transaction) => {
+          const archive = requireRow(
+            transaction
+              .select()
+              .from(originalDiscArchives)
+              .where(eq(originalDiscArchives.id, originalDiscArchiveId))
+              .get(),
+            "original disc archive",
+            originalDiscArchiveId,
+          );
+          if (archive.detectedDiscId !== claim.detectedDiscId) {
+            throw new DomainInvariantError(
+              "Archive Job result must belong to the job's Detected Disc",
+            );
+          }
+          const job = transaction
+            .update(archiveJobs)
+            .set({
+              originalDiscArchiveId,
+              status: "completed",
+              progressPhase: "finalizing",
+              progressPercent: 100,
+              completedAt: timestamp,
+              updatedAt: timestamp,
+            })
+            .where(
+              and(
+                eq(archiveJobs.id, claim.id),
+                eq(archiveJobs.status, "running"),
+                eq(archiveJobs.claimToken, claim.claimToken),
+              ),
+            )
+            .returning()
+            .get();
+          if (!job) {
+            throw new StaleJobAttemptError("archive job", claim.id);
+          }
+          transaction
+            .update(archiveRequests)
+            .set({
+              status: "fulfilled",
+              fulfilledAt: timestamp,
+              updatedAt: timestamp,
+            })
+            .where(eq(archiveRequests.id, job.archiveRequestId))
+            .run();
+          return job;
+        }, { behavior: "immediate" });
+      },
     },
 
     encodeJobs: {

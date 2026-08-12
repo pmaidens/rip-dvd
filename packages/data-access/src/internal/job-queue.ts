@@ -4,7 +4,7 @@ import {
   RecordNotFoundError,
   StaleJobAttemptError,
 } from "../errors.js";
-import type { ChronologicalListOptions, JobStatus } from "../types.js";
+import type { ChronologicalListOptions, EncodeJobStatus } from "../types.js";
 import { requireNonEmpty } from "./validation.js";
 
 const PROGRESS_WRITE_INTERVAL_MS = 1_000;
@@ -12,7 +12,7 @@ const PROGRESS_WRITE_DELTA = 5;
 
 export interface JobRecord<Id extends string, Token extends string> {
   id: Id;
-  status: JobStatus;
+  status: EncodeJobStatus;
   progressPercent: number;
   claimToken: Token | null;
   updatedAt: Date;

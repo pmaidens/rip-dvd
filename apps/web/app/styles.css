@@ -1259,7 +1259,8 @@ h3 {
 
 .status-ready,
 .status-completed,
-.status-archived {
+.status-archived,
+.status-fulfilled {
   border-color: #356953;
   background: rgba(64, 139, 108, 0.13);
   color: #80d4b1;
@@ -1267,7 +1268,9 @@ h3 {
 
 .status-running,
 .status-approved,
-.status-scanned {
+.status-scanned,
+.status-pending,
+.status-cancellation_requested {
   border-color: #796331;
   background: rgba(174, 127, 42, 0.12);
   color: #e1b765;
@@ -1275,7 +1278,10 @@ h3 {
 
 .status-failed,
 .status-rejected,
-.status-missing {
+.status-missing,
+.status-aborted,
+.status-cancelled,
+.status-needs_attention {
   border-color: #713d37;
   background: rgba(164, 71, 60, 0.12);
   color: #e89a90;
@@ -1307,6 +1313,51 @@ h3 {
   border-radius: inherit;
   background: linear-gradient(90deg, #9e742d, #e0b25f);
 }
+
+.progress-indeterminate span {
+  width: 36%;
+  animation: inspection-progress 1.4s ease-in-out infinite;
+}
+
+@keyframes inspection-progress {
+  from { transform: translateX(-110%); }
+  to { transform: translateX(310%); }
+}
+
+.nested-operation {
+  display: grid;
+  gap: 0.7rem;
+  margin-top: 1rem;
+  padding: 0.85rem;
+  border: 1px solid #29483f;
+  border-radius: 0.65rem;
+  background: #10231e;
+  color: #b8c8c3;
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
+.nested-operation p { margin: 0.2rem 0 0; }
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.archive-attempt-history {
+  margin: 0 1.4rem 1rem;
+  color: #9fb0ab;
+  font-size: 0.75rem;
+}
+
+.archive-attempt-history ol { margin-bottom: 0; }
 
 .job-progress-detail {
   margin: 0.7rem 0 0;
@@ -1507,7 +1558,6 @@ h3 {
   .app-navigation {
     display: block;
     padding: 0.85rem 1rem 0;
-    overflow: hidden;
   }
 
   .app-brand {
@@ -1515,14 +1565,9 @@ h3 {
   }
 
   .app-navigation-links {
+    flex-wrap: wrap;
     width: 100%;
     padding-bottom: 0.75rem;
-    overflow-x: auto;
-    scrollbar-width: none;
-  }
-
-  .app-navigation-links::-webkit-scrollbar {
-    display: none;
   }
 
   .dashboard-shell {
@@ -1670,7 +1715,8 @@ h3 {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .loading-dot {
+  .loading-dot,
+  .progress-indeterminate span {
     animation: none;
   }
 

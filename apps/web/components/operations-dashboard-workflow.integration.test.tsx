@@ -16,7 +16,7 @@ import {
   pollEncodeWorker,
   type HandBrakeRunner,
 } from "../../encode-worker/src/encode-worker.js";
-import { createArchiveJobsRoute } from "../app/api/archive-jobs/route";
+import { createArchiveRequestsRoute } from "../app/api/archive-requests/route";
 import { createCatalogReviewRoute } from "../app/api/catalog-reviews/[id]/route";
 import { createDashboardEventResponse } from "../app/api/dashboard/events/route";
 import { createDashboardResponse } from "../app/api/dashboard/route";
@@ -246,6 +246,7 @@ describe("end-to-end operations dashboard workflow", () => {
       confirmOpticalDrive: vi.fn(async (_binding, signal) => {
         signal.throwIfAborted();
       }),
+      observeMediaGeneration: vi.fn().mockResolvedValue("workflow-generation"),
       scanDvd: vi.fn().mockResolvedValue({
         fingerprint,
         scanData,
@@ -266,28 +267,30 @@ describe("end-to-end operations dashboard workflow", () => {
     const discoveredDashboard = await readDashboard(access);
     expect(discoveredDashboard.html).toContain("Workflow Optical Drive");
     expect(discoveredDashboard.html).toContain("WORKFLOW_DISC");
-    expect(discoveredDashboard.html).toContain("Approve archive");
+    expect(discoveredDashboard.html).toContain("Request archive");
     const detectedDisc = access.catalog.listDetectedDiscs()[0]!;
 
-    const approval = await createArchiveJobsRoute(
-      createMutationRequest("/api/archive-jobs", {
+    const approval = await createArchiveRequestsRoute(
+      createMutationRequest("/api/archive-requests", {
         detectedDiscId: detectedDisc.id,
       }),
       () => access,
       () => trustedOrigin,
     );
     expect(approval.status).toBe(201);
-    expect((await approval.json()).job).toMatchObject({ status: "queued" });
+    expect((await approval.json()).archiveRequest).toMatchObject({ status: "pending" });
     const queuedArchiveDashboard = await readDashboard(access);
-    expect(archiveJob(queuedArchiveDashboard.snapshot)).toMatchObject({
-      status: "queued",
-      progressPercent: 0,
+    expect(queuedArchiveDashboard.snapshot.archiveJobs).toEqual({
+      status: "loaded",
+      items: [],
     });
-    expect(queuedArchiveDashboard.html).toContain("Queued");
+    expect(queuedArchiveDashboard.html).toContain("Waiting for this disc");
 
     const archiveGate = createGate();
     const copyRunner: DvdCopyRunner = {
       isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
       async copy({ outputPath, onBytesCopied }) {
         onBytesCopied(4);
         await archiveGate.wait();

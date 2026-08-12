@@ -702,12 +702,17 @@ activation are host-local configuration and must not be committed. The archive
 worker can discover and use each explicitly mapped drive while the web and
 encode containers retain no device access. This worker does not eject media.
 
-The worker checks for newly approved Archive Jobs at least once per second and
-runs drive discovery at the configured poll interval capped at five seconds. An
-empty drive is a normal state. A long-running scan holds only its own drive and
-one configured concurrency slot, so idle capacity continues polling other
-drives. Scanner failures are logged per drive without hiding other drives, and
-a failed discovery does not mark every known drive missing. Successful DVD
+The worker checks for completed current Disc Inspections that match pending
+Archive Requests at the configured poll interval capped at five seconds. An
+empty drive is a normal state. A long-running inspection or archive holds only
+its own drive and one configured concurrency slot, so idle capacity continues
+polling other drives. Scanner failures are logged per drive without hiding other
+drives. Eligible completed inspections are considered in Archive Request
+priority order before a configured concurrency slot starts work. Native copy
+capacity matches that worker concurrency, while device-inode locks and durable
+job fences prevent overlapping work for the same drive or stale attempt. A
+failed discovery does not mark every known drive missing.
+Successful DVD
 scans store title numbers, durations, chapter counts, bounded per-stream
 language/format/channel/source-ID metadata, and a deterministic SHA-256 content
 identity over every declared raw-disc byte. The scanner authenticates through
@@ -727,32 +732,51 @@ kills and detaches the helper, and retains its per-drive single-flight tombstone
 until the child process is confirmed closed. Later polls reuse that tombstone;
 capacity is recovered and a fresh retry is admitted only after confirmed close.
 Raw-disc open/read/hash work uses the same bounded helper-process lifecycle, so
-a kernel-blocked device operation cannot keep the archive worker alive.
+a kernel-blocked device operation cannot keep the archive worker alive. Hash
+progress is streamed as throttled byte counts without contributing repetitive
+lines to the bounded diagnostic buffer; process capacity remains occupied until
+the child is confirmed closed.
 Reads are shell-free, size-capped, incremental, timed out, and
 cancellation-aware. The full-disc hash has an eight-hour ceiling so slow physical
 drives can complete while a permanently blocked read remains bounded.
-Repeated polls update the same Detected Disc. Dashboard approval atomically
-marks a scanned disc approved and creates its queued Archive Job; discovery
-never approves or queues work by itself. The archive worker claims approved
-work from an enabled, present drive before potentially long medium validation,
-then fails closed if the current physical disc no longer matches. Copying starts
-only after that validation succeeds. It copies through a bounded hidden partial
-path and publishes the fingerprint-named ISO and its Original Disc Archive
-record only after the source and completed image are reverified.
+One durable Disc Inspection represents the current insertion and owns metadata
+findings, full-content hash progress, retries, and terminal inspection outcome.
+It is resumed only while drive identity and Linux media-generation evidence
+prove the same insertion. The dashboard nests its indeterminate metadata phase,
+determinate byte progress, stabilized rate/ETA, retry state, and safe failure
+reason under the Optical Drive.
+Manual inspection retry is durable intent: the route leaves the inspection
+failed until the worker independently observes the drive again. Matching
+media-generation evidence reopens the same inspection and resets only its
+consecutive failure budget; changed or removed media never consumes that retry.
+
+Requesting preservation atomically marks a scanned disc approved and creates a
+pending Archive Request, not an Archive Job. A completed current inspection is
+reused without rehashing. Only when it matches a pending request does the worker
+atomically create a claimed running Archive Job attempt, then copy through a bounded
+hidden partial path, and publishes the fingerprint-named ISO and its Original
+Disc Archive record only after the source and completed image are reverified.
 Progress and terminal state are written to SQLite and reach the dashboard over
-SSE. Failed or interrupted copies are moved to a `.failed` recovery path and
-remain explicitly retryable from the dashboard unless another observation has
-already published an archive for the same fingerprint. Those superseded
-failures remain visible in Archive Job history without a retry action. Before
+SSE. Failed attempts move their request to `needs_attention`; manual retry
+returns the request to `pending` and the next execution creates another Archive
+Job attempt. Cooperative cancellation stops the external copy, records the
+attempt `aborted`, and records the request `cancelled`. Failed or interrupted
+copies are moved to a `.failed` recovery path. Older attempts remain grouped in
+Archive Job history. Before
 retrying, the worker examines at most 4,096 entries in the canonical originals
 directory for exact same-fingerprint attempt-unique partials, fails closed if
 discovery or inode ownership is ambiguous, and quarantines every inactive match
 before starting a new copy.
+The copy launcher acquires that same device-inode lock before asking data access
+to renew the current claim and recheck cancellation. The native reader cannot
+open the optical device or create its partial until that under-lock
+authorization succeeds, so a stale worker cannot restart external work after
+recovery finalizes cancellation.
 
 A fingerprint already stored by an Original Disc Archive, or recorded as a
 current content-ID alias for its legacy fingerprint, is shown as **Already
-archived**. The data-access facade removes any obsolete queued Archive Job for
-either form of that content identity.
+archived**. Matching nonterminal Archive Requests are fulfilled by that
+provenance and no duplicate execution attempt starts.
 
 The dashboard's HTTP snapshot carries review details. One-second SSE activity
 events retain up to 100 live Detected Discs and jobs ahead of 20 terminal-history
@@ -770,14 +794,12 @@ SQLite file, enables foreign keys, WAL journaling, a 5000 ms busy timeout, and
 normal WAL synchronization. Compose stores `/data/rip-dvd.sqlite` in the
 persistent `rip-dvd-data` volume.
 
-The facade exposes catalog operations and separate Archive Job and Encode Job
-queues without exposing Drizzle or a general transaction API to callers.
-Archive approval and job creation/retry share one immediate transaction.
-Archive Jobs are otherwise conditionally enqueued or requeued only while a
-Detected Disc is approved;
-approval revocation or archive publication removes obsolete queued work in the
-same short transaction. The atomic claim statement rechecks both current
-approval, enabled/present drive state, and the absence of an Original Disc
+The facade exposes catalog operations, Disc Inspections, Archive Requests,
+attempt-only Archive Jobs, and the Encode Job queue without exposing Drizzle or
+a general transaction API to callers. Request creation owns operator intent;
+inspection ownership and job execution use separate lease tokens. The atomic
+Archive Job start statement rechecks the completed current inspection, pending
+request, approval, enabled/present drive state, and absence of an Original Disc
 Archive with the same fingerprint before returning preservation work. It
 permits only one running Archive Job for a fingerprint across all Optical
 Drives and only one running job on each physical drive. Approval freezes the
@@ -811,9 +833,20 @@ migration twice.
 
 Archive claims also carry a bounded one-minute lease. The owning worker renews
 it with the same attempt-token compare-and-set guard while copying. Each poll
-recovers at most 100 expired claims, oldest first, into visible failed jobs that
-must be explicitly retried; a stale worker cannot renew, report, fail, or
-publish that recovered attempt. A timed-out or cancelled DVD read returns control
+recovers at most 100 ordinary expired claims into visible failed jobs that must
+be explicitly retried. Expired cancellations use a separately bounded,
+cursor-rotated recovery pass: they remain pending until cross-process device and
+partial ownership checks prove external work inactive; the worker holds the
+same device-inode exclusion through the fenced transition that records an
+aborted job and cancelled request. Recovery acquires `flock` on the exact
+inherited descriptor and retains that descriptor through the synchronous
+transition, so acquisition-helper exit cannot silently release the exclusion.
+Lock acquisition itself has a bounded deadline. If its helper does not close
+after cancellation, the worker destroys and unreferences its handles and
+returns the poll; any still-live inherited device descriptor remains visible to
+the same-UID `/proc` proof, so later recovery continues to fail closed.
+A stale worker cannot renew,
+report, fail, or publish a recovered attempt. A timed-out or cancelled DVD read returns control
 at its deadline, kills and detaches the child, and retains a device/output
 tombstone until the operating system reports the child closed. While that
 tombstone remains, retries are rejected and the live partial path is neither
@@ -842,9 +875,13 @@ The canonical catalog terms are:
   mapped to a Media Item.
 - **Encoding Profile**: immutable versioned encoding settings within a media
   domain.
-- **Archive Job** and **Encode Job**: separate mutable queue records. Both use
-  queued, running, completed, and failed states; Encode Jobs also retain
-  Cancelled as a distinct terminal outcome.
+- **Disc Inspection**: one insertion-scoped metadata and content examination.
+- **Archive Request**: durable preservation intent with waiting, attention,
+  cancellation, and fulfillment state.
+- **Archive Job**: one started preservation attempt with running, completed,
+  failed, or aborted status.
+- **Encode Job**: queued encoding work with queued, running, completed, and
+  failed status, plus Cancelled as a distinct terminal outcome.
 
 ### Encoding Profiles
 

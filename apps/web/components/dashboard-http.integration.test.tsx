@@ -27,6 +27,7 @@ describe("database-backed dashboard over HTTP", () => {
       confirmOpticalDrive: vi.fn(async (_binding, signal) => {
         signal.throwIfAborted();
       }),
+      observeMediaGeneration: vi.fn().mockResolvedValue("dashboard-generation"),
       discover: vi.fn().mockResolvedValue([
         {
           devicePath: "/dev/sr0",

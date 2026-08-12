@@ -11,12 +11,15 @@ import {
 } from "drizzle-orm/sqlite-core";
 
 import {
-  ARCHIVE_PROGRESS_PHASES,
-  ARCHIVE_QUEUED_PROGRESS_PHASES,
+  ARCHIVE_JOB_STATUSES,
+  ARCHIVE_REQUEST_STATUSES,
   ARCHIVE_RUNNING_PROGRESS_PHASES,
   ARCHIVE_FORMATS,
-  ARCHIVE_JOB_STATUSES,
   DETECTED_DISC_STATUSES,
+  DISC_INSPECTION_ATTEMPT_OUTCOMES,
+  DISC_INSPECTION_PHASES,
+  DISC_INSPECTION_REASON_CODES,
+  DISC_INSPECTION_STATUSES,
   DISC_KINDS,
   DISC_SELECTION_KINDS,
   ENCODE_JOB_STATUSES,
@@ -26,10 +29,13 @@ import {
   MEDIA_ITEM_KINDS,
 } from "../domain-values.js";
 import type {
+  ArchiveRequestId,
   ArchiveJobId,
   ArchiveJobClaimToken,
-  ArchiveJobInspectionToken,
   DetectedDiscId,
+  DiscInspectionAttemptId,
+  DiscInspectionClaimToken,
+  DiscInspectionId,
   DiscSelectionId,
   EncodeJobCleanupClaimToken,
   EncodeJobId,
@@ -118,6 +124,193 @@ export const detectedDiscs = sqliteTable(
     check(
       "detected_discs_status_check",
       sql`${table.status} in (${sqliteStringLiterals(DETECTED_DISC_STATUSES)})`,
+    ),
+  ],
+);
+
+export const discInspections = sqliteTable(
+  "disc_inspections",
+  {
+    id: text("id").$type<DiscInspectionId>().notNull().primaryKey(),
+    opticalDriveId: text("optical_drive_id")
+      .$type<OpticalDriveId>()
+      .notNull()
+      .references(() => opticalDrives.id, { onDelete: "restrict" }),
+    detectedDiscId: text("detected_disc_id")
+      .$type<DetectedDiscId>()
+      .references(() => detectedDiscs.id, { onDelete: "restrict" }),
+    mediaGeneration: text("media_generation").notNull(),
+    isCurrent: integer("is_current", { mode: "boolean" })
+      .notNull()
+      .default(true),
+    status: text("status", { enum: DISC_INSPECTION_STATUSES })
+      .notNull()
+      .default("running"),
+    phase: text("phase", { enum: DISC_INSPECTION_PHASES })
+      .notNull()
+      .default("reading_metadata"),
+    attemptCount: integer("attempt_count").notNull().default(1),
+    consecutiveFailureCount: integer("consecutive_failure_count")
+      .notNull()
+      .default(0),
+    volumeLabel: text("volume_label"),
+    titleCount: integer("title_count"),
+    chapterCount: integer("chapter_count"),
+    audioStreamCount: integer("audio_stream_count"),
+    subtitleStreamCount: integer("subtitle_stream_count"),
+    totalBytes: integer("total_bytes"),
+    bytesHashed: integer("bytes_hashed"),
+    bytesPerSecond: integer("bytes_per_second"),
+    etaSeconds: integer("eta_seconds"),
+    retryAt: integer("retry_at", { mode: "timestamp_ms" }),
+    manualRetryRequestedAt: integer("manual_retry_requested_at", {
+      mode: "timestamp_ms",
+    }),
+    reasonCode: text("reason_code", { enum: DISC_INSPECTION_REASON_CODES }),
+    diagnostic: text("diagnostic"),
+    claimToken: text("claim_token").$type<DiscInspectionClaimToken>(),
+    claimUpdatedAt: integer("claim_updated_at", { mode: "timestamp_ms" }),
+    phaseStartedAt: integer("phase_started_at", { mode: "timestamp_ms" })
+      .notNull(),
+    attemptStartedAt: integer("attempt_started_at", { mode: "timestamp_ms" })
+      .notNull(),
+    startedAt: integer("started_at", { mode: "timestamp_ms" }).notNull(),
+    completedAt: integer("completed_at", { mode: "timestamp_ms" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    check("disc_inspections_id_not_null", sql`${table.id} is not null`),
+    uniqueIndex("disc_inspections_current_drive_unique")
+      .on(table.opticalDriveId)
+      .where(sql`${table.isCurrent} = 1`),
+    index("disc_inspections_status_idx").on(table.status, table.updatedAt),
+    check(
+      "disc_inspections_status_check",
+      sql`${table.status} in (${sqliteStringLiterals(DISC_INSPECTION_STATUSES)})`,
+    ),
+    check(
+      "disc_inspections_phase_check",
+      sql`${table.phase} in (${sqliteStringLiterals(DISC_INSPECTION_PHASES)})`,
+    ),
+    check(
+      "disc_inspections_reason_check",
+      sql`${table.reasonCode} is null or ${table.reasonCode} in (${sqliteStringLiterals(DISC_INSPECTION_REASON_CODES)})`,
+    ),
+    check(
+      "disc_inspections_generation_check",
+      sql`length(${table.mediaGeneration}) between 1 and 64`,
+    ),
+    check(
+      "disc_inspections_attempt_count_check",
+      sql`typeof(${table.attemptCount}) = 'integer' and ${table.attemptCount} > 0 and typeof(${table.consecutiveFailureCount}) = 'integer' and ${table.consecutiveFailureCount} between 0 and 5 and ${table.consecutiveFailureCount} <= ${table.attemptCount}`,
+    ),
+    check(
+      "disc_inspections_findings_check",
+      sql`(${table.titleCount} is null or (typeof(${table.titleCount}) = 'integer' and ${table.titleCount} >= 0)) and (${table.chapterCount} is null or (typeof(${table.chapterCount}) = 'integer' and ${table.chapterCount} >= 0)) and (${table.audioStreamCount} is null or (typeof(${table.audioStreamCount}) = 'integer' and ${table.audioStreamCount} >= 0)) and (${table.subtitleStreamCount} is null or (typeof(${table.subtitleStreamCount}) = 'integer' and ${table.subtitleStreamCount} >= 0))`,
+    ),
+    check(
+      "disc_inspections_progress_check",
+      sql`(${table.totalBytes} is null or (typeof(${table.totalBytes}) = 'integer' and ${table.totalBytes} >= 0)) and (${table.bytesHashed} is null or (typeof(${table.bytesHashed}) = 'integer' and ${table.bytesHashed} >= 0 and (${table.totalBytes} is null or ${table.bytesHashed} <= ${table.totalBytes})))`,
+    ),
+    check(
+      "disc_inspections_estimate_check",
+      sql`(${table.bytesPerSecond} is null) = (${table.etaSeconds} is null) and (${table.bytesPerSecond} is null or (typeof(${table.bytesPerSecond}) = 'integer' and ${table.bytesPerSecond} > 0 and typeof(${table.etaSeconds}) = 'integer' and ${table.etaSeconds} >= 0))`,
+    ),
+    check(
+      "disc_inspections_claim_check",
+      sql`(${table.claimToken} is null) = (${table.claimUpdatedAt} is null) and (${table.claimToken} is null or ${table.status} = 'running')`,
+    ),
+    check(
+      "disc_inspections_terminal_check",
+      sql`(${table.status} = 'running') = (${table.completedAt} is null) and (${table.status} = 'completed') = (${table.detectedDiscId} is not null)`,
+    ),
+    check(
+      "disc_inspections_retry_check",
+      sql`(${table.retryAt} is null or (${table.status} = 'running' and ${table.phase} = 'retry_wait')) and (${table.manualRetryRequestedAt} is null or (${table.status} = 'failed' and ${table.isCurrent} = 1))`,
+    ),
+  ],
+);
+
+export const discInspectionAttempts = sqliteTable(
+  "disc_inspection_attempts",
+  {
+    id: text("id").$type<DiscInspectionAttemptId>().notNull().primaryKey(),
+    discInspectionId: text("disc_inspection_id")
+      .$type<DiscInspectionId>()
+      .notNull()
+      .references(() => discInspections.id, { onDelete: "restrict" }),
+    attemptNumber: integer("attempt_number").notNull(),
+    outcome: text("outcome", { enum: DISC_INSPECTION_ATTEMPT_OUTCOMES })
+      .notNull(),
+    phase: text("phase", { enum: DISC_INSPECTION_PHASES }).notNull(),
+    reasonCode: text("reason_code", { enum: DISC_INSPECTION_REASON_CODES }),
+    diagnostic: text("diagnostic"),
+    startedAt: integer("started_at", { mode: "timestamp_ms" }).notNull(),
+    endedAt: integer("ended_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (table) => [
+    check("disc_inspection_attempts_id_not_null", sql`${table.id} is not null`),
+    uniqueIndex("disc_inspection_attempts_number_unique").on(
+      table.discInspectionId,
+      table.attemptNumber,
+    ),
+    check(
+      "disc_inspection_attempts_number_check",
+      sql`typeof(${table.attemptNumber}) = 'integer' and ${table.attemptNumber} > 0`,
+    ),
+    check(
+      "disc_inspection_attempts_outcome_check",
+      sql`${table.outcome} in (${sqliteStringLiterals(DISC_INSPECTION_ATTEMPT_OUTCOMES)})`,
+    ),
+    check(
+      "disc_inspection_attempts_phase_check",
+      sql`${table.phase} in (${sqliteStringLiterals(DISC_INSPECTION_PHASES)})`,
+    ),
+    check(
+      "disc_inspection_attempts_reason_check",
+      sql`${table.reasonCode} is null or ${table.reasonCode} in (${sqliteStringLiterals(DISC_INSPECTION_REASON_CODES)})`,
+    ),
+  ],
+);
+
+export const archiveRequests = sqliteTable(
+  "archive_requests",
+  {
+    id: text("id").$type<ArchiveRequestId>().notNull().primaryKey(),
+    detectedDiscId: text("detected_disc_id")
+      .$type<DetectedDiscId>()
+      .notNull()
+      .references(() => detectedDiscs.id, { onDelete: "restrict" }),
+    status: text("status", { enum: ARCHIVE_REQUEST_STATUSES })
+      .notNull()
+      .default("pending"),
+    priority: integer("priority").notNull().default(0),
+    cancellationRequestedAt: integer("cancellation_requested_at", {
+      mode: "timestamp_ms",
+    }),
+    fulfilledAt: integer("fulfilled_at", { mode: "timestamp_ms" }),
+    cancelledAt: integer("cancelled_at", { mode: "timestamp_ms" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    check("archive_requests_id_not_null", sql`${table.id} is not null`),
+    uniqueIndex("archive_requests_nonterminal_disc_unique")
+      .on(table.detectedDiscId)
+      .where(sql`${table.status} in ('pending', 'running', 'needs_attention', 'cancellation_requested')`),
+    index("archive_requests_status_idx").on(
+      table.status,
+      table.priority,
+      table.createdAt,
+    ),
+    check(
+      "archive_requests_status_check",
+      sql`${table.status} in (${sqliteStringLiterals(ARCHIVE_REQUEST_STATUSES)})`,
+    ),
+    check(
+      "archive_requests_terminal_fields_check",
+      sql`(${table.fulfilledAt} is not null) = (${table.status} = 'fulfilled') and (${table.cancelledAt} is not null) = (${table.status} = 'cancelled') and (${table.cancellationRequestedAt} is not null) = (${table.status} in ('cancellation_requested', 'cancelled'))`,
     ),
   ],
 );
@@ -339,6 +532,10 @@ export const archiveJobs = sqliteTable(
   "archive_jobs",
   {
     id: text("id").$type<ArchiveJobId>().notNull().primaryKey(),
+    archiveRequestId: text("archive_request_id")
+      .$type<ArchiveRequestId>()
+      .notNull()
+      .references(() => archiveRequests.id, { onDelete: "restrict" }),
     detectedDiscId: text("detected_disc_id")
       .$type<DetectedDiscId>()
       .notNull()
@@ -346,20 +543,17 @@ export const archiveJobs = sqliteTable(
     originalDiscArchiveId: text("original_disc_archive_id")
       .$type<OriginalDiscArchiveId>()
       .references(() => originalDiscArchives.id, { onDelete: "restrict" }),
+    attemptOrdinal: integer("attempt_ordinal").notNull(),
     status: text("status", { enum: ARCHIVE_JOB_STATUSES })
       .notNull()
-      .default("queued"),
+      .default("running"),
     priority: integer("priority").notNull().default(0),
     progressPhase: text("progress_phase", {
-      enum: ARCHIVE_PROGRESS_PHASES,
+      enum: ARCHIVE_RUNNING_PROGRESS_PHASES,
     })
       .notNull()
-      .default("waiting"),
+      .default("preparing"),
     progressPercent: integer("progress_percent").notNull().default(0),
-    inspectionToken: text("inspection_token").$type<ArchiveJobInspectionToken>(),
-    inspectionUpdatedAt: integer("inspection_updated_at", {
-      mode: "timestamp_ms",
-    }),
     claimedBy: text("claimed_by"),
     claimToken: text("claim_token").$type<ArchiveJobClaimToken>(),
     claimedAt: integer("claimed_at", { mode: "timestamp_ms" }),
@@ -371,8 +565,17 @@ export const archiveJobs = sqliteTable(
   },
   (table) => [
     check("archive_jobs_id_not_null", sql`${table.id} is not null`),
-    uniqueIndex("archive_jobs_detected_disc_unique").on(table.detectedDiscId),
-    index("archive_jobs_queue_idx").on(table.status, table.priority, table.createdAt),
+    uniqueIndex("archive_jobs_request_attempt_unique").on(
+      table.archiveRequestId,
+      table.attemptOrdinal,
+    ),
+    uniqueIndex("archive_jobs_running_request_unique")
+      .on(table.archiveRequestId)
+      .where(sql`${table.status} = 'running'`),
+    index("archive_jobs_request_idx").on(
+      table.archiveRequestId,
+      table.attemptOrdinal,
+    ),
     check(
       "archive_jobs_status_check",
       sql`${table.status} in (${sqliteStringLiterals(ARCHIVE_JOB_STATUSES)})`,
@@ -383,15 +586,15 @@ export const archiveJobs = sqliteTable(
     ),
     check(
       "archive_jobs_progress_phase_check",
-      sql`${table.progressPhase} in (${sqliteStringLiterals(ARCHIVE_PROGRESS_PHASES)})`,
+      sql`${table.progressPhase} in (${sqliteStringLiterals(ARCHIVE_RUNNING_PROGRESS_PHASES)})`,
     ),
     check(
-      "archive_jobs_status_progress_phase_check",
-      sql`(${table.status} = 'queued' and ${table.progressPhase} in (${sqliteStringLiterals(ARCHIVE_QUEUED_PROGRESS_PHASES)})) or (${table.status} <> 'queued' and ${table.progressPhase} in (${sqliteStringLiterals(ARCHIVE_RUNNING_PROGRESS_PHASES)}))`,
+      "archive_jobs_attempt_ordinal_check",
+      sql`typeof(${table.attemptOrdinal}) = 'integer' and ${table.attemptOrdinal} > 0`,
     ),
     check(
-      "archive_jobs_inspection_lease_check",
-      sql`(${table.progressPhase} = 'inspecting_drive') = (${table.inspectionToken} is not null and ${table.inspectionUpdatedAt} is not null)`,
+      "archive_jobs_attempt_shape_check",
+      sql`(${table.status} = 'running' and ${table.claimedBy} is not null and ${table.claimToken} is not null and ${table.claimedAt} is not null and ${table.startedAt} is not null and ${table.completedAt} is null) or (${table.status} <> 'running' and ${table.startedAt} is not null and ${table.completedAt} is not null)`,
     ),
   ],
 );

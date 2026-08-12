@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { constants as fsConstants } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -7,12 +8,14 @@ import { promisify } from "node:util";
 
 import { describe, expect, it, vi } from "vitest";
 
+import { DiscInspectionError } from "./disc-inspection-error.js";
 import {
   createLinuxOpticalDriveHardware,
   createNodeCommandRunner,
   createNodeDiscContentProbeLauncher,
   createNodeDiscContentReader,
   createNodeFileDiscContentProbeLauncher,
+  createHashProgressParser,
   createNodeMediaGenerationProbeLauncher,
   createNodeMediaGenerationObserver,
   type CommandRunner,
@@ -89,27 +92,52 @@ describe("Linux Optical Drive hardware boundary", () => {
     });
 
   it("hashes DVD bytes through the libdvdcss reader", async () => {
-    const commandLauncher = {
-      start: vi.fn(() => ({
-        result: Promise.resolve({
-          exitCode: 0,
-          signal: null,
-          stderr: "",
-          stdout: `sha256:${"a".repeat(64)}`,
-        }),
-        closed: Promise.resolve(),
-        cancel: vi.fn(),
-      })),
-    };
-    const launcher = createNodeDiscContentProbeLauncher({ commandLauncher });
+    const stdout = new EventEmitter();
+    const stderr = Object.assign(new EventEmitter(), { destroy: vi.fn() });
+    const child = Object.assign(new EventEmitter(), {
+      kill: vi.fn(),
+      pid: 41,
+      stderr,
+      stdout: Object.assign(stdout, { destroy: vi.fn() }),
+      unref: vi.fn(),
+    });
+    const spawnProcess = vi.fn(() => child);
+    const launcher = createNodeDiscContentProbeLauncher({ spawnProcess });
+    const progress: number[] = [];
 
-    await expect(
-      launcher.start("/dev/sr0", 7_295_115_264).result,
-    ).resolves.toBe(`sha256:${"a".repeat(64)}`);
-    expect(commandLauncher.start).toHaveBeenCalledWith(
+    const active = launcher.start(
+      "/dev/sr0",
+      7_295_115_264,
+      (bytes) => progress.push(bytes),
+    );
+    stderr.emit("data", Buffer.from("65011712 bytes ha"));
+    stderr.emit("data", Buffer.from("shed\nignored diagnostic\n7295115264 bytes hashed\n"));
+    stdout.emit("data", Buffer.from(`sha256:${"a".repeat(64)}`));
+    child.emit("close", 0, null);
+
+    await expect(active.result).resolves.toBe(`sha256:${"a".repeat(64)}`);
+    await expect(active.closed).resolves.toBeUndefined();
+    expect(progress).toEqual([65_011_712, 7_295_115_264]);
+    expect(spawnProcess).toHaveBeenCalledWith(
       "rip-dvd-dvdcss-reader",
       ["hash", "/dev/sr0", "7295115264"],
-      128,
+      { shell: false, stdio: ["ignore", "pipe", "pipe"] },
+    );
+  });
+
+  it("parses chunked monotonic hash progress without treating diagnostics as progress", () => {
+    const progress: number[] = [];
+    const parser = createHashProgressParser(100, (bytes) => progress.push(bytes));
+
+    parser.push("10 bytes ha");
+    parser.push("shed\nnot progress\r50 bytes hashed\r");
+    parser.push("50 bytes hashed\n100 bytes hashed");
+    parser.finish();
+
+    expect(progress).toEqual([10, 50, 100]);
+    expect(parser.diagnostics()).toContain("not progress");
+    expect(() => parser.push("101 bytes hashed\n")).toThrow(
+      "invalid byte count",
     );
   });
 
@@ -1114,7 +1142,12 @@ describe("Linux Optical Drive hardware boundary", () => {
     });
     const signal = new AbortController().signal;
 
-    await expect(hardware.scanDvd(boundOpticalDrive(), signal)).resolves.toBeNull();
+    await expect(hardware.scanDvd(boundOpticalDrive(), signal)).rejects.toEqual(
+      expect.objectContaining<Partial<DiscInspectionError>>({
+        kind: "abort",
+        reasonCode: "no_medium",
+      }),
+    );
     await expect(hardware.scanDvd(boundOpticalDrive(), signal)).resolves.toMatchObject({
       volumeLabel: "DISC_A",
       fingerprint: `sha256:${"a".repeat(64)}`,
@@ -1418,7 +1451,10 @@ describe("Linux Optical Drive hardware boundary", () => {
         runner: emptyRunner,
         mediaGenerationObserver: stableMediaGenerationObserver(),
       }).scanDvd(boundOpticalDrive(), signal),
-    ).resolves.toBeNull();
+    ).rejects.toEqual(expect.objectContaining<Partial<DiscInspectionError>>({
+      kind: "abort",
+      reasonCode: "no_medium",
+    }));
 
     const failedRunner: CommandRunner = {
       run: vi.fn().mockResolvedValueOnce({

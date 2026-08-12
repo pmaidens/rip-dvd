@@ -13,11 +13,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 /* Some USB optical bridges reject larger READ(10) transfer lengths. */
 #define READ_BLOCKS 31
 #define MAX_DVD_CONTENT_BYTES UINT64_C(9000000000)
+#define HASH_PROGRESS_INTERVAL_BYTES UINT64_C(67108864)
+#define HASH_PROGRESS_INTERVAL_NS INT64_C(1000000000)
 
 enum operation {
     OPERATION_HASH,
@@ -28,7 +31,33 @@ struct operation_state {
     enum operation operation;
     EVP_MD_CTX *hash;
     int output_fd;
+    uint64_t last_progress_bytes;
+    struct timespec last_progress_at;
 };
+
+static int fail_errno(const char *operation);
+
+static int emit_hash_progress(struct operation_state *state,
+                              uint64_t bytes_read, int force)
+{
+    struct timespec current;
+    if (clock_gettime(CLOCK_MONOTONIC, &current) != 0) {
+        return fail_errno("DVD hash progress clock failed");
+    }
+    int64_t elapsed_nanoseconds =
+        ((int64_t)current.tv_sec - (int64_t)state->last_progress_at.tv_sec) *
+            INT64_C(1000000000) +
+        ((int64_t)current.tv_nsec - (int64_t)state->last_progress_at.tv_nsec);
+    if (!force &&
+        bytes_read - state->last_progress_bytes < HASH_PROGRESS_INTERVAL_BYTES &&
+        elapsed_nanoseconds < HASH_PROGRESS_INTERVAL_NS) {
+        return 0;
+    }
+    fprintf(stderr, "%" PRIu64 " bytes hashed\n", bytes_read);
+    state->last_progress_bytes = bytes_read;
+    state->last_progress_at = current;
+    return 0;
+}
 
 static int fail_errno(const char *operation)
 {
@@ -86,7 +115,7 @@ static int consume(struct operation_state *state, const unsigned char *buffer,
             fprintf(stderr, "DVD content hash update failed\n");
             return 1;
         }
-        return 0;
+        return emit_hash_progress(state, bytes_read, 0);
     }
     if (write_all(state->output_fd, buffer, length) != 0) {
         return 1;
@@ -156,8 +185,16 @@ static int run_hash(dvdcss_t dvdcss, uint64_t size_bytes)
         .operation = OPERATION_HASH,
         .hash = hash,
         .output_fd = -1,
+        .last_progress_bytes = 0,
     };
+    if (clock_gettime(CLOCK_MONOTONIC, &state.last_progress_at) != 0) {
+        EVP_MD_CTX_free(hash);
+        return fail_errno("DVD hash progress clock failed");
+    }
     int status = read_disc(dvdcss, size_bytes, &state);
+    if (status == 0 && state.last_progress_bytes != size_bytes) {
+        status = emit_hash_progress(&state, size_bytes, 1);
+    }
     unsigned char digest[EVP_MAX_MD_SIZE];
     unsigned int digest_length = 0;
     if (status == 0 && EVP_DigestFinal_ex(hash, digest, &digest_length) != 1) {
@@ -199,9 +236,29 @@ static int run_copy(dvdcss_t dvdcss, const char *output_path,
     return status;
 }
 
+static int await_copy_authorization(void)
+{
+    static const char ready[] = "rip-dvd-copy-authorization-ready\n";
+    if (write(4, ready, sizeof(ready) - 1) != (ssize_t)(sizeof(ready) - 1)) {
+        return fail_errno("DVD copy authorization readiness failed");
+    }
+    char authorized = 0;
+    ssize_t bytes_read;
+    do {
+        bytes_read = read(5, &authorized, 1);
+    } while (bytes_read < 0 && errno == EINTR);
+    if (bytes_read != 1 || authorized != '1') {
+        fprintf(stderr, "DVD copy authorization was denied\n");
+        return 1;
+    }
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
-    if (argc < 4 || (strcmp(argv[1], "hash") != 0 && strcmp(argv[1], "copy") != 0)) {
+    int authorized_copy = argc > 1 && strcmp(argv[1], "copy-authorized") == 0;
+    if (argc < 4 || (strcmp(argv[1], "hash") != 0 &&
+                     strcmp(argv[1], "copy") != 0 && !authorized_copy)) {
         fprintf(stderr, "usage: %s hash DEVICE SIZE | copy DEVICE OUTPUT SIZE\n", argv[0]);
         return 2;
     }
@@ -216,6 +273,9 @@ int main(int argc, char **argv)
     uint64_t size_bytes = 0;
     if (parse_size(argv[operation == OPERATION_HASH ? 3 : 4], &size_bytes) != 0) {
         return 2;
+    }
+    if (authorized_copy && await_copy_authorization() != 0) {
+        return 1;
     }
     dvdcss_t dvdcss = dvdcss_open(argv[2]);
     if (dvdcss == NULL) {
