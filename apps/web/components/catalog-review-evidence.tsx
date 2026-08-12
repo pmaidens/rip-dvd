@@ -106,6 +106,17 @@ function languageSummary(
   return languages.length > 0 ? languages.join(", ") : "None";
 }
 
+function mappingProposalIdentity(proposal: MappingProposal): string {
+  const source = proposal.sourceIdentity;
+  if (source.kind === "main_feature") {
+    return `${proposal.action}:main_feature`;
+  }
+  if (source.kind === "dvd_title") {
+    return `${proposal.action}:title:${source.titleNumber}`;
+  }
+  return `${proposal.action}:title:${source.titleNumber}:chapters:${source.chapterStart}-${source.chapterEnd}`;
+}
+
 function TechnicalStreamDetails({ title }: { title: DvdTitle }) {
   return (
     <details className="catalog-stream-details">
@@ -236,6 +247,7 @@ export function CatalogReviewEvidence({
       ) : null}
       {activeMappingProposal?.sourceIdentity.kind === "main_feature" ? (
         <CatalogReviewMappingProposal
+          key={mappingProposalIdentity(activeMappingProposal)}
           proposal={activeMappingProposal}
           proposedTitle={proposedTitle}
           mediaItems={mediaItems}
@@ -362,6 +374,7 @@ export function CatalogReviewEvidence({
                 </div>
                 {activeTitleProposal && activeMappingProposal ? (
                   <CatalogReviewMappingProposal
+                    key={mappingProposalIdentity(activeMappingProposal)}
                     proposal={activeMappingProposal}
                     proposedTitle={proposedTitle}
                     mediaItems={mediaItems}
