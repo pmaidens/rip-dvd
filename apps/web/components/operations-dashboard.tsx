@@ -207,6 +207,9 @@ function DashboardJobItem({
 }
 
 function encodeProgressDetail(job: DashboardEncodeJob): string | null {
+  if (job.status === "cancellation_requested") {
+    return "Waiting for HandBrake to stop safely";
+  }
   if (job.status !== "running" || job.progressPhase === null) {
     return null;
   }
@@ -1028,7 +1031,7 @@ export function DashboardView({
             verification={toFilesystemVerificationDisplay(job)}
             action={
               <div className="operation-actions">
-                {job.status === "queued" ? (
+                {job.status === "queued" || job.status === "running" ? (
                   <button
                     type="button"
                     disabled={
@@ -1039,7 +1042,9 @@ export function DashboardView({
                   >
                     {cancellingEncodeJobId === job.id
                       ? "Cancelling…"
-                      : "Cancel queued encode"}
+                      : job.status === "running"
+                        ? "Request cancellation"
+                        : "Cancel queued encode"}
                   </button>
                 ) : null}
                 {job.status === "failed" ||
@@ -1488,7 +1493,7 @@ export function OperationsDashboard({
       refresh: () => setRequestNumber((value) => value + 1),
     }),
   );
-  const [cancelQueuedEncodeJob] = useState(() =>
+  const [requestEncodeCancellation] = useState(() =>
     createDashboardMutationRunner<DashboardEncodeJob["id"]>({
       request: cancelEncodeJob,
       setBusyId: setCancellingEncodeJobId,
@@ -1725,7 +1730,7 @@ export function OperationsDashboard({
           }
           onRequeueEncodeJob={(id) => void requeueEncodeJob(id)}
           requeueingEncodeJobId={requeueingEncodeJobId}
-          onCancelEncodeJob={(id) => void cancelQueuedEncodeJob(id)}
+          onCancelEncodeJob={(id) => void requestEncodeCancellation(id)}
           cancellingEncodeJobId={cancellingEncodeJobId}
           onOpenCatalogReview={setCatalogReviewArchiveId}
           onCatalogReviewPage={setCatalogReviewCursor}

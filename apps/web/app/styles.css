@@ -1773,6 +1773,12 @@ h3 {
   color: #a9c4cd;
 }
 
+.status-cancellation_requested {
+  border-color: #a77f4f;
+  background: rgba(167, 127, 79, 0.14);
+  color: #e4c08f;
+}
+
 .progress-row {
   margin-top: 1rem;
   color: #b8c8c3;
