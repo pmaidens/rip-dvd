@@ -475,7 +475,7 @@ All tasks are AFK-ready; no product or architecture HITL decisions remain. Keep 
 
 ### Migration and recovery rehearsal
 
-- Generated and reviewed the versioned SQLite migration in `packages/data-access/drizzle/20260812034255_disc-inspection-archive-requests/` rather than using `push`.
+- Generated and reviewed the versioned SQLite migration in `packages/data-access/drizzle/20260812151540_disc-inspection-archive-requests/` rather than using `push`. After current `main` added the Encode Job cancellation migration, regenerated its snapshot from that latest checked-in state and retained the reviewed archive-intent transformation SQL so the history remains linear and the latest snapshot describes the combined schema.
 - Rehearsed both a fresh database and the predecessor schema. Fixtures cover queued/inspecting, running, completed, failed, approved-without-job, and mixed history. State/row assertions and `PRAGMA foreign_key_check` pass.
 - Queued or legacy inspecting jobs become pending requests without fabricated job or inspection history. Started jobs are preserved as attempt ordinal 1 with their practical status, progress, error, timestamps, and provenance.
 - Deployment remains coordinated across web, workers, and data access. Take the existing mode-0600 backup before deployment. If cutover fails before new-version writes, restore that database with the prior coordinated application version; after new-version writes begin, keep the new stack stopped and roll forward rather than running old code against the rebuilt schema.
