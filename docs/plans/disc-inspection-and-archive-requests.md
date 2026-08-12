@@ -469,6 +469,8 @@ All tasks are AFK-ready; no product or architecture HITL decisions remain. Keep 
 - Added request/inspection mutation routes, bounded dashboard DTOs, request-based operator attention, nested Disc Inspection and Archive Request presentation, grouped job attempts, semantic determinate/indeterminate progress, local timers, reduced-motion behavior, and responsive mutation-safe controls.
 - Updated root/package documentation, workflow fixtures, concurrency helpers, and tests; removed the obsolete Archive Job inspection helper and runtime `inspecting_drive` semantics.
 - Review remediation replaced text-derived inspection classification with typed outcomes, split polling from focused inspection/archive runners, rechecks media generation after failed reads, defers manual retry until fresh worker evidence, roots related dashboard reads from visible records, retains completed-inspection detail until fulfillment, and derives retry copy from the consecutive failure streak.
+- Terminal transitions now flush the newest coalesced progress and nullable estimates, publication fences stale claims before legacy reconciliation, and phase-specific media-change tests prove that removal/replacement never consumes retry budget.
+- Expired cancellation recovery is bounded and cursor-rotated, proves cross-process device and partial inactivity, retains the shared device-inode exclusion through fenced finalization, and cannot starve rows beyond the first page. Normal copy obtains that same exclusion and reauthorizes the current claim before the native reader can touch the device or output. A timed-out lock helper is killed and detached without blocking the poll; any still-live inherited descriptor keeps later `/proc` proofs closed.
 
 ### Migration and recovery rehearsal
 
@@ -482,14 +484,16 @@ All tasks are AFK-ready; no product or architecture HITL decisions remain. Keep 
 - The obsolete `POST /api/archive-jobs` surface remains as an explicit HTTP 410 compatibility tombstone directing callers to Archive Requests. It no longer creates intent or work.
 - The stale-partial ownership test in `dvd-archiver.test.ts` runs only where Linux `/proc` can prove writer ownership. macOS skips that platform assertion; production ownership/tombstone safety code is unchanged and the Linux Compose smoke covers the deployed environment.
 
-### Final validation — 2026-08-11
+### Final validation — 2026-08-12
 
 - `pnpm db:check` — passed; Drizzle reports the schema and migration history consistent.
 - `pnpm typecheck` — passed across all six packages/applications.
-- `pnpm test` — passed after review remediation: 779 tests passed and 7 platform-gated tests skipped.
+- `pnpm test` — passed in the Linux validation image after review remediation: 799 tests passed, including all 109 Archive Worker tests. The local macOS Archive Worker run passed 100 tests and skipped its 9 Linux-only ownership assertions.
 - `pnpm build` — passed, including the production Next.js build and both worker builds.
-- `sh scripts/smoke-compose-workers.sh all` — passed the native reader compile/test and named-volume plus bind-mount archive/encode worker smoke paths under UID 1000. The script deliberately retained its inspection resources under project prefixes `rip-dvd-worker-smoke-20260812045947-4d59e85f5409c1fd-named` and `rip-dvd-worker-smoke-20260812045947-4d59e85f5409c1fd-bind`, with bind source `/var/folders/nq/1b74p7fn7gn1d850ny6dr7d00000gn/T//rip-dvd-worker-bind-smoke.ebvCrr`.
+- `docker compose --profile validation build validation` — passed the pinned Node/pnpm toolchain check, native reader compile/test, all typechecks/tests, Drizzle consistency check, and all production builds on Linux.
+- `sh scripts/smoke-compose-workers.sh all` — passed the native reader compile/test and named-volume plus bind-mount archive/encode worker smoke paths under UID 1000 after final review remediation. The script deliberately retained its inspection resources under project prefixes `rip-dvd-worker-smoke-20260812071149-7abd6ba5b570f5af-named` and `rip-dvd-worker-smoke-20260812071149-7abd6ba5b570f5af-bind`, with bind source `/var/folders/nq/1b74p7fn7gn1d850ny6dr7d00000gn/T//rip-dvd-worker-bind-smoke.nIjVrZ`.
 - Deterministic browser verification passed at 1440×1000 and 390×844 with no horizontal document overflow. Reviewer evidence: `/private/tmp/rip-dvd-visual.V7yDMy/disc-dashboard-desktop.png` and `/private/tmp/rip-dvd-visual.V7yDMy/disc-dashboard-narrow.png`.
+- Eight iterative parallel Standards/Spec review rounds were completed. Every finding was fixed and revalidated; the final round returned no Standards problems and no Spec problems.
 - `git diff --check` passed. A stale-interface scan found `inspecting_drive` only in this historical plan text and the intentional predecessor migration fixture; no obsolete inspection/job interface remains in runtime code.
 - The implementation worktree and source handoff remain at `98ae8d6`; the source worktree still contains exactly its four intended untracked planning/domain artifacts. `CONTEXT.md` and both ADRs in this worktree remain byte-identical to their source copies; this plan alone was advanced with implementation results as required.
 
