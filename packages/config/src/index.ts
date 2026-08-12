@@ -14,7 +14,7 @@ type Environment = Readonly<Record<string, string | undefined>>;
 const DEFAULT_ARCHIVE_DEVICE_PATH = "/dev/sr0";
 const DEFAULT_WEB_TRUSTED_ORIGIN = "http://localhost:3000";
 const DEFAULT_WORKER_POLL_INTERVAL_MS = 5_000;
-const DEFAULT_ARCHIVE_WORKER_CONCURRENCY = 1;
+const DEFAULT_ARCHIVE_WORKER_CONCURRENCY = 2;
 const DEFAULT_ENCODE_WORKER_CONCURRENCY = 1;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
