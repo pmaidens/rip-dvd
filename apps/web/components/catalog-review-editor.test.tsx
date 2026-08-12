@@ -1126,12 +1126,14 @@ describe("CatalogReviewView", () => {
         mappingProposalError={null}
         selectionKind="main_feature"
         activeMappingProposal={null}
+        archiveOnlySelected={false}
         onClose={() => undefined}
         onRetry={() => undefined}
         onEditMediaItem={() => undefined}
         onCancelEdit={() => undefined}
         onDiscSelectionsPage={() => undefined}
         onSelectionKindChange={() => undefined}
+        onArchiveOnlyChange={() => undefined}
         onStartMappingProposal={() => undefined}
         onCancelMappingProposal={() => undefined}
         onCreateMappingProposal={() => undefined}
