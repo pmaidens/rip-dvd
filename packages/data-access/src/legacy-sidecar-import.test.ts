@@ -18,9 +18,11 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   DomainInvariantError,
-  InvalidStatusTransitionError,
 } from "./errors.js";
-import { completeCatalogReview } from "./catalog.test-support.js";
+import {
+  completeCatalogReview,
+  startArchiveJobForTest,
+} from "./catalog.test-support.js";
 import { decodeDvdTitleMap } from "./dvd-scan.js";
 import { createDataAccess } from "./index.js";
 import { createLegacySidecarDataAccess } from "./legacy-sidecars.js";
@@ -192,7 +194,7 @@ describe("legacy sidecar import", () => {
     const fixture = createUnreconciledLegacyDvdFixture();
 
     expect(() =>
-      fixture.access.archiveJobs.approve({ detectedDiscId: fixture.disc.id }),
+      fixture.access.archiveRequests.create({ detectedDiscId: fixture.disc.id }),
     ).toThrow(DomainInvariantError);
     expect(fixture.access.catalog.listDetectedDiscs(["scanned"]))
       .toEqual([expect.objectContaining({ id: fixture.disc.id })]);
@@ -207,7 +209,7 @@ describe("legacy sidecar import", () => {
     );
 
     expect(() =>
-      fixture.access.archiveJobs.approve({ detectedDiscId: fixture.disc.id }),
+      fixture.access.archiveRequests.create({ detectedDiscId: fixture.disc.id }),
     ).toThrow(DomainInvariantError);
     expect(fixture.access.catalog.listDetectedDiscs(["scanned"]))
       .toEqual([expect.objectContaining({ id: fixture.disc.id })]);
@@ -280,7 +282,7 @@ describe("legacy sidecar import", () => {
     }
     sqlite.close();
     expect(() =>
-      fixture.access.archiveJobs.approve({ detectedDiscId: fixture.disc.id }),
+      fixture.access.archiveRequests.create({ detectedDiscId: fixture.disc.id }),
     ).toThrow(DomainInvariantError);
 
     expect(() => fixture.access.catalog.registerDetectedDisc({
@@ -308,13 +310,13 @@ describe("legacy sidecar import", () => {
           sizeBytes: 14,
         }),
       ]));
-    const job = fixture.access.archiveJobs.approve({
-      detectedDiscId: fixture.disc.id,
-    });
-    expect(fixture.access.archiveJobs.claimNext("reconciled-worker", {
-      opticalDriveId: fixture.drive.id,
-      fingerprint,
-    })).toMatchObject({ id: job.id, status: "running" });
+    expect(
+      startArchiveJobForTest(
+        fixture.access,
+        fixture.disc,
+        "reconciled-worker",
+      ),
+    ).toMatchObject({ status: "running" });
     fixture.access.close();
   });
 
@@ -332,7 +334,7 @@ describe("legacy sidecar import", () => {
       sizeBytes: 14,
     })).toThrow(/operator remediation/i);
     expect(() =>
-      fixture.access.archiveJobs.approve({ detectedDiscId: fixture.disc.id }),
+      fixture.access.archiveRequests.create({ detectedDiscId: fixture.disc.id }),
     ).toThrow(DomainInvariantError);
     expect(fixture.access.catalog.listOriginalDiscArchives())
       .toEqual([expect.objectContaining({ sizeBytes: null })]);
@@ -343,7 +345,7 @@ describe("legacy sidecar import", () => {
     ["stored-size", undefined],
     ["NULL-size", null],
   ] as const)(
-    "fails an upgraded %s queued Archive Job claim closed until identity reconciliation",
+    "fails an upgraded %s pending Archive Request start closed until identity reconciliation",
     (_sizeState, legacySizeBytes) => {
       const fixture = createUnreconciledLegacyDvdFixture(
         SAME_DVD_CONTENT_ID,
@@ -355,15 +357,36 @@ describe("legacy sidecar import", () => {
         "update detected_discs set status = 'approved', updated_at = ? where id = ?",
       ).run(timestamp, fixture.disc.id);
       sqlite.prepare(`
-        insert into archive_jobs (
+        insert into archive_requests (
           id, detected_disc_id, status, created_at, updated_at
-        ) values (?, ?, 'queued', ?, ?)
-      `).run("unreconciled-upgrade-job", fixture.disc.id, timestamp, timestamp);
+        ) values (?, ?, 'pending', ?, ?)
+      `).run(
+        "unreconciled-upgrade-request",
+        fixture.disc.id,
+        timestamp,
+        timestamp,
+      );
       sqlite.close();
 
-      expect(fixture.access.archiveJobs.claimNext("upgrade-worker")).toBeNull();
-      expect(fixture.access.archiveJobs.list(["queued"]))
-        .toEqual([expect.objectContaining({ id: "unreconciled-upgrade-job" })]);
+      const started = fixture.access.discInspections.beginOrResume({
+        opticalDriveId: fixture.drive.id,
+        mediaGeneration: "unreconciled-upgrade-generation",
+      });
+      const inspection = fixture.access.discInspections.record(started.claim!, {
+        type: "complete",
+        detectedDiscId: fixture.disc.id,
+      });
+      expect(() =>
+        fixture.access.archiveJobs.startForInspection(
+          inspection.id,
+          "upgrade-worker",
+        ),
+      ).toThrow(DomainInvariantError);
+      expect(fixture.access.archiveJobs.list()).toEqual([]);
+      expect(fixture.access.archiveRequests.list(["pending"]))
+        .toEqual([
+          expect.objectContaining({ id: "unreconciled-upgrade-request" }),
+        ]);
       fixture.access.close();
     },
   );
@@ -384,13 +407,25 @@ describe("legacy sidecar import", () => {
         "update detected_discs set status = 'approved', updated_at = ? where id = ?",
       ).run(timestamp, fixture.disc.id);
       sqlite.prepare(`
+        insert into archive_requests (
+          id, detected_disc_id, status, created_at, updated_at
+        ) values (?, ?, 'running', ?, ?)
+      `).run(
+        "unreconciled-publication-request",
+        fixture.disc.id,
+        timestamp,
+        timestamp,
+      );
+      sqlite.prepare(`
         insert into archive_jobs (
-          id, detected_disc_id, status, progress_phase,
+          id, archive_request_id, detected_disc_id, attempt_ordinal,
+          status, progress_phase,
           claimed_by, claim_token, claimed_at,
           started_at, created_at, updated_at
-        ) values (?, ?, 'running', 'preparing', ?, ?, ?, ?, ?, ?)
+        ) values (?, ?, ?, 1, 'running', 'preparing', ?, ?, ?, ?, ?, ?)
       `).run(
         "unreconciled-publication-job",
+        "unreconciled-publication-request",
         fixture.disc.id,
         "upgrade-worker",
         "unreconciled-publication-claim",
@@ -532,14 +567,14 @@ describe("legacy sidecar import", () => {
           : observation;
       let approvalError: unknown;
       try {
-        access.archiveJobs.approve({ detectedDiscId: reviewed.id });
+        access.archiveRequests.create({ detectedDiscId: reviewed.id });
       } catch (error) {
         approvalError = error;
       }
-      const claim = access.archiveJobs.claimNext("replacement-worker");
+      const claim = access.archiveJobs.list(["running"])[0] ?? null;
 
       expect(reviewed.status).toBe("archived");
-      expect(approvalError).toBeInstanceOf(InvalidStatusTransitionError);
+      expect(approvalError).toBeInstanceOf(DomainInvariantError);
       expect(claim).toBeNull();
       expect(access.catalog.listOriginalDiscArchives()).toEqual([
         expect.objectContaining({

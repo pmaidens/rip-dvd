@@ -30,7 +30,24 @@ export interface OpticalDriveDvdScanner {
   scan(
     binding: BoundOpticalDrive,
     signal: AbortSignal,
+    options?: DiscInspectionScanOptions,
   ): Promise<ScannedDvd | null>;
+}
+
+export interface DiscInspectionMetadata {
+  audioStreamCount: number;
+  chapterCount: number;
+  subtitleStreamCount: number;
+  titleCount: number;
+  totalBytes: number;
+  volumeLabel: string | null;
+}
+
+export interface DiscInspectionScanOptions {
+  expectedMediaGeneration?: string;
+  onBytesHashed?(bytes: number): void;
+  onMetadata?(metadata: DiscInspectionMetadata): void;
+  onPhase?(phase: "reading_metadata" | "hashing_content" | "confirming_media"): void;
 }
 
 async function inspectDvd(
@@ -65,6 +82,8 @@ async function readDvdContentIdentity(
   signal: AbortSignal,
   runner: CommandRunner,
   contentReader: DiscContentReader,
+  metadata: NonNullable<Awaited<ReturnType<typeof inspectDvd>>>,
+  options: DiscInspectionScanOptions,
 ): Promise<{ contentId: string; sizeBytes: number }> {
   const sizeResult = await runner.run(
     "blockdev",
@@ -84,7 +103,32 @@ async function readDvdContentIdentity(
   } catch {
     throw new Error("blockdev returned an invalid DVD size");
   }
-  const contentId = await contentReader.hash(devicePath, sizeBytes, signal);
+  options.onMetadata?.({
+    audioStreamCount: metadata.titles.reduce(
+      (total, title) => total + title.audioStreams.length,
+      0,
+    ),
+    chapterCount: metadata.titles.reduce(
+      (total, title) => total + title.chapters,
+      0,
+    ),
+    subtitleStreamCount: metadata.titles.reduce(
+      (total, title) => total + title.subtitles.length,
+      0,
+    ),
+    titleCount: metadata.titles.length,
+    totalBytes: sizeBytes,
+    volumeLabel: metadata.volumeLabel ?? null,
+  });
+  options.onPhase?.("hashing_content");
+  const contentId = options.onBytesHashed === undefined
+    ? await contentReader.hash(devicePath, sizeBytes, signal)
+    : await contentReader.hash(
+        devicePath,
+        sizeBytes,
+        signal,
+        options.onBytesHashed,
+      );
   if (!isDvdContentId(contentId)) {
     throw new Error("DVD content reader returned an invalid content identity");
   }
@@ -99,7 +143,7 @@ export function createOpticalDriveDvdScanner({
   runner,
 }: OpticalDriveDvdScannerOptions): OpticalDriveDvdScanner {
   return {
-    async scan(binding, signal) {
+    async scan(binding, signal, options = {}) {
       const safeDevicePath = await identity.requireCurrent(
         binding,
         "before DVD scanning",
@@ -109,6 +153,12 @@ export function createOpticalDriveDvdScanner({
         safeDevicePath,
         signal,
       );
+      if (
+        options.expectedMediaGeneration !== undefined &&
+        options.expectedMediaGeneration !== generationBefore
+      ) {
+        throw new Error("DVD medium changed before scanning");
+      }
       const cached = cache.find(safeDevicePath, generationBefore);
       if (cached !== undefined) {
         await identity.requireCurrent(binding, "during DVD scanning", signal);
@@ -117,6 +167,7 @@ export function createOpticalDriveDvdScanner({
           : { ...cached.result, isNewMediumObservation: false };
       }
 
+      options.onPhase?.("reading_metadata");
       const metadata = await inspectDvd(safeDevicePath, signal, runner);
       if (metadata === null) {
         const generationAfter = await mediaGenerationObserver.observe(
@@ -136,7 +187,10 @@ export function createOpticalDriveDvdScanner({
         signal,
         runner,
         contentReader,
+        metadata,
+        options,
       );
+      options.onPhase?.("confirming_media");
       const generationAfter = await mediaGenerationObserver.observe(
         safeDevicePath,
         signal,

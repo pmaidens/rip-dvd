@@ -727,23 +727,33 @@ kills and detaches the helper, and retains its per-drive single-flight tombstone
 until the child process is confirmed closed. Later polls reuse that tombstone;
 capacity is recovered and a fresh retry is admitted only after confirmed close.
 Raw-disc open/read/hash work uses the same bounded helper-process lifecycle, so
-a kernel-blocked device operation cannot keep the archive worker alive.
+a kernel-blocked device operation cannot keep the archive worker alive. Hash
+progress is streamed as throttled byte counts without contributing repetitive
+lines to the bounded diagnostic buffer; process capacity remains occupied until
+the child is confirmed closed.
 Reads are shell-free, size-capped, incremental, timed out, and
 cancellation-aware. The full-disc hash has an eight-hour ceiling so slow physical
 drives can complete while a permanently blocked read remains bounded.
-Repeated polls update the same Detected Disc. Dashboard approval atomically
-marks a scanned disc approved and creates its queued Archive Job; discovery
-never approves or queues work by itself. The archive worker claims approved
-work from an enabled, present drive before potentially long medium validation,
-then fails closed if the current physical disc no longer matches. Copying starts
-only after that validation succeeds. It copies through a bounded hidden partial
-path and publishes the fingerprint-named ISO and its Original Disc Archive
-record only after the source and completed image are reverified.
+One durable Disc Inspection represents the current insertion and owns metadata
+findings, full-content hash progress, retries, and terminal inspection outcome.
+It is resumed only while drive identity and Linux media-generation evidence
+prove the same insertion. The dashboard nests its indeterminate metadata phase,
+determinate byte progress, stabilized rate/ETA, retry state, and safe failure
+reason under the Optical Drive.
+
+Requesting preservation atomically marks a scanned disc approved and creates a
+pending Archive Request, not an Archive Job. A completed current inspection is
+reused without rehashing. Only when it matches a pending request does the worker
+atomically create a claimed running Archive Job attempt, then copy through a bounded
+hidden partial path, and publishes the fingerprint-named ISO and its Original
+Disc Archive record only after the source and completed image are reverified.
 Progress and terminal state are written to SQLite and reach the dashboard over
-SSE. Failed or interrupted copies are moved to a `.failed` recovery path and
-remain explicitly retryable from the dashboard unless another observation has
-already published an archive for the same fingerprint. Those superseded
-failures remain visible in Archive Job history without a retry action. Before
+SSE. Failed attempts move their request to `needs_attention`; manual retry
+returns the request to `pending` and the next execution creates another Archive
+Job attempt. Cooperative cancellation stops the external copy, records the
+attempt `aborted`, and records the request `cancelled`. Failed or interrupted
+copies are moved to a `.failed` recovery path. Older attempts remain grouped in
+Archive Job history. Before
 retrying, the worker examines at most 4,096 entries in the canonical originals
 directory for exact same-fingerprint attempt-unique partials, fails closed if
 discovery or inode ownership is ambiguous, and quarantines every inactive match
@@ -751,8 +761,8 @@ before starting a new copy.
 
 A fingerprint already stored by an Original Disc Archive, or recorded as a
 current content-ID alias for its legacy fingerprint, is shown as **Already
-archived**. The data-access facade removes any obsolete queued Archive Job for
-either form of that content identity.
+archived**. Matching nonterminal Archive Requests are fulfilled by that
+provenance and no duplicate execution attempt starts.
 
 The dashboard's HTTP snapshot carries review details. One-second SSE activity
 events retain up to 100 live Detected Discs and jobs ahead of 20 terminal-history
@@ -770,14 +780,12 @@ SQLite file, enables foreign keys, WAL journaling, a 5000 ms busy timeout, and
 normal WAL synchronization. Compose stores `/data/rip-dvd.sqlite` in the
 persistent `rip-dvd-data` volume.
 
-The facade exposes catalog operations and separate Archive Job and Encode Job
-queues without exposing Drizzle or a general transaction API to callers.
-Archive approval and job creation/retry share one immediate transaction.
-Archive Jobs are otherwise conditionally enqueued or requeued only while a
-Detected Disc is approved;
-approval revocation or archive publication removes obsolete queued work in the
-same short transaction. The atomic claim statement rechecks both current
-approval, enabled/present drive state, and the absence of an Original Disc
+The facade exposes catalog operations, Disc Inspections, Archive Requests,
+attempt-only Archive Jobs, and the Encode Job queue without exposing Drizzle or
+a general transaction API to callers. Request creation owns operator intent;
+inspection ownership and job execution use separate lease tokens. The atomic
+Archive Job start statement rechecks the completed current inspection, pending
+request, approval, enabled/present drive state, and absence of an Original Disc
 Archive with the same fingerprint before returning preservation work. It
 permits only one running Archive Job for a fingerprint across all Optical
 Drives and only one running job on each physical drive. Approval freezes the
@@ -842,9 +850,13 @@ The canonical catalog terms are:
   mapped to a Media Item.
 - **Encoding Profile**: immutable versioned encoding settings within a media
   domain.
-- **Archive Job** and **Encode Job**: separate mutable queue records. Both use
-  queued, running, completed, and failed states; Encode Jobs also retain
-  Cancelled as a distinct terminal outcome.
+- **Disc Inspection**: one insertion-scoped metadata and content examination.
+- **Archive Request**: durable preservation intent with waiting, attention,
+  cancellation, and fulfillment state.
+- **Archive Job**: one started preservation attempt with running, completed,
+  failed, or aborted status.
+- **Encode Job**: queued encoding work with queued, running, completed, and
+  failed status, plus Cancelled as a distinct terminal outcome.
 
 ### Encoding Profiles
 

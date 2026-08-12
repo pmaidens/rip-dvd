@@ -9,7 +9,11 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import { readDashboardSnapshot } from "./dashboard";
-import { seedFailedArchiveJobAndQueuedDuplicate } from "../test/archive-job-fixture";
+import {
+  completeDiscInspection,
+  seedFailedArchiveJobAndQueuedDuplicate,
+  startArchiveJob,
+} from "../test/archive-job-fixture";
 import {
   completeCatalogReview,
   useDataAccessFixture,
@@ -281,7 +285,7 @@ describe("readDashboardSnapshot", () => {
     });
     access.catalog.updateDetectedDiscStatus(waitingDisc.id, "scanned");
     access.catalog.updateDetectedDiscStatus(waitingDisc.id, "approved");
-    access.archiveJobs.enqueue({ detectedDiscId: waitingDisc.id, priority: 10 });
+    access.archiveRequests.create({ detectedDiscId: waitingDisc.id, priority: 10 });
 
     const reviewDisc = access.catalog.registerDetectedDisc({
       opticalDriveId: drive.id,
@@ -346,7 +350,10 @@ describe("readDashboardSnapshot", () => {
       "HandBrake failed while reading '/private/media/secret file.iso': output /media/movies/partial.mkv",
     );
 
-    access.archiveJobs.beginDriveInspection(drive.id);
+    access.discInspections.beginOrResume({
+      opticalDriveId: drive.id,
+      mediaGeneration: "dashboard-inspection",
+    });
     const dashboard = readDashboardSnapshot(access);
 
     expect(dashboard.opticalDrives).toEqual({
@@ -401,17 +408,10 @@ describe("readDashboardSnapshot", () => {
         }),
       ]),
     });
-    expect(dashboard.archiveJobs).toEqual({
-      status: "loaded",
-      items: [
-        expect.objectContaining({
-          discLabel: "WAITING_DISC",
-          status: "queued",
-          progressPhase: "inspecting_drive",
-          progressPercent: 0,
-        }),
-      ],
-    });
+    expect(dashboard.archiveJobs).toEqual({ status: "loaded", items: [] });
+    expect(dashboard.detectedDiscs.status === "loaded" &&
+      dashboard.detectedDiscs.items.find((disc) => disc.volumeLabel === "WAITING_DISC")
+        ?.archiveRequest).toMatchObject({ status: "pending", attemptCount: 0 });
     expect(dashboard.encodeJobs).toEqual({
       status: "loaded",
       items: [
@@ -462,7 +462,6 @@ describe("readDashboardSnapshot", () => {
           id: fixture.failedJob.id,
           status: "failed",
           failureDetail: "The worker could not read its input.",
-          retryable: true,
         }),
       ]),
     });
@@ -483,12 +482,10 @@ describe("readDashboardSnapshot", () => {
           discLabel: "FAILED_DUPLICATE",
           status: "failed",
           failureDetail: "The worker could not read its input.",
-          retryable: false,
         }),
         expect.objectContaining({
           id: publishedJob.id,
           status: "completed",
-          retryable: false,
         }),
       ]),
     });
@@ -510,7 +507,7 @@ describe("readDashboardSnapshot", () => {
     });
     writer.catalog.updateDetectedDiscStatus(disc.id, "scanned");
     writer.catalog.updateDetectedDiscStatus(disc.id, "approved");
-    const job = writer.archiveJobs.enqueue({ detectedDiscId: disc.id });
+    const request = writer.archiveRequests.create({ detectedDiscId: disc.id });
     let archiveCommitted = false;
     const interleavedReader: DataAccess = {
       ...reader,
@@ -547,9 +544,13 @@ describe("readDashboardSnapshot", () => {
       status: "loaded",
       items: [expect.objectContaining({ id: disc.id, status: "approved" })],
     });
-    expect(dashboard.archiveJobs).toEqual({
+    expect(dashboard.archiveJobs).toEqual({ status: "loaded", items: [] });
+    expect(dashboard.detectedDiscs).toEqual({
       status: "loaded",
-      items: [expect.objectContaining({ id: job.id, status: "queued" })],
+      items: [expect.objectContaining({
+        id: disc.id,
+        archiveRequest: expect.objectContaining({ id: request.id, status: "pending" }),
+      })],
     });
     expect(dashboard.catalogReview).toEqual({ status: "loaded", items: [] });
     expect(writer.catalog.listDetectedDiscs()).toEqual([
@@ -654,7 +655,7 @@ describe("readDashboardSnapshot", () => {
     });
     access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
     access.catalog.updateDetectedDiscStatus(disc.id, "approved");
-    access.archiveJobs.enqueue({ detectedDiscId: disc.id });
+    access.archiveRequests.create({ detectedDiscId: disc.id });
 
     const dashboard = readDashboardSnapshot(withSnapshotOverrides(access, {
       catalog: {
@@ -687,7 +688,7 @@ describe("readDashboardSnapshot", () => {
     });
     access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
     access.catalog.updateDetectedDiscStatus(disc.id, "approved");
-    access.archiveJobs.enqueue({ detectedDiscId: disc.id });
+    access.archiveRequests.create({ detectedDiscId: disc.id });
 
     const dashboard = readDashboardSnapshot(withSnapshotOverrides(access, {
       catalog: {

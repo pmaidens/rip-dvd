@@ -1,8 +1,9 @@
 # @rip-dvd/data-access
 
 This package is the only runtime persistence boundary for rip-dvd. Its public
-interface speaks in Optical Drives, Detected Discs, Original Disc Archives,
-Media Items, Disc Selections, Encoding Profiles, Archive Jobs, and Encode Jobs.
+interface speaks in Optical Drives, Disc Inspections, Detected Discs, Archive
+Requests, Original Disc Archives, Media Items, Disc Selections, Encoding
+Profiles, Archive Jobs, and Encode Jobs.
 Drizzle tables, SQL, SQLite connections, and transaction objects remain
 private. The migration-only `@rip-dvd/data-access/legacy-sidecars` entrypoint is
 the sole format-named exception; it converts legacy persistence into those
@@ -39,8 +40,9 @@ content-ID validation instead of maintaining separate scan shapes.
 
 Bounded dashboard reads keep current state ahead of history: every present or
 enabled Optical Drive is returned before a capped history of disabled missing
-drives. Detected Discs awaiting review and the shared Archive/Encode Job policy
-each have an explicit active cap before recent terminal history is added.
+drives. Detected Discs awaiting review, current Disc Inspections, nonterminal
+Archive Requests, and Archive/Encode Job attempts remain bounded before recent
+terminal history is added.
 Pending catalog review pages use an archived-time and archive-ID keyset cursor,
 so completing a visible review does not shift or duplicate later pages.
 
@@ -119,30 +121,30 @@ not include encode output paths. While legacy cutover repair is pending, the
 archive fence suppresses every selection mutation action and explains that
 changes are unavailable.
 
-## Queue attempts and progress
+## Inspections, requests, and job attempts
 
-Every claim returns a unique, queue-specific claim token. Progress, completion,
-and failure commands accept the claimed running job and compare its ID, running
-status, and token in the update. Output from a stale worker attempt therefore
-cannot mutate a retried job.
+`discInspections.beginOrResume()` admits one current insertion per Optical
+Drive. Drive identity and media generation fence replacement, while a renewable
+claim token fences stale worker callbacks. Structured metadata, hash bytes,
+rate/ETA, attempt history, retry deadlines, reason codes, and bounded diagnostics
+are persisted without display strings. The fifth consecutive transient failure
+is terminal; manual retry preserves lifetime attempts while resetting only the
+consecutive budget. Removal and replacement abort rather than fail.
 
-`archiveJobs.approve()` atomically moves a scanned Detected Disc to approved and
-creates its queued job, or resets the same failed job for an explicit retry.
-Archive Jobs can otherwise be enqueued or requeued only while their Detected
-Disc is approved and no archive exists for its fingerprint. The single-statement
-claim also joins the current Detected Disc and Optical Drive state and returns
-only approved work for an enabled, present drive, so a revocation or drive-state
-change between enqueue and claim prevents an external preservation process from
-starting. It excludes another running Archive Job for either the same
-fingerprint across Optical Drives or the same physical drive. Approval freezes
-the reviewed Disc Kind and scan data until approval is revoked, and every
-observation of a fingerprint must have the same Disc Kind.
+`archiveRequests.create()` atomically approves a scanned Detected Disc and
+records durable intent without creating an Archive Job. Pending requests wait
+indefinitely. Failure moves a request to `needs_attention`; manual retry returns
+it to `pending`; cancellation either completes immediately or enters
+`cancellation_requested` until active external work stops.
 
-`archiveJobs.publish()` inserts Original Disc Archive provenance, marks every
-observation of the fingerprint archived, removes duplicate queued work, and
-records 100% terminal job success in one immediate transaction. Once archive
-provenance exists, rediscovery may refresh metadata but cannot change the
-Detected Disc kind.
+`archiveJobs.startForInspection()` atomically rechecks a completed current
+inspection, matching pending request, approved disc, enabled/present drive,
+legacy identity barrier, existing provenance, and same-fingerprint/same-drive
+execution exclusions before inserting a claimed running attempt. Every attempt
+has its own ordinal and claim token. Publication inserts Original Disc Archive
+provenance, archives matching observations, completes the attempt, and fulfills
+matching requests in one immediate transaction. Failure and abortion update the
+attempt and request together. A stale attempt cannot mutate a later attempt.
 
 DVD title/chapter coordinates and Encoding Profile versions must be positive
 safe integers at the facade. SQLite CHECK constraints also require integer
@@ -162,7 +164,8 @@ The database retains every version referenced by an Encode Job. Active state is
 mutable selection policy, while the key, name, domain, version, and settings
 that define historical job meaning have no update operation.
 
-Both queues share one progress coalescer. The first report is persisted
+Archive Job execution, Disc Inspection hashing, and Encode Job progress use the
+same one-second/five-percentage-point persistence policy. The first report is persisted
 immediately. Later reports persist when at least one second has elapsed or the
 reported value differs from the last persisted value by at least five
 percentage points; intermediate reports are coalesced in memory. Completion
@@ -212,10 +215,10 @@ The facade deliberately has no general mutation `transaction(callback)` escape
 hatch. The `readConsistentSnapshot()` boundary supplies only synchronous read
 operations and keeps composed cross-table reads on one short SQLite snapshot;
 it rejects asynchronous callbacks. The few multi-statement catalog mutations
-use short internal transactions. Queue claims use one atomic
-`UPDATE ... RETURNING` statement and return only after that statement has
-committed. Workers must start external programs only after `claimNext()`
-returns; process execution never belongs in a database transaction.
+use short internal transactions. Archive attempt start and Encode Job claim
+return only after their atomic writes commit. Workers start external programs
+only after those operations return; process execution never belongs in a
+database transaction.
 Encode publication persists a mutation token in one short transaction before
 filesystem work begins. Identity callbacks inspect already-staged media entries
 only outside writer transactions. Completion first commits while retaining the

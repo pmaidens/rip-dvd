@@ -4,9 +4,13 @@ import type {
   ArchiveJob,
   ArchiveJobStatus,
   ArchiveJobId,
+  ArchiveRequestId,
+  ArchiveRequestStatus,
   BoundedListPolicy,
   DataAccess,
   DetectedDiscId,
+  DiscInspectionId,
+  DiscInspectionStatus,
   DiscSelectionId,
   EncodeJob,
   EncodeJobId,
@@ -84,6 +88,28 @@ describe("data-access domain identifiers", () => {
     expectTypeOf<MediaItemId>().not.toEqualTypeOf<DiscSelectionId>();
     expectTypeOf<EncodingProfileId>().not.toEqualTypeOf<EncodeJobId>();
     expectTypeOf<ArchiveJobId>().not.toEqualTypeOf<EncodeJobId>();
+    expectTypeOf<DiscInspectionId>().not.toEqualTypeOf<OpticalDriveId>();
+    expectTypeOf<ArchiveRequestId>().not.toEqualTypeOf<DetectedDiscId>();
+  });
+
+  it("keeps inspection, request, archive-attempt, and encode statuses distinct", () => {
+    expectTypeOf<DiscInspectionStatus>()
+      .toEqualTypeOf<"running" | "completed" | "failed" | "aborted">();
+    expectTypeOf<ArchiveRequestStatus>()
+      .toEqualTypeOf<
+        | "pending"
+        | "running"
+        | "needs_attention"
+        | "cancellation_requested"
+        | "fulfilled"
+        | "cancelled"
+      >();
+    expectTypeOf<ArchiveJobStatus>()
+      .toEqualTypeOf<"running" | "completed" | "failed" | "aborted">();
+    expectTypeOf<EncodeJobStatus>()
+      .toEqualTypeOf<
+        "queued" | "running" | "completed" | "failed" | "cancelled"
+      >();
   });
 
   it("keeps Cancelled specific to Encode Job outcomes", () => {
@@ -125,7 +151,7 @@ describe("data-access domain identifiers", () => {
         discKind: "dvd",
         fingerprint: "fingerprint",
       });
-      access.archiveJobs.enqueue({
+      access.archiveRequests.create({
         // @ts-expect-error Optical Drive IDs cannot identify Detected Discs.
         detectedDiscId: driveId,
       });

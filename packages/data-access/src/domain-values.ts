@@ -23,23 +23,65 @@ export const MAX_MEDIA_ITEM_HIERARCHY_DEPTH = 32;
 
 export const MEDIA_DOMAINS = ["dvd_video", "audio"] as const;
 
-export const ARCHIVE_JOB_STATUSES = [
+export const ENCODE_JOB_STATUSES = [
   "queued",
   "running",
   "completed",
   "failed",
-] as const;
-
-export const JOB_STATUSES = [
-  ...ARCHIVE_JOB_STATUSES,
   "cancelled",
 ] as const;
 
-export const ENCODE_JOB_STATUSES = JOB_STATUSES;
+export const ARCHIVE_JOB_STATUSES = [
+  "running",
+  "completed",
+  "failed",
+  "aborted",
+] as const;
 
-export const ARCHIVE_QUEUED_PROGRESS_PHASES = [
-  "waiting",
-  "inspecting_drive",
+export const ARCHIVE_REQUEST_STATUSES = [
+  "pending",
+  "running",
+  "needs_attention",
+  "cancellation_requested",
+  "fulfilled",
+  "cancelled",
+] as const;
+
+export const DISC_INSPECTION_STATUSES = [
+  "running",
+  "completed",
+  "failed",
+  "aborted",
+] as const;
+
+export const DISC_INSPECTION_PHASES = [
+  "reading_metadata",
+  "hashing_content",
+  "confirming_media",
+  "retry_wait",
+] as const;
+
+export const DISC_INSPECTION_ATTEMPT_OUTCOMES = [
+  "completed",
+  "failed",
+  "aborted",
+  "interrupted",
+] as const;
+
+export const DISC_INSPECTION_REASON_CODES = [
+  "no_medium",
+  "media_changed",
+  "drive_identity_changed",
+  "drive_unavailable",
+  "drive_not_ready",
+  "metadata_read_failed",
+  "invalid_metadata",
+  "content_size_failed",
+  "content_read_failed",
+  "invalid_content",
+  "worker_interrupted",
+  "operator_cancelled",
+  "unknown",
 ] as const;
 
 export const ARCHIVE_RUNNING_PROGRESS_PHASES = [
@@ -47,11 +89,6 @@ export const ARCHIVE_RUNNING_PROGRESS_PHASES = [
   "copying",
   "verifying",
   "finalizing",
-] as const;
-
-export const ARCHIVE_PROGRESS_PHASES = [
-  ...ARCHIVE_QUEUED_PROGRESS_PHASES,
-  ...ARCHIVE_RUNNING_PROGRESS_PHASES,
 ] as const;
 
 export const ENCODE_PROGRESS_PHASES = [
