@@ -175,3 +175,26 @@ describe("dashboard 320px fallback", () => {
     );
   });
 });
+
+describe("Catalog Review evidence presentation", () => {
+  it("keeps title evidence wrap-safe with keyboard-visible disclosures", () => {
+    expect(selectorDeclarations(".catalog-title-evidence")).toMatch(
+      /min-width:\s*0/,
+    );
+    expect(selectorDeclarations(".catalog-title-evidence")).toMatch(
+      /overflow-wrap:\s*anywhere/,
+    );
+    expect(selectorDeclarations(".catalog-volume-labels code")).toMatch(
+      /overflow-wrap:\s*anywhere/,
+    );
+    expect(
+      selectorDeclarations(".catalog-stream-details summary:focus-visible"),
+    ).toMatch(/outline:\s*3px solid #d2a14b/);
+    expect(styles).toMatch(
+      /@media \(max-width: 47rem\)[\s\S]*?\.catalog-stream-groups\s*\{[^}]*grid-template-columns:\s*1fr/,
+    );
+    expect(styles).toMatch(
+      /@media \(max-width: 47rem\)[\s\S]*?\.catalog-title-evidence-heading\s*\{[^}]*flex-direction:\s*column/,
+    );
+  });
+});

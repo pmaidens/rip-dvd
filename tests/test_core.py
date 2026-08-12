@@ -40,8 +40,20 @@ class NamingTests(unittest.TestCase):
     def test_pretty_from_label_title_cases_disc_labels(self):
         self.assertEqual(pretty_from_label("THE_MATRIX_RELOADED"), "The Matrix Reloaded")
 
-    def test_classify_title_accounts_for_multiple_feature_length_titles(self):
-        self.assertEqual(classify_title(7200, feature_count=2), "possible feature / double feature")
+    def test_classify_title_uses_conservative_candidate_boundaries(self):
+        cases = [
+            (0, "Very short or menu candidate"),
+            (119, "Very short or menu candidate"),
+            (120, "Short or extra candidate"),
+            (1199, "Short or extra candidate"),
+            (1200, "Episode or long-extra candidate"),
+            (3599, "Episode or long-extra candidate"),
+            (3600, "Feature-length candidate"),
+        ]
+
+        for seconds, suggestion in cases:
+            with self.subTest(seconds=seconds):
+                self.assertEqual(classify_title(seconds), suggestion)
 
 
 class ScanParsingTests(unittest.TestCase):

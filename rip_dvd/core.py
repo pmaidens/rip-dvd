@@ -85,19 +85,14 @@ def parse_duration(value):
     return (hours * 3600) + (minutes * 60) + seconds
 
 
-def classify_title(seconds, feature_count=0):
-    minutes = seconds / 60
-    if minutes >= 60:
-        if feature_count > 1:
-            return "possible feature / double feature"
-        return "likely main feature"
-    if minutes >= 30:
-        return "possible episode / long bonus"
-    if minutes >= 15:
-        return "possible bonus feature / mini-movie"
-    if minutes >= 2:
-        return "possible short / trailer / extra"
-    return "likely menu / junk"
+def classify_title(seconds):
+    if seconds >= 3600:
+        return "Feature-length candidate"
+    if seconds >= 1200:
+        return "Episode or long-extra candidate"
+    if seconds >= 120:
+        return "Short or extra candidate"
+    return "Very short or menu candidate"
 
 
 def sanitize_filename(value):
