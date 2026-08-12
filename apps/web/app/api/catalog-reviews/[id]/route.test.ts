@@ -1096,6 +1096,98 @@ describe("Catalog Review API", () => {
     ]);
   });
 
+  it("creates a new Media Item and exact-title Disc Selection through one Mapping Proposal mutation", async () => {
+    const access = dataAccessFixture.create();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const contentId = `sha256:${"9".repeat(64)}`;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: contentId,
+      volumeLabel: "ROUTE_PROPOSAL_DISC_2",
+      scanData: {
+        schemaVersion: 2,
+        contentId,
+        titles: [{
+          number: 4,
+          durationSeconds: 600,
+          chapters: 6,
+          audioStreams: [],
+          subtitles: [],
+        }],
+      },
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Route Proposal.iso",
+      fingerprint: contentId,
+    });
+    const mutation = (body: unknown) => createCatalogReviewRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+        },
+        body: JSON.stringify(body),
+      }),
+      archive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+
+    const response = await mutation({
+      action: "create_mapping_proposal",
+      catalogRevision: archive.updatedAt.toISOString(),
+      mediaItem: {
+        kind: "bonus_feature",
+        title: "Route Proposal Disc 2",
+      },
+      discSelection: {
+        sourceIdentity: { kind: "dvd_title", titleNumber: 4 },
+        label: "Deleted scene",
+      },
+    });
+
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toEqual({
+      mediaItem: expect.objectContaining({
+        kind: "bonus_feature",
+        title: "Route Proposal Disc 2",
+      }),
+      discSelection: expect.objectContaining({
+        sourceIdentity: { kind: "dvd_title", titleNumber: 4 },
+        label: "Deleted scene",
+      }),
+    });
+    expect(access.catalog.listMediaItems()).toHaveLength(1);
+    expect(access.catalog.listDiscSelections({
+      originalDiscArchiveId: archive.id,
+    })).toHaveLength(1);
+
+    const staleResponse = await mutation({
+      action: "create_mapping_proposal",
+      catalogRevision: archive.updatedAt.toISOString(),
+      mediaItem: { kind: "movie", title: "Orphaned stale item" },
+      discSelection: {
+        sourceIdentity: { kind: "dvd_title", titleNumber: 4 },
+      },
+    });
+    expect(staleResponse.status).toBe(409);
+    expect(access.catalog.listMediaItems()).toHaveLength(1);
+    expect(access.catalog.listDiscSelections({
+      originalDiscArchiveId: archive.id,
+    })).toHaveLength(1);
+  });
+
   it("creates and edits nested Media Items, maps episode ranges, and completes review", async () => {
     const access = dataAccessFixture.create();
     const drive = access.catalog.upsertOpticalDrive({

@@ -5,6 +5,7 @@ import type {
 import { createDiscSelectionSourceIdentity } from "@rip-dvd/data-access/disc-selection-source-identity";
 
 export const CATALOG_REVIEW_COMMAND_ACTIONS = [
+  "create_mapping_proposal",
   "create_media_item",
   "update_media_item",
   "create_disc_selection",
@@ -43,7 +44,18 @@ export type CatalogReviewDiscSelectionInput =
   & CatalogReviewDiscSelectionBase
   & { sourceIdentity: DiscSelectionSourceIdentityInput };
 
+export interface CatalogReviewProposedDiscSelectionInput {
+  sourceIdentity: DiscSelectionSourceIdentityInput;
+  label?: string;
+}
+
 export type CatalogReviewCommand =
+  | {
+      action: "create_mapping_proposal";
+      catalogRevision: string;
+      mediaItem: CatalogReviewMediaItemInput;
+      discSelection: CatalogReviewProposedDiscSelectionInput;
+    }
   | {
       action: "create_media_item";
       mediaItem: CatalogReviewMediaItemInput;
@@ -71,6 +83,7 @@ export type CatalogReviewCommand =
 export type CatalogReviewCommandValidationError =
   | "Invalid catalog review mutation"
   | "Unknown catalog review mutation"
+  | "Invalid Mapping Proposal"
   | "Invalid Media Item"
   | "Invalid Media Item update"
   | "Invalid Media Item parent"
@@ -257,6 +270,34 @@ function parseMediaItemChanges(
   return { ok: true, changes: changes as CatalogReviewMediaItemChanges };
 }
 
+function parseProposedDiscSelectionInput(
+  value: unknown,
+): CatalogReviewProposedDiscSelectionInput | null {
+  const input = asRecord(value);
+  const sourceIdentityInput = asRecord(input?.sourceIdentity);
+  const label = input?.label === undefined
+    ? undefined
+    : boundedString(input.label);
+  if (
+    !input ||
+    !sourceIdentityInput ||
+    (input.label !== undefined && !label)
+  ) {
+    return null;
+  }
+
+  try {
+    return {
+      sourceIdentity: createDiscSelectionSourceIdentity(
+        sourceIdentityInput as unknown as DiscSelectionSourceIdentityInput,
+      ),
+      ...(label ? { label } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
 function parseDiscSelectionInput(
   value: unknown,
 ):
@@ -264,34 +305,16 @@ function parseDiscSelectionInput(
   | { ok: false; error: CatalogReviewCommandValidationError } {
   const input = asRecord(value);
   const mediaItemId = boundedString(input?.mediaItemId);
-  const sourceIdentityInput = asRecord(input?.sourceIdentity);
-  const label = input?.label === undefined
-    ? undefined
-    : boundedString(input.label);
-  if (
-    !input ||
-    !mediaItemId ||
-    !sourceIdentityInput ||
-    (input.label !== undefined && !label)
-  ) {
-    return { ok: false, error: "Invalid Disc Selection" };
-  }
-
-  let sourceIdentity: DiscSelectionSourceIdentityInput;
-  try {
-    sourceIdentity = createDiscSelectionSourceIdentity(
-      sourceIdentityInput as unknown as DiscSelectionSourceIdentityInput,
-    );
-  } catch {
-    return { ok: false, error: "Invalid Disc Selection" };
+  const proposedSelection = parseProposedDiscSelectionInput(value);
+  if (!mediaItemId || !proposedSelection) {
+    return {
+      ok: false,
+      error: "Invalid Disc Selection",
+    };
   }
   return {
     ok: true,
-    selection: {
-      mediaItemId,
-      sourceIdentity,
-      ...(label ? { label } : {}),
-    },
+    selection: { mediaItemId, ...proposedSelection },
   };
 }
 
@@ -306,6 +329,24 @@ export function parseCatalogReviewCommand(
   }
 
   switch (action) {
+    case "create_mapping_proposal": {
+      const revision = catalogRevision(body.catalogRevision);
+      const mediaItem = parseMediaItemInput(body.mediaItem, domainValues);
+      const discSelection = parseProposedDiscSelectionInput(
+        body.discSelection,
+      );
+      return revision && mediaItem && discSelection
+        ? {
+            ok: true,
+            command: {
+              action,
+              catalogRevision: revision,
+              mediaItem,
+              discSelection,
+            },
+          }
+        : invalid("Invalid Mapping Proposal");
+    }
     case "create_media_item": {
       const mediaItem = parseMediaItemInput(body.mediaItem, domainValues);
       return mediaItem

@@ -342,6 +342,7 @@ describe("end-to-end operations dashboard workflow", () => {
         isSaving={false}
         requestError={null}
         selectionKind="main_feature"
+        activeMappingProposal={null}
         onClose={() => undefined}
         onRetry={() => undefined}
         onEditMediaItem={() => undefined}
@@ -349,6 +350,9 @@ describe("end-to-end operations dashboard workflow", () => {
         onMediaItemsPage={() => undefined}
         onDiscSelectionsPage={() => undefined}
         onSelectionKindChange={() => undefined}
+        onStartMappingProposal={() => undefined}
+        onCancelMappingProposal={() => undefined}
+        onCreateMappingProposal={() => undefined}
         onSaveMediaItem={() => undefined}
         onCreateDiscSelection={() => undefined}
         onDeleteDiscSelection={() => undefined}
@@ -368,6 +372,12 @@ describe("end-to-end operations dashboard workflow", () => {
     expect(catalogReviewHtml).toContain("Technical stream details");
     expect(catalogReviewHtml).toContain("Audio stream 0x80");
     expect(catalogReviewHtml).toContain("Subtitle stream 0x20");
+    expect(catalogReviewHtml).toContain("Map DVD main feature");
+    expect(catalogReviewHtml).toContain("Map as movie");
+    expect(catalogReviewHtml).toContain("Map as bonus feature");
+    expect(catalogReviewHtml).toContain("Map as trailer");
+    expect(catalogReviewHtml).toContain("Map chapters");
+    expect(catalogReviewHtml).toContain("Map as other");
 
     const catalogMutation = (body: unknown) =>
       createCatalogReviewRoute(
@@ -376,37 +386,109 @@ describe("end-to-end operations dashboard workflow", () => {
         () => access,
         () => trustedOrigin,
       );
-    const mediaItemResponse = await catalogMutation({
-      action: "create_media_item",
-      mediaItem: { kind: "movie", title: "Workflow Movie", year: 2001 },
-    });
-    expect(mediaItemResponse.status).toBe(201);
-    const mediaItem = (await mediaItemResponse.json()).mediaItem as {
-      id: string;
-    };
-    const selectionResponse = await catalogMutation({
-      action: "create_disc_selection",
-      selection: {
-        label: "Main feature",
-        mediaItemId: mediaItem.id,
-        sourceIdentity: { kind: "main_feature" },
+    const failedProposal = await catalogMutation({
+      action: "create_mapping_proposal",
+      catalogRevision: catalogReview.catalogRevision,
+      mediaItem: { kind: "movie", title: "Orphaned Workflow Movie" },
+      discSelection: {
+        sourceIdentity: { kind: "dvd_title", titleNumber: 99 },
       },
     });
-    expect(selectionResponse.status).toBe(201);
-    const selection = (await selectionResponse.json()).discSelection as {
-      id: string;
+    expect(failedProposal.status).toBe(409);
+    expect(access.catalog.listMediaItems()).toEqual([]);
+    expect(access.catalog.listDiscSelections({
+      originalDiscArchiveId: archive.id,
+    })).toEqual([]);
+
+    const proposalResponse = await catalogMutation({
+      action: "create_mapping_proposal",
+      catalogRevision: catalogReview.catalogRevision,
+      mediaItem: { kind: "movie", title: "Workflow Movie", year: 2001 },
+      discSelection: {
+        label: "Exact archived title",
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      },
+    });
+    expect(proposalResponse.status).toBe(201);
+    const proposal = await proposalResponse.json() as {
+      mediaItem: { id: string };
+      discSelection: { id: string };
     };
-    const catalogRevision = access.catalog.listOriginalDiscArchives({
-      ids: [archive.id],
-    })[0]!.updatedAt.toISOString();
+    const selection = proposal.discSelection;
+    expect(access.catalog.listMediaItems()).toEqual([
+      expect.objectContaining({
+        id: proposal.mediaItem.id,
+        title: "Workflow Movie",
+      }),
+    ]);
+    expect(access.catalog.listDiscSelections({
+      originalDiscArchiveId: archive.id,
+    })).toEqual([
+      expect.objectContaining({
+        id: selection.id,
+        mediaItemId: proposal.mediaItem.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+        label: "Exact archived title",
+      }),
+    ]);
+
+    const refreshedReviewResponse = await createCatalogReviewRoute(
+      new Request(`${trustedOrigin}/api/catalog-reviews/${archive.id}`),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    const refreshedReview = await refreshedReviewResponse.json() as
+      CatalogReviewDto;
+    expect(refreshedReview.catalogRevision).not.toBe(
+      catalogReview.catalogRevision,
+    );
+    expect(refreshedReview.mediaItems).toEqual([
+      expect.objectContaining({ id: proposal.mediaItem.id }),
+    ]);
+    expect(refreshedReview.discSelections).toEqual([
+      expect.objectContaining({
+        id: selection.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      }),
+    ]);
     const completedReview = await catalogMutation({
       action: "complete_review",
-      catalogRevision,
+      catalogRevision: refreshedReview.catalogRevision,
     });
     expect(completedReview.status).toBe(200);
     expect((await completedReview.json()).archive.catalogReviewedAt).toEqual(
       expect.any(String),
     );
+
+    const reviewedRevision = access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]!.updatedAt.toISOString();
+    const additionalProposal = await catalogMutation({
+      action: "create_mapping_proposal",
+      catalogRevision: reviewedRevision,
+      mediaItem: { kind: "other", title: "Workflow Menu" },
+      discSelection: {
+        sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+      },
+    });
+    expect(additionalProposal.status).toBe(201);
+    expect(access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]!.catalogReviewedAt).toBeNull();
+    const refreshedCoverageResponse = await createCatalogReviewRoute(
+      new Request(`${trustedOrigin}/api/catalog-reviews/${archive.id}`),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    const refreshedCoverage = await refreshedCoverageResponse.json() as
+      CatalogReviewDto;
+    expect(refreshedCoverage.discSelections).toHaveLength(2);
+    expect((await catalogMutation({
+      action: "complete_review",
+      catalogRevision: refreshedCoverage.catalogRevision,
+    })).status).toBe(200);
 
     const profile = access.encodingProfiles.create({
       key: "workflow-dvd",
@@ -418,10 +500,14 @@ describe("end-to-end operations dashboard workflow", () => {
       new Request(`${trustedOrigin}/api/encode-jobs`),
       () => access,
     );
-    expect(await queueOptions.json()).toMatchObject({
-      profiles: [expect.objectContaining({ id: profile.id })],
-      selections: [expect.objectContaining({ id: selection.id })],
-    });
+    expect(await queueOptions.json()).toEqual(expect.objectContaining({
+      profiles: expect.arrayContaining([
+        expect.objectContaining({ id: profile.id }),
+      ]),
+      selections: expect.arrayContaining([
+        expect.objectContaining({ id: selection.id }),
+      ]),
+    }));
 
     const outputPath = join(mediaLibraryPath, "Workflow Movie (2001).mkv");
     const runtimeConfig = () => ({
