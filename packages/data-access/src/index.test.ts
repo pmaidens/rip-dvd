@@ -1063,6 +1063,16 @@ describe("data-access facade", () => {
     })).toEqual([
       expect.objectContaining({ id: catalogEntries[1]!.mediaItem.id }),
     ]);
+    const unicodeMediaItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Été à Montréal",
+    });
+    expect(access.catalog.searchMediaItems({
+      query: "ÉTÉ_MONTRÉAL",
+      limit: 1,
+    })).toEqual([
+      expect.objectContaining({ id: unicodeMediaItem.id }),
+    ]);
     expect(access.catalog.listDiscSelections({ limit: 1, offset: 1 })).toEqual([
       expect.objectContaining({ id: catalogEntries[1]!.discSelection.id }),
     ]);
