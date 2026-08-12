@@ -116,6 +116,7 @@ export function CatalogReviewView({
 
       <div className="catalog-editor-grid">
         <CatalogReviewEvidence
+          coverage={review.coverage}
           volumeLabel={review.archive.discLabel}
           titles={review.rawScan.titles}
           mediaItems={review.mediaItems}
@@ -156,7 +157,7 @@ export function CatalogReviewView({
           />
           <CatalogReviewCompletion
             isSaving={isSaving}
-            selectionCount={review.discSelections.length}
+            coverage={review.coverage}
             reviewStatus={review.reviewStatus}
             onComplete={onCompleteReview}
           />

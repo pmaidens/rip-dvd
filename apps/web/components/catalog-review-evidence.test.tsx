@@ -1,5 +1,9 @@
+// @vitest-environment happy-dom
+
+import { act } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import titleSuggestionPolicy from "../../../fixtures/title-suggestion-policy.json";
 
@@ -8,6 +12,27 @@ import {
   formatVolumeLabel,
   titleSuggestion,
 } from "./catalog-review-evidence";
+
+const evidenceCoverage = {
+  discSelectionCount: 2,
+  mediaItemsWithSelections: 2,
+  mappedTitles: 0,
+  partiallyMappedTitles: 1,
+  unmappedTitles: 1,
+  mainFeatureSelections: 0,
+  titles: [
+    {
+      titleNumber: 1,
+      status: "partially_mapped" as const,
+      hasOverlap: true,
+    },
+    {
+      titleNumber: 2,
+      status: "unmapped" as const,
+      hasOverlap: false,
+    },
+  ],
+};
 
 describe("Catalog Review Title Suggestions", () => {
   it.each(titleSuggestionPolicy.cases)(
@@ -41,6 +66,7 @@ describe("CatalogReviewEvidence", () => {
     const html = renderToStaticMarkup(
       <CatalogReviewEvidence
         volumeLabel="FEATURE_DISC_2_2005_SPECIAL_EDITION"
+        coverage={evidenceCoverage}
         titles={[
           {
             number: 1,
@@ -68,7 +94,7 @@ describe("CatalogReviewEvidence", () => {
           },
           {
             number: 2,
-            durationSeconds: 1_199,
+            durationSeconds: 90,
             chapters: 1,
             audioStreams: [],
             subtitles: [],
@@ -101,9 +127,14 @@ describe("CatalogReviewEvidence", () => {
     expect(html).toContain("English · AC3 · 6 channels");
     expect(html).toContain("Subtitle stream 0x20");
     expect(html).toContain("English · Normal");
-    expect(html).toContain("Short or extra candidate");
+    expect(html).toContain("Very short or menu candidate");
     expect(html).toContain("Audio: None");
     expect(html).toContain("Subtitles: None");
+    expect(html).toContain("Partially mapped");
+    expect(html).toContain("Overlapping Disc Selections");
+    expect(html).toContain("counted once and remain valid");
+    expect(html).toContain("1 very-short unmapped title");
+    expect(html).not.toContain('<details open=""');
     expect(html).toContain("<details");
     expect(html).toContain("<summary>Technical stream details</summary>");
     expect(html).not.toContain("<input");
@@ -114,6 +145,7 @@ describe("CatalogReviewEvidence", () => {
     const html = renderToStaticMarkup(
       <CatalogReviewEvidence
         volumeLabel="FEATURE_DISC_2_2005_SPECIAL_EDITION"
+        coverage={evidenceCoverage}
         titles={[{
           number: 2,
           durationSeconds: 1_200,
@@ -168,5 +200,169 @@ describe("CatalogReviewEvidence", () => {
     expect(html).toContain('name="chapterEnd"');
     expect(html).toContain('name="label"');
     expect(html).toContain("Create Media Item and Disc Selection");
+  });
+
+  it("does not automatically propose sources that overlap existing coverage", async () => {
+    (globalThis as typeof globalThis & {
+      IS_REACT_ACT_ENVIRONMENT: boolean;
+    }).IS_REACT_ACT_ENVIRONMENT = true;
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const onStartMappingProposal = vi.fn();
+
+    await act(async () => {
+      root.render(
+        <CatalogReviewEvidence
+          volumeLabel="PARTIAL_DISC"
+          coverage={{
+            ...evidenceCoverage,
+            titles: [evidenceCoverage.titles[0]!],
+          }}
+          titles={[{
+            number: 1,
+            durationSeconds: 3_600,
+            chapters: 12,
+            audioStreams: [],
+            subtitles: [],
+          }]}
+          onStartMappingProposal={onStartMappingProposal}
+        />,
+      );
+    });
+    const assistedActions = [...container.querySelectorAll<HTMLButtonElement>(
+      ".catalog-title-actions button",
+    )];
+    expect(assistedActions).toHaveLength(5);
+    expect(assistedActions.every((button) => button.disabled)).toBe(true);
+    expect(container.textContent).toContain(
+      "Use manual Disc Selection controls for intentional overlaps",
+    );
+    for (const button of assistedActions) {
+      await act(async () => button.click());
+    }
+    expect(onStartMappingProposal).not.toHaveBeenCalled();
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("filters the evidence cards while keeping very-short unmapped titles expandable", async () => {
+    (globalThis as typeof globalThis & {
+      IS_REACT_ACT_ENVIRONMENT: boolean;
+    }).IS_REACT_ACT_ENVIRONMENT = true;
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const titles = [
+      {
+        number: 1,
+        durationSeconds: 3_600,
+        chapters: 12,
+        audioStreams: [],
+        subtitles: [],
+      },
+      {
+        number: 2,
+        durationSeconds: 90,
+        chapters: 1,
+        audioStreams: [],
+        subtitles: [],
+      },
+    ];
+
+    await act(async () => {
+      root.render(
+        <CatalogReviewEvidence
+          volumeLabel="FILTER_DISC"
+          coverage={evidenceCoverage}
+          titles={titles}
+        />,
+      );
+    });
+    const collapsedTitles = container.querySelector<HTMLDetailsElement>(
+      ".catalog-coverage-collapsed",
+    );
+    expect(collapsedTitles?.open).toBe(false);
+    expect(collapsedTitles?.textContent).toContain("Title 2");
+    expect(collapsedTitles?.textContent).not.toContain("Title 1");
+
+    const unmappedFilter = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Unmapped",
+    );
+    if (!unmappedFilter) {
+      throw new Error("Expected the Unmapped filter");
+    }
+    await act(async () => unmappedFilter.click());
+
+    const visibleCards = [...container.querySelectorAll(
+      ".catalog-title-evidence",
+    )].map((element) => element.textContent);
+    expect(visibleCards).toHaveLength(1);
+    expect(visibleCards[0]).toContain("Title 2");
+    expect(container.textContent).not.toContain("Title 1");
+    expect(unmappedFilter.getAttribute("aria-pressed")).toBe("true");
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("keeps an active very-short Mapping Proposal visible across coverage filters", async () => {
+    (globalThis as typeof globalThis & {
+      IS_REACT_ACT_ENVIRONMENT: boolean;
+    }).IS_REACT_ACT_ENVIRONMENT = true;
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <CatalogReviewEvidence
+          volumeLabel="FILTER_DISC"
+          coverage={evidenceCoverage}
+          titles={[{
+            number: 2,
+            durationSeconds: 90,
+            chapters: 1,
+            audioStreams: [],
+            subtitles: [],
+          }]}
+          activeMappingProposal={{
+            action: "chapters",
+            sourceIdentity: {
+              kind: "dvd_chapters",
+              titleNumber: 2,
+              chapterStart: 1,
+              chapterEnd: 1,
+            },
+          }}
+          onStartMappingProposal={() => undefined}
+        />,
+      );
+    });
+    const mappedFilter = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Mapped",
+    );
+    if (!mappedFilter) {
+      throw new Error("Expected the Mapped filter");
+    }
+    await act(async () => mappedFilter.click());
+
+    const activeTitle = container.querySelector(
+      ".catalog-title-evidence-active",
+    );
+    expect(activeTitle?.textContent).toContain("Title 2");
+    expect(activeTitle?.textContent).toContain("Mapping Proposal");
+    expect(activeTitle?.querySelector('[name="titleNumber"]')?.getAttribute(
+      "value",
+    )).toBe("2");
+    expect(activeTitle?.querySelector('[name="chapterStart"]')).not.toBeNull();
+    expect(activeTitle?.querySelector('[name="chapterEnd"]')).not.toBeNull();
+    expect(activeTitle?.querySelector('[name="label"]')).not.toBeNull();
+    expect(activeTitle?.closest(".catalog-coverage-collapsed")).toBeNull();
+    expect(mappedFilter.getAttribute("aria-pressed")).toBe("true");
+
+    await act(async () => root.unmount());
+    container.remove();
   });
 });
