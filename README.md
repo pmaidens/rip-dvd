@@ -569,6 +569,16 @@ search is a separate non-cacheable, bounded, paged full-catalog read. It shows
 ancestor context and may label exact or normalized title suggestions, but never
 selects or merges a Media Item automatically. DVD main feature mapping remains
 a separate archive-level action.
+Bulk episode mapping lets an operator select uncovered DVD titles and provide a
+required starting episode number. The initial proposal follows DVD title
+number, while every Episode name, Episode number, and optional Disc Selection
+label remains editable. The operator explicitly creates or searches for and
+reuses the TV Show and Season. Submission creates one Episode and one
+whole-title Disc Selection per selected title in a single transaction; a
+failure leaves the complete proposal visible and creates none of the batch.
+This Assisted Mapping path enforces a TV Show → numbered Season → numbered
+Episode shape without adding that restriction to the general Media Item
+editor.
 New-item titles begin with formatting-only volume-label cleanup: separators
 become spaces, whitespace is normalized, and uniformly cased labels receive
 conservative title case without removing years, disc identifiers, seasons, or

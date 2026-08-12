@@ -1155,6 +1155,119 @@ describe("Catalog Review API", () => {
     })).toHaveLength(2);
   });
 
+  it("commits an episodic hierarchy and its whole-title Disc Selections atomically", async () => {
+    const access = dataAccessFixture.create();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const contentId = `sha256:${"8".repeat(64)}`;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: contentId,
+      volumeLabel: "EPISODIC_ROUTE",
+      scanData: {
+        schemaVersion: 2,
+        contentId,
+        titles: [3, 5, 8].map((number) => ({
+          number,
+          durationSeconds: 2_400,
+          chapters: 8,
+          audioStreams: [],
+          subtitles: [],
+        })),
+      },
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Episodic Route.iso",
+      fingerprint: contentId,
+    });
+
+    const mutate = (body: unknown) => createCatalogReviewRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+        },
+        body: JSON.stringify(body),
+      }),
+      archive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+    const validProposal = {
+      action: "create_episodic_mapping_proposal",
+      catalogRevision: archive.updatedAt.toISOString(),
+      tvShow: {
+        choice: "create_new",
+        title: "Route Show",
+        year: 2004,
+      },
+      season: {
+        choice: "create_new",
+        title: "Route Show Season 2",
+        seasonNumber: 2,
+      },
+      episodes: [
+        { titleNumber: 3, title: "Third", episodeNumber: 5 },
+        { titleNumber: 5, title: "Fifth", episodeNumber: 7 },
+        { titleNumber: 8, title: "Eighth", episodeNumber: 6 },
+      ],
+    };
+    const failed = await mutate({
+      ...validProposal,
+      episodes: [
+        validProposal.episodes[0],
+        { titleNumber: 99, title: "Missing source", episodeNumber: 6 },
+      ],
+    });
+    expect(failed.status).toBe(409);
+    expect(access.catalog.listMediaItems()).toEqual([]);
+    expect(access.catalog.listDiscSelections({
+      originalDiscArchiveId: archive.id,
+    })).toEqual([]);
+
+    const response = await mutate(validProposal);
+
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toMatchObject({
+      tvShow: { kind: "tv_show", title: "Route Show" },
+      season: { kind: "season", seasonNumber: 2 },
+      episodes: [
+        {
+          mediaItem: { title: "Third", episodeNumber: 5 },
+          discSelection: {
+            sourceIdentity: { kind: "dvd_title", titleNumber: 3 },
+          },
+        },
+        {
+          mediaItem: { title: "Fifth", episodeNumber: 7 },
+          discSelection: {
+            sourceIdentity: { kind: "dvd_title", titleNumber: 5 },
+          },
+        },
+        {
+          mediaItem: { title: "Eighth", episodeNumber: 6 },
+          discSelection: {
+            sourceIdentity: { kind: "dvd_title", titleNumber: 8 },
+          },
+        },
+      ],
+    });
+    expect(access.catalog.listMediaItems()).toHaveLength(5);
+    expect(access.catalog.listDiscSelections({
+      originalDiscArchiveId: archive.id,
+    })).toHaveLength(3);
+  });
+
   it("creates and edits nested Media Items, maps episode ranges, and completes review", async () => {
     const access = dataAccessFixture.create();
     const drive = access.catalog.upsertOpticalDrive({

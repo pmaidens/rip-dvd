@@ -2,9 +2,14 @@ import type {
   DiscSelectionSourceIdentityInput,
   MediaItemKind,
 } from "@rip-dvd/data-access";
+import {
+  MAX_DVD_SCAN_INTEGER,
+  MAX_DVD_TITLES,
+} from "@rip-dvd/data-access/dvd-scan";
 import { createDiscSelectionSourceIdentity } from "@rip-dvd/data-access/disc-selection-source-identity";
 
 export const CATALOG_REVIEW_COMMAND_ACTIONS = [
+  "create_episodic_mapping_proposal",
   "create_mapping_proposal",
   "create_media_item",
   "update_media_item",
@@ -59,7 +64,43 @@ export type CatalogReviewMappingTarget =
     mediaItemId: string;
   };
 
+export type CatalogReviewEpisodicTvShowTarget =
+  | {
+    choice: "create_new";
+    title: string;
+    year?: number | null;
+  }
+  | {
+    choice: "use_existing";
+    mediaItemId: string;
+  };
+
+export type CatalogReviewEpisodicSeasonTarget =
+  | {
+    choice: "create_new";
+    title: string;
+    seasonNumber: number;
+  }
+  | {
+    choice: "use_existing";
+    mediaItemId: string;
+  };
+
+export interface CatalogReviewEpisodicEpisodeInput {
+  titleNumber: number;
+  title: string;
+  episodeNumber: number;
+  label?: string;
+}
+
 export type CatalogReviewCommand =
+  | {
+      action: "create_episodic_mapping_proposal";
+      catalogRevision: string;
+      tvShow: CatalogReviewEpisodicTvShowTarget;
+      season: CatalogReviewEpisodicSeasonTarget;
+      episodes: CatalogReviewEpisodicEpisodeInput[];
+    }
   | {
       action: "create_mapping_proposal";
       catalogRevision: string;
@@ -93,6 +134,7 @@ export type CatalogReviewCommand =
 export type CatalogReviewCommandValidationError =
   | "Invalid catalog review mutation"
   | "Unknown catalog review mutation"
+  | "Invalid Episodic Mapping Proposal"
   | "Invalid Mapping Proposal"
   | "Invalid Media Item"
   | "Invalid Media Item update"
@@ -338,6 +380,122 @@ function parseMappingTarget(
   return null;
 }
 
+function hasOnlyFields(
+  value: Record<string, unknown>,
+  fields: readonly string[],
+): boolean {
+  const allowed = new Set(fields);
+  return Object.keys(value).every((field) => allowed.has(field));
+}
+
+function parseEpisodicTvShowTarget(
+  value: unknown,
+): CatalogReviewEpisodicTvShowTarget | null {
+  const target = asRecord(value);
+  const choice = boundedString(target?.choice, 32);
+  if (!target || !choice) {
+    return null;
+  }
+  if (choice === "create_new") {
+    const title = boundedString(target.title);
+    const year = optionalInteger(target.year, 1800, 9999);
+    return title &&
+        (target.year === undefined || year !== undefined) &&
+        hasOnlyFields(target, ["choice", "title", "year"])
+      ? {
+          choice,
+          title,
+          ...(target.year === undefined ? {} : { year: year ?? null }),
+        }
+      : null;
+  }
+  if (choice === "use_existing") {
+    const mediaItemId = boundedString(target.mediaItemId);
+    return mediaItemId &&
+        hasOnlyFields(target, ["choice", "mediaItemId"])
+      ? { choice, mediaItemId }
+      : null;
+  }
+  return null;
+}
+
+function parseEpisodicSeasonTarget(
+  value: unknown,
+): CatalogReviewEpisodicSeasonTarget | null {
+  const target = asRecord(value);
+  const choice = boundedString(target?.choice, 32);
+  if (!target || !choice) {
+    return null;
+  }
+  if (choice === "create_new") {
+    const title = boundedString(target.title);
+    const seasonNumber = optionalInteger(target.seasonNumber, 0);
+    return title && typeof seasonNumber === "number" &&
+        hasOnlyFields(target, ["choice", "title", "seasonNumber"])
+      ? { choice, title, seasonNumber }
+      : null;
+  }
+  if (choice === "use_existing") {
+    const mediaItemId = boundedString(target.mediaItemId);
+    return mediaItemId &&
+        hasOnlyFields(target, ["choice", "mediaItemId"])
+      ? { choice, mediaItemId }
+      : null;
+  }
+  return null;
+}
+
+function parseEpisodicEpisodes(
+  value: unknown,
+): CatalogReviewEpisodicEpisodeInput[] | null {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.length > MAX_DVD_TITLES
+  ) {
+    return null;
+  }
+  const episodes: CatalogReviewEpisodicEpisodeInput[] = [];
+  const selectedTitleNumbers = new Set<number>();
+  for (const valueEntry of value) {
+    const entry = asRecord(valueEntry);
+    const titleNumber = optionalInteger(
+      entry?.titleNumber,
+      1,
+      MAX_DVD_SCAN_INTEGER,
+    );
+    const title = boundedString(entry?.title);
+    const episodeNumber = optionalInteger(entry?.episodeNumber, 1);
+    const label = entry?.label === undefined
+      ? undefined
+      : boundedString(entry.label);
+    if (
+      !entry ||
+      typeof titleNumber !== "number" ||
+      !title ||
+      typeof episodeNumber !== "number" ||
+      (entry.label !== undefined && !label) ||
+      selectedTitleNumbers.has(titleNumber) ||
+      !hasOnlyFields(entry, [
+        "titleNumber",
+        "title",
+        "episodeNumber",
+        "label",
+      ])
+    ) {
+      return null;
+    }
+    selectedTitleNumbers.add(titleNumber);
+    episodes.push({
+      titleNumber,
+      title,
+      episodeNumber,
+      ...(label ? { label } : {}),
+    });
+  }
+  return episodes;
+}
+
 function parseDiscSelectionInput(
   value: unknown,
 ):
@@ -369,6 +527,24 @@ export function parseCatalogReviewCommand(
   }
 
   switch (action) {
+    case "create_episodic_mapping_proposal": {
+      const revision = catalogRevision(body.catalogRevision);
+      const tvShow = parseEpisodicTvShowTarget(body.tvShow);
+      const season = parseEpisodicSeasonTarget(body.season);
+      const episodes = parseEpisodicEpisodes(body.episodes);
+      return revision && tvShow && season && episodes
+        ? {
+            ok: true,
+            command: {
+              action,
+              catalogRevision: revision,
+              tvShow,
+              season,
+              episodes,
+            },
+          }
+        : invalid("Invalid Episodic Mapping Proposal");
+    }
     case "create_mapping_proposal": {
       const revision = catalogRevision(body.catalogRevision);
       const target = parseMappingTarget(body.target, domainValues);
