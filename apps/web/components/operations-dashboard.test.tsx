@@ -406,6 +406,52 @@ describe("DashboardView", () => {
     }
   });
 
+  it("renders Reviewed discovery controls and review summaries", () => {
+    const html = renderToStaticMarkup(
+      <DashboardView
+        section="catalog"
+        catalogReviewView="reviewed"
+        catalogReviewQuery="needle"
+        catalogReviewOutcome="reviewed_with_selections"
+        state={{
+          opticalDrives: { status: "loaded", items: [] },
+          detectedDiscs: { status: "loaded", items: [] },
+          archiveJobs: { status: "loaded", items: [] },
+          encodeJobs: { status: "loaded", items: [] },
+          catalogReview: {
+            status: "loaded",
+            items: [{
+              id: "reviewed-archive",
+              discLabel: "REVIEWED_DISC",
+              discKind: "dvd",
+              archiveFormat: "iso",
+              archivedAt: "2026-08-10T12:00:00.000Z",
+              catalogReviewedAt: "2026-08-11T12:00:00.000Z",
+              catalogReviewOutcome: "reviewed_with_selections",
+              mappedMediaItemCount: 2,
+              mappedMediaItemTitles: ["Needle Movie", "Needle Extra"],
+            }],
+            page: {
+              limit: 20,
+              previousCursor: null,
+              nextCursor: null,
+            },
+          },
+        }}
+      />,
+    );
+
+    expect(html).toContain("Needs review");
+    expect(html).toContain("Reviewed");
+    expect(html).toContain('aria-label="Search reviewed archives"');
+    expect(html).toContain("Reviewed with selections");
+    expect(html).toContain("Reviewed Aug");
+    expect(html).toContain("Needle Movie");
+    expect(html).toContain("Needle Extra");
+    expect(html).toContain("Open review");
+    expect(html).not.toContain("Review catalog");
+  });
+
   it("renders populated operations with path-free worker failure details", () => {
     const html = render({
       generatedAt: "2026-07-22T08:00:00.000Z",
@@ -513,6 +559,10 @@ describe("DashboardView", () => {
             discKind: "dvd",
             archiveFormat: "iso",
             archivedAt: "2026-07-22T07:00:00.000Z",
+            catalogReviewedAt: null,
+            catalogReviewOutcome: "needs_review",
+            mappedMediaItemCount: 0,
+            mappedMediaItemTitles: [],
           },
         ],
       },
@@ -805,6 +855,10 @@ describe("DashboardView", () => {
                 discKind: "dvd",
                 archiveFormat: "iso",
                 archivedAt: "2026-08-06T19:00:00.000Z",
+                catalogReviewedAt: null,
+                catalogReviewOutcome: "needs_review",
+                mappedMediaItemCount: 0,
+                mappedMediaItemTitles: [],
                 verificationStatus: "inaccessible",
                 verificationMessage:
                   "The web process cannot access the recorded path.",
@@ -907,6 +961,10 @@ describe("DashboardView", () => {
             discKind: "dvd",
             archiveFormat: "iso",
             archivedAt: "2026-07-22T07:00:00.000Z",
+            catalogReviewedAt: null,
+            catalogReviewOutcome: "needs_review",
+            mappedMediaItemCount: 0,
+            mappedMediaItemTitles: [],
           },
         ],
       },
@@ -1308,6 +1366,60 @@ afterEach(() => {
   vi.mocked(watchDashboardActivity).mockReset();
   vi.unstubAllGlobals();
   document.body.replaceChildren();
+});
+
+it("keeps the selected Reviewed filters across live dashboard snapshots", async () => {
+  const snapshot: DashboardSnapshot = {
+    generatedAt: "2026-08-12T17:00:00.000Z",
+    opticalDrives: { status: "loaded", items: [] },
+    detectedDiscs: { status: "loaded", items: [] },
+    archiveJobs: { status: "loaded", items: [] },
+    encodeJobs: { status: "loaded", items: [] },
+    catalogReview: { status: "loaded", items: [] },
+  };
+  const watch = vi.mocked(watchDashboardActivity);
+  watch.mockImplementation(({ onSnapshot }) => {
+    onSnapshot(snapshot);
+    return () => undefined;
+  });
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+
+  await act(async () => root.render(<OperationsDashboard page="catalog" />));
+  const reviewed = findButton(container, "Reviewed");
+  await act(async () => reviewed.click());
+  const query = container.querySelector<HTMLInputElement>(
+    'input[name="query"]',
+  );
+  const outcome = container.querySelector<HTMLSelectElement>(
+    'select[name="outcome"]',
+  );
+  if (!query || !outcome) {
+    throw new Error("Expected Reviewed search controls");
+  }
+  query.value = "needle title";
+  outcome.value = "archive_only";
+  await act(async () => findButton(container, "Search reviewed archives").click());
+
+  expect(watch).toHaveBeenLastCalledWith(expect.objectContaining({
+    catalogReviewCursor: null,
+    catalogReviewView: "reviewed",
+    catalogReviewQuery: "needle title",
+    catalogReviewOutcome: "archive_only",
+  }));
+  const latestOptions = watch.mock.calls.at(-1)![0];
+  await act(async () => latestOptions.onSnapshot({
+    ...snapshot,
+    generatedAt: "2026-08-12T17:00:01.000Z",
+  }));
+  expect(findButton(container, "Reviewed").getAttribute("aria-pressed"))
+    .toBe("true");
+  expect(container.textContent).toContain(
+    "No reviewed Original Disc Archives match these filters.",
+  );
+  await act(async () => root.unmount());
 });
 
 describe.each(dashboardMutationCases)("$action dashboard mutation", (mutationCase) => {

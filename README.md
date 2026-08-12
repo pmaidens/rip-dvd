@@ -549,18 +549,24 @@ trusted Origin/Host mutation policy as the other dashboard actions and is
 exposed at `POST /api/filesystem-verification`; its path-free inventory is read
 from `GET /api/filesystem-verification`.
 
-The paged Catalog Review queue keeps every archived disc reachable until review
-is explicitly completed; creating the first selection does not hide a partially
-cataloged multi-episode disc. **Review catalog** opens the archived DVD's
-read-only title map beside editable Media Items and reviewed Disc Selections.
+The Catalog page defaults to a paged **Needs review** queue; creating the first
+selection does not hide a partially cataloged multi-episode disc. Its bounded
+**Reviewed** view keeps completed archives reachable, searches disc labels and
+mapped Media Item titles, and filters **Reviewed with selections** from
+**Archive only**. Each history result includes the reviewed time, outcome, and a
+bounded mapped-item summary. **Review catalog** and **Open review** use the same
+workbench, with the archived DVD's complete read-only title map beside editable
+Media Items and reviewed Disc Selections.
 Media Items support movie, TV show, season, episode, trailer, and bonus-feature
 hierarchies. A Disc Selection maps one Media Item to the DVD main feature, one
 DVD title, or an inclusive chapter range within a scanned title. Completing
 review with selections requires at least one active selection. A disc with no
 selections can instead be explicitly completed as **Archive only**, which leaves
 the Catalog Review queue without creating encode work. Either completion records
-a separate reviewed time; adding another selection reopens review before any new
-encode can be enqueued.
+a separate reviewed time; changing or removing a job-free Disc Selection
+reopens only that archive before any new encode can be enqueued. Reviewed
+history pages use immutable archive identity, so paging remains stable while an
+archive moves back to Needs review.
 Each archived title exposes Assisted Mapping actions for a movie, bonus
 feature, trailer, chapter range, or other content. The editable Mapping
 Proposal remains next to that title on desktop and follows it on narrow screens;

@@ -1280,6 +1280,92 @@ describe("data-access facade", () => {
     access.close();
   });
 
+  it("lists bounded Catalog Review views with reviewed search and outcome filters", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const createArchive = (suffix: string, volumeLabel: string) => {
+      const fingerprint = `catalog-review-history-${suffix}`;
+      const disc = access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint,
+        volumeLabel,
+      });
+      access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+      access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+      return access.catalog.createOriginalDiscArchive({
+        detectedDiscId: disc.id,
+        discKind: "dvd",
+        archiveFormat: "iso",
+        archivePath: `/media/originals/${suffix}.iso`,
+        fingerprint,
+      });
+    };
+    const pending = createArchive("pending", "QUEUE_DISC");
+    const reviewed = createArchive("reviewed", "HIDDEN_LABEL");
+    const archiveOnly = createArchive("archive-only", "ARCHIVE_ONLY_FIND");
+    const movie = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Needle Movie",
+    });
+    access.catalog.createDiscSelection({
+      originalDiscArchiveId: reviewed.id,
+      mediaItemId: movie.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    completeCatalogReview(access, reviewed.id);
+    access.catalog.completeCatalogReview(
+      archiveOnly.id,
+      archiveOnly.updatedAt,
+      "archive_only",
+    );
+
+    expect(access.catalog.listCatalogReviewArchives({
+      view: "needs_review",
+      limit: 20,
+    })).toEqual([
+      expect.objectContaining({ id: pending.id, discLabel: "QUEUE_DISC" }),
+    ]);
+    expect(access.catalog.listCatalogReviewArchives({
+      view: "reviewed",
+      query: "needle",
+      limit: 20,
+    })).toEqual([
+      expect.objectContaining({
+        id: reviewed.id,
+        catalogReviewOutcome: "reviewed_with_selections",
+        mappedMediaItemCount: 1,
+        mappedMediaItemTitles: ["Needle Movie"],
+      }),
+    ]);
+    expect(access.catalog.listCatalogReviewArchives({
+      view: "reviewed",
+      query: "archive only find",
+      outcome: "archive_only",
+      limit: 20,
+    })).toEqual([
+      expect.objectContaining({
+        id: archiveOnly.id,
+        discLabel: "ARCHIVE_ONLY_FIND",
+        mappedMediaItemCount: 0,
+        mappedMediaItemTitles: [],
+      }),
+    ]);
+    expect(access.catalog.listCatalogReviewArchives({
+      view: "reviewed",
+      outcome: "reviewed_with_selections",
+      limit: 20,
+    }).map(({ id }) => id)).toEqual([reviewed.id]);
+    expect(() => access.catalog.listCatalogReviewArchives({
+      view: "reviewed",
+      limit: 101,
+    })).toThrow("Catalog Review archive limit must be between 1 and 100");
+    access.close();
+  });
+
   it("keeps partially cataloged archives in review until review is explicitly completed", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-03T18:00:00.000Z"));

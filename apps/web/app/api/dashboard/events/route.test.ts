@@ -21,6 +21,50 @@ afterEach(() => {
 });
 
 describe("GET /api/dashboard/events", () => {
+  it("keeps Reviewed search and outcome filters on live snapshots", async () => {
+    const access = dataAccessFixture.create();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "live-reviewed-filter",
+      volumeLabel: "LIVE_REVIEWED_FILTER",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Live Reviewed Filter.iso",
+      fingerprint: "live-reviewed-filter",
+    });
+    access.catalog.completeCatalogReview(
+      archive.id,
+      archive.updatedAt,
+      "archive_only",
+    );
+    const abortController = new AbortController();
+    const response = createDashboardEventRoute(
+      new Request(
+        "http://localhost/api/dashboard/events?catalogReviewView=reviewed&catalogReviewQuery=live&catalogReviewOutcome=archive_only",
+        { signal: abortController.signal },
+      ),
+      () => access,
+    );
+
+    const event = new TextDecoder().decode(
+      (await response.body!.getReader().read()).value,
+    );
+    abortController.abort();
+
+    expect(event).toContain('"discLabel":"LIVE_REVIEWED_FILTER"');
+    expect(event).toContain('"catalogReviewOutcome":"archive_only"');
+  });
+
   it("bounds activity events to recent disc summaries without title maps", async () => {
     vi.useFakeTimers();
     const access = dataAccessFixture.create();
