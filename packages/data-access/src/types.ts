@@ -132,6 +132,41 @@ interface DiscSelectionBase {
 
 export type DiscSelection = DiscSelectionBase;
 
+export type DiscSelectionAction =
+  | "correct"
+  | "edit_label"
+  | "remove"
+  | "repair";
+
+export type DiscSelectionActionAvailability =
+  | {
+    discSelectionId: DiscSelectionId;
+    state: "editable";
+    availableActions: readonly ["correct", "edit_label", "remove"];
+    reason: null;
+    relatedEncodeJob: null;
+  }
+  | {
+    discSelectionId: DiscSelectionId;
+    state: "locked_provenance";
+    availableActions: readonly [];
+    reason: string;
+    relatedEncodeJob: {
+      id: EncodeJobId;
+      status: JobStatus;
+    };
+  }
+  | {
+    discSelectionId: DiscSelectionId;
+    state: "needs_repair";
+    availableActions: readonly ["repair", "remove"] | readonly [];
+    reason: string;
+    relatedEncodeJob: {
+      id: EncodeJobId;
+      status: "queued" | "running";
+    } | null;
+  };
+
 export type DeleteDiscSelectionResult = DiscSelection & {
   deletedEncodeJobs: number;
   deletionComplete: boolean;
@@ -371,6 +406,9 @@ export interface CatalogAccess {
     limit?: number;
     offset?: number;
   }): DiscSelection[];
+  listDiscSelectionActionAvailability(options: {
+    ids: readonly DiscSelectionId[];
+  }): DiscSelectionActionAvailability[];
 }
 
 export interface EncodingProfileAccess {
@@ -535,6 +573,7 @@ export type SnapshotCatalogAccess = Pick<
   | "listOriginalDiscArchives"
   | "listMediaItems"
   | "listDiscSelections"
+  | "listDiscSelectionActionAvailability"
 >;
 
 export interface ConsistentReadAccess {

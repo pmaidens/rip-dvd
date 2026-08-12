@@ -63,6 +63,10 @@ export function withSnapshotOverrides(
 
 export function useDataAccessFixture(): {
   create(): LegacySidecarDataAccess;
+  createWithDatabasePath(): {
+    access: LegacySidecarDataAccess;
+    databasePath: string;
+  };
   createPair(): [LegacySidecarDataAccess, LegacySidecarDataAccess];
 } {
   const temporaryDirectories: string[] = [];
@@ -86,6 +90,14 @@ export function useDataAccessFixture(): {
       });
       openDataAccess.push(access);
       return access;
+    },
+    createWithDatabasePath() {
+      const directory = mkdtempSync(join(tmpdir(), "rip-dvd-dashboard-"));
+      temporaryDirectories.push(directory);
+      const databasePath = join(directory, "test.sqlite");
+      const access = createLegacySidecarDataAccess({ databasePath });
+      openDataAccess.push(access);
+      return { access, databasePath };
     },
     createPair() {
       const directory = mkdtempSync(join(tmpdir(), "rip-dvd-dashboard-"));

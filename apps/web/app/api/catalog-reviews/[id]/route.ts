@@ -7,6 +7,7 @@ import {
   type DataAccess,
   type CreateDiscSelectionInput,
   type DiscSelection,
+  type DiscSelectionActionAvailability,
   type DiscSelectionId,
   type MediaItem,
   type MediaItemId,
@@ -82,6 +83,18 @@ function serializeDiscSelection(selection: DiscSelection) {
   };
 }
 
+function serializeReviewDiscSelection(
+  selection: DiscSelection,
+  availability: DiscSelectionActionAvailability,
+) {
+  const { discSelectionId: _discSelectionId, ...actionAvailability } =
+    availability;
+  return {
+    ...serializeDiscSelection(selection),
+    actionAvailability,
+  };
+}
+
 function readCatalogReview(
   access: DataAccess,
   id: OriginalDiscArchiveId,
@@ -122,6 +135,16 @@ function readCatalogReview(
     const discSelectionsPage = discSelections.slice(
       0,
       CATALOG_REVIEW_SELECTION_PAGE_SIZE,
+    );
+    const actionAvailability = snapshot.catalog
+      .listDiscSelectionActionAvailability({
+        ids: discSelectionsPage.map((selection) => selection.id),
+      });
+    const actionAvailabilityById = new Map(
+      actionAvailability.map((availability) => [
+        availability.discSelectionId,
+        availability,
+      ]),
     );
     const mediaItemPageIds = new Set(mediaItemsPage.map((item) => item.id));
     const mediaItemsById = new Map(
@@ -199,7 +222,15 @@ function readCatalogReview(
         hasNext: hasNextMediaItems,
         itemIds: mediaItemsPage.map((item) => item.id),
       },
-      discSelections: discSelectionsPage.map(serializeDiscSelection),
+      discSelections: discSelectionsPage.map((selection) => {
+        const availability = actionAvailabilityById.get(selection.id);
+        if (!availability) {
+          throw new DomainInvariantError(
+            `Disc Selection ${selection.id} is missing action availability`,
+          );
+        }
+        return serializeReviewDiscSelection(selection, availability);
+      }),
       discSelectionsPage: {
         offset: discSelectionOffset,
         limit: CATALOG_REVIEW_SELECTION_PAGE_SIZE,
