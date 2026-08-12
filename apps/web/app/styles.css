@@ -895,12 +895,120 @@ h1 {
 }
 
 .catalog-complete {
+  margin-top: 1.25rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid #29483f;
+}
+
+.catalog-coverage-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.65rem;
+  margin: 1rem 0 0;
+}
+
+.catalog-coverage-summary > div {
+  min-width: 0;
+  padding: 0.75rem 0.8rem;
+  border: 1px solid #29483f;
+  border-radius: 0.55rem;
+  background: #10231e;
+}
+
+.catalog-coverage-summary dt {
+  color: #829790;
+  font-size: 0.65rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.catalog-coverage-summary dd {
+  margin: 0.35rem 0 0;
+  overflow-wrap: anywhere;
+  color: #dbe6e2;
+  font-size: 0.74rem;
+}
+
+.catalog-coverage-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 1rem;
+}
+
+.catalog-coverage-filters button {
+  min-height: 2.1rem;
+  padding: 0.35rem 0.6rem;
+  border-color: #365149;
+  font-size: 0.7rem;
+}
+
+.catalog-coverage-filters button[aria-pressed="true"] {
+  border-color: #d2a14b;
+  background: #d2a14b;
+  color: #10211c;
+}
+
+.catalog-coverage-state {
+  flex: 0 0 auto;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid #53686f;
+  border-radius: 999px;
+  color: #b8c8c3;
+  font-size: 0.65rem;
+}
+
+.catalog-coverage-state.is-mapped {
+  border-color: #547f70;
+  color: #b8d6cb;
+}
+
+.catalog-coverage-state.is-partially_mapped {
+  border-color: #796331;
+  color: #e1b765;
+}
+
+.catalog-coverage-warning {
+  display: grid;
+  gap: 0.15rem;
+  margin: 0.6rem 0 0;
+  padding: 0.55rem 0.65rem;
+  border-left: 0.2rem solid #d2a14b;
+  background: rgba(95, 77, 40, 0.18);
+  color: #b8c8c3;
+  font-size: 0.7rem;
+}
+
+.catalog-coverage-warning strong {
+  color: #e1b765;
+}
+
+.catalog-coverage-collapsed {
+  margin-top: 0.75rem;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid #29483f;
+  border-radius: 0.55rem;
+}
+
+.catalog-coverage-collapsed summary {
+  color: #d2a14b;
+  font-size: 0.72rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.catalog-coverage-collapsed summary:focus-visible {
+  outline: 3px solid #d2a14b;
+  outline-offset: 3px;
+}
+
+.catalog-complete-action {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
-  margin-top: 1.25rem;
-  padding-top: 1.25rem;
+  margin-top: 1rem;
+  padding-top: 1rem;
   border-top: 1px solid #29483f;
 }
 
@@ -1772,9 +1880,13 @@ h3 {
   }
 
   .catalog-editor-header,
-  .catalog-complete {
+  .catalog-complete-action {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .catalog-coverage-summary {
+    grid-template-columns: 1fr;
   }
 
   .selection-list li {

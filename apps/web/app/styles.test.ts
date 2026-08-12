@@ -212,3 +212,16 @@ describe("Catalog Review evidence presentation", () => {
     );
   });
 });
+
+describe("Catalog Review Coverage presentation", () => {
+  it("keeps coverage controls wrap-safe and keyboard-visible", () => {
+    expect(selectorDeclarations(".catalog-coverage-filters")).toMatch(
+      /flex-wrap:\s*wrap/,
+    );
+    expect(
+      selectorDeclarations(
+        ".catalog-coverage-collapsed summary:focus-visible",
+      ),
+    ).toMatch(/outline:\s*3px solid #d2a14b/);
+  });
+});

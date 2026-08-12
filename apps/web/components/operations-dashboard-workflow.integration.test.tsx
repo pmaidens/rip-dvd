@@ -81,6 +81,34 @@ async function readDashboard(access: DataAccess): Promise<{
   };
 }
 
+function renderCatalogReview(review: CatalogReviewDto): string {
+  return renderToStaticMarkup(
+    <CatalogReviewView
+      state={{ status: "loaded", review }}
+      editingMediaItemId={null}
+      isSaving={false}
+      requestError={null}
+      mappingProposalError={null}
+      selectionKind="main_feature"
+      activeMappingProposal={null}
+      onClose={() => undefined}
+      onRetry={() => undefined}
+      onEditMediaItem={() => undefined}
+      onCancelEdit={() => undefined}
+      onMediaItemsPage={() => undefined}
+      onDiscSelectionsPage={() => undefined}
+      onSelectionKindChange={() => undefined}
+      onStartMappingProposal={() => undefined}
+      onCancelMappingProposal={() => undefined}
+      onCreateMappingProposal={() => undefined}
+      onSaveMediaItem={() => undefined}
+      onCreateDiscSelection={() => undefined}
+      onDeleteDiscSelection={() => undefined}
+      onCompleteReview={() => undefined}
+    />,
+  );
+}
+
 function archiveJob(snapshot: DashboardSnapshot): DashboardArchiveJob {
   if (snapshot.archiveJobs.status !== "loaded") {
     throw new Error("Archive Jobs are unavailable");
@@ -230,6 +258,27 @@ describe("end-to-end operations dashboard workflow", () => {
         },
         {
           number: 2,
+          durationSeconds: 2_400,
+          chapters: 8,
+          audioStreams: [],
+          subtitles: [],
+        },
+        {
+          number: 3,
+          durationSeconds: 1_800,
+          chapters: 6,
+          audioStreams: [],
+          subtitles: [],
+        },
+        {
+          number: 4,
+          durationSeconds: 300,
+          chapters: 2,
+          audioStreams: [],
+          subtitles: [],
+        },
+        {
+          number: 5,
           durationSeconds: 119,
           chapters: 1,
           audioStreams: [],
@@ -338,31 +387,7 @@ describe("end-to-end operations dashboard workflow", () => {
     expect(catalogReviewResponse.status).toBe(200);
     const catalogReview = await catalogReviewResponse.json() as
       CatalogReviewDto;
-    const catalogReviewHtml = renderToStaticMarkup(
-      <CatalogReviewView
-        state={{ status: "loaded", review: catalogReview }}
-        editingMediaItemId={null}
-        isSaving={false}
-        requestError={null}
-        mappingProposalError={null}
-        selectionKind="main_feature"
-        activeMappingProposal={null}
-        onClose={() => undefined}
-        onRetry={() => undefined}
-        onEditMediaItem={() => undefined}
-        onCancelEdit={() => undefined}
-        onMediaItemsPage={() => undefined}
-        onDiscSelectionsPage={() => undefined}
-        onSelectionKindChange={() => undefined}
-        onStartMappingProposal={() => undefined}
-        onCancelMappingProposal={() => undefined}
-        onCreateMappingProposal={() => undefined}
-        onSaveMediaItem={() => undefined}
-        onCreateDiscSelection={() => undefined}
-        onDeleteDiscSelection={() => undefined}
-        onCompleteReview={() => undefined}
-      />,
-    );
+    const catalogReviewHtml = renderCatalogReview(catalogReview);
     expect(catalogReviewHtml).toContain("Catalog Workflow Disc");
     expect(catalogReviewHtml).toContain("Original volume label");
     expect(catalogReviewHtml).toContain("WORKFLOW_DISC");
@@ -456,9 +481,107 @@ describe("end-to-end operations dashboard workflow", () => {
         sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
       }),
     ]);
+
+    const mainFeatureResponse = await catalogMutation({
+      action: "create_disc_selection",
+      selection: {
+        label: "Main feature",
+        mediaItemId: proposal.mediaItem.id,
+        sourceIdentity: { kind: "main_feature" },
+      },
+    });
+    expect(mainFeatureResponse.status).toBe(201);
+    const titleSources = [
+      {
+        kind: "dvd_chapters",
+        titleNumber: 2,
+        chapterStart: 1,
+        chapterEnd: 3,
+      },
+      {
+        kind: "dvd_chapters",
+        titleNumber: 2,
+        chapterStart: 3,
+        chapterEnd: 5,
+      },
+      {
+        kind: "dvd_chapters",
+        titleNumber: 3,
+        chapterStart: 1,
+        chapterEnd: 3,
+      },
+      {
+        kind: "dvd_chapters",
+        titleNumber: 3,
+        chapterStart: 4,
+        chapterEnd: 6,
+      },
+    ] as const;
+    for (const sourceIdentity of titleSources) {
+      const response = await catalogMutation({
+        action: "create_disc_selection",
+        selection: { mediaItemId: proposal.mediaItem.id, sourceIdentity },
+      });
+      expect(response.status).toBe(201);
+    }
+
+    const coveredReviewResponse = await createCatalogReviewRoute(
+      new Request(`${trustedOrigin}/api/catalog-reviews/${archive.id}`),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    expect(coveredReviewResponse.status).toBe(200);
+    const coveredReview = await coveredReviewResponse.json() as
+      CatalogReviewDto;
+    expect(coveredReview.coverage).toEqual({
+      discSelectionCount: 6,
+      mediaItemsWithSelections: 1,
+      mappedTitles: 2,
+      partiallyMappedTitles: 1,
+      unmappedTitles: 2,
+      mainFeatureSelections: 1,
+      titles: [
+        {
+          titleNumber: 1,
+          status: "mapped",
+          hasOverlap: false,
+        },
+        {
+          titleNumber: 2,
+          status: "partially_mapped",
+          hasOverlap: true,
+        },
+        {
+          titleNumber: 3,
+          status: "mapped",
+          hasOverlap: false,
+        },
+        {
+          titleNumber: 4,
+          status: "unmapped",
+          hasOverlap: false,
+        },
+        {
+          titleNumber: 5,
+          status: "unmapped",
+          hasOverlap: false,
+        },
+      ],
+    });
+    const coveredReviewHtml = renderCatalogReview(coveredReview);
+    expect(coveredReviewHtml).toContain("1 Media Item with Disc Selections");
+    expect(coveredReviewHtml).toContain("2 mapped titles");
+    expect(coveredReviewHtml).toContain("1 partially mapped title");
+    expect(coveredReviewHtml).toContain("2 unmapped titles");
+    expect(coveredReviewHtml).toContain("1 main-feature selection");
+    expect(coveredReviewHtml).toContain("Overlapping Disc Selections");
+    expect(coveredReviewHtml).toContain("counted once and remain valid");
+    expect(coveredReviewHtml).toContain("1 very-short unmapped title");
+    expect(coveredReviewHtml).not.toContain('<details open=""');
     const completedReview = await catalogMutation({
       action: "complete_review",
-      catalogRevision: refreshedReview.catalogRevision,
+      catalogRevision: coveredReview.catalogRevision,
     });
     expect(completedReview.status).toBe(200);
     expect((await completedReview.json()).archive.catalogReviewedAt).toEqual(
@@ -488,7 +611,27 @@ describe("end-to-end operations dashboard workflow", () => {
     );
     const refreshedCoverage = await refreshedCoverageResponse.json() as
       CatalogReviewDto;
-    expect(refreshedCoverage.discSelections).toHaveLength(2);
+    expect(refreshedCoverage.discSelections).toHaveLength(7);
+    expect(refreshedCoverage.coverage).toMatchObject({
+      discSelectionCount: 7,
+      mediaItemsWithSelections: 2,
+      mappedTitles: 3,
+      partiallyMappedTitles: 0,
+      unmappedTitles: 2,
+      mainFeatureSelections: 1,
+    });
+    expect(refreshedCoverage.coverage.titles).toContainEqual({
+      titleNumber: 2,
+      status: "mapped",
+      hasOverlap: true,
+    });
+    const refreshedCoverageHtml = renderCatalogReview(refreshedCoverage);
+    expect(refreshedCoverageHtml).toContain(
+      "2 Media Items with Disc Selections",
+    );
+    expect(refreshedCoverageHtml).toContain("3 mapped titles");
+    expect(refreshedCoverageHtml).toContain("0 partially mapped titles");
+    expect(refreshedCoverageHtml).toContain("2 unmapped titles");
     expect((await catalogMutation({
       action: "complete_review",
       catalogRevision: refreshedCoverage.catalogRevision,
