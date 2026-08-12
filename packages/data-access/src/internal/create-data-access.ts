@@ -556,6 +556,36 @@ export function createDataAccessInternal(
     }
   }
 
+  function insertValidatedMediaItem(
+    transaction: CatalogTransaction,
+    input: Parameters<typeof validateMediaItem>[0],
+    timestamp: Date,
+    options: { requireAssistedMappingShape?: boolean } = {},
+  ) {
+    const values = validateMediaItem(
+      input,
+      transaction,
+      { titleNormalization: "trim" },
+    );
+    if (options.requireAssistedMappingShape) {
+      validateAssistedMappingShape(transaction, values);
+    }
+    return requireRow(
+      transaction
+        .insert(mediaItems)
+        .values({
+          id: input.id,
+          ...values,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        })
+        .returning()
+        .get(),
+      "media item",
+      input.id,
+    );
+  }
+
   async function inspectFilesystemPath(
     path: string,
     configuredRoot?: { resolvedPath: string },
@@ -2308,27 +2338,12 @@ export function createDataAccessInternal(
       createMediaItem(input) {
         const timestamp = now();
         const id = newId<MediaItemId>();
-        return database.transaction((transaction) => {
-          const values = validateMediaItem(
-            { ...input, id },
+        return database.transaction((transaction) =>
+          insertValidatedMediaItem(
             transaction,
-            { titleNormalization: "trim" },
-          );
-          return requireRow(
-            transaction
-              .insert(mediaItems)
-              .values({
-                id,
-                ...values,
-                createdAt: timestamp,
-                updatedAt: timestamp,
-              })
-              .returning()
-              .get(),
-            "media item",
-            id,
-          );
-        }, { behavior: "immediate" });
+            { ...input, id },
+            timestamp,
+          ), { behavior: "immediate" });
       },
 
       createMappingProposal(input) {
@@ -2370,28 +2385,12 @@ export function createDataAccessInternal(
             : requireNonEmpty(input.discSelection.label, "label");
 
           const mediaItem = input.existingMediaItemId === undefined
-            ? (() => {
-              const mediaItemValues = validateMediaItem(
-                { ...input.mediaItem, id: mediaItemId },
+            ? insertValidatedMediaItem(
                 transaction,
-                { titleNormalization: "trim" },
-              );
-              validateAssistedMappingShape(transaction, mediaItemValues);
-              return requireRow(
-                transaction
-                  .insert(mediaItems)
-                  .values({
-                    id: mediaItemId,
-                    ...mediaItemValues,
-                    createdAt: timestamp,
-                    updatedAt: timestamp,
-                  })
-                  .returning()
-                  .get(),
-                "media item",
-                mediaItemId,
-              );
-            })()
+                { ...input.mediaItem, id: mediaItemId },
+                timestamp,
+                { requireAssistedMappingShape: true },
+              )
             : requireRow(
               transaction
                 .select()
@@ -2467,24 +2466,10 @@ export function createDataAccessInternal(
             candidate: Omit<Parameters<typeof validateMediaItem>[0], "id">,
           ) => {
             const id = newId<MediaItemId>();
-            const values = validateMediaItem(
-              { ...candidate, id },
+            return insertValidatedMediaItem(
               transaction,
-              { titleNormalization: "trim" },
-            );
-            return requireRow(
-              transaction
-                .insert(mediaItems)
-                .values({
-                  id,
-                  ...values,
-                  createdAt: timestamp,
-                  updatedAt: timestamp,
-                })
-                .returning()
-                .get(),
-              "media item",
-              id,
+              { ...candidate, id },
+              timestamp,
             );
           };
           const readMediaItem = (id: MediaItemId) => requireRow(
