@@ -263,8 +263,8 @@ export function CatalogReviewEvidence({
       hasOverlap: false,
     };
     const activeTitleProposal = isActiveProposalTitle(title);
-    const assistedMappingDisabled = isSaving ||
-      titleCoverage.status !== "unmapped";
+    const hasExistingCoverage = titleCoverage.status !== "unmapped";
+    const assistedMappingDisabled = isSaving || hasExistingCoverage;
     return (
       <li
         key={title.number}
@@ -362,7 +362,7 @@ export function CatalogReviewEvidence({
                   Map as other
                 </button>
               </div>
-              {titleCoverage.status !== "unmapped" ? (
+              {hasExistingCoverage ? (
                 <p className="catalog-help">
                   Assisted Mapping is unavailable for covered titles. Use
                   manual Disc Selection controls for intentional overlaps.
