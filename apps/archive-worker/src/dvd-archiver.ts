@@ -105,6 +105,26 @@ type SpawnDvdCopyProcess = (
   },
 ) => DvdCopyChildProcess;
 
+interface DvdDeviceLockChildProcess {
+  stderr: DvdCopyReadablePipe | null;
+  kill(signal: NodeJS.Signals): boolean;
+  once(event: "error", listener: (error: Error) => void): void;
+  once(
+    event: "close",
+    listener: (code: number | null, signal: NodeJS.Signals | null) => void,
+  ): void;
+  unref(): void;
+}
+
+type SpawnDvdDeviceLockProcess = (
+  executable: string,
+  arguments_: readonly string[],
+  options: {
+    shell: false;
+    stdio: ["ignore", "ignore", "pipe", number];
+  },
+) => DvdDeviceLockChildProcess;
+
 function openDeviceLock(devicePath: string): number {
   const descriptor = openSync(
     devicePath,
@@ -132,16 +152,26 @@ function openDeviceLock(devicePath: string): number {
 }
 
 export function createNodeDvdCopyRunner({
+  deviceLockTimeoutMs = DEVICE_RECOVERY_LOCK_TIMEOUT_MS,
   requireInactive = requireDeviceInactive,
+  spawnLockProcess = spawn as unknown as SpawnDvdDeviceLockProcess,
   spawnProcess = spawn as unknown as SpawnDvdCopyProcess,
   timeoutMs = COPY_TIMEOUT_MS,
 }: {
+  deviceLockTimeoutMs?: number;
   requireInactive?: (devicePath: string) => void;
+  spawnLockProcess?: SpawnDvdDeviceLockProcess;
   spawnProcess?: SpawnDvdCopyProcess;
   timeoutMs?: number;
 } = {}): DvdCopyRunner {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
     throw new Error("DVD archive copy timeout is invalid");
+  }
+  if (
+    !Number.isSafeInteger(deviceLockTimeoutMs) ||
+    deviceLockTimeoutMs <= 0
+  ) {
+    throw new Error("DVD archive recovery lock timeout is invalid");
   }
   const copyKey = (devicePath: string, outputPath: string) =>
     JSON.stringify([devicePath, outputPath]);
@@ -358,7 +388,13 @@ export function createNodeDvdCopyRunner({
       if (coordinator.hasActive()) {
         throw new Error("DVD archive copy is still active");
       }
-      return withExclusiveDeviceInactivity(safeDevicePath, mutation);
+      return withExclusiveDeviceInactivity(
+        safeDevicePath,
+        mutation,
+        requireInactive,
+        spawnLockProcess,
+        deviceLockTimeoutMs,
+      );
     },
     waitForInactive(devicePath, outputPath) {
       return coordinator.waitForInactive(
@@ -474,14 +510,17 @@ function requireDeviceInactive(devicePath: string): void {
 async function withExclusiveDeviceInactivity(
   devicePath: string,
   mutation: () => undefined,
+  requireInactive: (devicePath: string) => void,
+  spawnLockProcess: SpawnDvdDeviceLockProcess,
+  timeoutMs: number,
 ): Promise<void> {
   // The scan catches pre-lock and pre-upgrade readers. Acquiring the same
   // inode flock used by copy then closes the gap through the mutation.
-  requireDeviceInactive(devicePath);
+  requireInactive(devicePath);
   const lockDescriptor = openDeviceLock(devicePath);
-  let child: ReturnType<typeof spawn>;
+  let child: DvdDeviceLockChildProcess;
   try {
-    child = spawn(
+    child = spawnLockProcess(
       "flock",
       [
         "--exclusive",
@@ -508,7 +547,7 @@ async function withExclusiveDeviceInactivity(
   const childDiagnostics = child.stderr;
   if (childDiagnostics === null) {
     child.kill("SIGKILL");
-    await closed;
+    child.unref();
     closeSync(lockDescriptor);
     throw new Error("DVD archive device lock streams are unavailable");
   }
@@ -529,13 +568,14 @@ async function withExclusiveDeviceInactivity(
         acquisitionTimedOut = true;
         child.kill("SIGKILL");
         resolveTimeout(undefined);
-      }, DEVICE_RECOVERY_LOCK_TIMEOUT_MS);
+      }, timeoutMs);
       acquisitionTimeout.unref();
     }),
   ]);
   clearTimeout(acquisitionTimeout);
   if (acquisitionTimedOut || outcome === undefined) {
-    await closed;
+    childDiagnostics.destroy();
+    child.unref();
     closeSync(lockDescriptor);
     throw new Error("DVD archive device lock timed out");
   }

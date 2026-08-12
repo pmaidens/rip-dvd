@@ -179,6 +179,38 @@ describe("DVD archive publication", () => {
     },
   );
 
+  it("bounds a cancellation-recovery lock helper that never closes", async () => {
+    const originalsLibraryPath = createOriginalsLibrary();
+    const stderr = Object.assign(new EventEmitter(), { destroy: vi.fn() });
+    const child = Object.assign(new EventEmitter(), {
+      stderr,
+      kill: vi.fn(() => true),
+      unref: vi.fn(),
+    });
+    const spawnLockProcess = vi.fn(() => child);
+    const runner = createNodeDvdCopyRunner({
+      deviceLockTimeoutMs: 10,
+      requireInactive: () => undefined,
+      spawnLockProcess,
+      timeoutMs: 1_000,
+    });
+
+    await expect(
+      withCancelledDvdArchiveInactive({
+        devicePath: "/dev/zero",
+        fingerprint: `sha256:${"c".repeat(64)}`,
+        mutation: vi.fn(() => undefined),
+        originalsLibraryPath,
+        runner,
+      }),
+    ).rejects.toThrow("DVD archive device lock timed out");
+
+    expect(spawnLockProcess).toHaveBeenCalledOnce();
+    expect(child.kill).toHaveBeenCalledWith("SIGKILL");
+    expect(stderr.destroy).toHaveBeenCalledOnce();
+    expect(child.unref).toHaveBeenCalledOnce();
+  });
+
   it.runIf(supportsLinuxWriterOwnership)(
     "excludes a pre-fix writer for another fingerprint and originals root",
     async () => {
