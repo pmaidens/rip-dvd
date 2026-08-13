@@ -3,7 +3,7 @@
 This package is the only runtime persistence boundary for rip-dvd. Its public
 interface speaks in Optical Drives, Disc Inspections, Detected Discs, Archive
 Requests, Original Disc Archives, Media Items, Disc Selections, Encoding
-Profiles, Archive Jobs, and Encode Jobs.
+Profiles, Archive Jobs, Encode Jobs, and Retained Encode Outputs.
 Drizzle tables, SQL, SQLite connections, and transaction objects remain
 private. The migration-only `@rip-dvd/data-access/legacy-sidecars` entrypoint is
 the sole format-named exception; it converts legacy persistence into those

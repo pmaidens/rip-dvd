@@ -521,6 +521,41 @@ export function createDataAccessInternal(
     }
   }
 
+  function finalizePublishedEncodeJob(
+    transaction: CatalogTransaction,
+    completionCondition: ReturnType<typeof and>,
+    provenance: EncodeJobPublicationProvenance | undefined,
+    operation: string,
+    jobId: EncodeJobId,
+  ): EncodeJob | undefined {
+    const current = transaction
+      .select()
+      .from(encodeJobs)
+      .where(completionCondition)
+      .get();
+    if (!current) {
+      throw new StaleJobAttemptError(operation, jobId);
+    }
+    const finalizedAt = now();
+    retainCorrectedEncodeOutput(
+      transaction,
+      current,
+      provenance,
+      finalizedAt,
+    );
+    return transaction
+      .update(encodeJobs)
+      .set({
+        replaceExistingOutput: false,
+        replacementOutputIdentity: null,
+        publicationCompletionPending: false,
+        updatedAt: finalizedAt,
+      })
+      .where(completionCondition)
+      .returning()
+      .get();
+  }
+
   function mediaItemDeletionReason(
     childCount: number,
     discSelectionReferenceCount: number,
@@ -2112,8 +2147,8 @@ export function createDataAccessInternal(
         },
         encodeJobs: {
           list: (statuses, options) => access.encodeJobs.list(statuses, options),
-          listForDiscSelections: (ids) =>
-            access.encodeJobs.listForDiscSelections(ids),
+          listCorrectionLinksForDiscSelections: (ids) =>
+            access.encodeJobs.listCorrectionLinksForDiscSelections(ids),
           listCorrectionLinks: (ids) =>
             access.encodeJobs.listCorrectionLinks(ids),
           listRetainedOutputs: (ids) =>
@@ -6637,17 +6672,31 @@ export function createDataAccessInternal(
       },
 
       claimNext: encodeJobQueue.claimNext,
-      listForDiscSelections(ids) {
+      listCorrectionLinksForDiscSelections(ids) {
         if (ids.length === 0) return [];
-        if (ids.length > 400) {
+        if (ids.length > 200) {
           throw new DomainInvariantError(
-            "Encode Job Disc Selection lookup is limited to 400 records",
+            "Encode Job correction-history lookup is limited to 200 Disc Selections",
           );
         }
+        const uniqueIds = [...new Set(ids)];
+        const displayedPredecessors = database
+          .select({ id: encodeJobs.predecessorEncodeJobId })
+          .from(encodeJobs)
+          .where(and(
+            inArray(encodeJobs.discSelectionId, uniqueIds),
+            isNotNull(encodeJobs.predecessorEncodeJobId),
+          ));
         return database
           .select()
           .from(encodeJobs)
-          .where(inArray(encodeJobs.discSelectionId, [...new Set(ids)]))
+          .where(or(
+            and(
+              inArray(encodeJobs.discSelectionId, uniqueIds),
+              isNotNull(encodeJobs.predecessorEncodeJobId),
+            ),
+            inArray(encodeJobs.id, displayedPredecessors),
+          ))
           .orderBy(asc(encodeJobs.createdAt), asc(encodeJobs.id))
           .all();
       },
@@ -6947,35 +6996,13 @@ export function createDataAccessInternal(
           );
         }
         const finalized = database.transaction((transaction) => {
-          const current = transaction
-            .select()
-            .from(encodeJobs)
-            .where(completionCondition)
-            .get();
-          if (!current) {
-            throw new StaleJobAttemptError(
-              "encode job publication mutation",
-              cleanup.jobId,
-            );
-          }
-          const finalizedAt = now();
-          retainCorrectedEncodeOutput(
+          return finalizePublishedEncodeJob(
             transaction,
-            current,
+            completionCondition,
             provenance,
-            finalizedAt,
+            "encode job publication mutation",
+            cleanup.jobId,
           );
-          return transaction
-            .update(encodeJobs)
-            .set({
-              replaceExistingOutput: false,
-              replacementOutputIdentity: null,
-              publicationCompletionPending: false,
-              updatedAt: finalizedAt,
-            })
-            .where(completionCondition)
-            .returning()
-            .get();
         }, { behavior: "immediate" });
         if (!finalized) {
           throw new StaleJobAttemptError(
@@ -7545,35 +7572,13 @@ export function createDataAccessInternal(
           );
         }
         const finalized = database.transaction((transaction) => {
-          const current = transaction
-            .select()
-            .from(encodeJobs)
-            .where(completionCondition)
-            .get();
-          if (!current) {
-            throw new StaleJobAttemptError(
-              "encode job publication",
-              cleanup.jobId,
-            );
-          }
-          const finalizedAt = now();
-          retainCorrectedEncodeOutput(
+          return finalizePublishedEncodeJob(
             transaction,
-            current,
+            completionCondition,
             provenance,
-            finalizedAt,
+            "encode job publication",
+            cleanup.jobId,
           );
-          return transaction
-            .update(encodeJobs)
-            .set({
-              replaceExistingOutput: false,
-              replacementOutputIdentity: null,
-              publicationCompletionPending: false,
-              updatedAt: finalizedAt,
-            })
-            .where(completionCondition)
-            .returning()
-            .get();
         }, { behavior: "immediate" });
         if (!finalized) {
           throw new StaleJobAttemptError(
@@ -7688,35 +7693,13 @@ export function createDataAccessInternal(
           );
         }
         const finalized = database.transaction((transaction) => {
-          const current = transaction
-            .select()
-            .from(encodeJobs)
-            .where(completionCondition)
-            .get();
-          if (!current) {
-            throw new StaleJobAttemptError(
-              "encode job publication",
-              cleanup.jobId,
-            );
-          }
-          const finalizedAt = now();
-          retainCorrectedEncodeOutput(
+          return finalizePublishedEncodeJob(
             transaction,
-            current,
+            completionCondition,
             provenance,
-            finalizedAt,
+            "encode job publication",
+            cleanup.jobId,
           );
-          return transaction
-            .update(encodeJobs)
-            .set({
-              replaceExistingOutput: false,
-              replacementOutputIdentity: null,
-              publicationCompletionPending: false,
-              updatedAt: finalizedAt,
-            })
-            .where(completionCondition)
-            .returning()
-            .get();
         }, { behavior: "immediate" });
         if (!finalized) {
           throw new StaleJobAttemptError(

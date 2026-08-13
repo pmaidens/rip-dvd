@@ -956,6 +956,10 @@ describe("Catalog Review API", () => {
       kind: "movie",
       title: "Atomic Route Mistake",
     });
+    const intermediateItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Atomic Route Intermediate",
+    });
     const correctedItem = access.catalog.createMediaItem({
       kind: "movie",
       title: "Atomic Route Correction",
@@ -982,8 +986,20 @@ describe("Catalog Review API", () => {
       throw new Error("Expected atomic route predecessor claim");
     }
     access.encodeJobs.complete(claim);
-    const correction = access.catalog.correctDiscSelection(
+    const firstCorrection = access.catalog.correctDiscSelection(
       mistakenSelection.id,
+      {
+        originalDiscArchiveId: archive.id,
+        catalogRevision: access.catalog.listOriginalDiscArchives({
+          ids: [archive.id],
+        })[0]!.updatedAt,
+        mediaItemId: intermediateItem.id,
+        sourceIdentity: { kind: "main_feature" },
+      },
+    );
+    completeCatalogReview(access, archive.id);
+    const correction = access.catalog.correctDiscSelection(
+      firstCorrection.discSelection.id,
       {
         originalDiscArchiveId: archive.id,
         catalogRevision: access.catalog.listOriginalDiscArchives({
@@ -1077,18 +1093,59 @@ describe("Catalog Review API", () => {
         retainedOutputIdentity: priorIdentity,
       },
     );
+    const linkedJobs = access.encodeJobs
+      .listCorrectionLinksForDiscSelections([correction.discSelection.id]);
+    const historicalPredecessor = linkedJobs.find(
+      (job) => job.id === predecessor.id,
+    )!;
+    const historicalReplacement = linkedJobs.find(
+      (job) => job.id === replacementClaim.id,
+    )!;
+    const retainedLookupBatchSizes: number[] = [];
+    const expandedLinkedJobs = [
+      historicalPredecessor,
+      historicalReplacement,
+      ...Array.from({ length: 200 }, (_, index) => {
+        const predecessorId = `historical-predecessor-${index}` as
+          typeof historicalPredecessor.id;
+        return [
+          {
+            ...historicalPredecessor,
+            id: predecessorId,
+          },
+          {
+            ...historicalReplacement,
+            id: `historical-replacement-${index}` as
+              typeof historicalReplacement.id,
+            predecessorEncodeJobId: predecessorId,
+          },
+        ];
+      }).flat(),
+    ];
+    const historyAccess = withSnapshotOverrides(access, {
+      encodeJobs: {
+        listCorrectionLinksForDiscSelections: () => expandedLinkedJobs,
+        listRetainedOutputs: (ids) => {
+          retainedLookupBatchSizes.push(ids.length);
+          return access.encodeJobs.listRetainedOutputs(ids);
+        },
+      },
+    });
 
     const historyResponse = await createCatalogReviewRoute(
       new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`),
       archive.id,
-      () => access,
+      () => historyAccess,
       () => "http://localhost:3000",
     );
     const historyText = await historyResponse.text();
     expect(historyResponse.status, historyText).toBe(200);
     expect(historyText).not.toContain("private-correction-token");
     const history = JSON.parse(historyText);
-    expect(history.correctionHistory[0].encodeHistory).toEqual([
+    expect(retainedLookupBatchSizes).toEqual([400, 2]);
+    expect(history.correctionHistory[0].encodeHistory).toEqual([]);
+    expect(history.correctionHistory[1].encodeHistory).toHaveLength(402);
+    expect(history.correctionHistory[1].encodeHistory.slice(0, 2)).toEqual([
       expect.objectContaining({
         id: predecessor.id,
         status: "completed",
