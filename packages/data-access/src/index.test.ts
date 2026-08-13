@@ -35,6 +35,7 @@ import type {
   DiscInspectionId,
   DiscSelectionId,
   EncodeJobId,
+  EncodeOutputFilesystemIdentity,
   MediaItemId,
   OriginalDiscArchiveId,
   RunningEncodeJob,
@@ -578,7 +579,7 @@ describe("data-access facade", () => {
         "disc_selection_supersessions",
       ]),
     );
-    expect(identifierTables).toHaveLength(14);
+    expect(identifierTables).toHaveLength(15);
     expect(
       identifierTables.every(({ name, sql }) =>
         name === "legacy_cutover_staged_sidecars"
@@ -2710,7 +2711,7 @@ describe("data-access facade", () => {
     access.close();
   });
 
-  it("atomically completes review and queues an opted-in corrected replacement", () => {
+  it("atomically completes review and admits an opted-in corrected replacement", () => {
     const {
       access,
       archive,
@@ -2781,17 +2782,79 @@ describe("data-access facade", () => {
       originalDiscArchiveId: archive.id,
       limit: 100,
     })).toEqual([]);
-    expect(access.encodeJobs.claimNext("replacement-plan-successor")).toBeNull();
-    expect(access.encodeJobs.listCorrectionLinks([replacement.id]))
-      .toContainEqual(expect.objectContaining({
+    expect(access.encodeJobs.claimNext("replacement-plan-successor"))
+      .toMatchObject({
         id: replacement.id,
-        correctedPublicationAdmitted: false,
-      }));
+        predecessorEncodeJobId: predecessor.id,
+        status: "running",
+      });
     expect(access.encodeJobs.list()).toContainEqual(expect.objectContaining({
       id: replacement.id,
       predecessorEncodeJobId: predecessor.id,
-      status: "queued",
+      status: "running",
     }));
+    const replacementClaim = access.encodeJobs.list(["running"])[0] as
+      RunningEncodeJob;
+    const priorOutputIdentity =
+      "1048576:2048:4096:1710000000000" as EncodeOutputFilesystemIdentity;
+    access.encodeJobs.recordReplacementOutputIdentity(
+      replacementClaim,
+      priorOutputIdentity,
+    );
+    const publication = access.encodeJobs.registerPartialCleanup(
+      replacementClaim,
+      { publicationPending: true },
+    );
+    const fencedPublication = access.encodeJobs.beginPublicationMutation(
+      replacementClaim,
+      publication,
+    );
+    const retainedOutputPath =
+      `${replacement.outputPath}.failed.${replacementClaim.claimToken}`;
+    expect(() =>
+      access.encodeJobs.completePublishedClaim(
+        replacementClaim,
+        fencedPublication,
+        () => true,
+      )
+    ).toThrow("Retained Encode output provenance is incomplete");
+    expect(access.encodeJobs.list()).toContainEqual(expect.objectContaining({
+      id: replacement.id,
+      status: "completed",
+      publicationCompletionPending: true,
+    }));
+    expect(access.encodeJobs.listRetainedOutputs([replacement.id])).toEqual([]);
+    access.encodeJobs.completePublishedPartial(
+      fencedPublication,
+      () => true,
+      { retainedOutputPath, retainedOutputIdentity: priorOutputIdentity },
+    );
+    expect(access.encodeJobs.listRetainedOutputs([replacement.id])).toEqual([{
+      id: expect.any(String),
+      predecessorEncodeJobId: predecessor.id,
+      replacementEncodeJobId: replacement.id,
+      retainedOutputPath,
+      filesystemIdentity: priorOutputIdentity,
+      state: "retained",
+      cleanupEligible: true,
+      retainedAt: expect.any(Date),
+    }]);
+    expect(access.encodeJobs.listForDiscSelections([
+      mistakenSelection.id,
+      correction.discSelection.id,
+    ])).toEqual([
+      expect.objectContaining({
+        id: predecessor.id,
+        discSelectionId: mistakenSelection.id,
+        status: "completed",
+      }),
+      expect.objectContaining({
+        id: replacement.id,
+        discSelectionId: correction.discSelection.id,
+        predecessorEncodeJobId: predecessor.id,
+        status: "completed",
+      }),
+    ]);
     access.close();
   });
 
@@ -2858,11 +2921,15 @@ describe("data-access facade", () => {
     expect(access.encodeJobs.completeCancellation(predecessorClaim))
       .toMatchObject({ id: predecessor.id, status: "cancelled" });
     expect(access.encodeJobs.claimNext("replacement-ready-after-cancel"))
-      .toBeNull();
+      .toMatchObject({
+        id: replacement.id,
+        predecessorEncodeJobId: predecessor.id,
+        status: "running",
+      });
     expect(access.encodeJobs.list()).toContainEqual(expect.objectContaining({
       id: replacement.id,
       predecessorEncodeJobId: predecessor.id,
-      status: "queued",
+      status: "running",
     }));
     access.close();
   });
@@ -2934,13 +3001,19 @@ describe("data-access facade", () => {
         status: "cancelled",
         replaceExistingOutput: true,
       });
-    expect(access.encodeJobs.claimNext("retained-final-successor")).toBeNull();
+    expect(access.encodeJobs.claimNext("retained-final-successor"))
+      .toMatchObject({
+        id: replacement.id,
+        predecessorEncodeJobId: predecessor.id,
+        replaceExistingOutput: true,
+        status: "running",
+      });
     expect(access.encodeJobs.list()).toContainEqual(expect.objectContaining({
         id: replacement.id,
         predecessorEncodeJobId: predecessor.id,
         discSelectionId: correction.discSelection.id,
         replaceExistingOutput: true,
-        status: "queued",
+        status: "running",
       }));
     access.close();
   });
@@ -3155,6 +3228,100 @@ describe("data-access facade", () => {
     access.close();
   });
 
+  it("transfers a corrected output reservation without a multi-process competitor gap", async () => {
+    const databasePath = createTestDatabasePath();
+    const {
+      access,
+      archive,
+      correctedItems: [correctedItem],
+      mistakenSelection,
+    } = createDiscSelectionCorrectionFixture({
+      key: "replacement-reservation-succession-race",
+      databasePath,
+    });
+    if (!correctedItem) throw new Error("Expected correction target");
+    const competingItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Competing reservation owner",
+    });
+    const competingSelection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: competingItem.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    });
+    completeCatalogReview(access, archive.id);
+    const profile = access.encodingProfiles.create({
+      key: "replacement-reservation-succession-race",
+      displayName: "Replacement reservation succession race",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const predecessor = access.encodeJobs.enqueue({
+      discSelectionId: mistakenSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Reservation succession race.mkv",
+    });
+    const claim = access.encodeJobs.claimNext("reservation-predecessor");
+    if (!claim) throw new Error("Expected predecessor claim");
+    access.encodeJobs.complete(claim);
+    access.catalog.correctDiscSelection(mistakenSelection.id, {
+      originalDiscArchiveId: archive.id,
+      catalogRevision: access.catalog.listOriginalDiscArchives({
+        ids: [archive.id],
+      })[0]!.updatedAt,
+      mediaItemId: correctedItem.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    const catalogRevision = access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]!.updatedAt;
+
+    const results = await runBarrierWorkers({
+      databasePath,
+      mode: "operation",
+      operations: [
+        {
+          operation: "complete-catalog-review-with-replacements",
+          originalDiscArchiveId: archive.id,
+          catalogRevision,
+          replacements: [{
+            predecessorEncodeJobId: predecessor.id,
+            encodingProfileId: profile.id,
+            outputPath: predecessor.outputPath,
+          }],
+        },
+        {
+          operation: "enqueue-encode",
+          discSelectionId: competingSelection.id,
+          encodingProfileId: profile.id,
+          outputPath: predecessor.outputPath,
+        },
+      ],
+    });
+
+    expect(results.map((result) =>
+      typeof result === "object" && result !== null && "outcome" in result
+        ? result.outcome
+        : result
+    ).sort()).toEqual(["rejected", "reviewed"]);
+    expect(access.encodeJobs.list()).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: predecessor.id,
+        reservesOutputPath: false,
+      }),
+      expect.objectContaining({
+        predecessorEncodeJobId: predecessor.id,
+        outputPath: predecessor.outputPath,
+        reservesOutputPath: true,
+        status: "queued",
+      }),
+    ]));
+    expect(access.encodeJobs.list().filter(
+      (job) => job.discSelectionId === competingSelection.id,
+    )).toEqual([]);
+    access.close();
+  });
+
   it.each([
     ["without a retained final", false, false],
     ["with a retained final", true, true],
@@ -3212,12 +3379,17 @@ describe("data-access facade", () => {
       }],
     ).replacementEncodeJobs[0]!;
 
-    expect(access.encodeJobs.claimNext(`${key}-successor`)).toBeNull();
+    expect(access.encodeJobs.claimNext(`${key}-successor`)).toMatchObject({
+      id: successor.id,
+      predecessorEncodeJobId: predecessor.id,
+      replaceExistingOutput: expectedReplaceExistingOutput,
+      status: "running",
+    });
     expect(access.encodeJobs.list()).toContainEqual(expect.objectContaining({
       id: successor.id,
       discSelectionId: correction.discSelection.id,
       replaceExistingOutput: expectedReplaceExistingOutput,
-      status: "queued",
+      status: "running",
     }));
     access.close();
   });
@@ -3744,11 +3916,6 @@ describe("data-access facade", () => {
 
     const concurrentWriter = new DatabaseSync(databasePath);
     concurrentWriter.exec("PRAGMA busy_timeout = 5000");
-    concurrentWriter.prepare(`
-      UPDATE encode_jobs
-      SET corrected_publication_admitted = 1
-      WHERE id = ?
-    `).run(successor.id);
     concurrentWriter.exec("BEGIN IMMEDIATE");
     concurrentWriter.prepare(`
       UPDATE encode_jobs
@@ -6105,13 +6272,29 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .prepare("select name from pragma_table_info('encode_jobs')")
         .all(),
     ).toEqual(expect.arrayContaining([
-      { name: "corrected_publication_admitted" },
       { name: "partial_cleanup_lease_token" },
       { name: "publication_completion_pending" },
       { name: "publication_pending" },
       { name: "verification_message" },
       { name: "verification_status" },
       { name: "verified_at" },
+    ]));
+    expect(
+      sqlite
+        .prepare("select name from pragma_table_info('encode_jobs')")
+        .all(),
+    ).not.toContainEqual({ name: "corrected_publication_admitted" });
+    expect(
+      sqlite
+        .prepare("select name from pragma_table_info('retained_encode_outputs')")
+        .all(),
+    ).toEqual(expect.arrayContaining([
+      { name: "predecessor_encode_job_id" },
+      { name: "replacement_encode_job_id" },
+      { name: "retained_output_path" },
+      { name: "filesystem_identity" },
+      { name: "cleanup_eligible" },
+      { name: "retained_at" },
     ]));
     expect(
       sqlite
@@ -6126,10 +6309,13 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(
       sqlite
         .prepare(
-          "select name from __drizzle_migrations order by id desc limit 8",
+          "select name from __drizzle_migrations order by id desc limit 9",
         )
         .all(),
     ).toEqual([
+      {
+        name: "20260813174634_retained-corrected-outputs",
+      },
       {
         name: "20260813142411_corrected-encode-replacements",
       },
@@ -9851,13 +10037,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
           outputPath: predecessor.outputPath,
         }],
       ).replacementEncodeJobs[0]!;
-      const admission = new DatabaseSync(databasePath);
-      admission.prepare(`
-        UPDATE encode_jobs
-        SET corrected_publication_admitted = 1
-        WHERE id = ?
-      `).run(replacement.id);
-      admission.close();
 
       const replacementClaim = access.encodeJobs.claimNext(
         `${key}-successor`,

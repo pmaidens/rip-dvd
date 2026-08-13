@@ -201,6 +201,24 @@ function readCatalogReview(
         ids: correctionSelectionIds,
       }).map((selection) => [selection.id, selection]),
     );
+    const correctionJobs = snapshot.encodeJobs.listForDiscSelections(
+      correctionSelectionIds,
+    );
+    const correctionJobsById = new Map(
+      correctionJobs.map((job) => [job.id, job]),
+    );
+    const replacementJobByPredecessorId = new Map(
+      correctionJobs.flatMap((job) =>
+        job.predecessorEncodeJobId
+          ? [[job.predecessorEncodeJobId, job] as const]
+          : []
+      ),
+    );
+    const retainedOutputByReplacementId = new Map(
+      snapshot.encodeJobs.listRetainedOutputs(
+        correctionJobs.map((job) => job.id),
+      ).map((output) => [output.replacementEncodeJobId, output]),
+    );
     const selectionsWithHistory = new Map(
       discSelectionsPage.map((selection) => [selection.id, selection]),
     );
@@ -219,6 +237,22 @@ function readCatalogReview(
           `Disc Selection supersession for ${supersession.replacementDiscSelectionId} is missing historical provenance`,
         );
       }
+      const correctionEncodeJobs = correctionJobs.filter((job) => {
+        if (
+          job.discSelectionId !== supersededDiscSelection.id &&
+          job.discSelectionId !== replacementDiscSelection.id
+        ) {
+          return false;
+        }
+        const predecessor = job.predecessorEncodeJobId
+          ? correctionJobsById.get(job.predecessorEncodeJobId)
+          : undefined;
+        const replacement = replacementJobByPredecessorId.get(job.id);
+        return (
+          predecessor?.discSelectionId === supersededDiscSelection.id ||
+          replacement?.discSelectionId === replacementDiscSelection.id
+        );
+      });
       return {
         supersededDiscSelection:
           serializeDiscSelection(supersededDiscSelection),
@@ -226,6 +260,22 @@ function readCatalogReview(
           serializeDiscSelection(replacementDiscSelection),
         reason: supersession.reason,
         correctedAt: supersession.createdAt.toISOString(),
+        encodeHistory: correctionEncodeJobs.map((job) => {
+          const retainedOutput = retainedOutputByReplacementId.get(job.id);
+          return {
+            id: job.id,
+            status: job.status,
+            predecessorEncodeJobId: job.predecessorEncodeJobId,
+            replacementEncodeJobId:
+              replacementJobByPredecessorId.get(job.id)?.id ?? null,
+            retainedOutput: retainedOutput
+              ? {
+                state: retainedOutput.state,
+                cleanupEligible: retainedOutput.cleanupEligible,
+              }
+              : null,
+          };
+        }),
       };
     });
     const actionAvailability = snapshot.catalog

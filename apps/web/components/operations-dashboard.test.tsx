@@ -435,7 +435,10 @@ describe("DashboardView", () => {
               predecessorId: "ready-predecessor" as EncodeJobId,
               predecessorStatus: "completed",
               predecessorReady: true,
-              publicationAdmissionPending: true,
+              priorOutput: {
+                state: "protected",
+                cleanupEligible: false,
+              },
             },
           },
           {
@@ -490,7 +493,10 @@ describe("DashboardView", () => {
     expect(html).toContain("Cancellation requested");
     expect(html).toContain("Waiting for HandBrake to stop safely");
     expect(html).toContain("Waiting for previous encode to stop");
-    expect(html).toContain("Waiting for corrected publication support");
+    expect(html).toContain("Ready for encode");
+    expect(html).toContain(
+      "Prior final remains published while correction runs.",
+    );
     expect(html).toContain("status status-cancellation_requested");
     expect(html).toContain("Requeue encode");
     expect(html).toContain("status status-cancelled");

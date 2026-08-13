@@ -28,6 +28,7 @@ import {
   FILESYSTEM_VERIFICATION_STATUSES,
   MEDIA_DOMAINS,
   MEDIA_ITEM_KINDS,
+  RETAINED_ENCODE_OUTPUT_STATES,
 } from "../domain-values.js";
 import type {
   ArchiveRequestId,
@@ -46,6 +47,7 @@ import type {
   MediaItemId,
   OpticalDriveId,
   OriginalDiscArchiveId,
+  RetainedEncodeOutputId,
 } from "../types.js";
 
 const createdAt = () => integer("created_at", { mode: "timestamp_ms" }).notNull();
@@ -648,12 +650,6 @@ export const encodeJobs = sqliteTable(
       .references((): AnySQLiteColumn => encodeJobs.id, {
         onDelete: "restrict",
       }),
-    correctedPublicationAdmitted: integer(
-      "corrected_publication_admitted",
-      { mode: "boolean" },
-    )
-      .notNull()
-      .default(false),
     discSelectionId: text("disc_selection_id")
       .$type<DiscSelectionId>()
       .notNull()
@@ -747,10 +743,6 @@ export const encodeJobs = sqliteTable(
       sql`${table.predecessorEncodeJobId} is null or ${table.predecessorEncodeJobId} <> ${table.id}`,
     ),
     check(
-      "encode_jobs_corrected_publication_admission_check",
-      sql`${table.correctedPublicationAdmitted} = 0 or ${table.predecessorEncodeJobId} is not null`,
-    ),
-    check(
       "encode_jobs_replacement_identity_check",
       sql`${table.replacementOutputIdentity} is null or ${table.replaceExistingOutput} = 1`,
     ),
@@ -773,6 +765,53 @@ export const encodeJobs = sqliteTable(
     check(
       "encode_jobs_verification_check",
       sql`(${table.verificationStatus} is null) = (${table.verificationMessage} is null) and (${table.verificationStatus} is null) = (${table.verifiedAt} is null) and (${table.verificationStatus} is null or ${table.verificationStatus} in (${sqliteStringLiterals(FILESYSTEM_VERIFICATION_STATUSES)}))`,
+    ),
+  ],
+);
+
+export const retainedEncodeOutputs = sqliteTable(
+  "retained_encode_outputs",
+  {
+    id: text("id").$type<RetainedEncodeOutputId>().notNull().primaryKey(),
+    predecessorEncodeJobId: text("predecessor_encode_job_id")
+      .$type<EncodeJobId>()
+      .notNull()
+      .references(() => encodeJobs.id, { onDelete: "restrict" }),
+    replacementEncodeJobId: text("replacement_encode_job_id")
+      .$type<EncodeJobId>()
+      .notNull()
+      .references(() => encodeJobs.id, { onDelete: "restrict" }),
+    retainedOutputPath: text("retained_output_path").notNull(),
+    filesystemIdentity: text("filesystem_identity")
+      .$type<EncodeOutputFilesystemIdentity>()
+      .notNull(),
+    state: text("state", { enum: RETAINED_ENCODE_OUTPUT_STATES })
+      .notNull()
+      .default("retained"),
+    cleanupEligible: integer("cleanup_eligible", { mode: "boolean" })
+      .notNull()
+      .default(true),
+    retainedAt: integer("retained_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (table) => [
+    check("retained_encode_outputs_id_not_null", sql`${table.id} is not null`),
+    uniqueIndex("retained_encode_outputs_replacement_unique")
+      .on(table.replacementEncodeJobId),
+    uniqueIndex("retained_encode_outputs_path_unique")
+      .on(table.retainedOutputPath),
+    index("retained_encode_outputs_predecessor_idx")
+      .on(table.predecessorEncodeJobId),
+    check(
+      "retained_encode_outputs_distinct_jobs_check",
+      sql`${table.predecessorEncodeJobId} <> ${table.replacementEncodeJobId}`,
+    ),
+    check(
+      "retained_encode_outputs_state_check",
+      sql`${table.state} in (${sqliteStringLiterals(RETAINED_ENCODE_OUTPUT_STATES)})`,
+    ),
+    check(
+      "retained_encode_outputs_cleanup_eligible_check",
+      sql`${table.cleanupEligible} = 1`,
     ),
   ],
 );

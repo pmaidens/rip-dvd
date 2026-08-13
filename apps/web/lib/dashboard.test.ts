@@ -1,4 +1,8 @@
-import { createDataAccess, type DataAccess } from "@rip-dvd/data-access";
+import {
+  createDataAccess,
+  type DataAccess,
+  type EncodeOutputFilesystemIdentity,
+} from "@rip-dvd/data-access";
 import {
   createLegacySidecarDataAccess,
   type LegacySidecarDataAccess,
@@ -146,9 +150,34 @@ describe("readDashboardSnapshot", () => {
       [{
         predecessorEncodeJobId: predecessor.id,
         encodingProfileId: newerProfile.id,
-        outputPath: "/media/movies/linked-outside-history.mkv",
+        outputPath: predecessor.outputPath,
       }],
     ).replacementEncodeJobs[0]!;
+    const successorClaim = access.encodeJobs.claimNext("retained-successor");
+    if (!successorClaim) throw new Error("Expected retained successor claim");
+    const retainedIdentity =
+      "retained-dashboard-identity" as EncodeOutputFilesystemIdentity;
+    access.encodeJobs.recordReplacementOutputIdentity(
+      successorClaim,
+      retainedIdentity,
+    );
+    const publication = access.encodeJobs.registerPartialCleanup(
+      successorClaim,
+      { publicationPending: true },
+    );
+    const fencedPublication = access.encodeJobs.beginPublicationMutation(
+      successorClaim,
+      publication,
+    );
+    access.encodeJobs.completePublishedClaim(
+      successorClaim,
+      fencedPublication,
+      () => true,
+      {
+        retainedOutputPath: "/private/media/retained-prior-final.mkv",
+        retainedOutputIdentity: retainedIdentity,
+      },
+    );
 
     const snapshot = readDashboardSnapshot(access, { activityLimit: 1 });
     expect(snapshot.encodeJobs).toEqual({
@@ -160,10 +189,14 @@ describe("readDashboardSnapshot", () => {
           predecessorId: predecessor.id,
           predecessorStatus: "completed",
           predecessorReady: true,
-          publicationAdmissionPending: true,
+          priorOutput: {
+            state: "retained",
+            cleanupEligible: true,
+          },
         },
       })]),
     });
+    expect(JSON.stringify(snapshot)).not.toContain("retained-prior-final.mkv");
     expect(correction.discSelection.id).toBe(successor.discSelectionId);
   });
 
