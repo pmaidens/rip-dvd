@@ -7,7 +7,13 @@ import {
   createLegacySidecarDataAccess,
   type LegacySidecarDataAccess,
 } from "@rip-dvd/data-access/legacy-sidecars";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -26,7 +32,10 @@ import {
 
 const dataAccessFixture = useDataAccessFixture();
 
-function seedEncodeJob(access: LegacySidecarDataAccess) {
+function seedEncodeJob(
+  access: LegacySidecarDataAccess,
+  outputPath = "/media/movies/enrichment.mkv",
+) {
   const drive = access.catalog.upsertOpticalDrive({
     devicePath: "/dev/sr0",
     isEnabled: true,
@@ -66,7 +75,7 @@ function seedEncodeJob(access: LegacySidecarDataAccess) {
   const job = access.encodeJobs.enqueue({
     discSelectionId: selection.id,
     encodingProfileId: profile.id,
-    outputPath: "/media/movies/enrichment.mkv",
+    outputPath,
   });
   return { archive, job, mediaItem, selection };
 }
@@ -112,7 +121,10 @@ describe("readDashboardSnapshot", () => {
 
   it("loads a displayed replacement's predecessor outside the history window", () => {
     const access = dataAccessFixture.create();
-    const { archive, job: predecessor, selection } = seedEncodeJob(access);
+    const { archive, job: predecessor, selection } = seedEncodeJob(
+      access,
+      join(realpathSync(tmpdir()), "dashboard-retained-output.mkv"),
+    );
     const predecessorClaim = access.encodeJobs.claimNext("old-predecessor");
     if (!predecessorClaim) throw new Error("Expected old predecessor claim");
     access.encodeJobs.complete(predecessorClaim);
