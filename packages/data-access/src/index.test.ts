@@ -2549,10 +2549,51 @@ describe("data-access facade", () => {
         catalogReviewedAt: null,
       });
     completeCatalogReview(access, archive.id);
-    expect(
-      access.catalog.deleteDiscSelection(correction.discSelection.id),
-    ).toMatchObject({
+    expect(access.catalog.listDiscSelectionActionAvailability({
+      ids: [correction.discSelection.id],
+    })).toEqual([{
+      discSelectionId: correction.discSelection.id,
+      state: "correction_lineage",
+      availableActions: ["correct", "remove"],
+      reason:
+        "This Disc Selection belongs to immutable correction lineage; correct it by supersession or remove it while retaining history",
+      relatedEncodeJob: null,
+    }]);
+    expect(() => access.catalog.repairDiscSelection(
+      correction.discSelection.id,
+      {
+        originalDiscArchiveId: archive.id,
+        mediaItemId: mistakenItem.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      },
+    )).toThrow("belongs to immutable correction lineage");
+    const secondCorrection = access.catalog.correctDiscSelection(
+      correction.discSelection.id,
+      {
+        originalDiscArchiveId: archive.id,
+        catalogRevision: access.catalog.listOriginalDiscArchives({
+          ids: [archive.id],
+        })[0]!.updatedAt,
+        mediaItemId: mistakenItem.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+        reason: "The replacement was also mistaken.",
+      },
+    );
+    expect(access.catalog.listDiscSelections({
+      ids: [correction.discSelection.id],
+    })).toEqual([expect.objectContaining({
       id: correction.discSelection.id,
+      mediaItemId: correctedItem.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    })]);
+    expect(access.catalog.listDiscSelectionSupersessions({
+      originalDiscArchiveId: archive.id,
+      limit: 100,
+    })).toEqual([correction.supersession, secondCorrection.supersession]);
+    expect(
+      access.catalog.deleteDiscSelection(secondCorrection.discSelection.id),
+    ).toMatchObject({
+      id: secondCorrection.discSelection.id,
       deletedEncodeJobs: 0,
       deletionComplete: true,
     });
@@ -2560,14 +2601,17 @@ describe("data-access facade", () => {
       originalDiscArchiveId: archive.id,
     })).toEqual([]);
     expect(access.catalog.listDiscSelections({
-      ids: [correction.discSelection.id],
-    })).toEqual([expect.objectContaining({ id: correction.discSelection.id })]);
+      ids: [secondCorrection.discSelection.id],
+    })).toEqual([
+      expect.objectContaining({ id: secondCorrection.discSelection.id }),
+    ]);
     expect(access.catalog.listDiscSelectionSupersessions({
       discSelectionIds: [
         mistakenSelection.id,
         correction.discSelection.id,
+        secondCorrection.discSelection.id,
       ],
-    })).toEqual([correction.supersession]);
+    })).toEqual([correction.supersession, secondCorrection.supersession]);
     expect(access.encodeJobs.list()).toEqual([
       expect.objectContaining({
         id: queued.id,

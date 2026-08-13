@@ -59,9 +59,11 @@ export async function requestCatalogReview(
   archiveId: string,
   discSelectionOffset: number,
   fetcher: CatalogReviewFetch = fetch,
+  correctionHistoryOffset = 0,
 ): Promise<CatalogReviewDto> {
   const query = new URLSearchParams({
     selectionOffset: String(discSelectionOffset),
+    correctionOffset: String(correctionHistoryOffset),
   });
   const response = await fetcher(
     `/api/catalog-reviews/${encodeURIComponent(archiveId)}?${query.toString()}`,
@@ -137,6 +139,7 @@ export function useCatalogReviewState({
     null,
   );
   const [discSelectionOffset, setDiscSelectionOffset] = useState(0);
+  const [correctionHistoryOffset, setCorrectionHistoryOffset] = useState(0);
   const [selectionKind, setSelectionKind] =
     useState<DiscSelectionKind>("main_feature");
   const [archiveOnlySelected, setArchiveOnlySelected] = useState(false);
@@ -165,6 +168,8 @@ export function useCatalogReviewState({
       const review = await requestCatalogReview(
         archiveId,
         discSelectionOffset,
+        fetch,
+        correctionHistoryOffset,
       );
       if (!requestScope.current?.isCurrent(archiveId, request)) {
         return;
@@ -180,6 +185,7 @@ export function useCatalogReviewState({
   }, [
     archiveId,
     discSelectionOffset,
+    correctionHistoryOffset,
   ]);
 
   useEffect(() => {
@@ -266,6 +272,14 @@ export function useCatalogReviewState({
     setDiscSelectionOffset(offset);
   }
 
+  function changeCorrectionHistoryOffset(offset: number) {
+    if (correctionHistoryOffset === offset) {
+      return;
+    }
+    requestScope.current?.invalidate(archiveId);
+    setCorrectionHistoryOffset(offset);
+  }
+
   function saveMediaItem(input: SaveMediaItemInput) {
     const { id, ...values } = input;
     void mutate(
@@ -284,7 +298,9 @@ export function useCatalogReviewState({
       : undefined;
     void mutate(
       replacesDiscSelectionId
-        ? target?.actionAvailability.state === "locked_provenance" &&
+        ? target &&
+            (target.actionAvailability.state === "locked_provenance" ||
+              target.actionAvailability.state === "correction_lineage") &&
             state.status === "loaded"
           ? {
               action: "correct_disc_selection",
@@ -347,6 +363,7 @@ export function useCatalogReviewState({
     editMediaItem: (id: string) => changeEditingMediaItem(id),
     cancelEdit: () => changeEditingMediaItem(null),
     changeDiscSelectionOffset,
+    changeCorrectionHistoryOffset,
     changeSelectionKind: setSelectionKind,
     changeArchiveOnlySelected: setArchiveOnlySelected,
     startMappingProposal: (proposal: MappingProposal) => {

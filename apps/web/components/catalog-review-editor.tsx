@@ -38,6 +38,7 @@ interface CatalogReviewViewProps {
   onEditMediaItem(id: string): void;
   onCancelEdit(): void;
   onDiscSelectionsPage(offset: number): void;
+  onCorrectionHistoryPage?(offset: number): void;
   onSelectionKindChange(kind: DiscSelectionKind): void;
   onArchiveOnlyChange(selected: boolean): void;
   onStartMappingProposal(proposal: MappingProposal): void;
@@ -71,6 +72,7 @@ export function CatalogReviewView({
   onEditMediaItem,
   onCancelEdit,
   onDiscSelectionsPage,
+  onCorrectionHistoryPage = () => undefined,
   onSelectionKindChange,
   onArchiveOnlyChange,
   onStartMappingProposal,
@@ -182,11 +184,14 @@ export function CatalogReviewView({
           <CatalogReviewDiscSelections
             discSelections={review.discSelections}
             page={review.discSelectionsPage}
+            correctionHistory={review.correctionHistory}
+            correctionHistoryPage={review.correctionHistoryPage}
             mediaItems={review.mediaItems}
             rawTitles={review.rawScan.titles}
             selectionKind={selectionKind}
             isSaving={isSaving}
             onPage={onDiscSelectionsPage}
+            onCorrectionHistoryPage={onCorrectionHistoryPage}
             onSelectionKindChange={onSelectionKindChange}
             onCreate={onCreateDiscSelection}
             onDelete={onDeleteDiscSelection}
@@ -233,6 +238,7 @@ export function CatalogReviewEditor({
       onEditMediaItem={review.editMediaItem}
       onCancelEdit={review.cancelEdit}
       onDiscSelectionsPage={review.changeDiscSelectionOffset}
+      onCorrectionHistoryPage={review.changeCorrectionHistoryOffset}
       onSelectionKindChange={review.changeSelectionKind}
       onArchiveOnlyChange={review.changeArchiveOnlySelected}
       onStartMappingProposal={review.startMappingProposal}

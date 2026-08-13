@@ -9,12 +9,10 @@ import {
   type DiscSelection,
   type DiscSelectionActionAvailability,
   type DiscSelectionId,
-  type DiscSelectionSupersession,
   type MediaItem,
   type MediaItemId,
   type MediaItemMaintenance,
   type OriginalDiscArchiveId,
-  type SnapshotCatalogAccess,
 } from "@rip-dvd/data-access";
 import { loadConfig } from "@rip-dvd/config";
 
@@ -37,7 +35,7 @@ export const runtime = "nodejs";
 const CATALOG_REVIEW_SELECTION_PAGE_SIZE = 100;
 const CATALOG_REVIEW_COVERAGE_SELECTION_PAGE_SIZE = 500;
 const CATALOG_REVIEW_MEDIA_ITEM_MAINTENANCE_BATCH_SIZE = 100;
-const CATALOG_REVIEW_CORRECTION_HISTORY_LIMIT = 100;
+const CATALOG_REVIEW_CORRECTION_HISTORY_PAGE_SIZE = 100;
 
 function response(body: unknown, status = 200): Response {
   return Response.json(body, {
@@ -122,123 +120,20 @@ function serializeDiscSelection(selection: DiscSelection) {
 function serializeReviewDiscSelection(
   selection: DiscSelection,
   availability: DiscSelectionActionAvailability,
-  correctionHistory: readonly {
-    supersededDiscSelection: DiscSelection;
-    replacementDiscSelection: DiscSelection;
-    supersession: DiscSelectionSupersession;
-  }[],
 ) {
   const { discSelectionId: _discSelectionId, ...actionAvailability } =
     availability;
   return {
     ...serializeDiscSelection(selection),
     actionAvailability,
-    ...(correctionHistory.length === 0
-      ? {}
-      : {
-        correctionHistory: correctionHistory.map((correction) => ({
-          supersededDiscSelection:
-            serializeDiscSelection(correction.supersededDiscSelection),
-          replacementDiscSelection:
-            serializeDiscSelection(correction.replacementDiscSelection),
-          reason: correction.supersession.reason,
-          correctedAt: correction.supersession.createdAt.toISOString(),
-        })),
-      }),
   };
-}
-
-function readDiscSelectionCorrectionHistory(
-  catalog: SnapshotCatalogAccess,
-  activeSelections: readonly DiscSelection[],
-) {
-  const histories = new Map<DiscSelectionId, Array<{
-    supersededDiscSelection: DiscSelection;
-    replacementDiscSelection: DiscSelection;
-    supersession: DiscSelectionSupersession;
-  }>>(
-    activeSelections.map((selection) => [selection.id, []]),
-  );
-  let frontier = new Map(
-    activeSelections.map((selection) => [selection.id, selection]),
-  );
-  let depth = 0;
-
-  while (frontier.size > 0) {
-    const frontierSelectionIds = new Set(
-      [...frontier.values()].map((selection) => selection.id),
-    );
-    const supersessions = catalog.listDiscSelectionSupersessions({
-      discSelectionIds: [...frontierSelectionIds],
-    });
-    const supersessionByReplacementId = new Map(
-      supersessions
-        .filter((supersession) =>
-          frontierSelectionIds.has(
-            supersession.replacementDiscSelectionId,
-          )
-        )
-        .map((supersession) => [
-          supersession.replacementDiscSelectionId,
-          supersession,
-        ]),
-    );
-    if (supersessionByReplacementId.size === 0) {
-      break;
-    }
-    if (depth >= CATALOG_REVIEW_CORRECTION_HISTORY_LIMIT) {
-      throw new DomainInvariantError(
-        `Disc Selection correction history exceeds ${CATALOG_REVIEW_CORRECTION_HISTORY_LIMIT} revisions`,
-      );
-    }
-    const predecessorIds = [...supersessionByReplacementId.values()].map(
-      (supersession) => supersession.supersededDiscSelectionId,
-    );
-    const predecessorsById = new Map(
-      catalog.listDiscSelections({ ids: predecessorIds }).map((selection) => [
-        selection.id,
-        selection,
-      ]),
-    );
-    const nextFrontier = new Map<DiscSelectionId, DiscSelection>();
-    for (const [activeSelectionId, replacementDiscSelection] of frontier) {
-      const supersession = supersessionByReplacementId.get(
-        replacementDiscSelection.id,
-      );
-      if (!supersession) {
-        continue;
-      }
-      const supersededDiscSelection = predecessorsById.get(
-        supersession.supersededDiscSelectionId,
-      );
-      if (!supersededDiscSelection) {
-        throw new DomainInvariantError(
-          `Disc Selection supersession for ${supersession.replacementDiscSelectionId} is missing historical provenance`,
-        );
-      }
-      histories.get(activeSelectionId)!.push({
-        supersededDiscSelection,
-        replacementDiscSelection,
-        supersession,
-      });
-      nextFrontier.set(activeSelectionId, supersededDiscSelection);
-    }
-    frontier = nextFrontier;
-    depth += 1;
-  }
-
-  return new Map(
-    [...histories].map(([selectionId, history]) => [
-      selectionId,
-      history.reverse(),
-    ]),
-  );
 }
 
 function readCatalogReview(
   access: DataAccess,
   id: OriginalDiscArchiveId,
   discSelectionOffset: number,
+  correctionHistoryOffset: number,
 ) {
   return access.readConsistentSnapshot((snapshot) => {
     const archive = snapshot.catalog.listOriginalDiscArchives({ ids: [id] })[0];
@@ -276,26 +171,56 @@ function readCatalogReview(
       discSelectionOffset,
       discSelectionOffset + CATALOG_REVIEW_SELECTION_PAGE_SIZE,
     );
-    const correctionHistoryBySelectionId =
-      readDiscSelectionCorrectionHistory(
-        snapshot.catalog,
-        discSelectionsPage,
-      );
+    const correctionHistoryRows = snapshot.catalog
+      .listDiscSelectionSupersessions({
+        originalDiscArchiveId: id,
+        limit: CATALOG_REVIEW_CORRECTION_HISTORY_PAGE_SIZE + 1,
+        offset: correctionHistoryOffset,
+      });
+    const hasNextCorrectionHistory = correctionHistoryRows.length >
+      CATALOG_REVIEW_CORRECTION_HISTORY_PAGE_SIZE;
+    const correctionHistoryPage = correctionHistoryRows.slice(
+      0,
+      CATALOG_REVIEW_CORRECTION_HISTORY_PAGE_SIZE,
+    );
+    const correctionSelectionIds = correctionHistoryPage.flatMap(
+      (supersession) => [
+        supersession.supersededDiscSelectionId,
+        supersession.replacementDiscSelectionId,
+      ],
+    );
+    const correctionSelectionsById = new Map(
+      snapshot.catalog.listDiscSelections({
+        ids: correctionSelectionIds,
+      }).map((selection) => [selection.id, selection]),
+    );
     const selectionsWithHistory = new Map(
       discSelectionsPage.map((selection) => [selection.id, selection]),
     );
-    for (const history of correctionHistoryBySelectionId.values()) {
-      for (const correction of history) {
-        selectionsWithHistory.set(
-          correction.supersededDiscSelection.id,
-          correction.supersededDiscSelection,
-        );
-        selectionsWithHistory.set(
-          correction.replacementDiscSelection.id,
-          correction.replacementDiscSelection,
+    for (const selection of correctionSelectionsById.values()) {
+      selectionsWithHistory.set(selection.id, selection);
+    }
+    const correctionHistory = correctionHistoryPage.map((supersession) => {
+      const supersededDiscSelection = correctionSelectionsById.get(
+        supersession.supersededDiscSelectionId,
+      );
+      const replacementDiscSelection = correctionSelectionsById.get(
+        supersession.replacementDiscSelectionId,
+      );
+      if (!supersededDiscSelection || !replacementDiscSelection) {
+        throw new DomainInvariantError(
+          `Disc Selection supersession for ${supersession.replacementDiscSelectionId} is missing historical provenance`,
         );
       }
-    }
+      return {
+        supersededDiscSelection:
+          serializeDiscSelection(supersededDiscSelection),
+        replacementDiscSelection:
+          serializeDiscSelection(replacementDiscSelection),
+        reason: supersession.reason,
+        correctedAt: supersession.createdAt.toISOString(),
+      };
+    });
     const actionAvailability = snapshot.catalog
       .listDiscSelectionActionAvailability({
         ids: discSelectionsPage.map((selection) => selection.id),
@@ -354,6 +279,13 @@ function readCatalogReview(
       mediaItems: reviewMediaItems.map((item) =>
         serializeMediaItem(item, maintenanceByMediaItemId.get(item.id))
       ),
+      correctionHistory,
+      correctionHistoryPage: {
+        offset: correctionHistoryOffset,
+        limit: CATALOG_REVIEW_CORRECTION_HISTORY_PAGE_SIZE,
+        hasPrevious: correctionHistoryOffset > 0,
+        hasNext: hasNextCorrectionHistory,
+      },
       discSelections: discSelectionsPage.map((selection) => {
         const availability = actionAvailabilityById.get(selection.id);
         if (!availability) {
@@ -364,7 +296,6 @@ function readCatalogReview(
         return serializeReviewDiscSelection(
           selection,
           availability,
-          correctionHistoryBySelectionId.get(selection.id) ?? [],
         );
       }),
       discSelectionsPage: {
@@ -394,9 +325,15 @@ export async function createCatalogReviewRoute(
     if (request.method === "GET") {
       const parameters = new URL(request.url).searchParams;
       const discSelectionOffset = recordOffset(request, "selectionOffset");
+      const correctionHistoryOffset = recordOffset(
+        request,
+        "correctionOffset",
+      );
       if (
-        [...parameters.keys()].some((key) => key !== "selectionOffset") ||
-        discSelectionOffset === null
+        [...parameters.keys()].some((key) =>
+          key !== "selectionOffset" && key !== "correctionOffset"
+        ) ||
+        discSelectionOffset === null || correctionHistoryOffset === null
       ) {
         return response({ error: "Invalid Catalog Review query" }, 400);
       }
@@ -404,6 +341,7 @@ export async function createCatalogReviewRoute(
         getAccess(),
         archiveId,
         discSelectionOffset,
+        correctionHistoryOffset,
       );
       return review === null
         ? response({ error: "Original Disc Archive not found" }, 404)
