@@ -335,6 +335,156 @@ describe("end-to-end operations dashboard workflow", () => {
     expect(html).toContain("3 mapped titles");
   });
 
+  it("saves a running Disc Selection Correction before cancellation finishes", async () => {
+    const root = mkdtempSync(join(tmpdir(), "rip-dvd-running-correction-"));
+    temporaryDirectories.push(root);
+    const originalsLibraryPath = join(root, "originals");
+    const mediaLibraryPath = join(root, "media");
+    mkdirSync(originalsLibraryPath);
+    mkdirSync(mediaLibraryPath);
+    const access = createLegacySidecarDataAccess({
+      databasePath: join(root, "rip-dvd.sqlite"),
+      mediaLibraryPath,
+      originalsLibraryPath,
+    });
+    openAccess.push(access);
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/running-correction",
+      isPresent: true,
+    });
+    const contentId = `sha256:${"e".repeat(64)}`;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: contentId,
+      scanData: {
+        schemaVersion: 2,
+        contentId,
+        titles: [{
+          number: 1,
+          durationSeconds: 5_400,
+          chapters: 12,
+          audioStreams: [],
+          subtitles: [],
+        }],
+      },
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: join(originalsLibraryPath, "Running Correction.iso"),
+      fingerprint: contentId,
+    });
+    writeFileSync(archive.archivePath, "running correction source");
+    const mistakenItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Running Correction Mistake",
+    });
+    const correctedItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Running Correction Target",
+    });
+    const selection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: mistakenItem.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    access.catalog.completeCatalogReview(
+      archive.id,
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+        .updatedAt,
+      "reviewed_with_selections",
+    );
+    const profile = access.encodingProfiles.create({
+      key: "running-correction",
+      displayName: "Running correction",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30", container: "mkv" },
+    });
+    const job = access.encodeJobs.enqueue({
+      discSelectionId: selection.id,
+      encodingProfileId: profile.id,
+      outputPath: join(mediaLibraryPath, "Running Correction.mkv"),
+    });
+    const workerGate = createGate();
+    const runner: HandBrakeRunner = {
+      async run({ outputPath }) {
+        writeFileSync(outputPath, "running correction partial", { flag: "wx" });
+        await workerGate.wait();
+      },
+    };
+    let workerSettled = false;
+    const workerPoll = pollEncodeWorker({
+      access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath,
+      originalsLibraryPath,
+      runner,
+      signal: new AbortController().signal,
+      workerId: "running-correction-worker",
+    }).finally(() => {
+      workerSettled = true;
+    });
+    await workerGate.entered;
+    expect(access.encodeJobs.list()).toEqual([
+      expect.objectContaining({ id: job.id, status: "running" }),
+    ]);
+
+    const response = await createCatalogReviewRoute(
+      createMutationRequest(`/api/catalog-reviews/${archive.id}`, {
+        action: "correct_disc_selection",
+        discSelectionId: selection.id,
+        catalogRevision: access.catalog.listOriginalDiscArchives({
+          ids: [archive.id],
+        })[0]!.updatedAt.toISOString(),
+        correctionReason: "The running encode uses the wrong mapping.",
+        selection: {
+          mediaItemId: correctedItem.id,
+          sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+        },
+      }),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      message: "Mapping changed; review required",
+      supersession: {
+        supersededDiscSelectionId: selection.id,
+        reason: "The running encode uses the wrong mapping.",
+      },
+    });
+    expect(workerSettled).toBe(false);
+    expect(access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: job.id,
+        discSelectionId: selection.id,
+        status: "cancellation_requested",
+      }),
+    ]);
+    expect(access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0])
+      .toMatchObject({
+        catalogReviewOutcome: "needs_review",
+        catalogReviewedAt: null,
+      });
+
+    workerGate.release();
+    await workerPoll;
+    expect(access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: job.id,
+        discSelectionId: selection.id,
+        status: "cancelled",
+      }),
+    ]);
+  });
+
   it("runs the public dashboard workflow through explicit verification", async () => {
     const root = mkdtempSync(join(tmpdir(), "rip-dvd-operations-workflow-"));
     temporaryDirectories.push(root);

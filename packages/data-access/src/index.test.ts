@@ -278,13 +278,14 @@ function createDiscSelectionCorrectionFixture(input: {
   key: string;
   databasePath?: string;
   correctedItemCount?: number;
+  contentIdFill?: string;
 }) {
   const access = openTestDatabase(input.databasePath);
   const drive = access.catalog.upsertOpticalDrive({
     devicePath: `/dev/${input.key}`,
     isPresent: true,
   });
-  const contentId = `sha256:${"4".repeat(64)}`;
+  const contentId = `sha256:${(input.contentIdFill ?? "4").repeat(64)}`;
   const disc = access.catalog.registerDetectedDisc({
     opticalDriveId: drive.id,
     discKind: "dvd",
@@ -2792,6 +2793,212 @@ describe("data-access facade", () => {
       })
     ).toThrow(/already been superseded or deactivated/);
     access.close();
+  });
+
+  it("preserves every job history while corrections contend across connections", async () => {
+    const databasePath = createTestDatabasePath();
+    const completedFixture = createDiscSelectionCorrectionFixture({
+      key: "matrix-completed-correction",
+      databasePath,
+      contentIdFill: "1",
+    });
+    const completedProfile = completedFixture.access.encodingProfiles.create({
+      key: "matrix-completed-correction",
+      displayName: "Matrix completed correction",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const completedJob = completedFixture.access.encodeJobs.enqueue({
+      discSelectionId: completedFixture.mistakenSelection.id,
+      encodingProfileId: completedProfile.id,
+      outputPath: "/media/movies/Matrix completed correction.mkv",
+    });
+    const completedClaim = completedFixture.access.encodeJobs.claimNext(
+      "matrix-completed-worker",
+    );
+    if (!completedClaim) {
+      throw new Error("Expected completed matrix claim");
+    }
+    completedFixture.access.encodeJobs.complete(completedClaim);
+
+    const failedFixture = createDiscSelectionCorrectionFixture({
+      key: "matrix-failed-correction",
+      databasePath,
+      contentIdFill: "2",
+    });
+    const failedProfile = failedFixture.access.encodingProfiles.create({
+      key: "matrix-failed-correction",
+      displayName: "Matrix failed correction",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const failedJob = failedFixture.access.encodeJobs.enqueue({
+      discSelectionId: failedFixture.mistakenSelection.id,
+      encodingProfileId: failedProfile.id,
+      outputPath: "/media/movies/Matrix failed correction.mkv",
+    });
+    const failedClaim = failedFixture.access.encodeJobs.claimNext(
+      "matrix-failed-worker",
+    );
+    if (!failedClaim) {
+      throw new Error("Expected failed matrix claim");
+    }
+    failedFixture.access.encodeJobs.fail(failedClaim, "Matrix failure");
+
+    const cancelledFixture = createDiscSelectionCorrectionFixture({
+      key: "matrix-cancelled-correction",
+      databasePath,
+      contentIdFill: "3",
+    });
+    const cancelledProfile =
+      cancelledFixture.access.encodingProfiles.create({
+        key: "matrix-cancelled-correction",
+        displayName: "Matrix cancelled correction",
+        mediaDomain: "dvd_video",
+        settings: {},
+      });
+    const cancelledJob = cancelledFixture.access.encodeJobs.enqueue({
+      discSelectionId: cancelledFixture.mistakenSelection.id,
+      encodingProfileId: cancelledProfile.id,
+      outputPath: "/media/movies/Matrix cancelled correction.mkv",
+    });
+    cancelledFixture.access.encodeJobs.requestCancellation(cancelledJob.id);
+
+    const runningFixture = createDiscSelectionCorrectionFixture({
+      key: "matrix-running-correction",
+      databasePath,
+      contentIdFill: "4",
+    });
+    const runningProfile = runningFixture.access.encodingProfiles.create({
+      key: "matrix-running-correction",
+      displayName: "Matrix running correction",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const runningJob = runningFixture.access.encodeJobs.enqueue({
+      discSelectionId: runningFixture.mistakenSelection.id,
+      encodingProfileId: runningProfile.id,
+      outputPath: "/media/movies/Matrix running correction.mkv",
+    });
+    const runningClaim = runningFixture.access.encodeJobs.claimNext(
+      "matrix-running-worker",
+    );
+    if (!runningClaim) {
+      throw new Error("Expected running matrix claim");
+    }
+
+    const legacyFixture = createDiscSelectionCorrectionFixture({
+      key: "matrix-legacy-correction",
+      databasePath,
+      contentIdFill: "5",
+    });
+    const legacyProfile = legacyFixture.access.encodingProfiles.create({
+      key: "matrix-legacy-correction",
+      displayName: "Matrix legacy correction",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const legacyJob = legacyFixture.access.encodeJobs.enqueue({
+      discSelectionId: legacyFixture.mistakenSelection.id,
+      encodingProfileId: legacyProfile.id,
+      outputPath: "/media/movies/Matrix legacy correction.mkv",
+    });
+    const legacyClaim = legacyFixture.access.encodeJobs.claimNext(
+      "matrix-legacy-worker",
+    );
+    if (!legacyClaim) {
+      throw new Error("Expected legacy matrix claim");
+    }
+    legacyFixture.access.encodeJobs.complete(legacyClaim);
+    const legacySqlite = new DatabaseSync(databasePath);
+    legacySqlite.prepare(`
+      update disc_selections set source_key = 'caller:matrix-legacy'
+      where id = ?
+    `).run(legacyFixture.mistakenSelection.id);
+    legacySqlite.close();
+
+    const queuedFixture = createDiscSelectionCorrectionFixture({
+      key: "matrix-queued-correction",
+      databasePath,
+      contentIdFill: "6",
+    });
+    const queuedProfile = queuedFixture.access.encodingProfiles.create({
+      key: "matrix-queued-correction",
+      displayName: "Matrix queued correction",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const queuedJob = queuedFixture.access.encodeJobs.enqueue({
+      discSelectionId: queuedFixture.mistakenSelection.id,
+      encodingProfileId: queuedProfile.id,
+      outputPath: "/media/movies/Matrix queued correction.mkv",
+    });
+
+    const fixtures = [
+      completedFixture,
+      failedFixture,
+      cancelledFixture,
+      queuedFixture,
+      runningFixture,
+      legacyFixture,
+    ] as const;
+    const revisions = fixtures.map((fixture) =>
+      fixture.access.catalog.listOriginalDiscArchives({
+        ids: [fixture.archive.id],
+      })[0]!.updatedAt
+    );
+    const results = await runBarrierWorkers({
+      databasePath,
+      mode: "operation",
+      operations: fixtures.map((fixture, index) => ({
+        operation: "correct-disc-selection" as const,
+        discSelectionId: fixture.mistakenSelection.id,
+        originalDiscArchiveId: fixture.archive.id,
+        catalogRevision: revisions[index]!,
+        mediaItemId: fixture.correctedItems[0]!.id,
+        reason: `Matrix correction ${index + 1}`,
+      })),
+    });
+
+    expect(results.slice(0, 5)).toEqual(
+      Array.from({ length: 5 }, () =>
+        expect.objectContaining({ outcome: "corrected" })
+      ),
+    );
+    expect(results[5]).toEqual({ outcome: "rejected" });
+    for (const fixture of fixtures.slice(0, 5)) {
+      expect(fixture.access.catalog.listDiscSelectionSupersessions({
+        discSelectionIds: [fixture.mistakenSelection.id],
+      })).toEqual([
+        expect.objectContaining({
+          supersededDiscSelectionId: fixture.mistakenSelection.id,
+        }),
+      ]);
+    }
+    expect(legacyFixture.access.catalog.listDiscSelectionSupersessions({
+      discSelectionIds: [legacyFixture.mistakenSelection.id],
+    })).toEqual([]);
+    expect(completedFixture.access.encodeJobs.list()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: completedJob.id, status: "completed" }),
+        expect.objectContaining({ id: failedJob.id, status: "failed" }),
+        expect.objectContaining({ id: cancelledJob.id, status: "cancelled" }),
+        expect.objectContaining({ id: queuedJob.id, status: "cancelled" }),
+        expect.objectContaining({
+          id: runningJob.id,
+          status: "cancellation_requested",
+        }),
+        expect.objectContaining({ id: legacyJob.id, status: "completed" }),
+      ]),
+    );
+    expect(legacyFixture.access.catalog.listDiscSelections({
+      originalDiscArchiveId: legacyFixture.archive.id,
+    })).toEqual([
+      expect.objectContaining({ id: legacyFixture.mistakenSelection.id }),
+    ]);
+    for (const fixture of fixtures) {
+      fixture.access.close();
+    }
   });
 
   it("rejects a stale correction without partially superseding or cancelling", () => {
