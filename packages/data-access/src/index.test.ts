@@ -2834,11 +2834,23 @@ describe("data-access facade", () => {
       publicationCompletionPending: true,
     }));
     expect(access.encodeJobs.listRetainedOutputs([replacement.id])).toEqual([]);
-    access.encodeJobs.completePublishedPartial(
+    const finalizedReplacement = access.encodeJobs.completePublishedPartial(
       fencedPublication,
       () => true,
       { retainedOutputPath, retainedOutputIdentity: priorOutputIdentity },
     );
+    expect(finalizedReplacement.job).toMatchObject({
+      id: replacement.id,
+      replacementOutputIdentity: null,
+      status: "completed",
+    });
+    expect(() =>
+      access.encodeJobs.completePublishedPartial(
+        fencedPublication,
+        () => true,
+        { retainedOutputPath, retainedOutputIdentity: priorOutputIdentity },
+      )
+    ).not.toThrow();
     access.encodeJobs.completePartialCleanup(fencedPublication);
     expect(access.encodeJobs.listRetainedOutputs([replacement.id])).toEqual([{
       id: expect.any(String),
