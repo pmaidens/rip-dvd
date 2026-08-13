@@ -6,7 +6,7 @@ import {
   statSync,
   unlinkSync,
 } from "node:fs";
-import { basename, dirname, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 
@@ -6951,16 +6951,46 @@ export function createDataAccessInternal(
           : requireNonEmpty(retainedOutputPath, "retainedOutputPath");
         if (
           normalizedRetainedOutputPath !== undefined &&
-          (
-            resolve(normalizedRetainedOutputPath) !==
-              normalizedRetainedOutputPath ||
-            basename(normalizedRetainedOutputPath) !==
-              `${basename(claim.outputPath)}.failed.${claim.claimToken}`
-          )
+          resolve(normalizedRetainedOutputPath) !==
+            normalizedRetainedOutputPath
         ) {
           throw new DomainInvariantError(
             "Retained Encode output path is not claim scoped",
           );
+        }
+        const persistedAttempt = normalizedRetainedOutputPath === undefined
+          ? undefined
+          : database
+            .select({
+              claimToken: encodeJobs.claimToken,
+              outputPath: encodeJobs.outputPath,
+            })
+            .from(encodeJobs)
+            .where(and(
+              eq(encodeJobs.id, claim.id),
+              eq(encodeJobs.claimToken, claim.claimToken),
+            ))
+            .get();
+        if (persistedAttempt && normalizedRetainedOutputPath !== undefined) {
+          const resolvedOutputPath = resolve(persistedAttempt.outputPath);
+          const logicalOutputDirectory = dirname(resolvedOutputPath);
+          let canonicalOutputDirectory = logicalOutputDirectory;
+          try {
+            canonicalOutputDirectory = realpathSync(logicalOutputDirectory);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+              throw error;
+            }
+          }
+          const expectedRetainedOutputPath = join(
+            canonicalOutputDirectory,
+            `${basename(resolvedOutputPath)}.failed.${persistedAttempt.claimToken}`,
+          );
+          if (normalizedRetainedOutputPath !== expectedRetainedOutputPath) {
+            throw new DomainInvariantError(
+              "Retained Encode output path does not match the Encode Job output",
+            );
+          }
         }
         const timestamp = now();
         const leaseToken = newId<EncodeJobCleanupClaimToken>();

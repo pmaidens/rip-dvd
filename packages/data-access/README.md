@@ -139,8 +139,11 @@ neither a still-stopping predecessor nor a retained final can become
 unprotected. Corrected publication retains the prior final at its canonical
 path while encoding. Before filesystem cutover, the publication-mutation fence
 stages the canonical claim-scoped retained path and prior-final identity in a
-private SQLite authority row. Every normal and recovery completion must match
-that row. Successful atomic cutover records the displaced output's predecessor,
+private SQLite authority row. The facade derives that path from the persisted
+running job and resolves its existing output directory before the write
+transaction; caller claim fields cannot select another directory. Every normal
+and recovery completion must match that row. Successful atomic cutover records
+the displaced output's predecessor,
 replacement, private path, filesystem identity, and retention time in
 `retained_encode_outputs` before replacement authority is cleared. Cleanup
 acknowledgement then removes only the transient authority row. Failure,
