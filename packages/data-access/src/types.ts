@@ -880,6 +880,7 @@ export interface EncodeJobAccess {
   beginPublicationMutation(
     claim: RunningEncodeJob,
     cleanup: EncodeJobPartialCleanup,
+    retainedOutputPath?: string,
   ): EncodeJobPartialCleanup;
   listPublicationMutations(): EncodeJobPartialCleanup[];
   listExpiredPublicationMutations(): EncodeJobPartialCleanup[];

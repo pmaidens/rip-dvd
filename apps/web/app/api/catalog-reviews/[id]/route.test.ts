@@ -1082,6 +1082,7 @@ describe("Catalog Review API", () => {
     const fencedPublication = access.encodeJobs.beginPublicationMutation(
       replacementClaim,
       publication,
+      `${predecessor.outputPath}.failed.${replacementClaim.claimToken}`,
     );
     access.encodeJobs.completePublishedClaim(
       replacementClaim,
@@ -1089,7 +1090,7 @@ describe("Catalog Review API", () => {
       () => true,
       {
         retainedOutputPath:
-          `${predecessor.outputPath}.failed.private-correction-token`,
+          `${predecessor.outputPath}.failed.${replacementClaim.claimToken}`,
         retainedOutputIdentity: priorIdentity,
       },
     );

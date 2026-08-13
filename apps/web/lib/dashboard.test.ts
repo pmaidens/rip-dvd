@@ -157,6 +157,8 @@ describe("readDashboardSnapshot", () => {
     if (!successorClaim) throw new Error("Expected retained successor claim");
     const retainedIdentity =
       "retained-dashboard-identity" as EncodeOutputFilesystemIdentity;
+    const retainedOutputPath =
+      `${successorClaim.outputPath}.failed.${successorClaim.claimToken}`;
     access.encodeJobs.recordReplacementOutputIdentity(
       successorClaim,
       retainedIdentity,
@@ -168,13 +170,14 @@ describe("readDashboardSnapshot", () => {
     const fencedPublication = access.encodeJobs.beginPublicationMutation(
       successorClaim,
       publication,
+      retainedOutputPath,
     );
     access.encodeJobs.completePublishedClaim(
       successorClaim,
       fencedPublication,
       () => true,
       {
-        retainedOutputPath: "/private/media/retained-prior-final.mkv",
+        retainedOutputPath,
         retainedOutputIdentity: retainedIdentity,
       },
     );

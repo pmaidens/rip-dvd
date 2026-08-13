@@ -137,12 +137,16 @@ all cleanup/publication fences permit it. Cancelling a queued same-path
 successor retains its transferred reservation, even in initial-output mode, so
 neither a still-stopping predecessor nor a retained final can become
 unprotected. Corrected publication retains the prior final at its canonical
-path while encoding. Successful atomic cutover records the displaced output's
-predecessor, replacement, private path, filesystem identity, and retention time
-in `retained_encode_outputs` before replacement authority is cleared. Failure,
-cancellation, interruption, and stale authority do not create that record or
-move the prior final. The record is cleanup-eligible, but the facade exposes no
-deletion, expiry, cleanup mutation, or metadata-only rename.
+path while encoding. Before filesystem cutover, the publication-mutation fence
+stages the canonical claim-scoped retained path and prior-final identity in a
+private SQLite authority row. Every normal and recovery completion must match
+that row. Successful atomic cutover records the displaced output's predecessor,
+replacement, private path, filesystem identity, and retention time in
+`retained_encode_outputs` before replacement authority is cleared. Cleanup
+acknowledgement then removes only the transient authority row. Failure,
+cancellation, interruption, and stale authority do not create a retained-output
+record or move the prior final. The retained record is cleanup-eligible, but the
+facade exposes no deletion, expiry, cleanup mutation, or metadata-only rename.
 
 Disc Selection mutation preserves three distinct identity paths:
 
@@ -332,12 +336,12 @@ only outside writer transactions. Completion first commits while retaining the
 token and cleanup provenance plus a durable completion-pending marker, rechecks
 the media identity after that commit, then finalizes success in another bounded
 write. A corrected replacement with a recorded prior-final identity cannot
-finalize without matching durable retained-output provenance. Re-encoding the
-same corrected job appends new provenance without overwriting any earlier
-retained output. A cross-boundary
-mismatch restores the nonaccepted state without
-removing provenance; restart cleanup converts a mismatched tentative completion
-back to failure before acknowledging that provenance. Recovery and legacy
+enter the filesystem mutation fence or finalize without matching its private,
+durably staged retained-path authority. Re-encoding the same corrected job
+appends new provenance without overwriting any earlier retained output. A
+cross-boundary mismatch restores the nonaccepted state without removing
+provenance; restart cleanup converts a mismatched tentative completion back to
+failure before acknowledging that provenance. Recovery and legacy
 cutover respect the persisted token, while a process-scoped filesystem lock
 distinguishes a paused owner from an abandoned mutation. No media-filesystem
 call or external process runs while SQLite holds its writer transaction.
