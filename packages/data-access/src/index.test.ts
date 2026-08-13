@@ -3,11 +3,13 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Worker } from "node:worker_threads";
 
@@ -2713,6 +2715,15 @@ describe("data-access facade", () => {
 
   it("atomically completes review and admits an opted-in corrected replacement", () => {
     const databasePath = createTestDatabasePath();
+    const logicalOutputDirectory = join(dirname(databasePath), "logical-media");
+    const canonicalOutputDirectory = join(
+      dirname(databasePath),
+      "canonical-media",
+    );
+    const outputPath = join(
+      logicalOutputDirectory,
+      "Replacement plan opt-in.mkv",
+    );
     const {
       access,
       archive,
@@ -2734,7 +2745,7 @@ describe("data-access facade", () => {
     const predecessor = access.encodeJobs.enqueue({
       discSelectionId: mistakenSelection.id,
       encodingProfileId: profile.id,
-      outputPath: "/media/movies/Replacement plan opt-in.mkv",
+      outputPath,
     });
     const predecessorClaim = access.encodeJobs.claimNext(
       "replacement-plan-predecessor",
@@ -2815,7 +2826,7 @@ describe("data-access facade", () => {
     );
     const priorOutputIdentity =
       "1048576:2048:4096:1710000000000" as EncodeOutputFilesystemIdentity;
-    const retainedOutputPath =
+    const logicalRetainedOutputPath =
       `${replacement.outputPath}.failed.${replacementClaim.claimToken}`;
     access.encodeJobs.recordReplacementOutputIdentity(
       replacementClaim,
@@ -2832,6 +2843,19 @@ describe("data-access facade", () => {
       )
     ).toThrow(
       "Corrected publication mutation requires retained output authority",
+    );
+    expect(() =>
+      access.encodeJobs.beginPublicationMutation(
+        replacementClaim,
+        publication,
+        logicalRetainedOutputPath,
+      )
+    ).toThrow("Encode Job output directory is unavailable");
+    mkdirSync(canonicalOutputDirectory);
+    symlinkSync(canonicalOutputDirectory, logicalOutputDirectory, "dir");
+    const retainedOutputPath = join(
+      realpathSync(canonicalOutputDirectory),
+      basename(logicalRetainedOutputPath),
     );
     expect(() =>
       access.encodeJobs.beginPublicationMutation(
@@ -2954,14 +2978,16 @@ describe("data-access facade", () => {
       reencodeClaim,
       { publicationPending: true },
     );
+    const correctedOutputPath = join(
+      realpathSync(canonicalOutputDirectory),
+      `${basename(replacement.outputPath)}.failed.${reencodeClaim.claimToken}`,
+    );
     const fencedReencodePublication = access.encodeJobs
       .beginPublicationMutation(
         reencodeClaim,
         reencodePublication,
-        `${replacement.outputPath}.failed.${reencodeClaim.claimToken}`,
+        correctedOutputPath,
       );
-    const correctedOutputPath =
-      `${replacement.outputPath}.failed.${reencodeClaim.claimToken}`;
     access.encodeJobs.completePublishedClaim(
       reencodeClaim,
       fencedReencodePublication,

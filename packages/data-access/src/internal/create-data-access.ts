@@ -6974,13 +6974,18 @@ export function createDataAccessInternal(
         if (persistedAttempt && normalizedRetainedOutputPath !== undefined) {
           const resolvedOutputPath = resolve(persistedAttempt.outputPath);
           const logicalOutputDirectory = dirname(resolvedOutputPath);
-          let canonicalOutputDirectory = logicalOutputDirectory;
+          let canonicalOutputDirectory: string;
           try {
             canonicalOutputDirectory = realpathSync(logicalOutputDirectory);
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-              throw error;
-            }
+          } catch {
+            throw new DomainInvariantError(
+              "Encode Job output directory is unavailable",
+            );
+          }
+          if (!statSync(canonicalOutputDirectory).isDirectory()) {
+            throw new DomainInvariantError(
+              "Encode Job output directory is unavailable",
+            );
           }
           const expectedRetainedOutputPath = join(
             canonicalOutputDirectory,

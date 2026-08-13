@@ -1,3 +1,6 @@
+import { realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import { describe, expect, expectTypeOf, it, vi } from "vitest";
@@ -934,6 +937,7 @@ describe("Catalog Review API", () => {
 
   it("completes a corrected review and queues explicit replacements atomically", async () => {
     const access = dataAccessFixture.create();
+    const mediaLibraryPath = realpathSync(tmpdir());
     const drive = access.catalog.upsertOpticalDrive({
       devicePath: "/dev/atomic-route-replacement",
       isPresent: true,
@@ -979,7 +983,7 @@ describe("Catalog Review API", () => {
     const predecessor = access.encodeJobs.enqueue({
       discSelectionId: mistakenSelection.id,
       encodingProfileId: profile.id,
-      outputPath: "/media/movies/Atomic route replacement.mkv",
+      outputPath: join(mediaLibraryPath, "Atomic route replacement.mkv"),
     });
     const claim = access.encodeJobs.claimNext("atomic-route-predecessor");
     if (!claim) {
@@ -1035,7 +1039,7 @@ describe("Catalog Review API", () => {
       archive.id,
       () => access,
       () => "http://localhost:3000",
-      () => "/media",
+      () => mediaLibraryPath,
     );
 
     expect(response.status).toBe(200);
