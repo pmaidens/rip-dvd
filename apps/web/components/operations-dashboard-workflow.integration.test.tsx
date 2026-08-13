@@ -98,6 +98,7 @@ function renderCatalogReview(review: CatalogReviewDto): string {
       onEditMediaItem={() => undefined}
       onCancelEdit={() => undefined}
       onDiscSelectionsPage={() => undefined}
+      onCorrectionHistoryPage={() => undefined}
       onSelectionKindChange={() => undefined}
       onArchiveOnlyChange={() => undefined}
       onStartMappingProposal={() => undefined}
