@@ -14,6 +14,7 @@ import {
   type DiscSelectionKind,
 } from "./catalog-review-model";
 import { CatalogReviewPagination } from "./catalog-review-pagination";
+import { displayTerm } from "../lib/display-term";
 
 interface CatalogReviewDiscSelectionsProps {
   discSelections: CatalogReviewDiscSelection[];
@@ -207,6 +208,30 @@ export function CatalogReviewDiscSelections({
                   )}
                 </p>
                 {correction.reason ? <p>{correction.reason}</p> : null}
+                {correction.encodeHistory.length > 0 ? (
+                  <ol className="selection-encode-history">
+                    {correction.encodeHistory.map((job) => (
+                      <li key={job.id}>
+                        <p>
+                          Encode Job {job.id} · {displayTerm(job.status)}
+                        </p>
+                        {job.replacementEncodeJobId ? (
+                          <p>Superseded by {job.replacementEncodeJobId}</p>
+                        ) : null}
+                        {job.predecessorEncodeJobId ? (
+                          <p>Replaces {job.predecessorEncodeJobId}</p>
+                        ) : null}
+                        {job.retainedOutput ? (
+                          <p>
+                            Prior output retained · {job.retainedOutput.cleanupEligible
+                              ? "Cleanup eligible"
+                              : "Cleanup unavailable"}
+                          </p>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ol>
+                ) : null}
               </li>
             ))}
           </ol>

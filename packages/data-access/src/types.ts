@@ -16,6 +16,7 @@ import type {
   FILESYSTEM_VERIFICATION_STATUSES,
   MEDIA_DOMAINS,
   MEDIA_ITEM_KINDS,
+  RETAINED_ENCODE_OUTPUT_STATES,
 } from "./domain-values.js";
 import type {
   DiscSelectionSourceIdentity,
@@ -48,6 +49,8 @@ export type ArchiveProgressPhase = ArchiveRunningProgressPhase;
 export type EncodeProgressPhase = (typeof ENCODE_PROGRESS_PHASES)[number];
 export type FilesystemVerificationStatus =
   (typeof FILESYSTEM_VERIFICATION_STATUSES)[number];
+export type RetainedEncodeOutputState =
+  (typeof RETAINED_ENCODE_OUTPUT_STATES)[number];
 
 declare const domainIdBrand: unique symbol;
 type DomainId<Name extends string> = string & {
@@ -65,6 +68,7 @@ export type DiscSelectionId = DomainId<"DiscSelection">;
 export type EncodingProfileId = DomainId<"EncodingProfile">;
 export type ArchiveJobId = DomainId<"ArchiveJob">;
 export type EncodeJobId = DomainId<"EncodeJob">;
+export type RetainedEncodeOutputId = DomainId<"RetainedEncodeOutput">;
 export type ArchiveJobClaimToken = DomainId<"ArchiveJobClaim">;
 export type DiscInspectionClaimToken = DomainId<"DiscInspectionClaim">;
 export type EncodeJobClaimToken = DomainId<"EncodeJobClaim">;
@@ -452,8 +456,17 @@ export interface EncodeJob {
   updatedAt: Date;
 }
 
-export interface EncodeJobCorrectionLink extends EncodeJob {
-  correctedPublicationAdmitted: boolean;
+export type EncodeJobCorrectionLink = EncodeJob;
+
+export interface RetainedEncodeOutput {
+  id: RetainedEncodeOutputId;
+  predecessorEncodeJobId: EncodeJobId;
+  replacementEncodeJobId: EncodeJobId;
+  retainedOutputPath: string;
+  filesystemIdentity: EncodeOutputFilesystemIdentity;
+  state: RetainedEncodeOutputState;
+  cleanupEligible: boolean;
+  retainedAt: Date;
 }
 
 export interface CorrectedEncodeReplacementPlan {
@@ -563,6 +576,11 @@ export interface EncodeJobPartialCleanup {
 
 export interface EncodeJobPartialCleanupOptions {
   publicationPending?: boolean;
+}
+
+export interface EncodeJobPublicationProvenance {
+  retainedOutputPath?: string;
+  retainedOutputIdentity?: EncodeOutputFilesystemIdentity;
 }
 
 export interface EncodeJobFailureOptions {
@@ -863,6 +881,7 @@ export interface EncodeJobAccess {
   completePublishedMutation(
     cleanup: EncodeJobPartialCleanup,
     publicationMatches: () => boolean,
+    provenance?: EncodeJobPublicationProvenance,
   ): EncodeJob;
   recoverExpiredPublicationMutation(
     cleanup: EncodeJobPartialCleanup,
@@ -903,18 +922,24 @@ export interface EncodeJobAccess {
   completePublishedPartial(
     cleanup: EncodeJobPartialCleanup,
     publicationMatches: () => boolean,
+    provenance?: EncodeJobPublicationProvenance,
   ): { cleanup: EncodeJobPartialCleanup; job: EncodeJob };
   completePublishedClaim(
     claim: RunningEncodeJob,
     cleanup: EncodeJobPartialCleanup,
     publicationMatches: () => boolean,
+    provenance?: EncodeJobPublicationProvenance,
   ): EncodeJob;
   completePartialCleanup(cleanup: EncodeJobPartialCleanup): EncodeJob;
   list(
     statuses?: EncodeJobStatus[],
     options?: ChronologicalListOptions,
   ): EncodeJob[];
+  listForDiscSelections(
+    ids: readonly DiscSelectionId[],
+  ): EncodeJob[];
   listCorrectionLinks(ids: readonly EncodeJobId[]): EncodeJobCorrectionLink[];
+  listRetainedOutputs(ids: readonly EncodeJobId[]): RetainedEncodeOutput[];
   updateProgress(
     claim: RunningEncodeJob,
     progress: number | EncodeJobProgress,
@@ -969,7 +994,10 @@ export interface ConsistentReadAccess {
   >;
   readonly encodeJobs: Pick<
     EncodeJobAccess,
-    "list" | "listCorrectionLinks"
+    | "list"
+    | "listForDiscSelections"
+    | "listCorrectionLinks"
+    | "listRetainedOutputs"
   >;
 }
 

@@ -66,6 +66,7 @@ import {
   opticalDrives,
   originalDiscArchiveContentIds,
   originalDiscArchives,
+  retainedEncodeOutputs,
 } from "./schema.js";
 import {
   reconcileLegacyRepairCutover,
@@ -138,6 +139,7 @@ import type {
   EncodeJob,
   EncodeJobFailureOptions,
   EncodeJobPartialCleanup,
+  EncodeJobPublicationProvenance,
   EncodeJobProgress,
   EncodeJobRequeueOptions,
   EncodeJobStatus,
@@ -147,6 +149,7 @@ import type {
   MediaItemId,
   OpticalDriveId,
   OriginalDiscArchiveId,
+  RetainedEncodeOutputId,
   RunningArchiveJob,
   RunningEncodeJob,
 } from "../types.js";
@@ -177,6 +180,7 @@ const MEDIA_ITEM_SEARCH_LIMIT = 100;
 const CATALOG_REVIEW_ARCHIVE_LIMIT = 100;
 const CATALOG_REVIEW_MAPPED_TITLE_SUMMARY_LIMIT = 3;
 const CORRECTED_ENCODE_REPLACEMENT_LIMIT = 100;
+const RETAINED_ENCODE_OUTPUT_LOOKUP_LIMIT = 400;
 const DEFAULT_MIGRATIONS_FOLDER = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../drizzle",
@@ -449,6 +453,73 @@ export function createDataAccessInternal(
   type CatalogTransaction = Parameters<
     Parameters<typeof database.transaction>[0]
   >[0];
+
+  function retainCorrectedEncodeOutput(
+    transaction: CatalogTransaction,
+    job: EncodeJob,
+    provenance: EncodeJobPublicationProvenance | undefined,
+    timestamp: Date,
+  ): void {
+    if (provenance?.retainedOutputPath === undefined) {
+      if (
+        provenance?.retainedOutputIdentity !== undefined ||
+        (
+          job.predecessorEncodeJobId !== null &&
+          job.replacementOutputIdentity !== null
+        )
+      ) {
+        throw new DomainInvariantError(
+          "Retained Encode output provenance is incomplete",
+        );
+      }
+      return;
+    }
+    const retainedOutputPath = requireNonEmpty(
+      provenance.retainedOutputPath,
+      "retainedOutputPath",
+    );
+    if (
+      job.predecessorEncodeJobId === null ||
+      job.replacementOutputIdentity === null ||
+      provenance.retainedOutputIdentity !== job.replacementOutputIdentity
+    ) {
+      throw new DomainInvariantError(
+        "Retained Encode output requires corrected replacement provenance",
+      );
+    }
+    transaction
+      .insert(retainedEncodeOutputs)
+      .values({
+        id: newId<RetainedEncodeOutputId>(),
+        predecessorEncodeJobId: job.predecessorEncodeJobId,
+        replacementEncodeJobId: job.id,
+        retainedOutputPath,
+        filesystemIdentity: job.replacementOutputIdentity,
+        state: "retained",
+        cleanupEligible: true,
+        retainedAt: timestamp,
+      })
+      .onConflictDoNothing({
+        target: retainedEncodeOutputs.replacementEncodeJobId,
+      })
+      .run();
+    const retained = transaction
+      .select()
+      .from(retainedEncodeOutputs)
+      .where(eq(retainedEncodeOutputs.replacementEncodeJobId, job.id))
+      .get();
+    if (
+      retained?.predecessorEncodeJobId !== job.predecessorEncodeJobId ||
+      retained.retainedOutputPath !== retainedOutputPath ||
+      retained.filesystemIdentity !== job.replacementOutputIdentity ||
+      retained.state !== "retained" ||
+      !retained.cleanupEligible
+    ) {
+      throw new DomainInvariantError(
+        "Retained Encode output provenance conflicts with publication",
+      );
+    }
+  }
 
   function mediaItemDeletionReason(
     childCount: number,
@@ -1557,10 +1628,6 @@ export function createDataAccessInternal(
     list: listEncodeJobs,
     claim: (workerId, token, timestamp) =>
       database.transaction((transaction) => {
-        const correctedPublicationAdmitted = or(
-          isNull(encodeJobs.predecessorEncodeJobId),
-          eq(encodeJobs.correctedPublicationAdmitted, true),
-        );
         const nextReviewedJob = transaction
           .select({
             id: encodeJobs.id,
@@ -1602,7 +1669,6 @@ export function createDataAccessInternal(
                 "reviewed_with_selections",
               ),
               eq(originalDiscArchives.legacyCutoverPending, false),
-              correctedPublicationAdmitted,
               or(
                 isNull(encodeJobs.predecessorEncodeJobId),
                 correctedEncodePredecessorReadyCondition(
@@ -1659,7 +1725,6 @@ export function createDataAccessInternal(
             and(
               eq(encodeJobs.status, "queued"),
               eq(encodeJobs.id, nextReviewedJob.id),
-              correctedPublicationAdmitted,
               predecessorStillEligible,
             ),
           )
@@ -2047,8 +2112,12 @@ export function createDataAccessInternal(
         },
         encodeJobs: {
           list: (statuses, options) => access.encodeJobs.list(statuses, options),
+          listForDiscSelections: (ids) =>
+            access.encodeJobs.listForDiscSelections(ids),
           listCorrectionLinks: (ids) =>
             access.encodeJobs.listCorrectionLinks(ids),
+          listRetainedOutputs: (ids) =>
+            access.encodeJobs.listRetainedOutputs(ids),
         },
       };
       sqlite.exec("BEGIN");
@@ -6568,6 +6637,20 @@ export function createDataAccessInternal(
       },
 
       claimNext: encodeJobQueue.claimNext,
+      listForDiscSelections(ids) {
+        if (ids.length === 0) return [];
+        if (ids.length > 400) {
+          throw new DomainInvariantError(
+            "Encode Job Disc Selection lookup is limited to 400 records",
+          );
+        }
+        return database
+          .select()
+          .from(encodeJobs)
+          .where(inArray(encodeJobs.discSelectionId, [...new Set(ids)]))
+          .orderBy(asc(encodeJobs.createdAt), asc(encodeJobs.id))
+          .all();
+      },
       listCorrectionLinks(ids) {
         if (ids.length === 0) return [];
         if (ids.length > 400) {
@@ -6589,6 +6672,27 @@ export function createDataAccessInternal(
             inArray(encodeJobs.id, displayedPredecessors),
           ))
           .orderBy(asc(encodeJobs.createdAt), asc(encodeJobs.id))
+          .all();
+      },
+      listRetainedOutputs(ids) {
+        if (ids.length === 0) return [];
+        if (ids.length > RETAINED_ENCODE_OUTPUT_LOOKUP_LIMIT) {
+          throw new DomainInvariantError(
+            `Retained Encode output lookup is limited to ${RETAINED_ENCODE_OUTPUT_LOOKUP_LIMIT} jobs`,
+          );
+        }
+        const uniqueIds = [...new Set(ids)];
+        return database
+          .select()
+          .from(retainedEncodeOutputs)
+          .where(or(
+            inArray(retainedEncodeOutputs.predecessorEncodeJobId, uniqueIds),
+            inArray(retainedEncodeOutputs.replacementEncodeJobId, uniqueIds),
+          ))
+          .orderBy(
+            asc(retainedEncodeOutputs.retainedAt),
+            asc(retainedEncodeOutputs.id),
+          )
           .all();
       },
       renewClaim(claim) {
@@ -6769,7 +6873,7 @@ export function createDataAccessInternal(
             };
           });
       },
-      completePublishedMutation(cleanup, publicationMatches) {
+      completePublishedMutation(cleanup, publicationMatches, provenance) {
         if (!cleanup.publicationPending || cleanup.leaseToken === null) {
           throw new DomainInvariantError(
             "Encode Job publication mutation completion requires fenced provenance",
@@ -6842,17 +6946,37 @@ export function createDataAccessInternal(
             cleanup.jobId,
           );
         }
-        const finalized = database
-          .update(encodeJobs)
-          .set({
-            replaceExistingOutput: false,
-            replacementOutputIdentity: null,
-            publicationCompletionPending: false,
-            updatedAt: now(),
-          })
-          .where(completionCondition)
-          .returning()
-          .get();
+        const finalized = database.transaction((transaction) => {
+          const current = transaction
+            .select()
+            .from(encodeJobs)
+            .where(completionCondition)
+            .get();
+          if (!current) {
+            throw new StaleJobAttemptError(
+              "encode job publication mutation",
+              cleanup.jobId,
+            );
+          }
+          const finalizedAt = now();
+          retainCorrectedEncodeOutput(
+            transaction,
+            current,
+            provenance,
+            finalizedAt,
+          );
+          return transaction
+            .update(encodeJobs)
+            .set({
+              replaceExistingOutput: false,
+              replacementOutputIdentity: null,
+              publicationCompletionPending: false,
+              updatedAt: finalizedAt,
+            })
+            .where(completionCondition)
+            .returning()
+            .get();
+        }, { behavior: "immediate" });
         if (!finalized) {
           throw new StaleJobAttemptError(
             "encode job publication mutation",
@@ -7314,7 +7438,7 @@ export function createDataAccessInternal(
         }
         return { ...cleanup, leaseToken };
       },
-      completePublishedPartial(cleanup, publicationMatches) {
+      completePublishedPartial(cleanup, publicationMatches, provenance) {
         if (!cleanup.publicationPending) {
           throw new DomainInvariantError(
             "Encode Job cleanup is not publication provenance",
@@ -7420,17 +7544,37 @@ export function createDataAccessInternal(
             cleanup.jobId,
           );
         }
-        const finalized = database
-          .update(encodeJobs)
-          .set({
-            replaceExistingOutput: false,
-            replacementOutputIdentity: null,
-            publicationCompletionPending: false,
-            updatedAt: now(),
-          })
-          .where(completionCondition)
-          .returning()
-          .get();
+        const finalized = database.transaction((transaction) => {
+          const current = transaction
+            .select()
+            .from(encodeJobs)
+            .where(completionCondition)
+            .get();
+          if (!current) {
+            throw new StaleJobAttemptError(
+              "encode job publication",
+              cleanup.jobId,
+            );
+          }
+          const finalizedAt = now();
+          retainCorrectedEncodeOutput(
+            transaction,
+            current,
+            provenance,
+            finalizedAt,
+          );
+          return transaction
+            .update(encodeJobs)
+            .set({
+              replaceExistingOutput: false,
+              replacementOutputIdentity: null,
+              publicationCompletionPending: false,
+              updatedAt: finalizedAt,
+            })
+            .where(completionCondition)
+            .returning()
+            .get();
+        }, { behavior: "immediate" });
         if (!finalized) {
           throw new StaleJobAttemptError(
             "encode job publication",
@@ -7442,7 +7586,7 @@ export function createDataAccessInternal(
           job: finalized,
         };
       },
-      completePublishedClaim(claim, cleanup, publicationMatches) {
+      completePublishedClaim(claim, cleanup, publicationMatches, provenance) {
         if (!cleanup.publicationPending) {
           throw new DomainInvariantError(
             "Encode Job cleanup is not publication provenance",
@@ -7543,17 +7687,37 @@ export function createDataAccessInternal(
             cleanup.jobId,
           );
         }
-        const finalized = database
-          .update(encodeJobs)
-          .set({
-            replaceExistingOutput: false,
-            replacementOutputIdentity: null,
-            publicationCompletionPending: false,
-            updatedAt: now(),
-          })
-          .where(completionCondition)
-          .returning()
-          .get();
+        const finalized = database.transaction((transaction) => {
+          const current = transaction
+            .select()
+            .from(encodeJobs)
+            .where(completionCondition)
+            .get();
+          if (!current) {
+            throw new StaleJobAttemptError(
+              "encode job publication",
+              cleanup.jobId,
+            );
+          }
+          const finalizedAt = now();
+          retainCorrectedEncodeOutput(
+            transaction,
+            current,
+            provenance,
+            finalizedAt,
+          );
+          return transaction
+            .update(encodeJobs)
+            .set({
+              replaceExistingOutput: false,
+              replacementOutputIdentity: null,
+              publicationCompletionPending: false,
+              updatedAt: finalizedAt,
+            })
+            .where(completionCondition)
+            .returning()
+            .get();
+        }, { behavior: "immediate" });
         if (!finalized) {
           throw new StaleJobAttemptError(
             "encode job publication",

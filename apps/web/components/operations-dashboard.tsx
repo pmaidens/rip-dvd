@@ -244,12 +244,6 @@ function encodeProgressDetail(job: DashboardEncodeJob): string | null {
   }
   if (
     job.status === "queued" &&
-    job.correctedReplacement?.publicationAdmissionPending === true
-  ) {
-    return "Waiting for corrected publication support";
-  }
-  if (
-    job.status === "queued" &&
     job.correctedReplacement?.predecessorReady === true
   ) {
     return "Ready for encode";
@@ -1098,6 +1092,15 @@ export function DashboardView({
                   <p>{job.discSelectionCorrection.reason}</p>
                 ) : null}
                 </> : null}
+                {job.correctedReplacement?.priorOutput?.state === "protected" ? (
+                  <p>Prior final remains published while correction runs.</p>
+                ) : null}
+                {job.correctedReplacement?.priorOutput?.state === "retained" ? (
+                  <p>
+                    Prior final retained · {job.correctedReplacement.priorOutput
+                      .cleanupEligible ? "Cleanup eligible" : "Not cleanup eligible"}
+                  </p>
+                ) : null}
               </div>
             ) : null}
             verification={toFilesystemVerificationDisplay(job)}

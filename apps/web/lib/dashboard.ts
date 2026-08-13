@@ -121,9 +121,12 @@ export interface DashboardEncodeJob {
     predecessorId?: EncodeJobId;
     predecessorStatus?: EncodeJobStatus;
     predecessorReady?: boolean;
-    publicationAdmissionPending?: boolean;
     successorId?: EncodeJobId;
     successorStatus?: EncodeJobStatus;
+    priorOutput?: {
+      state: "protected" | "retained";
+      cleanupEligible: boolean;
+    };
   };
   discSelectionCorrection?: {
     replacementDiscSelectionId: string;
@@ -392,6 +395,13 @@ function readDashboardSnapshotRecords(
       ? []
       : access.encodeJobs.listCorrectionLinks(
           encodeJobSource.value.map((job) => job.id),
+        )
+  );
+  const retainedEncodeOutputSource = readSource(() =>
+    encodeJobLinkSource.status === "error"
+      ? []
+      : access.encodeJobs.listRetainedOutputs(
+          encodeJobLinkSource.value.map((job) => job.id),
         )
   );
   const archiveSource = readSource(() =>
@@ -720,6 +730,7 @@ function readDashboardSnapshotRecords(
   const encodeJobs =
     encodeJobSource.status === "error" ||
     encodeJobLinkSource.status === "error" ||
+    retainedEncodeOutputSource.status === "error" ||
     selectionSource.status === "error" ||
     selectionSupersessionSource.status === "error" ||
     correctedSelectionSource.status === "error" ||
@@ -768,6 +779,12 @@ function readDashboardSnapshotRecords(
                 : [[job.predecessorEncodeJobId, job] as const]
             ),
           );
+          const retainedOutputByReplacementId = new Map(
+            retainedEncodeOutputSource.value.map((output) => [
+              output.replacementEncodeJobId,
+              output,
+            ]),
+          );
           return loaded(
             encodeJobSource.value.map((job) => {
               const relationshipJob = encodeJobsById.get(job.id);
@@ -791,6 +808,23 @@ function readDashboardSnapshotRecords(
                 ? undefined
                 : encodeJobsById.get(job.predecessorEncodeJobId);
               const successor = successorByPredecessorId.get(job.id);
+              const correctedJob = predecessor
+                ? relationshipJob
+                : successor;
+              const retainedOutput = correctedJob
+                ? retainedOutputByReplacementId.get(correctedJob.id)
+                : undefined;
+              const priorOutput = retainedOutput
+                ? {
+                    state: "retained" as const,
+                    cleanupEligible: retainedOutput.cleanupEligible,
+                  }
+                : correctedJob?.replaceExistingOutput
+                  ? {
+                      state: "protected" as const,
+                      cleanupEligible: false,
+                    }
+                  : undefined;
               return {
                 id: job.id,
                 mediaTitle: mediaItem?.title ?? "Unknown Media Item",
@@ -812,9 +846,6 @@ function readDashboardSnapshotRecords(
                               predecessorStatus: predecessor.status,
                               predecessorReady:
                                 isCorrectedEncodePredecessorReady(predecessor),
-                              publicationAdmissionPending:
-                                relationshipJob?.correctedPublicationAdmitted !==
-                                  true,
                             }
                           : {}),
                         ...(successor
@@ -823,6 +854,9 @@ function readDashboardSnapshotRecords(
                               successorStatus: successor.status,
                             }
                           : {}),
+                        ...(priorOutput === undefined
+                          ? {}
+                          : { priorOutput }),
                       },
                     }
                   : {}),

@@ -690,6 +690,7 @@ describe("Catalog Review API", () => {
       },
       reason: "The wrong movie was mapped.",
       correctedAt: expect.any(String),
+      encodeHistory: [],
     }]);
     expect(review.replacementPlan).toEqual({
       jobs: [{
@@ -1043,6 +1044,69 @@ describe("Catalog Review API", () => {
         status: "queued",
       }),
     ]));
+
+    const replacementClaim = access.encodeJobs.claimNext(
+      "atomic-route-replacement",
+    );
+    if (!replacementClaim) {
+      throw new Error("Expected corrected replacement claim");
+    }
+    const priorIdentity =
+      "1048576:2048:4096:1710000000000" as Parameters<
+        typeof access.encodeJobs.recordReplacementOutputIdentity
+      >[1];
+    access.encodeJobs.recordReplacementOutputIdentity(
+      replacementClaim,
+      priorIdentity,
+    );
+    const publication = access.encodeJobs.registerPartialCleanup(
+      replacementClaim,
+      { publicationPending: true },
+    );
+    const fencedPublication = access.encodeJobs.beginPublicationMutation(
+      replacementClaim,
+      publication,
+    );
+    access.encodeJobs.completePublishedClaim(
+      replacementClaim,
+      fencedPublication,
+      () => true,
+      {
+        retainedOutputPath:
+          `${predecessor.outputPath}.failed.private-correction-token`,
+        retainedOutputIdentity: priorIdentity,
+      },
+    );
+
+    const historyResponse = await createCatalogReviewRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`),
+      archive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+    const historyText = await historyResponse.text();
+    expect(historyResponse.status, historyText).toBe(200);
+    expect(historyText).not.toContain("private-correction-token");
+    const history = JSON.parse(historyText);
+    expect(history.correctionHistory[0].encodeHistory).toEqual([
+      expect.objectContaining({
+        id: predecessor.id,
+        status: "completed",
+        predecessorEncodeJobId: null,
+        replacementEncodeJobId: replacementClaim.id,
+        retainedOutput: null,
+      }),
+      expect.objectContaining({
+        id: replacementClaim.id,
+        status: "completed",
+        predecessorEncodeJobId: predecessor.id,
+        replacementEncodeJobId: null,
+        retainedOutput: {
+          state: "retained",
+          cleanupEligible: true,
+        },
+      }),
+    ]);
   });
 
   it("paginates correction history beyond one hundred revisions", async () => {
