@@ -1,12 +1,16 @@
 import { DatabaseSync } from "node:sqlite";
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import {
   MAX_MEDIA_ITEM_HIERARCHY_DEPTH,
+  type EncodeJobStatus,
   type MediaItem,
   type MediaItemId,
 } from "@rip-dvd/data-access";
 
+import type {
+  CatalogReviewDiscSelectionActionAvailability,
+} from "../../../../components/catalog-review-model";
 import {
   completeCatalogReview,
   useDataAccessFixture,
@@ -17,6 +21,16 @@ import { createCatalogReviewRoute } from "./route";
 const dataAccessFixture = useDataAccessFixture();
 
 describe("Catalog Review API", () => {
+  it("keeps locked-provenance job statuses aligned with data access", () => {
+    type LockedProvenance = Extract<
+      CatalogReviewDiscSelectionActionAvailability,
+      { state: "locked_provenance" }
+    >;
+
+    expectTypeOf<LockedProvenance["relatedEncodeJob"]["status"]>()
+      .toEqualTypeOf<EncodeJobStatus>();
+  });
+
   it("returns an archived DVD's raw title map separately from reviewed catalog data", async () => {
     const access = dataAccessFixture.create();
     const drive = access.catalog.upsertOpticalDrive({
@@ -424,7 +438,7 @@ describe("Catalog Review API", () => {
       scanData: {
         schemaVersion: 2,
         contentId,
-        titles: Array.from({ length: 4 }, (_, index) => ({
+        titles: Array.from({ length: 5 }, (_, index) => ({
           number: index + 1,
           durationSeconds: 2_400,
           chapters: 8,
@@ -442,7 +456,7 @@ describe("Catalog Review API", () => {
       archivePath: "/media/originals/Locked Selections.iso",
       fingerprint: contentId,
     });
-    const selections = Array.from({ length: 4 }, (_, index) => {
+    const selections = Array.from({ length: 5 }, (_, index) => {
       const item = access.catalog.createMediaItem({
         kind: "bonus_feature",
         title: `Locked Selection ${index + 1}`,
@@ -497,6 +511,12 @@ describe("Catalog Review API", () => {
       encodingProfileId: profile.id,
       outputPath: "/media/movies/Queued provenance.mkv",
     });
+    const cancelledJob = access.encodeJobs.enqueue({
+      discSelectionId: selections[4]!.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Cancelled provenance.mkv",
+    });
+    const cancelled = access.encodeJobs.requestCancellation(cancelledJob.id);
 
     const response = await createCatalogReviewRoute(
       new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`),
@@ -518,6 +538,7 @@ describe("Catalog Review API", () => {
       [selections[1]!, failedJob],
       [selections[2]!, runningClaim],
       [selections[3]!, queuedJob],
+      [selections[4]!, cancelled],
     ] as const) {
       expect(availabilityBySelection.get(selection.id)).toMatchObject({
         state: "locked_provenance",

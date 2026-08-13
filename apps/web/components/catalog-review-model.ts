@@ -3,6 +3,7 @@ import type {
   CatalogReviewOutcome,
   DiscSelectionSourceIdentityInput,
   DiscSelectionKind,
+  EncodeJobStatus,
   MediaItemKind,
 } from "@rip-dvd/data-access";
 import { MEDIA_ITEM_KINDS } from "@rip-dvd/data-access/catalog-kinds";
@@ -73,12 +74,7 @@ export type CatalogReviewDiscSelectionActionAvailability =
     reason: string;
     relatedEncodeJob: {
       id: string;
-      status:
-        | "queued"
-        | "running"
-        | "cancellation_requested"
-        | "completed"
-        | "failed";
+      status: EncodeJobStatus;
     };
   }
   | {
