@@ -1657,7 +1657,7 @@ describe("encode worker polling", () => {
     fixture.access.close();
   });
 
-  it("publishes a corrected replacement and durably retains its prior final", async () => {
+  it("publishes and re-encodes a corrected replacement while retaining every prior final", async () => {
     const fixture = createQueuedJob();
     const options = {
       access: fixture.access,
@@ -1734,6 +1734,34 @@ describe("encode worker polling", () => {
     expect(readFileSync(retained[0]!.retainedOutputPath, "utf8")).toBe(
       "incorrect final",
     );
+
+    fixture.access.encodeJobs.requeue(replacement.id);
+    await pollEncodeWorker({
+      ...options,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          expect(readFileSync(fixture.outputPath, "utf8")).toBe(
+            "corrected final",
+          );
+          writeFileSync(outputPath, "re-encoded corrected final", {
+            flag: "wx",
+          });
+        }),
+      },
+    });
+
+    expect(readFileSync(fixture.outputPath, "utf8")).toBe(
+      "re-encoded corrected final",
+    );
+    const retainedAfterReencode = fixture.access.encodeJobs
+      .listRetainedOutputs([replacement.id]);
+    expect(retainedAfterReencode).toHaveLength(2);
+    expect(retainedAfterReencode).toContainEqual(retained[0]);
+    expect(
+      retainedAfterReencode.map((output) =>
+        readFileSync(output.retainedOutputPath, "utf8")
+      ).sort(),
+    ).toEqual(["corrected final", "incorrect final"]);
     fixture.access.close();
   });
 

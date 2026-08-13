@@ -795,7 +795,7 @@ export const retainedEncodeOutputs = sqliteTable(
   },
   (table) => [
     check("retained_encode_outputs_id_not_null", sql`${table.id} is not null`),
-    uniqueIndex("retained_encode_outputs_replacement_unique")
+    index("retained_encode_outputs_replacement_idx")
       .on(table.replacementEncodeJobId),
     uniqueIndex("retained_encode_outputs_path_unique")
       .on(table.retainedOutputPath),

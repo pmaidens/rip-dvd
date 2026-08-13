@@ -2739,10 +2739,10 @@
           "isExpression": false
         }
       ],
-      "isUnique": true,
+      "isUnique": false,
       "where": null,
       "origin": "manual",
-      "name": "retained_encode_outputs_replacement_unique",
+      "name": "retained_encode_outputs_replacement_idx",
       "entityType": "indexes",
       "table": "retained_encode_outputs"
     },

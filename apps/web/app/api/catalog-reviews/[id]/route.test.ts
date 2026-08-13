@@ -1125,9 +1125,9 @@ describe("Catalog Review API", () => {
     const historyAccess = withSnapshotOverrides(access, {
       encodeJobs: {
         listCorrectionLinksForDiscSelections: () => expandedLinkedJobs,
-        listRetainedOutputs: (ids) => {
+        listRetainedOutputSummaries: (ids) => {
           retainedLookupBatchSizes.push(ids.length);
-          return access.encodeJobs.listRetainedOutputs(ids);
+          return access.encodeJobs.listRetainedOutputSummaries(ids);
         },
       },
     });

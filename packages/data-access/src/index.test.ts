@@ -2829,6 +2829,7 @@ describe("data-access facade", () => {
       () => true,
       { retainedOutputPath, retainedOutputIdentity: priorOutputIdentity },
     );
+    access.encodeJobs.completePartialCleanup(fencedPublication);
     expect(access.encodeJobs.listRetainedOutputs([replacement.id])).toEqual([{
       id: expect.any(String),
       predecessorEncodeJobId: predecessor.id,
@@ -2839,6 +2840,19 @@ describe("data-access facade", () => {
       cleanupEligible: true,
       retainedAt: expect.any(Date),
     }]);
+    access.readConsistentSnapshot((snapshot) => {
+      expect(snapshot.encodeJobs).not.toHaveProperty("listRetainedOutputs");
+      expect(
+        snapshot.encodeJobs.listRetainedOutputSummaries([replacement.id]),
+      ).toEqual([{
+        id: expect.any(String),
+        predecessorEncodeJobId: predecessor.id,
+        replacementEncodeJobId: replacement.id,
+        state: "retained",
+        cleanupEligible: true,
+        retainedAt: expect.any(Date),
+      }]);
+    });
     expect(access.encodeJobs.listCorrectionLinksForDiscSelections([
       mistakenSelection.id,
       correction.discSelection.id,
@@ -2855,6 +2869,53 @@ describe("data-access facade", () => {
         status: "completed",
       }),
     ]);
+    const requeuedReplacement = access.encodeJobs.requeue(replacement.id);
+    const reencodeClaim = access.encodeJobs.claimNext("corrected-reencoder");
+    if (!reencodeClaim || reencodeClaim.id !== requeuedReplacement.id) {
+      throw new Error("Expected corrected re-encode claim");
+    }
+    const correctedOutputIdentity =
+      "corrected-reencode-identity" as EncodeOutputFilesystemIdentity;
+    access.encodeJobs.recordReplacementOutputIdentity(
+      reencodeClaim,
+      correctedOutputIdentity,
+    );
+    const reencodePublication = access.encodeJobs.registerPartialCleanup(
+      reencodeClaim,
+      { publicationPending: true },
+    );
+    const fencedReencodePublication = access.encodeJobs
+      .beginPublicationMutation(reencodeClaim, reencodePublication);
+    const correctedOutputPath =
+      `${replacement.outputPath}.failed.${reencodeClaim.claimToken}`;
+    access.encodeJobs.completePublishedClaim(
+      reencodeClaim,
+      fencedReencodePublication,
+      () => true,
+      {
+        retainedOutputPath: correctedOutputPath,
+        retainedOutputIdentity: correctedOutputIdentity,
+      },
+    );
+    access.encodeJobs.completePartialCleanup(fencedReencodePublication);
+    expect(access.encodeJobs.listRetainedOutputs([replacement.id])).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          predecessorEncodeJobId: predecessor.id,
+          replacementEncodeJobId: replacement.id,
+          retainedOutputPath,
+          filesystemIdentity: priorOutputIdentity,
+        }),
+        expect.objectContaining({
+          predecessorEncodeJobId: predecessor.id,
+          replacementEncodeJobId: replacement.id,
+          retainedOutputPath: correctedOutputPath,
+          filesystemIdentity: correctedOutputIdentity,
+        }),
+      ]),
+    );
+    expect(access.encodeJobs.listRetainedOutputs([replacement.id]))
+      .toHaveLength(2);
     access.close();
   });
 

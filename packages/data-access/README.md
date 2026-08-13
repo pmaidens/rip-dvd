@@ -164,7 +164,9 @@ Disc Selection mutation preserves three distinct identity paths:
   correction creates another supersession, while removal deactivates the
   replacement rather than deleting either endpoint or an immutable link.
   Catalog history joins those links to original and replacement Encode outcomes
-  and retained-output state without returning the private retained path.
+  and retained-output state through a path-free summary projection. The
+  private retained path and filesystem identity remain available only on the
+  worker-facing provenance read, never the consistent web read facade.
 - **Unsafe legacy quarantine.** A caller-era mapping that fails canonical-key or
   archived-scan validation is the only historical exception.
   `repairDiscSelection()` or `deleteDiscSelection()` deactivates the old Disc
@@ -330,7 +332,9 @@ only outside writer transactions. Completion first commits while retaining the
 token and cleanup provenance plus a durable completion-pending marker, rechecks
 the media identity after that commit, then finalizes success in another bounded
 write. A corrected replacement with a recorded prior-final identity cannot
-finalize without matching durable retained-output provenance. A cross-boundary
+finalize without matching durable retained-output provenance. Re-encoding the
+same corrected job appends new provenance without overwriting any earlier
+retained output. A cross-boundary
 mismatch restores the nonaccepted state without
 removing provenance; restart cleanup converts a mismatched tentative completion
 back to failure before acknowledging that provenance. Recovery and legacy

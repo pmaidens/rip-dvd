@@ -400,7 +400,7 @@ function readDashboardSnapshotRecords(
   const retainedEncodeOutputSource = readSource(() =>
     encodeJobLinkSource.status === "error"
       ? []
-      : access.encodeJobs.listRetainedOutputs(
+      : access.encodeJobs.listRetainedOutputSummaries(
           encodeJobLinkSource.value.map((job) => job.id),
         )
   );

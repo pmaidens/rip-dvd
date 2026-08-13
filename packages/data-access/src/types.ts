@@ -469,6 +469,11 @@ export interface RetainedEncodeOutput {
   retainedAt: Date;
 }
 
+export type RetainedEncodeOutputSummary = Omit<
+  RetainedEncodeOutput,
+  "retainedOutputPath" | "filesystemIdentity"
+>;
+
 export interface CorrectedEncodeReplacementPlan {
   predecessorEncodeJobId: EncodeJobId;
   replacementDiscSelectionId: DiscSelectionId;
@@ -940,6 +945,9 @@ export interface EncodeJobAccess {
   ): EncodeJob[];
   listCorrectionLinks(ids: readonly EncodeJobId[]): EncodeJobCorrectionLink[];
   listRetainedOutputs(ids: readonly EncodeJobId[]): RetainedEncodeOutput[];
+  listRetainedOutputSummaries(
+    ids: readonly EncodeJobId[],
+  ): RetainedEncodeOutputSummary[];
   updateProgress(
     claim: RunningEncodeJob,
     progress: number | EncodeJobProgress,
@@ -997,7 +1005,7 @@ export interface ConsistentReadAccess {
     | "list"
     | "listCorrectionLinksForDiscSelections"
     | "listCorrectionLinks"
-    | "listRetainedOutputs"
+    | "listRetainedOutputSummaries"
   >;
 }
 
