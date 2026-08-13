@@ -1,9 +1,19 @@
-import { createDataAccess, type DataAccess } from "@rip-dvd/data-access";
+import {
+  createDataAccess,
+  type DataAccess,
+  type EncodeOutputFilesystemIdentity,
+} from "@rip-dvd/data-access";
 import {
   createLegacySidecarDataAccess,
   type LegacySidecarDataAccess,
 } from "@rip-dvd/data-access/legacy-sidecars";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -22,7 +32,10 @@ import {
 
 const dataAccessFixture = useDataAccessFixture();
 
-function seedEncodeJob(access: LegacySidecarDataAccess) {
+function seedEncodeJob(
+  access: LegacySidecarDataAccess,
+  outputPath = "/media/movies/enrichment.mkv",
+) {
   const drive = access.catalog.upsertOpticalDrive({
     devicePath: "/dev/sr0",
     isEnabled: true,
@@ -62,7 +75,7 @@ function seedEncodeJob(access: LegacySidecarDataAccess) {
   const job = access.encodeJobs.enqueue({
     discSelectionId: selection.id,
     encodingProfileId: profile.id,
-    outputPath: "/media/movies/enrichment.mkv",
+    outputPath,
   });
   return { archive, job, mediaItem, selection };
 }
@@ -108,7 +121,10 @@ describe("readDashboardSnapshot", () => {
 
   it("loads a displayed replacement's predecessor outside the history window", () => {
     const access = dataAccessFixture.create();
-    const { archive, job: predecessor, selection } = seedEncodeJob(access);
+    const { archive, job: predecessor, selection } = seedEncodeJob(
+      access,
+      join(realpathSync(tmpdir()), "dashboard-retained-output.mkv"),
+    );
     const predecessorClaim = access.encodeJobs.claimNext("old-predecessor");
     if (!predecessorClaim) throw new Error("Expected old predecessor claim");
     access.encodeJobs.complete(predecessorClaim);
@@ -146,9 +162,37 @@ describe("readDashboardSnapshot", () => {
       [{
         predecessorEncodeJobId: predecessor.id,
         encodingProfileId: newerProfile.id,
-        outputPath: "/media/movies/linked-outside-history.mkv",
+        outputPath: predecessor.outputPath,
       }],
     ).replacementEncodeJobs[0]!;
+    const successorClaim = access.encodeJobs.claimNext("retained-successor");
+    if (!successorClaim) throw new Error("Expected retained successor claim");
+    const retainedIdentity =
+      "retained-dashboard-identity" as EncodeOutputFilesystemIdentity;
+    const retainedOutputPath =
+      `${successorClaim.outputPath}.failed.${successorClaim.claimToken}`;
+    access.encodeJobs.recordReplacementOutputIdentity(
+      successorClaim,
+      retainedIdentity,
+    );
+    const publication = access.encodeJobs.registerPartialCleanup(
+      successorClaim,
+      { publicationPending: true },
+    );
+    const fencedPublication = access.encodeJobs.beginPublicationMutation(
+      successorClaim,
+      publication,
+      retainedOutputPath,
+    );
+    access.encodeJobs.completePublishedClaim(
+      successorClaim,
+      fencedPublication,
+      () => true,
+      {
+        retainedOutputPath,
+        retainedOutputIdentity: retainedIdentity,
+      },
+    );
 
     const snapshot = readDashboardSnapshot(access, { activityLimit: 1 });
     expect(snapshot.encodeJobs).toEqual({
@@ -160,10 +204,14 @@ describe("readDashboardSnapshot", () => {
           predecessorId: predecessor.id,
           predecessorStatus: "completed",
           predecessorReady: true,
-          publicationAdmissionPending: true,
+          priorOutput: {
+            state: "retained",
+            cleanupEligible: true,
+          },
         },
       })]),
     });
+    expect(JSON.stringify(snapshot)).not.toContain("retained-prior-final.mkv");
     expect(correction.discSelection.id).toBe(successor.discSelectionId);
   });
 

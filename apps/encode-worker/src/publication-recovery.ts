@@ -385,6 +385,33 @@ async function optionalMetadata(path: string): Promise<Stats | null> {
   }
 }
 
+function retainedOutputProvenance(path: string, metadata: Stats | null) {
+  if (metadata === null) {
+    return undefined;
+  }
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    throw new Error("Retained Encode output is not a regular file");
+  }
+  return {
+    retainedOutputPath: path,
+    retainedOutputIdentity: encodeOutputFilesystemIdentity(metadata),
+  };
+}
+
+function correctedRetainedOutputProvenance(
+  access: DataAccess,
+  jobId: RunningEncodeJob["id"],
+  path: string,
+  metadata: Stats | null,
+) {
+  const job = access.encodeJobs
+    .listCorrectionLinks([jobId])
+    .find((candidate) => candidate.id === jobId);
+  return job?.predecessorEncodeJobId === null || job === undefined
+    ? undefined
+    : retainedOutputProvenance(path, metadata);
+}
+
 async function moveAside(
   path: string,
   reservedQuarantinePath?: string,
@@ -988,6 +1015,12 @@ async function reconcilePendingPublications(
             options.access.encodeJobs.completePublishedPartial(
               cleanup,
               () => publicationMatches(finalPath, partialPath),
+              correctedRetainedOutputProvenance(
+                options.access,
+                cleanup.jobId,
+                priorFinalPath,
+                priorFinalMetadata,
+              ),
             );
           authorizedCleanup = completion.cleanup;
         } else {
@@ -1129,16 +1162,22 @@ async function reconcileActivePublicationMutations(
   });
   for (const mutation of mutations) {
     try {
-      const { finalPath, partialPath, replacementPath } =
+      const { finalPath, partialPath, priorFinalPath, replacementPath } =
         await requireOutputPaths(
         mediaRoot,
         mutation.outputPath,
         mutation.claimToken,
       );
-      const [finalMetadata, partialMetadata, replacementMetadata] =
+      const [
+        finalMetadata,
+        partialMetadata,
+        priorFinalMetadata,
+        replacementMetadata,
+      ] =
         await Promise.all([
           optionalMetadata(finalPath),
           optionalMetadata(partialPath),
+          optionalMetadata(priorFinalPath),
           optionalMetadata(replacementPath),
         ]);
       if (
@@ -1154,6 +1193,12 @@ async function reconcileActivePublicationMutations(
       options.access.encodeJobs.completePublishedMutation(
         mutation,
         () => publicationMatches(finalPath, partialPath),
+        correctedRetainedOutputProvenance(
+          options.access,
+          mutation.jobId,
+          priorFinalPath,
+          priorFinalMetadata,
+        ),
       );
       await unlink(partialPath);
       await syncPath(dirname(finalPath));
@@ -1303,12 +1348,8 @@ export async function executeEncodeClaim(
     }
     if (existingFinal !== null && claim.replaceExistingOutput) {
       const identity = encodeOutputFilesystemIdentity(existingFinal);
-      if (claim.replacementOutputIdentity === null) {
-        options.access.encodeJobs.recordReplacementOutputIdentity(
-          claim,
-          identity,
-        );
-      } else if (
+      if (
+        claim.replacementOutputIdentity !== null &&
         !matchesEncodeOutputFilesystemIdentity(
           claim.replacementOutputIdentity,
           existingFinal,
@@ -1316,6 +1357,10 @@ export async function executeEncodeClaim(
       ) {
         throw new Error("Encode Job prior final output changed before retry");
       }
+      options.access.encodeJobs.recordReplacementOutputIdentity(
+        claim,
+        identity,
+      );
     }
     replaceableFinal = existingFinal ?? undefined;
     await moveAside(paths.legacyPartialPath);
@@ -1385,6 +1430,9 @@ export async function executeEncodeClaim(
       options.access.encodeJobs.beginPublicationMutation(
         claim,
         pendingPartialCleanup,
+        claim.predecessorEncodeJobId === null || replaceableFinal === undefined
+          ? undefined
+          : paths.priorFinalPath,
       );
     signal.throwIfAborted();
     if (currentFinal !== null) {
@@ -1418,6 +1466,14 @@ export async function executeEncodeClaim(
           publicationChangedBeforeCompletion = !matches;
           return matches;
         },
+        claim.predecessorEncodeJobId === null ||
+            priorFinalFailedPath === null ||
+            replaceableFinal === undefined
+          ? undefined
+          : retainedOutputProvenance(
+              priorFinalFailedPath,
+              replaceableFinal,
+            ),
       );
     } catch (error) {
       if (publicationChangedBeforeCompletion) {

@@ -216,7 +216,7 @@ export function CatalogReviewCompletion({
                     </p>
                     <p className="catalog-help" role="status">
                       {job.predecessorReady
-                        ? "Predecessor ready; corrected publication remains pending"
+                        ? "Predecessor ready; replacement starts after review"
                         : "Waiting for previous encode to stop"}
                     </p>
                     <div className="profile-fields encode-job-fields">

@@ -40,6 +40,9 @@ import {
   pollEncodeWorker,
   type HandBrakeRunner,
 } from "./encode-worker.js";
+import {
+  encodeOutputFilesystemIdentity,
+} from "./encode-output-filesystem-identity.js";
 
 const quarantineRace = vi.hoisted(() => ({
   armed: false,
@@ -187,6 +190,11 @@ const completionCommitRace = vi.hoisted(() => ({
   competingPath: "",
   finalPath: "",
   mode: "commit" as "commit" | "update",
+  triggered: false,
+}));
+
+const postFinalizationCleanupFailure = vi.hoisted(() => ({
+  armed: false,
   triggered: false,
 }));
 
@@ -613,6 +621,20 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       }
       await publishCompetitorAfterQuarantine(sourcePath, destinationPath);
     },
+    unlink: async (path: string) => {
+      if (
+        postFinalizationCleanupFailure.armed &&
+        !postFinalizationCleanupFailure.triggered &&
+        path.endsWith(".rip-dvd-partial")
+      ) {
+        postFinalizationCleanupFailure.triggered = true;
+        throw Object.assign(
+          new Error("simulated process interruption before publication cleanup"),
+          { code: "EIO" },
+        );
+      }
+      await actual.unlink(path);
+    },
   };
 });
 
@@ -692,6 +714,8 @@ afterEach(() => {
   completionCommitRace.finalPath = "";
   completionCommitRace.mode = "commit";
   completionCommitRace.triggered = false;
+  postFinalizationCleanupFailure.armed = false;
+  postFinalizationCleanupFailure.triggered = false;
   publicationRace.resume?.();
   publicationRace.armed = false;
   publicationRace.finalPath = "";
@@ -803,6 +827,7 @@ function createQueuedJob(
     originalsLibraryPath,
     outputPath,
     profile,
+    selection,
     sourcePath,
   };
 }
@@ -990,6 +1015,57 @@ async function waitForChildLine(
 async function killChild(child: ChildProcessWithoutNullStreams): Promise<void> {
   child.kill("SIGKILL");
   await once(child, "exit");
+}
+
+async function createCorrectedReplacementFixture() {
+  const fixture = createQueuedJob();
+  const workerOptions = {
+    access: fixture.access,
+    concurrency: 1,
+    log: vi.fn(),
+    mediaLibraryPath: fixture.mediaLibraryPath,
+    originalsLibraryPath: fixture.originalsLibraryPath,
+    signal: new AbortController().signal,
+  };
+  await pollEncodeWorker({
+    ...workerOptions,
+    runner: {
+      run: vi.fn(async ({ outputPath }) => {
+        writeFileSync(outputPath, "incorrect final", { flag: "wx" });
+      }),
+    },
+  });
+  const correctedItem = fixture.access.catalog.createMediaItem({
+    kind: "movie",
+    title: "Corrected Example",
+  });
+  const correction = fixture.access.catalog.correctDiscSelection(
+    fixture.selection.id,
+    {
+      originalDiscArchiveId: fixture.archive.id,
+      catalogRevision: fixture.access.catalog.listOriginalDiscArchives({
+        ids: [fixture.archive.id],
+      })[0]!.updatedAt,
+      mediaItemId: correctedItem.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 4 },
+      reason: "The original source selection was wrong.",
+    },
+  );
+  const replacement = fixture.access.catalog
+    .completeCatalogReviewWithReplacements(
+      fixture.archive.id,
+      fixture.access.catalog.listOriginalDiscArchives({
+        ids: [fixture.archive.id],
+      })[0]!.updatedAt,
+      "reviewed_with_selections",
+      [{
+        predecessorEncodeJobId: fixture.job.id,
+        encodingProfileId: fixture.profile.id,
+        outputPath: fixture.outputPath,
+      }],
+    ).replacementEncodeJobs[0]!;
+  expect(replacement.discSelectionId).toBe(correction.discSelection.id);
+  return { fixture, replacement, workerOptions };
 }
 
 describe("encode worker polling", () => {
@@ -1599,6 +1675,404 @@ describe("encode worker polling", () => {
     expect(fixture.access.encodeJobs.list()).toEqual([
       expect.objectContaining({ id: fixture.job.id, status: "completed" }),
     ]);
+    fixture.access.close();
+  });
+
+  it("publishes and re-encodes a corrected replacement while retaining every prior final", async () => {
+    const fixture = createQueuedJob();
+    const options = {
+      access: fixture.access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      signal: new AbortController().signal,
+    };
+    await pollEncodeWorker({
+      ...options,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "incorrect final", { flag: "wx" });
+        }),
+      },
+    });
+    const correctedItem = fixture.access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Corrected Example",
+    });
+    const correction = fixture.access.catalog.correctDiscSelection(
+      fixture.selection.id,
+      {
+        originalDiscArchiveId: fixture.archive.id,
+        catalogRevision: fixture.access.catalog.listOriginalDiscArchives({
+          ids: [fixture.archive.id],
+        })[0]!.updatedAt,
+        mediaItemId: correctedItem.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 4 },
+        reason: "The original source selection was wrong.",
+      },
+    );
+    const replacement = fixture.access.catalog
+      .completeCatalogReviewWithReplacements(
+        fixture.archive.id,
+        fixture.access.catalog.listOriginalDiscArchives({
+          ids: [fixture.archive.id],
+        })[0]!.updatedAt,
+        "reviewed_with_selections",
+        [{
+          predecessorEncodeJobId: fixture.job.id,
+          encodingProfileId: fixture.profile.id,
+          outputPath: fixture.outputPath,
+        }],
+      ).replacementEncodeJobs[0]!;
+    expect(replacement.discSelectionId).toBe(correction.discSelection.id);
+
+    await pollEncodeWorker({
+      ...options,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          expect(readFileSync(fixture.outputPath, "utf8")).toBe(
+            "incorrect final",
+          );
+          writeFileSync(outputPath, "corrected final", { flag: "wx" });
+        }),
+      },
+    });
+
+    expect(readFileSync(fixture.outputPath, "utf8")).toBe("corrected final");
+    const retained = fixture.access.encodeJobs.listRetainedOutputs([
+      fixture.job.id,
+      replacement.id,
+    ]);
+    expect(retained).toEqual([
+      expect.objectContaining({
+        predecessorEncodeJobId: fixture.job.id,
+        replacementEncodeJobId: replacement.id,
+        state: "retained",
+        cleanupEligible: true,
+      }),
+    ]);
+    expect(readFileSync(retained[0]!.retainedOutputPath, "utf8")).toBe(
+      "incorrect final",
+    );
+
+    fixture.access.encodeJobs.requeue(replacement.id);
+    await pollEncodeWorker({
+      ...options,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          expect(readFileSync(fixture.outputPath, "utf8")).toBe(
+            "corrected final",
+          );
+          writeFileSync(outputPath, "re-encoded corrected final", {
+            flag: "wx",
+          });
+        }),
+      },
+    });
+
+    expect(readFileSync(fixture.outputPath, "utf8")).toBe(
+      "re-encoded corrected final",
+    );
+    const retainedAfterReencode = fixture.access.encodeJobs
+      .listRetainedOutputs([replacement.id]);
+    expect(retainedAfterReencode).toHaveLength(2);
+    expect(retainedAfterReencode).toContainEqual(retained[0]);
+    expect(
+      retainedAfterReencode.map((output) =>
+        readFileSync(output.retainedOutputPath, "utf8")
+      ).sort(),
+    ).toEqual(["corrected final", "incorrect final"]);
+    fixture.access.close();
+  });
+
+  it("leaves the prior final published when a corrected replacement fails", async () => {
+    const { fixture, replacement, workerOptions } =
+      await createCorrectedReplacementFixture();
+
+    await pollEncodeWorker({
+      ...workerOptions,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          expect(readFileSync(fixture.outputPath, "utf8")).toBe(
+            "incorrect final",
+          );
+          writeFileSync(outputPath, "failed correction", { flag: "wx" });
+          throw new Error("corrected HandBrake failure");
+        }),
+      },
+    });
+
+    expect(readFileSync(fixture.outputPath, "utf8")).toBe("incorrect final");
+    expect(fixture.access.encodeJobs.list()).toContainEqual(
+      expect.objectContaining({
+        id: replacement.id,
+        status: "failed",
+        replaceExistingOutput: true,
+      }),
+    );
+    expect(fixture.access.encodeJobs.listRetainedOutputs([replacement.id]))
+      .toEqual([]);
+    fixture.access.close();
+  });
+
+  it("leaves the prior final published when a corrected replacement is cancelled", async () => {
+    const { fixture, replacement, workerOptions } =
+      await createCorrectedReplacementFixture();
+    vi.useFakeTimers();
+    const runner: HandBrakeRunner = {
+      run: vi.fn(({ outputPath, signal }) => {
+        writeFileSync(outputPath, "cancelled correction", { flag: "wx" });
+        return new Promise<void>((_resolve, reject) => {
+          signal.addEventListener(
+            "abort",
+            () => reject(signal.reason as Error),
+            { once: true },
+          );
+        });
+      }),
+    };
+    const polling = pollEncodeWorker({ ...workerOptions, runner });
+    await vi.waitFor(() => expect(runner.run).toHaveBeenCalledOnce());
+    fixture.access.encodeJobs.requestCancellation(replacement.id);
+    await vi.advanceTimersByTimeAsync(
+      Math.floor(ENCODE_JOB_LEASE_DURATION_MS / 3),
+    );
+    await polling;
+
+    expect(readFileSync(fixture.outputPath, "utf8")).toBe("incorrect final");
+    expect(fixture.access.encodeJobs.list()).toContainEqual(
+      expect.objectContaining({ id: replacement.id, status: "cancelled" }),
+    );
+    expect(fixture.access.encodeJobs.listRetainedOutputs([replacement.id]))
+      .toEqual([]);
+    vi.useRealTimers();
+    fixture.access.close();
+  });
+
+  it("leaves the prior final published when a corrected replacement is interrupted", async () => {
+    const { fixture, replacement, workerOptions } =
+      await createCorrectedReplacementFixture();
+    const abortController = new AbortController();
+    const runner: HandBrakeRunner = {
+      run: vi.fn(({ outputPath, signal }) => {
+        writeFileSync(outputPath, "interrupted correction", { flag: "wx" });
+        return new Promise<void>((_resolve, reject) => {
+          signal.addEventListener(
+            "abort",
+            () => reject(signal.reason as Error),
+            { once: true },
+          );
+        });
+      }),
+    };
+    const polling = pollEncodeWorker({
+      ...workerOptions,
+      runner,
+      signal: abortController.signal,
+    });
+    await vi.waitFor(() => expect(runner.run).toHaveBeenCalledOnce());
+    abortController.abort(new Error("worker interrupted"));
+    await expect(polling).rejects.toThrow("worker interrupted");
+
+    expect(readFileSync(fixture.outputPath, "utf8")).toBe("incorrect final");
+    expect(fixture.access.encodeJobs.list()).toContainEqual(
+      expect.objectContaining({
+        id: replacement.id,
+        status: "failed",
+        errorMessage: "Encode interrupted",
+      }),
+    );
+    expect(fixture.access.encodeJobs.listRetainedOutputs([replacement.id]))
+      .toEqual([]);
+    fixture.access.close();
+  });
+
+  it("never overwrites a competing final that appears during a corrected encode", async () => {
+    const { fixture, replacement, workerOptions } =
+      await createCorrectedReplacementFixture();
+    const competingPath = join(
+      fixture.mediaLibraryPath,
+      ".corrected-output-competitor.mkv",
+    );
+
+    await pollEncodeWorker({
+      ...workerOptions,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "losing corrected encode", { flag: "wx" });
+          writeFileSync(competingPath, "competing corrected final", {
+            flag: "wx",
+          });
+          renameSync(competingPath, fixture.outputPath);
+        }),
+      },
+    });
+
+    expect(readFileSync(fixture.outputPath, "utf8")).toBe(
+      "competing corrected final",
+    );
+    expect(fixture.access.encodeJobs.list()).toContainEqual(
+      expect.objectContaining({ id: replacement.id, status: "failed" }),
+    );
+    expect(fixture.access.encodeJobs.listRetainedOutputs([replacement.id]))
+      .toEqual([]);
+    fixture.access.close();
+  });
+
+  it("recovers a corrected atomic replacement after a process kill", async () => {
+    const { fixture, replacement, workerOptions } =
+      await createCorrectedReplacementFixture();
+    const claim = fixture.access.encodeJobs.claimNext(
+      "crashed-corrected-publisher",
+    );
+    if (!claim) {
+      throw new Error("Expected corrected publication claim");
+    }
+    const priorMetadata = lstatSync(fixture.outputPath);
+    const canonicalFinalPath = join(
+      realpathSync(fixture.mediaLibraryPath),
+      basename(fixture.outputPath),
+    );
+    const retainedPath = priorFinalPath(
+      canonicalFinalPath,
+      claim.claimToken,
+    );
+    fixture.access.encodeJobs.recordReplacementOutputIdentity(
+      claim,
+      encodeOutputFilesystemIdentity(priorMetadata),
+    );
+    const partialPath = claimPartialPath(
+      canonicalFinalPath,
+      claim.claimToken,
+    );
+    const replacementPath = claimReplacementPath(
+      canonicalFinalPath,
+      claim.claimToken,
+    );
+    writeFileSync(partialPath, "corrected after crash", { flag: "wx" });
+    const publication = fixture.access.encodeJobs.registerPartialCleanup(claim, {
+      publicationPending: true,
+    });
+    fixture.access.encodeJobs.beginPublicationMutation(
+      claim,
+      publication,
+      retainedPath,
+    );
+    const child = spawnProcess(
+      process.execPath,
+      [
+        fileURLToPath(new URL(
+          "./test-fixtures/publication-kill-helper.mjs",
+          import.meta.url,
+        )),
+        "final-linked",
+        partialPath,
+        canonicalFinalPath,
+        retainedPath,
+        replacementPath,
+      ],
+      { stdio: ["pipe", "pipe", "pipe"] },
+    );
+    await waitForChildLine(child, "final-linked");
+    await killChild(child);
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.now() + ENCODE_JOB_LEASE_DURATION_MS + 1);
+
+    await pollEncodeWorker({
+      ...workerOptions,
+      runner: { run: vi.fn() },
+    });
+
+    expect(readFileSync(fixture.outputPath, "utf8")).toBe(
+      "corrected after crash",
+    );
+    expect(fixture.access.encodeJobs.list()).toContainEqual(
+      expect.objectContaining({ id: replacement.id, status: "completed" }),
+    );
+    const retained = fixture.access.encodeJobs.listRetainedOutputs([
+      replacement.id,
+    ]);
+    expect(retained).toEqual([
+      expect.objectContaining({
+        predecessorEncodeJobId: fixture.job.id,
+        replacementEncodeJobId: replacement.id,
+        retainedOutputPath: realpathSync(retainedPath),
+        state: "retained",
+        cleanupEligible: true,
+      }),
+    ]);
+    expect(readFileSync(retained[0]!.retainedOutputPath, "utf8")).toBe(
+      "incorrect final",
+    );
+    vi.useRealTimers();
+    fixture.access.close();
+  });
+
+  it("resumes corrected cleanup after publication provenance was finalized", async () => {
+    const { fixture, replacement, workerOptions } =
+      await createCorrectedReplacementFixture();
+    postFinalizationCleanupFailure.armed = true;
+
+    await pollEncodeWorker({
+      ...workerOptions,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "corrected before cleanup crash", {
+            flag: "wx",
+          });
+        }),
+      },
+      workerId: "corrected-finalization-crash",
+    });
+
+    expect(postFinalizationCleanupFailure.triggered).toBe(true);
+    expect(readFileSync(fixture.outputPath, "utf8")).toBe(
+      "corrected before cleanup crash",
+    );
+    expect(fixture.access.encodeJobs.list()).toContainEqual(
+      expect.objectContaining({
+        id: replacement.id,
+        publicationPending: true,
+        replacementOutputIdentity: null,
+        status: "completed",
+      }),
+    );
+    const retainedBeforeRecovery = fixture.access.encodeJobs
+      .listRetainedOutputs([replacement.id]);
+    expect(retainedBeforeRecovery).toEqual([
+      expect.objectContaining({
+        predecessorEncodeJobId: fixture.job.id,
+        replacementEncodeJobId: replacement.id,
+        state: "retained",
+      }),
+    ]);
+    expect(existsSync(retainedBeforeRecovery[0]!.retainedOutputPath)).toBe(
+      true,
+    );
+
+    postFinalizationCleanupFailure.armed = false;
+    await pollEncodeWorker({
+      ...workerOptions,
+      runner: { run: vi.fn() },
+      workerId: "corrected-finalization-recovery",
+    });
+
+    expect(readFileSync(fixture.outputPath, "utf8")).toBe(
+      "corrected before cleanup crash",
+    );
+    expect(fixture.access.encodeJobs.list()).toContainEqual(
+      expect.objectContaining({
+        id: replacement.id,
+        partialCleanupClaimToken: null,
+        publicationPending: false,
+        status: "completed",
+      }),
+    );
+    expect(fixture.access.encodeJobs.listRetainedOutputs([replacement.id]))
+      .toEqual(retainedBeforeRecovery);
+    expect(readFileSync(retainedBeforeRecovery[0]!.retainedOutputPath, "utf8"))
+      .toBe("incorrect final");
     fixture.access.close();
   });
 

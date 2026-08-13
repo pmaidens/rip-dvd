@@ -3,7 +3,7 @@
 This package is the only runtime persistence boundary for rip-dvd. Its public
 interface speaks in Optical Drives, Disc Inspections, Detected Discs, Archive
 Requests, Original Disc Archives, Media Items, Disc Selections, Encoding
-Profiles, Archive Jobs, and Encode Jobs.
+Profiles, Archive Jobs, Encode Jobs, and Retained Encode Outputs.
 Drizzle tables, SQL, SQLite connections, and transaction objects remain
 private. The migration-only `@rip-dvd/data-access/legacy-sidecars` entrypoint is
 the sole format-named exception; it converts legacy persistence into those
@@ -127,10 +127,8 @@ revision and commits review completion, replacement Encode Jobs, predecessor
 links, and output reservations in one immediate transaction, with at most 100
 selected replacements per atomic completion. Predecessor readiness stays false
 while the predecessor is active or has fenced cleanup/publication work, then
-becomes true automatically after a safely terminal predecessor. A separate
-corrected-publication admission fence keeps the successor unclaimable by the
-generic worker even after that readiness transition. Issue #151 owns opening
-that fence only together with durable corrected-output provenance.
+becomes true automatically after a safely terminal predecessor. The successor
+then becomes claimable without releasing the transferred output reservation.
 For the same output path, a completed predecessor or a failed/cancelled
 predecessor protecting a retained final transfers replacement authority to the
 successor; a failed predecessor without a retained final leaves the successor
@@ -138,9 +136,20 @@ in initial-output mode and releases its obsolete reservation when review and
 all cleanup/publication fences permit it. Cancelling a queued same-path
 successor retains its transferred reservation, even in initial-output mode, so
 neither a still-stopping predecessor nor a retained final can become
-unprotected. This contract plans and queues
-corrected encodes only; publishing corrected output and archiving superseded
-output remain separate responsibilities outside this facade workflow.
+unprotected. Corrected publication retains the prior final at its canonical
+path while encoding. Before filesystem cutover, the publication-mutation fence
+stages the canonical claim-scoped retained path and prior-final identity in a
+private SQLite authority row. The facade derives that path from the persisted
+running job and resolves its existing output directory before the write
+transaction; caller claim fields cannot select another directory. Every normal
+and recovery completion must match that row. Successful atomic cutover records
+the displaced output's predecessor,
+replacement, private path, filesystem identity, and retention time in
+`retained_encode_outputs` before replacement authority is cleared. Cleanup
+acknowledgement then removes only the transient authority row. Failure,
+cancellation, interruption, and stale authority do not create a retained-output
+record or move the prior final. The retained record is cleanup-eligible, but the
+facade exposes no deletion, expiry, cleanup mutation, or metadata-only rename.
 
 Disc Selection mutation preserves three distinct identity paths:
 
@@ -161,6 +170,10 @@ Disc Selection mutation preserves three distinct identity paths:
   replacement already in the lineage cannot be repaired in place; a later
   correction creates another supersession, while removal deactivates the
   replacement rather than deleting either endpoint or an immutable link.
+  Catalog history joins those links to original and replacement Encode outcomes
+  and retained-output state through a path-free summary projection. The
+  private retained path and filesystem identity remain available only on the
+  worker-facing provenance read, never the consistent web read facade.
 - **Unsafe legacy quarantine.** A caller-era mapping that fails canonical-key or
   archived-scan validation is the only historical exception.
   `repairDiscSelection()` or `deleteDiscSelection()` deactivates the old Disc
@@ -325,9 +338,13 @@ filesystem work begins. Identity callbacks inspect already-staged media entries
 only outside writer transactions. Completion first commits while retaining the
 token and cleanup provenance plus a durable completion-pending marker, rechecks
 the media identity after that commit, then finalizes success in another bounded
-write. A cross-boundary mismatch restores the nonaccepted state without
-removing provenance; restart cleanup converts a mismatched tentative completion
-back to failure before acknowledging that provenance. Recovery and legacy
+write. A corrected replacement with a recorded prior-final identity cannot
+enter the filesystem mutation fence or finalize without matching its private,
+durably staged retained-path authority. Re-encoding the same corrected job
+appends new provenance without overwriting any earlier retained output. A
+cross-boundary mismatch restores the nonaccepted state without removing
+provenance; restart cleanup converts a mismatched tentative completion back to
+failure before acknowledging that provenance. Recovery and legacy
 cutover respect the persisted token, while a process-scoped filesystem lock
 distinguishes a paused owner from an abandoned mutation. No media-filesystem
 call or external process runs while SQLite holds its writer transaction.

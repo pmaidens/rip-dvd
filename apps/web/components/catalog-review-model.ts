@@ -55,6 +55,16 @@ export interface CatalogReviewDiscSelectionCorrection {
   replacementDiscSelection: CatalogReviewDiscSelectionSummary;
   reason: string | null;
   correctedAt: string;
+  encodeHistory: Array<{
+    id: string;
+    status: EncodeJobStatus;
+    predecessorEncodeJobId: string | null;
+    replacementEncodeJobId: string | null;
+    retainedOutput: {
+      state: "retained";
+      cleanupEligible: boolean;
+    } | null;
+  }>;
 }
 
 export interface CatalogReviewReplacementPlan {

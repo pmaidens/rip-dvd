@@ -614,7 +614,9 @@ keeps ordinary retry history separate from unsafe legacy recovery:
   its original profile, output, and actual outcome. Queued work is cancelled
   immediately, while running work enters the general cancellation lifecycle;
   completed, failed, and cancelled outcomes stay terminal. Both Catalog Review
-  and Encode Jobs display the correction history. Catalog Review pages the
+  and Encode Jobs display the correction history. After corrected publication,
+  Catalog Review shows the original and replacement outcomes and the retained
+  prior-output state without exposing its private path. Catalog Review pages the
   archive-wide lineage, so repeated corrections keep every old-to-new mapping
   and operator reason even after the final replacement is removed. A job-free
   replacement in that lineage cannot be rewritten in place: another correction
@@ -999,19 +1001,22 @@ reservation. Paged choices remain reachable, but the workbench requires an
 operator to keep that one-review selection within the displayed atomic limit.
 Replacement jobs display `Waiting for previous encode to stop` until the
 predecessor is safely completed, failed, or cancelled with cleanup and
-publication fences clear, then change to `Waiting for corrected publication
-support` through the live dashboard event stream. Completed predecessors and
+publication fences clear, then become claimable through the live dashboard
+event stream. Completed predecessors and
 failed/cancelled predecessors that retain a prior final give same-path
 successors replacement authority; failed predecessors without a retained final
 do not. This workflow
 releases a failed non-retained predecessor's obsolete reservation at review
 completion, or after any fenced cleanup later finishes. Cancelling a queued
 same-path corrected successor retains the transferred reservation so the path
-cannot be claimed while its predecessor stops or protects a final. It plans and queues
-corrected encodes, but an explicit admission fence keeps linked jobs out of the
-generic worker publication path. The subsequent corrected-output publication
-workflow owns opening that fence together with its durable corrected-output
-provenance and superseded-output archival contract.
+cannot be claimed while its predecessor stops or protects a final. Corrected
+jobs are admitted after those safety conditions are durable. While a corrected
+encode runs, the prior final remains at its canonical path. Failure,
+cancellation, interruption, or stale publication authority leaves it untouched.
+Successful publication atomically replaces the canonical final and records the
+displaced inode and private quarantine path as durable retained-output
+provenance. That output is cleanup-eligible, but this workflow does not delete
+or expire it and exposes no cleanup mutation.
 
 The queue reserves each final output path for one logical job and keeps the
 database uniqueness constraint on Disc Selection plus Encoding Profile version
@@ -1107,6 +1112,15 @@ a changed final revokes replacement authority. Ordinary failed retries moved to
 a new path leave any existing final untouched.
 If a new final path appears during an encode, it is also left untouched and the
 new partial is quarantined.
+For a corrected successor, finalization also records the predecessor,
+replacement, displaced-output filesystem identity, private retained path, and
+retention time before clearing replacement authority. Re-encoding that same
+successor appends provenance for the newly displaced final without overwriting
+the original correction record. Recovery performs the same durable finalization
+after a crash. Only retention state and cleanup
+eligibility reach Catalog and Encoding responses; the private path remains
+worker-side. No automatic deletion, expiry, cleanup action, or metadata-only
+rename is provided.
 
 Visit `/health` for the visible service/database status or `/api/health` for
 the machine-readable health response. Validate schema history with
