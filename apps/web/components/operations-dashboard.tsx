@@ -69,6 +69,30 @@ function dashboardState(
   };
 }
 
+export function catalogReviewActivityRevision(
+  state: DashboardLoadState,
+  archiveId: string,
+): string {
+  const archiveRevision = state.catalogReview.status === "loaded"
+    ? state.catalogReview.items.find(({ id }) => id === archiveId)
+        ?.activityRevision ?? null
+    : state.catalogReview.status;
+  const correctedJobRevisions = state.encodeJobs.status === "loaded"
+    ? state.encodeJobs.items
+      .filter((job) =>
+        job.discSelectionCorrection !== undefined ||
+        job.correctedReplacement !== undefined
+      )
+      .map((job) => [
+        job.id,
+        job.activityRevision ?? null,
+        job.status,
+        job.correctedReplacement?.predecessorReady ?? null,
+      ])
+    : state.encodeJobs.status;
+  return JSON.stringify([archiveRevision, correctedJobRevisions]);
+}
+
 interface SectionProps<T> {
   title: string;
   eyebrow: string;
@@ -211,6 +235,25 @@ function DashboardJobItem({
 }
 
 function encodeProgressDetail(job: DashboardEncodeJob): string | null {
+  if (
+    job.status === "queued" &&
+    job.correctedReplacement?.predecessorStatus !== undefined &&
+    job.correctedReplacement.predecessorReady !== true
+  ) {
+    return "Waiting for previous encode to stop";
+  }
+  if (
+    job.status === "queued" &&
+    job.correctedReplacement?.publicationAdmissionPending === true
+  ) {
+    return "Waiting for corrected publication support";
+  }
+  if (
+    job.status === "queued" &&
+    job.correctedReplacement?.predecessorReady === true
+  ) {
+    return "Ready for encode";
+  }
   if (job.status === "cancellation_requested") {
     return "Waiting for HandBrake to stop safely";
   }
@@ -1032,8 +1075,21 @@ export function DashboardView({
             progressPercent={job.progressPercent}
             progressDetail={encodeProgressDetail(job)}
             failureDetail={job.failureDetail}
-            annotation={job.discSelectionCorrection ? (
+            annotation={job.discSelectionCorrection || job.correctedReplacement ? (
               <div className="selection-correction-history">
+                {job.correctedReplacement?.predecessorId ? (
+                  <>
+                    <strong>Corrected replacement encode</strong>
+                    <p>Replaces Encode Job {job.correctedReplacement.predecessorId}</p>
+                  </>
+                ) : null}
+                {job.correctedReplacement?.successorId ? (
+                  <>
+                    <strong>Superseded by corrected encode</strong>
+                    <p>Replacement Encode Job {job.correctedReplacement.successorId}</p>
+                  </>
+                ) : null}
+                {job.discSelectionCorrection ? <>
                 <strong>Disc Selection corrected</strong>
                 <p>
                   Superseded by {job.discSelectionCorrection.correctedMediaTitle}
@@ -1041,6 +1097,7 @@ export function DashboardView({
                 {job.discSelectionCorrection.reason ? (
                   <p>{job.discSelectionCorrection.reason}</p>
                 ) : null}
+                </> : null}
               </div>
             ) : null}
             verification={toFilesystemVerificationDisplay(job)}
@@ -1678,9 +1735,13 @@ export function OperationsDashboard({
       ) : null}
 
       {page === "catalog" && catalogReviewArchiveId ? (
-        <CatalogReviewEditor
-          key={catalogReviewArchiveId}
-          archiveId={catalogReviewArchiveId}
+          <CatalogReviewEditor
+            key={catalogReviewArchiveId}
+            archiveId={catalogReviewArchiveId}
+            activityRevision={catalogReviewActivityRevision(
+              state,
+              catalogReviewArchiveId,
+            )}
           onClose={() => setCatalogReviewArchiveId(null)}
           onCompleted={() => {
             setCatalogReviewArchiveId(null);

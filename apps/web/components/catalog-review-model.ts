@@ -57,6 +57,35 @@ export interface CatalogReviewDiscSelectionCorrection {
   correctedAt: string;
 }
 
+export interface CatalogReviewReplacementPlan {
+  jobs: Array<{
+    predecessorEncodeJobId: string;
+    predecessorStatus: EncodeJobStatus;
+    predecessorReady: boolean;
+    replacementDiscSelectionId: string;
+    proposedEncodingProfileId: string;
+    proposedOutputPath: string;
+  }>;
+  encodingProfiles: Array<{
+    id: string;
+    displayName: string;
+    version: number;
+    isActive: boolean;
+  }>;
+  jobsPage: {
+    offset: number;
+    limit: number;
+    hasPrevious: boolean;
+    hasNext: boolean;
+  };
+  encodingProfilesPage: {
+    offset: number;
+    limit: number;
+    hasPrevious: boolean;
+    hasNext: boolean;
+  };
+}
+
 export interface CatalogReviewDiscSelection
   extends CatalogReviewDiscSelectionSummary {
   actionAvailability: CatalogReviewDiscSelectionActionAvailability;
@@ -116,6 +145,7 @@ export interface CatalogReviewDto {
   coverage: CatalogReviewCoverage;
   mediaItems: CatalogReviewMediaItem[];
   correctionHistory: CatalogReviewDiscSelectionCorrection[];
+  replacementPlan?: CatalogReviewReplacementPlan;
   correctionHistoryPage: {
     offset: number;
     limit: number;

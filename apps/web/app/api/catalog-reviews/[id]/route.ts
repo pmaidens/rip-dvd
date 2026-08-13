@@ -9,6 +9,8 @@ import {
   type DiscSelection,
   type DiscSelectionActionAvailability,
   type DiscSelectionId,
+  type EncodeJobId,
+  type EncodingProfileId,
   type MediaItem,
   type MediaItemId,
   type MediaItemMaintenance,
@@ -28,6 +30,7 @@ import { readMediaItemsWithAncestors } from "../../../../lib/media-item-ancestor
 import {
   trustedMutationRequestProblem,
 } from "../../../../lib/server/trusted-mutation-request";
+import { mediaOutputPath } from "../../../../lib/server/media-output-path";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -36,6 +39,8 @@ const CATALOG_REVIEW_SELECTION_PAGE_SIZE = 100;
 const CATALOG_REVIEW_COVERAGE_SELECTION_PAGE_SIZE = 500;
 const CATALOG_REVIEW_MEDIA_ITEM_MAINTENANCE_BATCH_SIZE = 100;
 const CATALOG_REVIEW_CORRECTION_HISTORY_PAGE_SIZE = 100;
+const CATALOG_REVIEW_REPLACEMENT_PLAN_LIMIT = 100;
+const CATALOG_REVIEW_REPLACEMENT_PROFILE_LIMIT = 100;
 
 function response(body: unknown, status = 200): Response {
   return Response.json(body, {
@@ -134,6 +139,8 @@ function readCatalogReview(
   id: OriginalDiscArchiveId,
   discSelectionOffset: number,
   correctionHistoryOffset: number,
+  replacementOffset: number,
+  replacementProfileOffset: number,
 ) {
   return access.readConsistentSnapshot((snapshot) => {
     const archive = snapshot.catalog.listOriginalDiscArchives({ ids: [id] })[0];
@@ -259,6 +266,38 @@ function readCatalogReview(
         maintenance,
       ]),
     );
+    const replacementJobs = snapshot.catalog
+      .listCorrectedEncodeReplacementPlans({
+        originalDiscArchiveId: id,
+        limit: CATALOG_REVIEW_REPLACEMENT_PLAN_LIMIT + 1,
+        offset: replacementOffset,
+      });
+    const hasNextReplacementJobs = replacementJobs.length >
+      CATALOG_REVIEW_REPLACEMENT_PLAN_LIMIT;
+    const replacementJobPage = replacementJobs.slice(
+      0,
+      CATALOG_REVIEW_REPLACEMENT_PLAN_LIMIT,
+    );
+    const priorProfileIds = [...new Set(
+      replacementJobPage.map((job) => job.proposedEncodingProfileId),
+    )];
+    const activeReplacementProfiles = snapshot.encodingProfiles.list({
+      mediaDomain: "dvd_video",
+      activeOnly: true,
+      limit: CATALOG_REVIEW_REPLACEMENT_PROFILE_LIMIT + 1,
+      offset: replacementProfileOffset,
+    });
+    const hasNextReplacementProfiles = activeReplacementProfiles.length >
+      CATALOG_REVIEW_REPLACEMENT_PROFILE_LIMIT;
+    const replacementProfilesById = new Map(
+      [
+        ...snapshot.encodingProfiles.list({ ids: priorProfileIds }),
+        ...activeReplacementProfiles.slice(
+          0,
+          CATALOG_REVIEW_REPLACEMENT_PROFILE_LIMIT,
+        ),
+      ].map((profile) => [profile.id, profile]),
+    );
     const rawTitles = decodeArchivedDvdTitles(disc.scanData) ?? [];
     return {
       catalogRevision: archive.updatedAt.toISOString(),
@@ -280,6 +319,33 @@ function readCatalogReview(
         serializeMediaItem(item, maintenanceByMediaItemId.get(item.id))
       ),
       correctionHistory,
+      ...(replacementJobPage.length === 0 && replacementOffset === 0
+        ? {}
+        : {
+          replacementPlan: {
+            jobs: replacementJobPage,
+            encodingProfiles: [...replacementProfilesById.values()].map(
+              (profile) => ({
+                id: profile.id,
+                displayName: profile.displayName,
+                version: profile.version,
+                isActive: profile.isActive,
+              }),
+            ),
+            jobsPage: {
+              offset: replacementOffset,
+              limit: CATALOG_REVIEW_REPLACEMENT_PLAN_LIMIT,
+              hasPrevious: replacementOffset > 0,
+              hasNext: hasNextReplacementJobs,
+            },
+            encodingProfilesPage: {
+              offset: replacementProfileOffset,
+              limit: CATALOG_REVIEW_REPLACEMENT_PROFILE_LIMIT,
+              hasPrevious: replacementProfileOffset > 0,
+              hasNext: hasNextReplacementProfiles,
+            },
+          },
+        }),
       correctionHistoryPage: {
         offset: correctionHistoryOffset,
         limit: CATALOG_REVIEW_CORRECTION_HISTORY_PAGE_SIZE,
@@ -313,6 +379,7 @@ export async function createCatalogReviewRoute(
   id: string,
   getAccess: () => DataAccess = getDataAccess,
   getTrustedOrigin: () => string = () => loadConfig().webTrustedOrigin,
+  getMediaLibraryPath: () => string = () => loadConfig().mediaLibraryPath,
 ): Promise<Response> {
   if (request.method !== "GET" && request.method !== "POST") {
     return response({ error: "Method not allowed" }, 405);
@@ -329,11 +396,19 @@ export async function createCatalogReviewRoute(
         request,
         "correctionOffset",
       );
+      const replacementOffset = recordOffset(request, "replacementOffset");
+      const replacementProfileOffset = recordOffset(
+        request,
+        "replacementProfileOffset",
+      );
       if (
         [...parameters.keys()].some((key) =>
-          key !== "selectionOffset" && key !== "correctionOffset"
+          key !== "selectionOffset" && key !== "correctionOffset" &&
+          key !== "replacementOffset" &&
+          key !== "replacementProfileOffset"
         ) ||
-        discSelectionOffset === null || correctionHistoryOffset === null
+        discSelectionOffset === null || correctionHistoryOffset === null ||
+        replacementOffset === null || replacementProfileOffset === null
       ) {
         return response({ error: "Invalid Catalog Review query" }, 400);
       }
@@ -342,6 +417,8 @@ export async function createCatalogReviewRoute(
         archiveId,
         discSelectionOffset,
         correctionHistoryOffset,
+        replacementOffset,
+        replacementProfileOffset,
       );
       return review === null
         ? response({ error: "Original Disc Archive not found" }, 404)
@@ -576,18 +653,64 @@ export async function createCatalogReviewRoute(
       }
 
       case "complete_review": {
-        const archive = access.catalog.completeCatalogReview(
-          archiveId,
-          new Date(command.catalogRevision),
-          command.outcome,
-        );
+        let mediaLibraryPath: string | null = null;
+        if (command.replacementEncodes.length > 0) {
+          try {
+            mediaLibraryPath = getMediaLibraryPath();
+          } catch {
+            return response(
+              { error: "Corrected replacement queueing is unavailable" },
+              503,
+            );
+          }
+        }
+        const replacements = command.replacementEncodes.map((replacement) => {
+          const outputPath = mediaLibraryPath === null
+            ? replacement.outputPath
+            : mediaOutputPath(replacement.outputPath, mediaLibraryPath);
+          if (!outputPath) {
+            throw new DomainInvariantError(
+              "Corrected replacement output path is invalid",
+            );
+          }
+          return {
+            predecessorEncodeJobId:
+              replacement.predecessorEncodeJobId as EncodeJobId,
+            encodingProfileId:
+              replacement.encodingProfileId as EncodingProfileId,
+            outputPath,
+            ...(replacement.priority === undefined
+              ? {}
+              : { priority: replacement.priority }),
+          };
+        });
+        const completion = access.catalog
+          .completeCatalogReviewWithReplacements(
+            archiveId,
+            new Date(command.catalogRevision),
+            command.outcome,
+            replacements,
+          );
         return response({
           archive: {
-            id: archive.id,
+            id: completion.archive.id,
             catalogReviewedAt:
-              archive.catalogReviewedAt?.toISOString() ?? null,
-            catalogReviewOutcome: archive.catalogReviewOutcome,
+              completion.archive.catalogReviewedAt?.toISOString() ?? null,
+            catalogReviewOutcome: completion.archive.catalogReviewOutcome,
           },
+          ...(completion.replacementEncodeJobs.length === 0 ? {} : {
+            replacementEncodeJobs: completion.replacementEncodeJobs.map(
+              (job) => ({
+                id: job.id,
+                predecessorEncodeJobId: job.predecessorEncodeJobId,
+                discSelectionId: job.discSelectionId,
+                encodingProfileId: job.encodingProfileId,
+                outputPath: job.outputPath,
+                status: job.status,
+                priority: job.priority,
+                replaceExistingOutput: job.replaceExistingOutput,
+              })),
+          }),
         });
       }
 

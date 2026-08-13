@@ -643,6 +643,17 @@ export const encodeJobs = sqliteTable(
   "encode_jobs",
   {
     id: text("id").$type<EncodeJobId>().notNull().primaryKey(),
+    predecessorEncodeJobId: text("predecessor_encode_job_id")
+      .$type<EncodeJobId>()
+      .references((): AnySQLiteColumn => encodeJobs.id, {
+        onDelete: "restrict",
+      }),
+    correctedPublicationAdmitted: integer(
+      "corrected_publication_admitted",
+      { mode: "boolean" },
+    )
+      .notNull()
+      .default(false),
     discSelectionId: text("disc_selection_id")
       .$type<DiscSelectionId>()
       .notNull()
@@ -701,10 +712,12 @@ export const encodeJobs = sqliteTable(
   },
   (table) => [
     check("encode_jobs_id_not_null", sql`${table.id} is not null`),
-    uniqueIndex("encode_jobs_selection_profile_unique").on(
-      table.discSelectionId,
-      table.encodingProfileId,
-    ),
+    uniqueIndex("encode_jobs_predecessor_unique")
+      .on(table.predecessorEncodeJobId)
+      .where(sql`${table.predecessorEncodeJobId} is not null`),
+    uniqueIndex("encode_jobs_initial_selection_profile_unique")
+      .on(table.discSelectionId, table.encodingProfileId)
+      .where(sql`${table.predecessorEncodeJobId} is null`),
     uniqueIndex("encode_jobs_output_path_unique")
       .on(table.outputPath)
       .where(sql`${table.reservesOutputPath} = 1`),
@@ -727,7 +740,15 @@ export const encodeJobs = sqliteTable(
     ),
     check(
       "encode_jobs_output_reservation_check",
-      sql`${table.reservesOutputPath} = 1 or ${table.status} in ('failed', 'cancelled')`,
+      sql`${table.reservesOutputPath} = 1 or ${table.status} in ('cancellation_requested', 'completed', 'failed', 'cancelled')`,
+    ),
+    check(
+      "encode_jobs_predecessor_distinct_check",
+      sql`${table.predecessorEncodeJobId} is null or ${table.predecessorEncodeJobId} <> ${table.id}`,
+    ),
+    check(
+      "encode_jobs_corrected_publication_admission_check",
+      sql`${table.correctedPublicationAdmitted} = 0 or ${table.predecessorEncodeJobId} is not null`,
     ),
     check(
       "encode_jobs_replacement_identity_check",

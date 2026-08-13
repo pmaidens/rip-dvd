@@ -151,6 +151,387 @@ function renderCatalogReviewEditor(archiveId: string): void {
 }
 
 describe("CatalogReviewEditor", () => {
+  it("submits only explicitly selected replacement encodes with operator overrides", async () => {
+    const review = catalogReview({
+      archiveId: "archive-a",
+      discLabel: "REPLACEMENT_PLAN",
+    });
+    review.replacementPlan = {
+      jobs: [{
+        predecessorEncodeJobId: "predecessor-1",
+        predecessorStatus: "cancellation_requested",
+        predecessorReady: false,
+        replacementDiscSelectionId: review.discSelections[0]!.id,
+        proposedEncodingProfileId: "profile-prior",
+        proposedOutputPath: "/media/prior.mkv",
+      }],
+      encodingProfiles: [
+        { id: "profile-prior", displayName: "Prior", version: 1, isActive: false },
+        { id: "profile-new", displayName: "New", version: 2, isActive: true },
+      ],
+      jobsPage: {
+        offset: 0,
+        limit: 100,
+        hasPrevious: false,
+        hasNext: false,
+      },
+      encodingProfilesPage: {
+        offset: 0,
+        limit: 100,
+        hasPrevious: false,
+        hasNext: false,
+      },
+    };
+    const commands: unknown[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (init?.method === "POST") {
+        commands.push(JSON.parse(String(init.body)) as unknown);
+        return Response.json({});
+      }
+      return Response.json(review);
+    }));
+
+    await act(async () => renderCatalogReviewEditor("archive-a"));
+    const selected = container.querySelector<HTMLInputElement>(
+      'input[name="replacement:predecessor-1:selected"]',
+    );
+    const profile = container.querySelector<HTMLSelectElement>(
+      'select[name="replacement:predecessor-1:profile"]',
+    );
+    const output = container.querySelector<HTMLInputElement>(
+      'input[name="replacement:predecessor-1:output"]',
+    );
+    const submit = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent ===
+        "Complete review and queue selected replacements",
+    );
+    if (!selected || !profile || !output || !submit) {
+      throw new Error("Expected corrected replacement controls");
+    }
+    selected.click();
+    profile.value = "profile-new";
+    output.value = "/media/operator-choice.mkv";
+    await act(async () => submit.click());
+
+    expect(commands).toEqual([{
+      action: "complete_review",
+      catalogRevision: review.catalogRevision,
+      outcome: "reviewed_with_selections",
+      replacementEncodes: [{
+        predecessorEncodeJobId: "predecessor-1",
+        encodingProfileId: "profile-new",
+        outputPath: "/media/operator-choice.mkv",
+      }],
+    }]);
+  });
+
+  it("keeps selected replacements while paging every affected Encode Job", async () => {
+    const first = catalogReview({
+      archiveId: "archive-a",
+      discLabel: "PAGED_REPLACEMENTS",
+    });
+    const plan = (predecessorEncodeJobId: string, offset: number) => ({
+      jobs: [{
+        predecessorEncodeJobId,
+        predecessorStatus: "completed" as const,
+        predecessorReady: true,
+        replacementDiscSelectionId: first.discSelections[0]!.id,
+        proposedEncodingProfileId: "profile-1",
+        proposedOutputPath: `/media/${predecessorEncodeJobId}.mkv`,
+      }],
+      encodingProfiles: [{
+        id: "profile-1",
+        displayName: "Profile",
+        version: 1,
+        isActive: true,
+      }],
+      jobsPage: {
+        offset,
+        limit: 100,
+        hasPrevious: offset > 0,
+        hasNext: offset === 0,
+      },
+      encodingProfilesPage: {
+        offset: 0,
+        limit: 100,
+        hasPrevious: false,
+        hasNext: false,
+      },
+    });
+    first.replacementPlan = plan("predecessor-1", 0);
+    const second: CatalogReviewDto = {
+      ...first,
+      replacementPlan: plan("predecessor-2", 100),
+    };
+    const commands: unknown[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (init?.method === "POST") {
+        commands.push(JSON.parse(String(init.body)) as unknown);
+        return Response.json({});
+      }
+      return Response.json(String(input).includes("replacementOffset=100")
+        ? second
+        : first);
+    }));
+
+    await act(async () => renderCatalogReviewEditor("archive-a"));
+    const selectCurrent = async (predecessorId: string) => {
+      const checkbox = container.querySelector<HTMLInputElement>(
+        `input[name="replacement:${predecessorId}:selected"]`,
+      );
+      if (!checkbox) throw new Error(`Expected ${predecessorId} checkbox`);
+      await act(async () => checkbox.click());
+    };
+    await selectCurrent("predecessor-1");
+    const next = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Next affected Encode Jobs",
+    );
+    if (!next) throw new Error("Expected replacement continuation");
+    await act(async () => next.click());
+    await selectCurrent("predecessor-2");
+    const complete = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent ===
+        "Complete review and queue selected replacements",
+    );
+    if (!complete) throw new Error("Expected replacement completion");
+    await act(async () => complete.click());
+
+    expect(commands).toEqual([expect.objectContaining({
+      replacementEncodes: [
+        expect.objectContaining({ predecessorEncodeJobId: "predecessor-1" }),
+        expect.objectContaining({ predecessorEncodeJobId: "predecessor-2" }),
+      ],
+    })]);
+  });
+
+  it("drops a selected replacement when live refresh removes it from the same page", async () => {
+    const initial = catalogReview({
+      archiveId: "archive-a",
+      discLabel: "LIVE_REPLACEMENT_PLAN",
+    });
+    initial.replacementPlan = {
+      jobs: [{
+        predecessorEncodeJobId: "predecessor-1",
+        predecessorStatus: "completed",
+        predecessorReady: true,
+        replacementDiscSelectionId: initial.discSelections[0]!.id,
+        proposedEncodingProfileId: "profile-1",
+        proposedOutputPath: "/media/predecessor-1.mkv",
+      }],
+      encodingProfiles: [{
+        id: "profile-1",
+        displayName: "Profile",
+        version: 1,
+        isActive: true,
+      }],
+      jobsPage: {
+        offset: 0,
+        limit: 100,
+        hasPrevious: false,
+        hasNext: false,
+      },
+      encodingProfilesPage: {
+        offset: 0,
+        limit: 100,
+        hasPrevious: false,
+        hasNext: true,
+      },
+    };
+    const profilePaged: CatalogReviewDto = {
+      ...initial,
+      replacementPlan: {
+        ...initial.replacementPlan,
+        encodingProfilesPage: {
+          offset: 100,
+          limit: 100,
+          hasPrevious: true,
+          hasNext: false,
+        },
+      },
+    };
+    const refreshed: CatalogReviewDto = {
+      ...initial,
+      catalogRevision: "2026-08-11T06:01:00.000Z",
+      replacementPlan: {
+        ...initial.replacementPlan,
+        jobs: [],
+      },
+    };
+    const commands: unknown[] = [];
+    let getCount = 0;
+    vi.stubGlobal("fetch", vi.fn(async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (init?.method === "POST") {
+        commands.push(JSON.parse(String(init.body)) as unknown);
+        return Response.json({});
+      }
+      getCount += 1;
+      return Response.json(
+        getCount === 1 ? initial : getCount === 2 ? profilePaged : refreshed,
+      );
+    }));
+
+    await act(async () => {
+      root.render(
+        <CatalogReviewEditor
+          archiveId="archive-a"
+          activityRevision="activity-1"
+          onClose={() => undefined}
+          onCompleted={() => undefined}
+        />,
+      );
+    });
+    const selected = container.querySelector<HTMLInputElement>(
+      'input[name="replacement:predecessor-1:selected"]',
+    );
+    if (!selected) throw new Error("Expected replacement choice");
+    await act(async () => selected.click());
+    const nextProfiles = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Next Encoding Profiles",
+    );
+    if (!nextProfiles) throw new Error("Expected profile continuation");
+    await act(async () => nextProfiles.click());
+
+    await act(async () => {
+      root.render(
+        <CatalogReviewEditor
+          archiveId="archive-a"
+          activityRevision="activity-2"
+          onClose={() => undefined}
+          onCompleted={() => undefined}
+        />,
+      );
+    });
+    expect(container.querySelector(
+      'input[name="replacement:predecessor-1:selected"]',
+    )).toBeNull();
+    const complete = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent ===
+        "Complete review and queue selected replacements",
+    );
+    if (!complete) throw new Error("Expected replacement completion");
+    await act(async () => complete.click());
+
+    expect(commands).toEqual([expect.objectContaining({
+      replacementEncodes: [],
+    })]);
+  });
+
+  it("enforces the one-review limit after selecting one hundred paged replacements", async () => {
+    const first = catalogReview({
+      archiveId: "archive-a",
+      discLabel: "BOUNDED_REPLACEMENTS",
+    });
+    const profile = {
+      id: "profile-1",
+      displayName: "Profile",
+      version: 1,
+      isActive: true,
+    };
+    first.replacementPlan = {
+      jobs: Array.from({ length: 100 }, (_, index) => ({
+        predecessorEncodeJobId: `predecessor-${index + 1}`,
+        predecessorStatus: "completed" as const,
+        predecessorReady: true,
+        replacementDiscSelectionId: first.discSelections[0]!.id,
+        proposedEncodingProfileId: profile.id,
+        proposedOutputPath: `/media/predecessor-${index + 1}.mkv`,
+      })),
+      encodingProfiles: [profile],
+      jobsPage: {
+        offset: 0,
+        limit: 100,
+        hasPrevious: false,
+        hasNext: true,
+      },
+      encodingProfilesPage: {
+        offset: 0,
+        limit: 100,
+        hasPrevious: false,
+        hasNext: false,
+      },
+    };
+    const second: CatalogReviewDto = {
+      ...first,
+      replacementPlan: {
+        ...first.replacementPlan,
+        jobs: [{
+          predecessorEncodeJobId: "predecessor-101",
+          predecessorStatus: "completed",
+          predecessorReady: true,
+          replacementDiscSelectionId: first.discSelections[0]!.id,
+          proposedEncodingProfileId: profile.id,
+          proposedOutputPath: "/media/predecessor-101.mkv",
+        }],
+        jobsPage: {
+          offset: 100,
+          limit: 100,
+          hasPrevious: true,
+          hasNext: false,
+        },
+      },
+    };
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) =>
+      Response.json(String(input).includes("replacementOffset=100")
+        ? second
+        : first)));
+
+    await act(async () => renderCatalogReviewEditor("archive-a"));
+    const firstPageChoices = container.querySelectorAll<HTMLInputElement>(
+      'input[name$=":selected"]',
+    );
+    expect(firstPageChoices).toHaveLength(100);
+    await act(async () => {
+      for (const choice of firstPageChoices) choice.click();
+    });
+    const next = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Next affected Encode Jobs",
+    );
+    if (!next) throw new Error("Expected replacement continuation");
+    await act(async () => next.click());
+
+    const overflowChoice = container.querySelector<HTMLInputElement>(
+      'input[name="replacement:predecessor-101:selected"]',
+    );
+    expect(overflowChoice?.disabled).toBe(true);
+    expect(container.textContent).toContain(
+      "100 replacements selected — deselect one before choosing another",
+    );
+  });
+
+  it("reloads an open review when dashboard activity advances", async () => {
+    const requests: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      requests.push(String(input));
+      return Response.json(catalogReview({
+        archiveId: "archive-a",
+        discLabel: `LIVE_${requests.length}`,
+      }));
+    }));
+    const render = (activityRevision: string) => root.render(
+      <CatalogReviewEditor
+        archiveId="archive-a"
+        activityRevision={activityRevision}
+        onClose={() => undefined}
+        onCompleted={() => undefined}
+      />,
+    );
+
+    await act(async () => render("revision-1"));
+    expect(requests).toHaveLength(1);
+    await act(async () => render("revision-2"));
+    expect(requests).toHaveLength(2);
+    expect(container.textContent).toContain("Live 2");
+  });
+
   it("keeps the current archive visible when archive requests resolve out of order", async () => {
     const requests = stubDeferredCatalogReviewRequests();
 
@@ -989,6 +1370,7 @@ describe("CatalogReviewEditor", () => {
       action: "complete_review",
       catalogRevision: review.catalogRevision,
       outcome: "archive_only",
+      replacementEncodes: [],
     }]);
     expect(onCompleted).toHaveBeenCalledOnce();
   });
@@ -1292,6 +1674,7 @@ describe("CatalogReviewView", () => {
         action: "complete_review",
         catalogRevision: "2026-08-11T06:00:00.000Z",
         outcome: "reviewed_with_selections",
+        replacementEncodes: [],
       },
     } satisfies Record<CatalogReviewCommand["action"], CatalogReviewCommand>;
     const postedBodies: unknown[] = [];

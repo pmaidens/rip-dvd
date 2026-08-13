@@ -21,6 +21,7 @@ import type {
   OriginalDiscArchive,
   OriginalDiscArchiveId,
 } from "@rip-dvd/data-access";
+import { isCorrectedEncodePredecessorReady } from "@rip-dvd/data-access";
 import {
   decodeDvdTitleMap,
   type DvdTitle,
@@ -108,6 +109,7 @@ export interface DashboardArchiveJob {
 
 export interface DashboardEncodeJob {
   id: EncodeJobId;
+  activityRevision?: string;
   mediaTitle: string;
   mediaYear: number | null;
   encodingProfileName: string;
@@ -115,6 +117,14 @@ export interface DashboardEncodeJob {
   progressPhase: EncodeProgressPhase | null;
   progressPercent: number;
   progressEtaSeconds: number | null;
+  correctedReplacement?: {
+    predecessorId?: EncodeJobId;
+    predecessorStatus?: EncodeJobStatus;
+    predecessorReady?: boolean;
+    publicationAdmissionPending?: boolean;
+    successorId?: EncodeJobId;
+    successorStatus?: EncodeJobStatus;
+  };
   discSelectionCorrection?: {
     replacementDiscSelectionId: string;
     correctedMediaTitle: string;
@@ -129,6 +139,7 @@ export interface DashboardEncodeJob {
 
 export interface DashboardCatalogReviewItem {
   id: string;
+  activityRevision?: string;
   discLabel: string;
   discKind: DiscKind;
   archiveFormat: ArchiveFormat;
@@ -375,6 +386,13 @@ function readDashboardSnapshotRecords(
             },
           },
     ),
+  );
+  const encodeJobLinkSource = readSource(() =>
+    encodeJobSource.status === "error"
+      ? []
+      : access.encodeJobs.listCorrectionLinks(
+          encodeJobSource.value.map((job) => job.id),
+        )
   );
   const archiveSource = readSource(() =>
     access.catalog.listCatalogReviewArchives({
@@ -682,6 +700,7 @@ function readDashboardSnapshotRecords(
                 : undefined;
               return {
                 id: job.id,
+                activityRevision: job.updatedAt.toISOString(),
                 archiveRequestId: job.archiveRequestId,
                 attemptOrdinal: job.attemptOrdinal,
                 detectedDiscId: job.detectedDiscId,
@@ -700,6 +719,7 @@ function readDashboardSnapshotRecords(
 
   const encodeJobs =
     encodeJobSource.status === "error" ||
+    encodeJobLinkSource.status === "error" ||
     selectionSource.status === "error" ||
     selectionSupersessionSource.status === "error" ||
     correctedSelectionSource.status === "error" ||
@@ -737,8 +757,20 @@ function readDashboardSnapshotRecords(
               (selection) => selection.id,
             ),
           );
+          const relationshipJobs = encodeJobLinkSource.value;
+          const encodeJobsById = new Map(
+            relationshipJobs.map((job) => [job.id, job]),
+          );
+          const successorByPredecessorId = new Map(
+            relationshipJobs.flatMap((job) =>
+              job.predecessorEncodeJobId === null
+                ? []
+                : [[job.predecessorEncodeJobId, job] as const]
+            ),
+          );
           return loaded(
             encodeJobSource.value.map((job) => {
+              const relationshipJob = encodeJobsById.get(job.id);
               const selection = selectionsById.get(job.discSelectionId);
               const mediaItem = selection
                 ? mediaItemsById.get(selection.mediaItemId)
@@ -755,6 +787,10 @@ function readDashboardSnapshotRecords(
               const correctedMediaItem = correctedSelection
                 ? mediaItemsById.get(correctedSelection.mediaItemId)
                 : undefined;
+              const predecessor = job.predecessorEncodeJobId === null
+                ? undefined
+                : encodeJobsById.get(job.predecessorEncodeJobId);
+              const successor = successorByPredecessorId.get(job.id);
               return {
                 id: job.id,
                 mediaTitle: mediaItem?.title ?? "Unknown Media Item",
@@ -767,6 +803,29 @@ function readDashboardSnapshotRecords(
                 progressPhase: job.progressPhase,
                 progressPercent: job.progressPercent,
                 progressEtaSeconds: job.progressEtaSeconds,
+                ...(predecessor || successor
+                  ? {
+                      correctedReplacement: {
+                        ...(predecessor
+                          ? {
+                              predecessorId: predecessor.id,
+                              predecessorStatus: predecessor.status,
+                              predecessorReady:
+                                isCorrectedEncodePredecessorReady(predecessor),
+                              publicationAdmissionPending:
+                                relationshipJob?.correctedPublicationAdmitted !==
+                                  true,
+                            }
+                          : {}),
+                        ...(successor
+                          ? {
+                              successorId: successor.id,
+                              successorStatus: successor.status,
+                            }
+                          : {}),
+                      },
+                    }
+                  : {}),
                 ...(supersession === undefined
                   ? {}
                   : {
@@ -801,6 +860,7 @@ function readDashboardSnapshotRecords(
           status: "loaded" as const,
           items: catalogReviewArchives.map((archive) => ({
             id: archive.id,
+            activityRevision: archive.updatedAt.toISOString(),
             discLabel: archive.discLabel,
             discKind: archive.discKind,
             archiveFormat: archive.archiveFormat,

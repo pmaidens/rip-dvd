@@ -94,7 +94,7 @@ describe("CatalogReviewCompletion", () => {
     expect(html).toContain("1 main-feature selection");
     expect(html).toContain("Coverage always includes the complete archive");
     expect(html).toContain("Complete review");
-    expect(html).toContain('<button type="button">Complete review</button>');
+    expect(html).toContain('<button type="submit">Complete review</button>');
     expect(html).toContain("Archive only");
     expect(html).toContain(
       "Archive only is unavailable while Disc Selections are active",
@@ -131,5 +131,64 @@ describe("CatalogReviewCompletion", () => {
     expect(html).toContain("Complete review");
     expect(html).not.toContain('type="button" disabled=""');
     expect(html).not.toContain("dialog");
+  });
+
+  it("shows corrected replacement jobs as explicit unchecked choices with prior defaults", () => {
+    const html = renderToStaticMarkup(
+      <CatalogReviewCompletion
+        isSaving={false}
+        coverage={coverage}
+        reviewOutcome="needs_review"
+        archiveOnlySelected={false}
+        replacementPlan={{
+          jobs: [{
+            predecessorEncodeJobId: "predecessor-1",
+            predecessorStatus: "cancellation_requested",
+            predecessorReady: false,
+            replacementDiscSelectionId: "replacement-selection-1",
+            proposedEncodingProfileId: "profile-prior",
+            proposedOutputPath: "/media/movies/Prior output.mkv",
+          }],
+          encodingProfiles: [
+            {
+              id: "profile-prior",
+              displayName: "Prior profile",
+              version: 2,
+              isActive: false,
+            },
+            {
+              id: "profile-active",
+              displayName: "Active profile",
+              version: 3,
+              isActive: true,
+            },
+          ],
+          jobsPage: {
+            offset: 0,
+            limit: 100,
+            hasPrevious: false,
+            hasNext: false,
+          },
+          encodingProfilesPage: {
+            offset: 0,
+            limit: 100,
+            hasPrevious: false,
+            hasNext: false,
+          },
+        }}
+        onArchiveOnlyChange={() => undefined}
+        onComplete={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("Corrected replacement encodes");
+    expect(html).toContain("Waiting for previous encode to stop");
+    expect(html).toContain("Queue corrected replacement");
+    expect(html).toContain("Encode Job predecessor-1");
+    expect(html).toContain('name="replacement:predecessor-1:selected"');
+    expect(html).not.toContain('name="replacement:predecessor-1:selected" checked');
+    expect(html).toContain('value="profile-prior" selected');
+    expect(html).toContain('value="/media/movies/Prior output.mkv"');
+    expect(html).toContain("Complete review and queue selected replacements");
   });
 });

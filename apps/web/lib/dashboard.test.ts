@@ -106,6 +106,67 @@ describe("readDashboardSnapshot", () => {
     });
   });
 
+  it("loads a displayed replacement's predecessor outside the history window", () => {
+    const access = dataAccessFixture.create();
+    const { archive, job: predecessor, selection } = seedEncodeJob(access);
+    const predecessorClaim = access.encodeJobs.claimNext("old-predecessor");
+    if (!predecessorClaim) throw new Error("Expected old predecessor claim");
+    access.encodeJobs.complete(predecessorClaim);
+    const newerProfile = access.encodingProfiles.create({
+      key: "newer-history-profile",
+      displayName: "Newer history profile",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    access.encodeJobs.enqueue({
+      discSelectionId: selection.id,
+      encodingProfileId: newerProfile.id,
+      outputPath: "/media/movies/newer-history.mkv",
+    });
+    const newerClaim = access.encodeJobs.claimNext("newer-history");
+    if (!newerClaim) throw new Error("Expected newer history claim");
+    access.encodeJobs.complete(newerClaim);
+    const correctedItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Linked outside history",
+    });
+    const correction = access.catalog.correctDiscSelection(selection.id, {
+      originalDiscArchiveId: archive.id,
+      catalogRevision: access.catalog.listOriginalDiscArchives({
+        ids: [archive.id],
+      })[0]!.updatedAt,
+      mediaItemId: correctedItem.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    const successor = access.catalog.completeCatalogReviewWithReplacements(
+      archive.id,
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+        .updatedAt,
+      "reviewed_with_selections",
+      [{
+        predecessorEncodeJobId: predecessor.id,
+        encodingProfileId: newerProfile.id,
+        outputPath: "/media/movies/linked-outside-history.mkv",
+      }],
+    ).replacementEncodeJobs[0]!;
+
+    const snapshot = readDashboardSnapshot(access, { activityLimit: 1 });
+    expect(snapshot.encodeJobs).toEqual({
+      status: "loaded",
+      items: expect.arrayContaining([expect.objectContaining({
+        id: successor.id,
+        mediaTitle: correctedItem.title,
+        correctedReplacement: {
+          predecessorId: predecessor.id,
+          predecessorStatus: "completed",
+          predecessorReady: true,
+          publicationAdmissionPending: true,
+        },
+      })]),
+    });
+    expect(correction.discSelection.id).toBe(successor.discSelectionId);
+  });
+
   it("serializes explicit verification results without exposing paths", async () => {
     const access = dataAccessFixture.create();
     const { job } = seedEncodeJob(access);

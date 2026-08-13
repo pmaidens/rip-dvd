@@ -988,8 +988,35 @@ retry supplies a different path. A failed job without a retained output may
 move to the requested path. Repeated submissions also leave queued and running
 rows unchanged.
 
+When a Disc Selection Correction affects existing Encode Jobs, the Catalog
+Review completion panel lists those jobs and proposes each prior Encoding
+Profile and final output path. Replacement encoding is explicit per job:
+leaving every choice unchecked completes the review without replacements,
+while selected jobs may retain or override either proposal. One catalog
+revision transaction queues at most 100 selected replacements, completes the
+review, records every predecessor link, and transfers any same-path
+reservation. Paged choices remain reachable, but the workbench requires an
+operator to keep that one-review selection within the displayed atomic limit.
+Replacement jobs display `Waiting for previous encode to stop` until the
+predecessor is safely completed, failed, or cancelled with cleanup and
+publication fences clear, then change to `Waiting for corrected publication
+support` through the live dashboard event stream. Completed predecessors and
+failed/cancelled predecessors that retain a prior final give same-path
+successors replacement authority; failed predecessors without a retained final
+do not. This workflow
+releases a failed non-retained predecessor's obsolete reservation at review
+completion, or after any fenced cleanup later finishes. Cancelling a queued
+same-path corrected successor retains the transferred reservation so the path
+cannot be claimed while its predecessor stops or protects a final. It plans and queues
+corrected encodes, but an explicit admission fence keeps linked jobs out of the
+generic worker publication path. The subsequent corrected-output publication
+workflow owns opening that fence together with its durable corrected-output
+provenance and superseded-output archival contract.
+
 The queue reserves each final output path for one logical job and keeps the
-database uniqueness constraint on Disc Selection plus Encoding Profile version.
+database uniqueness constraint on Disc Selection plus Encoding Profile version
+for ordinary initial jobs. Corrected lineage may retain multiple same-profile
+jobs for one active selection, with one distinct successor per predecessor.
 The dashboard shows the referenced profile version with queued, running,
 cancellation-requested, completed, failed, and cancelled state.
 `GET /api/encode-jobs` independently

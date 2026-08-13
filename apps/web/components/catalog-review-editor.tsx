@@ -20,6 +20,7 @@ import type {
   MappingProposal,
   SaveMediaItemInput,
 } from "./catalog-review-model";
+import type { CatalogReviewReplacementEncodeInput } from "../lib/catalog-review-command";
 import { useCatalogReviewState } from "./catalog-review-state";
 
 interface CatalogReviewViewProps {
@@ -39,6 +40,8 @@ interface CatalogReviewViewProps {
   onCancelEdit(): void;
   onDiscSelectionsPage(offset: number): void;
   onCorrectionHistoryPage(offset: number): void;
+  onReplacementJobsPage?(offset: number): void;
+  onReplacementProfilesPage?(offset: number): void;
   onSelectionKindChange(kind: DiscSelectionKind): void;
   onArchiveOnlyChange(selected: boolean): void;
   onStartMappingProposal(proposal: MappingProposal): void;
@@ -53,7 +56,10 @@ interface CatalogReviewViewProps {
   onDeleteMediaItem(id: string): void;
   onCreateDiscSelection(input: CreateDiscSelectionInput): void;
   onDeleteDiscSelection(id: string): void;
-  onCompleteReview(outcome: CompletedCatalogReviewOutcome): void;
+  onCompleteReview(
+    outcome: CompletedCatalogReviewOutcome,
+    replacements: CatalogReviewReplacementEncodeInput[],
+  ): void;
 }
 
 export function CatalogReviewView({
@@ -73,6 +79,8 @@ export function CatalogReviewView({
   onCancelEdit,
   onDiscSelectionsPage,
   onCorrectionHistoryPage,
+  onReplacementJobsPage,
+  onReplacementProfilesPage,
   onSelectionKindChange,
   onArchiveOnlyChange,
   onStartMappingProposal,
@@ -201,7 +209,10 @@ export function CatalogReviewView({
             coverage={review.coverage}
             reviewOutcome={review.reviewOutcome}
             archiveOnlySelected={archiveOnlySelected}
+            replacementPlan={review.replacementPlan}
             onArchiveOnlyChange={onArchiveOnlyChange}
+            onReplacementJobsPage={onReplacementJobsPage}
+            onReplacementProfilesPage={onReplacementProfilesPage}
             onComplete={onCompleteReview}
           />
         </section>
@@ -212,14 +223,20 @@ export function CatalogReviewView({
 
 export function CatalogReviewEditor({
   archiveId,
+  activityRevision,
   onClose,
   onCompleted,
 }: {
   archiveId: string;
+  activityRevision?: string;
   onClose(): void;
   onCompleted(): void;
 }) {
-  const review = useCatalogReviewState({ archiveId, onCompleted });
+  const review = useCatalogReviewState({
+    archiveId,
+    activityRevision,
+    onCompleted,
+  });
 
   return (
     <CatalogReviewView
@@ -239,6 +256,8 @@ export function CatalogReviewEditor({
       onCancelEdit={review.cancelEdit}
       onDiscSelectionsPage={review.changeDiscSelectionOffset}
       onCorrectionHistoryPage={review.changeCorrectionHistoryOffset}
+      onReplacementJobsPage={review.changeReplacementOffset}
+      onReplacementProfilesPage={review.changeReplacementProfileOffset}
       onSelectionKindChange={review.changeSelectionKind}
       onArchiveOnlyChange={review.changeArchiveOnlySelected}
       onStartMappingProposal={review.startMappingProposal}

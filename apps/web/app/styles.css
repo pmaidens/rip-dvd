@@ -1256,6 +1256,47 @@ h1 {
   border-top: 1px solid #29483f;
 }
 
+.catalog-replacement-plan {
+  margin: 0;
+  padding: 1rem;
+  border: 1px solid #365149;
+  border-radius: 0.65rem;
+}
+
+.catalog-replacement-plan legend {
+  padding: 0 0.4rem;
+  color: #eef4f1;
+  font-weight: 700;
+}
+
+.catalog-replacement-jobs {
+  display: grid;
+  gap: 1rem;
+  margin: 1rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.catalog-replacement-jobs > li {
+  padding: 0.9rem;
+  border: 1px solid #29483f;
+  border-radius: 0.55rem;
+  background: #0b1b17;
+}
+
+.catalog-replacement-jobs > li > label {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  color: #eef4f1;
+  font-weight: 700;
+}
+
+.catalog-replacement-jobs .encode-job-fields {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  margin-top: 0.75rem;
+}
+
 .catalog-archive-only-choice label,
 .catalog-complete-submit {
   display: flex;

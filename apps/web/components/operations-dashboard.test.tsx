@@ -15,6 +15,7 @@ import {
   DashboardConnectionStatus,
   DashboardView,
   OperationsDashboard,
+  catalogReviewActivityRevision,
   requestActionOverview,
   requestArchiveApproval,
   requestFilesystemVerification,
@@ -43,6 +44,67 @@ const sectionNames = [
 function render(state: DashboardLoadState): string {
   return renderToStaticMarkup(<DashboardView state={state} />);
 }
+
+it("keeps an open review revision stable across unchanged SSE heartbeats", () => {
+  const state: DashboardLoadState = {
+    generatedAt: "2026-08-13T16:00:00.000Z",
+    opticalDrives: { status: "loaded", items: [] },
+    detectedDiscs: { status: "loaded", items: [] },
+    archiveJobs: { status: "loaded", items: [] },
+    encodeJobs: {
+      status: "loaded",
+      items: [{
+        id: "affected-job" as EncodeJobId,
+        mediaTitle: "Affected",
+        mediaYear: null,
+        encodingProfileName: "Profile · Version 1",
+        status: "cancellation_requested",
+        progressPhase: null,
+        progressPercent: 0,
+        progressEtaSeconds: null,
+        activityRevision: "2026-08-13T15:59:59.000Z",
+        discSelectionCorrection: {
+          replacementDiscSelectionId: "replacement-selection",
+          correctedMediaTitle: "Corrected",
+          reason: null,
+        },
+      }],
+    },
+    catalogReview: {
+      status: "loaded",
+      items: [{
+        id: "archive-a",
+        discLabel: "DISC",
+        discKind: "dvd",
+        archiveFormat: "iso",
+        archivedAt: "2026-08-13T12:00:00.000Z",
+        catalogReviewedAt: null,
+        catalogReviewOutcome: "needs_review",
+        mappedMediaItemCount: 1,
+        mappedMediaItemTitles: ["Corrected"],
+        activityRevision: "2026-08-13T15:59:58.000Z",
+      }],
+    },
+  };
+  const first = catalogReviewActivityRevision(state, "archive-a");
+  expect(catalogReviewActivityRevision({
+    ...state,
+    generatedAt: "2026-08-13T16:00:01.000Z",
+  }, "archive-a")).toBe(first);
+  const encodeJobs = state.encodeJobs.status === "loaded"
+    ? state.encodeJobs
+    : { status: "loaded" as const, items: [] };
+  expect(catalogReviewActivityRevision({
+    ...state,
+    encodeJobs: {
+      ...encodeJobs,
+      items: encodeJobs.items.map((job) => ({
+        ...job,
+        activityRevision: "2026-08-13T16:00:01.000Z",
+      })),
+    },
+  }, "archive-a")).not.toBe(first);
+});
 
 function expectEverySection(html: string): void {
   for (const sectionName of sectionNames) {
@@ -346,6 +408,37 @@ describe("DashboardView", () => {
             progressEtaSeconds: null,
           },
           {
+            id: "waiting-replacement" as EncodeJobId,
+            mediaTitle: "Waiting replacement",
+            mediaYear: null,
+            encodingProfileName: "DVD library · Version 1",
+            status: "queued",
+            progressPhase: null,
+            progressPercent: 0,
+            progressEtaSeconds: null,
+            correctedReplacement: {
+              predecessorId: "waiting-predecessor" as EncodeJobId,
+              predecessorStatus: "cancellation_requested",
+              predecessorReady: false,
+            },
+          },
+          {
+            id: "ready-replacement" as EncodeJobId,
+            mediaTitle: "Ready replacement",
+            mediaYear: null,
+            encodingProfileName: "DVD library · Version 1",
+            status: "queued",
+            progressPhase: null,
+            progressPercent: 0,
+            progressEtaSeconds: null,
+            correctedReplacement: {
+              predecessorId: "ready-predecessor" as EncodeJobId,
+              predecessorStatus: "completed",
+              predecessorReady: true,
+              publicationAdmissionPending: true,
+            },
+          },
+          {
             id: "running-encode" as EncodeJobId,
             mediaTitle: "Running Movie",
             mediaYear: null,
@@ -396,6 +489,8 @@ describe("DashboardView", () => {
     expect(html).toContain("Request cancellation");
     expect(html).toContain("Cancellation requested");
     expect(html).toContain("Waiting for HandBrake to stop safely");
+    expect(html).toContain("Waiting for previous encode to stop");
+    expect(html).toContain("Waiting for corrected publication support");
     expect(html).toContain("status status-cancellation_requested");
     expect(html).toContain("Requeue encode");
     expect(html).toContain("status status-cancelled");

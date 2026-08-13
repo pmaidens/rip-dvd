@@ -1,6 +1,8 @@
 import type {
   CompletedCatalogReviewOutcome,
   DiscSelectionSourceIdentityInput,
+  EncodeJobId,
+  EncodingProfileId,
   MediaItemKind,
 } from "@rip-dvd/data-access";
 import {
@@ -21,6 +23,7 @@ export const CATALOG_REVIEW_COMMAND_ACTIONS = [
   "delete_disc_selection",
   "complete_review",
 ] as const;
+export const MAX_CATALOG_REVIEW_REPLACEMENT_ENCODES = 100;
 
 export interface CatalogReviewCommandDomainValues {
   mediaItemKinds: readonly MediaItemKind[];
@@ -96,6 +99,13 @@ export interface CatalogReviewEpisodicEpisodeInput {
   label?: string;
 }
 
+export interface CatalogReviewReplacementEncodeInput {
+  predecessorEncodeJobId: EncodeJobId;
+  encodingProfileId: EncodingProfileId;
+  outputPath: string;
+  priority?: number;
+}
+
 export type CatalogReviewCommand =
   | {
       action: "create_episodic_mapping_proposal";
@@ -147,6 +157,7 @@ export type CatalogReviewCommand =
       action: "complete_review";
       catalogRevision: string;
       outcome: CompletedCatalogReviewOutcome;
+      replacementEncodes: CatalogReviewReplacementEncodeInput[];
     };
 
 export type CatalogReviewCommandValidationError =
@@ -164,6 +175,7 @@ export type CatalogReviewCommandValidationError =
   | "Invalid Media Item episodeNumber"
   | "Invalid Disc Selection"
   | "Invalid Disc Selection Correction"
+  | "Invalid corrected Encode replacement plan"
   | "Invalid catalog review revision"
   | "Invalid catalog review outcome";
 
@@ -544,6 +556,60 @@ function parseDiscSelectionInput(
   };
 }
 
+function parseReplacementEncodes(
+  value: unknown,
+): CatalogReviewReplacementEncodeInput[] | null {
+  if (value === undefined) {
+    return [];
+  }
+  if (
+    !Array.isArray(value) ||
+    value.length > MAX_CATALOG_REVIEW_REPLACEMENT_ENCODES
+  ) {
+    return null;
+  }
+  const predecessorIds = new Set<string>();
+  const replacements: CatalogReviewReplacementEncodeInput[] = [];
+  for (const valueEntry of value) {
+    const entry = asRecord(valueEntry);
+    const predecessorEncodeJobId = boundedString(
+      entry?.predecessorEncodeJobId,
+    );
+    const encodingProfileId = boundedString(entry?.encodingProfileId);
+    const outputPath = boundedString(entry?.outputPath, 4_096);
+    const priority = optionalInteger(
+      entry?.priority,
+      -Number.MAX_SAFE_INTEGER,
+      Number.MAX_SAFE_INTEGER,
+    );
+    if (
+      !entry ||
+      !predecessorEncodeJobId ||
+      !encodingProfileId ||
+      !outputPath ||
+      (entry.priority !== undefined && priority === undefined) ||
+      predecessorIds.has(predecessorEncodeJobId) ||
+      !hasOnlyFields(entry, [
+        "predecessorEncodeJobId",
+        "encodingProfileId",
+        "outputPath",
+        "priority",
+      ])
+    ) {
+      return null;
+    }
+    predecessorIds.add(predecessorEncodeJobId);
+    replacements.push({
+      predecessorEncodeJobId:
+        predecessorEncodeJobId as EncodeJobId,
+      encodingProfileId: encodingProfileId as EncodingProfileId,
+      outputPath,
+      ...(typeof priority === "number" ? { priority } : {}),
+    });
+  }
+  return replacements;
+}
+
 export function parseCatalogReviewCommand(
   value: unknown,
   domainValues: CatalogReviewCommandDomainValues,
@@ -678,12 +744,24 @@ export function parseCatalogReviewCommand(
         return invalid("Invalid catalog review revision");
       }
       const outcome = completedCatalogReviewOutcome(body.outcome);
-      return outcome
+      const replacementEncodes = parseReplacementEncodes(
+        body.replacementEncodes,
+      );
+      return outcome && replacementEncodes
         ? {
             ok: true,
-            command: { action, catalogRevision: revision, outcome },
+            command: {
+              action,
+              catalogRevision: revision,
+              outcome,
+              replacementEncodes,
+            },
           }
-        : invalid("Invalid catalog review outcome");
+        : invalid(
+          outcome
+            ? "Invalid corrected Encode replacement plan"
+            : "Invalid catalog review outcome",
+        );
     }
     default:
       return invalid("Unknown catalog review mutation");
