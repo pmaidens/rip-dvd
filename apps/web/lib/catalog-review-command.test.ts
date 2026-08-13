@@ -6,6 +6,7 @@ import {
 
 import {
   CATALOG_REVIEW_COMMAND_ACTIONS,
+  MAX_CATALOG_REVIEW_REPLACEMENT_ENCODES,
   parseCatalogReviewCommand,
   type CatalogReviewCommand,
 } from "./catalog-review-command";
@@ -129,6 +130,7 @@ const validCommands = {
     action: "complete_review",
     catalogRevision: "2026-08-11T06:00:00.000Z",
     outcome: "reviewed_with_selections",
+    replacementEncodes: [],
   },
 } satisfies Record<CatalogReviewCommand["action"], CatalogReviewCommand>;
 
@@ -179,7 +181,31 @@ describe("catalog review command contract", () => {
       outcome: "archive_only",
     } as const;
 
-    expect(parseCommand(command)).toEqual({ ok: true, command });
+    expect(parseCommand(command)).toEqual({
+      ok: true,
+      command: { ...command, replacementEncodes: [] },
+    });
+  });
+
+  it("rejects a replacement selection beyond the atomic review limit", () => {
+    const replacementEncodes = Array.from(
+      { length: MAX_CATALOG_REVIEW_REPLACEMENT_ENCODES + 1 },
+      (_, index) => ({
+        predecessorEncodeJobId: `predecessor-${index}`,
+        encodingProfileId: "profile-1",
+        outputPath: `/media/replacement-${index}.mkv`,
+      }),
+    );
+
+    expect(parseCommand({
+      action: "complete_review",
+      catalogRevision: "2026-08-11T06:00:00.000Z",
+      outcome: "reviewed_with_selections",
+      replacementEncodes,
+    })).toEqual({
+      ok: false,
+      error: "Invalid corrected Encode replacement plan",
+    });
   });
 
   it.each([

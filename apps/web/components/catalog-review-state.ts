@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { CompletedCatalogReviewOutcome } from "@rip-dvd/data-access";
 
 import type { CatalogReviewCommand } from "../lib/catalog-review-command";
+import type { CatalogReviewReplacementEncodeInput } from "../lib/catalog-review-command";
 import type {
   CatalogReviewDto,
   CatalogReviewLoadState,
@@ -60,11 +61,19 @@ export async function requestCatalogReview(
   discSelectionOffset: number,
   fetcher: CatalogReviewFetch = fetch,
   correctionHistoryOffset = 0,
+  replacementOffset = 0,
+  replacementProfileOffset = 0,
 ): Promise<CatalogReviewDto> {
   const query = new URLSearchParams({
     selectionOffset: String(discSelectionOffset),
     correctionOffset: String(correctionHistoryOffset),
   });
+  if (replacementOffset > 0) {
+    query.set("replacementOffset", String(replacementOffset));
+  }
+  if (replacementProfileOffset > 0) {
+    query.set("replacementProfileOffset", String(replacementProfileOffset));
+  }
   const response = await fetcher(
     `/api/catalog-reviews/${encodeURIComponent(archiveId)}?${query.toString()}`,
     { cache: "no-store", headers: { Accept: "application/json" } },
@@ -125,11 +134,13 @@ export async function mutateCatalogReview(
 
 interface UseCatalogReviewStateOptions {
   archiveId: string;
+  activityRevision?: string;
   onCompleted(): void;
 }
 
 export function useCatalogReviewState({
   archiveId,
+  activityRevision,
   onCompleted,
 }: UseCatalogReviewStateOptions) {
   const [state, setState] = useState<CatalogReviewLoadState>({
@@ -140,6 +151,8 @@ export function useCatalogReviewState({
   );
   const [discSelectionOffset, setDiscSelectionOffset] = useState(0);
   const [correctionHistoryOffset, setCorrectionHistoryOffset] = useState(0);
+  const [replacementOffset, setReplacementOffset] = useState(0);
+  const [replacementProfileOffset, setReplacementProfileOffset] = useState(0);
   const [selectionKind, setSelectionKind] =
     useState<DiscSelectionKind>("main_feature");
   const [archiveOnlySelected, setArchiveOnlySelected] = useState(false);
@@ -158,6 +171,7 @@ export function useCatalogReviewState({
   >(null);
   requestScope.current ??= createCatalogReviewRequestScope(archiveId);
   requestScope.current.activate(archiveId);
+  const observedActivityRevision = useRef(activityRevision);
 
   const load = useCallback(async () => {
     const request = requestScope.current?.begin(archiveId);
@@ -170,6 +184,8 @@ export function useCatalogReviewState({
         discSelectionOffset,
         fetch,
         correctionHistoryOffset,
+        replacementOffset,
+        replacementProfileOffset,
       );
       if (!requestScope.current?.isCurrent(archiveId, request)) {
         return;
@@ -186,12 +202,26 @@ export function useCatalogReviewState({
     archiveId,
     discSelectionOffset,
     correctionHistoryOffset,
+    replacementOffset,
+    replacementProfileOffset,
   ]);
 
   useEffect(() => {
-    setState({ status: "loading" });
+    setState((current) => current.status === "loaded"
+      ? current
+      : { status: "loading" });
     void load();
   }, [load]);
+
+  useEffect(() => {
+    if (
+      activityRevision !== undefined &&
+      observedActivityRevision.current !== activityRevision
+    ) {
+      observedActivityRevision.current = activityRevision;
+      void load();
+    }
+  }, [activityRevision, load]);
 
   useEffect(() => {
     setActiveMappingProposal(null);
@@ -280,6 +310,18 @@ export function useCatalogReviewState({
     setCorrectionHistoryOffset(offset);
   }
 
+  function changeReplacementOffset(offset: number) {
+    if (replacementOffset === offset) return;
+    requestScope.current?.invalidate(archiveId);
+    setReplacementOffset(offset);
+  }
+
+  function changeReplacementProfileOffset(offset: number) {
+    if (replacementProfileOffset === offset) return;
+    requestScope.current?.invalidate(archiveId);
+    setReplacementProfileOffset(offset);
+  }
+
   function saveMediaItem(input: SaveMediaItemInput) {
     const { id, ...values } = input;
     void mutate(
@@ -364,6 +406,8 @@ export function useCatalogReviewState({
     cancelEdit: () => changeEditingMediaItem(null),
     changeDiscSelectionOffset,
     changeCorrectionHistoryOffset,
+    changeReplacementOffset,
+    changeReplacementProfileOffset,
     changeSelectionKind: setSelectionKind,
     changeArchiveOnlySelected: setArchiveOnlySelected,
     startMappingProposal: (proposal: MappingProposal) => {
@@ -396,12 +440,16 @@ export function useCatalogReviewState({
     createDiscSelection,
     deleteDiscSelection: (discSelectionId: string) =>
       void mutate({ action: "delete_disc_selection", discSelectionId }),
-    completeReview: (outcome: CompletedCatalogReviewOutcome) => {
+    completeReview: (
+      outcome: CompletedCatalogReviewOutcome,
+      replacementEncodes: CatalogReviewReplacementEncodeInput[],
+    ) => {
       if (state.status === "loaded") {
         void mutate({
           action: "complete_review",
           catalogRevision: state.review.catalogRevision,
           outcome,
+          replacementEncodes,
         }, true);
       }
     },
