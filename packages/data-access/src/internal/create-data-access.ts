@@ -478,11 +478,39 @@ export function createDataAccessInternal(
       provenance.retainedOutputPath,
       "retainedOutputPath",
     );
+    const retainedOutputIdentity = provenance.retainedOutputIdentity;
     if (
       job.predecessorEncodeJobId === null ||
-      job.replacementOutputIdentity === null ||
-      provenance.retainedOutputIdentity !== job.replacementOutputIdentity
+      retainedOutputIdentity === undefined ||
+      (
+        job.replacementOutputIdentity !== null &&
+        retainedOutputIdentity !== job.replacementOutputIdentity
+      )
     ) {
+      throw new DomainInvariantError(
+        "Retained Encode output requires corrected replacement provenance",
+      );
+    }
+    const existing = transaction
+      .select()
+      .from(retainedEncodeOutputs)
+      .where(eq(retainedEncodeOutputs.retainedOutputPath, retainedOutputPath))
+      .get();
+    if (existing !== undefined) {
+      if (
+        existing.predecessorEncodeJobId !== job.predecessorEncodeJobId ||
+        existing.replacementEncodeJobId !== job.id ||
+        existing.filesystemIdentity !== retainedOutputIdentity ||
+        existing.state !== "retained" ||
+        !existing.cleanupEligible
+      ) {
+        throw new DomainInvariantError(
+          "Retained Encode output provenance conflicts with publication",
+        );
+      }
+      return;
+    }
+    if (job.replacementOutputIdentity === null) {
       throw new DomainInvariantError(
         "Retained Encode output requires corrected replacement provenance",
       );
@@ -494,7 +522,7 @@ export function createDataAccessInternal(
         predecessorEncodeJobId: job.predecessorEncodeJobId,
         replacementEncodeJobId: job.id,
         retainedOutputPath,
-        filesystemIdentity: job.replacementOutputIdentity,
+        filesystemIdentity: retainedOutputIdentity,
         state: "retained",
         cleanupEligible: true,
         retainedAt: timestamp,
@@ -510,8 +538,9 @@ export function createDataAccessInternal(
       .get();
     if (
       retained?.predecessorEncodeJobId !== job.predecessorEncodeJobId ||
+      retained.replacementEncodeJobId !== job.id ||
       retained.retainedOutputPath !== retainedOutputPath ||
-      retained.filesystemIdentity !== job.replacementOutputIdentity ||
+      retained.filesystemIdentity !== retainedOutputIdentity ||
       retained.state !== "retained" ||
       !retained.cleanupEligible
     ) {

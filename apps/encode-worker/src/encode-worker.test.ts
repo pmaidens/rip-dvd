@@ -193,6 +193,11 @@ const completionCommitRace = vi.hoisted(() => ({
   triggered: false,
 }));
 
+const postFinalizationCleanupFailure = vi.hoisted(() => ({
+  armed: false,
+  triggered: false,
+}));
+
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:child_process")>();
   return {
@@ -616,6 +621,20 @@ vi.mock("node:fs/promises", async (importOriginal) => {
       }
       await publishCompetitorAfterQuarantine(sourcePath, destinationPath);
     },
+    unlink: async (path: string) => {
+      if (
+        postFinalizationCleanupFailure.armed &&
+        !postFinalizationCleanupFailure.triggered &&
+        path.endsWith(".rip-dvd-partial")
+      ) {
+        postFinalizationCleanupFailure.triggered = true;
+        throw Object.assign(
+          new Error("simulated process interruption before publication cleanup"),
+          { code: "EIO" },
+        );
+      }
+      await actual.unlink(path);
+    },
   };
 });
 
@@ -695,6 +714,8 @@ afterEach(() => {
   completionCommitRace.finalPath = "";
   completionCommitRace.mode = "commit";
   completionCommitRace.triggered = false;
+  postFinalizationCleanupFailure.armed = false;
+  postFinalizationCleanupFailure.triggered = false;
   publicationRace.resume?.();
   publicationRace.armed = false;
   publicationRace.finalPath = "";
@@ -1976,6 +1997,73 @@ describe("encode worker polling", () => {
       "incorrect final",
     );
     vi.useRealTimers();
+    fixture.access.close();
+  });
+
+  it("resumes corrected cleanup after publication provenance was finalized", async () => {
+    const { fixture, replacement, workerOptions } =
+      await createCorrectedReplacementFixture();
+    postFinalizationCleanupFailure.armed = true;
+
+    await pollEncodeWorker({
+      ...workerOptions,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "corrected before cleanup crash", {
+            flag: "wx",
+          });
+        }),
+      },
+      workerId: "corrected-finalization-crash",
+    });
+
+    expect(postFinalizationCleanupFailure.triggered).toBe(true);
+    expect(readFileSync(fixture.outputPath, "utf8")).toBe(
+      "corrected before cleanup crash",
+    );
+    expect(fixture.access.encodeJobs.list()).toContainEqual(
+      expect.objectContaining({
+        id: replacement.id,
+        publicationPending: true,
+        replacementOutputIdentity: null,
+        status: "completed",
+      }),
+    );
+    const retainedBeforeRecovery = fixture.access.encodeJobs
+      .listRetainedOutputs([replacement.id]);
+    expect(retainedBeforeRecovery).toEqual([
+      expect.objectContaining({
+        predecessorEncodeJobId: fixture.job.id,
+        replacementEncodeJobId: replacement.id,
+        state: "retained",
+      }),
+    ]);
+    expect(existsSync(retainedBeforeRecovery[0]!.retainedOutputPath)).toBe(
+      true,
+    );
+
+    postFinalizationCleanupFailure.armed = false;
+    await pollEncodeWorker({
+      ...workerOptions,
+      runner: { run: vi.fn() },
+      workerId: "corrected-finalization-recovery",
+    });
+
+    expect(readFileSync(fixture.outputPath, "utf8")).toBe(
+      "corrected before cleanup crash",
+    );
+    expect(fixture.access.encodeJobs.list()).toContainEqual(
+      expect.objectContaining({
+        id: replacement.id,
+        partialCleanupClaimToken: null,
+        publicationPending: false,
+        status: "completed",
+      }),
+    );
+    expect(fixture.access.encodeJobs.listRetainedOutputs([replacement.id]))
+      .toEqual(retainedBeforeRecovery);
+    expect(readFileSync(retainedBeforeRecovery[0]!.retainedOutputPath, "utf8"))
+      .toBe("incorrect final");
     fixture.access.close();
   });
 
