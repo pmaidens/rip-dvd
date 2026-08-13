@@ -59,7 +59,6 @@ export interface CatalogReviewDiscSelectionCorrection {
 
 export interface CatalogReviewDiscSelection
   extends CatalogReviewDiscSelectionSummary {
-  correctionHistory?: readonly CatalogReviewDiscSelectionCorrection[];
   actionAvailability: CatalogReviewDiscSelectionActionAvailability;
 }
 
@@ -78,6 +77,12 @@ export type CatalogReviewDiscSelectionActionAvailability =
       id: string;
       status: EncodeJobStatus;
     };
+  }
+  | {
+    state: "correction_lineage";
+    availableActions: readonly ["correct", "remove"];
+    reason: string;
+    relatedEncodeJob: null;
   }
   | {
     state: "needs_repair";
@@ -110,6 +115,13 @@ export interface CatalogReviewDto {
   rawScan: { titles: DvdTitle[] };
   coverage: CatalogReviewCoverage;
   mediaItems: CatalogReviewMediaItem[];
+  correctionHistory: CatalogReviewDiscSelectionCorrection[];
+  correctionHistoryPage: {
+    offset: number;
+    limit: number;
+    hasPrevious: boolean;
+    hasNext: boolean;
+  };
   discSelections: CatalogReviewDiscSelection[];
   discSelectionsPage: {
     offset: number;

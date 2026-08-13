@@ -274,6 +274,13 @@ export type DiscSelectionActionAvailability =
   }
   | {
     discSelectionId: DiscSelectionId;
+    state: "correction_lineage";
+    availableActions: readonly ["correct", "remove"];
+    reason: string;
+    relatedEncodeJob: null;
+  }
+  | {
+    discSelectionId: DiscSelectionId;
     state: "needs_repair";
     availableActions: readonly ["repair", "remove"] | readonly [];
     reason: string;
@@ -684,9 +691,19 @@ export interface CatalogAccess {
     limit?: number;
     offset?: number;
   }): DiscSelection[];
-  listDiscSelectionSupersessions(options: {
-    discSelectionIds: readonly DiscSelectionId[];
-  }): DiscSelectionSupersession[];
+  listDiscSelectionSupersessions(options:
+    | {
+      discSelectionIds: readonly DiscSelectionId[];
+      originalDiscArchiveId?: never;
+      limit?: never;
+      offset?: never;
+    }
+    | {
+      originalDiscArchiveId: OriginalDiscArchiveId;
+      limit: number;
+      offset?: number;
+      discSelectionIds?: never;
+    }): DiscSelectionSupersession[];
   listDiscSelectionActionAvailability(options: {
     ids: readonly DiscSelectionId[];
   }): DiscSelectionActionAvailability[];

@@ -128,10 +128,12 @@ Disc Selection mutation preserves three distinct identity paths:
   with its original profile, output, and actual outcome. Queued work is
   cancelled immediately, running work follows the shared cancellation
   lifecycle, and terminal outcomes remain terminal.
-- **Immutable correction lineage.** Catalog Review walks the bounded
-  predecessor chain so repeated corrections retain every old-to-new mapping
-  and operator reason. Removing a job-free replacement deactivates it rather
-  than deleting either endpoint or the immutable supersession link.
+- **Immutable correction lineage.** Catalog Review reads paginated,
+  archive-wide history so repeated corrections retain every old-to-new mapping
+  and operator reason even when no active replacement remains. A job-free
+  replacement already in the lineage cannot be repaired in place; a later
+  correction creates another supersession, while removal deactivates the
+  replacement rather than deleting either endpoint or an immutable link.
 - **Unsafe legacy quarantine.** A caller-era mapping that fails canonical-key or
   archived-scan validation is the only historical exception.
   `repairDiscSelection()` or `deleteDiscSelection()` deactivates the old Disc
@@ -146,9 +148,9 @@ Disc Selection mutation preserves three distinct identity paths:
   ineligible. Only their output-path reservations are released, so a corrected
   mapping can enqueue a new logical job at the same path.
 
-Job-free selections can still be removed normally. Selections that participate
-in correction lineage are retained inactive so their immutable links remain
-queryable.
+Ordinary job-free selections can still be removed normally. Selections that
+participate in correction lineage are retained inactive so their immutable
+links remain queryable.
 
 Catalog Review reads Disc Selection action availability through a dedicated
 facade query capped at 100 selection IDs. A job-free selection is editable and

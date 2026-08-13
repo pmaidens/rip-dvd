@@ -18,11 +18,14 @@ import { CatalogReviewPagination } from "./catalog-review-pagination";
 interface CatalogReviewDiscSelectionsProps {
   discSelections: CatalogReviewDiscSelection[];
   page: CatalogReviewDto["discSelectionsPage"];
+  correctionHistory: CatalogReviewDto["correctionHistory"];
+  correctionHistoryPage: CatalogReviewDto["correctionHistoryPage"];
   mediaItems: CatalogReviewMediaItem[];
   rawTitles: DvdTitle[];
   selectionKind: DiscSelectionKind;
   isSaving: boolean;
   onPage(offset: number): void;
+  onCorrectionHistoryPage(offset: number): void;
   onSelectionKindChange(kind: DiscSelectionKind): void;
   onCreate(input: CreateDiscSelectionInput): void;
   onDelete(id: string): void;
@@ -37,6 +40,7 @@ const discSelectionLabels = {
 const actionStateLabels = {
   editable: "Editable",
   locked_provenance: "Locked provenance",
+  correction_lineage: "Correction lineage",
   needs_repair: "Needs repair",
   changes_unavailable: "Changes unavailable",
 } as const;
@@ -66,11 +70,14 @@ function discSelectionDescription(
 export function CatalogReviewDiscSelections({
   discSelections,
   page,
+  correctionHistory,
+  correctionHistoryPage,
   mediaItems,
   rawTitles,
   selectionKind,
   isSaving,
   onPage,
+  onCorrectionHistoryPage,
   onSelectionKindChange,
   onCreate,
   onDelete,
@@ -128,9 +135,10 @@ export function CatalogReviewDiscSelections({
     });
   }
 
-  const hasJobBackedCorrection = discSelections.some(
+  const hasSupersessionCorrection = discSelections.some(
     (selection) =>
-      selection.actionAvailability.state === "locked_provenance" &&
+      (selection.actionAvailability.state === "locked_provenance" ||
+        selection.actionAvailability.state === "correction_lineage") &&
       hasAction(selection, "correct"),
   );
 
@@ -167,31 +175,6 @@ export function CatalogReviewDiscSelections({
                     Remove Disc Selection
                   </button>
                 ) : null}
-                {selection.correctionHistory?.length ? (
-                  <div className="selection-correction-history">
-                    <strong>Disc Selection Correction History</strong>
-                    <ol>
-                      {selection.correctionHistory.map((correction) => (
-                        <li key={correction.supersededDiscSelection.id}>
-                          <p>
-                            {itemsById.get(
-                              correction.supersededDiscSelection.mediaItemId,
-                            )?.title ?? "Unknown Media Item"} · {discSelectionDescription(
-                              correction.supersededDiscSelection,
-                            )} → {itemsById.get(
-                              correction.replacementDiscSelection.mediaItemId,
-                            )?.title ?? "Unknown Media Item"} · {discSelectionDescription(
-                              correction.replacementDiscSelection,
-                            )}
-                          </p>
-                          {correction.reason ? (
-                            <p>{correction.reason}</p>
-                          ) : null}
-                        </li>
-                      ))}
-                    </ol>
-                  </div>
-                ) : null}
               </div>
             </li>
           ))}
@@ -206,9 +189,41 @@ export function CatalogReviewDiscSelections({
         onPage={onPage}
       />
 
+      {correctionHistory.length > 0 ? (
+        <div className="selection-correction-history">
+          <h4>Disc Selection Correction History</h4>
+          <ol>
+            {correctionHistory.map((correction) => (
+              <li key={correction.supersededDiscSelection.id}>
+                <p>
+                  {itemsById.get(
+                    correction.supersededDiscSelection.mediaItemId,
+                  )?.title ?? "Unknown Media Item"} · {discSelectionDescription(
+                    correction.supersededDiscSelection,
+                  )} → {itemsById.get(
+                    correction.replacementDiscSelection.mediaItemId,
+                  )?.title ?? "Unknown Media Item"} · {discSelectionDescription(
+                    correction.replacementDiscSelection,
+                  )}
+                </p>
+                {correction.reason ? <p>{correction.reason}</p> : null}
+              </li>
+            ))}
+          </ol>
+        </div>
+      ) : null}
+
+      <CatalogReviewPagination
+        ariaLabel="Disc Selection Correction History pages"
+        itemLabel="Corrections"
+        page={correctionHistoryPage}
+        isSaving={isSaving}
+        onPage={onCorrectionHistoryPage}
+      />
+
       <form className="catalog-form" onSubmit={createSelection}>
         <h3>Add Disc Selection</h3>
-        {hasJobBackedCorrection ? (
+        {hasSupersessionCorrection ? (
           <p>
             A job-backed Disc Selection Correction creates a new identity and
             preserves prior Encode Job provenance. Queued work is cancelled;
@@ -229,8 +244,7 @@ export function CatalogReviewDiscSelections({
                   <option key={selection.id} value={selection.id}>
                     {hasAction(selection, "repair")
                       ? "Repair unsafe legacy Disc Selection: "
-                      : selection.actionAvailability.state ===
-                          "locked_provenance"
+                      : selection.actionAvailability.state !== "editable"
                         ? "Correct by supersession: "
                         : "Correct or edit label: "}
                     {discSelectionDescription(selection)}
@@ -295,7 +309,7 @@ export function CatalogReviewDiscSelections({
             Label
             <input name="label" maxLength={256} placeholder="Optional" />
           </label>
-          {hasJobBackedCorrection ? (
+          {hasSupersessionCorrection ? (
             <label>
               Correction note
               <textarea

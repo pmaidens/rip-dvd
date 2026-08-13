@@ -30,6 +30,13 @@ describe("CatalogReviewDiscSelections", () => {
           hasPrevious: false,
           hasNext: true,
         }}
+        correctionHistory={[]}
+        correctionHistoryPage={{
+          offset: 0,
+          limit: 100,
+          hasPrevious: false,
+          hasNext: false,
+        }}
         mediaItems={[{
           id: "episode-1",
           parentId: null,
@@ -49,6 +56,7 @@ describe("CatalogReviewDiscSelections", () => {
         selectionKind="main_feature"
         isSaving={false}
         onPage={() => undefined}
+        onCorrectionHistoryPage={() => undefined}
         onSelectionKindChange={() => undefined}
         onCreate={() => undefined}
         onDelete={() => undefined}
@@ -85,6 +93,13 @@ describe("CatalogReviewDiscSelections", () => {
           hasPrevious: false,
           hasNext: false,
         }}
+        correctionHistory={[]}
+        correctionHistoryPage={{
+          offset: 0,
+          limit: 100,
+          hasPrevious: false,
+          hasNext: false,
+        }}
         mediaItems={[{
           id: "movie-1",
           parentId: null,
@@ -98,6 +113,7 @@ describe("CatalogReviewDiscSelections", () => {
         selectionKind="main_feature"
         isSaving={false}
         onPage={() => undefined}
+        onCorrectionHistoryPage={() => undefined}
         onSelectionKindChange={() => undefined}
         onCreate={() => undefined}
         onDelete={() => undefined}
@@ -121,40 +137,6 @@ describe("CatalogReviewDiscSelections", () => {
           mediaItemId: "movie-corrected",
           sourceIdentity: { kind: "dvd_title", titleNumber: 3 },
           label: null,
-          correctionHistory: [
-            {
-              supersededDiscSelection: {
-                id: "selection-mistaken",
-                mediaItemId: "movie-mistaken",
-                sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
-                label: "Theatrical cut",
-              },
-              replacementDiscSelection: {
-                id: "selection-intermediate",
-                mediaItemId: "movie-intermediate",
-                sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
-                label: null,
-              },
-              reason: "The director's cut is title 2.",
-              correctedAt: "2026-08-12T18:00:00.000Z",
-            },
-            {
-              supersededDiscSelection: {
-                id: "selection-intermediate",
-                mediaItemId: "movie-intermediate",
-                sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
-                label: null,
-              },
-              replacementDiscSelection: {
-                id: "selection-corrected",
-                mediaItemId: "movie-corrected",
-                sourceIdentity: { kind: "dvd_title", titleNumber: 3 },
-                label: null,
-              },
-              reason: "The restored edition is title 3.",
-              correctedAt: "2026-08-12T19:00:00.000Z",
-            },
-          ],
           actionAvailability: {
             state: "editable",
             availableActions: ["correct", "edit_label", "remove"],
@@ -163,6 +145,46 @@ describe("CatalogReviewDiscSelections", () => {
           },
         }]}
         page={{
+          offset: 0,
+          limit: 100,
+          hasPrevious: false,
+          hasNext: false,
+        }}
+        correctionHistory={[
+          {
+            supersededDiscSelection: {
+              id: "selection-mistaken",
+              mediaItemId: "movie-mistaken",
+              sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+              label: "Theatrical cut",
+            },
+            replacementDiscSelection: {
+              id: "selection-intermediate",
+              mediaItemId: "movie-intermediate",
+              sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+              label: null,
+            },
+            reason: "The director's cut is title 2.",
+            correctedAt: "2026-08-12T18:00:00.000Z",
+          },
+          {
+            supersededDiscSelection: {
+              id: "selection-intermediate",
+              mediaItemId: "movie-intermediate",
+              sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+              label: null,
+            },
+            replacementDiscSelection: {
+              id: "selection-corrected",
+              mediaItemId: "movie-corrected",
+              sourceIdentity: { kind: "dvd_title", titleNumber: 3 },
+              label: null,
+            },
+            reason: "The restored edition is title 3.",
+            correctedAt: "2026-08-12T19:00:00.000Z",
+          },
+        ]}
+        correctionHistoryPage={{
           offset: 0,
           limit: 100,
           hasPrevious: false,
@@ -201,6 +223,7 @@ describe("CatalogReviewDiscSelections", () => {
         selectionKind="main_feature"
         isSaving={false}
         onPage={() => undefined}
+        onCorrectionHistoryPage={() => undefined}
         onSelectionKindChange={() => undefined}
         onCreate={() => undefined}
         onDelete={() => undefined}
@@ -256,6 +279,13 @@ describe("CatalogReviewDiscSelections", () => {
           hasPrevious: false,
           hasNext: false,
         }}
+        correctionHistory={[]}
+        correctionHistoryPage={{
+          offset: 0,
+          limit: 100,
+          hasPrevious: false,
+          hasNext: false,
+        }}
         mediaItems={[
           {
             id: "movie-1",
@@ -286,6 +316,7 @@ describe("CatalogReviewDiscSelections", () => {
         selectionKind="main_feature"
         isSaving={false}
         onPage={() => undefined}
+        onCorrectionHistoryPage={() => undefined}
         onSelectionKindChange={() => undefined}
         onCreate={() => undefined}
         onDelete={() => undefined}
@@ -324,6 +355,13 @@ describe("CatalogReviewDiscSelections", () => {
           hasPrevious: false,
           hasNext: false,
         }}
+        correctionHistory={[]}
+        correctionHistoryPage={{
+          offset: 0,
+          limit: 100,
+          hasPrevious: false,
+          hasNext: false,
+        }}
         mediaItems={[{
           id: "movie-1",
           parentId: null,
@@ -337,6 +375,7 @@ describe("CatalogReviewDiscSelections", () => {
         selectionKind="main_feature"
         isSaving={false}
         onPage={() => undefined}
+        onCorrectionHistoryPage={() => undefined}
         onSelectionKindChange={() => undefined}
         onCreate={() => undefined}
         onDelete={() => undefined}
