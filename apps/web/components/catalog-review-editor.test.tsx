@@ -121,6 +121,13 @@ function catalogReview({
       hasPrevious: discSelectionOffset > 0,
       hasNext: discSelectionOffset === 0,
     },
+    correctionHistory: [],
+    correctionHistoryPage: {
+      offset: 0,
+      limit: 100,
+      hasPrevious: false,
+      hasNext: false,
+    },
   };
 }
 
@@ -151,8 +158,8 @@ describe("CatalogReviewEditor", () => {
     await act(async () => renderCatalogReviewEditor("archive-b"));
 
     expect(requests.map(({ url }) => url)).toEqual([
-      "/api/catalog-reviews/archive-a?selectionOffset=0",
-      "/api/catalog-reviews/archive-b?selectionOffset=0",
+      "/api/catalog-reviews/archive-a?selectionOffset=0&correctionOffset=0",
+      "/api/catalog-reviews/archive-b?selectionOffset=0&correctionOffset=0",
     ]);
 
     await resolveRequest(
@@ -185,7 +192,7 @@ describe("CatalogReviewEditor", () => {
     }
     await act(async () => nextDiscSelectionsPage.click());
     expect(requests.slice(1).map(({ url }) => url)).toEqual([
-      "/api/catalog-reviews/archive-a?selectionOffset=100",
+      "/api/catalog-reviews/archive-a?selectionOffset=100&correctionOffset=0",
     ]);
 
     await resolveRequest(
@@ -198,6 +205,64 @@ describe("CatalogReviewEditor", () => {
     );
     expect(container.textContent).toContain("CURRENT_PAGE item");
     expect(container.textContent).toContain("Title 2");
+  });
+
+  it("corrects a job-free replacement by supersession instead of rewriting it", async () => {
+    const review = catalogReview({
+      archiveId: "archive-a",
+      discLabel: "CORRECTION_LINEAGE",
+    });
+    review.discSelections[0]!.actionAvailability = {
+      state: "correction_lineage",
+      availableActions: ["correct", "remove"],
+      reason:
+        "This Disc Selection belongs to immutable correction lineage; correct it by supersession or remove it while retaining history",
+      relatedEncodeJob: null,
+    };
+    const postedCommands: unknown[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (init?.method === "POST") {
+        postedCommands.push(JSON.parse(String(init.body)) as unknown);
+        return Response.json({});
+      }
+      return Response.json(review);
+    }));
+
+    await act(async () => renderCatalogReviewEditor("archive-a"));
+    const replacement = container.querySelector<HTMLSelectElement>(
+      'select[name="replacesDiscSelectionId"]',
+    );
+    const mediaItem = container.querySelector<HTMLSelectElement>(
+      'select[name="mediaItemId"]',
+    );
+    const correctionReason = container.querySelector<HTMLTextAreaElement>(
+      'textarea[name="correctionReason"]',
+    );
+    const submit = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Add Disc Selection",
+    );
+    if (!replacement || !mediaItem || !correctionReason || !submit) {
+      throw new Error("Expected Disc Selection correction controls");
+    }
+    replacement.value = review.discSelections[0]!.id;
+    mediaItem.value = review.mediaItems[0]!.id;
+    correctionReason.value = "Keep the second replacement immutable.";
+
+    await act(async () => submit.click());
+
+    expect(postedCommands).toEqual([{
+      action: "correct_disc_selection",
+      discSelectionId: review.discSelections[0]!.id,
+      catalogRevision: review.catalogRevision,
+      correctionReason: "Keep the second replacement immutable.",
+      selection: {
+        mediaItemId: review.mediaItems[0]!.id,
+        sourceIdentity: { kind: "main_feature" },
+      },
+    }]);
   });
 
   it("keeps a failed Mapping Proposal editable and refreshes the exact-source mapping after success", async () => {
@@ -992,12 +1057,12 @@ describe("CatalogReviewEditor", () => {
     expect(requests).toEqual([
       {
         method: "GET",
-        url: "/api/catalog-reviews/archive-a?selectionOffset=0",
+        url: "/api/catalog-reviews/archive-a?selectionOffset=0&correctionOffset=0",
       },
       { method: "POST", url: "/api/catalog-reviews/archive-a" },
       {
         method: "GET",
-        url: "/api/catalog-reviews/archive-a?selectionOffset=0",
+        url: "/api/catalog-reviews/archive-a?selectionOffset=0&correctionOffset=0",
       },
     ]);
     expect(container.textContent).toContain("REFRESHED_SELECTION_DISC");
@@ -1132,6 +1197,7 @@ describe("CatalogReviewView", () => {
         onEditMediaItem={() => undefined}
         onCancelEdit={() => undefined}
         onDiscSelectionsPage={() => undefined}
+        onCorrectionHistoryPage={() => undefined}
         onSelectionKindChange={() => undefined}
         onArchiveOnlyChange={() => undefined}
         onStartMappingProposal={() => undefined}
@@ -1206,6 +1272,16 @@ describe("CatalogReviewView", () => {
         selection: {
           mediaItemId: "media-item-1",
           sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+        },
+      },
+      correct_disc_selection: {
+        action: "correct_disc_selection",
+        discSelectionId: "selection-1",
+        catalogRevision: "2026-08-11T06:00:00.000Z",
+        correctionReason: "Wrong source",
+        selection: {
+          mediaItemId: "media-item-2",
+          sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
         },
       },
       delete_disc_selection: {
@@ -1336,9 +1412,9 @@ describe("CatalogReviewView", () => {
               label: null,
               actionAvailability: {
                 state: "locked_provenance",
-                availableActions: [],
+                availableActions: ["correct"],
                 reason:
-                  "Encode Job job-1 is completed; this Disc Selection is locked provenance and cannot be changed directly",
+                  "Encode Job job-1 is completed; correct this Disc Selection by supersession to preserve its provenance",
                 relatedEncodeJob: { id: "job-1", status: "completed" },
               },
             }],
@@ -1347,6 +1423,13 @@ describe("CatalogReviewView", () => {
               limit: 100,
               hasPrevious: false,
               hasNext: true,
+            },
+            correctionHistory: [],
+            correctionHistoryPage: {
+              offset: 0,
+              limit: 100,
+              hasPrevious: false,
+              hasNext: false,
             },
           },
         }}
@@ -1364,6 +1447,7 @@ describe("CatalogReviewView", () => {
         onEditMediaItem={() => undefined}
         onCancelEdit={() => undefined}
         onDiscSelectionsPage={() => undefined}
+        onCorrectionHistoryPage={() => undefined}
         onSelectionKindChange={() => undefined}
         onArchiveOnlyChange={() => undefined}
         onStartMappingProposal={() => undefined}
@@ -1491,6 +1575,13 @@ describe("CatalogReviewView", () => {
               hasPrevious: false,
               hasNext: false,
             },
+            correctionHistory: [],
+            correctionHistoryPage: {
+              offset: 0,
+              limit: 100,
+              hasPrevious: false,
+              hasNext: false,
+            },
           },
         }}
         editingMediaItemId="episode-1"
@@ -1505,6 +1596,7 @@ describe("CatalogReviewView", () => {
         onEditMediaItem={() => undefined}
         onCancelEdit={() => undefined}
         onDiscSelectionsPage={() => undefined}
+        onCorrectionHistoryPage={() => undefined}
         onSelectionKindChange={() => undefined}
         onArchiveOnlyChange={() => undefined}
         onStartMappingProposal={() => undefined}

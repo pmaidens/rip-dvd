@@ -16,7 +16,21 @@ describe("catalog review request state", () => {
     await requestCatalogReview("archive-1", 200, fetcher);
 
     expect(requestedUrl).toBe(
-      "/api/catalog-reviews/archive-1?selectionOffset=200",
+      "/api/catalog-reviews/archive-1?selectionOffset=200&correctionOffset=0",
+    );
+  });
+
+  it("requests a bounded correction-history page independently", async () => {
+    let requestedUrl = "";
+    const fetcher = async (input: RequestInfo | URL) => {
+      requestedUrl = String(input);
+      return Response.json({});
+    };
+
+    await requestCatalogReview("archive-1", 100, fetcher, 300);
+
+    expect(requestedUrl).toBe(
+      "/api/catalog-reviews/archive-1?selectionOffset=100&correctionOffset=300",
     );
   });
 

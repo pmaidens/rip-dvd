@@ -35,6 +35,7 @@ export const runtime = "nodejs";
 const CATALOG_REVIEW_SELECTION_PAGE_SIZE = 100;
 const CATALOG_REVIEW_COVERAGE_SELECTION_PAGE_SIZE = 500;
 const CATALOG_REVIEW_MEDIA_ITEM_MAINTENANCE_BATCH_SIZE = 100;
+const CATALOG_REVIEW_CORRECTION_HISTORY_PAGE_SIZE = 100;
 
 function response(body: unknown, status = 200): Response {
   return Response.json(body, {
@@ -132,6 +133,7 @@ function readCatalogReview(
   access: DataAccess,
   id: OriginalDiscArchiveId,
   discSelectionOffset: number,
+  correctionHistoryOffset: number,
 ) {
   return access.readConsistentSnapshot((snapshot) => {
     const archive = snapshot.catalog.listOriginalDiscArchives({ ids: [id] })[0];
@@ -169,6 +171,56 @@ function readCatalogReview(
       discSelectionOffset,
       discSelectionOffset + CATALOG_REVIEW_SELECTION_PAGE_SIZE,
     );
+    const correctionHistoryRows = snapshot.catalog
+      .listDiscSelectionSupersessions({
+        originalDiscArchiveId: id,
+        limit: CATALOG_REVIEW_CORRECTION_HISTORY_PAGE_SIZE + 1,
+        offset: correctionHistoryOffset,
+      });
+    const hasNextCorrectionHistory = correctionHistoryRows.length >
+      CATALOG_REVIEW_CORRECTION_HISTORY_PAGE_SIZE;
+    const correctionHistoryPage = correctionHistoryRows.slice(
+      0,
+      CATALOG_REVIEW_CORRECTION_HISTORY_PAGE_SIZE,
+    );
+    const correctionSelectionIds = correctionHistoryPage.flatMap(
+      (supersession) => [
+        supersession.supersededDiscSelectionId,
+        supersession.replacementDiscSelectionId,
+      ],
+    );
+    const correctionSelectionsById = new Map(
+      snapshot.catalog.listDiscSelections({
+        ids: correctionSelectionIds,
+      }).map((selection) => [selection.id, selection]),
+    );
+    const selectionsWithHistory = new Map(
+      discSelectionsPage.map((selection) => [selection.id, selection]),
+    );
+    for (const selection of correctionSelectionsById.values()) {
+      selectionsWithHistory.set(selection.id, selection);
+    }
+    const correctionHistory = correctionHistoryPage.map((supersession) => {
+      const supersededDiscSelection = correctionSelectionsById.get(
+        supersession.supersededDiscSelectionId,
+      );
+      const replacementDiscSelection = correctionSelectionsById.get(
+        supersession.replacementDiscSelectionId,
+      );
+      if (!supersededDiscSelection || !replacementDiscSelection) {
+        throw new DomainInvariantError(
+          `Disc Selection supersession for ${supersession.replacementDiscSelectionId} is missing historical provenance`,
+        );
+      }
+      return {
+        supersededDiscSelection:
+          serializeDiscSelection(supersededDiscSelection),
+        replacementDiscSelection:
+          serializeDiscSelection(replacementDiscSelection),
+        reason: supersession.reason,
+        correctedAt: supersession.createdAt.toISOString(),
+      };
+    });
     const actionAvailability = snapshot.catalog
       .listDiscSelectionActionAvailability({
         ids: discSelectionsPage.map((selection) => selection.id),
@@ -181,7 +233,9 @@ function readCatalogReview(
     );
     const reviewMediaItems = readMediaItemsWithAncestors(
       snapshot.catalog,
-      discSelectionsPage.map((selection) => selection.mediaItemId),
+      [...selectionsWithHistory.values()].map(
+        (selection) => selection.mediaItemId,
+      ),
     );
     const mediaItemMaintenance: MediaItemMaintenance[] = [];
     for (
@@ -225,6 +279,13 @@ function readCatalogReview(
       mediaItems: reviewMediaItems.map((item) =>
         serializeMediaItem(item, maintenanceByMediaItemId.get(item.id))
       ),
+      correctionHistory,
+      correctionHistoryPage: {
+        offset: correctionHistoryOffset,
+        limit: CATALOG_REVIEW_CORRECTION_HISTORY_PAGE_SIZE,
+        hasPrevious: correctionHistoryOffset > 0,
+        hasNext: hasNextCorrectionHistory,
+      },
       discSelections: discSelectionsPage.map((selection) => {
         const availability = actionAvailabilityById.get(selection.id);
         if (!availability) {
@@ -232,7 +293,10 @@ function readCatalogReview(
             `Disc Selection ${selection.id} is missing action availability`,
           );
         }
-        return serializeReviewDiscSelection(selection, availability);
+        return serializeReviewDiscSelection(
+          selection,
+          availability,
+        );
       }),
       discSelectionsPage: {
         offset: discSelectionOffset,
@@ -261,9 +325,15 @@ export async function createCatalogReviewRoute(
     if (request.method === "GET") {
       const parameters = new URL(request.url).searchParams;
       const discSelectionOffset = recordOffset(request, "selectionOffset");
+      const correctionHistoryOffset = recordOffset(
+        request,
+        "correctionOffset",
+      );
       if (
-        [...parameters.keys()].some((key) => key !== "selectionOffset") ||
-        discSelectionOffset === null
+        [...parameters.keys()].some((key) =>
+          key !== "selectionOffset" && key !== "correctionOffset"
+        ) ||
+        discSelectionOffset === null || correctionHistoryOffset === null
       ) {
         return response({ error: "Invalid Catalog Review query" }, 400);
       }
@@ -271,6 +341,7 @@ export async function createCatalogReviewRoute(
         getAccess(),
         archiveId,
         discSelectionOffset,
+        correctionHistoryOffset,
       );
       return review === null
         ? response({ error: "Original Disc Archive not found" }, 404)
@@ -299,14 +370,15 @@ export async function createCatalogReviewRoute(
         mediaItemKinds: MEDIA_ITEM_KINDS,
       },
     );
-    const repairDiscSelectionId = parsedCommand.ok
-      ? parsedCommand.command.action === "repair_disc_selection"
+    const targetedDiscSelectionId = parsedCommand.ok
+      ? parsedCommand.command.action === "repair_disc_selection" ||
+          parsedCommand.command.action === "correct_disc_selection"
         ? parsedCommand.command.discSelectionId
         : null
       : parsedCommand.repairDiscSelectionId ?? null;
-    if (repairDiscSelectionId !== null) {
+    if (targetedDiscSelectionId !== null) {
       const existing = access.catalog.listDiscSelections({
-        ids: [repairDiscSelectionId as DiscSelectionId],
+        ids: [targetedDiscSelectionId as DiscSelectionId],
         originalDiscArchiveId: archiveId,
       })[0];
       if (!existing) {
@@ -458,6 +530,31 @@ export async function createCatalogReviewRoute(
           },
           repairSelectionId === null ? 201 : 200,
         );
+      }
+
+      case "correct_disc_selection": {
+        const input = command.selection;
+        const correction = access.catalog.correctDiscSelection(
+          command.discSelectionId as DiscSelectionId,
+          {
+            originalDiscArchiveId: archiveId,
+            catalogRevision: new Date(command.catalogRevision),
+            mediaItemId: input.mediaItemId as MediaItemId,
+            sourceIdentity: input.sourceIdentity,
+            ...(input.label ? { label: input.label } : {}),
+            ...(command.correctionReason
+              ? { reason: command.correctionReason }
+              : {}),
+          },
+        );
+        return response({
+          message: "Mapping changed; review required",
+          discSelection: serializeDiscSelection(correction.discSelection),
+          supersession: {
+            ...correction.supersession,
+            createdAt: correction.supersession.createdAt.toISOString(),
+          },
+        });
       }
 
       case "delete_disc_selection": {

@@ -18,11 +18,14 @@ import { CatalogReviewPagination } from "./catalog-review-pagination";
 interface CatalogReviewDiscSelectionsProps {
   discSelections: CatalogReviewDiscSelection[];
   page: CatalogReviewDto["discSelectionsPage"];
+  correctionHistory: CatalogReviewDto["correctionHistory"];
+  correctionHistoryPage: CatalogReviewDto["correctionHistoryPage"];
   mediaItems: CatalogReviewMediaItem[];
   rawTitles: DvdTitle[];
   selectionKind: DiscSelectionKind;
   isSaving: boolean;
   onPage(offset: number): void;
+  onCorrectionHistoryPage(offset: number): void;
   onSelectionKindChange(kind: DiscSelectionKind): void;
   onCreate(input: CreateDiscSelectionInput): void;
   onDelete(id: string): void;
@@ -37,6 +40,7 @@ const discSelectionLabels = {
 const actionStateLabels = {
   editable: "Editable",
   locked_provenance: "Locked provenance",
+  correction_lineage: "Correction lineage",
   needs_repair: "Needs repair",
   changes_unavailable: "Changes unavailable",
 } as const;
@@ -51,7 +55,7 @@ function hasAction(
 }
 
 function discSelectionDescription(
-  selection: CatalogReviewDiscSelection,
+  selection: Pick<CatalogReviewDiscSelection, "sourceIdentity">,
 ): string {
   const sourceIdentity = selection.sourceIdentity;
   if (sourceIdentity.kind === "main_feature") {
@@ -66,11 +70,14 @@ function discSelectionDescription(
 export function CatalogReviewDiscSelections({
   discSelections,
   page,
+  correctionHistory,
+  correctionHistoryPage,
   mediaItems,
   rawTitles,
   selectionKind,
   isSaving,
   onPage,
+  onCorrectionHistoryPage,
   onSelectionKindChange,
   onCreate,
   onDelete,
@@ -85,8 +92,12 @@ export function CatalogReviewDiscSelections({
     const replacesDiscSelectionId = String(
       form.get("replacesDiscSelectionId") ?? "",
     ).trim();
+    const correctionReason = String(
+      form.get("correctionReason") ?? "",
+    ).trim();
     const common = {
       ...(replacesDiscSelectionId ? { replacesDiscSelectionId } : {}),
+      ...(correctionReason ? { correctionReason } : {}),
       mediaItemId: String(form.get("mediaItemId")),
       ...(label ? { label } : {}),
     };
@@ -123,6 +134,13 @@ export function CatalogReviewDiscSelections({
       },
     });
   }
+
+  const hasSupersessionCorrection = discSelections.some(
+    (selection) =>
+      (selection.actionAvailability.state === "locked_provenance" ||
+        selection.actionAvailability.state === "correction_lineage") &&
+      hasAction(selection, "correct"),
+  );
 
   return (
     <>
@@ -171,8 +189,47 @@ export function CatalogReviewDiscSelections({
         onPage={onPage}
       />
 
+      {correctionHistory.length > 0 ? (
+        <div className="selection-correction-history">
+          <h4>Disc Selection Correction History</h4>
+          <ol>
+            {correctionHistory.map((correction) => (
+              <li key={correction.supersededDiscSelection.id}>
+                <p>
+                  {itemsById.get(
+                    correction.supersededDiscSelection.mediaItemId,
+                  )?.title ?? "Unknown Media Item"} · {discSelectionDescription(
+                    correction.supersededDiscSelection,
+                  )} → {itemsById.get(
+                    correction.replacementDiscSelection.mediaItemId,
+                  )?.title ?? "Unknown Media Item"} · {discSelectionDescription(
+                    correction.replacementDiscSelection,
+                  )}
+                </p>
+                {correction.reason ? <p>{correction.reason}</p> : null}
+              </li>
+            ))}
+          </ol>
+        </div>
+      ) : null}
+
+      <CatalogReviewPagination
+        ariaLabel="Disc Selection Correction History pages"
+        itemLabel="Corrections"
+        page={correctionHistoryPage}
+        isSaving={isSaving}
+        onPage={onCorrectionHistoryPage}
+      />
+
       <form className="catalog-form" onSubmit={createSelection}>
         <h3>Add Disc Selection</h3>
+        {hasSupersessionCorrection ? (
+          <p>
+            A job-backed Disc Selection Correction creates a new identity and
+            preserves prior Encode Job provenance. Queued work is cancelled;
+            running work will request cancellation without waiting here.
+          </p>
+        ) : null}
         <div className="catalog-fields">
           <label>
             Catalog action
@@ -187,7 +244,9 @@ export function CatalogReviewDiscSelections({
                   <option key={selection.id} value={selection.id}>
                     {hasAction(selection, "repair")
                       ? "Repair unsafe legacy Disc Selection: "
-                      : "Correct or edit label: "}
+                      : selection.actionAvailability.state !== "editable"
+                        ? "Correct by supersession: "
+                        : "Correct or edit label: "}
                     {discSelectionDescription(selection)}
                   </option>
                 ))}
@@ -250,6 +309,16 @@ export function CatalogReviewDiscSelections({
             Label
             <input name="label" maxLength={256} placeholder="Optional" />
           </label>
+          {hasSupersessionCorrection ? (
+            <label>
+              Correction note
+              <textarea
+                name="correctionReason"
+                maxLength={1_000}
+                placeholder="Optional human context for catalog and encode history"
+              />
+            </label>
+          ) : null}
         </div>
         <button
           type="submit"

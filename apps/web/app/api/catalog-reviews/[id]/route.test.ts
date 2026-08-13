@@ -1,12 +1,16 @@
 import { DatabaseSync } from "node:sqlite";
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import {
   MAX_MEDIA_ITEM_HIERARCHY_DEPTH,
+  type EncodeJobStatus,
   type MediaItem,
   type MediaItemId,
 } from "@rip-dvd/data-access";
 
+import type {
+  CatalogReviewDiscSelectionActionAvailability,
+} from "../../../../components/catalog-review-model";
 import {
   completeCatalogReview,
   useDataAccessFixture,
@@ -17,6 +21,16 @@ import { createCatalogReviewRoute } from "./route";
 const dataAccessFixture = useDataAccessFixture();
 
 describe("Catalog Review API", () => {
+  it("keeps locked-provenance job statuses aligned with data access", () => {
+    type LockedProvenance = Extract<
+      CatalogReviewDiscSelectionActionAvailability,
+      { state: "locked_provenance" }
+    >;
+
+    expectTypeOf<LockedProvenance["relatedEncodeJob"]["status"]>()
+      .toEqualTypeOf<EncodeJobStatus>();
+  });
+
   it("returns an archived DVD's raw title map separately from reviewed catalog data", async () => {
     const access = dataAccessFixture.create();
     const drive = access.catalog.upsertOpticalDrive({
@@ -102,12 +116,21 @@ describe("Catalog Review API", () => {
         hasPrevious: false,
         hasNext: false,
       },
+      correctionHistory: [],
+      correctionHistoryPage: {
+        offset: 0,
+        limit: 100,
+        hasPrevious: false,
+        hasNext: false,
+      },
     });
   });
 
   it.each([
     "?selectionOffset=-1",
     "?selectionOffset=1&selectionOffset=2",
+    "?correctionOffset=-1",
+    "?correctionOffset=1&correctionOffset=2",
     "?mediaOffset=0",
     "?editingMediaItemId=unrelated-item",
   ])("fails closed on malformed review query input: %s", async (query) => {
@@ -424,7 +447,7 @@ describe("Catalog Review API", () => {
       scanData: {
         schemaVersion: 2,
         contentId,
-        titles: Array.from({ length: 4 }, (_, index) => ({
+        titles: Array.from({ length: 5 }, (_, index) => ({
           number: index + 1,
           durationSeconds: 2_400,
           chapters: 8,
@@ -442,7 +465,7 @@ describe("Catalog Review API", () => {
       archivePath: "/media/originals/Locked Selections.iso",
       fingerprint: contentId,
     });
-    const selections = Array.from({ length: 4 }, (_, index) => {
+    const selections = Array.from({ length: 5 }, (_, index) => {
       const item = access.catalog.createMediaItem({
         kind: "bonus_feature",
         title: `Locked Selection ${index + 1}`,
@@ -497,6 +520,12 @@ describe("Catalog Review API", () => {
       encodingProfileId: profile.id,
       outputPath: "/media/movies/Queued provenance.mkv",
     });
+    const cancelledJob = access.encodeJobs.enqueue({
+      discSelectionId: selections[4]!.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Cancelled provenance.mkv",
+    });
+    const cancelled = access.encodeJobs.requestCancellation(cancelledJob.id);
 
     const response = await createCatalogReviewRoute(
       new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`),
@@ -518,16 +547,403 @@ describe("Catalog Review API", () => {
       [selections[1]!, failedJob],
       [selections[2]!, runningClaim],
       [selections[3]!, queuedJob],
+      [selections[4]!, cancelled],
     ] as const) {
       expect(availabilityBySelection.get(selection.id)).toMatchObject({
         state: "locked_provenance",
-        availableActions: [],
+        availableActions: ["correct"],
         reason: expect.stringContaining(job.status),
         relatedEncodeJob: { id: job.id, status: job.status },
       });
     }
     expect(JSON.stringify([...availabilityBySelection.values()]))
       .not.toContain("/media/");
+  });
+
+  it("corrects job-backed provenance and returns its supersession history", async () => {
+    const access = dataAccessFixture.create();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/job-backed-route-correction",
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "job-backed-route-correction",
+      volumeLabel: "ROUTE_CORRECTION",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Route Correction.iso",
+      fingerprint: "job-backed-route-correction",
+    });
+    const mistakenItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Route Mistake",
+    });
+    const correctedItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Route Correction",
+    });
+    const revisedItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Route Revision",
+    });
+    const mistakenSelection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: mistakenItem.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    completeCatalogReview(access, archive.id);
+    const profile = access.encodingProfiles.create({
+      key: "job-backed-route-correction",
+      displayName: "Job-backed route correction",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    access.encodeJobs.enqueue({
+      discSelectionId: mistakenSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Route Mistake.mkv",
+    });
+    const claim = access.encodeJobs.claimNext("route-correction-worker");
+    if (!claim) {
+      throw new Error("Expected route correction Encode Job claim");
+    }
+    const completed = access.encodeJobs.complete(claim);
+    const catalogRevision = access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]!.updatedAt.toISOString();
+
+    const correctionResponse = await createCatalogReviewRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+        },
+        body: JSON.stringify({
+          action: "correct_disc_selection",
+          discSelectionId: mistakenSelection.id,
+          catalogRevision,
+          correctionReason: "The wrong movie was mapped.",
+          selection: {
+            mediaItemId: correctedItem.id,
+            sourceIdentity: { kind: "main_feature" },
+          },
+        }),
+      }),
+      archive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+
+    expect(correctionResponse.status).toBe(200);
+    const correctionBody = await correctionResponse.json();
+    expect(correctionBody).toMatchObject({
+      message: "Mapping changed; review required",
+      discSelection: {
+        id: expect.not.stringMatching(new RegExp(`^${mistakenSelection.id}$`)),
+        mediaItemId: correctedItem.id,
+      },
+      supersession: {
+        supersededDiscSelectionId: mistakenSelection.id,
+        replacementDiscSelectionId: expect.any(String),
+        reason: "The wrong movie was mapped.",
+      },
+    });
+    const reviewResponse = await createCatalogReviewRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`),
+      archive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+    const review = await reviewResponse.json();
+    expect(review.reviewOutcome).toBe("needs_review");
+    expect(review.discSelections).toEqual([
+      expect.objectContaining({
+        id: correctionBody.discSelection.id,
+        mediaItemId: correctedItem.id,
+        actionAvailability: expect.objectContaining({
+          state: "correction_lineage",
+          availableActions: ["correct", "remove"],
+        }),
+      }),
+    ]);
+    expect(review.correctionHistory).toEqual([{
+      supersededDiscSelection: {
+        id: mistakenSelection.id,
+        mediaItemId: mistakenItem.id,
+        sourceIdentity: { kind: "main_feature" },
+        label: null,
+      },
+      replacementDiscSelection: {
+        id: correctionBody.discSelection.id,
+        mediaItemId: correctedItem.id,
+        sourceIdentity: { kind: "main_feature" },
+        label: null,
+      },
+      reason: "The wrong movie was mapped.",
+      correctedAt: expect.any(String),
+    }]);
+    expect(review.mediaItems).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: mistakenItem.id }),
+      expect.objectContaining({ id: correctedItem.id }),
+    ]));
+    expect(access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: completed.id,
+        discSelectionId: mistakenSelection.id,
+        status: "completed",
+      }),
+    ]);
+    expect(JSON.stringify(review)).not.toContain("Route Mistake.mkv");
+
+    completeCatalogReview(access, archive.id);
+    const secondCorrectionResponse = await createCatalogReviewRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+        },
+        body: JSON.stringify({
+          action: "correct_disc_selection",
+          discSelectionId: correctionBody.discSelection.id,
+          catalogRevision: access.catalog.listOriginalDiscArchives({
+            ids: [archive.id],
+          })[0]!.updatedAt.toISOString(),
+          correctionReason: "The reviewed edition belongs to another movie.",
+          selection: {
+            mediaItemId: revisedItem.id,
+            sourceIdentity: { kind: "main_feature" },
+          },
+        }),
+      }),
+      archive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+    expect(secondCorrectionResponse.status).toBe(200);
+    const secondCorrection = await secondCorrectionResponse.json();
+
+    const revisedReviewResponse = await createCatalogReviewRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`),
+      archive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+    const revisedReview = await revisedReviewResponse.json();
+    expect(revisedReview.discSelections).toEqual([
+      expect.objectContaining({
+        id: secondCorrection.discSelection.id,
+        mediaItemId: revisedItem.id,
+      }),
+    ]);
+    expect(revisedReview.correctionHistory).toEqual([
+      expect.objectContaining({
+        supersededDiscSelection: expect.objectContaining({
+          id: mistakenSelection.id,
+          mediaItemId: mistakenItem.id,
+        }),
+        replacementDiscSelection: expect.objectContaining({
+          id: correctionBody.discSelection.id,
+          mediaItemId: correctedItem.id,
+        }),
+        reason: "The wrong movie was mapped.",
+      }),
+      expect.objectContaining({
+        supersededDiscSelection: expect.objectContaining({
+          id: correctionBody.discSelection.id,
+          mediaItemId: correctedItem.id,
+        }),
+        replacementDiscSelection: expect.objectContaining({
+          id: secondCorrection.discSelection.id,
+          mediaItemId: revisedItem.id,
+        }),
+        reason: "The reviewed edition belongs to another movie.",
+      }),
+    ]);
+    expect(revisedReview.mediaItems).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: mistakenItem.id }),
+      expect.objectContaining({ id: correctedItem.id }),
+      expect.objectContaining({ id: revisedItem.id }),
+    ]));
+    expect(access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: completed.id,
+        discSelectionId: mistakenSelection.id,
+        status: "completed",
+      }),
+    ]);
+
+    const deleteResponse = await createCatalogReviewRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+        },
+        body: JSON.stringify({
+          action: "delete_disc_selection",
+          discSelectionId: secondCorrection.discSelection.id,
+        }),
+      }),
+      archive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+    expect(deleteResponse.status).toBe(200);
+    expect(access.catalog.listDiscSelections({
+      originalDiscArchiveId: archive.id,
+    })).toEqual([]);
+    expect(access.catalog.listDiscSelectionSupersessions({
+      discSelectionIds: [
+        mistakenSelection.id,
+        correctionBody.discSelection.id,
+        secondCorrection.discSelection.id,
+      ],
+    })).toHaveLength(2);
+
+    const deletedReviewResponse = await createCatalogReviewRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`),
+      archive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+    expect(deletedReviewResponse.status).toBe(200);
+    const deletedReview = await deletedReviewResponse.json();
+    expect(deletedReview.discSelections).toEqual([]);
+    expect(deletedReview.correctionHistory).toEqual([
+      expect.objectContaining({
+        supersededDiscSelection: expect.objectContaining({
+          id: mistakenSelection.id,
+        }),
+        replacementDiscSelection: expect.objectContaining({
+          id: correctionBody.discSelection.id,
+        }),
+      }),
+      expect.objectContaining({
+        supersededDiscSelection: expect.objectContaining({
+          id: correctionBody.discSelection.id,
+        }),
+        replacementDiscSelection: expect.objectContaining({
+          id: secondCorrection.discSelection.id,
+        }),
+      }),
+    ]);
+  });
+
+  it("paginates correction history beyond one hundred revisions", async () => {
+    const access = dataAccessFixture.create();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/long-route-correction-history",
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "long-route-correction-history",
+      volumeLabel: "LONG_CORRECTION_HISTORY",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Long Correction History.iso",
+      fingerprint: "long-route-correction-history",
+    });
+    const item = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Long Correction History",
+    });
+    let currentSelection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: item.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    completeCatalogReview(access, archive.id);
+    const profile = access.encodingProfiles.create({
+      key: "long-route-correction-history",
+      displayName: "Long route correction history",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const initialJob = access.encodeJobs.enqueue({
+      discSelectionId: currentSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Long Correction History.mkv",
+    });
+    access.encodeJobs.requestCancellation(initialJob.id);
+
+    for (let revision = 1; revision <= 101; revision += 1) {
+      if (revision > 1) {
+        completeCatalogReview(access, archive.id);
+      }
+      currentSelection = access.catalog.correctDiscSelection(
+        currentSelection.id,
+        {
+          originalDiscArchiveId: archive.id,
+          catalogRevision: access.catalog.listOriginalDiscArchives({
+            ids: [archive.id],
+          })[0]!.updatedAt,
+          mediaItemId: item.id,
+          sourceIdentity: { kind: "main_feature" },
+          reason: `Correction ${revision}`,
+        },
+      ).discSelection;
+    }
+
+    const firstPageResponse = await createCatalogReviewRoute(
+      new Request(
+        `http://localhost:3000/api/catalog-reviews/${archive.id}?correctionOffset=0`,
+      ),
+      archive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+    expect(firstPageResponse.status).toBe(200);
+    const firstPage = await firstPageResponse.json();
+    expect(firstPage.correctionHistory).toHaveLength(100);
+    expect(firstPage.correctionHistoryPage).toEqual({
+      offset: 0,
+      limit: 100,
+      hasPrevious: false,
+      hasNext: true,
+    });
+
+    const secondPageResponse = await createCatalogReviewRoute(
+      new Request(
+        `http://localhost:3000/api/catalog-reviews/${archive.id}?correctionOffset=100`,
+      ),
+      archive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+    expect(secondPageResponse.status).toBe(200);
+    const secondPage = await secondPageResponse.json();
+    expect(secondPage.correctionHistory).toHaveLength(1);
+    expect(secondPage.correctionHistoryPage).toEqual({
+      offset: 100,
+      limit: 100,
+      hasPrevious: true,
+      hasNext: false,
+    });
+    expect(new Set([
+      ...firstPage.correctionHistory,
+      ...secondPage.correctionHistory,
+    ].map((correction: { reason: string }) => correction.reason)).size).toBe(
+      101,
+    );
   });
 
   it("exposes only repair and removal for unsafe legacy selections while retaining quarantine provenance", async () => {

@@ -500,6 +500,36 @@ export const discSelections = sqliteTable(
   ],
 );
 
+export const discSelectionSupersessions = sqliteTable(
+  "disc_selection_supersessions",
+  {
+    supersededDiscSelectionId: text("superseded_disc_selection_id")
+      .$type<DiscSelectionId>()
+      .notNull()
+      .primaryKey()
+      .references(() => discSelections.id, { onDelete: "restrict" }),
+    replacementDiscSelectionId: text("replacement_disc_selection_id")
+      .$type<DiscSelectionId>()
+      .notNull()
+      .references(() => discSelections.id, { onDelete: "restrict" }),
+    reason: text("reason"),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    check(
+      "disc_selection_supersessions_id_not_null",
+      sql`${table.supersededDiscSelectionId} is not null`,
+    ),
+    uniqueIndex("disc_selection_supersessions_replacement_unique").on(
+      table.replacementDiscSelectionId,
+    ),
+    check(
+      "disc_selection_supersessions_distinct_selections_check",
+      sql`${table.supersededDiscSelectionId} <> ${table.replacementDiscSelectionId}`,
+    ),
+  ],
+);
+
 export const encodingProfiles = sqliteTable(
   "encoding_profiles",
   {

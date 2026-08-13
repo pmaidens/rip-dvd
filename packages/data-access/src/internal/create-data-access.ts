@@ -56,6 +56,7 @@ import {
   detectedDiscs,
   discInspectionAttempts,
   discInspections,
+  discSelectionSupersessions,
   discSelections,
   encodeJobs,
   encodingProfiles,
@@ -128,6 +129,7 @@ import type {
   DiscInspectionReasonCode,
   DiscSelectionId,
   DiscSelectionActionAvailability,
+  DiscSelectionSupersession,
   EncodeJobClaimToken,
   EncodeJobCleanupClaimToken,
   EncodeJobId,
@@ -163,6 +165,7 @@ const LEGACY_ARCHIVE_RECONCILIATION_LIMIT = 4;
 const LEGACY_ARCHIVE_RECONCILIATION_BYTES = 9_000_000_000;
 const DISC_SELECTION_REVIEW_BATCH_SIZE = 100;
 const DISC_SELECTION_ACTION_AVAILABILITY_LIMIT = 100;
+const DISC_SELECTION_SUPERSESSION_LIMIT = 100;
 const MEDIA_ITEM_SEARCH_LIMIT = 100;
 const CATALOG_REVIEW_ARCHIVE_LIMIT = 100;
 const CATALOG_REVIEW_MAPPED_TITLE_SUMMARY_LIMIT = 3;
@@ -445,6 +448,24 @@ export function createDataAccessInternal(
     return blockers.length === 0 ? null : blockers.join(" and ");
   }
 
+  function hasDiscSelectionSupersession(
+    id: DiscSelectionId,
+    querySource: Pick<typeof database, "select"> = database,
+  ): boolean {
+    return querySource
+      .select({
+        supersededDiscSelectionId:
+          discSelectionSupersessions.supersededDiscSelectionId,
+      })
+      .from(discSelectionSupersessions)
+      .where(or(
+        eq(discSelectionSupersessions.supersededDiscSelectionId, id),
+        eq(discSelectionSupersessions.replacementDiscSelectionId, id),
+      ))
+      .limit(1)
+      .get() !== undefined;
+  }
+
   function readMediaItemMaintenance(
     ids: readonly MediaItemId[],
     currentArchiveId: OriginalDiscArchiveId | undefined,
@@ -600,6 +621,7 @@ export function createDataAccessInternal(
     archiveId: OriginalDiscArchiveId,
     timestamp: Date,
     expectedRevision?: Date,
+    staleOperation = "Mapping Proposal",
   ): void {
     const changedArchive = transaction
       .update(originalDiscArchives)
@@ -618,9 +640,70 @@ export function createDataAccessInternal(
       .get();
     if (expectedRevision !== undefined && !changedArchive) {
       throw new DomainInvariantError(
-        "Catalog review changed; reload before saving Mapping Proposal",
+        `Catalog review changed; reload before saving ${staleOperation}`,
       );
     }
+  }
+
+  function requestEncodeJobCancellation(
+    transaction: CatalogTransaction,
+    id: EncodeJobId,
+    timestamp: Date,
+  ): EncodeJob {
+    const current = requireRow(
+      transaction
+        .select()
+        .from(encodeJobs)
+        .where(eq(encodeJobs.id, id))
+        .get(),
+      "encode job",
+      id,
+    );
+    if (current.status !== "queued" && current.status !== "running") {
+      throw new InvalidStatusTransitionError(
+        "encode job",
+        current.status,
+        "cancelled",
+      );
+    }
+    const claimToken = current.status === "running"
+      ? current.claimToken
+      : null;
+    if (current.status === "running" && claimToken === null) {
+      throw new DomainInvariantError(
+        "Running Encode Job has no claim token",
+      );
+    }
+    const requestedStatus = current.status === "running"
+      ? "cancellation_requested" as const
+      : "cancelled" as const;
+    const updated = transaction
+      .update(encodeJobs)
+      .set({
+        status: requestedStatus,
+        reservesOutputPath: current.status === "queued"
+          ? current.replaceExistingOutput
+          : true,
+        progressEtaSeconds: null,
+        updatedAt: timestamp,
+      })
+      .where(and(
+        eq(encodeJobs.id, id),
+        eq(encodeJobs.status, current.status),
+        claimToken !== null
+          ? eq(encodeJobs.claimToken, claimToken)
+          : undefined,
+      ))
+      .returning()
+      .get();
+    if (!updated) {
+      throw new InvalidStatusTransitionError(
+        "encode job",
+        current.status,
+        requestedStatus,
+      );
+    }
+    return updated;
   }
 
   function validateAssistedMappingShape(
@@ -1720,6 +1803,8 @@ export function createDataAccessInternal(
             access.catalog.searchMediaItems(options),
           listDiscSelections: (options) =>
             access.catalog.listDiscSelections(options),
+          listDiscSelectionSupersessions: (options) =>
+            access.catalog.listDiscSelectionSupersessions(options),
           listDiscSelectionActionAvailability: (options) =>
             access.catalog.listDiscSelectionActionAvailability(options),
         },
@@ -3061,6 +3146,143 @@ export function createDataAccessInternal(
         );
       },
 
+      correctDiscSelection(id, input) {
+        const timestamp = now();
+        const reason = input.reason === undefined
+          ? null
+          : requireNonEmpty(input.reason, "reason");
+        if (reason !== null && reason.length > 1_000) {
+          throw new DomainInvariantError(
+            "Disc Selection correction reason must be at most 1000 characters",
+          );
+        }
+        return database.transaction((transaction) => {
+          const current = requireRow(
+            transaction
+              .select()
+              .from(discSelections)
+              .where(eq(discSelections.id, id))
+              .get(),
+            "disc selection",
+            id,
+          );
+          if (!current.isCatalogActive) {
+            throw new DomainInvariantError(
+              `Disc Selection ${id} has already been superseded or deactivated`,
+            );
+          }
+          if (current.originalDiscArchiveId !== input.originalDiscArchiveId) {
+            throw new DomainInvariantError(
+              "A Disc Selection correction cannot move between Original Disc Archives",
+            );
+          }
+          const source = requireRow(
+            transaction
+              .select({
+                legacyCutoverPending:
+                  originalDiscArchives.legacyCutoverPending,
+                scanData: detectedDiscs.scanData,
+              })
+              .from(originalDiscArchives)
+              .innerJoin(
+                detectedDiscs,
+                eq(detectedDiscs.id, originalDiscArchives.detectedDiscId),
+              )
+              .where(eq(originalDiscArchives.id, input.originalDiscArchiveId))
+              .get(),
+            "original disc archive",
+            input.originalDiscArchiveId,
+          );
+          if (source.legacyCutoverPending) {
+            throw new DomainInvariantError(
+              "Disc Selections cannot be changed while legacy cutover repair is pending",
+            );
+          }
+          if (
+            requiresLegacyDiscSelectionRepair(
+              current,
+              createArchivedDvdSelectionValidator(source.scanData),
+            )
+          ) {
+            throw new DomainInvariantError(
+              `Disc Selection ${id} needs unsafe legacy repair, not ordinary correction`,
+            );
+          }
+          const historicalJob = transaction
+            .select({ id: encodeJobs.id })
+            .from(encodeJobs)
+            .where(eq(encodeJobs.discSelectionId, id))
+            .limit(1)
+            .get();
+          const preservedLineage = hasDiscSelectionSupersession(
+            id,
+            transaction,
+          );
+          if (!historicalJob && !preservedLineage) {
+            throw new DomainInvariantError(
+              `Disc Selection ${id} has no Encode Job history and can be corrected directly`,
+            );
+          }
+          reopenCatalogReview(
+            transaction,
+            input.originalDiscArchiveId,
+            timestamp,
+            input.catalogRevision,
+            "Disc Selection correction",
+          );
+          requireRow(
+            transaction
+              .update(discSelections)
+              .set({ isCatalogActive: false, updatedAt: timestamp })
+              .where(and(
+                eq(discSelections.id, id),
+                eq(discSelections.isCatalogActive, true),
+              ))
+              .returning({ id: discSelections.id })
+              .get(),
+            "disc selection",
+            id,
+          );
+          const replacementId = newId<DiscSelectionId>();
+          const discSelection = insertDiscSelection(
+            transaction,
+            input,
+            replacementId,
+            timestamp,
+          );
+          const supersession = requireRow(
+            transaction
+              .insert(discSelectionSupersessions)
+              .values({
+                supersededDiscSelectionId: id,
+                replacementDiscSelectionId: replacementId,
+                reason,
+                createdAt: timestamp,
+              })
+              .returning()
+              .get(),
+            "disc selection supersession",
+            id,
+          );
+          const activeJobs = transaction
+            .select({ id: encodeJobs.id })
+            .from(encodeJobs)
+            .where(and(
+              eq(encodeJobs.discSelectionId, id),
+              inArray(encodeJobs.status, ["queued", "running"]),
+            ))
+            .orderBy(asc(encodeJobs.createdAt), asc(encodeJobs.id))
+            .all();
+          for (const job of activeJobs) {
+            requestEncodeJobCancellation(transaction, job.id, timestamp);
+          }
+          return {
+            discSelection,
+            supersession: supersession satisfies DiscSelectionSupersession,
+          };
+        }, { behavior: "immediate" });
+      },
+
       repairDiscSelection(id, input) {
         const timestamp = now();
         return database.transaction(
@@ -3110,6 +3332,15 @@ export function createDataAccessInternal(
               .where(eq(encodeJobs.discSelectionId, id))
               .limit(1)
               .get();
+            const preservedLineage = hasDiscSelectionSupersession(
+              id,
+              transaction,
+            );
+            if (preservedLineage) {
+              throw new DomainInvariantError(
+                `Disc Selection ${id} belongs to immutable correction lineage and must be corrected by supersession`,
+              );
+            }
             const source = requireRow(
               transaction
                 .select({
@@ -3323,15 +3554,35 @@ export function createDataAccessInternal(
                 ))
                 .run();
             } else {
-              requireRow(
-                transaction
-                  .delete(discSelections)
-                  .where(eq(discSelections.id, id))
-                  .returning({ id: discSelections.id })
-                  .get(),
-                "disc selection",
+              const preservedSupersession = hasDiscSelectionSupersession(
                 id,
+                transaction,
               );
+              if (preservedSupersession) {
+                requireRow(
+                  transaction
+                    .update(discSelections)
+                    .set({ isCatalogActive: false, updatedAt: timestamp })
+                    .where(and(
+                      eq(discSelections.id, id),
+                      eq(discSelections.isCatalogActive, true),
+                    ))
+                    .returning({ id: discSelections.id })
+                    .get(),
+                  "disc selection",
+                  id,
+                );
+              } else {
+                requireRow(
+                  transaction
+                    .delete(discSelections)
+                    .where(eq(discSelections.id, id))
+                    .returning({ id: discSelections.id })
+                    .get(),
+                  "disc selection",
+                  id,
+                );
+              }
             }
             transaction
               .update(originalDiscArchives)
@@ -3408,6 +3659,70 @@ export function createDataAccessInternal(
         return rows.map(toDiscSelection);
       },
 
+      listDiscSelectionSupersessions(options) {
+        const selection = {
+          supersededDiscSelectionId:
+            discSelectionSupersessions.supersededDiscSelectionId,
+          replacementDiscSelectionId:
+            discSelectionSupersessions.replacementDiscSelectionId,
+          reason: discSelectionSupersessions.reason,
+          createdAt: discSelectionSupersessions.createdAt,
+        };
+        if (options.originalDiscArchiveId !== undefined) {
+          const query = database
+            .select(selection)
+            .from(discSelectionSupersessions)
+            .innerJoin(
+              discSelections,
+              eq(
+                discSelections.id,
+                discSelectionSupersessions.replacementDiscSelectionId,
+              ),
+            )
+            .where(eq(
+              discSelections.originalDiscArchiveId,
+              options.originalDiscArchiveId,
+            ))
+            .orderBy(
+              asc(discSelectionSupersessions.createdAt),
+              asc(discSelectionSupersessions.supersededDiscSelectionId),
+            );
+          return listWithBoundedOffset(
+            query,
+            options,
+            "Disc Selection supersession history",
+          );
+        }
+        if (options.discSelectionIds.length === 0) {
+          return [];
+        }
+        if (
+          options.discSelectionIds.length > DISC_SELECTION_SUPERSESSION_LIMIT
+        ) {
+          throw new DomainInvariantError(
+            `Disc Selection supersession lookup is limited to ${DISC_SELECTION_SUPERSESSION_LIMIT} records`,
+          );
+        }
+        return database
+          .select(selection)
+          .from(discSelectionSupersessions)
+          .where(or(
+            inArray(
+              discSelectionSupersessions.supersededDiscSelectionId,
+              [...options.discSelectionIds],
+            ),
+            inArray(
+              discSelectionSupersessions.replacementDiscSelectionId,
+              [...options.discSelectionIds],
+            ),
+          ))
+          .orderBy(
+            asc(discSelectionSupersessions.createdAt),
+            asc(discSelectionSupersessions.supersededDiscSelectionId),
+          )
+          .all();
+      },
+
       listDiscSelectionActionAvailability(options) {
         if (options.ids.length === 0) {
           return [];
@@ -3471,6 +3786,7 @@ export function createDataAccessInternal(
               status: "queued" | "running" | "cancellation_requested";
             }
             : null;
+          const preservedLineage = hasDiscSelectionSupersession(selection.id);
 
           if (legacyCutoverPending) {
             return {
@@ -3499,11 +3815,21 @@ export function createDataAccessInternal(
             return {
               discSelectionId: selection.id,
               state: "locked_provenance",
-              availableActions: [],
+              availableActions: ["correct"],
               reason: activeJob === null
-                ? `Encode Job ${relatedEncodeJob.id} is ${relatedEncodeJob.status}; this Disc Selection is locked provenance and cannot be changed directly`
-                : `Encode Job ${activeJob.id} is ${activeJob.status}; direct mutation is unavailable because its Disc Selection provenance must be preserved`,
+                ? `Encode Job ${relatedEncodeJob.id} is ${relatedEncodeJob.status}; correct this Disc Selection by supersession to preserve its provenance`
+                : `Encode Job ${activeJob.id} is ${activeJob.status}; correcting by supersession will request cancellation and preserve its provenance`,
               relatedEncodeJob,
+            } satisfies DiscSelectionActionAvailability;
+          }
+          if (preservedLineage) {
+            return {
+              discSelectionId: selection.id,
+              state: "correction_lineage",
+              availableActions: ["correct", "remove"],
+              reason:
+                "This Disc Selection belongs to immutable correction lineage; correct it by supersession or remove it while retaining history",
+              relatedEncodeJob: null,
             } satisfies DiscSelectionActionAvailability;
           }
           return {
@@ -5799,62 +6125,11 @@ export function createDataAccessInternal(
 
       requestCancellation(id) {
         const timestamp = now();
-        return database.transaction((transaction) => {
-          const current = requireRow(
-            transaction
-              .select()
-              .from(encodeJobs)
-              .where(eq(encodeJobs.id, id))
-              .get(),
-            "encode job",
-            id,
-          );
-          if (current.status !== "queued" && current.status !== "running") {
-            throw new InvalidStatusTransitionError(
-              "encode job",
-              current.status,
-              "cancelled",
-            );
-          }
-          const claimToken = current.status === "running"
-            ? current.claimToken
-            : null;
-          if (current.status === "running" && claimToken === null) {
-            throw new DomainInvariantError(
-              "Running Encode Job has no claim token",
-            );
-          }
-          const requestedStatus = current.status === "running"
-            ? "cancellation_requested" as const
-            : "cancelled" as const;
-          const updated = transaction
-            .update(encodeJobs)
-            .set({
-              status: requestedStatus,
-              reservesOutputPath: current.status === "queued"
-                ? current.replaceExistingOutput
-                : true,
-              progressEtaSeconds: null,
-              updatedAt: timestamp,
-            })
-            .where(and(
-              eq(encodeJobs.id, id),
-              eq(encodeJobs.status, current.status),
-              claimToken !== null
-                ? eq(encodeJobs.claimToken, claimToken)
-                : undefined,
-            ))
-            .returning()
-            .get();
-          if (!updated) {
-            throw new InvalidStatusTransitionError(
-              "encode job",
-              current.status,
-              requestedStatus,
-            );
-          }
-          return updated;
-        }, { behavior: "immediate" });
+        return database.transaction(
+          (transaction) =>
+            requestEncodeJobCancellation(transaction, id, timestamp),
+          { behavior: "immediate" },
+        );
       },
 
       claimNext: encodeJobQueue.claimNext,
