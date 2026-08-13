@@ -2795,6 +2795,12 @@ describe("data-access facade", () => {
     }));
     const replacementClaim = access.encodeJobs.list(["running"])[0] as
       RunningEncodeJob;
+    expect(() =>
+      access.encodeJobs.complete({
+        ...replacementClaim,
+        predecessorEncodeJobId: null,
+      })
+    ).toThrow(StaleJobAttemptError);
     expect(() => access.encodeJobs.complete(replacementClaim)).toThrow(
       "Corrected replacement Encode Job completion requires publication provenance",
     );

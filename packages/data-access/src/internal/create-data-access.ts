@@ -1833,7 +1833,12 @@ export function createDataAccessInternal(
                 }
               : {}),
         })
-        .where(encodeAttemptCondition(claim, update.updatedAt))
+        .where(and(
+          encodeAttemptCondition(claim, update.updatedAt),
+          update.status === "completed"
+            ? isNull(encodeJobs.predecessorEncodeJobId)
+            : undefined,
+        ))
         .returning()
         .get(),
     updateProgressAttempt: (claim, update, details, failureOptions) =>
