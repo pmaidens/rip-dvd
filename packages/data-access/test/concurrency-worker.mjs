@@ -20,6 +20,9 @@ try {
   parentPort.postMessage({ type: "ready" });
   Atomics.wait(barrier, 0, 0);
   parentPort.postMessage({ type: "operation-started" });
+  if (workerData.delayMs !== undefined) {
+    await new Promise((resolve) => setTimeout(resolve, workerData.delayMs));
+  }
 
   if (workerData.mode === "open") {
     access = createDataAccess({ databasePath: workerData.databasePath });
@@ -152,6 +155,28 @@ try {
       if (!(error instanceof DomainInvariantError)) {
         throw error;
       }
+      parentPort.postMessage({
+        type: "result",
+        value: { outcome: "rejected" },
+      });
+    }
+  } else if (workerData.operation === "complete-catalog-review-with-replacements") {
+    try {
+      const completion = access.catalog.completeCatalogReviewWithReplacements(
+        workerData.originalDiscArchiveId,
+        new Date(workerData.catalogRevision),
+        "reviewed_with_selections",
+        workerData.replacements,
+      );
+      parentPort.postMessage({
+        type: "result",
+        value: {
+          outcome: "reviewed",
+          id: completion.replacementEncodeJobs[0]?.id,
+        },
+      });
+    } catch (error) {
+      if (!(error instanceof DomainInvariantError)) throw error;
       parentPort.postMessage({
         type: "result",
         value: { outcome: "rejected" },

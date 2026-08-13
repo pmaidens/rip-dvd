@@ -423,6 +423,7 @@ export interface ArchiveJob {
 
 export interface EncodeJob {
   id: EncodeJobId;
+  predecessorEncodeJobId: EncodeJobId | null;
   discSelectionId: DiscSelectionId;
   encodingProfileId: EncodingProfileId;
   outputPath: string;
@@ -449,6 +450,31 @@ export interface EncodeJob {
   verifiedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
+}
+
+export interface EncodeJobCorrectionLink extends EncodeJob {
+  correctedPublicationAdmitted: boolean;
+}
+
+export interface CorrectedEncodeReplacementPlan {
+  predecessorEncodeJobId: EncodeJobId;
+  replacementDiscSelectionId: DiscSelectionId;
+  proposedEncodingProfileId: EncodingProfileId;
+  proposedOutputPath: string;
+  predecessorStatus: EncodeJobStatus;
+  predecessorReady: boolean;
+}
+
+export interface CorrectedEncodeReplacementInput {
+  predecessorEncodeJobId: EncodeJobId;
+  encodingProfileId: EncodingProfileId;
+  outputPath: string;
+  priority?: number;
+}
+
+export interface CompletedCatalogReviewWithReplacements {
+  archive: OriginalDiscArchive;
+  replacementEncodeJobs: EncodeJob[];
 }
 
 export type RunningArchiveJob = ArchiveJob & {
@@ -641,6 +667,12 @@ export interface CatalogAccess {
     catalogRevision: Date,
     outcome: CompletedCatalogReviewOutcome,
   ): OriginalDiscArchive;
+  completeCatalogReviewWithReplacements(
+    id: OriginalDiscArchiveId,
+    catalogRevision: Date,
+    outcome: CompletedCatalogReviewOutcome,
+    replacements: readonly CorrectedEncodeReplacementInput[],
+  ): CompletedCatalogReviewWithReplacements;
   createMediaItem(input: CreateMediaItemInput): MediaItem;
   createMappingProposal(
     input: CreateMappingProposalInput,
@@ -704,6 +736,11 @@ export interface CatalogAccess {
       offset?: number;
       discSelectionIds?: never;
     }): DiscSelectionSupersession[];
+  listCorrectedEncodeReplacementPlans(options: {
+    originalDiscArchiveId: OriginalDiscArchiveId;
+    limit: number;
+    offset?: number;
+  }): CorrectedEncodeReplacementPlan[];
   listDiscSelectionActionAvailability(options: {
     ids: readonly DiscSelectionId[];
   }): DiscSelectionActionAvailability[];
@@ -877,6 +914,7 @@ export interface EncodeJobAccess {
     statuses?: EncodeJobStatus[],
     options?: ChronologicalListOptions,
   ): EncodeJob[];
+  listCorrectionLinks(ids: readonly EncodeJobId[]): EncodeJobCorrectionLink[];
   updateProgress(
     claim: RunningEncodeJob,
     progress: number | EncodeJobProgress,
@@ -913,6 +951,7 @@ export type SnapshotCatalogAccess = Pick<
   | "searchMediaItems"
   | "listDiscSelections"
   | "listDiscSelectionSupersessions"
+  | "listCorrectedEncodeReplacementPlans"
   | "listDiscSelectionActionAvailability"
 >;
 
@@ -928,7 +967,10 @@ export interface ConsistentReadAccess {
     ArchiveJobAccess,
     "list" | "listLatestForRequests"
   >;
-  readonly encodeJobs: Pick<EncodeJobAccess, "list">;
+  readonly encodeJobs: Pick<
+    EncodeJobAccess,
+    "list" | "listCorrectionLinks"
+  >;
 }
 
 export interface DataAccess {

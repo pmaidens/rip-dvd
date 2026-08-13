@@ -32,6 +32,7 @@ import {
 } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-sqlite";
 import { migrate } from "drizzle-orm/node-sqlite/migrator";
+import { alias } from "drizzle-orm/sqlite-core";
 
 import {
   createBoundedFilesystemPathProbe,
@@ -117,6 +118,7 @@ import type {
   ConsistentReadAccess,
   CreateDiscSelectionInput,
   CompletedCatalogReviewOutcome,
+  CorrectedEncodeReplacementPlan,
   DataAccess,
   DetectedDiscId,
   DetectedDiscListOptions,
@@ -154,8 +156,13 @@ import {
   ENCODE_JOB_LEASE_DURATION_MS,
 } from "../types.js";
 import { newId, requireRow } from "./persistence.js";
+import {
+  correctedEncodePredecessorReadyCondition,
+  isCorrectedEncodePredecessorReady,
+} from "../corrected-encode-readiness.js";
 
 const BUSY_TIMEOUT_MS = 5_000;
+const MAX_CORRECTED_ENCODE_REPLACEMENT_PLAN_PAGE_SIZE = 101;
 const MIGRATION_LOCK_TIMEOUT_MS = 15_000;
 const MIGRATION_LOCK_STALE_MS = 300_000;
 const MIGRATION_LOCK_POLL_MS = 10;
@@ -169,6 +176,7 @@ const DISC_SELECTION_SUPERSESSION_LIMIT = 100;
 const MEDIA_ITEM_SEARCH_LIMIT = 100;
 const CATALOG_REVIEW_ARCHIVE_LIMIT = 100;
 const CATALOG_REVIEW_MAPPED_TITLE_SUMMARY_LIMIT = 3;
+const CORRECTED_ENCODE_REPLACEMENT_LIMIT = 100;
 const DEFAULT_MIGRATIONS_FOLDER = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../drizzle",
@@ -231,6 +239,19 @@ const detectedDiscUsesCurrentDvdContentId = sql<boolean>`
   and substr(${detectedDiscs.fingerprint}, 1, 7) = 'sha256:'
   and substr(${detectedDiscs.fingerprint}, 8) not glob '*[^0-9a-f]*'
 `;
+
+const replacementEncodeJobRecords = alias(
+  encodeJobs,
+  "replacement_encode_jobs",
+);
+const predecessorEncodeJobRecords = alias(
+  encodeJobs,
+  "predecessor_encode_jobs",
+);
+const claimPredecessorEncodeJobRecords = alias(
+  encodeJobs,
+  "claim_predecessor_encode_jobs",
+);
 
 const unresolvedLegacyDvdArchiveIdentity = and(
   eq(originalDiscArchives.discKind, "dvd"),
@@ -677,12 +698,21 @@ export function createDataAccessInternal(
     const requestedStatus = current.status === "running"
       ? "cancellation_requested" as const
       : "cancelled" as const;
+    const predecessor = current.predecessorEncodeJobId === null
+      ? undefined
+      : transaction
+          .select({ outputPath: encodeJobs.outputPath })
+          .from(encodeJobs)
+          .where(eq(encodeJobs.id, current.predecessorEncodeJobId))
+          .get();
+    const protectsCorrectedSamePath =
+      predecessor?.outputPath === current.outputPath;
     const updated = transaction
       .update(encodeJobs)
       .set({
         status: requestedStatus,
         reservesOutputPath: current.status === "queued"
-          ? current.replaceExistingOutput
+          ? current.replaceExistingOutput || protectsCorrectedSamePath
           : true,
         progressEtaSeconds: null,
         updatedAt: timestamp,
@@ -1357,6 +1387,136 @@ export function createDataAccessInternal(
     },
   });
 
+  const correctedEncodeReplacementPlanStatement = sqlite.prepare(`
+    with recursive correction_lineage(
+      ancestor_disc_selection_id,
+      replacement_disc_selection_id
+    ) as (
+      select
+        supersession.superseded_disc_selection_id,
+        active_replacement.id
+      from disc_selection_supersessions as supersession
+      inner join disc_selections as active_replacement
+        on active_replacement.id = supersession.replacement_disc_selection_id
+      where active_replacement.original_disc_archive_id = ?
+        and active_replacement.is_catalog_active = 1
+      union
+      select
+        prior_correction.superseded_disc_selection_id,
+        correction_lineage.replacement_disc_selection_id
+      from correction_lineage
+      inner join disc_selection_supersessions as prior_correction
+        on prior_correction.replacement_disc_selection_id =
+          correction_lineage.ancestor_disc_selection_id
+    )
+    select distinct
+      predecessor.id as predecessor_encode_job_id,
+      active_replacement.id as replacement_disc_selection_id,
+      predecessor.encoding_profile_id as proposed_encoding_profile_id,
+      predecessor.output_path as proposed_output_path,
+      predecessor.status as predecessor_status,
+      predecessor.partial_cleanup_output_path,
+      predecessor.partial_cleanup_claim_token,
+      predecessor.partial_cleanup_lease_token,
+      predecessor.publication_pending,
+      predecessor.publication_completion_pending
+    from correction_lineage
+    inner join disc_selections as active_replacement
+      on active_replacement.id =
+        correction_lineage.replacement_disc_selection_id
+    inner join encode_jobs as predecessor
+      on predecessor.disc_selection_id =
+        correction_lineage.ancestor_disc_selection_id
+    left join encode_jobs as corrected_replacement
+      on corrected_replacement.predecessor_encode_job_id = predecessor.id
+    where corrected_replacement.id is null
+      and (? is null or predecessor.id = ?)
+    order by predecessor.created_at, predecessor.id
+    limit ? offset ?
+  `);
+  const releaseCorrectedFailedReservationsStatement = sqlite.prepare(`
+    with recursive correction_lineage(ancestor_disc_selection_id) as (
+      select
+        supersession.superseded_disc_selection_id
+      from disc_selection_supersessions as supersession
+      inner join disc_selections as active_replacement
+        on active_replacement.id = supersession.replacement_disc_selection_id
+      where active_replacement.original_disc_archive_id = ?
+        and active_replacement.is_catalog_active = 1
+      union
+      select
+        prior_correction.superseded_disc_selection_id
+      from correction_lineage
+      inner join disc_selection_supersessions as prior_correction
+        on prior_correction.replacement_disc_selection_id =
+          correction_lineage.ancestor_disc_selection_id
+    )
+    update encode_jobs
+    set reserves_output_path = 0, updated_at = ?
+    where status = 'failed'
+      and replace_existing_output = 0
+      and reserves_output_path = 1
+      and partial_cleanup_output_path is null
+      and partial_cleanup_claim_token is null
+      and partial_cleanup_lease_token is null
+      and publication_pending = 0
+      and publication_completion_pending = 0
+      and disc_selection_id in (
+        select correction_lineage.ancestor_disc_selection_id
+        from correction_lineage
+      )
+  `);
+
+  function readCorrectedEncodeReplacementPlans(input: {
+    originalDiscArchiveId: OriginalDiscArchiveId;
+    predecessorEncodeJobId?: EncodeJobId;
+    limit: number;
+    offset?: number;
+  }): CorrectedEncodeReplacementPlan[] {
+    const limit = requirePositiveSafeInteger(input.limit, "limit");
+    if (limit > MAX_CORRECTED_ENCODE_REPLACEMENT_PLAN_PAGE_SIZE) {
+      throw new DomainInvariantError(
+        `Corrected Encode replacement plan limit cannot exceed ${MAX_CORRECTED_ENCODE_REPLACEMENT_PLAN_PAGE_SIZE}`,
+      );
+    }
+    const offset = optionalSafeInteger(input.offset, "offset", 0) ?? 0;
+    const predecessorEncodeJobId = input.predecessorEncodeJobId ?? null;
+    const rows = correctedEncodeReplacementPlanStatement.all(
+      input.originalDiscArchiveId,
+      predecessorEncodeJobId,
+      predecessorEncodeJobId,
+      limit,
+      offset,
+    ) as unknown as Array<{
+      predecessor_encode_job_id: EncodeJobId;
+      replacement_disc_selection_id: DiscSelectionId;
+      proposed_encoding_profile_id: EncodingProfileId;
+      proposed_output_path: string;
+      predecessor_status: EncodeJobStatus;
+      partial_cleanup_output_path: string | null;
+      partial_cleanup_claim_token: EncodeJobClaimToken | null;
+      partial_cleanup_lease_token: EncodeJobCleanupClaimToken | null;
+      publication_pending: number;
+      publication_completion_pending: number;
+    }>;
+    return rows.map((row) => ({
+      predecessorEncodeJobId: row.predecessor_encode_job_id,
+      replacementDiscSelectionId: row.replacement_disc_selection_id,
+      proposedEncodingProfileId: row.proposed_encoding_profile_id,
+      proposedOutputPath: row.proposed_output_path,
+      predecessorStatus: row.predecessor_status,
+      predecessorReady: isCorrectedEncodePredecessorReady({
+        status: row.predecessor_status,
+        partialCleanupOutputPath: row.partial_cleanup_output_path,
+        partialCleanupClaimToken: row.partial_cleanup_claim_token,
+        partialCleanupLeaseToken: row.partial_cleanup_lease_token,
+        publicationPending: row.publication_pending === 1,
+        publicationCompletionPending:
+          row.publication_completion_pending === 1,
+      }),
+    }));
+  }
+
   const encodeAttemptCondition = (
     claim: RunningEncodeJob,
     timestamp: Date,
@@ -1395,62 +1555,118 @@ export function createDataAccessInternal(
     find: (id) =>
       database.select().from(encodeJobs).where(eq(encodeJobs.id, id)).get(),
     list: listEncodeJobs,
-    claim: (workerId, token, timestamp) => {
-      const nextReviewedJob = database
-        .select({ id: encodeJobs.id })
-        .from(encodeJobs)
-        .innerJoin(
-          discSelections,
-          eq(discSelections.id, encodeJobs.discSelectionId),
-        )
-        .innerJoin(
-          originalDiscArchives,
-          eq(
-            originalDiscArchives.id,
-            discSelections.originalDiscArchiveId,
-          ),
-        )
-        .where(
-          and(
-            eq(encodeJobs.status, "queued"),
-            isNull(encodeJobs.partialCleanupClaimToken),
-            isNull(encodeJobs.partialCleanupOutputPath),
-            isNull(encodeJobs.partialCleanupLeaseToken),
-            eq(discSelections.isCatalogActive, true),
+    claim: (workerId, token, timestamp) =>
+      database.transaction((transaction) => {
+        const correctedPublicationAdmitted = or(
+          isNull(encodeJobs.predecessorEncodeJobId),
+          eq(encodeJobs.correctedPublicationAdmitted, true),
+        );
+        const nextReviewedJob = transaction
+          .select({
+            id: encodeJobs.id,
+            outputPath: encodeJobs.outputPath,
+            replaceExistingOutput: encodeJobs.replaceExistingOutput,
+            predecessorOutputPath: predecessorEncodeJobRecords.outputPath,
+            predecessorStatus: predecessorEncodeJobRecords.status,
+            predecessorReplaceExistingOutput:
+              predecessorEncodeJobRecords.replaceExistingOutput,
+          })
+          .from(encodeJobs)
+          .innerJoin(
+            discSelections,
+            eq(discSelections.id, encodeJobs.discSelectionId),
+          )
+          .innerJoin(
+            originalDiscArchives,
             eq(
-              originalDiscArchives.catalogReviewOutcome,
-              "reviewed_with_selections",
+              originalDiscArchives.id,
+              discSelections.originalDiscArchiveId,
             ),
-            eq(originalDiscArchives.legacyCutoverPending, false),
+          )
+          .leftJoin(
+            predecessorEncodeJobRecords,
+            eq(
+              predecessorEncodeJobRecords.id,
+              encodeJobs.predecessorEncodeJobId,
+            ),
+          )
+          .where(
+            and(
+              eq(encodeJobs.status, "queued"),
+              isNull(encodeJobs.partialCleanupClaimToken),
+              isNull(encodeJobs.partialCleanupOutputPath),
+              isNull(encodeJobs.partialCleanupLeaseToken),
+              eq(discSelections.isCatalogActive, true),
+              eq(
+                originalDiscArchives.catalogReviewOutcome,
+                "reviewed_with_selections",
+              ),
+              eq(originalDiscArchives.legacyCutoverPending, false),
+              correctedPublicationAdmitted,
+              or(
+                isNull(encodeJobs.predecessorEncodeJobId),
+                correctedEncodePredecessorReadyCondition(
+                  predecessorEncodeJobRecords,
+                ),
+              ),
+            ),
+          )
+          .orderBy(
+            desc(encodeJobs.priority),
+            asc(encodeJobs.createdAt),
+            asc(encodeJobs.id),
+          )
+          .limit(1)
+          .get();
+        if (!nextReviewedJob) {
+          return undefined;
+        }
+        const predecessorStillEligible = or(
+          isNull(encodeJobs.predecessorEncodeJobId),
+          exists(
+            transaction
+              .select({ id: claimPredecessorEncodeJobRecords.id })
+              .from(claimPredecessorEncodeJobRecords)
+              .where(and(
+                eq(
+                  claimPredecessorEncodeJobRecords.id,
+                  encodeJobs.predecessorEncodeJobId,
+                ),
+                correctedEncodePredecessorReadyCondition(
+                  claimPredecessorEncodeJobRecords,
+                ),
+              )),
           ),
-        )
-        .orderBy(
-          desc(encodeJobs.priority),
-          asc(encodeJobs.createdAt),
-          asc(encodeJobs.id),
-        )
-        .limit(1);
-      const claimed = database
-        .update(encodeJobs)
-        .set({
-          status: "running",
-          claimedBy: workerId,
-          claimToken: token,
-          claimedAt: timestamp,
-          startedAt: timestamp,
-          errorMessage: null,
-          updatedAt: timestamp,
-        })
-        .where(
-          and(
-            eq(encodeJobs.status, "queued"),
-            eq(encodeJobs.id, nextReviewedJob),
-          ),
-        )
-        .returning()
-        .get();
-      return claimed ? asRunningEncodeJob(claimed) : undefined;
-    },
+        );
+        const claimed = transaction
+          .update(encodeJobs)
+          .set({
+            status: "running",
+            replaceExistingOutput:
+              nextReviewedJob.replaceExistingOutput ||
+              (nextReviewedJob.outputPath ===
+                  nextReviewedJob.predecessorOutputPath &&
+                (nextReviewedJob.predecessorStatus === "completed" ||
+                  nextReviewedJob.predecessorReplaceExistingOutput === true)),
+            claimedBy: workerId,
+            claimToken: token,
+            claimedAt: timestamp,
+            startedAt: timestamp,
+            errorMessage: null,
+            updatedAt: timestamp,
+          })
+          .where(
+            and(
+              eq(encodeJobs.status, "queued"),
+              eq(encodeJobs.id, nextReviewedJob.id),
+              correctedPublicationAdmitted,
+              predecessorStillEligible,
+            ),
+          )
+          .returning()
+          .get();
+        return claimed ? asRunningEncodeJob(claimed) : undefined;
+      }, { behavior: "immediate" }),
     isAttemptCurrent: (current, _claim, timestamp) =>
       current.updatedAt.getTime() >
       timestamp.getTime() - ENCODE_JOB_LEASE_DURATION_MS,
@@ -1805,6 +2021,8 @@ export function createDataAccessInternal(
             access.catalog.listDiscSelections(options),
           listDiscSelectionSupersessions: (options) =>
             access.catalog.listDiscSelectionSupersessions(options),
+          listCorrectedEncodeReplacementPlans: (options) =>
+            access.catalog.listCorrectedEncodeReplacementPlans(options),
           listDiscSelectionActionAvailability: (options) =>
             access.catalog.listDiscSelectionActionAvailability(options),
         },
@@ -1829,6 +2047,8 @@ export function createDataAccessInternal(
         },
         encodeJobs: {
           list: (statuses, options) => access.encodeJobs.list(statuses, options),
+          listCorrectionLinks: (ids) =>
+            access.encodeJobs.listCorrectionLinks(ids),
         },
       };
       sqlite.exec("BEGIN");
@@ -2737,6 +2957,219 @@ export function createDataAccessInternal(
             );
           }
           return completed;
+        }, { behavior: "immediate" });
+      },
+
+      completeCatalogReviewWithReplacements(
+        id,
+        catalogRevision,
+        outcome,
+        replacements,
+      ) {
+        if (
+          !(catalogRevision instanceof Date) ||
+          !Number.isSafeInteger(catalogRevision.getTime())
+        ) {
+          throw new DomainInvariantError(
+            "Catalog review revision must be a valid timestamp",
+          );
+        }
+        if (
+          outcome !== "reviewed_with_selections" &&
+          outcome !== "archive_only"
+        ) {
+          throw new DomainInvariantError(
+            "Catalog review outcome must be reviewed with selections or Archive only",
+          );
+        }
+        if (
+          !Array.isArray(replacements) ||
+          replacements.length > CORRECTED_ENCODE_REPLACEMENT_LIMIT
+        ) {
+          throw new DomainInvariantError(
+            "Corrected Encode replacement plan is limited to 100 jobs",
+          );
+        }
+        if (outcome === "archive_only" && replacements.length > 0) {
+          throw new DomainInvariantError(
+            "Archive-only Review cannot queue corrected replacement encodes",
+          );
+        }
+        const predecessorIds = new Set<EncodeJobId>();
+        for (const replacement of replacements) {
+          if (predecessorIds.has(replacement.predecessorEncodeJobId)) {
+            throw new DomainInvariantError(
+              "Corrected Encode replacement plan contains a duplicate predecessor",
+            );
+          }
+          predecessorIds.add(replacement.predecessorEncodeJobId);
+          requireNonEmpty(replacement.outputPath, "outputPath");
+          if (
+            replacement.priority !== undefined &&
+            !Number.isSafeInteger(replacement.priority)
+          ) {
+            throw new DomainInvariantError("priority must be a safe integer");
+          }
+        }
+        const timestamp = now();
+        const validatedArchive = outcome === "reviewed_with_selections"
+          ? validateDiscSelectionsOutsideWriter(id)
+          : validateArchiveOnlyOutsideWriter(id);
+        return database.transaction((transaction) => {
+          const archive = requireCurrentCatalogValidation(
+            validatedArchive,
+            transaction,
+          );
+          if (archive.legacyCutoverPending) {
+            throw new DomainInvariantError(
+              "Catalog review cannot be completed while legacy cutover repair is pending",
+            );
+          }
+          if (archive.updatedAt.getTime() !== catalogRevision.getTime()) {
+            throw new DomainInvariantError(
+              "Catalog review changed; reload before completing review",
+            );
+          }
+          if (archive.catalogReviewedAt !== null) {
+            throw new DomainInvariantError(
+              "Catalog review changed; reload before completing review",
+            );
+          }
+
+          const replacementEncodeJobs: EncodeJob[] = [];
+          for (const input of replacements) {
+            const plan = requireRow(
+              readCorrectedEncodeReplacementPlans({
+                originalDiscArchiveId: id,
+                predecessorEncodeJobId: input.predecessorEncodeJobId,
+                limit: 1,
+              })[0],
+              "corrected Encode predecessor",
+              input.predecessorEncodeJobId,
+            );
+            const predecessor = requireRow(
+              transaction
+                .select()
+                .from(encodeJobs)
+                .where(eq(encodeJobs.id, plan.predecessorEncodeJobId))
+                .get(),
+              "encode job",
+              plan.predecessorEncodeJobId,
+            );
+            const candidate = {
+              predecessor,
+              replacementDiscSelectionId:
+                plan.replacementDiscSelectionId,
+            };
+            const existingReplacement = transaction
+              .select({ id: replacementEncodeJobRecords.id })
+              .from(replacementEncodeJobRecords)
+              .where(eq(
+                replacementEncodeJobRecords.predecessorEncodeJobId,
+                candidate.predecessor.id,
+              ))
+              .limit(1)
+              .get();
+            if (existingReplacement) {
+              throw new DomainInvariantError(
+                `Encode Job ${candidate.predecessor.id} already has a corrected replacement`,
+              );
+            }
+            const profile = requireRow(
+              transaction
+                .select()
+                .from(encodingProfiles)
+                .where(eq(encodingProfiles.id, input.encodingProfileId))
+                .get(),
+              "encoding profile",
+              input.encodingProfileId,
+            );
+            if (
+              input.encodingProfileId !==
+                candidate.predecessor.encodingProfileId &&
+              (!profile.isActive || profile.mediaDomain !== "dvd_video")
+            ) {
+              throw new DomainInvariantError(
+                "Corrected replacement encodes require the prior or an active DVD video Encoding Profile",
+              );
+            }
+            const outputPath = requireNonEmpty(input.outputPath, "outputPath");
+            const outputOwner = transaction
+              .select({ id: encodeJobs.id })
+              .from(encodeJobs)
+              .where(and(
+                eq(encodeJobs.outputPath, outputPath),
+                eq(encodeJobs.reservesOutputPath, true),
+                ne(encodeJobs.id, candidate.predecessor.id),
+              ))
+              .limit(1)
+              .get();
+            if (outputOwner) {
+              throw new DomainInvariantError(
+                `Encode Job output is already assigned: ${outputPath}`,
+              );
+            }
+            if (
+              outputPath === candidate.predecessor.outputPath &&
+              candidate.predecessor.reservesOutputPath
+            ) {
+              transaction
+                .update(encodeJobs)
+                .set({ reservesOutputPath: false, updatedAt: timestamp })
+                .where(eq(encodeJobs.id, candidate.predecessor.id))
+                .run();
+            }
+            const replacement = requireRow(
+              transaction
+                .insert(encodeJobs)
+                .values({
+                  id: newId<EncodeJobId>(),
+                  predecessorEncodeJobId: candidate.predecessor.id,
+                  discSelectionId: candidate.replacementDiscSelectionId,
+                  encodingProfileId: input.encodingProfileId,
+                  outputPath,
+                  priority: input.priority ?? candidate.predecessor.priority,
+                  replaceExistingOutput:
+                    outputPath === candidate.predecessor.outputPath &&
+                    (candidate.predecessor.status === "completed" ||
+                      candidate.predecessor.replaceExistingOutput),
+                  createdAt: timestamp,
+                  updatedAt: timestamp,
+                })
+                .returning()
+                .get(),
+              "corrected Encode replacement",
+              candidate.predecessor.id,
+            );
+            replacementEncodeJobs.push(replacement);
+          }
+
+          releaseCorrectedFailedReservationsStatement.run(
+            id,
+            timestamp.getTime(),
+          );
+
+          const completed = transaction
+            .update(originalDiscArchives)
+            .set({
+              catalogReviewedAt: timestamp,
+              catalogReviewOutcome: outcome,
+              updatedAt: nextCatalogMutationTimestamp(timestamp),
+            })
+            .where(and(
+              eq(originalDiscArchives.id, id),
+              eq(originalDiscArchives.updatedAt, catalogRevision),
+              isNull(originalDiscArchives.catalogReviewedAt),
+              eq(originalDiscArchives.catalogReviewOutcome, "needs_review"),
+            ))
+            .returning()
+            .get();
+          if (!completed) {
+            throw new DomainInvariantError(
+              "Catalog review changed; reload before completing review",
+            );
+          }
+          return { archive: completed, replacementEncodeJobs };
         }, { behavior: "immediate" });
       },
 
@@ -3721,6 +4154,10 @@ export function createDataAccessInternal(
             asc(discSelectionSupersessions.supersededDiscSelectionId),
           )
           .all();
+      },
+
+      listCorrectedEncodeReplacementPlans(options) {
+        return readCorrectedEncodeReplacementPlans(options);
       },
 
       listDiscSelectionActionAvailability(options) {
@@ -6041,6 +6478,7 @@ export function createDataAccessInternal(
                 and(
                   eq(encodeJobs.discSelectionId, input.discSelectionId),
                   eq(encodeJobs.encodingProfileId, input.encodingProfileId),
+                  isNull(encodeJobs.predecessorEncodeJobId),
                 ),
               )
               .get();
@@ -6057,6 +6495,7 @@ export function createDataAccessInternal(
                   or(
                     ne(encodeJobs.discSelectionId, input.discSelectionId),
                     ne(encodeJobs.encodingProfileId, input.encodingProfileId),
+                    isNotNull(encodeJobs.predecessorEncodeJobId),
                   ),
                 ),
               )
@@ -6096,12 +6535,7 @@ export function createDataAccessInternal(
                 createdAt: timestamp,
                 updatedAt: timestamp,
               })
-              .onConflictDoNothing({
-                target: [
-                  encodeJobs.discSelectionId,
-                  encodeJobs.encodingProfileId,
-                ],
-              })
+              .onConflictDoNothing()
               .run();
 
             return requireRow(
@@ -6112,6 +6546,7 @@ export function createDataAccessInternal(
                   and(
                     eq(encodeJobs.discSelectionId, input.discSelectionId),
                     eq(encodeJobs.encodingProfileId, input.encodingProfileId),
+                    isNull(encodeJobs.predecessorEncodeJobId),
                   ),
                 )
                 .get(),
@@ -6133,6 +6568,29 @@ export function createDataAccessInternal(
       },
 
       claimNext: encodeJobQueue.claimNext,
+      listCorrectionLinks(ids) {
+        if (ids.length === 0) return [];
+        if (ids.length > 400) {
+          throw new DomainInvariantError(
+            "Encode Job correction-link lookup is limited to 400 records",
+          );
+        }
+        const uniqueIds = [...new Set(ids)];
+        const displayedPredecessors = database
+          .select({ id: encodeJobs.predecessorEncodeJobId })
+          .from(encodeJobs)
+          .where(inArray(encodeJobs.id, uniqueIds));
+        return database
+          .select()
+          .from(encodeJobs)
+          .where(or(
+            inArray(encodeJobs.id, uniqueIds),
+            inArray(encodeJobs.predecessorEncodeJobId, uniqueIds),
+            inArray(encodeJobs.id, displayedPredecessors),
+          ))
+          .orderBy(asc(encodeJobs.createdAt), asc(encodeJobs.id))
+          .all();
+      },
       renewClaim(claim) {
         const timestamp = now();
         const renewed = database
@@ -6165,7 +6623,12 @@ export function createDataAccessInternal(
           .update(encodeJobs)
           .set({
             status: "cancelled",
-            reservesOutputPath: claim.replaceExistingOutput,
+            reservesOutputPath: sql`case when exists (
+              select 1 from encode_jobs as corrected_replacement
+              where corrected_replacement.predecessor_encode_job_id = ${claim.id}
+                and corrected_replacement.output_path = ${claim.outputPath}
+                and corrected_replacement.reserves_output_path = 1
+            ) then 0 else ${claim.replaceExistingOutput ? 1 : 0} end`,
             partialCleanupOutputPath: null,
             partialCleanupClaimToken: null,
             partialCleanupLeaseToken: null,
@@ -6464,7 +6927,12 @@ export function createDataAccessInternal(
           .update(encodeJobs)
           .set({
             status: "cancelled",
-            reservesOutputPath: claim.replaceExistingOutput,
+            reservesOutputPath: sql`case when exists (
+              select 1 from encode_jobs as corrected_replacement
+              where corrected_replacement.predecessor_encode_job_id = ${claim.id}
+                and corrected_replacement.output_path = ${claim.outputPath}
+                and corrected_replacement.reserves_output_path = 1
+            ) then 0 else ${claim.replaceExistingOutput ? 1 : 0} end`,
             partialCleanupOutputPath: claim.outputPath,
             partialCleanupClaimToken: claim.claimToken,
             partialCleanupLeaseToken: null,
@@ -7106,6 +7574,21 @@ export function createDataAccessInternal(
             partialCleanupLeaseToken: null,
             publicationPending: false,
             publicationCompletionPending: false,
+            reservesOutputPath: sql`case when
+              ${encodeJobs.status} = 'failed'
+              and ${encodeJobs.replaceExistingOutput} = 0
+              and exists (
+                select 1
+                from ${discSelections} as inactive_selection
+                inner join ${originalDiscArchives} as reviewed_archive
+                  on reviewed_archive.id =
+                    inactive_selection.original_disc_archive_id
+                where inactive_selection.id = ${encodeJobs.discSelectionId}
+                  and inactive_selection.is_catalog_active = 0
+                  and reviewed_archive.catalog_review_outcome <>
+                    'needs_review'
+              )
+              then 0 else ${encodeJobs.reservesOutputPath} end`,
           })
           .where(
             and(

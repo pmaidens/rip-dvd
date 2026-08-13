@@ -6,6 +6,7 @@ import type { DataAccess } from "./types.js";
 
 export { createDiscSelectionSourceIdentity } from "./disc-selection-source-identity.js";
 export { normalizeMediaItemSearchTitle } from "./media-item-title-search.js";
+export { isCorrectedEncodePredecessorReady } from "./corrected-encode-readiness.js";
 
 export * from "./errors.js";
 export * from "./dvd-scan.js";

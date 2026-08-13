@@ -135,6 +135,15 @@ function encodeJob(snapshot: DashboardSnapshot): DashboardEncodeJob {
   return job;
 }
 
+function encodeJobById(
+  snapshot: DashboardSnapshot,
+  id: string,
+): DashboardEncodeJob | undefined {
+  return snapshot.encodeJobs.status === "loaded"
+    ? snapshot.encodeJobs.items.find((job) => job.id === id)
+    : undefined;
+}
+
 function createDashboardEventReader(access: DataAccess) {
   const controller = new AbortController();
   openEventStreams.push(controller);
@@ -475,15 +484,120 @@ describe("end-to-end operations dashboard workflow", () => {
         catalogReviewedAt: null,
       });
 
+    const reviewResponse = await createCatalogReviewRoute(
+      new Request(`${trustedOrigin}/api/catalog-reviews/${archive.id}`),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    expect(reviewResponse.status).toBe(200);
+    const review = await reviewResponse.json() as CatalogReviewDto;
+    expect(review.replacementPlan).toEqual({
+      jobs: [{
+        predecessorEncodeJobId: job.id,
+        predecessorStatus: "cancellation_requested",
+        predecessorReady: false,
+        replacementDiscSelectionId: expect.any(String),
+        proposedEncodingProfileId: profile.id,
+        proposedOutputPath: job.outputPath,
+      }],
+      encodingProfiles: [{
+        id: profile.id,
+        displayName: profile.displayName,
+        version: profile.version,
+        isActive: true,
+      }],
+      jobsPage: {
+        offset: 0,
+        limit: 100,
+        hasPrevious: false,
+        hasNext: false,
+      },
+      encodingProfilesPage: {
+        offset: 0,
+        limit: 100,
+        hasPrevious: false,
+        hasNext: false,
+      },
+    });
+    const reviewHtml = renderCatalogReview(review);
+    expect(reviewHtml).toContain("Queue corrected replacement");
+    expect(reviewHtml).toContain("Waiting for previous encode to stop");
+    expect(reviewHtml).toContain(`value="${profile.id}" selected`);
+    expect(reviewHtml).toContain(`value="${job.outputPath}"`);
+    expect(reviewHtml).not.toContain(
+      `name="replacement:${job.id}:selected" checked`,
+    );
+
+    const events = createDashboardEventReader(access);
+    await events.next((snapshot) =>
+      encodeJobById(snapshot, job.id)?.status === "cancellation_requested"
+    );
+    const completionResponse = await createCatalogReviewRoute(
+      createMutationRequest(`/api/catalog-reviews/${archive.id}`, {
+        action: "complete_review",
+        catalogRevision: review.catalogRevision,
+        outcome: "reviewed_with_selections",
+        replacementEncodes: [{
+          predecessorEncodeJobId: job.id,
+          encodingProfileId: profile.id,
+          outputPath: job.outputPath,
+        }],
+      }),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+      () => mediaLibraryPath,
+    );
+    expect(completionResponse.status).toBe(200);
+    const completion = await completionResponse.json() as {
+      archive: { catalogReviewOutcome: string };
+      replacementEncodeJobs: Array<{ id: string }>;
+    };
+    expect(completion.archive.catalogReviewOutcome).toBe(
+      "reviewed_with_selections",
+    );
+    const replacementJobId = completion.replacementEncodeJobs[0]!.id;
+    const waitingSnapshot = await events.next((snapshot) => {
+      const predecessor = encodeJobById(snapshot, job.id);
+      const replacement = encodeJobById(snapshot, replacementJobId);
+      return predecessor?.correctedReplacement?.successorId ===
+        replacementJobId &&
+        replacement?.correctedReplacement?.predecessorId === job.id;
+    });
+    const waitingHtml = renderToStaticMarkup(
+      <DashboardView state={waitingSnapshot} />,
+    );
+    expect(waitingHtml).toContain(`Replacement Encode Job ${replacementJobId}`);
+    expect(waitingHtml).toContain(`Replaces Encode Job ${job.id}`);
+    expect(waitingHtml).toContain("Waiting for previous encode to stop");
+
     workerGate.release();
     await workerPoll;
-    expect(access.encodeJobs.list()).toEqual([
+    const readySnapshot = await events.next((snapshot) => {
+      const predecessor = encodeJobById(snapshot, job.id);
+      const replacement = encodeJobById(snapshot, replacementJobId);
+      return predecessor?.status === "cancelled" &&
+        replacement?.correctedReplacement?.predecessorReady === true;
+    });
+    expect(access.encodeJobs.list()).toEqual(expect.arrayContaining([
       expect.objectContaining({
         id: job.id,
         discSelectionId: selection.id,
         status: "cancelled",
       }),
-    ]);
+      expect.objectContaining({
+        id: replacementJobId,
+        predecessorEncodeJobId: job.id,
+        status: "queued",
+      }),
+    ]));
+    const readyHtml = renderToStaticMarkup(
+      <DashboardView state={readySnapshot} />,
+    );
+    expect(readyHtml).toContain("Waiting for corrected publication support");
+    expect(readyHtml).not.toContain("Ready for encode");
+    await events.close();
   });
 
   it("runs the public dashboard workflow through explicit verification", async () => {

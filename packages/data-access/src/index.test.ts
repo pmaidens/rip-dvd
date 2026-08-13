@@ -67,7 +67,7 @@ type ConcurrentWorkerResult =
     }
   | null;
 
-type ConcurrentOperation =
+type ConcurrentOperation = (
   | {
       operation: "start-archive";
       discInspectionId: DiscInspectionId;
@@ -105,6 +105,16 @@ type ConcurrentOperation =
       catalogReviewOutcome?: "reviewed_with_selections" | "archive_only";
     }
   | {
+      operation: "complete-catalog-review-with-replacements";
+      originalDiscArchiveId: OriginalDiscArchiveId;
+      catalogRevision: Date;
+      replacements: Array<{
+        predecessorEncodeJobId: EncodeJobId;
+        encodingProfileId: EncodingProfileId;
+        outputPath: string;
+      }>;
+    }
+  | {
       operation: "create-disc-selection";
       originalDiscArchiveId: OriginalDiscArchiveId;
       mediaItemId: MediaItemId;
@@ -121,7 +131,8 @@ type ConcurrentOperation =
       operation: "create-media-item";
       parentId: MediaItemId;
       title: string;
-    };
+    }
+) & { delayMs?: number };
 
 type BarrierWorkerOptions = {
   databasePath: string;
@@ -2622,6 +2633,1155 @@ describe("data-access facade", () => {
     access.close();
   });
 
+  it("proposes corrected replacement defaults and completes review with explicit opt-out", () => {
+    const {
+      access,
+      archive,
+      correctedItems: [correctedItem],
+      mistakenSelection,
+    } = createDiscSelectionCorrectionFixture({
+      key: "replacement-plan-opt-out",
+    });
+    if (!correctedItem) {
+      throw new Error("Expected replacement plan correction target");
+    }
+    const profile = access.encodingProfiles.create({
+      key: "replacement-plan-opt-out",
+      displayName: "Replacement plan opt-out",
+      mediaDomain: "dvd_video",
+      settings: { preset: "HQ" },
+    });
+    const predecessor = access.encodeJobs.enqueue({
+      discSelectionId: mistakenSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Replacement plan opt-out.mkv",
+    });
+    const claim = access.encodeJobs.claimNext("replacement-plan-opt-out");
+    if (!claim) {
+      throw new Error("Expected replacement plan predecessor claim");
+    }
+    access.encodeJobs.complete(claim);
+    const correction = access.catalog.correctDiscSelection(
+      mistakenSelection.id,
+      {
+        originalDiscArchiveId: archive.id,
+        catalogRevision: access.catalog.listOriginalDiscArchives({
+          ids: [archive.id],
+        })[0]!.updatedAt,
+        mediaItemId: correctedItem.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      },
+    );
+
+    expect(access.catalog.listCorrectedEncodeReplacementPlans({
+      originalDiscArchiveId: archive.id,
+      limit: 100,
+    })).toEqual([{
+      predecessorEncodeJobId: predecessor.id,
+      replacementDiscSelectionId: correction.discSelection.id,
+      proposedEncodingProfileId: profile.id,
+      proposedOutputPath: predecessor.outputPath,
+      predecessorStatus: "completed",
+      predecessorReady: true,
+    }]);
+
+    const completion = access.catalog.completeCatalogReviewWithReplacements(
+      archive.id,
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+        .updatedAt,
+      "reviewed_with_selections",
+      [],
+    );
+
+    expect(completion).toMatchObject({
+      archive: {
+        id: archive.id,
+        catalogReviewOutcome: "reviewed_with_selections",
+        catalogReviewedAt: expect.any(Date),
+      },
+      replacementEncodeJobs: [],
+    });
+    expect(access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: predecessor.id,
+        status: "completed",
+      }),
+    ]);
+    access.close();
+  });
+
+  it("atomically completes review and queues an opted-in corrected replacement", () => {
+    const {
+      access,
+      archive,
+      correctedItems: [correctedItem],
+      mistakenSelection,
+    } = createDiscSelectionCorrectionFixture({
+      key: "replacement-plan-opt-in",
+    });
+    if (!correctedItem) {
+      throw new Error("Expected replacement opt-in correction target");
+    }
+    const profile = access.encodingProfiles.create({
+      key: "replacement-plan-opt-in",
+      displayName: "Replacement plan opt-in",
+      mediaDomain: "dvd_video",
+      settings: { preset: "HQ" },
+    });
+    const predecessor = access.encodeJobs.enqueue({
+      discSelectionId: mistakenSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Replacement plan opt-in.mkv",
+    });
+    const predecessorClaim = access.encodeJobs.claimNext(
+      "replacement-plan-predecessor",
+    );
+    if (!predecessorClaim) {
+      throw new Error("Expected completed replacement predecessor claim");
+    }
+    access.encodeJobs.complete(predecessorClaim);
+    const correction = access.catalog.correctDiscSelection(
+      mistakenSelection.id,
+      {
+        originalDiscArchiveId: archive.id,
+        catalogRevision: access.catalog.listOriginalDiscArchives({
+          ids: [archive.id],
+        })[0]!.updatedAt,
+        mediaItemId: correctedItem.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      },
+    );
+
+    const completion = access.catalog.completeCatalogReviewWithReplacements(
+      archive.id,
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+        .updatedAt,
+      "reviewed_with_selections",
+      [{
+        predecessorEncodeJobId: predecessor.id,
+        encodingProfileId: profile.id,
+        outputPath: predecessor.outputPath,
+      }],
+    );
+
+    expect(completion.replacementEncodeJobs).toEqual([
+      expect.objectContaining({
+        id: expect.any(String),
+        predecessorEncodeJobId: predecessor.id,
+        discSelectionId: correction.discSelection.id,
+        encodingProfileId: profile.id,
+        outputPath: predecessor.outputPath,
+        status: "queued",
+        replaceExistingOutput: true,
+      }),
+    ]);
+    const replacement = completion.replacementEncodeJobs[0]!;
+    expect(replacement.id).not.toBe(predecessor.id);
+    expect(access.catalog.listCorrectedEncodeReplacementPlans({
+      originalDiscArchiveId: archive.id,
+      limit: 100,
+    })).toEqual([]);
+    expect(access.encodeJobs.claimNext("replacement-plan-successor")).toBeNull();
+    expect(access.encodeJobs.listCorrectionLinks([replacement.id]))
+      .toContainEqual(expect.objectContaining({
+        id: replacement.id,
+        correctedPublicationAdmitted: false,
+      }));
+    expect(access.encodeJobs.list()).toContainEqual(expect.objectContaining({
+      id: replacement.id,
+      predecessorEncodeJobId: predecessor.id,
+      status: "queued",
+    }));
+    access.close();
+  });
+
+  it("keeps a corrected replacement waiting until its predecessor cancellation is terminal", () => {
+    const {
+      access,
+      archive,
+      correctedItems: [correctedItem],
+      mistakenSelection,
+    } = createDiscSelectionCorrectionFixture({
+      key: "replacement-waits-for-cancellation",
+    });
+    if (!correctedItem) {
+      throw new Error("Expected waiting replacement correction target");
+    }
+    const profile = access.encodingProfiles.create({
+      key: "replacement-waits-for-cancellation",
+      displayName: "Replacement waits for cancellation",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const predecessor = access.encodeJobs.enqueue({
+      discSelectionId: mistakenSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Replacement waits for cancellation.mkv",
+    });
+    const predecessorClaim = access.encodeJobs.claimNext(
+      "replacement-waiting-predecessor",
+    );
+    if (!predecessorClaim) {
+      throw new Error("Expected running replacement predecessor");
+    }
+    const correction = access.catalog.correctDiscSelection(
+      mistakenSelection.id,
+      {
+        originalDiscArchiveId: archive.id,
+        catalogRevision: access.catalog.listOriginalDiscArchives({
+          ids: [archive.id],
+        })[0]!.updatedAt,
+        mediaItemId: correctedItem.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      },
+    );
+    const completion = access.catalog.completeCatalogReviewWithReplacements(
+      archive.id,
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+        .updatedAt,
+      "reviewed_with_selections",
+      [{
+        predecessorEncodeJobId: predecessor.id,
+        encodingProfileId: profile.id,
+        outputPath: predecessor.outputPath,
+      }],
+    );
+    const replacement = completion.replacementEncodeJobs[0]!;
+
+    expect(replacement).toMatchObject({
+      predecessorEncodeJobId: predecessor.id,
+      discSelectionId: correction.discSelection.id,
+      status: "queued",
+      replaceExistingOutput: false,
+    });
+    expect(access.encodeJobs.claimNext("replacement-must-wait")).toBeNull();
+    expect(access.encodeJobs.completeCancellation(predecessorClaim))
+      .toMatchObject({ id: predecessor.id, status: "cancelled" });
+    expect(access.encodeJobs.claimNext("replacement-ready-after-cancel"))
+      .toBeNull();
+    expect(access.encodeJobs.list()).toContainEqual(expect.objectContaining({
+      id: replacement.id,
+      predecessorEncodeJobId: predecessor.id,
+      status: "queued",
+    }));
+    access.close();
+  });
+
+  it("preserves retained-final semantics when predecessor cancellation wins", () => {
+    const {
+      access,
+      archive,
+      correctedItems: [correctedItem],
+      mistakenSelection,
+    } = createDiscSelectionCorrectionFixture({
+      key: "replacement-retained-final-cancellation",
+    });
+    if (!correctedItem) {
+      throw new Error("Expected retained-final correction target");
+    }
+    const profile = access.encodingProfiles.create({
+      key: "replacement-retained-final-cancellation",
+      displayName: "Replacement retained final cancellation",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const predecessor = access.encodeJobs.enqueue({
+      discSelectionId: mistakenSelection.id,
+      encodingProfileId: profile.id,
+      outputPath:
+        "/media/movies/Replacement retained final cancellation.mkv",
+    });
+    const initialClaim = access.encodeJobs.claimNext("retained-final-initial");
+    if (!initialClaim) {
+      throw new Error("Expected initial retained-final claim");
+    }
+    access.encodeJobs.complete(initialClaim);
+    access.encodeJobs.requeue(predecessor.id);
+    const predecessorClaim = access.encodeJobs.claimNext(
+      "retained-final-predecessor",
+    );
+    if (!predecessorClaim) {
+      throw new Error("Expected retained-final predecessor claim");
+    }
+    expect(predecessorClaim.replaceExistingOutput).toBe(true);
+    const correction = access.catalog.correctDiscSelection(
+      mistakenSelection.id,
+      {
+        originalDiscArchiveId: archive.id,
+        catalogRevision: access.catalog.listOriginalDiscArchives({
+          ids: [archive.id],
+        })[0]!.updatedAt,
+        mediaItemId: correctedItem.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      },
+    );
+    const replacement = access.catalog
+      .completeCatalogReviewWithReplacements(
+        archive.id,
+        access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+          .updatedAt,
+        "reviewed_with_selections",
+        [{
+          predecessorEncodeJobId: predecessor.id,
+          encodingProfileId: profile.id,
+          outputPath: predecessor.outputPath,
+        }],
+      ).replacementEncodeJobs[0]!;
+
+    expect(access.encodeJobs.completeCancellation(predecessorClaim))
+      .toMatchObject({
+        id: predecessor.id,
+        status: "cancelled",
+        replaceExistingOutput: true,
+      });
+    expect(access.encodeJobs.claimNext("retained-final-successor")).toBeNull();
+    expect(access.encodeJobs.list()).toContainEqual(expect.objectContaining({
+        id: replacement.id,
+        predecessorEncodeJobId: predecessor.id,
+        discSelectionId: correction.discSelection.id,
+        replaceExistingOutput: true,
+        status: "queued",
+      }));
+    access.close();
+  });
+
+  it.each([
+    ["before predecessor cancellation finishes", "cancelled", false, true],
+    ["after predecessor cancellation finishes", "cancelled", false, false],
+    ["after predecessor completion wins", "completed", true, false],
+  ] as const)(
+    "keeps a cancelled same-path corrected successor reserved %s",
+    (
+      _label,
+      predecessorOutcome,
+      terminalizeBeforeCorrection,
+      cancelBeforeTerminal,
+    ) => {
+      const key = `cancel-corrected-successor-${predecessorOutcome}`;
+      const {
+        access,
+        archive,
+        correctedItems: [correctedItem],
+        mistakenSelection,
+      } = createDiscSelectionCorrectionFixture({ key });
+      if (!correctedItem) throw new Error("Expected cancellation target");
+      const profile = access.encodingProfiles.create({
+        key,
+        displayName: key,
+        mediaDomain: "dvd_video",
+        settings: {},
+      });
+      const competingProfile = access.encodingProfiles.create({
+        key: `${key}-competing`,
+        displayName: `${key} competing`,
+        mediaDomain: "dvd_video",
+        settings: {},
+      });
+      const predecessor = access.encodeJobs.enqueue({
+        discSelectionId: mistakenSelection.id,
+        encodingProfileId: profile.id,
+        outputPath: `/media/movies/${key}.mkv`,
+      });
+      const claim = access.encodeJobs.claimNext(`${key}-predecessor`);
+      if (!claim) throw new Error("Expected predecessor claim");
+      if (terminalizeBeforeCorrection) {
+        access.encodeJobs.complete(claim);
+      }
+      const correction = access.catalog.correctDiscSelection(
+        mistakenSelection.id,
+        {
+          originalDiscArchiveId: archive.id,
+          catalogRevision: access.catalog.listOriginalDiscArchives({
+            ids: [archive.id],
+          })[0]!.updatedAt,
+          mediaItemId: correctedItem.id,
+          sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+        },
+      );
+      const successor = access.catalog.completeCatalogReviewWithReplacements(
+        archive.id,
+        access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+          .updatedAt,
+        "reviewed_with_selections",
+        [{
+          predecessorEncodeJobId: predecessor.id,
+          encodingProfileId: profile.id,
+          outputPath: predecessor.outputPath,
+        }],
+      ).replacementEncodeJobs[0]!;
+
+      if (predecessorOutcome === "cancelled" && !cancelBeforeTerminal) {
+        access.encodeJobs.completeCancellation(claim);
+      }
+      expect(access.encodeJobs.requestCancellation(successor.id)).toMatchObject({
+        id: successor.id,
+        predecessorEncodeJobId: predecessor.id,
+        status: "cancelled",
+        reservesOutputPath: true,
+      });
+      if (predecessorOutcome === "cancelled" && cancelBeforeTerminal) {
+        access.encodeJobs.completeCancellation(claim);
+      }
+
+      expect(access.encodeJobs.list()).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          id: predecessor.id,
+          status: predecessorOutcome,
+          reservesOutputPath: false,
+        }),
+        expect.objectContaining({
+          id: successor.id,
+          status: "cancelled",
+          reservesOutputPath: true,
+        }),
+      ]));
+      expect(() => access.encodeJobs.enqueue({
+        discSelectionId: correction.discSelection.id,
+        encodingProfileId: competingProfile.id,
+        outputPath: predecessor.outputPath,
+      })).toThrow(
+        `Encode Job output is already assigned: ${predecessor.outputPath}`,
+      );
+      access.close();
+    },
+  );
+
+  it("keeps a terminal predecessor waiting until fenced cleanup is complete", () => {
+    const { access, archive, correctedItems: [correctedItem], mistakenSelection } =
+      createDiscSelectionCorrectionFixture({ key: "replacement-cleanup-wait" });
+    if (!correctedItem) throw new Error("Expected cleanup correction target");
+    const profile = access.encodingProfiles.create({
+      key: "replacement-cleanup-wait",
+      displayName: "Replacement cleanup wait",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const predecessor = access.encodeJobs.enqueue({
+      discSelectionId: mistakenSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Replacement cleanup wait.mkv",
+    });
+    const claim = access.encodeJobs.claimNext("replacement-cleanup-wait");
+    if (!claim) throw new Error("Expected cleanup predecessor claim");
+    const cleanup = access.encodeJobs.registerPartialCleanup(claim);
+    access.encodeJobs.fail(claim, "Failed with cleanup pending");
+    access.catalog.correctDiscSelection(mistakenSelection.id, {
+      originalDiscArchiveId: archive.id,
+      catalogRevision: access.catalog.listOriginalDiscArchives({
+        ids: [archive.id],
+      })[0]!.updatedAt,
+      mediaItemId: correctedItem.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+
+    expect(access.catalog.listCorrectedEncodeReplacementPlans({
+      originalDiscArchiveId: archive.id,
+      limit: 100,
+    })[0]).toMatchObject({
+      predecessorEncodeJobId: predecessor.id,
+      predecessorStatus: "failed",
+      predecessorReady: false,
+    });
+    access.encodeJobs.completePartialCleanup(cleanup);
+    expect(access.catalog.listCorrectedEncodeReplacementPlans({
+      originalDiscArchiveId: archive.id,
+      limit: 100,
+    })[0]).toMatchObject({ predecessorReady: true });
+    access.close();
+  });
+
+  it("queues exactly one corrected replacement when review completions race across connections", async () => {
+    const databasePath = createTestDatabasePath();
+    const {
+      access,
+      archive,
+      correctedItems: [correctedItem],
+      mistakenSelection,
+    } = createDiscSelectionCorrectionFixture({
+      key: "replacement-review-race",
+      databasePath,
+    });
+    if (!correctedItem) throw new Error("Expected correction target");
+    const profile = access.encodingProfiles.create({
+      key: "replacement-review-race",
+      displayName: "Replacement review race",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const predecessor = access.encodeJobs.enqueue({
+      discSelectionId: mistakenSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Replacement review race.mkv",
+    });
+    const claim = access.encodeJobs.claimNext("replacement-review-race");
+    if (!claim) throw new Error("Expected predecessor claim");
+    access.encodeJobs.complete(claim);
+    access.catalog.correctDiscSelection(mistakenSelection.id, {
+      originalDiscArchiveId: archive.id,
+      catalogRevision: access.catalog.listOriginalDiscArchives({
+        ids: [archive.id],
+      })[0]!.updatedAt,
+      mediaItemId: correctedItem.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    const catalogRevision = access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]!.updatedAt;
+    const operation = {
+      operation: "complete-catalog-review-with-replacements" as const,
+      originalDiscArchiveId: archive.id,
+      catalogRevision,
+      replacements: [{
+        predecessorEncodeJobId: predecessor.id,
+        encodingProfileId: profile.id,
+        outputPath: predecessor.outputPath,
+      }],
+    };
+
+    const results = await runBarrierWorkers({
+      databasePath,
+      mode: "operation",
+      operations: [operation, operation],
+    });
+
+    expect(results.map((result) =>
+      typeof result === "object" && result !== null && "outcome" in result
+        ? result.outcome
+        : result
+    ).sort()).toEqual(["rejected", "reviewed"]);
+    expect(access.encodeJobs.list().filter(
+      (job) => job.predecessorEncodeJobId === predecessor.id,
+    )).toHaveLength(1);
+    access.close();
+  });
+
+  it.each([
+    ["without a retained final", false, false],
+    ["with a retained final", true, true],
+  ] as const)("admits a failed predecessor %s with the correct reservation mode", (
+    _label,
+    retainedFinal,
+    expectedReplaceExistingOutput,
+  ) => {
+    const key = `replacement-failed-${retainedFinal ? "retained" : "empty"}`;
+    const { access, archive, correctedItems: [correctedItem], mistakenSelection } =
+      createDiscSelectionCorrectionFixture({ key });
+    if (!correctedItem) throw new Error("Expected failed correction target");
+    const profile = access.encodingProfiles.create({
+      key,
+      displayName: key,
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const predecessor = access.encodeJobs.enqueue({
+      discSelectionId: mistakenSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: `/media/movies/${key}.mkv`,
+    });
+    let claim = access.encodeJobs.claimNext(`${key}-initial`);
+    if (!claim) throw new Error("Expected failed predecessor claim");
+    if (retainedFinal) {
+      access.encodeJobs.complete(claim);
+      access.encodeJobs.requeue(predecessor.id);
+      claim = access.encodeJobs.claimNext(`${key}-replacement`);
+      if (!claim) throw new Error("Expected retained-final retry claim");
+    }
+    access.encodeJobs.fail(claim, "Predecessor failed", {
+      preserveReplacementAuthority: retainedFinal,
+    });
+    const correction = access.catalog.correctDiscSelection(
+      mistakenSelection.id,
+      {
+        originalDiscArchiveId: archive.id,
+        catalogRevision: access.catalog.listOriginalDiscArchives({
+          ids: [archive.id],
+        })[0]!.updatedAt,
+        mediaItemId: correctedItem.id,
+        sourceIdentity: { kind: "main_feature" },
+      },
+    );
+    const successor = access.catalog.completeCatalogReviewWithReplacements(
+      archive.id,
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+        .updatedAt,
+      "reviewed_with_selections",
+      [{
+        predecessorEncodeJobId: predecessor.id,
+        encodingProfileId: profile.id,
+        outputPath: predecessor.outputPath,
+      }],
+    ).replacementEncodeJobs[0]!;
+
+    expect(access.encodeJobs.claimNext(`${key}-successor`)).toBeNull();
+    expect(access.encodeJobs.list()).toContainEqual(expect.objectContaining({
+      id: successor.id,
+      discSelectionId: correction.discSelection.id,
+      replaceExistingOutput: expectedReplaceExistingOutput,
+      status: "queued",
+    }));
+    access.close();
+  });
+
+  it("releases a failed non-retained predecessor reservation after explicit opt-out", () => {
+    const { access, archive, correctedItems: [correctedItem], mistakenSelection } =
+      createDiscSelectionCorrectionFixture({ key: "replacement-failed-opt-out" });
+    if (!correctedItem) throw new Error("Expected opt-out correction target");
+    const profile = access.encodingProfiles.create({
+      key: "replacement-failed-opt-out",
+      displayName: "Replacement failed opt-out",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const predecessor = access.encodeJobs.enqueue({
+      discSelectionId: mistakenSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Replacement failed opt-out.mkv",
+    });
+    const claim = access.encodeJobs.claimNext("replacement-failed-opt-out");
+    if (!claim) throw new Error("Expected opt-out predecessor claim");
+    access.encodeJobs.fail(claim, "No final retained");
+    access.catalog.correctDiscSelection(mistakenSelection.id, {
+      originalDiscArchiveId: archive.id,
+      catalogRevision: access.catalog.listOriginalDiscArchives({
+        ids: [archive.id],
+      })[0]!.updatedAt,
+      mediaItemId: correctedItem.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+
+    access.catalog.completeCatalogReviewWithReplacements(
+      archive.id,
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+        .updatedAt,
+      "reviewed_with_selections",
+      [],
+    );
+
+    expect(access.encodeJobs.list()).toContainEqual(expect.objectContaining({
+      id: predecessor.id,
+      status: "failed",
+      reservesOutputPath: false,
+      replaceExistingOutput: false,
+    }));
+    access.close();
+  });
+
+  it("releases a failed non-retained predecessor when its successor uses another path", () => {
+    const { access, archive, correctedItems: [correctedItem], mistakenSelection } =
+      createDiscSelectionCorrectionFixture({
+        key: "replacement-failed-changed-path",
+      });
+    if (!correctedItem) throw new Error("Expected changed-path correction target");
+    const profile = access.encodingProfiles.create({
+      key: "replacement-failed-changed-path",
+      displayName: "Replacement failed changed path",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const predecessor = access.encodeJobs.enqueue({
+      discSelectionId: mistakenSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Replacement failed prior path.mkv",
+    });
+    const claim = access.encodeJobs.claimNext("replacement-failed-changed-path");
+    if (!claim) throw new Error("Expected changed-path predecessor claim");
+    access.encodeJobs.fail(claim, "No final retained");
+    access.catalog.correctDiscSelection(mistakenSelection.id, {
+      originalDiscArchiveId: archive.id,
+      catalogRevision: access.catalog.listOriginalDiscArchives({
+        ids: [archive.id],
+      })[0]!.updatedAt,
+      mediaItemId: correctedItem.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    const successor = access.catalog.completeCatalogReviewWithReplacements(
+      archive.id,
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+        .updatedAt,
+      "reviewed_with_selections",
+      [{
+        predecessorEncodeJobId: predecessor.id,
+        encodingProfileId: profile.id,
+        outputPath: "/media/movies/Replacement failed corrected path.mkv",
+      }],
+    ).replacementEncodeJobs[0]!;
+
+    expect(access.encodeJobs.list()).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: predecessor.id,
+        reservesOutputPath: false,
+        replaceExistingOutput: false,
+      }),
+      expect.objectContaining({
+        id: successor.id,
+        reservesOutputPath: true,
+        replaceExistingOutput: false,
+      }),
+    ]));
+    access.close();
+  });
+
+  it("keeps a failed predecessor reservation fenced until cleanup finishes", () => {
+    const { access, archive, correctedItems: [correctedItem], mistakenSelection } =
+      createDiscSelectionCorrectionFixture({
+        key: "replacement-failed-cleanup-reservation",
+      });
+    if (!correctedItem) throw new Error("Expected cleanup correction target");
+    const profile = access.encodingProfiles.create({
+      key: "replacement-failed-cleanup-reservation",
+      displayName: "Replacement failed cleanup reservation",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const predecessor = access.encodeJobs.enqueue({
+      discSelectionId: mistakenSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Replacement failed cleanup.mkv",
+    });
+    const claim = access.encodeJobs.claimNext(
+      "replacement-failed-cleanup-reservation",
+    );
+    if (!claim) throw new Error("Expected cleanup predecessor claim");
+    const cleanup = access.encodeJobs.registerPartialCleanup(claim);
+    access.encodeJobs.fail(claim, "Cleanup remains fenced");
+    access.catalog.correctDiscSelection(mistakenSelection.id, {
+      originalDiscArchiveId: archive.id,
+      catalogRevision: access.catalog.listOriginalDiscArchives({
+        ids: [archive.id],
+      })[0]!.updatedAt,
+      mediaItemId: correctedItem.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    access.catalog.completeCatalogReviewWithReplacements(
+      archive.id,
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+        .updatedAt,
+      "reviewed_with_selections",
+      [],
+    );
+
+    expect(access.encodeJobs.list()).toContainEqual(expect.objectContaining({
+      id: predecessor.id,
+      reservesOutputPath: true,
+      partialCleanupOutputPath: predecessor.outputPath,
+    }));
+    expect(access.encodeJobs.completePartialCleanup(cleanup)).toMatchObject({
+      id: predecessor.id,
+      status: "failed",
+      reservesOutputPath: false,
+      partialCleanupOutputPath: null,
+    });
+    access.close();
+  });
+
+  it("carries an unqueued predecessor plan through repeated correction lineage", () => {
+    const {
+      access,
+      archive,
+      correctedItems: [firstCorrectedItem, finalCorrectedItem],
+      mistakenSelection,
+    } = createDiscSelectionCorrectionFixture({
+      key: "replacement-plan-lineage",
+      correctedItemCount: 2,
+    });
+    if (!firstCorrectedItem || !finalCorrectedItem) {
+      throw new Error("Expected repeated correction targets");
+    }
+    const profile = access.encodingProfiles.create({
+      key: "replacement-plan-lineage",
+      displayName: "Replacement plan lineage",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const predecessor = access.encodeJobs.enqueue({
+      discSelectionId: mistakenSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Replacement plan lineage.mkv",
+    });
+    const claim = access.encodeJobs.claimNext("replacement-lineage-initial");
+    if (!claim) {
+      throw new Error("Expected replacement lineage predecessor claim");
+    }
+    access.encodeJobs.complete(claim);
+    const firstCorrection = access.catalog.correctDiscSelection(
+      mistakenSelection.id,
+      {
+        originalDiscArchiveId: archive.id,
+        catalogRevision: access.catalog.listOriginalDiscArchives({
+          ids: [archive.id],
+        })[0]!.updatedAt,
+        mediaItemId: firstCorrectedItem.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      },
+    );
+    access.catalog.completeCatalogReviewWithReplacements(
+      archive.id,
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+        .updatedAt,
+      "reviewed_with_selections",
+      [],
+    );
+    const finalCorrection = access.catalog.correctDiscSelection(
+      firstCorrection.discSelection.id,
+      {
+        originalDiscArchiveId: archive.id,
+        catalogRevision: access.catalog.listOriginalDiscArchives({
+          ids: [archive.id],
+        })[0]!.updatedAt,
+        mediaItemId: finalCorrectedItem.id,
+        sourceIdentity: { kind: "main_feature" },
+      },
+    );
+
+    expect(access.catalog.listCorrectedEncodeReplacementPlans({
+      originalDiscArchiveId: archive.id,
+      limit: 100,
+    })).toEqual([{
+      predecessorEncodeJobId: predecessor.id,
+      replacementDiscSelectionId: finalCorrection.discSelection.id,
+      proposedEncodingProfileId: profile.id,
+      proposedOutputPath: predecessor.outputPath,
+      predecessorStatus: "completed",
+      predecessorReady: true,
+    }]);
+    const replacement = access.catalog
+      .completeCatalogReviewWithReplacements(
+        archive.id,
+        access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+          .updatedAt,
+        "reviewed_with_selections",
+        [{
+          predecessorEncodeJobId: predecessor.id,
+          encodingProfileId: profile.id,
+          outputPath: predecessor.outputPath,
+        }],
+      ).replacementEncodeJobs[0]!;
+    expect(replacement).toMatchObject({
+      predecessorEncodeJobId: predecessor.id,
+      discSelectionId: finalCorrection.discSelection.id,
+    });
+    access.close();
+  });
+
+  it("queues distinct same-profile replacements for every predecessor in repeated correction lineage", () => {
+    const {
+      access,
+      archive,
+      correctedItems: [firstCorrectedItem, finalCorrectedItem],
+      mistakenSelection,
+    } = createDiscSelectionCorrectionFixture({
+      key: "replacement-plan-multiple-lineage-jobs",
+      correctedItemCount: 2,
+    });
+    if (!firstCorrectedItem || !finalCorrectedItem) {
+      throw new Error("Expected repeated correction targets");
+    }
+    const profile = access.encodingProfiles.create({
+      key: "replacement-plan-multiple-lineage-jobs",
+      displayName: "Replacement plan multiple lineage jobs",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const firstPredecessor = access.encodeJobs.enqueue({
+      discSelectionId: mistakenSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Replacement lineage first.mkv",
+    });
+    const firstClaim = access.encodeJobs.claimNext(
+      "replacement-multiple-lineage-first",
+    );
+    if (!firstClaim) throw new Error("Expected first lineage claim");
+    access.encodeJobs.complete(firstClaim);
+    const firstCorrection = access.catalog.correctDiscSelection(
+      mistakenSelection.id,
+      {
+        originalDiscArchiveId: archive.id,
+        catalogRevision: access.catalog.listOriginalDiscArchives({
+          ids: [archive.id],
+        })[0]!.updatedAt,
+        mediaItemId: firstCorrectedItem.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      },
+    );
+    access.catalog.completeCatalogReviewWithReplacements(
+      archive.id,
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+        .updatedAt,
+      "reviewed_with_selections",
+      [],
+    );
+
+    const secondPredecessor = access.encodeJobs.enqueue({
+      discSelectionId: firstCorrection.discSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Replacement lineage second.mkv",
+    });
+    const secondClaim = access.encodeJobs.claimNext(
+      "replacement-multiple-lineage-second",
+    );
+    if (!secondClaim) throw new Error("Expected second lineage claim");
+    access.encodeJobs.complete(secondClaim);
+    const finalCorrection = access.catalog.correctDiscSelection(
+      firstCorrection.discSelection.id,
+      {
+        originalDiscArchiveId: archive.id,
+        catalogRevision: access.catalog.listOriginalDiscArchives({
+          ids: [archive.id],
+        })[0]!.updatedAt,
+        mediaItemId: finalCorrectedItem.id,
+        sourceIdentity: { kind: "main_feature" },
+      },
+    );
+    const plans = access.catalog.listCorrectedEncodeReplacementPlans({
+      originalDiscArchiveId: archive.id,
+      limit: 100,
+    });
+    expect(plans.map((plan) => plan.predecessorEncodeJobId)).toEqual([
+      firstPredecessor.id,
+      secondPredecessor.id,
+    ]);
+
+    const replacements = access.catalog.completeCatalogReviewWithReplacements(
+      archive.id,
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+        .updatedAt,
+      "reviewed_with_selections",
+      plans.map((plan) => ({
+        predecessorEncodeJobId: plan.predecessorEncodeJobId,
+        encodingProfileId: plan.proposedEncodingProfileId,
+        outputPath: plan.proposedOutputPath,
+      })),
+    ).replacementEncodeJobs;
+
+    expect(replacements).toHaveLength(2);
+    expect(replacements).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        predecessorEncodeJobId: firstPredecessor.id,
+        discSelectionId: finalCorrection.discSelection.id,
+        encodingProfileId: profile.id,
+      }),
+      expect.objectContaining({
+        predecessorEncodeJobId: secondPredecessor.id,
+        discSelectionId: finalCorrection.discSelection.id,
+        encodingProfileId: profile.id,
+      }),
+    ]));
+
+    const ordinary = access.encodeJobs.enqueue({
+      discSelectionId: finalCorrection.discSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Replacement lineage ordinary.mkv",
+    });
+    expect(ordinary).toMatchObject({
+      predecessorEncodeJobId: null,
+      discSelectionId: finalCorrection.discSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Replacement lineage ordinary.mkv",
+    });
+    expect(replacements.map(({ id }) => id)).not.toContain(ordinary.id);
+    access.close();
+  });
+
+  it("bounds corrected replacement plan pages at the public facade", () => {
+    const { access, archive } = createDiscSelectionCorrectionFixture({
+      key: "replacement-plan-limit",
+    });
+    expect(() => access.catalog.listCorrectedEncodeReplacementPlans({
+      originalDiscArchiveId: archive.id,
+      limit: 102,
+    })).toThrow("Corrected Encode replacement plan limit cannot exceed 101");
+    access.close();
+  });
+
+  it("accepts explicit corrected profile and output overrides without moving prior output", () => {
+    const {
+      access,
+      archive,
+      correctedItems: [correctedItem],
+      mistakenSelection,
+    } = createDiscSelectionCorrectionFixture({
+      key: "replacement-plan-overrides",
+    });
+    if (!correctedItem) {
+      throw new Error("Expected replacement override correction target");
+    }
+    const priorProfile = access.encodingProfiles.create({
+      key: "replacement-plan-prior-profile",
+      displayName: "Replacement plan prior profile",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast" },
+    });
+    const overrideProfile = access.encodingProfiles.create({
+      key: "replacement-plan-override-profile",
+      displayName: "Replacement plan override profile",
+      mediaDomain: "dvd_video",
+      settings: { preset: "HQ" },
+    });
+    const predecessor = access.encodeJobs.enqueue({
+      discSelectionId: mistakenSelection.id,
+      encodingProfileId: priorProfile.id,
+      outputPath: "/media/movies/Replacement plan prior output.mkv",
+    });
+    const claim = access.encodeJobs.claimNext("replacement-override-initial");
+    if (!claim) {
+      throw new Error("Expected replacement override predecessor claim");
+    }
+    access.encodeJobs.complete(claim);
+    const correction = access.catalog.correctDiscSelection(
+      mistakenSelection.id,
+      {
+        originalDiscArchiveId: archive.id,
+        catalogRevision: access.catalog.listOriginalDiscArchives({
+          ids: [archive.id],
+        })[0]!.updatedAt,
+        mediaItemId: correctedItem.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      },
+    );
+    expect(access.catalog.listCorrectedEncodeReplacementPlans({
+      originalDiscArchiveId: archive.id,
+      limit: 100,
+    })).toEqual([expect.objectContaining({
+      proposedEncodingProfileId: priorProfile.id,
+      proposedOutputPath: predecessor.outputPath,
+    })]);
+    const overriddenPath =
+      "/media/movies/Replacement plan corrected destination.mkv";
+    const replacement = access.catalog
+      .completeCatalogReviewWithReplacements(
+        archive.id,
+        access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+          .updatedAt,
+        "reviewed_with_selections",
+        [{
+          predecessorEncodeJobId: predecessor.id,
+          encodingProfileId: overrideProfile.id,
+          outputPath: overriddenPath,
+        }],
+      ).replacementEncodeJobs[0]!;
+
+    expect(replacement).toMatchObject({
+      predecessorEncodeJobId: predecessor.id,
+      discSelectionId: correction.discSelection.id,
+      encodingProfileId: overrideProfile.id,
+      outputPath: overriddenPath,
+      replaceExistingOutput: false,
+    });
+    expect(access.encodeJobs.list()).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: predecessor.id,
+        outputPath: predecessor.outputPath,
+        status: "completed",
+      }),
+      expect.objectContaining({
+        id: replacement.id,
+        outputPath: overriddenPath,
+        status: "queued",
+      }),
+    ]));
+    access.close();
+  });
+
+  it("rechecks predecessor eligibility after a concurrent database writer commits", async () => {
+    const databasePath = createTestDatabasePath();
+    const {
+      access,
+      archive,
+      correctedItems: [correctedItem],
+      mistakenSelection,
+    } = createDiscSelectionCorrectionFixture({
+      key: "replacement-claim-predecessor-race",
+      databasePath,
+    });
+    if (!correctedItem) {
+      throw new Error("Expected predecessor-race correction target");
+    }
+    const profile = access.encodingProfiles.create({
+      key: "replacement-claim-predecessor-race",
+      displayName: "Replacement claim predecessor race",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const predecessor = access.encodeJobs.enqueue({
+      discSelectionId: mistakenSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Replacement claim predecessor.mkv",
+    });
+    const predecessorClaim = access.encodeJobs.claimNext(
+      "replacement-claim-predecessor-race",
+    );
+    if (!predecessorClaim) {
+      throw new Error("Expected predecessor-race claim");
+    }
+    access.encodeJobs.complete(predecessorClaim);
+    const correction = access.catalog.correctDiscSelection(
+      mistakenSelection.id,
+      {
+        originalDiscArchiveId: archive.id,
+        catalogRevision: access.catalog.listOriginalDiscArchives({
+          ids: [archive.id],
+        })[0]!.updatedAt,
+        mediaItemId: correctedItem.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      },
+    );
+    const successor = access.catalog.completeCatalogReviewWithReplacements(
+      archive.id,
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+        .updatedAt,
+      "reviewed_with_selections",
+      [{
+        predecessorEncodeJobId: predecessor.id,
+        encodingProfileId: profile.id,
+        outputPath: "/media/movies/Replacement claim successor.mkv",
+      }],
+    ).replacementEncodeJobs[0]!;
+    expect(successor).toMatchObject({
+      discSelectionId: correction.discSelection.id,
+      predecessorEncodeJobId: predecessor.id,
+      status: "queued",
+    });
+
+    const concurrentWriter = new DatabaseSync(databasePath);
+    concurrentWriter.exec("PRAGMA busy_timeout = 5000");
+    concurrentWriter.prepare(`
+      UPDATE encode_jobs
+      SET corrected_publication_admitted = 1
+      WHERE id = ?
+    `).run(successor.id);
+    concurrentWriter.exec("BEGIN IMMEDIATE");
+    concurrentWriter.prepare(`
+      UPDATE encode_jobs
+      SET status = 'queued', progress_percent = 0,
+          claimed_by = NULL, claim_token = NULL, claimed_at = NULL,
+          started_at = NULL, completed_at = NULL, error_message = NULL,
+          updated_at = updated_at + 1
+      WHERE id = ?
+    `).run(predecessor.id);
+
+    const results = await runBarrierWorkers(
+      {
+        databasePath,
+        mode: "operation",
+        operations: [{ operation: "claim-encode" }],
+      },
+      {
+        async afterOperationsStart() {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+          concurrentWriter.exec("COMMIT");
+        },
+      },
+    );
+
+    expect(results).toEqual([{ outcome: "rejected" }]);
+    expect(access.encodeJobs.list()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: predecessor.id, status: "queued" }),
+      expect.objectContaining({ id: successor.id, status: "queued" }),
+    ]));
+    concurrentWriter.close();
+    access.close();
+  }, 20_000);
+
   it("requests general cancellation for queued and running jobs during correction", () => {
     const {
       access,
@@ -4945,6 +6105,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .prepare("select name from pragma_table_info('encode_jobs')")
         .all(),
     ).toEqual(expect.arrayContaining([
+      { name: "corrected_publication_admitted" },
       { name: "partial_cleanup_lease_token" },
       { name: "publication_completion_pending" },
       { name: "publication_pending" },
@@ -4970,6 +6131,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
+        name: "20260813142411_corrected-encode-replacements",
+      },
+      {
         name: "20260812180200_hard_smiling_tiger",
       },
       {
@@ -4989,9 +6153,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260811214753_archive-job-progress-phase",
-      },
-      {
-        name: "20260811051606_blue_oracle",
       },
     ]);
     expect(
@@ -8604,6 +9765,112 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     ]);
     access.close();
   });
+
+  it.each([
+    ["cancellation", 0, 150, "cancelled", false],
+    ["completion", 150, 0, "completed", true],
+  ] as const)(
+    "adapts a corrected same-path replacement when %s wins the predecessor race",
+    async (
+      outcome,
+      correctionDelayMs,
+      completionDelayMs,
+      predecessorStatus,
+      replaceExistingOutput,
+    ) => {
+      const databasePath = createTestDatabasePath();
+      const key = `corrected-predecessor-${outcome}-race`;
+      const {
+        access,
+        archive,
+        correctedItems: [correctedItem],
+        mistakenSelection,
+      } = createDiscSelectionCorrectionFixture({ key, databasePath });
+      if (!correctedItem) throw new Error("Expected race correction target");
+      const profile = access.encodingProfiles.create({
+        key,
+        displayName: key,
+        mediaDomain: "dvd_video",
+        settings: {},
+      });
+      const predecessor = access.encodeJobs.enqueue({
+        discSelectionId: mistakenSelection.id,
+        encodingProfileId: profile.id,
+        outputPath: `/media/movies/${key}.mkv`,
+      });
+      const claim = access.encodeJobs.claimNext(`${key}-worker`);
+      if (!claim) throw new Error("Expected corrected predecessor claim");
+      const catalogRevision = access.catalog.listOriginalDiscArchives({
+        ids: [archive.id],
+      })[0]!.updatedAt;
+
+      const results = await runBarrierWorkers({
+        databasePath,
+        mode: "operation",
+        operations: [
+          {
+            operation: "correct-disc-selection",
+            discSelectionId: mistakenSelection.id,
+            originalDiscArchiveId: archive.id,
+            catalogRevision,
+            mediaItemId: correctedItem.id,
+            reason: `The ${outcome} race corrected the source mapping.`,
+            delayMs: correctionDelayMs,
+          },
+          {
+            operation: "complete-encode",
+            claim,
+            delayMs: completionDelayMs,
+          },
+        ],
+      });
+
+      expect(results[0]).toMatchObject({ outcome: "corrected" });
+      expect(results[1]).toMatchObject({
+        outcome: outcome === "completion" ? "completed" : "rejected",
+      });
+      if (outcome === "cancellation") {
+        expect(access.encodeJobs.completeCancellation(claim)).toMatchObject({
+          id: predecessor.id,
+          status: "cancelled",
+        });
+      }
+      expect(access.encodeJobs.list()).toContainEqual(expect.objectContaining({
+        id: predecessor.id,
+        status: predecessorStatus,
+      }));
+
+      const replacement = access.catalog.completeCatalogReviewWithReplacements(
+        archive.id,
+        access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+          .updatedAt,
+        "reviewed_with_selections",
+        [{
+          predecessorEncodeJobId: predecessor.id,
+          encodingProfileId: profile.id,
+          outputPath: predecessor.outputPath,
+        }],
+      ).replacementEncodeJobs[0]!;
+      const admission = new DatabaseSync(databasePath);
+      admission.prepare(`
+        UPDATE encode_jobs
+        SET corrected_publication_admitted = 1
+        WHERE id = ?
+      `).run(replacement.id);
+      admission.close();
+
+      const replacementClaim = access.encodeJobs.claimNext(
+        `${key}-successor`,
+      );
+      expect(replacementClaim).toMatchObject({
+        id: replacement.id,
+        predecessorEncodeJobId: predecessor.id,
+        replaceExistingOutput,
+      });
+      access.close();
+    },
+    20_000,
+  );
 
   it("keeps encode submission idempotent and requeues only on explicit intent", () => {
     vi.useFakeTimers();
