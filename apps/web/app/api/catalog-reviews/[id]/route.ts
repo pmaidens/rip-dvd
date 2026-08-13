@@ -218,7 +218,7 @@ function readCatalogReview(
     );
     const retainedOutputs = correctionJobs.flatMap((_job, index) =>
       index % RETAINED_OUTPUT_LOOKUP_BATCH_SIZE === 0
-        ? snapshot.encodeJobs.listRetainedOutputs(
+        ? snapshot.encodeJobs.listRetainedOutputSummaries(
             correctionJobs.slice(
               index,
               index + RETAINED_OUTPUT_LOOKUP_BATCH_SIZE,

@@ -72,6 +72,6 @@ CREATE UNIQUE INDEX `encode_jobs_predecessor_unique` ON `encode_jobs` (`predeces
 CREATE UNIQUE INDEX `encode_jobs_initial_selection_profile_unique` ON `encode_jobs` (`disc_selection_id`,`encoding_profile_id`) WHERE "encode_jobs"."predecessor_encode_job_id" is null;--> statement-breakpoint
 CREATE UNIQUE INDEX `encode_jobs_output_path_unique` ON `encode_jobs` (`output_path`) WHERE "encode_jobs"."reserves_output_path" = 1;--> statement-breakpoint
 CREATE INDEX `encode_jobs_queue_idx` ON `encode_jobs` (`status`,`priority`,`created_at`);--> statement-breakpoint
-CREATE UNIQUE INDEX `retained_encode_outputs_replacement_unique` ON `retained_encode_outputs` (`replacement_encode_job_id`);--> statement-breakpoint
+CREATE INDEX `retained_encode_outputs_replacement_idx` ON `retained_encode_outputs` (`replacement_encode_job_id`);--> statement-breakpoint
 CREATE UNIQUE INDEX `retained_encode_outputs_path_unique` ON `retained_encode_outputs` (`retained_output_path`);--> statement-breakpoint
 CREATE INDEX `retained_encode_outputs_predecessor_idx` ON `retained_encode_outputs` (`predecessor_encode_job_id`);

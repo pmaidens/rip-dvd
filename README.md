@@ -1114,8 +1114,10 @@ If a new final path appears during an encode, it is also left untouched and the
 new partial is quarantined.
 For a corrected successor, finalization also records the predecessor,
 replacement, displaced-output filesystem identity, private retained path, and
-retention time before clearing replacement authority. Recovery performs the
-same durable finalization after a crash. Only retention state and cleanup
+retention time before clearing replacement authority. Re-encoding that same
+successor appends provenance for the newly displaced final without overwriting
+the original correction record. Recovery performs the same durable finalization
+after a crash. Only retention state and cleanup
 eligibility reach Catalog and Encoding responses; the private path remains
 worker-side. No automatic deletion, expiry, cleanup action, or metadata-only
 rename is provided.

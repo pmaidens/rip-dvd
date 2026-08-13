@@ -500,13 +500,13 @@ export function createDataAccessInternal(
         retainedAt: timestamp,
       })
       .onConflictDoNothing({
-        target: retainedEncodeOutputs.replacementEncodeJobId,
+        target: retainedEncodeOutputs.retainedOutputPath,
       })
       .run();
     const retained = transaction
       .select()
       .from(retainedEncodeOutputs)
-      .where(eq(retainedEncodeOutputs.replacementEncodeJobId, job.id))
+      .where(eq(retainedEncodeOutputs.retainedOutputPath, retainedOutputPath))
       .get();
     if (
       retained?.predecessorEncodeJobId !== job.predecessorEncodeJobId ||
@@ -554,6 +554,17 @@ export function createDataAccessInternal(
       .where(completionCondition)
       .returning()
       .get();
+  }
+
+  function retainedEncodeOutputLookupIds(
+    ids: readonly EncodeJobId[],
+  ): EncodeJobId[] {
+    if (ids.length > RETAINED_ENCODE_OUTPUT_LOOKUP_LIMIT) {
+      throw new DomainInvariantError(
+        `Retained Encode output lookup is limited to ${RETAINED_ENCODE_OUTPUT_LOOKUP_LIMIT} jobs`,
+      );
+    }
+    return [...new Set(ids)];
   }
 
   function mediaItemDeletionReason(
@@ -2151,8 +2162,8 @@ export function createDataAccessInternal(
             access.encodeJobs.listCorrectionLinksForDiscSelections(ids),
           listCorrectionLinks: (ids) =>
             access.encodeJobs.listCorrectionLinks(ids),
-          listRetainedOutputs: (ids) =>
-            access.encodeJobs.listRetainedOutputs(ids),
+          listRetainedOutputSummaries: (ids) =>
+            access.encodeJobs.listRetainedOutputSummaries(ids),
         },
       };
       sqlite.exec("BEGIN");
@@ -6725,14 +6736,34 @@ export function createDataAccessInternal(
       },
       listRetainedOutputs(ids) {
         if (ids.length === 0) return [];
-        if (ids.length > RETAINED_ENCODE_OUTPUT_LOOKUP_LIMIT) {
-          throw new DomainInvariantError(
-            `Retained Encode output lookup is limited to ${RETAINED_ENCODE_OUTPUT_LOOKUP_LIMIT} jobs`,
-          );
-        }
-        const uniqueIds = [...new Set(ids)];
+        const uniqueIds = retainedEncodeOutputLookupIds(ids);
         return database
           .select()
+          .from(retainedEncodeOutputs)
+          .where(or(
+            inArray(retainedEncodeOutputs.predecessorEncodeJobId, uniqueIds),
+            inArray(retainedEncodeOutputs.replacementEncodeJobId, uniqueIds),
+          ))
+          .orderBy(
+            asc(retainedEncodeOutputs.retainedAt),
+            asc(retainedEncodeOutputs.id),
+          )
+          .all();
+      },
+      listRetainedOutputSummaries(ids) {
+        if (ids.length === 0) return [];
+        const uniqueIds = retainedEncodeOutputLookupIds(ids);
+        return database
+          .select({
+            id: retainedEncodeOutputs.id,
+            predecessorEncodeJobId:
+              retainedEncodeOutputs.predecessorEncodeJobId,
+            replacementEncodeJobId:
+              retainedEncodeOutputs.replacementEncodeJobId,
+            state: retainedEncodeOutputs.state,
+            cleanupEligible: retainedEncodeOutputs.cleanupEligible,
+            retainedAt: retainedEncodeOutputs.retainedAt,
+          })
           .from(retainedEncodeOutputs)
           .where(or(
             inArray(retainedEncodeOutputs.predecessorEncodeJobId, uniqueIds),
