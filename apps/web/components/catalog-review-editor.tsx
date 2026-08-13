@@ -38,7 +38,7 @@ interface CatalogReviewViewProps {
   onEditMediaItem(id: string): void;
   onCancelEdit(): void;
   onDiscSelectionsPage(offset: number): void;
-  onCorrectionHistoryPage?(offset: number): void;
+  onCorrectionHistoryPage(offset: number): void;
   onSelectionKindChange(kind: DiscSelectionKind): void;
   onArchiveOnlyChange(selected: boolean): void;
   onStartMappingProposal(proposal: MappingProposal): void;
@@ -72,7 +72,7 @@ export function CatalogReviewView({
   onEditMediaItem,
   onCancelEdit,
   onDiscSelectionsPage,
-  onCorrectionHistoryPage = () => undefined,
+  onCorrectionHistoryPage,
   onSelectionKindChange,
   onArchiveOnlyChange,
   onStartMappingProposal,

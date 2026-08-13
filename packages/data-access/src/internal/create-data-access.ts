@@ -448,6 +448,24 @@ export function createDataAccessInternal(
     return blockers.length === 0 ? null : blockers.join(" and ");
   }
 
+  function hasDiscSelectionSupersession(
+    id: DiscSelectionId,
+    querySource: Pick<typeof database, "select"> = database,
+  ): boolean {
+    return querySource
+      .select({
+        supersededDiscSelectionId:
+          discSelectionSupersessions.supersededDiscSelectionId,
+      })
+      .from(discSelectionSupersessions)
+      .where(or(
+        eq(discSelectionSupersessions.supersededDiscSelectionId, id),
+        eq(discSelectionSupersessions.replacementDiscSelectionId, id),
+      ))
+      .limit(1)
+      .get() !== undefined;
+  }
+
   function readMediaItemMaintenance(
     ids: readonly MediaItemId[],
     currentArchiveId: OriginalDiscArchiveId | undefined,
@@ -3196,24 +3214,10 @@ export function createDataAccessInternal(
             .where(eq(encodeJobs.discSelectionId, id))
             .limit(1)
             .get();
-          const preservedLineage = transaction
-            .select({
-              supersededDiscSelectionId:
-                discSelectionSupersessions.supersededDiscSelectionId,
-            })
-            .from(discSelectionSupersessions)
-            .where(or(
-              eq(
-                discSelectionSupersessions.supersededDiscSelectionId,
-                id,
-              ),
-              eq(
-                discSelectionSupersessions.replacementDiscSelectionId,
-                id,
-              ),
-            ))
-            .limit(1)
-            .get();
+          const preservedLineage = hasDiscSelectionSupersession(
+            id,
+            transaction,
+          );
           if (!historicalJob && !preservedLineage) {
             throw new DomainInvariantError(
               `Disc Selection ${id} has no Encode Job history and can be corrected directly`,
@@ -3328,24 +3332,10 @@ export function createDataAccessInternal(
               .where(eq(encodeJobs.discSelectionId, id))
               .limit(1)
               .get();
-            const preservedLineage = transaction
-              .select({
-                supersededDiscSelectionId:
-                  discSelectionSupersessions.supersededDiscSelectionId,
-              })
-              .from(discSelectionSupersessions)
-              .where(or(
-                eq(
-                  discSelectionSupersessions.supersededDiscSelectionId,
-                  id,
-                ),
-                eq(
-                  discSelectionSupersessions.replacementDiscSelectionId,
-                  id,
-                ),
-              ))
-              .limit(1)
-              .get();
+            const preservedLineage = hasDiscSelectionSupersession(
+              id,
+              transaction,
+            );
             if (preservedLineage) {
               throw new DomainInvariantError(
                 `Disc Selection ${id} belongs to immutable correction lineage and must be corrected by supersession`,
@@ -3564,24 +3554,10 @@ export function createDataAccessInternal(
                 ))
                 .run();
             } else {
-              const preservedSupersession = transaction
-                .select({
-                  supersededDiscSelectionId:
-                    discSelectionSupersessions.supersededDiscSelectionId,
-                })
-                .from(discSelectionSupersessions)
-                .where(or(
-                  eq(
-                    discSelectionSupersessions.supersededDiscSelectionId,
-                    id,
-                  ),
-                  eq(
-                    discSelectionSupersessions.replacementDiscSelectionId,
-                    id,
-                  ),
-                ))
-                .limit(1)
-                .get();
+              const preservedSupersession = hasDiscSelectionSupersession(
+                id,
+                transaction,
+              );
               if (preservedSupersession) {
                 requireRow(
                   transaction
@@ -3810,24 +3786,7 @@ export function createDataAccessInternal(
               status: "queued" | "running" | "cancellation_requested";
             }
             : null;
-          const preservedLineage = database
-            .select({
-              supersededDiscSelectionId:
-                discSelectionSupersessions.supersededDiscSelectionId,
-            })
-            .from(discSelectionSupersessions)
-            .where(or(
-              eq(
-                discSelectionSupersessions.supersededDiscSelectionId,
-                selection.id,
-              ),
-              eq(
-                discSelectionSupersessions.replacementDiscSelectionId,
-                selection.id,
-              ),
-            ))
-            .limit(1)
-            .get();
+          const preservedLineage = hasDiscSelectionSupersession(selection.id);
 
           if (legacyCutoverPending) {
             return {
