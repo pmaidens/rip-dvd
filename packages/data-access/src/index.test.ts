@@ -2548,6 +2548,33 @@ describe("data-access facade", () => {
         catalogReviewOutcome: "needs_review",
         catalogReviewedAt: null,
       });
+    completeCatalogReview(access, archive.id);
+    expect(
+      access.catalog.deleteDiscSelection(correction.discSelection.id),
+    ).toMatchObject({
+      id: correction.discSelection.id,
+      deletedEncodeJobs: 0,
+      deletionComplete: true,
+    });
+    expect(access.catalog.listDiscSelections({
+      originalDiscArchiveId: archive.id,
+    })).toEqual([]);
+    expect(access.catalog.listDiscSelections({
+      ids: [correction.discSelection.id],
+    })).toEqual([expect.objectContaining({ id: correction.discSelection.id })]);
+    expect(access.catalog.listDiscSelectionSupersessions({
+      discSelectionIds: [
+        mistakenSelection.id,
+        correction.discSelection.id,
+      ],
+    })).toEqual([correction.supersession]);
+    expect(access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: queued.id,
+        discSelectionId: mistakenSelection.id,
+        status: "completed",
+      }),
+    ]);
     access.close();
   });
 

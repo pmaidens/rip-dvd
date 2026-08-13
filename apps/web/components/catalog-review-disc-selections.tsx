@@ -167,20 +167,29 @@ export function CatalogReviewDiscSelections({
                     Remove Disc Selection
                   </button>
                 ) : null}
-                {selection.correction ? (
+                {selection.correctionHistory?.length ? (
                   <div className="selection-correction-history">
-                    <strong>Disc Selection Correction</strong>
-                    <p>
-                      Supersedes {itemsById.get(
-                        selection.correction.supersededDiscSelection
-                          .mediaItemId,
-                      )?.title ?? "Unknown Media Item"} · {discSelectionDescription(
-                        selection.correction.supersededDiscSelection,
-                      )}
-                    </p>
-                    {selection.correction.reason ? (
-                      <p>{selection.correction.reason}</p>
-                    ) : null}
+                    <strong>Disc Selection Correction History</strong>
+                    <ol>
+                      {selection.correctionHistory.map((correction) => (
+                        <li key={correction.supersededDiscSelection.id}>
+                          <p>
+                            {itemsById.get(
+                              correction.supersededDiscSelection.mediaItemId,
+                            )?.title ?? "Unknown Media Item"} · {discSelectionDescription(
+                              correction.supersededDiscSelection,
+                            )} → {itemsById.get(
+                              correction.replacementDiscSelection.mediaItemId,
+                            )?.title ?? "Unknown Media Item"} · {discSelectionDescription(
+                              correction.replacementDiscSelection,
+                            )}
+                          </p>
+                          {correction.reason ? (
+                            <p>{correction.reason}</p>
+                          ) : null}
+                        </li>
+                      ))}
+                    </ol>
                   </div>
                 ) : null}
               </div>
