@@ -7,7 +7,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { Worker } from "node:worker_threads";
 
@@ -2832,6 +2832,15 @@ describe("data-access facade", () => {
       )
     ).toThrow(
       "Corrected publication mutation requires retained output authority",
+    );
+    expect(() =>
+      access.encodeJobs.beginPublicationMutation(
+        replacementClaim,
+        publication,
+        join("/unrelated", basename(retainedOutputPath)),
+      )
+    ).toThrow(
+      "Retained Encode output path does not match the Encode Job output",
     );
     const fencedPublication = access.encodeJobs.beginPublicationMutation(
       replacementClaim,
