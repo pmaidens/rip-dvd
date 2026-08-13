@@ -3,6 +3,7 @@ import type {
   CatalogReviewOutcome,
   DiscSelectionSourceIdentityInput,
   DiscSelectionKind,
+  EncodeJobStatus,
   MediaItemKind,
 } from "@rip-dvd/data-access";
 import { MEDIA_ITEM_KINDS } from "@rip-dvd/data-access/catalog-kinds";
@@ -42,11 +43,22 @@ export interface MediaItemMaintenance {
     | { state: "unavailable"; reason: string };
 }
 
-export interface CatalogReviewDiscSelection {
+export interface CatalogReviewDiscSelectionSummary {
   id: string;
   mediaItemId: string;
   sourceIdentity: DiscSelectionSourceIdentityInput;
   label: string | null;
+}
+
+export interface CatalogReviewDiscSelectionCorrection {
+  supersededDiscSelection: CatalogReviewDiscSelectionSummary;
+  replacementDiscSelection: CatalogReviewDiscSelectionSummary;
+  reason: string | null;
+  correctedAt: string;
+}
+
+export interface CatalogReviewDiscSelection
+  extends CatalogReviewDiscSelectionSummary {
   actionAvailability: CatalogReviewDiscSelectionActionAvailability;
 }
 
@@ -59,17 +71,18 @@ export type CatalogReviewDiscSelectionActionAvailability =
   }
   | {
     state: "locked_provenance";
-    availableActions: readonly [];
+    availableActions: readonly ["correct"];
     reason: string;
     relatedEncodeJob: {
       id: string;
-      status:
-        | "queued"
-        | "running"
-        | "cancellation_requested"
-        | "completed"
-        | "failed";
+      status: EncodeJobStatus;
     };
+  }
+  | {
+    state: "correction_lineage";
+    availableActions: readonly ["correct", "remove"];
+    reason: string;
+    relatedEncodeJob: null;
   }
   | {
     state: "needs_repair";
@@ -102,6 +115,13 @@ export interface CatalogReviewDto {
   rawScan: { titles: DvdTitle[] };
   coverage: CatalogReviewCoverage;
   mediaItems: CatalogReviewMediaItem[];
+  correctionHistory: CatalogReviewDiscSelectionCorrection[];
+  correctionHistoryPage: {
+    offset: number;
+    limit: number;
+    hasPrevious: boolean;
+    hasNext: boolean;
+  };
   discSelections: CatalogReviewDiscSelection[];
   discSelectionsPage: {
     offset: number;
@@ -122,6 +142,7 @@ export type SaveMediaItemInput = CatalogReviewMediaItemInput & {
 
 export type CreateDiscSelectionInput = CatalogReviewDiscSelectionInput & {
   replacesDiscSelectionId?: string;
+  correctionReason?: string;
 };
 
 export type MappingProposalAction =

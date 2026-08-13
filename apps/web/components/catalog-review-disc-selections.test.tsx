@@ -30,6 +30,13 @@ describe("CatalogReviewDiscSelections", () => {
           hasPrevious: false,
           hasNext: true,
         }}
+        correctionHistory={[]}
+        correctionHistoryPage={{
+          offset: 0,
+          limit: 100,
+          hasPrevious: false,
+          hasNext: false,
+        }}
         mediaItems={[{
           id: "episode-1",
           parentId: null,
@@ -49,6 +56,7 @@ describe("CatalogReviewDiscSelections", () => {
         selectionKind="main_feature"
         isSaving={false}
         onPage={() => undefined}
+        onCorrectionHistoryPage={() => undefined}
         onSelectionKindChange={() => undefined}
         onCreate={() => undefined}
         onDelete={() => undefined}
@@ -63,7 +71,7 @@ describe("CatalogReviewDiscSelections", () => {
     expect(html).toContain("Next Disc Selections");
   });
 
-  it("explains a running dependency without rendering doomed mutation actions", () => {
+  it("offers supersession for a running dependency without direct mutation actions", () => {
     const html = renderToStaticMarkup(
       <CatalogReviewDiscSelections
         discSelections={[{
@@ -73,13 +81,20 @@ describe("CatalogReviewDiscSelections", () => {
           label: null,
           actionAvailability: {
             state: "locked_provenance",
-            availableActions: [],
+            availableActions: ["correct"],
             reason:
-              "Encode Job job-1 is running; direct mutation is unavailable because its Disc Selection provenance must be preserved",
+              "Encode Job job-1 is running; correcting by supersession will request cancellation and preserve its provenance",
             relatedEncodeJob: { id: "job-1", status: "running" },
           },
         }]}
         page={{
+          offset: 0,
+          limit: 100,
+          hasPrevious: false,
+          hasNext: false,
+        }}
+        correctionHistory={[]}
+        correctionHistoryPage={{
           offset: 0,
           limit: 100,
           hasPrevious: false,
@@ -98,6 +113,7 @@ describe("CatalogReviewDiscSelections", () => {
         selectionKind="main_feature"
         isSaving={false}
         onPage={() => undefined}
+        onCorrectionHistoryPage={() => undefined}
         onSelectionKindChange={() => undefined}
         onCreate={() => undefined}
         onDelete={() => undefined}
@@ -106,9 +122,124 @@ describe("CatalogReviewDiscSelections", () => {
 
     expect(html).toContain("Locked provenance");
     expect(html).toContain("Encode Job job-1 is running");
-    expect(html).not.toContain("Correct or edit label");
+    expect(html).toContain("Correct by supersession");
+    expect(html).toContain("Correction note");
+    expect(html).toContain("will request cancellation");
     expect(html).not.toContain("Repair unsafe legacy Disc Selection");
     expect(html).not.toContain("Remove Disc Selection");
+  });
+
+  it("shows every superseded source and human correction note", () => {
+    const html = renderToStaticMarkup(
+      <CatalogReviewDiscSelections
+        discSelections={[{
+          id: "selection-corrected",
+          mediaItemId: "movie-corrected",
+          sourceIdentity: { kind: "dvd_title", titleNumber: 3 },
+          label: null,
+          actionAvailability: {
+            state: "editable",
+            availableActions: ["correct", "edit_label", "remove"],
+            reason: null,
+            relatedEncodeJob: null,
+          },
+        }]}
+        page={{
+          offset: 0,
+          limit: 100,
+          hasPrevious: false,
+          hasNext: false,
+        }}
+        correctionHistory={[
+          {
+            supersededDiscSelection: {
+              id: "selection-mistaken",
+              mediaItemId: "movie-mistaken",
+              sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+              label: "Theatrical cut",
+            },
+            replacementDiscSelection: {
+              id: "selection-intermediate",
+              mediaItemId: "movie-intermediate",
+              sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+              label: null,
+            },
+            reason: "The director's cut is title 2.",
+            correctedAt: "2026-08-12T18:00:00.000Z",
+          },
+          {
+            supersededDiscSelection: {
+              id: "selection-intermediate",
+              mediaItemId: "movie-intermediate",
+              sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+              label: null,
+            },
+            replacementDiscSelection: {
+              id: "selection-corrected",
+              mediaItemId: "movie-corrected",
+              sourceIdentity: { kind: "dvd_title", titleNumber: 3 },
+              label: null,
+            },
+            reason: "The restored edition is title 3.",
+            correctedAt: "2026-08-12T19:00:00.000Z",
+          },
+        ]}
+        correctionHistoryPage={{
+          offset: 0,
+          limit: 100,
+          hasPrevious: false,
+          hasNext: false,
+        }}
+        mediaItems={[
+          {
+            id: "movie-corrected",
+            parentId: null,
+            kind: "movie",
+            title: "Correct Movie",
+            year: null,
+            seasonNumber: null,
+            episodeNumber: null,
+          },
+          {
+            id: "movie-intermediate",
+            parentId: null,
+            kind: "movie",
+            title: "Intermediate Movie",
+            year: null,
+            seasonNumber: null,
+            episodeNumber: null,
+          },
+          {
+            id: "movie-mistaken",
+            parentId: null,
+            kind: "movie",
+            title: "Mistaken Movie",
+            year: null,
+            seasonNumber: null,
+            episodeNumber: null,
+          },
+        ]}
+        rawTitles={[]}
+        selectionKind="main_feature"
+        isSaving={false}
+        onPage={() => undefined}
+        onCorrectionHistoryPage={() => undefined}
+        onSelectionKindChange={() => undefined}
+        onCreate={() => undefined}
+        onDelete={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("Disc Selection Correction History");
+    expect(html).toContain(
+      "Mistaken Movie · Title 1 → Intermediate Movie · Title 2",
+    );
+    expect(html).toContain(
+      "Intermediate Movie · Title 2 → Correct Movie · Title 3",
+    );
+    expect(html).toContain("The director&#x27;s cut is title 2.");
+    expect(html).toContain("The restored edition is title 3.");
+    expect(html).toContain("Correct Movie");
   });
 
   it("marks unsafe legacy selections as Needs repair with only recovery actions", () => {
@@ -148,6 +279,13 @@ describe("CatalogReviewDiscSelections", () => {
           hasPrevious: false,
           hasNext: false,
         }}
+        correctionHistory={[]}
+        correctionHistoryPage={{
+          offset: 0,
+          limit: 100,
+          hasPrevious: false,
+          hasNext: false,
+        }}
         mediaItems={[
           {
             id: "movie-1",
@@ -178,6 +316,7 @@ describe("CatalogReviewDiscSelections", () => {
         selectionKind="main_feature"
         isSaving={false}
         onPage={() => undefined}
+        onCorrectionHistoryPage={() => undefined}
         onSelectionKindChange={() => undefined}
         onCreate={() => undefined}
         onDelete={() => undefined}
@@ -216,6 +355,13 @@ describe("CatalogReviewDiscSelections", () => {
           hasPrevious: false,
           hasNext: false,
         }}
+        correctionHistory={[]}
+        correctionHistoryPage={{
+          offset: 0,
+          limit: 100,
+          hasPrevious: false,
+          hasNext: false,
+        }}
         mediaItems={[{
           id: "movie-1",
           parentId: null,
@@ -229,6 +375,7 @@ describe("CatalogReviewDiscSelections", () => {
         selectionKind="main_feature"
         isSaving={false}
         onPage={() => undefined}
+        onCorrectionHistoryPage={() => undefined}
         onSelectionKindChange={() => undefined}
         onCreate={() => undefined}
         onDelete={() => undefined}

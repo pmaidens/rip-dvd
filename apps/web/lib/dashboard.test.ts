@@ -64,10 +64,48 @@ function seedEncodeJob(access: LegacySidecarDataAccess) {
     encodingProfileId: profile.id,
     outputPath: "/media/movies/enrichment.mkv",
   });
-  return { archive, job };
+  return { archive, job, mediaItem, selection };
 }
 
 describe("readDashboardSnapshot", () => {
+  it("keeps a terminal Encode Job outcome beside its Disc Selection correction", () => {
+    const access = dataAccessFixture.create();
+    const { archive, job, selection } = seedEncodeJob(access);
+    const claim = access.encodeJobs.claimNext("dashboard-correction-worker");
+    if (!claim) {
+      throw new Error("Expected dashboard correction Encode Job claim");
+    }
+    access.encodeJobs.complete(claim);
+    const correctedItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Corrected dashboard title",
+    });
+    const catalogRevision = access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]!.updatedAt;
+    const correction = access.catalog.correctDiscSelection(selection.id, {
+      originalDiscArchiveId: archive.id,
+      catalogRevision,
+      mediaItemId: correctedItem.id,
+      sourceIdentity: { kind: "main_feature" },
+      reason: "The dashboard mapping was wrong.",
+    });
+
+    expect(readDashboardSnapshot(access).encodeJobs).toEqual({
+      status: "loaded",
+      items: [expect.objectContaining({
+        id: job.id,
+        mediaTitle: "Enriched title",
+        status: "completed",
+        discSelectionCorrection: {
+          replacementDiscSelectionId: correction.discSelection.id,
+          correctedMediaTitle: "Corrected dashboard title",
+          reason: "The dashboard mapping was wrong.",
+        },
+      })],
+    });
+  });
+
   it("serializes explicit verification results without exposing paths", async () => {
     const access = dataAccessFixture.create();
     const { job } = seedEncodeJob(access);
