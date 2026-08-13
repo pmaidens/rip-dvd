@@ -580,6 +580,10 @@ describe("Catalog Review API", () => {
       kind: "movie",
       title: "Route Correction",
     });
+    const revisedItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Route Revision",
+    });
     const mistakenSelection = access.catalog.createDiscSelection({
       originalDiscArchiveId: archive.id,
       mediaItemId: mistakenItem.id,
@@ -656,16 +660,22 @@ describe("Catalog Review API", () => {
       expect.objectContaining({
         id: correctionBody.discSelection.id,
         mediaItemId: correctedItem.id,
-        correction: {
+        correctionHistory: [{
           supersededDiscSelection: {
             id: mistakenSelection.id,
             mediaItemId: mistakenItem.id,
             sourceIdentity: { kind: "main_feature" },
             label: null,
           },
+          replacementDiscSelection: {
+            id: correctionBody.discSelection.id,
+            mediaItemId: correctedItem.id,
+            sourceIdentity: { kind: "main_feature" },
+            label: null,
+          },
           reason: "The wrong movie was mapped.",
           correctedAt: expect.any(String),
-        },
+        }],
       }),
     ]);
     expect(review.mediaItems).toEqual(expect.arrayContaining([
@@ -680,6 +690,131 @@ describe("Catalog Review API", () => {
       }),
     ]);
     expect(JSON.stringify(review)).not.toContain("Route Mistake.mkv");
+
+    completeCatalogReview(access, archive.id);
+    access.encodeJobs.enqueue({
+      discSelectionId: correctionBody.discSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Route Correction.mkv",
+    });
+    const revisionClaim = access.encodeJobs.claimNext(
+      "route-revision-worker",
+    );
+    if (!revisionClaim) {
+      throw new Error("Expected route revision Encode Job claim");
+    }
+    const revisionCompleted = access.encodeJobs.complete(revisionClaim);
+    const secondCorrectionResponse = await createCatalogReviewRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+        },
+        body: JSON.stringify({
+          action: "correct_disc_selection",
+          discSelectionId: correctionBody.discSelection.id,
+          catalogRevision: access.catalog.listOriginalDiscArchives({
+            ids: [archive.id],
+          })[0]!.updatedAt.toISOString(),
+          correctionReason: "The reviewed edition belongs to another movie.",
+          selection: {
+            mediaItemId: revisedItem.id,
+            sourceIdentity: { kind: "main_feature" },
+          },
+        }),
+      }),
+      archive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+    expect(secondCorrectionResponse.status).toBe(200);
+    const secondCorrection = await secondCorrectionResponse.json();
+
+    const revisedReviewResponse = await createCatalogReviewRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`),
+      archive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+    const revisedReview = await revisedReviewResponse.json();
+    expect(revisedReview.discSelections).toEqual([
+      expect.objectContaining({
+        id: secondCorrection.discSelection.id,
+        mediaItemId: revisedItem.id,
+        correctionHistory: [
+          expect.objectContaining({
+            supersededDiscSelection: expect.objectContaining({
+              id: mistakenSelection.id,
+              mediaItemId: mistakenItem.id,
+            }),
+            replacementDiscSelection: expect.objectContaining({
+              id: correctionBody.discSelection.id,
+              mediaItemId: correctedItem.id,
+            }),
+            reason: "The wrong movie was mapped.",
+          }),
+          expect.objectContaining({
+            supersededDiscSelection: expect.objectContaining({
+              id: correctionBody.discSelection.id,
+              mediaItemId: correctedItem.id,
+            }),
+            replacementDiscSelection: expect.objectContaining({
+              id: secondCorrection.discSelection.id,
+              mediaItemId: revisedItem.id,
+            }),
+            reason: "The reviewed edition belongs to another movie.",
+          }),
+        ],
+      }),
+    ]);
+    expect(revisedReview.mediaItems).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: mistakenItem.id }),
+      expect.objectContaining({ id: correctedItem.id }),
+      expect.objectContaining({ id: revisedItem.id }),
+    ]));
+    expect(access.encodeJobs.list()).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: completed.id,
+        discSelectionId: mistakenSelection.id,
+        status: "completed",
+      }),
+      expect.objectContaining({
+        id: revisionCompleted.id,
+        discSelectionId: correctionBody.discSelection.id,
+        status: "completed",
+      }),
+    ]));
+
+    const deleteResponse = await createCatalogReviewRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+        },
+        body: JSON.stringify({
+          action: "delete_disc_selection",
+          discSelectionId: secondCorrection.discSelection.id,
+        }),
+      }),
+      archive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+    expect(deleteResponse.status).toBe(200);
+    expect(access.catalog.listDiscSelections({
+      originalDiscArchiveId: archive.id,
+    })).toEqual([]);
+    expect(access.catalog.listDiscSelectionSupersessions({
+      discSelectionIds: [
+        mistakenSelection.id,
+        correctionBody.discSelection.id,
+        secondCorrection.discSelection.id,
+      ],
+    })).toHaveLength(2);
   });
 
   it("exposes only repair and removal for unsafe legacy selections while retaining quarantine provenance", async () => {

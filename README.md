@@ -614,8 +614,10 @@ keeps ordinary retry history separate from unsafe legacy recovery:
   its original profile, output, and actual outcome. Queued work is cancelled
   immediately, while running work enters the general cancellation lifecycle;
   completed, failed, and cancelled outcomes stay terminal. Both Catalog Review
-  and Encode Jobs display the correction history, and the changed catalog must
-  be reviewed again before the replacement can encode.
+  and Encode Jobs display the correction history. Repeated corrections keep the
+  bounded full predecessor chain and every operator reason. Removing a job-free
+  replacement retains it inactive with its immutable lineage. The changed
+  catalog must be reviewed again before the replacement can encode.
 - **Unsafe legacy quarantine.** Only a caller-era mapping that fails current
   canonical or archived-scan validation takes the recovery path. Repair or
   removal deactivates the old Disc Selection rather than deleting it; repair

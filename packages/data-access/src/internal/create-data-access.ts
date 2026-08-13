@@ -3523,15 +3523,49 @@ export function createDataAccessInternal(
                 ))
                 .run();
             } else {
-              requireRow(
-                transaction
-                  .delete(discSelections)
-                  .where(eq(discSelections.id, id))
-                  .returning({ id: discSelections.id })
-                  .get(),
-                "disc selection",
-                id,
-              );
+              const preservedSupersession = transaction
+                .select({
+                  supersededDiscSelectionId:
+                    discSelectionSupersessions.supersededDiscSelectionId,
+                })
+                .from(discSelectionSupersessions)
+                .where(or(
+                  eq(
+                    discSelectionSupersessions.supersededDiscSelectionId,
+                    id,
+                  ),
+                  eq(
+                    discSelectionSupersessions.replacementDiscSelectionId,
+                    id,
+                  ),
+                ))
+                .limit(1)
+                .get();
+              if (preservedSupersession) {
+                requireRow(
+                  transaction
+                    .update(discSelections)
+                    .set({ isCatalogActive: false, updatedAt: timestamp })
+                    .where(and(
+                      eq(discSelections.id, id),
+                      eq(discSelections.isCatalogActive, true),
+                    ))
+                    .returning({ id: discSelections.id })
+                    .get(),
+                  "disc selection",
+                  id,
+                );
+              } else {
+                requireRow(
+                  transaction
+                    .delete(discSelections)
+                    .where(eq(discSelections.id, id))
+                    .returning({ id: discSelections.id })
+                    .get(),
+                  "disc selection",
+                  id,
+                );
+              }
             }
             transaction
               .update(originalDiscArchives)

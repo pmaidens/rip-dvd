@@ -43,21 +43,23 @@ export interface MediaItemMaintenance {
     | { state: "unavailable"; reason: string };
 }
 
-export interface CatalogReviewDiscSelection {
+export interface CatalogReviewDiscSelectionSummary {
   id: string;
   mediaItemId: string;
   sourceIdentity: DiscSelectionSourceIdentityInput;
   label: string | null;
-  correction?: {
-    supersededDiscSelection: {
-      id: string;
-      mediaItemId: string;
-      sourceIdentity: DiscSelectionSourceIdentityInput;
-      label: string | null;
-    };
-    reason: string | null;
-    correctedAt: string;
-  };
+}
+
+export interface CatalogReviewDiscSelectionCorrection {
+  supersededDiscSelection: CatalogReviewDiscSelectionSummary;
+  replacementDiscSelection: CatalogReviewDiscSelectionSummary;
+  reason: string | null;
+  correctedAt: string;
+}
+
+export interface CatalogReviewDiscSelection
+  extends CatalogReviewDiscSelectionSummary {
+  correctionHistory?: readonly CatalogReviewDiscSelectionCorrection[];
   actionAvailability: CatalogReviewDiscSelectionActionAvailability;
 }
 

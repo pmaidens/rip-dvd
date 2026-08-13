@@ -113,24 +113,48 @@ describe("CatalogReviewDiscSelections", () => {
     expect(html).not.toContain("Remove Disc Selection");
   });
 
-  it("shows the superseded source and human correction note", () => {
+  it("shows every superseded source and human correction note", () => {
     const html = renderToStaticMarkup(
       <CatalogReviewDiscSelections
         discSelections={[{
           id: "selection-corrected",
           mediaItemId: "movie-corrected",
-          sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+          sourceIdentity: { kind: "dvd_title", titleNumber: 3 },
           label: null,
-          correction: {
-            supersededDiscSelection: {
-              id: "selection-mistaken",
-              mediaItemId: "movie-mistaken",
-              sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
-              label: "Theatrical cut",
+          correctionHistory: [
+            {
+              supersededDiscSelection: {
+                id: "selection-mistaken",
+                mediaItemId: "movie-mistaken",
+                sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+                label: "Theatrical cut",
+              },
+              replacementDiscSelection: {
+                id: "selection-intermediate",
+                mediaItemId: "movie-intermediate",
+                sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+                label: null,
+              },
+              reason: "The director's cut is title 2.",
+              correctedAt: "2026-08-12T18:00:00.000Z",
             },
-            reason: "The director's cut is title 2.",
-            correctedAt: "2026-08-12T18:00:00.000Z",
-          },
+            {
+              supersededDiscSelection: {
+                id: "selection-intermediate",
+                mediaItemId: "movie-intermediate",
+                sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+                label: null,
+              },
+              replacementDiscSelection: {
+                id: "selection-corrected",
+                mediaItemId: "movie-corrected",
+                sourceIdentity: { kind: "dvd_title", titleNumber: 3 },
+                label: null,
+              },
+              reason: "The restored edition is title 3.",
+              correctedAt: "2026-08-12T19:00:00.000Z",
+            },
+          ],
           actionAvailability: {
             state: "editable",
             availableActions: ["correct", "edit_label", "remove"],
@@ -155,6 +179,15 @@ describe("CatalogReviewDiscSelections", () => {
             episodeNumber: null,
           },
           {
+            id: "movie-intermediate",
+            parentId: null,
+            kind: "movie",
+            title: "Intermediate Movie",
+            year: null,
+            seasonNumber: null,
+            episodeNumber: null,
+          },
+          {
             id: "movie-mistaken",
             parentId: null,
             kind: "movie",
@@ -174,9 +207,15 @@ describe("CatalogReviewDiscSelections", () => {
       />,
     );
 
-    expect(html).toContain("Disc Selection Correction");
-    expect(html).toContain("Supersedes Mistaken Movie · Title 1");
+    expect(html).toContain("Disc Selection Correction History");
+    expect(html).toContain(
+      "Mistaken Movie · Title 1 → Intermediate Movie · Title 2",
+    );
+    expect(html).toContain(
+      "Intermediate Movie · Title 2 → Correct Movie · Title 3",
+    );
     expect(html).toContain("The director&#x27;s cut is title 2.");
+    expect(html).toContain("The restored edition is title 3.");
     expect(html).toContain("Correct Movie");
   });
 
