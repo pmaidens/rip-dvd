@@ -2839,7 +2839,7 @@ describe("data-access facade", () => {
       cleanupEligible: true,
       retainedAt: expect.any(Date),
     }]);
-    expect(access.encodeJobs.listForDiscSelections([
+    expect(access.encodeJobs.listCorrectionLinksForDiscSelections([
       mistakenSelection.id,
       correction.discSelection.id,
     ])).toEqual([

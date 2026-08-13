@@ -935,7 +935,7 @@ export interface EncodeJobAccess {
     statuses?: EncodeJobStatus[],
     options?: ChronologicalListOptions,
   ): EncodeJob[];
-  listForDiscSelections(
+  listCorrectionLinksForDiscSelections(
     ids: readonly DiscSelectionId[],
   ): EncodeJob[];
   listCorrectionLinks(ids: readonly EncodeJobId[]): EncodeJobCorrectionLink[];
@@ -995,7 +995,7 @@ export interface ConsistentReadAccess {
   readonly encodeJobs: Pick<
     EncodeJobAccess,
     | "list"
-    | "listForDiscSelections"
+    | "listCorrectionLinksForDiscSelections"
     | "listCorrectionLinks"
     | "listRetainedOutputs"
   >;

@@ -41,6 +41,7 @@ const CATALOG_REVIEW_MEDIA_ITEM_MAINTENANCE_BATCH_SIZE = 100;
 const CATALOG_REVIEW_CORRECTION_HISTORY_PAGE_SIZE = 100;
 const CATALOG_REVIEW_REPLACEMENT_PLAN_LIMIT = 100;
 const CATALOG_REVIEW_REPLACEMENT_PROFILE_LIMIT = 100;
+const RETAINED_OUTPUT_LOOKUP_BATCH_SIZE = 400;
 
 function response(body: unknown, status = 200): Response {
   return Response.json(body, {
@@ -196,17 +197,18 @@ function readCatalogReview(
         supersession.replacementDiscSelectionId,
       ],
     );
+    const replacementSelectionIds = correctionHistoryPage.map(
+      (supersession) => supersession.replacementDiscSelectionId,
+    );
     const correctionSelectionsById = new Map(
       snapshot.catalog.listDiscSelections({
         ids: correctionSelectionIds,
       }).map((selection) => [selection.id, selection]),
     );
-    const correctionJobs = snapshot.encodeJobs.listForDiscSelections(
-      correctionSelectionIds,
-    );
-    const correctionJobsById = new Map(
-      correctionJobs.map((job) => [job.id, job]),
-    );
+    const correctionJobs = snapshot.encodeJobs
+      .listCorrectionLinksForDiscSelections(
+        replacementSelectionIds,
+      );
     const replacementJobByPredecessorId = new Map(
       correctionJobs.flatMap((job) =>
         job.predecessorEncodeJobId
@@ -214,10 +216,18 @@ function readCatalogReview(
           : []
       ),
     );
+    const retainedOutputs = correctionJobs.flatMap((_job, index) =>
+      index % RETAINED_OUTPUT_LOOKUP_BATCH_SIZE === 0
+        ? snapshot.encodeJobs.listRetainedOutputs(
+            correctionJobs.slice(
+              index,
+              index + RETAINED_OUTPUT_LOOKUP_BATCH_SIZE,
+            ).map((job) => job.id),
+          )
+        : []
+    );
     const retainedOutputByReplacementId = new Map(
-      snapshot.encodeJobs.listRetainedOutputs(
-        correctionJobs.map((job) => job.id),
-      ).map((output) => [output.replacementEncodeJobId, output]),
+      retainedOutputs.map((output) => [output.replacementEncodeJobId, output]),
     );
     const selectionsWithHistory = new Map(
       discSelectionsPage.map((selection) => [selection.id, selection]),
@@ -238,18 +248,12 @@ function readCatalogReview(
         );
       }
       const correctionEncodeJobs = correctionJobs.filter((job) => {
-        if (
-          job.discSelectionId !== supersededDiscSelection.id &&
-          job.discSelectionId !== replacementDiscSelection.id
-        ) {
-          return false;
-        }
-        const predecessor = job.predecessorEncodeJobId
-          ? correctionJobsById.get(job.predecessorEncodeJobId)
-          : undefined;
         const replacement = replacementJobByPredecessorId.get(job.id);
         return (
-          predecessor?.discSelectionId === supersededDiscSelection.id ||
+          (
+            job.predecessorEncodeJobId !== null &&
+            job.discSelectionId === replacementDiscSelection.id
+          ) ||
           replacement?.discSelectionId === replacementDiscSelection.id
         );
       });
