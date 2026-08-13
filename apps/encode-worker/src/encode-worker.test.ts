@@ -1930,26 +1930,35 @@ describe("encode worker polling", () => {
       throw new Error("Expected corrected publication claim");
     }
     const priorMetadata = lstatSync(fixture.outputPath);
+    const canonicalFinalPath = join(
+      realpathSync(fixture.mediaLibraryPath),
+      basename(fixture.outputPath),
+    );
+    const retainedPath = priorFinalPath(
+      canonicalFinalPath,
+      claim.claimToken,
+    );
     fixture.access.encodeJobs.recordReplacementOutputIdentity(
       claim,
       encodeOutputFilesystemIdentity(priorMetadata),
     );
     const partialPath = claimPartialPath(
-      fixture.outputPath,
-      claim.claimToken,
-    );
-    const retainedPath = priorFinalPath(
-      fixture.outputPath,
+      canonicalFinalPath,
       claim.claimToken,
     );
     const replacementPath = claimReplacementPath(
-      fixture.outputPath,
+      canonicalFinalPath,
       claim.claimToken,
     );
     writeFileSync(partialPath, "corrected after crash", { flag: "wx" });
-    fixture.access.encodeJobs.registerPartialCleanup(claim, {
+    const publication = fixture.access.encodeJobs.registerPartialCleanup(claim, {
       publicationPending: true,
     });
+    fixture.access.encodeJobs.beginPublicationMutation(
+      claim,
+      publication,
+      retainedPath,
+    );
     const child = spawnProcess(
       process.execPath,
       [
@@ -1959,7 +1968,7 @@ describe("encode worker polling", () => {
         )),
         "final-linked",
         partialPath,
-        fixture.outputPath,
+        canonicalFinalPath,
         retainedPath,
         replacementPath,
       ],

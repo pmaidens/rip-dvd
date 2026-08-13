@@ -815,3 +815,27 @@ export const retainedEncodeOutputs = sqliteTable(
     ),
   ],
 );
+
+export const correctedEncodePublicationAuthorities = sqliteTable(
+  "corrected_encode_publication_authorities",
+  {
+    replacementEncodeJobId: text("replacement_encode_job_id")
+      .$type<EncodeJobId>()
+      .notNull()
+      .primaryKey()
+      .references(() => encodeJobs.id, { onDelete: "restrict" }),
+    claimToken: text("claim_token").$type<EncodeJobClaimToken>().notNull(),
+    retainedOutputPath: text("retained_output_path").notNull(),
+    filesystemIdentity: text("filesystem_identity")
+      .$type<EncodeOutputFilesystemIdentity>()
+      .notNull(),
+  },
+  (table) => [
+    check(
+      "corrected_encode_publication_authorities_id_not_null",
+      sql`${table.replacementEncodeJobId} is not null`,
+    ),
+    uniqueIndex("corrected_encode_publication_authorities_path_unique")
+      .on(table.retainedOutputPath),
+  ],
+);

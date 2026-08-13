@@ -1348,12 +1348,8 @@ export async function executeEncodeClaim(
     }
     if (existingFinal !== null && claim.replaceExistingOutput) {
       const identity = encodeOutputFilesystemIdentity(existingFinal);
-      if (claim.replacementOutputIdentity === null) {
-        options.access.encodeJobs.recordReplacementOutputIdentity(
-          claim,
-          identity,
-        );
-      } else if (
+      if (
+        claim.replacementOutputIdentity !== null &&
         !matchesEncodeOutputFilesystemIdentity(
           claim.replacementOutputIdentity,
           existingFinal,
@@ -1361,6 +1357,10 @@ export async function executeEncodeClaim(
       ) {
         throw new Error("Encode Job prior final output changed before retry");
       }
+      options.access.encodeJobs.recordReplacementOutputIdentity(
+        claim,
+        identity,
+      );
     }
     replaceableFinal = existingFinal ?? undefined;
     await moveAside(paths.legacyPartialPath);
@@ -1430,6 +1430,9 @@ export async function executeEncodeClaim(
       options.access.encodeJobs.beginPublicationMutation(
         claim,
         pendingPartialCleanup,
+        claim.predecessorEncodeJobId === null || replaceableFinal === undefined
+          ? undefined
+          : paths.priorFinalPath,
       );
     signal.throwIfAborted();
     if (currentFinal !== null) {

@@ -6,7 +6,7 @@ import {
   statSync,
   unlinkSync,
 } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 
@@ -54,6 +54,7 @@ import { assignDvdContentIdAlias } from "./dvd-content-id-alias.js";
 import {
   archiveRequests,
   archiveJobs,
+  correctedEncodePublicationAuthorities,
   detectedDiscs,
   discInspectionAttempts,
   discInspections,
@@ -454,19 +455,41 @@ export function createDataAccessInternal(
     Parameters<typeof database.transaction>[0]
   >[0];
 
+  function clearCorrectedEncodePublicationAuthority(
+    transaction: CatalogTransaction,
+    jobId: EncodeJobId,
+  ): void {
+    transaction
+      .delete(correctedEncodePublicationAuthorities)
+      .where(eq(
+        correctedEncodePublicationAuthorities.replacementEncodeJobId,
+        jobId,
+      ))
+      .run();
+  }
+
   function retainCorrectedEncodeOutput(
     transaction: CatalogTransaction,
     job: EncodeJob,
     provenance: EncodeJobPublicationProvenance | undefined,
     timestamp: Date,
   ): void {
+    const publicationAuthority = transaction
+      .select()
+      .from(correctedEncodePublicationAuthorities)
+      .where(eq(
+        correctedEncodePublicationAuthorities.replacementEncodeJobId,
+        job.id,
+      ))
+      .get();
     if (provenance?.retainedOutputPath === undefined) {
       if (
         provenance?.retainedOutputIdentity !== undefined ||
         (
           job.predecessorEncodeJobId !== null &&
           job.replacementOutputIdentity !== null
-        )
+        ) ||
+        publicationAuthority !== undefined
       ) {
         throw new DomainInvariantError(
           "Retained Encode output provenance is incomplete",
@@ -489,6 +512,19 @@ export function createDataAccessInternal(
     ) {
       throw new DomainInvariantError(
         "Retained Encode output requires corrected replacement provenance",
+      );
+    }
+    if (
+      publicationAuthority?.claimToken !== job.claimToken ||
+      publicationAuthority.retainedOutputPath !== retainedOutputPath
+    ) {
+      throw new DomainInvariantError(
+        "Retained Encode output path conflicts with publication authority",
+      );
+    }
+    if (publicationAuthority.filesystemIdentity !== retainedOutputIdentity) {
+      throw new DomainInvariantError(
+        "Retained Encode output identity conflicts with publication authority",
       );
     }
     const existing = transaction
@@ -1811,55 +1847,75 @@ export function createDataAccessInternal(
       current.updatedAt.getTime() >
       timestamp.getTime() - ENCODE_JOB_LEASE_DURATION_MS,
     updateAttempt: (claim, update, _completion, failureOptions) =>
-      database
-        .update(encodeJobs)
-        .set({
-          ...update,
-          ...(update.status === "completed"
-            ? {
-                progressEtaSeconds: null,
-                replaceExistingOutput: false,
-                replacementOutputIdentity: null,
-              }
-            : update.status === "failed"
+      database.transaction((transaction) => {
+        const updated = transaction
+          .update(encodeJobs)
+          .set({
+            ...update,
+            ...(update.status === "completed"
               ? {
                   progressEtaSeconds: null,
-                  ...(failureOptions?.preserveReplacementAuthority
-                    ? {}
-                    : {
-                        replaceExistingOutput: false,
-                        replacementOutputIdentity: null,
-                      }),
+                  replaceExistingOutput: false,
+                  replacementOutputIdentity: null,
+                }
+              : update.status === "failed"
+                ? {
+                    progressEtaSeconds: null,
+                    ...(failureOptions?.preserveReplacementAuthority
+                      ? {}
+                      : {
+                          replaceExistingOutput: false,
+                          replacementOutputIdentity: null,
+                        }),
+                  }
+                : {}),
+          })
+          .where(and(
+            encodeAttemptCondition(claim, update.updatedAt),
+            update.status === "completed"
+              ? isNull(encodeJobs.predecessorEncodeJobId)
+              : undefined,
+          ))
+          .returning()
+          .get();
+        if (
+          updated &&
+          update.status === "failed" &&
+          !failureOptions?.preserveReplacementAuthority
+        ) {
+          clearCorrectedEncodePublicationAuthority(transaction, updated.id);
+        }
+        return updated;
+      }, { behavior: "immediate" }),
+    updateProgressAttempt: (claim, update, details, failureOptions) =>
+      database.transaction((transaction) => {
+        const updated = transaction
+          .update(encodeJobs)
+          .set({
+            ...update,
+            progressPhase: details.phase,
+            progressEtaSeconds:
+              update.status === "failed" ? null : details.etaSeconds,
+            ...(update.status === "failed" &&
+              !failureOptions?.preserveReplacementAuthority
+              ? {
+                  replaceExistingOutput: false,
+                  replacementOutputIdentity: null,
                 }
               : {}),
-        })
-        .where(and(
-          encodeAttemptCondition(claim, update.updatedAt),
-          update.status === "completed"
-            ? isNull(encodeJobs.predecessorEncodeJobId)
-            : undefined,
-        ))
-        .returning()
-        .get(),
-    updateProgressAttempt: (claim, update, details, failureOptions) =>
-      database
-        .update(encodeJobs)
-        .set({
-          ...update,
-          progressPhase: details.phase,
-          progressEtaSeconds:
-            update.status === "failed" ? null : details.etaSeconds,
-          ...(update.status === "failed" &&
-            !failureOptions?.preserveReplacementAuthority
-            ? {
-                replaceExistingOutput: false,
-                replacementOutputIdentity: null,
-              }
-            : {}),
-        })
-        .where(encodeAttemptCondition(claim, update.updatedAt))
-        .returning()
-        .get(),
+          })
+          .where(encodeAttemptCondition(claim, update.updatedAt))
+          .returning()
+          .get();
+        if (
+          updated &&
+          update.status === "failed" &&
+          !failureOptions?.preserveReplacementAuthority
+        ) {
+          clearCorrectedEncodePublicationAuthority(transaction, updated.id);
+        }
+        return updated;
+      }, { behavior: "immediate" }),
     progressDetailsChanged: (current, previous) =>
       current?.phase !== previous?.phase,
     requeue: (id, expectedStatus, current, update, options) => {
@@ -1891,7 +1947,7 @@ export function createDataAccessInternal(
             `Encode Job output is already assigned: ${targetOutputPath}`,
           );
         }
-        return transaction
+        const requeued = transaction
           .update(encodeJobs)
           .set({
             ...update,
@@ -1949,6 +2005,10 @@ export function createDataAccessInternal(
           )
           .returning()
           .get();
+        if (requeued) {
+          clearCorrectedEncodePublicationAuthority(transaction, requeued.id);
+        }
+        return requeued;
       }, { behavior: "immediate" });
     },
   } satisfies JobQueueAdapter<
@@ -6837,50 +6897,69 @@ export function createDataAccessInternal(
       },
       completeCancellation(claim) {
         const timestamp = now();
-        const cancelled = database
-          .update(encodeJobs)
-          .set({
-            status: "cancelled",
-            reservesOutputPath: sql`case when exists (
-              select 1 from encode_jobs as corrected_replacement
-              where corrected_replacement.predecessor_encode_job_id = ${claim.id}
-                and corrected_replacement.output_path = ${claim.outputPath}
-                and corrected_replacement.reserves_output_path = 1
-            ) then 0 else ${claim.replaceExistingOutput ? 1 : 0} end`,
-            partialCleanupOutputPath: null,
-            partialCleanupClaimToken: null,
-            partialCleanupLeaseToken: null,
-            publicationPending: false,
-            publicationCompletionPending: false,
-            progressEtaSeconds: null,
-            claimedBy: null,
-            claimToken: null,
-            claimedAt: null,
-            completedAt: null,
-            errorMessage: null,
-            updatedAt: timestamp,
-          })
-          .where(and(
-            eq(encodeJobs.id, claim.id),
-            eq(encodeJobs.status, "cancellation_requested"),
-            eq(encodeJobs.claimToken, claim.claimToken),
-            isNull(encodeJobs.partialCleanupOutputPath),
-            isNull(encodeJobs.partialCleanupClaimToken),
-            isNull(encodeJobs.partialCleanupLeaseToken),
-            eq(encodeJobs.publicationPending, false),
-            eq(encodeJobs.publicationCompletionPending, false),
-          ))
-          .returning()
-          .get();
-        if (!cancelled) {
-          throw new StaleJobAttemptError("encode job", claim.id);
-        }
-        return cancelled;
+        return database.transaction((transaction) => {
+          const cancelled = transaction
+            .update(encodeJobs)
+            .set({
+              status: "cancelled",
+              reservesOutputPath: sql`case when exists (
+                select 1 from encode_jobs as corrected_replacement
+                where corrected_replacement.predecessor_encode_job_id = ${claim.id}
+                  and corrected_replacement.output_path = ${claim.outputPath}
+                  and corrected_replacement.reserves_output_path = 1
+              ) then 0 else ${claim.replaceExistingOutput ? 1 : 0} end`,
+              partialCleanupOutputPath: null,
+              partialCleanupClaimToken: null,
+              partialCleanupLeaseToken: null,
+              publicationPending: false,
+              publicationCompletionPending: false,
+              progressEtaSeconds: null,
+              claimedBy: null,
+              claimToken: null,
+              claimedAt: null,
+              completedAt: null,
+              errorMessage: null,
+              updatedAt: timestamp,
+            })
+            .where(and(
+              eq(encodeJobs.id, claim.id),
+              eq(encodeJobs.status, "cancellation_requested"),
+              eq(encodeJobs.claimToken, claim.claimToken),
+              isNull(encodeJobs.partialCleanupOutputPath),
+              isNull(encodeJobs.partialCleanupClaimToken),
+              isNull(encodeJobs.partialCleanupLeaseToken),
+              eq(encodeJobs.publicationPending, false),
+              eq(encodeJobs.publicationCompletionPending, false),
+            ))
+            .returning()
+            .get();
+          if (!cancelled) {
+            throw new StaleJobAttemptError("encode job", claim.id);
+          }
+          clearCorrectedEncodePublicationAuthority(transaction, cancelled.id);
+          return cancelled;
+        }, { behavior: "immediate" });
       },
-      beginPublicationMutation(claim, cleanup) {
+      beginPublicationMutation(claim, cleanup, retainedOutputPath) {
         if (!cleanup.publicationPending || cleanup.leaseToken !== null) {
           throw new DomainInvariantError(
             "Encode Job publication mutation requires unfenced provenance",
+          );
+        }
+        const normalizedRetainedOutputPath = retainedOutputPath === undefined
+          ? undefined
+          : requireNonEmpty(retainedOutputPath, "retainedOutputPath");
+        if (
+          normalizedRetainedOutputPath !== undefined &&
+          (
+            resolve(normalizedRetainedOutputPath) !==
+              normalizedRetainedOutputPath ||
+            basename(normalizedRetainedOutputPath) !==
+              `${basename(claim.outputPath)}.failed.${claim.claimToken}`
+          )
+        ) {
+          throw new DomainInvariantError(
+            "Retained Encode output path is not claim scoped",
           );
         }
         const timestamp = now();
@@ -6903,6 +6982,43 @@ export function createDataAccessInternal(
             .get();
           if (!renewed) {
             throw new StaleJobAttemptError("encode job", claim.id);
+          }
+          if (renewed.predecessorEncodeJobId === null) {
+            if (normalizedRetainedOutputPath !== undefined) {
+              throw new DomainInvariantError(
+                "Only corrected Encode Jobs can stage retained output paths",
+              );
+            }
+          } else if (renewed.replacementOutputIdentity === null) {
+            if (normalizedRetainedOutputPath !== undefined) {
+              throw new DomainInvariantError(
+                "Corrected publication without a prior final cannot stage retained output authority",
+              );
+            }
+          } else {
+            if (normalizedRetainedOutputPath === undefined) {
+              throw new DomainInvariantError(
+                "Corrected publication mutation requires retained output authority",
+              );
+            }
+            transaction
+              .insert(correctedEncodePublicationAuthorities)
+              .values({
+                replacementEncodeJobId: renewed.id,
+                claimToken: claim.claimToken,
+                retainedOutputPath: normalizedRetainedOutputPath,
+                filesystemIdentity: renewed.replacementOutputIdentity,
+              })
+              .onConflictDoUpdate({
+                target:
+                  correctedEncodePublicationAuthorities.replacementEncodeJobId,
+                set: {
+                  claimToken: claim.claimToken,
+                  retainedOutputPath: normalizedRetainedOutputPath,
+                  filesystemIdentity: renewed.replacementOutputIdentity,
+                },
+              })
+              .run();
           }
           return { ...cleanup, leaseToken };
         }, { behavior: "immediate" });
@@ -7775,65 +7891,75 @@ export function createDataAccessInternal(
         return finalized;
       },
       completePartialCleanup(cleanup) {
-        const updated = database
-          .update(encodeJobs)
-          .set({
-            status: sql`case when ${encodeJobs.publicationCompletionPending} = 1 then 'failed' else ${encodeJobs.status} end`,
-            completedAt: sql`case when ${encodeJobs.publicationCompletionPending} = 1 then null else ${encodeJobs.completedAt} end`,
-            errorMessage: sql`case when ${encodeJobs.publicationCompletionPending} = 1 then 'Encode publication completion was interrupted' else ${encodeJobs.errorMessage} end`,
-            partialCleanupOutputPath: null,
-            partialCleanupClaimToken: null,
-            partialCleanupLeaseToken: null,
-            publicationPending: false,
-            publicationCompletionPending: false,
-            reservesOutputPath: sql`case when
-              ${encodeJobs.status} = 'failed'
-              and ${encodeJobs.replaceExistingOutput} = 0
-              and exists (
-                select 1
-                from ${discSelections} as inactive_selection
-                inner join ${originalDiscArchives} as reviewed_archive
-                  on reviewed_archive.id =
-                    inactive_selection.original_disc_archive_id
-                where inactive_selection.id = ${encodeJobs.discSelectionId}
-                  and inactive_selection.is_catalog_active = 0
-                  and reviewed_archive.catalog_review_outcome <>
-                    'needs_review'
-              )
-              then 0 else ${encodeJobs.reservesOutputPath} end`,
-          })
-          .where(
-            and(
-              eq(encodeJobs.id, cleanup.jobId),
-              eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
-              eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
-              cleanup.leaseToken === null
-                ? isNull(encodeJobs.partialCleanupLeaseToken)
-                : eq(
-                    encodeJobs.partialCleanupLeaseToken,
-                    cleanup.leaseToken,
-                  ),
-            ),
-          )
-          .returning()
-          .get();
-        if (updated) {
-          return updated;
-        }
-        const current = database
-          .select()
-          .from(encodeJobs)
-          .where(eq(encodeJobs.id, cleanup.jobId))
-          .get();
-        if (
-          current?.partialCleanupOutputPath === null &&
-          current.partialCleanupClaimToken === null &&
-          current.partialCleanupLeaseToken === null &&
-          !current.publicationPending
-        ) {
-          return current;
-        }
-        throw new StaleJobAttemptError("encode job cleanup", cleanup.jobId);
+        return database.transaction((transaction) => {
+          const updated = transaction
+            .update(encodeJobs)
+            .set({
+              status: sql`case when ${encodeJobs.publicationCompletionPending} = 1 then 'failed' else ${encodeJobs.status} end`,
+              completedAt: sql`case when ${encodeJobs.publicationCompletionPending} = 1 then null else ${encodeJobs.completedAt} end`,
+              errorMessage: sql`case when ${encodeJobs.publicationCompletionPending} = 1 then 'Encode publication completion was interrupted' else ${encodeJobs.errorMessage} end`,
+              partialCleanupOutputPath: null,
+              partialCleanupClaimToken: null,
+              partialCleanupLeaseToken: null,
+              publicationPending: false,
+              publicationCompletionPending: false,
+              reservesOutputPath: sql`case when
+                ${encodeJobs.status} = 'failed'
+                and ${encodeJobs.replaceExistingOutput} = 0
+                and exists (
+                  select 1
+                  from ${discSelections} as inactive_selection
+                  inner join ${originalDiscArchives} as reviewed_archive
+                    on reviewed_archive.id =
+                      inactive_selection.original_disc_archive_id
+                  where inactive_selection.id = ${encodeJobs.discSelectionId}
+                    and inactive_selection.is_catalog_active = 0
+                    and reviewed_archive.catalog_review_outcome <>
+                      'needs_review'
+                )
+                then 0 else ${encodeJobs.reservesOutputPath} end`,
+            })
+            .where(
+              and(
+                eq(encodeJobs.id, cleanup.jobId),
+                eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
+                eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
+                cleanup.leaseToken === null
+                  ? isNull(encodeJobs.partialCleanupLeaseToken)
+                  : eq(
+                      encodeJobs.partialCleanupLeaseToken,
+                      cleanup.leaseToken,
+                    ),
+              ),
+            )
+            .returning()
+            .get();
+          if (updated) {
+            clearCorrectedEncodePublicationAuthority(
+              transaction,
+              cleanup.jobId,
+            );
+            return updated;
+          }
+          const current = transaction
+            .select()
+            .from(encodeJobs)
+            .where(eq(encodeJobs.id, cleanup.jobId))
+            .get();
+          if (
+            current?.partialCleanupOutputPath === null &&
+            current.partialCleanupClaimToken === null &&
+            current.partialCleanupLeaseToken === null &&
+            !current.publicationPending
+          ) {
+            clearCorrectedEncodePublicationAuthority(
+              transaction,
+              cleanup.jobId,
+            );
+            return current;
+          }
+          throw new StaleJobAttemptError("encode job cleanup", cleanup.jobId);
+        }, { behavior: "immediate" });
       },
       list: encodeJobQueue.list,
       updateProgress(claim, progress) {

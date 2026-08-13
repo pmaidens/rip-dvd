@@ -579,7 +579,7 @@ describe("data-access facade", () => {
         "disc_selection_supersessions",
       ]),
     );
-    expect(identifierTables).toHaveLength(15);
+    expect(identifierTables).toHaveLength(16);
     expect(
       identifierTables.every(({ name, sql }) =>
         name === "legacy_cutover_staged_sidecars"
@@ -2712,12 +2712,14 @@ describe("data-access facade", () => {
   });
 
   it("atomically completes review and admits an opted-in corrected replacement", () => {
+    const databasePath = createTestDatabasePath();
     const {
       access,
       archive,
       correctedItems: [correctedItem],
       mistakenSelection,
     } = createDiscSelectionCorrectionFixture({
+      databasePath,
       key: "replacement-plan-opt-in",
     });
     if (!correctedItem) {
@@ -2813,6 +2815,8 @@ describe("data-access facade", () => {
     );
     const priorOutputIdentity =
       "1048576:2048:4096:1710000000000" as EncodeOutputFilesystemIdentity;
+    const retainedOutputPath =
+      `${replacement.outputPath}.failed.${replacementClaim.claimToken}`;
     access.encodeJobs.recordReplacementOutputIdentity(
       replacementClaim,
       priorOutputIdentity,
@@ -2821,12 +2825,19 @@ describe("data-access facade", () => {
       replacementClaim,
       { publicationPending: true },
     );
+    expect(() =>
+      access.encodeJobs.beginPublicationMutation(
+        replacementClaim,
+        publication,
+      )
+    ).toThrow(
+      "Corrected publication mutation requires retained output authority",
+    );
     const fencedPublication = access.encodeJobs.beginPublicationMutation(
       replacementClaim,
       publication,
+      retainedOutputPath,
     );
-    const retainedOutputPath =
-      `${replacement.outputPath}.failed.${replacementClaim.claimToken}`;
     expect(() =>
       access.encodeJobs.completePublishedClaim(
         replacementClaim,
@@ -2839,6 +2850,17 @@ describe("data-access facade", () => {
       status: "completed",
       publicationCompletionPending: true,
     }));
+    expect(access.encodeJobs.listRetainedOutputs([replacement.id])).toEqual([]);
+    expect(() =>
+      access.encodeJobs.completePublishedPartial(
+        fencedPublication,
+        () => true,
+        {
+          retainedOutputPath: `${retainedOutputPath}.forged`,
+          retainedOutputIdentity: priorOutputIdentity,
+        },
+      )
+    ).toThrow("Retained Encode output path conflicts with publication authority");
     expect(access.encodeJobs.listRetainedOutputs([replacement.id])).toEqual([]);
     const finalizedReplacement = access.encodeJobs.completePublishedPartial(
       fencedPublication,
@@ -2854,10 +2876,21 @@ describe("data-access facade", () => {
       access.encodeJobs.completePublishedPartial(
         fencedPublication,
         () => true,
+      )
+    ).toThrow("Retained Encode output provenance is incomplete");
+    expect(() =>
+      access.encodeJobs.completePublishedPartial(
+        fencedPublication,
+        () => true,
         { retainedOutputPath, retainedOutputIdentity: priorOutputIdentity },
       )
     ).not.toThrow();
     access.encodeJobs.completePartialCleanup(fencedPublication);
+    const sqlite = new DatabaseSync(databasePath);
+    expect(sqlite.prepare(
+      "select count(*) as count from corrected_encode_publication_authorities",
+    ).get()).toEqual({ count: 0 });
+    sqlite.close();
     expect(access.encodeJobs.listRetainedOutputs([replacement.id])).toEqual([{
       id: expect.any(String),
       predecessorEncodeJobId: predecessor.id,
@@ -2913,7 +2946,11 @@ describe("data-access facade", () => {
       { publicationPending: true },
     );
     const fencedReencodePublication = access.encodeJobs
-      .beginPublicationMutation(reencodeClaim, reencodePublication);
+      .beginPublicationMutation(
+        reencodeClaim,
+        reencodePublication,
+        `${replacement.outputPath}.failed.${reencodeClaim.claimToken}`,
+      );
     const correctedOutputPath =
       `${replacement.outputPath}.failed.${reencodeClaim.claimToken}`;
     access.encodeJobs.completePublishedClaim(
@@ -6387,6 +6424,18 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     ]));
     expect(
       sqlite
+        .prepare(
+          "select name from pragma_table_info('corrected_encode_publication_authorities')",
+        )
+        .all(),
+    ).toEqual(expect.arrayContaining([
+      { name: "replacement_encode_job_id" },
+      { name: "claim_token" },
+      { name: "retained_output_path" },
+      { name: "filesystem_identity" },
+    ]));
+    expect(
+      sqlite
         .prepare("select name from pragma_table_info('archive_jobs')")
         .all(),
     ).toEqual(expect.arrayContaining([
@@ -6398,10 +6447,13 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(
       sqlite
         .prepare(
-          "select name from __drizzle_migrations order by id desc limit 9",
+          "select name from __drizzle_migrations order by id desc limit 10",
         )
         .all(),
     ).toEqual([
+      {
+        name: "20260813194303_corrected-publication-authority",
+      },
       {
         name: "20260813174634_retained-corrected-outputs",
       },
