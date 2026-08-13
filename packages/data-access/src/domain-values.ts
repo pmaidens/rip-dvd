@@ -104,6 +104,8 @@ export const ENCODE_PROGRESS_PHASES = [
   "encoding",
 ] as const;
 
+export const RETAINED_ENCODE_OUTPUT_STATES = ["retained"] as const;
+
 export const FILESYSTEM_VERIFICATION_STATUSES = [
   "accessible",
   "missing",

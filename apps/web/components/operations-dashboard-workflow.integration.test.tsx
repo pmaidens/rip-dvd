@@ -578,7 +578,7 @@ describe("end-to-end operations dashboard workflow", () => {
       const predecessor = encodeJobById(snapshot, job.id);
       const replacement = encodeJobById(snapshot, replacementJobId);
       return predecessor?.status === "cancelled" &&
-        replacement?.correctedReplacement?.predecessorReady === true;
+        replacement?.status === "completed";
     });
     expect(access.encodeJobs.list()).toEqual(expect.arrayContaining([
       expect.objectContaining({
@@ -589,14 +589,14 @@ describe("end-to-end operations dashboard workflow", () => {
       expect.objectContaining({
         id: replacementJobId,
         predecessorEncodeJobId: job.id,
-        status: "queued",
+        status: "completed",
       }),
     ]));
     const readyHtml = renderToStaticMarkup(
       <DashboardView state={readySnapshot} />,
     );
-    expect(readyHtml).toContain("Waiting for corrected publication support");
-    expect(readyHtml).not.toContain("Ready for encode");
+    expect(readyHtml).toContain(`Replaces Encode Job ${job.id}`);
+    expect(readyHtml).not.toContain("Waiting for corrected publication support");
     await events.close();
   });
 

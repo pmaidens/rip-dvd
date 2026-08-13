@@ -41,6 +41,7 @@ const CATALOG_REVIEW_MEDIA_ITEM_MAINTENANCE_BATCH_SIZE = 100;
 const CATALOG_REVIEW_CORRECTION_HISTORY_PAGE_SIZE = 100;
 const CATALOG_REVIEW_REPLACEMENT_PLAN_LIMIT = 100;
 const CATALOG_REVIEW_REPLACEMENT_PROFILE_LIMIT = 100;
+const RETAINED_OUTPUT_LOOKUP_BATCH_SIZE = 400;
 
 function response(body: unknown, status = 200): Response {
   return Response.json(body, {
@@ -196,10 +197,37 @@ function readCatalogReview(
         supersession.replacementDiscSelectionId,
       ],
     );
+    const replacementSelectionIds = correctionHistoryPage.map(
+      (supersession) => supersession.replacementDiscSelectionId,
+    );
     const correctionSelectionsById = new Map(
       snapshot.catalog.listDiscSelections({
         ids: correctionSelectionIds,
       }).map((selection) => [selection.id, selection]),
+    );
+    const correctionJobs = snapshot.encodeJobs
+      .listCorrectionLinksForDiscSelections(
+        replacementSelectionIds,
+      );
+    const replacementJobByPredecessorId = new Map(
+      correctionJobs.flatMap((job) =>
+        job.predecessorEncodeJobId
+          ? [[job.predecessorEncodeJobId, job] as const]
+          : []
+      ),
+    );
+    const retainedOutputs = correctionJobs.flatMap((_job, index) =>
+      index % RETAINED_OUTPUT_LOOKUP_BATCH_SIZE === 0
+        ? snapshot.encodeJobs.listRetainedOutputSummaries(
+            correctionJobs.slice(
+              index,
+              index + RETAINED_OUTPUT_LOOKUP_BATCH_SIZE,
+            ).map((job) => job.id),
+          )
+        : []
+    );
+    const retainedOutputByReplacementId = new Map(
+      retainedOutputs.map((output) => [output.replacementEncodeJobId, output]),
     );
     const selectionsWithHistory = new Map(
       discSelectionsPage.map((selection) => [selection.id, selection]),
@@ -219,6 +247,16 @@ function readCatalogReview(
           `Disc Selection supersession for ${supersession.replacementDiscSelectionId} is missing historical provenance`,
         );
       }
+      const correctionEncodeJobs = correctionJobs.filter((job) => {
+        const replacement = replacementJobByPredecessorId.get(job.id);
+        return (
+          (
+            job.predecessorEncodeJobId !== null &&
+            job.discSelectionId === replacementDiscSelection.id
+          ) ||
+          replacement?.discSelectionId === replacementDiscSelection.id
+        );
+      });
       return {
         supersededDiscSelection:
           serializeDiscSelection(supersededDiscSelection),
@@ -226,6 +264,22 @@ function readCatalogReview(
           serializeDiscSelection(replacementDiscSelection),
         reason: supersession.reason,
         correctedAt: supersession.createdAt.toISOString(),
+        encodeHistory: correctionEncodeJobs.map((job) => {
+          const retainedOutput = retainedOutputByReplacementId.get(job.id);
+          return {
+            id: job.id,
+            status: job.status,
+            predecessorEncodeJobId: job.predecessorEncodeJobId,
+            replacementEncodeJobId:
+              replacementJobByPredecessorId.get(job.id)?.id ?? null,
+            retainedOutput: retainedOutput
+              ? {
+                state: retainedOutput.state,
+                cleanupEligible: retainedOutput.cleanupEligible,
+              }
+              : null,
+          };
+        }),
       };
     });
     const actionAvailability = snapshot.catalog

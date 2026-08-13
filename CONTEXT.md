@@ -23,3 +23,7 @@ _Avoid_: Queued Archive Job, approval
 **Disc Inspection**:
 An insertion-scoped examination that establishes a disc's identity and describes its contents before preservation begins.
 _Avoid_: Hash Job, rip, metadata scan, drive inspection
+
+**Retained Encode Output**:
+A prior final preserved when a corrected Encode Job publishes a replacement. Its durable provenance links the predecessor and replacement Encode Jobs and marks it eligible for future operator-directed cleanup.
+_Avoid_: Backup, failed output
