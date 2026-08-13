@@ -7823,7 +7823,14 @@ export function createDataAccessInternal(
           },
         );
       },
-      complete: (claim) => encodeJobQueue.complete(claim, undefined),
+      complete(claim) {
+        if (claim.predecessorEncodeJobId !== null) {
+          throw new DomainInvariantError(
+            "Corrected replacement Encode Job completion requires publication provenance",
+          );
+        }
+        return encodeJobQueue.complete(claim, undefined);
+      },
       fail: encodeJobQueue.fail,
       requeue(id, options) {
         const outputPath = options?.outputPath === undefined
