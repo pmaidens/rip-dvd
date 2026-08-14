@@ -259,6 +259,9 @@ function parseJob(
   if (!output) {
     return invalid("Encode job output must be a non-empty path");
   }
+  if (output.includes("\0")) {
+    return invalid("Encode job output path contains a NUL byte");
+  }
   const outputResolution = resolveRecordedPath(output, sidecarPath, pathBase);
   if (outputResolution.outcome === "ambiguous") {
     return invalid(outputResolution.message);

@@ -1894,6 +1894,44 @@ describe("legacy sidecar import", () => {
     fixture.access.close();
   });
 
+  it("reports a NUL output path without aborting valid legacy jobs", () => {
+    const fixture = createFixture();
+    const sidecar = JSON.parse(readFileSync(fixture.sidecarPath, "utf8")) as {
+      jobs: Array<Record<string, unknown>>;
+    };
+    sidecar.jobs.push({
+      label: "Extra 2: Invalid output",
+      source: fixture.archivePath,
+      output: `${fixture.originalsLibraryPath}/invalid\0output.mkv`,
+      preset: "Fast 480p30",
+      selection: "title",
+      title_number: 1,
+    });
+    writeFileSync(fixture.sidecarPath, JSON.stringify(sidecar));
+
+    const report = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+
+    expect(report).toMatchObject({
+      sidecarsImported: 1,
+      sidecarsSkipped: 0,
+      issues: [expect.objectContaining({
+        code: "invalid_job",
+        jobIndex: 2,
+        message: expect.stringMatching(/output.*NUL/i),
+      })],
+    });
+    expect(fixture.access.encodeJobs.list()).toHaveLength(2);
+    expect(fixture.access.encodeJobs.list().map((job) => job.outputPath))
+      .toEqual(expect.arrayContaining([
+        fixture.movieOutputPath,
+        fixture.trailerOutputPath,
+      ]));
+
+    fixture.access.close();
+  });
+
   it("does not retire a valid sidecar while a rejected sidecar still needs repair", () => {
     const root = temporaryDirectories.create("rip-dvd-rejected-recovery-");
     const originalsLibraryPath = join(root, "originals");
