@@ -607,9 +607,10 @@ source edits, and correction may intentionally create overlapping source
 slices, including the same whole title
 or exact chapter range for different Media Items. Catalog Review warns about
 those overlaps and computes coverage from the source union, so repeated slices
-are counted once. Assisted Mapping keeps covered-title proposals unavailable
-and rejects whole-title reuse or intersecting chapter coordinates
-transactionally. Migration replaces the
+are counted once. Assisted Mapping keeps covered-title proposals unavailable,
+keeps the archive-level main-feature action unavailable while an active
+main-feature selection exists, and rejects whole-title reuse or intersecting
+chapter coordinates transactionally. Migration replaces the
 active-source unique index with a non-unique lookup index without rewriting
 existing Disc Selections, correction lineage, or Encode Job provenance. Supported upgrades reopen
 caller-era scan-dependent or noncanonical

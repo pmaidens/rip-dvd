@@ -252,6 +252,59 @@ describe("CatalogReviewEvidence", () => {
     expect(html).toContain("Create Media Item and Disc Selection");
   });
 
+  it("makes main-feature Assisted Mapping unavailable after a main-feature selection exists", async () => {
+    (globalThis as typeof globalThis & {
+      IS_REACT_ACT_ENVIRONMENT: boolean;
+    }).IS_REACT_ACT_ENVIRONMENT = true;
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const onStartMappingProposal = vi.fn();
+
+    await act(async () => {
+      root.render(
+        <CatalogReviewEvidence
+          volumeLabel="MAIN_FEATURE_DISC"
+          coverage={evidenceCoverage}
+          titles={[]}
+          onStartMappingProposal={onStartMappingProposal}
+        />,
+      );
+    });
+    const availableAction = container.querySelector<HTMLButtonElement>(
+      ".catalog-archive-mapping-action button",
+    );
+    expect(availableAction?.disabled).toBe(false);
+    await act(async () => availableAction?.click());
+    expect(onStartMappingProposal).toHaveBeenCalledWith({
+      action: "main_feature",
+      sourceIdentity: { kind: "main_feature" },
+    });
+
+    await act(async () => {
+      root.render(
+        <CatalogReviewEvidence
+          volumeLabel="MAIN_FEATURE_DISC"
+          coverage={{ ...evidenceCoverage, mainFeatureSelections: 1 }}
+          titles={[]}
+          onStartMappingProposal={onStartMappingProposal}
+        />,
+      );
+    });
+    const unavailableAction = container.querySelector<HTMLButtonElement>(
+      ".catalog-archive-mapping-action button",
+    );
+    expect(unavailableAction?.disabled).toBe(true);
+    expect(container.textContent).toContain(
+      "Assisted Mapping is unavailable because this archive already has an active main-feature Disc Selection",
+    );
+    await act(async () => unavailableAction?.click());
+    expect(onStartMappingProposal).toHaveBeenCalledTimes(1);
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
   it("groups an episodic proposal after its selected title evidence", () => {
     const titles = [8, 3, 5].map((number) => ({
       number,

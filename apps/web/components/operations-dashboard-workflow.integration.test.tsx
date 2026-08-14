@@ -1058,6 +1058,12 @@ describe("end-to-end operations dashboard workflow", () => {
     expect(catalogReviewHtml).toContain("Audio stream 0x80");
     expect(catalogReviewHtml).toContain("Subtitle stream 0x20");
     expect(catalogReviewHtml).toContain("Map DVD main feature");
+    expect(catalogReviewHtml).toContain(
+      '<button type="button">Map DVD main feature</button>',
+    );
+    expect(catalogReviewHtml).toContain(
+      "HandBrake resolves the source during encode",
+    );
     expect(catalogReviewHtml).toContain("Map as movie");
     expect(catalogReviewHtml).toContain("Map as bonus feature");
     expect(catalogReviewHtml).toContain("Map as trailer");
@@ -1351,6 +1357,12 @@ describe("end-to-end operations dashboard workflow", () => {
     expect(coveredReviewHtml).toContain("1 partially mapped title");
     expect(coveredReviewHtml).toContain("2 unmapped titles");
     expect(coveredReviewHtml).toContain("1 main-feature selection");
+    expect(coveredReviewHtml).toContain(
+      '<button type="button" disabled="">Map DVD main feature</button>',
+    );
+    expect(coveredReviewHtml).toContain(
+      "already has an active main-feature Disc Selection",
+    );
     expect(coveredReviewHtml).toContain("Overlapping Disc Selections");
     expect(coveredReviewHtml).toContain("counted once and remain valid");
     expect(coveredReviewHtml).toContain("1 very-short unmapped title");
