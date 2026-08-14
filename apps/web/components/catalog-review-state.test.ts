@@ -13,7 +13,11 @@ describe("catalog review request state", () => {
       return Response.json({});
     };
 
-    await requestCatalogReview("archive-1", 200, fetcher);
+    await requestCatalogReview(
+      "archive-1",
+      { discSelectionOffset: 200 },
+      fetcher,
+    );
 
     expect(requestedUrl).toBe(
       "/api/catalog-reviews/archive-1?selectionOffset=200&correctionOffset=0",
@@ -27,7 +31,11 @@ describe("catalog review request state", () => {
       return Response.json({});
     };
 
-    await requestCatalogReview("archive-1", 100, fetcher, 300);
+    await requestCatalogReview(
+      "archive-1",
+      { discSelectionOffset: 100, correctionHistoryOffset: 300 },
+      fetcher,
+    );
 
     expect(requestedUrl).toBe(
       "/api/catalog-reviews/archive-1?selectionOffset=100&correctionOffset=300",
@@ -41,7 +49,15 @@ describe("catalog review request state", () => {
       return Response.json({});
     };
 
-    await requestCatalogReview("archive-1", 100, fetcher, 200, 300);
+    await requestCatalogReview(
+      "archive-1",
+      {
+        discSelectionOffset: 100,
+        correctionHistoryOffset: 200,
+        correctionEncodeHistoryOffset: 300,
+      },
+      fetcher,
+    );
 
     expect(requestedUrl).toBe(
       "/api/catalog-reviews/archive-1?selectionOffset=100&correctionOffset=200&correctionJobOffset=300",
@@ -55,7 +71,16 @@ describe("catalog review request state", () => {
       return Response.json({});
     };
 
-    await requestCatalogReview("archive-1", 100, fetcher, 200, 300, 400);
+    await requestCatalogReview(
+      "archive-1",
+      {
+        discSelectionOffset: 100,
+        correctionHistoryOffset: 200,
+        correctionEncodeHistoryOffset: 300,
+        correctionRetainedOutputHistoryOffset: 400,
+      },
+      fetcher,
+    );
 
     expect(requestedUrl).toBe(
       "/api/catalog-reviews/archive-1?selectionOffset=100&correctionOffset=200&correctionJobOffset=300&correctionOutputOffset=400",

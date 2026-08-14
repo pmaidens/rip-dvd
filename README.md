@@ -672,10 +672,12 @@ replacement-job creation time and identity, and `correctionOutputOffset`
 traverses up to 100 path-free Retained Encode output summaries ordered by
 retention time and identity. Each correction-job entry contains exactly one
 predecessor/replacement pair, so that nested response is capped at 200 job
-summaries and no link is split across pages. Retained-output retries remain
-individually reachable on their own page. Each page uses a one-row lookahead
-internally; selection and ancestor ID lookups run in batches of 100. Missing
-offsets mean zero, while duplicate, negative, fractional, unsafe, oversized, or
+summaries and no link is split across pages. The consistent web facade projects
+only job identities and statuses for those summaries, so private output paths
+and worker claim details never cross that boundary. Retained-output retries
+remain individually reachable on their own page. Each page uses a one-row
+lookahead internally; selection and ancestor ID lookups run in batches of 100.
+Missing offsets mean zero, while duplicate, negative, fractional, unsafe, oversized, or
 unknown query parameters fail with `400`. Responses always use
 `Cache-Control: no-store`.
 

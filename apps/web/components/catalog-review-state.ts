@@ -23,6 +23,15 @@ type CatalogReviewFetch = (
   init?: RequestInit,
 ) => Promise<Response>;
 
+interface CatalogReviewPageCoordinates {
+  discSelectionOffset: number;
+  correctionHistoryOffset?: number;
+  correctionEncodeHistoryOffset?: number;
+  correctionRetainedOutputHistoryOffset?: number;
+  replacementOffset?: number;
+  replacementProfileOffset?: number;
+}
+
 function createCatalogReviewRequestScope(initialArchiveId: string) {
   let activeArchiveId: string | null = initialArchiveId;
   let currentRequest = Symbol("catalog-review-request");
@@ -59,14 +68,17 @@ function createCatalogReviewRequestScope(initialArchiveId: string) {
 
 export async function requestCatalogReview(
   archiveId: string,
-  discSelectionOffset: number,
+  coordinates: CatalogReviewPageCoordinates,
   fetcher: CatalogReviewFetch = fetch,
-  correctionHistoryOffset = 0,
-  correctionEncodeHistoryOffset = 0,
-  correctionRetainedOutputHistoryOffset = 0,
-  replacementOffset = 0,
-  replacementProfileOffset = 0,
 ): Promise<CatalogReviewDto> {
+  const {
+    discSelectionOffset,
+    correctionHistoryOffset = 0,
+    correctionEncodeHistoryOffset = 0,
+    correctionRetainedOutputHistoryOffset = 0,
+    replacementOffset = 0,
+    replacementProfileOffset = 0,
+  } = coordinates;
   const query = new URLSearchParams({
     selectionOffset: String(discSelectionOffset),
     correctionOffset: String(correctionHistoryOffset),
@@ -199,13 +211,15 @@ export function useCatalogReviewState({
     try {
       const review = await requestCatalogReview(
         archiveId,
-        discSelectionOffset,
+        {
+          discSelectionOffset,
+          correctionHistoryOffset,
+          correctionEncodeHistoryOffset,
+          correctionRetainedOutputHistoryOffset,
+          replacementOffset,
+          replacementProfileOffset,
+        },
         fetch,
-        correctionHistoryOffset,
-        correctionEncodeHistoryOffset,
-        correctionRetainedOutputHistoryOffset,
-        replacementOffset,
-        replacementProfileOffset,
       );
       if (!requestScope.current?.isCurrent(archiveId, request)) {
         return;
