@@ -144,6 +144,22 @@ class RuntimeScaffoldTests(unittest.TestCase):
         self.assertIn("CFLAGS=\"-include /tmp/libdvdcss-sg-io.h\"", dockerfile)
         self.assertIn("#define READ_BLOCKS 31", reader)
 
+    def test_archive_worker_packages_a_css_enabled_lsdvd_command(self) -> None:
+        dockerfile = (ROOT / "docker" / "runtime.Dockerfile").read_text()
+        command = (ROOT / "docker" / "lsdvd-with-css.sh").read_text()
+
+        self.assertIn("--default-library=shared", dockerfile)
+        self.assertIn("' dvdcss_open$'", dockerfile)
+        self.assertIn("/usr/local/lib/libdvdcss.so.2", dockerfile)
+        self.assertIn("/usr/local/lib/libdvdcss-sg-io.so.0", dockerfile)
+        self.assertIn(
+            "COPY docker/lsdvd-with-css.sh /usr/local/bin/rip-dvd-lsdvd",
+            dockerfile,
+        )
+        self.assertIn("chmod 0555 /usr/local/bin/rip-dvd-lsdvd", dockerfile)
+        self.assertIn("LD_LIBRARY_PATH=/usr/local/lib", command)
+        self.assertIn("exec /usr/bin/lsdvd", command)
+
     def test_worker_smoke_uses_configured_command_and_bounded_shutdown(self) -> None:
         smoke = (ROOT / "scripts" / "smoke-compose-workers.sh").read_text()
 
