@@ -253,8 +253,8 @@ export interface DiscSelectionCorrection {
 }
 
 export type DiscSelectionAction =
+  | "update"
   | "correct"
-  | "edit_label"
   | "remove"
   | "repair";
 
@@ -262,7 +262,7 @@ export type DiscSelectionActionAvailability =
   | {
     discSelectionId: DiscSelectionId;
     state: "editable";
-    availableActions: readonly ["correct", "edit_label", "remove"];
+    availableActions: readonly ["update", "remove"];
     reason: null;
     relatedEncodeJob: null;
   }
@@ -312,6 +312,20 @@ export type CreateDiscSelectionInput = {
   sourceIdentity: DiscSelectionSourceIdentityInput;
   label?: string;
 };
+
+type UpdateDiscSelectionChanges = {
+  mediaItemId?: MediaItemId;
+  sourceIdentity?: DiscSelectionSourceIdentityInput;
+  label?: string | null;
+};
+
+export type UpdateDiscSelectionInput = {
+  originalDiscArchiveId: OriginalDiscArchiveId;
+} & UpdateDiscSelectionChanges & (
+  | { mediaItemId: MediaItemId }
+  | { sourceIdentity: DiscSelectionSourceIdentityInput }
+  | { label: string | null }
+);
 
 export interface CreateMediaItemInput {
   parentId?: MediaItemId;
@@ -730,6 +744,10 @@ export interface CatalogAccess {
     offset?: number;
   }): MediaItem[];
   createDiscSelection(input: CreateDiscSelectionInput): DiscSelection;
+  updateDiscSelection(
+    id: DiscSelectionId,
+    input: UpdateDiscSelectionInput,
+  ): DiscSelection;
   correctDiscSelection(
     id: DiscSelectionId,
     input: CorrectDiscSelectionInput,

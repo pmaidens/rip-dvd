@@ -15,6 +15,7 @@ import type {
   EpisodicMappingProposal,
   MappingProposal,
   SaveMediaItemInput,
+  UpdateDiscSelectionInput,
 } from "./catalog-review-model";
 
 type CatalogReviewFetch = (
@@ -333,31 +334,46 @@ export function useCatalogReviewState({
 
   function createDiscSelection(selection: CreateDiscSelectionInput) {
     const { replacesDiscSelectionId, correctionReason, ...values } = selection;
-    const target = state.status === "loaded" && replacesDiscSelectionId
-      ? state.review.discSelections.find(
-          (candidate) => candidate.id === replacesDiscSelectionId,
-        )
-      : undefined;
-    void mutate(
-      replacesDiscSelectionId
-        ? target &&
-            (target.actionAvailability.state === "locked_provenance" ||
-              target.actionAvailability.state === "correction_lineage") &&
-            state.status === "loaded"
-          ? {
-              action: "correct_disc_selection",
-              discSelectionId: replacesDiscSelectionId,
-              catalogRevision: state.review.catalogRevision,
-              ...(correctionReason ? { correctionReason } : {}),
-              selection: values,
-            }
-          : {
-              action: "repair_disc_selection",
-              discSelectionId: replacesDiscSelectionId,
-              selection: values,
-            }
-        : { action: "create_disc_selection", selection: values },
+    if (!replacesDiscSelectionId) {
+      void mutate({ action: "create_disc_selection", selection: values });
+      return;
+    }
+    if (state.status !== "loaded") return;
+    const target = state.review.discSelections.find(
+      (candidate) => candidate.id === replacesDiscSelectionId,
     );
+    if (!target) return;
+    if (
+      target.actionAvailability.state === "locked_provenance" ||
+      target.actionAvailability.state === "correction_lineage"
+    ) {
+      void mutate({
+        action: "correct_disc_selection",
+        discSelectionId: replacesDiscSelectionId,
+        catalogRevision: state.review.catalogRevision,
+        ...(correctionReason ? { correctionReason } : {}),
+        selection: values,
+      });
+      return;
+    }
+    if (target.actionAvailability.state === "needs_repair") {
+      void mutate({
+        action: "repair_disc_selection",
+        discSelectionId: replacesDiscSelectionId,
+        selection: values,
+      });
+    }
+  }
+
+  function updateDiscSelection(
+    discSelectionId: string,
+    changes: UpdateDiscSelectionInput,
+  ) {
+    void mutate({
+      action: "update_disc_selection",
+      discSelectionId,
+      changes,
+    });
   }
 
   function createMappingProposal(input: CreateMappingProposalInput) {
@@ -438,6 +454,7 @@ export function useCatalogReviewState({
     deleteMediaItem: (mediaItemId: string) =>
       void mutate({ action: "delete_media_item", mediaItemId }),
     createDiscSelection,
+    updateDiscSelection,
     deleteDiscSelection: (discSelectionId: string) =>
       void mutate({ action: "delete_disc_selection", discSelectionId }),
     completeReview: (

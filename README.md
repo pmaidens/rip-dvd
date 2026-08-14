@@ -606,6 +606,11 @@ SQLite writer lock completes again; unsafe jobs cannot be enqueued, requeued,
 or claimed. The review editor
 keeps ordinary retry history separate from unsafe legacy recovery:
 
+- **Ordinary job-free update.** A Disc Selection without Encode Job history or
+  correction lineage is edited in place. Unchanged Media Item, source, and
+  label fields are omitted and preserved; explicitly clearing a label sends
+  `label: null`. The edit reopens only the affected Original Disc Archive and
+  advances its catalog revision.
 - **Ordinary retry identity.** A current-valid Disc Selection with any dependent
   Encode Job history, including completed or imported history, cannot be
   repaired or removed. Every job stays attached to that selection; retry or

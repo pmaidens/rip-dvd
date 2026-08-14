@@ -1,7 +1,102 @@
+// @vitest-environment happy-dom
+
+import { act, useState } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { CatalogReviewDiscSelections } from "./catalog-review-disc-selections";
+import type {
+  CatalogReviewDiscSelection,
+  DiscSelectionKind,
+  UpdateDiscSelectionInput,
+} from "./catalog-review-model";
+
+(globalThis as typeof globalThis & {
+  IS_REACT_ACT_ENVIRONMENT: boolean;
+}).IS_REACT_ACT_ENVIRONMENT = true;
+
+const editableSelection: CatalogReviewDiscSelection = {
+  id: "selection-1",
+  mediaItemId: "episode-1",
+  sourceIdentity: {
+    kind: "dvd_chapters",
+    titleNumber: 1,
+    chapterStart: 2,
+    chapterEnd: 5,
+  },
+  label: "Director's cut",
+  actionAvailability: {
+    state: "editable",
+    availableActions: ["update", "remove"],
+    reason: null,
+    relatedEncodeJob: null,
+  },
+};
+
+function InteractiveDiscSelections({
+  onUpdate,
+  selection = editableSelection,
+}: {
+  onUpdate(id: string, changes: UpdateDiscSelectionInput): void;
+  selection?: CatalogReviewDiscSelection;
+}) {
+  const [selectionKind, setSelectionKind] =
+    useState<DiscSelectionKind>("main_feature");
+  return (
+    <CatalogReviewDiscSelections
+      discSelections={[selection]}
+      page={{
+        offset: 0,
+        limit: 100,
+        hasPrevious: false,
+        hasNext: false,
+      }}
+      correctionHistory={[]}
+      correctionHistoryPage={{
+        offset: 0,
+        limit: 100,
+        hasPrevious: false,
+        hasNext: false,
+      }}
+      mediaItems={[
+        {
+          id: "episode-1",
+          parentId: null,
+          kind: "episode",
+          title: "Episode One",
+          year: null,
+          seasonNumber: null,
+          episodeNumber: 1,
+        },
+        {
+          id: "episode-2",
+          parentId: null,
+          kind: "episode",
+          title: "Episode Two",
+          year: null,
+          seasonNumber: null,
+          episodeNumber: 2,
+        },
+      ]}
+      rawTitles={[{
+        number: 1,
+        durationSeconds: 2_400,
+        chapters: 8,
+        audioStreams: [],
+        subtitles: [],
+      }]}
+      selectionKind={selectionKind}
+      isSaving={false}
+      onPage={() => undefined}
+      onCorrectionHistoryPage={() => undefined}
+      onSelectionKindChange={setSelectionKind}
+      onCreate={() => undefined}
+      onUpdate={onUpdate}
+      onDelete={() => undefined}
+    />
+  );
+}
 
 describe("CatalogReviewDiscSelections", () => {
   it("renders reviewed mappings, repair choices, and pagination", () => {
@@ -19,7 +114,7 @@ describe("CatalogReviewDiscSelections", () => {
           label: null,
           actionAvailability: {
             state: "editable",
-            availableActions: ["correct", "edit_label", "remove"],
+            availableActions: ["update", "remove"],
             reason: null,
             relatedEncodeJob: null,
           },
@@ -59,14 +154,16 @@ describe("CatalogReviewDiscSelections", () => {
         onCorrectionHistoryPage={() => undefined}
         onSelectionKindChange={() => undefined}
         onCreate={() => undefined}
+        onUpdate={() => undefined}
         onDelete={() => undefined}
       />,
     );
 
     expect(html).toContain("Episode One");
     expect(html).toContain("Title 1, chapters 1–4");
+    expect(html).toContain("Label: None");
     expect(html).toContain("Editable");
-    expect(html).toContain("Correct or edit label");
+    expect(html).toContain("Edit Disc Selection");
     expect(html).toContain("Remove Disc Selection");
     expect(html).toContain("Next Disc Selections");
   });
@@ -116,6 +213,7 @@ describe("CatalogReviewDiscSelections", () => {
         onCorrectionHistoryPage={() => undefined}
         onSelectionKindChange={() => undefined}
         onCreate={() => undefined}
+        onUpdate={() => undefined}
         onDelete={() => undefined}
       />,
     );
@@ -139,7 +237,7 @@ describe("CatalogReviewDiscSelections", () => {
           label: null,
           actionAvailability: {
             state: "editable",
-            availableActions: ["correct", "edit_label", "remove"],
+            availableActions: ["update", "remove"],
             reason: null,
             relatedEncodeJob: null,
           },
@@ -246,6 +344,7 @@ describe("CatalogReviewDiscSelections", () => {
         onCorrectionHistoryPage={() => undefined}
         onSelectionKindChange={() => undefined}
         onCreate={() => undefined}
+        onUpdate={() => undefined}
         onDelete={() => undefined}
       />,
     );
@@ -344,6 +443,7 @@ describe("CatalogReviewDiscSelections", () => {
         onCorrectionHistoryPage={() => undefined}
         onSelectionKindChange={() => undefined}
         onCreate={() => undefined}
+        onUpdate={() => undefined}
         onDelete={() => undefined}
       />,
     );
@@ -353,7 +453,7 @@ describe("CatalogReviewDiscSelections", () => {
     expect(html).toContain("Encode Job job-2 is queued");
     expect(html).toContain("Repair unsafe legacy Disc Selection");
     expect(html).toContain("Remove Disc Selection");
-    expect(html).not.toContain("Correct or edit label");
+    expect(html).not.toContain("Edit Disc Selection");
     expect(html.match(/Repair unsafe legacy Disc Selection/g)).toHaveLength(1);
     expect(html.match(/Remove Disc Selection/g)).toHaveLength(1);
   });
@@ -403,14 +503,138 @@ describe("CatalogReviewDiscSelections", () => {
         onCorrectionHistoryPage={() => undefined}
         onSelectionKindChange={() => undefined}
         onCreate={() => undefined}
+        onUpdate={() => undefined}
         onDelete={() => undefined}
       />,
     );
 
     expect(html).toContain("Changes unavailable");
     expect(html).toContain("legacy cutover repair is pending");
-    expect(html).not.toContain("Correct or edit label");
+    expect(html).not.toContain("Edit Disc Selection");
     expect(html).not.toContain("Repair unsafe legacy Disc Selection");
     expect(html).not.toContain("Remove Disc Selection");
+  });
+
+  it("prefills an editable mapping and preserves every unchanged field", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const onUpdate = vi.fn();
+    await act(async () => {
+      root.render(<InteractiveDiscSelections onUpdate={onUpdate} />);
+    });
+
+    expect(container.textContent).toContain("Label: Director's cut");
+    const action = container.querySelector<HTMLSelectElement>(
+      'select[name="replacesDiscSelectionId"]',
+    );
+    if (!action) throw new Error("Expected the Catalog action control");
+    await act(async () => {
+      action.value = editableSelection.id;
+      action.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    expect(container.querySelector<HTMLSelectElement>(
+      'select[name="mediaItemId"]',
+    )?.value).toBe("episode-1");
+    expect(container.querySelector<HTMLSelectElement>(
+      'select[name="selectionKind"]',
+    )?.value).toBe("dvd_chapters");
+    expect(container.querySelector<HTMLSelectElement>(
+      'select[name="titleNumber"]',
+    )?.value).toBe("1");
+    expect(container.querySelector<HTMLInputElement>(
+      'input[name="chapterStart"]',
+    )?.value).toBe("2");
+    expect(container.querySelector<HTMLInputElement>(
+      'input[name="chapterEnd"]',
+    )?.value).toBe("5");
+    expect(container.querySelector<HTMLInputElement>(
+      'input[name="label"]',
+    )?.value).toBe("Director's cut");
+
+    const mediaItem = container.querySelector<HTMLSelectElement>(
+      'select[name="mediaItemId"]',
+    );
+    const submit = container.querySelector<HTMLButtonElement>(
+      'button[type="submit"]',
+    );
+    if (!mediaItem || !submit) {
+      throw new Error("Expected editable Disc Selection controls");
+    }
+    await act(async () => {
+      mediaItem.value = "episode-2";
+      mediaItem.dispatchEvent(new Event("change", { bubbles: true }));
+      submit.click();
+    });
+
+    expect(onUpdate).toHaveBeenCalledWith(editableSelection.id, {
+      mediaItemId: "episode-2",
+    });
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("requires the explicit clear control before removing an existing label", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const onUpdate = vi.fn();
+    await act(async () => {
+      root.render(<InteractiveDiscSelections onUpdate={onUpdate} />);
+    });
+    const action = container.querySelector<HTMLSelectElement>(
+      'select[name="replacesDiscSelectionId"]',
+    );
+    if (!action) throw new Error("Expected the Catalog action control");
+    await act(async () => {
+      action.value = editableSelection.id;
+      action.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    const label = container.querySelector<HTMLInputElement>(
+      'input[name="label"]',
+    );
+    const clear = container.querySelector<HTMLInputElement>(
+      'input[name="clearLabel"]',
+    );
+    const form = container.querySelector<HTMLFormElement>("form.catalog-form");
+    const submit = container.querySelector<HTMLButtonElement>(
+      'button[type="submit"]',
+    );
+    if (!label || !clear || !form || !submit) {
+      throw new Error("Expected explicit label-clearing controls");
+    }
+    await act(async () => {
+      label.value = "";
+      label.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(label.required).toBe(true);
+    expect(form.checkValidity()).toBe(false);
+    await act(async () => submit.click());
+    expect(onUpdate).not.toHaveBeenCalled();
+
+    await act(async () => clear.click());
+    expect(label.disabled).toBe(true);
+    await act(async () => submit.click());
+    expect(onUpdate).toHaveBeenCalledWith(editableSelection.id, {
+      label: null,
+    });
+
+    await act(async () => {
+      root.render(
+        <InteractiveDiscSelections
+          selection={{ ...editableSelection, label: null }}
+          onUpdate={onUpdate}
+        />,
+      );
+    });
+    expect(container.querySelector('input[name="clearLabel"]')).toBeNull();
+    const refreshedLabel = container.querySelector<HTMLInputElement>(
+      'input[name="label"]',
+    );
+    expect(refreshedLabel?.disabled).toBe(false);
+    expect(refreshedLabel?.value).toBe("");
+    await act(async () => root.unmount());
+    container.remove();
   });
 });

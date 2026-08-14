@@ -13,6 +13,7 @@ import type {
   CatalogReviewEpisodicSeasonTarget,
   CatalogReviewEpisodicTvShowTarget,
   CatalogReviewDiscSelectionInput,
+  CatalogReviewDiscSelectionChanges,
   CatalogReviewMappingTarget,
   CatalogReviewMediaItemInput,
   CatalogReviewProposedDiscSelectionInput,
@@ -104,7 +105,7 @@ export interface CatalogReviewDiscSelection
 export type CatalogReviewDiscSelectionActionAvailability =
   | {
     state: "editable";
-    availableActions: readonly ["correct", "edit_label", "remove"];
+    availableActions: readonly ["update", "remove"];
     reason: null;
     relatedEncodeJob: null;
   }
@@ -184,6 +185,8 @@ export type CreateDiscSelectionInput = CatalogReviewDiscSelectionInput & {
   replacesDiscSelectionId?: string;
   correctionReason?: string;
 };
+
+export type UpdateDiscSelectionInput = CatalogReviewDiscSelectionChanges;
 
 export type MappingProposalAction =
   | "movie"
