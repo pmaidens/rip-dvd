@@ -13,7 +13,11 @@ describe("catalog review request state", () => {
       return Response.json({});
     };
 
-    await requestCatalogReview("archive-1", 200, fetcher);
+    await requestCatalogReview(
+      "archive-1",
+      { discSelectionOffset: 200 },
+      fetcher,
+    );
 
     expect(requestedUrl).toBe(
       "/api/catalog-reviews/archive-1?selectionOffset=200&correctionOffset=0",
@@ -27,10 +31,59 @@ describe("catalog review request state", () => {
       return Response.json({});
     };
 
-    await requestCatalogReview("archive-1", 100, fetcher, 300);
+    await requestCatalogReview(
+      "archive-1",
+      { discSelectionOffset: 100, correctionHistoryOffset: 300 },
+      fetcher,
+    );
 
     expect(requestedUrl).toBe(
       "/api/catalog-reviews/archive-1?selectionOffset=100&correctionOffset=300",
+    );
+  });
+
+  it("requests a bounded correction Encode Job page independently", async () => {
+    let requestedUrl = "";
+    const fetcher = async (input: RequestInfo | URL) => {
+      requestedUrl = String(input);
+      return Response.json({});
+    };
+
+    await requestCatalogReview(
+      "archive-1",
+      {
+        discSelectionOffset: 100,
+        correctionHistoryOffset: 200,
+        correctionEncodeHistoryOffset: 300,
+      },
+      fetcher,
+    );
+
+    expect(requestedUrl).toBe(
+      "/api/catalog-reviews/archive-1?selectionOffset=100&correctionOffset=200&correctionJobOffset=300",
+    );
+  });
+
+  it("requests a bounded correction Retained Output page independently", async () => {
+    let requestedUrl = "";
+    const fetcher = async (input: RequestInfo | URL) => {
+      requestedUrl = String(input);
+      return Response.json({});
+    };
+
+    await requestCatalogReview(
+      "archive-1",
+      {
+        discSelectionOffset: 100,
+        correctionHistoryOffset: 200,
+        correctionEncodeHistoryOffset: 300,
+        correctionRetainedOutputHistoryOffset: 400,
+      },
+      fetcher,
+    );
+
+    expect(requestedUrl).toBe(
+      "/api/catalog-reviews/archive-1?selectionOffset=100&correctionOffset=200&correctionJobOffset=300&correctionOutputOffset=400",
     );
   });
 

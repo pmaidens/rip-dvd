@@ -22,12 +22,21 @@ interface CatalogReviewDiscSelectionsProps {
   page: CatalogReviewDto["discSelectionsPage"];
   correctionHistory: CatalogReviewDto["correctionHistory"];
   correctionHistoryPage: CatalogReviewDto["correctionHistoryPage"];
+  correctionEncodeHistory: CatalogReviewDto["correctionEncodeHistory"];
+  correctionEncodeHistoryPage:
+    CatalogReviewDto["correctionEncodeHistoryPage"];
+  correctionRetainedOutputHistory:
+    CatalogReviewDto["correctionRetainedOutputHistory"];
+  correctionRetainedOutputHistoryPage:
+    CatalogReviewDto["correctionRetainedOutputHistoryPage"];
   mediaItems: CatalogReviewMediaItem[];
   rawTitles: DvdTitle[];
   selectionKind: DiscSelectionKind;
   isSaving: boolean;
   onPage(offset: number): void;
   onCorrectionHistoryPage(offset: number): void;
+  onCorrectionEncodeHistoryPage(offset: number): void;
+  onCorrectionRetainedOutputHistoryPage(offset: number): void;
   onSelectionKindChange(kind: DiscSelectionKind): void;
   onCreate(input: CreateDiscSelectionInput): void;
   onUpdate(id: string, changes: UpdateDiscSelectionInput): void;
@@ -92,12 +101,18 @@ export function CatalogReviewDiscSelections({
   page,
   correctionHistory,
   correctionHistoryPage,
+  correctionEncodeHistory,
+  correctionEncodeHistoryPage,
+  correctionRetainedOutputHistory,
+  correctionRetainedOutputHistoryPage,
   mediaItems,
   rawTitles,
   selectionKind,
   isSaving,
   onPage,
   onCorrectionHistoryPage,
+  onCorrectionEncodeHistoryPage,
+  onCorrectionRetainedOutputHistoryPage,
   onSelectionKindChange,
   onCreate,
   onUpdate,
@@ -304,30 +319,6 @@ export function CatalogReviewDiscSelections({
                   )}
                 </p>
                 {correction.reason ? <p>{correction.reason}</p> : null}
-                {correction.encodeHistory.length > 0 ? (
-                  <ol className="selection-encode-history">
-                    {correction.encodeHistory.map((job) => (
-                      <li key={job.id}>
-                        <p>
-                          Encode Job {job.id} · {displayTerm(job.status)}
-                        </p>
-                        {job.replacementEncodeJobId ? (
-                          <p>Superseded by {job.replacementEncodeJobId}</p>
-                        ) : null}
-                        {job.predecessorEncodeJobId ? (
-                          <p>Replaces {job.predecessorEncodeJobId}</p>
-                        ) : null}
-                        {job.retainedOutput ? (
-                          <p>
-                            Prior output retained · {job.retainedOutput.cleanupEligible
-                              ? "Cleanup eligible"
-                              : "Cleanup unavailable"}
-                          </p>
-                        ) : null}
-                      </li>
-                    ))}
-                  </ol>
-                ) : null}
               </li>
             ))}
           </ol>
@@ -340,6 +331,87 @@ export function CatalogReviewDiscSelections({
         page={correctionHistoryPage}
         isSaving={isSaving}
         onPage={onCorrectionHistoryPage}
+      />
+
+      {correctionEncodeHistory.length > 0 ? (
+        <div className="selection-correction-history">
+          <h4>Correction Encode Job History</h4>
+          <ol className="selection-encode-history">
+            {correctionEncodeHistory.map((history) => (
+              <li
+                key={history.replacementEncodeJob?.id ??
+                  history.predecessorEncodeJob.id}
+              >
+                <p>
+                  Encode Job {history.predecessorEncodeJob.id} · {displayTerm(
+                    history.predecessorEncodeJob.status,
+                  )}{history.replacementEncodeJob === null
+                    ? " → No replacement Encode Job scheduled"
+                    : (
+                      <>
+                        {" → "}Encode Job {history.replacementEncodeJob.id} ·{
+                          " "
+                        }{displayTerm(history.replacementEncodeJob.status)}
+                      </>
+                    )}
+                </p>
+                <p>
+                  Replacement Disc Selection{
+                    " "
+                  }{history.replacementDiscSelectionId}
+                </p>
+              </li>
+            ))}
+          </ol>
+        </div>
+      ) : null}
+
+      <CatalogReviewPagination
+        ariaLabel="Correction Encode Job History pages"
+        itemLabel="Correction Encode Job entries"
+        page={correctionEncodeHistoryPage}
+        isSaving={isSaving}
+        onPage={onCorrectionEncodeHistoryPage}
+      />
+
+      {correctionRetainedOutputHistory.length > 0 ? (
+        <div className="selection-correction-history">
+          <h4>Correction Retained Output History</h4>
+          <ol className="selection-encode-history">
+            {correctionRetainedOutputHistory.map(
+              ({ replacementDiscSelectionId, retainedOutput }) => (
+                <li key={retainedOutput.id}>
+                  <p>
+                    Retained Output {retainedOutput.id} · {displayTerm(
+                      retainedOutput.state,
+                    )}
+                  </p>
+                  <p>
+                    Encode Job {retainedOutput.predecessorEncodeJobId}{" → "}
+                    Encode Job {retainedOutput.replacementEncodeJobId}
+                  </p>
+                  <p>
+                    Replacement Disc Selection {replacementDiscSelectionId}
+                  </p>
+                  <p>
+                    Retained {retainedOutput.retainedAt} · {retainedOutput
+                        .cleanupEligible
+                      ? "Cleanup eligible"
+                      : "Cleanup unavailable"}
+                  </p>
+                </li>
+              ),
+            )}
+          </ol>
+        </div>
+      ) : null}
+
+      <CatalogReviewPagination
+        ariaLabel="Correction Retained Output History pages"
+        itemLabel="Retained outputs"
+        page={correctionRetainedOutputHistoryPage}
+        isSaving={isSaving}
+        onPage={onCorrectionRetainedOutputHistoryPage}
       />
 
       <form className="catalog-form" onSubmit={submitSelection}>

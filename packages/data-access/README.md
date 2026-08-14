@@ -176,8 +176,22 @@ Disc Selection mutation preserves distinct identity paths:
   replacement already in the lineage cannot be repaired in place; a later
   correction creates another supersession, while removal deactivates the
   replacement rather than deleting either endpoint or an immutable link.
-  Catalog history joins those links to original and replacement Encode outcomes
-  and retained-output state through a path-free summary projection. The
+  Catalog history pages supersessions separately from correction Encode Job
+  links. Archive-scoped `listDiscSelectionSupersessions()` requires a limit no
+  larger than 101 (including the route's one-row lookahead).
+  `listDiscSelectionCorrectionEncodeJobLinks()` requires an archive,
+  offset, and limit no larger than 101. It returns one path-free row per
+  correction-associated predecessor, with an optional replacement summary, and
+  always orders by immutable predecessor creation time and identity. Scheduling
+  a delayed replacement therefore cannot move a row across offset pages, while
+  declining a replacement or later removing its job-free Disc Selection never
+  hides the predecessor's outcome. Each job summary contains only its identity
+  and status.
+  `listDiscSelectionCorrectionRetainedOutputSummaries()` independently
+  requires an archive, offset, and limit no larger than 101, orders summaries by
+  immutable retention time and identity, and returns every retry as a separate
+  path-free row. The resulting projections preserve job outcomes, links, and
+  every Retained Encode output summary without exposing output paths. The
   private retained path and filesystem identity remain available only on the
   worker-facing provenance read, never the consistent web read facade.
 - **Unsafe legacy quarantine.** A caller-era mapping that fails canonical-key or
@@ -207,6 +221,16 @@ repair and removal when no active dependency blocks recovery. These reasons do
 not include encode output paths. While legacy cutover repair is pending, the
 archive fence suppresses every selection mutation action and explains that
 changes are unavailable.
+
+`catalog.getCatalogReviewCoverage()` accepts only an archive identity, derives
+the title map from that archive's immutable Detected Disc scan, and computes
+Review Coverage across every active Disc Selection without returning or
+materializing those selection rows. Its first aggregate query always returns
+one summary row; its interval-union query returns exactly one row for each
+archived title, with the scan contract limiting that input and output to 512.
+Whole-title, clamped chapter-union, overlap, distinct Media Item, and
+main-feature counts therefore remain archive-wide while the surrounding read
+snapshot stays independent of the number of Disc Selections.
 
 Catalog Review archive discovery uses a separate facade query capped at 100
 rows. It selects either Needs review or Reviewed archives, pages on immutable

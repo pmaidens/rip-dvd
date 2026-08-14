@@ -663,6 +663,36 @@ chains at 32 levels without limiting siblings or the total Media Item count, and
 reads fail closed instead of presenting a truncated chain. The review workflow
 is exposed at `GET`/`POST /api/catalog-reviews/:archiveId`.
 
+Every `GET /api/catalog-reviews/:archiveId` read uses independent, stable
+archive-scoped pages: `selectionOffset` traverses up to 100 active Disc
+Selections ordered by creation time and identity, `correctionOffset` traverses
+up to 100 supersessions ordered by correction time and superseded identity, and
+`correctionJobOffset` traverses up to 100 correction-associated predecessor
+jobs ordered by immutable predecessor creation time and identity, regardless of
+whether a replacement is scheduled later. `correctionOutputOffset`
+traverses up to 100 path-free Retained Encode output summaries ordered by
+retention time and identity. Each correction-job entry contains one predecessor
+and at most one replacement, so that nested response is capped at 200 job
+summaries and no pair is split across pages. Declining replacement encoding does
+not remove the predecessor outcome from history. The consistent web facade projects
+only job identities and statuses for those summaries, so private output paths
+and worker claim details never cross that boundary. Retained-output retries
+remain individually reachable on their own page. Each page uses a one-row
+lookahead internally; selection and ancestor ID lookups run in batches of 100.
+Missing offsets mean zero, while duplicate, negative, fractional, unsafe, oversized, or
+unknown query parameters fail with `400`. Responses always use
+`Cache-Control: no-store`.
+
+Review Coverage is independent of those visible pages. One bounded facade
+aggregate derives the title map from the archive's immutable Detected Disc scan,
+considers every active Disc Selection, and returns one summary row plus at most
+one interval-union row for each of that scan's maximum 512 titles. The request
+therefore never accumulates the archive's selections or correction-linked jobs
+in memory, and the consistent read snapshot performs a fixed set of
+bounded-result queries regardless of history size. Replacement plans and active
+Encoding Profiles retain their separate existing 100-row pages through
+`replacementOffset` and `replacementProfileOffset`.
+
 To use host libraries instead, set `RIP_DVD_MEDIA_LIBRARY_HOST_PATH` and
 `RIP_DVD_ORIGINALS_LIBRARY_HOST_PATH`. On native Linux, create new bind-source
 directories with ownership that matches the container user before starting
