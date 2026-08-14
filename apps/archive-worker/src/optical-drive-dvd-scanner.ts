@@ -7,11 +7,15 @@ import {
 import type { BoundOpticalDrive, ScannedDvd } from "./archive-worker.js";
 import { DiscInspectionError } from "./disc-inspection-error.js";
 import { requireDvdContentSize } from "./dvd-content-policy.js";
-import { decodeLsdvdMetadata } from "./dvd-metadata.js";
+import {
+  decodeLsdvdMetadata,
+  type DecodedDvdMetadata,
+} from "./dvd-metadata.js";
 import {
   commandFailure,
   MAX_OPTICAL_DRIVE_COMMAND_OUTPUT_BYTES,
   OPTICAL_DRIVE_COMMAND_TIMEOUT_MS,
+  type CommandResult,
   type CommandRunner,
 } from "./optical-drive-command-runner.js";
 import type { BoundOpticalDriveIdentity } from "./optical-drive-identity.js";
@@ -55,6 +59,89 @@ function mediaChanged(message: string): DiscInspectionError {
   return new DiscInspectionError("abort", "media_changed", message);
 }
 
+const MAX_RECOVERY_TITLE_ATTEMPTS = 99;
+const MAX_CONSECUTIVE_TITLE_FAILURES = 3;
+
+function lsdvdCommandOptions(signal: AbortSignal) {
+  return {
+    maxBufferBytes: MAX_OPTICAL_DRIVE_COMMAND_OUTPUT_BYTES,
+    signal,
+    timeoutMs: OPTICAL_DRIVE_COMMAND_TIMEOUT_MS,
+  };
+}
+
+function decodeLsdvdResult(result: CommandResult): DecodedDvdMetadata {
+  return decodeLsdvdMetadata(`${result.stdout}\n${result.stderr}`);
+}
+
+async function recoverReadableTitles(
+  devicePath: string,
+  signal: AbortSignal,
+  runner: CommandRunner,
+): Promise<DecodedDvdMetadata | null> {
+  const titles: DecodedDvdMetadata["titles"] = [];
+  let volumeLabel: string | undefined;
+  let hasVolumeLabel = false;
+  let consecutiveFailures = 0;
+
+  for (
+    let titleNumber = 1;
+    titleNumber <= MAX_RECOVERY_TITLE_ATTEMPTS &&
+    consecutiveFailures < MAX_CONSECUTIVE_TITLE_FAILURES;
+    titleNumber += 1
+  ) {
+    signal.throwIfAborted();
+    const result = await runner.run(
+      "rip-dvd-lsdvd",
+      [
+        "-q",
+        "-t",
+        String(titleNumber),
+        "-Oh",
+        "-a",
+        "-c",
+        "-s",
+        devicePath,
+      ],
+      lsdvdCommandOptions(signal),
+    );
+    if (result.exitCode !== 0) {
+      consecutiveFailures += 1;
+      continue;
+    }
+
+    let decoded: DecodedDvdMetadata;
+    try {
+      decoded = decodeLsdvdResult(result);
+    } catch {
+      consecutiveFailures += 1;
+      continue;
+    }
+    if (
+      decoded.titles.length !== 1 ||
+      decoded.titles[0]?.number !== titleNumber
+    ) {
+      return null;
+    }
+    if (!hasVolumeLabel) {
+      volumeLabel = decoded.volumeLabel;
+      hasVolumeLabel = true;
+    } else if (decoded.volumeLabel !== volumeLabel) {
+      return null;
+    }
+    titles.push(decoded.titles[0]);
+    consecutiveFailures = 0;
+  }
+
+  if (titles.length === 0) {
+    return null;
+  }
+  return {
+    ...(volumeLabel ? { volumeLabel } : {}),
+    titles,
+  };
+}
+
 async function inspectDvd(
   devicePath: string,
   signal: AbortSignal,
@@ -63,11 +150,7 @@ async function inspectDvd(
   const result = await runner.run(
     "rip-dvd-lsdvd",
     ["-Oh", "-a", "-c", "-s", devicePath],
-    {
-      maxBufferBytes: MAX_OPTICAL_DRIVE_COMMAND_OUTPUT_BYTES,
-      signal,
-      timeoutMs: OPTICAL_DRIVE_COMMAND_TIMEOUT_MS,
-    },
+    lsdvdCommandOptions(signal),
   );
   if (result.exitCode !== 0) {
     const output = `${result.stdout}\n${result.stderr}`;
@@ -85,6 +168,12 @@ async function inspectDvd(
         "Optical Drive is temporarily not ready",
       );
     }
+    if (/Invalid IFO for title \d+/i.test(output)) {
+      const recovered = await recoverReadableTitles(devicePath, signal, runner);
+      if (recovered !== null) {
+        return recovered;
+      }
+    }
     const failure = commandFailure("lsdvd", result);
     throw new DiscInspectionError(
       "retry",
@@ -94,7 +183,7 @@ async function inspectDvd(
     );
   }
   try {
-    return decodeLsdvdMetadata(`${result.stdout}\n${result.stderr}`);
+    return decodeLsdvdResult(result);
   } catch (error) {
     const message = error instanceof Error
       ? error.message
