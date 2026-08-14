@@ -13,17 +13,19 @@ export function archiveIntegrityLabel(integrity: ArchiveIntegrity): string {
   return ARCHIVE_INTEGRITY_LABELS[integrity];
 }
 
+export interface ArchiveIntegrityDetailInput {
+  badAreaCount: number | null;
+  badSectorCount: number | null;
+  badSectorRanges: readonly UnreadableSectorRange[] | null;
+  integrity: ArchiveIntegrity;
+}
+
 export function archiveIntegrityDetail({
   badAreaCount,
   badSectorCount,
   badSectorRanges,
   integrity,
-}: {
-  badAreaCount: number | null;
-  badSectorCount: number | null;
-  badSectorRanges: readonly UnreadableSectorRange[] | null;
-  integrity: ArchiveIntegrity;
-}): string | null {
+}: ArchiveIntegrityDetailInput): string | null {
   if (integrity !== "watchable_salvage") {
     return null;
   }

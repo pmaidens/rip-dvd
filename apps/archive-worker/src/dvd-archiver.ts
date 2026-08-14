@@ -1032,6 +1032,8 @@ export async function preserveDvdArchive({
             validation.recoveryResult.unrecoveredSectorRanges,
           ),
         };
+        await verifySource();
+        signal.throwIfAborted();
       } else {
         await movePartialAside(partialPath);
         await sync(root);

@@ -72,6 +72,10 @@ function extentContainsLba(extent: SectorExtent, lba: number): boolean {
   return lba >= extent.startLba && lba < extent.startLba + extent.sectorCount;
 }
 
+function recognitionDescriptorsContainLba(lba: number): boolean {
+  return lba >= 16 && lba < 16 + 32;
+}
+
 function badSectorSet(ranges: readonly UnreadableSectorRange[]): Set<number> {
   const sectors = new Set<number>();
   for (const range of ranges) {
@@ -454,6 +458,7 @@ export async function classifyDvdImageDamage({
   };
 
   const parseUdf = async (): Promise<{
+    damagedRecognition: boolean;
     hasUdf: boolean;
     partitions: readonly UdfPartition[];
   }> => {
@@ -470,6 +475,9 @@ export async function classifyDvdImageDamage({
     );
     if (nsrIndex === -1) {
       return {
+        damagedRecognition: recognitionDescriptors.some(({ lba }) =>
+          badSectors.has(lba)
+        ),
         hasUdf: false,
         partitions: [],
       };
@@ -484,6 +492,9 @@ export async function classifyDvdImageDamage({
       .slice(nsrIndex + 1)
       .findIndex(({ identifier }) => identifier === "TEA01");
     if (beginningIndex === -1 || relativeTerminatorIndex === -1) {
+      if (recognitionDescriptors.some(({ lba }) => badSectors.has(lba))) {
+        throw new ClassifiedDamageError("filesystem_metadata");
+      }
       throw new Error("DVD UDF recognition sequence is incomplete");
     }
     const terminatorIndex = nsrIndex + 1 + relativeTerminatorIndex;
@@ -848,7 +859,11 @@ export async function classifyDvdImageDamage({
       }
     };
     await parseUdfNode(rootIcb, "");
-    return { hasUdf: true, partitions: partitionsByReference };
+    return {
+      damagedRecognition: false,
+      hasUdf: true,
+      partitions: partitionsByReference,
+    };
   };
 
   try {
@@ -869,6 +884,12 @@ export async function classifyDvdImageDamage({
       );
       if (allocated !== undefined) {
         return { outcome: "rejected", reason: allocated.reason };
+      }
+      if (
+        udfBounds.damagedRecognition &&
+        recognitionDescriptorsContainLba(badLba)
+      ) {
+        return { outcome: "rejected", reason: "ambiguous" };
       }
       if (
         badLba >= isoVolumeSpaceSize ||

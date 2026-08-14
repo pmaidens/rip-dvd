@@ -403,17 +403,18 @@ function createSyntheticUdfDvdImage(badLba: number): {
 
 describe("DVD layout damage classification", () => {
   it("accepts a substituted sector proved outside filesystem allocation", async () => {
-    const fixture = createSyntheticDvdImage(30);
+    const fixture = createSyntheticDvdImage(50);
 
     await expect(classifyDvdImageDamage({
       ...fixture,
       expectedByteCount: fixture.sizeBytes,
-      unreadableSectorRanges: [{ startLba: 30, sectorCount: 1 }],
+      unreadableSectorRanges: [{ startLba: 50, sectorCount: 1 }],
     })).resolves.toEqual({ outcome: "accepted" });
   });
 
   it.each([
     [1, "ambiguous"],
+    [30, "ambiguous"],
     [16, "filesystem_metadata"],
     [20, "directory_data"],
     [22, "ifo"],
