@@ -79,6 +79,7 @@ function catalogReview({
       discLabel,
       discKind: "dvd",
       archiveFormat: "iso",
+      integrity: "unknown",
       archivedAt: "2026-08-03T18:00:00.000Z",
       catalogReviewedAt: null,
       catalogReviewOutcome: "needs_review",
@@ -1707,6 +1708,7 @@ describe("CatalogReviewView", () => {
 
     expect(html).toContain('role="status"');
     expect(html).toContain("Metadata saved");
+    expect(html).toContain("Archive integrity: Unknown read quality");
     expect(html).not.toContain("Mapping changed; review required");
   });
 
@@ -1821,6 +1823,7 @@ describe("CatalogReviewView", () => {
               discLabel: "EPISODE_DISC_2_2005",
               discKind: "dvd",
               archiveFormat: "iso",
+              integrity: "clean_read",
               archivedAt: "2026-08-03T18:00:00.000Z",
               catalogReviewedAt: null,
               catalogReviewOutcome: "needs_review",
@@ -1979,6 +1982,7 @@ describe("CatalogReviewView", () => {
     );
 
     expect(html).toContain("Catalog Episode Disc 2 2005");
+    expect(html).toContain("Clean read");
     expect(html).toContain(
       "Disc Selection selection-1 cannot be deleted because Encode Job history must be preserved",
     );
@@ -2030,6 +2034,7 @@ describe("CatalogReviewView", () => {
               discLabel: "PAGED_DISC",
               discKind: "dvd",
               archiveFormat: "iso",
+              integrity: "unknown",
               archivedAt: "2026-08-03T19:00:00.000Z",
               catalogReviewedAt: null,
               catalogReviewOutcome: "needs_review",

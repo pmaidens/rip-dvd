@@ -26,6 +26,7 @@ import {
   type OpticalDriveHardware,
 } from "./archive-worker.js";
 import type { DvdCopyRunner } from "./dvd-archiver.js";
+import { createCleanDvdRecoveryResult } from "./dvd-recovery-contracts.js";
 import { DiscInspectionError } from "./disc-inspection-error.js";
 import {
   createLinuxOpticalDriveHardware,
@@ -315,10 +316,11 @@ describe("archive worker polling", () => {
       }),
     };
     const copyRunner: DvdCopyRunner = {
-      copy: vi.fn(async ({ outputPath, onBytesCopied }) => {
+      copy: vi.fn(async ({ outputPath, onBytesCopied, sizeBytes }) => {
         onBytesCopied(4);
         writeFileSync(outputPath, "dvd-image");
         onBytesCopied(9);
+        return createCleanDvdRecoveryResult(sizeBytes);
       }),
       isActive: () => false,
       withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
@@ -351,6 +353,11 @@ describe("archive worker polling", () => {
       detectedDiscId: disc.id,
       fingerprint,
       sizeBytes: 9,
+      integrity: "clean_read",
+      integrityPolicyVersion: "dvd-recovery-v1",
+      badSectorCount: 0,
+      badAreaCount: 0,
+      badSectorRanges: [],
     });
     expect(readFileSync(archive.archivePath, "utf8")).toBe("dvd-image");
     expect(existsSync(`${archive.archivePath}.failed`)).toBe(false);
@@ -410,7 +417,7 @@ describe("archive worker polling", () => {
     });
     let activeCopies = 0;
     let maximumActiveCopies = 0;
-    const copy = vi.fn(async ({ outputPath, onBytesCopied }) => {
+    const copy = vi.fn(async ({ outputPath, onBytesCopied, sizeBytes }) => {
       activeCopies += 1;
       maximumActiveCopies = Math.max(maximumActiveCopies, activeCopies);
       try {
@@ -423,6 +430,7 @@ describe("archive worker polling", () => {
       } finally {
         activeCopies -= 1;
       }
+      return createCleanDvdRecoveryResult(sizeBytes);
     });
     const copyRunner: DvdCopyRunner = {
       copy,
@@ -555,13 +563,14 @@ describe("archive worker polling", () => {
     });
     const copiedFingerprints: string[] = [];
     const copyRunner: DvdCopyRunner = {
-      copy: vi.fn(async ({ outputPath, onBytesCopied }) => {
+      copy: vi.fn(async ({ outputPath, onBytesCopied, sizeBytes }) => {
         const contentIndex = fingerprints.findIndex((fingerprint) =>
           outputPath.includes(fingerprint.slice("sha256:".length)),
         );
         copiedFingerprints.push(fingerprints[contentIndex]!);
         writeFileSync(outputPath, contents[contentIndex]!);
         onBytesCopied(Buffer.byteLength(contents[contentIndex]!));
+        return createCleanDvdRecoveryResult(sizeBytes);
       }),
       isActive: () => false,
       withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
@@ -685,9 +694,10 @@ describe("archive worker polling", () => {
       },
     );
     const copyRunner: DvdCopyRunner = {
-      copy: vi.fn(async ({ outputPath, onBytesCopied }) => {
+      copy: vi.fn(async ({ outputPath, onBytesCopied, sizeBytes }) => {
         onBytesCopied(9);
         writeFileSync(outputPath, "dvd-image");
+        return createCleanDvdRecoveryResult(sizeBytes);
       }),
       isActive: () => false,
       withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
@@ -919,7 +929,7 @@ describe("archive worker polling", () => {
     };
     let failedPartialPath: string | undefined;
     const copyRunner: DvdCopyRunner = {
-      copy: vi.fn(async ({ outputPath, onBytesCopied }) => {
+      copy: vi.fn(async ({ outputPath, onBytesCopied, sizeBytes }) => {
         failedPartialPath = outputPath;
         onBytesCopied(4);
         writeFileSync(outputPath, "partial");
@@ -1014,11 +1024,12 @@ describe("archive worker polling", () => {
     const interruption = new Error("worker shutdown");
     let interruptedPartialPath: string | undefined;
     const copyRunner: DvdCopyRunner = {
-      copy: vi.fn(async ({ outputPath, onBytesCopied }) => {
+      copy: vi.fn(async ({ outputPath, onBytesCopied, sizeBytes }) => {
         interruptedPartialPath = outputPath;
         writeFileSync(outputPath, "partial");
         onBytesCopied(4);
         controller.abort(interruption);
+        return createCleanDvdRecoveryResult(sizeBytes);
       }),
       isActive: () => false,
       withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
@@ -1115,7 +1126,7 @@ describe("archive worker polling", () => {
     const copyRunner: DvdCopyRunner = {
       copy: vi.fn(({ signal }) => {
         copyStarted();
-        return new Promise<void>((_resolve, reject) => {
+        return new Promise<never>((_resolve, reject) => {
           signal.addEventListener(
             "abort",
             () => {
@@ -1215,7 +1226,7 @@ describe("archive worker polling", () => {
       copy: vi.fn(({ signal }) => {
         copyActive = true;
         copyStarted();
-        return new Promise<void>((_resolve, reject) => {
+        return new Promise<never>((_resolve, reject) => {
           signal.addEventListener("abort", () => reject(signal.reason), { once: true });
         });
       }),

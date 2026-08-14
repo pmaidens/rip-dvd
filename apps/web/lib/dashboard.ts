@@ -1,5 +1,6 @@
 import type {
   ArchiveFormat,
+  ArchiveIntegrity,
   ArchiveJobStatus,
   ArchiveProgressPhase,
   ArchiveRequestStatus,
@@ -146,6 +147,7 @@ export interface DashboardCatalogReviewItem {
   discLabel: string;
   discKind: DiscKind;
   archiveFormat: ArchiveFormat;
+  integrity: ArchiveIntegrity;
   archivedAt: string;
   catalogReviewedAt: string | null;
   catalogReviewOutcome: "needs_review" | CompletedCatalogReviewOutcome;
@@ -898,6 +900,7 @@ function readDashboardSnapshotRecords(
             discLabel: archive.discLabel,
             discKind: archive.discKind,
             archiveFormat: archive.archiveFormat,
+            integrity: archive.integrity,
             archivedAt: archive.archivedAt.toISOString(),
             catalogReviewedAt:
               archive.catalogReviewedAt?.toISOString() ?? null,

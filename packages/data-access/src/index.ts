@@ -5,12 +5,14 @@ import {
 import type { DataAccess } from "./types.js";
 
 export { createDiscSelectionSourceIdentity } from "./disc-selection-source-identity.js";
+export { createCleanReadArchiveIntegrityEvidence } from "./archive-integrity.js";
 export { normalizeMediaItemSearchTitle } from "./media-item-title-search.js";
 export { isCorrectedEncodePredecessorReady } from "./corrected-encode-readiness.js";
 
 export * from "./errors.js";
 export * from "./dvd-scan.js";
 export {
+  ARCHIVE_INTEGRITIES,
   CATALOG_REVIEW_OUTCOMES,
   DISC_SELECTION_KINDS,
   MAX_MEDIA_ITEM_HIERARCHY_DEPTH,

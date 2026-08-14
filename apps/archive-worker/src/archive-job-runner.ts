@@ -120,6 +120,7 @@ export async function runArchiveJob({
     try {
       access.archiveJobs.publish(claim, {
         archivePath: preserved.archivePath,
+        integrityEvidence: preserved.integrityEvidence,
         sizeBytes: preserved.sizeBytes,
       });
     } catch (error) {

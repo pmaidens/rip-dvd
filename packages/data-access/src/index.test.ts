@@ -22,6 +22,7 @@ import {
   ARCHIVE_JOB_LEASE_DURATION_MS,
   DISC_INSPECTION_LEASE_DURATION_MS,
   createDataAccess,
+  createCleanReadArchiveIntegrityEvidence,
   createDiscSelectionSourceIdentity,
   DVD_TITLE_MAP_SCHEMA_VERSION,
   DomainInvariantError,
@@ -608,6 +609,78 @@ describe("data-access facade", () => {
     const reopened = openTestDatabase(databasePath);
     expect(reopened.checkHealth().status).toBe("ok");
     reopened.close();
+  });
+
+  it("migrates historical Original Disc Archives to unknown integrity", () => {
+    const databasePath = createTestDatabasePath();
+    const sqlite = new DatabaseSync(databasePath);
+    const migrationsRoot = new URL("../drizzle/", import.meta.url);
+    const integrityMigration = "20260814192709_steep_king_cobra";
+    const predecessorNames = readdirSync(migrationsRoot)
+      .filter((name) => /^\d/.test(name) && name < integrityMigration)
+      .sort();
+    for (const migrationName of predecessorNames) {
+      const migration = readFileSync(
+        new URL(`../drizzle/${migrationName}/migration.sql`, import.meta.url),
+        "utf8",
+      );
+      for (const statement of migration.split("--> statement-breakpoint")) {
+        if (statement.trim()) {
+          sqlite.exec(statement);
+        }
+      }
+    }
+    sqlite.exec(`
+      create table __drizzle_migrations (
+        id integer primary key,
+        hash text not null,
+        created_at numeric,
+        name text,
+        applied_at text
+      );
+    `);
+    const recordMigration = sqlite.prepare(`
+      insert into __drizzle_migrations (hash, created_at, name)
+      values (?, 0, ?)
+    `);
+    for (const migrationName of predecessorNames) {
+      recordMigration.run(`pre-integrity-${migrationName}`, migrationName);
+    }
+    sqlite.exec(`
+      insert into optical_drives (
+        id, device_path, is_present, last_seen_at, created_at, updated_at
+      ) values (
+        'historical-drive', '/dev/historical', 1, 1, 1, 1
+      );
+      insert into detected_discs (
+        id, optical_drive_id, disc_kind, fingerprint, status, detected_at,
+        created_at, updated_at
+      ) values (
+        'historical-disc', 'historical-drive', 'dvd',
+        'historical-fingerprint', 'archived', 1, 1, 1
+      );
+      insert into original_disc_archives (
+        id, detected_disc_id, disc_kind, archive_format, archive_path,
+        fingerprint, archived_at, created_at, updated_at
+      ) values (
+        'historical-archive', 'historical-disc', 'dvd', 'iso',
+        '/media/originals/historical.iso', 'historical-fingerprint', 1, 1, 1
+      );
+    `);
+    sqlite.close();
+
+    const migrated = openTestDatabase(databasePath);
+    expect(migrated.catalog.listOriginalDiscArchives()).toEqual([
+      expect.objectContaining({
+        id: "historical-archive",
+        integrity: "unknown",
+        integrityPolicyVersion: null,
+        badSectorCount: null,
+        badAreaCount: null,
+        badSectorRanges: null,
+      }),
+    ]);
+    migrated.close();
   });
 
   it("serializes simultaneous first openers of a fresh database", async () => {
@@ -7429,6 +7502,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
+        name: "20260814192709_steep_king_cobra",
+      },
+      {
         name: "20260814152555_allow-intentional-exact-overlaps",
       },
       {
@@ -7454,9 +7530,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260812142359_even_human_robot",
-      },
-      {
-        name: "20260812011518_optical_drive_present_path_identity",
       },
     ]);
     expect(
@@ -10271,9 +10344,32 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       progressPercent: 60,
     });
 
+    expect(() => access.archiveJobs.publish(claim, {
+      archivePath: "/media/originals/publication.iso",
+      sizeBytes: 1_000,
+      integrityEvidence: {
+        integrity: "clean_read",
+        policyVersion: "",
+        badSectorCount: 0,
+        badAreaCount: 0,
+        badSectorRanges: [],
+      },
+    })).toThrow(DomainInvariantError);
+    expect(access.catalog.listOriginalDiscArchives()).toEqual([]);
+    expect(access.archiveJobs.list(["running"])).toEqual([
+      expect.objectContaining({ id: claim.id }),
+    ]);
+
     const completed = access.archiveJobs.publish(claim, {
       archivePath: "/media/originals/publication.iso",
       sizeBytes: 1_000,
+      integrityEvidence: {
+        integrity: "clean_read",
+        policyVersion: "dvd-recovery-v1",
+        badSectorCount: 0,
+        badAreaCount: 0,
+        badSectorRanges: [],
+      },
     });
     expect(completed).toMatchObject({
       originalDiscArchiveId: expect.any(String),
@@ -10290,6 +10386,11 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       expect.objectContaining({
         archivePath: "/media/originals/publication.iso",
         fingerprint: "publication-disc",
+        integrity: "clean_read",
+        integrityPolicyVersion: "dvd-recovery-v1",
+        badSectorCount: 0,
+        badAreaCount: 0,
+        badSectorRanges: [],
       }),
     ]);
     expect(() => access.archiveJobs.fail(claim, "stale failure")).toThrow(
@@ -10347,13 +10448,23 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       archivePath: legacyArchivePath,
       fingerprint: legacyDisc.fingerprint,
     });
-    expect(legacyArchive.sizeBytes).toBeNull();
+    expect(legacyArchive).toMatchObject({
+      sizeBytes: null,
+      integrity: "unknown",
+      integrityPolicyVersion: null,
+      badSectorCount: null,
+      badAreaCount: null,
+      badSectorRanges: null,
+    });
 
     access.archiveRequests.cancel(request.id);
 
     expect(() =>
       access.archiveJobs.publish(claim, {
         archivePath: join(archiveDirectory, "current.iso"),
+        integrityEvidence: createCleanReadArchiveIntegrityEvidence(
+          "test-clean-v1",
+        ),
         sizeBytes: archiveBytes.byteLength,
       }),
     ).toThrow(StaleJobAttemptError);
@@ -10473,6 +10584,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(() =>
       access.archiveJobs.publish(publicationRace.claim, {
         archivePath: "/media/originals/cancelled-race.iso",
+        integrityEvidence: createCleanReadArchiveIntegrityEvidence(
+          "test-clean-v1",
+        ),
         sizeBytes: 1_000,
       }),
     ).toThrow(StaleJobAttemptError);
