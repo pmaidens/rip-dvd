@@ -890,6 +890,7 @@ describe("watchDashboardActivity", () => {
             discLabel: "REVIEW_DISC",
             discKind: "dvd",
             archiveFormat: "iso",
+            integrity: "unknown",
             archivedAt: "2026-07-26T15:00:00.000Z",
             catalogReviewedAt: null,
             catalogReviewOutcome: "needs_review",

@@ -1,4 +1,7 @@
-import type { DataAccess } from "@rip-dvd/data-access";
+import {
+  createCleanReadArchiveIntegrityEvidence,
+  type DataAccess,
+} from "@rip-dvd/data-access";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -447,6 +450,9 @@ describe("GET /api/dashboard/events", () => {
     )!;
     access.archiveJobs.publish(retryClaim, {
       archivePath: "/media/originals/lifecycle.iso",
+      integrityEvidence: createCleanReadArchiveIntegrityEvidence(
+        "test-clean-v1",
+      ),
       sizeBytes: 9,
     });
     await vi.advanceTimersByTimeAsync(1_000);

@@ -24,7 +24,10 @@ import {
   startArchiveJobForTest,
 } from "./catalog.test-support.js";
 import { decodeDvdTitleMap } from "./dvd-scan.js";
-import { createDataAccess } from "./index.js";
+import {
+  createCleanReadArchiveIntegrityEvidence,
+  createDataAccess,
+} from "./index.js";
 import { createLegacySidecarDataAccess } from "./legacy-sidecars.js";
 import { createTemporaryDirectoryFixture } from "./legacy-sidecar.test-support.js";
 
@@ -451,6 +454,9 @@ describe("legacy sidecar import", () => {
       expect(() =>
         fixture.access.archiveJobs.publish(claim, {
           archivePath: join(dirname(fixture.archivePath), "Duplicate.iso"),
+          integrityEvidence: createCleanReadArchiveIntegrityEvidence(
+            "test-clean-v1",
+          ),
           sizeBytes: 14,
         }),
       ).toThrow(DomainInvariantError);

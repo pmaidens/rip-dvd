@@ -356,6 +356,7 @@ function readCatalogReview(
         discLabel: disc.volumeLabel ?? "Unlabeled disc",
         discKind: archive.discKind,
         archiveFormat: archive.archiveFormat,
+        integrity: archive.integrity,
         archivedAt: archive.archivedAt.toISOString(),
         catalogReviewedAt: archive.catalogReviewedAt?.toISOString() ?? null,
         catalogReviewOutcome: archive.catalogReviewOutcome,

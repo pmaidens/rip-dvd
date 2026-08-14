@@ -1,3 +1,4 @@
+import { createCleanReadArchiveIntegrityEvidence } from "@rip-dvd/data-access";
 import type { LegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 
 export function startArchiveJob(
@@ -81,6 +82,9 @@ export function seedFailedArchiveJobAndQueuedDuplicate(
       );
       return access.archiveJobs.publish(publishingJob, {
         archivePath: `/media/originals/${fingerprint}.iso`,
+        integrityEvidence: createCleanReadArchiveIntegrityEvidence(
+          "test-clean-v1",
+        ),
         sizeBytes: 9,
       });
     },
