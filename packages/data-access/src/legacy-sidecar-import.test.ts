@@ -887,6 +887,140 @@ describe("legacy sidecar import", () => {
     fixture.access.close();
   });
 
+  it("keeps first-import jobs with one source and distinct media identities separate", () => {
+    const fixture = createFixture();
+    const alternateOutputPath = join(
+      dirname(fixture.trailerOutputPath),
+      "Alternate extra.mkv",
+    );
+    const sidecar = JSON.parse(readFileSync(fixture.sidecarPath, "utf8")) as {
+      jobs: Array<Record<string, unknown>>;
+    };
+    sidecar.jobs.push({
+      label: "Extra 2: Alternate extra",
+      source: fixture.archivePath,
+      output: alternateOutputPath,
+      preset: "Fast 480p30",
+      selection: "title",
+      title_number: 2,
+    });
+    writeFileSync(fixture.sidecarPath, JSON.stringify(sidecar));
+
+    expect(fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    })).toMatchObject({ sidecarsImported: 1, issues: [] });
+    const jobs = fixture.access.encodeJobs.list();
+    const selections = fixture.access.catalog.listDiscSelections();
+    const mediaItems = fixture.access.catalog.listMediaItems();
+    const trailerJob = jobs.find(
+      (job) => job.outputPath === fixture.trailerOutputPath,
+    )!;
+    const alternateJob = jobs.find(
+      (job) => job.outputPath === alternateOutputPath,
+    )!;
+    const trailerSelection = selections.find(
+      (selection) => selection.id === trailerJob.discSelectionId,
+    )!;
+    const alternateSelection = selections.find(
+      (selection) => selection.id === alternateJob.discSelectionId,
+    )!;
+
+    expect(alternateSelection.id).not.toBe(trailerSelection.id);
+    expect(mediaItems.find(
+      (item) => item.id === trailerSelection.mediaItemId,
+    )).toMatchObject({ title: "Trailer" });
+    expect(mediaItems.find(
+      (item) => item.id === alternateSelection.mediaItemId,
+    )).toMatchObject({ title: "Alternate extra" });
+    expect([trailerSelection, alternateSelection]).toEqual([
+      expect.objectContaining({
+        sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+      }),
+      expect.objectContaining({
+        sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+      }),
+    ]);
+
+    fixture.access.close();
+  });
+
+  it("prefers durable output provenance over edited overlap metadata", () => {
+    const fixture = createFixture();
+    expect(fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    })).toMatchObject({ issues: [] });
+    const movieJob = fixture.access.encodeJobs.list().find(
+      (job) => job.outputPath === fixture.movieOutputPath,
+    )!;
+    const originalSelection = fixture.access.catalog.listDiscSelections({
+      ids: [movieJob.discSelectionId],
+    })[0]!;
+    fixture.access.catalog.updateMediaItem(originalSelection.mediaItemId, {
+      title: "Operator-edited movie",
+      year: 2002,
+    });
+    const decoyMovie = fixture.access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Example Movie",
+      year: 2001,
+    });
+    fixture.access.catalog.createDiscSelection({
+      originalDiscArchiveId: originalSelection.originalDiscArchiveId,
+      mediaItemId: decoyMovie.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+
+    expect(fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    })).toMatchObject({ sidecarsImported: 1, issues: [] });
+    expect(fixture.access.encodeJobs.list().find(
+      (job) => job.id === movieJob.id,
+    )).toMatchObject({ discSelectionId: originalSelection.id });
+
+    fixture.access.close();
+  });
+
+  it("recognizes captured retired provenance before active overlap ambiguity", () => {
+    const fixture = createFixture();
+    expect(fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    })).toMatchObject({ issues: [] });
+    const movieJob = fixture.access.encodeJobs.list().find(
+      (job) => job.outputPath === fixture.movieOutputPath,
+    )!;
+    const originalSelection = fixture.access.catalog.listDiscSelections({
+      ids: [movieJob.discSelectionId],
+    })[0]!;
+    const archive = fixture.access.catalog.listOriginalDiscArchives({
+      ids: [originalSelection.originalDiscArchiveId],
+    })[0]!;
+    fixture.access.catalog.correctDiscSelection(originalSelection.id, {
+      originalDiscArchiveId: archive.id,
+      catalogRevision: archive.updatedAt,
+      mediaItemId: originalSelection.mediaItemId,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    const duplicateMovie = fixture.access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Example Movie",
+      year: 2001,
+    });
+    fixture.access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: duplicateMovie.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+
+    expect(fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    })).toMatchObject({ sidecarsImported: 1, issues: [] });
+    expect(fixture.access.encodeJobs.list().find(
+      (job) => job.id === movieJob.id,
+    )).toMatchObject({ discSelectionId: originalSelection.id });
+
+    fixture.access.close();
+  });
+
   it.each([
     {
       decoyTitle: "Alternate extra",
@@ -2377,6 +2511,46 @@ describe("legacy sidecar import", () => {
       ]),
     );
     expect(fixture.access.encodeJobs.list()).toHaveLength(2);
+    fixture.access.close();
+  });
+
+  it("uses Encode Job provenance to recover schema-1 exact overlaps", () => {
+    const fixture = createFixture();
+    const markerPath = join(
+      fixture.originalsLibraryPath,
+      ".rip-dvd-sqlite-catalog",
+    );
+    expect(fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    })).toMatchObject({ issues: [] });
+    const jobsBefore = fixture.access.encodeJobs.list();
+    const movieJob = jobsBefore.find(
+      (job) => job.outputPath === fixture.movieOutputPath,
+    )!;
+    const movieSelection = fixture.access.catalog.listDiscSelections({
+      ids: [movieJob.discSelectionId],
+    })[0]!;
+    const duplicateMovie = fixture.access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Schema-one duplicate",
+      year: 2001,
+    });
+    fixture.access.catalog.createDiscSelection({
+      originalDiscArchiveId: movieSelection.originalDiscArchiveId,
+      mediaItemId: duplicateMovie.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    writeFileSync(markerPath, JSON.stringify({
+      schemaVersion: 1,
+      legacyQueueStatus: "retired",
+      authoritativeStore: "sqlite",
+    }));
+
+    expect(fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    })).toMatchObject({ sidecarsImported: 1, issues: [] });
+    expect(fixture.access.encodeJobs.list()).toEqual(jobsBefore);
+
     fixture.access.close();
   });
 

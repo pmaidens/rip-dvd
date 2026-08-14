@@ -1150,6 +1150,76 @@ describe("data-access facade", () => {
       originalDiscArchiveId: archive.id,
     })).toEqual(selectionsBeforeFailure);
 
+    const partialOwner = access.catalog.createMediaItem({
+      kind: "bonus_feature",
+      title: "Partial source owner",
+    });
+    access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: partialOwner.id,
+      sourceIdentity: {
+        kind: "dvd_chapters",
+        titleNumber: 5,
+        chapterStart: 2,
+        chapterEnd: 4,
+      },
+    });
+    const catalogBeforeCoordinateOverlaps = {
+      mediaItems: access.catalog.listMediaItems(),
+      discSelections: access.catalog.listDiscSelections({
+        originalDiscArchiveId: archive.id,
+      }),
+    };
+    const overlapRevision = access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]!.updatedAt;
+    for (const sourceIdentity of [
+      { kind: "dvd_title", titleNumber: 5 },
+      {
+        kind: "dvd_chapters",
+        titleNumber: 5,
+        chapterStart: 4,
+        chapterEnd: 6,
+      },
+    ] as const) {
+      expect(() => access.catalog.createMappingProposal({
+        originalDiscArchiveId: archive.id,
+        catalogRevision: overlapRevision,
+        mediaItem: { kind: "movie", title: "Coordinate overlap" },
+        discSelection: { sourceIdentity },
+      })).toThrow("Assisted Mapping cannot use an overlapping DVD source");
+      expect(access.catalog.listMediaItems()).toEqual(
+        catalogBeforeCoordinateOverlaps.mediaItems,
+      );
+      expect(access.catalog.listDiscSelections({
+        originalDiscArchiveId: archive.id,
+      })).toEqual(catalogBeforeCoordinateOverlaps.discSelections);
+    }
+    expect(access.catalog.createMappingProposal({
+      originalDiscArchiveId: archive.id,
+      catalogRevision: overlapRevision,
+      mediaItem: { kind: "movie", title: "Disjoint chapters" },
+      discSelection: {
+        sourceIdentity: {
+          kind: "dvd_chapters",
+          titleNumber: 5,
+          chapterStart: 5,
+          chapterEnd: 6,
+        },
+      },
+    }).discSelection).toMatchObject({
+      sourceIdentity: {
+        kind: "dvd_chapters",
+        titleNumber: 5,
+        chapterStart: 5,
+        chapterEnd: 6,
+      },
+    });
+    const revisionAfterDisjointProposal =
+      access.catalog.listOriginalDiscArchives({
+        ids: [archive.id],
+      })[0]!.updatedAt;
+
     const unconventionalParent = access.catalog.createMediaItem({
       kind: "other",
       title: "Imported unconventional parent",
@@ -1167,7 +1237,7 @@ describe("data-access facade", () => {
     };
     expect(() => access.catalog.createMappingProposal({
       originalDiscArchiveId: archive.id,
-      catalogRevision: currentRevision,
+      catalogRevision: revisionAfterDisjointProposal,
       mediaItem: {
         parentId: unconventionalParent.id,
         kind: "bonus_feature",
@@ -1188,7 +1258,7 @@ describe("data-access facade", () => {
 
     const attachedExtra = access.catalog.createMappingProposal({
       originalDiscArchiveId: archive.id,
-      catalogRevision: currentRevision,
+      catalogRevision: revisionAfterDisjointProposal,
       mediaItem: {
         parentId: created.mediaItem.id,
         kind: "bonus_feature",
@@ -1367,7 +1437,7 @@ describe("data-access facade", () => {
       scanData: {
         schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
         contentId,
-        titles: [2, 4, 7].map((number) => ({
+        titles: [2, 4, 5, 7].map((number) => ({
           number,
           durationSeconds: 2_400,
           chapters: 8,
@@ -1449,6 +1519,21 @@ describe("data-access facade", () => {
       originalDiscArchiveId: archive.id,
     })).toHaveLength(3);
 
+    const partialOwner = access.catalog.createMediaItem({
+      kind: "bonus_feature",
+      title: "Partially mapped episode source",
+    });
+    access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: partialOwner.id,
+      sourceIdentity: {
+        kind: "dvd_chapters",
+        titleNumber: 5,
+        chapterStart: 2,
+        chapterEnd: 4,
+      },
+    });
+
     const catalogBeforeOverlap = {
       mediaItems: access.catalog.listMediaItems(),
       discSelections: access.catalog.listDiscSelections({
@@ -1468,7 +1553,7 @@ describe("data-access facade", () => {
         seasonNumber: 1,
       },
       episodes: [{
-        titleNumber: 2,
+        titleNumber: 5,
         title: "Overlapping Episode",
         episodeNumber: 1,
       }],

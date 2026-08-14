@@ -90,8 +90,9 @@ parallel kind, title, and chapter fields. Its persistence codec alone flattens
 that value into the normalized SQLite columns and derives the canonical legacy
 source key. Manual mapping and correction may persist intentional overlaps,
 including identical whole-title or chapter-range sources, while every Disc
-Selection retains a separate identity. Assisted Mapping rejects exact source
-reuse in its immediate transaction. Title selections must reference the
+Selection retains a separate identity. Assisted Mapping rejects whole-title
+reuse and intersecting chapter coordinates in its immediate transaction. Title
+selections must reference the
 archived scan, chapter ranges stay within the selected title, and main-feature
 selections remain a distinct DVD source kind. The schema migration replaces
 the former active-source unique index with a non-unique lookup index, preserving

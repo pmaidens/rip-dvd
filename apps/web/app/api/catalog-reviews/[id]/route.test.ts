@@ -247,7 +247,7 @@ describe("Catalog Review API", () => {
         mediaItem: { kind: "movie", title: "Automatic overlap" },
       },
       discSelection: {
-        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+        sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
       },
     });
     expect(assistedOverlap.status).toBe(409);

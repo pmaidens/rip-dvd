@@ -1009,6 +1009,9 @@ export function createLegacySidecarImportAccess(
               string,
               Array<typeof discSelections.$inferSelect>
             >();
+            const preExistingSelectionIds = new Set(
+              existingSelections.map((selection) => selection.id),
+            );
             const addSelectionCandidate = (
               selection: typeof discSelections.$inferSelect,
             ) => {
@@ -1038,25 +1041,119 @@ export function createLegacySidecarImportAccess(
                     : null)
               );
             };
-            const resolveSelectionByMediaEvidence = (
+            const resolveActiveSelection = (
               job: ParsedLegacyJob,
+              profile: typeof encodingProfiles.$inferSelect | undefined,
+              outputJob: typeof encodeJobs.$inferSelect | undefined,
             ) => {
               const candidates =
                 selectionsBySourceKey.get(job.sourceKey) ?? [];
-              if (candidates.length <= 1) {
-                return candidates[0];
+              if (outputJob) {
+                const outputSelection = candidates.find(
+                  (candidate) =>
+                    candidate.id === outputJob.discSelectionId,
+                );
+                if (outputSelection) {
+                  return { selection: outputSelection, ambiguous: false };
+                }
               }
-              const matches = candidates.filter((selection) =>
-                selectionMatchesMediaEvidence(selection, job)
+              if (profile && candidates.length > 0) {
+                const logicalJobs = transaction
+                  .select({
+                    discSelectionId: encodeJobs.discSelectionId,
+                    outputPath: encodeJobs.outputPath,
+                  })
+                  .from(encodeJobs)
+                  .where(and(
+                    inArray(
+                      encodeJobs.discSelectionId,
+                      candidates.map((candidate) => candidate.id),
+                    ),
+                    eq(encodeJobs.encodingProfileId, profile.id),
+                  ))
+                  .all();
+                const exactOutputSelectionIds = new Set(
+                  logicalJobs.flatMap((candidate) =>
+                    candidate.outputPath === job.outputPath
+                      ? [candidate.discSelectionId]
+                      : [],
+                  ),
+                );
+                const logicalSelectionIds = exactOutputSelectionIds.size > 0
+                  ? exactOutputSelectionIds
+                  : new Set(
+                      logicalJobs.map((candidate) =>
+                        candidate.discSelectionId
+                      ),
+                    );
+                if (logicalSelectionIds.size === 1) {
+                  const [logicalSelectionId] = logicalSelectionIds;
+                  return {
+                    selection: candidates.find(
+                      (candidate) => candidate.id === logicalSelectionId,
+                    ),
+                    ambiguous: false,
+                  };
+                }
+              }
+              const preExistingCandidates = candidates.filter((candidate) =>
+                preExistingSelectionIds.has(candidate.id)
               );
-              return matches.length === 1 ? matches[0] : undefined;
+              if (preExistingCandidates.length === 1) {
+                return {
+                  selection: preExistingCandidates[0],
+                  ambiguous: false,
+                };
+              }
+              const mediaCandidates = preExistingCandidates.length > 0
+                ? preExistingCandidates
+                : candidates;
+              const mediaMatches = mediaCandidates.filter((candidate) =>
+                selectionMatchesMediaEvidence(candidate, job)
+              );
+              return {
+                selection: mediaMatches.length === 1
+                  ? mediaMatches[0]
+                  : undefined,
+                ambiguous:
+                  mediaMatches.length > 1 ||
+                  (preExistingCandidates.length > 1 &&
+                    mediaMatches.length === 0),
+              };
             };
             const findExistingSelection = (
               mediaItemKind: "movie" | "bonus_feature",
             ) => {
               for (const job of sidecar.jobs) {
                 if (job.mediaItemKind === mediaItemKind) {
-                  const selection = resolveSelectionByMediaEvidence(job);
+                  const profile = transaction
+                    .select()
+                    .from(encodingProfiles)
+                    .where(and(
+                      eq(encodingProfiles.mediaDomain, "dvd_video"),
+                      eq(encodingProfiles.key, job.profileKey),
+                      eq(encodingProfiles.version, 1),
+                    ))
+                    .get();
+                  if (
+                    profile &&
+                    !isCompatibleLegacyEncodingProfile(profile, job)
+                  ) {
+                    continue;
+                  }
+                  const outputJob = transaction
+                    .select()
+                    .from(encodeJobs)
+                    .where(and(
+                      eq(encodeJobs.outputPath, job.outputPath),
+                      eq(encodeJobs.reservesOutputPath, true),
+                    ))
+                    .get();
+                  const { selection } = resolveActiveSelection(
+                    job,
+                    profile,
+                    outputJob,
+                  );
                   if (selection) {
                     return selection;
                   }
@@ -1196,77 +1293,6 @@ export function createLegacySidecarImportAccess(
                   eq(encodeJobs.reservesOutputPath, true),
                 ))
                 .get();
-              const selectionCandidates =
-                selectionsBySourceKey.get(job.sourceKey) ?? [];
-              let selection = selectionCandidates.length === 1
-                ? selectionCandidates[0]
-                : undefined;
-              if (!selection && outputJob) {
-                selection = selectionCandidates.find(
-                  (candidate) =>
-                    candidate.id === outputJob.discSelectionId,
-                );
-              }
-              if (!selection && profile && selectionCandidates.length > 1) {
-                const logicalJobs = transaction
-                  .select({
-                    discSelectionId: encodeJobs.discSelectionId,
-                    outputPath: encodeJobs.outputPath,
-                  })
-                  .from(encodeJobs)
-                  .where(and(
-                    inArray(
-                      encodeJobs.discSelectionId,
-                      selectionCandidates.map((candidate) => candidate.id),
-                    ),
-                    eq(encodeJobs.encodingProfileId, profile.id),
-                  ))
-                  .all();
-                const exactOutputSelectionIds = new Set(
-                  logicalJobs.flatMap((candidate) =>
-                    candidate.outputPath === job.outputPath
-                      ? [candidate.discSelectionId]
-                      : [],
-                  ),
-                );
-                const logicalSelectionIds = exactOutputSelectionIds.size > 0
-                  ? exactOutputSelectionIds
-                  : new Set(
-                      logicalJobs.map((candidate) =>
-                        candidate.discSelectionId
-                      ),
-                    );
-                if (logicalSelectionIds.size === 1) {
-                  const [logicalSelectionId] = logicalSelectionIds;
-                  selection = selectionCandidates.find(
-                    (candidate) => candidate.id === logicalSelectionId,
-                  );
-                }
-              }
-              selection ??= resolveSelectionByMediaEvidence(job);
-              if (!selection && selectionCandidates.length > 1) {
-                persistenceIssues.push({
-                  code: "duplicate_record",
-                  jobIndex: job.jobIndex,
-                  message:
-                    "Legacy Encode Job source matches multiple Disc Selections and requires unambiguous job, output, or Media Item provenance",
-                  sidecarPath: sidecar.sidecarPath,
-                });
-                continue;
-              }
-              const logicalJob =
-                selection && profile
-                  ? transaction
-                      .select()
-                      .from(encodeJobs)
-                      .where(
-                        and(
-                          eq(encodeJobs.discSelectionId, selection.id),
-                          eq(encodeJobs.encodingProfileId, profile.id),
-                        ),
-                      )
-                      .get()
-                  : undefined;
               const retiredHistoricalJob =
                 capturedSnapshotMatches && profile
                   ? transaction
@@ -1294,6 +1320,34 @@ export function createLegacySidecarImportAccess(
                 persistedJobs.push(job);
                 continue;
               }
+              const {
+                selection: resolvedSelection,
+                ambiguous: selectionIsAmbiguous,
+              } = resolveActiveSelection(job, profile, outputJob);
+              let selection = resolvedSelection;
+              if (selectionIsAmbiguous) {
+                persistenceIssues.push({
+                  code: "duplicate_record",
+                  jobIndex: job.jobIndex,
+                  message:
+                    "Legacy Encode Job source matches multiple Disc Selections and requires unambiguous job, output, or Media Item provenance",
+                  sidecarPath: sidecar.sidecarPath,
+                });
+                continue;
+              }
+              const logicalJob =
+                selection && profile
+                  ? transaction
+                      .select()
+                      .from(encodeJobs)
+                      .where(
+                        and(
+                          eq(encodeJobs.discSelectionId, selection.id),
+                          eq(encodeJobs.encodingProfileId, profile.id),
+                        ),
+                      )
+                      .get()
+                  : undefined;
               if (
                 logicalJob &&
                 logicalJob.outputPath !== job.outputPath &&
@@ -1343,11 +1397,21 @@ export function createLegacySidecarImportAccess(
                 );
                 if (
                   job.mediaItemKind === "movie" &&
-                  mediaItem.id !== requireMovieItem().id
+                  movieItem !== undefined &&
+                  mediaItem.id !== movieItem.id
                 ) {
                   throw new DomainInvariantError(
                     `Movie Disc Selection ${job.sourceKey} maps to a duplicate Media Item`,
                   );
+                }
+                if (job.mediaItemKind === "movie") {
+                  movieItem = mediaItem;
+                } else if (movieItem === undefined && mediaItem.parentId) {
+                  movieItem = transaction
+                    .select()
+                    .from(mediaItems)
+                    .where(eq(mediaItems.id, mediaItem.parentId))
+                    .get();
                 }
                 // Existing SQLite catalog rows may have been edited after the
                 // durable marker was published. SQLite is authoritative once

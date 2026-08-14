@@ -1306,7 +1306,7 @@ describe("end-to-end operations dashboard workflow", () => {
         mediaItemId: existingEpisode.id,
       },
       discSelection: {
-        sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+        sourceIdentity: { kind: "dvd_title", titleNumber: 5 },
       },
     });
     expect(additionalProposal.status).toBe(201);
@@ -1331,22 +1331,27 @@ describe("end-to-end operations dashboard workflow", () => {
       discSelectionCount: 9,
       mediaItemsWithSelections: 2,
       mappedTitles: 3,
-      partiallyMappedTitles: 0,
-      unmappedTitles: 2,
+      partiallyMappedTitles: 1,
+      unmappedTitles: 1,
       mainFeatureSelections: 1,
     });
     expect(refreshedCoverage.coverage.titles).toContainEqual({
       titleNumber: 2,
-      status: "mapped",
+      status: "partially_mapped",
       hasOverlap: true,
+    });
+    expect(refreshedCoverage.coverage.titles).toContainEqual({
+      titleNumber: 5,
+      status: "mapped",
+      hasOverlap: false,
     });
     const refreshedCoverageHtml = renderCatalogReview(refreshedCoverage);
     expect(refreshedCoverageHtml).toContain(
       "2 Media Items with Disc Selections",
     );
     expect(refreshedCoverageHtml).toContain("3 mapped titles");
-    expect(refreshedCoverageHtml).toContain("0 partially mapped titles");
-    expect(refreshedCoverageHtml).toContain("2 unmapped titles");
+    expect(refreshedCoverageHtml).toContain("1 partially mapped title");
+    expect(refreshedCoverageHtml).toContain("1 unmapped title");
     expect(refreshedCoverage.mediaItems).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: proposal.mediaItem.id }),
       expect.objectContaining({ id: existingShow.id }),

@@ -1045,7 +1045,7 @@ export function createDataAccessInternal(
     input: CreateDiscSelectionInput,
     id: DiscSelectionId,
     timestamp: Date,
-    options: { rejectExactOverlap?: boolean } = {},
+    options: { rejectSourceOverlap?: boolean } = {},
   ) {
     const source = requireRow(
       transaction
@@ -1083,20 +1083,47 @@ export function createDataAccessInternal(
       );
     const sourcePersistence =
       serializeDiscSelectionSourceIdentity(sourceIdentity);
-    if (options.rejectExactOverlap) {
-      const duplicate = transaction
-        .select({ id: discSelections.id })
+    if (options.rejectSourceOverlap) {
+      const activeSources = transaction
+        .select({
+          kind: discSelections.kind,
+          titleNumber: discSelections.titleNumber,
+          chapterStart: discSelections.chapterStart,
+          chapterEnd: discSelections.chapterEnd,
+        })
         .from(discSelections)
         .where(and(
           eq(
             discSelections.originalDiscArchiveId,
             input.originalDiscArchiveId,
           ),
-          eq(discSelections.sourceKey, sourcePersistence.sourceKey),
           eq(discSelections.isCatalogActive, true),
         ))
-        .get();
-      if (duplicate) {
+        .all();
+      const overlapsActiveSource = activeSources.some((activeSource) => {
+        if (sourceIdentity.kind === "main_feature") {
+          return activeSource.kind === "main_feature";
+        }
+        if (
+          activeSource.kind === "main_feature" ||
+          activeSource.titleNumber !== sourceIdentity.titleNumber
+        ) {
+          return false;
+        }
+        if (
+          sourceIdentity.kind === "dvd_title" ||
+          activeSource.kind === "dvd_title"
+        ) {
+          return true;
+        }
+        return (
+          activeSource.chapterStart !== null &&
+          activeSource.chapterEnd !== null &&
+          activeSource.chapterStart <= sourceIdentity.chapterEnd &&
+          activeSource.chapterEnd >= sourceIdentity.chapterStart
+        );
+      });
+      if (overlapsActiveSource) {
         throw new DomainInvariantError(
           "Assisted Mapping cannot use an overlapping DVD source",
         );
@@ -3796,7 +3823,7 @@ export function createDataAccessInternal(
             },
             discSelectionId,
             timestamp,
-            { rejectExactOverlap: true },
+            { rejectSourceOverlap: true },
           );
           reopenCatalogReview(
             transaction,
@@ -3931,7 +3958,7 @@ export function createDataAccessInternal(
               },
               newId<DiscSelectionId>(),
               timestamp,
-              { rejectExactOverlap: true },
+              { rejectSourceOverlap: true },
             );
             return { mediaItem, discSelection };
           });
