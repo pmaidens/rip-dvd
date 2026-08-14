@@ -153,9 +153,43 @@ const FAILURE_REASON_RULES: readonly FailureReasonRule[] = [
 const UNCLASSIFIED_FAILURE_REASON =
   "The worker reported an unclassified failure. Check the worker logs for the full diagnostic.";
 
+function formatByteOffset(byteOffset: string): string {
+  return byteOffset.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+function formatArchiveCopyFailure(errorMessage: string): string | null {
+  const readFailure =
+    /DVD content read failed at byte (\d+)/i.exec(errorMessage);
+  if (readFailure?.[1] !== undefined) {
+    const byteOffset = formatByteOffset(readFailure[1]);
+    return /input\/output error|\bI\/O error\b/i.test(errorMessage)
+      ? `The archive worker encountered an input/output error while reading the disc at byte ${byteOffset}.`
+      : `The archive worker could not read the disc at byte ${byteOffset}.`;
+  }
+  if (/DVD content read ended before the declared media size/i.test(errorMessage)) {
+    return "The archive worker reached the end of the disc before its declared size.";
+  }
+  const status =
+    /DVD archive copy failed with status (-?\d{1,4})\b/i.exec(errorMessage)?.[1];
+  if (status !== undefined) {
+    return `The archive copy command exited with status ${status}.`;
+  }
+  const signal =
+    /DVD archive copy failed with signal ([A-Z][A-Z0-9]{1,15})\b/.exec(
+      errorMessage,
+    )?.[1];
+  return signal === undefined
+    ? null
+    : `The archive copy command stopped after receiving signal ${signal}.`;
+}
+
 export function formatFailureDetail(errorMessage: string | null): string | null {
   if (errorMessage === null) {
     return null;
+  }
+  const archiveCopyFailure = formatArchiveCopyFailure(errorMessage);
+  if (archiveCopyFailure !== null) {
+    return archiveCopyFailure;
   }
   for (const rule of FAILURE_REASON_RULES) {
     if (rule.pattern.test(errorMessage)) {

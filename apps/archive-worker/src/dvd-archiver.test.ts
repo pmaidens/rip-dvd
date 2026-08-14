@@ -603,6 +603,69 @@ describe("DVD archive publication", () => {
     expect(copied).toEqual([4, 9]);
   });
 
+  it("preserves a copy failure diagnostic after extensive progress", async () => {
+    const originalsLibraryPath = createOriginalsLibrary();
+    const outputPath = join(
+      originalsLibraryPath,
+      ".disc.iso.rip-dvd-partial",
+    );
+    const stderr = Object.assign(new EventEmitter(), { destroy: vi.fn() });
+    const authorizationReady = Object.assign(new EventEmitter(), {
+      destroy: vi.fn(),
+    });
+    const authorizationStart = { destroy: vi.fn(), end: vi.fn() };
+    const child = Object.assign(new EventEmitter(), {
+      stderr,
+      stdio: [
+        null,
+        null,
+        stderr,
+        null,
+        authorizationReady,
+        authorizationStart,
+      ] as [
+        null,
+        null,
+        typeof stderr,
+        null,
+        typeof authorizationReady,
+        typeof authorizationStart,
+      ],
+      kill: vi.fn(() => true),
+      unref: vi.fn(),
+    });
+    const runner = createNodeDvdCopyRunner({
+      requireInactive: () => undefined,
+      spawnProcess: () => child,
+    });
+    const completion = runner.copy({
+      devicePath: "/dev/zero",
+      outputPath,
+      sizeBytes: 9,
+      signal: new AbortController().signal,
+      onBytesCopied: () => undefined,
+    });
+    authorizationReady.emit(
+      "data",
+      Buffer.from("rip-dvd-copy-authorization-ready\n"),
+    );
+    const progress = Array.from(
+      { length: 30 },
+      (_, index) => `${(index + 1) * 63_488} bytes copied`,
+    );
+    stderr.emit(
+      "data",
+      Buffer.from(
+        `${progress.join("\n")}\nDVD content read failed at byte 1904640: Input/output error\n`,
+      ),
+    );
+    child.emit("close", 1, null);
+
+    await expect(completion).rejects.toThrow(
+      "DVD archive copy failed: DVD content read failed at byte 1904640: Input/output error",
+    );
+  });
+
   it("matches native reader capacity to configured drive concurrency", async () => {
     const originalsLibraryPath = createOriginalsLibrary();
     const children = Array.from({ length: 2 }, () => {
