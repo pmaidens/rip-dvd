@@ -40,6 +40,7 @@ interface DvdRescueMap {
   totalSectorCount: number;
   recoveryPolicyVersion: typeof DVD_RECOVERY_POLICY_VERSION;
   imageFilesystemIdentity: string;
+  preparedImageBasename?: string;
   recoveryProtocol: DvdRecoveryProtocolPayload;
 }
 
@@ -149,6 +150,7 @@ function createRescueMap(
   identity: DvdRescueIdentity,
   imageFilesystemIdentity: string,
   recoveryResult: DvdRecoveryResult,
+  preparedImageBasename?: string,
 ): DvdRescueMap {
   const recoveryProtocol = createDvdRecoveryProtocolPayload(recoveryResult);
   parseDvdRecoveryResultProtocol(
@@ -164,8 +166,42 @@ function createRescueMap(
     totalSectorCount: identity.sizeBytes / DVD_SECTOR_SIZE_BYTES,
     recoveryPolicyVersion: DVD_RECOVERY_POLICY_VERSION,
     imageFilesystemIdentity,
+    ...(preparedImageBasename === undefined ? {} : { preparedImageBasename }),
     recoveryProtocol,
   };
+}
+
+function requirePreparedImagePath(
+  root: string,
+  identity: DvdRescueIdentity,
+  value: unknown,
+): string {
+  const digest = identity.fingerprint.slice(
+    identity.fingerprint.lastIndexOf(":") + 1,
+  );
+  const stem = identity.fingerprint.startsWith("dvdmeta-sha256:")
+    ? `dvdmeta-${digest}`
+    : digest;
+  const expectedPrefix = `.${stem}.`;
+  const expectedSuffix = ".iso.rip-dvd-partial";
+  const uuid =
+    typeof value === "string" &&
+    value.startsWith(expectedPrefix) &&
+    value.endsWith(expectedSuffix)
+      ? value.slice(expectedPrefix.length, -expectedSuffix.length)
+      : "";
+  if (
+    typeof value !== "string" ||
+    basename(value) !== value ||
+    !ARCHIVE_REQUEST_ID_PATTERN.test(uuid)
+  ) {
+    throw new Error("Prepared DVD rescue image identity is invalid");
+  }
+  const path = join(root, value);
+  if (dirname(path) !== root) {
+    throw new Error("Prepared DVD rescue image escaped the Originals library");
+  }
+  return path;
 }
 
 async function writeMapAtomically(
@@ -227,11 +263,7 @@ export async function loadDvdRescueWorkspace(
       !Number.isSafeInteger(identity.sizeBytes) ||
       identity.sizeBytes <= 0 ||
       identity.sizeBytes % DVD_SECTOR_SIZE_BYTES !== 0 ||
-      imageMetadata === null ||
       mapMetadata === null ||
-      !imageMetadata.isFile() ||
-      imageMetadata.isSymbolicLink() ||
-      imageMetadata.size !== identity.sizeBytes ||
       !mapMetadata.isFile() ||
       mapMetadata.isSymbolicLink() ||
       mapMetadata.size <= 0 ||
@@ -261,6 +293,43 @@ export async function loadDvdRescueWorkspace(
     const parsed = JSON.parse(text) as unknown;
     const recoveryResult = recoveryResultFromRescueMap(parsed, identity);
     const map = parsed as DvdRescueMap;
+    const preparedImagePath =
+      "preparedImageBasename" in map
+        ? requirePreparedImagePath(
+            root,
+            identity,
+            map.preparedImageBasename,
+          )
+        : null;
+    if (imageMetadata === null && preparedImagePath !== null) {
+      const preparedImageMetadata = await lstat(preparedImagePath);
+      if (
+        !preparedImageMetadata.isFile() ||
+        preparedImageMetadata.isSymbolicLink() ||
+        preparedImageMetadata.size !== identity.sizeBytes ||
+        filesystemIdentity(preparedImageMetadata) !==
+          map.imageFilesystemIdentity
+      ) {
+        throw new Error("Prepared DVD rescue image is invalid");
+      }
+      await rename(preparedImagePath, paths.imagePath);
+      await syncPath(root);
+      imageMetadata = await lstat(paths.imagePath);
+    } else if (
+      imageMetadata !== null &&
+      preparedImagePath !== null &&
+      (await optionalMetadata(preparedImagePath)) !== null
+    ) {
+      throw new Error("DVD rescue transaction contains conflicting images");
+    }
+    if (
+      imageMetadata === null ||
+      !imageMetadata.isFile() ||
+      imageMetadata.isSymbolicLink() ||
+      imageMetadata.size !== identity.sizeBytes
+    ) {
+      throw new Error("DVD rescue image is invalid");
+    }
     if (map.imageFilesystemIdentity !== filesystemIdentity(imageMetadata)) {
       throw new Error("DVD rescue image does not match its recovery map");
     }
@@ -270,6 +339,17 @@ export async function loadDvdRescueWorkspace(
       basename(canonicalImagePath) !== basename(paths.imagePath)
     ) {
       throw new Error("DVD rescue image escaped the Originals library");
+    }
+    if (preparedImagePath !== null) {
+      await writeMapAtomically(
+        root,
+        paths.mapPath,
+        createRescueMap(
+          identity,
+          map.imageFilesystemIdentity,
+          recoveryResult,
+        ),
+      );
     }
     return {
       ...paths,
@@ -308,9 +388,8 @@ export async function commitDvdRescueWorkspace(
   ) {
     throw new Error("DVD rescue workspace cannot be committed safely");
   }
-  await rename(sourceImagePath, paths.imagePath);
   try {
-    const imageMetadata = await lstat(paths.imagePath);
+    const imageMetadata = await lstat(sourceImagePath);
     if (
       !imageMetadata.isFile() ||
       imageMetadata.isSymbolicLink() ||
@@ -319,6 +398,17 @@ export async function commitDvdRescueWorkspace(
       throw new Error("DVD rescue image is invalid");
     }
     const imageFilesystemIdentity = filesystemIdentity(imageMetadata);
+    await writeMapAtomically(
+      root,
+      paths.mapPath,
+      createRescueMap(
+        identity,
+        imageFilesystemIdentity,
+        recoveryResult,
+        basename(sourceImagePath),
+      ),
+    );
+    await rename(sourceImagePath, paths.imagePath);
     await syncPath(root);
     await writeMapAtomically(
       root,
@@ -331,13 +421,6 @@ export async function commitDvdRescueWorkspace(
     );
     return { ...paths, imageFilesystemIdentity, recoveryResult };
   } catch (error) {
-    try {
-      await quarantineWorkspaceFiles(root, paths);
-    } catch (quarantineError) {
-      throw new Error("DVD rescue state could not be quarantined", {
-        cause: quarantineError,
-      });
-    }
     throw new Error("DVD rescue state could not be committed", {
       cause: error,
     });
