@@ -15,9 +15,21 @@ const UDF_EXTENT_LENGTH_MASK = 0x3fff_ffff;
 const UDF_EXTENT_TYPE_MASK = 0xc000_0000;
 
 interface SectorExtent {
+  fileSectorOffset?: number;
+  path?: string;
+  source?: "iso" | "udf";
   startLba: number;
   sectorCount: number;
   reason: DvdSalvageRejectionReason;
+}
+
+interface DvdFileLayout {
+  byteCount: number;
+  extents: readonly {
+    byteCount: number;
+    startLba: number;
+  }[];
+  path: string;
 }
 
 interface UdfLongAllocationDescriptor {
@@ -103,6 +115,20 @@ function classifyDvdPath(path: string): DvdSalvageRejectionReason {
   return "referenced_content";
 }
 
+function titleVobIdentity(path: string): {
+  partNumber: number;
+  titleSetNumber: number;
+} | null {
+  const match = /^VIDEO_TS\/VTS_(\d{2})_([1-9])\.VOB$/.exec(path);
+  if (match === null) {
+    return null;
+  }
+  return {
+    partNumber: Number(match[2]),
+    titleSetNumber: Number(match[1]),
+  };
+}
+
 function validateUdfTag(buffer: Buffer, expectedIdentifiers: readonly number[]): number {
   if (buffer.byteLength < 16) {
     throw new Error("DVD UDF descriptor is truncated");
@@ -182,6 +208,9 @@ export async function classifyDvdImageDamage({
   expectedByteCount: number;
   unreadableSectorRanges: readonly UnreadableSectorRange[];
 }): Promise<{ outcome: "accepted" } | {
+  affectedTitleSetNumbers: readonly number[];
+  outcome: "accepted";
+} | {
   outcome: "rejected";
   reason: DvdSalvageRejectionReason;
 }> {
@@ -213,15 +242,22 @@ export async function classifyDvdImageDamage({
 
   const handle = await open(imagePath, "r");
   const allocatedExtents: SectorExtent[] = [];
+  const isoDvdFiles = new Map<string, DvdFileLayout>();
+  const udfDvdFiles = new Map<string, DvdFileLayout>();
   const isoDvdPaths = new Set<string>();
   const udfDvdPaths = new Set<string>();
   const addExtent = (
     startLba: number,
     sectorCount: number,
     reason: DvdSalvageRejectionReason,
+    file?: {
+      fileSectorOffset: number;
+      path: string;
+      source: "iso" | "udf";
+    },
   ) => {
     requireSafeExtent(startLba, sectorCount, totalSectorCount);
-    allocatedExtents.push({ startLba, sectorCount, reason });
+    allocatedExtents.push({ startLba, sectorCount, reason, ...file });
   };
   const classifyBeforeMetadataRead = (
     startLba: number,
@@ -355,16 +391,203 @@ export async function classifyDvdImageDamage({
             visited,
           );
         } else {
-          isoDvdPaths.add(path.toUpperCase());
+          const normalizedPath = path.toUpperCase();
+          isoDvdPaths.add(normalizedPath);
+          const fileLayout = {
+            byteCount: extentBytes,
+            extents: [{ byteCount: extentBytes, startLba: dataLba }],
+            path: normalizedPath,
+          } satisfies DvdFileLayout;
+          const existingFile = isoDvdFiles.get(normalizedPath);
+          if (
+            existingFile !== undefined &&
+            JSON.stringify(existingFile) !== JSON.stringify(fileLayout)
+          ) {
+            throw new Error("DVD ISO file layout is ambiguous");
+          }
+          isoDvdFiles.set(normalizedPath, fileLayout);
           addExtent(
             dataLba,
             sectorCountForBytes(extentBytes),
             classifyDvdPath(path),
+            {
+              fileSectorOffset: 0,
+              path: normalizedPath,
+              source: "iso",
+            },
           );
         }
       }
       offset += recordLength;
     }
+  };
+
+  const readDvdFile = async (
+    file: DvdFileLayout,
+    maximumBytes: number,
+  ): Promise<Buffer> => {
+    if (file.byteCount <= 0 || file.byteCount > maximumBytes) {
+      throw new Error("DVD-Video control file exceeds its safety bound");
+    }
+    const content = Buffer.alloc(file.byteCount);
+    let written = 0;
+    for (const extent of file.extents) {
+      const sectorCount = sectorCountForBytes(extent.byteCount);
+      requireSafeExtent(extent.startLba, sectorCount, totalSectorCount);
+      for (
+        let lba = extent.startLba;
+        lba < extent.startLba + sectorCount;
+        lba += 1
+      ) {
+        if (badSectors.has(lba)) {
+          throw new ClassifiedDamageError("ifo");
+        }
+      }
+      const bytesToRead = Math.min(extent.byteCount, file.byteCount - written);
+      const { bytesRead } = await handle.read(
+        content,
+        written,
+        bytesToRead,
+        extent.startLba * DVD_SECTOR_SIZE_BYTES,
+      );
+      if (bytesRead !== bytesToRead) {
+        throw new Error("DVD-Video control file read was incomplete");
+      }
+      written += bytesRead;
+    }
+    if (written !== file.byteCount) {
+      throw new Error("DVD-Video control file layout is incomplete");
+    }
+    return content;
+  };
+
+  const readTitleVobuAddressMap = async (
+    dvdFiles: ReadonlyMap<string, DvdFileLayout>,
+    titleSetNumber: number,
+    titleVobSectorCount: number,
+  ): Promise<ReadonlySet<number>> => {
+    const ifoPath = `VIDEO_TS/VTS_${String(titleSetNumber).padStart(2, "0")}_0.IFO`;
+    const file = dvdFiles.get(ifoPath);
+    if (file === undefined) {
+      throw new Error("DVD title-set navigation file is missing");
+    }
+    const content = await readDvdFile(file, MAX_FILE_ENTRY_BYTES * 16);
+    if (
+      content.byteLength < DVD_SECTOR_SIZE_BYTES ||
+      content.toString("ascii", 0, 12) !== "DVDVIDEO-VTS"
+    ) {
+      throw new Error("DVD title-set navigation file is malformed");
+    }
+    const addressMapSector = content.readUInt32BE(0xe4);
+    const addressMapOffset = addressMapSector * DVD_SECTOR_SIZE_BYTES;
+    if (
+      !Number.isSafeInteger(addressMapOffset) ||
+      addressMapOffset < DVD_SECTOR_SIZE_BYTES ||
+      addressMapOffset + 4 > content.byteLength
+    ) {
+      throw new Error("DVD title VOBU address map is missing");
+    }
+    const tableByteCount = content.readUInt32BE(addressMapOffset) + 1;
+    if (
+      tableByteCount < 8 ||
+      tableByteCount % 4 !== 0 ||
+      addressMapOffset + tableByteCount > content.byteLength
+    ) {
+      throw new Error("DVD title VOBU address map is malformed");
+    }
+    const navigationSectors = new Set<number>();
+    let previousSector = -1;
+    for (
+      let offset = addressMapOffset + 4;
+      offset < addressMapOffset + tableByteCount;
+      offset += 4
+    ) {
+      const sector = content.readUInt32BE(offset);
+      if (sector <= previousSector || sector >= titleVobSectorCount) {
+        throw new Error("DVD title VOBU address map is malformed");
+      }
+      navigationSectors.add(sector);
+      previousSector = sector;
+    }
+    if (!navigationSectors.has(0)) {
+      throw new Error("DVD title VOBU address map is incomplete");
+    }
+    return navigationSectors;
+  };
+
+  const classifyTitleVobSector = async (
+    extent: SectorExtent,
+    badLba: number,
+  ): Promise<{ outcome: "navigation" } | {
+    outcome: "payload";
+    titleSetNumber: number;
+  } | { outcome: "ambiguous" }> => {
+    if (
+      extent.path === undefined ||
+      extent.fileSectorOffset === undefined ||
+      extent.source === undefined
+    ) {
+      return { outcome: "ambiguous" };
+    }
+    const identity = titleVobIdentity(extent.path);
+    if (identity === null) {
+      return { outcome: "ambiguous" };
+    }
+    const dvdFiles = extent.source === "iso" ? isoDvdFiles : udfDvdFiles;
+    const titleParts = [...dvdFiles.values()]
+      .map((file) => ({ file, identity: titleVobIdentity(file.path) }))
+      .filter(({ identity: partIdentity }) =>
+        partIdentity?.titleSetNumber === identity.titleSetNumber
+      )
+      .sort((left, right) =>
+        left.identity!.partNumber - right.identity!.partNumber
+      );
+    if (
+      titleParts.length === 0 ||
+      titleParts.some(({ file, identity: partIdentity }, index) =>
+        partIdentity!.partNumber !== index + 1 ||
+        file.byteCount % DVD_SECTOR_SIZE_BYTES !== 0
+      )
+    ) {
+      return { outcome: "ambiguous" };
+    }
+    const currentPartIndex = titleParts.findIndex(({ identity: partIdentity }) =>
+      partIdentity!.partNumber === identity.partNumber
+    );
+    if (currentPartIndex === -1) {
+      return { outcome: "ambiguous" };
+    }
+    const precedingSectorCount = titleParts
+      .slice(0, currentPartIndex)
+      .reduce(
+        (total, { file }) => total + file.byteCount / DVD_SECTOR_SIZE_BYTES,
+        0,
+      );
+    const titleVobSector = precedingSectorCount +
+      extent.fileSectorOffset + badLba - extent.startLba;
+    const titleVobSectorCount = titleParts.reduce(
+      (total, { file }) => total + file.byteCount / DVD_SECTOR_SIZE_BYTES,
+      0,
+    );
+    if (
+      !Number.isSafeInteger(titleVobSector) ||
+      titleVobSector < 0 ||
+      titleVobSector >= titleVobSectorCount
+    ) {
+      return { outcome: "ambiguous" };
+    }
+    const ifoPath = `VIDEO_TS/VTS_${String(identity.titleSetNumber).padStart(2, "0")}_0.IFO`;
+    if (!dvdFiles.has(ifoPath)) {
+      return { outcome: "ambiguous" };
+    }
+    const navigationSectors = await readTitleVobuAddressMap(
+      dvdFiles,
+      identity.titleSetNumber,
+      titleVobSectorCount,
+    );
+    return navigationSectors.has(titleVobSector)
+      ? { outcome: "navigation" }
+      : { outcome: "payload", titleSetNumber: identity.titleSetNumber };
   };
 
   const parseIso = async (): Promise<number> => {
@@ -746,7 +969,9 @@ export async function classifyDvdImageDamage({
       if (!isDirectory && fileType !== 5) {
         throw new Error("DVD UDF file type is unsupported");
       }
+      const normalizedPath = path.toUpperCase();
       const dataExtents: Array<{ startLba: number; byteCount: number }> = [];
+      let fileByteOffset = 0;
       if (allocationType === 3) {
         if (allocationDescriptorLength < informationLength) {
           throw new Error("DVD UDF embedded file data is truncated");
@@ -800,11 +1025,39 @@ export async function classifyDvdImageDamage({
           const extentReason = isDirectory
             ? "directory_data"
             : classifyDvdPath(path);
-          addExtent(startLba, sectorCountForBytes(extentLength), extentReason);
+          const fileSectorOffset = fileByteOffset % DVD_SECTOR_SIZE_BYTES === 0
+            ? fileByteOffset / DVD_SECTOR_SIZE_BYTES
+            : undefined;
+          addExtent(
+            startLba,
+            sectorCountForBytes(extentLength),
+            extentReason,
+            !isDirectory && fileSectorOffset !== undefined
+              ? {
+                  fileSectorOffset,
+                  path: normalizedPath,
+                  source: "udf",
+                }
+              : undefined,
+          );
+          fileByteOffset += extentLength;
         }
       }
       if (!isDirectory) {
-        udfDvdPaths.add(path.toUpperCase());
+        udfDvdPaths.add(normalizedPath);
+        const fileLayout = {
+          byteCount: informationLength,
+          extents: dataExtents,
+          path: normalizedPath,
+        } satisfies DvdFileLayout;
+        const existingFile = udfDvdFiles.get(normalizedPath);
+        if (
+          existingFile !== undefined &&
+          JSON.stringify(existingFile) !== JSON.stringify(fileLayout)
+        ) {
+          throw new Error("DVD UDF file layout is ambiguous");
+        }
+        udfDvdFiles.set(normalizedPath, fileLayout);
         return;
       }
 
@@ -900,12 +1153,54 @@ export async function classifyDvdImageDamage({
         requiredDvdPaths.some((path) => !udfDvdPaths.has(path)))) {
       throw new Error("DVD-Video control structures are missing");
     }
+    const affectedTitleSetNumbers = new Set<number>();
     for (const badLba of badSectors) {
-      const allocated = allocatedExtents.find((extent) =>
+      const allocations = allocatedExtents.filter((extent) =>
         extentContainsLba(extent, badLba)
       );
-      if (allocated !== undefined) {
-        return { outcome: "rejected", reason: allocated.reason };
+      if (allocations.length > 0) {
+        const structural = allocations.find((extent) =>
+          extent.reason !== "referenced_content"
+        );
+        if (structural !== undefined) {
+          return { outcome: "rejected", reason: structural.reason };
+        }
+        if (udfBounds.hasUdf) {
+          const allocationSources = new Set(
+            allocations.map((extent) => extent.source),
+          );
+          if (
+            !allocationSources.has("iso") ||
+            !allocationSources.has("udf")
+          ) {
+            return { outcome: "rejected", reason: "ambiguous" };
+          }
+        }
+        const titleVobClassifications = await Promise.all(
+          allocations.map((extent) => classifyTitleVobSector(extent, badLba)),
+        );
+        if (titleVobClassifications.some(({ outcome }) =>
+          outcome === "navigation"
+        )) {
+          return { outcome: "rejected", reason: "navigation" };
+        }
+        if (titleVobClassifications.some(({ outcome }) =>
+          outcome === "ambiguous"
+        )) {
+          return { outcome: "rejected", reason: "ambiguous" };
+        }
+        const payloadTitleSetNumbers = new Set(
+          titleVobClassifications.map((classification) =>
+            classification.outcome === "payload"
+              ? classification.titleSetNumber
+              : -1
+          ),
+        );
+        if (payloadTitleSetNumbers.size !== 1) {
+          return { outcome: "rejected", reason: "ambiguous" };
+        }
+        affectedTitleSetNumbers.add([...payloadTitleSetNumbers][0]!);
+        continue;
       }
       if (
         udfBounds.damagedRecognition &&
@@ -936,7 +1231,14 @@ export async function classifyDvdImageDamage({
         throw new Error("DVD salvage substituted sector data is invalid");
       }
     }
-    return { outcome: "accepted" };
+    return affectedTitleSetNumbers.size === 0
+      ? { outcome: "accepted" }
+      : {
+          affectedTitleSetNumbers: [...affectedTitleSetNumbers].sort(
+            (left, right) => left - right,
+          ),
+          outcome: "accepted",
+        };
   } catch (error) {
     if (error instanceof ClassifiedDamageError) {
       return { outcome: "rejected", reason: error.reason };

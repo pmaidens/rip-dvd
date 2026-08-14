@@ -49,7 +49,7 @@ import {
   validateDvdRecoveryResult,
 } from "./dvd-recovery-contracts.js";
 import {
-  DVD_UNUSED_SPACE_SALVAGE_POLICY_VERSION,
+  DVD_WATCHABLE_SALVAGE_POLICY_VERSION,
   formatRejectedDvdSalvage,
   type DvdSalvageValidator,
 } from "./dvd-salvage-validator.js";
@@ -1028,7 +1028,7 @@ export async function preserveDvdArchive({
         validation = {
           outcome: "publish",
           integrityEvidence: createWatchableSalvageArchiveIntegrityEvidence(
-            DVD_UNUSED_SPACE_SALVAGE_POLICY_VERSION,
+            DVD_WATCHABLE_SALVAGE_POLICY_VERSION,
             validation.recoveryResult.unrecoveredSectorRanges,
           ),
         };
