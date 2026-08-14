@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { lstatSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   createInProcessDvdRescueWorkspaceLock,
   createNodeDvdRescueWorkspaceLock,
+  DVD_RESCUE_WORKSPACE_LOCK_DIRECTORY_NAME,
   type DvdRescueWorkspaceLock,
 } from "./dvd-rescue-workspace-lock.js";
 
@@ -78,6 +79,31 @@ describe("DVD rescue workspace lock", () => {
     "excludes overlapping work across file descriptors",
     async () => {
       await expectExclusiveLock(createNodeDvdRescueWorkspaceLock());
+    },
+  );
+
+  it.skipIf(!hasFlock)(
+    "keeps persistent lock sentinels outside the flat archive scan",
+    async () => {
+      const originalsLibraryPath = createOriginalsLibrary();
+      await createNodeDvdRescueWorkspaceLock().withLock({
+        archiveRequestId: "archive-request:disc:dedicated-lock-directory",
+        originalsLibraryPath,
+        signal: new AbortController().signal,
+        task: async () => undefined,
+      });
+
+      expect(readdirSync(originalsLibraryPath)).toEqual([
+        DVD_RESCUE_WORKSPACE_LOCK_DIRECTORY_NAME,
+      ]);
+      const lockDirectory = join(
+        originalsLibraryPath,
+        DVD_RESCUE_WORKSPACE_LOCK_DIRECTORY_NAME,
+      );
+      expect(lstatSync(lockDirectory).mode & 0o077).toBe(0);
+      expect(readdirSync(lockDirectory)).toEqual([
+        expect.stringMatching(/^\.[0-9a-f]{64}\.rip-dvd-rescue\.json\.lock$/),
+      ]);
     },
   );
 });

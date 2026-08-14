@@ -2,6 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -31,6 +32,9 @@ import {
   DVD_RECOVERY_RESULT_PREFIX,
 } from "./dvd-recovery-contracts.js";
 import { dvdRescueWorkspacePaths } from "./dvd-rescue-workspace.js";
+import {
+  DVD_RESCUE_WORKSPACE_LOCK_DIRECTORY_NAME,
+} from "./dvd-rescue-workspace-lock.js";
 
 const temporaryDirectories: string[] = [];
 const orphanedWriterPids: number[] = [];
@@ -585,6 +589,43 @@ describe("DVD archive publication", () => {
     expect(runner.copy).not.toHaveBeenCalled();
     expect(readFileSync(partialPath, "utf8")).toBe("recoverable evidence");
     expect(existsSync(`${partialPath}.failed`)).toBe(false);
+  });
+
+  it("does not count nested rescue lock sentinels as archive entries", async () => {
+    const originalsLibraryPath = createOriginalsLibrary();
+    const root = realpathSync(originalsLibraryPath);
+    const lockDirectory = join(
+      root,
+      DVD_RESCUE_WORKSPACE_LOCK_DIRECTORY_NAME,
+    );
+    mkdirSync(lockDirectory, { mode: 0o700 });
+    for (let index = 0; index < 4_097; index += 1) {
+      writeFileSync(join(lockDirectory, `request-${index}.lock`), "");
+    }
+    const content = Buffer.from("fresh archive");
+    const runner: DvdCopyRunner = {
+      copy: vi.fn(async ({ outputPath, sizeBytes }) => {
+        writeFileSync(outputPath, content);
+        return createCleanDvdRecoveryResult(sizeBytes);
+      }),
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    };
+
+    await expect(preserveDvdArchive({
+      devicePath: "/dev/sr0",
+      fingerprint: `sha256:${"c".repeat(64)}`,
+      originalsLibraryPath,
+      runner,
+      signal: new AbortController().signal,
+      sizeBytes: content.byteLength,
+      verifySource: async () => undefined,
+      onProgress: () => undefined,
+    })).resolves.toMatchObject({ recovered: false });
+
+    expect(runner.copy).toHaveBeenCalledOnce();
+    expect(readdirSync(lockDirectory)).toHaveLength(4_097);
   });
 
   it.runIf(supportsLinuxWriterOwnership)(
