@@ -79,8 +79,27 @@ export async function runArchiveJob({
 
   let publishedArchivePath: string | undefined;
   try {
+    const verifySource = async () => {
+      await confirmAuthorizedDrive({
+        access,
+        configuredCanonicalPath,
+        expected: binding.drive,
+        hardware,
+        phase: "DVD persistence",
+        signal: archiveSignal,
+      });
+      await hardware.confirmOpticalDrive(binding, archiveSignal);
+      const observedGeneration = await hardware.observeMediaGeneration(
+        binding,
+        archiveSignal,
+      );
+      if (observedGeneration !== mediaGeneration) {
+        throw new Error("DVD medium changed during archiving");
+      }
+    };
     const preserved = await preserveDvdArchive({
-      authorizeCopy: () => {
+      archiveRequestId: claim.archiveRequestId,
+      authorizeCopy: async () => {
         archiveSignal.throwIfAborted();
         if (access.archiveJobs.isCancellationRequested(claim)) {
           const cancellation = new Error(
@@ -90,6 +109,8 @@ export async function runArchiveJob({
           archiveSignal.throwIfAborted();
         }
         access.archiveJobs.renewClaim(claim);
+        await verifySource();
+        archiveSignal.throwIfAborted();
       },
       devicePath: binding.drive.devicePath,
       expectedTitleMap: scanData,
@@ -102,24 +123,7 @@ export async function runArchiveJob({
       onProgress: (progress) => {
         access.archiveJobs.updateProgress(claim, progress);
       },
-      verifySource: async () => {
-        await confirmAuthorizedDrive({
-          access,
-          configuredCanonicalPath,
-          expected: binding.drive,
-          hardware,
-          phase: "DVD persistence",
-          signal: archiveSignal,
-        });
-        await hardware.confirmOpticalDrive(binding, archiveSignal);
-        const observedGeneration = await hardware.observeMediaGeneration(
-          binding,
-          archiveSignal,
-        );
-        if (observedGeneration !== mediaGeneration) {
-          throw new Error("DVD medium changed during archiving");
-        }
-      },
+      verifySource,
     });
     publishedArchivePath = preserved.archivePath;
     try {
@@ -128,6 +132,15 @@ export async function runArchiveJob({
         integrityEvidence: preserved.integrityEvidence,
         sizeBytes: preserved.sizeBytes,
       });
+      try {
+        await preserved.finalizePublication?.();
+      } catch (cleanupError) {
+        const cleanupMessage =
+          cleanupError instanceof Error
+            ? cleanupError.message
+            : String(cleanupError);
+        log(`Completed DVD rescue cleanup deferred: ${cleanupMessage}`);
+      }
     } catch (error) {
       await quarantinePublishedArchive(preserved.archivePath);
       publishedArchivePath = undefined;
