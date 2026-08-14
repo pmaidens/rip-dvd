@@ -59,6 +59,20 @@ function InteractiveDiscSelections({
         hasPrevious: false,
         hasNext: false,
       }}
+      correctionEncodeHistory={[]}
+      correctionEncodeHistoryPage={{
+        offset: 0,
+        limit: 100,
+        hasPrevious: false,
+        hasNext: false,
+      }}
+      correctionRetainedOutputHistory={[]}
+      correctionRetainedOutputHistoryPage={{
+        offset: 0,
+        limit: 100,
+        hasPrevious: false,
+        hasNext: false,
+      }}
       mediaItems={[
         {
           id: "episode-1",
@@ -90,6 +104,8 @@ function InteractiveDiscSelections({
       isSaving={false}
       onPage={() => undefined}
       onCorrectionHistoryPage={() => undefined}
+      onCorrectionEncodeHistoryPage={() => undefined}
+      onCorrectionRetainedOutputHistoryPage={() => undefined}
       onSelectionKindChange={setSelectionKind}
       onCreate={() => undefined}
       onUpdate={onUpdate}
