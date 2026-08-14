@@ -600,21 +600,59 @@ static int parse_resume_bitmap(const char *text, uint64_t total_sector_count,
     return 0;
 }
 
+static int parse_filesystem_identity(const char *text,
+                                     uintmax_t *expected_device,
+                                     uintmax_t *expected_inode)
+{
+    if (text == NULL || text[0] < '0' || text[0] > '9') {
+        fprintf(stderr, "DVD rescue image identity is invalid\n");
+        return 1;
+    }
+    char *device_end = NULL;
+    errno = 0;
+    uintmax_t device = strtoumax(text, &device_end, 10);
+    if (errno != 0 || device_end == text || *device_end != ':' ||
+        device_end[1] < '0' || device_end[1] > '9') {
+        fprintf(stderr, "DVD rescue image identity is invalid\n");
+        return 1;
+    }
+    char *inode_end = NULL;
+    errno = 0;
+    uintmax_t inode = strtoumax(device_end + 1, &inode_end, 10);
+    if (errno != 0 || inode_end == device_end + 1 || *inode_end != '\0' ||
+        inode == 0) {
+        fprintf(stderr, "DVD rescue image identity is invalid\n");
+        return 1;
+    }
+    *expected_device = device;
+    *expected_inode = inode;
+    return 0;
+}
+
 static int run_resume(struct read_backend *backend, const char *output_path,
                       uint64_t size_bytes,
                       const unsigned char *prior_bad_sector_bitmap,
                       uint64_t prior_bad_sector_count,
+                      const char *expected_filesystem_identity,
                       int emit_malformed_result)
 {
+    uintmax_t expected_device = 0;
+    uintmax_t expected_inode = 0;
+    if (parse_filesystem_identity(expected_filesystem_identity,
+                                  &expected_device, &expected_inode) != 0) {
+        return 1;
+    }
     int output_fd = open(output_path, O_RDWR | O_NOFOLLOW | O_CLOEXEC);
     if (output_fd < 0) {
         return fail_errno("DVD rescue image open failed");
     }
     struct stat output;
     if (fstat(output_fd, &output) != 0 || !S_ISREG(output.st_mode) ||
-        output.st_size < 0 || (uint64_t)output.st_size != size_bytes) {
+        output.st_size < 0 || (uint64_t)output.st_size != size_bytes ||
+        (uintmax_t)output.st_dev != expected_device ||
+        (uintmax_t)output.st_ino != expected_inode) {
         close(output_fd);
-        fprintf(stderr, "DVD rescue image is invalid\n");
+        fprintf(stderr, "DVD rescue image does not match its recovery map\n");
         return 1;
     }
     uint64_t total_sector_count = size_bytes / DVDCSS_BLOCK_SIZE;
@@ -917,9 +955,9 @@ static int run_test_copy(int argc, char **argv)
 
 static int run_test_resume(int argc, char **argv)
 {
-    if (argc != 9) {
+    if (argc != 10) {
         fprintf(stderr,
-                "usage: %s resume-test SOURCE OUTPUT SIZE FAULTS DELAY MODE BITMAP\n",
+                "usage: %s resume-test SOURCE OUTPUT SIZE FAULTS DELAY MODE BITMAP IDENTITY\n",
                 argv[0]);
         return 2;
     }
@@ -944,7 +982,8 @@ static int run_test_resume(int argc, char **argv)
         return close_test_backend(&backend, 2);
     }
     int status = run_resume(&backend, argv[3], size_bytes, resume_bitmap,
-                            resume_bad_sector_count, malformed_result);
+                            resume_bad_sector_count, argv[9],
+                            malformed_result);
     free(resume_bitmap);
     return close_test_backend(&backend, status);
 }
@@ -976,7 +1015,8 @@ int main(int argc, char **argv)
                                    ? OPERATION_HASH
                                    : OPERATION_COPY;
     if ((operation == OPERATION_HASH && argc != 4) ||
-        (operation == OPERATION_COPY && argc != 5)) {
+        (operation == OPERATION_COPY &&
+         argc != (authorized_resume ? 6 : 5))) {
         fprintf(stderr, "DVD reader arguments are invalid\n");
         return 2;
     }
@@ -1005,7 +1045,7 @@ int main(int argc, char **argv)
         status = run_hash(&backend, size_bytes);
     } else if (authorized_resume) {
         status = run_resume(&backend, argv[3], size_bytes, resume_bitmap,
-                            resume_bad_sector_count, 0);
+                            resume_bad_sector_count, argv[5], 0);
     } else {
         status = run_copy(&backend, argv[3], size_bytes, 0);
     }

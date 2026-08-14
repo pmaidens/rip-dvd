@@ -87,6 +87,7 @@ export interface DvdCopyRequest {
   authorizeStart?(): void | Promise<void>;
   devicePath: string;
   outputPath: string;
+  resumeImageFilesystemIdentity?: string;
   sizeBytes: number;
   signal: AbortSignal;
   onBytesCopied(bytes: number): void;
@@ -232,6 +233,16 @@ export function createNodeDvdCopyRunner({
       const lockDescriptor = openDeviceLock(request.devicePath);
       let child: DvdCopyChildProcess;
       try {
+        const resumeImageFilesystemIdentity =
+          request.resumeFrom === undefined
+            ? undefined
+            : request.resumeImageFilesystemIdentity;
+        if (
+          request.resumeFrom !== undefined &&
+          !/^\d+:[1-9]\d*$/.test(resumeImageFilesystemIdentity ?? "")
+        ) {
+          throw new Error("DVD rescue image identity is invalid");
+        }
         child = spawnProcess(
           "flock",
           [
@@ -248,6 +259,9 @@ export function createNodeDvdCopyRunner({
             requireSafeOpticalDevicePath(request.devicePath),
             request.outputPath,
             String(requireDvdContentSize(request.sizeBytes)),
+            ...(resumeImageFilesystemIdentity === undefined
+              ? []
+              : [resumeImageFilesystemIdentity]),
           ],
           {
             shell: false,
@@ -1127,10 +1141,13 @@ export async function preserveDvdArchive({
           ),
         });
       },
-      resumeFrom:
-        rescueWorkspace?.recoveryResult.outcome === "damaged"
-          ? rescueWorkspace.recoveryResult
-          : undefined,
+      ...(rescueWorkspace?.recoveryResult.outcome === "damaged"
+        ? {
+            resumeFrom: rescueWorkspace.recoveryResult,
+            resumeImageFilesystemIdentity:
+              rescueWorkspace.imageFilesystemIdentity,
+          }
+        : {}),
     });
     validation =
       rescueWorkspace?.recoveryResult.outcome === "damaged"

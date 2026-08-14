@@ -4,6 +4,7 @@ import { once } from "node:events";
 import {
   existsSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -80,6 +81,7 @@ function runTestCopy(name, faults, mode = "valid") {
 }
 
 function runTestResume(outputPath, faults, bitmapHex) {
+  const output = statSync(outputPath);
   const result = spawnSync(
     testExecutable,
     [
@@ -91,6 +93,7 @@ function runTestResume(outputPath, faults, bitmapHex) {
       "0",
       "valid",
       bitmapHex,
+      `${output.dev}:${output.ino}`,
     ],
     { encoding: "utf8" },
   );
@@ -252,6 +255,7 @@ const authorizedResume = spawn(
     sourcePath,
     persistentResumePath,
     String(content.byteLength),
+    `${statSync(persistentResumePath).dev}:${statSync(persistentResumePath).ino}`,
   ],
   { stdio: ["ignore", "ignore", "pipe", "ignore", "pipe", "pipe"] },
 );
@@ -274,6 +278,45 @@ if (
 ) {
   throw new Error(
     `libdvdcss reader authorized resume check failed: ${authorizedResumeStderr}`,
+  );
+}
+
+const replacementRacePath = prepareOutput(
+  "/tmp/rip-dvd-reader-replacement-race.img",
+);
+writeFileSync(replacementRacePath, isolatedContent);
+const expectedReplacementIdentity = statSync(replacementRacePath);
+const replacementContent = Buffer.alloc(content.byteLength, 91);
+const replacementCandidatePath = prepareOutput(`${replacementRacePath}.new`);
+writeFileSync(replacementCandidatePath, replacementContent);
+renameSync(replacementCandidatePath, replacementRacePath);
+const replacementRace = spawn(
+  executable,
+  [
+    "resume-authorized",
+    sourcePath,
+    replacementRacePath,
+    String(content.byteLength),
+    `${expectedReplacementIdentity.dev}:${expectedReplacementIdentity.ino}`,
+  ],
+  { stdio: ["ignore", "ignore", "pipe", "ignore", "pipe", "pipe"] },
+);
+let replacementRaceStderr = "";
+replacementRace.stderr.on("data", (chunk) => {
+  replacementRaceStderr += chunk.toString("utf8");
+});
+await once(replacementRace.stdio[4], "data");
+replacementRace.stdio[5].end(`1${isolatedResult.badSectorBitmapHex}`);
+const [replacementRaceStatus] = await once(replacementRace, "close");
+if (
+  replacementRaceStatus === 0 ||
+  !replacementRaceStderr.includes(
+    "DVD rescue image does not match its recovery map",
+  ) ||
+  !readFileSync(replacementRacePath).equals(replacementContent)
+) {
+  throw new Error(
+    `libdvdcss reader replacement race check failed: ${replacementRaceStderr}`,
   );
 }
 
