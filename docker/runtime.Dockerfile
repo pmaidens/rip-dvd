@@ -50,8 +50,24 @@ RUN gcc -std=c17 -O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong \
     /tmp/dvdcss-reader.c /tmp/libdvdcss-sg-io.c \
     --output /usr/local/bin/rip-dvd-dvdcss-reader \
     $(pkg-config --cflags --libs libdvdcss) -lcrypto \
+  && gcc -std=c17 -O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong \
+    -Wall -Wextra -Werror -Wformat=2 -fPIC -shared \
+    /tmp/libdvdcss-sg-io.c \
+    -Wl,-soname,libdvdcss-sg-io.so.0 -Wl,-z,defs \
+    --output /usr/local/lib/libdvdcss-sg-io.so.0 \
+  && CFLAGS="-include /tmp/libdvdcss-sg-io.h" \
+    LDFLAGS="-L/usr/local/lib -Wl,--no-as-needed -l:libdvdcss-sg-io.so.0 -Wl,--as-needed" \
+    LD_LIBRARY_PATH=/usr/local/lib \
+    meson setup /tmp/libdvdcss-shared-build /tmp/libdvdcss-source \
+    --buildtype=release --default-library=shared \
+    --libdir=lib \
+    -Denable_docs=false -Denable_examples=false \
+  && meson compile --clean --verbose --jobs 2 -C /tmp/libdvdcss-shared-build \
+  && meson install -C /tmp/libdvdcss-shared-build \
   && ldd /usr/local/bin/rip-dvd-dvdcss-reader \
   && ! ldd /usr/local/bin/rip-dvd-dvdcss-reader | grep --quiet libdvdcss \
+  && LD_LIBRARY_PATH=/usr/local/lib ldd /usr/local/lib/libdvdcss.so.2 \
+  && nm --dynamic --defined-only /usr/local/lib/libdvdcss.so.2 | grep --quiet ' dvdcss_open$' \
   && node /tmp/test-dvdcss-reader.mjs
 
 FROM dependencies AS shared-builder
@@ -154,12 +170,18 @@ RUN apt-get update \
 RUN mkdir --parents /media/originals \
   && chown node:node /media/originals
 COPY --from=dvdcss-reader-builder /usr/local/bin/rip-dvd-dvdcss-reader /usr/local/bin/rip-dvd-dvdcss-reader
+COPY --from=dvdcss-reader-builder /usr/local/lib/libdvdcss.so.2.4.0 /usr/local/lib/libdvdcss.so.2
+COPY --from=dvdcss-reader-builder /usr/local/lib/libdvdcss-sg-io.so.0 /usr/local/lib/libdvdcss-sg-io.so.0
+COPY docker/lsdvd-with-css.sh /usr/local/bin/rip-dvd-lsdvd
 COPY --from=dvdcss-reader-builder /tmp/libdvdcss.tar.xz /usr/share/doc/rip-dvd-dvdcss-reader/libdvdcss-1.6.0.tar.xz
 COPY --from=dvdcss-reader-builder /tmp/libdvdcss-source/COPYING /usr/share/doc/rip-dvd-dvdcss-reader/COPYING
 COPY docker/dvdcss-reader.c /usr/share/doc/rip-dvd-dvdcss-reader/dvdcss-reader.c
 COPY docker/libdvdcss-sg-io.h /usr/share/doc/rip-dvd-dvdcss-reader/libdvdcss-sg-io.h
 COPY docker/libdvdcss-sg-io.c /usr/share/doc/rip-dvd-dvdcss-reader/libdvdcss-sg-io.c
 COPY --from=archive-worker-builder --chown=node:node /archive-worker ./apps/archive-worker
+RUN chmod 0555 /usr/local/bin/rip-dvd-lsdvd \
+  && ldconfig \
+  && ldconfig -p | grep --quiet 'libdvdcss.so.2'
 ENV DVDCSS_CACHE="off"
 USER node
 ENTRYPOINT ["sh", "/app/scripts/worker-priority-entrypoint.sh"]

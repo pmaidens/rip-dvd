@@ -813,7 +813,7 @@ describe("Linux Optical Drive hardware boundary", () => {
     );
     expect(runner.run).toHaveBeenNthCalledWith(
       2,
-      "lsdvd",
+      "rip-dvd-lsdvd",
       ["-Oh", "-a", "-c", "-s", "/dev/sr0"],
       expect.objectContaining({
         maxBufferBytes: 1_048_576,
@@ -883,6 +883,51 @@ describe("Linux Optical Drive hardware boundary", () => {
             ],
           },
         ],
+      },
+    });
+  });
+
+  it("inspects a CSS-protected DVD through the packaged metadata reader", async () => {
+    const runner: CommandRunner = {
+      run: vi.fn().mockImplementation(async (executable: string) => {
+        if (executable === "lsdvd") {
+          return {
+            exitCode: 139,
+            stdout: "",
+            stderr: "Encrypted DVD support unavailable\nNo css library available",
+          };
+        }
+        if (executable === "rip-dvd-lsdvd") {
+          return {
+            exitCode: 0,
+            stdout: [
+              "Disc Title: PROTECTED_DISC",
+              "Title: 01, Length: 00:42:00.000 Chapters: 8, Cells: 8, Audio streams: 0, Subpictures: 0",
+            ].join("\n"),
+            stderr: "",
+          };
+        }
+        if (executable === "blockdev") {
+          return { exitCode: 0, stdout: "4700000000\n", stderr: "" };
+        }
+        throw new Error(`Unexpected command: ${executable}`);
+      }),
+    };
+    const hardware = createTestOpticalDriveHardware({
+      platform: "linux",
+      runner,
+      contentReader: {
+        hash: vi.fn().mockResolvedValue(`sha256:${"e".repeat(64)}`),
+      },
+      mediaGenerationObserver: stableMediaGenerationObserver(),
+    });
+
+    await expect(
+      hardware.scanDvd(boundOpticalDrive(), new AbortController().signal),
+    ).resolves.toMatchObject({
+      volumeLabel: "PROTECTED_DISC",
+      scanData: {
+        titles: [{ number: 1, durationSeconds: 2_520, chapters: 8 }],
       },
     });
   });
