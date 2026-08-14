@@ -457,6 +457,17 @@ export function CatalogReviewEvidence({
                 <button
                   type="button"
                   disabled={assistedMappingDisabled}
+                  onClick={() =>
+                    startWholeTitleProposal(
+                      title.number,
+                      "existing_media_item",
+                    )}
+                >
+                  Map to existing Media Item
+                </button>
+                <button
+                  type="button"
+                  disabled={assistedMappingDisabled}
                   onClick={() => onStartMappingProposal({
                     action: "chapters",
                     sourceIdentity: {

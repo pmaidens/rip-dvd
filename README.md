@@ -571,7 +571,9 @@ reopens only that archive before any new encode can be enqueued. Reviewed
 history pages use immutable archive identity, so paging remains stable while an
 archive moves back to Needs review.
 Each archived title exposes Assisted Mapping actions for a movie, bonus
-feature, trailer, chapter range, or other content. The editable Mapping
+feature, trailer, existing Media Item, chapter range, or other content. The
+existing-item action opens the Mapping Proposal directly in **Use existing
+Media Item** mode without preselecting a catalog identity. The editable Mapping
 Proposal remains next to that title on desktop and follows it on narrow screens;
 it preserves the initiating title while making **Create new Media Item** and
 **Use existing Media Item** explicit choices. New-item fields, the chosen
