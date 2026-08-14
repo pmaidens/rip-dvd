@@ -1045,6 +1045,7 @@ export function createDataAccessInternal(
     input: CreateDiscSelectionInput,
     id: DiscSelectionId,
     timestamp: Date,
+    options: { rejectExactOverlap?: boolean } = {},
   ) {
     const source = requireRow(
       transaction
@@ -1082,22 +1083,24 @@ export function createDataAccessInternal(
       );
     const sourcePersistence =
       serializeDiscSelectionSourceIdentity(sourceIdentity);
-    const duplicate = transaction
-      .select({ id: discSelections.id })
-      .from(discSelections)
-      .where(and(
-        eq(
-          discSelections.originalDiscArchiveId,
-          input.originalDiscArchiveId,
-        ),
-        eq(discSelections.sourceKey, sourcePersistence.sourceKey),
-        eq(discSelections.isCatalogActive, true),
-      ))
-      .get();
-    if (duplicate) {
-      throw new DomainInvariantError(
-        "A Disc Selection already maps this exact DVD source",
-      );
+    if (options.rejectExactOverlap) {
+      const duplicate = transaction
+        .select({ id: discSelections.id })
+        .from(discSelections)
+        .where(and(
+          eq(
+            discSelections.originalDiscArchiveId,
+            input.originalDiscArchiveId,
+          ),
+          eq(discSelections.sourceKey, sourcePersistence.sourceKey),
+          eq(discSelections.isCatalogActive, true),
+        ))
+        .get();
+      if (duplicate) {
+        throw new DomainInvariantError(
+          "Assisted Mapping cannot use an overlapping DVD source",
+        );
+      }
     }
     return toDiscSelection(requireRow(
       transaction
@@ -1406,28 +1409,6 @@ export function createDataAccessInternal(
       "detected disc",
       archive.detectedDiscId,
     ).scanData;
-    const duplicateLogicalSelection = querySource
-      .select({ id: discSelections.id })
-      .from(discSelections)
-      .where(and(
-        eq(discSelections.originalDiscArchiveId, archiveId),
-        eq(discSelections.isCatalogActive, true),
-      ))
-      .groupBy(
-        discSelections.kind,
-        discSelections.titleNumber,
-        discSelections.chapterStart,
-        discSelections.chapterEnd,
-      )
-      .having(sql`count(*) > 1`)
-      .limit(1)
-      .get();
-    if (duplicateLogicalSelection) {
-      throw new DomainInvariantError(
-        "Catalog review cannot contain duplicate logical Disc Selections",
-      );
-    }
-
     const validator = createArchivedDvdSelectionValidator(scanData);
     let lastSelectionId: DiscSelectionId | undefined;
     let selectionCount = 0;
@@ -3815,6 +3796,7 @@ export function createDataAccessInternal(
             },
             discSelectionId,
             timestamp,
+            { rejectExactOverlap: true },
           );
           reopenCatalogReview(
             transaction,
@@ -3949,6 +3931,7 @@ export function createDataAccessInternal(
               },
               newId<DiscSelectionId>(),
               timestamp,
+              { rejectExactOverlap: true },
             );
             return { mediaItem, discSelection };
           });

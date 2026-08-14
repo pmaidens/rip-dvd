@@ -62,6 +62,38 @@ describe("Catalog Review volume-label formatting", () => {
 });
 
 describe("CatalogReviewEvidence", () => {
+  it("renders the overlap warning for exact-overlap coverage", () => {
+    const html = renderToStaticMarkup(
+      <CatalogReviewEvidence
+        volumeLabel="CONCERT_DISC"
+        coverage={{
+          discSelectionCount: 2,
+          mediaItemsWithSelections: 2,
+          mappedTitles: 1,
+          partiallyMappedTitles: 0,
+          unmappedTitles: 0,
+          mainFeatureSelections: 0,
+          titles: [{
+            titleNumber: 1,
+            status: "mapped",
+            hasOverlap: true,
+          }],
+        }}
+        titles={[{
+          number: 1,
+          durationSeconds: 3_600,
+          chapters: 8,
+          audioStreams: [],
+          subtitles: [],
+        }]}
+      />,
+    );
+
+    expect(html).toContain("Overlapping Disc Selections");
+    expect(html).toContain("counted once and remain valid");
+    expect(html).toContain("Mapped");
+  });
+
   it("renders archived evidence and non-authoritative suggestions accessibly", () => {
     const html = renderToStaticMarkup(
       <CatalogReviewEvidence
@@ -255,7 +287,14 @@ describe("CatalogReviewEvidence", () => {
     );
   });
 
-  it("does not automatically propose sources that overlap existing coverage", async () => {
+  it.each([
+    ["partially mapped", "partially_mapped" as const, true],
+    ["already mapped", "mapped" as const, false],
+  ])("does not automatically propose sources for a %s title", async (
+    _label,
+    status,
+    hasOverlap,
+  ) => {
     (globalThis as typeof globalThis & {
       IS_REACT_ACT_ENVIRONMENT: boolean;
     }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -270,7 +309,9 @@ describe("CatalogReviewEvidence", () => {
           volumeLabel="PARTIAL_DISC"
           coverage={{
             ...evidenceCoverage,
-            titles: [evidenceCoverage.titles[0]!],
+            mappedTitles: status === "mapped" ? 1 : 0,
+            partiallyMappedTitles: status === "partially_mapped" ? 1 : 0,
+            titles: [{ titleNumber: 1, status, hasOverlap }],
           }}
           titles={[{
             number: 1,

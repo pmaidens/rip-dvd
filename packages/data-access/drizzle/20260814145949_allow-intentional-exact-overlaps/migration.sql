@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS `disc_selections_archive_active_source_unique`;

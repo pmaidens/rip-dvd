@@ -1170,36 +1170,63 @@ describe("end-to-end operations dashboard workflow", () => {
       },
     });
     expect(mainFeatureResponse.status).toBe(201);
-    const titleSources = [
+    const manualSelections = [
       {
-        kind: "dvd_chapters",
-        titleNumber: 2,
-        chapterStart: 1,
-        chapterEnd: 3,
+        mediaItemId: existingEpisode.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
       },
-      {
-        kind: "dvd_chapters",
-        titleNumber: 2,
-        chapterStart: 3,
-        chapterEnd: 5,
-      },
-      {
-        kind: "dvd_chapters",
-        titleNumber: 3,
-        chapterStart: 1,
-        chapterEnd: 3,
-      },
-      {
-        kind: "dvd_chapters",
-        titleNumber: 3,
-        chapterStart: 4,
-        chapterEnd: 6,
-      },
+      ...[
+        {
+          mediaItemId: proposal.mediaItem.id,
+          sourceIdentity: {
+            kind: "dvd_chapters" as const,
+            titleNumber: 2,
+            chapterStart: 1,
+            chapterEnd: 3,
+          },
+        },
+        {
+          mediaItemId: existingEpisode.id,
+          sourceIdentity: {
+            kind: "dvd_chapters" as const,
+            titleNumber: 2,
+            chapterStart: 1,
+            chapterEnd: 3,
+          },
+        },
+        {
+          mediaItemId: proposal.mediaItem.id,
+          sourceIdentity: {
+            kind: "dvd_chapters" as const,
+            titleNumber: 2,
+            chapterStart: 3,
+            chapterEnd: 5,
+          },
+        },
+        {
+          mediaItemId: proposal.mediaItem.id,
+          sourceIdentity: {
+            kind: "dvd_chapters" as const,
+            titleNumber: 3,
+            chapterStart: 1,
+            chapterEnd: 3,
+          },
+        },
+        {
+          mediaItemId: proposal.mediaItem.id,
+          sourceIdentity: {
+            kind: "dvd_chapters" as const,
+            titleNumber: 3,
+            chapterStart: 4,
+            chapterEnd: 6,
+          },
+        },
+      ],
     ] as const;
-    for (const sourceIdentity of titleSources) {
+    for (const { mediaItemId, sourceIdentity } of manualSelections) {
       const response = await catalogMutation({
         action: "create_disc_selection",
-        selection: { mediaItemId: proposal.mediaItem.id, sourceIdentity },
+        selection: { mediaItemId, sourceIdentity },
       });
       expect(response.status).toBe(201);
     }
@@ -1214,8 +1241,8 @@ describe("end-to-end operations dashboard workflow", () => {
     const coveredReview = await coveredReviewResponse.json() as
       CatalogReviewDto;
     expect(coveredReview.coverage).toEqual({
-      discSelectionCount: 6,
-      mediaItemsWithSelections: 1,
+      discSelectionCount: 8,
+      mediaItemsWithSelections: 2,
       mappedTitles: 2,
       partiallyMappedTitles: 1,
       unmappedTitles: 2,
@@ -1224,7 +1251,7 @@ describe("end-to-end operations dashboard workflow", () => {
         {
           titleNumber: 1,
           status: "mapped",
-          hasOverlap: false,
+          hasOverlap: true,
         },
         {
           titleNumber: 2,
@@ -1249,7 +1276,7 @@ describe("end-to-end operations dashboard workflow", () => {
       ],
     });
     const coveredReviewHtml = renderCatalogReview(coveredReview);
-    expect(coveredReviewHtml).toContain("1 Media Item with Disc Selections");
+    expect(coveredReviewHtml).toContain("2 Media Items with Disc Selections");
     expect(coveredReviewHtml).toContain("2 mapped titles");
     expect(coveredReviewHtml).toContain("1 partially mapped title");
     expect(coveredReviewHtml).toContain("2 unmapped titles");
@@ -1299,9 +1326,9 @@ describe("end-to-end operations dashboard workflow", () => {
     );
     const refreshedCoverage = await refreshedCoverageResponse.json() as
       CatalogReviewDto;
-    expect(refreshedCoverage.discSelections).toHaveLength(7);
+    expect(refreshedCoverage.discSelections).toHaveLength(9);
     expect(refreshedCoverage.coverage).toMatchObject({
-      discSelectionCount: 7,
+      discSelectionCount: 9,
       mediaItemsWithSelections: 2,
       mappedTitles: 3,
       partiallyMappedTitles: 0,
