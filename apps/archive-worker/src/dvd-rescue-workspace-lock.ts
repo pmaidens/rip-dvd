@@ -6,13 +6,13 @@ import {
   lstatSync,
   openSync,
 } from "node:fs";
-import { lstat, mkdir, realpath } from "node:fs/promises";
-import { resolve } from "node:path";
-
 import { optionalBoundedText } from "./bounded-text.js";
+import {
+  MAX_ARCHIVE_PATH_BYTES,
+  requireSafeArchiveRoot,
+} from "./archive-root.js";
 import { dvdRescueWorkspacePaths } from "./dvd-rescue-workspace.js";
 
-const MAX_RESCUE_LOCK_PATH_BYTES = 4_096;
 const FLOCK_CONFLICT_EXIT_CODE = 75;
 
 export interface DvdRescueWorkspaceLock {
@@ -24,21 +24,8 @@ export interface DvdRescueWorkspaceLock {
   }): Promise<Result>;
 }
 
-async function requireSafeArchiveRoot(path: string): Promise<string> {
-  const resolved = resolve(path);
-  if (Buffer.byteLength(resolved) > MAX_RESCUE_LOCK_PATH_BYTES) {
-    throw new Error("Originals library path exceeds the safety limit");
-  }
-  await mkdir(resolved, { recursive: true, mode: 0o750 });
-  const metadata = await lstat(resolved);
-  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
-    throw new Error("Originals library must be a real directory");
-  }
-  return realpath(resolved);
-}
-
 function openWorkspaceLock(path: string): number {
-  if (Buffer.byteLength(path) > MAX_RESCUE_LOCK_PATH_BYTES) {
+  if (Buffer.byteLength(path) > MAX_ARCHIVE_PATH_BYTES) {
     throw new Error("DVD rescue workspace lock path is too long");
   }
   const descriptor = openSync(

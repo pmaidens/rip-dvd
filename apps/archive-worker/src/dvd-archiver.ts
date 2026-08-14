@@ -13,13 +13,11 @@ import { spawn } from "node:child_process";
 import {
   link,
   lstat,
-  mkdir,
   open,
-  realpath,
   rename,
   unlink,
 } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 
 import {
   createUnknownArchiveIntegrityEvidence,
@@ -34,6 +32,10 @@ import {
 } from "@rip-dvd/data-access/dvd-scan";
 
 import { requireDvdContentSize } from "./dvd-content-policy.js";
+import {
+  MAX_ARCHIVE_PATH_BYTES,
+  requireSafeArchiveRoot,
+} from "./archive-root.js";
 import { requireSafeOpticalDevicePath } from "./optical-media-generation.js";
 import { optionalBoundedText } from "./bounded-text.js";
 import {
@@ -70,7 +72,6 @@ import {
   type DvdRescueWorkspaceLock,
 } from "./dvd-rescue-workspace-lock.js";
 
-const MAX_ARCHIVE_PATH_BYTES = 4_096;
 const MAX_ARCHIVE_RECOVERY_ENTRIES = 4_096;
 const MAX_COPY_DIAGNOSTIC_BYTES = 65_536;
 const MAX_COPY_PROTOCOL_BYTES = 1_200_000;
@@ -1044,20 +1045,6 @@ async function evaluateDvdSalvage({
         : formatUnvalidatedDvdRecovery(recoveryResult),
     ),
   };
-}
-
-async function requireSafeArchiveRoot(path: string): Promise<string> {
-  const resolved = resolve(path);
-  if (Buffer.byteLength(resolved) > MAX_ARCHIVE_PATH_BYTES) {
-    throw new Error("Originals library path exceeds the safety limit");
-  }
-  await mkdir(resolved, { recursive: true, mode: 0o750 });
-  const metadata = await lstat(resolved);
-  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
-    throw new Error("Originals library must be a real directory");
-  }
-  const canonical = await realpath(resolved);
-  return canonical;
 }
 
 export async function preserveDvdArchive({
