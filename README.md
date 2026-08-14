@@ -403,8 +403,11 @@ The runtime mount and hardware boundary is deliberately narrow:
 The web image contains only the Next.js runtime and its traced dependencies. It
 does not contain `lsdvd`, HandBrake, ffmpeg, `sqlite3`, or worker hardware
 permissions. The archive-worker image adds `lsdvd`, `lsblk`, a statically linked
-`libdvdcss` disc reader, `nice`, and `ionice`; the encode-worker image adds
-HandBrake, ffmpeg, `nice`, and `ionice`.
+`libdvdcss` disc reader, a CSS-enabled `lsdvd` command, `nice`, and `ionice`;
+the encode-worker image adds HandBrake, ffmpeg, `nice`, and `ionice`. Both DVD
+commands use the same pinned `libdvdcss` source and SCSI-generic compatibility
+bridge. The archive-worker image carries that source archive, its license, and
+the project bridge source alongside the binaries.
 The short-lived deployment-tools image owns schema migration and SQLite backup
 commands instead of expanding the web image's attack surface.
 
@@ -771,7 +774,9 @@ capacity matches that worker concurrency, while device-inode locks and durable
 job fences prevent overlapping work for the same drive or stale attempt. A
 failed discovery does not mark every known drive missing.
 Successful DVD
-scans store title numbers, durations, chapter counts, bounded per-stream
+scans use the packaged `rip-dvd-lsdvd` command so metadata inspection can load
+the bridge-patched `libdvdcss` runtime for CSS-protected media. They store title
+numbers, durations, chapter counts, bounded per-stream
 language/format/channel/source-ID metadata, and a deterministic SHA-256 content
 identity over every declared raw-disc byte. The scanner authenticates through
 `libdvdcss` but deliberately reads without its decrypt flag, so CSS-protected
