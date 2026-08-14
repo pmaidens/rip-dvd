@@ -299,6 +299,8 @@ export function CatalogReviewEvidence({
     ...titles.map((title) => title.durationSeconds),
   );
   const proposedTitle = formatVolumeLabel(volumeLabel);
+  const mainFeatureAssistedMappingUnavailable =
+    coverage.mainFeatureSelections > 0;
   function toggleEpisodicTitle(titleNumber: number) {
     setSelectedEpisodicTitleNumbers((current) => {
       const next = new Set(current);
@@ -547,7 +549,7 @@ export function CatalogReviewEvidence({
         <div className="catalog-archive-mapping-action">
           <button
             type="button"
-            disabled={isSaving}
+            disabled={isSaving || mainFeatureAssistedMappingUnavailable}
             onClick={() => onStartMappingProposal({
               action: "main_feature",
               sourceIdentity: { kind: "main_feature" },
@@ -556,7 +558,9 @@ export function CatalogReviewEvidence({
             Map DVD main feature
           </button>
           <span>
-            Archive-level action; HandBrake resolves the source during encode.
+            {mainFeatureAssistedMappingUnavailable
+              ? "Assisted Mapping is unavailable because this archive already has an active main-feature Disc Selection. Use manual or correction Disc Selection controls for intentional overlaps."
+              : "Archive-level action; HandBrake resolves the source during encode."}
           </span>
         </div>
       ) : null}
