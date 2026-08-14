@@ -88,7 +88,8 @@ The facade carries each DVD source as one immutable, validated
 `DiscSelectionSourceIdentity` value instead of exposing a source key beside
 parallel kind, title, and chapter fields. Its persistence codec alone flattens
 that value into the normalized SQLite columns and derives the canonical legacy
-source key. Manual mapping and correction may persist intentional overlaps,
+source key. Manual mapping, ordinary job-free source edits, and correction may
+persist intentional overlaps,
 including identical whole-title or chapter-range sources, while every Disc
 Selection retains a separate identity. Assisted Mapping rejects whole-title
 reuse and intersecting chapter coordinates in its immediate transaction. Title
@@ -416,8 +417,11 @@ the originals-library root. A marker failure exposes no imported SQLite state
 and leaves those archives pending review; a restart after marker publication
 safely resumes the idempotent import with the legacy queue already inactive.
 The marker records the immutable logical-job configuration captured at
-cutover, allowing restart/retry to report later sidecar conflicts while
-preserving authoritative SQLite requeues. A parser, persistence, transaction,
+cutover, including the output path that distinguishes jobs sharing a source
+and Encoding Profile. Older markers without that output component remain
+readable and are reconciled conservatively. This allows restart/retry to report
+later sidecar conflicts while preserving authoritative SQLite requeues. A
+parser, persistence, transaction,
 or captured-source conflict changes the marker to a `repair` state: its
 presence continues to block legacy workers, while a later complete and
 parseable live inventory can replace the failed snapshot after repair. Repair

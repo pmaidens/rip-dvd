@@ -640,21 +640,17 @@ export function parseLegacySidecar(
   });
   const jobs: ParsedLegacyJob[] = [];
   const outputPaths = new Set<string>();
-  const logicalJobs = new Set<string>();
   for (const job of parsedJobs) {
-    const logicalKey = JSON.stringify([job.sourceKey, job.profileKey]);
-    if (outputPaths.has(job.outputPath) || logicalJobs.has(logicalKey)) {
+    if (outputPaths.has(job.outputPath)) {
       issues.push({
         code: "duplicate_record",
         jobIndex: job.jobIndex,
-        message:
-          "Encode job duplicates an earlier output or selection/profile mapping",
+        message: "Encode job duplicates an earlier output path",
         sidecarPath,
       });
       continue;
     }
     outputPaths.add(job.outputPath);
-    logicalJobs.add(logicalKey);
     jobs.push(job);
   }
   const parsedSidecar: ParsedLegacySidecar = {

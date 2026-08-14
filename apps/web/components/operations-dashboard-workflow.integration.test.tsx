@@ -534,6 +534,57 @@ describe("end-to-end operations dashboard workflow", () => {
         label: null,
       }),
     ]);
+
+    const wholeTarget = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: correctedItem.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    });
+    const wholeEditable = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: correctedItem.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    const rangeEditable = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: correctedItem.id,
+      sourceIdentity: {
+        kind: "dvd_chapters",
+        titleNumber: 1,
+        chapterStart: 6,
+        chapterEnd: 8,
+      },
+    });
+    for (const [discSelectionId, sourceIdentity] of [
+      [wholeEditable.id, wholeTarget.sourceIdentity],
+      [rangeEditable.id, selection.sourceIdentity],
+    ] as const) {
+      const overlapUpdate = await createCatalogReviewRoute(
+        createMutationRequest(`/api/catalog-reviews/${archive.id}`, {
+          action: "update_disc_selection",
+          discSelectionId,
+          changes: { sourceIdentity },
+        }),
+        archive.id,
+        () => access,
+        () => trustedOrigin,
+      );
+      expect(overlapUpdate.status).toBe(200);
+    }
+    const overlapReview = await readReview();
+    expect(overlapReview.discSelections).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: wholeEditable.id,
+        sourceIdentity: wholeTarget.sourceIdentity,
+      }),
+      expect.objectContaining({
+        id: rangeEditable.id,
+        sourceIdentity: selection.sourceIdentity,
+      }),
+    ]));
+    expect(renderCatalogReview(overlapReview)).toContain(
+      "Overlapping Disc Selections",
+    );
   });
 
   it("saves a running Disc Selection Correction before cancellation finishes", async () => {

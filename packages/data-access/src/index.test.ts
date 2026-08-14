@@ -1519,6 +1519,38 @@ describe("data-access facade", () => {
       originalDiscArchiveId: archive.id,
     })).toHaveLength(3);
 
+    access.catalog.deleteDiscSelection(
+      created.episodes[2]!.discSelection.id,
+    );
+    const catalogBeforeIntraProposalOverlap = {
+      mediaItems: access.catalog.listMediaItems(),
+      discSelections: access.catalog.listDiscSelections({
+        originalDiscArchiveId: archive.id,
+      }),
+    };
+    expect(() => access.catalog.createEpisodicMappingProposal({
+      originalDiscArchiveId: archive.id,
+      catalogRevision: access.catalog.listOriginalDiscArchives({
+        ids: [archive.id],
+      })[0]!.updatedAt,
+      tvShow: { choice: "create_new", title: "Duplicate Source Show" },
+      season: {
+        choice: "create_new",
+        title: "Duplicate Source Show Season 1",
+        seasonNumber: 1,
+      },
+      episodes: [
+        { titleNumber: 7, title: "First mapping", episodeNumber: 1 },
+        { titleNumber: 7, title: "Second mapping", episodeNumber: 2 },
+      ],
+    })).toThrow("Assisted Mapping cannot use an overlapping DVD source");
+    expect(access.catalog.listMediaItems()).toEqual(
+      catalogBeforeIntraProposalOverlap.mediaItems,
+    );
+    expect(access.catalog.listDiscSelections({
+      originalDiscArchiveId: archive.id,
+    })).toEqual(catalogBeforeIntraProposalOverlap.discSelections);
+
     const partialOwner = access.catalog.createMediaItem({
       kind: "bonus_feature",
       title: "Partially mapped episode source",
@@ -2232,12 +2264,53 @@ describe("data-access facade", () => {
       mediaItemId: correctedItem.id,
       sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
     });
-    expect(() =>
-      access.catalog.updateDiscSelection(cleared.id, {
-        originalDiscArchiveId: archive.id,
+    expect(access.catalog.updateDiscSelection(cleared.id, {
+      originalDiscArchiveId: archive.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    })).toMatchObject({
+      id: cleared.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    });
+
+    const rangeTarget = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: correctedItem.id,
+      sourceIdentity: {
+        kind: "dvd_chapters",
+        titleNumber: 1,
+        chapterStart: 2,
+        chapterEnd: 5,
+      },
+    });
+    const rangeEditable = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: correctedItem.id,
+      sourceIdentity: {
+        kind: "dvd_chapters",
+        titleNumber: 1,
+        chapterStart: 6,
+        chapterEnd: 8,
+      },
+    });
+    expect(access.catalog.updateDiscSelection(rangeEditable.id, {
+      originalDiscArchiveId: archive.id,
+      sourceIdentity: rangeTarget.sourceIdentity,
+    })).toMatchObject({
+      id: rangeEditable.id,
+      sourceIdentity: rangeTarget.sourceIdentity,
+    });
+    expect(access.catalog.listDiscSelections({
+      originalDiscArchiveId: archive.id,
+    })).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: cleared.id,
         sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
-      })
-    ).toThrow("A Disc Selection already maps this exact DVD source");
+      }),
+      expect.objectContaining({
+        id: rangeEditable.id,
+        sourceIdentity: rangeTarget.sourceIdentity,
+      }),
+    ]));
     access.close();
   });
 

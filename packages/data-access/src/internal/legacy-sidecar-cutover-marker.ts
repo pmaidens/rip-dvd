@@ -186,7 +186,9 @@ function isValidPublishedJob(
   return (
     identity !== null &&
     identity.sourceKey === sourceKey &&
-    identity.profileKey === profile
+    identity.profileKey === profile &&
+    (identity.outputPath === undefined ||
+      identity.outputPath === job.outputPath)
   );
 }
 

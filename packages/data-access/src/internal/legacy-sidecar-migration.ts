@@ -1079,15 +1079,8 @@ export function createLegacySidecarImportAccess(
                       : [],
                   ),
                 );
-                const logicalSelectionIds = exactOutputSelectionIds.size > 0
-                  ? exactOutputSelectionIds
-                  : new Set(
-                      logicalJobs.map((candidate) =>
-                        candidate.discSelectionId
-                      ),
-                    );
-                if (logicalSelectionIds.size === 1) {
-                  const [logicalSelectionId] = logicalSelectionIds;
+                if (exactOutputSelectionIds.size === 1) {
+                  const [logicalSelectionId] = exactOutputSelectionIds;
                   return {
                     selection: candidates.find(
                       (candidate) => candidate.id === logicalSelectionId,
@@ -1635,6 +1628,7 @@ export function createLegacySidecarImportAccess(
           .select({
             archivePath: originalDiscArchives.archivePath,
             fingerprint: originalDiscArchives.fingerprint,
+            outputPath: encodeJobs.outputPath,
             profileKey: encodingProfiles.key,
             sourceKey: discSelections.sourceKey,
           })
@@ -1680,6 +1674,7 @@ export function createLegacySidecarImportAccess(
         for (const importedJob of libraryJobCandidates) {
           const logicalKey = createLegacyJobLogicalKey({
             fingerprint: importedJob.fingerprint,
+            outputPath: importedJob.outputPath,
             profileKey: importedJob.profileKey,
             sourceKey: importedJob.sourceKey,
           });
@@ -1718,7 +1713,7 @@ export function createLegacySidecarImportAccess(
               "Published legacy job has an invalid logical identity",
             );
           }
-          const { fingerprint, profileKey, sourceKey } = identity;
+          const { fingerprint, outputPath, profileKey, sourceKey } = identity;
           const archive = database
             .select()
             .from(originalDiscArchives)
@@ -1752,6 +1747,9 @@ export function createLegacySidecarImportAccess(
                       ),
                       eq(discSelections.sourceKey, sourceKey),
                       eq(encodeJobs.encodingProfileId, profile.id),
+                      outputPath === undefined
+                        ? undefined
+                        : eq(encodeJobs.outputPath, outputPath),
                     ),
                   )
                   .get()

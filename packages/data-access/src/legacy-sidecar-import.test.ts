@@ -900,7 +900,7 @@ describe("legacy sidecar import", () => {
       label: "Extra 2: Alternate extra",
       source: fixture.archivePath,
       output: alternateOutputPath,
-      preset: "Fast 480p30",
+      preset: "HQ 480p30 Surround",
       selection: "title",
       title_number: 2,
     });
@@ -940,6 +940,43 @@ describe("legacy sidecar import", () => {
         sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
       }),
     ]);
+
+    expect(fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    })).toMatchObject({ sidecarsImported: 1, issues: [] });
+    expect(fixture.access.encodeJobs.list().map((job) => ({
+      id: job.id,
+      discSelectionId: job.discSelectionId,
+      outputPath: job.outputPath,
+    }))).toEqual(jobs.map((job) => ({
+      id: job.id,
+      discSelectionId: job.discSelectionId,
+      outputPath: job.outputPath,
+    })));
+
+    writeFileSync(
+      join(
+        fixture.originalsLibraryPath,
+        ".rip-dvd-sqlite-catalog",
+      ),
+      JSON.stringify({
+        schemaVersion: 1,
+        legacyQueueStatus: "retired",
+        authoritativeStore: "sqlite",
+      }),
+    );
+    expect(fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    })).toMatchObject({ sidecarsImported: 1, issues: [] });
+    expect(fixture.access.encodeJobs.list().map((job) => ({
+      id: job.id,
+      discSelectionId: job.discSelectionId,
+      outputPath: job.outputPath,
+    }))).toEqual(jobs.map((job) => ({
+      id: job.id,
+      discSelectionId: job.discSelectionId,
+      outputPath: job.outputPath,
+    })));
 
     fixture.access.close();
   });

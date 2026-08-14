@@ -614,6 +614,58 @@ describe("Catalog Review API", () => {
       },
     });
 
+    const wholeEditable = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: correctedMovie.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    const rangeTarget = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: correctedMovie.id,
+      sourceIdentity: {
+        kind: "dvd_chapters",
+        titleNumber: 1,
+        chapterStart: 2,
+        chapterEnd: 4,
+      },
+    });
+    const rangeEditable = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: correctedMovie.id,
+      sourceIdentity: {
+        kind: "dvd_chapters",
+        titleNumber: 1,
+        chapterStart: 5,
+        chapterEnd: 6,
+      },
+    });
+    const wholeOverlapResponse = await mutate({
+      action: "update_disc_selection",
+      discSelectionId: wholeEditable.id,
+      changes: {
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      },
+    });
+    expect(wholeOverlapResponse.status).toBe(200);
+    await expect(wholeOverlapResponse.json()).resolves.toMatchObject({
+      discSelection: {
+        id: wholeEditable.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      },
+    });
+    const rangeOverlapResponse = await mutate({
+      action: "update_disc_selection",
+      discSelectionId: rangeEditable.id,
+      changes: { sourceIdentity: rangeTarget.sourceIdentity },
+    });
+    expect(rangeOverlapResponse.status).toBe(200);
+    await expect(rangeOverlapResponse.json()).resolves.toMatchObject({
+      discSelection: {
+        id: rangeEditable.id,
+        sourceIdentity: rangeTarget.sourceIdentity,
+      },
+    });
+
     expect((await mutate({
       action: "update_disc_selection",
       discSelectionId: selection.id,
@@ -636,7 +688,7 @@ describe("Catalog Review API", () => {
     );
     expect(cutoverResponse.status).toBe(200);
     const cutoverBody = await cutoverResponse.json();
-    expect(cutoverBody.discSelections).toEqual([
+    expect(cutoverBody.discSelections).toEqual(expect.arrayContaining([
       expect.objectContaining({
         id: selection.id,
         actionAvailability: {
@@ -647,7 +699,7 @@ describe("Catalog Review API", () => {
           relatedEncodeJob: null,
         },
       }),
-    ]);
+    ]));
   });
 
   it("locks ordinary Encode Job provenance and identifies active dependency states without exposing paths", async () => {

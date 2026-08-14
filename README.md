@@ -600,8 +600,9 @@ become spaces, whitespace is normalized, and uniformly cased labels receive
 conservative title case without removing years, disc identifiers, seasons, or
 edition wording.
 The facade derives canonical DVD source identities while keeping every Disc
-Selection as a distinct catalog identity. Manual mapping and correction may
-intentionally create overlapping source slices, including the same whole title
+Selection as a distinct catalog identity. Manual mapping, ordinary job-free
+source edits, and correction may intentionally create overlapping source
+slices, including the same whole title
 or exact chapter range for different Media Items. Catalog Review warns about
 those overlaps and computes coverage from the source union, so repeated slices
 are counted once. Assisted Mapping keeps covered-title proposals unavailable
