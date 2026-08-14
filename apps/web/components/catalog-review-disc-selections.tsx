@@ -492,6 +492,7 @@ export function CatalogReviewDiscSelections({
                 ))}
               </select>
             </label>
+          ) : null}
           {selectionKind === "dvd_chapters" ? (
             <>
               <label>
