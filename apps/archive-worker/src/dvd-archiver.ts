@@ -1102,7 +1102,7 @@ export async function preserveDvdArchive({
   let rescueWorkspace =
     rescueIdentity === undefined
       ? null
-      : await loadDvdRescueWorkspace(root, rescueIdentity);
+      : await loadDvdRescueWorkspace(root, rescueIdentity, archivePath);
   const recoveryPaths = [
     legacyPartialPath,
     ...discoverAttemptPartialPaths(root, digest),
@@ -1150,14 +1150,30 @@ export async function preserveDvdArchive({
     }
     await verifySource();
     signal.throwIfAborted();
-    const revalidatedArchive = await lstat(archivePath);
+    let revalidatedArchive;
+    let revalidatedRescueImage;
+    try {
+      [revalidatedArchive, revalidatedRescueImage] = await Promise.all([
+        lstat(archivePath),
+        lstat(rescueWorkspace.imagePath),
+      ]);
+    } catch {
+      await quarantinePublishedArchive(archivePath);
+      throw new Error("Existing DVD archive conflicts with rescue state");
+    }
     if (
       !matchesRescueImageIdentity(
         revalidatedArchive,
         rescueWorkspace.imageFilesystemIdentity,
         safeSizeBytes,
+      ) ||
+      !matchesRescueImageIdentity(
+        revalidatedRescueImage,
+        rescueWorkspace.imageFilesystemIdentity,
+        safeSizeBytes,
       )
     ) {
+      await quarantinePublishedArchive(archivePath);
       throw new Error("Existing DVD archive conflicts with rescue state");
     }
     onProgress({ phase: "finalizing", progressPercent: 99 });

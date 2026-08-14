@@ -105,10 +105,15 @@ async function quarantinePath(path: string): Promise<boolean> {
 async function quarantineWorkspaceFiles(
   root: string,
   paths: Pick<DvdRescueWorkspace, "imagePath" | "mapPath">,
+  correlatedArchivePath?: string,
 ): Promise<void> {
+  const archiveChanged =
+    correlatedArchivePath === undefined
+      ? false
+      : await quarantinePath(correlatedArchivePath);
   const mapChanged = await quarantinePath(paths.mapPath);
   const imageChanged = await quarantinePath(paths.imagePath);
-  if (mapChanged || imageChanged) {
+  if (archiveChanged || mapChanged || imageChanged) {
     await syncPath(root);
   }
 }
@@ -240,8 +245,15 @@ async function writeMapAtomically(
 export async function loadDvdRescueWorkspace(
   root: string,
   identity: DvdRescueIdentity,
+  correlatedArchivePath?: string,
 ): Promise<DvdRescueWorkspace | null> {
   const paths = dvdRescueWorkspacePaths(root, identity.archiveRequestId);
+  if (
+    correlatedArchivePath !== undefined &&
+    dirname(correlatedArchivePath) !== root
+  ) {
+    throw new Error("Correlated DVD archive escaped the Originals library");
+  }
   let imageMetadata: Awaited<ReturnType<typeof optionalMetadata>>;
   let mapMetadata: Awaited<ReturnType<typeof optionalMetadata>>;
   try {
@@ -358,7 +370,7 @@ export async function loadDvdRescueWorkspace(
     };
   } catch (error) {
     try {
-      await quarantineWorkspaceFiles(root, paths);
+      await quarantineWorkspaceFiles(root, paths, correlatedArchivePath);
     } catch (quarantineError) {
       throw new Error("DVD rescue state could not be quarantined", {
         cause: quarantineError,
