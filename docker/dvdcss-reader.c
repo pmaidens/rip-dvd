@@ -150,6 +150,28 @@ static int write_all(int descriptor, const unsigned char *buffer, size_t length)
     return 0;
 }
 
+static int write_all_at(int descriptor, const unsigned char *buffer,
+                        size_t length, off_t offset)
+{
+    size_t written = 0;
+    while (written < length) {
+        ssize_t result = pwrite(descriptor, buffer + written,
+                                length - written, offset + (off_t)written);
+        if (result < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return fail_errno("DVD rescue write failed");
+        }
+        if (result == 0) {
+            fprintf(stderr, "DVD rescue write ended early\n");
+            return 1;
+        }
+        written += (size_t)result;
+    }
+    return 0;
+}
+
 static int consume(struct operation_state *state, const unsigned char *buffer,
                    size_t length, uint64_t bytes_read)
 {
@@ -530,7 +552,152 @@ static int run_copy(struct read_backend *backend, const char *output_path,
     return status;
 }
 
-static int await_copy_authorization(void)
+static int hex_digit_value(char value)
+{
+    if (value >= '0' && value <= '9') {
+        return value - '0';
+    }
+    if (value >= 'a' && value <= 'f') {
+        return value - 'a' + 10;
+    }
+    return -1;
+}
+
+static int parse_resume_bitmap(const char *text, uint64_t total_sector_count,
+                               unsigned char *bitmap, size_t bitmap_byte_count,
+                               uint64_t *bad_sector_count)
+{
+    size_t expected_length = bitmap_byte_count * 2;
+    if (strlen(text) != expected_length) {
+        fprintf(stderr, "DVD rescue map is invalid\n");
+        return 1;
+    }
+    *bad_sector_count = 0;
+    for (size_t index = 0; index < bitmap_byte_count; index++) {
+        int high = hex_digit_value(text[index * 2]);
+        int low = hex_digit_value(text[index * 2 + 1]);
+        if (high < 0 || low < 0) {
+            fprintf(stderr, "DVD rescue map is invalid\n");
+            return 1;
+        }
+        bitmap[index] = (unsigned char)((high << 4) | low);
+        for (unsigned int bit = 0; bit < 8; bit++) {
+            uint64_t lba = (uint64_t)index * 8 + bit;
+            if ((bitmap[index] & (unsigned char)(1U << bit)) == 0) {
+                continue;
+            }
+            if (lba >= total_sector_count) {
+                fprintf(stderr, "DVD rescue map is invalid\n");
+                return 1;
+            }
+            *bad_sector_count += 1;
+        }
+    }
+    if (*bad_sector_count == 0) {
+        fprintf(stderr, "DVD rescue map is empty\n");
+        return 1;
+    }
+    return 0;
+}
+
+static int run_resume(struct read_backend *backend, const char *output_path,
+                      uint64_t size_bytes,
+                      const unsigned char *prior_bad_sector_bitmap,
+                      uint64_t prior_bad_sector_count,
+                      int emit_malformed_result)
+{
+    int output_fd = open(output_path, O_RDWR | O_NOFOLLOW | O_CLOEXEC);
+    if (output_fd < 0) {
+        return fail_errno("DVD rescue image open failed");
+    }
+    struct stat output;
+    if (fstat(output_fd, &output) != 0 || !S_ISREG(output.st_mode) ||
+        output.st_size < 0 || (uint64_t)output.st_size != size_bytes) {
+        close(output_fd);
+        fprintf(stderr, "DVD rescue image is invalid\n");
+        return 1;
+    }
+    uint64_t total_sector_count = size_bytes / DVDCSS_BLOCK_SIZE;
+    size_t bitmap_byte_count = (size_t)((total_sector_count + 7) / 8);
+    unsigned char *bad_sector_bitmap = calloc(bitmap_byte_count, 1);
+    void *allocation = NULL;
+    if (bad_sector_bitmap == NULL ||
+        posix_memalign(&allocation, DVDCSS_BLOCK_SIZE, DVDCSS_BLOCK_SIZE) != 0) {
+        free(bad_sector_bitmap);
+        close(output_fd);
+        fprintf(stderr, "DVD rescue allocation failed\n");
+        return 1;
+    }
+    unsigned char *buffer = allocation;
+    struct recovery_state recovery = {
+        .bad_sector_bitmap = bad_sector_bitmap,
+        .bitmap_byte_count = bitmap_byte_count,
+        .bad_sector_count = 0,
+        .bad_area_count = 0,
+        .emit_malformed_result = emit_malformed_result,
+    };
+    uint64_t bytes_processed =
+        size_bytes - prior_bad_sector_count * DVDCSS_BLOCK_SIZE;
+    int status = 0;
+    for (uint64_t lba = 0; lba < total_sector_count; lba++) {
+        size_t byte_index = (size_t)(lba / 8);
+        unsigned int bit_index = (unsigned int)(lba % 8);
+        if ((prior_bad_sector_bitmap[byte_index] &
+             (unsigned char)(1U << bit_index)) == 0) {
+            continue;
+        }
+        int recovered = 0;
+        for (int attempt = 0; attempt < RECOVERY_READ_ATTEMPTS; attempt++) {
+            struct backend_read_result result =
+                backend_read(backend, buffer, lba, 1, 1);
+            if (result.status == BACKEND_READ_FATAL) {
+                status = 1;
+                break;
+            }
+            if (result.status == BACKEND_READ_END) {
+                fprintf(stderr,
+                        "DVD content read ended before the declared media size\n");
+                status = 1;
+                break;
+            }
+            if (result.status == BACKEND_READ_MEDIA_ERROR) {
+                continue;
+            }
+            if (result.blocks_read != 1 ||
+                write_all_at(output_fd, buffer, DVDCSS_BLOCK_SIZE,
+                             (off_t)(lba * DVDCSS_BLOCK_SIZE)) != 0) {
+                status = 1;
+                break;
+            }
+            recovered = 1;
+            break;
+        }
+        if (status != 0) {
+            break;
+        }
+        if (!recovered) {
+            mark_bad_sector(&recovery, lba);
+        }
+        bytes_processed += DVDCSS_BLOCK_SIZE;
+        fprintf(stderr, "%" PRIu64 " bytes copied\n", bytes_processed);
+    }
+    if (status == 0 && fsync(output_fd) != 0) {
+        status = fail_errno("DVD rescue image sync failed");
+    }
+    if (close(output_fd) != 0 && status == 0) {
+        status = fail_errno("DVD rescue image close failed");
+    }
+    if (status == 0) {
+        status = emit_recovery_result(size_bytes, &recovery);
+    }
+    free(allocation);
+    free(bad_sector_bitmap);
+    return status;
+}
+
+static int await_copy_authorization(uint64_t total_sector_count, int resume,
+                                    unsigned char **resume_bitmap,
+                                    uint64_t *resume_bad_sector_count)
 {
     static const char ready[] = "rip-dvd-copy-authorization-ready\n";
     if (write(4, ready, sizeof(ready) - 1) != (ssize_t)(sizeof(ready) - 1)) {
@@ -545,6 +712,51 @@ static int await_copy_authorization(void)
         fprintf(stderr, "DVD copy authorization was denied\n");
         return 1;
     }
+    if (!resume) {
+        return 0;
+    }
+    size_t bitmap_byte_count =
+        (size_t)((total_sector_count + 7) / 8);
+    size_t text_length = bitmap_byte_count * 2;
+    char *text = malloc(text_length + 1);
+    unsigned char *bitmap = calloc(bitmap_byte_count, 1);
+    if (text == NULL || bitmap == NULL) {
+        free(text);
+        free(bitmap);
+        fprintf(stderr, "DVD rescue map allocation failed\n");
+        return 1;
+    }
+    size_t received = 0;
+    while (received < text_length) {
+        do {
+            bytes_read = read(5, text + received, text_length - received);
+        } while (bytes_read < 0 && errno == EINTR);
+        if (bytes_read <= 0) {
+            free(text);
+            free(bitmap);
+            fprintf(stderr, "DVD rescue map authorization is incomplete\n");
+            return 1;
+        }
+        received += (size_t)bytes_read;
+    }
+    text[text_length] = '\0';
+    char extra;
+    do {
+        bytes_read = read(5, &extra, 1);
+    } while (bytes_read < 0 && errno == EINTR);
+    if (bytes_read != 0 ||
+        parse_resume_bitmap(text, total_sector_count, bitmap,
+                            bitmap_byte_count,
+                            resume_bad_sector_count) != 0) {
+        free(text);
+        free(bitmap);
+        if (bytes_read != 0) {
+            fprintf(stderr, "DVD rescue map authorization is invalid\n");
+        }
+        return 1;
+    }
+    free(text);
+    *resume_bitmap = bitmap;
     return 0;
 }
 
@@ -675,6 +887,80 @@ static int run_test_copy(int argc, char **argv)
     }
     return status;
 }
+
+static int run_test_resume(int argc, char **argv)
+{
+    if (argc != 9) {
+        fprintf(stderr,
+                "usage: %s resume-test SOURCE OUTPUT SIZE FAULTS DELAY MODE BITMAP\n",
+                argv[0]);
+        return 2;
+    }
+    uint64_t size_bytes = 0;
+    if (parse_size(argv[4], &size_bytes) != 0) {
+        return 2;
+    }
+    int malformed_result;
+    if (strcmp(argv[7], "valid") == 0) {
+        malformed_result = 0;
+    } else if (strcmp(argv[7], "malformed") == 0) {
+        malformed_result = 1;
+    } else {
+        fprintf(stderr, "DVD test result mode is invalid\n");
+        return 2;
+    }
+    struct read_backend backend = {
+        .dvdcss = NULL,
+        .test_source_fd = -1,
+        .use_test_source = 1,
+    };
+    if (parse_test_delay(argv[6], &backend.test_delay_ms) != 0) {
+        return 2;
+    }
+    char *faults = strdup(argv[5]);
+    if (faults == NULL) {
+        fprintf(stderr, "DVD test fault allocation failed\n");
+        return 1;
+    }
+    int fault_status = parse_test_faults(
+        faults, size_bytes / DVDCSS_BLOCK_SIZE, &backend);
+    free(faults);
+    if (fault_status != 0) {
+        return 2;
+    }
+    uint64_t total_sector_count = size_bytes / DVDCSS_BLOCK_SIZE;
+    size_t bitmap_byte_count = (size_t)((total_sector_count + 7) / 8);
+    unsigned char *resume_bitmap = calloc(bitmap_byte_count, 1);
+    uint64_t resume_bad_sector_count = 0;
+    if (resume_bitmap == NULL ||
+        parse_resume_bitmap(argv[8], total_sector_count, resume_bitmap,
+                            bitmap_byte_count,
+                            &resume_bad_sector_count) != 0) {
+        free(resume_bitmap);
+        return 2;
+    }
+    backend.test_source_fd =
+        open(argv[2], O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (backend.test_source_fd < 0) {
+        free(resume_bitmap);
+        return fail_errno("DVD test source open failed");
+    }
+    struct stat source;
+    if (fstat(backend.test_source_fd, &source) != 0 ||
+        !S_ISREG(source.st_mode)) {
+        close(backend.test_source_fd);
+        free(resume_bitmap);
+        fprintf(stderr, "DVD test source is invalid\n");
+        return 1;
+    }
+    int status = run_resume(&backend, argv[3], size_bytes, resume_bitmap,
+                            resume_bad_sector_count, malformed_result);
+    if (close(backend.test_source_fd) != 0 && status == 0) {
+        status = fail_errno("DVD test source close failed");
+    }
+    free(resume_bitmap);
+    return status;
+}
 #endif
 
 int main(int argc, char **argv)
@@ -683,11 +969,17 @@ int main(int argc, char **argv)
     if (argc > 1 && strcmp(argv[1], "copy-test") == 0) {
         return run_test_copy(argc, argv);
     }
+    if (argc > 1 && strcmp(argv[1], "resume-test") == 0) {
+        return run_test_resume(argc, argv);
+    }
 #endif
     int authorized_copy = argc > 1 &&
         strcmp(argv[1], "copy-authorized") == 0;
+    int authorized_resume = argc > 1 &&
+        strcmp(argv[1], "resume-authorized") == 0;
     if (argc < 4 || (strcmp(argv[1], "hash") != 0 &&
-                     strcmp(argv[1], "copy") != 0 && !authorized_copy)) {
+                     strcmp(argv[1], "copy") != 0 && !authorized_copy &&
+                     !authorized_resume)) {
         fprintf(stderr,
                 "usage: %s hash DEVICE SIZE | copy DEVICE OUTPUT SIZE\n",
                 argv[0]);
@@ -706,18 +998,31 @@ int main(int argc, char **argv)
                    &size_bytes) != 0) {
         return 2;
     }
-    if (authorized_copy && await_copy_authorization() != 0) {
+    unsigned char *resume_bitmap = NULL;
+    uint64_t resume_bad_sector_count = 0;
+    if ((authorized_copy || authorized_resume) &&
+        await_copy_authorization(size_bytes / DVDCSS_BLOCK_SIZE,
+                                 authorized_resume, &resume_bitmap,
+                                 &resume_bad_sector_count) != 0) {
         return 1;
     }
     dvdcss_t dvdcss = dvdcss_open(argv[2]);
     if (dvdcss == NULL) {
+        free(resume_bitmap);
         fprintf(stderr, "DVD content open failed\n");
         return 1;
     }
     struct read_backend backend = { .dvdcss = dvdcss };
-    int status = operation == OPERATION_HASH
-                     ? run_hash(&backend, size_bytes)
-                     : run_copy(&backend, argv[3], size_bytes, 0);
+    int status;
+    if (operation == OPERATION_HASH) {
+        status = run_hash(&backend, size_bytes);
+    } else if (authorized_resume) {
+        status = run_resume(&backend, argv[3], size_bytes, resume_bitmap,
+                            resume_bad_sector_count, 0);
+    } else {
+        status = run_copy(&backend, argv[3], size_bytes, 0);
+    }
+    free(resume_bitmap);
     if (dvdcss_close(dvdcss) != 0 && status == 0) {
         fprintf(stderr, "DVD content close failed\n");
         status = 1;
