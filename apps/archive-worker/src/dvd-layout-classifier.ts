@@ -210,8 +210,9 @@ export async function classifyDvdImageDamage({
   expectedByteCount: number;
   unreadableSectorRanges: readonly UnreadableSectorRange[];
 }): Promise<{
-  affectedTitleSetBadSectorCounts: readonly {
+  affectedTitleBadSectorCounts: readonly {
     badSectorCount: number;
+    titleNumber: number;
     titleSetNumber: number;
   }[];
   outcome: "accepted";
@@ -520,6 +521,390 @@ export async function classifyDvdImageDamage({
     return navigationSectors;
   };
 
+  interface GlobalDvdTitle {
+    angleCount: number;
+    chapterCount: number;
+    titleNumber: number;
+    titleSetNumber: number;
+    titleSetTitleNumber: number;
+  }
+
+  interface DvdProgramChain {
+    angleBlockLengths: readonly number[];
+    cells: readonly {
+      blockMode: number;
+      blockType: number;
+      cellNumber: number;
+      firstSector: number;
+      lastSector: number;
+      vobId: number;
+    }[];
+    programStartCells: readonly number[];
+  }
+
+  const parseGlobalTitles = async (
+    dvdFiles: ReadonlyMap<string, DvdFileLayout>,
+  ): Promise<readonly GlobalDvdTitle[]> => {
+    const file = dvdFiles.get("VIDEO_TS/VIDEO_TS.IFO");
+    if (file === undefined) {
+      throw new Error("DVD video manager navigation file is missing");
+    }
+    const content = await readDvdFile(file, MAX_FILE_ENTRY_BYTES * 16);
+    if (
+      content.byteLength < DVD_SECTOR_SIZE_BYTES ||
+      content.toString("ascii", 0, 12) !== "DVDVIDEO-VMG"
+    ) {
+      throw new Error("DVD video manager navigation file is malformed");
+    }
+    const tableOffset = content.readUInt32BE(0xc4) * DVD_SECTOR_SIZE_BYTES;
+    if (
+      !Number.isSafeInteger(tableOffset) ||
+      tableOffset < DVD_SECTOR_SIZE_BYTES ||
+      tableOffset + 8 > content.byteLength
+    ) {
+      throw new Error("DVD title search table is missing");
+    }
+    const titleCount = content.readUInt16BE(tableOffset);
+    const tableByteCount = content.readUInt32BE(tableOffset + 4) + 1;
+    if (
+      titleCount <= 0 ||
+      titleCount > 99 ||
+      content.readUInt16BE(tableOffset + 2) !== 0 ||
+      tableByteCount < 8 + titleCount * 12 ||
+      tableOffset + tableByteCount > content.byteLength
+    ) {
+      throw new Error("DVD title search table is malformed");
+    }
+    const titles: GlobalDvdTitle[] = [];
+    const titleSetTitles = new Set<string>();
+    for (let index = 0; index < titleCount; index += 1) {
+      const offset = tableOffset + 8 + index * 12;
+      const angleCount = content[offset + 1]!;
+      const chapterCount = content.readUInt16BE(offset + 2);
+      const titleSetNumber = content[offset + 6]!;
+      const titleSetTitleNumber = content[offset + 7]!;
+      const key = `${titleSetNumber}:${titleSetTitleNumber}`;
+      if (
+        angleCount <= 0 ||
+        angleCount > 9 ||
+        chapterCount <= 0 ||
+        titleSetNumber <= 0 ||
+        titleSetNumber > 99 ||
+        titleSetTitleNumber <= 0 ||
+        titleSetTitleNumber > 99 ||
+        titleSetTitles.has(key)
+      ) {
+        throw new Error("DVD title search table is malformed");
+      }
+      titleSetTitles.add(key);
+      titles.push({
+        angleCount,
+        chapterCount,
+        titleNumber: index + 1,
+        titleSetNumber,
+        titleSetTitleNumber,
+      });
+    }
+    return titles;
+  };
+
+  const parseProgramChain = (
+    content: Buffer,
+    pgcitOffset: number,
+    pgcitByteCount: number,
+    pgcStartByte: number,
+    titleVobSectorCount: number,
+  ): DvdProgramChain => {
+    const pgcOffset = pgcitOffset + pgcStartByte;
+    if (
+      pgcStartByte < 8 ||
+      pgcStartByte + 236 > pgcitByteCount ||
+      pgcOffset + 236 > content.byteLength
+    ) {
+      throw new Error("DVD program chain table is malformed");
+    }
+    const programCount = content[pgcOffset + 2]!;
+    const cellCount = content[pgcOffset + 3]!;
+    const programMapOffset = content.readUInt16BE(pgcOffset + 230);
+    const cellPlaybackOffset = content.readUInt16BE(pgcOffset + 232);
+    const cellPositionOffset = content.readUInt16BE(pgcOffset + 234);
+    if (
+      programCount <= 0 ||
+      cellCount <= 0 ||
+      programCount > cellCount ||
+      programMapOffset < 236 ||
+      cellPlaybackOffset < 236 ||
+      cellPositionOffset < 236 ||
+      programMapOffset + programCount > cellPlaybackOffset ||
+      cellPlaybackOffset + cellCount * 24 > cellPositionOffset ||
+      pgcStartByte + cellPositionOffset + cellCount * 4 > pgcitByteCount
+    ) {
+      throw new Error("DVD program chain table is malformed");
+    }
+    const programStartCells: number[] = [];
+    let previousStartCell = 0;
+    for (let index = 0; index < programCount; index += 1) {
+      const startCell = content[pgcOffset + programMapOffset + index]!;
+      if (
+        startCell <= previousStartCell ||
+        startCell > cellCount ||
+        (index === 0 && startCell !== 1)
+      ) {
+        throw new Error("DVD program chain table is malformed");
+      }
+      programStartCells.push(startCell);
+      previousStartCell = startCell;
+    }
+    const cells: Array<DvdProgramChain["cells"][number]> = [];
+    let angleBlockLength = 0;
+    const angleBlockLengths: number[] = [];
+    for (let index = 0; index < cellCount; index += 1) {
+      const playbackOffset = pgcOffset + cellPlaybackOffset + index * 24;
+      const positionOffset = pgcOffset + cellPositionOffset + index * 4;
+      const blockMode = content[playbackOffset]! >> 6;
+      const blockType = (content[playbackOffset]! >> 4) & 0x03;
+      const firstSector = content.readUInt32BE(playbackOffset + 8);
+      const lastVobuStartSector = content.readUInt32BE(playbackOffset + 16);
+      const lastSector = content.readUInt32BE(playbackOffset + 20);
+      const vobId = content.readUInt16BE(positionOffset);
+      const cellNumber = content[positionOffset + 3]!;
+      if (
+        firstSector > lastVobuStartSector ||
+        lastVobuStartSector > lastSector ||
+        lastSector >= titleVobSectorCount ||
+        vobId <= 0 ||
+        content[positionOffset + 2] !== 0 ||
+        cellNumber <= 0
+      ) {
+        throw new Error("DVD program chain cell table is malformed");
+      }
+      if (blockType === 0) {
+        if (blockMode !== 0 || angleBlockLength !== 0) {
+          throw new Error("DVD program chain angle layout is malformed");
+        }
+      } else if (blockType === 1) {
+        if (blockMode === 1 && angleBlockLength === 0) {
+          angleBlockLength = 1;
+        } else if (blockMode === 2 && angleBlockLength > 0) {
+          angleBlockLength += 1;
+        } else if (blockMode === 3 && angleBlockLength > 0) {
+          angleBlockLengths.push(angleBlockLength + 1);
+          angleBlockLength = 0;
+        } else {
+          throw new Error("DVD program chain angle layout is malformed");
+        }
+      } else {
+        throw new Error("DVD program chain angle layout is malformed");
+      }
+      cells.push({
+        blockMode,
+        blockType,
+        cellNumber,
+        firstSector,
+        lastSector,
+        vobId,
+      });
+    }
+    if (angleBlockLength !== 0) {
+      throw new Error("DVD program chain angle layout is malformed");
+    }
+    return { angleBlockLengths, cells, programStartCells };
+  };
+
+  const titleAssociationsBySourceAndSet = new Map<
+    string,
+    Promise<readonly {
+      angleCount: number;
+      sectors: readonly { firstSector: number; lastSector: number }[];
+      titleNumber: number;
+    }[]>
+  >();
+  const readTitleAssociations = (
+    source: "iso" | "udf",
+    titleSetNumber: number,
+    titleVobSectorCount: number,
+  ) => {
+    const key = `${source}:${titleSetNumber}:${titleVobSectorCount}`;
+    const existing = titleAssociationsBySourceAndSet.get(key);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const associations = (async () => {
+      const dvdFiles = source === "iso" ? isoDvdFiles : udfDvdFiles;
+      const globalTitles = (await parseGlobalTitles(dvdFiles)).filter(
+        (title) => title.titleSetNumber === titleSetNumber,
+      );
+      if (globalTitles.length === 0) {
+        throw new Error("DVD title-set has no global title references");
+      }
+      const ifoPath = `VIDEO_TS/VTS_${String(titleSetNumber).padStart(2, "0")}_0.IFO`;
+      const file = dvdFiles.get(ifoPath);
+      if (file === undefined) {
+        throw new Error("DVD title-set navigation file is missing");
+      }
+      const content = await readDvdFile(file, MAX_FILE_ENTRY_BYTES * 16);
+      if (
+        content.byteLength < DVD_SECTOR_SIZE_BYTES ||
+        content.toString("ascii", 0, 12) !== "DVDVIDEO-VTS"
+      ) {
+        throw new Error("DVD title-set navigation file is malformed");
+      }
+      const pttOffset = content.readUInt32BE(0xc8) * DVD_SECTOR_SIZE_BYTES;
+      const pgcitOffset = content.readUInt32BE(0xcc) * DVD_SECTOR_SIZE_BYTES;
+      if (
+        pttOffset < DVD_SECTOR_SIZE_BYTES ||
+        pttOffset + 8 > content.byteLength ||
+        pgcitOffset < DVD_SECTOR_SIZE_BYTES ||
+        pgcitOffset + 8 > content.byteLength
+      ) {
+        throw new Error("DVD title traversal tables are missing");
+      }
+      const localTitleCount = content.readUInt16BE(pttOffset);
+      const pttByteCount = content.readUInt32BE(pttOffset + 4) + 1;
+      if (
+        localTitleCount <= 0 ||
+        localTitleCount > 99 ||
+        content.readUInt16BE(pttOffset + 2) !== 0 ||
+        pttByteCount < 8 + localTitleCount * 4 ||
+        pttOffset + pttByteCount > content.byteLength ||
+        globalTitles.length !== localTitleCount ||
+        globalTitles.some((title) =>
+          title.titleSetTitleNumber > localTitleCount
+        )
+      ) {
+        throw new Error("DVD part-of-title table is malformed");
+      }
+      const titleParts: Array<readonly {
+        pgcNumber: number;
+        programNumber: number;
+      }[]> = [];
+      let previousPartOffset = 8 + localTitleCount * 4;
+      for (let index = 0; index < localTitleCount; index += 1) {
+        const partOffset = content.readUInt32BE(pttOffset + 8 + index * 4);
+        const nextPartOffset = index + 1 < localTitleCount
+          ? content.readUInt32BE(pttOffset + 8 + (index + 1) * 4)
+          : pttByteCount;
+        if (
+          partOffset < previousPartOffset ||
+          nextPartOffset <= partOffset ||
+          nextPartOffset > pttByteCount ||
+          (nextPartOffset - partOffset) % 4 !== 0
+        ) {
+          throw new Error("DVD part-of-title table is malformed");
+        }
+        const parts = [];
+        for (let offset = partOffset; offset < nextPartOffset; offset += 4) {
+          const pgcNumber = content.readUInt16BE(pttOffset + offset);
+          const programNumber = content.readUInt16BE(pttOffset + offset + 2);
+          if (pgcNumber <= 0 || programNumber <= 0) {
+            throw new Error("DVD part-of-title table is malformed");
+          }
+          parts.push({ pgcNumber, programNumber });
+        }
+        titleParts.push(parts);
+        previousPartOffset = nextPartOffset;
+      }
+      for (const title of globalTitles) {
+        if (
+          titleParts[title.titleSetTitleNumber - 1]?.length !==
+            title.chapterCount
+        ) {
+          throw new Error("DVD title chapter relationships are malformed");
+        }
+      }
+
+      const pgcCount = content.readUInt16BE(pgcitOffset);
+      const pgcitByteCount = content.readUInt32BE(pgcitOffset + 4) + 1;
+      if (
+        pgcCount <= 0 ||
+        pgcCount > 999 ||
+        content.readUInt16BE(pgcitOffset + 2) !== 0 ||
+        pgcitByteCount < 8 + pgcCount * 8 ||
+        pgcitOffset + pgcitByteCount > content.byteLength
+      ) {
+        throw new Error("DVD program chain table is malformed");
+      }
+      const programChains = new Map<number, DvdProgramChain>();
+      for (const parts of titleParts) {
+        for (const { pgcNumber } of parts) {
+          if (pgcNumber > pgcCount || programChains.has(pgcNumber)) {
+            continue;
+          }
+          const searchPointerOffset = pgcitOffset + 8 + (pgcNumber - 1) * 8;
+          const pgcStartByte = content.readUInt32BE(searchPointerOffset + 4);
+          programChains.set(
+            pgcNumber,
+            parseProgramChain(
+              content,
+              pgcitOffset,
+              pgcitByteCount,
+              pgcStartByte,
+              titleVobSectorCount,
+            ),
+          );
+        }
+      }
+      return globalTitles.map((title) => {
+        const parts = titleParts[title.titleSetTitleNumber - 1]!;
+        const sectors: Array<{ firstSector: number; lastSector: number }> = [];
+        const seenPgcNumbers = new Set<number>();
+        for (let index = 0; index < parts.length; index += 1) {
+          const part = parts[index]!;
+          const chain = programChains.get(part.pgcNumber);
+          if (
+            chain === undefined ||
+            part.programNumber > chain.programStartCells.length ||
+            (seenPgcNumbers.has(part.pgcNumber) &&
+              parts[index - 1]?.pgcNumber !== part.pgcNumber)
+          ) {
+            throw new Error("DVD title program relationships are malformed");
+          }
+          seenPgcNumbers.add(part.pgcNumber);
+          const nextPart = parts[index + 1];
+          if (
+            nextPart?.pgcNumber === part.pgcNumber &&
+            nextPart.programNumber <= part.programNumber
+          ) {
+            throw new Error("DVD title program relationships are malformed");
+          }
+          const firstCell = chain.programStartCells[part.programNumber - 1]!;
+          const lastCell = nextPart?.pgcNumber === part.pgcNumber
+            ? chain.programStartCells[nextPart.programNumber - 1]! - 1
+            : chain.cells.length;
+          if (lastCell < firstCell) {
+            throw new Error("DVD title program relationships are malformed");
+          }
+          for (let cell = firstCell; cell <= lastCell; cell += 1) {
+            const playback = chain.cells[cell - 1];
+            if (playback === undefined) {
+              throw new Error("DVD title cell relationships are malformed");
+            }
+            sectors.push({
+              firstSector: playback.firstSector,
+              lastSector: playback.lastSector,
+            });
+          }
+        }
+        const angleBlockLengths = [...seenPgcNumbers].flatMap((pgcNumber) =>
+          programChains.get(pgcNumber)?.angleBlockLengths ?? []
+        );
+        if (
+          angleBlockLengths.some((length) => length !== title.angleCount) ||
+          (title.angleCount > 1 && angleBlockLengths.length === 0)
+        ) {
+          throw new Error("DVD title angle relationships are malformed");
+        }
+        return {
+          angleCount: title.angleCount,
+          sectors,
+          titleNumber: title.titleNumber,
+        };
+      });
+    })();
+    titleAssociationsBySourceAndSet.set(key, associations);
+    return associations;
+  };
+
   const classifyTitleVobSector = async (
     extent: SectorExtent,
     badLba: number,
@@ -529,6 +914,7 @@ export async function classifyDvdImageDamage({
   } | {
     evidenceKey: string;
     outcome: "payload";
+    affectedTitleNumbers: readonly number[];
     titleSetNumber: number;
   } | { outcome: "ambiguous" }> => {
     if (
@@ -598,6 +984,20 @@ export async function classifyDvdImageDamage({
       identity.titleSetNumber,
       titleVobSectorCount,
     );
+    const titleAssociations = await readTitleAssociations(
+      extent.fileLocation.source,
+      identity.titleSetNumber,
+      titleVobSectorCount,
+    );
+    const affectedTitleNumbers = titleAssociations
+      .filter(({ sectors }) => sectors.some(({ firstSector, lastSector }) =>
+        titleVobSector >= firstSector && titleVobSector <= lastSector
+      ))
+      .map(({ titleNumber }) => titleNumber)
+      .sort((left, right) => left - right);
+    if (affectedTitleNumbers.length === 0) {
+      return { outcome: "ambiguous" };
+    }
     const layout = titleParts.map(({ file }) => ({
       byteCount: file.byteCount,
       extents: file.extents.reduce<Array<{
@@ -622,6 +1022,7 @@ export async function classifyDvdImageDamage({
       damagedPath: extent.fileLocation.path,
       layout,
       navigationSectors: [...navigationSectors],
+      affectedTitleNumbers,
       titleSetNumber: identity.titleSetNumber,
       titleVobSector,
     });
@@ -630,6 +1031,7 @@ export async function classifyDvdImageDamage({
       : {
           evidenceKey,
           outcome: "payload",
+          affectedTitleNumbers,
           titleSetNumber: identity.titleSetNumber,
         };
   };
@@ -1197,7 +1599,10 @@ export async function classifyDvdImageDamage({
         requiredDvdPaths.some((path) => !udfDvdPaths.has(path)))) {
       throw new Error("DVD-Video control structures are missing");
     }
-    const badSectorCountsByTitleSet = new Map<number, number>();
+    const badSectorCountsByTitle = new Map<
+      number,
+      { badSectorCount: number; titleSetNumber: number }
+    >();
     for (const badLba of badSectors) {
       const allocations = allocatedExtents.filter((extent) =>
         extentContainsLba(extent, badLba)
@@ -1242,11 +1647,19 @@ export async function classifyDvdImageDamage({
         if (classification.outcome === "navigation") {
           return { outcome: "rejected", reason: "navigation" };
         }
-        badSectorCountsByTitleSet.set(
-          classification.titleSetNumber,
-          (badSectorCountsByTitleSet.get(classification.titleSetNumber) ?? 0) +
-            1,
-        );
+        for (const titleNumber of classification.affectedTitleNumbers) {
+          const existing = badSectorCountsByTitle.get(titleNumber);
+          if (
+            existing !== undefined &&
+            existing.titleSetNumber !== classification.titleSetNumber
+          ) {
+            return { outcome: "rejected", reason: "ambiguous" };
+          }
+          badSectorCountsByTitle.set(titleNumber, {
+            badSectorCount: (existing?.badSectorCount ?? 0) + 1,
+            titleSetNumber: classification.titleSetNumber,
+          });
+        }
         continue;
       }
       if (
@@ -1278,14 +1691,14 @@ export async function classifyDvdImageDamage({
         throw new Error("DVD salvage substituted sector data is invalid");
       }
     }
-    return badSectorCountsByTitleSet.size === 0
-      ? { affectedTitleSetBadSectorCounts: [], outcome: "accepted" }
+    return badSectorCountsByTitle.size === 0
+      ? { affectedTitleBadSectorCounts: [], outcome: "accepted" }
       : {
-          affectedTitleSetBadSectorCounts: [...badSectorCountsByTitleSet]
+          affectedTitleBadSectorCounts: [...badSectorCountsByTitle]
             .sort(([left], [right]) => left - right)
-            .map(([titleSetNumber, badSectorCount]) => ({
-              badSectorCount,
-              titleSetNumber,
+            .map(([titleNumber, evidence]) => ({
+              ...evidence,
+              titleNumber,
             })),
           outcome: "accepted",
         };

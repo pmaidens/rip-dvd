@@ -61,8 +61,9 @@ function validationRequest() {
 }
 
 function payloadValidationRunner(playback: {
-  affectedTitleSetBadSectorCounts?: readonly {
+  affectedTitleBadSectorCounts?: readonly {
     badSectorCount: number;
+    titleNumber: number;
     titleSetNumber: number;
   }[];
   error?: Error;
@@ -75,12 +76,13 @@ function payloadValidationRunner(playback: {
       exitCode: 0,
       stderr: "",
       stdout: JSON.stringify({
-        affectedTitleSetBadSectorCounts:
-          playback.affectedTitleSetBadSectorCounts ?? [{
+        affectedTitleBadSectorCounts:
+          playback.affectedTitleBadSectorCounts ?? [{
             badSectorCount: 1,
+            titleNumber: 1,
             titleSetNumber: 1,
           }],
-        protocolVersion: 2,
+        protocolVersion: 3,
         outcome: "accepted",
       }),
     })
@@ -105,8 +107,8 @@ describe("DVD salvage validation process boundary", () => {
         exitCode: 0,
         stderr: "",
         stdout: JSON.stringify({
-          affectedTitleSetBadSectorCounts: [],
-          protocolVersion: 2,
+          affectedTitleBadSectorCounts: [],
+          protocolVersion: 3,
           outcome: "accepted",
         }),
       })
@@ -181,11 +183,11 @@ describe("DVD salvage validation process boundary", () => {
         exitCode: 0,
         stderr: "",
         stdout: JSON.stringify({
-          affectedTitleSetBadSectorCounts: [{
-            badSectorCount: 1,
-            titleSetNumber: 1,
-          }],
-          protocolVersion: 2,
+          affectedTitleBadSectorCounts: [
+            { badSectorCount: 1, titleNumber: 1, titleSetNumber: 1 },
+            { badSectorCount: 1, titleNumber: 2, titleSetNumber: 1 },
+          ],
+          protocolVersion: 3,
           outcome: "accepted",
         }),
       })
@@ -369,7 +371,7 @@ describe("DVD salvage validation process boundary", () => {
       exitCode: 0,
       stderr: "",
       stdout: JSON.stringify({
-        protocolVersion: 2,
+        protocolVersion: 3,
         outcome: "rejected",
         reason: "navigation",
       }),
@@ -420,8 +422,8 @@ describe("DVD salvage validation process boundary", () => {
         exitCode: 0,
         stderr: "",
         stdout: JSON.stringify({
-          affectedTitleSetBadSectorCounts: [],
-          protocolVersion: 2,
+          affectedTitleBadSectorCounts: [],
+          protocolVersion: 3,
           outcome: "accepted",
         }),
       })
@@ -454,8 +456,9 @@ describe("DVD salvage validation process boundary", () => {
     "%s isolated bad sectors in one title are %s at the per-title boundary",
     async (badSectorCount, expectedOutcome) => {
       const run = payloadValidationRunner({
-        affectedTitleSetBadSectorCounts: [{
+        affectedTitleBadSectorCounts: [{
           badSectorCount,
+          titleNumber: 1,
           titleSetNumber: 1,
         }],
       });
@@ -491,8 +494,9 @@ describe("DVD salvage validation process boundary", () => {
 
   it("accepts combined unused-space and payload damage with exact title counts", async () => {
     const run = payloadValidationRunner({
-      affectedTitleSetBadSectorCounts: [{
+      affectedTitleBadSectorCounts: [{
         badSectorCount: 2,
+        titleNumber: 1,
         titleSetNumber: 1,
       }],
     });
@@ -546,27 +550,27 @@ describe("DVD salvage validation process boundary", () => {
 
   it.each([
     {
-      name: "invalid per-title-set count",
-      evidence: [{ badSectorCount: 0, titleSetNumber: 1 }],
+      name: "invalid per-title count",
+      evidence: [{ badSectorCount: 0, titleNumber: 1, titleSetNumber: 1 }],
     },
     {
-      name: "duplicate title set",
+      name: "duplicate title",
       evidence: [
-        { badSectorCount: 1, titleSetNumber: 1 },
-        { badSectorCount: 1, titleSetNumber: 1 },
+        { badSectorCount: 1, titleNumber: 1, titleSetNumber: 1 },
+        { badSectorCount: 1, titleNumber: 1, titleSetNumber: 1 },
       ],
     },
     {
       name: "more classified damage than the recovery map",
-      evidence: [{ badSectorCount: 2, titleSetNumber: 1 }],
+      evidence: [{ badSectorCount: 2, titleNumber: 1, titleSetNumber: 1 }],
     },
   ])("fails closed on $name evidence", async ({ evidence }) => {
     const run = vi.fn<CommandRunner["run"]>().mockResolvedValue({
       exitCode: 0,
       stderr: "",
       stdout: JSON.stringify({
-        affectedTitleSetBadSectorCounts: evidence,
-        protocolVersion: 2,
+        affectedTitleBadSectorCounts: evidence,
+        protocolVersion: 3,
         outcome: "accepted",
       }),
     });
@@ -583,8 +587,8 @@ describe("DVD salvage validation process boundary", () => {
         exitCode: 0,
         stderr: "",
         stdout: JSON.stringify({
-          affectedTitleSetBadSectorCounts: [],
-          protocolVersion: 2,
+          affectedTitleBadSectorCounts: [],
+          protocolVersion: 3,
           outcome: "accepted",
         }),
       })

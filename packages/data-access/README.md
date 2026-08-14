@@ -289,7 +289,10 @@ remain `unknown`, while a newly observed zero-damage recovery is `clean_read`
 with its recovery-policy version and zero bad-sector evidence. A rescued image
 whose unreadable sectors are proved to occupy unused filesystem space, or whose
 isolated title-VOB payload errors pass bounded DVD-aware playback validation for
-every affected title, is published as `watchable_salvage`. Its atomic evidence
+every affected title, is published as `watchable_salvage`. Affected titles are
+derived from the VMG title table and each title set's part-of-title, program
+chain, program, cell, and angle relationships; sharing a title set alone does
+not attribute a damaged sector to a title. Its atomic evidence
 records the versioned acceptance policy, normalized ranges, disc-wide totals,
 and sorted per-title bad-sector counts. Version-one salvage rows predate exact
 per-title evidence and remain distinguishable from new version-two decisions.
