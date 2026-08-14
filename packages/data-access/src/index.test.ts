@@ -3403,6 +3403,22 @@ describe("data-access facade", () => {
         reason: `Correction history ${index}`,
       })
     );
+    const expectedPredecessorIds = [...predecessors]
+      .sort((left, right) =>
+        left.createdAt.getTime() - right.createdAt.getTime() ||
+        left.id.localeCompare(right.id)
+      )
+      .map(({ id }) => id);
+    const firstPageBeforeDelayedReplacements = access.encodeJobs
+      .listDiscSelectionCorrectionEncodeJobLinks({
+        originalDiscArchiveId: archive.id,
+        limit: 100,
+        offset: 0,
+      });
+    expect(firstPageBeforeDelayedReplacements).toHaveLength(100);
+    expect(firstPageBeforeDelayedReplacements.every(
+      ({ replacementEncodeJob }) => replacementEncodeJob === null,
+    )).toBe(true);
 
     const unrelatedSelection = access.catalog.createDiscSelection({
       originalDiscArchiveId: unrelatedArchive.id,
@@ -3527,6 +3543,10 @@ describe("data-access facade", () => {
       })
     );
     expect(correctionJobPages.map((page) => page.length)).toEqual([100, 100, 1]);
+    const traversedPredecessorIds = correctionJobPages.flatMap((page) =>
+      page.map(({ predecessorEncodeJob }) => predecessorEncodeJob.id)
+    );
+    expect(traversedPredecessorIds).toEqual(expectedPredecessorIds);
     const traversedReplacementIds = correctionJobPages.flatMap((page) =>
       page.map(({ replacementEncodeJob }) => {
         if (replacementEncodeJob === null) {
@@ -3535,9 +3555,28 @@ describe("data-access facade", () => {
         return replacementEncodeJob.id;
       })
     );
-    expect(traversedReplacementIds).toEqual(replacementIds);
+    const replacementIdByPredecessorId = new Map(
+      predecessors.map((predecessor, index) => [
+        predecessor.id,
+        replacementIds[index]!,
+      ]),
+    );
+    expect(traversedReplacementIds).toEqual(
+      expectedPredecessorIds.map(
+        (predecessorId) => replacementIdByPredecessorId.get(predecessorId),
+      ),
+    );
     expect(new Set(traversedReplacementIds).size).toBe(historySize);
     expect(traversedReplacementIds).not.toContain(unrelatedReplacementId);
+    const delayedReplacementTraversal = [
+      firstPageBeforeDelayedReplacements,
+      correctionJobPages[1]!,
+      correctionJobPages[2]!,
+    ].flatMap((page) =>
+      page.map(({ predecessorEncodeJob }) => predecessorEncodeJob.id)
+    );
+    expect(delayedReplacementTraversal).toEqual(expectedPredecessorIds);
+    expect(new Set(delayedReplacementTraversal).size).toBe(historySize);
 
     const retainedOutputPages = [0, 100, 200].map((offset) =>
       access.encodeJobs

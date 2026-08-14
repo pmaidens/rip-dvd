@@ -668,8 +668,8 @@ archive-scoped pages: `selectionOffset` traverses up to 100 active Disc
 Selections ordered by creation time and identity, `correctionOffset` traverses
 up to 100 supersessions ordered by correction time and superseded identity, and
 `correctionJobOffset` traverses up to 100 correction-associated predecessor
-jobs ordered by replacement creation time when one was scheduled, or otherwise
-by predecessor creation time, then identity. `correctionOutputOffset`
+jobs ordered by immutable predecessor creation time and identity, regardless of
+whether a replacement is scheduled later. `correctionOutputOffset`
 traverses up to 100 path-free Retained Encode output summaries ordered by
 retention time and identity. Each correction-job entry contains one predecessor
 and at most one replacement, so that nested response is capped at 200 job
