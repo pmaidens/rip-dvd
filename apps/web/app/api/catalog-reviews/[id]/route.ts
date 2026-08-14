@@ -42,6 +42,15 @@ const CATALOG_REVIEW_CORRECTION_RETAINED_OUTPUT_HISTORY_PAGE_SIZE = 100;
 const CATALOG_REVIEW_REPLACEMENT_PLAN_LIMIT = 100;
 const CATALOG_REVIEW_REPLACEMENT_PROFILE_LIMIT = 100;
 
+interface CatalogReviewPageCoordinates {
+  discSelectionOffset: number;
+  correctionHistoryOffset: number;
+  correctionEncodeHistoryOffset: number;
+  correctionRetainedOutputHistoryOffset: number;
+  replacementOffset: number;
+  replacementProfileOffset: number;
+}
+
 function response(body: unknown, status = 200): Response {
   return Response.json(body, {
     status,
@@ -157,13 +166,16 @@ function readDiscSelectionsByIds(
 function readCatalogReview(
   access: DataAccess,
   id: OriginalDiscArchiveId,
-  discSelectionOffset: number,
-  correctionHistoryOffset: number,
-  correctionEncodeHistoryOffset: number,
-  correctionRetainedOutputHistoryOffset: number,
-  replacementOffset: number,
-  replacementProfileOffset: number,
+  coordinates: CatalogReviewPageCoordinates,
 ) {
+  const {
+    discSelectionOffset,
+    correctionHistoryOffset,
+    correctionEncodeHistoryOffset,
+    correctionRetainedOutputHistoryOffset,
+    replacementOffset,
+    replacementProfileOffset,
+  } = coordinates;
   return access.readConsistentSnapshot((snapshot) => {
     const archive = snapshot.catalog.listOriginalDiscArchives({ ids: [id] })[0];
     if (!archive) {
@@ -506,12 +518,14 @@ export async function createCatalogReviewRoute(
       const review = readCatalogReview(
         getAccess(),
         archiveId,
-        discSelectionOffset,
-        correctionHistoryOffset,
-        correctionEncodeHistoryOffset,
-        correctionRetainedOutputHistoryOffset,
-        replacementOffset,
-        replacementProfileOffset,
+        {
+          discSelectionOffset,
+          correctionHistoryOffset,
+          correctionEncodeHistoryOffset,
+          correctionRetainedOutputHistoryOffset,
+          replacementOffset,
+          replacementProfileOffset,
+        },
       );
       return review === null
         ? response({ error: "Original Disc Archive not found" }, 404)

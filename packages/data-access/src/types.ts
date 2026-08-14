@@ -275,8 +275,14 @@ export interface CatalogReviewCoverage {
 
 export interface DiscSelectionCorrectionEncodeJobLink {
   replacementDiscSelectionId: DiscSelectionId;
-  predecessorEncodeJob: EncodeJob;
-  replacementEncodeJob: EncodeJob;
+  predecessorEncodeJob: {
+    id: EncodeJobId;
+    status: EncodeJobStatus;
+  };
+  replacementEncodeJob: {
+    id: EncodeJobId;
+    status: EncodeJobStatus;
+  };
 }
 
 export type DiscSelectionAction =

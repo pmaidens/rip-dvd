@@ -177,10 +177,13 @@ Disc Selection mutation preserves distinct identity paths:
   correction creates another supersession, while removal deactivates the
   replacement rather than deleting either endpoint or an immutable link.
   Catalog history pages supersessions separately from correction Encode Job
-  links. `listDiscSelectionCorrectionEncodeJobLinks()` requires an archive,
+  links. Archive-scoped `listDiscSelectionSupersessions()` requires a limit no
+  larger than 101 (including the route's one-row lookahead).
+  `listDiscSelectionCorrectionEncodeJobLinks()` requires an archive,
   offset, and limit no larger than 101, orders replacement jobs by immutable
   creation time and identity, and returns one predecessor/replacement pair per
-  row. `listDiscSelectionCorrectionRetainedOutputSummaries()` independently
+  path-free job-summary row containing only identities and statuses.
+  `listDiscSelectionCorrectionRetainedOutputSummaries()` independently
   requires an archive, offset, and limit no larger than 101, orders summaries by
   immutable retention time and identity, and returns every retry as a separate
   path-free row. The resulting projections preserve job outcomes, links, and

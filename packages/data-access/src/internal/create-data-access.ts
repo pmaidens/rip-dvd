@@ -188,6 +188,7 @@ const LEGACY_ARCHIVE_RECONCILIATION_BYTES = 9_000_000_000;
 const DISC_SELECTION_REVIEW_BATCH_SIZE = 100;
 const DISC_SELECTION_ACTION_AVAILABILITY_LIMIT = 100;
 const DISC_SELECTION_SUPERSESSION_LIMIT = 100;
+const DISC_SELECTION_SUPERSESSION_HISTORY_LIMIT = 101;
 const DISC_SELECTION_CORRECTION_ENCODE_JOB_LINK_LIMIT = 101;
 const DISC_SELECTION_CORRECTION_RETAINED_OUTPUT_SUMMARY_LIMIT = 101;
 const MEDIA_ITEM_SEARCH_LIMIT = 100;
@@ -4818,6 +4819,15 @@ export function createDataAccessInternal(
           createdAt: discSelectionSupersessions.createdAt,
         };
         if (options.originalDiscArchiveId !== undefined) {
+          if (
+            !Number.isSafeInteger(options.limit) ||
+            options.limit < 1 ||
+            options.limit > DISC_SELECTION_SUPERSESSION_HISTORY_LIMIT
+          ) {
+            throw new DomainInvariantError(
+              `Disc Selection supersession history limit must be a safe integer between 1 and ${DISC_SELECTION_SUPERSESSION_HISTORY_LIMIT}`,
+            );
+          }
           const query = database
             .select(selection)
             .from(discSelectionSupersessions)
@@ -7216,8 +7226,14 @@ export function createDataAccessInternal(
         const query = database
           .select({
             replacementDiscSelectionId: discSelections.id,
-            predecessorEncodeJob: predecessorEncodeJobRecords,
-            replacementEncodeJob: encodeJobs,
+            predecessorEncodeJob: {
+              id: predecessorEncodeJobRecords.id,
+              status: predecessorEncodeJobRecords.status,
+            },
+            replacementEncodeJob: {
+              id: encodeJobs.id,
+              status: encodeJobs.status,
+            },
           })
           .from(encodeJobs)
           .innerJoin(

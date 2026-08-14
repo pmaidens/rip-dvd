@@ -2798,6 +2798,12 @@ describe("data-access facade", () => {
       originalDiscArchiveId: archive.id,
       limit: 100,
     })).toEqual([correction.supersession, secondCorrection.supersession]);
+    expect(() => access.catalog.listDiscSelectionSupersessions({
+      originalDiscArchiveId: archive.id,
+      limit: 102,
+    })).toThrow(
+      "Disc Selection supersession history limit must be a safe integer between 1 and 101",
+    );
     expect(
       access.catalog.deleteDiscSelection(secondCorrection.discSelection.id),
     ).toMatchObject({
@@ -3155,14 +3161,34 @@ describe("data-access facade", () => {
             retainedAt: expect.any(Date),
           },
         }]);
+      expect(snapshot.encodeJobs.listDiscSelectionCorrectionEncodeJobLinks({
+        originalDiscArchiveId: archive.id,
+        limit: 1,
+      })).toEqual([{
+        replacementDiscSelectionId: correction.discSelection.id,
+        predecessorEncodeJob: {
+          id: predecessor.id,
+          status: "completed",
+        },
+        replacementEncodeJob: {
+          id: replacement.id,
+          status: "completed",
+        },
+      }]);
     });
     expect(access.encodeJobs.listDiscSelectionCorrectionEncodeJobLinks({
       originalDiscArchiveId: archive.id,
       limit: 1,
     })).toEqual([{
       replacementDiscSelectionId: correction.discSelection.id,
-      predecessorEncodeJob: expect.objectContaining({ id: predecessor.id }),
-      replacementEncodeJob: expect.objectContaining({ id: replacement.id }),
+      predecessorEncodeJob: {
+        id: predecessor.id,
+        status: "completed",
+      },
+      replacementEncodeJob: {
+        id: replacement.id,
+        status: "completed",
+      },
     }]);
     expect(access.encodeJobs.listDiscSelectionCorrectionEncodeJobLinks({
       originalDiscArchiveId: archive.id,
