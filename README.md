@@ -329,6 +329,28 @@ supported Node range therefore starts at 22.23.1. When that exact toolchain is
 not installed on the host, run the same frozen-install check, database migration
 check, tests, and build with `docker compose --profile validation build validation`.
 
+### Catalog Review browser validation
+
+Install the Playwright Chromium browser once:
+
+```bash
+pnpm --filter @rip-dvd/web exec playwright install chromium
+```
+
+Run the deterministic Catalog Review browser suite with:
+
+```bash
+pnpm test:browser
+```
+
+The command builds and starts the production web app, seeds isolated Catalog
+Review fixtures under `apps/web/test-results/`, and runs the workflow at
+1440×1000 and 390×844. It covers keyboard-only mapping and job-free correction,
+filters, bulk proposals, Review Coverage, corrected/replacement content, long
+labels and stream lists, accessibility state and error associations, and
+horizontal-overflow checks. Run it alongside the standard validation commands
+when changing Catalog Review presentation or interaction behavior.
+
 The shared `@rip-dvd/config` package validates the runtime environment for the
 web app and both workers. Copy `.env.example` to `.env` when overriding the
 Docker Compose defaults. Compose fixes the database and library paths to

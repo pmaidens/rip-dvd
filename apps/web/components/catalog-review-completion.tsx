@@ -326,6 +326,7 @@ export function CatalogReviewCompletion({
           <label>
             <input
               type="checkbox"
+              aria-describedby="catalog-archive-only-explanation"
               checked={!hasSelections && archiveOnlySelected}
               disabled={isSaving || hasSelections || !isPending}
               onChange={(event) => onArchiveOnlyChange(event.target.checked)}
@@ -336,20 +337,28 @@ export function CatalogReviewCompletion({
             </span>
           </label>
           {hasSelections ? (
-            <p className="catalog-help">
+            <p className="catalog-help" id="catalog-archive-only-explanation">
               Archive only is unavailable while Disc Selections are active.
             </p>
           ) : (
-            <p className="catalog-help">
+            <p className="catalog-help" id="catalog-archive-only-explanation">
               Select Archive only explicitly to distinguish this outcome from
               an incomplete review.
             </p>
           )}
         </div>
         <div className="catalog-complete-submit">
-          <p>Completing review removes this archive from the dashboard queue.</p>
+          <p id="catalog-complete-explanation">
+            Completing review removes this archive from the dashboard queue.
+            {!isPending
+              ? " This Catalog Review is already complete."
+              : !hasSelections && !archiveOnlySelected
+                ? " Select Archive only before completing a review with no Disc Selections."
+                : null}
+          </p>
           <button
             type="submit"
+            aria-describedby="catalog-complete-explanation"
             disabled={
               isSaving ||
               !isPending ||

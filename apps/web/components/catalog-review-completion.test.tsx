@@ -94,10 +94,15 @@ describe("CatalogReviewCompletion", () => {
     expect(html).toContain("1 main-feature selection");
     expect(html).toContain("Coverage always includes the complete archive");
     expect(html).toContain("Complete review");
-    expect(html).toContain('<button type="submit">Complete review</button>');
+    expect(html).toContain(
+      '<button type="submit" aria-describedby="catalog-complete-explanation">Complete review</button>',
+    );
     expect(html).toContain("Archive only");
     expect(html).toContain(
       "Archive only is unavailable while Disc Selections are active",
+    );
+    expect(html).toContain(
+      'aria-describedby="catalog-archive-only-explanation"',
     );
   });
 

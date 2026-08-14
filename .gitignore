@@ -4,6 +4,8 @@ __pycache__/
 node_modules/
 .pnpm-store/
 .next/
+playwright-report/
+test-results/
 dist/
 *.tsbuildinfo
 .env

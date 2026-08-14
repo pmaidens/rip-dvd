@@ -8,6 +8,8 @@
     "pretest": "node ../encode-worker/scripts/build-atomic-exchange.mjs",
     "start": "next start",
     "test": "tsc -p ../../packages/config/tsconfig.build.json && tsc -p ../../packages/data-access/tsconfig.build.json && vitest run",
+    "test:browser": "playwright test",
+    "test:browser:serve": "next build && node test/browser/seed-catalog-review.mjs && node test/browser/start-catalog-review-server.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -18,6 +20,7 @@
     "react-dom": "19.2.8"
   },
   "devDependencies": {
+    "@playwright/test": "1.62.1",
     "@types/react": "19.2.17",
     "@types/react-dom": "19.2.3",
     "happy-dom": "20.11.2"
