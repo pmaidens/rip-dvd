@@ -105,7 +105,7 @@ export interface CatalogReviewDiscSelection
 export type CatalogReviewDiscSelectionActionAvailability =
   | {
     state: "editable";
-    availableActions: readonly ["correct", "edit_label", "remove"];
+    availableActions: readonly ["update", "remove"];
     reason: null;
     relatedEncodeJob: null;
   }

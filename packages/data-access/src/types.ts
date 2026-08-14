@@ -253,8 +253,8 @@ export interface DiscSelectionCorrection {
 }
 
 export type DiscSelectionAction =
+  | "update"
   | "correct"
-  | "edit_label"
   | "remove"
   | "repair";
 
@@ -262,7 +262,7 @@ export type DiscSelectionActionAvailability =
   | {
     discSelectionId: DiscSelectionId;
     state: "editable";
-    availableActions: readonly ["correct", "edit_label", "remove"];
+    availableActions: readonly ["update", "remove"];
     reason: null;
     relatedEncodeJob: null;
   }

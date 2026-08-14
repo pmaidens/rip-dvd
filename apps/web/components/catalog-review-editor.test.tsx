@@ -110,7 +110,7 @@ function catalogReview({
       label: null,
       actionAvailability: {
         state: "editable",
-        availableActions: ["correct", "edit_label", "remove"],
+        availableActions: ["update", "remove"],
         reason: null,
         relatedEncodeJob: null,
       },
@@ -767,7 +767,7 @@ describe("CatalogReviewEditor", () => {
         label: null,
         actionAvailability: {
           state: "editable",
-          availableActions: ["correct", "edit_label", "remove"],
+          availableActions: ["update", "remove"],
           reason: null,
           relatedEncodeJob: null,
         },
@@ -2042,7 +2042,7 @@ describe("CatalogReviewView", () => {
               label: null,
               actionAvailability: {
                 state: "editable",
-                availableActions: ["correct", "edit_label", "remove"],
+                availableActions: ["update", "remove"],
                 reason: null,
                 relatedEncodeJob: null,
               },

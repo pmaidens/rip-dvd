@@ -400,7 +400,7 @@ describe("Catalog Review API", () => {
         label: "Original label",
         actionAvailability: {
           state: "editable",
-          availableActions: ["correct", "edit_label", "remove"],
+          availableActions: ["update", "remove"],
           reason: null,
           relatedEncodeJob: null,
         },

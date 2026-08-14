@@ -28,7 +28,7 @@ const editableSelection: CatalogReviewDiscSelection = {
   label: "Director's cut",
   actionAvailability: {
     state: "editable",
-    availableActions: ["correct", "edit_label", "remove"],
+    availableActions: ["update", "remove"],
     reason: null,
     relatedEncodeJob: null,
   },
@@ -114,7 +114,7 @@ describe("CatalogReviewDiscSelections", () => {
           label: null,
           actionAvailability: {
             state: "editable",
-            availableActions: ["correct", "edit_label", "remove"],
+            availableActions: ["update", "remove"],
             reason: null,
             relatedEncodeJob: null,
           },
@@ -237,7 +237,7 @@ describe("CatalogReviewDiscSelections", () => {
           label: null,
           actionAvailability: {
             state: "editable",
-            availableActions: ["correct", "edit_label", "remove"],
+            availableActions: ["update", "remove"],
             reason: null,
             relatedEncodeJob: null,
           },

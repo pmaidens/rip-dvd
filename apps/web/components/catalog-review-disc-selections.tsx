@@ -362,6 +362,7 @@ export function CatalogReviewDiscSelections({
               <option value="">Add a new Disc Selection</option>
               {discSelections
                 .filter((selection) =>
+                  hasAction(selection, "update") ||
                   hasAction(selection, "correct") ||
                   hasAction(selection, "repair")
                 )

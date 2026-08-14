@@ -750,7 +750,7 @@ export function createDataAccessInternal(
     return {
       discSelectionId: input.selection.id,
       state: "editable",
-      availableActions: ["correct", "edit_label", "remove"],
+      availableActions: ["update", "remove"],
       reason: null,
       relatedEncodeJob: null,
     };
