@@ -151,7 +151,7 @@ cancellation, interruption, and stale authority do not create a retained-output
 record or move the prior final. The retained record is cleanup-eligible, but the
 facade exposes no deletion, expiry, cleanup mutation, or metadata-only rename.
 
-Disc Selection mutation preserves three distinct identity paths:
+Disc Selection mutation preserves distinct identity paths:
 
 - **Ordinary job-free update.** `updateDiscSelection()` updates the active
   Disc Selection in place only while it has no Encode Job history and belongs

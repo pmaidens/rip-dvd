@@ -36,14 +36,16 @@ const editableSelection: CatalogReviewDiscSelection = {
 
 function InteractiveDiscSelections({
   onUpdate,
+  selection = editableSelection,
 }: {
   onUpdate(id: string, changes: UpdateDiscSelectionInput): void;
+  selection?: CatalogReviewDiscSelection;
 }) {
   const [selectionKind, setSelectionKind] =
     useState<DiscSelectionKind>("main_feature");
   return (
     <CatalogReviewDiscSelections
-      discSelections={[editableSelection]}
+      discSelections={[selection]}
       page={{
         offset: 0,
         limit: 100,
@@ -617,6 +619,21 @@ describe("CatalogReviewDiscSelections", () => {
     expect(onUpdate).toHaveBeenCalledWith(editableSelection.id, {
       label: null,
     });
+
+    await act(async () => {
+      root.render(
+        <InteractiveDiscSelections
+          selection={{ ...editableSelection, label: null }}
+          onUpdate={onUpdate}
+        />,
+      );
+    });
+    expect(container.querySelector('input[name="clearLabel"]')).toBeNull();
+    const refreshedLabel = container.querySelector<HTMLInputElement>(
+      'input[name="label"]',
+    );
+    expect(refreshedLabel?.disabled).toBe(false);
+    expect(refreshedLabel?.value).toBe("");
     await act(async () => root.unmount());
     container.remove();
   });

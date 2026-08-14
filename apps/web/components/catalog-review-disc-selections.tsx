@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 
 import type { DiscSelectionAction } from "@rip-dvd/data-access";
 import type { DvdTitle } from "@rip-dvd/data-access/dvd-scan";
@@ -119,24 +119,9 @@ export function CatalogReviewDiscSelections({
     : discSelections.find((selection) => selection.id === editingSelectionId) ??
       null;
 
-  function selectCatalogAction(event: React.ChangeEvent<HTMLSelectElement>) {
-    const selection = discSelections.find(
-      (candidate) => candidate.id === event.currentTarget.value,
-    );
-    if (selection?.actionAvailability.state !== "editable") {
-      if (editingSelectionId !== null) {
-        setMediaItemId("");
-        setTitleNumber("");
-        setChapterStart("");
-        setChapterEnd("");
-        setLabel("");
-        onSelectionKindChange("main_feature");
-      }
-      setEditingSelectionId(null);
-      setClearLabel(false);
-      return;
-    }
-    setEditingSelectionId(selection.id);
+  useEffect(() => {
+    const selection = editingSelection;
+    if (selection === null) return;
     setMediaItemId(selection.mediaItemId);
     setLabel(selection.label ?? "");
     setClearLabel(false);
@@ -155,9 +140,29 @@ export function CatalogReviewDiscSelections({
       setChapterStart("");
       setChapterEnd("");
     }
+  }, [editingSelection, onSelectionKindChange]);
+
+  function selectCatalogAction(event: React.ChangeEvent<HTMLSelectElement>) {
+    const selection = discSelections.find(
+      (candidate) => candidate.id === event.currentTarget.value,
+    );
+    if (selection?.actionAvailability.state !== "editable") {
+      if (editingSelectionId !== null) {
+        setMediaItemId("");
+        setTitleNumber("");
+        setChapterStart("");
+        setChapterEnd("");
+        setLabel("");
+        onSelectionKindChange("main_feature");
+      }
+      setEditingSelectionId(null);
+      setClearLabel(false);
+      return;
+    }
+    setEditingSelectionId(selection.id);
   }
 
-  function createSelection(event: React.FormEvent<HTMLFormElement>) {
+  function submitSelection(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const nextLabel = String(form.get("label") ?? "").trim();
@@ -337,7 +342,7 @@ export function CatalogReviewDiscSelections({
         onPage={onCorrectionHistoryPage}
       />
 
-      <form className="catalog-form" onSubmit={createSelection}>
+      <form className="catalog-form" onSubmit={submitSelection}>
         <h3>{editingSelection ? "Edit Disc Selection" : "Add Disc Selection"}</h3>
         {hasSupersessionCorrection ? (
           <p>

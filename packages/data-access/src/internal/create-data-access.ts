@@ -669,6 +669,93 @@ export function createDataAccessInternal(
       .get() !== undefined;
   }
 
+  function readDiscSelectionActionAvailability(
+    input: {
+      selection: typeof discSelections.$inferSelect;
+      scanData: unknown;
+      legacyCutoverPending: boolean;
+    },
+    querySource: Pick<typeof database, "select"> = database,
+  ): DiscSelectionActionAvailability {
+    const relatedEncodeJob = querySource
+      .select({ id: encodeJobs.id, status: encodeJobs.status })
+      .from(encodeJobs)
+      .where(eq(encodeJobs.discSelectionId, input.selection.id))
+      .orderBy(
+        sql`case ${encodeJobs.status} when 'cancellation_requested' then 0 when 'running' then 1 when 'queued' then 2 when 'completed' then 3 else 4 end`,
+        asc(encodeJobs.createdAt),
+        asc(encodeJobs.id),
+      )
+      .limit(1)
+      .get() ?? null;
+    const needsRepair = requiresLegacyDiscSelectionRepair(
+      input.selection,
+      createArchivedDvdSelectionValidator(input.scanData),
+    );
+    const activeJob = relatedEncodeJob?.status === "queued" ||
+        relatedEncodeJob?.status === "running" ||
+        relatedEncodeJob?.status === "cancellation_requested"
+      ? relatedEncodeJob as {
+        id: EncodeJobId;
+        status: "queued" | "running" | "cancellation_requested";
+      }
+      : null;
+    const preservedLineage = hasDiscSelectionSupersession(
+      input.selection.id,
+      querySource,
+    );
+
+    if (input.legacyCutoverPending) {
+      return {
+        discSelectionId: input.selection.id,
+        state: "changes_unavailable",
+        availableActions: [],
+        reason:
+          "Disc Selection changes are unavailable while legacy cutover repair is pending",
+        relatedEncodeJob: null,
+      };
+    }
+    if (needsRepair) {
+      return {
+        discSelectionId: input.selection.id,
+        state: "needs_repair",
+        availableActions: activeJob === null ? ["repair", "remove"] : [],
+        reason: activeJob === null
+          ? "Unsafe legacy Disc Selection; repair or remove it before completing Catalog Review"
+          : `Encode Job ${activeJob.id} is ${activeJob.status}; this unsafe legacy Disc Selection needs repair, but direct mutation is unavailable while the job is active`,
+        relatedEncodeJob: activeJob,
+      };
+    }
+    if (relatedEncodeJob !== null) {
+      return {
+        discSelectionId: input.selection.id,
+        state: "locked_provenance",
+        availableActions: ["correct"],
+        reason: activeJob === null
+          ? `Encode Job ${relatedEncodeJob.id} is ${relatedEncodeJob.status}; correct this Disc Selection by supersession to preserve its provenance`
+          : `Encode Job ${activeJob.id} is ${activeJob.status}; correcting by supersession will request cancellation and preserve its provenance`,
+        relatedEncodeJob,
+      };
+    }
+    if (preservedLineage) {
+      return {
+        discSelectionId: input.selection.id,
+        state: "correction_lineage",
+        availableActions: ["correct", "remove"],
+        reason:
+          "This Disc Selection belongs to immutable correction lineage; correct it by supersession or remove it while retaining history",
+        relatedEncodeJob: null,
+      };
+    }
+    return {
+      discSelectionId: input.selection.id,
+      state: "editable",
+      availableActions: ["correct", "edit_label", "remove"],
+      reason: null,
+      relatedEncodeJob: null,
+    };
+  }
+
   function readMediaItemMaintenance(
     ids: readonly MediaItemId[],
     currentArchiveId: OriginalDiscArchiveId | undefined,
@@ -3834,34 +3921,33 @@ export function createDataAccessInternal(
             "original disc archive",
             input.originalDiscArchiveId,
           );
-          if (source.legacyCutoverPending) {
-            throw new DomainInvariantError(
-              "Disc Selections cannot be changed while legacy cutover repair is pending",
-            );
-          }
           const validator = createArchivedDvdSelectionValidator(
             source.scanData,
           );
-          if (requiresLegacyDiscSelectionRepair(current, validator)) {
-            throw new DomainInvariantError(
-              `Disc Selection ${id} needs unsafe legacy repair, not ordinary update`,
-            );
-          }
-          const historicalJob = transaction
-            .select({ id: encodeJobs.id })
-            .from(encodeJobs)
-            .where(eq(encodeJobs.discSelectionId, id))
-            .limit(1)
-            .get();
-          if (historicalJob) {
-            throw new DomainInvariantError(
-              `Disc Selection ${id} cannot be updated because Encode Job history must keep its provenance (job ${historicalJob.id})`,
-            );
-          }
-          if (hasDiscSelectionSupersession(id, transaction)) {
-            throw new DomainInvariantError(
-              `Disc Selection ${id} belongs to immutable correction lineage and must be corrected by supersession`,
-            );
+          const availability = readDiscSelectionActionAvailability({
+            selection: current,
+            scanData: source.scanData,
+            legacyCutoverPending: source.legacyCutoverPending,
+          }, transaction);
+          switch (availability.state) {
+            case "changes_unavailable":
+              throw new DomainInvariantError(
+                "Disc Selections cannot be changed while legacy cutover repair is pending",
+              );
+            case "needs_repair":
+              throw new DomainInvariantError(
+                `Disc Selection ${id} needs unsafe legacy repair, not ordinary update`,
+              );
+            case "locked_provenance":
+              throw new DomainInvariantError(
+                `Disc Selection ${id} cannot be updated because Encode Job history must keep its provenance (job ${availability.relatedEncodeJob.id})`,
+              );
+            case "correction_lineage":
+              throw new DomainInvariantError(
+                `Disc Selection ${id} belongs to immutable correction lineage and must be corrected by supersession`,
+              );
+            case "editable":
+              break;
           }
 
           const changes: Partial<typeof discSelections.$inferInsert> = {
@@ -4559,84 +4645,11 @@ export function createDataAccessInternal(
           selection,
           scanData,
           legacyCutoverPending,
-        }) => {
-          const relatedEncodeJob = database
-            .select({ id: encodeJobs.id, status: encodeJobs.status })
-            .from(encodeJobs)
-            .where(eq(encodeJobs.discSelectionId, selection.id))
-            .orderBy(
-              sql`case ${encodeJobs.status} when 'cancellation_requested' then 0 when 'running' then 1 when 'queued' then 2 when 'completed' then 3 else 4 end`,
-              asc(encodeJobs.createdAt),
-              asc(encodeJobs.id),
-            )
-            .limit(1)
-            .get() ?? null;
-          const needsRepair = requiresLegacyDiscSelectionRepair(
-            selection,
-            createArchivedDvdSelectionValidator(scanData),
-          );
-          const activeJob = relatedEncodeJob?.status === "queued" ||
-              relatedEncodeJob?.status === "running" ||
-              relatedEncodeJob?.status === "cancellation_requested"
-            ? relatedEncodeJob as {
-              id: EncodeJobId;
-              status: "queued" | "running" | "cancellation_requested";
-            }
-            : null;
-          const preservedLineage = hasDiscSelectionSupersession(selection.id);
-
-          if (legacyCutoverPending) {
-            return {
-              discSelectionId: selection.id,
-              state: "changes_unavailable",
-              availableActions: [],
-              reason:
-                "Disc Selection changes are unavailable while legacy cutover repair is pending",
-              relatedEncodeJob: null,
-            } satisfies DiscSelectionActionAvailability;
-          }
-          if (needsRepair) {
-            return {
-              discSelectionId: selection.id,
-              state: "needs_repair",
-              availableActions: activeJob === null
-                ? ["repair", "remove"]
-                : [],
-              reason: activeJob === null
-                ? "Unsafe legacy Disc Selection; repair or remove it before completing Catalog Review"
-                : `Encode Job ${activeJob.id} is ${activeJob.status}; this unsafe legacy Disc Selection needs repair, but direct mutation is unavailable while the job is active`,
-              relatedEncodeJob: activeJob,
-            } satisfies DiscSelectionActionAvailability;
-          }
-          if (relatedEncodeJob !== null) {
-            return {
-              discSelectionId: selection.id,
-              state: "locked_provenance",
-              availableActions: ["correct"],
-              reason: activeJob === null
-                ? `Encode Job ${relatedEncodeJob.id} is ${relatedEncodeJob.status}; correct this Disc Selection by supersession to preserve its provenance`
-                : `Encode Job ${activeJob.id} is ${activeJob.status}; correcting by supersession will request cancellation and preserve its provenance`,
-              relatedEncodeJob,
-            } satisfies DiscSelectionActionAvailability;
-          }
-          if (preservedLineage) {
-            return {
-              discSelectionId: selection.id,
-              state: "correction_lineage",
-              availableActions: ["correct", "remove"],
-              reason:
-                "This Disc Selection belongs to immutable correction lineage; correct it by supersession or remove it while retaining history",
-              relatedEncodeJob: null,
-            } satisfies DiscSelectionActionAvailability;
-          }
-          return {
-            discSelectionId: selection.id,
-            state: "editable",
-            availableActions: ["correct", "edit_label", "remove"],
-            reason: null,
-            relatedEncodeJob: null,
-          } satisfies DiscSelectionActionAvailability;
-        });
+        }) => readDiscSelectionActionAvailability({
+          selection,
+          scanData,
+          legacyCutoverPending,
+        }));
       },
     },
 
