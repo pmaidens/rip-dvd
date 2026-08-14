@@ -667,12 +667,14 @@ export function createLegacySidecarImportAccess(
                           ),
                           eq(encodeJobs.encodingProfileId, profile.id),
                           eq(encodeJobs.outputPath, job.outputPath),
+                          isNull(encodeJobs.predecessorEncodeJobId),
                         )),
                     ),
                     sql`(
                       select count(*) from ${encodeJobs}
                       where ${encodeJobs.discSelectionId} = ${discSelections.id}
                         and ${encodeJobs.encodingProfileId} = ${profile.id}
+                        and ${encodeJobs.predecessorEncodeJobId} is null
                     ) = 1`,
                   ))
                   .limit(2)
@@ -1023,6 +1025,10 @@ export function createLegacySidecarImportAccess(
             }
 
             let movieItem: typeof mediaItems.$inferSelect | undefined;
+            const bonusFeatureItemsByTitle = new Map<
+              string,
+              typeof mediaItems.$inferSelect
+            >();
             const readActiveSelection = (
               selectionId: DiscSelectionId,
               job: ParsedLegacyJob,
@@ -1079,6 +1085,9 @@ export function createLegacySidecarImportAccess(
               number,
               Array<{ id: DiscSelectionId }>
             >();
+            // Freeze provenance before importing any job so two jobs in one
+            // sidecar cannot collapse onto an identity created earlier in the
+            // same loop merely because their media metadata is identical.
             for (const job of sidecar.jobs) {
               if (!preExistingSourceCandidates.has(job.sourceKey)) {
                 preExistingSourceCandidates.set(
@@ -1150,9 +1159,8 @@ export function createLegacySidecarImportAccess(
                   ambiguous: false,
                 };
               }
-              const mediaMatches = sourceCandidates.length > 0
-                ? preExistingMediaMatches.get(job.jobIndex) ?? []
-                : selectMediaMatchingSelectionIds(job);
+              const mediaMatches =
+                preExistingMediaMatches.get(job.jobIndex) ?? [];
               return {
                 selection: mediaMatches.length === 1
                   ? readActiveSelection(mediaMatches[0]!.id, job)
@@ -1264,6 +1272,10 @@ export function createLegacySidecarImportAccess(
               return movieItem;
             };
             const createBonusFeatureItem = (title: string) => {
+              const existing = bonusFeatureItemsByTitle.get(title);
+              if (existing) {
+                return existing;
+              }
               const id = newId<MediaItemId>();
               const values = validateLegacyMediaItem({
                 id,
@@ -1271,7 +1283,7 @@ export function createLegacySidecarImportAccess(
                 kind: "bonus_feature",
                 title,
               });
-              return requireRow(
+              const createdItem = requireRow(
                 transaction
                   .insert(mediaItems)
                   .values({
@@ -1285,6 +1297,9 @@ export function createLegacySidecarImportAccess(
                 "legacy media item",
                 title,
               );
+              bonusFeatureItemsByTitle.set(title, createdItem);
+              created.mediaItems += 1;
+              return createdItem;
             };
 
             for (const job of acceptedJobs) {
@@ -1478,9 +1493,6 @@ export function createLegacySidecarImportAccess(
                   job.mediaItemKind === "movie"
                     ? requireMovieItem()
                     : createBonusFeatureItem(job.mediaTitle);
-                if (job.mediaItemKind !== "movie") {
-                  created.mediaItems += 1;
-                }
                 selection = requireRow(
                   transaction
                     .insert(discSelections)

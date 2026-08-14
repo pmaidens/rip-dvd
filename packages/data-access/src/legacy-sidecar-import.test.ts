@@ -981,6 +981,79 @@ describe("legacy sidecar import", () => {
     fixture.access.close();
   });
 
+  it("keeps first-import jobs with identical source, profile, and media but distinct outputs separate", () => {
+    const fixture = createFixture();
+    const alternateOutputPath = join(
+      dirname(fixture.trailerOutputPath),
+      "Trailer alternate encode.mkv",
+    );
+    const sidecar = JSON.parse(readFileSync(fixture.sidecarPath, "utf8")) as {
+      jobs: Array<Record<string, unknown>>;
+    };
+    sidecar.jobs.push({
+      label: "Extra 2: Trailer",
+      source: fixture.archivePath,
+      output: alternateOutputPath,
+      preset: "HQ 480p30 Surround",
+      selection: "title",
+      title_number: 2,
+    });
+    writeFileSync(fixture.sidecarPath, JSON.stringify(sidecar));
+
+    const report = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+
+    expect(report).toMatchObject({
+      sidecarsImported: 1,
+      issues: [],
+      recordsCreated: {
+        discSelections: 3,
+        encodeJobs: 3,
+        mediaItems: 2,
+      },
+    });
+    const jobs = fixture.access.encodeJobs.list();
+    const originalJob = jobs.find(
+      (job) => job.outputPath === fixture.trailerOutputPath,
+    )!;
+    const alternateJob = jobs.find(
+      (job) => job.outputPath === alternateOutputPath,
+    )!;
+    const selections = fixture.access.catalog.listDiscSelections({
+      ids: [originalJob.discSelectionId, alternateJob.discSelectionId],
+    });
+    expect(originalJob.discSelectionId).not.toBe(
+      alternateJob.discSelectionId,
+    );
+    expect(selections).toHaveLength(2);
+    expect(new Set(selections.map((selection) => selection.mediaItemId)).size)
+      .toBe(1);
+    expect(selections).toEqual([
+      expect.objectContaining({
+        sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+      }),
+      expect.objectContaining({
+        sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+      }),
+    ]);
+    const importedIdentities = jobs.map((job) => ({
+      id: job.id,
+      discSelectionId: job.discSelectionId,
+      outputPath: job.outputPath,
+    }));
+    expect(fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    })).toMatchObject({ sidecarsImported: 1, issues: [] });
+    expect(fixture.access.encodeJobs.list().map((job) => ({
+      id: job.id,
+      discSelectionId: job.discSelectionId,
+      outputPath: job.outputPath,
+    }))).toEqual(importedIdentities);
+
+    fixture.access.close();
+  });
+
   it("prefers durable output provenance over edited overlap metadata", () => {
     const fixture = createFixture();
     expect(fixture.access.legacySidecars.importLibrary({
@@ -2869,6 +2942,87 @@ describe("legacy sidecar import", () => {
     })).toMatchObject({ sidecarsImported: 1, issues: [] });
     expect(fixture.access.encodeJobs.list()).toEqual(jobsBefore);
 
+    fixture.access.close();
+  });
+
+  it("does not use a same-output correction successor as schema-1 legacy provenance", () => {
+    const fixture = createFixture();
+    const markerPath = join(
+      fixture.originalsLibraryPath,
+      ".rip-dvd-sqlite-catalog",
+    );
+    expect(fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    })).toMatchObject({ issues: [] });
+    const predecessor = fixture.access.encodeJobs.list().find(
+      (job) => job.outputPath === fixture.movieOutputPath,
+    )!;
+    const originalSelection = fixture.access.catalog.listDiscSelections({
+      ids: [predecessor.discSelectionId],
+    })[0]!;
+    let archive = fixture.access.catalog.listOriginalDiscArchives({
+      ids: [originalSelection.originalDiscArchiveId],
+    })[0]!;
+    const correction = fixture.access.catalog.correctDiscSelection(
+      originalSelection.id,
+      {
+        originalDiscArchiveId: archive.id,
+        catalogRevision: archive.updatedAt,
+        mediaItemId: originalSelection.mediaItemId,
+        sourceIdentity: originalSelection.sourceIdentity,
+      },
+    );
+    archive = fixture.access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]!;
+    const completion =
+      fixture.access.catalog.completeCatalogReviewWithReplacements(
+        archive.id,
+        archive.updatedAt,
+        "reviewed_with_selections",
+        [{
+          predecessorEncodeJobId: predecessor.id,
+          encodingProfileId: predecessor.encodingProfileId,
+          outputPath: predecessor.outputPath,
+        }],
+      );
+    expect(completion.replacementEncodeJobs).toEqual([
+      expect.objectContaining({
+        predecessorEncodeJobId: predecessor.id,
+        discSelectionId: correction.discSelection.id,
+        outputPath: predecessor.outputPath,
+      }),
+    ]);
+    const sqlite = new DatabaseSync(fixture.databasePath);
+    sqlite.prepare(
+      "update disc_selections set label = ? where id = ?",
+    ).run(originalSelection.label, correction.discSelection.id);
+    sqlite.close();
+    const schemaOneMarker = {
+      schemaVersion: 1,
+      legacyQueueStatus: "retired",
+      authoritativeStore: "sqlite",
+    };
+    writeFileSync(markerPath, JSON.stringify(schemaOneMarker));
+
+    const report = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+
+    expect(report).toMatchObject({
+      sidecarsImported: 0,
+      sidecarsSkipped: 1,
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: "duplicate_record",
+          jobIndex: 0,
+          message: expect.stringMatching(/schema-1.*ambiguous/i),
+        }),
+      ]),
+    });
+    expect(JSON.parse(readFileSync(markerPath, "utf8"))).toEqual(
+      schemaOneMarker,
+    );
     fixture.access.close();
   });
 
