@@ -6,6 +6,8 @@ import {
   lstatSync,
   openSync,
 } from "node:fs";
+import { lstat, mkdir, realpath } from "node:fs/promises";
+import { basename, join } from "node:path";
 import { optionalBoundedText } from "./bounded-text.js";
 import {
   MAX_ARCHIVE_PATH_BYTES,
@@ -14,6 +16,8 @@ import {
 import { dvdRescueWorkspacePaths } from "./dvd-rescue-workspace.js";
 
 const FLOCK_CONFLICT_EXIT_CODE = 75;
+export const DVD_RESCUE_WORKSPACE_LOCK_DIRECTORY_NAME =
+  ".rip-dvd-rescue-locks";
 
 export interface DvdRescueWorkspaceLock {
   withLock<Result>(options: {
@@ -22,6 +26,35 @@ export interface DvdRescueWorkspaceLock {
     signal: AbortSignal;
     task(): Promise<Result>;
   }): Promise<Result>;
+}
+
+async function requireSafeWorkspaceLockDirectory(root: string): Promise<string> {
+  const path = join(root, DVD_RESCUE_WORKSPACE_LOCK_DIRECTORY_NAME);
+  if (Buffer.byteLength(path) > MAX_ARCHIVE_PATH_BYTES) {
+    throw new Error("DVD rescue workspace lock directory path is too long");
+  }
+  await mkdir(path, { recursive: true, mode: 0o700 });
+  const metadata = await lstat(path);
+  const effectiveUserId = process.geteuid?.();
+  if (
+    !metadata.isDirectory() ||
+    metadata.isSymbolicLink() ||
+    (metadata.mode & 0o077) !== 0 ||
+    effectiveUserId === undefined ||
+    metadata.uid !== effectiveUserId
+  ) {
+    throw new Error("DVD rescue workspace lock directory is unsafe");
+  }
+  const canonical = await realpath(path);
+  const revalidated = await lstat(canonical);
+  if (
+    canonical !== path ||
+    revalidated.dev !== metadata.dev ||
+    revalidated.ino !== metadata.ino
+  ) {
+    throw new Error("DVD rescue workspace lock directory changed");
+  }
+  return canonical;
 }
 
 function openWorkspaceLock(path: string): number {
@@ -129,7 +162,11 @@ export function createNodeDvdRescueWorkspaceLock(): DvdRescueWorkspaceLock {
     }) {
       signal.throwIfAborted();
       const root = await requireSafeArchiveRoot(originalsLibraryPath);
-      const lockPath = `${dvdRescueWorkspacePaths(root, archiveRequestId).mapPath}.lock`;
+      const lockDirectory = await requireSafeWorkspaceLockDirectory(root);
+      const mapName = basename(
+        dvdRescueWorkspacePaths(root, archiveRequestId).mapPath,
+      );
+      const lockPath = join(lockDirectory, `${mapName}.lock`);
       const descriptor = openWorkspaceLock(lockPath);
       try {
         await acquireWorkspaceLock(descriptor);
