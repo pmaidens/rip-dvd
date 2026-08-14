@@ -121,6 +121,7 @@ describe("Catalog Review API", () => {
       },
       correctionHistory: [],
       correctionEncodeHistory: [],
+      correctionRetainedOutputHistory: [],
       correctionHistoryPage: {
         offset: 0,
         limit: 100,
@@ -128,6 +129,12 @@ describe("Catalog Review API", () => {
         hasNext: false,
       },
       correctionEncodeHistoryPage: {
+        offset: 0,
+        limit: 100,
+        hasPrevious: false,
+        hasNext: false,
+      },
+      correctionRetainedOutputHistoryPage: {
         offset: 0,
         limit: 100,
         hasPrevious: false,
@@ -143,6 +150,8 @@ describe("Catalog Review API", () => {
     "?correctionOffset=1&correctionOffset=2",
     "?correctionJobOffset=-1",
     "?correctionJobOffset=1&correctionJobOffset=2",
+    "?correctionOutputOffset=-1",
+    "?correctionOutputOffset=1&correctionOutputOffset=2",
     "?mediaOffset=0",
     "?editingMediaItemId=unrelated-item",
   ])("fails closed on malformed review query input: %s", async (query) => {
@@ -1207,7 +1216,9 @@ describe("Catalog Review API", () => {
         originalDiscArchiveId: archive.id,
         limit: 1,
       })[0]!;
-    const retainedLookupBatchSizes: number[] = [];
+    const retainedOutput = access.encodeJobs.listRetainedOutputSummaries([
+      replacementClaim.id,
+    ])[0]!;
     const expandedLinks = [
       correctionLink,
       ...Array.from({ length: 200 }, (_, index) => {
@@ -1228,6 +1239,25 @@ describe("Catalog Review API", () => {
         };
       }),
     ];
+    const expandedRetainedOutputs = [
+      {
+        replacementDiscSelectionId: correction.discSelection.id,
+        retainedOutput,
+      },
+      ...Array.from({ length: 200 }, (_, index) => ({
+        replacementDiscSelectionId: correction.discSelection.id,
+        retainedOutput: {
+          ...retainedOutput,
+          id: `historical-retained-output-${index}` as
+            typeof retainedOutput.id,
+          predecessorEncodeJobId: `historical-predecessor-${index}` as
+            typeof retainedOutput.predecessorEncodeJobId,
+          replacementEncodeJobId: `historical-replacement-${index}` as
+            typeof retainedOutput.replacementEncodeJobId,
+          retainedAt: new Date(Date.UTC(2026, 0, index + 1)),
+        },
+      })),
+    ];
     const historyAccess = withSnapshotOverrides(access, {
       encodeJobs: {
         listDiscSelectionCorrectionEncodeJobLinks: (options) =>
@@ -1235,10 +1265,11 @@ describe("Catalog Review API", () => {
             options.offset ?? 0,
             (options.offset ?? 0) + options.limit,
           ),
-        listLatestRetainedOutputSummaries: (ids) => {
-          retainedLookupBatchSizes.push(ids.length);
-          return access.encodeJobs.listLatestRetainedOutputSummaries(ids);
-        },
+        listDiscSelectionCorrectionRetainedOutputSummaries: (options) =>
+          expandedRetainedOutputs.slice(
+            options.offset ?? 0,
+            (options.offset ?? 0) + options.limit,
+          ),
       },
     });
 
@@ -1259,7 +1290,6 @@ describe("Catalog Review API", () => {
       pages.push(JSON.parse(historyText));
     }
 
-    expect(retainedLookupBatchSizes).toEqual([100, 100, 1]);
     expect(pages.map((page) => page.correctionEncodeHistory.length)).toEqual([
       100,
       100,
@@ -1305,11 +1335,68 @@ describe("Catalog Review API", () => {
         status: "completed",
         predecessorEncodeJobId: predecessor.id,
       },
-      retainedOutput: {
-        state: "retained",
-        cleanupEligible: true,
-      },
     });
+
+    const retainedOutputPages = [];
+    for (const offset of [0, 100, 200]) {
+      const historyResponse = await createCatalogReviewRoute(
+        new Request(
+          `http://localhost:3000/api/catalog-reviews/${archive.id}?correctionOutputOffset=${offset}`,
+        ),
+        archive.id,
+        () => historyAccess,
+        () => "http://localhost:3000",
+      );
+      const historyText = await historyResponse.text();
+      expect(historyResponse.status, historyText).toBe(200);
+      expect(historyText).not.toContain("private-correction-token");
+      expect(historyText).not.toContain(predecessor.outputPath);
+      retainedOutputPages.push(JSON.parse(historyText));
+    }
+    expect(retainedOutputPages.map((page) =>
+      page.correctionRetainedOutputHistory.length
+    )).toEqual([100, 100, 1]);
+    expect(retainedOutputPages.map((page) =>
+      page.correctionRetainedOutputHistoryPage
+    )).toEqual([
+      {
+        offset: 0,
+        limit: 100,
+        hasPrevious: false,
+        hasNext: true,
+      },
+      {
+        offset: 100,
+        limit: 100,
+        hasPrevious: true,
+        hasNext: true,
+      },
+      {
+        offset: 200,
+        limit: 100,
+        hasPrevious: true,
+        hasNext: false,
+      },
+    ]);
+    const retainedOutputIds = retainedOutputPages.flatMap((page) =>
+      page.correctionRetainedOutputHistory.map(
+        (entry: { retainedOutput: { id: string } }) => entry.retainedOutput.id,
+      )
+    );
+    expect(retainedOutputIds).toHaveLength(201);
+    expect(new Set(retainedOutputIds).size).toBe(201);
+    expect(retainedOutputPages[0].correctionRetainedOutputHistory[0])
+      .toEqual({
+        replacementDiscSelectionId: correction.discSelection.id,
+        retainedOutput: {
+          id: retainedOutput.id,
+          predecessorEncodeJobId: predecessor.id,
+          replacementEncodeJobId: replacementClaim.id,
+          state: "retained",
+          cleanupEligible: true,
+          retainedAt: retainedOutput.retainedAt.toISOString(),
+        },
+      });
   });
 
   it("paginates correction history beyond one hundred revisions", async () => {

@@ -48,6 +48,20 @@ describe("catalog review request state", () => {
     );
   });
 
+  it("requests a bounded correction Retained Output page independently", async () => {
+    let requestedUrl = "";
+    const fetcher = async (input: RequestInfo | URL) => {
+      requestedUrl = String(input);
+      return Response.json({});
+    };
+
+    await requestCatalogReview("archive-1", 100, fetcher, 200, 300, 400);
+
+    expect(requestedUrl).toBe(
+      "/api/catalog-reviews/archive-1?selectionOffset=100&correctionOffset=200&correctionJobOffset=300&correctionOutputOffset=400",
+    );
+  });
+
   it("reports when removal is blocked to preserve Encode Job history", async () => {
     const fetcher = async () => Response.json({
       error:

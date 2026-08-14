@@ -100,6 +100,7 @@ function renderCatalogReview(review: CatalogReviewDto): string {
       onDiscSelectionsPage={() => undefined}
       onCorrectionHistoryPage={() => undefined}
       onCorrectionEncodeHistoryPage={() => undefined}
+      onCorrectionRetainedOutputHistoryPage={() => undefined}
       onSelectionKindChange={() => undefined}
       onArchiveOnlyChange={() => undefined}
       onStartMappingProposal={() => undefined}

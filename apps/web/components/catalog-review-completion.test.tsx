@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import type { CatalogReviewCoverage } from "@rip-dvd/data-access";
 
-import type { CatalogReviewCoverage } from "../lib/catalog-review-coverage";
 import { CatalogReviewCompletion } from "./catalog-review-completion";
 
 const coverage = {

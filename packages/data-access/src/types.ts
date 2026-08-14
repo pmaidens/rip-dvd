@@ -515,6 +515,11 @@ export type RetainedEncodeOutputSummary = Omit<
   "retainedOutputPath" | "filesystemIdentity"
 >;
 
+export interface DiscSelectionCorrectionRetainedOutputSummary {
+  replacementDiscSelectionId: DiscSelectionId;
+  retainedOutput: RetainedEncodeOutputSummary;
+}
+
 export interface CorrectedEncodeReplacementPlan {
   predecessorEncodeJobId: EncodeJobId;
   replacementDiscSelectionId: DiscSelectionId;
@@ -791,10 +796,9 @@ export interface CatalogAccess {
     limit?: number;
     offset?: number;
   }): DiscSelection[];
-  getCatalogReviewCoverage(options: {
-    originalDiscArchiveId: OriginalDiscArchiveId;
-    titles: readonly { number: number; chapters: number }[];
-  }): CatalogReviewCoverage;
+  getCatalogReviewCoverage(
+    originalDiscArchiveId: OriginalDiscArchiveId,
+  ): CatalogReviewCoverage;
   listDiscSelectionSupersessions(options:
     | {
       discSelectionIds: readonly DiscSelectionId[];
@@ -995,12 +999,14 @@ export interface EncodeJobAccess {
     limit: number;
     offset?: number;
   }): DiscSelectionCorrectionEncodeJobLink[];
+  listDiscSelectionCorrectionRetainedOutputSummaries(options: {
+    originalDiscArchiveId: OriginalDiscArchiveId;
+    limit: number;
+    offset?: number;
+  }): DiscSelectionCorrectionRetainedOutputSummary[];
   listCorrectionLinks(ids: readonly EncodeJobId[]): EncodeJobCorrectionLink[];
   listRetainedOutputs(ids: readonly EncodeJobId[]): RetainedEncodeOutput[];
   listRetainedOutputSummaries(
-    ids: readonly EncodeJobId[],
-  ): RetainedEncodeOutputSummary[];
-  listLatestRetainedOutputSummaries(
     ids: readonly EncodeJobId[],
   ): RetainedEncodeOutputSummary[];
   updateProgress(
@@ -1060,9 +1066,9 @@ export interface ConsistentReadAccess {
     EncodeJobAccess,
     | "list"
     | "listDiscSelectionCorrectionEncodeJobLinks"
+    | "listDiscSelectionCorrectionRetainedOutputSummaries"
     | "listCorrectionLinks"
     | "listRetainedOutputSummaries"
-    | "listLatestRetainedOutputSummaries"
   >;
 }
 
