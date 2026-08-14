@@ -24,8 +24,10 @@ import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidec
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
-  pollArchiveWorker,
-  runArchiveWorker,
+  pollArchiveWorker as pollArchiveWorkerWithDefaults,
+  runArchiveWorker as runArchiveWorkerWithDefaults,
+  type PollArchiveWorkerOptions,
+  type RunArchiveWorkerOptions,
   type OpticalDriveHardware,
 } from "./archive-worker.js";
 import type { DvdCopyRunner } from "./dvd-archiver.js";
@@ -34,6 +36,7 @@ import {
   createDamagedDvdRecoveryResult,
 } from "./dvd-recovery-contracts.js";
 import { dvdRescueWorkspacePaths } from "./dvd-rescue-workspace.js";
+import { createInProcessDvdRescueWorkspaceLock } from "./dvd-rescue-workspace-lock.js";
 import { DiscInspectionError } from "./disc-inspection-error.js";
 import {
   createLinuxOpticalDriveHardware,
@@ -41,6 +44,23 @@ import {
 } from "./optical-drive-hardware.js";
 
 const temporaryDirectories: string[] = [];
+const testRescueWorkspaceLock = createInProcessDvdRescueWorkspaceLock();
+
+function pollArchiveWorker(options: PollArchiveWorkerOptions): Promise<void> {
+  return pollArchiveWorkerWithDefaults({
+    ...options,
+    rescueWorkspaceLock:
+      options.rescueWorkspaceLock ?? testRescueWorkspaceLock,
+  });
+}
+
+function runArchiveWorker(options: RunArchiveWorkerOptions): Promise<void> {
+  return runArchiveWorkerWithDefaults({
+    ...options,
+    rescueWorkspaceLock:
+      options.rescueWorkspaceLock ?? testRescueWorkspaceLock,
+  });
+}
 
 const salvageFailureCases: readonly ({
   description: string;
@@ -2150,6 +2170,209 @@ describe("archive worker polling", () => {
     const interruption = new Error("worker shutdown");
     controller.abort(interruption);
     await expect(polling).rejects.toBe(interruption);
+  });
+
+  it("fences a stale rescue owner before its successor uses the workspace", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-14T20:00:00.000Z"));
+    const access = openTestDataAccess();
+    const originalsLibraryPath = mkdtempSync(
+      join(tmpdir(), "rip-dvd-originals-stale-owner-"),
+    );
+    temporaryDirectories.push(originalsLibraryPath);
+    const digest = "6".repeat(64);
+    const fingerprint = `dvdmeta-sha256:${digest}`;
+    const scanData = {
+      schemaVersion: 2 as const,
+      contentId: fingerprint,
+      titles: [{
+        number: 1,
+        durationSeconds: 3_600,
+        chapters: 10,
+        audioStreams: [],
+        subtitles: [],
+      }],
+    };
+    const discoveredDrive = {
+      devicePath: "/dev/sr0",
+      serialNumber: "ARCHIVE-STALE-OWNER-001",
+    };
+    const drive = access.catalog.reconcileOpticalDrives([
+      { ...discoveredDrive, isConfiguredDevice: true },
+    ])[0]!;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint,
+      scanData,
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    const request = access.archiveRequests.create({ detectedDiscId: disc.id });
+    const sizeBytes = 2 * 2_048;
+    const damagedRecovery = createDamagedDvdRecoveryResult(sizeBytes, [
+      { startLba: 1, sectorCount: 1 },
+    ]);
+    const hardware: OpticalDriveHardware = {
+      ...stableDeviceBinding(),
+      discover: vi.fn().mockResolvedValue([discoveredDrive]),
+      scanDvd: vi.fn().mockResolvedValue({
+        fingerprint,
+        scanData,
+        sizeBytes,
+      }),
+    };
+    const workspaceLock = createInProcessDvdRescueWorkspaceLock();
+    const damagedImage = Buffer.alloc(sizeBytes, 4);
+    damagedImage.fill(0, 2_048);
+    await pollArchiveWorker({
+      access,
+      configuredDevicePath: "/dev/sr0",
+      copyRunner: {
+        copy: vi.fn(async ({ authorizeStart, outputPath }) => {
+          await authorizeStart?.();
+          writeFileSync(outputPath, damagedImage);
+          return damagedRecovery;
+        }),
+        isActive: () => false,
+        withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+        waitForInactive: vi.fn(async () => undefined),
+      },
+      hardware,
+      log: vi.fn(),
+      originalsLibraryPath,
+      rescueWorkspaceLock: workspaceLock,
+      signal: new AbortController().signal,
+      workerId: "archive-worker-stale-owner-seed",
+    });
+
+    access.archiveRequests.retry(request.id);
+    const rescuePaths = dvdRescueWorkspacePaths(
+      realpathSync(originalsLibraryPath),
+      request.id,
+    );
+    let staleCopyStarted!: () => void;
+    const staleStarted = new Promise<void>((resolve) => {
+      staleCopyStarted = resolve;
+    });
+    let finishStaleCopy!: () => void;
+    const staleCopyGate = new Promise<void>((resolve) => {
+      finishStaleCopy = resolve;
+    });
+    const staleRecoveredImage = Buffer.alloc(sizeBytes, 7);
+    const staleRunner: DvdCopyRunner = {
+      copy: vi.fn(async ({ authorizeStart, outputPath, resumeFrom }) => {
+        expect(resumeFrom).toEqual(damagedRecovery);
+        await authorizeStart?.();
+        writeFileSync(outputPath, staleRecoveredImage);
+        staleCopyStarted();
+        await staleCopyGate;
+        return createCleanDvdRecoveryResult(sizeBytes);
+      }),
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    };
+    const originalRenewClaim = access.archiveJobs.renewClaim.bind(
+      access.archiveJobs,
+    );
+    let suppressHeartbeatRenewal = false;
+    vi.spyOn(access.archiveJobs, "renewClaim").mockImplementation((claim) =>
+      suppressHeartbeatRenewal ? claim : originalRenewClaim(claim)
+    );
+    const stalePoll = pollArchiveWorker({
+      access,
+      configuredDevicePath: "/dev/sr0",
+      copyRunner: staleRunner,
+      hardware,
+      log: vi.fn(),
+      originalsLibraryPath,
+      rescueWorkspaceLock: workspaceLock,
+      signal: new AbortController().signal,
+      workerId: "archive-worker-stale-owner",
+    });
+    await staleStarted;
+
+    suppressHeartbeatRenewal = true;
+    await vi.advanceTimersByTimeAsync(ARCHIVE_JOB_LEASE_DURATION_MS + 1);
+    expect(access.archiveJobs.recoverExpiredClaims()).toHaveLength(1);
+    suppressHeartbeatRenewal = false;
+    access.archiveRequests.retry(request.id);
+
+    const excludedSuccessorCopy = vi.fn();
+    await pollArchiveWorker({
+      access,
+      configuredDevicePath: "/dev/sr0",
+      copyRunner: {
+        copy: excludedSuccessorCopy,
+        isActive: () => false,
+        withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+        waitForInactive: vi.fn(async () => undefined),
+      },
+      hardware,
+      log: vi.fn(),
+      originalsLibraryPath,
+      rescueWorkspaceLock: workspaceLock,
+      signal: new AbortController().signal,
+      workerId: "archive-worker-excluded-successor",
+    });
+    expect(excludedSuccessorCopy).not.toHaveBeenCalled();
+    expect(access.archiveJobs.list(["failed"]).at(-1)).toMatchObject({
+      attemptOrdinal: 3,
+      errorMessage: "DVD rescue workspace is already active",
+    });
+
+    finishStaleCopy();
+    await stalePoll;
+    expect(
+      existsSync(join(realpathSync(originalsLibraryPath), `dvdmeta-${digest}.iso`)),
+    ).toBe(false);
+    expect(readFileSync(rescuePaths.imagePath)).toEqual(staleRecoveredImage);
+
+    access.archiveRequests.retry(request.id);
+    const successorImage = Buffer.alloc(sizeBytes, 8);
+    const successorCopy = vi.fn(async ({
+      authorizeStart,
+      outputPath,
+      resumeFrom,
+    }) => {
+      expect(resumeFrom).toEqual(damagedRecovery);
+      await authorizeStart?.();
+      writeFileSync(outputPath, successorImage);
+      return createCleanDvdRecoveryResult(sizeBytes);
+    });
+    await pollArchiveWorker({
+      access,
+      configuredDevicePath: "/dev/sr0",
+      copyRunner: {
+        copy: successorCopy,
+        isActive: () => false,
+        withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+        waitForInactive: vi.fn(async () => undefined),
+      },
+      hardware,
+      log: vi.fn(),
+      originalsLibraryPath,
+      rescueWorkspaceLock: workspaceLock,
+      signal: new AbortController().signal,
+      workerId: "archive-worker-current-successor",
+    });
+
+    expect(successorCopy).toHaveBeenCalledOnce();
+    expect(
+      access.archiveJobs.list()
+        .map(({ attemptOrdinal, status }) => ({ attemptOrdinal, status }))
+        .sort((left, right) => left.attemptOrdinal - right.attemptOrdinal),
+    ).toEqual([
+      { attemptOrdinal: 1, status: "failed" },
+      { attemptOrdinal: 2, status: "failed" },
+      { attemptOrdinal: 3, status: "failed" },
+      { attemptOrdinal: 4, status: "completed" },
+    ]);
+    expect(readFileSync(
+      access.catalog.listOriginalDiscArchives()[0]!.archivePath,
+    )).toEqual(successorImage);
+    expect(existsSync(rescuePaths.imagePath)).toBe(false);
+    expect(existsSync(rescuePaths.mapPath)).toBe(false);
   });
 
   it("does not finalize cancellation until the copy helper is closed", async () => {
