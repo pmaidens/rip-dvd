@@ -99,6 +99,11 @@ const validCommands = {
       label: "Feature",
     },
   },
+  update_disc_selection: {
+    action: "update_disc_selection",
+    discSelectionId: "selection-1",
+    changes: { mediaItemId: "media-item-2" },
+  },
   repair_disc_selection: {
     action: "repair_disc_selection",
     discSelectionId: "selection-1",
@@ -184,6 +189,33 @@ describe("catalog review command contract", () => {
     expect(parseCommand(command)).toEqual({
       ok: true,
       command: { ...command, replacementEncodes: [] },
+    });
+  });
+
+  it("distinguishes an omitted Disc Selection label from explicit clearing", () => {
+    expect(parseCommand({
+      action: "update_disc_selection",
+      discSelectionId: "selection-1",
+      changes: { mediaItemId: "media-item-2" },
+    })).toEqual({
+      ok: true,
+      command: {
+        action: "update_disc_selection",
+        discSelectionId: "selection-1",
+        changes: { mediaItemId: "media-item-2" },
+      },
+    });
+    expect(parseCommand({
+      action: "update_disc_selection",
+      discSelectionId: "selection-1",
+      changes: { label: null },
+    })).toEqual({
+      ok: true,
+      command: {
+        action: "update_disc_selection",
+        discSelectionId: "selection-1",
+        changes: { label: null },
+      },
     });
   });
 
@@ -313,6 +345,10 @@ describe("catalog review command contract", () => {
       "Invalid Disc Selection",
     ],
     [
+      { action: "update_disc_selection", changes: {} },
+      "Invalid Disc Selection update",
+    ],
+    [
       {
         action: "repair_disc_selection",
         selection: {
@@ -374,7 +410,19 @@ describe("catalog review command contract", () => {
     })).toEqual({
       ok: false,
       error: "Invalid Disc Selection",
-      repairDiscSelectionId: "selection-1",
+      targetedDiscSelectionId: "selection-1",
+    });
+  });
+
+  it("retains a validated update target when its changes are invalid", () => {
+    expect(parseCommand({
+      action: "update_disc_selection",
+      discSelectionId: "selection-1",
+      changes: { label: "   " },
+    })).toEqual({
+      ok: false,
+      error: "Invalid Disc Selection update",
+      targetedDiscSelectionId: "selection-1",
     });
   });
 });

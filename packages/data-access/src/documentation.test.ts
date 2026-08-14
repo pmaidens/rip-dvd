@@ -12,6 +12,9 @@ describe.each(readmes)("%s", (_name, readmeUrl) => {
     const readme = readFileSync(readmeUrl, "utf8").replace(/\s+/g, " ");
 
     expect(readme).toMatch(
+      /\*\*Ordinary job-free update\.\*\*[\s\S]{0,600}in place[\s\S]{0,600}(?:omitted|unchanged)[\s\S]{0,600}label: null[\s\S]{0,600}(?:affected Original Disc Archive|reopens only)/i,
+    );
+    expect(readme).toMatch(
       /\*\*Ordinary retry identity\.\*\*[\s\S]{0,500}cannot be repaired or removed[\s\S]{0,500}same logical Encode Job/i,
     );
     expect(readme).toMatch(

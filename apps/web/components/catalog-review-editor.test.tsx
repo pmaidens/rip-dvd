@@ -628,11 +628,25 @@ describe("CatalogReviewEditor", () => {
     if (!replacement || !mediaItem || !correctionReason || !submit) {
       throw new Error("Expected Disc Selection correction controls");
     }
-    replacement.value = review.discSelections[0]!.id;
-    mediaItem.value = review.mediaItems[0]!.id;
-    correctionReason.value = "Keep the second replacement immutable.";
+    await act(async () => {
+      replacement.value = review.discSelections[0]!.id;
+      replacement.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await act(async () => {
+      mediaItem.value = review.mediaItems[0]!.id;
+      mediaItem.dispatchEvent(new Event("change", { bubbles: true }));
+      correctionReason.value = "Keep the second replacement immutable.";
+      correctionReason.dispatchEvent(new Event("input", { bubbles: true }));
+    });
 
-    await act(async () => submit.click());
+    const form = submit.closest("form");
+    if (!form) throw new Error("Expected Disc Selection correction form");
+    await act(async () => {
+      form.dispatchEvent(new Event("submit", {
+        bubbles: true,
+        cancelable: true,
+      }));
+    });
 
     expect(postedCommands).toEqual([{
       action: "correct_disc_selection",
@@ -644,6 +658,80 @@ describe("CatalogReviewEditor", () => {
         sourceIdentity: { kind: "main_feature" },
       },
     }]);
+  });
+
+  it("updates a job-free Disc Selection without resubmitting unchanged source or label values", async () => {
+    const review = catalogReview({
+      archiveId: "archive-a",
+      discLabel: "EDITABLE_SELECTION",
+    });
+    review.rawScan.titles = [{
+      number: 1,
+      durationSeconds: 2_400,
+      chapters: 8,
+      audioStreams: [],
+      subtitles: [],
+    }];
+    review.discSelections[0]!.sourceIdentity = {
+      kind: "dvd_chapters",
+      titleNumber: 1,
+      chapterStart: 2,
+      chapterEnd: 5,
+    };
+    review.discSelections[0]!.label = "Director's cut";
+    review.mediaItems.push({
+      id: "episode-2",
+      parentId: null,
+      kind: "episode",
+      title: "Episode Two",
+      year: null,
+      seasonNumber: null,
+      episodeNumber: 2,
+    });
+    const postedCommands: unknown[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (
+      _input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (init?.method === "POST") {
+        postedCommands.push(JSON.parse(String(init.body)) as unknown);
+        return Response.json({ message: "Mapping changed; review required" });
+      }
+      return Response.json(review);
+    }));
+
+    await act(async () => renderCatalogReviewEditor("archive-a"));
+    const action = container.querySelector<HTMLSelectElement>(
+      'select[name="replacesDiscSelectionId"]',
+    );
+    if (!action) throw new Error("Expected the Catalog action control");
+    await act(async () => {
+      action.value = review.discSelections[0]!.id;
+      action.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    const mediaItem = container.querySelector<HTMLSelectElement>(
+      'select[name="mediaItemId"]',
+    );
+    const submit = container.querySelector<HTMLButtonElement>(
+      'button[type="submit"]',
+    );
+    if (!mediaItem || !submit) {
+      throw new Error("Expected editable Disc Selection controls");
+    }
+    await act(async () => {
+      mediaItem.value = "episode-2";
+      mediaItem.dispatchEvent(new Event("change", { bubbles: true }));
+      submit.click();
+    });
+
+    expect(postedCommands).toEqual([{
+      action: "update_disc_selection",
+      discSelectionId: review.discSelections[0]!.id,
+      changes: { mediaItemId: "episode-2" },
+    }]);
+    expect(container.textContent).toContain(
+      "Mapping changed; review required",
+    );
   });
 
   it("keeps a failed Mapping Proposal editable and refreshes the exact-source mapping after success", async () => {
@@ -1588,6 +1676,7 @@ describe("CatalogReviewView", () => {
         onSaveMediaItem={() => undefined}
         onDeleteMediaItem={() => undefined}
         onCreateDiscSelection={() => undefined}
+        onUpdateDiscSelection={() => undefined}
         onDeleteDiscSelection={() => undefined}
         onCompleteReview={() => undefined}
       />,
@@ -1647,6 +1736,11 @@ describe("CatalogReviewView", () => {
           mediaItemId: "media-item-1",
           sourceIdentity: { kind: "main_feature" },
         },
+      },
+      update_disc_selection: {
+        action: "update_disc_selection",
+        discSelectionId: "selection-1",
+        changes: { label: null },
       },
       repair_disc_selection: {
         action: "repair_disc_selection",
@@ -1839,6 +1933,7 @@ describe("CatalogReviewView", () => {
         onSaveMediaItem={() => undefined}
         onDeleteMediaItem={() => undefined}
         onCreateDiscSelection={() => undefined}
+        onUpdateDiscSelection={() => undefined}
         onDeleteDiscSelection={() => undefined}
         onCompleteReview={() => undefined}
       />,
@@ -1988,6 +2083,7 @@ describe("CatalogReviewView", () => {
         onSaveMediaItem={() => undefined}
         onDeleteMediaItem={() => undefined}
         onCreateDiscSelection={() => undefined}
+        onUpdateDiscSelection={() => undefined}
         onDeleteDiscSelection={() => undefined}
         onCompleteReview={() => undefined}
       />,

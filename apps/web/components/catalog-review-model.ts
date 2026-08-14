@@ -13,6 +13,7 @@ import type {
   CatalogReviewEpisodicSeasonTarget,
   CatalogReviewEpisodicTvShowTarget,
   CatalogReviewDiscSelectionInput,
+  CatalogReviewDiscSelectionChanges,
   CatalogReviewMappingTarget,
   CatalogReviewMediaItemInput,
   CatalogReviewProposedDiscSelectionInput,
@@ -184,6 +185,8 @@ export type CreateDiscSelectionInput = CatalogReviewDiscSelectionInput & {
   replacesDiscSelectionId?: string;
   correctionReason?: string;
 };
+
+export type UpdateDiscSelectionInput = CatalogReviewDiscSelectionChanges;
 
 export type MappingProposalAction =
   | "movie"

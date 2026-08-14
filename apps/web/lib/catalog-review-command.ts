@@ -18,6 +18,7 @@ export const CATALOG_REVIEW_COMMAND_ACTIONS = [
   "update_media_item",
   "delete_media_item",
   "create_disc_selection",
+  "update_disc_selection",
   "repair_disc_selection",
   "correct_disc_selection",
   "delete_disc_selection",
@@ -54,6 +55,20 @@ interface CatalogReviewDiscSelectionBase {
 export type CatalogReviewDiscSelectionInput =
   & CatalogReviewDiscSelectionBase
   & { sourceIdentity: DiscSelectionSourceIdentityInput };
+
+type CatalogReviewDiscSelectionChangeFields = {
+  mediaItemId?: string;
+  sourceIdentity?: DiscSelectionSourceIdentityInput;
+  label?: string | null;
+};
+
+export type CatalogReviewDiscSelectionChanges =
+  & CatalogReviewDiscSelectionChangeFields
+  & (
+    | { mediaItemId: string }
+    | { sourceIdentity: DiscSelectionSourceIdentityInput }
+    | { label: string | null }
+  );
 
 export interface CatalogReviewProposedDiscSelectionInput {
   sourceIdentity: DiscSelectionSourceIdentityInput;
@@ -138,6 +153,11 @@ export type CatalogReviewCommand =
       selection: CatalogReviewDiscSelectionInput;
     }
   | {
+      action: "update_disc_selection";
+      discSelectionId: string;
+      changes: CatalogReviewDiscSelectionChanges;
+    }
+  | {
       action: "repair_disc_selection";
       discSelectionId: string;
       selection: CatalogReviewDiscSelectionInput;
@@ -174,6 +194,7 @@ export type CatalogReviewCommandValidationError =
   | "Invalid Media Item seasonNumber"
   | "Invalid Media Item episodeNumber"
   | "Invalid Disc Selection"
+  | "Invalid Disc Selection update"
   | "Invalid Disc Selection Correction"
   | "Invalid corrected Encode replacement plan"
   | "Invalid catalog review revision"
@@ -184,7 +205,7 @@ export type CatalogReviewCommandParseResult =
   | {
       ok: false;
       error: CatalogReviewCommandValidationError;
-      repairDiscSelectionId?: string;
+      targetedDiscSelectionId?: string;
     };
 
 const MEDIA_ITEM_UPDATE_FIELDS: ReadonlySet<string> = new Set([
@@ -247,11 +268,11 @@ function optionalInteger(
 
 function invalid(
   error: CatalogReviewCommandValidationError,
-  repairDiscSelectionId?: string,
+  targetedDiscSelectionId?: string,
 ): CatalogReviewCommandParseResult {
-  return repairDiscSelectionId === undefined
+  return targetedDiscSelectionId === undefined
     ? { ok: false, error }
-    : { ok: false, error, repairDiscSelectionId };
+    : { ok: false, error, targetedDiscSelectionId };
 }
 
 function parseMediaItemInput(
@@ -556,6 +577,52 @@ function parseDiscSelectionInput(
   };
 }
 
+function parseDiscSelectionChanges(
+  value: unknown,
+): CatalogReviewDiscSelectionChanges | null {
+  const input = asRecord(value);
+  if (
+    !input ||
+    Object.keys(input).length === 0 ||
+    !hasOnlyFields(input, ["mediaItemId", "sourceIdentity", "label"])
+  ) {
+    return null;
+  }
+  const changes: CatalogReviewDiscSelectionChangeFields = {};
+  if ("mediaItemId" in input) {
+    const mediaItemId = boundedString(input.mediaItemId);
+    if (!mediaItemId) {
+      return null;
+    }
+    changes.mediaItemId = mediaItemId;
+  }
+  if ("sourceIdentity" in input) {
+    const sourceIdentity = asRecord(input.sourceIdentity);
+    if (!sourceIdentity) {
+      return null;
+    }
+    try {
+      changes.sourceIdentity = createDiscSelectionSourceIdentity(
+        sourceIdentity as unknown as DiscSelectionSourceIdentityInput,
+      );
+    } catch {
+      return null;
+    }
+  }
+  if ("label" in input) {
+    if (input.label === null) {
+      changes.label = null;
+    } else {
+      const label = boundedString(input.label);
+      if (!label) {
+        return null;
+      }
+      changes.label = label;
+    }
+  }
+  return changes as CatalogReviewDiscSelectionChanges;
+}
+
 function parseReplacementEncodes(
   value: unknown,
 ): CatalogReviewReplacementEncodeInput[] | null {
@@ -690,6 +757,19 @@ export function parseCatalogReviewCommand(
             command: { action, selection: parsedSelection.selection },
           }
         : invalid(parsedSelection.error);
+    }
+    case "update_disc_selection": {
+      const discSelectionId = boundedString(body.discSelectionId);
+      const changes = parseDiscSelectionChanges(body.changes);
+      return discSelectionId && changes
+        ? {
+            ok: true,
+            command: { action, discSelectionId, changes },
+          }
+        : invalid(
+          "Invalid Disc Selection update",
+          discSelectionId ?? undefined,
+        );
     }
     case "repair_disc_selection": {
       const discSelectionId = boundedString(body.discSelectionId);

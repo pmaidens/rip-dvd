@@ -15,6 +15,7 @@ import {
   type MediaItemId,
   type MediaItemMaintenance,
   type OriginalDiscArchiveId,
+  type UpdateDiscSelectionInput,
 } from "@rip-dvd/data-access";
 import { loadConfig } from "@rip-dvd/config";
 
@@ -502,11 +503,12 @@ export async function createCatalogReviewRoute(
       },
     );
     const targetedDiscSelectionId = parsedCommand.ok
-      ? parsedCommand.command.action === "repair_disc_selection" ||
+      ? parsedCommand.command.action === "update_disc_selection" ||
+          parsedCommand.command.action === "repair_disc_selection" ||
           parsedCommand.command.action === "correct_disc_selection"
         ? parsedCommand.command.discSelectionId
         : null
-      : parsedCommand.repairDiscSelectionId ?? null;
+      : parsedCommand.targetedDiscSelectionId ?? null;
     if (targetedDiscSelectionId !== null) {
       const existing = access.catalog.listDiscSelections({
         ids: [targetedDiscSelectionId as DiscSelectionId],
@@ -661,6 +663,29 @@ export async function createCatalogReviewRoute(
           },
           repairSelectionId === null ? 201 : 200,
         );
+      }
+
+      case "update_disc_selection": {
+        const changes = command.changes;
+        const update = {
+          originalDiscArchiveId: archiveId,
+          ...("mediaItemId" in changes && changes.mediaItemId !== undefined
+            ? { mediaItemId: changes.mediaItemId as MediaItemId }
+            : {}),
+          ...("sourceIdentity" in changes &&
+              changes.sourceIdentity !== undefined
+            ? { sourceIdentity: changes.sourceIdentity }
+            : {}),
+          ...("label" in changes ? { label: changes.label } : {}),
+        } as UpdateDiscSelectionInput;
+        const selection = access.catalog.updateDiscSelection(
+          command.discSelectionId as DiscSelectionId,
+          update,
+        );
+        return response({
+          message: "Mapping changed; review required",
+          discSelection: serializeDiscSelection(selection),
+        });
       }
 
       case "correct_disc_selection": {

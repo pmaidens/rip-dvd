@@ -150,6 +150,7 @@ describe("data-access domain identifiers", () => {
       const driveId = undefined as unknown as OpticalDriveId;
       const archiveId = undefined as unknown as OriginalDiscArchiveId;
       const mediaItemId = undefined as unknown as MediaItemId;
+      const discSelectionId = undefined as unknown as DiscSelectionId;
 
       access.catalog.registerDetectedDisc({
         // @ts-expect-error Media Item IDs cannot identify Optical Drives.
@@ -174,6 +175,14 @@ describe("data-access domain identifiers", () => {
         // @ts-expect-error Source coordinates cannot be passed as parallel fields.
         kind: "dvd_title",
         titleNumber: 1,
+      });
+      access.catalog.updateDiscSelection(discSelectionId, {
+        originalDiscArchiveId: archiveId,
+        label: null,
+      });
+      // @ts-expect-error A Disc Selection update must identify a change.
+      access.catalog.updateDiscSelection(discSelectionId, {
+        originalDiscArchiveId: archiveId,
       });
     }
   });

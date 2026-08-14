@@ -3788,6 +3788,157 @@ export function createDataAccessInternal(
         );
       },
 
+      updateDiscSelection(id, input) {
+        const timestamp = now();
+        if (
+          input.mediaItemId === undefined &&
+          input.sourceIdentity === undefined &&
+          input.label === undefined
+        ) {
+          throw new DomainInvariantError(
+            "Disc Selection update requires at least one change",
+          );
+        }
+        return database.transaction((transaction) => {
+          const current = requireRow(
+            transaction
+              .select()
+              .from(discSelections)
+              .where(and(
+                eq(discSelections.id, id),
+                eq(discSelections.isCatalogActive, true),
+              ))
+              .get(),
+            "disc selection",
+            id,
+          );
+          if (current.originalDiscArchiveId !== input.originalDiscArchiveId) {
+            throw new DomainInvariantError(
+              "A Disc Selection update cannot move between Original Disc Archives",
+            );
+          }
+          const source = requireRow(
+            transaction
+              .select({
+                legacyCutoverPending:
+                  originalDiscArchives.legacyCutoverPending,
+                scanData: detectedDiscs.scanData,
+              })
+              .from(originalDiscArchives)
+              .innerJoin(
+                detectedDiscs,
+                eq(detectedDiscs.id, originalDiscArchives.detectedDiscId),
+              )
+              .where(eq(originalDiscArchives.id, input.originalDiscArchiveId))
+              .get(),
+            "original disc archive",
+            input.originalDiscArchiveId,
+          );
+          if (source.legacyCutoverPending) {
+            throw new DomainInvariantError(
+              "Disc Selections cannot be changed while legacy cutover repair is pending",
+            );
+          }
+          const validator = createArchivedDvdSelectionValidator(
+            source.scanData,
+          );
+          if (requiresLegacyDiscSelectionRepair(current, validator)) {
+            throw new DomainInvariantError(
+              `Disc Selection ${id} needs unsafe legacy repair, not ordinary update`,
+            );
+          }
+          const historicalJob = transaction
+            .select({ id: encodeJobs.id })
+            .from(encodeJobs)
+            .where(eq(encodeJobs.discSelectionId, id))
+            .limit(1)
+            .get();
+          if (historicalJob) {
+            throw new DomainInvariantError(
+              `Disc Selection ${id} cannot be updated because Encode Job history must keep its provenance (job ${historicalJob.id})`,
+            );
+          }
+          if (hasDiscSelectionSupersession(id, transaction)) {
+            throw new DomainInvariantError(
+              `Disc Selection ${id} belongs to immutable correction lineage and must be corrected by supersession`,
+            );
+          }
+
+          const changes: Partial<typeof discSelections.$inferInsert> = {
+            updatedAt: timestamp,
+          };
+          if (input.mediaItemId !== undefined) {
+            requireRow(
+              transaction
+                .select({ id: mediaItems.id })
+                .from(mediaItems)
+                .where(eq(mediaItems.id, input.mediaItemId))
+                .get(),
+              "media item",
+              input.mediaItemId,
+            );
+            changes.mediaItemId = input.mediaItemId;
+          }
+          if (input.sourceIdentity !== undefined) {
+            const sourcePersistence = serializeDiscSelectionSourceIdentity(
+              validator.validate(input.sourceIdentity),
+            );
+            const duplicate = transaction
+              .select({ id: discSelections.id })
+              .from(discSelections)
+              .where(and(
+                eq(
+                  discSelections.originalDiscArchiveId,
+                  input.originalDiscArchiveId,
+                ),
+                eq(discSelections.sourceKey, sourcePersistence.sourceKey),
+                eq(discSelections.isCatalogActive, true),
+                ne(discSelections.id, id),
+              ))
+              .get();
+            if (duplicate) {
+              throw new DomainInvariantError(
+                "A Disc Selection already maps this exact DVD source",
+              );
+            }
+            Object.assign(changes, sourcePersistence);
+          }
+          if (input.label !== undefined) {
+            if (input.label === null) {
+              changes.label = null;
+            } else {
+              const label = requireNonEmpty(input.label, "label");
+              if (label.length > 256) {
+                throw new DomainInvariantError(
+                  "Disc Selection label must be at most 256 characters",
+                );
+              }
+              changes.label = label;
+            }
+          }
+
+          const selection = toDiscSelection(requireRow(
+            transaction
+              .update(discSelections)
+              .set(changes)
+              .where(and(
+                eq(discSelections.id, id),
+                eq(discSelections.isCatalogActive, true),
+              ))
+              .returning()
+              .get(),
+            "disc selection",
+            id,
+          ));
+          reopenCatalogReview(
+            transaction,
+            input.originalDiscArchiveId,
+            timestamp,
+          );
+          return selection;
+        }, { behavior: "immediate" });
+      },
+
       correctDiscSelection(id, input) {
         const timestamp = now();
         const reason = input.reason === undefined

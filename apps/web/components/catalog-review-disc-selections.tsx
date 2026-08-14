@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 
 import type { DiscSelectionAction } from "@rip-dvd/data-access";
 import type { DvdTitle } from "@rip-dvd/data-access/dvd-scan";
@@ -12,6 +12,7 @@ import {
   type CatalogReviewMediaItem,
   type CreateDiscSelectionInput,
   type DiscSelectionKind,
+  type UpdateDiscSelectionInput,
 } from "./catalog-review-model";
 import { CatalogReviewPagination } from "./catalog-review-pagination";
 import { displayTerm } from "../lib/display-term";
@@ -29,6 +30,7 @@ interface CatalogReviewDiscSelectionsProps {
   onCorrectionHistoryPage(offset: number): void;
   onSelectionKindChange(kind: DiscSelectionKind): void;
   onCreate(input: CreateDiscSelectionInput): void;
+  onUpdate(id: string, changes: UpdateDiscSelectionInput): void;
   onDelete(id: string): void;
 }
 
@@ -68,6 +70,23 @@ function discSelectionDescription(
   return `Title ${sourceIdentity.titleNumber}, chapters ${sourceIdentity.chapterStart}–${sourceIdentity.chapterEnd}`;
 }
 
+function sameSourceIdentity(
+  left: CatalogReviewDiscSelection["sourceIdentity"],
+  right: CatalogReviewDiscSelection["sourceIdentity"],
+): boolean {
+  if (left.kind !== right.kind) return false;
+  if (left.kind === "main_feature" && right.kind === "main_feature") {
+    return true;
+  }
+  if (left.kind === "dvd_title" && right.kind === "dvd_title") {
+    return left.titleNumber === right.titleNumber;
+  }
+  return left.kind === "dvd_chapters" && right.kind === "dvd_chapters" &&
+    left.titleNumber === right.titleNumber &&
+    left.chapterStart === right.chapterStart &&
+    left.chapterEnd === right.chapterEnd;
+}
+
 export function CatalogReviewDiscSelections({
   discSelections,
   page,
@@ -81,15 +100,67 @@ export function CatalogReviewDiscSelections({
   onCorrectionHistoryPage,
   onSelectionKindChange,
   onCreate,
+  onUpdate,
   onDelete,
 }: CatalogReviewDiscSelectionsProps) {
   const hierarchy = orderMediaItemHierarchy(mediaItems);
   const itemsById = new Map(mediaItems.map((item) => [item.id, item]));
+  const [editingSelectionId, setEditingSelectionId] = useState<string | null>(
+    null,
+  );
+  const [mediaItemId, setMediaItemId] = useState("");
+  const [titleNumber, setTitleNumber] = useState("");
+  const [chapterStart, setChapterStart] = useState("");
+  const [chapterEnd, setChapterEnd] = useState("");
+  const [label, setLabel] = useState("");
+  const [clearLabel, setClearLabel] = useState(false);
+  const editingSelection = editingSelectionId === null
+    ? null
+    : discSelections.find((selection) => selection.id === editingSelectionId) ??
+      null;
+
+  function selectCatalogAction(event: React.ChangeEvent<HTMLSelectElement>) {
+    const selection = discSelections.find(
+      (candidate) => candidate.id === event.currentTarget.value,
+    );
+    if (selection?.actionAvailability.state !== "editable") {
+      if (editingSelectionId !== null) {
+        setMediaItemId("");
+        setTitleNumber("");
+        setChapterStart("");
+        setChapterEnd("");
+        setLabel("");
+        onSelectionKindChange("main_feature");
+      }
+      setEditingSelectionId(null);
+      setClearLabel(false);
+      return;
+    }
+    setEditingSelectionId(selection.id);
+    setMediaItemId(selection.mediaItemId);
+    setLabel(selection.label ?? "");
+    setClearLabel(false);
+    onSelectionKindChange(selection.sourceIdentity.kind);
+    if (selection.sourceIdentity.kind === "main_feature") {
+      setTitleNumber("");
+      setChapterStart("");
+      setChapterEnd("");
+      return;
+    }
+    setTitleNumber(String(selection.sourceIdentity.titleNumber));
+    if (selection.sourceIdentity.kind === "dvd_chapters") {
+      setChapterStart(String(selection.sourceIdentity.chapterStart));
+      setChapterEnd(String(selection.sourceIdentity.chapterEnd));
+    } else {
+      setChapterStart("");
+      setChapterEnd("");
+    }
+  }
 
   function createSelection(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    const label = String(form.get("label") ?? "").trim();
+    const nextLabel = String(form.get("label") ?? "").trim();
     const replacesDiscSelectionId = String(
       form.get("replacesDiscSelectionId") ?? "",
     ).trim();
@@ -100,40 +171,59 @@ export function CatalogReviewDiscSelections({
       ...(replacesDiscSelectionId ? { replacesDiscSelectionId } : {}),
       ...(correctionReason ? { correctionReason } : {}),
       mediaItemId: String(form.get("mediaItemId")),
-      ...(label ? { label } : {}),
+      ...(nextLabel ? { label: nextLabel } : {}),
     };
+    let sourceIdentity: CatalogReviewDiscSelection["sourceIdentity"];
     if (selectionKind === "main_feature") {
-      onCreate({
-        ...common,
-        sourceIdentity: { kind: selectionKind },
-      });
+      sourceIdentity = { kind: selectionKind };
+    } else {
+      const selectedTitleNumber = integerFormValue(form, "titleNumber");
+      if (selectedTitleNumber === undefined) return;
+      if (selectionKind === "dvd_title") {
+        sourceIdentity = {
+          kind: selectionKind,
+          titleNumber: selectedTitleNumber,
+        };
+      } else {
+        const selectedChapterStart = integerFormValue(form, "chapterStart");
+        const selectedChapterEnd = integerFormValue(form, "chapterEnd");
+        if (
+          selectedChapterStart === undefined || selectedChapterEnd === undefined
+        ) return;
+        sourceIdentity = {
+          kind: selectionKind,
+          titleNumber: selectedTitleNumber,
+          chapterStart: selectedChapterStart,
+          chapterEnd: selectedChapterEnd,
+        };
+      }
+    }
+
+    const target = discSelections.find(
+      (selection) => selection.id === replacesDiscSelectionId,
+    );
+    if (target?.actionAvailability.state === "editable") {
+      const changes: Partial<UpdateDiscSelectionInput> = {};
+      if (common.mediaItemId !== target.mediaItemId) {
+        changes.mediaItemId = common.mediaItemId;
+      }
+      if (!sameSourceIdentity(sourceIdentity, target.sourceIdentity)) {
+        changes.sourceIdentity = sourceIdentity;
+      }
+      if (form.get("clearLabel") === "on") {
+        changes.label = null;
+      } else if (nextLabel === "" && target.label !== null) {
+        return;
+      } else if (nextLabel !== (target.label ?? "")) {
+        changes.label = nextLabel;
+      }
+      if (Object.keys(changes).length > 0) {
+        onUpdate(target.id, changes as UpdateDiscSelectionInput);
+      }
       return;
     }
-    const titleNumber = integerFormValue(form, "titleNumber");
-    if (titleNumber === undefined) {
-      return;
-    }
-    if (selectionKind === "dvd_title") {
-      onCreate({
-        ...common,
-        sourceIdentity: { kind: selectionKind, titleNumber },
-      });
-      return;
-    }
-    const chapterStart = integerFormValue(form, "chapterStart");
-    const chapterEnd = integerFormValue(form, "chapterEnd");
-    if (chapterStart === undefined || chapterEnd === undefined) {
-      return;
-    }
-    onCreate({
-      ...common,
-      sourceIdentity: {
-        kind: selectionKind,
-        titleNumber,
-        chapterStart,
-        chapterEnd,
-      },
-    });
+
+    onCreate({ ...common, sourceIdentity });
   }
 
   const hasSupersessionCorrection = discSelections.some(
@@ -158,6 +248,7 @@ export function CatalogReviewDiscSelections({
                     "Unknown Media Item"}
                 </strong>
                 <span>{discSelectionDescription(selection)}</span>
+                <span>Label: {selection.label ?? "None"}</span>
               </div>
               <div className="selection-action-state">
                 <span className="attention-mark">
@@ -247,7 +338,7 @@ export function CatalogReviewDiscSelections({
       />
 
       <form className="catalog-form" onSubmit={createSelection}>
-        <h3>Add Disc Selection</h3>
+        <h3>{editingSelection ? "Edit Disc Selection" : "Add Disc Selection"}</h3>
         {hasSupersessionCorrection ? (
           <p>
             A job-backed Disc Selection Correction creates a new identity and
@@ -258,7 +349,11 @@ export function CatalogReviewDiscSelections({
         <div className="catalog-fields">
           <label>
             Catalog action
-            <select name="replacesDiscSelectionId" defaultValue="">
+            <select
+              name="replacesDiscSelectionId"
+              defaultValue=""
+              onChange={selectCatalogAction}
+            >
               <option value="">Add a new Disc Selection</option>
               {discSelections
                 .filter((selection) =>
@@ -279,7 +374,12 @@ export function CatalogReviewDiscSelections({
           </label>
           <label>
             Media Item
-            <select name="mediaItemId" required defaultValue="">
+            <select
+              name="mediaItemId"
+              required
+              value={mediaItemId}
+              onChange={(event) => setMediaItemId(event.currentTarget.value)}
+            >
               <option value="" disabled>Select a Media Item</option>
               {hierarchy.map(({ item, depth }) => (
                 <option key={item.id} value={item.id}>
@@ -293,10 +393,11 @@ export function CatalogReviewDiscSelections({
             <select
               name="selectionKind"
               value={selectionKind}
-              onChange={(event) =>
+              onChange={(event) => {
                 onSelectionKindChange(
                   event.currentTarget.value as DiscSelectionKind,
-                )}
+                );
+              }}
             >
               {DISC_SELECTION_KINDS.map((kind) => (
                 <option key={kind} value={kind}>
@@ -308,7 +409,12 @@ export function CatalogReviewDiscSelections({
           {selectionKind !== "main_feature" ? (
             <label>
               DVD title
-              <select name="titleNumber" required defaultValue="">
+              <select
+                name="titleNumber"
+                required
+                value={titleNumber}
+                onChange={(event) => setTitleNumber(event.currentTarget.value)}
+              >
                 <option value="" disabled>Select a title</option>
                 {rawTitles.map((title) => (
                   <option key={title.number} value={title.number}>
@@ -322,18 +428,60 @@ export function CatalogReviewDiscSelections({
             <>
               <label>
                 First chapter
-                <input name="chapterStart" type="number" min="1" required />
+                <input
+                  name="chapterStart"
+                  type="number"
+                  min="1"
+                  required
+                  value={chapterStart}
+                  onChange={(event) => setChapterStart(event.currentTarget.value)}
+                />
               </label>
               <label>
                 Last chapter
-                <input name="chapterEnd" type="number" min="1" required />
+                <input
+                  name="chapterEnd"
+                  type="number"
+                  min="1"
+                  required
+                  value={chapterEnd}
+                  onChange={(event) => setChapterEnd(event.currentTarget.value)}
+                />
               </label>
             </>
           ) : null}
           <label>
             Label
-            <input name="label" maxLength={256} placeholder="Optional" />
+            <input
+              name="label"
+              maxLength={256}
+              placeholder="Optional"
+              value={label}
+              disabled={clearLabel}
+              required={
+                editingSelection !== null && editingSelection.label !== null &&
+                !clearLabel
+              }
+              onChange={(event) => setLabel(event.currentTarget.value)}
+            />
           </label>
+          {editingSelection !== null && editingSelection.label !== null ? (
+            <label className="catalog-clear-label">
+              <input
+                name="clearLabel"
+                type="checkbox"
+                checked={clearLabel}
+                onChange={(event) => setClearLabel(event.currentTarget.checked)}
+              />
+              Clear current label
+            </label>
+          ) : null}
+          {editingSelection ? (
+            <p className="catalog-edit-preservation">
+              Unchanged values are preserved. Use Clear current label to
+              remove the existing label intentionally.
+            </p>
+          ) : null}
           {hasSupersessionCorrection ? (
             <label>
               Correction note
@@ -349,7 +497,7 @@ export function CatalogReviewDiscSelections({
           type="submit"
           disabled={isSaving || mediaItems.length === 0}
         >
-          Add Disc Selection
+          {editingSelection ? "Save Disc Selection" : "Add Disc Selection"}
         </button>
       </form>
     </>
