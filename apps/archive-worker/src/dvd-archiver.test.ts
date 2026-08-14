@@ -136,7 +136,10 @@ async function createInterruptedDamagedPublication(
       waitForInactive: vi.fn(async () => undefined),
     },
     salvageValidator: {
-      validate: vi.fn().mockResolvedValue({ outcome: "accepted" }),
+      validate: vi.fn().mockResolvedValue({
+        badSectorCountsByTitle: [{ badSectorCount: 1, titleNumber: 1 }],
+        outcome: "accepted",
+      }),
     },
     signal: new AbortController().signal,
   });
@@ -1815,7 +1818,10 @@ describe("DVD archive publication", () => {
         validate: vi.fn(async () => {
           renameSync(fixture.rescuePaths.imagePath, displacedRescuePath);
           writeFileSync(fixture.rescuePaths.imagePath, replacementImage);
-          return { outcome: "accepted" as const };
+          return {
+            badSectorCountsByTitle: [{ badSectorCount: 1, titleNumber: 1 }],
+            outcome: "accepted" as const,
+          };
         }),
       },
       signal: new AbortController().signal,
@@ -1848,7 +1854,10 @@ describe("DVD archive publication", () => {
         waitForInactive: vi.fn(async () => undefined),
       },
       salvageValidator: {
-        validate: vi.fn().mockResolvedValue({ outcome: "accepted" }),
+        validate: vi.fn().mockResolvedValue({
+          badSectorCountsByTitle: [{ badSectorCount: 1, titleNumber: 1 }],
+          outcome: "accepted",
+        }),
       },
       signal: new AbortController().signal,
     })).rejects.toThrow("DVD rescue state does not match the Archive Request");

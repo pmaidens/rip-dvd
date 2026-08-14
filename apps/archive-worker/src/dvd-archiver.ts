@@ -1034,6 +1034,7 @@ async function evaluateDvdSalvage({
       integrityEvidence: createWatchableSalvageArchiveIntegrityEvidence(
         DVD_WATCHABLE_SALVAGE_POLICY_VERSION,
         recoveryResult.unrecoveredSectorRanges,
+        salvageValidation.badSectorCountsByTitle,
       ),
     };
   }
