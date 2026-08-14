@@ -19,9 +19,11 @@ export {
   ARCHIVE_INTEGRITIES,
   CATALOG_REVIEW_OUTCOMES,
   DISC_SELECTION_KINDS,
+  DVD_SALVAGE_REJECTION_DESCRIPTIONS,
   MAX_MEDIA_ITEM_HIERARCHY_DEPTH,
   MEDIA_ITEM_KINDS,
 } from "./domain-values.js";
+export type { DvdSalvageRejectionReason } from "./domain-values.js";
 export type * from "./types.js";
 export type {
   DiscSelectionSourceIdentity,
