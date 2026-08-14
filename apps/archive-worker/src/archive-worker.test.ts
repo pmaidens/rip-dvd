@@ -932,9 +932,15 @@ describe("archive worker polling", () => {
         ).toEqual([expect.objectContaining({ id: scenario.request.id })]);
         expect(scenario.access.catalog.listOriginalDiscArchives()).toEqual([]);
         expect(scenario.rescuedPartialPath).toBeDefined();
-        expect(readFileSync(`${scenario.rescuedPartialPath}.failed`)).toEqual(
+        expect(existsSync(scenario.rescuedPartialPath!)).toBe(false);
+        const rescuePaths = dvdRescueWorkspacePaths(
+          realpathSync(scenario.originalsLibraryPath),
+          scenario.request.id,
+        );
+        expect(readFileSync(rescuePaths.imagePath)).toEqual(
           scenario.rescuedImage,
         );
+        expect(existsSync(rescuePaths.mapPath)).toBe(true);
       }
     },
   );
@@ -965,15 +971,25 @@ describe("archive worker polling", () => {
       expect.objectContaining({ id: scenario.request.id }),
     ]);
     expect(scenario.access.catalog.listOriginalDiscArchives()).toEqual([]);
-    expect(readdirSync(scenario.originalsLibraryPath).sort()).toEqual([
-      `dvdmeta-${"9".repeat(64)}.iso.failed`,
-    ]);
+    const entries = readdirSync(scenario.originalsLibraryPath).sort();
+    expect(entries).toHaveLength(3);
+    expect(entries.filter((name) => name.endsWith(".rip-dvd-rescue.iso")))
+      .toHaveLength(1);
+    expect(entries.filter((name) => name.endsWith(".rip-dvd-rescue.json")))
+      .toHaveLength(1);
+    expect(entries).toContain(`dvdmeta-${"9".repeat(64)}.iso.failed`);
     expect(readFileSync(
       join(
         scenario.originalsLibraryPath,
         `dvdmeta-${"9".repeat(64)}.iso.failed`,
       ),
     )).toEqual(scenario.rescuedImage);
+    const rescuePaths = dvdRescueWorkspacePaths(
+      realpathSync(scenario.originalsLibraryPath),
+      scenario.request.id,
+    );
+    expect(readFileSync(rescuePaths.imagePath)).toEqual(scenario.rescuedImage);
+    expect(existsSync(rescuePaths.mapPath)).toBe(true);
   });
 
   it("resumes retained rescue work after a worker restart and publishes a clean read", async () => {
