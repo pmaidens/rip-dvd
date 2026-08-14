@@ -1353,23 +1353,30 @@ describe("CatalogReviewEditor", () => {
     }));
 
     await act(async () => renderCatalogReviewEditor("archive-a"));
-    const mapMovie = [...container.querySelectorAll("button")].find(
-      (button) => button.textContent === "Map as movie",
+    const mapExisting = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Map to existing Media Item",
     );
-    if (!mapMovie) {
-      throw new Error("Expected a title-row movie mapping action");
+    if (!mapExisting) {
+      throw new Error("Expected a direct existing Media Item mapping action");
     }
-    await act(async () => mapMovie.click());
+    await act(async () => mapExisting.click());
 
     expect(container.textContent).toContain("Create new Media Item");
     expect(container.textContent).toContain("Use existing Media Item");
+    expect(container.querySelector<HTMLInputElement>(
+      'input[name="mappingTargetChoice"][value="create_new"]',
+    )?.checked).toBe(false);
     const useExisting = container.querySelector<HTMLInputElement>(
       'input[name="mappingTargetChoice"][value="use_existing"]',
     );
     if (!useExisting) {
       throw new Error("Expected the existing Media Item choice");
     }
-    await act(async () => useExisting.click());
+    expect(useExisting.checked).toBe(true);
+    expect(container.querySelector<HTMLInputElement>(
+      '.catalog-mapping-proposal input[name="titleNumber"]',
+    )?.value).toBe("1");
+    expect(container.textContent).toContain("exact whole Title 1");
 
     const search = [...container.querySelectorAll("button")].find(
       (button) => button.textContent === "Search full catalog",

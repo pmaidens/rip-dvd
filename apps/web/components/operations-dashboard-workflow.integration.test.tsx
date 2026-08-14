@@ -35,6 +35,7 @@ import {
   CatalogReviewView,
   type CatalogReviewDto,
 } from "./catalog-review-editor";
+import type { MappingProposal } from "./catalog-review-model";
 import {
   FilesystemVerificationInventoryView,
   type FilesystemVerificationInventoryState,
@@ -82,7 +83,10 @@ async function readDashboard(access: DataAccess): Promise<{
   };
 }
 
-function renderCatalogReview(review: CatalogReviewDto): string {
+function renderCatalogReview(
+  review: CatalogReviewDto,
+  activeMappingProposal: MappingProposal | null = null,
+): string {
   return renderToStaticMarkup(
     <CatalogReviewView
       state={{ status: "loaded", review }}
@@ -91,7 +95,7 @@ function renderCatalogReview(review: CatalogReviewDto): string {
       requestError={null}
       mappingProposalError={null}
       selectionKind="main_feature"
-      activeMappingProposal={null}
+      activeMappingProposal={activeMappingProposal}
       archiveOnlySelected={false}
       onClose={() => undefined}
       onRetry={() => undefined}
@@ -1057,10 +1061,25 @@ describe("end-to-end operations dashboard workflow", () => {
     expect(catalogReviewHtml).toContain("Map as movie");
     expect(catalogReviewHtml).toContain("Map as bonus feature");
     expect(catalogReviewHtml).toContain("Map as trailer");
+    expect(catalogReviewHtml).toContain("Map to existing Media Item");
     expect(catalogReviewHtml).toContain("Map chapters");
     expect(catalogReviewHtml).toContain("Map as other");
     expect(catalogReviewHtml).not.toContain("Unrelated Global Noise");
     expect(catalogReviewHtml).not.toContain("Existing Workflow Show");
+    const directReuseProposalHtml = renderCatalogReview(catalogReview, {
+      action: "existing_media_item",
+      sourceIdentity: { kind: "dvd_title", titleNumber: 5 },
+    });
+    expect(directReuseProposalHtml).toContain("exact whole Title 5");
+    expect(directReuseProposalHtml).toMatch(
+      /name="mappingTargetChoice" checked="" value="use_existing"/,
+    );
+    expect(directReuseProposalHtml).not.toMatch(
+      /name="mappingTargetChoice" checked="" value="create_new"/,
+    );
+    expect(directReuseProposalHtml).not.toContain(
+      'name="existingMediaItemId"',
+    );
 
     const mediaItemSearchResponse = await createMediaItemSearchRoute(
       new Request(

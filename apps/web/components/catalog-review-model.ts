@@ -223,6 +223,7 @@ export type MappingProposalAction =
   | "movie"
   | "bonus_feature"
   | "trailer"
+  | "existing_media_item"
   | "chapters"
   | "other"
   | "main_feature";

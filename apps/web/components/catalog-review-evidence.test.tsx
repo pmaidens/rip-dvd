@@ -231,6 +231,7 @@ describe("CatalogReviewEvidence", () => {
     expect(html).toContain("Map as movie");
     expect(html).toContain("Map as bonus feature");
     expect(html).toContain("Map as trailer");
+    expect(html).toContain("Map to existing Media Item");
     expect(html).toContain("Map chapters");
     expect(html).toContain("Map as other");
     expect(html).toContain("Mapping Proposal");
@@ -344,7 +345,7 @@ describe("CatalogReviewEvidence", () => {
     const assistedActions = [...container.querySelectorAll<HTMLButtonElement>(
       ".catalog-title-actions button",
     )];
-    expect(assistedActions).toHaveLength(5);
+    expect(assistedActions).toHaveLength(6);
     expect(assistedActions.every((button) => button.disabled)).toBe(true);
     expect(container.textContent).toContain(
       "Use manual Disc Selection controls for intentional overlaps",
