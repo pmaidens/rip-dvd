@@ -307,7 +307,16 @@ export function createNodeDvdCopyRunner({
           cancel();
         }
       });
-      const parseProgress = (text: string, flush = false) => {
+      const appendDiagnostic = (text: string) => {
+        const diagnostic = text.trim();
+        if (diagnostic.length === 0) {
+          return;
+        }
+        diagnostics = `${diagnostics}${diagnostics ? "\n" : ""}${diagnostic}`.slice(
+          -MAX_COPY_DIAGNOSTIC_BYTES,
+        );
+      };
+      const parseCopyOutput = (text: string, flush = false) => {
         progressBuffer += text;
         if (progressBuffer.length > MAX_COPY_DIAGNOSTIC_BYTES) {
           progressBuffer = progressBuffer.slice(-MAX_COPY_DIAGNOSTIC_BYTES);
@@ -319,18 +328,19 @@ export function createNodeDvdCopyRunner({
           const bytes = match ? Number(match[1]) : Number.NaN;
           if (Number.isSafeInteger(bytes) && bytes >= 0) {
             request.onBytesCopied(bytes);
+          } else {
+            appendDiagnostic(segment);
           }
         }
       };
 
       child.stderr.on("data", (chunk) => {
         const text = chunk.toString("utf8");
-        diagnostics = `${diagnostics}${text}`.slice(-MAX_COPY_DIAGNOSTIC_BYTES);
         if (operationSettled || cancellationRequested) {
           return;
         }
         try {
-          parseProgress(text);
+          parseCopyOutput(text);
         } catch (error) {
           rejectOperation(error);
           cancel();
@@ -356,7 +366,7 @@ export function createNodeDvdCopyRunner({
           return;
         }
         try {
-          parseProgress("", true);
+          parseCopyOutput("", true);
         } catch (error) {
           rejectOperation(error);
           return;

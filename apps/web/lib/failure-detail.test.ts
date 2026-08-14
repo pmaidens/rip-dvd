@@ -25,6 +25,21 @@ describe("formatFailureDetail", () => {
       "The worker reported an input/output error.",
     ],
     [
+      "archive read input/output",
+      "DVD archive copy failed: DVD content read failed at byte 1904640: Input/output error",
+      "The archive worker encountered an input/output error while reading the disc at byte 1,904,640.",
+    ],
+    [
+      "archive read without a recognized cause",
+      "DVD archive copy failed: DVD content read failed at byte 2048: private-name.iso",
+      "The archive worker could not read the disc at byte 2,048.",
+    ],
+    [
+      "archive read ending early",
+      "DVD archive copy failed: DVD content read ended before the declared media size",
+      "The archive worker reached the end of the disc before its declared size.",
+    ],
+    [
       "timeout",
       "DVD archive copy timed out",
       "The worker operation timed out.",
@@ -98,6 +113,11 @@ describe("formatFailureDetail", () => {
       "command status",
       "DVD archive copy stopped with status 23",
       "A worker command exited with status 23.",
+    ],
+    [
+      "archive copy status fallback",
+      "DVD archive copy failed with status 1",
+      "The archive copy command exited with status 1.",
     ],
     [
       "command signal",
