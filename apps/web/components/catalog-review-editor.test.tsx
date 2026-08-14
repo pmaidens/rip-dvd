@@ -123,6 +123,7 @@ function catalogReview({
     },
     correctionHistory: [],
     correctionEncodeHistory: [],
+    correctionRetainedOutputHistory: [],
     correctionHistoryPage: {
       offset: 0,
       limit: 100,
@@ -130,6 +131,12 @@ function catalogReview({
       hasNext: false,
     },
     correctionEncodeHistoryPage: {
+      offset: 0,
+      limit: 100,
+      hasPrevious: false,
+      hasNext: false,
+    },
+    correctionRetainedOutputHistoryPage: {
       offset: 0,
       limit: 100,
       hasPrevious: false,
@@ -1676,6 +1683,7 @@ describe("CatalogReviewView", () => {
         onDiscSelectionsPage={() => undefined}
         onCorrectionHistoryPage={() => undefined}
         onCorrectionEncodeHistoryPage={() => undefined}
+        onCorrectionRetainedOutputHistoryPage={() => undefined}
         onSelectionKindChange={() => undefined}
         onArchiveOnlyChange={() => undefined}
         onStartMappingProposal={() => undefined}
@@ -1911,6 +1919,7 @@ describe("CatalogReviewView", () => {
             },
             correctionHistory: [],
             correctionEncodeHistory: [],
+            correctionRetainedOutputHistory: [],
             correctionHistoryPage: {
               offset: 0,
               limit: 100,
@@ -1918,6 +1927,12 @@ describe("CatalogReviewView", () => {
               hasNext: false,
             },
             correctionEncodeHistoryPage: {
+              offset: 0,
+              limit: 100,
+              hasPrevious: false,
+              hasNext: false,
+            },
+            correctionRetainedOutputHistoryPage: {
               offset: 0,
               limit: 100,
               hasPrevious: false,
@@ -1941,6 +1956,7 @@ describe("CatalogReviewView", () => {
         onDiscSelectionsPage={() => undefined}
         onCorrectionHistoryPage={() => undefined}
         onCorrectionEncodeHistoryPage={() => undefined}
+        onCorrectionRetainedOutputHistoryPage={() => undefined}
         onSelectionKindChange={() => undefined}
         onArchiveOnlyChange={() => undefined}
         onStartMappingProposal={() => undefined}
@@ -2071,6 +2087,7 @@ describe("CatalogReviewView", () => {
             },
             correctionHistory: [],
             correctionEncodeHistory: [],
+            correctionRetainedOutputHistory: [],
             correctionHistoryPage: {
               offset: 0,
               limit: 100,
@@ -2078,6 +2095,12 @@ describe("CatalogReviewView", () => {
               hasNext: false,
             },
             correctionEncodeHistoryPage: {
+              offset: 0,
+              limit: 100,
+              hasPrevious: false,
+              hasNext: false,
+            },
+            correctionRetainedOutputHistoryPage: {
               offset: 0,
               limit: 100,
               hasPrevious: false,
@@ -2099,6 +2122,7 @@ describe("CatalogReviewView", () => {
         onDiscSelectionsPage={() => undefined}
         onCorrectionHistoryPage={() => undefined}
         onCorrectionEncodeHistoryPage={() => undefined}
+        onCorrectionRetainedOutputHistoryPage={() => undefined}
         onSelectionKindChange={() => undefined}
         onArchiveOnlyChange={() => undefined}
         onStartMappingProposal={() => undefined}

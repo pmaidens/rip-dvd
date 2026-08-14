@@ -139,6 +139,13 @@ describe("CatalogReviewDiscSelections", () => {
           hasPrevious: false,
           hasNext: false,
         }}
+        correctionRetainedOutputHistory={[]}
+        correctionRetainedOutputHistoryPage={{
+          offset: 0,
+          limit: 100,
+          hasPrevious: false,
+          hasNext: false,
+        }}
         mediaItems={[{
           id: "episode-1",
           parentId: null,
@@ -160,6 +167,7 @@ describe("CatalogReviewDiscSelections", () => {
         onPage={() => undefined}
         onCorrectionHistoryPage={() => undefined}
         onCorrectionEncodeHistoryPage={() => undefined}
+        onCorrectionRetainedOutputHistoryPage={() => undefined}
         onSelectionKindChange={() => undefined}
         onCreate={() => undefined}
         onUpdate={() => undefined}
@@ -212,6 +220,13 @@ describe("CatalogReviewDiscSelections", () => {
           hasPrevious: false,
           hasNext: false,
         }}
+        correctionRetainedOutputHistory={[]}
+        correctionRetainedOutputHistoryPage={{
+          offset: 0,
+          limit: 100,
+          hasPrevious: false,
+          hasNext: false,
+        }}
         mediaItems={[{
           id: "movie-1",
           parentId: null,
@@ -227,6 +242,7 @@ describe("CatalogReviewDiscSelections", () => {
         onPage={() => undefined}
         onCorrectionHistoryPage={() => undefined}
         onCorrectionEncodeHistoryPage={() => undefined}
+        onCorrectionRetainedOutputHistoryPage={() => undefined}
         onSelectionKindChange={() => undefined}
         onCreate={() => undefined}
         onUpdate={() => undefined}
@@ -316,12 +332,25 @@ describe("CatalogReviewDiscSelections", () => {
             status: "completed",
             predecessorEncodeJobId: "encode-original",
           },
-          retainedOutput: {
-            state: "retained",
-            cleanupEligible: true,
-          },
         }]}
         correctionEncodeHistoryPage={{
+          offset: 0,
+          limit: 100,
+          hasPrevious: false,
+          hasNext: false,
+        }}
+        correctionRetainedOutputHistory={[{
+          replacementDiscSelectionId: "selection-intermediate",
+          retainedOutput: {
+            id: "retained-output-1",
+            predecessorEncodeJobId: "encode-original",
+            replacementEncodeJobId: "encode-corrected",
+            state: "retained",
+            cleanupEligible: true,
+            retainedAt: "2026-08-12T20:00:00.000Z",
+          },
+        }]}
+        correctionRetainedOutputHistoryPage={{
           offset: 0,
           limit: 100,
           hasPrevious: false,
@@ -362,6 +391,7 @@ describe("CatalogReviewDiscSelections", () => {
         onPage={() => undefined}
         onCorrectionHistoryPage={() => undefined}
         onCorrectionEncodeHistoryPage={() => undefined}
+        onCorrectionRetainedOutputHistoryPage={() => undefined}
         onSelectionKindChange={() => undefined}
         onCreate={() => undefined}
         onUpdate={() => undefined}
@@ -382,7 +412,8 @@ describe("CatalogReviewDiscSelections", () => {
       "Encode Job encode-original · Completed → Encode Job encode-corrected · Completed",
     );
     expect(html).toContain("Replacement Disc Selection selection-intermediate");
-    expect(html).toContain("Prior output retained · Cleanup eligible");
+    expect(html).toContain("Retained Output retained-output-1 · Retained");
+    expect(html).toContain("Retained 2026-08-12T20:00:00.000Z · Cleanup eligible");
     expect(html).toContain("Correct Movie");
   });
 
@@ -437,6 +468,13 @@ describe("CatalogReviewDiscSelections", () => {
           hasPrevious: false,
           hasNext: false,
         }}
+        correctionRetainedOutputHistory={[]}
+        correctionRetainedOutputHistoryPage={{
+          offset: 0,
+          limit: 100,
+          hasPrevious: false,
+          hasNext: false,
+        }}
         mediaItems={[
           {
             id: "movie-1",
@@ -469,6 +507,7 @@ describe("CatalogReviewDiscSelections", () => {
         onPage={() => undefined}
         onCorrectionHistoryPage={() => undefined}
         onCorrectionEncodeHistoryPage={() => undefined}
+        onCorrectionRetainedOutputHistoryPage={() => undefined}
         onSelectionKindChange={() => undefined}
         onCreate={() => undefined}
         onUpdate={() => undefined}
@@ -522,6 +561,13 @@ describe("CatalogReviewDiscSelections", () => {
           hasPrevious: false,
           hasNext: false,
         }}
+        correctionRetainedOutputHistory={[]}
+        correctionRetainedOutputHistoryPage={{
+          offset: 0,
+          limit: 100,
+          hasPrevious: false,
+          hasNext: false,
+        }}
         mediaItems={[{
           id: "movie-1",
           parentId: null,
@@ -537,6 +583,7 @@ describe("CatalogReviewDiscSelections", () => {
         onPage={() => undefined}
         onCorrectionHistoryPage={() => undefined}
         onCorrectionEncodeHistoryPage={() => undefined}
+        onCorrectionRetainedOutputHistoryPage={() => undefined}
         onSelectionKindChange={() => undefined}
         onCreate={() => undefined}
         onUpdate={() => undefined}

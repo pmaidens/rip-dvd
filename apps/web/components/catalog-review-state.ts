@@ -63,6 +63,7 @@ export async function requestCatalogReview(
   fetcher: CatalogReviewFetch = fetch,
   correctionHistoryOffset = 0,
   correctionEncodeHistoryOffset = 0,
+  correctionRetainedOutputHistoryOffset = 0,
   replacementOffset = 0,
   replacementProfileOffset = 0,
 ): Promise<CatalogReviewDto> {
@@ -75,6 +76,12 @@ export async function requestCatalogReview(
   }
   if (correctionEncodeHistoryOffset > 0) {
     query.set("correctionJobOffset", String(correctionEncodeHistoryOffset));
+  }
+  if (correctionRetainedOutputHistoryOffset > 0) {
+    query.set(
+      "correctionOutputOffset",
+      String(correctionRetainedOutputHistoryOffset),
+    );
   }
   if (replacementProfileOffset > 0) {
     query.set("replacementProfileOffset", String(replacementProfileOffset));
@@ -158,6 +165,10 @@ export function useCatalogReviewState({
   const [correctionHistoryOffset, setCorrectionHistoryOffset] = useState(0);
   const [correctionEncodeHistoryOffset, setCorrectionEncodeHistoryOffset] =
     useState(0);
+  const [
+    correctionRetainedOutputHistoryOffset,
+    setCorrectionRetainedOutputHistoryOffset,
+  ] = useState(0);
   const [replacementOffset, setReplacementOffset] = useState(0);
   const [replacementProfileOffset, setReplacementProfileOffset] = useState(0);
   const [selectionKind, setSelectionKind] =
@@ -192,6 +203,7 @@ export function useCatalogReviewState({
         fetch,
         correctionHistoryOffset,
         correctionEncodeHistoryOffset,
+        correctionRetainedOutputHistoryOffset,
         replacementOffset,
         replacementProfileOffset,
       );
@@ -211,6 +223,7 @@ export function useCatalogReviewState({
     discSelectionOffset,
     correctionHistoryOffset,
     correctionEncodeHistoryOffset,
+    correctionRetainedOutputHistoryOffset,
     replacementOffset,
     replacementProfileOffset,
   ]);
@@ -327,6 +340,14 @@ export function useCatalogReviewState({
     setCorrectionEncodeHistoryOffset(offset);
   }
 
+  function changeCorrectionRetainedOutputHistoryOffset(offset: number) {
+    if (correctionRetainedOutputHistoryOffset === offset) {
+      return;
+    }
+    requestScope.current?.invalidate(archiveId);
+    setCorrectionRetainedOutputHistoryOffset(offset);
+  }
+
   function changeReplacementOffset(offset: number) {
     if (replacementOffset === offset) return;
     requestScope.current?.invalidate(archiveId);
@@ -439,6 +460,7 @@ export function useCatalogReviewState({
     changeDiscSelectionOffset,
     changeCorrectionHistoryOffset,
     changeCorrectionEncodeHistoryOffset,
+    changeCorrectionRetainedOutputHistoryOffset,
     changeReplacementOffset,
     changeReplacementProfileOffset,
     changeSelectionKind: setSelectionKind,

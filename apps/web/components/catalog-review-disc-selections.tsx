@@ -25,6 +25,10 @@ interface CatalogReviewDiscSelectionsProps {
   correctionEncodeHistory: CatalogReviewDto["correctionEncodeHistory"];
   correctionEncodeHistoryPage:
     CatalogReviewDto["correctionEncodeHistoryPage"];
+  correctionRetainedOutputHistory:
+    CatalogReviewDto["correctionRetainedOutputHistory"];
+  correctionRetainedOutputHistoryPage:
+    CatalogReviewDto["correctionRetainedOutputHistoryPage"];
   mediaItems: CatalogReviewMediaItem[];
   rawTitles: DvdTitle[];
   selectionKind: DiscSelectionKind;
@@ -32,6 +36,7 @@ interface CatalogReviewDiscSelectionsProps {
   onPage(offset: number): void;
   onCorrectionHistoryPage(offset: number): void;
   onCorrectionEncodeHistoryPage(offset: number): void;
+  onCorrectionRetainedOutputHistoryPage(offset: number): void;
   onSelectionKindChange(kind: DiscSelectionKind): void;
   onCreate(input: CreateDiscSelectionInput): void;
   onUpdate(id: string, changes: UpdateDiscSelectionInput): void;
@@ -98,6 +103,8 @@ export function CatalogReviewDiscSelections({
   correctionHistoryPage,
   correctionEncodeHistory,
   correctionEncodeHistoryPage,
+  correctionRetainedOutputHistory,
+  correctionRetainedOutputHistoryPage,
   mediaItems,
   rawTitles,
   selectionKind,
@@ -105,6 +112,7 @@ export function CatalogReviewDiscSelections({
   onPage,
   onCorrectionHistoryPage,
   onCorrectionEncodeHistoryPage,
+  onCorrectionRetainedOutputHistoryPage,
   onSelectionKindChange,
   onCreate,
   onUpdate,
@@ -343,13 +351,6 @@ export function CatalogReviewDiscSelections({
                     " "
                   }{history.replacementDiscSelectionId}
                 </p>
-                {history.retainedOutput ? (
-                  <p>
-                    Prior output retained · {history.retainedOutput.cleanupEligible
-                      ? "Cleanup eligible"
-                      : "Cleanup unavailable"}
-                  </p>
-                ) : null}
               </li>
             ))}
           </ol>
@@ -362,6 +363,46 @@ export function CatalogReviewDiscSelections({
         page={correctionEncodeHistoryPage}
         isSaving={isSaving}
         onPage={onCorrectionEncodeHistoryPage}
+      />
+
+      {correctionRetainedOutputHistory.length > 0 ? (
+        <div className="selection-correction-history">
+          <h4>Correction Retained Output History</h4>
+          <ol className="selection-encode-history">
+            {correctionRetainedOutputHistory.map(
+              ({ replacementDiscSelectionId, retainedOutput }) => (
+                <li key={retainedOutput.id}>
+                  <p>
+                    Retained Output {retainedOutput.id} · {displayTerm(
+                      retainedOutput.state,
+                    )}
+                  </p>
+                  <p>
+                    Encode Job {retainedOutput.predecessorEncodeJobId}{" → "}
+                    Encode Job {retainedOutput.replacementEncodeJobId}
+                  </p>
+                  <p>
+                    Replacement Disc Selection {replacementDiscSelectionId}
+                  </p>
+                  <p>
+                    Retained {retainedOutput.retainedAt} · {retainedOutput
+                        .cleanupEligible
+                      ? "Cleanup eligible"
+                      : "Cleanup unavailable"}
+                  </p>
+                </li>
+              ),
+            )}
+          </ol>
+        </div>
+      ) : null}
+
+      <CatalogReviewPagination
+        ariaLabel="Correction Retained Output History pages"
+        itemLabel="Retained outputs"
+        page={correctionRetainedOutputHistoryPage}
+        isSaving={isSaving}
+        onPage={onCorrectionRetainedOutputHistoryPage}
       />
 
       <form className="catalog-form" onSubmit={submitSelection}>
@@ -451,7 +492,6 @@ export function CatalogReviewDiscSelections({
                 ))}
               </select>
             </label>
-          ) : null}
           {selectionKind === "dvd_chapters" ? (
             <>
               <label>

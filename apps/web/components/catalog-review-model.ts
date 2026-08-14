@@ -1,5 +1,6 @@
 import type { DvdTitle } from "@rip-dvd/data-access/dvd-scan";
 import type {
+  CatalogReviewCoverage,
   CatalogReviewOutcome,
   DiscSelectionSourceIdentityInput,
   DiscSelectionKind,
@@ -18,7 +19,6 @@ import type {
   CatalogReviewMediaItemInput,
   CatalogReviewProposedDiscSelectionInput,
 } from "../lib/catalog-review-command";
-import type { CatalogReviewCoverage } from "../lib/catalog-review-coverage";
 
 export const mediaItemKinds = MEDIA_ITEM_KINDS;
 export type { DiscSelectionKind, MediaItemKind };
@@ -70,10 +70,18 @@ export interface CatalogReviewCorrectionEncodeHistory {
     status: EncodeJobStatus;
     predecessorEncodeJobId: string;
   };
+}
+
+export interface CatalogReviewCorrectionRetainedOutputHistory {
+  replacementDiscSelectionId: string;
   retainedOutput: {
+    id: string;
+    predecessorEncodeJobId: string;
+    replacementEncodeJobId: string;
     state: "retained";
     cleanupEligible: boolean;
-  } | null;
+    retainedAt: string;
+  };
 }
 
 export interface CatalogReviewReplacementPlan {
@@ -165,6 +173,8 @@ export interface CatalogReviewDto {
   mediaItems: CatalogReviewMediaItem[];
   correctionHistory: CatalogReviewDiscSelectionCorrection[];
   correctionEncodeHistory: CatalogReviewCorrectionEncodeHistory[];
+  correctionRetainedOutputHistory:
+    CatalogReviewCorrectionRetainedOutputHistory[];
   replacementPlan?: CatalogReviewReplacementPlan;
   correctionHistoryPage: {
     offset: number;
@@ -173,6 +183,12 @@ export interface CatalogReviewDto {
     hasNext: boolean;
   };
   correctionEncodeHistoryPage: {
+    offset: number;
+    limit: number;
+    hasPrevious: boolean;
+    hasNext: boolean;
+  };
+  correctionRetainedOutputHistoryPage: {
     offset: number;
     limit: number;
     hasPrevious: boolean;

@@ -38,6 +38,7 @@ const CATALOG_REVIEW_DISC_SELECTION_LOOKUP_BATCH_SIZE = 100;
 const CATALOG_REVIEW_MEDIA_ITEM_MAINTENANCE_BATCH_SIZE = 100;
 const CATALOG_REVIEW_CORRECTION_HISTORY_PAGE_SIZE = 100;
 const CATALOG_REVIEW_CORRECTION_ENCODE_HISTORY_PAGE_SIZE = 100;
+const CATALOG_REVIEW_CORRECTION_RETAINED_OUTPUT_HISTORY_PAGE_SIZE = 100;
 const CATALOG_REVIEW_REPLACEMENT_PLAN_LIMIT = 100;
 const CATALOG_REVIEW_REPLACEMENT_PROFILE_LIMIT = 100;
 
@@ -159,6 +160,7 @@ function readCatalogReview(
   discSelectionOffset: number,
   correctionHistoryOffset: number,
   correctionEncodeHistoryOffset: number,
+  correctionRetainedOutputHistoryOffset: number,
   replacementOffset: number,
   replacementProfileOffset: number,
 ) {
@@ -176,10 +178,7 @@ function readCatalogReview(
       );
     }
     const rawTitles = decodeArchivedDvdTitles(disc.scanData) ?? [];
-    const coverage = snapshot.catalog.getCatalogReviewCoverage({
-      originalDiscArchiveId: id,
-      titles: rawTitles.map(({ number, chapters }) => ({ number, chapters })),
-    });
+    const coverage = snapshot.catalog.getCatalogReviewCoverage(id);
     const discSelectionRows = snapshot.catalog.listDiscSelections({
       originalDiscArchiveId: id,
       limit: CATALOG_REVIEW_SELECTION_PAGE_SIZE + 1,
@@ -226,15 +225,21 @@ function readCatalogReview(
       0,
       CATALOG_REVIEW_CORRECTION_ENCODE_HISTORY_PAGE_SIZE,
     );
-    const retainedOutputs = snapshot.encodeJobs
-      .listLatestRetainedOutputSummaries(
-        correctionEncodeHistoryPage.map(({ replacementEncodeJob }) =>
-          replacementEncodeJob.id
-        ),
+    const correctionRetainedOutputHistoryRows = snapshot.encodeJobs
+      .listDiscSelectionCorrectionRetainedOutputSummaries({
+        originalDiscArchiveId: id,
+        limit:
+          CATALOG_REVIEW_CORRECTION_RETAINED_OUTPUT_HISTORY_PAGE_SIZE + 1,
+        offset: correctionRetainedOutputHistoryOffset,
+      });
+    const hasNextCorrectionRetainedOutputHistory =
+      correctionRetainedOutputHistoryRows.length >
+        CATALOG_REVIEW_CORRECTION_RETAINED_OUTPUT_HISTORY_PAGE_SIZE;
+    const correctionRetainedOutputHistoryPage =
+      correctionRetainedOutputHistoryRows.slice(
+        0,
+        CATALOG_REVIEW_CORRECTION_RETAINED_OUTPUT_HISTORY_PAGE_SIZE,
       );
-    const retainedOutputByReplacementId = new Map(
-      retainedOutputs.map((output) => [output.replacementEncodeJobId, output]),
-    );
     const selectionsWithHistory = new Map(
       discSelectionsPage.map((selection) => [selection.id, selection]),
     );
@@ -353,9 +358,6 @@ function readCatalogReview(
       ),
       correctionHistory,
       correctionEncodeHistory: correctionEncodeHistoryPage.map((link) => {
-        const retainedOutput = retainedOutputByReplacementId.get(
-          link.replacementEncodeJob.id,
-        );
         return {
           replacementDiscSelectionId: link.replacementDiscSelectionId,
           predecessorEncodeJob: {
@@ -368,14 +370,22 @@ function readCatalogReview(
             status: link.replacementEncodeJob.status,
             predecessorEncodeJobId: link.predecessorEncodeJob.id,
           },
-          retainedOutput: retainedOutput
-            ? {
-              state: retainedOutput.state,
-              cleanupEligible: retainedOutput.cleanupEligible,
-            }
-            : null,
         };
       }),
+      correctionRetainedOutputHistory:
+        correctionRetainedOutputHistoryPage.map((entry) => ({
+          replacementDiscSelectionId: entry.replacementDiscSelectionId,
+          retainedOutput: {
+            id: entry.retainedOutput.id,
+            predecessorEncodeJobId:
+              entry.retainedOutput.predecessorEncodeJobId,
+            replacementEncodeJobId:
+              entry.retainedOutput.replacementEncodeJobId,
+            state: entry.retainedOutput.state,
+            cleanupEligible: entry.retainedOutput.cleanupEligible,
+            retainedAt: entry.retainedOutput.retainedAt.toISOString(),
+          },
+        })),
       ...(replacementJobPage.length === 0 && replacementOffset === 0
         ? {}
         : {
@@ -414,6 +424,12 @@ function readCatalogReview(
         limit: CATALOG_REVIEW_CORRECTION_ENCODE_HISTORY_PAGE_SIZE,
         hasPrevious: correctionEncodeHistoryOffset > 0,
         hasNext: hasNextCorrectionEncodeHistory,
+      },
+      correctionRetainedOutputHistoryPage: {
+        offset: correctionRetainedOutputHistoryOffset,
+        limit: CATALOG_REVIEW_CORRECTION_RETAINED_OUTPUT_HISTORY_PAGE_SIZE,
+        hasPrevious: correctionRetainedOutputHistoryOffset > 0,
+        hasNext: hasNextCorrectionRetainedOutputHistory,
       },
       discSelections: discSelectionsPage.map((selection) => {
         const availability = actionAvailabilityById.get(selection.id);
@@ -463,6 +479,10 @@ export async function createCatalogReviewRoute(
         request,
         "correctionJobOffset",
       );
+      const correctionRetainedOutputHistoryOffset = recordOffset(
+        request,
+        "correctionOutputOffset",
+      );
       const replacementOffset = recordOffset(request, "replacementOffset");
       const replacementProfileOffset = recordOffset(
         request,
@@ -472,11 +492,13 @@ export async function createCatalogReviewRoute(
         [...parameters.keys()].some((key) =>
           key !== "selectionOffset" && key !== "correctionOffset" &&
           key !== "correctionJobOffset" &&
+          key !== "correctionOutputOffset" &&
           key !== "replacementOffset" &&
           key !== "replacementProfileOffset"
         ) ||
         discSelectionOffset === null || correctionHistoryOffset === null ||
         correctionEncodeHistoryOffset === null ||
+        correctionRetainedOutputHistoryOffset === null ||
         replacementOffset === null || replacementProfileOffset === null
       ) {
         return response({ error: "Invalid Catalog Review query" }, 400);
@@ -487,6 +509,7 @@ export async function createCatalogReviewRoute(
         discSelectionOffset,
         correctionHistoryOffset,
         correctionEncodeHistoryOffset,
+        correctionRetainedOutputHistoryOffset,
         replacementOffset,
         replacementProfileOffset,
       );

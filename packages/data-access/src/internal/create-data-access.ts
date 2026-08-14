@@ -96,6 +96,7 @@ import {
 import { serializeDiscSelectionSourceIdentity } from "../disc-selection-source-identity.js";
 import { createDvdMetadataFingerprint } from "../dvd-metadata-fingerprint.js";
 import {
+  decodeArchivedDvdTitles,
   decodeDvdTitleMap,
   isDvdContentId,
   isDvdMetadataFingerprint,
@@ -142,6 +143,7 @@ import type {
   DiscSelectionId,
   DiscSelectionActionAvailability,
   DiscSelectionCorrectionEncodeJobLink,
+  DiscSelectionCorrectionRetainedOutputSummary,
   DiscSelectionSupersession,
   EncodeJobClaimToken,
   EncodeJobCleanupClaimToken,
@@ -187,12 +189,12 @@ const DISC_SELECTION_REVIEW_BATCH_SIZE = 100;
 const DISC_SELECTION_ACTION_AVAILABILITY_LIMIT = 100;
 const DISC_SELECTION_SUPERSESSION_LIMIT = 100;
 const DISC_SELECTION_CORRECTION_ENCODE_JOB_LINK_LIMIT = 101;
+const DISC_SELECTION_CORRECTION_RETAINED_OUTPUT_SUMMARY_LIMIT = 101;
 const MEDIA_ITEM_SEARCH_LIMIT = 100;
 const CATALOG_REVIEW_ARCHIVE_LIMIT = 100;
 const CATALOG_REVIEW_MAPPED_TITLE_SUMMARY_LIMIT = 3;
 const CORRECTED_ENCODE_REPLACEMENT_LIMIT = 100;
 const RETAINED_ENCODE_OUTPUT_LOOKUP_LIMIT = 400;
-const LATEST_RETAINED_ENCODE_OUTPUT_SUMMARY_LIMIT = 100;
 const DEFAULT_MIGRATIONS_FOLDER = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../drizzle",
@@ -265,10 +267,6 @@ const replacementEncodeJobRecords = alias(
 const predecessorEncodeJobRecords = alias(
   encodeJobs,
   "predecessor_encode_jobs",
-);
-const newerRetainedEncodeOutputRecords = alias(
-  retainedEncodeOutputs,
-  "newer_retained_encode_outputs",
 );
 const claimPredecessorEncodeJobRecords = alias(
   encodeJobs,
@@ -468,32 +466,25 @@ export function createDataAccessInternal(
     return new Date();
   }
 
-  function getCatalogReviewCoverage(options: {
-    originalDiscArchiveId: OriginalDiscArchiveId;
-    titles: readonly { number: number; chapters: number }[];
-  }): CatalogReviewCoverage {
-    if (options.titles.length > MAX_DVD_TITLES) {
-      throw new DomainInvariantError(
-        `Catalog Review Coverage is limited to ${MAX_DVD_TITLES} DVD titles`,
-      );
-    }
-    const titleNumbers = new Set<number>();
-    for (const title of options.titles) {
-      if (
-        !Number.isSafeInteger(title.number) ||
-        title.number < 1 ||
-        title.number > MAX_DVD_SCAN_INTEGER ||
-        !Number.isSafeInteger(title.chapters) ||
-        title.chapters < 0 ||
-        title.chapters > MAX_DVD_SCAN_INTEGER ||
-        titleNumbers.has(title.number)
-      ) {
-        throw new DomainInvariantError(
-          "Catalog Review Coverage requires unique bounded DVD titles",
-        );
-      }
-      titleNumbers.add(title.number);
-    }
+  function getCatalogReviewCoverage(
+    originalDiscArchiveId: OriginalDiscArchiveId,
+  ): CatalogReviewCoverage {
+    const archiveEvidence = requireRow(
+      database
+        .select({ scanData: detectedDiscs.scanData })
+        .from(originalDiscArchives)
+        .innerJoin(
+          detectedDiscs,
+          eq(detectedDiscs.id, originalDiscArchives.detectedDiscId),
+        )
+        .where(eq(originalDiscArchives.id, originalDiscArchiveId))
+        .get(),
+      "Original Disc Archive",
+      originalDiscArchiveId,
+    );
+    const archivedTitles = (
+      decodeArchivedDvdTitles(archiveEvidence.scanData) ?? []
+    ).map(({ number, chapters }) => ({ number, chapters }));
 
     const summary = database
       .select({
@@ -505,7 +496,7 @@ export function createDataAccessInternal(
       .where(and(
         eq(
           discSelections.originalDiscArchiveId,
-          options.originalDiscArchiveId,
+          originalDiscArchiveId,
         ),
         eq(discSelections.isCatalogActive, true),
       ))
@@ -516,7 +507,7 @@ export function createDataAccessInternal(
       );
     }
 
-    if (options.titles.length === 0) {
+    if (archivedTitles.length === 0) {
       return {
         ...summary,
         mappedTitles: 0,
@@ -526,7 +517,7 @@ export function createDataAccessInternal(
       };
     }
 
-    const titleMapValues = options.titles.map(() => "(?, ?, ?)").join(", ");
+    const titleMapValues = archivedTitles.map(() => "(?, ?, ?)").join(", ");
     const statement = sqlite.prepare(`
       with title_map(title_number, chapters, ordinal) as (
         values ${titleMapValues}
@@ -629,14 +620,14 @@ export function createDataAccessInternal(
       left join overlap_by_title using (title_number)
       order by title_map.ordinal
     `);
-    const parameters = options.titles.flatMap((title, index) => [
+    const parameters = archivedTitles.flatMap((title, index) => [
       title.number,
       title.chapters,
       index,
     ]);
     const rows = statement.all(
       ...parameters,
-      options.originalDiscArchiveId,
+      originalDiscArchiveId,
     ) as Array<{
       title_number: number;
       chapters: number;
@@ -2579,8 +2570,8 @@ export function createDataAccessInternal(
             access.catalog.searchMediaItems(options),
           listDiscSelections: (options) =>
             access.catalog.listDiscSelections(options),
-          getCatalogReviewCoverage: (options) =>
-            access.catalog.getCatalogReviewCoverage(options),
+          getCatalogReviewCoverage: (originalDiscArchiveId) =>
+            access.catalog.getCatalogReviewCoverage(originalDiscArchiveId),
           listDiscSelectionSupersessions: (options) =>
             access.catalog.listDiscSelectionSupersessions(options),
           listCorrectedEncodeReplacementPlans: (options) =>
@@ -2613,12 +2604,13 @@ export function createDataAccessInternal(
             access.encodeJobs.listDiscSelectionCorrectionEncodeJobLinks(
               options,
             ),
+          listDiscSelectionCorrectionRetainedOutputSummaries: (options) =>
+            access.encodeJobs
+              .listDiscSelectionCorrectionRetainedOutputSummaries(options),
           listCorrectionLinks: (ids) =>
             access.encodeJobs.listCorrectionLinks(ids),
           listRetainedOutputSummaries: (ids) =>
             access.encodeJobs.listRetainedOutputSummaries(ids),
-          listLatestRetainedOutputSummaries: (ids) =>
-            access.encodeJobs.listLatestRetainedOutputSummaries(ids),
         },
       };
       sqlite.exec("BEGIN");
@@ -4812,8 +4804,8 @@ export function createDataAccessInternal(
         return rows.map(toDiscSelection);
       },
 
-      getCatalogReviewCoverage(options) {
-        return getCatalogReviewCoverage(options);
+      getCatalogReviewCoverage(originalDiscArchiveId) {
+        return getCatalogReviewCoverage(originalDiscArchiveId);
       },
 
       listDiscSelectionSupersessions(options) {
@@ -7257,6 +7249,69 @@ export function createDataAccessInternal(
           "Disc Selection correction Encode Job history",
         ) as DiscSelectionCorrectionEncodeJobLink[];
       },
+      listDiscSelectionCorrectionRetainedOutputSummaries(options) {
+        if (
+          !Number.isSafeInteger(options.limit) ||
+          options.limit < 1 ||
+          options.limit >
+            DISC_SELECTION_CORRECTION_RETAINED_OUTPUT_SUMMARY_LIMIT
+        ) {
+          throw new DomainInvariantError(
+            `Disc Selection correction Retained Encode output history limit must be a safe integer between 1 and ${DISC_SELECTION_CORRECTION_RETAINED_OUTPUT_SUMMARY_LIMIT}`,
+          );
+        }
+        const query = database
+          .select({
+            replacementDiscSelectionId: discSelections.id,
+            id: retainedEncodeOutputs.id,
+            predecessorEncodeJobId:
+              retainedEncodeOutputs.predecessorEncodeJobId,
+            replacementEncodeJobId:
+              retainedEncodeOutputs.replacementEncodeJobId,
+            state: retainedEncodeOutputs.state,
+            cleanupEligible: retainedEncodeOutputs.cleanupEligible,
+            retainedAt: retainedEncodeOutputs.retainedAt,
+          })
+          .from(retainedEncodeOutputs)
+          .innerJoin(
+            encodeJobs,
+            eq(encodeJobs.id, retainedEncodeOutputs.replacementEncodeJobId),
+          )
+          .innerJoin(
+            discSelections,
+            eq(discSelections.id, encodeJobs.discSelectionId),
+          )
+          .innerJoin(
+            discSelectionSupersessions,
+            eq(
+              discSelectionSupersessions.replacementDiscSelectionId,
+              discSelections.id,
+            ),
+          )
+          .where(eq(
+            discSelections.originalDiscArchiveId,
+            options.originalDiscArchiveId,
+          ))
+          .orderBy(
+            asc(retainedEncodeOutputs.retainedAt),
+            asc(retainedEncodeOutputs.id),
+          );
+        return listWithBoundedOffset(
+          query,
+          options,
+          "Disc Selection correction Retained Encode output history",
+        ).map((row): DiscSelectionCorrectionRetainedOutputSummary => ({
+          replacementDiscSelectionId: row.replacementDiscSelectionId,
+          retainedOutput: {
+            id: row.id,
+            predecessorEncodeJobId: row.predecessorEncodeJobId,
+            replacementEncodeJobId: row.replacementEncodeJobId,
+            state: row.state,
+            cleanupEligible: row.cleanupEligible,
+            retainedAt: row.retainedAt,
+          },
+        }));
+      },
       listCorrectionLinks(ids) {
         if (ids.length === 0) return [];
         if (ids.length > 400) {
@@ -7317,65 +7372,6 @@ export function createDataAccessInternal(
           ))
           .orderBy(
             asc(retainedEncodeOutputs.retainedAt),
-            asc(retainedEncodeOutputs.id),
-          )
-          .all();
-      },
-      listLatestRetainedOutputSummaries(ids) {
-        if (ids.length === 0) return [];
-        if (ids.length > LATEST_RETAINED_ENCODE_OUTPUT_SUMMARY_LIMIT) {
-          throw new DomainInvariantError(
-            `Latest Retained Encode output summary lookup is limited to ${LATEST_RETAINED_ENCODE_OUTPUT_SUMMARY_LIMIT} jobs`,
-          );
-        }
-        const uniqueIds = [...new Set(ids)];
-        return database
-          .select({
-            id: retainedEncodeOutputs.id,
-            predecessorEncodeJobId:
-              retainedEncodeOutputs.predecessorEncodeJobId,
-            replacementEncodeJobId:
-              retainedEncodeOutputs.replacementEncodeJobId,
-            state: retainedEncodeOutputs.state,
-            cleanupEligible: retainedEncodeOutputs.cleanupEligible,
-            retainedAt: retainedEncodeOutputs.retainedAt,
-          })
-          .from(retainedEncodeOutputs)
-          .where(and(
-            inArray(
-              retainedEncodeOutputs.replacementEncodeJobId,
-              uniqueIds,
-            ),
-            notExists(
-              database
-                .select({ id: newerRetainedEncodeOutputRecords.id })
-                .from(newerRetainedEncodeOutputRecords)
-                .where(and(
-                  eq(
-                    newerRetainedEncodeOutputRecords.replacementEncodeJobId,
-                    retainedEncodeOutputs.replacementEncodeJobId,
-                  ),
-                  or(
-                    gt(
-                      newerRetainedEncodeOutputRecords.retainedAt,
-                      retainedEncodeOutputs.retainedAt,
-                    ),
-                    and(
-                      eq(
-                        newerRetainedEncodeOutputRecords.retainedAt,
-                        retainedEncodeOutputs.retainedAt,
-                      ),
-                      gt(
-                        newerRetainedEncodeOutputRecords.id,
-                        retainedEncodeOutputs.id,
-                      ),
-                    ),
-                  ),
-                )),
-            ),
-          ))
-          .orderBy(
-            asc(retainedEncodeOutputs.replacementEncodeJobId),
             asc(retainedEncodeOutputs.id),
           )
           .all();

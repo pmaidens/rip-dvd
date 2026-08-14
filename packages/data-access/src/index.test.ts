@@ -1495,24 +1495,9 @@ describe("data-access facade", () => {
     );
     expect(() => access.catalog.listDiscSelections({ offset: 1 }))
       .toThrow("Disc Selection offset requires a bounded limit");
-    expect(() => access.catalog.getCatalogReviewCoverage({
-      originalDiscArchiveId: catalogEntries[0]!.archive.id,
-      titles: Array.from({ length: MAX_DVD_TITLES + 1 }, (_, index) => ({
-        number: index + 1,
-        chapters: 1,
-      })),
-    })).toThrow(
-      `Catalog Review Coverage is limited to ${MAX_DVD_TITLES} DVD titles`,
-    );
-    expect(() => access.catalog.getCatalogReviewCoverage({
-      originalDiscArchiveId: catalogEntries[0]!.archive.id,
-      titles: [
-        { number: 1, chapters: 1 },
-        { number: 1, chapters: 1 },
-      ],
-    })).toThrow(
-      "Catalog Review Coverage requires unique bounded DVD titles",
-    );
+    expect(() => access.catalog.getCatalogReviewCoverage(
+      "missing-archive" as OriginalDiscArchiveId,
+    )).toThrow(RecordNotFoundError);
     access.close();
   });
 
@@ -2193,6 +2178,104 @@ describe("data-access facade", () => {
     access.close();
   });
 
+  it("computes whole-archive Review Coverage from immutable scan evidence", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/catalog-review-coverage",
+      isPresent: true,
+    });
+    const contentId = `sha256:${"c".repeat(64)}`;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: contentId,
+      scanData: {
+        schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+        contentId,
+        titles: [
+          { number: 1, durationSeconds: 5_400, chapters: 12 },
+          { number: 2, durationSeconds: 2_400, chapters: 8 },
+          { number: 3, durationSeconds: 1_800, chapters: 6 },
+          { number: 4, durationSeconds: 90, chapters: 1 },
+        ].map((title) => ({
+          ...title,
+          audioStreams: [],
+          subtitles: [],
+        })),
+      },
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Catalog Review Coverage.iso",
+      fingerprint: contentId,
+    });
+    const items = ["Movie", "Episode A", "Episode B"].map((title) =>
+      access.catalog.createMediaItem({ kind: "movie", title })
+    );
+    const createSelection = (
+      mediaItemIndex: number,
+      sourceIdentity: Parameters<
+        typeof access.catalog.createDiscSelection
+      >[0]["sourceIdentity"],
+    ) => access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: items[mediaItemIndex]!.id,
+      sourceIdentity,
+    });
+    createSelection(0, { kind: "dvd_title", titleNumber: 1 });
+    createSelection(1, {
+      kind: "dvd_chapters",
+      titleNumber: 1,
+      chapterStart: 3,
+      chapterEnd: 4,
+    });
+    createSelection(1, {
+      kind: "dvd_chapters",
+      titleNumber: 2,
+      chapterStart: 1,
+      chapterEnd: 3,
+    });
+    createSelection(2, {
+      kind: "dvd_chapters",
+      titleNumber: 2,
+      chapterStart: 3,
+      chapterEnd: 5,
+    });
+    createSelection(1, {
+      kind: "dvd_chapters",
+      titleNumber: 3,
+      chapterStart: 1,
+      chapterEnd: 3,
+    });
+    createSelection(2, {
+      kind: "dvd_chapters",
+      titleNumber: 3,
+      chapterStart: 4,
+      chapterEnd: 6,
+    });
+    createSelection(0, { kind: "main_feature" });
+
+    expect(access.catalog.getCatalogReviewCoverage(archive.id)).toEqual({
+      discSelectionCount: 7,
+      mediaItemsWithSelections: 3,
+      mappedTitles: 2,
+      partiallyMappedTitles: 1,
+      unmappedTitles: 1,
+      mainFeatureSelections: 1,
+      titles: [
+        { titleNumber: 1, status: "mapped", hasOverlap: true },
+        { titleNumber: 2, status: "partially_mapped", hasOverlap: true },
+        { titleNumber: 3, status: "mapped", hasOverlap: false },
+        { titleNumber: 4, status: "unmapped", hasOverlap: false },
+      ],
+    });
+    access.close();
+  });
+
   it("validates a large catalog outside the SQLite writer lock without weakening review or encode checks", async () => {
     const databasePath = createTestDatabasePath();
     const access = openTestDatabase(databasePath);
@@ -2276,10 +2359,7 @@ describe("data-access facade", () => {
     `).run(archive.id);
     sqlite.exec("commit");
 
-    expect(access.catalog.getCatalogReviewCoverage({
-      originalDiscArchiveId: archive.id,
-      titles: [{ number: 1, chapters: 100_000 }],
-    })).toEqual({
+    expect(access.catalog.getCatalogReviewCoverage(archive.id)).toEqual({
       discSelectionCount: selectionCount + 1,
       mediaItemsWithSelections: 1,
       mappedTitles: 0,
@@ -3060,18 +3140,21 @@ describe("data-access facade", () => {
         cleanupEligible: true,
         retainedAt: expect.any(Date),
       }]);
-      expect(
-        snapshot.encodeJobs.listLatestRetainedOutputSummaries([
-          replacement.id,
-        ]),
-      ).toEqual([{
-        id: expect.any(String),
-        predecessorEncodeJobId: predecessor.id,
-        replacementEncodeJobId: replacement.id,
-        state: "retained",
-        cleanupEligible: true,
-        retainedAt: expect.any(Date),
-      }]);
+      expect(snapshot.encodeJobs
+        .listDiscSelectionCorrectionRetainedOutputSummaries({
+          originalDiscArchiveId: archive.id,
+          limit: 1,
+        })).toEqual([{
+          replacementDiscSelectionId: correction.discSelection.id,
+          retainedOutput: {
+            id: expect.any(String),
+            predecessorEncodeJobId: predecessor.id,
+            replacementEncodeJobId: replacement.id,
+            state: "retained",
+            cleanupEligible: true,
+            retainedAt: expect.any(Date),
+          },
+        }]);
     });
     expect(access.encodeJobs.listDiscSelectionCorrectionEncodeJobLinks({
       originalDiscArchiveId: archive.id,
@@ -3094,12 +3177,13 @@ describe("data-access facade", () => {
     ).toThrow(
       "Disc Selection correction Encode Job history limit must be a safe integer between 1 and 101",
     );
-    expect(() => access.encodeJobs.listLatestRetainedOutputSummaries(
-      Array.from({ length: 101 }, (_, index) =>
-        `replacement-${index}` as EncodeJobId),
-    )).toThrow(
-      "Latest Retained Encode output summary lookup is limited to 100 jobs",
-    );
+    expect(() => access.encodeJobs
+      .listDiscSelectionCorrectionRetainedOutputSummaries({
+        originalDiscArchiveId: archive.id,
+        limit: 102,
+      })).toThrow(
+        "Disc Selection correction Retained Encode output history limit must be a safe integer between 1 and 101",
+      );
     const requeuedReplacement = access.encodeJobs.requeue(replacement.id);
     const reencodeClaim = access.encodeJobs.claimNext("corrected-reencoder");
     if (!reencodeClaim || reencodeClaim.id !== requeuedReplacement.id) {
@@ -3155,20 +3239,264 @@ describe("data-access facade", () => {
       replacement.id,
     ]);
     expect(retainedHistory).toHaveLength(2);
-    const latestRetainedOutput = [...retainedHistory].sort((left, right) =>
-      left.retainedAt.getTime() - right.retainedAt.getTime() ||
-      left.id.localeCompare(right.id)
-    ).at(-1)!;
-    expect(access.encodeJobs.listLatestRetainedOutputSummaries([
-      replacement.id,
-    ])).toEqual([{
-      id: latestRetainedOutput.id,
-      predecessorEncodeJobId: predecessor.id,
-      replacementEncodeJobId: replacement.id,
-      state: "retained",
-      cleanupEligible: true,
-      retainedAt: latestRetainedOutput.retainedAt,
-    }]);
+    expect(access.encodeJobs
+      .listDiscSelectionCorrectionRetainedOutputSummaries({
+        originalDiscArchiveId: archive.id,
+        limit: 2,
+      }).map(({ retainedOutput }) => retainedOutput.id)).toEqual(
+        retainedHistory.map(({ id }) => id),
+      );
+    access.close();
+  });
+
+  it("stably traverses persisted correction jobs and retained outputs beyond multiple page boundaries", () => {
+    const databasePath = createTestDatabasePath();
+    const access = openTestDatabase(databasePath);
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/correction-history-boundaries",
+      isPresent: true,
+    });
+    const createArchive = (suffix: string, fill: string) => {
+      const contentId = `sha256:${fill.repeat(64)}`;
+      const disc = access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint: contentId,
+        scanData: {
+          schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+          contentId,
+          titles: [{
+            number: 1,
+            durationSeconds: 100_000,
+            chapters: 100_000,
+            audioStreams: [],
+            subtitles: [],
+          }],
+        },
+      });
+      access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+      access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+      return access.catalog.createOriginalDiscArchive({
+        detectedDiscId: disc.id,
+        discKind: "dvd",
+        archiveFormat: "iso",
+        archivePath: `/media/originals/${suffix}.iso`,
+        fingerprint: contentId,
+      });
+    };
+    const archive = createArchive("Correction History Boundaries", "d");
+    const unrelatedArchive = createArchive(
+      "Unrelated Correction History",
+      "e",
+    );
+    const mistakenItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Correction History Mistake",
+    });
+    const correctedItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Correction History Correction",
+    });
+    const profile = access.encodingProfiles.create({
+      key: "correction-history-boundaries",
+      displayName: "Correction history boundaries",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const historySize = 201;
+    const selections = Array.from({ length: historySize }, (_, index) =>
+      access.catalog.createDiscSelection({
+        originalDiscArchiveId: archive.id,
+        mediaItemId: mistakenItem.id,
+        sourceIdentity: {
+          kind: "dvd_chapters",
+          titleNumber: 1,
+          chapterStart: index + 1,
+          chapterEnd: index + 1,
+        },
+      })
+    );
+    completeCatalogReview(access, archive.id);
+    const predecessors = selections.map((selection, index) =>
+      access.encodeJobs.enqueue({
+        discSelectionId: selection.id,
+        encodingProfileId: profile.id,
+        outputPath: `/media/movies/correction-history-${String(index).padStart(3, "0")}.mkv`,
+      })
+    );
+    for (let index = 0; index < historySize; index += 1) {
+      const claim = access.encodeJobs.claimNext(
+        `correction-history-predecessor-${index}`,
+      );
+      if (!claim) {
+        throw new Error("Expected correction-history predecessor claim");
+      }
+      access.encodeJobs.complete(claim);
+    }
+    const corrections = selections.map((selection, index) =>
+      access.catalog.correctDiscSelection(selection.id, {
+        originalDiscArchiveId: archive.id,
+        catalogRevision: access.catalog.listOriginalDiscArchives({
+          ids: [archive.id],
+        })[0]!.updatedAt,
+        mediaItemId: correctedItem.id,
+        sourceIdentity: {
+          kind: "dvd_chapters",
+          titleNumber: 1,
+          chapterStart: index + 1,
+          chapterEnd: index + 1,
+        },
+        reason: `Correction history ${index}`,
+      })
+    );
+
+    const unrelatedSelection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: unrelatedArchive.id,
+      mediaItemId: mistakenItem.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    });
+    completeCatalogReview(access, unrelatedArchive.id);
+    const unrelatedPredecessor = access.encodeJobs.enqueue({
+      discSelectionId: unrelatedSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/unrelated-correction-history.mkv",
+    });
+    const unrelatedClaim = access.encodeJobs.claimNext(
+      "unrelated-correction-history",
+    );
+    if (!unrelatedClaim) {
+      throw new Error("Expected unrelated correction-history claim");
+    }
+    access.encodeJobs.complete(unrelatedClaim);
+    const unrelatedCorrection = access.catalog.correctDiscSelection(
+      unrelatedSelection.id,
+      {
+        originalDiscArchiveId: unrelatedArchive.id,
+        catalogRevision: access.catalog.listOriginalDiscArchives({
+          ids: [unrelatedArchive.id],
+        })[0]!.updatedAt,
+        mediaItemId: correctedItem.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      },
+    );
+
+    const sqlite = new DatabaseSync(databasePath);
+    const insertReplacement = sqlite.prepare(`
+      insert into encode_jobs (
+        id,
+        predecessor_encode_job_id,
+        disc_selection_id,
+        encoding_profile_id,
+        output_path,
+        reserves_output_path,
+        status,
+        created_at,
+        updated_at
+      ) values (?, ?, ?, ?, ?, 0, 'completed', ?, ?)
+    `);
+    const insertRetainedOutput = sqlite.prepare(`
+      insert into retained_encode_outputs (
+        id,
+        predecessor_encode_job_id,
+        replacement_encode_job_id,
+        retained_output_path,
+        filesystem_identity,
+        state,
+        cleanup_eligible,
+        retained_at
+      ) values (?, ?, ?, ?, ?, 'retained', 1, ?)
+    `);
+    const replacementIds: EncodeJobId[] = [];
+    const retainedOutputIds: string[] = [];
+    sqlite.exec("begin");
+    for (let index = 0; index < historySize; index += 1) {
+      const suffix = String(index).padStart(3, "0");
+      const replacementId = `boundary-replacement-${suffix}` as EncodeJobId;
+      const retainedOutputId = `boundary-retained-${suffix}`;
+      replacementIds.push(replacementId);
+      retainedOutputIds.push(retainedOutputId);
+      insertReplacement.run(
+        replacementId,
+        predecessors[index]!.id,
+        corrections[index]!.discSelection.id,
+        profile.id,
+        `/media/movies/correction-history-replacement-${suffix}.mkv`,
+        1_000 + index,
+        1_000 + index,
+      );
+      insertRetainedOutput.run(
+        retainedOutputId,
+        predecessors[index]!.id,
+        replacementId,
+        `/media/movies/correction-history-retained-${suffix}.mkv`,
+        `correction-history-identity-${suffix}`,
+        2_000 + index,
+      );
+    }
+    const repeatedRetainedOutputId = "boundary-retained-repeat";
+    retainedOutputIds.push(repeatedRetainedOutputId);
+    insertRetainedOutput.run(
+      repeatedRetainedOutputId,
+      predecessors[0]!.id,
+      replacementIds[0]!,
+      "/media/movies/correction-history-retained-repeat.mkv",
+      "correction-history-identity-repeat",
+      5_000,
+    );
+    const unrelatedReplacementId = "unrelated-boundary-replacement";
+    insertReplacement.run(
+      unrelatedReplacementId,
+      unrelatedPredecessor.id,
+      unrelatedCorrection.discSelection.id,
+      profile.id,
+      "/media/movies/unrelated-correction-history-replacement.mkv",
+      9_000,
+      9_000,
+    );
+    insertRetainedOutput.run(
+      "unrelated-boundary-retained",
+      unrelatedPredecessor.id,
+      unrelatedReplacementId,
+      "/media/movies/unrelated-correction-history-retained.mkv",
+      "unrelated-correction-history-identity",
+      9_000,
+    );
+    sqlite.exec("commit");
+    expect(sqlite.prepare("pragma foreign_key_check").all()).toEqual([]);
+    sqlite.close();
+
+    const correctionJobPages = [0, 100, 200].map((offset) =>
+      access.encodeJobs.listDiscSelectionCorrectionEncodeJobLinks({
+        originalDiscArchiveId: archive.id,
+        limit: 100,
+        offset,
+      })
+    );
+    expect(correctionJobPages.map((page) => page.length)).toEqual([100, 100, 1]);
+    const traversedReplacementIds = correctionJobPages.flatMap((page) =>
+      page.map(({ replacementEncodeJob }) => replacementEncodeJob.id)
+    );
+    expect(traversedReplacementIds).toEqual(replacementIds);
+    expect(new Set(traversedReplacementIds).size).toBe(historySize);
+    expect(traversedReplacementIds).not.toContain(unrelatedReplacementId);
+
+    const retainedOutputPages = [0, 100, 200].map((offset) =>
+      access.encodeJobs
+        .listDiscSelectionCorrectionRetainedOutputSummaries({
+          originalDiscArchiveId: archive.id,
+          limit: 100,
+          offset,
+        })
+    );
+    expect(retainedOutputPages.map((page) => page.length)).toEqual([100, 100, 2]);
+    const traversedRetainedOutputIds = retainedOutputPages.flatMap((page) =>
+      page.map(({ retainedOutput }) => retainedOutput.id)
+    );
+    expect(traversedRetainedOutputIds).toEqual(retainedOutputIds);
+    expect(new Set(traversedRetainedOutputIds).size).toBe(historySize + 1);
+    expect(traversedRetainedOutputIds).not.toContain(
+      "unrelated-boundary-retained",
+    );
     access.close();
   });
 

@@ -42,6 +42,7 @@ interface CatalogReviewViewProps {
   onDiscSelectionsPage(offset: number): void;
   onCorrectionHistoryPage(offset: number): void;
   onCorrectionEncodeHistoryPage(offset: number): void;
+  onCorrectionRetainedOutputHistoryPage(offset: number): void;
   onReplacementJobsPage?(offset: number): void;
   onReplacementProfilesPage?(offset: number): void;
   onSelectionKindChange(kind: DiscSelectionKind): void;
@@ -83,6 +84,7 @@ export function CatalogReviewView({
   onDiscSelectionsPage,
   onCorrectionHistoryPage,
   onCorrectionEncodeHistoryPage,
+  onCorrectionRetainedOutputHistoryPage,
   onReplacementJobsPage,
   onReplacementProfilesPage,
   onSelectionKindChange,
@@ -201,6 +203,12 @@ export function CatalogReviewView({
             correctionHistoryPage={review.correctionHistoryPage}
             correctionEncodeHistory={review.correctionEncodeHistory}
             correctionEncodeHistoryPage={review.correctionEncodeHistoryPage}
+            correctionRetainedOutputHistory={
+              review.correctionRetainedOutputHistory
+            }
+            correctionRetainedOutputHistoryPage={
+              review.correctionRetainedOutputHistoryPage
+            }
             mediaItems={review.mediaItems}
             rawTitles={review.rawScan.titles}
             selectionKind={selectionKind}
@@ -208,6 +216,9 @@ export function CatalogReviewView({
             onPage={onDiscSelectionsPage}
             onCorrectionHistoryPage={onCorrectionHistoryPage}
             onCorrectionEncodeHistoryPage={onCorrectionEncodeHistoryPage}
+            onCorrectionRetainedOutputHistoryPage={
+              onCorrectionRetainedOutputHistoryPage
+            }
             onSelectionKindChange={onSelectionKindChange}
             onCreate={onCreateDiscSelection}
             onUpdate={onUpdateDiscSelection}
@@ -267,6 +278,9 @@ export function CatalogReviewEditor({
       onCorrectionHistoryPage={review.changeCorrectionHistoryOffset}
       onCorrectionEncodeHistoryPage={
         review.changeCorrectionEncodeHistoryOffset
+      }
+      onCorrectionRetainedOutputHistoryPage={
+        review.changeCorrectionRetainedOutputHistoryOffset
       }
       onReplacementJobsPage={review.changeReplacementOffset}
       onReplacementProfilesPage={review.changeReplacementProfileOffset}
