@@ -1705,7 +1705,8 @@ describe("DVD archive publication", () => {
   it("recovers an accepted damaged publication after a worker restart", async () => {
     const originalsLibraryPath = createOriginalsLibrary();
     const root = realpathSync(originalsLibraryPath);
-    const archiveRequestId = "33333333-3333-4333-8333-333333333334";
+    const archiveRequestId =
+      "archive-request:disc:33333333-3333-4333-8333-333333333334";
     const digest = "c".repeat(64);
     const sizeBytes = 2 * 2_048;
     const rescuedImage = Buffer.alloc(sizeBytes, 6);
