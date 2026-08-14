@@ -33,6 +33,7 @@ import {
   createCleanDvdRecoveryResult,
   createDamagedDvdRecoveryResult,
 } from "./dvd-recovery-contracts.js";
+import { dvdRescueWorkspacePaths } from "./dvd-rescue-workspace.js";
 import { DiscInspectionError } from "./disc-inspection-error.js";
 import {
   createLinuxOpticalDriveHardware,
@@ -617,7 +618,14 @@ describe("archive worker polling", () => {
         expect.objectContaining({ id: request.id }),
       ]);
       expect(access.catalog.listOriginalDiscArchives()).toEqual([]);
-      expect(readFileSync(`${rescuedPartialPath}.failed`)).toEqual(rescuedImage);
+      const rescuePaths = dvdRescueWorkspacePaths(
+        realpathSync(originalsLibraryPath),
+        request.id,
+      );
+      expect(existsSync(rescuedPartialPath!)).toBe(false);
+      expect(existsSync(`${rescuedPartialPath}.failed`)).toBe(false);
+      expect(readFileSync(rescuePaths.imagePath)).toEqual(rescuedImage);
+      expect(existsSync(rescuePaths.mapPath)).toBe(true);
     },
   );
 
@@ -723,6 +731,12 @@ describe("archive worker polling", () => {
     });
     expect(readFileSync(archive.archivePath)).toEqual(rescuedImage);
     expect(existsSync(`${archive.archivePath}.failed`)).toBe(false);
+    const rescuePaths = dvdRescueWorkspacePaths(
+      realpathSync(originalsLibraryPath),
+      request.id,
+    );
+    expect(existsSync(rescuePaths.imagePath)).toBe(false);
+    expect(existsSync(rescuePaths.mapPath)).toBe(false);
   });
 
   it.each([
