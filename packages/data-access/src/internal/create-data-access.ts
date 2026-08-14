@@ -6765,6 +6765,7 @@ export function createDataAccessInternal(
         const sizeBytes = requirePositiveSafeInteger(input.sizeBytes, "sizeBytes");
         const integrityEvidence = input.integrityEvidence;
         let integrityPolicyVersion: string | null;
+        let badSectorCountsByTitle = null;
         if (integrityEvidence.integrity === "unknown") {
           if (
             integrityEvidence.policyVersion !== null ||
@@ -6802,6 +6803,7 @@ export function createDataAccessInternal(
             createWatchableSalvageArchiveIntegrityEvidence(
               integrityPolicyVersion,
               integrityEvidence.badSectorRanges,
+              integrityEvidence.badSectorCountsByTitle,
             );
           if (
             validatedEvidence.badSectorCount !==
@@ -6812,6 +6814,7 @@ export function createDataAccessInternal(
               "Watchable-salvage Archive Integrity evidence is invalid",
             );
           }
+          badSectorCountsByTitle = validatedEvidence.badSectorCountsByTitle;
         }
         const requireCurrentClaim = (
           querySource: Pick<typeof database, "select">,
@@ -6903,6 +6906,7 @@ export function createDataAccessInternal(
                 badSectorCount: integrityEvidence.badSectorCount,
                 badAreaCount: integrityEvidence.badAreaCount,
                 badSectorRanges: integrityEvidence.badSectorRanges,
+                badSectorCountsByTitle,
                 legacyCutoverPending:
                   transaction
                     .select({

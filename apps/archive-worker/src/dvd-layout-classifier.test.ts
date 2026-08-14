@@ -555,7 +555,10 @@ describe("DVD layout damage classification", () => {
       ...fixture,
       expectedByteCount: fixture.sizeBytes,
       unreadableSectorRanges: [{ startLba: 50, sectorCount: 1 }],
-    })).resolves.toEqual({ outcome: "accepted" });
+    })).resolves.toEqual({
+      affectedTitleSetBadSectorCounts: [],
+      outcome: "accepted",
+    });
   });
 
   it("identifies isolated MPEG payload damage in a title VOB", async () => {
@@ -566,7 +569,30 @@ describe("DVD layout damage classification", () => {
       expectedByteCount: fixture.sizeBytes,
       unreadableSectorRanges: [{ startLba: 29, sectorCount: 1 }],
     })).resolves.toEqual({
-      affectedTitleSetNumbers: [1],
+      affectedTitleSetBadSectorCounts: [{
+        badSectorCount: 1,
+        titleSetNumber: 1,
+      }],
+      outcome: "accepted",
+    });
+  });
+
+  it("counts multiple isolated payload sectors while accepting unused damage", async () => {
+    const fixture = createSyntheticPayloadDvdImage(29);
+
+    await expect(classifyDvdImageDamage({
+      ...fixture,
+      expectedByteCount: fixture.sizeBytes,
+      unreadableSectorRanges: [
+        { startLba: 29, sectorCount: 1 },
+        { startLba: 32, sectorCount: 1 },
+        { startLba: 50, sectorCount: 1 },
+      ],
+    })).resolves.toEqual({
+      affectedTitleSetBadSectorCounts: [{
+        badSectorCount: 2,
+        titleSetNumber: 1,
+      }],
       outcome: "accepted",
     });
   });
@@ -628,7 +654,10 @@ describe("DVD layout damage classification", () => {
       expectedByteCount: fixture.sizeBytes,
       imagePath: fixture.imagePath,
       unreadableSectorRanges: [{ startLba: 500, sectorCount: 1 }],
-    })).resolves.toEqual({ outcome: "accepted" });
+    })).resolves.toEqual({
+      affectedTitleSetBadSectorCounts: [],
+      outcome: "accepted",
+    });
   });
 
   it("rejects damage to a UDF file entry as filesystem metadata", async () => {

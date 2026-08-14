@@ -189,6 +189,7 @@ export interface OriginalDiscArchive {
   badSectorCount: number | null;
   badAreaCount: number | null;
   badSectorRanges: readonly UnreadableSectorRange[] | null;
+  badSectorCountsByTitle: readonly DvdTitleBadSectorCount[] | null;
   archivedAt: Date;
   catalogReviewedAt: Date | null;
   catalogReviewOutcome: CatalogReviewOutcome;
@@ -202,6 +203,11 @@ export interface OriginalDiscArchive {
 export interface UnreadableSectorRange {
   startLba: number;
   sectorCount: number;
+}
+
+export interface DvdTitleBadSectorCount {
+  titleNumber: number;
+  badSectorCount: number;
 }
 
 export interface CleanReadArchiveIntegrityEvidence {
@@ -226,6 +232,7 @@ export interface WatchableSalvageArchiveIntegrityEvidence {
   badSectorCount: number;
   badAreaCount: number;
   badSectorRanges: readonly UnreadableSectorRange[];
+  badSectorCountsByTitle: readonly DvdTitleBadSectorCount[];
 }
 
 export type ArchiveIntegrityEvidence =

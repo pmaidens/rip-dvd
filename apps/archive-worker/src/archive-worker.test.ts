@@ -576,7 +576,10 @@ describe("archive worker polling", () => {
       log: vi.fn(),
       originalsLibraryPath,
       salvageValidator: {
-        validate: vi.fn().mockResolvedValue({ outcome: "accepted" }),
+        validate: vi.fn().mockResolvedValue({
+          badSectorCountsByTitle: [],
+          outcome: "accepted",
+        }),
       },
       signal: new AbortController().signal,
       workerId: "archive-worker-unused-salvage-test",
@@ -598,10 +601,11 @@ describe("archive worker polling", () => {
     expect(archive).toMatchObject({
       detectedDiscId: disc.id,
       integrity: "watchable_salvage",
-      integrityPolicyVersion: "dvd-watchable-salvage-v1",
+      integrityPolicyVersion: "dvd-watchable-salvage-v2",
       badSectorCount: 1,
       badAreaCount: 1,
       badSectorRanges: [{ startLba: 1, sectorCount: 1 }],
+      badSectorCountsByTitle: [],
     });
     expect(readFileSync(archive.archivePath)).toEqual(rescuedImage);
     expect(existsSync(`${archive.archivePath}.failed`)).toBe(false);

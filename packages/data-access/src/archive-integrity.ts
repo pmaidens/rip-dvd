@@ -1,6 +1,8 @@
 import { DomainInvariantError } from "./errors.js";
+import { MAX_DVD_TITLES } from "./dvd-scan.js";
 import type {
   CleanReadArchiveIntegrityEvidence,
+  DvdTitleBadSectorCount,
   UnreadableSectorRange,
   UnknownArchiveIntegrityEvidence,
   WatchableSalvageArchiveIntegrityEvidence,
@@ -36,6 +38,7 @@ export function createCleanReadArchiveIntegrityEvidence(
 export function createWatchableSalvageArchiveIntegrityEvidence(
   policyVersion: string,
   unreadableSectorRanges: readonly UnreadableSectorRange[],
+  badSectorCountsByTitle: readonly DvdTitleBadSectorCount[],
 ): WatchableSalvageArchiveIntegrityEvidence {
   const ranges = unreadableSectorRanges.map(({ startLba, sectorCount }) => ({
     startLba,
@@ -74,12 +77,40 @@ export function createWatchableSalvageArchiveIntegrityEvidence(
       "Watchable-salvage sector evidence exceeds the policy bound",
     );
   }
+  if (
+    !Array.isArray(badSectorCountsByTitle) ||
+    badSectorCountsByTitle.length > MAX_DVD_TITLES
+  ) {
+    throw new DomainInvariantError(
+      "Watchable-salvage per-title evidence exceeds the policy bound",
+    );
+  }
+  let previousTitleNumber = 0;
+  const titleCounts = badSectorCountsByTitle.map(
+    ({ titleNumber, badSectorCount: titleBadSectorCount }) => {
+      if (
+        !Number.isSafeInteger(titleNumber) ||
+        titleNumber <= previousTitleNumber ||
+        !Number.isSafeInteger(titleBadSectorCount) ||
+        titleBadSectorCount <= 0 ||
+        titleBadSectorCount > 16 ||
+        titleBadSectorCount > badSectorCount
+      ) {
+        throw new DomainInvariantError(
+          "Watchable-salvage per-title evidence exceeds the policy bound",
+        );
+      }
+      previousTitleNumber = titleNumber;
+      return { titleNumber, badSectorCount: titleBadSectorCount };
+    },
+  );
   return {
     integrity: "watchable_salvage",
     policyVersion: normalizePolicyVersion(policyVersion),
     badSectorCount,
     badAreaCount: ranges.length,
     badSectorRanges: ranges,
+    badSectorCountsByTitle: titleCounts,
   };
 }
 
