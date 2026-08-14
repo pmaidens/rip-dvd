@@ -7267,7 +7267,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
-        name: "20260814145949_allow-intentional-exact-overlaps",
+        name: "20260814152555_allow-intentional-exact-overlaps",
       },
       {
         name: "20260813194303_corrected-publication-authority",
@@ -7312,7 +7312,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     const sqlite = new DatabaseSync(databasePath);
     const migrationsRoot = new URL("../drizzle/", import.meta.url);
     const overlapMigration =
-      "20260814145949_allow-intentional-exact-overlaps";
+      "20260814152555_allow-intentional-exact-overlaps";
     const predecessorNames = readdirSync(migrationsRoot)
       .filter((name) => /^\d/.test(name) && name < overlapMigration)
       .sort();
@@ -7448,6 +7448,16 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         where name = 'disc_selections_archive_active_source_unique'
       `).get(),
     ).toBeUndefined();
+    expect(
+      verified.prepare(`
+        select name, "unique" as is_unique
+        from pragma_index_list('disc_selections')
+        where name = 'disc_selections_archive_active_source_idx'
+      `).get(),
+    ).toEqual({
+      name: "disc_selections_archive_active_source_idx",
+      is_unique: 0,
+    });
     expect(verified.prepare("pragma foreign_key_check").all()).toEqual([]);
     verified.close();
   });

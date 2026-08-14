@@ -93,9 +93,9 @@ including identical whole-title or chapter-range sources, while every Disc
 Selection retains a separate identity. Assisted Mapping rejects exact source
 reuse in its immediate transaction. Title selections must reference the
 archived scan, chapter ranges stay within the selected title, and main-feature
-selections remain a distinct DVD source kind. The schema migration drops only
-the former active-source unique index, preserving existing Disc Selection,
-correction, and Encode Job rows unchanged.
+selections remain a distinct DVD source kind. The schema migration replaces
+the former active-source unique index with a non-unique lookup index, preserving
+existing Disc Selection, correction, and Encode Job rows unchanged.
 Full catalog validation for review completion and Encode Job enqueueing runs in
 a consistent deferred read snapshot. Each operation then compares the archive's
 monotonic catalog revision and writes in one short immediate transaction, so a
@@ -428,8 +428,11 @@ enqueue, requeue, and claim until the whole captured batch succeeds. Catalog
 review timestamps are committed together only after that validation and only
 for archives unchanged since the review boundary was staged. Existing Media
 Items and Disc Selections remain SQLite-authoritative throughout initial and
-recovery imports. A shared
-library-scoped lease serializes discovery, marker publication, and import with
+recovery imports. When intentional exact overlaps provide multiple active
+selection candidates, import preserves every identity and resolves provenance
+from existing job/output evidence or a unique Media Item match; ambiguous jobs
+fail closed without attaching to an arbitrary selection. A shared library-scoped
+lease serializes discovery, marker publication, and import with
 in-flight legacy archive/encode batches. It never writes the sidecars
 themselves. All legacy archive and queue commands refuse a marked library,
 making SQLite the enforceable catalog and queue authority. Recursive traversal,

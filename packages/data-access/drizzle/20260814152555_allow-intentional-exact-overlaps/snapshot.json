@@ -1,7 +1,7 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "e9bd1d40-6bf6-4d74-a2a4-a58ea183cba2",
+  "id": "4112efcb-6a65-4986-a3bb-3db8642ee476",
   "prevIds": [
     "f0cb1b04-4eac-4352-aee1-8e026638c96d"
   ],
@@ -2575,6 +2575,24 @@
       "name": "disc_selection_supersessions_replacement_unique",
       "entityType": "indexes",
       "table": "disc_selection_supersessions"
+    },
+    {
+      "columns": [
+        {
+          "value": "original_disc_archive_id",
+          "isExpression": false
+        },
+        {
+          "value": "source_key",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": "\"disc_selections\".\"is_catalog_active\" = 1",
+      "origin": "manual",
+      "name": "disc_selections_archive_active_source_idx",
+      "entityType": "indexes",
+      "table": "disc_selections"
     },
     {
       "columns": [

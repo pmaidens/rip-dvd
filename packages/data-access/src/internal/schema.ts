@@ -487,6 +487,9 @@ export const discSelections = sqliteTable(
   },
   (table) => [
     check("disc_selections_id_not_null", sql`${table.id} is not null`),
+    index("disc_selections_archive_active_source_idx")
+      .on(table.originalDiscArchiveId, table.sourceKey)
+      .where(sql`${table.isCatalogActive} = 1`),
     index("disc_selections_media_item_idx").on(table.mediaItemId),
     check(
       "disc_selections_kind_check",

@@ -887,6 +887,120 @@ describe("legacy sidecar import", () => {
     fixture.access.close();
   });
 
+  it.each([
+    {
+      decoyTitle: "Alternate extra",
+      expectedOutcome: "resolved" as const,
+      name: "uses Media Item evidence to preserve exact-overlap selection provenance",
+    },
+    {
+      decoyTitle: "Trailer",
+      expectedOutcome: "ambiguous" as const,
+      name: "fails closed when exact-overlap selection provenance is ambiguous",
+    },
+  ])("$name", ({ decoyTitle, expectedOutcome }) => {
+    const fixture = createFixture();
+    const contentId = `sha256:${"a".repeat(64)}`;
+    const sidecar = JSON.parse(readFileSync(fixture.sidecarPath, "utf8"));
+    sidecar.disc_fingerprint = contentId;
+    writeFileSync(fixture.sidecarPath, JSON.stringify(sidecar));
+    const drive = fixture.access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/exact-overlap-import",
+      isPresent: true,
+    });
+    const disc = fixture.access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: contentId,
+      scanData: {
+        schemaVersion: 2,
+        contentId,
+        titles: [
+          {
+            number: 1,
+            durationSeconds: 6_000,
+            chapters: 12,
+            audioStreams: [],
+            subtitles: [],
+          },
+          {
+            number: 2,
+            durationSeconds: 240,
+            chapters: 1,
+            audioStreams: [],
+            subtitles: [],
+          },
+        ],
+      },
+    });
+    fixture.access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    fixture.access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = fixture.access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: fixture.archivePath,
+      fingerprint: contentId,
+    });
+    const movie = fixture.access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Example Movie",
+      year: 2001,
+    });
+    const trailer = fixture.access.catalog.createMediaItem({
+      parentId: movie.id,
+      kind: "bonus_feature",
+      title: "Trailer",
+    });
+    const decoy = fixture.access.catalog.createMediaItem({
+      parentId: movie.id,
+      kind: "bonus_feature",
+      title: decoyTitle,
+    });
+    const trailerSelection = fixture.access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: trailer.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+    });
+    const decoySelection = fixture.access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: decoy.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+    });
+
+    const report = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+    const importedTrailerJob = fixture.access.encodeJobs.list().find(
+      (job) => job.outputPath === fixture.trailerOutputPath,
+    );
+    if (expectedOutcome === "resolved") {
+      expect(report).toMatchObject({ sidecarsImported: 1, issues: [] });
+      expect(importedTrailerJob).toMatchObject({
+        discSelectionId: trailerSelection.id,
+      });
+      expect(fixture.access.encodeJobs.list().some(
+        (job) => job.discSelectionId === decoySelection.id,
+      )).toBe(false);
+    } else {
+      expect(report.issues).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          code: "duplicate_record",
+          message: expect.stringMatching(
+            /multiple Disc Selections.*unambiguous.*provenance/i,
+          ),
+        }),
+      ]));
+      expect(importedTrailerJob).toBeUndefined();
+      expect(fixture.access.encodeJobs.list().some((job) =>
+        job.discSelectionId === trailerSelection.id ||
+        job.discSelectionId === decoySelection.id
+      )).toBe(false);
+    }
+
+    fixture.access.close();
+  });
+
   it("preserves accepted legacy Media Item title whitespace", () => {
     const fixture = createFixture();
     const sidecar = JSON.parse(readFileSync(fixture.sidecarPath, "utf8"));

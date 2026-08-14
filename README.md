@@ -605,9 +605,9 @@ intentionally create overlapping source slices, including the same whole title
 or exact chapter range for different Media Items. Catalog Review warns about
 those overlaps and computes coverage from the source union, so repeated slices
 are counted once. Assisted Mapping keeps covered-title proposals unavailable
-and rejects exact source reuse transactionally. The active-source uniqueness
-index is removed by migration without rewriting existing Disc Selections,
-correction lineage, or Encode Job provenance. Supported upgrades reopen
+and rejects exact source reuse transactionally. Migration replaces the
+active-source unique index with a non-unique lookup index without rewriting
+existing Disc Selections, correction lineage, or Encode Job provenance. Supported upgrades reopen
 caller-era scan-dependent or noncanonical
 catalogs and fail their active Encode Jobs until paged validation outside the
 SQLite writer lock completes again; unsafe jobs cannot be enqueued, requeued,
