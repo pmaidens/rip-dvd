@@ -619,22 +619,6 @@ export function createLegacySidecarImportAccess(
             schemaOneHasUnresolvedWork = true;
           }
           for (const job of sidecar.jobs) {
-            const selections = corroboratingArchive
-              ? database
-                  .select()
-                  .from(discSelections)
-                  .where(
-                    and(
-                      eq(
-                        discSelections.originalDiscArchiveId,
-                        corroboratingArchive.id,
-                      ),
-                      eq(discSelections.sourceKey, job.sourceKey),
-                      eq(discSelections.isCatalogActive, true),
-                    ),
-                  )
-                  .all()
-              : [];
             const profile = database
               .select()
               .from(encodingProfiles)
@@ -646,38 +630,54 @@ export function createLegacySidecarImportAccess(
                 ),
               )
               .get();
-            const matchingSelections = selections.filter((selection) => {
-              const mediaItem = database
-                .select()
-                .from(mediaItems)
-                .where(eq(mediaItems.id, selection.mediaItemId))
-                .get();
-              const logicalJobs = profile
-                ? database
-                    .select()
-                    .from(encodeJobs)
-                    .where(
-                      and(
-                        eq(encodeJobs.discSelectionId, selection.id),
-                        eq(encodeJobs.encodingProfileId, profile.id),
-                      ),
-                    )
-                    .all()
-                : [];
-              return (
-                selection.kind === job.kind &&
-                selection.titleNumber === job.titleNumber &&
-                selection.label === job.label &&
-                mediaItem?.kind === job.mediaItemKind &&
-                mediaItem.title === job.mediaTitle &&
-                mediaItem.year ===
-                  (job.mediaItemKind === "movie"
-                    ? sidecar.movieYear
-                    : null) &&
-                logicalJobs.length === 1 &&
-                logicalJobs[0]?.outputPath === job.outputPath
-              );
-            });
+            const matchingSelections = corroboratingArchive && profile
+              ? database
+                  .select({ id: discSelections.id })
+                  .from(discSelections)
+                  .innerJoin(
+                    mediaItems,
+                    eq(mediaItems.id, discSelections.mediaItemId),
+                  )
+                  .where(and(
+                    eq(
+                      discSelections.originalDiscArchiveId,
+                      corroboratingArchive.id,
+                    ),
+                    eq(discSelections.sourceKey, job.sourceKey),
+                    eq(discSelections.isCatalogActive, true),
+                    eq(discSelections.kind, job.kind),
+                    job.titleNumber === null
+                      ? isNull(discSelections.titleNumber)
+                      : eq(discSelections.titleNumber, job.titleNumber),
+                    eq(discSelections.label, job.label),
+                    eq(mediaItems.kind, job.mediaItemKind),
+                    eq(mediaItems.title, job.mediaTitle),
+                    job.mediaItemKind === "movie" &&
+                        sidecar.movieYear !== null
+                      ? eq(mediaItems.year, sidecar.movieYear)
+                      : isNull(mediaItems.year),
+                    exists(
+                      database
+                        .select({ id: encodeJobs.id })
+                        .from(encodeJobs)
+                        .where(and(
+                          eq(
+                            encodeJobs.discSelectionId,
+                            discSelections.id,
+                          ),
+                          eq(encodeJobs.encodingProfileId, profile.id),
+                          eq(encodeJobs.outputPath, job.outputPath),
+                        )),
+                    ),
+                    sql`(
+                      select count(*) from ${encodeJobs}
+                      where ${encodeJobs.discSelectionId} = ${discSelections.id}
+                        and ${encodeJobs.encodingProfileId} = ${profile.id}
+                    ) = 1`,
+                  ))
+                  .limit(2)
+                  .all()
+              : [];
             const exactMatch =
               corroboratingArchive?.sizeBytes ===
                 sidecar.archiveSizeBytes &&
@@ -1023,125 +1023,143 @@ export function createLegacySidecarImportAccess(
             }
 
             let movieItem: typeof mediaItems.$inferSelect | undefined;
-            const existingSelections = transaction
-              .select()
-              .from(discSelections)
-              .where(
-                and(
+            const readActiveSelection = (
+              selectionId: DiscSelectionId,
+              job: ParsedLegacyJob,
+            ) =>
+              transaction
+                .select()
+                .from(discSelections)
+                .where(and(
+                  eq(discSelections.id, selectionId),
                   eq(discSelections.originalDiscArchiveId, archive.id),
+                  eq(discSelections.sourceKey, job.sourceKey),
                   eq(discSelections.isCatalogActive, true),
-                ),
-              )
-              .all();
-            const selectionsBySourceKey = new Map<
+                ))
+                .get();
+            const selectActiveSourceCandidates = (job: ParsedLegacyJob) =>
+              transaction
+                .select()
+                .from(discSelections)
+                .where(and(
+                  eq(discSelections.originalDiscArchiveId, archive.id),
+                  eq(discSelections.sourceKey, job.sourceKey),
+                  eq(discSelections.isCatalogActive, true),
+                ))
+                .limit(2)
+                .all();
+            const selectMediaMatchingSelectionIds = (
+              job: ParsedLegacyJob,
+            ) =>
+              transaction
+                .select({ id: discSelections.id })
+                .from(discSelections)
+                .innerJoin(
+                  mediaItems,
+                  eq(mediaItems.id, discSelections.mediaItemId),
+                )
+                .where(and(
+                  eq(discSelections.originalDiscArchiveId, archive.id),
+                  eq(discSelections.sourceKey, job.sourceKey),
+                  eq(discSelections.isCatalogActive, true),
+                  eq(mediaItems.kind, job.mediaItemKind),
+                  eq(mediaItems.title, job.mediaTitle),
+                  job.mediaItemKind === "movie" &&
+                      sidecar.movieYear !== null
+                    ? eq(mediaItems.year, sidecar.movieYear)
+                    : isNull(mediaItems.year),
+                ))
+                .limit(2)
+                .all();
+            const preExistingSourceCandidates = new Map<
               string,
               Array<typeof discSelections.$inferSelect>
             >();
-            const preExistingSelectionIds = new Set(
-              existingSelections.map((selection) => selection.id),
-            );
-            const addSelectionCandidate = (
-              selection: typeof discSelections.$inferSelect,
-            ) => {
-              const candidates =
-                selectionsBySourceKey.get(selection.sourceKey) ?? [];
-              candidates.push(selection);
-              selectionsBySourceKey.set(selection.sourceKey, candidates);
-            };
-            for (const selection of existingSelections) {
-              addSelectionCandidate(selection);
-            }
-            const selectionMatchesMediaEvidence = (
-              selection: typeof discSelections.$inferSelect,
-              job: ParsedLegacyJob,
-            ) => {
-              const mediaItem = transaction
-                .select()
-                .from(mediaItems)
-                .where(eq(mediaItems.id, selection.mediaItemId))
-                .get();
-              return (
-                mediaItem?.kind === job.mediaItemKind &&
-                mediaItem.title === job.mediaTitle &&
-                mediaItem.year ===
-                  (job.mediaItemKind === "movie"
-                    ? sidecar.movieYear
-                    : null)
+            const preExistingMediaMatches = new Map<
+              number,
+              Array<{ id: DiscSelectionId }>
+            >();
+            for (const job of sidecar.jobs) {
+              if (!preExistingSourceCandidates.has(job.sourceKey)) {
+                preExistingSourceCandidates.set(
+                  job.sourceKey,
+                  selectActiveSourceCandidates(job),
+                );
+              }
+              preExistingMediaMatches.set(
+                job.jobIndex,
+                selectMediaMatchingSelectionIds(job),
               );
-            };
+            }
             const resolveActiveSelection = (
               job: ParsedLegacyJob,
               profile: typeof encodingProfiles.$inferSelect | undefined,
               outputJob: typeof encodeJobs.$inferSelect | undefined,
             ) => {
-              const candidates =
-                selectionsBySourceKey.get(job.sourceKey) ?? [];
               if (outputJob) {
-                const outputSelection = candidates.find(
-                  (candidate) =>
-                    candidate.id === outputJob.discSelectionId,
+                const outputSelection = readActiveSelection(
+                  outputJob.discSelectionId,
+                  job,
                 );
                 if (outputSelection) {
                   return { selection: outputSelection, ambiguous: false };
                 }
               }
-              if (profile && candidates.length > 0) {
-                const logicalJobs = transaction
-                  .select({
-                    discSelectionId: encodeJobs.discSelectionId,
-                    outputPath: encodeJobs.outputPath,
-                  })
-                  .from(encodeJobs)
-                  .where(and(
-                    inArray(
+              if (profile) {
+                const exactOutputSelectionIds = transaction
+                  .select({ id: discSelections.id })
+                  .from(discSelections)
+                  .innerJoin(
+                    encodeJobs,
+                    eq(
                       encodeJobs.discSelectionId,
-                      candidates.map((candidate) => candidate.id),
+                      discSelections.id,
                     ),
+                  )
+                  .where(and(
+                    eq(
+                      discSelections.originalDiscArchiveId,
+                      archive.id,
+                    ),
+                    eq(discSelections.sourceKey, job.sourceKey),
+                    eq(discSelections.isCatalogActive, true),
                     eq(encodeJobs.encodingProfileId, profile.id),
+                    eq(encodeJobs.outputPath, job.outputPath),
                   ))
+                  .groupBy(discSelections.id)
+                  .limit(2)
                   .all();
-                const exactOutputSelectionIds = new Set(
-                  logicalJobs.flatMap((candidate) =>
-                    candidate.outputPath === job.outputPath
-                      ? [candidate.discSelectionId]
-                      : [],
-                  ),
-                );
-                if (exactOutputSelectionIds.size === 1) {
-                  const [logicalSelectionId] = exactOutputSelectionIds;
+                if (exactOutputSelectionIds.length === 1) {
                   return {
-                    selection: candidates.find(
-                      (candidate) => candidate.id === logicalSelectionId,
+                    selection: readActiveSelection(
+                      exactOutputSelectionIds[0]!.id,
+                      job,
                     ),
                     ambiguous: false,
                   };
                 }
-                if (exactOutputSelectionIds.size > 1) {
+                if (exactOutputSelectionIds.length > 1) {
                   return { selection: undefined, ambiguous: true };
                 }
               }
-              const preExistingCandidates = candidates.filter((candidate) =>
-                preExistingSelectionIds.has(candidate.id)
-              );
-              if (preExistingCandidates.length === 1) {
+              const sourceCandidates =
+                preExistingSourceCandidates.get(job.sourceKey) ?? [];
+              if (sourceCandidates.length === 1) {
                 return {
-                  selection: preExistingCandidates[0],
+                  selection: sourceCandidates[0],
                   ambiguous: false,
                 };
               }
-              const mediaCandidates = preExistingCandidates.length > 0
-                ? preExistingCandidates
-                : candidates;
-              const mediaMatches = mediaCandidates.filter((candidate) =>
-                selectionMatchesMediaEvidence(candidate, job)
-              );
+              const mediaMatches = sourceCandidates.length > 0
+                ? preExistingMediaMatches.get(job.jobIndex) ?? []
+                : selectMediaMatchingSelectionIds(job);
               return {
                 selection: mediaMatches.length === 1
-                  ? mediaMatches[0]
+                  ? readActiveSelection(mediaMatches[0]!.id, job)
                   : undefined,
                 ambiguous:
                   mediaMatches.length > 1 ||
-                  (preExistingCandidates.length > 1 &&
+                  (sourceCandidates.length > 1 &&
                     mediaMatches.length === 0),
               };
             };
@@ -1472,7 +1490,6 @@ export function createLegacySidecarImportAccess(
                   "legacy disc selection",
                   job.sourceKey,
                 );
-                addSelectionCandidate(selection);
                 created.discSelections += 1;
               }
 

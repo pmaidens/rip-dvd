@@ -1070,6 +1070,83 @@ describe("legacy sidecar import", () => {
     fixture.access.close();
   });
 
+  it("bounds exact-overlap provenance lookup beyond SQLite's bind limit", () => {
+    const fixture = createFixture();
+    expect(fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    })).toMatchObject({ issues: [] });
+    const trailerJob = fixture.access.encodeJobs.list().find(
+      (job) => job.outputPath === fixture.trailerOutputPath,
+    )!;
+    const trailerSelection = fixture.access.catalog.listDiscSelections({
+      ids: [trailerJob.discSelectionId],
+    })[0]!;
+    fixture.access.encodeJobs.requestCancellation(trailerJob.id);
+
+    const sqlite = new DatabaseSync(fixture.databasePath);
+    const timestamp = Date.now();
+    const insertMediaItem = sqlite.prepare(`
+      insert into media_items (id, kind, title, created_at, updated_at)
+      values (?, 'bonus_feature', ?, ?, ?)
+    `);
+    const insertSelection = sqlite.prepare(`
+      insert into disc_selections (
+        id, original_disc_archive_id, media_item_id, source_key, kind,
+        title_number, label, created_at, updated_at
+      ) values (?, ?, ?, 'dvd:title:2', 'dvd_title', 2, ?, ?, ?)
+    `);
+    sqlite.exec("begin immediate");
+    try {
+      for (let index = 0; index < 32_767; index += 1) {
+        const mediaItemId = `bounded-overlap-media-${index}`;
+        insertMediaItem.run(
+          mediaItemId,
+          `Bounded overlap decoy ${index}`,
+          timestamp,
+          timestamp,
+        );
+        insertSelection.run(
+          `bounded-overlap-selection-${index}`,
+          trailerSelection.originalDiscArchiveId,
+          mediaItemId,
+          `Bounded overlap decoy ${index}`,
+          timestamp,
+          timestamp,
+        );
+      }
+      sqlite.exec("commit");
+    } catch (error) {
+      sqlite.exec("rollback");
+      throw error;
+    } finally {
+      sqlite.close();
+    }
+
+    expect(fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    })).toMatchObject({ sidecarsImported: 1, issues: [] });
+    expect(fixture.access.encodeJobs.list().find(
+      (job) => job.id === trailerJob.id,
+    )).toMatchObject({ discSelectionId: trailerSelection.id });
+
+    writeFileSync(
+      join(fixture.originalsLibraryPath, ".rip-dvd-sqlite-catalog"),
+      JSON.stringify({
+        schemaVersion: 1,
+        legacyQueueStatus: "retired",
+        authoritativeStore: "sqlite",
+      }),
+    );
+    expect(fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    })).toMatchObject({ sidecarsImported: 1, issues: [] });
+    expect(fixture.access.encodeJobs.list().find(
+      (job) => job.id === trailerJob.id,
+    )).toMatchObject({ discSelectionId: trailerSelection.id });
+
+    fixture.access.close();
+  }, 60_000);
+
   it("recognizes captured retired provenance before active overlap ambiguity", () => {
     const fixture = createFixture();
     expect(fixture.access.legacySidecars.importLibrary({
