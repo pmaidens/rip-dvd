@@ -23,11 +23,16 @@ interface ParsedDvdTitle extends DvdTitle {
   subtitles: DvdSubtitleStream[];
   expectedAudioStreams: number;
   expectedSubtitles: number;
+  titleSetNumber?: number;
 }
 
 export interface DecodedDvdMetadata {
   volumeLabel?: string;
   titles: DvdTitle[];
+}
+
+export interface DecodedDvdNavigationMetadata extends DecodedDvdMetadata {
+  titleSetsByTitleNumber: ReadonlyMap<number, number>;
 }
 
 function boundedNonNegativeInteger(value: string, field: string): number {
@@ -69,7 +74,9 @@ function recordStreamOrdinal(
   seen.add(ordinal);
 }
 
-export function decodeLsdvdMetadata(output: string): DecodedDvdMetadata {
+export function decodeLsdvdNavigationMetadata(
+  output: string,
+): DecodedDvdNavigationMetadata {
   if (Buffer.byteLength(output) > MAX_OPTICAL_DRIVE_COMMAND_OUTPUT_BYTES) {
     throw new Error("lsdvd output exceeds the scan size limit");
   }
@@ -82,6 +89,7 @@ export function decodeLsdvdMetadata(output: string): DecodedDvdMetadata {
     /^\s*Audio:\s*(\d+),\s*Language:\s*(.*?)\s*-\s*(.*?),\s*Format:\s*([^,]+),.*?\sChannels:\s*(\d+),.*?\sStream id:\s*(0x[0-9a-f]+|\d+)\s*$/i;
   const subtitlePattern =
     /^\s*(?:Subtitle|Subpicture):\s*(\d+),\s*Language:\s*(.*?)\s*-\s*(.*?),\s*Content:\s*(.*?),\s*Stream id:\s*(0x[0-9a-f]+|\d+),?\s*$/i;
+  const titleSetPattern = /^\s*VTS:\s*(\d+),\s*TTN:\s*\d+,/i;
   let currentTitle: ParsedDvdTitle | undefined;
   for (const line of output.split(/\r?\n/)) {
     if (/^\s*Title:/i.test(line)) {
@@ -127,6 +135,25 @@ export function decodeLsdvdMetadata(output: string): DecodedDvdMetadata {
         throw new Error("lsdvd returned too many DVD streams");
       }
       titles.push(currentTitle);
+      continue;
+    }
+    if (/^\s*VTS:/i.test(line)) {
+      const match = line.match(titleSetPattern);
+      if (currentTitle === undefined || match === null) {
+        throw new Error("lsdvd returned malformed DVD title-set metadata");
+      }
+      const titleSetNumber = boundedNonNegativeInteger(
+        match[1],
+        "title-set number",
+      );
+      if (
+        titleSetNumber === 0 ||
+        titleSetNumber > 99 ||
+        currentTitle.titleSetNumber !== undefined
+      ) {
+        throw new Error("lsdvd returned invalid DVD title-set metadata");
+      }
+      currentTitle.titleSetNumber = titleSetNumber;
       continue;
     }
     if (/^\s*Audio:/i.test(line)) {
@@ -213,8 +240,16 @@ export function decodeLsdvdMetadata(output: string): DecodedDvdMetadata {
       throw new Error("lsdvd returned incomplete DVD stream metadata");
     }
   }
+  const titleSetsByTitleNumber = new Map(
+    titles.flatMap((title) =>
+      title.titleSetNumber === undefined
+        ? []
+        : [[title.number, title.titleSetNumber] as const]
+    ),
+  );
   return {
     ...(volumeLabel ? { volumeLabel } : {}),
+    titleSetsByTitleNumber,
     titles: titles.map(
       ({
         audioOrdinals: _audioOrdinals,
@@ -223,8 +258,15 @@ export function decodeLsdvdMetadata(output: string): DecodedDvdMetadata {
         expectedSubtitles: _subtitles,
         subtitleOrdinals: _subtitleOrdinals,
         subtitleSourceIds: _subtitleSourceIds,
+        titleSetNumber: _titleSetNumber,
         ...title
       }) => title,
     ),
   };
+}
+
+export function decodeLsdvdMetadata(output: string): DecodedDvdMetadata {
+  const { titleSetsByTitleNumber: _titleSetsByTitleNumber, ...metadata } =
+    decodeLsdvdNavigationMetadata(output);
+  return metadata;
 }

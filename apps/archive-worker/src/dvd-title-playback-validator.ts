@@ -64,7 +64,17 @@ function parseCompletedPlayback(
   const audioSourcePattern =
     /scan:\s*audio\s+(0x[0-9a-f]+|\d+):\s*([a-z0-9_]+)/gi;
   for (const match of output.matchAll(audioSourcePattern)) {
-    const sourceId = Number.parseInt(match[1]!, match[1]!.startsWith("0x") ? 16 : 10);
+    const sourceIdText = match[1]!.toLowerCase();
+    const packedSourceId = Number.parseInt(
+      sourceIdText,
+      sourceIdText.startsWith("0x") ? 16 : 10,
+    );
+    const sourceId =
+      packedSourceId > 0xff &&
+        packedSourceId <= 0xffff &&
+        (packedSourceId & 0xff) === 0xbd
+        ? packedSourceId >>> 8
+        : packedSourceId;
     const codec = match[2]!.toLowerCase();
     if (
       !Number.isSafeInteger(sourceId) ||

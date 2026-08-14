@@ -6,7 +6,7 @@ import {
 } from "@rip-dvd/data-access";
 import type { DvdTitleMap } from "@rip-dvd/data-access/dvd-scan";
 
-import { decodeLsdvdMetadata } from "./dvd-metadata.js";
+import { decodeLsdvdNavigationMetadata } from "./dvd-metadata.js";
 import {
   formatDvdDamageRanges,
   type DamagedDvdRecoveryResult,
@@ -106,43 +106,6 @@ function parseClassifierResult(payload: string): ClassifierResult {
   throw new Error("DVD salvage classifier returned malformed output");
 }
 
-function titleSetsByTitleNumber(
-  output: string,
-  expectedTitleNumbers: readonly number[],
-): ReadonlyMap<number, number> {
-  const titleSets = new Map<number, number>();
-  let currentTitleNumber: number | undefined;
-  for (const line of output.split(/\r?\n/)) {
-    const title = /^\s*Title:\s*(\d+),/i.exec(line);
-    if (title !== null) {
-      currentTitleNumber = Number(title[1]);
-      continue;
-    }
-    const titleSet = /^\s*VTS:\s*(\d+),\s*TTN:\s*\d+,/i.exec(line);
-    if (titleSet === null) {
-      continue;
-    }
-    const titleSetNumber = Number(titleSet[1]);
-    if (
-      currentTitleNumber === undefined ||
-      !Number.isSafeInteger(titleSetNumber) ||
-      titleSetNumber <= 0 ||
-      titleSetNumber > 99 ||
-      titleSets.has(currentTitleNumber)
-    ) {
-      throw new Error("DVD salvage navigation validation returned malformed output");
-    }
-    titleSets.set(currentTitleNumber, titleSetNumber);
-  }
-  if (
-    expectedTitleNumbers.some((titleNumber) => !titleSets.has(titleNumber)) ||
-    titleSets.size !== expectedTitleNumbers.length
-  ) {
-    throw new Error("DVD salvage navigation validation returned malformed output");
-  }
-  return titleSets;
-}
-
 function canonicalizeDvdTitles(titles: DvdTitleMap["titles"]): string {
   return JSON.stringify(
     [...titles].sort((left, right) => left.number - right.number),
@@ -229,9 +192,9 @@ export function createNodeDvdSalvageValidator({
       if (navigation.exitCode !== 0) {
         throw new Error("DVD salvage navigation validation failed");
       }
-      let observedTitleMap;
+      let observedNavigation;
       try {
-        observedTitleMap = decodeLsdvdMetadata(
+        observedNavigation = decodeLsdvdNavigationMetadata(
           `${navigation.stdout}\n${navigation.stderr}`,
         );
       } catch (error) {
@@ -240,7 +203,7 @@ export function createNodeDvdSalvageValidator({
         });
       }
       if (
-        canonicalizeDvdTitles(observedTitleMap.titles) !==
+        canonicalizeDvdTitles(observedNavigation.titles) !==
           canonicalizeDvdTitles(expectedTitleMap.titles)
       ) {
         throw new Error("DVD salvage navigation validation changed the title map");
@@ -248,10 +211,14 @@ export function createNodeDvdSalvageValidator({
       if (result.affectedTitleSetNumbers.length === 0) {
         return { outcome: "accepted" };
       }
-      const titleSets = titleSetsByTitleNumber(
-        `${navigation.stdout}\n${navigation.stderr}`,
-        observedTitleMap.titles.map((title) => title.number),
-      );
+      const titleSets = observedNavigation.titleSetsByTitleNumber;
+      if (
+        observedNavigation.titles.some((title) =>
+          !titleSets.has(title.number)
+        ) || titleSets.size !== observedNavigation.titles.length
+      ) {
+        throw new Error("DVD salvage navigation validation returned malformed output");
+      }
       const affectedTitleSetNumbers = new Set(
         result.affectedTitleSetNumbers,
       );

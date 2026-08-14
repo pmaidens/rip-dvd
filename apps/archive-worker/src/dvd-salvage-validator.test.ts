@@ -42,7 +42,7 @@ const payloadLsdvdOutput = [
   "  Audio: 1, Language: en - English, Format: ac3, Frequency: 48000, Quantization: drc, Channels: 2, AP: 0, Content: Normal, Stream id: 0x80",
 ].join("\n");
 const completedPlaybackOutput = [
-  "[12:00:00] scan: audio 0x80: ac3, rate=48000Hz, bitrate=448000 English (AC3) (2.0 ch)",
+  "[12:00:00] scan: audio 0x80bd: ac3, rate=48000Hz, bitrate=448000 English (AC3) (2.0 ch)",
   "[12:00:00] ac3-decoder done: 112500 frames, 0 decoder errors",
   "[12:00:00] mpeg2video-decoder done: 90000 frames, 0 decoder errors",
   "[12:00:00] sync: got 90000 frames, 90000 expected",
@@ -298,7 +298,7 @@ describe("DVD salvage validation process boundary", () => {
     [
       "unexpected audio source",
       () => payloadValidationRunner({
-        stderr: completedPlaybackOutput.replace("audio 0x80", "audio 0x81"),
+        stderr: completedPlaybackOutput.replace("audio 0x80bd", "audio 0x81bd"),
       }),
       "DVD title playback validator returned malformed output",
     ],
