@@ -7,10 +7,10 @@ import { createOpticalDriveDvdScanner } from "./optical-drive-dvd-scanner.js";
 import { createOpticalDriveScanCache } from "./optical-drive-scan-cache.js";
 import type { DiscContentReader } from "./optical-disc-content.js";
 
-function validMetadata(volumeLabel: string): string {
+function validMetadata(volumeLabel: string, titleNumber = 1): string {
   return [
     `Disc Title: ${volumeLabel}`,
-    "Title: 01, Length: 00:01:00.000 Chapters: 1, Cells: 1, Audio streams: 0, Subpictures: 0",
+    `Title: ${String(titleNumber).padStart(2, "0")}, Length: 00:01:00.000 Chapters: 1, Cells: 1, Audio streams: 0, Subpictures: 0`,
   ].join("\n");
 }
 
@@ -147,6 +147,76 @@ describe("Optical Drive DVD scan coordinator", () => {
         reasonCode: "metadata_read_failed",
       }),
     );
+  });
+
+  it("recovers valid titles when unreadable IFO decoys crash the full scan", async () => {
+    const contentId = `sha256:${"d".repeat(64)}`;
+    const runner = {
+      run: vi
+        .fn()
+        .mockResolvedValueOnce({
+          exitCode: 139,
+          stdout: "",
+          stderr:
+            "libdvdread: Invalid IFO for title 20 (VTS_20_0.IFO).\nSegmentation fault",
+        })
+        .mockResolvedValueOnce({
+          exitCode: 0,
+          stdout: validMetadata("PROTECTED_DISC", 1),
+          stderr: "",
+        })
+        .mockResolvedValueOnce({
+          exitCode: 0,
+          stdout: validMetadata("PROTECTED_DISC", 2),
+          stderr: "",
+        })
+        .mockResolvedValueOnce({
+          exitCode: 4,
+          stdout: "",
+          stderr: "Can't open ifo 3!",
+        })
+        .mockResolvedValueOnce({
+          exitCode: 4,
+          stdout: "",
+          stderr: "Can't open ifo 4!",
+        })
+        .mockResolvedValueOnce({
+          exitCode: 4,
+          stdout: "",
+          stderr: "Can't open ifo 5!",
+        })
+        .mockResolvedValueOnce({
+          exitCode: 0,
+          stdout: "4096\n",
+          stderr: "",
+        }),
+    };
+    const contentReader = { hash: vi.fn().mockResolvedValue(contentId) };
+    const { binding, scanner, signal } = await createScannerFixture({
+      contentReader,
+      runner,
+    });
+
+    await expect(scanner.scan(binding, signal)).resolves.toMatchObject({
+      fingerprint: contentId,
+      scanData: {
+        titles: [{ number: 1 }, { number: 2 }],
+      },
+      volumeLabel: "PROTECTED_DISC",
+    });
+    expect(runner.run).toHaveBeenNthCalledWith(
+      2,
+      "rip-dvd-lsdvd",
+      ["-q", "-t", "1", "-Oh", "-a", "-c", "-s", "/dev/sr0"],
+      expect.any(Object),
+    );
+    expect(runner.run).toHaveBeenNthCalledWith(
+      6,
+      "rip-dvd-lsdvd",
+      ["-q", "-t", "5", "-Oh", "-a", "-c", "-s", "/dev/sr0"],
+      expect.any(Object),
+    );
+    expect(contentReader.hash).toHaveBeenCalledOnce();
   });
 
   it("reports malformed lsdvd output as a structured metadata failure", async () => {
