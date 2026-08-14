@@ -261,7 +261,7 @@ export function CatalogReviewDiscSelections({
                 </span>
                 <p>
                   {selection.actionAvailability.reason ??
-                    "Direct correction, label editing, and removal are available."}
+                    "Direct editing and removal are available."}
                 </p>
                 {hasAction(selection, "remove") ? (
                   <button
@@ -371,7 +371,7 @@ export function CatalogReviewDiscSelections({
                       ? "Repair unsafe legacy Disc Selection: "
                       : selection.actionAvailability.state !== "editable"
                         ? "Correct by supersession: "
-                        : "Correct or edit label: "}
+                        : "Edit Disc Selection: "}
                     {discSelectionDescription(selection)}
                   </option>
                 ))}

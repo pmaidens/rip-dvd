@@ -163,7 +163,7 @@ describe("CatalogReviewDiscSelections", () => {
     expect(html).toContain("Title 1, chapters 1–4");
     expect(html).toContain("Label: None");
     expect(html).toContain("Editable");
-    expect(html).toContain("Correct or edit label");
+    expect(html).toContain("Edit Disc Selection");
     expect(html).toContain("Remove Disc Selection");
     expect(html).toContain("Next Disc Selections");
   });
@@ -453,7 +453,7 @@ describe("CatalogReviewDiscSelections", () => {
     expect(html).toContain("Encode Job job-2 is queued");
     expect(html).toContain("Repair unsafe legacy Disc Selection");
     expect(html).toContain("Remove Disc Selection");
-    expect(html).not.toContain("Correct or edit label");
+    expect(html).not.toContain("Edit Disc Selection");
     expect(html.match(/Repair unsafe legacy Disc Selection/g)).toHaveLength(1);
     expect(html.match(/Remove Disc Selection/g)).toHaveLength(1);
   });
@@ -510,7 +510,7 @@ describe("CatalogReviewDiscSelections", () => {
 
     expect(html).toContain("Changes unavailable");
     expect(html).toContain("legacy cutover repair is pending");
-    expect(html).not.toContain("Correct or edit label");
+    expect(html).not.toContain("Edit Disc Selection");
     expect(html).not.toContain("Repair unsafe legacy Disc Selection");
     expect(html).not.toContain("Remove Disc Selection");
   });
