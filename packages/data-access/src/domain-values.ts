@@ -13,6 +13,27 @@ export const ARCHIVE_INTEGRITIES = [
   "watchable_salvage",
 ] as const;
 
+export const DVD_SALVAGE_REJECTION_DESCRIPTIONS = {
+  filesystem_metadata: "filesystem metadata",
+  directory_data: "filesystem directory data",
+  ifo: "DVD IFO data",
+  bup: "DVD backup data",
+  menu: "DVD menu data",
+  navigation: "DVD navigation data",
+  referenced_content: "referenced DVD content",
+  ambiguous: "an ambiguous DVD region",
+  unmappable: "an unmappable DVD region",
+  consecutive_damage: "consecutive unreadable sectors",
+  policy_limit: "damage beyond the automatic salvage policy limit",
+  decoder_stream: "a missing decoded audio or video stream",
+  decoder_duration: "an incomplete decoded title duration",
+  decoder_rate: "decoding failures beyond the automatic salvage policy limit",
+  decoder_incomplete: "incomplete DVD title traversal",
+} as const;
+
+export type DvdSalvageRejectionReason =
+  keyof typeof DVD_SALVAGE_REJECTION_DESCRIPTIONS;
+
 export const CATALOG_REVIEW_OUTCOMES = [
   "needs_review",
   "reviewed_with_selections",

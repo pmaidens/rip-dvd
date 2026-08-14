@@ -15,9 +15,11 @@ const UDF_EXTENT_LENGTH_MASK = 0x3fff_ffff;
 const UDF_EXTENT_TYPE_MASK = 0xc000_0000;
 
 interface SectorExtent {
-  fileSectorOffset?: number;
-  path?: string;
-  source?: "iso" | "udf";
+  fileLocation?: {
+    path: string;
+    sectorOffset: number;
+    source: "iso" | "udf";
+  };
   startLba: number;
   sectorCount: number;
   reason: DvdSalvageRejectionReason;
@@ -251,13 +253,13 @@ export async function classifyDvdImageDamage({
     sectorCount: number,
     reason: DvdSalvageRejectionReason,
     file?: {
-      fileSectorOffset: number;
       path: string;
+      sectorOffset: number;
       source: "iso" | "udf";
     },
   ) => {
     requireSafeExtent(startLba, sectorCount, totalSectorCount);
-    allocatedExtents.push({ startLba, sectorCount, reason, ...file });
+    allocatedExtents.push({ startLba, sectorCount, reason, fileLocation: file });
   };
   const classifyBeforeMetadataRead = (
     startLba: number,
@@ -411,8 +413,8 @@ export async function classifyDvdImageDamage({
             sectorCountForBytes(extentBytes),
             classifyDvdPath(path),
             {
-              fileSectorOffset: 0,
               path: normalizedPath,
+              sectorOffset: 0,
               source: "iso",
             },
           );
@@ -518,22 +520,26 @@ export async function classifyDvdImageDamage({
   const classifyTitleVobSector = async (
     extent: SectorExtent,
     badLba: number,
-  ): Promise<{ outcome: "navigation" } | {
+  ): Promise<{
+    evidenceKey: string;
+    outcome: "navigation";
+  } | {
+    evidenceKey: string;
     outcome: "payload";
     titleSetNumber: number;
   } | { outcome: "ambiguous" }> => {
     if (
-      extent.path === undefined ||
-      extent.fileSectorOffset === undefined ||
-      extent.source === undefined
+      extent.fileLocation === undefined
     ) {
       return { outcome: "ambiguous" };
     }
-    const identity = titleVobIdentity(extent.path);
+    const identity = titleVobIdentity(extent.fileLocation.path);
     if (identity === null) {
       return { outcome: "ambiguous" };
     }
-    const dvdFiles = extent.source === "iso" ? isoDvdFiles : udfDvdFiles;
+    const dvdFiles = extent.fileLocation.source === "iso"
+      ? isoDvdFiles
+      : udfDvdFiles;
     const titleParts = [...dvdFiles.values()]
       .map((file) => ({ file, identity: titleVobIdentity(file.path) }))
       .filter(({ identity: partIdentity }) =>
@@ -546,7 +552,11 @@ export async function classifyDvdImageDamage({
       titleParts.length === 0 ||
       titleParts.some(({ file, identity: partIdentity }, index) =>
         partIdentity!.partNumber !== index + 1 ||
-        file.byteCount % DVD_SECTOR_SIZE_BYTES !== 0
+        file.byteCount % DVD_SECTOR_SIZE_BYTES !== 0 ||
+        file.extents.length === 0 ||
+        file.extents.some(({ byteCount }) =>
+          byteCount % DVD_SECTOR_SIZE_BYTES !== 0
+        )
       )
     ) {
       return { outcome: "ambiguous" };
@@ -564,7 +574,7 @@ export async function classifyDvdImageDamage({
         0,
       );
     const titleVobSector = precedingSectorCount +
-      extent.fileSectorOffset + badLba - extent.startLba;
+      extent.fileLocation.sectorOffset + badLba - extent.startLba;
     const titleVobSectorCount = titleParts.reduce(
       (total, { file }) => total + file.byteCount / DVD_SECTOR_SIZE_BYTES,
       0,
@@ -585,9 +595,40 @@ export async function classifyDvdImageDamage({
       identity.titleSetNumber,
       titleVobSectorCount,
     );
+    const layout = titleParts.map(({ file }) => ({
+      byteCount: file.byteCount,
+      extents: file.extents.reduce<Array<{
+        sectorCount: number;
+        startLba: number;
+      }>>((normalized, fileExtent) => {
+        const sectorCount = fileExtent.byteCount / DVD_SECTOR_SIZE_BYTES;
+        const previous = normalized.at(-1);
+        if (
+          previous !== undefined &&
+          previous.startLba + previous.sectorCount === fileExtent.startLba
+        ) {
+          previous.sectorCount += sectorCount;
+        } else {
+          normalized.push({ sectorCount, startLba: fileExtent.startLba });
+        }
+        return normalized;
+      }, []),
+      path: file.path,
+    }));
+    const evidenceKey = JSON.stringify({
+      damagedPath: extent.fileLocation.path,
+      layout,
+      navigationSectors: [...navigationSectors],
+      titleSetNumber: identity.titleSetNumber,
+      titleVobSector,
+    });
     return navigationSectors.has(titleVobSector)
-      ? { outcome: "navigation" }
-      : { outcome: "payload", titleSetNumber: identity.titleSetNumber };
+      ? { evidenceKey, outcome: "navigation" }
+      : {
+          evidenceKey,
+          outcome: "payload",
+          titleSetNumber: identity.titleSetNumber,
+        };
   };
 
   const parseIso = async (): Promise<number> => {
@@ -1034,8 +1075,8 @@ export async function classifyDvdImageDamage({
             extentReason,
             !isDirectory && fileSectorOffset !== undefined
               ? {
-                  fileSectorOffset,
                   path: normalizedPath,
+                  sectorOffset: fileSectorOffset,
                   source: "udf",
                 }
               : undefined,
@@ -1167,7 +1208,7 @@ export async function classifyDvdImageDamage({
         }
         if (udfBounds.hasUdf) {
           const allocationSources = new Set(
-            allocations.map((extent) => extent.source),
+            allocations.map((extent) => extent.fileLocation?.source),
           );
           if (
             !allocationSources.has("iso") ||
@@ -1180,26 +1221,25 @@ export async function classifyDvdImageDamage({
           allocations.map((extent) => classifyTitleVobSector(extent, badLba)),
         );
         if (titleVobClassifications.some(({ outcome }) =>
-          outcome === "navigation"
-        )) {
-          return { outcome: "rejected", reason: "navigation" };
-        }
-        if (titleVobClassifications.some(({ outcome }) =>
           outcome === "ambiguous"
         )) {
           return { outcome: "rejected", reason: "ambiguous" };
         }
-        const payloadTitleSetNumbers = new Set(
-          titleVobClassifications.map((classification) =>
-            classification.outcome === "payload"
-              ? classification.titleSetNumber
-              : -1
-          ),
+        const conclusiveClassifications = titleVobClassifications.filter(
+          (classification) => classification.outcome !== "ambiguous",
         );
-        if (payloadTitleSetNumbers.size !== 1) {
+        if (
+          new Set(
+            conclusiveClassifications.map(({ evidenceKey }) => evidenceKey),
+          ).size !== 1
+        ) {
           return { outcome: "rejected", reason: "ambiguous" };
         }
-        affectedTitleSetNumbers.add([...payloadTitleSetNumbers][0]!);
+        const classification = conclusiveClassifications[0]!;
+        if (classification.outcome === "navigation") {
+          return { outcome: "rejected", reason: "navigation" };
+        }
+        affectedTitleSetNumbers.add(classification.titleSetNumber);
         continue;
       }
       if (

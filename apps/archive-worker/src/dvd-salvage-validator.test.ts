@@ -42,6 +42,7 @@ const payloadLsdvdOutput = [
   "  Audio: 1, Language: en - English, Format: ac3, Frequency: 48000, Quantization: drc, Channels: 2, AP: 0, Content: Normal, Stream id: 0x80",
 ].join("\n");
 const completedPlaybackOutput = [
+  "[12:00:00] scan: audio 0x80: ac3, rate=48000Hz, bitrate=448000 English (AC3) (2.0 ch)",
   "[12:00:00] ac3-decoder done: 112500 frames, 0 decoder errors",
   "[12:00:00] mpeg2video-decoder done: 90000 frames, 0 decoder errors",
   "[12:00:00] sync: got 90000 frames, 90000 expected",
@@ -211,6 +212,14 @@ describe("DVD salvage validation process boundary", () => {
       "decoder_stream",
     ],
     [
+      "zero-frame audio stream",
+      completedPlaybackOutput.replace(
+        "ac3-decoder done: 112500 frames, 0 decoder errors",
+        "ac3-decoder done: 0 frames, 0 decoder errors",
+      ),
+      "decoder_stream",
+    ],
+    [
       "duration more than one second short",
       completedPlaybackOutput.replace(
         "sync: got 90000 frames, 90000 expected",
@@ -223,11 +232,11 @@ describe("DVD salvage validation process boundary", () => {
       completedPlaybackOutput
         .replace(
           "ac3-decoder done: 112500 frames, 0 decoder errors",
-          "ac3-decoder done: 0 frames, 0 decoder errors",
+          "ac3-decoder done: 1 frames, 0 decoder errors",
         )
         .replace(
           "mpeg2video-decoder done: 90000 frames, 0 decoder errors",
-          "mpeg2video-decoder done: 9998 frames, 2 decoder errors",
+          "mpeg2video-decoder done: 9997 frames, 2 decoder errors",
         ),
       "decoder_rate",
     ],
@@ -258,11 +267,11 @@ describe("DVD salvage validation process boundary", () => {
       completedPlaybackOutput
         .replace(
           "ac3-decoder done: 112500 frames, 0 decoder errors",
-          "ac3-decoder done: 0 frames, 0 decoder errors",
+          "ac3-decoder done: 1 frames, 0 decoder errors",
         )
         .replace(
           "mpeg2video-decoder done: 90000 frames, 0 decoder errors",
-          "mpeg2video-decoder done: 9999 frames, 1 decoder errors",
+          "mpeg2video-decoder done: 9998 frames, 1 decoder errors",
         ),
     ],
   ] as const)("accepts payload damage with %s", async (
@@ -283,6 +292,23 @@ describe("DVD salvage validation process boundary", () => {
       "malformed completion",
       () => payloadValidationRunner({
         stderr: completedPlaybackOutput.replace(/^.*sync: got.*\n/m, ""),
+      }),
+      "DVD title playback validator returned malformed output",
+    ],
+    [
+      "unexpected audio source",
+      () => payloadValidationRunner({
+        stderr: completedPlaybackOutput.replace("audio 0x80", "audio 0x81"),
+      }),
+      "DVD title playback validator returned malformed output",
+    ],
+    [
+      "non-audio decoder substituted for audio",
+      () => payloadValidationRunner({
+        stderr: completedPlaybackOutput.replace(
+          "ac3-decoder done: 112500 frames, 0 decoder errors",
+          "dvdsub-decoder done: 112500 frames, 0 decoder errors",
+        ),
       }),
       "DVD title playback validator returned malformed output",
     ],

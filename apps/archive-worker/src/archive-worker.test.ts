@@ -14,7 +14,9 @@ import { join } from "node:path";
 import {
   ARCHIVE_JOB_LEASE_DURATION_MS,
   DISC_INSPECTION_LEASE_DURATION_MS,
+  DVD_SALVAGE_REJECTION_DESCRIPTIONS,
   type DiscoveredOpticalDrive,
+  type DvdSalvageRejectionReason,
 } from "@rip-dvd/data-access";
 import { createRawDvdContentIdHasher } from "@rip-dvd/data-access/dvd-content-id";
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
@@ -37,6 +39,31 @@ import {
 } from "./optical-drive-hardware.js";
 
 const temporaryDirectories: string[] = [];
+
+const salvageFailureCases: readonly ({
+  description: string;
+  name: string;
+  reason: DvdSalvageRejectionReason;
+} | {
+  errorMessage: string;
+  name: string;
+})[] = [
+  ...(Object.keys(
+    DVD_SALVAGE_REJECTION_DESCRIPTIONS,
+  ) as DvdSalvageRejectionReason[]).map((reason) => ({
+    description: DVD_SALVAGE_REJECTION_DESCRIPTIONS[reason],
+    name: reason,
+    reason,
+  })),
+  {
+    name: "decoder timeout",
+    errorMessage: "DVD title playback validation failed",
+  },
+  {
+    name: "decoder crash",
+    errorMessage: "DVD title playback validation failed",
+  },
+];
 
 function openTestDataAccess() {
   const directory = mkdtempSync(join(tmpdir(), "rip-dvd-archive-worker-"));
@@ -369,26 +396,9 @@ describe("archive worker polling", () => {
     expect(salvageValidator.validate).not.toHaveBeenCalled();
   });
 
-  it.each([
-    ["filesystem_metadata", "filesystem metadata"],
-    ["directory_data", "filesystem directory data"],
-    ["ifo", "DVD IFO data"],
-    ["bup", "DVD backup data"],
-    ["menu", "DVD menu data"],
-    ["navigation", "DVD navigation data"],
-    ["referenced_content", "referenced DVD content"],
-    ["ambiguous", "an ambiguous DVD region"],
-    ["unmappable", "an unmappable DVD region"],
-    ["decoder_stream", "a missing decoded audio or video stream"],
-    ["decoder_duration", "an incomplete decoded title duration"],
-    [
-      "decoder_rate",
-      "decoding failures beyond the automatic salvage policy limit",
-    ],
-    ["decoder_incomplete", "incomplete DVD title traversal"],
-  ] as const)(
-    "retains a rescued image rejected for %s damage",
-    async (reason, description) => {
+  it.each(salvageFailureCases)(
+    "retains a rescued image after $name",
+    async (failureCase) => {
       const access = openTestDataAccess();
       const originalsLibraryPath = mkdtempSync(
         join(tmpdir(), "rip-dvd-originals-rescue-"),
@@ -461,9 +471,14 @@ describe("archive worker polling", () => {
         log: vi.fn(),
         originalsLibraryPath,
         salvageValidator: {
-          validate: vi.fn().mockResolvedValue({
-            outcome: "rejected",
-            reason,
+          validate: vi.fn(async () => {
+            if (!("reason" in failureCase)) {
+              throw new Error(failureCase.errorMessage);
+            }
+            return {
+              outcome: "rejected" as const,
+              reason: failureCase.reason,
+            };
           }),
         },
         signal: new AbortController().signal,
@@ -471,13 +486,15 @@ describe("archive worker polling", () => {
       });
 
       const failure = access.archiveJobs.list(["failed"])[0]!;
+      const expectedErrorMessage = "reason" in failureCase
+        ? `DVD salvage rejected: unreadable sectors affect ${failureCase.description}; 1 sector in 1 area; LBAs 1`
+        : failureCase.errorMessage;
       expect(failure).toMatchObject({
         archiveRequestId: request.id,
         status: "failed",
         progressPhase: "verifying",
         progressPercent: 99,
-        errorMessage:
-          `DVD salvage rejected: unreadable sectors affect ${description}; 1 sector in 1 area; LBAs 1`,
+        errorMessage: expectedErrorMessage,
         originalDiscArchiveId: null,
       });
       expect(failure.errorMessage).not.toContain(originalsLibraryPath);

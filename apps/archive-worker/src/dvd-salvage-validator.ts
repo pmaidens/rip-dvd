@@ -1,5 +1,9 @@
 import { fileURLToPath } from "node:url";
 
+import {
+  DVD_SALVAGE_REJECTION_DESCRIPTIONS,
+  type DvdSalvageRejectionReason,
+} from "@rip-dvd/data-access";
 import type { DvdTitleMap } from "@rip-dvd/data-access/dvd-scan";
 
 import { decodeLsdvdMetadata } from "./dvd-metadata.js";
@@ -26,22 +30,7 @@ export interface DvdSalvageValidationRequest {
   signal: AbortSignal;
 }
 
-export type DvdSalvageRejectionReason =
-  | "filesystem_metadata"
-  | "directory_data"
-  | "ifo"
-  | "bup"
-  | "menu"
-  | "navigation"
-  | "referenced_content"
-  | "ambiguous"
-  | "unmappable"
-  | "consecutive_damage"
-  | "policy_limit"
-  | "decoder_stream"
-  | "decoder_duration"
-  | "decoder_rate"
-  | "decoder_incomplete";
+export type { DvdSalvageRejectionReason } from "@rip-dvd/data-access";
 
 export type DvdSalvageValidationResult =
   | { outcome: "accepted" }
@@ -52,24 +41,6 @@ export interface DvdSalvageValidator {
     request: DvdSalvageValidationRequest,
   ): Promise<DvdSalvageValidationResult>;
 }
-
-const REJECTION_DESCRIPTIONS = {
-  filesystem_metadata: "filesystem metadata",
-  directory_data: "filesystem directory data",
-  ifo: "DVD IFO data",
-  bup: "DVD backup data",
-  menu: "DVD menu data",
-  navigation: "DVD navigation data",
-  referenced_content: "referenced DVD content",
-  ambiguous: "an ambiguous DVD region",
-  unmappable: "an unmappable DVD region",
-  consecutive_damage: "consecutive unreadable sectors",
-  policy_limit: "damage beyond the automatic salvage policy limit",
-  decoder_stream: "a missing decoded audio or video stream",
-  decoder_duration: "an incomplete decoded title duration",
-  decoder_rate: "decoding failures beyond the automatic salvage policy limit",
-  decoder_incomplete: "incomplete DVD title traversal",
-} satisfies Record<DvdSalvageRejectionReason, string>;
 
 const CLASSIFIER_OUTPUT_LIMIT_BYTES = 4_096;
 const CLASSIFIER_TIMEOUT_MS = 5 * 60_000;
@@ -125,7 +96,7 @@ function parseClassifierResult(payload: string): ClassifierResult {
     parsed.outcome === "rejected" &&
     "reason" in parsed &&
     typeof parsed.reason === "string" &&
-    parsed.reason in REJECTION_DESCRIPTIONS
+    parsed.reason in DVD_SALVAGE_REJECTION_DESCRIPTIONS
   ) {
     return {
       outcome: "rejected",
@@ -334,5 +305,5 @@ export function formatRejectedDvdSalvage(
   reason: DvdSalvageRejectionReason,
   recoveryResult: DamagedDvdRecoveryResult,
 ): string {
-  return `DVD salvage rejected: unreadable sectors affect ${REJECTION_DESCRIPTIONS[reason]}; ${recoveryResult.badSectorCount} ${recoveryResult.badSectorCount === 1 ? "sector" : "sectors"} in ${recoveryResult.badAreaCount} ${recoveryResult.badAreaCount === 1 ? "area" : "areas"}; LBAs ${formatDvdDamageRanges(recoveryResult)}`;
+  return `DVD salvage rejected: unreadable sectors affect ${DVD_SALVAGE_REJECTION_DESCRIPTIONS[reason]}; ${recoveryResult.badSectorCount} ${recoveryResult.badSectorCount === 1 ? "sector" : "sectors"} in ${recoveryResult.badAreaCount} ${recoveryResult.badAreaCount === 1 ? "area" : "areas"}; LBAs ${formatDvdDamageRanges(recoveryResult)}`;
 }

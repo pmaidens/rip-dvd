@@ -244,7 +244,9 @@ function writeUdfFileEntry(
     fileEntryLba,
     fileType,
     informationLength,
+    allocationByteCount = DVD_SECTOR_SIZE_BYTES,
   }: {
+    allocationByteCount?: number;
     dataLba: number;
     fileEntryLba: number;
     fileType: 4 | 5;
@@ -259,7 +261,7 @@ function writeUdfFileEntry(
   entry.writeBigUInt64LE(BigInt(informationLength), 56);
   entry.writeUInt32LE(0, 168);
   entry.writeUInt32LE(8, 172);
-  entry.writeUInt32LE(DVD_SECTOR_SIZE_BYTES, 176);
+  entry.writeUInt32LE(allocationByteCount, 176);
   entry.writeUInt32LE(dataLba, 180);
   writeUdfTag(entry, 261);
 }
@@ -278,7 +280,12 @@ function writeUdfDirectory(
   return offset - start;
 }
 
-function writeSyntheticUdfLayout(image: Buffer) {
+function writeSyntheticUdfLayout(
+  image: Buffer,
+  {
+    payloadTitleVobStartLba,
+  }: { payloadTitleVobStartLba?: number } = {},
+) {
   for (const [lba, identifier] of [
     [18, "BEA01"],
     [19, "NSR02"],
@@ -367,12 +374,26 @@ function writeSyntheticUdfLayout(image: Buffer) {
     fileType: 4,
     informationLength: rootDirectoryBytes,
   });
+  const videoDirectoryEntries = payloadTitleVobStartLba === undefined
+    ? [
+        { childLba: 5, name: "VIDEO_TS.IFO" },
+        { childLba: 6, name: "VIDEO_TS.BUP" },
+        { childLba: 7, name: "VIDEO_TS.VOB" },
+        { childLba: 8, name: "VTS_01_1.VOB" },
+      ]
+    : [
+        { childLba: 5, name: "VIDEO_TS.IFO" },
+        { childLba: 6, name: "VIDEO_TS.BUP" },
+        { childLba: 7, name: "VIDEO_TS.VOB" },
+        { childLba: 8, name: "VTS_01_0.IFO" },
+        { childLba: 9, name: "VTS_01_0.BUP" },
+        { childLba: 10, name: "VTS_01_1.VOB" },
+      ];
   const videoDirectoryBytes = writeUdfDirectory(image, 304, [
     udfFileIdentifier({ childLba: 1, fileCharacteristics: 8 }),
-    udfFileIdentifier({ childLba: 5, fileCharacteristics: 0, name: "VIDEO_TS.IFO" }),
-    udfFileIdentifier({ childLba: 6, fileCharacteristics: 0, name: "VIDEO_TS.BUP" }),
-    udfFileIdentifier({ childLba: 7, fileCharacteristics: 0, name: "VIDEO_TS.VOB" }),
-    udfFileIdentifier({ childLba: 8, fileCharacteristics: 0, name: "VTS_01_1.VOB" }),
+    ...videoDirectoryEntries.map(({ childLba, name }) =>
+      udfFileIdentifier({ childLba, fileCharacteristics: 0, name })
+    ),
   ]);
   writeUdfFileEntry(image, {
     dataLba: 4,
@@ -380,13 +401,37 @@ function writeSyntheticUdfLayout(image: Buffer) {
     fileType: 4,
     informationLength: videoDirectoryBytes,
   });
-  for (let offset = 0; offset < 4; offset += 1) {
-    writeUdfFileEntry(image, {
-      dataLba: 10 + offset,
-      fileEntryLba: 305 + offset,
-      fileType: 5,
-      informationLength: DVD_SECTOR_SIZE_BYTES,
-    });
+  if (payloadTitleVobStartLba === undefined) {
+    for (let offset = 0; offset < 4; offset += 1) {
+      writeUdfFileEntry(image, {
+        dataLba: 10 + offset,
+        fileEntryLba: 305 + offset,
+        fileType: 5,
+        informationLength: DVD_SECTOR_SIZE_BYTES,
+      });
+    }
+  } else {
+    for (const file of [
+      { dataLba: 30, fileEntryLba: 305, sectorCount: 1 },
+      { dataLba: 31, fileEntryLba: 306, sectorCount: 1 },
+      { dataLba: 32, fileEntryLba: 307, sectorCount: 1 },
+      { dataLba: 33, fileEntryLba: 308, sectorCount: 2 },
+      { dataLba: 50, fileEntryLba: 309, sectorCount: 1 },
+      {
+        dataLba: payloadTitleVobStartLba - 300,
+        fileEntryLba: 310,
+        sectorCount: 6,
+      },
+    ]) {
+      const byteCount = file.sectorCount * DVD_SECTOR_SIZE_BYTES;
+      writeUdfFileEntry(image, {
+        allocationByteCount: byteCount,
+        dataLba: file.dataLba,
+        fileEntryLba: file.fileEntryLba,
+        fileType: 5,
+        informationLength: byteCount,
+      });
+    }
   }
 }
 
@@ -469,6 +514,39 @@ function createSyntheticUdfDvdImage(badLba: number): {
   return writeFixture(image, badLba);
 }
 
+function createSyntheticContradictoryUdfPayloadDvdImage(badLba: number): {
+  imagePath: string;
+  sizeBytes: number;
+} {
+  const image = Buffer.alloc(700 * DVD_SECTOR_SIZE_BYTES);
+  writeSyntheticIsoLayout(image, {
+    fileStartLba: 330,
+    pathTableLba: 40,
+    rootLba: 42,
+    videoDirectoryLba: 43,
+    videoFiles: [
+      { extentLba: 330, name: "VIDEO_TS.IFO" },
+      { extentLba: 331, name: "VIDEO_TS.BUP" },
+      { extentLba: 332, name: "VIDEO_TS.VOB" },
+      {
+        byteCount: 2 * DVD_SECTOR_SIZE_BYTES,
+        extentLba: 333,
+        name: "VTS_01_0.IFO",
+      },
+      { extentLba: 335, name: "VTS_01_0.BUP" },
+      {
+        byteCount: 6 * DVD_SECTOR_SIZE_BYTES,
+        extentLba: 336,
+        name: "VTS_01_1.VOB",
+      },
+    ],
+    volumeSpaceSize: 600,
+  });
+  writeSyntheticUdfLayout(image, { payloadTitleVobStartLba: 335 });
+  writeTitleVobuAddressMap(image, 333, [0, 3]);
+  return writeFixture(image, badLba);
+}
+
 describe("DVD layout damage classification", () => {
   it("accepts a substituted sector proved outside filesystem allocation", async () => {
     const fixture = createSyntheticDvdImage(50);
@@ -511,6 +589,16 @@ describe("DVD layout damage classification", () => {
       expectedByteCount: fixture.sizeBytes,
       unreadableSectorRanges: [{ startLba: 29, sectorCount: 1 }],
     })).rejects.toThrow("DVD title VOBU address map is malformed");
+  });
+
+  it("rejects contradictory ISO and UDF title VOB layouts as ambiguous", async () => {
+    const fixture = createSyntheticContradictoryUdfPayloadDvdImage(337);
+
+    await expect(classifyDvdImageDamage({
+      ...fixture,
+      expectedByteCount: fixture.sizeBytes,
+      unreadableSectorRanges: [{ startLba: 337, sectorCount: 1 }],
+    })).resolves.toEqual({ outcome: "rejected", reason: "ambiguous" });
   });
 
   it.each([
