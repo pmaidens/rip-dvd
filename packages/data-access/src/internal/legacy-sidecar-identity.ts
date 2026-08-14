@@ -8,6 +8,7 @@ export type LegacyJobLogicalKey = string & {
 
 export interface LegacyJobLogicalIdentity {
   fingerprint: string;
+  outputPath?: string;
   profileKey: string;
   sourceKey: string;
 }
@@ -19,6 +20,7 @@ export function createLegacyJobLogicalKey(
     identity.fingerprint,
     identity.sourceKey,
     identity.profileKey,
+    ...(identity.outputPath === undefined ? [] : [identity.outputPath]),
   ];
   if (fields.some((field) => field.length === 0 || field.includes("\0"))) {
     throw new Error("Legacy job logical identity contains an invalid field");
@@ -30,11 +32,19 @@ export function parseLegacyJobLogicalKey(
   logicalKey: string,
 ): LegacyJobLogicalIdentity | null {
   const fields = logicalKey.split("\0");
-  if (fields.length !== 3 || fields.some((field) => field.length === 0)) {
+  if (
+    (fields.length !== 3 && fields.length !== 4) ||
+    fields.some((field) => field.length === 0)
+  ) {
     return null;
   }
-  const [fingerprint, sourceKey, profileKey] = fields;
-  return { fingerprint, profileKey, sourceKey };
+  const [fingerprint, sourceKey, profileKey, outputPath] = fields;
+  return {
+    fingerprint,
+    ...(outputPath === undefined ? {} : { outputPath }),
+    profileKey,
+    sourceKey,
+  };
 }
 
 export function legacyJobLogicalKey(
@@ -43,6 +53,7 @@ export function legacyJobLogicalKey(
 ): LegacyJobLogicalKey {
   return createLegacyJobLogicalKey({
     fingerprint,
+    outputPath: job.outputPath,
     profileKey: job.profileKey,
     sourceKey: job.sourceKey,
   });

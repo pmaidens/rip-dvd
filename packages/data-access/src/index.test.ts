@@ -1033,21 +1033,24 @@ describe("data-access facade", () => {
         kind: "main_feature",
       }),
     });
-    expect(() =>
-      access.catalog.createDiscSelection({
-        originalDiscArchiveId: archive.id,
-        mediaItemId: trailer.id,
-        sourceIdentity: createDiscSelectionSourceIdentity({
-          kind: "main_feature",
-        }),
+    const overlappingSelection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: trailer.id,
+      sourceIdentity: createDiscSelectionSourceIdentity({
+        kind: "main_feature",
       }),
-    ).toThrow();
+    });
 
     expect(access.catalog.listOriginalDiscArchives()).toEqual([
       expect.objectContaining({ id: archive.id, fingerprint: "disc-fingerprint" }),
     ]);
     expect(selection.mediaItemId).toBe(movie.id);
     expect(selection.sourceIdentity).toEqual({ kind: "main_feature" });
+    expect(overlappingSelection).toMatchObject({
+      mediaItemId: trailer.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    expect(overlappingSelection.id).not.toBe(selection.id);
     access.close();
   });
 
@@ -1141,11 +1144,81 @@ describe("data-access facade", () => {
           sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
         },
       })
-    ).toThrow();
+    ).toThrow("Assisted Mapping cannot use an overlapping DVD source");
     expect(access.catalog.listMediaItems()).toEqual(mediaItemsBeforeFailure);
     expect(access.catalog.listDiscSelections({
       originalDiscArchiveId: archive.id,
     })).toEqual(selectionsBeforeFailure);
+
+    const partialOwner = access.catalog.createMediaItem({
+      kind: "bonus_feature",
+      title: "Partial source owner",
+    });
+    access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: partialOwner.id,
+      sourceIdentity: {
+        kind: "dvd_chapters",
+        titleNumber: 5,
+        chapterStart: 2,
+        chapterEnd: 4,
+      },
+    });
+    const catalogBeforeCoordinateOverlaps = {
+      mediaItems: access.catalog.listMediaItems(),
+      discSelections: access.catalog.listDiscSelections({
+        originalDiscArchiveId: archive.id,
+      }),
+    };
+    const overlapRevision = access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]!.updatedAt;
+    for (const sourceIdentity of [
+      { kind: "dvd_title", titleNumber: 5 },
+      {
+        kind: "dvd_chapters",
+        titleNumber: 5,
+        chapterStart: 4,
+        chapterEnd: 6,
+      },
+    ] as const) {
+      expect(() => access.catalog.createMappingProposal({
+        originalDiscArchiveId: archive.id,
+        catalogRevision: overlapRevision,
+        mediaItem: { kind: "movie", title: "Coordinate overlap" },
+        discSelection: { sourceIdentity },
+      })).toThrow("Assisted Mapping cannot use an overlapping DVD source");
+      expect(access.catalog.listMediaItems()).toEqual(
+        catalogBeforeCoordinateOverlaps.mediaItems,
+      );
+      expect(access.catalog.listDiscSelections({
+        originalDiscArchiveId: archive.id,
+      })).toEqual(catalogBeforeCoordinateOverlaps.discSelections);
+    }
+    expect(access.catalog.createMappingProposal({
+      originalDiscArchiveId: archive.id,
+      catalogRevision: overlapRevision,
+      mediaItem: { kind: "movie", title: "Disjoint chapters" },
+      discSelection: {
+        sourceIdentity: {
+          kind: "dvd_chapters",
+          titleNumber: 5,
+          chapterStart: 5,
+          chapterEnd: 6,
+        },
+      },
+    }).discSelection).toMatchObject({
+      sourceIdentity: {
+        kind: "dvd_chapters",
+        titleNumber: 5,
+        chapterStart: 5,
+        chapterEnd: 6,
+      },
+    });
+    const revisionAfterDisjointProposal =
+      access.catalog.listOriginalDiscArchives({
+        ids: [archive.id],
+      })[0]!.updatedAt;
 
     const unconventionalParent = access.catalog.createMediaItem({
       kind: "other",
@@ -1164,7 +1237,7 @@ describe("data-access facade", () => {
     };
     expect(() => access.catalog.createMappingProposal({
       originalDiscArchiveId: archive.id,
-      catalogRevision: currentRevision,
+      catalogRevision: revisionAfterDisjointProposal,
       mediaItem: {
         parentId: unconventionalParent.id,
         kind: "bonus_feature",
@@ -1185,7 +1258,7 @@ describe("data-access facade", () => {
 
     const attachedExtra = access.catalog.createMappingProposal({
       originalDiscArchiveId: archive.id,
-      catalogRevision: currentRevision,
+      catalogRevision: revisionAfterDisjointProposal,
       mediaItem: {
         parentId: created.mediaItem.id,
         kind: "bonus_feature",
@@ -1239,6 +1312,117 @@ describe("data-access facade", () => {
     access.close();
   });
 
+  it("keeps exact-overlap Disc Selection identities and Encode Job provenance distinct", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const contentId = `sha256:${"e".repeat(64)}`;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: contentId,
+      scanData: {
+        schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+        contentId,
+        titles: [1, 2].map((number) => ({
+          number,
+          durationSeconds: 2_400,
+          chapters: 8,
+          audioStreams: [],
+          subtitles: [],
+        })),
+      },
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Exact Overlap.iso",
+      fingerprint: contentId,
+    });
+    const items = ["Concert", "Concert copy", "Song", "Song translation"]
+      .map((title) => access.catalog.createMediaItem({ kind: "movie", title }));
+
+    const wholeTitleSelections = items.slice(0, 2).map((mediaItem) =>
+      access.catalog.createDiscSelection({
+        originalDiscArchiveId: archive.id,
+        mediaItemId: mediaItem.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      })
+    );
+    const exactChapterSelections = items.slice(2).map((mediaItem) =>
+      access.catalog.createDiscSelection({
+        originalDiscArchiveId: archive.id,
+        mediaItemId: mediaItem.id,
+        sourceIdentity: {
+          kind: "dvd_chapters",
+          titleNumber: 2,
+          chapterStart: 3,
+          chapterEnd: 5,
+        },
+      })
+    );
+
+    expect(new Set([
+      ...wholeTitleSelections,
+      ...exactChapterSelections,
+    ].map(({ id }) => id)).size).toBe(4);
+    expect(completeCatalogReview(access, archive.id)).toMatchObject({
+      catalogReviewOutcome: "reviewed_with_selections",
+    });
+
+    const profile = access.encodingProfiles.create({
+      key: "exact-overlap",
+      displayName: "Exact overlap",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const historicalSelection = wholeTitleSelections[0]!;
+    const historicalJob = access.encodeJobs.enqueue({
+      discSelectionId: historicalSelection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Exact Overlap.mkv",
+    });
+    const reviewedArchive = access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]!;
+    const correction = access.catalog.correctDiscSelection(
+      historicalSelection.id,
+      {
+        originalDiscArchiveId: archive.id,
+        catalogRevision: reviewedArchive.updatedAt,
+        mediaItemId: historicalSelection.mediaItemId,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+        reason: "Keep a corrected identity for the same intentional source.",
+      },
+    );
+
+    expect(correction.discSelection.id).not.toBe(historicalSelection.id);
+    expect(correction.discSelection.sourceIdentity).toEqual(
+      wholeTitleSelections[1]!.sourceIdentity,
+    );
+    expect(access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: historicalJob.id,
+        discSelectionId: historicalSelection.id,
+        status: "cancelled",
+      }),
+    ]);
+    expect(access.catalog.listDiscSelectionSupersessions({
+      discSelectionIds: [historicalSelection.id],
+    })).toEqual([
+      expect.objectContaining({
+        supersededDiscSelectionId: historicalSelection.id,
+        replacementDiscSelectionId: correction.discSelection.id,
+      }),
+    ]);
+    access.close();
+  });
+
   it("creates one numbered Episode and whole-title Disc Selection per episodic proposal entry", () => {
     const access = openTestDatabase();
     const drive = access.catalog.upsertOpticalDrive({
@@ -1253,7 +1437,7 @@ describe("data-access facade", () => {
       scanData: {
         schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
         contentId,
-        titles: [2, 4, 7].map((number) => ({
+        titles: [2, 4, 5, 7].map((number) => ({
           number,
           durationSeconds: 2_400,
           chapters: 8,
@@ -1334,6 +1518,84 @@ describe("data-access facade", () => {
     expect(access.catalog.listDiscSelections({
       originalDiscArchiveId: archive.id,
     })).toHaveLength(3);
+
+    access.catalog.deleteDiscSelection(
+      created.episodes[2]!.discSelection.id,
+    );
+    const catalogBeforeIntraProposalOverlap = {
+      mediaItems: access.catalog.listMediaItems(),
+      discSelections: access.catalog.listDiscSelections({
+        originalDiscArchiveId: archive.id,
+      }),
+    };
+    expect(() => access.catalog.createEpisodicMappingProposal({
+      originalDiscArchiveId: archive.id,
+      catalogRevision: access.catalog.listOriginalDiscArchives({
+        ids: [archive.id],
+      })[0]!.updatedAt,
+      tvShow: { choice: "create_new", title: "Duplicate Source Show" },
+      season: {
+        choice: "create_new",
+        title: "Duplicate Source Show Season 1",
+        seasonNumber: 1,
+      },
+      episodes: [
+        { titleNumber: 7, title: "First mapping", episodeNumber: 1 },
+        { titleNumber: 7, title: "Second mapping", episodeNumber: 2 },
+      ],
+    })).toThrow("Assisted Mapping cannot use an overlapping DVD source");
+    expect(access.catalog.listMediaItems()).toEqual(
+      catalogBeforeIntraProposalOverlap.mediaItems,
+    );
+    expect(access.catalog.listDiscSelections({
+      originalDiscArchiveId: archive.id,
+    })).toEqual(catalogBeforeIntraProposalOverlap.discSelections);
+
+    const partialOwner = access.catalog.createMediaItem({
+      kind: "bonus_feature",
+      title: "Partially mapped episode source",
+    });
+    access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: partialOwner.id,
+      sourceIdentity: {
+        kind: "dvd_chapters",
+        titleNumber: 5,
+        chapterStart: 2,
+        chapterEnd: 4,
+      },
+    });
+
+    const catalogBeforeOverlap = {
+      mediaItems: access.catalog.listMediaItems(),
+      discSelections: access.catalog.listDiscSelections({
+        originalDiscArchiveId: archive.id,
+      }),
+    };
+    const currentRevision = access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]!.updatedAt;
+    expect(() => access.catalog.createEpisodicMappingProposal({
+      originalDiscArchiveId: archive.id,
+      catalogRevision: currentRevision,
+      tvShow: { choice: "create_new", title: "Overlapping Show" },
+      season: {
+        choice: "create_new",
+        title: "Overlapping Show Season 1",
+        seasonNumber: 1,
+      },
+      episodes: [{
+        titleNumber: 5,
+        title: "Overlapping Episode",
+        episodeNumber: 1,
+      }],
+    })).toThrow("Assisted Mapping cannot use an overlapping DVD source");
+    expect(access.catalog.listMediaItems()).toEqual(
+      catalogBeforeOverlap.mediaItems,
+    );
+    expect(access.catalog.listDiscSelections({
+      originalDiscArchiveId: archive.id,
+    })).toEqual(catalogBeforeOverlap.discSelections);
     access.close();
   });
 
@@ -1793,6 +2055,62 @@ describe("data-access facade", () => {
     access.close();
   });
 
+  it("serializes concurrent exact-overlap creation without merging identities", async () => {
+    const databasePath = createTestDatabasePath();
+    const access = openTestDatabase(databasePath);
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "concurrent-exact-overlap-disc",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Concurrent Exact Overlap.iso",
+      fingerprint: "concurrent-exact-overlap-disc",
+    });
+    const mediaItems = ["Concert", "Alternate catalog identity"].map(
+      (title) => access.catalog.createMediaItem({ kind: "movie", title }),
+    );
+
+    const results = await runBarrierWorkers({
+      databasePath,
+      mode: "operation",
+      operations: mediaItems.map((mediaItem) => ({
+        operation: "create-disc-selection" as const,
+        originalDiscArchiveId: archive.id,
+        mediaItemId: mediaItem.id,
+      })),
+    });
+
+    expect(results).toEqual([
+      expect.objectContaining({ outcome: "created" }),
+      expect.objectContaining({ outcome: "created" }),
+    ]);
+    expect(new Set(results.map((result) =>
+      typeof result === "object" && result !== null ? result.id : undefined
+    )).size).toBe(2);
+    expect(access.catalog.listDiscSelections({
+      originalDiscArchiveId: archive.id,
+    })).toHaveLength(2);
+    const currentArchive = access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]!;
+    expect(access.catalog.completeCatalogReview(
+      archive.id,
+      currentArchive.updatedAt,
+      "reviewed_with_selections",
+    )).toMatchObject({ catalogReviewOutcome: "reviewed_with_selections" });
+    access.close();
+  });
+
   it("reopens catalog review when a Disc Selection is added after completion", () => {
     const access = openTestDatabase();
     const drive = access.catalog.upsertOpticalDrive({
@@ -1946,12 +2264,53 @@ describe("data-access facade", () => {
       mediaItemId: correctedItem.id,
       sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
     });
-    expect(() =>
-      access.catalog.updateDiscSelection(cleared.id, {
-        originalDiscArchiveId: archive.id,
+    expect(access.catalog.updateDiscSelection(cleared.id, {
+      originalDiscArchiveId: archive.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    })).toMatchObject({
+      id: cleared.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    });
+
+    const rangeTarget = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: correctedItem.id,
+      sourceIdentity: {
+        kind: "dvd_chapters",
+        titleNumber: 1,
+        chapterStart: 2,
+        chapterEnd: 5,
+      },
+    });
+    const rangeEditable = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: correctedItem.id,
+      sourceIdentity: {
+        kind: "dvd_chapters",
+        titleNumber: 1,
+        chapterStart: 6,
+        chapterEnd: 8,
+      },
+    });
+    expect(access.catalog.updateDiscSelection(rangeEditable.id, {
+      originalDiscArchiveId: archive.id,
+      sourceIdentity: rangeTarget.sourceIdentity,
+    })).toMatchObject({
+      id: rangeEditable.id,
+      sourceIdentity: rangeTarget.sourceIdentity,
+    });
+    expect(access.catalog.listDiscSelections({
+      originalDiscArchiveId: archive.id,
+    })).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: cleared.id,
         sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
-      })
-    ).toThrow("A Disc Selection already maps this exact DVD source");
+      }),
+      expect.objectContaining({
+        id: rangeEditable.id,
+        sourceIdentity: rangeTarget.sourceIdentity,
+      }),
+    ]));
     access.close();
   });
 
@@ -2197,6 +2556,7 @@ describe("data-access facade", () => {
           { number: 2, durationSeconds: 2_400, chapters: 8 },
           { number: 3, durationSeconds: 1_800, chapters: 6 },
           { number: 4, durationSeconds: 90, chapters: 1 },
+          { number: 5, durationSeconds: 120, chapters: 0 },
         ].map((title) => ({
           ...title,
           audioStreams: [],
@@ -2258,11 +2618,13 @@ describe("data-access facade", () => {
       chapterEnd: 6,
     });
     createSelection(0, { kind: "main_feature" });
+    createSelection(0, { kind: "dvd_title", titleNumber: 5 });
+    createSelection(1, { kind: "dvd_title", titleNumber: 5 });
 
     expect(access.catalog.getCatalogReviewCoverage(archive.id)).toEqual({
-      discSelectionCount: 7,
+      discSelectionCount: 9,
       mediaItemsWithSelections: 3,
-      mappedTitles: 2,
+      mappedTitles: 3,
       partiallyMappedTitles: 1,
       unmappedTitles: 1,
       mainFeatureSelections: 1,
@@ -2271,6 +2633,7 @@ describe("data-access facade", () => {
         { titleNumber: 2, status: "partially_mapped", hasOverlap: true },
         { titleNumber: 3, status: "mapped", hasOverlap: false },
         { titleNumber: 4, status: "unmapped", hasOverlap: false },
+        { titleNumber: 5, status: "mapped", hasOverlap: true },
       ],
     });
     access.close();
@@ -7066,6 +7429,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
+        name: "20260814152555_allow-intentional-exact-overlaps",
+      },
+      {
         name: "20260813194303_corrected-publication-authority",
       },
       {
@@ -7092,9 +7458,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       {
         name: "20260812011518_optical_drive_present_path_identity",
       },
-      {
-        name: "20260811214753_archive-job-progress-phase",
-      },
     ]);
     expect(
       sqlite
@@ -7104,6 +7467,161 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .get(),
     ).toEqual({ resolved: 1 });
     sqlite.close();
+  });
+
+  it("migrates active-source uniqueness without rewriting selection or job provenance", () => {
+    const databasePath = createTestDatabasePath();
+    const sqlite = new DatabaseSync(databasePath);
+    const migrationsRoot = new URL("../drizzle/", import.meta.url);
+    const overlapMigration =
+      "20260814152555_allow-intentional-exact-overlaps";
+    const predecessorNames = readdirSync(migrationsRoot)
+      .filter((name) => /^\d/.test(name) && name < overlapMigration)
+      .sort();
+    for (const migrationName of predecessorNames) {
+      const migration = readFileSync(
+        new URL(`../drizzle/${migrationName}/migration.sql`, import.meta.url),
+        "utf8",
+      );
+      for (const statement of migration.split("--> statement-breakpoint")) {
+        if (statement.trim()) {
+          sqlite.exec(statement);
+        }
+      }
+    }
+    sqlite.exec(`
+      create table __drizzle_migrations (
+        id integer primary key,
+        hash text not null,
+        created_at numeric,
+        name text,
+        applied_at text
+      );
+    `);
+    const recordMigration = sqlite.prepare(`
+      insert into __drizzle_migrations (hash, created_at, name)
+      values (?, 0, ?)
+    `);
+    for (const migrationName of predecessorNames) {
+      recordMigration.run(`pre-overlap-${migrationName}`, migrationName);
+    }
+    const contentId = `sha256:${"7".repeat(64)}`;
+    const scanData = JSON.stringify({
+      schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+      contentId,
+      titles: [{
+        number: 1,
+        durationSeconds: 3_600,
+        chapters: 8,
+        audioStreams: [],
+        subtitles: [],
+      }],
+    });
+    sqlite.prepare(`
+      insert into optical_drives (
+        id, device_path, is_present, last_seen_at, created_at, updated_at
+      ) values ('pre-overlap-drive', '/dev/pre-overlap', 1, 1, 1, 1)
+    `).run();
+    sqlite.prepare(`
+      insert into detected_discs (
+        id, optical_drive_id, disc_kind, fingerprint, status, scan_data,
+        detected_at, created_at, updated_at
+      ) values (
+        'pre-overlap-disc', 'pre-overlap-drive', 'dvd', ?, 'archived', ?,
+        1, 1, 1
+      )
+    `).run(contentId, scanData);
+    sqlite.prepare(`
+      insert into original_disc_archives (
+        id, detected_disc_id, disc_kind, archive_format, archive_path,
+        fingerprint, archived_at, catalog_reviewed_at,
+        catalog_review_outcome, created_at, updated_at
+      ) values (
+        'pre-overlap-archive', 'pre-overlap-disc', 'dvd', 'iso',
+        '/media/originals/Pre-overlap.iso', ?, 1, 2,
+        'reviewed_with_selections', 1, 2
+      )
+    `).run(contentId);
+    sqlite.exec(`
+      insert into media_items (
+        id, kind, title, created_at, updated_at
+      ) values
+        ('pre-overlap-original-item', 'movie', 'Original identity', 1, 1),
+        ('pre-overlap-new-item', 'movie', 'Intentional overlap', 1, 1);
+      insert into disc_selections (
+        id, original_disc_archive_id, media_item_id, source_key, kind,
+        title_number, created_at, updated_at
+      ) values (
+        'pre-overlap-selection', 'pre-overlap-archive',
+        'pre-overlap-original-item', 'dvd:title:1', 'dvd_title', 1, 1, 1
+      );
+      insert into encoding_profiles (
+        id, key, display_name, media_domain, version, is_active, settings,
+        created_at, updated_at
+      ) values (
+        'pre-overlap-profile', 'pre-overlap-profile', 'Pre-overlap profile',
+        'dvd_video', 1, 1, '{}', 1, 1
+      );
+      insert into encode_jobs (
+        id, disc_selection_id, encoding_profile_id, output_path, status,
+        progress_percent, completed_at, created_at, updated_at
+      ) values (
+        'pre-overlap-job', 'pre-overlap-selection', 'pre-overlap-profile',
+        '/media/movies/Pre-overlap.mkv', 'completed', 100, 2, 1, 2
+      );
+    `);
+    expect(
+      sqlite.prepare(`
+        select name from pragma_index_list('disc_selections')
+        where name = 'disc_selections_archive_active_source_unique'
+      `).get(),
+    ).toEqual({ name: "disc_selections_archive_active_source_unique" });
+    sqlite.close();
+
+    const migrated = openTestDatabase(databasePath);
+    const overlap = migrated.catalog.createDiscSelection({
+      originalDiscArchiveId:
+        "pre-overlap-archive" as OriginalDiscArchiveId,
+      mediaItemId: "pre-overlap-new-item" as MediaItemId,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    });
+    expect(overlap.id).not.toBe("pre-overlap-selection");
+    expect(migrated.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: "pre-overlap-job",
+        discSelectionId: "pre-overlap-selection",
+        status: "completed",
+      }),
+    ]);
+    const migratedArchive = migrated.catalog.listOriginalDiscArchives({
+      ids: ["pre-overlap-archive" as OriginalDiscArchiveId],
+    })[0]!;
+    expect(migrated.catalog.completeCatalogReview(
+      migratedArchive.id,
+      migratedArchive.updatedAt,
+      "reviewed_with_selections",
+    )).toMatchObject({ catalogReviewOutcome: "reviewed_with_selections" });
+    migrated.close();
+
+    const verified = new DatabaseSync(databasePath);
+    expect(
+      verified.prepare(`
+        select name from pragma_index_list('disc_selections')
+        where name = 'disc_selections_archive_active_source_unique'
+      `).get(),
+    ).toBeUndefined();
+    expect(
+      verified.prepare(`
+        select name, "unique" as is_unique
+        from pragma_index_list('disc_selections')
+        where name = 'disc_selections_archive_active_source_idx'
+      `).get(),
+    ).toEqual({
+      name: "disc_selections_archive_active_source_idx",
+      is_unique: 0,
+    });
+    expect(verified.prepare("pragma foreign_key_check").all()).toEqual([]);
+    verified.close();
   });
 
   it("migrates existing Catalog Review state without inferring Archive only", () => {
@@ -7673,7 +8191,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         access,
         "duplicate-archive" as OriginalDiscArchiveId,
       )
-    ).toThrow(/duplicate logical Disc Selections/);
+    ).toThrow(/canonical Disc Selection source keys/);
     expect(() =>
       completeCatalogReview(
         access,

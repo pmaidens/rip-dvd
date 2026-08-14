@@ -599,8 +599,18 @@ New-item titles begin with formatting-only volume-label cleanup: separators
 become spaces, whitespace is normalized, and uniformly cased labels receive
 conservative title case without removing years, disc identifiers, seasons, or
 edition wording.
-The facade derives canonical DVD source identities and rejects duplicate source
-slices. Supported upgrades reopen caller-era scan-dependent or noncanonical
+The facade derives canonical DVD source identities while keeping every Disc
+Selection as a distinct catalog identity. Manual mapping, ordinary job-free
+source edits, and correction may intentionally create overlapping source
+slices, including the same whole title
+or exact chapter range for different Media Items. Catalog Review warns about
+those overlaps and computes coverage from the source union, so repeated slices
+are counted once. Assisted Mapping keeps covered-title proposals unavailable
+and rejects whole-title reuse or intersecting chapter coordinates
+transactionally. Migration replaces the
+active-source unique index with a non-unique lookup index without rewriting
+existing Disc Selections, correction lineage, or Encode Job provenance. Supported upgrades reopen
+caller-era scan-dependent or noncanonical
 catalogs and fail their active Encode Jobs until paged validation outside the
 SQLite writer lock completes again; unsafe jobs cannot be enqueued, requeued,
 or claimed. The review editor

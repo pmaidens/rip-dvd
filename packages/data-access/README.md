@@ -63,9 +63,10 @@ limiting siblings or the total Media Item count.
 `catalog.createMappingProposal()` either creates one proposed Media Item or
 reuses one explicitly selected existing Media Item, then creates its exact DVD
 Disc Selection in the same immediate transaction against that revision.
-Invalid source coordinates, missing reuse targets, duplicate source slices,
-assisted-hierarchy violations, and stale revisions therefore leave no partial
-mapping behind. `catalog.searchMediaItems()` is an explicitly bounded,
+Invalid source coordinates, missing reuse targets, Assisted Mapping attempts
+to reuse an exact source, assisted-hierarchy violations, and stale revisions
+therefore leave no partial mapping behind. `catalog.searchMediaItems()` is an
+explicitly bounded,
 offset-paged title search used by the separate full-catalog reuse surface. The
 `catalog.createEpisodicMappingProposal()` transaction creates or explicitly
 reuses a TV Show and its numbered Season, then creates one numbered Episode and
@@ -87,9 +88,16 @@ The facade carries each DVD source as one immutable, validated
 `DiscSelectionSourceIdentity` value instead of exposing a source key beside
 parallel kind, title, and chapter fields. Its persistence codec alone flattens
 that value into the normalized SQLite columns and derives the canonical legacy
-source key. The facade rejects duplicate source slices, requires title
-selections to reference the archived scan, and keeps chapter ranges within the
-selected title; main-feature selections remain a distinct DVD source kind.
+source key. Manual mapping, ordinary job-free source edits, and correction may
+persist intentional overlaps,
+including identical whole-title or chapter-range sources, while every Disc
+Selection retains a separate identity. Assisted Mapping rejects whole-title
+reuse and intersecting chapter coordinates in its immediate transaction. Title
+selections must reference the
+archived scan, chapter ranges stay within the selected title, and main-feature
+selections remain a distinct DVD source kind. The schema migration replaces
+the former active-source unique index with a non-unique lookup index, preserving
+existing Disc Selection, correction, and Encode Job rows unchanged.
 Full catalog validation for review completion and Encode Job enqueueing runs in
 a consistent deferred read snapshot. Each operation then compares the archive's
 monotonic catalog revision and writes in one short immediate transaction, so a
@@ -107,8 +115,7 @@ databases preserve the review time for canonical main-feature-only catalogs. Cal
 scan-dependent, noncanonical, or otherwise unsafe catalogs are reopened
 conservatively, their active Encode Jobs fail visibly, and paged catalog
 validation outside the writer lock is required before review can complete
-again. Duplicate logical
-slices, noncanonical source keys, missing DVD
+again. Noncanonical source keys, missing DVD
 titles, and out-of-range chapters fail that validation. Scan evidence referenced
 by an Original Disc Archive is immutable across rediscovery, so reviewed
 selection bounds cannot drift after enqueue. Migration-only legacy sidecar
@@ -410,8 +417,11 @@ the originals-library root. A marker failure exposes no imported SQLite state
 and leaves those archives pending review; a restart after marker publication
 safely resumes the idempotent import with the legacy queue already inactive.
 The marker records the immutable logical-job configuration captured at
-cutover, allowing restart/retry to report later sidecar conflicts while
-preserving authoritative SQLite requeues. A parser, persistence, transaction,
+cutover, including the output path that distinguishes jobs sharing a source
+and Encoding Profile. Older markers without that output component remain
+readable and are reconciled conservatively. This allows restart/retry to report
+later sidecar conflicts while preserving authoritative SQLite requeues. A
+parser, persistence, transaction,
 or captured-source conflict changes the marker to a `repair` state: its
 presence continues to block legacy workers, while a later complete and
 parseable live inventory can replace the failed snapshot after repair. Repair
@@ -423,8 +433,11 @@ enqueue, requeue, and claim until the whole captured batch succeeds. Catalog
 review timestamps are committed together only after that validation and only
 for archives unchanged since the review boundary was staged. Existing Media
 Items and Disc Selections remain SQLite-authoritative throughout initial and
-recovery imports. A shared
-library-scoped lease serializes discovery, marker publication, and import with
+recovery imports. When intentional exact overlaps provide multiple active
+selection candidates, import preserves every identity and resolves provenance
+from existing job/output evidence or a unique Media Item match; ambiguous jobs
+fail closed without attaching to an arbitrary selection. A shared library-scoped
+lease serializes discovery, marker publication, and import with
 in-flight legacy archive/encode batches. It never writes the sidecars
 themselves. All legacy archive and queue commands refuse a marked library,
 making SQLite the enforceable catalog and queue authority. Recursive traversal,

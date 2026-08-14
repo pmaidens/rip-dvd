@@ -534,6 +534,57 @@ describe("end-to-end operations dashboard workflow", () => {
         label: null,
       }),
     ]);
+
+    const wholeTarget = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: correctedItem.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    });
+    const wholeEditable = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: correctedItem.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    const rangeEditable = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: correctedItem.id,
+      sourceIdentity: {
+        kind: "dvd_chapters",
+        titleNumber: 1,
+        chapterStart: 6,
+        chapterEnd: 8,
+      },
+    });
+    for (const [discSelectionId, sourceIdentity] of [
+      [wholeEditable.id, wholeTarget.sourceIdentity],
+      [rangeEditable.id, selection.sourceIdentity],
+    ] as const) {
+      const overlapUpdate = await createCatalogReviewRoute(
+        createMutationRequest(`/api/catalog-reviews/${archive.id}`, {
+          action: "update_disc_selection",
+          discSelectionId,
+          changes: { sourceIdentity },
+        }),
+        archive.id,
+        () => access,
+        () => trustedOrigin,
+      );
+      expect(overlapUpdate.status).toBe(200);
+    }
+    const overlapReview = await readReview();
+    expect(overlapReview.discSelections).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: wholeEditable.id,
+        sourceIdentity: wholeTarget.sourceIdentity,
+      }),
+      expect.objectContaining({
+        id: rangeEditable.id,
+        sourceIdentity: selection.sourceIdentity,
+      }),
+    ]));
+    expect(renderCatalogReview(overlapReview)).toContain(
+      "Overlapping Disc Selections",
+    );
   });
 
   it("saves a running Disc Selection Correction before cancellation finishes", async () => {
@@ -1170,36 +1221,63 @@ describe("end-to-end operations dashboard workflow", () => {
       },
     });
     expect(mainFeatureResponse.status).toBe(201);
-    const titleSources = [
+    const manualSelections = [
       {
-        kind: "dvd_chapters",
-        titleNumber: 2,
-        chapterStart: 1,
-        chapterEnd: 3,
+        mediaItemId: existingEpisode.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
       },
-      {
-        kind: "dvd_chapters",
-        titleNumber: 2,
-        chapterStart: 3,
-        chapterEnd: 5,
-      },
-      {
-        kind: "dvd_chapters",
-        titleNumber: 3,
-        chapterStart: 1,
-        chapterEnd: 3,
-      },
-      {
-        kind: "dvd_chapters",
-        titleNumber: 3,
-        chapterStart: 4,
-        chapterEnd: 6,
-      },
+      ...[
+        {
+          mediaItemId: proposal.mediaItem.id,
+          sourceIdentity: {
+            kind: "dvd_chapters" as const,
+            titleNumber: 2,
+            chapterStart: 1,
+            chapterEnd: 3,
+          },
+        },
+        {
+          mediaItemId: existingEpisode.id,
+          sourceIdentity: {
+            kind: "dvd_chapters" as const,
+            titleNumber: 2,
+            chapterStart: 1,
+            chapterEnd: 3,
+          },
+        },
+        {
+          mediaItemId: proposal.mediaItem.id,
+          sourceIdentity: {
+            kind: "dvd_chapters" as const,
+            titleNumber: 2,
+            chapterStart: 3,
+            chapterEnd: 5,
+          },
+        },
+        {
+          mediaItemId: proposal.mediaItem.id,
+          sourceIdentity: {
+            kind: "dvd_chapters" as const,
+            titleNumber: 3,
+            chapterStart: 1,
+            chapterEnd: 3,
+          },
+        },
+        {
+          mediaItemId: proposal.mediaItem.id,
+          sourceIdentity: {
+            kind: "dvd_chapters" as const,
+            titleNumber: 3,
+            chapterStart: 4,
+            chapterEnd: 6,
+          },
+        },
+      ],
     ] as const;
-    for (const sourceIdentity of titleSources) {
+    for (const { mediaItemId, sourceIdentity } of manualSelections) {
       const response = await catalogMutation({
         action: "create_disc_selection",
-        selection: { mediaItemId: proposal.mediaItem.id, sourceIdentity },
+        selection: { mediaItemId, sourceIdentity },
       });
       expect(response.status).toBe(201);
     }
@@ -1214,8 +1292,8 @@ describe("end-to-end operations dashboard workflow", () => {
     const coveredReview = await coveredReviewResponse.json() as
       CatalogReviewDto;
     expect(coveredReview.coverage).toEqual({
-      discSelectionCount: 6,
-      mediaItemsWithSelections: 1,
+      discSelectionCount: 8,
+      mediaItemsWithSelections: 2,
       mappedTitles: 2,
       partiallyMappedTitles: 1,
       unmappedTitles: 2,
@@ -1224,7 +1302,7 @@ describe("end-to-end operations dashboard workflow", () => {
         {
           titleNumber: 1,
           status: "mapped",
-          hasOverlap: false,
+          hasOverlap: true,
         },
         {
           titleNumber: 2,
@@ -1249,7 +1327,7 @@ describe("end-to-end operations dashboard workflow", () => {
       ],
     });
     const coveredReviewHtml = renderCatalogReview(coveredReview);
-    expect(coveredReviewHtml).toContain("1 Media Item with Disc Selections");
+    expect(coveredReviewHtml).toContain("2 Media Items with Disc Selections");
     expect(coveredReviewHtml).toContain("2 mapped titles");
     expect(coveredReviewHtml).toContain("1 partially mapped title");
     expect(coveredReviewHtml).toContain("2 unmapped titles");
@@ -1279,7 +1357,7 @@ describe("end-to-end operations dashboard workflow", () => {
         mediaItemId: existingEpisode.id,
       },
       discSelection: {
-        sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+        sourceIdentity: { kind: "dvd_title", titleNumber: 5 },
       },
     });
     expect(additionalProposal.status).toBe(201);
@@ -1299,27 +1377,32 @@ describe("end-to-end operations dashboard workflow", () => {
     );
     const refreshedCoverage = await refreshedCoverageResponse.json() as
       CatalogReviewDto;
-    expect(refreshedCoverage.discSelections).toHaveLength(7);
+    expect(refreshedCoverage.discSelections).toHaveLength(9);
     expect(refreshedCoverage.coverage).toMatchObject({
-      discSelectionCount: 7,
+      discSelectionCount: 9,
       mediaItemsWithSelections: 2,
       mappedTitles: 3,
-      partiallyMappedTitles: 0,
-      unmappedTitles: 2,
+      partiallyMappedTitles: 1,
+      unmappedTitles: 1,
       mainFeatureSelections: 1,
     });
     expect(refreshedCoverage.coverage.titles).toContainEqual({
       titleNumber: 2,
-      status: "mapped",
+      status: "partially_mapped",
       hasOverlap: true,
+    });
+    expect(refreshedCoverage.coverage.titles).toContainEqual({
+      titleNumber: 5,
+      status: "mapped",
+      hasOverlap: false,
     });
     const refreshedCoverageHtml = renderCatalogReview(refreshedCoverage);
     expect(refreshedCoverageHtml).toContain(
       "2 Media Items with Disc Selections",
     );
     expect(refreshedCoverageHtml).toContain("3 mapped titles");
-    expect(refreshedCoverageHtml).toContain("0 partially mapped titles");
-    expect(refreshedCoverageHtml).toContain("2 unmapped titles");
+    expect(refreshedCoverageHtml).toContain("1 partially mapped title");
+    expect(refreshedCoverageHtml).toContain("1 unmapped title");
     expect(refreshedCoverage.mediaItems).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: proposal.mediaItem.id }),
       expect.objectContaining({ id: existingShow.id }),

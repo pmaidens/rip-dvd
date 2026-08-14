@@ -143,6 +143,130 @@ describe("Catalog Review API", () => {
     });
   });
 
+  it("accepts exact-overlap route mutations, warns on their source union, and completes review", async () => {
+    const access = dataAccessFixture.create();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const contentId = `sha256:${"f".repeat(64)}`;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: contentId,
+      scanData: {
+        schemaVersion: 2,
+        contentId,
+        titles: [1, 2].map((number) => ({
+          number,
+          durationSeconds: 2_400,
+          chapters: 8,
+          audioStreams: [],
+          subtitles: [],
+        })),
+      },
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Route Exact Overlap.iso",
+      fingerprint: contentId,
+    });
+    const mediaItems = ["Concert", "Concert copy", "Song", "Translation"]
+      .map((title) => access.catalog.createMediaItem({ kind: "movie", title }));
+    const mutate = (body: unknown) => createCatalogReviewRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+        },
+        body: JSON.stringify(body),
+      }),
+      archive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+    const sources = [
+      { kind: "dvd_title", titleNumber: 1 },
+      { kind: "dvd_title", titleNumber: 1 },
+      {
+        kind: "dvd_chapters",
+        titleNumber: 2,
+        chapterStart: 3,
+        chapterEnd: 5,
+      },
+      {
+        kind: "dvd_chapters",
+        titleNumber: 2,
+        chapterStart: 3,
+        chapterEnd: 5,
+      },
+    ] as const;
+    for (const [index, sourceIdentity] of sources.entries()) {
+      const response = await mutate({
+        action: "create_disc_selection",
+        selection: {
+          mediaItemId: mediaItems[index]!.id,
+          sourceIdentity,
+        },
+      });
+      expect(response.status).toBe(201);
+    }
+
+    const reviewResponse = await createCatalogReviewRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`),
+      archive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+    expect(reviewResponse.status).toBe(200);
+    const review = await reviewResponse.json();
+    expect(review.coverage).toEqual({
+      discSelectionCount: 4,
+      mediaItemsWithSelections: 4,
+      mappedTitles: 1,
+      partiallyMappedTitles: 1,
+      unmappedTitles: 0,
+      mainFeatureSelections: 0,
+      titles: [
+        { titleNumber: 1, status: "mapped", hasOverlap: true },
+        { titleNumber: 2, status: "partially_mapped", hasOverlap: true },
+      ],
+    });
+
+    const assistedOverlap = await mutate({
+      action: "create_mapping_proposal",
+      catalogRevision: review.catalogRevision,
+      target: {
+        choice: "create_new",
+        mediaItem: { kind: "movie", title: "Automatic overlap" },
+      },
+      discSelection: {
+        sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+      },
+    });
+    expect(assistedOverlap.status).toBe(409);
+    await expect(assistedOverlap.json()).resolves.toEqual({
+      error: "Assisted Mapping cannot use an overlapping DVD source",
+    });
+    expect(access.catalog.listMediaItems()).toHaveLength(4);
+
+    const completed = await mutate({
+      action: "complete_review",
+      catalogRevision: review.catalogRevision,
+      outcome: "reviewed_with_selections",
+    });
+    expect(completed.status).toBe(200);
+    await expect(completed.json()).resolves.toMatchObject({
+      archive: { catalogReviewOutcome: "reviewed_with_selections" },
+    });
+  });
+
   it.each([
     "?selectionOffset=-1",
     "?selectionOffset=1&selectionOffset=2",
@@ -490,6 +614,58 @@ describe("Catalog Review API", () => {
       },
     });
 
+    const wholeEditable = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: correctedMovie.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    const rangeTarget = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: correctedMovie.id,
+      sourceIdentity: {
+        kind: "dvd_chapters",
+        titleNumber: 1,
+        chapterStart: 2,
+        chapterEnd: 4,
+      },
+    });
+    const rangeEditable = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: correctedMovie.id,
+      sourceIdentity: {
+        kind: "dvd_chapters",
+        titleNumber: 1,
+        chapterStart: 5,
+        chapterEnd: 6,
+      },
+    });
+    const wholeOverlapResponse = await mutate({
+      action: "update_disc_selection",
+      discSelectionId: wholeEditable.id,
+      changes: {
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      },
+    });
+    expect(wholeOverlapResponse.status).toBe(200);
+    await expect(wholeOverlapResponse.json()).resolves.toMatchObject({
+      discSelection: {
+        id: wholeEditable.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      },
+    });
+    const rangeOverlapResponse = await mutate({
+      action: "update_disc_selection",
+      discSelectionId: rangeEditable.id,
+      changes: { sourceIdentity: rangeTarget.sourceIdentity },
+    });
+    expect(rangeOverlapResponse.status).toBe(200);
+    await expect(rangeOverlapResponse.json()).resolves.toMatchObject({
+      discSelection: {
+        id: rangeEditable.id,
+        sourceIdentity: rangeTarget.sourceIdentity,
+      },
+    });
+
     expect((await mutate({
       action: "update_disc_selection",
       discSelectionId: selection.id,
@@ -512,7 +688,7 @@ describe("Catalog Review API", () => {
     );
     expect(cutoverResponse.status).toBe(200);
     const cutoverBody = await cutoverResponse.json();
-    expect(cutoverBody.discSelections).toEqual([
+    expect(cutoverBody.discSelections).toEqual(expect.arrayContaining([
       expect.objectContaining({
         id: selection.id,
         actionAvailability: {
@@ -523,7 +699,7 @@ describe("Catalog Review API", () => {
           relatedEncodeJob: null,
         },
       }),
-    ]);
+    ]));
   });
 
   it("locks ordinary Encode Job provenance and identifies active dependency states without exposing paths", async () => {

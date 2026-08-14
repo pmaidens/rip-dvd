@@ -524,6 +524,14 @@ export function CatalogReviewEvidence({
           <dd>{formatVolumeLabel(volumeLabel) || "Unlabeled disc"}</dd>
         </div>
       </dl>
+      {coverage.mainFeatureSelections > 1 ? (
+        <p className="catalog-coverage-warning" role="status">
+          <strong>Overlapping Disc Selections</strong>
+          <span>
+            Exact main-feature sources remain separate catalog identities.
+          </span>
+        </p>
+      ) : null}
       {onStartMappingProposal ? (
         <div className="catalog-archive-mapping-action">
           <button
