@@ -152,6 +152,8 @@ export function CatalogReviewEpisodicMappingProposal({
   const [selectedTvShowId, setSelectedTvShowId] = useState<string | null>(null);
   const [selectedSeasonId, setSelectedSeasonId] = useState<string | null>(null);
   const [clientError, setClientError] = useState<string | null>(null);
+  const visibleError = clientError ?? error;
+  const errorId = "episodic-mapping-proposal-error";
 
   function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -219,12 +221,20 @@ export function CatalogReviewEpisodicMappingProposal({
         Review the TV Show, numbered Season, Episodes, and whole-title Disc
         Selections. The complete batch commits together or none of it does.
       </p>
-      {error || clientError ? (
-        <div className="catalog-mapping-proposal-error section-error" role="alert">
-          {clientError ?? error}
+      {visibleError ? (
+        <div
+          className="catalog-mapping-proposal-error section-error"
+          id={errorId}
+          role="alert"
+        >
+          {visibleError}
         </div>
       ) : null}
-      <form className="catalog-form" onSubmit={submit}>
+      <form
+        className="catalog-form"
+        aria-describedby={visibleError ? errorId : undefined}
+        onSubmit={submit}
+      >
         <fieldset>
           <legend>TV Show</legend>
           <div className="catalog-mapping-target-choices">
