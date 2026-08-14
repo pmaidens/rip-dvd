@@ -19,6 +19,7 @@ const actionMediaItemKinds = {
   movie: "movie",
   bonus_feature: "bonus_feature",
   trailer: "trailer",
+  existing_media_item: "other",
   chapters: "other",
   other: "other",
   main_feature: "movie",
@@ -56,7 +57,11 @@ export function CatalogReviewMappingProposal({
   const source = proposal.sourceIdentity;
   const [targetChoice, setTargetChoice] = useState<
     "create_new" | "use_existing"
-  >("create_new");
+  >(
+    proposal.action === "existing_media_item"
+      ? "use_existing"
+      : "create_new",
+  );
   const [searchQuery, setSearchQuery] = useState(proposedTitle);
   const [searchResult, setSearchResult] = useState<MediaItemSearchDto | null>(
     null,
