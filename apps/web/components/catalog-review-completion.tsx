@@ -1,10 +1,10 @@
 import type {
+  CatalogReviewCoverage,
   CatalogReviewOutcome,
   CompletedCatalogReviewOutcome,
 } from "@rip-dvd/data-access";
 import { useEffect, useRef, useState } from "react";
 
-import type { CatalogReviewCoverage } from "../lib/catalog-review-coverage";
 import { formatCountLabel } from "../lib/format-count-label";
 import type { CatalogReviewReplacementPlan } from "./catalog-review-model";
 import {

@@ -6,6 +6,8 @@ import {
   type SnapshotCatalogAccess,
 } from "@rip-dvd/data-access";
 
+const MEDIA_ITEM_ANCESTOR_LOOKUP_BATCH_SIZE = 100;
+
 export function readMediaItemsWithAncestors(
   catalog: Pick<SnapshotCatalogAccess, "listMediaItems">,
   seedIds: readonly MediaItemId[],
@@ -20,9 +22,19 @@ export function readMediaItemsWithAncestors(
     const missingIds = [...currentDepths.keys()].filter(
       (itemId) => !mediaItemsById.has(itemId),
     );
-    const contextItems = missingIds.length === 0
-      ? []
-      : catalog.listMediaItems({ ids: missingIds });
+    const contextItems: MediaItem[] = [];
+    for (
+      let offset = 0;
+      offset < missingIds.length;
+      offset += MEDIA_ITEM_ANCESTOR_LOOKUP_BATCH_SIZE
+    ) {
+      contextItems.push(...catalog.listMediaItems({
+        ids: missingIds.slice(
+          offset,
+          offset + MEDIA_ITEM_ANCESTOR_LOOKUP_BATCH_SIZE,
+        ),
+      }));
+    }
     for (const item of contextItems) {
       mediaItemsById.set(item.id, item);
     }

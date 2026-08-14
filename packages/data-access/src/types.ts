@@ -252,6 +252,39 @@ export interface DiscSelectionCorrection {
   supersession: DiscSelectionSupersession;
 }
 
+export type CatalogReviewCoverageStatus =
+  | "mapped"
+  | "partially_mapped"
+  | "unmapped";
+
+export interface CatalogReviewTitleCoverage {
+  titleNumber: number;
+  status: CatalogReviewCoverageStatus;
+  hasOverlap: boolean;
+}
+
+export interface CatalogReviewCoverage {
+  discSelectionCount: number;
+  mediaItemsWithSelections: number;
+  mappedTitles: number;
+  partiallyMappedTitles: number;
+  unmappedTitles: number;
+  mainFeatureSelections: number;
+  titles: CatalogReviewTitleCoverage[];
+}
+
+export interface DiscSelectionCorrectionEncodeJobLink {
+  replacementDiscSelectionId: DiscSelectionId;
+  predecessorEncodeJob: {
+    id: EncodeJobId;
+    status: EncodeJobStatus;
+  };
+  replacementEncodeJob: {
+    id: EncodeJobId;
+    status: EncodeJobStatus;
+  } | null;
+}
+
 export type DiscSelectionAction =
   | "update"
   | "correct"
@@ -487,6 +520,11 @@ export type RetainedEncodeOutputSummary = Omit<
   RetainedEncodeOutput,
   "retainedOutputPath" | "filesystemIdentity"
 >;
+
+export interface DiscSelectionCorrectionRetainedOutputSummary {
+  replacementDiscSelectionId: DiscSelectionId;
+  retainedOutput: RetainedEncodeOutputSummary;
+}
 
 export interface CorrectedEncodeReplacementPlan {
   predecessorEncodeJobId: EncodeJobId;
@@ -764,6 +802,9 @@ export interface CatalogAccess {
     limit?: number;
     offset?: number;
   }): DiscSelection[];
+  getCatalogReviewCoverage(
+    originalDiscArchiveId: OriginalDiscArchiveId,
+  ): CatalogReviewCoverage;
   listDiscSelectionSupersessions(options:
     | {
       discSelectionIds: readonly DiscSelectionId[];
@@ -959,9 +1000,16 @@ export interface EncodeJobAccess {
     statuses?: EncodeJobStatus[],
     options?: ChronologicalListOptions,
   ): EncodeJob[];
-  listCorrectionLinksForDiscSelections(
-    ids: readonly DiscSelectionId[],
-  ): EncodeJob[];
+  listDiscSelectionCorrectionEncodeJobLinks(options: {
+    originalDiscArchiveId: OriginalDiscArchiveId;
+    limit: number;
+    offset?: number;
+  }): DiscSelectionCorrectionEncodeJobLink[];
+  listDiscSelectionCorrectionRetainedOutputSummaries(options: {
+    originalDiscArchiveId: OriginalDiscArchiveId;
+    limit: number;
+    offset?: number;
+  }): DiscSelectionCorrectionRetainedOutputSummary[];
   listCorrectionLinks(ids: readonly EncodeJobId[]): EncodeJobCorrectionLink[];
   listRetainedOutputs(ids: readonly EncodeJobId[]): RetainedEncodeOutput[];
   listRetainedOutputSummaries(
@@ -1002,6 +1050,7 @@ export type SnapshotCatalogAccess = Pick<
   | "listMediaItemMaintenance"
   | "searchMediaItems"
   | "listDiscSelections"
+  | "getCatalogReviewCoverage"
   | "listDiscSelectionSupersessions"
   | "listCorrectedEncodeReplacementPlans"
   | "listDiscSelectionActionAvailability"
@@ -1022,7 +1071,8 @@ export interface ConsistentReadAccess {
   readonly encodeJobs: Pick<
     EncodeJobAccess,
     | "list"
-    | "listCorrectionLinksForDiscSelections"
+    | "listDiscSelectionCorrectionEncodeJobLinks"
+    | "listDiscSelectionCorrectionRetainedOutputSummaries"
     | "listCorrectionLinks"
     | "listRetainedOutputSummaries"
   >;

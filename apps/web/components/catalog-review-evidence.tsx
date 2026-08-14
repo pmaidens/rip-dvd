@@ -10,8 +10,8 @@ import type {
 
 import type {
   CatalogReviewCoverage,
-  CatalogReviewTitleCoverageStatus,
-} from "../lib/catalog-review-coverage";
+  CatalogReviewCoverageStatus as CatalogReviewTitleCoverageStatus,
+} from "@rip-dvd/data-access";
 import { formatCountLabel } from "../lib/format-count-label";
 import { CatalogReviewEpisodicMappingProposal } from "./catalog-review-episodic-mapping-proposal";
 import { CatalogReviewMappingProposal } from "./catalog-review-mapping-proposal";
