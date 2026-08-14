@@ -169,18 +169,119 @@ function writeSyntheticIsoLayout(
   ]);
 }
 
-function writeTitleVobuAddressMap(
+interface SyntheticGlobalTitle {
+  angleCount?: number;
+  parts: readonly { pgcNumber: number; programNumber: number }[];
+  titleSetTitleNumber: number;
+}
+
+interface SyntheticProgramChain {
+  cells: readonly {
+    blockMode?: 0 | 1 | 2 | 3;
+    blockType?: 0 | 1;
+    firstSector: number;
+    lastSector: number;
+  }[];
+  programStartCells: readonly number[];
+}
+
+function writeDvdNavigationRelationships(
   image: Buffer,
-  ifoLba: number,
-  vobuStartSectors: readonly number[],
+  {
+    globalTitles,
+    managerIfoLba,
+    programChains,
+    titleSetIfoLba,
+    vobuStartSectors,
+  }: {
+    globalTitles: readonly SyntheticGlobalTitle[];
+    managerIfoLba: number;
+    programChains: readonly SyntheticProgramChain[];
+    titleSetIfoLba: number;
+    vobuStartSectors: readonly number[];
+  },
 ) {
+  const managerIfo = image.subarray(
+    managerIfoLba * DVD_SECTOR_SIZE_BYTES,
+    (managerIfoLba + 2) * DVD_SECTOR_SIZE_BYTES,
+  );
+  managerIfo.write("DVDVIDEO-VMG", 0, "ascii");
+  managerIfo.writeUInt32BE(1, 0xc4);
+  const titleSearchTable = managerIfo.subarray(DVD_SECTOR_SIZE_BYTES);
+  titleSearchTable.writeUInt16BE(globalTitles.length, 0);
+  titleSearchTable.writeUInt32BE(8 + globalTitles.length * 12 - 1, 4);
+  for (const [index, title] of globalTitles.entries()) {
+    const offset = 8 + index * 12;
+    titleSearchTable[offset + 1] = title.angleCount ?? 1;
+    titleSearchTable.writeUInt16BE(title.parts.length, offset + 2);
+    titleSearchTable[offset + 6] = 1;
+    titleSearchTable[offset + 7] = title.titleSetTitleNumber;
+  }
+
   const ifo = image.subarray(
-    ifoLba * DVD_SECTOR_SIZE_BYTES,
-    (ifoLba + 2) * DVD_SECTOR_SIZE_BYTES,
+    titleSetIfoLba * DVD_SECTOR_SIZE_BYTES,
+    (titleSetIfoLba + 4) * DVD_SECTOR_SIZE_BYTES,
   );
   ifo.write("DVDVIDEO-VTS", 0, "ascii");
-  ifo.writeUInt32BE(1, 0xe4);
-  const addressMap = ifo.subarray(DVD_SECTOR_SIZE_BYTES);
+  ifo.writeUInt32BE(1, 0xc8);
+  ifo.writeUInt32BE(2, 0xcc);
+  ifo.writeUInt32BE(3, 0xe4);
+
+  const partTable = ifo.subarray(DVD_SECTOR_SIZE_BYTES);
+  const localTitleCount = Math.max(
+    ...globalTitles.map((title) => title.titleSetTitleNumber),
+  );
+  partTable.writeUInt16BE(localTitleCount, 0);
+  let partOffset = 8 + localTitleCount * 4;
+  for (let localTitleNumber = 1; localTitleNumber <= localTitleCount; localTitleNumber += 1) {
+    const title = globalTitles.find((candidate) =>
+      candidate.titleSetTitleNumber === localTitleNumber
+    );
+    if (title === undefined) {
+      throw new Error("Synthetic DVD titles must be contiguous");
+    }
+    partTable.writeUInt32BE(partOffset, 8 + (localTitleNumber - 1) * 4);
+    for (const part of title.parts) {
+      partTable.writeUInt16BE(part.pgcNumber, partOffset);
+      partTable.writeUInt16BE(part.programNumber, partOffset + 2);
+      partOffset += 4;
+    }
+  }
+  partTable.writeUInt32BE(partOffset - 1, 4);
+
+  const programChainTable = ifo.subarray(2 * DVD_SECTOR_SIZE_BYTES);
+  programChainTable.writeUInt16BE(programChains.length, 0);
+  let pgcOffset = 8 + programChains.length * 8;
+  for (const [index, chain] of programChains.entries()) {
+    programChainTable.writeUInt32BE(pgcOffset, 8 + index * 8 + 4);
+    programChainTable[pgcOffset + 2] = chain.programStartCells.length;
+    programChainTable[pgcOffset + 3] = chain.cells.length;
+    const programMapOffset = 236;
+    const cellPlaybackOffset = programMapOffset + chain.programStartCells.length;
+    const cellPositionOffset = cellPlaybackOffset + chain.cells.length * 24;
+    programChainTable.writeUInt16BE(programMapOffset, pgcOffset + 230);
+    programChainTable.writeUInt16BE(cellPlaybackOffset, pgcOffset + 232);
+    programChainTable.writeUInt16BE(cellPositionOffset, pgcOffset + 234);
+    for (const [programIndex, startCell] of chain.programStartCells.entries()) {
+      programChainTable[pgcOffset + programMapOffset + programIndex] = startCell;
+    }
+    for (const [cellIndex, cell] of chain.cells.entries()) {
+      const playbackOffset = pgcOffset + cellPlaybackOffset + cellIndex * 24;
+      programChainTable[playbackOffset] =
+        ((cell.blockMode ?? 0) << 6) | ((cell.blockType ?? 0) << 4);
+      programChainTable.writeUInt32BE(cell.firstSector, playbackOffset + 8);
+      programChainTable.writeUInt32BE(cell.firstSector, playbackOffset + 12);
+      programChainTable.writeUInt32BE(cell.lastSector, playbackOffset + 16);
+      programChainTable.writeUInt32BE(cell.lastSector, playbackOffset + 20);
+      const positionOffset = pgcOffset + cellPositionOffset + cellIndex * 4;
+      programChainTable.writeUInt16BE(1, positionOffset);
+      programChainTable[positionOffset + 3] = cellIndex + 1;
+    }
+    pgcOffset += cellPositionOffset + chain.cells.length * 4;
+  }
+  programChainTable.writeUInt32BE(pgcOffset - 1, 4);
+
+  const addressMap = ifo.subarray(3 * DVD_SECTOR_SIZE_BYTES);
   addressMap.writeUInt32BE(3 + vobuStartSectors.length * 4, 0);
   for (const [index, startSector] of vobuStartSectors.entries()) {
     addressMap.writeUInt32BE(startSector, 4 + index * 4);
@@ -412,11 +513,11 @@ function writeSyntheticUdfLayout(
     }
   } else {
     for (const file of [
-      { dataLba: 30, fileEntryLba: 305, sectorCount: 1 },
-      { dataLba: 31, fileEntryLba: 306, sectorCount: 1 },
-      { dataLba: 32, fileEntryLba: 307, sectorCount: 1 },
-      { dataLba: 33, fileEntryLba: 308, sectorCount: 2 },
-      { dataLba: 50, fileEntryLba: 309, sectorCount: 1 },
+      { dataLba: 30, fileEntryLba: 305, sectorCount: 2 },
+      { dataLba: 32, fileEntryLba: 306, sectorCount: 1 },
+      { dataLba: 33, fileEntryLba: 307, sectorCount: 1 },
+      { dataLba: 34, fileEntryLba: 308, sectorCount: 4 },
+      { dataLba: 38, fileEntryLba: 309, sectorCount: 1 },
       {
         dataLba: payloadTitleVobStartLba - 300,
         fileEntryLba: 310,
@@ -466,6 +567,19 @@ function createSyntheticDvdImage(badLba: number): {
 function createSyntheticPayloadDvdImage(
   badLba: number,
   vobuStartSectors: readonly number[] = [0, 3],
+  {
+    globalTitles = [{
+      parts: [{ pgcNumber: 1, programNumber: 1 }],
+      titleSetTitleNumber: 1,
+    }],
+    programChains = [{
+      cells: [{ firstSector: 0, lastSector: 5 }],
+      programStartCells: [1],
+    }],
+  }: {
+    globalTitles?: readonly SyntheticGlobalTitle[];
+    programChains?: readonly SyntheticProgramChain[];
+  } = {},
 ): {
   imagePath: string;
   sizeBytes: number;
@@ -477,24 +591,34 @@ function createSyntheticPayloadDvdImage(
     rootLba: 20,
     videoDirectoryLba: 21,
     videoFiles: [
-      { extentLba: 22, name: "VIDEO_TS.IFO" },
-      { extentLba: 23, name: "VIDEO_TS.BUP" },
-      { extentLba: 24, name: "VIDEO_TS.VOB" },
       {
         byteCount: 2 * DVD_SECTOR_SIZE_BYTES,
-        extentLba: 25,
+        extentLba: 22,
+        name: "VIDEO_TS.IFO",
+      },
+      { extentLba: 24, name: "VIDEO_TS.BUP" },
+      { extentLba: 25, name: "VIDEO_TS.VOB" },
+      {
+        byteCount: 4 * DVD_SECTOR_SIZE_BYTES,
+        extentLba: 26,
         name: "VTS_01_0.IFO",
       },
-      { extentLba: 27, name: "VTS_01_0.BUP" },
+      { extentLba: 30, name: "VTS_01_0.BUP" },
       {
         byteCount: 6 * DVD_SECTOR_SIZE_BYTES,
-        extentLba: 28,
+        extentLba: 31,
         name: "VTS_01_1.VOB",
       },
     ],
     volumeSpaceSize: 90,
   });
-  writeTitleVobuAddressMap(image, 25, vobuStartSectors);
+  writeDvdNavigationRelationships(image, {
+    globalTitles,
+    managerIfoLba: 22,
+    programChains,
+    titleSetIfoLba: 26,
+    vobuStartSectors,
+  });
   return writeFixture(image, badLba);
 }
 
@@ -525,25 +649,41 @@ function createSyntheticContradictoryUdfPayloadDvdImage(badLba: number): {
     rootLba: 42,
     videoDirectoryLba: 43,
     videoFiles: [
-      { extentLba: 330, name: "VIDEO_TS.IFO" },
-      { extentLba: 331, name: "VIDEO_TS.BUP" },
-      { extentLba: 332, name: "VIDEO_TS.VOB" },
       {
         byteCount: 2 * DVD_SECTOR_SIZE_BYTES,
-        extentLba: 333,
+        extentLba: 330,
+        name: "VIDEO_TS.IFO",
+      },
+      { extentLba: 332, name: "VIDEO_TS.BUP" },
+      { extentLba: 333, name: "VIDEO_TS.VOB" },
+      {
+        byteCount: 4 * DVD_SECTOR_SIZE_BYTES,
+        extentLba: 334,
         name: "VTS_01_0.IFO",
       },
-      { extentLba: 335, name: "VTS_01_0.BUP" },
+      { extentLba: 338, name: "VTS_01_0.BUP" },
       {
         byteCount: 6 * DVD_SECTOR_SIZE_BYTES,
-        extentLba: 336,
+        extentLba: 340,
         name: "VTS_01_1.VOB",
       },
     ],
     volumeSpaceSize: 600,
   });
-  writeSyntheticUdfLayout(image, { payloadTitleVobStartLba: 335 });
-  writeTitleVobuAddressMap(image, 333, [0, 3]);
+  writeSyntheticUdfLayout(image, { payloadTitleVobStartLba: 341 });
+  writeDvdNavigationRelationships(image, {
+    globalTitles: [{
+      parts: [{ pgcNumber: 1, programNumber: 1 }],
+      titleSetTitleNumber: 1,
+    }],
+    managerIfoLba: 330,
+    programChains: [{
+      cells: [{ firstSector: 0, lastSector: 5 }],
+      programStartCells: [1],
+    }],
+    titleSetIfoLba: 334,
+    vobuStartSectors: [0, 3],
+  });
   return writeFixture(image, badLba);
 }
 
@@ -556,21 +696,22 @@ describe("DVD layout damage classification", () => {
       expectedByteCount: fixture.sizeBytes,
       unreadableSectorRanges: [{ startLba: 50, sectorCount: 1 }],
     })).resolves.toEqual({
-      affectedTitleSetBadSectorCounts: [],
+      affectedTitleBadSectorCounts: [],
       outcome: "accepted",
     });
   });
 
   it("identifies isolated MPEG payload damage in a title VOB", async () => {
-    const fixture = createSyntheticPayloadDvdImage(29);
+    const fixture = createSyntheticPayloadDvdImage(32);
 
     await expect(classifyDvdImageDamage({
       ...fixture,
       expectedByteCount: fixture.sizeBytes,
-      unreadableSectorRanges: [{ startLba: 29, sectorCount: 1 }],
+      unreadableSectorRanges: [{ startLba: 32, sectorCount: 1 }],
     })).resolves.toEqual({
-      affectedTitleSetBadSectorCounts: [{
+      affectedTitleBadSectorCounts: [{
         badSectorCount: 1,
+        titleNumber: 1,
         titleSetNumber: 1,
       }],
       outcome: "accepted",
@@ -578,52 +719,168 @@ describe("DVD layout damage classification", () => {
   });
 
   it("counts multiple isolated payload sectors while accepting unused damage", async () => {
-    const fixture = createSyntheticPayloadDvdImage(29);
+    const fixture = createSyntheticPayloadDvdImage(32);
 
     await expect(classifyDvdImageDamage({
       ...fixture,
       expectedByteCount: fixture.sizeBytes,
       unreadableSectorRanges: [
-        { startLba: 29, sectorCount: 1 },
         { startLba: 32, sectorCount: 1 },
+        { startLba: 35, sectorCount: 1 },
         { startLba: 50, sectorCount: 1 },
       ],
     })).resolves.toEqual({
-      affectedTitleSetBadSectorCounts: [{
+      affectedTitleBadSectorCounts: [{
         badSectorCount: 2,
+        titleNumber: 1,
         titleSetNumber: 1,
       }],
       outcome: "accepted",
     });
   });
 
-  it("rejects a substituted VOB navigation pack", async () => {
-    const fixture = createSyntheticPayloadDvdImage(31);
+  it("associates disjoint cells in one title set only with traversing titles", async () => {
+    const fixture = createSyntheticPayloadDvdImage(32, [0, 3], {
+      globalTitles: [
+        {
+          parts: [{ pgcNumber: 1, programNumber: 1 }],
+          titleSetTitleNumber: 1,
+        },
+        {
+          parts: [{ pgcNumber: 2, programNumber: 1 }],
+          titleSetTitleNumber: 2,
+        },
+      ],
+      programChains: [
+        {
+          cells: [{ firstSector: 0, lastSector: 2 }],
+          programStartCells: [1],
+        },
+        {
+          cells: [{ firstSector: 3, lastSector: 5 }],
+          programStartCells: [1],
+        },
+      ],
+    });
 
     await expect(classifyDvdImageDamage({
       ...fixture,
       expectedByteCount: fixture.sizeBytes,
-      unreadableSectorRanges: [{ startLba: 31, sectorCount: 1 }],
+      unreadableSectorRanges: [
+        { startLba: 32, sectorCount: 1 },
+        { startLba: 35, sectorCount: 1 },
+      ],
+    })).resolves.toEqual({
+      affectedTitleBadSectorCounts: [
+        { badSectorCount: 1, titleNumber: 1, titleSetNumber: 1 },
+        { badSectorCount: 1, titleNumber: 2, titleSetNumber: 1 },
+      ],
+      outcome: "accepted",
+    });
+  });
+
+  it("associates a shared cell with every referencing title", async () => {
+    const fixture = createSyntheticPayloadDvdImage(32, [0, 3], {
+      globalTitles: [
+        {
+          parts: [{ pgcNumber: 1, programNumber: 1 }],
+          titleSetTitleNumber: 1,
+        },
+        {
+          parts: [{ pgcNumber: 2, programNumber: 1 }],
+          titleSetTitleNumber: 2,
+        },
+      ],
+      programChains: [
+        {
+          cells: [{ firstSector: 0, lastSector: 5 }],
+          programStartCells: [1],
+        },
+        {
+          cells: [{ firstSector: 1, lastSector: 3 }],
+          programStartCells: [1],
+        },
+      ],
+    });
+
+    await expect(classifyDvdImageDamage({
+      ...fixture,
+      expectedByteCount: fixture.sizeBytes,
+      unreadableSectorRanges: [{ startLba: 32, sectorCount: 1 }],
+    })).resolves.toEqual({
+      affectedTitleBadSectorCounts: [
+        { badSectorCount: 1, titleNumber: 1, titleSetNumber: 1 },
+        { badSectorCount: 1, titleNumber: 2, titleSetNumber: 1 },
+      ],
+      outcome: "accepted",
+    });
+  });
+
+  it("includes every cell in a referenced multi-angle block", async () => {
+    const fixture = createSyntheticPayloadDvdImage(32, [0, 3], {
+      globalTitles: [{
+        angleCount: 2,
+        parts: [{ pgcNumber: 1, programNumber: 1 }],
+        titleSetTitleNumber: 1,
+      }],
+      programChains: [{
+        cells: [
+          {
+            blockMode: 1,
+            blockType: 1,
+            firstSector: 0,
+            lastSector: 0,
+          },
+          {
+            blockMode: 3,
+            blockType: 1,
+            firstSector: 1,
+            lastSector: 2,
+          },
+        ],
+        programStartCells: [1],
+      }],
+    });
+
+    await expect(classifyDvdImageDamage({
+      ...fixture,
+      expectedByteCount: fixture.sizeBytes,
+      unreadableSectorRanges: [{ startLba: 32, sectorCount: 1 }],
+    })).resolves.toEqual({
+      affectedTitleBadSectorCounts: [
+        { badSectorCount: 1, titleNumber: 1, titleSetNumber: 1 },
+      ],
+      outcome: "accepted",
+    });
+  });
+
+  it("rejects a substituted VOB navigation pack", async () => {
+    const fixture = createSyntheticPayloadDvdImage(34);
+
+    await expect(classifyDvdImageDamage({
+      ...fixture,
+      expectedByteCount: fixture.sizeBytes,
+      unreadableSectorRanges: [{ startLba: 34, sectorCount: 1 }],
     })).resolves.toEqual({ outcome: "rejected", reason: "navigation" });
   });
 
   it("fails closed when the title VOBU address map is malformed", async () => {
-    const fixture = createSyntheticPayloadDvdImage(29, [0, 0]);
+    const fixture = createSyntheticPayloadDvdImage(32, [0, 0]);
 
     await expect(classifyDvdImageDamage({
       ...fixture,
       expectedByteCount: fixture.sizeBytes,
-      unreadableSectorRanges: [{ startLba: 29, sectorCount: 1 }],
+      unreadableSectorRanges: [{ startLba: 32, sectorCount: 1 }],
     })).rejects.toThrow("DVD title VOBU address map is malformed");
   });
 
   it("rejects contradictory ISO and UDF title VOB layouts as ambiguous", async () => {
-    const fixture = createSyntheticContradictoryUdfPayloadDvdImage(337);
+    const fixture = createSyntheticContradictoryUdfPayloadDvdImage(342);
 
     await expect(classifyDvdImageDamage({
       ...fixture,
       expectedByteCount: fixture.sizeBytes,
-      unreadableSectorRanges: [{ startLba: 337, sectorCount: 1 }],
+      unreadableSectorRanges: [{ startLba: 342, sectorCount: 1 }],
     })).resolves.toEqual({ outcome: "rejected", reason: "ambiguous" });
   });
 
@@ -655,7 +912,7 @@ describe("DVD layout damage classification", () => {
       imagePath: fixture.imagePath,
       unreadableSectorRanges: [{ startLba: 500, sectorCount: 1 }],
     })).resolves.toEqual({
-      affectedTitleSetBadSectorCounts: [],
+      affectedTitleBadSectorCounts: [],
       outcome: "accepted",
     });
   });
