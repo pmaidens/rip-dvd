@@ -40,6 +40,7 @@ import type {
   DiscInspectionClaimToken,
   DiscInspectionId,
   DiscSelectionId,
+  DvdTitleBadSectorCount,
   EncodeJobCleanupClaimToken,
   EncodeJobId,
   EncodeJobClaimToken,
@@ -341,6 +342,8 @@ export const originalDiscArchives = sqliteTable(
     badAreaCount: integer("bad_area_count"),
     badSectorRanges: text("bad_sector_ranges", { mode: "json" })
       .$type<readonly UnreadableSectorRange[]>(),
+    badSectorCountsByTitle: text("bad_sector_counts_by_title", { mode: "json" })
+      .$type<readonly DvdTitleBadSectorCount[]>(),
     archivedAt: integer("archived_at", { mode: "timestamp_ms" }).notNull(),
     catalogReviewedAt: integer("catalog_reviewed_at", {
       mode: "timestamp_ms",
@@ -388,7 +391,7 @@ export const originalDiscArchives = sqliteTable(
     ),
     check(
       "original_disc_archives_integrity_evidence_check",
-      sql`(${table.integrity} = 'unknown' and ${table.integrityPolicyVersion} is null and ${table.badSectorCount} is null and ${table.badAreaCount} is null and ${table.badSectorRanges} is null) or (${table.integrity} = 'clean_read' and ${table.integrityPolicyVersion} is not null and ${table.badSectorCount} is not null and ${table.badAreaCount} is not null and ${table.badSectorRanges} is not null and length(${table.integrityPolicyVersion}) between 1 and 128 and ${table.badSectorCount} = 0 and ${table.badAreaCount} = 0 and json(${table.badSectorRanges}) = json('[]')) or (${table.integrity} = 'watchable_salvage' and ${table.integrityPolicyVersion} is not null and ${table.badSectorCount} is not null and ${table.badAreaCount} is not null and ${table.badSectorRanges} is not null and length(${table.integrityPolicyVersion}) between 1 and 128 and ${table.badSectorCount} > 0 and ${table.badAreaCount} > 0 and json_valid(${table.badSectorRanges}) and json_type(${table.badSectorRanges}) = 'array')`,
+      sql`(${table.integrity} = 'unknown' and ${table.integrityPolicyVersion} is null and ${table.badSectorCount} is null and ${table.badAreaCount} is null and ${table.badSectorRanges} is null and ${table.badSectorCountsByTitle} is null) or (${table.integrity} = 'clean_read' and ${table.integrityPolicyVersion} is not null and ${table.badSectorCount} is not null and ${table.badAreaCount} is not null and ${table.badSectorRanges} is not null and ${table.badSectorCountsByTitle} is null and length(${table.integrityPolicyVersion}) between 1 and 128 and ${table.badSectorCount} = 0 and ${table.badAreaCount} = 0 and json(${table.badSectorRanges}) = json('[]')) or (${table.integrity} = 'watchable_salvage' and ${table.integrityPolicyVersion} is not null and ${table.badSectorCount} is not null and ${table.badAreaCount} is not null and ${table.badSectorRanges} is not null and length(${table.integrityPolicyVersion}) between 1 and 128 and ${table.badSectorCount} > 0 and ${table.badAreaCount} > 0 and json_valid(${table.badSectorRanges}) and json_type(${table.badSectorRanges}) = 'array' and (${table.integrityPolicyVersion} = 'dvd-watchable-salvage-v1' or (${table.badSectorCountsByTitle} is not null and json_valid(${table.badSectorCountsByTitle}) and json_type(${table.badSectorCountsByTitle}) = 'array')))`,
     ),
     check(
       "original_disc_archives_catalog_review_outcome_check",

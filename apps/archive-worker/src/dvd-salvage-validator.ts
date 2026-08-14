@@ -21,7 +21,7 @@ import {
 } from "./dvd-title-playback-validator.js";
 
 export const DVD_WATCHABLE_SALVAGE_POLICY_VERSION =
-  "dvd-watchable-salvage-v1";
+  "dvd-watchable-salvage-v2";
 
 export interface DvdSalvageValidationRequest {
   expectedTitleMap: DvdTitleMap;
@@ -33,7 +33,13 @@ export interface DvdSalvageValidationRequest {
 export type { DvdSalvageRejectionReason } from "@rip-dvd/data-access";
 
 export type DvdSalvageValidationResult =
-  | { outcome: "accepted" }
+  | {
+    badSectorCountsByTitle: readonly {
+      badSectorCount: number;
+      titleNumber: number;
+    }[];
+    outcome: "accepted";
+  }
   | { outcome: "rejected"; reason: DvdSalvageRejectionReason };
 
 export interface DvdSalvageValidator {
@@ -51,7 +57,13 @@ const CLASSIFIER_SCRIPT_PATH = fileURLToPath(
 );
 
 type ClassifierResult =
-  | { affectedTitleSetNumbers: readonly number[]; outcome: "accepted" }
+  | {
+    affectedTitleSetBadSectorCounts: readonly {
+      badSectorCount: number;
+      titleSetNumber: number;
+    }[];
+    outcome: "accepted";
+  }
   | { outcome: "rejected"; reason: DvdSalvageRejectionReason };
 
 function parseClassifierResult(payload: string): ClassifierResult {
@@ -65,30 +77,52 @@ function parseClassifierResult(payload: string): ClassifierResult {
     typeof parsed !== "object" ||
     parsed === null ||
     !("protocolVersion" in parsed) ||
-    parsed.protocolVersion !== 1 ||
+    parsed.protocolVersion !== 2 ||
     !("outcome" in parsed)
   ) {
     throw new Error("DVD salvage classifier returned malformed output");
   }
   if (parsed.outcome === "accepted") {
-    const affectedTitleSetNumbers = "affectedTitleSetNumbers" in parsed
-      ? parsed.affectedTitleSetNumbers
-      : [];
+    const affectedTitleSetBadSectorCounts =
+      "affectedTitleSetBadSectorCounts" in parsed
+      ? parsed.affectedTitleSetBadSectorCounts
+      : undefined;
     if (
-      !Array.isArray(affectedTitleSetNumbers) ||
-      affectedTitleSetNumbers.length > 32 ||
-      affectedTitleSetNumbers.some((value, index) =>
-        !Number.isSafeInteger(value) ||
-        (value as number) <= 0 ||
-        (value as number) > 99 ||
-        (index > 0 &&
-          (affectedTitleSetNumbers[index - 1] as number) >= (value as number))
-      )
+      !Array.isArray(affectedTitleSetBadSectorCounts) ||
+      affectedTitleSetBadSectorCounts.length > 32
     ) {
       throw new Error("DVD salvage classifier returned malformed output");
     }
+    let previousTitleSetNumber = 0;
+    let classifiedBadSectorCount = 0;
+    const counts: Array<{ badSectorCount: number; titleSetNumber: number }> = [];
+    for (const value of affectedTitleSetBadSectorCounts) {
+      if (
+        typeof value !== "object" ||
+        value === null ||
+        !("titleSetNumber" in value) ||
+        !Number.isSafeInteger(value.titleSetNumber) ||
+        (value.titleSetNumber as number) <= previousTitleSetNumber ||
+        (value.titleSetNumber as number) > 99 ||
+        !("badSectorCount" in value) ||
+        !Number.isSafeInteger(value.badSectorCount) ||
+        (value.badSectorCount as number) <= 0 ||
+        (value.badSectorCount as number) > 32
+      ) {
+        throw new Error("DVD salvage classifier returned malformed output");
+      }
+      previousTitleSetNumber = value.titleSetNumber as number;
+      classifiedBadSectorCount += value.badSectorCount as number;
+      if (classifiedBadSectorCount > 32) {
+        throw new Error("DVD salvage classifier returned malformed output");
+      }
+      counts.push({
+        badSectorCount: value.badSectorCount as number,
+        titleSetNumber: value.titleSetNumber as number,
+      });
+    }
     return {
-      affectedTitleSetNumbers: affectedTitleSetNumbers as number[],
+      affectedTitleSetBadSectorCounts: counts,
       outcome: "accepted",
     };
   }
@@ -166,11 +200,10 @@ export function createNodeDvdSalvageValidator({
       if (result.outcome === "rejected") {
         return result;
       }
-      if (
-        result.affectedTitleSetNumbers.length > 0 &&
-        recoveryResult.badSectorCount !== 1
-      ) {
-        return { outcome: "rejected", reason: "policy_limit" };
+      const classifiedBadSectorCount = result.affectedTitleSetBadSectorCounts
+        .reduce((total, evidence) => total + evidence.badSectorCount, 0);
+      if (classifiedBadSectorCount > recoveryResult.badSectorCount) {
+        throw new Error("DVD salvage classifier returned malformed output");
       }
 
       let navigation;
@@ -208,8 +241,8 @@ export function createNodeDvdSalvageValidator({
       ) {
         throw new Error("DVD salvage navigation validation changed the title map");
       }
-      if (result.affectedTitleSetNumbers.length === 0) {
-        return { outcome: "accepted" };
+      if (result.affectedTitleSetBadSectorCounts.length === 0) {
+        return { badSectorCountsByTitle: [], outcome: "accepted" };
       }
       const titleSets = observedNavigation.titleSetsByTitleNumber;
       if (
@@ -219,21 +252,33 @@ export function createNodeDvdSalvageValidator({
       ) {
         throw new Error("DVD salvage navigation validation returned malformed output");
       }
-      const affectedTitleSetNumbers = new Set(
-        result.affectedTitleSetNumbers,
+      const badSectorCountsByTitleSet = new Map(
+        result.affectedTitleSetBadSectorCounts.map((evidence) =>
+          [evidence.titleSetNumber, evidence.badSectorCount] as const
+        ),
       );
-      const affectedTitles = expectedTitleMap.titles.filter((title) =>
-        affectedTitleSetNumbers.has(titleSets.get(title.number)!)
-      );
+      const affectedTitles = expectedTitleMap.titles
+        .flatMap((title) => {
+          const badSectorCount = badSectorCountsByTitleSet.get(
+            titleSets.get(title.number)!,
+          );
+          return badSectorCount === undefined
+            ? []
+            : [{ badSectorCount, title }];
+        })
+        .sort((left, right) => left.title.number - right.title.number);
       if (
         affectedTitles.length === 0 ||
         new Set(
-          affectedTitles.map((title) => titleSets.get(title.number)!),
-        ).size !== affectedTitleSetNumbers.size
+          affectedTitles.map(({ title }) => titleSets.get(title.number)!),
+        ).size !== badSectorCountsByTitleSet.size
       ) {
         throw new Error("DVD salvage navigation validation changed the title map");
       }
-      for (const title of affectedTitles) {
+      if (affectedTitles.some(({ badSectorCount }) => badSectorCount > 16)) {
+        return { outcome: "rejected", reason: "policy_limit" };
+      }
+      for (const { title } of affectedTitles) {
         const playback = await titlePlaybackValidator.validate({
           imagePath,
           signal,
@@ -263,7 +308,15 @@ export function createNodeDvdSalvageValidator({
           return { outcome: "rejected", reason: "decoder_rate" };
         }
       }
-      return { outcome: "accepted" };
+      return {
+        badSectorCountsByTitle: affectedTitles.map(
+          ({ badSectorCount, title }) => ({
+            badSectorCount,
+            titleNumber: title.number,
+          }),
+        ),
+        outcome: "accepted",
+      };
     },
   };
 }

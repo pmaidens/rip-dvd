@@ -310,7 +310,10 @@ describe("end-to-end operations dashboard workflow", () => {
       log: vi.fn(),
       originalsLibraryPath,
       salvageValidator: {
-        validate: vi.fn().mockResolvedValue({ outcome: "accepted" }),
+        validate: vi.fn().mockResolvedValue({
+          badSectorCountsByTitle: [],
+          outcome: "accepted",
+        }),
       },
       signal,
       workerId: "salvage-workflow-worker",

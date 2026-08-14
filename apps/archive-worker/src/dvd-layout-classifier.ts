@@ -209,8 +209,11 @@ export async function classifyDvdImageDamage({
   imagePath: string;
   expectedByteCount: number;
   unreadableSectorRanges: readonly UnreadableSectorRange[];
-}): Promise<{ outcome: "accepted" } | {
-  affectedTitleSetNumbers: readonly number[];
+}): Promise<{
+  affectedTitleSetBadSectorCounts: readonly {
+    badSectorCount: number;
+    titleSetNumber: number;
+  }[];
   outcome: "accepted";
 } | {
   outcome: "rejected";
@@ -1194,7 +1197,7 @@ export async function classifyDvdImageDamage({
         requiredDvdPaths.some((path) => !udfDvdPaths.has(path)))) {
       throw new Error("DVD-Video control structures are missing");
     }
-    const affectedTitleSetNumbers = new Set<number>();
+    const badSectorCountsByTitleSet = new Map<number, number>();
     for (const badLba of badSectors) {
       const allocations = allocatedExtents.filter((extent) =>
         extentContainsLba(extent, badLba)
@@ -1239,7 +1242,11 @@ export async function classifyDvdImageDamage({
         if (classification.outcome === "navigation") {
           return { outcome: "rejected", reason: "navigation" };
         }
-        affectedTitleSetNumbers.add(classification.titleSetNumber);
+        badSectorCountsByTitleSet.set(
+          classification.titleSetNumber,
+          (badSectorCountsByTitleSet.get(classification.titleSetNumber) ?? 0) +
+            1,
+        );
         continue;
       }
       if (
@@ -1271,12 +1278,15 @@ export async function classifyDvdImageDamage({
         throw new Error("DVD salvage substituted sector data is invalid");
       }
     }
-    return affectedTitleSetNumbers.size === 0
-      ? { outcome: "accepted" }
+    return badSectorCountsByTitleSet.size === 0
+      ? { affectedTitleSetBadSectorCounts: [], outcome: "accepted" }
       : {
-          affectedTitleSetNumbers: [...affectedTitleSetNumbers].sort(
-            (left, right) => left - right,
-          ),
+          affectedTitleSetBadSectorCounts: [...badSectorCountsByTitleSet]
+            .sort(([left], [right]) => left - right)
+            .map(([titleSetNumber, badSectorCount]) => ({
+              badSectorCount,
+              titleSetNumber,
+            })),
           outcome: "accepted",
         };
   } catch (error) {
