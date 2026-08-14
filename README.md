@@ -774,9 +774,10 @@ capacity matches that worker concurrency, while device-inode locks and durable
 job fences prevent overlapping work for the same drive or stale attempt. A
 failed discovery does not mark every known drive missing.
 Successful DVD
-scans use the packaged `rip-dvd-lsdvd` command so metadata inspection can load
-the bridge-patched `libdvdcss` runtime for CSS-protected media. They store title
-numbers, durations, chapter counts, bounded per-stream
+Disc Inspections use the packaged `rip-dvd-lsdvd` command so they can read
+metadata from CSS-protected media through the bridge-patched `libdvdcss`
+runtime. Successful scans store title numbers, durations, chapter counts,
+bounded per-stream
 language/format/channel/source-ID metadata, and a deterministic SHA-256 content
 identity over every declared raw-disc byte. The scanner authenticates through
 `libdvdcss` but deliberately reads without its decrypt flag, so CSS-protected
