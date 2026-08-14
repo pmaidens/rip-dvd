@@ -3,6 +3,7 @@
 import type { CompletedCatalogReviewOutcome } from "@rip-dvd/data-access";
 
 import { archiveIntegrityLabel } from "../lib/archive-integrity";
+import { ArchiveIntegrityDescription } from "./archive-integrity-description";
 import { displayTerm } from "../lib/display-term";
 import { CatalogReviewCompletion } from "./catalog-review-completion";
 import { CatalogReviewDiscSelections } from "./catalog-review-disc-selections";
@@ -140,6 +141,7 @@ export function CatalogReviewView({
           <p>
             Archive integrity: {archiveIntegrityLabel(review.archive.integrity)}
           </p>
+          <ArchiveIntegrityDescription {...review.archive} />
         </div>
         <div className="profile-actions">
           <span className="attention-mark">

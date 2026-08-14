@@ -6,6 +6,7 @@ import { runConfiguredAsyncWorker } from "@rip-dvd/worker-runtime";
 import { runArchiveWorker } from "./archive-worker.js";
 import { createNodeDvdCopyRunner } from "./dvd-archiver.js";
 import { createLinuxOpticalDriveHardware } from "./optical-drive-hardware.js";
+import { createNodeDvdSalvageValidator } from "./dvd-salvage-validator.js";
 
 await runConfiguredAsyncWorker(
   {
@@ -29,6 +30,7 @@ await runConfiguredAsyncWorker(
         hardware: createLinuxOpticalDriveHardware(),
         log,
         originalsLibraryPath: config.originalsLibraryPath,
+        salvageValidator: createNodeDvdSalvageValidator(),
         pollIntervalMs: config.workerPollIntervalMs,
         signal,
         workerId: `archive-worker:${process.pid}:${randomUUID()}`,

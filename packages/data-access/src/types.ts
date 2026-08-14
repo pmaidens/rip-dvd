@@ -220,9 +220,18 @@ export interface UnknownArchiveIntegrityEvidence {
   badSectorRanges: null;
 }
 
+export interface WatchableSalvageArchiveIntegrityEvidence {
+  integrity: "watchable_salvage";
+  policyVersion: string;
+  badSectorCount: number;
+  badAreaCount: number;
+  badSectorRanges: readonly UnreadableSectorRange[];
+}
+
 export type ArchiveIntegrityEvidence =
   | CleanReadArchiveIntegrityEvidence
-  | UnknownArchiveIntegrityEvidence;
+  | UnknownArchiveIntegrityEvidence
+  | WatchableSalvageArchiveIntegrityEvidence;
 
 export type CatalogReviewArchiveView = "needs_review" | "reviewed";
 

@@ -8,6 +8,7 @@ export { createDiscSelectionSourceIdentity } from "./disc-selection-source-ident
 export {
   createCleanReadArchiveIntegrityEvidence,
   createUnknownArchiveIntegrityEvidence,
+  createWatchableSalvageArchiveIntegrityEvidence,
 } from "./archive-integrity.js";
 export { normalizeMediaItemSearchTitle } from "./media-item-title-search.js";
 export { isCorrectedEncodePredecessorReady } from "./corrected-encode-readiness.js";

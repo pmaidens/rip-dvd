@@ -28,6 +28,7 @@ import {
 import { archiveIntegrityLabel } from "../lib/archive-integrity";
 import { displayTerm } from "../lib/display-term";
 import { isTerminalEncodeJobStatus } from "../lib/encode-job-status";
+import { ArchiveIntegrityDescription } from "./archive-integrity-description";
 import { CatalogReviewEditor } from "./catalog-review-editor";
 import {
   cancelEncodeJob,
@@ -1260,6 +1261,7 @@ export function DashboardView({
                 <p>
                   Archive integrity: {archiveIntegrityLabel(archive.integrity)}
                 </p>
+                <ArchiveIntegrityDescription {...archive} />
               </div>
               <span
                 className="attention-mark"

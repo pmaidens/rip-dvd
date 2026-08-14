@@ -12,6 +12,7 @@ import {
   type DvdCopyRunner,
   withCancelledDvdArchiveInactive,
 } from "./dvd-archiver.js";
+import type { DvdSalvageValidator } from "./dvd-salvage-validator.js";
 
 export type {
   BoundOpticalDrive,
@@ -27,6 +28,7 @@ export interface PollArchiveWorkerOptions {
   hardware: OpticalDriveHardware;
   log(message: string): void;
   originalsLibraryPath?: string;
+  salvageValidator?: DvdSalvageValidator;
   signal: AbortSignal;
   workerId?: string;
 }
@@ -113,6 +115,7 @@ async function pollArchiveWorkerWithDriveAdmission(
     hardware,
     log,
     originalsLibraryPath,
+    salvageValidator,
     signal,
     workerId = "archive-worker",
   }: PollArchiveWorkerOptions,
@@ -224,6 +227,7 @@ async function pollArchiveWorkerWithDriveAdmission(
         hardware,
         log,
         originalsLibraryPath,
+        salvageValidator,
         signal,
         workerId,
       });

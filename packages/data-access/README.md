@@ -286,7 +286,10 @@ provenance, archives matching observations, completes the attempt, and fulfills
 matching requests in one immediate transaction. Archive Integrity evidence is
 part of that same publication transaction: historical Original Disc Archives
 remain `unknown`, while a newly observed zero-damage recovery is `clean_read`
-with its recovery-policy version and zero bad-sector evidence. Failure and
+with its recovery-policy version and zero bad-sector evidence. A rescued image
+whose unreadable sectors are proved to occupy only unused filesystem space is
+published as `watchable_salvage` with the versioned acceptance policy and its
+normalized, bounded bad-sector ranges. Failure and
 abortion update the attempt and request together. A stale attempt cannot mutate
 a later attempt.
 Each recovery pass bounds ordinary expired claims to 100 visible failures.
