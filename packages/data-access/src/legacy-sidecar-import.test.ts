@@ -1189,6 +1189,119 @@ describe("legacy sidecar import", () => {
   });
 
   it.each([
+    ["current", "missing"],
+    ["current", "corrupt"],
+    ["legacy", "missing"],
+    ["legacy", "corrupt"],
+  ] as const)(
+    "fails closed for %s marker provenance when the live sidecar is %s and released history collides",
+    (markerIdentity, liveSidecarState) => {
+      const fixture = createFixture();
+      const markerPath = join(
+        fixture.originalsLibraryPath,
+        ".rip-dvd-sqlite-catalog",
+      );
+      expect(fixture.access.legacySidecars.importLibrary({
+        originalsLibraryPath: fixture.originalsLibraryPath,
+      })).toMatchObject({ issues: [] });
+      const trailerJob = fixture.access.encodeJobs.list().find(
+        (job) => job.outputPath === fixture.trailerOutputPath,
+      )!;
+      const originalSelection = fixture.access.catalog.listDiscSelections({
+        ids: [trailerJob.discSelectionId],
+      })[0]!;
+      fixture.access.encodeJobs.requestCancellation(trailerJob.id);
+      let archive = fixture.access.catalog.listOriginalDiscArchives({
+        ids: [originalSelection.originalDiscArchiveId],
+      })[0]!;
+      fixture.access.catalog.correctDiscSelection(originalSelection.id, {
+        originalDiscArchiveId: archive.id,
+        catalogRevision: archive.updatedAt,
+        mediaItemId: originalSelection.mediaItemId,
+        sourceIdentity: originalSelection.sourceIdentity,
+      });
+
+      const duplicateMediaItem = fixture.access.catalog.createMediaItem({
+        kind: "bonus_feature",
+        title: "Trailer history collision",
+      });
+      const duplicateSelection = fixture.access.catalog.createDiscSelection({
+        originalDiscArchiveId: archive.id,
+        mediaItemId: duplicateMediaItem.id,
+        sourceIdentity: originalSelection.sourceIdentity,
+      });
+      completeCatalogReview(fixture.access, archive.id);
+      fixture.access.encodingProfiles.setActive({
+        id: trailerJob.encodingProfileId,
+        mediaDomain: "dvd_video",
+        isActive: true,
+      });
+      const duplicateJob = fixture.access.encodeJobs.enqueue({
+        discSelectionId: duplicateSelection.id,
+        encodingProfileId: trailerJob.encodingProfileId,
+        outputPath: trailerJob.outputPath,
+      });
+      fixture.access.encodeJobs.requestCancellation(duplicateJob.id);
+      archive = fixture.access.catalog.listOriginalDiscArchives({
+        ids: [archive.id],
+      })[0]!;
+      fixture.access.catalog.correctDiscSelection(duplicateSelection.id, {
+        originalDiscArchiveId: archive.id,
+        catalogRevision: archive.updatedAt,
+        mediaItemId: duplicateSelection.mediaItemId,
+        sourceIdentity: duplicateSelection.sourceIdentity,
+      });
+
+      if (markerIdentity === "legacy") {
+        const currentMarker = JSON.parse(
+          readFileSync(markerPath, "utf8"),
+        ) as {
+          legacyJobs: Array<{ logicalKey: string }>;
+          legacySidecars: unknown[];
+        };
+        const legacyJobs = currentMarker.legacyJobs.map((job) => ({
+          ...job,
+          logicalKey: job.logicalKey.split("\0").slice(0, 3).join("\0"),
+        }));
+        writeFileSync(markerPath, JSON.stringify({
+          ...currentMarker,
+          legacyJobs,
+          snapshotDigest: createHash("sha256")
+            .update(
+              `${JSON.stringify(currentMarker.legacySidecars)}\n${
+                JSON.stringify(legacyJobs)
+              }`,
+            )
+            .digest("hex"),
+        }));
+      }
+      if (liveSidecarState === "missing") {
+        unlinkSync(fixture.sidecarPath);
+      } else {
+        writeFileSync(fixture.sidecarPath, "{bad");
+      }
+
+      const report = fixture.access.legacySidecars.importLibrary({
+        originalsLibraryPath: fixture.originalsLibraryPath,
+      });
+
+      expect(report.issues).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          code: "duplicate_record",
+          message: expect.stringMatching(
+            /multiple retired Encode Jobs.*provenance/i,
+          ),
+        }),
+      ]));
+      expect(JSON.parse(readFileSync(markerPath, "utf8"))).toMatchObject({
+        legacyQueueStatus: "repair",
+      });
+      fixture.access.close();
+    },
+    60_000,
+  );
+
+  it.each([
     {
       decoyTitle: "Alternate extra",
       expectedOutcome: "resolved" as const,
@@ -3431,6 +3544,73 @@ describe("legacy sidecar import", () => {
     );
 
     fixture.access.close();
+  });
+
+  it("resolves legacy logical identity to the initial job before correction successors", () => {
+    const fixture = createFixture();
+    const markerPath = join(
+      fixture.originalsLibraryPath,
+      ".rip-dvd-sqlite-catalog",
+    );
+    expect(fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    })).toMatchObject({ issues: [] });
+    const initialJob = fixture.access.encodeJobs.list().find(
+      (job) => job.outputPath === fixture.movieOutputPath,
+    )!;
+    fixture.access.close();
+
+    const sqlite = new DatabaseSync(fixture.databasePath);
+    sqlite.exec("pragma foreign_keys = off");
+    sqlite.prepare(
+      "create temp table preserved_initial_job as select * from encode_jobs where id = ?",
+    ).run(initialJob.id);
+    sqlite.prepare("delete from encode_jobs where id = ?").run(initialJob.id);
+    const insertSuccessor = sqlite.prepare(`
+      insert into encode_jobs (
+        id, predecessor_encode_job_id, disc_selection_id,
+        encoding_profile_id, output_path, reserves_output_path, status,
+        created_at, updated_at
+      ) values (?, ?, ?, ?, ?, 0, 'cancelled', ?, ?)
+    `);
+    const timestamp = Date.now();
+    insertSuccessor.run(
+      "legacy-correction-successor-2",
+      "legacy-correction-successor-1",
+      initialJob.discSelectionId,
+      initialJob.encodingProfileId,
+      join(fixture.originalsLibraryPath, "successor-2.mkv"),
+      timestamp,
+      timestamp,
+    );
+    insertSuccessor.run(
+      "legacy-correction-successor-1",
+      initialJob.id,
+      initialJob.discSelectionId,
+      initialJob.encodingProfileId,
+      join(fixture.originalsLibraryPath, "successor-1.mkv"),
+      timestamp,
+      timestamp,
+    );
+    sqlite.exec("insert into encode_jobs select * from preserved_initial_job");
+    sqlite.exec("drop table preserved_initial_job");
+    unlinkSync(markerPath);
+    sqlite.close();
+
+    const access = createLegacySidecarDataAccess({
+      databasePath: fixture.databasePath,
+    });
+    const report = access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+
+    expect(report).toMatchObject({ sidecarsImported: 1, issues: [] });
+    expect(access.encodeJobs.list().filter(
+      (job) =>
+        job.discSelectionId === initialJob.discSelectionId &&
+        job.encodingProfileId === initialJob.encodingProfileId,
+    )).toHaveLength(3);
+    access.close();
   });
 
   it("preserves legacy archive and completion timestamps", () => {

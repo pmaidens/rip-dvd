@@ -1337,7 +1337,7 @@ export function createLegacySidecarImportAccess(
                   eq(encodeJobs.reservesOutputPath, true),
                 ))
                 .get();
-              const retiredHistoricalJob =
+              const retiredHistoricalJobs =
                 capturedSnapshotMatches && profile
                   ? transaction
                       .select({ id: encodeJobs.id })
@@ -1355,11 +1355,22 @@ export function createLegacySidecarImportAccess(
                         ),
                         eq(discSelections.sourceKey, job.sourceKey),
                         eq(discSelections.isCatalogActive, false),
+                        isNull(encodeJobs.predecessorEncodeJobId),
                       ))
-                      .limit(1)
-                      .get()
-                  : undefined;
-              if (retiredHistoricalJob) {
+                      .limit(2)
+                      .all()
+                  : [];
+              if (retiredHistoricalJobs.length > 1) {
+                persistenceIssues.push({
+                  code: "duplicate_record",
+                  jobIndex: job.jobIndex,
+                  message:
+                    "Legacy Encode Job matches multiple retired Encode Jobs and requires unambiguous provenance",
+                  sidecarPath: sidecar.sidecarPath,
+                });
+                continue;
+              }
+              if (retiredHistoricalJobs.length === 1) {
                 unchanged += 1;
                 persistedJobs.push(job);
                 continue;
@@ -1388,6 +1399,7 @@ export function createLegacySidecarImportAccess(
                         and(
                           eq(encodeJobs.discSelectionId, selection.id),
                           eq(encodeJobs.encodingProfileId, profile.id),
+                          isNull(encodeJobs.predecessorEncodeJobId),
                         ),
                       )
                       .get()
@@ -1780,7 +1792,7 @@ export function createLegacySidecarImportAccess(
               ),
             )
             .get();
-          const reconciledJob =
+          const reconciledJobs =
             archive && profile
               ? database
                   .select({ id: encodeJobs.id })
@@ -1800,11 +1812,13 @@ export function createLegacySidecarImportAccess(
                       outputPath === undefined
                         ? undefined
                         : eq(encodeJobs.outputPath, outputPath),
+                      isNull(encodeJobs.predecessorEncodeJobId),
                     ),
                   )
-                  .get()
-              : undefined;
-          if (!reconciledJob) {
+                  .limit(2)
+                  .all()
+              : [];
+          if (reconciledJobs.length !== 1) {
             hasIncompleteCapturedWork = true;
             fingerprintsRequiringHumanReview.add(fingerprint);
             reviewCandidates.delete(fingerprint);
@@ -1823,7 +1837,9 @@ export function createLegacySidecarImportAccess(
               code: "invalid_job",
               jobIndex: snapshot.jobIndex,
               message:
-                "The Encode Job captured at SQLite cutover is missing from both the legacy sidecars and SQLite catalog",
+                reconciledJobs.length === 0
+                  ? "The Encode Job captured at SQLite cutover is missing from both the legacy sidecars and SQLite catalog"
+                  : "The Encode Job captured at SQLite cutover matches multiple initial Encode Jobs in the SQLite catalog and requires unambiguous output provenance",
               sidecarPath: snapshot.sidecarPath,
             });
           }
