@@ -729,6 +729,7 @@ describe("DVD archive publication", () => {
         { startLba: 1, sectorCount: 1 },
         { startLba: 3, sectorCount: 1 },
       ]),
+      resumeImageFilesystemIdentity: "1:2",
       sizeBytes,
       signal: new AbortController().signal,
       onBytesCopied: () => undefined,
