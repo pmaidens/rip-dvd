@@ -321,6 +321,7 @@ export async function classifyDvdImageDamage({
       const extentBytes = record.readUInt32LE(10);
       const extentBytesBe = record.readUInt32BE(14);
       const flags = record[25]!;
+      const extendedAttributeSectorCount = record[1]!;
       const identifierLength = record[32]!;
       if (
         extentLba !== extentLbaBe ||
@@ -338,9 +339,17 @@ export async function classifyDvdImageDamage({
       if (!isSpecial && extentBytes > 0) {
         const name = identifier.toString("ascii").replace(/;\d+$/, "");
         const path = `${parentPath}/${name}`.replace(/^\/+/, "");
+        if (extendedAttributeSectorCount > 0) {
+          addExtent(
+            extentLba,
+            extendedAttributeSectorCount,
+            "filesystem_metadata",
+          );
+        }
+        const dataLba = extentLba + extendedAttributeSectorCount;
         if ((flags & 0x02) !== 0) {
           await parseIsoDirectory(
-            extentLba,
+            dataLba,
             extentBytes,
             path,
             visited,
@@ -348,7 +357,7 @@ export async function classifyDvdImageDamage({
         } else {
           isoDvdPaths.add(path.toUpperCase());
           addExtent(
-            extentLba,
+            dataLba,
             sectorCountForBytes(extentBytes),
             classifyDvdPath(path),
           );
@@ -433,6 +442,7 @@ export async function classifyDvdImageDamage({
       }
       const rootLba = rootRecord.readUInt32LE(2);
       const rootBytes = rootRecord.readUInt32LE(10);
+      const rootExtendedAttributeSectorCount = rootRecord[1]!;
       if (
         rootLba !== rootRecord.readUInt32BE(6) ||
         rootBytes !== rootRecord.readUInt32BE(14) ||
@@ -440,7 +450,19 @@ export async function classifyDvdImageDamage({
       ) {
         throw new Error("DVD ISO root directory extent is invalid");
       }
-      await parseIsoDirectory(rootLba, rootBytes, "", new Set());
+      if (rootExtendedAttributeSectorCount > 0) {
+        addExtent(
+          rootLba,
+          rootExtendedAttributeSectorCount,
+          "filesystem_metadata",
+        );
+      }
+      await parseIsoDirectory(
+        rootLba + rootExtendedAttributeSectorCount,
+        rootBytes,
+        "",
+        new Set(),
+      );
     }
     return volumeSpaceSize;
   };

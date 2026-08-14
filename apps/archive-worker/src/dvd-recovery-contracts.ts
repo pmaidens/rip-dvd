@@ -1,8 +1,8 @@
 import {
   createCleanReadArchiveIntegrityEvidence,
-  type ArchiveIntegrityEvidence,
   type CleanReadArchiveIntegrityEvidence,
   type UnreadableSectorRange,
+  type WatchableSalvageArchiveIntegrityEvidence,
 } from "@rip-dvd/data-access";
 
 export const DVD_SECTOR_SIZE_BYTES = 2_048;
@@ -35,7 +35,9 @@ export type DvdRecoveryResult =
 
 export interface PublishableDvdValidationResult {
   outcome: "publish";
-  integrityEvidence: ArchiveIntegrityEvidence;
+  integrityEvidence:
+    | CleanReadArchiveIntegrityEvidence
+    | WatchableSalvageArchiveIntegrityEvidence;
 }
 
 export interface UnvalidatedDvdRecoveryResult {
@@ -43,7 +45,6 @@ export interface UnvalidatedDvdRecoveryResult {
   recoveryResult: DamagedDvdRecoveryResult;
 }
 
-/** Extended with validated salvage outcomes by later rescue slices. */
 export type DvdValidationResult =
   | PublishableDvdValidationResult
   | UnvalidatedDvdRecoveryResult;

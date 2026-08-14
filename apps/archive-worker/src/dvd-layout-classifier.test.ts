@@ -26,10 +26,12 @@ function writeBothEndian16(buffer: Buffer, offset: number, value: number) {
 }
 
 function isoDirectoryRecord({
+  extendedAttributeSectorCount = 0,
   extentLba,
   identifier,
   isDirectory,
 }: {
+  extendedAttributeSectorCount?: number;
   extentLba: number;
   identifier: Buffer;
   isDirectory: boolean;
@@ -38,6 +40,7 @@ function isoDirectoryRecord({
     (identifier.byteLength % 2 === 0 ? 1 : 0);
   const record = Buffer.alloc(recordLength);
   record[0] = recordLength;
+  record[1] = extendedAttributeSectorCount;
   writeBothEndian32(record, 2, extentLba);
   writeBothEndian32(record, 10, DVD_SECTOR_SIZE_BYTES);
   record[25] = isDirectory ? 2 : 0;
@@ -59,12 +62,14 @@ function writeSyntheticIsoLayout(
   image: Buffer,
   {
     fileStartLba,
+    lastFileExtendedAttributeSectorCount = 0,
     pathTableLba,
     rootLba,
     videoDirectoryLba,
     volumeSpaceSize,
   }: {
     fileStartLba: number;
+    lastFileExtendedAttributeSectorCount?: number;
     pathTableLba: number;
     rootLba: number;
     videoDirectoryLba: number;
@@ -147,6 +152,7 @@ function writeSyntheticIsoLayout(
       isDirectory: false,
     }),
     isoDirectoryRecord({
+      extendedAttributeSectorCount: lastFileExtendedAttributeSectorCount,
       extentLba: fileStartLba + 3,
       identifier: Buffer.from("VTS_01_1.VOB;1"),
       isDirectory: false,
@@ -452,6 +458,28 @@ describe("DVD layout damage classification", () => {
     })).resolves.toEqual({
       outcome: "rejected",
       reason: "filesystem_metadata",
+    });
+  });
+
+  it("classifies file data after an ISO extended-attribute record", async () => {
+    const image = Buffer.alloc(64 * DVD_SECTOR_SIZE_BYTES);
+    writeSyntheticIsoLayout(image, {
+      fileStartLba: 22,
+      lastFileExtendedAttributeSectorCount: 1,
+      pathTableLba: 18,
+      rootLba: 20,
+      videoDirectoryLba: 21,
+      volumeSpaceSize: 60,
+    });
+    const fixture = writeFixture(image, 26);
+
+    await expect(classifyDvdImageDamage({
+      ...fixture,
+      expectedByteCount: fixture.sizeBytes,
+      unreadableSectorRanges: [{ startLba: 26, sectorCount: 1 }],
+    })).resolves.toEqual({
+      outcome: "rejected",
+      reason: "referenced_content",
     });
   });
 });
