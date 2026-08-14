@@ -210,7 +210,9 @@ if (
 const persistentResumePath = prepareOutput(
   "/tmp/rip-dvd-reader-persistent-resume.img",
 );
-writeFileSync(persistentResumePath, isolatedContent);
+const contaminatedPersistentResumeContent = Buffer.from(isolatedContent);
+contaminatedPersistentResumeContent.fill(91, 5 * 2_048, 6 * 2_048);
+writeFileSync(persistentResumePath, contaminatedPersistentResumeContent);
 const persistentResume = runTestResume(
   persistentResumePath,
   "5:always",
@@ -219,6 +221,9 @@ const persistentResume = runTestResume(
 const persistentResumeResult = recoveryResult(persistentResume.stderr);
 if (
   persistentResume.status !== 0 ||
+  !readFileSync(persistentResumePath)
+    .subarray(5 * 2_048, 6 * 2_048)
+    .equals(Buffer.alloc(2_048)) ||
   persistentResumeResult.badSectorCount !== 1 ||
   persistentResumeResult.badSectorBitmapHex !==
     isolatedResult.badSectorBitmapHex ||
@@ -230,6 +235,30 @@ if (
 ) {
   throw new Error(
     `libdvdcss persistent resume check failed: ${persistentResume.stderr}`,
+  );
+}
+
+const fullyMappedResumePath = prepareOutput(
+  "/tmp/rip-dvd-reader-fully-mapped-resume.img",
+);
+writeFileSync(fullyMappedResumePath, Buffer.alloc(content.byteLength, 37));
+const fullyMappedResume = runTestResume(
+  fullyMappedResumePath,
+  "none",
+  Buffer.alloc(content.byteLength / 2_048 / 8, 0xff).toString("hex"),
+);
+const fullyMappedProgress = fullyMappedResume.stderr
+  .trim()
+  .split("\n")
+  .filter((line) => / bytes copied$/.test(line));
+if (
+  fullyMappedResume.status !== 0 ||
+  !readFileSync(fullyMappedResumePath).equals(content) ||
+  fullyMappedProgress.length > 2 ||
+  fullyMappedProgress.at(-1) !== `${content.byteLength} bytes copied`
+) {
+  throw new Error(
+    `libdvdcss reader resume progress check failed: ${fullyMappedResume.stderr}`,
   );
 }
 

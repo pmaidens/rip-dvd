@@ -20,8 +20,8 @@
 #define READ_BLOCKS 31
 #define RECOVERY_READ_ATTEMPTS 2
 #define MAX_DVD_CONTENT_BYTES UINT64_C(9000000000)
-#define HASH_PROGRESS_INTERVAL_BYTES UINT64_C(67108864)
-#define HASH_PROGRESS_INTERVAL_NS INT64_C(1000000000)
+#define PROGRESS_INTERVAL_BYTES UINT64_C(67108864)
+#define PROGRESS_INTERVAL_NS INT64_C(1000000000)
 #define RECOVERY_POLICY_VERSION "dvd-recovery-v1"
 #define RECOVERY_RESULT_PREFIX "rip-dvd-recovery-result "
 
@@ -92,13 +92,36 @@ static int emit_hash_progress(struct operation_state *state,
             INT64_C(1000000000) +
         ((int64_t)current.tv_nsec - (int64_t)state->last_progress_at.tv_nsec);
     if (!force &&
-        bytes_read - state->last_progress_bytes < HASH_PROGRESS_INTERVAL_BYTES &&
-        elapsed_nanoseconds < HASH_PROGRESS_INTERVAL_NS) {
+        bytes_read - state->last_progress_bytes < PROGRESS_INTERVAL_BYTES &&
+        elapsed_nanoseconds < PROGRESS_INTERVAL_NS) {
         return 0;
     }
     fprintf(stderr, "%" PRIu64 " bytes hashed\n", bytes_read);
     state->last_progress_bytes = bytes_read;
     state->last_progress_at = current;
+    return 0;
+}
+
+static int emit_copy_progress(uint64_t bytes_copied,
+                              uint64_t *last_progress_bytes,
+                              struct timespec *last_progress_at, int force)
+{
+    struct timespec current;
+    if (clock_gettime(CLOCK_MONOTONIC, &current) != 0) {
+        return fail_errno("DVD copy progress clock failed");
+    }
+    int64_t elapsed_nanoseconds =
+        ((int64_t)current.tv_sec - (int64_t)last_progress_at->tv_sec) *
+            INT64_C(1000000000) +
+        ((int64_t)current.tv_nsec - (int64_t)last_progress_at->tv_nsec);
+    if (!force &&
+        bytes_copied - *last_progress_bytes < PROGRESS_INTERVAL_BYTES &&
+        elapsed_nanoseconds < PROGRESS_INTERVAL_NS) {
+        return 0;
+    }
+    fprintf(stderr, "%" PRIu64 " bytes copied\n", bytes_copied);
+    *last_progress_bytes = bytes_copied;
+    *last_progress_at = current;
     return 0;
 }
 
@@ -676,6 +699,14 @@ static int run_resume(struct read_backend *backend, const char *output_path,
     };
     uint64_t bytes_processed =
         size_bytes - prior_bad_sector_count * DVDCSS_BLOCK_SIZE;
+    uint64_t last_progress_bytes = bytes_processed;
+    struct timespec last_progress_at;
+    if (clock_gettime(CLOCK_MONOTONIC, &last_progress_at) != 0) {
+        free(allocation);
+        free(bad_sector_bitmap);
+        close(output_fd);
+        return fail_errno("DVD copy progress clock failed");
+    }
     int status = 0;
     for (uint64_t lba = 0; lba < total_sector_count; lba++) {
         size_t byte_index = (size_t)(lba / 8);
@@ -714,10 +745,25 @@ static int run_resume(struct read_backend *backend, const char *output_path,
             break;
         }
         if (!recovered) {
+            memset(buffer, 0, DVDCSS_BLOCK_SIZE);
+            if (write_all_at(output_fd, buffer, DVDCSS_BLOCK_SIZE,
+                             (off_t)(lba * DVDCSS_BLOCK_SIZE)) != 0) {
+                status = 1;
+                break;
+            }
             mark_bad_sector(&recovery, lba);
         }
         bytes_processed += DVDCSS_BLOCK_SIZE;
-        fprintf(stderr, "%" PRIu64 " bytes copied\n", bytes_processed);
+        if (emit_copy_progress(bytes_processed, &last_progress_bytes,
+                               &last_progress_at, 0) != 0) {
+            status = 1;
+            break;
+        }
+    }
+    if (status == 0 && last_progress_bytes != size_bytes &&
+        emit_copy_progress(size_bytes, &last_progress_bytes,
+                           &last_progress_at, 1) != 0) {
+        status = 1;
     }
     if (status == 0 && fsync(output_fd) != 0) {
         status = fail_errno("DVD rescue image sync failed");
