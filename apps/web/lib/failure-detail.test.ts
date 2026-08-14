@@ -40,6 +40,16 @@ describe("formatFailureDetail", () => {
       "The archive worker reached the end of the disc before its declared size.",
     ],
     [
+      "rescued unreadable sectors",
+      "DVD rescue requires validation: 3 unreadable sectors in 2 areas; LBAs 12, 20-21",
+      "The rescued image was retained for validation with 3 unreadable sectors across 2 areas (LBAs 12, 20–21).",
+    ],
+    [
+      "bounded rescued unreadable areas",
+      "DVD rescue requires validation: 10 unreadable sectors in 10 areas; LBAs 0, 2, 4, 6, 8, 10, 12, 14, and 2 more",
+      "The rescued image was retained for validation with 10 unreadable sectors across 10 areas (LBAs 0, 2, 4, 6, 8, 10, 12, 14, and 2 more).",
+    ],
+    [
       "timeout",
       "DVD archive copy timed out",
       "The worker operation timed out.",
