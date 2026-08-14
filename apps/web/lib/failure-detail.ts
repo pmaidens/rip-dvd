@@ -157,6 +157,30 @@ function formatByteOffset(byteOffset: string): string {
   return byteOffset.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 }
 
+function formatArchiveRescueFailure(errorMessage: string): string | null {
+  const damage =
+    /^DVD rescue requires validation: (\d{1,7}) unreadable sectors? in (\d{1,7}) areas?; LBAs (.{1,200})$/.exec(
+      errorMessage,
+    );
+  if (
+    damage?.[1] === undefined ||
+    damage[2] === undefined ||
+    damage[3] === undefined ||
+    !/^\d{1,7}(?:-\d{1,7})?(?:, \d{1,7}(?:-\d{1,7})?){0,7}(?:, and \d{1,7} more)?$/.test(
+      damage[3],
+    )
+  ) {
+    return null;
+  }
+  const badSectorCount = Number(damage[1]);
+  const badAreaCount = Number(damage[2]);
+  if (badSectorCount <= 0 || badAreaCount <= 0) {
+    return null;
+  }
+  const ranges = damage[3].replace(/(\d+)-(\d+)/g, "$1–$2");
+  return `The rescued image was retained for validation with ${badSectorCount} unreadable ${badSectorCount === 1 ? "sector" : "sectors"} across ${badAreaCount} ${badAreaCount === 1 ? "area" : "areas"} (LBAs ${ranges}).`;
+}
+
 function formatArchiveCopyFailure(errorMessage: string): string | null {
   const readFailure =
     /DVD content read failed at byte (\d+)/i.exec(errorMessage);
@@ -186,6 +210,10 @@ function formatArchiveCopyFailure(errorMessage: string): string | null {
 export function formatFailureDetail(errorMessage: string | null): string | null {
   if (errorMessage === null) {
     return null;
+  }
+  const archiveRescueFailure = formatArchiveRescueFailure(errorMessage);
+  if (archiveRescueFailure !== null) {
+    return archiveRescueFailure;
   }
   const archiveCopyFailure = formatArchiveCopyFailure(errorMessage);
   if (archiveCopyFailure !== null) {

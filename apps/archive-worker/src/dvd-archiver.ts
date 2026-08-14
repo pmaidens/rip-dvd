@@ -39,7 +39,9 @@ import {
   type ActiveBoundedProcess,
 } from "./bounded-child-process.js";
 import {
-  createCleanDvdRecoveryResult,
+  DVD_RECOVERY_RESULT_PREFIX,
+  formatUnvalidatedDvdRecovery,
+  parseDvdRecoveryResultProtocol,
   type DvdRecoveryResult,
   type DvdValidationResult,
   validateDvdRecoveryResult,
@@ -48,6 +50,7 @@ import {
 const MAX_ARCHIVE_PATH_BYTES = 4_096;
 const MAX_ARCHIVE_RECOVERY_ENTRIES = 4_096;
 const MAX_COPY_DIAGNOSTIC_BYTES = 65_536;
+const MAX_COPY_PROTOCOL_BYTES = 1_200_000;
 const MAX_PROC_ENTRIES = 4_096;
 const MAX_PROC_FILE_DESCRIPTORS = 65_536;
 const COPY_TIMEOUT_MS = 12 * 60 * 60_000;
@@ -245,6 +248,7 @@ export function createNodeDvdCopyRunner({
       let authorizationBuffer = "";
       let progressBuffer = "";
       let diagnostics = "";
+      let recoveryResultPayload: string | undefined;
       let resolveResult!: (result: DvdRecoveryResult) => void;
       let rejectResult!: (reason: unknown) => void;
       let resolveClosed!: () => void;
@@ -328,12 +332,21 @@ export function createNodeDvdCopyRunner({
       };
       const parseCopyOutput = (text: string, flush = false) => {
         progressBuffer += text;
-        if (progressBuffer.length > MAX_COPY_DIAGNOSTIC_BYTES) {
-          progressBuffer = progressBuffer.slice(-MAX_COPY_DIAGNOSTIC_BYTES);
+        if (progressBuffer.length > MAX_COPY_PROTOCOL_BYTES) {
+          throw new Error("DVD recovery helper output exceeded its bound");
         }
         const segments = progressBuffer.split(/[\r\n]/);
         progressBuffer = flush ? "" : (segments.pop() ?? "");
         for (const segment of segments) {
+          if (segment.startsWith(DVD_RECOVERY_RESULT_PREFIX)) {
+            if (recoveryResultPayload !== undefined) {
+              throw new Error("DVD recovery helper result is malformed");
+            }
+            recoveryResultPayload = segment.slice(
+              DVD_RECOVERY_RESULT_PREFIX.length,
+            );
+            continue;
+          }
           const match = /^\s*(\d+)\s+bytes\b/.exec(segment);
           const bytes = match ? Number(match[1]) : Number.NaN;
           if (Number.isSafeInteger(bytes) && bytes >= 0) {
@@ -382,7 +395,20 @@ export function createNodeDvdCopyRunner({
           return;
         }
         if (code === 0) {
-          resolveOperation(createCleanDvdRecoveryResult(request.sizeBytes));
+          if (recoveryResultPayload === undefined) {
+            rejectOperation(new Error("DVD recovery helper result is missing"));
+            return;
+          }
+          try {
+            resolveOperation(
+              parseDvdRecoveryResultProtocol(
+                recoveryResultPayload,
+                request.sizeBytes,
+              ),
+            );
+          } catch (error) {
+            rejectOperation(error);
+          }
           return;
         }
         const detail = optionalBoundedText(diagnostics, 500);
@@ -930,6 +956,7 @@ export async function preserveDvdArchive({
   }
   await movePartialAside(partialPath);
   let finalPublished = false;
+  let retainedForValidation = false;
   let validation: DvdValidationResult | undefined;
   try {
     onProgress({ phase: "copying", progressPercent: 0 });
@@ -967,6 +994,15 @@ export async function preserveDvdArchive({
     }
     await verifySource();
     signal.throwIfAborted();
+    if (validation.outcome === "requires_validation") {
+      onProgress({ phase: "verifying", progressPercent: 99 });
+      await sync(partialPath);
+      signal.throwIfAborted();
+      await movePartialAside(partialPath);
+      await sync(root);
+      retainedForValidation = true;
+      throw new Error(formatUnvalidatedDvdRecovery(validation.recoveryResult));
+    }
     onProgress({ phase: "finalizing", progressPercent: 99 });
     await sync(partialPath);
     // A hard link publishes the fully-synced inode without the overwrite
@@ -982,7 +1018,10 @@ export async function preserveDvdArchive({
     if (finalPublished) {
       await quarantinePublishedArchive(archivePath);
       await movePartialAside(partialPath);
-    } else if (!runner.isActive(safeDevicePath, partialPath)) {
+    } else if (
+      !retainedForValidation &&
+      !runner.isActive(safeDevicePath, partialPath)
+    ) {
       await movePartialAside(partialPath);
     }
     throw error;
