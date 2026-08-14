@@ -100,9 +100,9 @@ function parseClassifierResult(payload: string): DvdSalvageValidationResult {
   throw new Error("DVD salvage classifier returned malformed output");
 }
 
-function normalizedTitleMap(titleMap: DvdTitleMap): string {
+function canonicalizeDvdTitles(titles: DvdTitleMap["titles"]): string {
   return JSON.stringify(
-    [...titleMap.titles].sort((left, right) => left.number - right.number),
+    [...titles].sort((left, right) => left.number - right.number),
   );
 }
 
@@ -187,10 +187,8 @@ export function createNodeDvdSalvageValidator({
         });
       }
       if (
-        normalizedTitleMap({
-          ...expectedTitleMap,
-          titles: observedTitleMap.titles,
-        }) !== normalizedTitleMap(expectedTitleMap)
+        canonicalizeDvdTitles(observedTitleMap.titles) !==
+          canonicalizeDvdTitles(expectedTitleMap.titles)
       ) {
         throw new Error("DVD salvage navigation validation changed the title map");
       }

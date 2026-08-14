@@ -353,6 +353,7 @@ describe("end-to-end operations dashboard workflow", () => {
     ["bup", "DVD backup data"],
     ["menu", "DVD menu data"],
     ["navigation", "DVD navigation data"],
+    ["referenced_content", "referenced DVD content"],
     ["ambiguous", "an ambiguous DVD region"],
     ["unmappable", "an unmappable DVD region"],
   ] as const)(
