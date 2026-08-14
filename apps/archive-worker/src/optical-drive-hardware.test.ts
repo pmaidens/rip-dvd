@@ -4,6 +4,7 @@ import { constants as fsConstants } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { performance } from "node:perf_hooks";
 import { promisify } from "node:util";
 
 import { describe, expect, it, vi } from "vitest";
@@ -1091,6 +1092,64 @@ describe("Linux Optical Drive hardware boundary", () => {
     });
     expect(runner.run).toHaveBeenCalledTimes(3);
     expect(contentReader.hash).toHaveBeenCalledOnce();
+  });
+
+  it("detects an inserted DVD when the media generation does not advance", async () => {
+    const now = vi.spyOn(performance, "now").mockReturnValue(200);
+    try {
+      const runner: CommandRunner = {
+        run: vi.fn()
+          .mockResolvedValueOnce({
+            exitCode: 1,
+            stdout: "",
+            stderr: "Device not ready: no medium found",
+          })
+          .mockResolvedValueOnce({
+            exitCode: 0,
+            stdout: [
+              "Disc Title: INSERTED_DISC",
+              "Title: 01, Length: 00:01:00.000 Chapters: 1, Cells: 1, Audio streams: 0, Subpictures: 0",
+            ].join("\n"),
+            stderr: "",
+          })
+          .mockResolvedValueOnce({
+            exitCode: 0,
+            stdout: "1024\n",
+            stderr: "",
+          }),
+      };
+      const contentReader: DiscContentReader = {
+        hash: vi.fn().mockResolvedValue(`sha256:${"a".repeat(64)}`),
+      };
+      const hardware = createTestOpticalDriveHardware({
+        platform: "linux",
+        runner,
+        contentReader,
+        mediaGenerationObserver: stableMediaGenerationObserver(),
+      });
+      const signal = new AbortController().signal;
+
+      await expect(hardware.scanDvd(boundOpticalDrive(), signal)).rejects.toEqual(
+        expect.objectContaining<Partial<DiscInspectionError>>({
+          kind: "abort",
+          reasonCode: "no_medium",
+        }),
+      );
+
+      // Worker polls start five seconds apart, so the next scan can begin less
+      // than five seconds after the previous lsdvd call completed.
+      now.mockReturnValue(5_000);
+
+      await expect(hardware.scanDvd(boundOpticalDrive(), signal)).resolves.toMatchObject({
+        volumeLabel: "INSERTED_DISC",
+        fingerprint: `sha256:${"a".repeat(64)}`,
+        isNewMediumObservation: true,
+      });
+      expect(runner.run).toHaveBeenCalledTimes(3);
+      expect(contentReader.hash).toHaveBeenCalledOnce();
+    } finally {
+      now.mockRestore();
+    }
   });
 
   it("detects empty-to-disc and A-to-B changes without an external poller or rediscovery", async () => {
