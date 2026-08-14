@@ -1,4 +1,12 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -16,6 +24,9 @@ import {
   createCleanDvdRecoveryResult,
   createDamagedDvdRecoveryResult,
 } from "../../archive-worker/src/dvd-recovery-contracts.js";
+import {
+  dvdRescueWorkspacePaths,
+} from "../../archive-worker/src/dvd-rescue-workspace.js";
 import {
   pollEncodeWorker,
   type HandBrakeRunner,
@@ -458,7 +469,14 @@ describe("end-to-end operations dashboard workflow", () => {
         expect.objectContaining({ id: request.id }),
       ]);
       expect(access.catalog.listOriginalDiscArchives()).toEqual([]);
-      expect(readFileSync(`${rescuedPartialPath}.failed`)).toEqual(rescuedImage);
+      const rescuePaths = dvdRescueWorkspacePaths(
+        realpathSync(originalsLibraryPath),
+        request.id,
+      );
+      expect(existsSync(rescuedPartialPath!)).toBe(false);
+      expect(existsSync(`${rescuedPartialPath}.failed`)).toBe(false);
+      expect(readFileSync(rescuePaths.imagePath)).toEqual(rescuedImage);
+      expect(existsSync(rescuePaths.mapPath)).toBe(true);
       const dashboard = await readDashboard(access);
       expect(dashboard.html).toContain(
         `Automatic salvage validation rejected damage to ${description}`,
