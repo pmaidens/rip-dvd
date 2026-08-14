@@ -142,7 +142,6 @@ describe("Optical Drive DVD scan coordinator", () => {
   });
 
   it("recovers valid titles when unreadable IFO decoys crash the full scan", async () => {
-    const contentId = `sha256:${"d".repeat(64)}`;
     const runner = {
       run: vi
         .fn()
@@ -183,14 +182,12 @@ describe("Optical Drive DVD scan coordinator", () => {
           stderr: "",
         }),
     };
-    const contentReader = { hash: vi.fn().mockResolvedValue(contentId) };
     const { binding, scanner, signal } = await createScannerFixture({
-      contentReader,
       runner,
     });
 
     await expect(scanner.scan(binding, signal)).resolves.toMatchObject({
-      fingerprint: contentId,
+      fingerprint: expect.stringMatching(/^dvdmeta-sha256:[0-9a-f]{64}$/),
       scanData: {
         titles: [{ number: 1 }, { number: 2 }],
       },
@@ -208,7 +205,13 @@ describe("Optical Drive DVD scan coordinator", () => {
       ["-q", "-t", "5", "-Oh", "-a", "-c", "-s", "/dev/sr0"],
       expect.any(Object),
     );
-    expect(contentReader.hash).toHaveBeenCalledOnce();
+    expect(runner.run).toHaveBeenNthCalledWith(
+      7,
+      "blockdev",
+      ["--getsize64", "/dev/sr0"],
+      expect.any(Object),
+    );
+    expect(runner.run).toHaveBeenCalledTimes(7);
   });
 
   it("reports malformed lsdvd output as a structured metadata failure", async () => {
