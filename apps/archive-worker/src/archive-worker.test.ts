@@ -2,6 +2,7 @@ import {
   existsSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -87,6 +88,119 @@ function stableDeviceBinding() {
       },
     ),
     observeMediaGeneration: vi.fn(async () => "test-media-generation"),
+  };
+}
+
+async function exerciseWatchabilityWorkerScenario({
+  beforePoll,
+  ranges,
+  titleCount = 1,
+  validation,
+}: {
+  beforePoll?: (access: ReturnType<typeof openTestDataAccess>) => void;
+  ranges: readonly { sectorCount: number; startLba: number }[];
+  titleCount?: number;
+  validation:
+    | {
+      badSectorCountsByTitle: readonly {
+        badSectorCount: number;
+        titleNumber: number;
+      }[];
+      outcome: "accepted";
+    }
+    | { outcome: "rejected"; reason: DvdSalvageRejectionReason };
+}) {
+  const access = openTestDataAccess();
+  const originalsLibraryPath = mkdtempSync(
+    join(tmpdir(), "rip-dvd-originals-policy-integration-"),
+  );
+  temporaryDirectories.push(originalsLibraryPath);
+  const fingerprint = `dvdmeta-sha256:${"9".repeat(64)}`;
+  const scanData = {
+    schemaVersion: 2 as const,
+    contentId: fingerprint,
+    titles: Array.from({ length: titleCount }, (_, index) => ({
+      number: index + 1,
+      durationSeconds: 3_600,
+      chapters: 10,
+      audioStreams: [],
+      subtitles: [],
+    })),
+  };
+  const discoveredDrive = {
+    devicePath: "/dev/sr0",
+    displayName: "Policy integration drive",
+    vendor: "Pioneer",
+    product: "DVD-RW",
+    serialNumber: "ARCHIVE-POLICY-INTEGRATION-001",
+  };
+  const drive = access.catalog.reconcileOpticalDrives([
+    { ...discoveredDrive, isConfiguredDevice: true },
+  ])[0]!;
+  const disc = access.catalog.registerDetectedDisc({
+    opticalDriveId: drive.id,
+    discKind: "dvd",
+    fingerprint,
+    scanData,
+  });
+  access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+  const request = access.archiveRequests.create({ detectedDiscId: disc.id });
+  const highestEndLba = ranges.reduce(
+    (highest, range) =>
+      Math.max(highest, range.startLba + range.sectorCount),
+    0,
+  );
+  const sizeBytes = Math.max(4, highestEndLba + 1) * 2_048;
+  const rescuedImage = Buffer.alloc(sizeBytes, 5);
+  for (const range of ranges) {
+    rescuedImage.fill(
+      0,
+      range.startLba * 2_048,
+      (range.startLba + range.sectorCount) * 2_048,
+    );
+  }
+  let rescuedPartialPath: string | undefined;
+  const copyRunner: DvdCopyRunner = {
+    copy: vi.fn(async ({ outputPath }) => {
+      rescuedPartialPath = outputPath;
+      writeFileSync(outputPath, rescuedImage);
+      return createDamagedDvdRecoveryResult(sizeBytes, ranges);
+    }),
+    isActive: () => false,
+    withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+    waitForInactive: vi.fn(async () => undefined),
+  };
+  const salvageValidator = { validate: vi.fn().mockResolvedValue(validation) };
+  beforePoll?.(access);
+
+  await pollArchiveWorker({
+    access,
+    configuredDevicePath: "/dev/sr0",
+    copyRunner,
+    hardware: {
+      ...stableDeviceBinding(),
+      discover: vi.fn().mockResolvedValue([discoveredDrive]),
+      scanDvd: vi.fn().mockResolvedValue({
+        fingerprint,
+        scanData,
+        sizeBytes,
+      }),
+    },
+    log: vi.fn(),
+    originalsLibraryPath,
+    salvageValidator,
+    signal: new AbortController().signal,
+    workerId: "archive-worker-policy-integration-test",
+  });
+
+  return {
+    access,
+    fingerprint,
+    originalsLibraryPath,
+    request,
+    rescuedImage,
+    rescuedPartialPath,
+    salvageValidator,
   };
 }
 
@@ -576,7 +690,10 @@ describe("archive worker polling", () => {
       log: vi.fn(),
       originalsLibraryPath,
       salvageValidator: {
-        validate: vi.fn().mockResolvedValue({ outcome: "accepted" }),
+        validate: vi.fn().mockResolvedValue({
+          badSectorCountsByTitle: [],
+          outcome: "accepted",
+        }),
       },
       signal: new AbortController().signal,
       workerId: "archive-worker-unused-salvage-test",
@@ -598,13 +715,227 @@ describe("archive worker polling", () => {
     expect(archive).toMatchObject({
       detectedDiscId: disc.id,
       integrity: "watchable_salvage",
-      integrityPolicyVersion: "dvd-watchable-salvage-v1",
+      integrityPolicyVersion: "dvd-watchable-salvage-v2",
       badSectorCount: 1,
       badAreaCount: 1,
       badSectorRanges: [{ startLba: 1, sectorCount: 1 }],
+      badSectorCountsByTitle: [],
     });
     expect(readFileSync(archive.archivePath)).toEqual(rescuedImage);
     expect(existsSync(`${archive.archivePath}.failed`)).toBe(false);
+  });
+
+  it.each([
+    {
+      name: "a one-sector bad run",
+      ranges: [{ startLba: 1, sectorCount: 1 }],
+      validation: {
+        badSectorCountsByTitle: [{ badSectorCount: 1, titleNumber: 1 }],
+        outcome: "accepted" as const,
+      },
+    },
+    {
+      name: "a two-sector bad run",
+      ranges: [{ startLba: 1, sectorCount: 2 }],
+      validation: {
+        outcome: "rejected" as const,
+        reason: "consecutive_damage" as const,
+      },
+    },
+    {
+      name: "16 bad sectors in one title",
+      ranges: Array.from({ length: 16 }, (_, index) => ({
+        startLba: index * 2 + 1,
+        sectorCount: 1,
+      })),
+      validation: {
+        badSectorCountsByTitle: [{ badSectorCount: 16, titleNumber: 1 }],
+        outcome: "accepted" as const,
+      },
+    },
+    {
+      name: "17 bad sectors in one title",
+      ranges: Array.from({ length: 17 }, (_, index) => ({
+        startLba: index * 2 + 1,
+        sectorCount: 1,
+      })),
+      validation: {
+        outcome: "rejected" as const,
+        reason: "policy_limit" as const,
+      },
+    },
+    {
+      name: "32 bad sectors across the disc",
+      ranges: Array.from({ length: 32 }, (_, index) => ({
+        startLba: index * 2 + 1,
+        sectorCount: 1,
+      })),
+      validation: {
+        badSectorCountsByTitle: [],
+        outcome: "accepted" as const,
+      },
+    },
+    {
+      name: "33 bad sectors across the disc",
+      ranges: Array.from({ length: 33 }, (_, index) => ({
+        startLba: index * 2 + 1,
+        sectorCount: 1,
+      })),
+      validation: {
+        outcome: "rejected" as const,
+        reason: "policy_limit" as const,
+      },
+    },
+    {
+      name: "a shared VOB referenced by two titles",
+      ranges: [{ startLba: 1, sectorCount: 1 }],
+      titleCount: 2,
+      validation: {
+        badSectorCountsByTitle: [
+          { badSectorCount: 1, titleNumber: 1 },
+          { badSectorCount: 1, titleNumber: 2 },
+        ],
+        outcome: "accepted" as const,
+      },
+    },
+    {
+      name: "combined unused-space and payload damage",
+      ranges: [
+        { startLba: 1, sectorCount: 1 },
+        { startLba: 3, sectorCount: 1 },
+        { startLba: 5, sectorCount: 1 },
+      ],
+      validation: {
+        badSectorCountsByTitle: [{ badSectorCount: 2, titleNumber: 1 }],
+        outcome: "accepted" as const,
+      },
+    },
+    {
+      name: "an indeterminate DVD layout",
+      ranges: [{ startLba: 1, sectorCount: 1 }],
+      validation: {
+        outcome: "rejected" as const,
+        reason: "ambiguous" as const,
+      },
+    },
+    {
+      name: "a decoder exactly one second short",
+      ranges: [{ startLba: 1, sectorCount: 1 }],
+      validation: {
+        badSectorCountsByTitle: [{ badSectorCount: 1, titleNumber: 1 }],
+        outcome: "accepted" as const,
+      },
+    },
+    {
+      name: "a decoder more than one second short",
+      ranges: [{ startLba: 1, sectorCount: 1 }],
+      validation: {
+        outcome: "rejected" as const,
+        reason: "decoder_duration" as const,
+      },
+    },
+    {
+      name: "a decoder at the 0.0001 failure-rate limit",
+      ranges: [{ startLba: 1, sectorCount: 1 }],
+      validation: {
+        badSectorCountsByTitle: [{ badSectorCount: 1, titleNumber: 1 }],
+        outcome: "accepted" as const,
+      },
+    },
+    {
+      name: "a decoder above the 0.0001 failure-rate limit",
+      ranges: [{ startLba: 1, sectorCount: 1 }],
+      validation: {
+        outcome: "rejected" as const,
+        reason: "decoder_rate" as const,
+      },
+    },
+  ])(
+    "drives an Archive Job through the complete policy for $name",
+    async ({ ranges, titleCount, validation }) => {
+      const scenario = await exerciseWatchabilityWorkerScenario({
+        ranges,
+        titleCount,
+        validation,
+      });
+
+      expect(scenario.salvageValidator.validate).toHaveBeenCalledOnce();
+      if (validation.outcome === "accepted") {
+        expect(scenario.access.archiveJobs.list(["completed"])).toHaveLength(1);
+        expect(scenario.access.archiveRequests.list(["fulfilled"])).toEqual([
+          expect.objectContaining({ id: scenario.request.id }),
+        ]);
+        const archive = scenario.access.catalog.listOriginalDiscArchives()[0]!;
+        expect(archive).toMatchObject({
+          integrity: "watchable_salvage",
+          integrityPolicyVersion: "dvd-watchable-salvage-v2",
+          badSectorCount: ranges.reduce(
+            (total, range) => total + range.sectorCount,
+            0,
+          ),
+          badAreaCount: ranges.length,
+          badSectorRanges: ranges,
+          badSectorCountsByTitle: validation.badSectorCountsByTitle,
+        });
+        expect(readFileSync(archive.archivePath)).toEqual(
+          scenario.rescuedImage,
+        );
+        expect(existsSync(`${archive.archivePath}.failed`)).toBe(false);
+      } else {
+        expect(scenario.access.archiveJobs.list(["failed"])).toEqual([
+          expect.objectContaining({
+            archiveRequestId: scenario.request.id,
+            originalDiscArchiveId: null,
+            progressPhase: "verifying",
+          }),
+        ]);
+        expect(
+          scenario.access.archiveRequests.list(["needs_attention"]),
+        ).toEqual([expect.objectContaining({ id: scenario.request.id })]);
+        expect(scenario.access.catalog.listOriginalDiscArchives()).toEqual([]);
+        expect(scenario.rescuedPartialPath).toBeDefined();
+        expect(readFileSync(`${scenario.rescuedPartialPath}.failed`)).toEqual(
+          scenario.rescuedImage,
+        );
+      }
+    },
+  );
+
+  it("quarantines worker publication when atomic catalog publication fails", async () => {
+    const scenario = await exerciseWatchabilityWorkerScenario({
+      beforePoll(access) {
+        vi.spyOn(access.archiveJobs, "publish").mockImplementation(() => {
+          throw new Error("catalog publication failed");
+        });
+      },
+      ranges: [{ startLba: 1, sectorCount: 1 }],
+      validation: {
+        badSectorCountsByTitle: [{ badSectorCount: 1, titleNumber: 1 }],
+        outcome: "accepted",
+      },
+    });
+
+    expect(scenario.access.archiveJobs.list(["failed"])).toEqual([
+      expect.objectContaining({
+        archiveRequestId: scenario.request.id,
+        errorMessage: "catalog publication failed",
+        originalDiscArchiveId: null,
+        progressPhase: "finalizing",
+      }),
+    ]);
+    expect(scenario.access.archiveRequests.list(["needs_attention"])).toEqual([
+      expect.objectContaining({ id: scenario.request.id }),
+    ]);
+    expect(scenario.access.catalog.listOriginalDiscArchives()).toEqual([]);
+    expect(readdirSync(scenario.originalsLibraryPath).sort()).toEqual([
+      `dvdmeta-${"9".repeat(64)}.iso.failed`,
+    ]);
+    expect(readFileSync(
+      join(
+        scenario.originalsLibraryPath,
+        `dvdmeta-${"9".repeat(64)}.iso.failed`,
+      ),
+    )).toEqual(scenario.rescuedImage);
   });
 
   it("copies requested work on different drives within configured concurrency", async () => {

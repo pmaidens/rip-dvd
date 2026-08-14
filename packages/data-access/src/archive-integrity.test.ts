@@ -5,19 +5,27 @@ import { createWatchableSalvageArchiveIntegrityEvidence } from "./archive-integr
 describe("Archive Integrity evidence", () => {
   it("normalizes bounded isolated-sector evidence for watchable salvage", () => {
     expect(createWatchableSalvageArchiveIntegrityEvidence(
-      " dvd-unused-space-v1 ",
+      " dvd-watchable-salvage-v2 ",
       [
         { startLba: 12, sectorCount: 1 },
         { startLba: 20, sectorCount: 1 },
       ],
+      [
+        { titleNumber: 2, badSectorCount: 1 },
+        { titleNumber: 5, badSectorCount: 2 },
+      ],
     )).toEqual({
       integrity: "watchable_salvage",
-      policyVersion: "dvd-unused-space-v1",
+      policyVersion: "dvd-watchable-salvage-v2",
       badSectorCount: 2,
       badAreaCount: 2,
       badSectorRanges: [
         { startLba: 12, sectorCount: 1 },
         { startLba: 20, sectorCount: 1 },
+      ],
+      badSectorCountsByTitle: [
+        { titleNumber: 2, badSectorCount: 1 },
+        { titleNumber: 5, badSectorCount: 2 },
       ],
     });
   });
@@ -39,6 +47,26 @@ describe("Archive Integrity evidence", () => {
     expect(() => createWatchableSalvageArchiveIntegrityEvidence(
       "dvd-unused-space-v1",
       ranges,
+      [],
+    )).toThrow();
+  });
+
+  it.each([
+    ["per-title policy bound", [{ titleNumber: 1, badSectorCount: 17 }]],
+    ["ascending title order", [
+      { titleNumber: 2, badSectorCount: 1 },
+      { titleNumber: 1, badSectorCount: 1 },
+    ]],
+    ["positive title number", [{ titleNumber: 0, badSectorCount: 1 }]],
+    ["disc evidence consistency", [{ titleNumber: 1, badSectorCount: 3 }]],
+  ] as const)("rejects invalid %s evidence", (_description, titleCounts) => {
+    expect(() => createWatchableSalvageArchiveIntegrityEvidence(
+      "dvd-watchable-salvage-v2",
+      [
+        { startLba: 12, sectorCount: 1 },
+        { startLba: 20, sectorCount: 1 },
+      ],
+      titleCounts,
     )).toThrow();
   });
 });

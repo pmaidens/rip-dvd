@@ -61,6 +61,11 @@ function validationRequest() {
 }
 
 function payloadValidationRunner(playback: {
+  affectedTitleBadSectorCounts?: readonly {
+    badSectorCount: number;
+    titleNumber: number;
+    titleSetNumber: number;
+  }[];
   error?: Error;
   exitCode?: number;
   stderr?: string;
@@ -71,8 +76,13 @@ function payloadValidationRunner(playback: {
       exitCode: 0,
       stderr: "",
       stdout: JSON.stringify({
-        affectedTitleSetNumbers: [1],
-        protocolVersion: 1,
+        affectedTitleBadSectorCounts:
+          playback.affectedTitleBadSectorCounts ?? [{
+            badSectorCount: 1,
+            titleNumber: 1,
+            titleSetNumber: 1,
+          }],
+        protocolVersion: 3,
         outcome: "accepted",
       }),
     })
@@ -96,7 +106,11 @@ describe("DVD salvage validation process boundary", () => {
       .mockResolvedValueOnce({
         exitCode: 0,
         stderr: "",
-        stdout: JSON.stringify({ protocolVersion: 1, outcome: "accepted" }),
+        stdout: JSON.stringify({
+          affectedTitleBadSectorCounts: [],
+          protocolVersion: 3,
+          outcome: "accepted",
+        }),
       })
       .mockResolvedValueOnce({
         exitCode: 0,
@@ -110,6 +124,7 @@ describe("DVD salvage validation process boundary", () => {
     const request = validationRequest();
 
     await expect(validator.validate(request)).resolves.toEqual({
+      badSectorCountsByTitle: [],
       outcome: "accepted",
     });
     expect(run).toHaveBeenNthCalledWith(
@@ -129,6 +144,7 @@ describe("DVD salvage validation process boundary", () => {
     };
 
     await expect(validator.validate(request)).resolves.toEqual({
+      badSectorCountsByTitle: [{ badSectorCount: 1, titleNumber: 1 }],
       outcome: "accepted",
     });
     expect(run).toHaveBeenNthCalledWith(
@@ -167,8 +183,11 @@ describe("DVD salvage validation process boundary", () => {
         exitCode: 0,
         stderr: "",
         stdout: JSON.stringify({
-          affectedTitleSetNumbers: [1],
-          protocolVersion: 1,
+          affectedTitleBadSectorCounts: [
+            { badSectorCount: 1, titleNumber: 1, titleSetNumber: 1 },
+            { badSectorCount: 1, titleNumber: 2, titleSetNumber: 1 },
+          ],
+          protocolVersion: 3,
           outcome: "accepted",
         }),
       })
@@ -187,7 +206,13 @@ describe("DVD salvage validation process boundary", () => {
     await expect(validator.validate({
       ...validationRequest(),
       expectedTitleMap: sharedTitleMap,
-    })).resolves.toEqual({ outcome: "accepted" });
+    })).resolves.toEqual({
+      badSectorCountsByTitle: [
+        { badSectorCount: 1, titleNumber: 1 },
+        { badSectorCount: 1, titleNumber: 2 },
+      ],
+      outcome: "accepted",
+    });
     expect(run.mock.calls.slice(2).map((call) => call[1])).toEqual([
       expect.arrayContaining(["--title", "1"]),
       expect.arrayContaining(["--title", "2"]),
@@ -284,7 +309,10 @@ describe("DVD salvage validation process boundary", () => {
     await expect(validator.validate({
       ...validationRequest(),
       expectedTitleMap: payloadExpectedTitleMap,
-    })).resolves.toEqual({ outcome: "accepted" });
+    })).resolves.toEqual({
+      badSectorCountsByTitle: [{ badSectorCount: 1, titleNumber: 1 }],
+      outcome: "accepted",
+    });
   });
 
   it.each([
@@ -343,7 +371,7 @@ describe("DVD salvage validation process boundary", () => {
       exitCode: 0,
       stderr: "",
       stdout: JSON.stringify({
-        protocolVersion: 1,
+        protocolVersion: 3,
         outcome: "rejected",
         reason: "navigation",
       }),
@@ -388,8 +416,110 @@ describe("DVD salvage validation process boundary", () => {
     expect(run).not.toHaveBeenCalled();
   });
 
-  it("rejects multiple isolated payload sectors before title playback", async () => {
-    const run = vi.fn<CommandRunner["run"]>().mockResolvedValueOnce({
+  it("accepts exactly 32 isolated bad sectors across the disc", async () => {
+    const run = vi.fn<CommandRunner["run"]>()
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stderr: "",
+        stdout: JSON.stringify({
+          affectedTitleBadSectorCounts: [],
+          protocolVersion: 3,
+          outcome: "accepted",
+        }),
+      })
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stderr: "",
+        stdout: lsdvdOutput,
+      });
+    const validator = createNodeDvdSalvageValidator({ runner: { run } });
+
+    await expect(validator.validate({
+      ...validationRequest(),
+      recoveryResult: createDamagedDvdRecoveryResult(
+        66 * 2_048,
+        Array.from({ length: 32 }, (_, index) => ({
+          startLba: index * 2 + 1,
+          sectorCount: 1,
+        })),
+      ),
+    })).resolves.toEqual({
+      badSectorCountsByTitle: [],
+      outcome: "accepted",
+    });
+  });
+
+  it.each([
+    [16, "accepted"],
+    [17, "rejected"],
+  ] as const)(
+    "%s isolated bad sectors in one title are %s at the per-title boundary",
+    async (badSectorCount, expectedOutcome) => {
+      const run = payloadValidationRunner({
+        affectedTitleBadSectorCounts: [{
+          badSectorCount,
+          titleNumber: 1,
+          titleSetNumber: 1,
+        }],
+      });
+      const validator = createNodeDvdSalvageValidator({ runner: { run } });
+      const ranges = Array.from({ length: badSectorCount }, (_, index) => ({
+        startLba: index * 2 + 1,
+        sectorCount: 1,
+      }));
+
+      const result = await validator.validate({
+        ...validationRequest(),
+        expectedTitleMap: payloadExpectedTitleMap,
+        recoveryResult: createDamagedDvdRecoveryResult(
+          (badSectorCount * 2 + 2) * 2_048,
+          ranges,
+        ),
+      });
+
+      expect(result).toEqual(
+        expectedOutcome === "accepted"
+          ? {
+              badSectorCountsByTitle: [{
+                badSectorCount: 16,
+                titleNumber: 1,
+              }],
+              outcome: "accepted",
+            }
+          : { outcome: "rejected", reason: "policy_limit" },
+      );
+      expect(run).toHaveBeenCalledTimes(expectedOutcome === "accepted" ? 3 : 2);
+    },
+  );
+
+  it("accepts combined unused-space and payload damage with exact title counts", async () => {
+    const run = payloadValidationRunner({
+      affectedTitleBadSectorCounts: [{
+        badSectorCount: 2,
+        titleNumber: 1,
+        titleSetNumber: 1,
+      }],
+    });
+    const validator = createNodeDvdSalvageValidator({ runner: { run } });
+
+    await expect(validator.validate({
+      ...validationRequest(),
+      expectedTitleMap: payloadExpectedTitleMap,
+      recoveryResult: createDamagedDvdRecoveryResult(12 * 2_048, [
+        { startLba: 1, sectorCount: 1 },
+        { startLba: 3, sectorCount: 1 },
+        { startLba: 10, sectorCount: 1 },
+      ]),
+    })).resolves.toEqual({
+      badSectorCountsByTitle: [{ badSectorCount: 2, titleNumber: 1 }],
+      outcome: "accepted",
+    });
+  });
+
+  it.each([
+    ["process crash", async () => ({ exitCode: 9, stderr: "secret path", stdout: "" }), "DVD salvage filesystem classification failed"],
+    ["malformed protocol", async () => ({ exitCode: 0, stderr: "", stdout: "not-json" }), "DVD salvage classifier returned malformed output"],
+    ["stale protocol", async () => ({
       exitCode: 0,
       stderr: "",
       stdout: JSON.stringify({
@@ -397,22 +527,7 @@ describe("DVD salvage validation process boundary", () => {
         protocolVersion: 1,
         outcome: "accepted",
       }),
-    });
-    const validator = createNodeDvdSalvageValidator({ runner: { run } });
-
-    await expect(validator.validate({
-      ...validationRequest(),
-      recoveryResult: createDamagedDvdRecoveryResult(6 * 2_048, [
-        { startLba: 1, sectorCount: 1 },
-        { startLba: 3, sectorCount: 1 },
-      ]),
-    })).resolves.toEqual({ outcome: "rejected", reason: "policy_limit" });
-    expect(run).toHaveBeenCalledTimes(1);
-  });
-
-  it.each([
-    ["process crash", async () => ({ exitCode: 9, stderr: "secret path", stdout: "" }), "DVD salvage filesystem classification failed"],
-    ["malformed protocol", async () => ({ exitCode: 0, stderr: "", stdout: "not-json" }), "DVD salvage classifier returned malformed output"],
+    }), "DVD salvage classifier returned malformed output"],
     ["timeout", async () => {
       throw new Error("device command timed out at /private/image");
     }, "DVD salvage filesystem classification failed"],
@@ -433,12 +548,49 @@ describe("DVD salvage validation process boundary", () => {
     );
   });
 
+  it.each([
+    {
+      name: "invalid per-title count",
+      evidence: [{ badSectorCount: 0, titleNumber: 1, titleSetNumber: 1 }],
+    },
+    {
+      name: "duplicate title",
+      evidence: [
+        { badSectorCount: 1, titleNumber: 1, titleSetNumber: 1 },
+        { badSectorCount: 1, titleNumber: 1, titleSetNumber: 1 },
+      ],
+    },
+    {
+      name: "more classified damage than the recovery map",
+      evidence: [{ badSectorCount: 2, titleNumber: 1, titleSetNumber: 1 }],
+    },
+  ])("fails closed on $name evidence", async ({ evidence }) => {
+    const run = vi.fn<CommandRunner["run"]>().mockResolvedValue({
+      exitCode: 0,
+      stderr: "",
+      stdout: JSON.stringify({
+        affectedTitleBadSectorCounts: evidence,
+        protocolVersion: 3,
+        outcome: "accepted",
+      }),
+    });
+    const validator = createNodeDvdSalvageValidator({ runner: { run } });
+
+    await expect(validator.validate(validationRequest())).rejects.toThrow(
+      "DVD salvage classifier returned malformed output",
+    );
+  });
+
   it("fails closed when navigation no longer matches Disc Inspection", async () => {
     const run = vi.fn<CommandRunner["run"]>()
       .mockResolvedValueOnce({
         exitCode: 0,
         stderr: "",
-        stdout: JSON.stringify({ protocolVersion: 1, outcome: "accepted" }),
+        stdout: JSON.stringify({
+          affectedTitleBadSectorCounts: [],
+          protocolVersion: 3,
+          outcome: "accepted",
+        }),
       })
       .mockResolvedValueOnce({
         exitCode: 0,

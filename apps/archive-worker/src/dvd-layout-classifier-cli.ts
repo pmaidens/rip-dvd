@@ -57,4 +57,4 @@ const result = await classifyDvdImageDamage({
   expectedByteCount,
   unreadableSectorRanges: decodeRanges(rangesText),
 });
-process.stdout.write(`${JSON.stringify({ protocolVersion: 1, ...result })}\n`);
+process.stdout.write(`${JSON.stringify({ protocolVersion: 3, ...result })}\n`);
