@@ -25,6 +25,7 @@ import {
   createCleanReadArchiveIntegrityEvidence,
   createDiscSelectionSourceIdentity,
   createUnknownArchiveIntegrityEvidence,
+  createWatchableSalvageArchiveIntegrityEvidence,
   DVD_TITLE_MAP_SCHEMA_VERSION,
   DomainInvariantError,
   ENCODE_JOB_LEASE_DURATION_MS,
@@ -679,6 +680,79 @@ describe("data-access facade", () => {
         badSectorCount: null,
         badAreaCount: null,
         badSectorRanges: null,
+      }),
+    ]);
+    migrated.close();
+  });
+
+  it("preserves version-one salvage evidence without inventing title counts", () => {
+    const databasePath = createTestDatabasePath();
+    const sqlite = new DatabaseSync(databasePath);
+    const migrationsRoot = new URL("../drizzle/", import.meta.url);
+    const versionOneMigration = "20260814192709_steep_king_cobra";
+    const predecessorNames = readdirSync(migrationsRoot)
+      .filter((name) => /^\d/.test(name) && name <= versionOneMigration)
+      .sort();
+    for (const migrationName of predecessorNames) {
+      const migration = readFileSync(
+        new URL(`../drizzle/${migrationName}/migration.sql`, import.meta.url),
+        "utf8",
+      );
+      for (const statement of migration.split("--> statement-breakpoint")) {
+        if (statement.trim()) {
+          sqlite.exec(statement);
+        }
+      }
+    }
+    sqlite.exec(`
+      create table __drizzle_migrations (
+        id integer primary key,
+        hash text not null,
+        created_at numeric,
+        name text,
+        applied_at text
+      );
+    `);
+    const recordMigration = sqlite.prepare(`
+      insert into __drizzle_migrations (hash, created_at, name)
+      values (?, 0, ?)
+    `);
+    for (const migrationName of predecessorNames) {
+      recordMigration.run(`pre-v2-salvage-${migrationName}`, migrationName);
+    }
+    sqlite.exec(`
+      insert into optical_drives (
+        id, device_path, is_present, last_seen_at, created_at, updated_at
+      ) values ('v1-drive', '/dev/v1', 1, 1, 1, 1);
+      insert into detected_discs (
+        id, optical_drive_id, disc_kind, fingerprint, status, detected_at,
+        created_at, updated_at
+      ) values (
+        'v1-disc', 'v1-drive', 'dvd', 'v1-fingerprint', 'archived', 1, 1, 1
+      );
+      insert into original_disc_archives (
+        id, detected_disc_id, disc_kind, archive_format, archive_path,
+        fingerprint, integrity, integrity_policy_version, bad_sector_count,
+        bad_area_count, bad_sector_ranges, archived_at, created_at, updated_at
+      ) values (
+        'v1-archive', 'v1-disc', 'dvd', 'iso',
+        '/media/originals/v1.iso', 'v1-fingerprint', 'watchable_salvage',
+        'dvd-watchable-salvage-v1', 1, 1,
+        '[{"startLba":10,"sectorCount":1}]', 1, 1, 1
+      );
+    `);
+    sqlite.close();
+
+    const migrated = openTestDatabase(databasePath);
+    expect(migrated.catalog.listOriginalDiscArchives()).toEqual([
+      expect.objectContaining({
+        id: "v1-archive",
+        integrity: "watchable_salvage",
+        integrityPolicyVersion: "dvd-watchable-salvage-v1",
+        badSectorCount: 1,
+        badAreaCount: 1,
+        badSectorRanges: [{ startLba: 10, sectorCount: 1 }],
+        badSectorCountsByTitle: null,
       }),
     ]);
     migrated.close();
@@ -7439,6 +7513,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         )
         .all(),
     ).toEqual(expect.arrayContaining([
+      { name: "bad_sector_counts_by_title" },
       { name: "legacy_cutover_pending" },
       { name: "verification_message" },
       { name: "verification_status" },
@@ -7503,6 +7578,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
+        name: "20260814225652_familiar_bug",
+      },
+      {
         name: "20260814192709_steep_king_cobra",
       },
       {
@@ -7528,9 +7606,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260812151540_disc-inspection-archive-requests",
-      },
-      {
-        name: "20260812142359_even_human_robot",
       },
     ]);
     expect(
@@ -10436,6 +10511,64 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     access.close();
   });
 
+  it("publishes complete watchable-salvage evidence atomically", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/watchable-salvage",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const { disc, inspection } = completeDiscInspection(access, {
+      opticalDriveId: drive.id,
+      mediaGeneration: "watchable-salvage",
+      fingerprint: "watchable-salvage",
+    });
+    const request = access.archiveRequests.create({ detectedDiscId: disc.id });
+    const claim = access.archiveJobs.startForInspection(
+      inspection.id,
+      "watchable-salvage-publisher",
+    )!;
+
+    access.archiveJobs.publish(claim, {
+      archivePath: "/media/originals/watchable-salvage.iso",
+      sizeBytes: 100_000,
+      integrityEvidence: createWatchableSalvageArchiveIntegrityEvidence(
+        "dvd-watchable-salvage-v2",
+        [
+          { startLba: 10, sectorCount: 1 },
+          { startLba: 20, sectorCount: 1 },
+          { startLba: 30, sectorCount: 1 },
+        ],
+        [
+          { titleNumber: 1, badSectorCount: 2 },
+          { titleNumber: 2, badSectorCount: 2 },
+        ],
+      ),
+    });
+
+    expect(access.catalog.listOriginalDiscArchives()).toEqual([
+      expect.objectContaining({
+        integrity: "watchable_salvage",
+        integrityPolicyVersion: "dvd-watchable-salvage-v2",
+        badSectorCount: 3,
+        badAreaCount: 3,
+        badSectorRanges: [
+          { startLba: 10, sectorCount: 1 },
+          { startLba: 20, sectorCount: 1 },
+          { startLba: 30, sectorCount: 1 },
+        ],
+        badSectorCountsByTitle: [
+          { titleNumber: 1, badSectorCount: 2 },
+          { titleNumber: 2, badSectorCount: 2 },
+        ],
+      }),
+    ]);
+    expect(access.archiveRequests.list(["fulfilled"])).toEqual([
+      expect.objectContaining({ id: request.id }),
+    ]);
+    access.close();
+  });
+
   it("rejects incomplete required Archive Integrity evidence at the SQLite boundary", () => {
     const databasePath = createTestDatabasePath();
     const access = openTestDatabase(databasePath);
@@ -10481,9 +10614,13 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
           integrity_policy_version = 'salvage-policy-v1',
           bad_sector_count = 1,
           bad_area_count = 1,
-          bad_sector_ranges = '[{"startLba":1,"sectorCount":1}]'
+          bad_sector_ranges = '[{"startLba":1,"sectorCount":1}]',
+          bad_sector_counts_by_title = '[{"titleNumber":1,"badSectorCount":1}]'
     `);
-    for (const column of evidenceColumns) {
+    for (const column of [
+      ...evidenceColumns,
+      "bad_sector_counts_by_title",
+    ] as const) {
       expect(() =>
         sqlite.exec(`update original_disc_archives set ${column} = null`),
       ).toThrow(/constraint/i);

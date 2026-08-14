@@ -1030,6 +1030,7 @@ export async function preserveDvdArchive({
           integrityEvidence: createWatchableSalvageArchiveIntegrityEvidence(
             DVD_WATCHABLE_SALVAGE_POLICY_VERSION,
             validation.recoveryResult.unrecoveredSectorRanges,
+            salvageValidation.badSectorCountsByTitle,
           ),
         };
         await verifySource();

@@ -1323,7 +1323,10 @@ describe("DVD archive publication", () => {
       waitForInactive: vi.fn(async () => undefined),
     };
     const salvageValidator = {
-      validate: vi.fn().mockResolvedValue({ outcome: "accepted" }),
+      validate: vi.fn().mockResolvedValue({
+        badSectorCountsByTitle: [],
+        outcome: "accepted",
+      }),
     };
     const verifySource = vi.fn()
       .mockResolvedValueOnce(undefined)
@@ -1357,6 +1360,126 @@ describe("DVD archive publication", () => {
     expect(
       existsSync(join(realpathSync(originalsLibraryPath), `dvdmeta-${digest}.iso`)),
     ).toBe(false);
+    expect(readFileSync(`${partialPath}.failed`)).toEqual(content);
+  });
+
+  it("rejects malformed accepted salvage evidence before publication", async () => {
+    const originalsLibraryPath = createOriginalsLibrary();
+    const content = Buffer.alloc(6 * 2_048, 0);
+    const digest = "9".repeat(64);
+    let partialPath: string | undefined;
+    const runner: DvdCopyRunner = {
+      copy: vi.fn(async ({ outputPath, sizeBytes }) => {
+        partialPath = outputPath;
+        writeFileSync(outputPath, content);
+        return createDamagedDvdRecoveryResult(sizeBytes, [
+          { startLba: 1, sectorCount: 1 },
+          { startLba: 3, sectorCount: 1 },
+        ]);
+      }),
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    };
+
+    await expect(preserveDvdArchive({
+      devicePath: "/dev/sr0",
+      expectedTitleMap: {
+        schemaVersion: 2,
+        contentId: `dvdmeta-sha256:${digest}`,
+        titles: [{
+          number: 1,
+          durationSeconds: 3_600,
+          chapters: 10,
+          audioStreams: [],
+          subtitles: [],
+        }],
+      },
+      fingerprint: `dvdmeta-sha256:${digest}`,
+      originalsLibraryPath,
+      runner,
+      salvageValidator: {
+        validate: vi.fn().mockResolvedValue({
+          badSectorCountsByTitle: [{
+            badSectorCount: 3,
+            titleNumber: 1,
+          }],
+          outcome: "accepted",
+        }),
+      },
+      signal: new AbortController().signal,
+      sizeBytes: content.byteLength,
+      verifySource: async () => undefined,
+      onProgress: () => undefined,
+    })).rejects.toThrow(
+      "Watchable-salvage per-title evidence exceeds the policy bound",
+    );
+
+    expect(existsSync(join(
+      realpathSync(originalsLibraryPath),
+      `dvdmeta-${digest}.iso`,
+    ))).toBe(false);
+    expect(readFileSync(`${partialPath}.failed`)).toEqual(content);
+  });
+
+  it("cannot publish when validation loses cancellation or lease authority", async () => {
+    const originalsLibraryPath = createOriginalsLibrary();
+    const content = Buffer.alloc(4 * 2_048, 0);
+    const digest = "6".repeat(64);
+    const controller = new AbortController();
+    const authorityLost = new Error("Archive validation authority lost");
+    let partialPath: string | undefined;
+    const runner: DvdCopyRunner = {
+      copy: vi.fn(async ({ outputPath, sizeBytes }) => {
+        partialPath = outputPath;
+        writeFileSync(outputPath, content);
+        return createDamagedDvdRecoveryResult(sizeBytes, [
+          { startLba: 1, sectorCount: 1 },
+        ]);
+      }),
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    };
+
+    await expect(preserveDvdArchive({
+      devicePath: "/dev/sr0",
+      expectedTitleMap: {
+        schemaVersion: 2,
+        contentId: `dvdmeta-sha256:${digest}`,
+        titles: [{
+          number: 1,
+          durationSeconds: 3_600,
+          chapters: 10,
+          audioStreams: [],
+          subtitles: [],
+        }],
+      },
+      fingerprint: `dvdmeta-sha256:${digest}`,
+      originalsLibraryPath,
+      runner,
+      salvageValidator: {
+        validate: vi.fn(async () => {
+          controller.abort(authorityLost);
+          return {
+            badSectorCountsByTitle: [{
+              badSectorCount: 1,
+              titleNumber: 1,
+            }],
+            outcome: "accepted" as const,
+          };
+        }),
+      },
+      signal: controller.signal,
+      sizeBytes: content.byteLength,
+      verifySource: async () => undefined,
+      onProgress: () => undefined,
+    })).rejects.toBe(authorityLost);
+
+    expect(existsSync(join(
+      realpathSync(originalsLibraryPath),
+      `dvdmeta-${digest}.iso`,
+    ))).toBe(false);
     expect(readFileSync(`${partialPath}.failed`)).toEqual(content);
   });
 
@@ -1641,6 +1764,66 @@ describe("DVD archive publication", () => {
     ).rejects.toThrow("directory fsync failed");
 
     const archivePath = join(root, `${digest}.iso`);
+    expect(existsSync(archivePath)).toBe(false);
+    expect(readFileSync(`${archivePath}.failed`)).toEqual(content);
+  });
+
+  it("quarantines an accepted salvage when durable publication fails", async () => {
+    const originalsLibraryPath = createOriginalsLibrary();
+    const root = realpathSync(originalsLibraryPath);
+    const digest = "4".repeat(64);
+    const content = Buffer.alloc(6 * 2_048, 0);
+    const runner: DvdCopyRunner = {
+      copy: vi.fn(async ({ outputPath, sizeBytes }) => {
+        writeFileSync(outputPath, content);
+        return createDamagedDvdRecoveryResult(sizeBytes, [
+          { startLba: 1, sectorCount: 1 },
+          { startLba: 3, sectorCount: 1 },
+        ]);
+      }),
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    };
+    const sync = vi
+      .fn<(_path: string) => Promise<void>>()
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("salvage directory fsync failed"));
+
+    await expect(preserveDvdArchive({
+      devicePath: "/dev/sr0",
+      expectedTitleMap: {
+        schemaVersion: 2,
+        contentId: `dvdmeta-sha256:${digest}`,
+        titles: [{
+          number: 1,
+          durationSeconds: 3_600,
+          chapters: 10,
+          audioStreams: [],
+          subtitles: [],
+        }],
+      },
+      fingerprint: `dvdmeta-sha256:${digest}`,
+      originalsLibraryPath,
+      runner,
+      salvageValidator: {
+        validate: vi.fn().mockResolvedValue({
+          badSectorCountsByTitle: [{
+            badSectorCount: 2,
+            titleNumber: 1,
+          }],
+          outcome: "accepted",
+        }),
+      },
+      signal: new AbortController().signal,
+      sizeBytes: content.byteLength,
+      verifySource: async () => undefined,
+      onProgress: () => undefined,
+      sync,
+    })).rejects.toThrow("salvage directory fsync failed");
+
+    const archivePath = join(root, `dvdmeta-${digest}.iso`);
     expect(existsSync(archivePath)).toBe(false);
     expect(readFileSync(`${archivePath}.failed`)).toEqual(content);
   });
