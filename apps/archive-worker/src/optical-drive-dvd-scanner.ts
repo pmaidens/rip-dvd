@@ -61,7 +61,7 @@ async function inspectDvd(
   runner: CommandRunner,
 ) {
   const result = await runner.run(
-    "lsdvd",
+    "rip-dvd-lsdvd",
     ["-Oh", "-a", "-c", "-s", devicePath],
     {
       maxBufferBytes: MAX_OPTICAL_DRIVE_COMMAND_OUTPUT_BYTES,

@@ -1469,7 +1469,7 @@ describe("archive worker polling", () => {
             stderr: "",
           };
         }
-        if (executable === "lsdvd") {
+        if (executable === "rip-dvd-lsdvd") {
           return {
             exitCode: 0,
             stdout: [
@@ -1517,7 +1517,7 @@ describe("archive worker polling", () => {
     ]);
     expect(access.catalog.listDetectedDiscs()).toEqual([]);
     expect(runner.run).toHaveBeenCalledWith(
-      "lsdvd",
+      "rip-dvd-lsdvd",
       ["-Oh", "-a", "-c", "-s", "/dev/sr0"],
       expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
@@ -1673,7 +1673,7 @@ describe("archive worker polling", () => {
             stderr: "",
           };
         }
-        if (executable === "lsdvd") {
+        if (executable === "rip-dvd-lsdvd") {
           return {
             exitCode: 0,
             stdout: [
@@ -1723,7 +1723,7 @@ describe("archive worker polling", () => {
       }),
     ]);
     expect(runner.run).not.toHaveBeenCalledWith(
-      "lsdvd",
+      "rip-dvd-lsdvd",
       expect.anything(),
       expect.anything(),
     );
@@ -1755,7 +1755,7 @@ describe("archive worker polling", () => {
             stderr: "",
           };
         }
-        if (executable === "lsdvd") {
+        if (executable === "rip-dvd-lsdvd") {
           return {
             exitCode: 0,
             stdout: [
@@ -1803,7 +1803,7 @@ describe("archive worker polling", () => {
 
     expect(access.catalog.listDetectedDiscs()).toEqual([]);
     expect(runner.run).not.toHaveBeenCalledWith(
-      "lsdvd",
+      "rip-dvd-lsdvd",
       expect.anything(),
       expect.anything(),
     );
