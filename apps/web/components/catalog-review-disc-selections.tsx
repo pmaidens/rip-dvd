@@ -338,13 +338,22 @@ export function CatalogReviewDiscSelections({
           <h4>Correction Encode Job History</h4>
           <ol className="selection-encode-history">
             {correctionEncodeHistory.map((history) => (
-              <li key={history.replacementEncodeJob.id}>
+              <li
+                key={history.replacementEncodeJob?.id ??
+                  history.predecessorEncodeJob.id}
+              >
                 <p>
                   Encode Job {history.predecessorEncodeJob.id} · {displayTerm(
                     history.predecessorEncodeJob.status,
-                  )}{" → "}Encode Job {history.replacementEncodeJob.id} ·{
-                    " "
-                  }{displayTerm(history.replacementEncodeJob.status)}
+                  )}{history.replacementEncodeJob === null
+                    ? " → No replacement Encode Job scheduled"
+                    : (
+                      <>
+                        {" → "}Encode Job {history.replacementEncodeJob.id} ·{
+                          " "
+                        }{displayTerm(history.replacementEncodeJob.status)}
+                      </>
+                    )}
                 </p>
                 <p>
                   Replacement Disc Selection{
@@ -359,7 +368,7 @@ export function CatalogReviewDiscSelections({
 
       <CatalogReviewPagination
         ariaLabel="Correction Encode Job History pages"
-        itemLabel="Correction Encode Job links"
+        itemLabel="Correction Encode Job entries"
         page={correctionEncodeHistoryPage}
         isSaving={isSaving}
         onPage={onCorrectionEncodeHistoryPage}

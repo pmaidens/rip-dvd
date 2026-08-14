@@ -336,19 +336,30 @@ describe("CatalogReviewDiscSelections", () => {
           hasPrevious: false,
           hasNext: false,
         }}
-        correctionEncodeHistory={[{
-          replacementDiscSelectionId: "selection-intermediate",
-          predecessorEncodeJob: {
-            id: "encode-original",
-            status: "completed",
-            replacementEncodeJobId: "encode-corrected",
+        correctionEncodeHistory={[
+          {
+            replacementDiscSelectionId: "selection-intermediate",
+            predecessorEncodeJob: {
+              id: "encode-original",
+              status: "completed",
+              replacementEncodeJobId: "encode-corrected",
+            },
+            replacementEncodeJob: {
+              id: "encode-corrected",
+              status: "completed",
+              predecessorEncodeJobId: "encode-original",
+            },
           },
-          replacementEncodeJob: {
-            id: "encode-corrected",
-            status: "completed",
-            predecessorEncodeJobId: "encode-original",
+          {
+            replacementDiscSelectionId: "selection-corrected",
+            predecessorEncodeJob: {
+              id: "encode-without-replacement",
+              status: "failed",
+              replacementEncodeJobId: null,
+            },
+            replacementEncodeJob: null,
           },
-        }]}
+        ]}
         correctionEncodeHistoryPage={{
           offset: 0,
           limit: 100,
@@ -426,6 +437,9 @@ describe("CatalogReviewDiscSelections", () => {
     expect(html).toContain("The restored edition is title 3.");
     expect(html).toContain(
       "Encode Job encode-original · Completed → Encode Job encode-corrected · Completed",
+    );
+    expect(html).toContain(
+      "Encode Job encode-without-replacement · Failed → No replacement Encode Job scheduled",
     );
     expect(html).toContain("Replacement Disc Selection selection-intermediate");
     expect(html).toContain("Retained Output retained-output-1 · Retained");

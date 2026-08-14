@@ -63,13 +63,13 @@ export interface CatalogReviewCorrectionEncodeHistory {
   predecessorEncodeJob: {
     id: string;
     status: EncodeJobStatus;
-    replacementEncodeJobId: string;
+    replacementEncodeJobId: string | null;
   };
   replacementEncodeJob: {
     id: string;
     status: EncodeJobStatus;
     predecessorEncodeJobId: string;
-  };
+  } | null;
 }
 
 export interface CatalogReviewCorrectionRetainedOutputHistory {

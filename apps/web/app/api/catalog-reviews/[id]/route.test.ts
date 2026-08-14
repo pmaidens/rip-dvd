@@ -836,6 +836,15 @@ describe("Catalog Review API", () => {
         hasNext: false,
       },
     });
+    expect(review.correctionEncodeHistory).toEqual([{
+      replacementDiscSelectionId: correctionBody.discSelection.id,
+      predecessorEncodeJob: {
+        id: completed.id,
+        status: "completed",
+        replacementEncodeJobId: null,
+      },
+      replacementEncodeJob: null,
+    }]);
     expect(review.mediaItems).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: mistakenItem.id }),
       expect.objectContaining({ id: correctedItem.id }),
@@ -1046,6 +1055,16 @@ describe("Catalog Review API", () => {
         }),
       }),
     ]);
+    expect(deletedReview.correctionEncodeHistory).toEqual([{
+      replacementDiscSelectionId: correctionBody.discSelection.id,
+      predecessorEncodeJob: {
+        id: completed.id,
+        status: "completed",
+        replacementEncodeJobId: null,
+      },
+      replacementEncodeJob: null,
+    }]);
+    expect(JSON.stringify(deletedReview)).not.toContain(completed.outputPath);
   });
 
   it("completes a corrected review and queues explicit replacements atomically", async () => {
@@ -1216,6 +1235,10 @@ describe("Catalog Review API", () => {
         originalDiscArchiveId: archive.id,
         limit: 1,
       })[0]!;
+    const replacementEncodeJob = correctionLink.replacementEncodeJob;
+    if (replacementEncodeJob === null) {
+      throw new Error("Expected corrected replacement Encode Job link");
+    }
     const retainedOutput = access.encodeJobs.listRetainedOutputSummaries([
       replacementClaim.id,
     ])[0]!;
@@ -1231,10 +1254,9 @@ describe("Catalog Review API", () => {
             id: predecessorId,
           },
           replacementEncodeJob: {
-            ...correctionLink.replacementEncodeJob,
+            ...replacementEncodeJob,
             id: `historical-replacement-${index}` as
-              typeof correctionLink.replacementEncodeJob.id,
-            predecessorEncodeJobId: predecessorId,
+              typeof replacementEncodeJob.id,
           },
         };
       }),
