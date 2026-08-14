@@ -50,6 +50,11 @@ describe("formatFailureDetail", () => {
       "The rescued image was retained for validation with 10 unreadable sectors across 10 areas (LBAs 0, 2, 4, 6, 8, 10, 12, 14, and 2 more).",
     ],
     [
+      "structural salvage rejection",
+      "DVD salvage rejected: unreadable sectors affect DVD navigation data; 1 sector in 1 area; LBAs 20",
+      "Automatic salvage validation rejected damage to DVD navigation data; the image remains available for another recovery attempt with 1 unreadable sector across 1 area (LBAs 20).",
+    ],
+    [
       "timeout",
       "DVD archive copy timed out",
       "The worker operation timed out.",

@@ -21,6 +21,7 @@ import type {
   FilesystemVerificationStatus,
   OriginalDiscArchive,
   OriginalDiscArchiveId,
+  UnreadableSectorRange,
 } from "@rip-dvd/data-access";
 import { isCorrectedEncodePredecessorReady } from "@rip-dvd/data-access";
 import {
@@ -148,6 +149,9 @@ export interface DashboardCatalogReviewItem {
   discKind: DiscKind;
   archiveFormat: ArchiveFormat;
   integrity: ArchiveIntegrity;
+  badSectorCount: number | null;
+  badAreaCount: number | null;
+  badSectorRanges: readonly UnreadableSectorRange[] | null;
   archivedAt: string;
   catalogReviewedAt: string | null;
   catalogReviewOutcome: "needs_review" | CompletedCatalogReviewOutcome;
@@ -901,6 +905,9 @@ function readDashboardSnapshotRecords(
             discKind: archive.discKind,
             archiveFormat: archive.archiveFormat,
             integrity: archive.integrity,
+            badSectorCount: archive.badSectorCount,
+            badAreaCount: archive.badAreaCount,
+            badSectorRanges: archive.badSectorRanges,
             archivedAt: archive.archivedAt.toISOString(),
             catalogReviewedAt:
               archive.catalogReviewedAt?.toISOString() ?? null,

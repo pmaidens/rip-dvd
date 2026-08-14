@@ -21,7 +21,7 @@ An operator's durable intent to preserve a Detected Disc. It may wait for the ma
 _Avoid_: Queued Archive Job, approval
 
 **Archive Integrity**:
-The evidence-backed read quality recorded with an Original Disc Archive. Historical archives are `unknown`; a new Archive Job that observes a complete recovery with no unreadable sectors records `clean_read`; a future archive accepted after automatic damage validation records `watchable_salvage`.
+The evidence-backed read quality recorded with an Original Disc Archive. Historical archives are `unknown`; a new Archive Job that observes a complete recovery with no unreadable sectors records `clean_read`; an archive accepted after automatic damage validation records `watchable_salvage`.
 _Avoid_: Bit-perfect, exact copy, Archive Job status
 
 **Disc Inspection**:

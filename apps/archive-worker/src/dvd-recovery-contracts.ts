@@ -2,6 +2,7 @@ import {
   createCleanReadArchiveIntegrityEvidence,
   type CleanReadArchiveIntegrityEvidence,
   type UnreadableSectorRange,
+  type WatchableSalvageArchiveIntegrityEvidence,
 } from "@rip-dvd/data-access";
 
 export const DVD_SECTOR_SIZE_BYTES = 2_048;
@@ -34,7 +35,9 @@ export type DvdRecoveryResult =
 
 export interface PublishableDvdValidationResult {
   outcome: "publish";
-  integrityEvidence: CleanReadArchiveIntegrityEvidence;
+  integrityEvidence:
+    | CleanReadArchiveIntegrityEvidence
+    | WatchableSalvageArchiveIntegrityEvidence;
 }
 
 export interface UnvalidatedDvdRecoveryResult {
@@ -42,7 +45,6 @@ export interface UnvalidatedDvdRecoveryResult {
   recoveryResult: DamagedDvdRecoveryResult;
 }
 
-/** Extended with validated salvage outcomes by later rescue slices. */
 export type DvdValidationResult =
   | PublishableDvdValidationResult
   | UnvalidatedDvdRecoveryResult;
@@ -274,6 +276,12 @@ export function parseDvdRecoveryResultProtocol(
 export function formatUnvalidatedDvdRecovery(
   result: DamagedDvdRecoveryResult,
 ): string {
+  return `DVD rescue requires validation: ${result.badSectorCount} unreadable ${result.badSectorCount === 1 ? "sector" : "sectors"} in ${result.badAreaCount} ${result.badAreaCount === 1 ? "area" : "areas"}; LBAs ${formatDvdDamageRanges(result)}`;
+}
+
+export function formatDvdDamageRanges(
+  result: DamagedDvdRecoveryResult,
+): string {
   const displayedRanges = result.unrecoveredSectorRanges.slice(0, 8);
   const lbas = displayedRanges.map(({ startLba, sectorCount }) =>
     sectorCount === 1
@@ -284,5 +292,5 @@ export function formatUnvalidatedDvdRecovery(
   if (hiddenAreaCount > 0) {
     lbas.push(`and ${hiddenAreaCount} more`);
   }
-  return `DVD rescue requires validation: ${result.badSectorCount} unreadable ${result.badSectorCount === 1 ? "sector" : "sectors"} in ${result.badAreaCount} ${result.badAreaCount === 1 ? "area" : "areas"}; LBAs ${lbas.join(", ")}`;
+  return lbas.join(", ");
 }

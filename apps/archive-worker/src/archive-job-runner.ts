@@ -5,6 +5,7 @@ import { decodeDvdTitleMap } from "@rip-dvd/data-access/dvd-scan";
 import type { OpticalDriveHardware } from "./archive-worker-contracts.js";
 import { confirmAuthorizedDrive } from "./authorized-optical-drive.js";
 import type { CompletedDiscInspection } from "./disc-inspection-runner.js";
+import type { DvdSalvageValidator } from "./dvd-salvage-validator.js";
 import {
   preserveDvdArchive,
   quarantinePublishedArchive,
@@ -19,6 +20,7 @@ export interface RunArchiveJobOptions {
   hardware: OpticalDriveHardware;
   log(message: string): void;
   originalsLibraryPath: string;
+  salvageValidator?: DvdSalvageValidator;
   signal: AbortSignal;
   workerId: string;
 }
@@ -31,6 +33,7 @@ export async function runArchiveJob({
   hardware,
   log,
   originalsLibraryPath,
+  salvageValidator,
   signal,
   workerId,
 }: RunArchiveJobOptions): Promise<void> {
@@ -89,9 +92,11 @@ export async function runArchiveJob({
         access.archiveJobs.renewClaim(claim);
       },
       devicePath: binding.drive.devicePath,
+      expectedTitleMap: scanData,
       fingerprint: disc.fingerprint,
       originalsLibraryPath,
       runner: copyRunner,
+      salvageValidator,
       signal: archiveSignal,
       sizeBytes: archiveSizeBytes,
       onProgress: (progress) => {

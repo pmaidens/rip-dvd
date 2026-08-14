@@ -1305,6 +1305,61 @@ describe("DVD archive publication", () => {
     });
   });
 
+  it("revalidates the source after salvage validation before publication", async () => {
+    const originalsLibraryPath = createOriginalsLibrary();
+    const content = Buffer.alloc(2 * 2_048, 0);
+    const digest = "8".repeat(64);
+    let partialPath: string | undefined;
+    const runner: DvdCopyRunner = {
+      copy: vi.fn(async ({ outputPath, sizeBytes }) => {
+        partialPath = outputPath;
+        writeFileSync(outputPath, content);
+        return createDamagedDvdRecoveryResult(sizeBytes, [
+          { startLba: 1, sectorCount: 1 },
+        ]);
+      }),
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    };
+    const salvageValidator = {
+      validate: vi.fn().mockResolvedValue({ outcome: "accepted" }),
+    };
+    const verifySource = vi.fn()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("DVD medium changed during validation"));
+
+    await expect(preserveDvdArchive({
+      devicePath: "/dev/sr0",
+      expectedTitleMap: {
+        schemaVersion: 2,
+        contentId: `dvdmeta-sha256:${digest}`,
+        titles: [{
+          number: 1,
+          durationSeconds: 3_600,
+          chapters: 10,
+          audioStreams: [],
+          subtitles: [],
+        }],
+      },
+      fingerprint: `dvdmeta-sha256:${digest}`,
+      originalsLibraryPath,
+      runner,
+      salvageValidator,
+      signal: new AbortController().signal,
+      sizeBytes: content.byteLength,
+      verifySource,
+      onProgress: () => undefined,
+    })).rejects.toThrow("DVD medium changed during validation");
+
+    expect(verifySource).toHaveBeenCalledTimes(2);
+    expect(salvageValidator.validate).toHaveBeenCalledOnce();
+    expect(
+      existsSync(join(realpathSync(originalsLibraryPath), `dvdmeta-${digest}.iso`)),
+    ).toBe(false);
+    expect(readFileSync(`${partialPath}.failed`)).toEqual(content);
+  });
+
   it("moves a failed partial image aside without publishing an archive", async () => {
     const originalsLibraryPath = createOriginalsLibrary();
     const digest = "b".repeat(64);
