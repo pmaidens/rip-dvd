@@ -182,10 +182,11 @@ Disc Selection mutation preserves distinct identity paths:
   `listDiscSelectionCorrectionEncodeJobLinks()` requires an archive,
   offset, and limit no larger than 101. It returns one path-free row per
   correction-associated predecessor, with an optional replacement summary, and
-  orders by immutable replacement creation time when present or predecessor
-  creation time otherwise, then identity. Declining a replacement or later
-  removing its job-free Disc Selection therefore never hides the predecessor's
-  outcome. Each job summary contains only its identity and status.
+  always orders by immutable predecessor creation time and identity. Scheduling
+  a delayed replacement therefore cannot move a row across offset pages, while
+  declining a replacement or later removing its job-free Disc Selection never
+  hides the predecessor's outcome. Each job summary contains only its identity
+  and status.
   `listDiscSelectionCorrectionRetainedOutputSummaries()` independently
   requires an archive, offset, and limit no larger than 101, orders summaries by
   immutable retention time and identity, and returns every retry as a separate

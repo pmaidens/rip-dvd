@@ -7272,14 +7272,8 @@ export function createDataAccessInternal(
             options.originalDiscArchiveId,
           ))
           .orderBy(
-            asc(sql`coalesce(
-              ${replacementEncodeJobRecords.createdAt},
-              ${predecessorEncodeJobRecords.createdAt}
-            )`),
-            asc(sql`coalesce(
-              ${replacementEncodeJobRecords.id},
-              ${predecessorEncodeJobRecords.id}
-            )`),
+            asc(predecessorEncodeJobRecords.createdAt),
+            asc(predecessorEncodeJobRecords.id),
           );
         const rows = listWithBoundedOffset(
           query,
