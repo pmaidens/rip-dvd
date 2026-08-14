@@ -1639,6 +1639,92 @@ describe("DVD archive publication", () => {
     expect(readFileSync(`${partialPath}.failed`)).toEqual(content);
   });
 
+  it("keeps clean rescue state valid when archive directory sync fails", async () => {
+    const originalsLibraryPath = createOriginalsLibrary();
+    const root = realpathSync(originalsLibraryPath);
+    const archiveRequestId = "33333333-3333-4333-8333-333333333333";
+    const digest = "c".repeat(64);
+    const sizeBytes = 2 * 2_048;
+    const rescuedImage = Buffer.alloc(sizeBytes, 6);
+    rescuedImage.fill(0, 2_048);
+    const baseOptions = {
+      archiveRequestId,
+      devicePath: "/dev/sr0",
+      fingerprint: `dvdmeta-sha256:${digest}`,
+      originalsLibraryPath,
+      sizeBytes,
+      verifySource: async () => undefined,
+      onProgress: () => undefined,
+    };
+    const damagedRecovery = createDamagedDvdRecoveryResult(sizeBytes, [
+      { startLba: 1, sectorCount: 1 },
+    ]);
+    const firstRunner: DvdCopyRunner = {
+      copy: vi.fn(async ({ outputPath }) => {
+        writeFileSync(outputPath, rescuedImage);
+        return damagedRecovery;
+      }),
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    };
+
+    await expect(preserveDvdArchive({
+      ...baseOptions,
+      runner: firstRunner,
+      signal: new AbortController().signal,
+    })).rejects.toThrow("DVD rescue requires validation");
+
+    const rescueImageName = readdirSync(root).find((name) =>
+      name.endsWith(".rip-dvd-rescue.iso"),
+    );
+    const rescueImagePath = join(root, rescueImageName!);
+    const completionRunner: DvdCopyRunner = {
+      copy: vi.fn(async ({ outputPath, sizeBytes: expectedSize }) => {
+        const completedImage = Buffer.from(readFileSync(outputPath));
+        completedImage.fill(6, 2_048);
+        writeFileSync(outputPath, completedImage);
+        return createCleanDvdRecoveryResult(expectedSize);
+      }),
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    };
+
+    await expect(preserveDvdArchive({
+      ...baseOptions,
+      runner: completionRunner,
+      signal: new AbortController().signal,
+      sync: async (path) => {
+        if (path === root) {
+          throw new Error("directory sync failed");
+        }
+      },
+    })).rejects.toThrow("directory sync failed");
+
+    expect(existsSync(rescueImagePath)).toBe(true);
+    expect(
+      readdirSync(root).some((name) => name.endsWith(".rip-dvd-rescue.json")),
+    ).toBe(true);
+    const noCopyRunner: DvdCopyRunner = {
+      copy: vi.fn(),
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    };
+
+    const completed = await preserveDvdArchive({
+      ...baseOptions,
+      runner: noCopyRunner,
+      signal: new AbortController().signal,
+    });
+
+    expect(noCopyRunner.copy).not.toHaveBeenCalled();
+    expect(readFileSync(completed.archivePath)).toEqual(Buffer.alloc(sizeBytes, 6));
+    await completed.finalizePublication?.();
+    expect(existsSync(rescueImagePath)).toBe(false);
+  });
+
   it("moves a failed partial image aside without publishing an archive", async () => {
     const originalsLibraryPath = createOriginalsLibrary();
     const digest = "b".repeat(64);

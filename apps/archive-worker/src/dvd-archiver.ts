@@ -1225,7 +1225,9 @@ export async function preserveDvdArchive({
     await runner.waitForInactive(safeDevicePath, partialPath);
     if (finalPublished) {
       await quarantinePublishedArchive(archivePath);
-      await movePartialAside(partialPath);
+      if (rescueWorkspace === null) {
+        await movePartialAside(partialPath);
+      }
     } else if (
       rescueWorkspace === null &&
       !retainedForValidation &&
