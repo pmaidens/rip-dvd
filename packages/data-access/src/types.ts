@@ -3,6 +3,7 @@ import type {
   ARCHIVE_REQUEST_STATUSES,
   ARCHIVE_RUNNING_PROGRESS_PHASES,
   ARCHIVE_FORMATS,
+  ARCHIVE_INTEGRITIES,
   CATALOG_REVIEW_OUTCOMES,
   DETECTED_DISC_STATUSES,
   DISC_KINDS,
@@ -24,6 +25,7 @@ import type {
 } from "./disc-selection-source-identity.js";
 
 export type ArchiveFormat = (typeof ARCHIVE_FORMATS)[number];
+export type ArchiveIntegrity = (typeof ARCHIVE_INTEGRITIES)[number];
 export type CatalogReviewOutcome = (typeof CATALOG_REVIEW_OUTCOMES)[number];
 export type CompletedCatalogReviewOutcome = Exclude<
   CatalogReviewOutcome,
@@ -182,6 +184,11 @@ export interface OriginalDiscArchive {
   archivePath: string;
   fingerprint: string;
   sizeBytes: number | null;
+  integrity: ArchiveIntegrity;
+  integrityPolicyVersion: string | null;
+  badSectorCount: number | null;
+  badAreaCount: number | null;
+  badSectorRanges: readonly UnreadableSectorRange[] | null;
   archivedAt: Date;
   catalogReviewedAt: Date | null;
   catalogReviewOutcome: CatalogReviewOutcome;
@@ -190,6 +197,19 @@ export interface OriginalDiscArchive {
   verifiedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
+}
+
+export interface UnreadableSectorRange {
+  startLba: number;
+  sectorCount: number;
+}
+
+export interface CleanReadArchiveIntegrityEvidence {
+  integrity: "clean_read";
+  policyVersion: string;
+  badSectorCount: 0;
+  badAreaCount: 0;
+  badSectorRanges: readonly [];
 }
 
 export type CatalogReviewArchiveView = "needs_review" | "reviewed";
@@ -882,7 +902,11 @@ export interface ArchiveJobAccess {
   ): ArchiveJob;
   publish(
     claim: RunningArchiveJob,
-    input: { archivePath: string; sizeBytes: number },
+    input: {
+      archivePath: string;
+      sizeBytes: number;
+      integrityEvidence: CleanReadArchiveIntegrityEvidence;
+    },
   ): ArchiveJob;
   fail(claim: RunningArchiveJob, errorMessage: string): ArchiveJob;
   abort(claim: RunningArchiveJob, errorMessage: string): ArchiveJob;

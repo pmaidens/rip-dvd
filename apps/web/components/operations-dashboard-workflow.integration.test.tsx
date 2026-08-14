@@ -12,6 +12,7 @@ import {
   type OpticalDriveHardware,
 } from "../../archive-worker/src/archive-worker.js";
 import type { DvdCopyRunner } from "../../archive-worker/src/dvd-archiver.js";
+import { createCleanDvdRecoveryResult } from "../../archive-worker/src/dvd-recovery-contracts.js";
 import {
   pollEncodeWorker,
   type HandBrakeRunner,
@@ -975,11 +976,12 @@ describe("end-to-end operations dashboard workflow", () => {
       isActive: () => false,
       withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
       waitForInactive: vi.fn(async () => undefined),
-      async copy({ outputPath, onBytesCopied }) {
+      async copy({ outputPath, onBytesCopied, sizeBytes }) {
         onBytesCopied(4);
         await archiveGate.wait();
         writeFileSync(outputPath, "dvd-image", { flag: "wx" });
         onBytesCopied(9);
+        return createCleanDvdRecoveryResult(sizeBytes);
       },
     };
     const archivePoll = pollArchiveWorker({
@@ -1010,7 +1012,17 @@ describe("end-to-end operations dashboard workflow", () => {
     });
     expect(completedArchiveDashboard.html).toContain("Completed");
     expect(completedArchiveDashboard.html).toContain("Review catalog");
+    expect(completedArchiveDashboard.html).toContain(
+      "Archive integrity: Clean read",
+    );
     const archive = access.catalog.listOriginalDiscArchives()[0]!;
+    expect(archive).toMatchObject({
+      integrity: "clean_read",
+      integrityPolicyVersion: "dvd-recovery-v1",
+      badSectorCount: 0,
+      badAreaCount: 0,
+      badSectorRanges: [],
+    });
     expect(existsSync(archive.archivePath)).toBe(true);
     const unrelatedMediaItem = access.catalog.createMediaItem({
       kind: "movie",
@@ -1042,9 +1054,13 @@ describe("end-to-end operations dashboard workflow", () => {
     expect(catalogReviewResponse.status).toBe(200);
     const catalogReview = await catalogReviewResponse.json() as
       CatalogReviewDto;
+    expect(catalogReview.archive.integrity).toBe("clean_read");
+    expect(JSON.stringify(catalogReview)).not.toContain(archive.archivePath);
+    expect(JSON.stringify(catalogReview)).not.toContain(originalsLibraryPath);
     expect(catalogReview.mediaItems).toEqual([]);
     const catalogReviewHtml = renderCatalogReview(catalogReview);
     expect(catalogReviewHtml).toContain("Catalog Workflow Disc");
+    expect(catalogReviewHtml).toContain("Archive integrity: Clean read");
     expect(catalogReviewHtml).toContain("Original volume label");
     expect(catalogReviewHtml).toContain("WORKFLOW_DISC");
     expect(catalogReviewHtml).toContain("1h 35m 11s");

@@ -24,6 +24,7 @@ import {
   withCancelledDvdArchiveInactive,
   type DvdCopyRunner,
 } from "./dvd-archiver.js";
+import { createCleanDvdRecoveryResult } from "./dvd-recovery-contracts.js";
 
 const temporaryDirectories: string[] = [];
 const orphanedWriterPids: number[] = [];
@@ -356,7 +357,10 @@ describe("DVD archive publication", () => {
       writeFileSync(otherFingerprintPartial, "other disc");
       const content = Buffer.from("fresh");
       const runner: DvdCopyRunner = {
-        copy: vi.fn(async ({ outputPath }) => writeFileSync(outputPath, content)),
+        copy: vi.fn(async ({ outputPath, sizeBytes }) => {
+          writeFileSync(outputPath, content);
+          return createCleanDvdRecoveryResult(sizeBytes);
+        }),
         isActive: () => false,
         withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
         waitForInactive: vi.fn(async () => undefined),
@@ -730,7 +734,10 @@ describe("DVD archive publication", () => {
       );
       child.emit("close", 0, null);
     }
-    await expect(Promise.all(copies)).resolves.toEqual([undefined, undefined]);
+    await expect(Promise.all(copies)).resolves.toEqual([
+      createCleanDvdRecoveryResult(9),
+      createCleanDvdRecoveryResult(9),
+    ]);
   });
 
   it("scopes cancellation-recovery exclusion to the matching device tombstone", async () => {
@@ -967,7 +974,7 @@ describe("DVD archive publication", () => {
       Buffer.from("rip-dvd-copy-authorization-ready\n"),
     );
     children[1]!.emit("close", 0, null);
-    await expect(retry).resolves.toBeUndefined();
+    await expect(retry).resolves.toEqual(createCleanDvdRecoveryResult(9));
   });
 
   it("contains progress callback failures and waits for the reader to close", async () => {
@@ -1033,11 +1040,12 @@ describe("DVD archive publication", () => {
     const digest = "e5cbeaa2965a33da9559ec142f30f4046ff91d1788a8d2f6ba22490b095f1c61";
     const progress: ArchiveJobProgress[] = [];
     const runner: DvdCopyRunner = {
-      copy: vi.fn(async ({ outputPath, onBytesCopied }) => {
+      copy: vi.fn(async ({ outputPath, onBytesCopied, sizeBytes }) => {
         expect(basename(outputPath)).toMatch(/^\..+\.rip-dvd-partial$/);
         onBytesCopied(4);
         writeFileSync(outputPath, content);
         onBytesCopied(content.byteLength);
+        return createCleanDvdRecoveryResult(sizeBytes);
       }),
       isActive: () => false,
       withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
@@ -1061,6 +1069,13 @@ describe("DVD archive publication", () => {
         realpathSync(originalsLibraryPath),
         `dvdmeta-${digest}.iso`,
       ),
+      integrityEvidence: {
+        integrity: "clean_read",
+        policyVersion: "dvd-recovery-v1",
+        badSectorCount: 0,
+        badAreaCount: 0,
+        badSectorRanges: [],
+      },
       recovered: false,
       sizeBytes: content.byteLength,
     });
@@ -1078,12 +1093,49 @@ describe("DVD archive publication", () => {
     expect(verifySource).toHaveBeenCalledOnce();
   });
 
+  it("rejects malformed recovery evidence before publishing a complete image", async () => {
+    const originalsLibraryPath = createOriginalsLibrary();
+    const content = Buffer.from("dvd-image");
+    const digest = "a".repeat(64);
+    let partialPath: string | undefined;
+    const runner: DvdCopyRunner = {
+      copy: vi.fn(async ({ outputPath, sizeBytes }) => {
+        partialPath = outputPath;
+        writeFileSync(outputPath, content);
+        return {
+          ...createCleanDvdRecoveryResult(sizeBytes),
+          recoveredByteCount: sizeBytes - 1,
+        };
+      }),
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    };
+
+    await expect(preserveDvdArchive({
+      devicePath: "/dev/sr0",
+      fingerprint: `sha256:${digest}`,
+      originalsLibraryPath,
+      runner,
+      signal: new AbortController().signal,
+      sizeBytes: content.byteLength,
+      verifySource: async () => undefined,
+      onProgress: () => undefined,
+    })).rejects.toThrow("DVD recovery result is invalid");
+
+    expect(existsSync(join(
+      realpathSync(originalsLibraryPath),
+      `${digest}.iso`,
+    ))).toBe(false);
+    expect(readFileSync(`${partialPath}.failed`)).toEqual(content);
+  });
+
   it("moves a failed partial image aside without publishing an archive", async () => {
     const originalsLibraryPath = createOriginalsLibrary();
     const digest = "b".repeat(64);
     let copiedPartialPath: string | undefined;
     const runner: DvdCopyRunner = {
-      copy: vi.fn(async ({ outputPath }) => {
+      copy: vi.fn(async ({ outputPath, sizeBytes }) => {
         copiedPartialPath = outputPath;
         writeFileSync(outputPath, "partial evidence");
         throw new Error("disc read failed");
@@ -1126,7 +1178,7 @@ describe("DVD archive publication", () => {
     let active = false;
     let copyAttempts = 0;
     const runner: DvdCopyRunner = {
-      copy: vi.fn(async ({ outputPath }) => {
+      copy: vi.fn(async ({ outputPath, sizeBytes }) => {
         copyAttempts += 1;
         if (copyAttempts === 1) {
           active = true;
@@ -1135,6 +1187,7 @@ describe("DVD archive publication", () => {
           throw new Error("DVD archive copy timed out");
         }
         writeFileSync(outputPath, content);
+        return createCleanDvdRecoveryResult(sizeBytes);
       }),
       isActive: vi.fn(() => active),
       withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
@@ -1184,10 +1237,11 @@ describe("DVD archive publication", () => {
       writeFileSync(partialPath, "stale");
       const content = Buffer.from("fresh");
       const runner: DvdCopyRunner = {
-        copy: vi.fn(async ({ outputPath }) => {
+        copy: vi.fn(async ({ outputPath, sizeBytes }) => {
           expect(existsSync(outputPath)).toBe(false);
           expect(readFileSync(`${partialPath}.failed`, "utf8")).toBe("stale");
           writeFileSync(outputPath, content);
+          return createCleanDvdRecoveryResult(sizeBytes);
         }),
         isActive: () => false,
         withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
@@ -1217,8 +1271,9 @@ describe("DVD archive publication", () => {
     const outsidePath = join(root, "outside");
     writeFileSync(outsidePath, "outside");
     const runner: DvdCopyRunner = {
-      copy: vi.fn(async ({ outputPath }) => {
+      copy: vi.fn(async ({ outputPath, sizeBytes }) => {
         symlinkSync(outsidePath, outputPath);
+        return createCleanDvdRecoveryResult(sizeBytes);
       }),
       isActive: () => false,
       withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
@@ -1268,7 +1323,18 @@ describe("DVD archive publication", () => {
         onProgress: () => undefined,
         sync,
       }),
-    ).resolves.toEqual({ archivePath, recovered: true, sizeBytes: 8 });
+    ).resolves.toEqual({
+      archivePath,
+      integrityEvidence: {
+        integrity: "clean_read",
+        policyVersion: "dvd-recovery-v1",
+        badSectorCount: 0,
+        badAreaCount: 0,
+        badSectorRanges: [],
+      },
+      recovered: true,
+      sizeBytes: 8,
+    });
     expect(runner.copy).not.toHaveBeenCalled();
     expect(sync.mock.calls).toEqual([[archivePath], [root]]);
     expect(readFileSync(archivePath, "utf8")).toBe("complete");
@@ -1283,10 +1349,11 @@ describe("DVD archive publication", () => {
     const content = Buffer.from("dvd-image");
     let copiedPartialPath: string | undefined;
     const runner: DvdCopyRunner = {
-      copy: vi.fn(async ({ outputPath }) => {
+      copy: vi.fn(async ({ outputPath, sizeBytes }) => {
         copiedPartialPath = outputPath;
         writeFileSync(outputPath, content);
         writeFileSync(archivePath, "other publisher");
+        return createCleanDvdRecoveryResult(sizeBytes);
       }),
       isActive: () => false,
       withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
@@ -1316,7 +1383,10 @@ describe("DVD archive publication", () => {
     const digest = "e5cbeaa2965a33da9559ec142f30f4046ff91d1788a8d2f6ba22490b095f1c61";
     const content = Buffer.from("dvd-image");
     const runner: DvdCopyRunner = {
-      copy: vi.fn(async ({ outputPath }) => writeFileSync(outputPath, content)),
+      copy: vi.fn(async ({ outputPath, sizeBytes }) => {
+        writeFileSync(outputPath, content);
+        return createCleanDvdRecoveryResult(sizeBytes);
+      }),
       isActive: () => false,
       withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
       waitForInactive: vi.fn(async () => undefined),

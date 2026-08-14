@@ -1,4 +1,5 @@
 import {
+  createCleanReadArchiveIntegrityEvidence,
   createDataAccess,
   type DataAccess,
   type EncodeOutputFilesystemIdentity,
@@ -634,6 +635,9 @@ describe("readDashboardSnapshot", () => {
     const job = access.archiveJobs.startForInspection(inspection.id, "worker-1")!;
     access.archiveJobs.publish(job, {
       archivePath: "/media/originals/completed-inspection.iso",
+      integrityEvidence: createCleanReadArchiveIntegrityEvidence(
+        "test-clean-v1",
+      ),
       sizeBytes: 9,
     });
 

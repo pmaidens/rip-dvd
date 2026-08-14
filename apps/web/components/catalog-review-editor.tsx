@@ -2,6 +2,7 @@
 
 import type { CompletedCatalogReviewOutcome } from "@rip-dvd/data-access";
 
+import { archiveIntegrityLabel } from "../lib/archive-integrity";
 import { displayTerm } from "../lib/display-term";
 import { CatalogReviewCompletion } from "./catalog-review-completion";
 import { CatalogReviewDiscSelections } from "./catalog-review-disc-selections";
@@ -135,6 +136,9 @@ export function CatalogReviewView({
             {displayTerm(review.archive.discKind)} · {
               review.archive.archiveFormat.toUpperCase()
             }
+          </p>
+          <p>
+            Archive integrity: {archiveIntegrityLabel(review.archive.integrity)}
           </p>
         </div>
         <div className="profile-actions">

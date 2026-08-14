@@ -283,8 +283,12 @@ legacy identity barrier, existing provenance, and same-fingerprint/same-drive
 execution exclusions before inserting a claimed running attempt. Every attempt
 has its own ordinal and claim token. Publication inserts Original Disc Archive
 provenance, archives matching observations, completes the attempt, and fulfills
-matching requests in one immediate transaction. Failure and abortion update the
-attempt and request together. A stale attempt cannot mutate a later attempt.
+matching requests in one immediate transaction. Archive Integrity evidence is
+part of that same publication transaction: historical Original Disc Archives
+remain `unknown`, while a newly observed zero-damage recovery is `clean_read`
+with its recovery-policy version and zero bad-sector evidence. Failure and
+abortion update the attempt and request together. A stale attempt cannot mutate
+a later attempt.
 Each recovery pass bounds ordinary expired claims to 100 visible failures.
 Expired cancellation claims remain separately discoverable: the archive worker
 must prove the copy runner and every matching partial inactive, then hold the
