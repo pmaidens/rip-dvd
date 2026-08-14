@@ -1129,9 +1129,13 @@ describe("archive worker polling", () => {
       withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
       waitForInactive: vi.fn(async () => undefined),
     };
-    vi.spyOn(access.archiveJobs, "publish").mockImplementationOnce(() => {
-      throw new Error("catalog publication failed");
-    });
+    vi.spyOn(access.archiveJobs, "publish")
+      .mockImplementationOnce(() => {
+        throw new Error("catalog publication failed");
+      })
+      .mockImplementationOnce(() => {
+        throw new Error("catalog publication failed again");
+      });
 
     await pollArchiveWorker({
       access,
@@ -1168,12 +1172,40 @@ describe("archive worker polling", () => {
       configuredDevicePath: "/dev/sr0",
       copyRunner: publicationRetryRunner,
       hardware,
+      log: vi.fn(),
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+      workerId: "archive-worker-rescue-publication-retry-test",
+    });
+
+    expect(publicationRetryCopy).not.toHaveBeenCalled();
+    expect(access.archiveRequests.list(["needs_attention"])).toEqual([
+      expect.objectContaining({ id: request.id }),
+    ]);
+    expect(access.archiveJobs.list(["failed"]).at(-1)).toMatchObject({
+      attemptOrdinal: 4,
+      errorMessage: "catalog publication failed again",
+    });
+    const archivePath = join(
+      realpathSync(originalsLibraryPath),
+      `dvdmeta-${fingerprint.slice(fingerprint.lastIndexOf(":") + 1)}.iso`,
+    );
+    expect(existsSync(archivePath)).toBe(false);
+    expect(readFileSync(`${archivePath}.failed`)).toEqual(recoveredImage);
+    expect(readFileSync(rescueImagePath)).toEqual(recoveredImage);
+
+    access.archiveRequests.retry(request.id);
+    await pollArchiveWorker({
+      access,
+      configuredDevicePath: "/dev/sr0",
+      copyRunner: publicationRetryRunner,
+      hardware,
       log(message) {
         throw new Error(message);
       },
       originalsLibraryPath,
       signal: new AbortController().signal,
-      workerId: "archive-worker-rescue-publication-retry-test",
+      workerId: "archive-worker-rescue-publication-final-retry-test",
     });
 
     expect(publicationRetryCopy).not.toHaveBeenCalled();
@@ -1184,7 +1216,8 @@ describe("archive worker polling", () => {
       expect.objectContaining({ status: "failed", attemptOrdinal: 1 }),
       expect.objectContaining({ status: "failed", attemptOrdinal: 2 }),
       expect.objectContaining({ status: "failed", attemptOrdinal: 3 }),
-      expect.objectContaining({ status: "completed", attemptOrdinal: 4 }),
+      expect.objectContaining({ status: "failed", attemptOrdinal: 4 }),
+      expect.objectContaining({ status: "completed", attemptOrdinal: 5 }),
     ]);
     const archive = access.catalog.listOriginalDiscArchives()[0]!;
     expect(archive).toMatchObject({

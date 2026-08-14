@@ -933,7 +933,15 @@ export async function quarantinePublishedArchive(
   ) {
     throw new Error("Published DVD archive failed path is not a regular file");
   }
-  await rename(archivePath, failedPath);
+  if (
+    failedMetadata !== null &&
+    failedMetadata.dev === metadata.dev &&
+    failedMetadata.ino === metadata.ino
+  ) {
+    await unlink(archivePath);
+  } else {
+    await rename(archivePath, failedPath);
+  }
   await syncPath(dirname(archivePath));
 }
 

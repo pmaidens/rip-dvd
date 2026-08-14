@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { lstat, open, realpath, rename, unlink } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
@@ -15,7 +15,7 @@ import {
 } from "./dvd-recovery-contracts.js";
 
 const MAX_RESCUE_MAP_BYTES = 1_200_000;
-const ARCHIVE_REQUEST_ID_PATTERN =
+const UUID_V4_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 export interface DvdRescueIdentity {
@@ -57,20 +57,26 @@ function filesystemIdentity(metadata: Awaited<ReturnType<typeof lstat>>): string
 }
 
 function requireArchiveRequestId(value: string): string {
-  if (!ARCHIVE_REQUEST_ID_PATTERN.test(value)) {
+  if (typeof value !== "string" || value.length === 0) {
     throw new Error("Archive Request identity is invalid for DVD rescue");
   }
   return value;
+}
+
+function archiveRequestPathKey(archiveRequestId: string): string {
+  return createHash("sha256")
+    .update(requireArchiveRequestId(archiveRequestId), "utf8")
+    .digest("hex");
 }
 
 export function dvdRescueWorkspacePaths(
   root: string,
   archiveRequestId: string,
 ): Pick<DvdRescueWorkspace, "imagePath" | "mapPath"> {
-  const safeRequestId = requireArchiveRequestId(archiveRequestId);
+  const requestPathKey = archiveRequestPathKey(archiveRequestId);
   return {
-    imagePath: join(root, `.${safeRequestId}.rip-dvd-rescue.iso`),
-    mapPath: join(root, `.${safeRequestId}.rip-dvd-rescue.json`),
+    imagePath: join(root, `.${requestPathKey}.rip-dvd-rescue.iso`),
+    mapPath: join(root, `.${requestPathKey}.rip-dvd-rescue.json`),
   };
 }
 
@@ -111,9 +117,12 @@ async function quarantineWorkspaceFiles(
     correlatedArchivePath === undefined
       ? false
       : await quarantinePath(correlatedArchivePath);
+  if (archiveChanged) {
+    await syncPath(root);
+  }
   const mapChanged = await quarantinePath(paths.mapPath);
   const imageChanged = await quarantinePath(paths.imagePath);
-  if (archiveChanged || mapChanged || imageChanged) {
+  if (mapChanged || imageChanged) {
     await syncPath(root);
   }
 }
@@ -198,7 +207,7 @@ function requirePreparedImagePath(
   if (
     typeof value !== "string" ||
     basename(value) !== value ||
-    !ARCHIVE_REQUEST_ID_PATTERN.test(uuid)
+    !UUID_V4_PATTERN.test(uuid)
   ) {
     throw new Error("Prepared DVD rescue image identity is invalid");
   }
