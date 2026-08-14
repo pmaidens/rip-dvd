@@ -5,7 +5,10 @@ import {
 import type { DataAccess } from "./types.js";
 
 export { createDiscSelectionSourceIdentity } from "./disc-selection-source-identity.js";
-export { createCleanReadArchiveIntegrityEvidence } from "./archive-integrity.js";
+export {
+  createCleanReadArchiveIntegrityEvidence,
+  createUnknownArchiveIntegrityEvidence,
+} from "./archive-integrity.js";
 export { normalizeMediaItemSearchTitle } from "./media-item-title-search.js";
 export { isCorrectedEncodePredecessorReady } from "./corrected-encode-readiness.js";
 
