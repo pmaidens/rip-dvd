@@ -45,7 +45,7 @@ function boundedFrameCount(value: string): number {
 
 function parseCompletedPlayback(
   output: string,
-  titleNumber: number,
+  title: DvdTitle,
 ): DvdTitlePlaybackResult {
   if (
     !/libhb:\s*work result\s*=\s*0\b/.test(output) ||
@@ -60,9 +60,38 @@ function parseCompletedPlayback(
     decodedFrameCount: boundedFrameCount(match[2]!),
     failedFrameCount: boundedFrameCount(match[3]!),
   }));
-  const videoDecoders = decoders.filter(({ codec }) => codec === "mpeg2video");
-  const audioDecoders = decoders.filter(({ codec }) => codec !== "mpeg2video");
-  if (videoDecoders.length > 1) {
+  const audioCodecsBySourceId = new Map<number, string>();
+  const audioSourcePattern =
+    /scan:\s*audio\s+(0x[0-9a-f]+|\d+):\s*([a-z0-9_]+)/gi;
+  for (const match of output.matchAll(audioSourcePattern)) {
+    const sourceId = Number.parseInt(match[1]!, match[1]!.startsWith("0x") ? 16 : 10);
+    const codec = match[2]!.toLowerCase();
+    if (
+      !Number.isSafeInteger(sourceId) ||
+      audioCodecsBySourceId.has(sourceId)
+    ) {
+      throw new Error("DVD title playback validator returned malformed output");
+    }
+    audioCodecsBySourceId.set(sourceId, codec);
+  }
+  if (
+    audioCodecsBySourceId.size !== title.audioStreams.length ||
+    title.audioStreams.some(({ id }) => !audioCodecsBySourceId.has(id))
+  ) {
+    throw new Error("DVD title playback validator returned malformed output");
+  }
+  const unmatchedDecoders = [...decoders];
+  const takeDecoder = (codec: string) => {
+    const index = unmatchedDecoders.findIndex((decoder) =>
+      decoder.codec === codec
+    );
+    return index === -1 ? undefined : unmatchedDecoders.splice(index, 1)[0];
+  };
+  const videoDecoder = takeDecoder("mpeg2video");
+  const audioDecoders = title.audioStreams.map(({ id }) =>
+    takeDecoder(audioCodecsBySourceId.get(id)!)
+  );
+  if (unmatchedDecoders.length > 0) {
     throw new Error("DVD title playback validator returned malformed output");
   }
   const synchronization =
@@ -85,7 +114,9 @@ function parseCompletedPlayback(
     throw new Error("DVD title playback validator returned malformed output");
   }
   return {
-    audioStreamCount: audioDecoders.length,
+    audioStreamCount: audioDecoders.filter((decoder) =>
+      decoder !== undefined && decoder.decodedFrameCount > 0
+    ).length,
     decodedDurationSeconds: synchronizedFrameCount / averageFrameRate,
     decodedFrameCount: decoders.reduce(
       (total, decoder) => total + decoder.decodedFrameCount,
@@ -96,8 +127,9 @@ function parseCompletedPlayback(
       0,
     ),
     terminalStatus: "completed",
-    titleNumber,
-    videoStreamCount: videoDecoders.length,
+    titleNumber: title.number,
+    videoStreamCount:
+      videoDecoder !== undefined && videoDecoder.decodedFrameCount > 0 ? 1 : 0,
   };
 }
 
@@ -147,7 +179,7 @@ export function createNodeDvdTitlePlaybackValidator({
       }
       return parseCompletedPlayback(
         `${playback.stdout}\n${playback.stderr}`,
-        title.number,
+        title,
       );
     },
   };
