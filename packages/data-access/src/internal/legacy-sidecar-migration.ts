@@ -110,6 +110,30 @@ function isCompatibleLegacyEncodingProfile(
   );
 }
 
+function findCapturedLegacyJobSnapshot(
+  snapshots: ReadonlyMap<LegacyJobLogicalKey, LegacyQueueJobSnapshot>,
+  fingerprint: string,
+  job: ParsedLegacyJob,
+): {
+  logicalKey: LegacyJobLogicalKey;
+  snapshot: LegacyQueueJobSnapshot;
+} | undefined {
+  const logicalKey = legacyJobLogicalKey(fingerprint, job);
+  const snapshot = snapshots.get(logicalKey);
+  if (snapshot) {
+    return { logicalKey, snapshot };
+  }
+  const legacyLogicalKey = createLegacyJobLogicalKey({
+    fingerprint,
+    profileKey: job.profileKey,
+    sourceKey: job.sourceKey,
+  });
+  const legacySnapshot = snapshots.get(legacyLogicalKey);
+  return legacySnapshot
+    ? { logicalKey: legacyLogicalKey, snapshot: legacySnapshot }
+    : undefined;
+}
+
 export function createLegacySidecarImportAccess(
   database: LegacySidecarCatalogAdapter,
   now: () => Date,
@@ -544,15 +568,16 @@ export function createLegacySidecarImportAccess(
           input.recoverHistoricalCutover !== true
         ) {
           for (const job of sidecar.jobs) {
-            const logicalKey = legacyJobLogicalKey(
+            const capturedSnapshot = findCapturedLegacyJobSnapshot(
+              cutover.jobSnapshots,
               sidecar.fingerprint,
               job,
             );
             if (
-              cutover.jobSnapshots.get(logicalKey)?.signature ===
+              capturedSnapshot?.snapshot.signature ===
               legacyJobSignature(job)
             ) {
-              reconciledSnapshotKeys.add(logicalKey);
+              reconciledSnapshotKeys.add(capturedSnapshot.logicalKey);
             }
           }
           report.sidecarsSkipped += 1;
@@ -697,10 +722,13 @@ export function createLegacySidecarImportAccess(
           const signature = legacyJobSignature(job);
           const persisted = persistedLegacyJobs.get(logicalKey);
           if (!persisted) {
-            const publishedSnapshot =
-              cutover.jobSnapshots.get(logicalKey);
+            const publishedSnapshot = findCapturedLegacyJobSnapshot(
+              cutover.jobSnapshots,
+              sidecar.fingerprint,
+              job,
+            );
             if (
-              publishedSnapshot?.signature !== signature
+              publishedSnapshot?.snapshot.signature !== signature
             ) {
               const issue = {
                 code: "duplicate_record",
@@ -713,7 +741,7 @@ export function createLegacySidecarImportAccess(
               report.issues.push(issue);
               return false;
             }
-            reconciledSnapshotKeys.add(logicalKey);
+            reconciledSnapshotKeys.add(publishedSnapshot.logicalKey);
             return true;
           }
           if (legacyJobSignature(persisted.job) === signature) {
@@ -1088,6 +1116,9 @@ export function createLegacySidecarImportAccess(
                     ambiguous: false,
                   };
                 }
+                if (exactOutputSelectionIds.size > 1) {
+                  return { selection: undefined, ambiguous: true };
+                }
               }
               const preExistingCandidates = candidates.filter((candidate) =>
                 preExistingSelectionIds.has(candidate.id)
@@ -1275,9 +1306,11 @@ export function createLegacySidecarImportAccess(
               }
               const capturedSnapshotMatches =
                 cutover.wasAlreadyPublished &&
-                cutover.jobSnapshots
-                  .get(legacyJobLogicalKey(sidecar.fingerprint, job))
-                  ?.signature === legacyJobSignature(job);
+                findCapturedLegacyJobSnapshot(
+                  cutover.jobSnapshots,
+                  sidecar.fingerprint,
+                  job,
+                )?.snapshot.signature === legacyJobSignature(job);
               const outputJob = transaction
                 .select()
                 .from(encodeJobs)

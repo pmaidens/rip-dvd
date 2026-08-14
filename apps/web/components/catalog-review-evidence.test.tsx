@@ -94,6 +94,23 @@ describe("CatalogReviewEvidence", () => {
     expect(html).toContain("Mapped");
   });
 
+  it("renders the overlap warning for duplicate main-feature selections", () => {
+    const html = renderToStaticMarkup(
+      <CatalogReviewEvidence
+        volumeLabel="TWO_MAIN_FEATURES"
+        coverage={{
+          ...evidenceCoverage,
+          discSelectionCount: 2,
+          mainFeatureSelections: 2,
+        }}
+        titles={[]}
+      />,
+    );
+
+    expect(html).toContain("Overlapping Disc Selections");
+    expect(html).toContain("main-feature sources");
+  });
+
   it("renders archived evidence and non-authoritative suggestions accessibly", () => {
     const html = renderToStaticMarkup(
       <CatalogReviewEvidence

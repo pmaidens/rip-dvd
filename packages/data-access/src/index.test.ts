@@ -2556,6 +2556,7 @@ describe("data-access facade", () => {
           { number: 2, durationSeconds: 2_400, chapters: 8 },
           { number: 3, durationSeconds: 1_800, chapters: 6 },
           { number: 4, durationSeconds: 90, chapters: 1 },
+          { number: 5, durationSeconds: 120, chapters: 0 },
         ].map((title) => ({
           ...title,
           audioStreams: [],
@@ -2617,11 +2618,13 @@ describe("data-access facade", () => {
       chapterEnd: 6,
     });
     createSelection(0, { kind: "main_feature" });
+    createSelection(0, { kind: "dvd_title", titleNumber: 5 });
+    createSelection(1, { kind: "dvd_title", titleNumber: 5 });
 
     expect(access.catalog.getCatalogReviewCoverage(archive.id)).toEqual({
-      discSelectionCount: 7,
+      discSelectionCount: 9,
       mediaItemsWithSelections: 3,
-      mappedTitles: 2,
+      mappedTitles: 3,
       partiallyMappedTitles: 1,
       unmappedTitles: 1,
       mainFeatureSelections: 1,
@@ -2630,6 +2633,7 @@ describe("data-access facade", () => {
         { titleNumber: 2, status: "partially_mapped", hasOverlap: true },
         { titleNumber: 3, status: "mapped", hasOverlap: false },
         { titleNumber: 4, status: "unmapped", hasOverlap: false },
+        { titleNumber: 5, status: "mapped", hasOverlap: true },
       ],
     });
     access.close();

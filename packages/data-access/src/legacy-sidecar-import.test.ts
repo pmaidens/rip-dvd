@@ -1017,6 +1017,59 @@ describe("legacy sidecar import", () => {
     fixture.access.close();
   });
 
+  it("fails closed when released output history points at multiple active exact overlaps", () => {
+    const fixture = createFixture();
+    expect(fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    })).toMatchObject({ issues: [] });
+    const trailerJob = fixture.access.encodeJobs.list().find(
+      (job) => job.outputPath === fixture.trailerOutputPath,
+    )!;
+    const trailerSelection = fixture.access.catalog.listDiscSelections({
+      ids: [trailerJob.discSelectionId],
+    })[0]!;
+    fixture.access.encodeJobs.requestCancellation(trailerJob.id);
+    const decoy = fixture.access.catalog.createMediaItem({
+      kind: "bonus_feature",
+      title: "Different extra",
+    });
+    const decoySelection = fixture.access.catalog.createDiscSelection({
+      originalDiscArchiveId: trailerSelection.originalDiscArchiveId,
+      mediaItemId: decoy.id,
+      sourceIdentity: trailerSelection.sourceIdentity,
+    });
+    completeCatalogReview(
+      fixture.access,
+      trailerSelection.originalDiscArchiveId,
+    );
+    fixture.access.encodingProfiles.setActive({
+      id: trailerJob.encodingProfileId,
+      mediaDomain: "dvd_video",
+      isActive: true,
+    });
+    const conflictingHistory = fixture.access.encodeJobs.enqueue({
+      discSelectionId: decoySelection.id,
+      encodingProfileId: trailerJob.encodingProfileId,
+      outputPath: trailerJob.outputPath,
+    });
+    fixture.access.encodeJobs.requestCancellation(conflictingHistory.id);
+
+    const report = fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    });
+
+    expect(report.issues).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        code: "duplicate_record",
+        message: expect.stringMatching(/multiple Disc Selections.*provenance/i),
+      }),
+    ]));
+    expect(fixture.access.encodeJobs.list().filter(
+      (job) => job.outputPath === fixture.trailerOutputPath,
+    )).toHaveLength(2);
+    fixture.access.close();
+  });
+
   it("recognizes captured retired provenance before active overlap ambiguity", () => {
     const fixture = createFixture();
     expect(fixture.access.legacySidecars.importLibrary({
@@ -2979,6 +3032,56 @@ describe("legacy sidecar import", () => {
         message: expect.stringMatching(/schema-2\/3.*explicit.*recovery/i),
       }),
     ]));
+    expect(fixture.access.encodeJobs.list()).toHaveLength(2);
+    fixture.access.close();
+  });
+
+  it("retries an unchanged schema-4 marker with pre-output logical keys", () => {
+    const fixture = createFixture();
+    const markerPath = join(
+      fixture.originalsLibraryPath,
+      ".rip-dvd-sqlite-catalog",
+    );
+    expect(fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    })).toMatchObject({ issues: [] });
+    const currentMarker = JSON.parse(readFileSync(markerPath, "utf8")) as {
+      schemaVersion: 4;
+      legacyQueueStatus: "retired";
+      authoritativeStore: "sqlite";
+      legacySidecars: unknown[];
+      legacyJobs: Array<{
+        logicalKey: string;
+        jobIndex: number;
+        sidecarPath: string;
+        signature: string;
+      }>;
+      snapshotDigest: string;
+    };
+    const legacyJobs = currentMarker.legacyJobs.map((job) => ({
+      ...job,
+      logicalKey: job.logicalKey.split("\0").slice(0, 3).join("\0"),
+    }));
+    const legacyMarker = {
+      ...currentMarker,
+      legacyJobs,
+      snapshotDigest: createHash("sha256")
+        .update(
+          `${JSON.stringify(currentMarker.legacySidecars)}\n${
+            JSON.stringify(legacyJobs)
+          }`,
+        )
+        .digest("hex"),
+    };
+    writeFileSync(markerPath, JSON.stringify(legacyMarker));
+
+    expect(fixture.access.legacySidecars.importLibrary({
+      originalsLibraryPath: fixture.originalsLibraryPath,
+    })).toMatchObject({ sidecarsImported: 1, issues: [] });
+    expect(JSON.parse(readFileSync(markerPath, "utf8"))).toMatchObject({
+      legacyQueueStatus: "retired",
+      legacyJobs,
+    });
     expect(fixture.access.encodeJobs.list()).toHaveLength(2);
     fixture.access.close();
   });

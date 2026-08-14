@@ -196,11 +196,6 @@ const DISC_SELECTION_CORRECTION_ENCODE_JOB_LINK_LIMIT = 101;
 const DISC_SELECTION_CORRECTION_RETAINED_OUTPUT_SUMMARY_LIMIT = 101;
 const MEDIA_ITEM_SEARCH_LIMIT = 100;
 
-type DiscSelectionSourceCoordinates = Omit<
-  DiscSelectionSourceIdentityColumns,
-  "sourceKey"
->;
-
 interface DiscSelectionSourceOverlapTracker {
   chapterRangesByTitle: Map<number, Array<readonly [number, number]>>;
   hasMainFeature: boolean;
@@ -209,7 +204,7 @@ interface DiscSelectionSourceOverlapTracker {
 
 function addDiscSelectionSourceToOverlapTracker(
   tracker: DiscSelectionSourceOverlapTracker,
-  candidate: DiscSelectionSourceCoordinates,
+  candidate: DiscSelectionSourceIdentityColumns,
 ): void {
   switch (candidate.kind) {
     case "main_feature":
@@ -227,18 +222,13 @@ function addDiscSelectionSourceToOverlapTracker(
   }
 }
 
-function createDiscSelectionSourceOverlapTracker(
-  activeSources: readonly DiscSelectionSourceCoordinates[],
-): DiscSelectionSourceOverlapTracker {
-  const tracker: DiscSelectionSourceOverlapTracker = {
+function createDiscSelectionSourceOverlapTracker():
+  DiscSelectionSourceOverlapTracker {
+  return {
     chapterRangesByTitle: new Map(),
     hasMainFeature: false,
     wholeTitles: new Set(),
   };
-  for (const source of activeSources) {
-    addDiscSelectionSourceToOverlapTracker(tracker, source);
-  }
-  return tracker;
 }
 
 function discSelectionSourceOverlapsTracker(
@@ -682,7 +672,10 @@ export function createDataAccessInternal(
         group by title_number
       ),
       whole_title_by_title as (
-        select title_number, max(is_whole_title) as has_whole_title
+        select
+          title_number,
+          max(is_whole_title) as has_whole_title,
+          sum(is_whole_title) as whole_title_selections
         from raw_intervals
         group by title_number
       )
@@ -691,7 +684,12 @@ export function createDataAccessInternal(
         title_map.chapters,
         coalesce(whole_title_by_title.has_whole_title, 0) as has_whole_title,
         coalesce(covered_chapters.covered_chapters, 0) as covered_chapters,
-        coalesce(overlap_by_title.has_overlap, 0) as has_overlap
+        case
+          when coalesce(overlap_by_title.has_overlap, 0) = 1
+            or coalesce(whole_title_by_title.whole_title_selections, 0) > 1
+            then 1
+          else 0
+        end as has_overlap
       from title_map
       left join whole_title_by_title using (title_number)
       left join covered_chapters using (title_number)
@@ -1113,6 +1111,38 @@ export function createDataAccessInternal(
     });
   }
 
+  function activeDiscSelectionSourceOverlapExists(
+    transaction: CatalogTransaction,
+    archiveId: OriginalDiscArchiveId,
+    candidate: DiscSelectionSourceIdentityColumns,
+  ): boolean {
+    const coordinateOverlap = candidate.kind === "main_feature"
+      ? eq(discSelections.kind, "main_feature")
+      : candidate.kind === "dvd_title"
+      ? eq(discSelections.titleNumber, candidate.titleNumber!)
+      : and(
+        eq(discSelections.titleNumber, candidate.titleNumber!),
+        or(
+          eq(discSelections.kind, "dvd_title"),
+          and(
+            eq(discSelections.kind, "dvd_chapters"),
+            lte(discSelections.chapterStart, candidate.chapterEnd!),
+            gte(discSelections.chapterEnd, candidate.chapterStart!),
+          ),
+        ),
+      );
+    return transaction
+      .select({ id: discSelections.id })
+      .from(discSelections)
+      .where(and(
+        eq(discSelections.originalDiscArchiveId, archiveId),
+        eq(discSelections.isCatalogActive, true),
+        coordinateOverlap,
+      ))
+      .limit(1)
+      .get() !== undefined;
+  }
+
   function insertDiscSelection(
     transaction: CatalogTransaction,
     input: CreateDiscSelectionInput,
@@ -1160,29 +1190,17 @@ export function createDataAccessInternal(
     const sourcePersistence =
       serializeDiscSelectionSourceIdentity(sourceIdentity);
     if (options.rejectSourceOverlap) {
-      const activeSourceTracker = options.activeSourceTracker ??
-        createDiscSelectionSourceOverlapTracker(
-          transaction
-            .select({
-              kind: discSelections.kind,
-              titleNumber: discSelections.titleNumber,
-              chapterStart: discSelections.chapterStart,
-              chapterEnd: discSelections.chapterEnd,
-            })
-            .from(discSelections)
-            .where(and(
-              eq(
-                discSelections.originalDiscArchiveId,
-                input.originalDiscArchiveId,
-              ),
-              eq(discSelections.isCatalogActive, true),
-            ))
-            .all(),
-        );
-      if (discSelectionSourceOverlapsTracker(
-        sourcePersistence,
-        activeSourceTracker,
-      )) {
+      const overlapsSource = options.activeSourceTracker
+        ? discSelectionSourceOverlapsTracker(
+            sourcePersistence,
+            options.activeSourceTracker,
+          )
+        : activeDiscSelectionSourceOverlapExists(
+            transaction,
+            input.originalDiscArchiveId,
+            sourcePersistence,
+          );
+      if (overlapsSource) {
         throw new DomainInvariantError(
           "Assisted Mapping cannot use an overlapping DVD source",
         );
@@ -3942,25 +3960,32 @@ export function createDataAccessInternal(
             );
           }
 
-          const activeSourceTracker =
-            createDiscSelectionSourceOverlapTracker(
-              transaction
-                .select({
-                  kind: discSelections.kind,
-                  titleNumber: discSelections.titleNumber,
-                  chapterStart: discSelections.chapterStart,
-                  chapterEnd: discSelections.chapterEnd,
-                })
-                .from(discSelections)
-                .where(and(
-                  eq(
-                    discSelections.originalDiscArchiveId,
-                    input.originalDiscArchiveId,
-                  ),
-                  eq(discSelections.isCatalogActive, true),
-                ))
-                .all(),
+          const proposedTitleNumbers = [...new Set(input.episodes.map(
+            (episode) => requirePositiveSafeInteger(
+              episode.titleNumber,
+              "Episode title number",
+            ),
+          ))];
+          const overlapsPersistedSource = transaction
+            .select({ id: discSelections.id })
+            .from(discSelections)
+            .where(and(
+              eq(
+                discSelections.originalDiscArchiveId,
+                input.originalDiscArchiveId,
+              ),
+              eq(discSelections.isCatalogActive, true),
+              inArray(discSelections.titleNumber, proposedTitleNumbers),
+            ))
+            .limit(1)
+            .get();
+          if (overlapsPersistedSource) {
+            throw new DomainInvariantError(
+              "Assisted Mapping cannot use an overlapping DVD source",
             );
+          }
+          const activeSourceTracker =
+            createDiscSelectionSourceOverlapTracker();
 
           const createMediaItem = (
             candidate: Omit<Parameters<typeof validateMediaItem>[0], "id">,
