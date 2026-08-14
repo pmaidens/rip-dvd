@@ -2904,6 +2904,34 @@ describe("data-access facade", () => {
       },
       replacementEncodeJobs: [],
     });
+    expect(access.encodeJobs.listDiscSelectionCorrectionEncodeJobLinks({
+      originalDiscArchiveId: archive.id,
+      limit: 100,
+    })).toEqual([{
+      replacementDiscSelectionId: correction.discSelection.id,
+      predecessorEncodeJob: {
+        id: predecessor.id,
+        status: "completed",
+      },
+      replacementEncodeJob: null,
+    }]);
+    expect(
+      access.catalog.deleteDiscSelection(correction.discSelection.id),
+    ).toMatchObject({
+      id: correction.discSelection.id,
+      deletionComplete: true,
+    });
+    expect(access.encodeJobs.listDiscSelectionCorrectionEncodeJobLinks({
+      originalDiscArchiveId: archive.id,
+      limit: 100,
+    })).toEqual([{
+      replacementDiscSelectionId: correction.discSelection.id,
+      predecessorEncodeJob: {
+        id: predecessor.id,
+        status: "completed",
+      },
+      replacementEncodeJob: null,
+    }]);
     expect(access.encodeJobs.list()).toEqual([
       expect.objectContaining({
         id: predecessor.id,
@@ -3500,7 +3528,12 @@ describe("data-access facade", () => {
     );
     expect(correctionJobPages.map((page) => page.length)).toEqual([100, 100, 1]);
     const traversedReplacementIds = correctionJobPages.flatMap((page) =>
-      page.map(({ replacementEncodeJob }) => replacementEncodeJob.id)
+      page.map(({ replacementEncodeJob }) => {
+        if (replacementEncodeJob === null) {
+          throw new Error("Expected persisted correction replacement");
+        }
+        return replacementEncodeJob.id;
+      })
     );
     expect(traversedReplacementIds).toEqual(replacementIds);
     expect(new Set(traversedReplacementIds).size).toBe(historySize);

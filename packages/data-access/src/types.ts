@@ -282,7 +282,7 @@ export interface DiscSelectionCorrectionEncodeJobLink {
   replacementEncodeJob: {
     id: EncodeJobId;
     status: EncodeJobStatus;
-  };
+  } | null;
 }
 
 export type DiscSelectionAction =

@@ -370,18 +370,21 @@ function readCatalogReview(
       ),
       correctionHistory,
       correctionEncodeHistory: correctionEncodeHistoryPage.map((link) => {
+        const replacementEncodeJob = link.replacementEncodeJob;
         return {
           replacementDiscSelectionId: link.replacementDiscSelectionId,
           predecessorEncodeJob: {
             id: link.predecessorEncodeJob.id,
             status: link.predecessorEncodeJob.status,
-            replacementEncodeJobId: link.replacementEncodeJob.id,
+            replacementEncodeJobId: replacementEncodeJob?.id ?? null,
           },
-          replacementEncodeJob: {
-            id: link.replacementEncodeJob.id,
-            status: link.replacementEncodeJob.status,
-            predecessorEncodeJobId: link.predecessorEncodeJob.id,
-          },
+          replacementEncodeJob: replacementEncodeJob === null
+            ? null
+            : {
+              id: replacementEncodeJob.id,
+              status: replacementEncodeJob.status,
+              predecessorEncodeJobId: link.predecessorEncodeJob.id,
+            },
         };
       }),
       correctionRetainedOutputHistory:

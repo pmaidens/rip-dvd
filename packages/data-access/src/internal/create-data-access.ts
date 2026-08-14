@@ -269,6 +269,10 @@ const predecessorEncodeJobRecords = alias(
   encodeJobs,
   "predecessor_encode_jobs",
 );
+const supersededDiscSelectionRecords = alias(
+  discSelections,
+  "superseded_disc_selections",
+);
 const claimPredecessorEncodeJobRecords = alias(
   encodeJobs,
   "claim_predecessor_encode_jobs",
@@ -7225,45 +7229,87 @@ export function createDataAccessInternal(
         }
         const query = database
           .select({
-            replacementDiscSelectionId: discSelections.id,
-            predecessorEncodeJob: {
-              id: predecessorEncodeJobRecords.id,
-              status: predecessorEncodeJobRecords.status,
-            },
-            replacementEncodeJob: {
-              id: encodeJobs.id,
-              status: encodeJobs.status,
-            },
+            replacementDiscSelectionId: sql<DiscSelectionId>`coalesce(
+              ${replacementEncodeJobRecords.discSelectionId},
+              ${discSelectionSupersessions.replacementDiscSelectionId}
+            )`,
+            predecessorEncodeJobId: predecessorEncodeJobRecords.id,
+            predecessorEncodeJobStatus: predecessorEncodeJobRecords.status,
+            replacementEncodeJobId: replacementEncodeJobRecords.id,
+            replacementEncodeJobStatus: replacementEncodeJobRecords.status,
           })
-          .from(encodeJobs)
+          .from(predecessorEncodeJobRecords)
           .innerJoin(
-            predecessorEncodeJobRecords,
+            supersededDiscSelectionRecords,
             eq(
-              predecessorEncodeJobRecords.id,
-              encodeJobs.predecessorEncodeJobId,
+              supersededDiscSelectionRecords.id,
+              predecessorEncodeJobRecords.discSelectionId,
             ),
-          )
-          .innerJoin(
-            discSelections,
-            eq(discSelections.id, encodeJobs.discSelectionId),
           )
           .innerJoin(
             discSelectionSupersessions,
             eq(
+              discSelectionSupersessions.supersededDiscSelectionId,
+              supersededDiscSelectionRecords.id,
+            ),
+          )
+          .innerJoin(
+            discSelections,
+            eq(
               discSelectionSupersessions.replacementDiscSelectionId,
               discSelections.id,
+            ),
+          )
+          .leftJoin(
+            replacementEncodeJobRecords,
+            eq(
+              replacementEncodeJobRecords.predecessorEncodeJobId,
+              predecessorEncodeJobRecords.id,
             ),
           )
           .where(eq(
             discSelections.originalDiscArchiveId,
             options.originalDiscArchiveId,
           ))
-          .orderBy(asc(encodeJobs.createdAt), asc(encodeJobs.id));
-        return listWithBoundedOffset(
+          .orderBy(
+            asc(sql`coalesce(
+              ${replacementEncodeJobRecords.createdAt},
+              ${predecessorEncodeJobRecords.createdAt}
+            )`),
+            asc(sql`coalesce(
+              ${replacementEncodeJobRecords.id},
+              ${predecessorEncodeJobRecords.id}
+            )`),
+          );
+        const rows = listWithBoundedOffset(
           query,
           options,
           "Disc Selection correction Encode Job history",
-        ) as DiscSelectionCorrectionEncodeJobLink[];
+        );
+        return rows.map((row): DiscSelectionCorrectionEncodeJobLink => {
+          let replacementEncodeJob:
+            DiscSelectionCorrectionEncodeJobLink["replacementEncodeJob"] =
+              null;
+          if (row.replacementEncodeJobId !== null) {
+            if (row.replacementEncodeJobStatus === null) {
+              throw new DomainInvariantError(
+                "Correction replacement Encode Job is missing its status",
+              );
+            }
+            replacementEncodeJob = {
+              id: row.replacementEncodeJobId,
+              status: row.replacementEncodeJobStatus,
+            };
+          }
+          return {
+            replacementDiscSelectionId: row.replacementDiscSelectionId,
+            predecessorEncodeJob: {
+              id: row.predecessorEncodeJobId,
+              status: row.predecessorEncodeJobStatus,
+            },
+            replacementEncodeJob,
+          };
+        });
       },
       listDiscSelectionCorrectionRetainedOutputSummaries(options) {
         if (

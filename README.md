@@ -667,12 +667,14 @@ Every `GET /api/catalog-reviews/:archiveId` read uses independent, stable
 archive-scoped pages: `selectionOffset` traverses up to 100 active Disc
 Selections ordered by creation time and identity, `correctionOffset` traverses
 up to 100 supersessions ordered by correction time and superseded identity, and
-`correctionJobOffset` traverses up to 100 correction Encode Job links ordered by
-replacement-job creation time and identity, and `correctionOutputOffset`
+`correctionJobOffset` traverses up to 100 correction-associated predecessor
+jobs ordered by replacement creation time when one was scheduled, or otherwise
+by predecessor creation time, then identity. `correctionOutputOffset`
 traverses up to 100 path-free Retained Encode output summaries ordered by
-retention time and identity. Each correction-job entry contains exactly one
-predecessor/replacement pair, so that nested response is capped at 200 job
-summaries and no link is split across pages. The consistent web facade projects
+retention time and identity. Each correction-job entry contains one predecessor
+and at most one replacement, so that nested response is capped at 200 job
+summaries and no pair is split across pages. Declining replacement encoding does
+not remove the predecessor outcome from history. The consistent web facade projects
 only job identities and statuses for those summaries, so private output paths
 and worker claim details never cross that boundary. Retained-output retries
 remain individually reachable on their own page. Each page uses a one-row
