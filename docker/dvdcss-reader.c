@@ -829,6 +829,71 @@ static int parse_test_faults(char *text, uint64_t total_sector_count,
     return 0;
 }
 
+static int initialize_test_backend(const char *source_path,
+                                   const char *size_text,
+                                   const char *fault_text,
+                                   const char *delay_text,
+                                   const char *result_mode,
+                                   uint64_t *size_bytes,
+                                   int *malformed_result,
+                                   struct read_backend *backend)
+{
+    if (parse_size(size_text, size_bytes) != 0) {
+        return 2;
+    }
+    if (strcmp(result_mode, "valid") == 0) {
+        *malformed_result = 0;
+    } else if (strcmp(result_mode, "malformed") == 0) {
+        *malformed_result = 1;
+    } else {
+        fprintf(stderr, "DVD test result mode is invalid\n");
+        return 2;
+    }
+    *backend = (struct read_backend){
+        .dvdcss = NULL,
+        .test_source_fd = -1,
+        .use_test_source = 1,
+    };
+    if (parse_test_delay(delay_text, &backend->test_delay_ms) != 0) {
+        return 2;
+    }
+    char *faults = strdup(fault_text);
+    if (faults == NULL) {
+        fprintf(stderr, "DVD test fault allocation failed\n");
+        return 1;
+    }
+    int fault_status = parse_test_faults(
+        faults, *size_bytes / DVDCSS_BLOCK_SIZE, backend);
+    free(faults);
+    if (fault_status != 0) {
+        return 2;
+    }
+    backend->test_source_fd =
+        open(source_path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (backend->test_source_fd < 0) {
+        return fail_errno("DVD test source open failed");
+    }
+    struct stat source;
+    if (fstat(backend->test_source_fd, &source) != 0 ||
+        !S_ISREG(source.st_mode)) {
+        close(backend->test_source_fd);
+        backend->test_source_fd = -1;
+        fprintf(stderr, "DVD test source is invalid\n");
+        return 1;
+    }
+    return 0;
+}
+
+static int close_test_backend(struct read_backend *backend, int status)
+{
+    if (backend->test_source_fd >= 0 &&
+        close(backend->test_source_fd) != 0 && status == 0) {
+        status = fail_errno("DVD test source close failed");
+    }
+    backend->test_source_fd = -1;
+    return status;
+}
+
 static int run_test_copy(int argc, char **argv)
 {
     if (argc != 8) {
@@ -838,54 +903,16 @@ static int run_test_copy(int argc, char **argv)
         return 2;
     }
     uint64_t size_bytes = 0;
-    if (parse_size(argv[4], &size_bytes) != 0) {
-        return 2;
-    }
     int malformed_result;
-    if (strcmp(argv[7], "valid") == 0) {
-        malformed_result = 0;
-    } else if (strcmp(argv[7], "malformed") == 0) {
-        malformed_result = 1;
-    } else {
-        fprintf(stderr, "DVD test result mode is invalid\n");
-        return 2;
-    }
-    struct read_backend backend = {
-        .dvdcss = NULL,
-        .test_source_fd = -1,
-        .use_test_source = 1,
-    };
-    if (parse_test_delay(argv[6], &backend.test_delay_ms) != 0) {
-        return 2;
-    }
-    char *faults = strdup(argv[5]);
-    if (faults == NULL) {
-        fprintf(stderr, "DVD test fault allocation failed\n");
-        return 1;
-    }
-    int fault_status = parse_test_faults(
-        faults, size_bytes / DVDCSS_BLOCK_SIZE, &backend);
-    free(faults);
-    if (fault_status != 0) {
-        return 2;
-    }
-    backend.test_source_fd =
-        open(argv[2], O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-    if (backend.test_source_fd < 0) {
-        return fail_errno("DVD test source open failed");
-    }
-    struct stat source;
-    if (fstat(backend.test_source_fd, &source) != 0 ||
-        !S_ISREG(source.st_mode)) {
-        close(backend.test_source_fd);
-        fprintf(stderr, "DVD test source is invalid\n");
-        return 1;
+    struct read_backend backend;
+    int setup_status = initialize_test_backend(
+        argv[2], argv[4], argv[5], argv[6], argv[7], &size_bytes,
+        &malformed_result, &backend);
+    if (setup_status != 0) {
+        return setup_status;
     }
     int status = run_copy(&backend, argv[3], size_bytes, malformed_result);
-    if (close(backend.test_source_fd) != 0 && status == 0) {
-        status = fail_errno("DVD test source close failed");
-    }
-    return status;
+    return close_test_backend(&backend, status);
 }
 
 static int run_test_resume(int argc, char **argv)
@@ -897,36 +924,13 @@ static int run_test_resume(int argc, char **argv)
         return 2;
     }
     uint64_t size_bytes = 0;
-    if (parse_size(argv[4], &size_bytes) != 0) {
-        return 2;
-    }
     int malformed_result;
-    if (strcmp(argv[7], "valid") == 0) {
-        malformed_result = 0;
-    } else if (strcmp(argv[7], "malformed") == 0) {
-        malformed_result = 1;
-    } else {
-        fprintf(stderr, "DVD test result mode is invalid\n");
-        return 2;
-    }
-    struct read_backend backend = {
-        .dvdcss = NULL,
-        .test_source_fd = -1,
-        .use_test_source = 1,
-    };
-    if (parse_test_delay(argv[6], &backend.test_delay_ms) != 0) {
-        return 2;
-    }
-    char *faults = strdup(argv[5]);
-    if (faults == NULL) {
-        fprintf(stderr, "DVD test fault allocation failed\n");
-        return 1;
-    }
-    int fault_status = parse_test_faults(
-        faults, size_bytes / DVDCSS_BLOCK_SIZE, &backend);
-    free(faults);
-    if (fault_status != 0) {
-        return 2;
+    struct read_backend backend;
+    int setup_status = initialize_test_backend(
+        argv[2], argv[4], argv[5], argv[6], argv[7], &size_bytes,
+        &malformed_result, &backend);
+    if (setup_status != 0) {
+        return setup_status;
     }
     uint64_t total_sector_count = size_bytes / DVDCSS_BLOCK_SIZE;
     size_t bitmap_byte_count = (size_t)((total_sector_count + 7) / 8);
@@ -937,29 +941,12 @@ static int run_test_resume(int argc, char **argv)
                             bitmap_byte_count,
                             &resume_bad_sector_count) != 0) {
         free(resume_bitmap);
-        return 2;
-    }
-    backend.test_source_fd =
-        open(argv[2], O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-    if (backend.test_source_fd < 0) {
-        free(resume_bitmap);
-        return fail_errno("DVD test source open failed");
-    }
-    struct stat source;
-    if (fstat(backend.test_source_fd, &source) != 0 ||
-        !S_ISREG(source.st_mode)) {
-        close(backend.test_source_fd);
-        free(resume_bitmap);
-        fprintf(stderr, "DVD test source is invalid\n");
-        return 1;
+        return close_test_backend(&backend, 2);
     }
     int status = run_resume(&backend, argv[3], size_bytes, resume_bitmap,
                             resume_bad_sector_count, malformed_result);
-    if (close(backend.test_source_fd) != 0 && status == 0) {
-        status = fail_errno("DVD test source close failed");
-    }
     free(resume_bitmap);
-    return status;
+    return close_test_backend(&backend, status);
 }
 #endif
 

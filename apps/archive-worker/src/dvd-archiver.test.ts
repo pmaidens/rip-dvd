@@ -704,6 +704,7 @@ describe("DVD archive publication", () => {
   });
 
   it("authorizes the native reader to retry only unresolved rescue sectors", async () => {
+    vi.useFakeTimers();
     const originalsLibraryPath = createOriginalsLibrary();
     const child = createMockDvdCopyChild();
     const spawnProcess = vi.fn(() => child);
@@ -738,6 +739,8 @@ describe("DVD archive publication", () => {
       Buffer.from("rip-dvd-copy-authorization-ready\n"),
     );
     expect(child.stdio[5].end).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(5_001);
+    expect(child.kill).not.toHaveBeenCalled();
     authorize();
     await authorization;
     await Promise.resolve();

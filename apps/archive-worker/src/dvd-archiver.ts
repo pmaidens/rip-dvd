@@ -73,7 +73,8 @@ const MAX_COPY_PROTOCOL_BYTES = 1_200_000;
 const MAX_PROC_ENTRIES = 4_096;
 const MAX_PROC_FILE_DESCRIPTORS = 65_536;
 const COPY_TIMEOUT_MS = 12 * 60 * 60_000;
-const COPY_AUTHORIZATION_TIMEOUT_MS = 5_000;
+const COPY_AUTHORIZATION_READY_TIMEOUT_MS = 5_000;
+const COPY_START_AUTHORIZATION_TIMEOUT_MS = 5 * 60_000;
 const DEVICE_RECOVERY_LOCK_TIMEOUT_MS = 5_000;
 const FLOCK_CONFLICT_EXIT_CODE = 75;
 
@@ -317,14 +318,17 @@ export function createNodeDvdCopyRunner({
           child.unref();
         }
       };
-      const authorizationTimeout = setTimeout(() => {
+      const authorizationReadyTimeout = setTimeout(() => {
         if (!authorizationSettled) {
           authorizationSettled = true;
-          rejectOperation(new Error("DVD archive copy authorization timed out"));
+          rejectOperation(
+            new Error("DVD archive copy authorization readiness timed out"),
+          );
           cancel();
         }
-      }, COPY_AUTHORIZATION_TIMEOUT_MS);
-      authorizationTimeout.unref();
+      }, COPY_AUTHORIZATION_READY_TIMEOUT_MS);
+      authorizationReadyTimeout.unref();
+      let startAuthorizationTimeout: ReturnType<typeof setTimeout> | undefined;
       child.stdio[4].on("data", (chunk) => {
         if (
           authorizationStarted ||
@@ -339,12 +343,21 @@ export function createNodeDvdCopyRunner({
           return;
         }
         authorizationStarted = true;
+        clearTimeout(authorizationReadyTimeout);
+        startAuthorizationTimeout = setTimeout(() => {
+          if (!authorizationSettled) {
+            authorizationSettled = true;
+            rejectOperation(new Error("DVD archive copy authorization timed out"));
+            cancel();
+          }
+        }, COPY_START_AUTHORIZATION_TIMEOUT_MS);
+        startAuthorizationTimeout.unref();
         const grantAuthorization = () => {
           if (authorizationSettled || cancellationRequested || processClosed) {
             return;
           }
           authorizationSettled = true;
-          clearTimeout(authorizationTimeout);
+          clearTimeout(startAuthorizationTimeout);
           child.stdio[5].end(
             request.resumeFrom === undefined
               ? "1"
@@ -356,7 +369,7 @@ export function createNodeDvdCopyRunner({
             return;
           }
           authorizationSettled = true;
-          clearTimeout(authorizationTimeout);
+          clearTimeout(startAuthorizationTimeout);
           rejectOperation(error);
           cancel();
         };
@@ -428,7 +441,8 @@ export function createNodeDvdCopyRunner({
         }
       });
       child.once("close", (code, signal) => {
-        clearTimeout(authorizationTimeout);
+        clearTimeout(authorizationReadyTimeout);
+        clearTimeout(startAuthorizationTimeout);
         confirmClosed();
         if (cancellationRequested) {
           rejectOperation(new Error("DVD archive copy was cancelled"));

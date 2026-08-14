@@ -79,7 +79,7 @@ function runTestCopy(name, faults, mode = "valid") {
   return { ...result, outputPath };
 }
 
-function runTestResume(name, outputPath, faults, bitmapHex) {
+function runTestResume(outputPath, faults, bitmapHex) {
   const result = spawnSync(
     testExecutable,
     [
@@ -209,7 +209,6 @@ const persistentResumePath = prepareOutput(
 );
 writeFileSync(persistentResumePath, isolatedContent);
 const persistentResume = runTestResume(
-  "persistent-resume",
   persistentResumePath,
   "5:always",
   isolatedResult.badSectorBitmapHex,
@@ -232,7 +231,6 @@ if (
 }
 
 const resumed = runTestResume(
-  "recovered-resume",
   isolated.outputPath,
   "none",
   isolatedResult.badSectorBitmapHex,
