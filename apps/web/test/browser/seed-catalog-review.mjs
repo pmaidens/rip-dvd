@@ -1,5 +1,5 @@
 import { mkdirSync, rmSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 
@@ -9,6 +9,17 @@ const originalsLibraryPath = process.env.RIP_DVD_ORIGINALS_LIBRARY_PATH;
 
 if (!databasePath || !mediaLibraryPath || !originalsLibraryPath) {
   throw new Error("Catalog Review browser fixture paths are required");
+}
+
+const expectedFixtureRoot = resolve("test-results/catalog-review-browser-data");
+if (
+  resolve(databasePath) !== join(expectedFixtureRoot, "rip-dvd.sqlite") ||
+  resolve(mediaLibraryPath) !== join(expectedFixtureRoot, "media") ||
+  resolve(originalsLibraryPath) !== join(expectedFixtureRoot, "originals")
+) {
+  throw new Error(
+    `Refusing to seed outside the Catalog Review browser fixture root: ${expectedFixtureRoot}`,
+  );
 }
 
 const fixtureRoot = dirname(databasePath);

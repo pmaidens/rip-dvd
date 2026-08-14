@@ -9,7 +9,7 @@
     "start": "next start",
     "test": "tsc -p ../../packages/config/tsconfig.build.json && tsc -p ../../packages/data-access/tsconfig.build.json && vitest run",
     "test:browser": "playwright test",
-    "test:browser:serve": "next build && node test/browser/seed-catalog-review.mjs && next start --hostname 127.0.0.1 --port 3100",
+    "test:browser:serve": "next build && node test/browser/seed-catalog-review.mjs && node test/browser/start-catalog-review-server.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

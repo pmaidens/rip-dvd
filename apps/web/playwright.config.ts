@@ -9,7 +9,7 @@ export default defineConfig({
   testMatch: "*.e2e.ts",
   fullyParallel: false,
   forbidOnly: Boolean(process.env.CI),
-  retries: process.env.CI ? 2 : 0,
+  retries: 0,
   workers: 1,
   reporter: "line",
   outputDir: "test-results/playwright",
@@ -27,6 +27,8 @@ export default defineConfig({
     reuseExistingServer: false,
     timeout: 120_000,
     env: {
+      HOSTNAME: "127.0.0.1",
+      PORT: "3100",
       RIP_DVD_DATABASE_PATH: resolve(browserDataRoot, "rip-dvd.sqlite"),
       RIP_DVD_MEDIA_LIBRARY_PATH: resolve(browserDataRoot, "media"),
       RIP_DVD_ORIGINALS_LIBRARY_PATH: resolve(browserDataRoot, "originals"),
