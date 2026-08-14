@@ -1,5 +1,6 @@
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -36,7 +37,10 @@ import {
   createDamagedDvdRecoveryResult,
 } from "./dvd-recovery-contracts.js";
 import { dvdRescueWorkspacePaths } from "./dvd-rescue-workspace.js";
-import { createInProcessDvdRescueWorkspaceLock } from "./dvd-rescue-workspace-lock.js";
+import {
+  createInProcessDvdRescueWorkspaceLock,
+  type DvdRescueWorkspaceLock,
+} from "./dvd-rescue-workspace-lock.js";
 import { DiscInspectionError } from "./disc-inspection-error.js";
 import {
   createLinuxOpticalDriveHardware,
@@ -1130,6 +1134,11 @@ describe("archive worker polling", () => {
 
     access.archiveRequests.retry(request.id);
     const recoveredImage = Buffer.alloc(sizeBytes, 5);
+    const archivePath = join(
+      realpathSync(originalsLibraryPath),
+      `dvdmeta-${fingerprint.slice(fingerprint.lastIndexOf(":") + 1)}.iso`,
+    );
+    const successorImage = Buffer.alloc(sizeBytes, 9);
     const finalCopyRunner: DvdCopyRunner = {
       copy: vi.fn(async ({
         authorizeStart,
@@ -1156,6 +1165,21 @@ describe("archive worker polling", () => {
       .mockImplementationOnce(() => {
         throw new Error("catalog publication failed again");
       });
+    mkdirSync(`${archivePath}.failed`);
+    const publicationFailureWorkspaceLock: DvdRescueWorkspaceLock = {
+      async withLock(options) {
+        try {
+          return await testRescueWorkspaceLock.withLock(options);
+        } catch (error) {
+          // Model a successor becoming eligible immediately after the lock is
+          // released. Cleanup by the failed owner must not retry after this.
+          rmSync(`${archivePath}.failed`, { recursive: true });
+          unlinkSync(archivePath);
+          writeFileSync(archivePath, successorImage);
+          throw error;
+        }
+      },
+    };
 
     await pollArchiveWorker({
       access,
@@ -1164,6 +1188,7 @@ describe("archive worker polling", () => {
       hardware,
       log: vi.fn(),
       originalsLibraryPath,
+      rescueWorkspaceLock: publicationFailureWorkspaceLock,
       signal: new AbortController().signal,
       workerId: "archive-worker-rescue-final-test",
     });
@@ -1178,6 +1203,9 @@ describe("archive worker polling", () => {
     });
     expect(access.catalog.listOriginalDiscArchives()).toEqual([]);
     expect(readFileSync(rescueImagePath)).toEqual(recoveredImage);
+    expect(readFileSync(archivePath)).toEqual(successorImage);
+    expect(existsSync(`${archivePath}.failed`)).toBe(false);
+    unlinkSync(archivePath);
 
     access.archiveRequests.retry(request.id);
     const publicationRetryCopy = vi.fn();
@@ -1206,10 +1234,6 @@ describe("archive worker polling", () => {
       attemptOrdinal: 4,
       errorMessage: "catalog publication failed again",
     });
-    const archivePath = join(
-      realpathSync(originalsLibraryPath),
-      `dvdmeta-${fingerprint.slice(fingerprint.lastIndexOf(":") + 1)}.iso`,
-    );
     expect(existsSync(archivePath)).toBe(false);
     expect(readFileSync(`${archivePath}.failed`)).toEqual(recoveredImage);
     expect(readFileSync(rescueImagePath)).toEqual(recoveredImage);

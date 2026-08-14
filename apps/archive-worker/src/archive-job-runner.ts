@@ -80,7 +80,6 @@ export async function runArchiveJob({
   }, 1_000);
   cancellationPoll.unref();
 
-  let publishedArchivePath: string | undefined;
   try {
     const authorizeClaim = () => {
       archiveSignal.throwIfAborted();
@@ -139,7 +138,6 @@ export async function runArchiveJob({
           },
           verifySource,
         });
-        publishedArchivePath = preserved.archivePath;
         try {
           authorizeClaim();
           access.archiveJobs.publish(claim, {
@@ -156,10 +154,18 @@ export async function runArchiveJob({
                 : String(cleanupError);
             log(`Completed DVD rescue cleanup deferred: ${cleanupMessage}`);
           }
-          publishedArchivePath = undefined;
         } catch (error) {
-          await quarantinePublishedArchive(preserved.archivePath);
-          publishedArchivePath = undefined;
+          try {
+            await quarantinePublishedArchive(preserved.archivePath);
+          } catch (quarantineError) {
+            const quarantineMessage =
+              quarantineError instanceof Error
+                ? quarantineError.message
+                : String(quarantineError);
+            log(
+              `Published DVD archive cleanup deferred: ${quarantineMessage}`,
+            );
+          }
           throw error;
         }
       },
@@ -186,9 +192,6 @@ export async function runArchiveJob({
         ? failureError.message
         : String(failureError);
       log(`Archive Job failure state could not be persisted: ${failureMessage}`);
-    }
-    if (publishedArchivePath !== undefined) {
-      await quarantinePublishedArchive(publishedArchivePath);
     }
     if (signal.aborted) {
       throw error;
