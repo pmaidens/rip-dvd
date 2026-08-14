@@ -782,11 +782,12 @@ Successful DVD
 Disc Inspections use the packaged `rip-dvd-lsdvd` command so they can read
 metadata from CSS-protected media through the bridge-patched `libdvdcss`
 runtime. Successful scans store title numbers, durations, chapter counts,
-bounded per-stream
-language/format/channel/source-ID metadata, and a deterministic SHA-256 content
-identity over every declared raw-disc byte. The scanner authenticates through
-`libdvdcss` but deliberately reads without its decrypt flag, so CSS-protected
-discs remain byte-identical to the archived ISO. On SCSI-generic VM passthrough,
+bounded per-stream language/format/channel/source-ID metadata, and a
+deterministic metadata fingerprint over the volume label, complete title map,
+and declared disc size. Inspection does not read every raw-disc byte. The
+archive copy authenticates through `libdvdcss` but deliberately reads without
+its decrypt flag, so CSS-protected discs remain byte-identical to the archived
+ISO. On SCSI-generic VM passthrough,
 a small compatibility bridge sends libdvdcss's CSS authentication exchanges
 through the block device's mapped SCSI-generic sibling while all sector reads
 stay on the read-only block device. Before trusting a cached scan and
@@ -800,20 +801,19 @@ isolated in a bounded helper process. Timeout or shutdown requests cancellation,
 kills and detaches the helper, and retains its per-drive single-flight tombstone
 until the child process is confirmed closed. Later polls reuse that tombstone;
 capacity is recovered and a fresh retry is admitted only after confirmed close.
-Raw-disc open/read/hash work uses the same bounded helper-process lifecycle, so
-a kernel-blocked device operation cannot keep the archive worker alive. Hash
-progress is streamed as throttled byte counts without contributing repetitive
-lines to the bounded diagnostic buffer; process capacity remains occupied until
-the child is confirmed closed.
+Raw-disc copy work uses the same bounded helper-process lifecycle, so a
+kernel-blocked device operation cannot keep the archive worker alive. Copy
+progress is streamed as bounded byte counts; process capacity remains occupied
+until the child is confirmed closed.
 Reads are shell-free, size-capped, incremental, timed out, and
-cancellation-aware. The full-disc hash has an eight-hour ceiling so slow physical
-drives can complete while a permanently blocked read remains bounded.
+cancellation-aware. The archive copy is the workflow's only complete sequential
+read of the physical disc.
 One durable Disc Inspection represents the current insertion and owns metadata
-findings, full-content hash progress, retries, and terminal inspection outcome.
+findings, retries, and terminal inspection outcome.
 It is resumed only while drive identity and Linux media-generation evidence
 prove the same insertion. The dashboard nests its indeterminate metadata phase,
-determinate byte progress, stabilized rate/ETA, retry state, and safe failure
-reason under the Optical Drive.
+retry state, and safe failure reason under the Optical Drive. Determinate byte
+progress belongs to the later Archive Job copy.
 Manual inspection retry is durable intent: the route leaves the inspection
 failed until the worker independently observes the drive again. Matching
 media-generation evidence reopens the same inspection and resets only its
@@ -823,8 +823,9 @@ Requesting preservation atomically marks a scanned disc approved and creates a
 pending Archive Request, not an Archive Job. A completed current inspection is
 reused without rehashing. Only when it matches a pending request does the worker
 atomically create a claimed running Archive Job attempt, then copy through a bounded
-hidden partial path, and publishes the fingerprint-named ISO and its Original
-Disc Archive record only after the source and completed image are reverified.
+hidden partial path, and publish the fingerprint-named ISO and its Original Disc
+Archive record after the source identity is rechecked and the image has the
+declared complete size. The image is not reread for post-copy hashing.
 Progress and terminal state are written to SQLite and reach the dashboard over
 SSE. Failed attempts move their request to `needs_attention`; manual retry
 returns the request to `pending` and the next execution creates another Archive

@@ -31,7 +31,7 @@ export function normalizeDetectedDiscScan({
   }
   if (decoded.contentId !== fingerprint) {
     throw new DomainInvariantError(
-      "DVD scan content ID must match its Detected Disc fingerprint",
+      "DVD scan fingerprint must match its Detected Disc fingerprint",
     );
   }
   return decoded;

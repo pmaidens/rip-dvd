@@ -7,6 +7,10 @@
 - **Implementation state:** All phases complete
 - **Remaining HITL decisions:** none
 
+> Historical implementation record. [ADR 0003](../adr/0003-archive-copy-is-the-only-full-disc-read.md)
+> later removed full-content hashing from Disc Inspection and post-copy archive
+> verification so the archive copy is the only complete disc read.
+
 ## Problem
 
 The archive worker currently performs a potentially long DVD scan and full-disc content hash before it can claim an Archive Job. The dashboard only persists `ArchiveJob.progressPhase = inspecting_drive` at `0%`, so operators receive no meaningful feedback during this work.

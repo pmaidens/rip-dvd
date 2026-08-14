@@ -1,8 +1,8 @@
 import {
   decodeDvdTitleMap,
   DVD_TITLE_MAP_SCHEMA_VERSION,
-  isDvdContentId,
 } from "@rip-dvd/data-access/dvd-scan";
+import { createDvdMetadataFingerprint } from "@rip-dvd/data-access/dvd-metadata-fingerprint";
 
 import type { BoundOpticalDrive, ScannedDvd } from "./archive-worker.js";
 import { DiscInspectionError } from "./disc-inspection-error.js";
@@ -20,12 +20,10 @@ import {
 } from "./optical-drive-command-runner.js";
 import type { BoundOpticalDriveIdentity } from "./optical-drive-identity.js";
 import type { OpticalDriveScanCache } from "./optical-drive-scan-cache.js";
-import type { DiscContentReader } from "./optical-disc-content.js";
 import type { MediaGenerationObserver } from "./optical-media-generation.js";
 
 interface OpticalDriveDvdScannerOptions {
   cache: OpticalDriveScanCache;
-  contentReader: DiscContentReader;
   identity: BoundOpticalDriveIdentity;
   mediaGenerationObserver: MediaGenerationObserver;
   runner: CommandRunner;
@@ -50,9 +48,8 @@ export interface DiscInspectionMetadata {
 
 export interface DiscInspectionScanOptions {
   expectedMediaGeneration?: string;
-  onBytesHashed?(bytes: number): void;
   onMetadata?(metadata: DiscInspectionMetadata): void;
-  onPhase?(phase: "reading_metadata" | "hashing_content" | "confirming_media"): void;
+  onPhase?(phase: "reading_metadata" | "confirming_media"): void;
 }
 
 function mediaChanged(message: string): DiscInspectionError {
@@ -197,14 +194,13 @@ async function inspectDvd(
   }
 }
 
-async function readDvdContentIdentity(
+async function readDvdIdentity(
   devicePath: string,
   signal: AbortSignal,
   runner: CommandRunner,
-  contentReader: DiscContentReader,
   metadata: NonNullable<Awaited<ReturnType<typeof inspectDvd>>>,
   options: DiscInspectionScanOptions,
-): Promise<{ contentId: string; sizeBytes: number }> {
+): Promise<{ fingerprint: string; sizeBytes: number }> {
   const sizeResult = await runner.run(
     "blockdev",
     ["--getsize64", devicePath],
@@ -251,45 +247,18 @@ async function readDvdContentIdentity(
     totalBytes: sizeBytes,
     volumeLabel: metadata.volumeLabel ?? null,
   });
-  options.onPhase?.("hashing_content");
-  let contentId: string;
-  try {
-    contentId = options.onBytesHashed === undefined
-      ? await contentReader.hash(devicePath, sizeBytes, signal)
-      : await contentReader.hash(
-          devicePath,
-          sizeBytes,
-          signal,
-          options.onBytesHashed,
-        );
-  } catch (error) {
-    signal.throwIfAborted();
-    if (error instanceof DiscInspectionError) {
-      throw error;
-    }
-    const message = error instanceof Error
-      ? error.message
-      : "DVD content reader failed";
-    throw new DiscInspectionError(
-      "retry",
-      "content_read_failed",
-      message,
-      { cause: error },
-    );
-  }
-  if (!isDvdContentId(contentId)) {
-    throw new DiscInspectionError(
-      "fail",
-      "invalid_content",
-      "DVD content reader returned an invalid content identity",
-    );
-  }
-  return { contentId, sizeBytes };
+  return {
+    fingerprint: createDvdMetadataFingerprint({
+      sizeBytes,
+      titles: metadata.titles,
+      volumeLabel: metadata.volumeLabel,
+    }),
+    sizeBytes,
+  };
 }
 
 export function createOpticalDriveDvdScanner({
   cache,
-  contentReader,
   identity,
   mediaGenerationObserver,
   runner,
@@ -347,11 +316,10 @@ export function createOpticalDriveDvdScanner({
         throw error;
       }
 
-      const { contentId, sizeBytes } = await readDvdContentIdentity(
+      const { fingerprint, sizeBytes } = await readDvdIdentity(
         safeDevicePath,
         signal,
         runner,
-        contentReader,
         metadata,
         options,
       );
@@ -366,7 +334,7 @@ export function createOpticalDriveDvdScanner({
       await identity.requireCurrent(binding, "during DVD scanning", signal);
       const scanData = decodeDvdTitleMap({
         schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
-        contentId,
+        contentId: fingerprint,
         titles: metadata.titles,
       });
       if (scanData === null) {
@@ -377,7 +345,7 @@ export function createOpticalDriveDvdScanner({
         );
       }
       const result = {
-        fingerprint: contentId,
+        fingerprint,
         isNewMediumObservation: true,
         sizeBytes,
         ...(metadata.volumeLabel ? { volumeLabel: metadata.volumeLabel } : {}),

@@ -3,7 +3,6 @@ import {
   type Stats,
   closeSync,
   constants as fsConstants,
-  createReadStream,
   fstatSync,
   lstatSync,
   openSync,
@@ -22,9 +21,11 @@ import {
 } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
-import { createRawDvdContentIdHasher } from "@rip-dvd/data-access/dvd-content-id";
 import type { ArchiveJobProgress } from "@rip-dvd/data-access";
-import { isDvdContentId } from "@rip-dvd/data-access/dvd-scan";
+import {
+  isDvdFingerprint,
+  isDvdMetadataFingerprint,
+} from "@rip-dvd/data-access/dvd-scan";
 
 import { requireDvdContentSize } from "./dvd-content-policy.js";
 import { requireSafeOpticalDevicePath } from "./optical-media-generation.js";
@@ -43,6 +44,11 @@ const COPY_TIMEOUT_MS = 12 * 60 * 60_000;
 const COPY_AUTHORIZATION_TIMEOUT_MS = 5_000;
 const DEVICE_RECOVERY_LOCK_TIMEOUT_MS = 5_000;
 const FLOCK_CONFLICT_EXIT_CODE = 75;
+
+function dvdArchiveStem(fingerprint: string): string {
+  const digest = fingerprint.slice(fingerprint.lastIndexOf(":") + 1);
+  return isDvdMetadataFingerprint(fingerprint) ? `dvdmeta-${digest}` : digest;
+}
 
 export interface DvdCopyRequest {
   authorizeStart?(): void;
@@ -699,11 +705,11 @@ export async function withCancelledDvdArchiveInactive({
   runner: DvdCopyRunner;
 }): Promise<void> {
   const safeDevicePath = requireSafeOpticalDevicePath(devicePath);
-  if (!isDvdContentId(fingerprint)) {
+  if (!isDvdFingerprint(fingerprint)) {
     throw new Error("Detected Disc fingerprint is invalid");
   }
   const root = await requireSafeArchiveRoot(originalsLibraryPath);
-  const digest = fingerprint.slice("sha256:".length);
+  const digest = dvdArchiveStem(fingerprint);
   return runner.withDeviceInactive(safeDevicePath, () => {
     const partialPaths = [
       join(root, `.${digest}.iso.rip-dvd-partial`),
@@ -808,19 +814,6 @@ async function optionalMetadata(path: string) {
   }
 }
 
-async function fingerprintArchiveFile(
-  path: string,
-  sizeBytes: number,
-  signal: AbortSignal,
-): Promise<string> {
-  const hasher = createRawDvdContentIdHasher(sizeBytes);
-  for await (const chunk of createReadStream(path, { signal })) {
-    signal.throwIfAborted();
-    hasher.update(chunk);
-  }
-  return hasher.digest();
-}
-
 async function requireSafeArchiveRoot(path: string): Promise<string> {
   const resolved = resolve(path);
   if (Buffer.byteLength(resolved) > MAX_ARCHIVE_PATH_BYTES) {
@@ -851,11 +844,11 @@ export async function preserveDvdArchive({
   onProgress({ phase: "preparing", progressPercent: 0 });
   const safeDevicePath = requireSafeOpticalDevicePath(devicePath);
   const safeSizeBytes = requireDvdContentSize(sizeBytes);
-  if (!isDvdContentId(fingerprint)) {
+  if (!isDvdFingerprint(fingerprint)) {
     throw new Error("Detected Disc fingerprint is invalid");
   }
   const root = await requireSafeArchiveRoot(originalsLibraryPath);
-  const digest = fingerprint.slice("sha256:".length);
+  const digest = dvdArchiveStem(fingerprint);
   const archivePath = join(root, `${digest}.iso`);
   const legacyPartialPath = join(root, `.${digest}.iso.rip-dvd-partial`);
   const partialPath = join(
@@ -890,15 +883,10 @@ export async function preserveDvdArchive({
 
   const existingArchive = await optionalMetadata(archivePath);
   if (existingArchive) {
-    onProgress({ phase: "verifying", progressPercent: 0 });
     if (!existingArchive.isFile() || existingArchive.isSymbolicLink()) {
       throw new Error("Existing DVD archive path is not a regular file");
     }
-    if (
-      existingArchive.size !== safeSizeBytes ||
-      (await fingerprintArchiveFile(archivePath, safeSizeBytes, signal)) !==
-        fingerprint
-    ) {
+    if (existingArchive.size !== safeSizeBytes) {
       throw new Error("Existing DVD archive does not match the Detected Disc");
     }
     await verifySource();
@@ -946,15 +934,8 @@ export async function preserveDvdArchive({
     ) {
       throw new Error("DVD archive copy did not produce the expected complete image");
     }
-    onProgress({ phase: "verifying", progressPercent: 99 });
     await verifySource();
     signal.throwIfAborted();
-    if (
-      (await fingerprintArchiveFile(partialPath, safeSizeBytes, signal)) !==
-      fingerprint
-    ) {
-      throw new Error("DVD archive copy fingerprint does not match the Detected Disc");
-    }
     onProgress({ phase: "finalizing", progressPercent: 99 });
     await sync(partialPath);
     // A hard link publishes the fully-synced inode without the overwrite

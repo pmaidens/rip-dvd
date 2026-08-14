@@ -18,6 +18,10 @@
       "types": "./src/dvd-content-id.ts",
       "default": "./dist/dvd-content-id.js"
     },
+    "./dvd-metadata-fingerprint": {
+      "types": "./src/dvd-metadata-fingerprint.ts",
+      "default": "./dist/dvd-metadata-fingerprint.js"
+    },
     "./catalog-kinds": {
       "types": "./src/catalog-kinds.ts",
       "default": "./dist/catalog-kinds.js"

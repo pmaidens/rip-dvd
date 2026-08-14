@@ -5,7 +5,6 @@ import type { CommandRunner } from "./optical-drive-command-runner.js";
 import { createBoundOpticalDriveIdentity } from "./optical-drive-identity.js";
 import { createOpticalDriveDvdScanner } from "./optical-drive-dvd-scanner.js";
 import { createOpticalDriveScanCache } from "./optical-drive-scan-cache.js";
-import type { DiscContentReader } from "./optical-disc-content.js";
 
 function validMetadata(volumeLabel: string, titleNumber = 1): string {
   return [
@@ -15,12 +14,10 @@ function validMetadata(volumeLabel: string, titleNumber = 1): string {
 }
 
 async function createScannerFixture({
-  contentReader = { hash: vi.fn() },
   mediaGeneration = "generation-17",
   runner,
   signal = new AbortController().signal,
 }: {
-  contentReader?: DiscContentReader;
   mediaGeneration?: string;
   runner: CommandRunner;
   signal?: AbortSignal;
@@ -30,7 +27,6 @@ async function createScannerFixture({
   });
   const scanner = createOpticalDriveDvdScanner({
     cache: createOpticalDriveScanCache(),
-    contentReader,
     identity,
     mediaGenerationObserver: {
       observe: vi.fn().mockResolvedValue(mediaGeneration),
@@ -43,7 +39,6 @@ async function createScannerFixture({
 
 describe("Optical Drive DVD scan coordinator", () => {
   it("reuses a stable cached scan as an existing medium observation", async () => {
-    const contentId = `sha256:${"c".repeat(64)}`;
     const runner = {
       run: vi
         .fn()
@@ -61,13 +56,11 @@ describe("Optical Drive DVD scan coordinator", () => {
           stderr: "",
         }),
     };
-    const contentReader = { hash: vi.fn().mockResolvedValue(contentId) };
     const identity = createBoundOpticalDriveIdentity({
       observe: vi.fn().mockResolvedValue("instance-17"),
     });
     const scanner = createOpticalDriveDvdScanner({
       cache: createOpticalDriveScanCache(),
-      contentReader,
       identity,
       mediaGenerationObserver: {
         observe: vi.fn().mockResolvedValue("generation-17"),
@@ -81,7 +74,7 @@ describe("Optical Drive DVD scan coordinator", () => {
     const repeated = await scanner.scan(binding, signal);
 
     expect(first).toMatchObject({
-      fingerprint: contentId,
+      fingerprint: expect.stringMatching(/^dvdmeta-sha256:[0-9a-f]{64}$/),
       isNewMediumObservation: true,
     });
     expect(repeated).toEqual({
@@ -89,7 +82,6 @@ describe("Optical Drive DVD scan coordinator", () => {
       isNewMediumObservation: false,
     });
     expect(runner.run).toHaveBeenCalledTimes(2);
-    expect(contentReader.hash).toHaveBeenCalledOnce();
   });
 
   it("reports an empty Optical Drive with a structured no-medium outcome", async () => {
@@ -150,7 +142,6 @@ describe("Optical Drive DVD scan coordinator", () => {
   });
 
   it("recovers valid titles when unreadable IFO decoys crash the full scan", async () => {
-    const contentId = `sha256:${"d".repeat(64)}`;
     const runner = {
       run: vi
         .fn()
@@ -191,14 +182,12 @@ describe("Optical Drive DVD scan coordinator", () => {
           stderr: "",
         }),
     };
-    const contentReader = { hash: vi.fn().mockResolvedValue(contentId) };
     const { binding, scanner, signal } = await createScannerFixture({
-      contentReader,
       runner,
     });
 
     await expect(scanner.scan(binding, signal)).resolves.toMatchObject({
-      fingerprint: contentId,
+      fingerprint: expect.stringMatching(/^dvdmeta-sha256:[0-9a-f]{64}$/),
       scanData: {
         titles: [{ number: 1 }, { number: 2 }],
       },
@@ -216,7 +205,13 @@ describe("Optical Drive DVD scan coordinator", () => {
       ["-q", "-t", "5", "-Oh", "-a", "-c", "-s", "/dev/sr0"],
       expect.any(Object),
     );
-    expect(contentReader.hash).toHaveBeenCalledOnce();
+    expect(runner.run).toHaveBeenNthCalledWith(
+      7,
+      "blockdev",
+      ["--getsize64", "/dev/sr0"],
+      expect.any(Object),
+    );
+    expect(runner.run).toHaveBeenCalledTimes(7);
   });
 
   it("reports malformed lsdvd output as a structured metadata failure", async () => {
@@ -288,72 +283,10 @@ describe("Optical Drive DVD scan coordinator", () => {
     );
   });
 
-  it("reports content-reader errors as structured read retries regardless of message", async () => {
-    const { binding, scanner, signal } = await createScannerFixture({
-      contentReader: {
-        hash: vi.fn().mockRejectedValue(
-          new Error("DVD medium changed according to an arbitrary helper string"),
-        ),
-      },
-      runner: {
-        run: vi.fn()
-          .mockResolvedValueOnce({
-            exitCode: 0,
-            stdout: validMetadata("READ_FAILURE"),
-            stderr: "",
-          })
-          .mockResolvedValueOnce({
-            exitCode: 0,
-            stdout: "1024",
-            stderr: "",
-          }),
-      },
-    });
-
-    await expect(scanner.scan(binding, signal)).rejects.toEqual(
-      expect.objectContaining<Partial<DiscInspectionError>>({
-        kind: "retry",
-        reasonCode: "content_read_failed",
-      }),
-    );
-  });
-
-  it("reports an invalid content identity as a structured contract failure", async () => {
-    const { binding, scanner, signal } = await createScannerFixture({
-      contentReader: { hash: vi.fn().mockResolvedValue("not-a-content-id") },
-      runner: {
-        run: vi.fn()
-          .mockResolvedValueOnce({
-            exitCode: 0,
-            stdout: validMetadata("INVALID_IDENTITY"),
-            stderr: "",
-          })
-          .mockResolvedValueOnce({
-            exitCode: 0,
-            stdout: "1024",
-            stderr: "",
-          }),
-      },
-    });
-
-    await expect(scanner.scan(binding, signal)).rejects.toEqual(
-      expect.objectContaining<Partial<DiscInspectionError>>({
-        kind: "fail",
-        reasonCode: "invalid_content",
-      }),
-    );
-  });
-
-  it("preserves the AbortSignal reason across the content-reader boundary", async () => {
+  it("preserves the AbortSignal reason across the content-size boundary", async () => {
     const controller = new AbortController();
     const shutdown = new Error("worker shutdown");
     const { binding, scanner } = await createScannerFixture({
-      contentReader: {
-        hash: vi.fn().mockImplementation(async () => {
-          controller.abort(shutdown);
-          throw shutdown;
-        }),
-      },
       runner: {
         run: vi.fn()
           .mockResolvedValueOnce({
@@ -361,10 +294,9 @@ describe("Optical Drive DVD scan coordinator", () => {
             stdout: validMetadata("ABORTED_READ"),
             stderr: "",
           })
-          .mockResolvedValueOnce({
-            exitCode: 0,
-            stdout: "1024",
-            stderr: "",
+          .mockImplementationOnce(async () => {
+            controller.abort(shutdown);
+            throw shutdown;
           }),
       },
       signal: controller.signal,
