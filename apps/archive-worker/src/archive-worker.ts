@@ -13,6 +13,10 @@ import {
   withCancelledDvdArchiveInactive,
 } from "./dvd-archiver.js";
 import type { DvdSalvageValidator } from "./dvd-salvage-validator.js";
+import {
+  defaultDvdRescueWorkspaceLock,
+  type DvdRescueWorkspaceLock,
+} from "./dvd-rescue-workspace-lock.js";
 
 export type {
   BoundOpticalDrive,
@@ -28,6 +32,7 @@ export interface PollArchiveWorkerOptions {
   hardware: OpticalDriveHardware;
   log(message: string): void;
   originalsLibraryPath?: string;
+  rescueWorkspaceLock?: DvdRescueWorkspaceLock;
   salvageValidator?: DvdSalvageValidator;
   signal: AbortSignal;
   workerId?: string;
@@ -115,6 +120,7 @@ async function pollArchiveWorkerWithDriveAdmission(
     hardware,
     log,
     originalsLibraryPath,
+    rescueWorkspaceLock = defaultDvdRescueWorkspaceLock,
     salvageValidator,
     signal,
     workerId = "archive-worker",
@@ -149,6 +155,8 @@ async function pollArchiveWorkerWithDriveAdmission(
           },
           originalsLibraryPath,
           runner: copyRunner,
+          signal,
+          workspaceLock: rescueWorkspaceLock,
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -228,6 +236,7 @@ async function pollArchiveWorkerWithDriveAdmission(
         hardware,
         log,
         originalsLibraryPath,
+        rescueWorkspaceLock,
         salvageValidator,
         signal,
         workerId,

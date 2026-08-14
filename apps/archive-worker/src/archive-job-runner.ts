@@ -6,6 +6,7 @@ import type { OpticalDriveHardware } from "./archive-worker-contracts.js";
 import { confirmAuthorizedDrive } from "./authorized-optical-drive.js";
 import type { CompletedDiscInspection } from "./disc-inspection-runner.js";
 import type { DvdSalvageValidator } from "./dvd-salvage-validator.js";
+import type { DvdRescueWorkspaceLock } from "./dvd-rescue-workspace-lock.js";
 import {
   preserveDvdArchive,
   quarantinePublishedArchive,
@@ -20,6 +21,7 @@ export interface RunArchiveJobOptions {
   hardware: OpticalDriveHardware;
   log(message: string): void;
   originalsLibraryPath: string;
+  rescueWorkspaceLock: DvdRescueWorkspaceLock;
   salvageValidator?: DvdSalvageValidator;
   signal: AbortSignal;
   workerId: string;
@@ -33,6 +35,7 @@ export async function runArchiveJob({
   hardware,
   log,
   originalsLibraryPath,
+  rescueWorkspaceLock,
   salvageValidator,
   signal,
   workerId,
@@ -79,6 +82,18 @@ export async function runArchiveJob({
 
   let publishedArchivePath: string | undefined;
   try {
+    const authorizeClaim = () => {
+      archiveSignal.throwIfAborted();
+      if (access.archiveJobs.isCancellationRequested(claim)) {
+        const cancellation = new Error(
+          "Archive Request cancellation requested",
+        );
+        claimController.abort(cancellation);
+        archiveSignal.throwIfAborted();
+      }
+      access.archiveJobs.renewClaim(claim);
+      archiveSignal.throwIfAborted();
+    };
     const verifySource = async () => {
       await confirmAuthorizedDrive({
         access,
@@ -97,55 +112,58 @@ export async function runArchiveJob({
         throw new Error("DVD medium changed during archiving");
       }
     };
-    const preserved = await preserveDvdArchive({
+    await rescueWorkspaceLock.withLock({
       archiveRequestId: claim.archiveRequestId,
-      authorizeCopy: async () => {
-        archiveSignal.throwIfAborted();
-        if (access.archiveJobs.isCancellationRequested(claim)) {
-          const cancellation = new Error(
-            "Archive Request cancellation requested",
-          );
-          claimController.abort(cancellation);
-          archiveSignal.throwIfAborted();
-        }
-        access.archiveJobs.renewClaim(claim);
-        await verifySource();
-        archiveSignal.throwIfAborted();
-      },
-      devicePath: binding.drive.devicePath,
-      expectedTitleMap: scanData,
-      fingerprint: disc.fingerprint,
       originalsLibraryPath,
-      runner: copyRunner,
-      salvageValidator,
       signal: archiveSignal,
-      sizeBytes: archiveSizeBytes,
-      onProgress: (progress) => {
-        access.archiveJobs.updateProgress(claim, progress);
+      task: async () => {
+        authorizeClaim();
+        const preserved = await preserveDvdArchive({
+          archiveRequestId: claim.archiveRequestId,
+          authorizeCopy: async () => {
+            authorizeClaim();
+            await verifySource();
+            archiveSignal.throwIfAborted();
+          },
+          authorizeMutation: authorizeClaim,
+          devicePath: binding.drive.devicePath,
+          expectedTitleMap: scanData,
+          fingerprint: disc.fingerprint,
+          originalsLibraryPath,
+          runner: copyRunner,
+          salvageValidator,
+          signal: archiveSignal,
+          sizeBytes: archiveSizeBytes,
+          onProgress: (progress) => {
+            access.archiveJobs.updateProgress(claim, progress);
+          },
+          verifySource,
+        });
+        publishedArchivePath = preserved.archivePath;
+        try {
+          authorizeClaim();
+          access.archiveJobs.publish(claim, {
+            archivePath: preserved.archivePath,
+            integrityEvidence: preserved.integrityEvidence,
+            sizeBytes: preserved.sizeBytes,
+          });
+          try {
+            await preserved.finalizePublication?.();
+          } catch (cleanupError) {
+            const cleanupMessage =
+              cleanupError instanceof Error
+                ? cleanupError.message
+                : String(cleanupError);
+            log(`Completed DVD rescue cleanup deferred: ${cleanupMessage}`);
+          }
+          publishedArchivePath = undefined;
+        } catch (error) {
+          await quarantinePublishedArchive(preserved.archivePath);
+          publishedArchivePath = undefined;
+          throw error;
+        }
       },
-      verifySource,
     });
-    publishedArchivePath = preserved.archivePath;
-    try {
-      access.archiveJobs.publish(claim, {
-        archivePath: preserved.archivePath,
-        integrityEvidence: preserved.integrityEvidence,
-        sizeBytes: preserved.sizeBytes,
-      });
-      try {
-        await preserved.finalizePublication?.();
-      } catch (cleanupError) {
-        const cleanupMessage =
-          cleanupError instanceof Error
-            ? cleanupError.message
-            : String(cleanupError);
-        log(`Completed DVD rescue cleanup deferred: ${cleanupMessage}`);
-      }
-    } catch (error) {
-      await quarantinePublishedArchive(preserved.archivePath);
-      publishedArchivePath = undefined;
-      throw error;
-    }
   } catch (error) {
     let cancellationRequested =
       archiveSignal.aborted &&
