@@ -99,6 +99,7 @@ import {
   decodeDvdTitleMap,
   isDvdContentId,
   isDvdMetadataFingerprint,
+  MAX_DVD_SCAN_INTEGER,
   MAX_DVD_TITLES,
 } from "../dvd-scan.js";
 import {
@@ -121,6 +122,7 @@ import type {
   ArchiveJobProgress,
   ArchiveRequestId,
   ArchiveRequestStatus,
+  CatalogReviewCoverage,
   ClaimedEncodeJob,
   ChronologicalListOptions,
   ConsistentReadAccess,
@@ -139,6 +141,7 @@ import type {
   DiscInspectionReasonCode,
   DiscSelectionId,
   DiscSelectionActionAvailability,
+  DiscSelectionCorrectionEncodeJobLink,
   DiscSelectionSupersession,
   EncodeJobClaimToken,
   EncodeJobCleanupClaimToken,
@@ -183,11 +186,13 @@ const LEGACY_ARCHIVE_RECONCILIATION_BYTES = 9_000_000_000;
 const DISC_SELECTION_REVIEW_BATCH_SIZE = 100;
 const DISC_SELECTION_ACTION_AVAILABILITY_LIMIT = 100;
 const DISC_SELECTION_SUPERSESSION_LIMIT = 100;
+const DISC_SELECTION_CORRECTION_ENCODE_JOB_LINK_LIMIT = 101;
 const MEDIA_ITEM_SEARCH_LIMIT = 100;
 const CATALOG_REVIEW_ARCHIVE_LIMIT = 100;
 const CATALOG_REVIEW_MAPPED_TITLE_SUMMARY_LIMIT = 3;
 const CORRECTED_ENCODE_REPLACEMENT_LIMIT = 100;
 const RETAINED_ENCODE_OUTPUT_LOOKUP_LIMIT = 400;
+const LATEST_RETAINED_ENCODE_OUTPUT_SUMMARY_LIMIT = 100;
 const DEFAULT_MIGRATIONS_FOLDER = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../../drizzle",
@@ -260,6 +265,10 @@ const replacementEncodeJobRecords = alias(
 const predecessorEncodeJobRecords = alias(
   encodeJobs,
   "predecessor_encode_jobs",
+);
+const newerRetainedEncodeOutputRecords = alias(
+  retainedEncodeOutputs,
+  "newer_retained_encode_outputs",
 );
 const claimPredecessorEncodeJobRecords = alias(
   encodeJobs,
@@ -457,6 +466,205 @@ export function createDataAccessInternal(
 
   function now(): Date {
     return new Date();
+  }
+
+  function getCatalogReviewCoverage(options: {
+    originalDiscArchiveId: OriginalDiscArchiveId;
+    titles: readonly { number: number; chapters: number }[];
+  }): CatalogReviewCoverage {
+    if (options.titles.length > MAX_DVD_TITLES) {
+      throw new DomainInvariantError(
+        `Catalog Review Coverage is limited to ${MAX_DVD_TITLES} DVD titles`,
+      );
+    }
+    const titleNumbers = new Set<number>();
+    for (const title of options.titles) {
+      if (
+        !Number.isSafeInteger(title.number) ||
+        title.number < 1 ||
+        title.number > MAX_DVD_SCAN_INTEGER ||
+        !Number.isSafeInteger(title.chapters) ||
+        title.chapters < 0 ||
+        title.chapters > MAX_DVD_SCAN_INTEGER ||
+        titleNumbers.has(title.number)
+      ) {
+        throw new DomainInvariantError(
+          "Catalog Review Coverage requires unique bounded DVD titles",
+        );
+      }
+      titleNumbers.add(title.number);
+    }
+
+    const summary = database
+      .select({
+        discSelectionCount: count(),
+        mediaItemsWithSelections: countDistinct(discSelections.mediaItemId),
+        mainFeatureSelections: sql<number>`coalesce(sum(case when ${discSelections.kind} = 'main_feature' then 1 else 0 end), 0)`,
+      })
+      .from(discSelections)
+      .where(and(
+        eq(
+          discSelections.originalDiscArchiveId,
+          options.originalDiscArchiveId,
+        ),
+        eq(discSelections.isCatalogActive, true),
+      ))
+      .get();
+    if (!summary) {
+      throw new DomainInvariantError(
+        "Catalog Review Coverage summary could not be read",
+      );
+    }
+
+    if (options.titles.length === 0) {
+      return {
+        ...summary,
+        mappedTitles: 0,
+        partiallyMappedTitles: 0,
+        unmappedTitles: 0,
+        titles: [],
+      };
+    }
+
+    const titleMapValues = options.titles.map(() => "(?, ?, ?)").join(", ");
+    const statement = sqlite.prepare(`
+      with title_map(title_number, chapters, ordinal) as (
+        values ${titleMapValues}
+      ),
+      raw_intervals as (
+        select
+          title_map.title_number,
+          disc_selections.id as selection_id,
+          case
+            when disc_selections.kind = 'dvd_title' then 1
+            else max(1, disc_selections.chapter_start)
+          end as interval_start,
+          case
+            when disc_selections.kind = 'dvd_title' then title_map.chapters
+            else min(title_map.chapters, disc_selections.chapter_end)
+          end as interval_end,
+          case when disc_selections.kind = 'dvd_title' then 1 else 0 end
+            as is_whole_title
+        from title_map
+        inner join disc_selections
+          on disc_selections.title_number = title_map.title_number
+        where disc_selections.original_disc_archive_id = ?
+          and disc_selections.is_catalog_active = 1
+          and disc_selections.kind in ('dvd_title', 'dvd_chapters')
+      ),
+      valid_intervals as (
+        select *
+        from raw_intervals
+        where interval_start <= interval_end
+      ),
+      ordered_intervals as (
+        select
+          *,
+          max(interval_end) over (
+            partition by title_number
+            order by interval_start, interval_end, selection_id
+            rows between unbounded preceding and 1 preceding
+          ) as preceding_interval_end
+        from valid_intervals
+      ),
+      grouped_intervals as (
+        select
+          *,
+          sum(
+            case
+              when preceding_interval_end is null
+                or interval_start > preceding_interval_end
+                then 1
+              else 0
+            end
+          ) over (
+            partition by title_number
+            order by interval_start, interval_end, selection_id
+            rows unbounded preceding
+          ) as interval_group
+        from ordered_intervals
+      ),
+      coverage_islands as (
+        select
+          title_number,
+          interval_group,
+          min(interval_start) as interval_start,
+          max(interval_end) as interval_end
+        from grouped_intervals
+        group by title_number, interval_group
+      ),
+      covered_chapters as (
+        select
+          title_number,
+          sum(interval_end - interval_start + 1) as covered_chapters
+        from coverage_islands
+        group by title_number
+      ),
+      overlap_by_title as (
+        select
+          title_number,
+          max(
+            case
+              when preceding_interval_end >= interval_start then 1
+              else 0
+            end
+          ) as has_overlap
+        from ordered_intervals
+        group by title_number
+      ),
+      whole_title_by_title as (
+        select title_number, max(is_whole_title) as has_whole_title
+        from raw_intervals
+        group by title_number
+      )
+      select
+        title_map.title_number,
+        title_map.chapters,
+        coalesce(whole_title_by_title.has_whole_title, 0) as has_whole_title,
+        coalesce(covered_chapters.covered_chapters, 0) as covered_chapters,
+        coalesce(overlap_by_title.has_overlap, 0) as has_overlap
+      from title_map
+      left join whole_title_by_title using (title_number)
+      left join covered_chapters using (title_number)
+      left join overlap_by_title using (title_number)
+      order by title_map.ordinal
+    `);
+    const parameters = options.titles.flatMap((title, index) => [
+      title.number,
+      title.chapters,
+      index,
+    ]);
+    const rows = statement.all(
+      ...parameters,
+      options.originalDiscArchiveId,
+    ) as Array<{
+      title_number: number;
+      chapters: number;
+      has_whole_title: number;
+      covered_chapters: number;
+      has_overlap: number;
+    }>;
+    const titles = rows.map((row) => ({
+      titleNumber: row.title_number,
+      status: row.has_whole_title === 1 ||
+          (row.chapters > 0 && row.covered_chapters >= row.chapters)
+        ? "mapped" as const
+        : row.covered_chapters > 0
+        ? "partially_mapped" as const
+        : "unmapped" as const,
+      hasOverlap: row.has_overlap === 1,
+    }));
+
+    return {
+      ...summary,
+      mappedTitles: titles.filter(({ status }) => status === "mapped").length,
+      partiallyMappedTitles: titles.filter(
+        ({ status }) => status === "partially_mapped",
+      ).length,
+      unmappedTitles: titles.filter(({ status }) => status === "unmapped")
+        .length,
+      titles,
+    };
   }
 
   type CatalogTransaction = Parameters<
@@ -2371,6 +2579,8 @@ export function createDataAccessInternal(
             access.catalog.searchMediaItems(options),
           listDiscSelections: (options) =>
             access.catalog.listDiscSelections(options),
+          getCatalogReviewCoverage: (options) =>
+            access.catalog.getCatalogReviewCoverage(options),
           listDiscSelectionSupersessions: (options) =>
             access.catalog.listDiscSelectionSupersessions(options),
           listCorrectedEncodeReplacementPlans: (options) =>
@@ -2399,12 +2609,16 @@ export function createDataAccessInternal(
         },
         encodeJobs: {
           list: (statuses, options) => access.encodeJobs.list(statuses, options),
-          listCorrectionLinksForDiscSelections: (ids) =>
-            access.encodeJobs.listCorrectionLinksForDiscSelections(ids),
+          listDiscSelectionCorrectionEncodeJobLinks: (options) =>
+            access.encodeJobs.listDiscSelectionCorrectionEncodeJobLinks(
+              options,
+            ),
           listCorrectionLinks: (ids) =>
             access.encodeJobs.listCorrectionLinks(ids),
           listRetainedOutputSummaries: (ids) =>
             access.encodeJobs.listRetainedOutputSummaries(ids),
+          listLatestRetainedOutputSummaries: (ids) =>
+            access.encodeJobs.listLatestRetainedOutputSummaries(ids),
         },
       };
       sqlite.exec("BEGIN");
@@ -4596,6 +4810,10 @@ export function createDataAccessInternal(
           "Disc Selection",
         );
         return rows.map(toDiscSelection);
+      },
+
+      getCatalogReviewCoverage(options) {
+        return getCatalogReviewCoverage(options);
       },
 
       listDiscSelectionSupersessions(options) {
@@ -6993,33 +7211,51 @@ export function createDataAccessInternal(
       },
 
       claimNext: encodeJobQueue.claimNext,
-      listCorrectionLinksForDiscSelections(ids) {
-        if (ids.length === 0) return [];
-        if (ids.length > 200) {
+      listDiscSelectionCorrectionEncodeJobLinks(options) {
+        if (
+          !Number.isSafeInteger(options.limit) ||
+          options.limit < 1 ||
+          options.limit > DISC_SELECTION_CORRECTION_ENCODE_JOB_LINK_LIMIT
+        ) {
           throw new DomainInvariantError(
-            "Encode Job correction-history lookup is limited to 200 Disc Selections",
+            `Disc Selection correction Encode Job history limit must be a safe integer between 1 and ${DISC_SELECTION_CORRECTION_ENCODE_JOB_LINK_LIMIT}`,
           );
         }
-        const uniqueIds = [...new Set(ids)];
-        const displayedPredecessors = database
-          .select({ id: encodeJobs.predecessorEncodeJobId })
+        const query = database
+          .select({
+            replacementDiscSelectionId: discSelections.id,
+            predecessorEncodeJob: predecessorEncodeJobRecords,
+            replacementEncodeJob: encodeJobs,
+          })
           .from(encodeJobs)
-          .where(and(
-            inArray(encodeJobs.discSelectionId, uniqueIds),
-            isNotNull(encodeJobs.predecessorEncodeJobId),
-          ));
-        return database
-          .select()
-          .from(encodeJobs)
-          .where(or(
-            and(
-              inArray(encodeJobs.discSelectionId, uniqueIds),
-              isNotNull(encodeJobs.predecessorEncodeJobId),
+          .innerJoin(
+            predecessorEncodeJobRecords,
+            eq(
+              predecessorEncodeJobRecords.id,
+              encodeJobs.predecessorEncodeJobId,
             ),
-            inArray(encodeJobs.id, displayedPredecessors),
+          )
+          .innerJoin(
+            discSelections,
+            eq(discSelections.id, encodeJobs.discSelectionId),
+          )
+          .innerJoin(
+            discSelectionSupersessions,
+            eq(
+              discSelectionSupersessions.replacementDiscSelectionId,
+              discSelections.id,
+            ),
+          )
+          .where(eq(
+            discSelections.originalDiscArchiveId,
+            options.originalDiscArchiveId,
           ))
-          .orderBy(asc(encodeJobs.createdAt), asc(encodeJobs.id))
-          .all();
+          .orderBy(asc(encodeJobs.createdAt), asc(encodeJobs.id));
+        return listWithBoundedOffset(
+          query,
+          options,
+          "Disc Selection correction Encode Job history",
+        ) as DiscSelectionCorrectionEncodeJobLink[];
       },
       listCorrectionLinks(ids) {
         if (ids.length === 0) return [];
@@ -7081,6 +7317,65 @@ export function createDataAccessInternal(
           ))
           .orderBy(
             asc(retainedEncodeOutputs.retainedAt),
+            asc(retainedEncodeOutputs.id),
+          )
+          .all();
+      },
+      listLatestRetainedOutputSummaries(ids) {
+        if (ids.length === 0) return [];
+        if (ids.length > LATEST_RETAINED_ENCODE_OUTPUT_SUMMARY_LIMIT) {
+          throw new DomainInvariantError(
+            `Latest Retained Encode output summary lookup is limited to ${LATEST_RETAINED_ENCODE_OUTPUT_SUMMARY_LIMIT} jobs`,
+          );
+        }
+        const uniqueIds = [...new Set(ids)];
+        return database
+          .select({
+            id: retainedEncodeOutputs.id,
+            predecessorEncodeJobId:
+              retainedEncodeOutputs.predecessorEncodeJobId,
+            replacementEncodeJobId:
+              retainedEncodeOutputs.replacementEncodeJobId,
+            state: retainedEncodeOutputs.state,
+            cleanupEligible: retainedEncodeOutputs.cleanupEligible,
+            retainedAt: retainedEncodeOutputs.retainedAt,
+          })
+          .from(retainedEncodeOutputs)
+          .where(and(
+            inArray(
+              retainedEncodeOutputs.replacementEncodeJobId,
+              uniqueIds,
+            ),
+            notExists(
+              database
+                .select({ id: newerRetainedEncodeOutputRecords.id })
+                .from(newerRetainedEncodeOutputRecords)
+                .where(and(
+                  eq(
+                    newerRetainedEncodeOutputRecords.replacementEncodeJobId,
+                    retainedEncodeOutputs.replacementEncodeJobId,
+                  ),
+                  or(
+                    gt(
+                      newerRetainedEncodeOutputRecords.retainedAt,
+                      retainedEncodeOutputs.retainedAt,
+                    ),
+                    and(
+                      eq(
+                        newerRetainedEncodeOutputRecords.retainedAt,
+                        retainedEncodeOutputs.retainedAt,
+                      ),
+                      gt(
+                        newerRetainedEncodeOutputRecords.id,
+                        retainedEncodeOutputs.id,
+                      ),
+                    ),
+                  ),
+                )),
+            ),
+          ))
+          .orderBy(
+            asc(retainedEncodeOutputs.replacementEncodeJobId),
             asc(retainedEncodeOutputs.id),
           )
           .all();

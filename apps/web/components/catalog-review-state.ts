@@ -62,6 +62,7 @@ export async function requestCatalogReview(
   discSelectionOffset: number,
   fetcher: CatalogReviewFetch = fetch,
   correctionHistoryOffset = 0,
+  correctionEncodeHistoryOffset = 0,
   replacementOffset = 0,
   replacementProfileOffset = 0,
 ): Promise<CatalogReviewDto> {
@@ -71,6 +72,9 @@ export async function requestCatalogReview(
   });
   if (replacementOffset > 0) {
     query.set("replacementOffset", String(replacementOffset));
+  }
+  if (correctionEncodeHistoryOffset > 0) {
+    query.set("correctionJobOffset", String(correctionEncodeHistoryOffset));
   }
   if (replacementProfileOffset > 0) {
     query.set("replacementProfileOffset", String(replacementProfileOffset));
@@ -152,6 +156,8 @@ export function useCatalogReviewState({
   );
   const [discSelectionOffset, setDiscSelectionOffset] = useState(0);
   const [correctionHistoryOffset, setCorrectionHistoryOffset] = useState(0);
+  const [correctionEncodeHistoryOffset, setCorrectionEncodeHistoryOffset] =
+    useState(0);
   const [replacementOffset, setReplacementOffset] = useState(0);
   const [replacementProfileOffset, setReplacementProfileOffset] = useState(0);
   const [selectionKind, setSelectionKind] =
@@ -185,6 +191,7 @@ export function useCatalogReviewState({
         discSelectionOffset,
         fetch,
         correctionHistoryOffset,
+        correctionEncodeHistoryOffset,
         replacementOffset,
         replacementProfileOffset,
       );
@@ -203,6 +210,7 @@ export function useCatalogReviewState({
     archiveId,
     discSelectionOffset,
     correctionHistoryOffset,
+    correctionEncodeHistoryOffset,
     replacementOffset,
     replacementProfileOffset,
   ]);
@@ -309,6 +317,14 @@ export function useCatalogReviewState({
     }
     requestScope.current?.invalidate(archiveId);
     setCorrectionHistoryOffset(offset);
+  }
+
+  function changeCorrectionEncodeHistoryOffset(offset: number) {
+    if (correctionEncodeHistoryOffset === offset) {
+      return;
+    }
+    requestScope.current?.invalidate(archiveId);
+    setCorrectionEncodeHistoryOffset(offset);
   }
 
   function changeReplacementOffset(offset: number) {
@@ -422,6 +438,7 @@ export function useCatalogReviewState({
     cancelEdit: () => changeEditingMediaItem(null),
     changeDiscSelectionOffset,
     changeCorrectionHistoryOffset,
+    changeCorrectionEncodeHistoryOffset,
     changeReplacementOffset,
     changeReplacementProfileOffset,
     changeSelectionKind: setSelectionKind,

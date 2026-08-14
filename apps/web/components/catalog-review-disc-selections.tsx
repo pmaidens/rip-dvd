@@ -22,12 +22,16 @@ interface CatalogReviewDiscSelectionsProps {
   page: CatalogReviewDto["discSelectionsPage"];
   correctionHistory: CatalogReviewDto["correctionHistory"];
   correctionHistoryPage: CatalogReviewDto["correctionHistoryPage"];
+  correctionEncodeHistory: CatalogReviewDto["correctionEncodeHistory"];
+  correctionEncodeHistoryPage:
+    CatalogReviewDto["correctionEncodeHistoryPage"];
   mediaItems: CatalogReviewMediaItem[];
   rawTitles: DvdTitle[];
   selectionKind: DiscSelectionKind;
   isSaving: boolean;
   onPage(offset: number): void;
   onCorrectionHistoryPage(offset: number): void;
+  onCorrectionEncodeHistoryPage(offset: number): void;
   onSelectionKindChange(kind: DiscSelectionKind): void;
   onCreate(input: CreateDiscSelectionInput): void;
   onUpdate(id: string, changes: UpdateDiscSelectionInput): void;
@@ -92,12 +96,15 @@ export function CatalogReviewDiscSelections({
   page,
   correctionHistory,
   correctionHistoryPage,
+  correctionEncodeHistory,
+  correctionEncodeHistoryPage,
   mediaItems,
   rawTitles,
   selectionKind,
   isSaving,
   onPage,
   onCorrectionHistoryPage,
+  onCorrectionEncodeHistoryPage,
   onSelectionKindChange,
   onCreate,
   onUpdate,
@@ -304,30 +311,6 @@ export function CatalogReviewDiscSelections({
                   )}
                 </p>
                 {correction.reason ? <p>{correction.reason}</p> : null}
-                {correction.encodeHistory.length > 0 ? (
-                  <ol className="selection-encode-history">
-                    {correction.encodeHistory.map((job) => (
-                      <li key={job.id}>
-                        <p>
-                          Encode Job {job.id} · {displayTerm(job.status)}
-                        </p>
-                        {job.replacementEncodeJobId ? (
-                          <p>Superseded by {job.replacementEncodeJobId}</p>
-                        ) : null}
-                        {job.predecessorEncodeJobId ? (
-                          <p>Replaces {job.predecessorEncodeJobId}</p>
-                        ) : null}
-                        {job.retainedOutput ? (
-                          <p>
-                            Prior output retained · {job.retainedOutput.cleanupEligible
-                              ? "Cleanup eligible"
-                              : "Cleanup unavailable"}
-                          </p>
-                        ) : null}
-                      </li>
-                    ))}
-                  </ol>
-                ) : null}
               </li>
             ))}
           </ol>
@@ -340,6 +323,45 @@ export function CatalogReviewDiscSelections({
         page={correctionHistoryPage}
         isSaving={isSaving}
         onPage={onCorrectionHistoryPage}
+      />
+
+      {correctionEncodeHistory.length > 0 ? (
+        <div className="selection-correction-history">
+          <h4>Correction Encode Job History</h4>
+          <ol className="selection-encode-history">
+            {correctionEncodeHistory.map((history) => (
+              <li key={history.replacementEncodeJob.id}>
+                <p>
+                  Encode Job {history.predecessorEncodeJob.id} · {displayTerm(
+                    history.predecessorEncodeJob.status,
+                  )}{" → "}Encode Job {history.replacementEncodeJob.id} ·{
+                    " "
+                  }{displayTerm(history.replacementEncodeJob.status)}
+                </p>
+                <p>
+                  Replacement Disc Selection{
+                    " "
+                  }{history.replacementDiscSelectionId}
+                </p>
+                {history.retainedOutput ? (
+                  <p>
+                    Prior output retained · {history.retainedOutput.cleanupEligible
+                      ? "Cleanup eligible"
+                      : "Cleanup unavailable"}
+                  </p>
+                ) : null}
+              </li>
+            ))}
+          </ol>
+        </div>
+      ) : null}
+
+      <CatalogReviewPagination
+        ariaLabel="Correction Encode Job History pages"
+        itemLabel="Correction Encode Job links"
+        page={correctionEncodeHistoryPage}
+        isSaving={isSaving}
+        onPage={onCorrectionEncodeHistoryPage}
       />
 
       <form className="catalog-form" onSubmit={submitSelection}>

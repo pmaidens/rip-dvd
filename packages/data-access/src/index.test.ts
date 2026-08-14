@@ -1495,6 +1495,24 @@ describe("data-access facade", () => {
     );
     expect(() => access.catalog.listDiscSelections({ offset: 1 }))
       .toThrow("Disc Selection offset requires a bounded limit");
+    expect(() => access.catalog.getCatalogReviewCoverage({
+      originalDiscArchiveId: catalogEntries[0]!.archive.id,
+      titles: Array.from({ length: MAX_DVD_TITLES + 1 }, (_, index) => ({
+        number: index + 1,
+        chapters: 1,
+      })),
+    })).toThrow(
+      `Catalog Review Coverage is limited to ${MAX_DVD_TITLES} DVD titles`,
+    );
+    expect(() => access.catalog.getCatalogReviewCoverage({
+      originalDiscArchiveId: catalogEntries[0]!.archive.id,
+      titles: [
+        { number: 1, chapters: 1 },
+        { number: 1, chapters: 1 },
+      ],
+    })).toThrow(
+      "Catalog Review Coverage requires unique bounded DVD titles",
+    );
     access.close();
   });
 
@@ -2257,6 +2275,23 @@ describe("data-access facade", () => {
       where id = ?
     `).run(archive.id);
     sqlite.exec("commit");
+
+    expect(access.catalog.getCatalogReviewCoverage({
+      originalDiscArchiveId: archive.id,
+      titles: [{ number: 1, chapters: 100_000 }],
+    })).toEqual({
+      discSelectionCount: selectionCount + 1,
+      mediaItemsWithSelections: 1,
+      mappedTitles: 0,
+      partiallyMappedTitles: 1,
+      unmappedTitles: 0,
+      mainFeatureSelections: 1,
+      titles: [{
+        titleNumber: 1,
+        status: "partially_mapped",
+        hasOverlap: false,
+      }],
+    });
 
     const finalSelectionId =
       `large-selection-${String(selectionCount).padStart(6, "0")}`;
@@ -3025,23 +3060,46 @@ describe("data-access facade", () => {
         cleanupEligible: true,
         retainedAt: expect.any(Date),
       }]);
-    });
-    expect(access.encodeJobs.listCorrectionLinksForDiscSelections([
-      mistakenSelection.id,
-      correction.discSelection.id,
-    ])).toEqual([
-      expect.objectContaining({
-        id: predecessor.id,
-        discSelectionId: mistakenSelection.id,
-        status: "completed",
-      }),
-      expect.objectContaining({
-        id: replacement.id,
-        discSelectionId: correction.discSelection.id,
+      expect(
+        snapshot.encodeJobs.listLatestRetainedOutputSummaries([
+          replacement.id,
+        ]),
+      ).toEqual([{
+        id: expect.any(String),
         predecessorEncodeJobId: predecessor.id,
-        status: "completed",
-      }),
-    ]);
+        replacementEncodeJobId: replacement.id,
+        state: "retained",
+        cleanupEligible: true,
+        retainedAt: expect.any(Date),
+      }]);
+    });
+    expect(access.encodeJobs.listDiscSelectionCorrectionEncodeJobLinks({
+      originalDiscArchiveId: archive.id,
+      limit: 1,
+    })).toEqual([{
+      replacementDiscSelectionId: correction.discSelection.id,
+      predecessorEncodeJob: expect.objectContaining({ id: predecessor.id }),
+      replacementEncodeJob: expect.objectContaining({ id: replacement.id }),
+    }]);
+    expect(access.encodeJobs.listDiscSelectionCorrectionEncodeJobLinks({
+      originalDiscArchiveId: archive.id,
+      limit: 1,
+      offset: 1,
+    })).toEqual([]);
+    expect(() =>
+      access.encodeJobs.listDiscSelectionCorrectionEncodeJobLinks({
+        originalDiscArchiveId: archive.id,
+        limit: 102,
+      })
+    ).toThrow(
+      "Disc Selection correction Encode Job history limit must be a safe integer between 1 and 101",
+    );
+    expect(() => access.encodeJobs.listLatestRetainedOutputSummaries(
+      Array.from({ length: 101 }, (_, index) =>
+        `replacement-${index}` as EncodeJobId),
+    )).toThrow(
+      "Latest Retained Encode output summary lookup is limited to 100 jobs",
+    );
     const requeuedReplacement = access.encodeJobs.requeue(replacement.id);
     const reencodeClaim = access.encodeJobs.claimNext("corrected-reencoder");
     if (!reencodeClaim || reencodeClaim.id !== requeuedReplacement.id) {
@@ -3093,8 +3151,24 @@ describe("data-access facade", () => {
         }),
       ]),
     );
-    expect(access.encodeJobs.listRetainedOutputs([replacement.id]))
-      .toHaveLength(2);
+    const retainedHistory = access.encodeJobs.listRetainedOutputs([
+      replacement.id,
+    ]);
+    expect(retainedHistory).toHaveLength(2);
+    const latestRetainedOutput = [...retainedHistory].sort((left, right) =>
+      left.retainedAt.getTime() - right.retainedAt.getTime() ||
+      left.id.localeCompare(right.id)
+    ).at(-1)!;
+    expect(access.encodeJobs.listLatestRetainedOutputSummaries([
+      replacement.id,
+    ])).toEqual([{
+      id: latestRetainedOutput.id,
+      predecessorEncodeJobId: predecessor.id,
+      replacementEncodeJobId: replacement.id,
+      state: "retained",
+      cleanupEligible: true,
+      retainedAt: latestRetainedOutput.retainedAt,
+    }]);
     access.close();
   });
 

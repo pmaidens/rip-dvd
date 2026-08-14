@@ -56,16 +56,24 @@ export interface CatalogReviewDiscSelectionCorrection {
   replacementDiscSelection: CatalogReviewDiscSelectionSummary;
   reason: string | null;
   correctedAt: string;
-  encodeHistory: Array<{
+}
+
+export interface CatalogReviewCorrectionEncodeHistory {
+  replacementDiscSelectionId: string;
+  predecessorEncodeJob: {
     id: string;
     status: EncodeJobStatus;
-    predecessorEncodeJobId: string | null;
-    replacementEncodeJobId: string | null;
-    retainedOutput: {
-      state: "retained";
-      cleanupEligible: boolean;
-    } | null;
-  }>;
+    replacementEncodeJobId: string;
+  };
+  replacementEncodeJob: {
+    id: string;
+    status: EncodeJobStatus;
+    predecessorEncodeJobId: string;
+  };
+  retainedOutput: {
+    state: "retained";
+    cleanupEligible: boolean;
+  } | null;
 }
 
 export interface CatalogReviewReplacementPlan {
@@ -156,8 +164,15 @@ export interface CatalogReviewDto {
   coverage: CatalogReviewCoverage;
   mediaItems: CatalogReviewMediaItem[];
   correctionHistory: CatalogReviewDiscSelectionCorrection[];
+  correctionEncodeHistory: CatalogReviewCorrectionEncodeHistory[];
   replacementPlan?: CatalogReviewReplacementPlan;
   correctionHistoryPage: {
+    offset: number;
+    limit: number;
+    hasPrevious: boolean;
+    hasNext: boolean;
+  };
+  correctionEncodeHistoryPage: {
     offset: number;
     limit: number;
     hasPrevious: boolean;

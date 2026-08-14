@@ -176,8 +176,15 @@ Disc Selection mutation preserves distinct identity paths:
   replacement already in the lineage cannot be repaired in place; a later
   correction creates another supersession, while removal deactivates the
   replacement rather than deleting either endpoint or an immutable link.
-  Catalog history joins those links to original and replacement Encode outcomes
-  and retained-output state through a path-free summary projection. The
+  Catalog history pages supersessions separately from correction Encode Job
+  links. `listDiscSelectionCorrectionEncodeJobLinks()` requires an archive,
+  offset, and limit no larger than 101, orders replacement jobs by immutable
+  creation time and identity, and returns one predecessor/replacement pair per
+  row. `listLatestRetainedOutputSummaries()` accepts at most 100 replacement
+  job identities and returns at most one stable latest summary for each, so a
+  repeatedly published job cannot expand the Catalog Review response. The
+  resulting projections preserve both job outcomes and
+  links without exposing output paths. The
   private retained path and filesystem identity remain available only on the
   worker-facing provenance read, never the consistent web read facade.
 - **Unsafe legacy quarantine.** A caller-era mapping that fails canonical-key or
@@ -207,6 +214,15 @@ repair and removal when no active dependency blocks recovery. These reasons do
 not include encode output paths. While legacy cutover repair is pending, the
 archive fence suppresses every selection mutation action and explains that
 changes are unavailable.
+
+`catalog.getCatalogReviewCoverage()` computes Review Coverage across every
+active Disc Selection for one archive without returning or materializing those
+selection rows. Its first aggregate query always returns one summary row; its
+interval-union query returns exactly one row for each supplied archived title,
+with the existing title-map contract limiting that input and output to 512.
+Whole-title, clamped chapter-union, overlap, distinct Media Item, and
+main-feature counts therefore remain archive-wide while the surrounding read
+snapshot stays independent of the number of Disc Selections.
 
 Catalog Review archive discovery uses a separate facade query capped at 100
 rows. It selects either Needs review or Reviewed archives, pages on immutable

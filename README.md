@@ -663,6 +663,28 @@ chains at 32 levels without limiting siblings or the total Media Item count, and
 reads fail closed instead of presenting a truncated chain. The review workflow
 is exposed at `GET`/`POST /api/catalog-reviews/:archiveId`.
 
+Every `GET /api/catalog-reviews/:archiveId` read uses independent, stable
+archive-scoped pages: `selectionOffset` traverses up to 100 active Disc
+Selections ordered by creation time and identity, `correctionOffset` traverses
+up to 100 supersessions ordered by correction time and superseded identity, and
+`correctionJobOffset` traverses up to 100 correction Encode Job links ordered by
+replacement-job creation time and identity. Each correction-job entry contains
+one path-free predecessor/replacement pair plus its retained-output summary, so
+the nested response is capped at 200 job summaries and no link is split across
+pages. Each page uses a one-row lookahead internally; selection and ancestor ID
+lookups run in batches of 100. Missing offsets mean zero, while duplicate,
+negative, fractional, unsafe, oversized, or unknown query parameters fail with
+`400`. Responses always use `Cache-Control: no-store`.
+
+Review Coverage is independent of those visible pages. One bounded facade
+aggregate considers every active Disc Selection and returns one summary row
+plus at most one interval-union row for each of the archived title map's maximum
+512 titles. The request therefore never accumulates the archive's selections
+or correction-linked jobs in memory, and the consistent read snapshot performs
+a fixed set of bounded-result queries regardless of history size. Replacement
+plans and active Encoding Profiles retain their separate existing 100-row
+pages through `replacementOffset` and `replacementProfileOffset`.
+
 To use host libraries instead, set `RIP_DVD_MEDIA_LIBRARY_HOST_PATH` and
 `RIP_DVD_ORIGINALS_LIBRARY_HOST_PATH`. On native Linux, create new bind-source
 directories with ownership that matches the container user before starting
