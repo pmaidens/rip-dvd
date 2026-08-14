@@ -212,6 +212,18 @@ export interface CleanReadArchiveIntegrityEvidence {
   badSectorRanges: readonly [];
 }
 
+export interface UnknownArchiveIntegrityEvidence {
+  integrity: "unknown";
+  policyVersion: null;
+  badSectorCount: null;
+  badAreaCount: null;
+  badSectorRanges: null;
+}
+
+export type ArchiveIntegrityEvidence =
+  | CleanReadArchiveIntegrityEvidence
+  | UnknownArchiveIntegrityEvidence;
+
 export type CatalogReviewArchiveView = "needs_review" | "reviewed";
 
 export interface CatalogReviewArchive extends OriginalDiscArchive {
@@ -905,7 +917,7 @@ export interface ArchiveJobAccess {
     input: {
       archivePath: string;
       sizeBytes: number;
-      integrityEvidence: CleanReadArchiveIntegrityEvidence;
+      integrityEvidence: ArchiveIntegrityEvidence;
     },
   ): ArchiveJob;
   fail(claim: RunningArchiveJob, errorMessage: string): ArchiveJob;

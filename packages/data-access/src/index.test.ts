@@ -24,6 +24,7 @@ import {
   createDataAccess,
   createCleanReadArchiveIntegrityEvidence,
   createDiscSelectionSourceIdentity,
+  createUnknownArchiveIntegrityEvidence,
   DVD_TITLE_MAP_SCHEMA_VERSION,
   DomainInvariantError,
   ENCODE_JOB_LEASE_DURATION_MS,
@@ -10397,6 +10398,97 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       StaleJobAttemptError,
     );
     access.close();
+  });
+
+  it("publishes recovered archives with explicit unknown integrity evidence", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/recovered-archive",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const { disc, inspection } = completeDiscInspection(access, {
+      opticalDriveId: drive.id,
+      mediaGeneration: "recovered-archive",
+      fingerprint: "recovered-archive",
+    });
+    access.archiveRequests.create({ detectedDiscId: disc.id });
+    const claim = access.archiveJobs.startForInspection(
+      inspection.id,
+      "recovery-publisher",
+    )!;
+
+    access.archiveJobs.publish(claim, {
+      archivePath: "/media/originals/recovered.iso",
+      sizeBytes: 1_000,
+      integrityEvidence: createUnknownArchiveIntegrityEvidence(),
+    });
+
+    expect(access.catalog.listOriginalDiscArchives()).toEqual([
+      expect.objectContaining({
+        integrity: "unknown",
+        integrityPolicyVersion: null,
+        badSectorCount: null,
+        badAreaCount: null,
+        badSectorRanges: null,
+      }),
+    ]);
+    access.close();
+  });
+
+  it("rejects incomplete required Archive Integrity evidence at the SQLite boundary", () => {
+    const databasePath = createTestDatabasePath();
+    const access = openTestDatabase(databasePath);
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/integrity-constraint",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const { disc, inspection } = completeDiscInspection(access, {
+      opticalDriveId: drive.id,
+      mediaGeneration: "integrity-constraint",
+      fingerprint: "integrity-constraint",
+    });
+    access.archiveRequests.create({ detectedDiscId: disc.id });
+    const claim = access.archiveJobs.startForInspection(
+      inspection.id,
+      "constraint-publisher",
+    )!;
+    access.archiveJobs.publish(claim, {
+      archivePath: "/media/originals/integrity-constraint.iso",
+      sizeBytes: 1_000,
+      integrityEvidence: createCleanReadArchiveIntegrityEvidence(
+        "constraint-policy-v1",
+      ),
+    });
+    access.close();
+
+    const sqlite = new DatabaseSync(databasePath);
+    const evidenceColumns = [
+      "integrity_policy_version",
+      "bad_sector_count",
+      "bad_area_count",
+      "bad_sector_ranges",
+    ] as const;
+    for (const column of evidenceColumns) {
+      expect(() =>
+        sqlite.exec(`update original_disc_archives set ${column} = null`),
+      ).toThrow(/constraint/i);
+    }
+    sqlite.exec(`
+      update original_disc_archives
+      set integrity = 'watchable_salvage',
+          integrity_policy_version = 'salvage-policy-v1',
+          bad_sector_count = 1,
+          bad_area_count = 1,
+          bad_sector_ranges = '[{"startLba":1,"sectorCount":1}]'
+    `);
+    for (const column of evidenceColumns) {
+      expect(() =>
+        sqlite.exec(`update original_disc_archives set ${column} = null`),
+      ).toThrow(/constraint/i);
+    }
+    sqlite.close();
   });
 
   it("fences stale publication before legacy provenance reconciliation", () => {

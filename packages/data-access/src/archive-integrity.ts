@@ -1,5 +1,8 @@
 import { DomainInvariantError } from "./errors.js";
-import type { CleanReadArchiveIntegrityEvidence } from "./types.js";
+import type {
+  CleanReadArchiveIntegrityEvidence,
+  UnknownArchiveIntegrityEvidence,
+} from "./types.js";
 
 export function createCleanReadArchiveIntegrityEvidence(
   policyVersion: string,
@@ -19,5 +22,15 @@ export function createCleanReadArchiveIntegrityEvidence(
     badSectorCount: 0,
     badAreaCount: 0,
     badSectorRanges: [],
+  };
+}
+
+export function createUnknownArchiveIntegrityEvidence(): UnknownArchiveIntegrityEvidence {
+  return {
+    integrity: "unknown",
+    policyVersion: null,
+    badSectorCount: null,
+    badAreaCount: null,
+    badSectorRanges: null,
   };
 }

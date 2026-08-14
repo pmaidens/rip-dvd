@@ -1326,11 +1326,11 @@ describe("DVD archive publication", () => {
     ).resolves.toEqual({
       archivePath,
       integrityEvidence: {
-        integrity: "clean_read",
-        policyVersion: "dvd-recovery-v1",
-        badSectorCount: 0,
-        badAreaCount: 0,
-        badSectorRanges: [],
+        integrity: "unknown",
+        policyVersion: null,
+        badSectorCount: null,
+        badAreaCount: null,
+        badSectorRanges: null,
       },
       recovered: true,
       sizeBytes: 8,

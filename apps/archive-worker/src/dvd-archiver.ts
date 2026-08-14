@@ -21,9 +21,10 @@ import {
 } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
-import type {
-  ArchiveJobProgress,
-  CleanReadArchiveIntegrityEvidence,
+import {
+  createUnknownArchiveIntegrityEvidence,
+  type ArchiveIntegrityEvidence,
+  type ArchiveJobProgress,
 } from "@rip-dvd/data-access";
 import {
   isDvdFingerprint,
@@ -760,7 +761,7 @@ export interface PreserveDvdArchiveOptions {
 
 export interface PreservedDvdArchive {
   archivePath: string;
-  integrityEvidence: CleanReadArchiveIntegrityEvidence;
+  integrityEvidence: ArchiveIntegrityEvidence;
   recovered: boolean;
   sizeBytes: number;
 }
@@ -916,13 +917,9 @@ export async function preserveDvdArchive({
     signal.throwIfAborted();
     await sync(root);
     signal.throwIfAborted();
-    const validation = validateDvdRecoveryResult(
-      createCleanDvdRecoveryResult(safeSizeBytes),
-      safeSizeBytes,
-    );
     return {
       archivePath,
-      integrityEvidence: validation.integrityEvidence,
+      integrityEvidence: createUnknownArchiveIntegrityEvidence(),
       recovered: true,
       sizeBytes: safeSizeBytes,
     };

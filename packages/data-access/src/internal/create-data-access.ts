@@ -6763,21 +6763,35 @@ export function createDataAccessInternal(
         const archivePath = requireNonEmpty(input.archivePath, "archivePath");
         const sizeBytes = requirePositiveSafeInteger(input.sizeBytes, "sizeBytes");
         const integrityEvidence = input.integrityEvidence;
-        const integrityPolicyVersion = requireNonEmpty(
-          integrityEvidence.policyVersion,
-          "integrityEvidence.policyVersion",
-        );
-        if (
-          integrityEvidence.integrity !== "clean_read" ||
-          integrityPolicyVersion.length > 128 ||
-          integrityEvidence.badSectorCount !== 0 ||
-          integrityEvidence.badAreaCount !== 0 ||
-          !Array.isArray(integrityEvidence.badSectorRanges) ||
-          integrityEvidence.badSectorRanges.length !== 0
-        ) {
-          throw new DomainInvariantError(
-            "Clean-read Archive Integrity evidence is invalid",
+        let integrityPolicyVersion: string | null;
+        if (integrityEvidence.integrity === "unknown") {
+          if (
+            integrityEvidence.policyVersion !== null ||
+            integrityEvidence.badSectorCount !== null ||
+            integrityEvidence.badAreaCount !== null ||
+            integrityEvidence.badSectorRanges !== null
+          ) {
+            throw new DomainInvariantError(
+              "Unknown Archive Integrity evidence is invalid",
+            );
+          }
+          integrityPolicyVersion = null;
+        } else {
+          integrityPolicyVersion = requireNonEmpty(
+            integrityEvidence.policyVersion,
+            "integrityEvidence.policyVersion",
           );
+          if (
+            integrityPolicyVersion.length > 128 ||
+            integrityEvidence.badSectorCount !== 0 ||
+            integrityEvidence.badAreaCount !== 0 ||
+            !Array.isArray(integrityEvidence.badSectorRanges) ||
+            integrityEvidence.badSectorRanges.length !== 0
+          ) {
+            throw new DomainInvariantError(
+              "Clean-read Archive Integrity evidence is invalid",
+            );
+          }
         }
         const requireCurrentClaim = (
           querySource: Pick<typeof database, "select">,
