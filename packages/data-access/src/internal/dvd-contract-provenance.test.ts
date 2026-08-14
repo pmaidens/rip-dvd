@@ -23,7 +23,7 @@ const scanData = {
 };
 
 describe("DVD contract and provenance policy", () => {
-  it("normalizes only valid DVD scans whose content identity matches", () => {
+  it("normalizes only valid DVD scans whose fingerprint matches", () => {
     expect(
       normalizeDetectedDiscScan({
         discKind: "dvd",

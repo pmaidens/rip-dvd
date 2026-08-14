@@ -38,6 +38,17 @@ export function isDvdContentId(value: unknown): value is string {
   return typeof value === "string" && /^sha256:[0-9a-f]{64}$/.test(value);
 }
 
+export function isDvdMetadataFingerprint(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^dvdmeta-sha256:[0-9a-f]{64}$/.test(value)
+  );
+}
+
+export function isDvdFingerprint(value: unknown): value is string {
+  return isDvdContentId(value) || isDvdMetadataFingerprint(value);
+}
+
 type UnknownRecord = Record<string, unknown>;
 
 function isRecord(value: unknown): value is UnknownRecord {
@@ -172,7 +183,7 @@ export function decodeDvdTitleMap(value: unknown): DvdTitleMap | null {
   if (
     !isRecord(value) ||
     value.schemaVersion !== DVD_TITLE_MAP_SCHEMA_VERSION ||
-    !isDvdContentId(value.contentId) ||
+    !isDvdFingerprint(value.contentId) ||
     !Array.isArray(value.titles) ||
     value.titles.length === 0 ||
     value.titles.length > MAX_DVD_TITLES

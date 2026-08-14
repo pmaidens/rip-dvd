@@ -67,7 +67,7 @@ afterEach(() => {
 });
 
 describe("archive worker polling", () => {
-  it("persists metadata findings and hash progress before completing inspection", async () => {
+  it("persists metadata findings without hashing the full disc", async () => {
     const access = openTestDataAccess();
     const fingerprint = `sha256:${"7".repeat(64)}`;
     const scanData = {
@@ -85,7 +85,7 @@ describe("archive worker polling", () => {
       devicePath: "/dev/sr0",
       serialNumber: "INSPECTION-PROGRESS-001",
     };
-    const observedDuringHash: unknown[] = [];
+    const observedAfterMetadata: unknown[] = [];
     const hardware: OpticalDriveHardware = {
       ...stableDeviceBinding(),
       discover: vi.fn().mockResolvedValue([discoveredDrive]),
@@ -99,10 +99,9 @@ describe("archive worker polling", () => {
           totalBytes: 1_000,
           volumeLabel: "PROGRESS_DISC",
         });
-        options?.onPhase?.("hashing_content");
-        options?.onBytesHashed?.(440);
-        observedDuringHash.push(access.discInspections.list({ currentOnly: true })[0]);
-        options?.onBytesHashed?.(1_000);
+        observedAfterMetadata.push(
+          access.discInspections.list({ currentOnly: true })[0],
+        );
         options?.onPhase?.("confirming_media");
         return { fingerprint, scanData, sizeBytes: 1_000, volumeLabel: "PROGRESS_DISC" };
       }),
@@ -116,25 +115,25 @@ describe("archive worker polling", () => {
       signal: new AbortController().signal,
     });
 
-    expect(observedDuringHash).toEqual([
+    expect(observedAfterMetadata).toEqual([
       expect.objectContaining({
-        phase: "hashing_content",
+        phase: "confirming_media",
         volumeLabel: "PROGRESS_DISC",
         titleCount: 1,
-        bytesHashed: 440,
+        bytesHashed: null,
         status: "running",
       }),
     ]);
     expect(access.discInspections.list({ currentOnly: true })).toEqual([
       expect.objectContaining({
-        bytesHashed: 1_000,
+        bytesHashed: null,
         detectedDiscId: expect.any(String),
         status: "completed",
       }),
     ]);
   });
 
-  it("aborts without consuming retry budget when the medium changes after hashing throws", async () => {
+  it("aborts without consuming retry budget when the medium changes after metadata", async () => {
     const access = openTestDataAccess();
     const discoveredDrive = {
       devicePath: "/dev/sr0",
@@ -152,11 +151,9 @@ describe("archive worker polling", () => {
         subtitleStreamCount: 0,
         titleCount: 1,
         totalBytes: 1_000,
-        volumeLabel: "REMOVED_DURING_HASH",
+        volumeLabel: "REMOVED_AFTER_METADATA",
       });
-      options?.onPhase?.("hashing_content");
-      options?.onBytesHashed?.(440);
-      throw new Error("DVD content read failed during hashing");
+      throw new Error("DVD medium changed after metadata");
     });
 
     await pollArchiveWorker({
@@ -219,8 +216,6 @@ describe("archive worker polling", () => {
             totalBytes: 1_000,
             volumeLabel: "REMOVED_DISC",
           });
-          options?.onPhase?.("hashing_content");
-          options?.onBytesHashed?.(1_000);
           options?.onPhase?.("confirming_media");
         }
         throw new DiscInspectionError(
@@ -251,7 +246,7 @@ describe("archive worker polling", () => {
         consecutiveFailureCount: 0,
         retryAt: null,
         ...(boundary === "confirming media"
-          ? { phase: "confirming_media", bytesHashed: 1_000 }
+          ? { phase: "confirming_media", bytesHashed: null }
           : { phase: "reading_metadata" }),
       });
       expect(access.discInspections.listAttempts(inspection!.id)).toEqual([
@@ -1488,13 +1483,6 @@ describe("archive worker polling", () => {
     const hardware = createLinuxOpticalDriveHardware({
       platform: "linux",
       runner,
-      contentReader: {
-        hash: vi
-          .fn()
-          .mockResolvedValue(
-            "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-          ),
-      },
       mediaGenerationObserver: {
         observe: vi.fn().mockResolvedValue("1"),
       },
@@ -1692,13 +1680,6 @@ describe("archive worker polling", () => {
     const hardwareOptions = {
       platform: "linux" as NodeJS.Platform,
       runner,
-      contentReader: {
-        hash: vi
-          .fn()
-          .mockResolvedValue(
-            "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-          ),
-      },
       mediaGenerationObserver: {
         observe: vi.fn().mockResolvedValue("7"),
       },
@@ -1774,13 +1755,6 @@ describe("archive worker polling", () => {
     const hardware = createLinuxOpticalDriveHardware({
       platform: "linux",
       runner,
-      contentReader: {
-        hash: vi
-          .fn()
-          .mockResolvedValue(
-            "sha256:abababababababababababababababababababababababababababababababab",
-          ),
-      },
       mediaGenerationObserver: {
         observe: vi.fn().mockResolvedValue("7"),
       },

@@ -984,7 +984,7 @@ describe("DVD archive publication", () => {
 
     const result = await preserveDvdArchive({
       devicePath: "/dev/sr0",
-      fingerprint: `sha256:${digest}`,
+      fingerprint: `dvdmeta-sha256:${digest}`,
       originalsLibraryPath,
       runner,
       signal: new AbortController().signal,
@@ -994,7 +994,10 @@ describe("DVD archive publication", () => {
     });
 
     expect(result).toEqual({
-      archivePath: join(realpathSync(originalsLibraryPath), `${digest}.iso`),
+      archivePath: join(
+        realpathSync(originalsLibraryPath),
+        `dvdmeta-${digest}.iso`,
+      ),
       recovered: false,
       sizeBytes: content.byteLength,
     });
@@ -1007,7 +1010,6 @@ describe("DVD archive publication", () => {
       { phase: "copying", progressPercent: 0 },
       { phase: "copying", progressPercent: 44 },
       { phase: "copying", progressPercent: 99 },
-      { phase: "verifying", progressPercent: 99 },
       { phase: "finalizing", progressPercent: 99 },
     ]);
     expect(verifySource).toHaveBeenCalledOnce();
@@ -1177,7 +1179,7 @@ describe("DVD archive publication", () => {
     expect(existsSync(join(root, `${digest}.iso`))).toBe(false);
   });
 
-  it("recovers a verified final image without allowing the runner to overwrite it", async () => {
+  it("recovers a complete-size final image without allowing the runner to overwrite it", async () => {
     const originalsLibraryPath = createOriginalsLibrary();
     const root = realpathSync(originalsLibraryPath);
     const digest = "e2cddf0cd7207e4492e0e3e66befe4b818247051391a48871d2d9a07eaa9524b";
