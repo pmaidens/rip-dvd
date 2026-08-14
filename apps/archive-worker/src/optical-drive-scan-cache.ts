@@ -2,7 +2,9 @@ import { performance } from "node:perf_hooks";
 
 import type { ScannedDvd } from "./archive-worker.js";
 
-const NO_MEDIUM_CACHE_TTL_MS = 5_000;
+// Keep this comfortably below the worker's five-second maximum drive-poll
+// interval so probe duration cannot defer revalidation by another poll.
+const NO_MEDIUM_CACHE_TTL_MS = 1_000;
 
 export interface OpticalDriveScanCache {
   find(

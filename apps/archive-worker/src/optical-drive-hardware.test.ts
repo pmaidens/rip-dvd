@@ -1095,7 +1095,7 @@ describe("Linux Optical Drive hardware boundary", () => {
   });
 
   it("detects an inserted DVD when the media generation does not advance", async () => {
-    const now = vi.spyOn(performance, "now").mockReturnValue(0);
+    const now = vi.spyOn(performance, "now").mockReturnValue(200);
     try {
       const runner: CommandRunner = {
         run: vi.fn()
@@ -1136,6 +1136,8 @@ describe("Linux Optical Drive hardware boundary", () => {
         }),
       );
 
+      // Worker polls start five seconds apart, so the next scan can begin less
+      // than five seconds after the previous lsdvd call completed.
       now.mockReturnValue(5_000);
 
       await expect(hardware.scanDvd(boundOpticalDrive(), signal)).resolves.toMatchObject({
