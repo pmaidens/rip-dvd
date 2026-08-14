@@ -122,7 +122,14 @@ function catalogReview({
       hasNext: discSelectionOffset === 0,
     },
     correctionHistory: [],
+    correctionEncodeHistory: [],
     correctionHistoryPage: {
+      offset: 0,
+      limit: 100,
+      hasPrevious: false,
+      hasNext: false,
+    },
+    correctionEncodeHistoryPage: {
       offset: 0,
       limit: 100,
       hasPrevious: false,
@@ -1668,6 +1675,7 @@ describe("CatalogReviewView", () => {
         onCancelEdit={() => undefined}
         onDiscSelectionsPage={() => undefined}
         onCorrectionHistoryPage={() => undefined}
+        onCorrectionEncodeHistoryPage={() => undefined}
         onSelectionKindChange={() => undefined}
         onArchiveOnlyChange={() => undefined}
         onStartMappingProposal={() => undefined}
@@ -1902,7 +1910,14 @@ describe("CatalogReviewView", () => {
               hasNext: true,
             },
             correctionHistory: [],
+            correctionEncodeHistory: [],
             correctionHistoryPage: {
+              offset: 0,
+              limit: 100,
+              hasPrevious: false,
+              hasNext: false,
+            },
+            correctionEncodeHistoryPage: {
               offset: 0,
               limit: 100,
               hasPrevious: false,
@@ -1925,6 +1940,7 @@ describe("CatalogReviewView", () => {
         onCancelEdit={() => undefined}
         onDiscSelectionsPage={() => undefined}
         onCorrectionHistoryPage={() => undefined}
+        onCorrectionEncodeHistoryPage={() => undefined}
         onSelectionKindChange={() => undefined}
         onArchiveOnlyChange={() => undefined}
         onStartMappingProposal={() => undefined}
@@ -2054,7 +2070,14 @@ describe("CatalogReviewView", () => {
               hasNext: false,
             },
             correctionHistory: [],
+            correctionEncodeHistory: [],
             correctionHistoryPage: {
+              offset: 0,
+              limit: 100,
+              hasPrevious: false,
+              hasNext: false,
+            },
+            correctionEncodeHistoryPage: {
               offset: 0,
               limit: 100,
               hasPrevious: false,
@@ -2075,6 +2098,7 @@ describe("CatalogReviewView", () => {
         onCancelEdit={() => undefined}
         onDiscSelectionsPage={() => undefined}
         onCorrectionHistoryPage={() => undefined}
+        onCorrectionEncodeHistoryPage={() => undefined}
         onSelectionKindChange={() => undefined}
         onArchiveOnlyChange={() => undefined}
         onStartMappingProposal={() => undefined}

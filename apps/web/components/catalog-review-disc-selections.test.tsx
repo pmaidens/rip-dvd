@@ -132,6 +132,13 @@ describe("CatalogReviewDiscSelections", () => {
           hasPrevious: false,
           hasNext: false,
         }}
+        correctionEncodeHistory={[]}
+        correctionEncodeHistoryPage={{
+          offset: 0,
+          limit: 100,
+          hasPrevious: false,
+          hasNext: false,
+        }}
         mediaItems={[{
           id: "episode-1",
           parentId: null,
@@ -152,6 +159,7 @@ describe("CatalogReviewDiscSelections", () => {
         isSaving={false}
         onPage={() => undefined}
         onCorrectionHistoryPage={() => undefined}
+        onCorrectionEncodeHistoryPage={() => undefined}
         onSelectionKindChange={() => undefined}
         onCreate={() => undefined}
         onUpdate={() => undefined}
@@ -197,6 +205,13 @@ describe("CatalogReviewDiscSelections", () => {
           hasPrevious: false,
           hasNext: false,
         }}
+        correctionEncodeHistory={[]}
+        correctionEncodeHistoryPage={{
+          offset: 0,
+          limit: 100,
+          hasPrevious: false,
+          hasNext: false,
+        }}
         mediaItems={[{
           id: "movie-1",
           parentId: null,
@@ -211,6 +226,7 @@ describe("CatalogReviewDiscSelections", () => {
         isSaving={false}
         onPage={() => undefined}
         onCorrectionHistoryPage={() => undefined}
+        onCorrectionEncodeHistoryPage={() => undefined}
         onSelectionKindChange={() => undefined}
         onCreate={() => undefined}
         onUpdate={() => undefined}
@@ -264,25 +280,6 @@ describe("CatalogReviewDiscSelections", () => {
             },
             reason: "The director's cut is title 2.",
             correctedAt: "2026-08-12T18:00:00.000Z",
-            encodeHistory: [
-              {
-                id: "encode-original",
-                status: "completed",
-                predecessorEncodeJobId: null,
-                replacementEncodeJobId: "encode-corrected",
-                retainedOutput: null,
-              },
-              {
-                id: "encode-corrected",
-                status: "completed",
-                predecessorEncodeJobId: "encode-original",
-                replacementEncodeJobId: null,
-                retainedOutput: {
-                  state: "retained",
-                  cleanupEligible: true,
-                },
-              },
-            ],
           },
           {
             supersededDiscSelection: {
@@ -299,10 +296,32 @@ describe("CatalogReviewDiscSelections", () => {
             },
             reason: "The restored edition is title 3.",
             correctedAt: "2026-08-12T19:00:00.000Z",
-            encodeHistory: [],
           },
         ]}
         correctionHistoryPage={{
+          offset: 0,
+          limit: 100,
+          hasPrevious: false,
+          hasNext: false,
+        }}
+        correctionEncodeHistory={[{
+          replacementDiscSelectionId: "selection-intermediate",
+          predecessorEncodeJob: {
+            id: "encode-original",
+            status: "completed",
+            replacementEncodeJobId: "encode-corrected",
+          },
+          replacementEncodeJob: {
+            id: "encode-corrected",
+            status: "completed",
+            predecessorEncodeJobId: "encode-original",
+          },
+          retainedOutput: {
+            state: "retained",
+            cleanupEligible: true,
+          },
+        }]}
+        correctionEncodeHistoryPage={{
           offset: 0,
           limit: 100,
           hasPrevious: false,
@@ -342,6 +361,7 @@ describe("CatalogReviewDiscSelections", () => {
         isSaving={false}
         onPage={() => undefined}
         onCorrectionHistoryPage={() => undefined}
+        onCorrectionEncodeHistoryPage={() => undefined}
         onSelectionKindChange={() => undefined}
         onCreate={() => undefined}
         onUpdate={() => undefined}
@@ -358,10 +378,10 @@ describe("CatalogReviewDiscSelections", () => {
     );
     expect(html).toContain("The director&#x27;s cut is title 2.");
     expect(html).toContain("The restored edition is title 3.");
-    expect(html).toContain("Encode Job encode-original · Completed");
-    expect(html).toContain("Superseded by encode-corrected");
-    expect(html).toContain("Encode Job encode-corrected · Completed");
-    expect(html).toContain("Replaces encode-original");
+    expect(html).toContain(
+      "Encode Job encode-original · Completed → Encode Job encode-corrected · Completed",
+    );
+    expect(html).toContain("Replacement Disc Selection selection-intermediate");
     expect(html).toContain("Prior output retained · Cleanup eligible");
     expect(html).toContain("Correct Movie");
   });
@@ -410,6 +430,13 @@ describe("CatalogReviewDiscSelections", () => {
           hasPrevious: false,
           hasNext: false,
         }}
+        correctionEncodeHistory={[]}
+        correctionEncodeHistoryPage={{
+          offset: 0,
+          limit: 100,
+          hasPrevious: false,
+          hasNext: false,
+        }}
         mediaItems={[
           {
             id: "movie-1",
@@ -441,6 +468,7 @@ describe("CatalogReviewDiscSelections", () => {
         isSaving={false}
         onPage={() => undefined}
         onCorrectionHistoryPage={() => undefined}
+        onCorrectionEncodeHistoryPage={() => undefined}
         onSelectionKindChange={() => undefined}
         onCreate={() => undefined}
         onUpdate={() => undefined}
@@ -487,6 +515,13 @@ describe("CatalogReviewDiscSelections", () => {
           hasPrevious: false,
           hasNext: false,
         }}
+        correctionEncodeHistory={[]}
+        correctionEncodeHistoryPage={{
+          offset: 0,
+          limit: 100,
+          hasPrevious: false,
+          hasNext: false,
+        }}
         mediaItems={[{
           id: "movie-1",
           parentId: null,
@@ -501,6 +536,7 @@ describe("CatalogReviewDiscSelections", () => {
         isSaving={false}
         onPage={() => undefined}
         onCorrectionHistoryPage={() => undefined}
+        onCorrectionEncodeHistoryPage={() => undefined}
         onSelectionKindChange={() => undefined}
         onCreate={() => undefined}
         onUpdate={() => undefined}

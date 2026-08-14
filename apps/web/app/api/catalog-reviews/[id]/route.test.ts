@@ -120,7 +120,14 @@ describe("Catalog Review API", () => {
         hasNext: false,
       },
       correctionHistory: [],
+      correctionEncodeHistory: [],
       correctionHistoryPage: {
+        offset: 0,
+        limit: 100,
+        hasPrevious: false,
+        hasNext: false,
+      },
+      correctionEncodeHistoryPage: {
         offset: 0,
         limit: 100,
         hasPrevious: false,
@@ -134,6 +141,8 @@ describe("Catalog Review API", () => {
     "?selectionOffset=1&selectionOffset=2",
     "?correctionOffset=-1",
     "?correctionOffset=1&correctionOffset=2",
+    "?correctionJobOffset=-1",
+    "?correctionJobOffset=1&correctionJobOffset=2",
     "?mediaOffset=0",
     "?editingMediaItemId=unrelated-item",
   ])("fails closed on malformed review query input: %s", async (query) => {
@@ -789,7 +798,6 @@ describe("Catalog Review API", () => {
       },
       reason: "The wrong movie was mapped.",
       correctedAt: expect.any(String),
-      encodeHistory: [],
     }]);
     expect(review.replacementPlan).toEqual({
       jobs: [{
@@ -1194,77 +1202,114 @@ describe("Catalog Review API", () => {
         retainedOutputIdentity: priorIdentity,
       },
     );
-    const linkedJobs = access.encodeJobs
-      .listCorrectionLinksForDiscSelections([correction.discSelection.id]);
-    const historicalPredecessor = linkedJobs.find(
-      (job) => job.id === predecessor.id,
-    )!;
-    const historicalReplacement = linkedJobs.find(
-      (job) => job.id === replacementClaim.id,
-    )!;
+    const correctionLink = access.encodeJobs
+      .listDiscSelectionCorrectionEncodeJobLinks({
+        originalDiscArchiveId: archive.id,
+        limit: 1,
+      })[0]!;
     const retainedLookupBatchSizes: number[] = [];
-    const expandedLinkedJobs = [
-      historicalPredecessor,
-      historicalReplacement,
+    const expandedLinks = [
+      correctionLink,
       ...Array.from({ length: 200 }, (_, index) => {
         const predecessorId = `historical-predecessor-${index}` as
-          typeof historicalPredecessor.id;
-        return [
-          {
-            ...historicalPredecessor,
+          typeof correctionLink.predecessorEncodeJob.id;
+        return {
+          ...correctionLink,
+          predecessorEncodeJob: {
+            ...correctionLink.predecessorEncodeJob,
             id: predecessorId,
           },
-          {
-            ...historicalReplacement,
+          replacementEncodeJob: {
+            ...correctionLink.replacementEncodeJob,
             id: `historical-replacement-${index}` as
-              typeof historicalReplacement.id,
+              typeof correctionLink.replacementEncodeJob.id,
             predecessorEncodeJobId: predecessorId,
           },
-        ];
-      }).flat(),
+        };
+      }),
     ];
     const historyAccess = withSnapshotOverrides(access, {
       encodeJobs: {
-        listCorrectionLinksForDiscSelections: () => expandedLinkedJobs,
-        listRetainedOutputSummaries: (ids) => {
+        listDiscSelectionCorrectionEncodeJobLinks: (options) =>
+          expandedLinks.slice(
+            options.offset ?? 0,
+            (options.offset ?? 0) + options.limit,
+          ),
+        listLatestRetainedOutputSummaries: (ids) => {
           retainedLookupBatchSizes.push(ids.length);
-          return access.encodeJobs.listRetainedOutputSummaries(ids);
+          return access.encodeJobs.listLatestRetainedOutputSummaries(ids);
         },
       },
     });
 
-    const historyResponse = await createCatalogReviewRoute(
-      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`),
-      archive.id,
-      () => historyAccess,
-      () => "http://localhost:3000",
+    const pages = [];
+    for (const offset of [0, 100, 200]) {
+      const historyResponse = await createCatalogReviewRoute(
+        new Request(
+          `http://localhost:3000/api/catalog-reviews/${archive.id}?correctionJobOffset=${offset}`,
+        ),
+        archive.id,
+        () => historyAccess,
+        () => "http://localhost:3000",
+      );
+      const historyText = await historyResponse.text();
+      expect(historyResponse.status, historyText).toBe(200);
+      expect(historyText).not.toContain("private-correction-token");
+      expect(historyText).not.toContain(predecessor.outputPath);
+      pages.push(JSON.parse(historyText));
+    }
+
+    expect(retainedLookupBatchSizes).toEqual([100, 100, 1]);
+    expect(pages.map((page) => page.correctionEncodeHistory.length)).toEqual([
+      100,
+      100,
+      1,
+    ]);
+    expect(pages.map((page) => page.correctionEncodeHistoryPage)).toEqual([
+      {
+        offset: 0,
+        limit: 100,
+        hasPrevious: false,
+        hasNext: true,
+      },
+      {
+        offset: 100,
+        limit: 100,
+        hasPrevious: true,
+        hasNext: true,
+      },
+      {
+        offset: 200,
+        limit: 100,
+        hasPrevious: true,
+        hasNext: false,
+      },
+    ]);
+    const replacementJobIds = pages.flatMap((page) =>
+      page.correctionEncodeHistory.map(
+        (link: { replacementEncodeJob: { id: string } }) =>
+          link.replacementEncodeJob.id,
+      )
     );
-    const historyText = await historyResponse.text();
-    expect(historyResponse.status, historyText).toBe(200);
-    expect(historyText).not.toContain("private-correction-token");
-    const history = JSON.parse(historyText);
-    expect(retainedLookupBatchSizes).toEqual([400, 2]);
-    expect(history.correctionHistory[0].encodeHistory).toEqual([]);
-    expect(history.correctionHistory[1].encodeHistory).toHaveLength(402);
-    expect(history.correctionHistory[1].encodeHistory.slice(0, 2)).toEqual([
-      expect.objectContaining({
+    expect(replacementJobIds).toHaveLength(201);
+    expect(new Set(replacementJobIds).size).toBe(201);
+    expect(pages[0].correctionEncodeHistory[0]).toEqual({
+      replacementDiscSelectionId: correction.discSelection.id,
+      predecessorEncodeJob: {
         id: predecessor.id,
         status: "completed",
-        predecessorEncodeJobId: null,
         replacementEncodeJobId: replacementClaim.id,
-        retainedOutput: null,
-      }),
-      expect.objectContaining({
+      },
+      replacementEncodeJob: {
         id: replacementClaim.id,
         status: "completed",
         predecessorEncodeJobId: predecessor.id,
-        replacementEncodeJobId: null,
-        retainedOutput: {
-          state: "retained",
-          cleanupEligible: true,
-        },
-      }),
-    ]);
+      },
+      retainedOutput: {
+        state: "retained",
+        cleanupEligible: true,
+      },
+    });
   });
 
   it("paginates correction history beyond one hundred revisions", async () => {
@@ -1870,16 +1915,31 @@ describe("Catalog Review API", () => {
       });
     }
 
-    const firstResponse = await createCatalogReviewRoute(
-      new Request(
-        `http://localhost:3000/api/catalog-reviews/${archive.id}`,
-      ),
-      archive.id,
-      () => access,
-      () => "http://localhost:3000",
-    );
-    expect(firstResponse.status).toBe(200);
-    const first = await firstResponse.json();
+    const archiveSelectionPageLimits: number[] = [];
+    const pagedAccess = withSnapshotOverrides(access, {
+      catalog: {
+        listDiscSelections(options) {
+          if (options?.originalDiscArchiveId === archive.id) {
+            archiveSelectionPageLimits.push(options.limit ?? 0);
+          }
+          return access.catalog.listDiscSelections(options);
+        },
+      },
+    });
+    const pages = [];
+    for (const offset of [0, 100, 200, 300, 400, 500]) {
+      const pageResponse = await createCatalogReviewRoute(
+        new Request(
+          `http://localhost:3000/api/catalog-reviews/${archive.id}?selectionOffset=${offset}`,
+        ),
+        archive.id,
+        () => pagedAccess,
+        () => "http://localhost:3000",
+      );
+      expect(pageResponse.status).toBe(200);
+      pages.push(await pageResponse.json());
+    }
+    const first = pages[0];
     expect(first.discSelections).toHaveLength(100);
     expect(first.discSelectionsPage).toEqual({
       offset: 0,
@@ -1896,17 +1956,18 @@ describe("Catalog Review API", () => {
       mainFeatureSelections: 0,
     });
     expect(first.coverage.titles).toHaveLength(501);
-
-    const lastResponse = await createCatalogReviewRoute(
-      new Request(
-        `http://localhost:3000/api/catalog-reviews/${archive.id}?selectionOffset=500`,
-      ),
-      archive.id,
-      () => access,
-      () => "http://localhost:3000",
+    expect(archiveSelectionPageLimits).toEqual(Array(6).fill(101));
+    expect(pages.every((page) => page.discSelections.length <= 100)).toBe(true);
+    const selectionIds = pages.flatMap((page) =>
+      page.discSelections.map((selection: { id: string }) => selection.id)
     );
-    expect(lastResponse.status).toBe(200);
-    const last = await lastResponse.json();
+    expect(selectionIds).toHaveLength(501);
+    expect(new Set(selectionIds).size).toBe(501);
+    for (const page of pages) {
+      expect(page.coverage).toEqual(first.coverage);
+    }
+
+    const last = pages[5];
     expect(last.discSelections).toHaveLength(1);
     expect(last.discSelectionsPage).toEqual({
       offset: 500,

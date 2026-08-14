@@ -23,9 +23,6 @@ import {
   parseCatalogReviewCommand,
   type CatalogReviewMediaItemInput,
 } from "../../../../lib/catalog-review-command";
-import {
-  calculateCatalogReviewCoverage,
-} from "../../../../lib/catalog-review-coverage";
 import { getDataAccess } from "../../../../lib/data-access";
 import { readMediaItemsWithAncestors } from "../../../../lib/media-item-ancestor-context";
 import {
@@ -37,12 +34,12 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 const CATALOG_REVIEW_SELECTION_PAGE_SIZE = 100;
-const CATALOG_REVIEW_COVERAGE_SELECTION_PAGE_SIZE = 500;
+const CATALOG_REVIEW_DISC_SELECTION_LOOKUP_BATCH_SIZE = 100;
 const CATALOG_REVIEW_MEDIA_ITEM_MAINTENANCE_BATCH_SIZE = 100;
 const CATALOG_REVIEW_CORRECTION_HISTORY_PAGE_SIZE = 100;
+const CATALOG_REVIEW_CORRECTION_ENCODE_HISTORY_PAGE_SIZE = 100;
 const CATALOG_REVIEW_REPLACEMENT_PLAN_LIMIT = 100;
 const CATALOG_REVIEW_REPLACEMENT_PROFILE_LIMIT = 100;
-const RETAINED_OUTPUT_LOOKUP_BATCH_SIZE = 400;
 
 function response(body: unknown, status = 200): Response {
   return Response.json(body, {
@@ -136,11 +133,32 @@ function serializeReviewDiscSelection(
   };
 }
 
+function readDiscSelectionsByIds(
+  catalog: Pick<DataAccess["catalog"], "listDiscSelections">,
+  ids: readonly DiscSelectionId[],
+): DiscSelection[] {
+  const selections: DiscSelection[] = [];
+  for (
+    let offset = 0;
+    offset < ids.length;
+    offset += CATALOG_REVIEW_DISC_SELECTION_LOOKUP_BATCH_SIZE
+  ) {
+    selections.push(...catalog.listDiscSelections({
+      ids: ids.slice(
+        offset,
+        offset + CATALOG_REVIEW_DISC_SELECTION_LOOKUP_BATCH_SIZE,
+      ),
+    }));
+  }
+  return selections;
+}
+
 function readCatalogReview(
   access: DataAccess,
   id: OriginalDiscArchiveId,
   discSelectionOffset: number,
   correctionHistoryOffset: number,
+  correctionEncodeHistoryOffset: number,
   replacementOffset: number,
   replacementProfileOffset: number,
 ) {
@@ -157,28 +175,21 @@ function readCatalogReview(
         "Original Disc Archive is missing its Detected Disc provenance",
       );
     }
-    const allDiscSelections: DiscSelection[] = [];
-    let coverageSelectionOffset = 0;
-    while (true) {
-      const coverageSelectionPage = snapshot.catalog.listDiscSelections({
-        originalDiscArchiveId: id,
-        limit: CATALOG_REVIEW_COVERAGE_SELECTION_PAGE_SIZE,
-        offset: coverageSelectionOffset,
-      });
-      allDiscSelections.push(...coverageSelectionPage);
-      if (
-        coverageSelectionPage.length <
-          CATALOG_REVIEW_COVERAGE_SELECTION_PAGE_SIZE
-      ) {
-        break;
-      }
-      coverageSelectionOffset += coverageSelectionPage.length;
-    }
-    const hasNextDiscSelections = allDiscSelections.length >
-      discSelectionOffset + CATALOG_REVIEW_SELECTION_PAGE_SIZE;
-    const discSelectionsPage = allDiscSelections.slice(
-      discSelectionOffset,
-      discSelectionOffset + CATALOG_REVIEW_SELECTION_PAGE_SIZE,
+    const rawTitles = decodeArchivedDvdTitles(disc.scanData) ?? [];
+    const coverage = snapshot.catalog.getCatalogReviewCoverage({
+      originalDiscArchiveId: id,
+      titles: rawTitles.map(({ number, chapters }) => ({ number, chapters })),
+    });
+    const discSelectionRows = snapshot.catalog.listDiscSelections({
+      originalDiscArchiveId: id,
+      limit: CATALOG_REVIEW_SELECTION_PAGE_SIZE + 1,
+      offset: discSelectionOffset,
+    });
+    const hasNextDiscSelections = discSelectionRows.length >
+      CATALOG_REVIEW_SELECTION_PAGE_SIZE;
+    const discSelectionsPage = discSelectionRows.slice(
+      0,
+      CATALOG_REVIEW_SELECTION_PAGE_SIZE,
     );
     const correctionHistoryRows = snapshot.catalog
       .listDiscSelectionSupersessions({
@@ -198,35 +209,29 @@ function readCatalogReview(
         supersession.replacementDiscSelectionId,
       ],
     );
-    const replacementSelectionIds = correctionHistoryPage.map(
-      (supersession) => supersession.replacementDiscSelectionId,
-    );
     const correctionSelectionsById = new Map(
-      snapshot.catalog.listDiscSelections({
-        ids: correctionSelectionIds,
-      }).map((selection) => [selection.id, selection]),
-    );
-    const correctionJobs = snapshot.encodeJobs
-      .listCorrectionLinksForDiscSelections(
-        replacementSelectionIds,
-      );
-    const replacementJobByPredecessorId = new Map(
-      correctionJobs.flatMap((job) =>
-        job.predecessorEncodeJobId
-          ? [[job.predecessorEncodeJobId, job] as const]
-          : []
+      readDiscSelectionsByIds(snapshot.catalog, correctionSelectionIds).map(
+        (selection) => [selection.id, selection],
       ),
     );
-    const retainedOutputs = correctionJobs.flatMap((_job, index) =>
-      index % RETAINED_OUTPUT_LOOKUP_BATCH_SIZE === 0
-        ? snapshot.encodeJobs.listRetainedOutputSummaries(
-            correctionJobs.slice(
-              index,
-              index + RETAINED_OUTPUT_LOOKUP_BATCH_SIZE,
-            ).map((job) => job.id),
-          )
-        : []
+    const correctionEncodeHistoryRows = snapshot.encodeJobs
+      .listDiscSelectionCorrectionEncodeJobLinks({
+        originalDiscArchiveId: id,
+        limit: CATALOG_REVIEW_CORRECTION_ENCODE_HISTORY_PAGE_SIZE + 1,
+        offset: correctionEncodeHistoryOffset,
+      });
+    const hasNextCorrectionEncodeHistory = correctionEncodeHistoryRows.length >
+      CATALOG_REVIEW_CORRECTION_ENCODE_HISTORY_PAGE_SIZE;
+    const correctionEncodeHistoryPage = correctionEncodeHistoryRows.slice(
+      0,
+      CATALOG_REVIEW_CORRECTION_ENCODE_HISTORY_PAGE_SIZE,
     );
+    const retainedOutputs = snapshot.encodeJobs
+      .listLatestRetainedOutputSummaries(
+        correctionEncodeHistoryPage.map(({ replacementEncodeJob }) =>
+          replacementEncodeJob.id
+        ),
+      );
     const retainedOutputByReplacementId = new Map(
       retainedOutputs.map((output) => [output.replacementEncodeJobId, output]),
     );
@@ -248,16 +253,6 @@ function readCatalogReview(
           `Disc Selection supersession for ${supersession.replacementDiscSelectionId} is missing historical provenance`,
         );
       }
-      const correctionEncodeJobs = correctionJobs.filter((job) => {
-        const replacement = replacementJobByPredecessorId.get(job.id);
-        return (
-          (
-            job.predecessorEncodeJobId !== null &&
-            job.discSelectionId === replacementDiscSelection.id
-          ) ||
-          replacement?.discSelectionId === replacementDiscSelection.id
-        );
-      });
       return {
         supersededDiscSelection:
           serializeDiscSelection(supersededDiscSelection),
@@ -265,22 +260,6 @@ function readCatalogReview(
           serializeDiscSelection(replacementDiscSelection),
         reason: supersession.reason,
         correctedAt: supersession.createdAt.toISOString(),
-        encodeHistory: correctionEncodeJobs.map((job) => {
-          const retainedOutput = retainedOutputByReplacementId.get(job.id);
-          return {
-            id: job.id,
-            status: job.status,
-            predecessorEncodeJobId: job.predecessorEncodeJobId,
-            replacementEncodeJobId:
-              replacementJobByPredecessorId.get(job.id)?.id ?? null,
-            retainedOutput: retainedOutput
-              ? {
-                state: retainedOutput.state,
-                cleanupEligible: retainedOutput.cleanupEligible,
-              }
-              : null,
-          };
-        }),
       };
     });
     const actionAvailability = snapshot.catalog
@@ -353,7 +332,6 @@ function readCatalogReview(
         ),
       ].map((profile) => [profile.id, profile]),
     );
-    const rawTitles = decodeArchivedDvdTitles(disc.scanData) ?? [];
     return {
       catalogRevision: archive.updatedAt.toISOString(),
       archive: {
@@ -369,11 +347,35 @@ function readCatalogReview(
       rawScan: {
         titles: rawTitles,
       },
-      coverage: calculateCatalogReviewCoverage(rawTitles, allDiscSelections),
+      coverage,
       mediaItems: reviewMediaItems.map((item) =>
         serializeMediaItem(item, maintenanceByMediaItemId.get(item.id))
       ),
       correctionHistory,
+      correctionEncodeHistory: correctionEncodeHistoryPage.map((link) => {
+        const retainedOutput = retainedOutputByReplacementId.get(
+          link.replacementEncodeJob.id,
+        );
+        return {
+          replacementDiscSelectionId: link.replacementDiscSelectionId,
+          predecessorEncodeJob: {
+            id: link.predecessorEncodeJob.id,
+            status: link.predecessorEncodeJob.status,
+            replacementEncodeJobId: link.replacementEncodeJob.id,
+          },
+          replacementEncodeJob: {
+            id: link.replacementEncodeJob.id,
+            status: link.replacementEncodeJob.status,
+            predecessorEncodeJobId: link.predecessorEncodeJob.id,
+          },
+          retainedOutput: retainedOutput
+            ? {
+              state: retainedOutput.state,
+              cleanupEligible: retainedOutput.cleanupEligible,
+            }
+            : null,
+        };
+      }),
       ...(replacementJobPage.length === 0 && replacementOffset === 0
         ? {}
         : {
@@ -406,6 +408,12 @@ function readCatalogReview(
         limit: CATALOG_REVIEW_CORRECTION_HISTORY_PAGE_SIZE,
         hasPrevious: correctionHistoryOffset > 0,
         hasNext: hasNextCorrectionHistory,
+      },
+      correctionEncodeHistoryPage: {
+        offset: correctionEncodeHistoryOffset,
+        limit: CATALOG_REVIEW_CORRECTION_ENCODE_HISTORY_PAGE_SIZE,
+        hasPrevious: correctionEncodeHistoryOffset > 0,
+        hasNext: hasNextCorrectionEncodeHistory,
       },
       discSelections: discSelectionsPage.map((selection) => {
         const availability = actionAvailabilityById.get(selection.id);
@@ -451,6 +459,10 @@ export async function createCatalogReviewRoute(
         request,
         "correctionOffset",
       );
+      const correctionEncodeHistoryOffset = recordOffset(
+        request,
+        "correctionJobOffset",
+      );
       const replacementOffset = recordOffset(request, "replacementOffset");
       const replacementProfileOffset = recordOffset(
         request,
@@ -459,10 +471,12 @@ export async function createCatalogReviewRoute(
       if (
         [...parameters.keys()].some((key) =>
           key !== "selectionOffset" && key !== "correctionOffset" &&
+          key !== "correctionJobOffset" &&
           key !== "replacementOffset" &&
           key !== "replacementProfileOffset"
         ) ||
         discSelectionOffset === null || correctionHistoryOffset === null ||
+        correctionEncodeHistoryOffset === null ||
         replacementOffset === null || replacementProfileOffset === null
       ) {
         return response({ error: "Invalid Catalog Review query" }, 400);
@@ -472,6 +486,7 @@ export async function createCatalogReviewRoute(
         archiveId,
         discSelectionOffset,
         correctionHistoryOffset,
+        correctionEncodeHistoryOffset,
         replacementOffset,
         replacementProfileOffset,
       );
