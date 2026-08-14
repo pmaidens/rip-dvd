@@ -151,8 +151,14 @@ cancellation, interruption, and stale authority do not create a retained-output
 record or move the prior final. The retained record is cleanup-eligible, but the
 facade exposes no deletion, expiry, cleanup mutation, or metadata-only rename.
 
-Disc Selection mutation preserves three distinct identity paths:
+Disc Selection mutation preserves distinct identity paths:
 
+- **Ordinary job-free update.** `updateDiscSelection()` updates the active
+  Disc Selection in place only while it has no Encode Job history and belongs
+  to no correction lineage. Omitted Media Item, source identity, and label
+  fields remain unchanged; `label: null` is the explicit label-clearing signal.
+  A successful update reopens only its Original Disc Archive for Catalog Review
+  and advances that archive's catalog revision.
 - **Ordinary retry identity.** A current-valid Disc Selection with any dependent
   Encode Job history cannot be repaired or removed. Every dependent job remains
   attached to the selection; `requeue()` of a terminal row resets the same

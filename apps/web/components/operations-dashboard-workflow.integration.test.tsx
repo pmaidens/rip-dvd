@@ -107,6 +107,7 @@ function renderCatalogReview(review: CatalogReviewDto): string {
       onSaveMediaItem={() => undefined}
       onDeleteMediaItem={() => undefined}
       onCreateDiscSelection={() => undefined}
+      onUpdateDiscSelection={() => undefined}
       onDeleteDiscSelection={() => undefined}
       onCompleteReview={() => undefined}
     />,
@@ -343,6 +344,194 @@ describe("end-to-end operations dashboard workflow", () => {
     const html = renderCatalogReview(refreshed);
     expect(html).toContain("3 Media Items with Disc Selections");
     expect(html).toContain("3 mapped titles");
+  });
+
+  it("preserves a job-free Disc Selection edit and reopens only its archive", async () => {
+    const root = mkdtempSync(join(tmpdir(), "rip-dvd-job-free-edit-"));
+    temporaryDirectories.push(root);
+    const access = createLegacySidecarDataAccess({
+      databasePath: join(root, "rip-dvd.sqlite"),
+    });
+    openAccess.push(access);
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/job-free-edit",
+      isPresent: true,
+    });
+    const contentId = `sha256:${"d".repeat(64)}`;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: contentId,
+      volumeLabel: "JOB_FREE_EDIT",
+      scanData: {
+        schemaVersion: 2,
+        contentId,
+        titles: [{
+          number: 1,
+          durationSeconds: 2_400,
+          chapters: 8,
+          audioStreams: [],
+          subtitles: [],
+        }],
+      },
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Job Free Edit.iso",
+      fingerprint: contentId,
+    });
+    const originalItem = access.catalog.createMediaItem({
+      kind: "episode",
+      title: "Original episode",
+      episodeNumber: 1,
+    });
+    const correctedItem = access.catalog.createMediaItem({
+      kind: "episode",
+      title: "Corrected episode",
+      episodeNumber: 2,
+    });
+    const selection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: originalItem.id,
+      sourceIdentity: {
+        kind: "dvd_chapters",
+        titleNumber: 1,
+        chapterStart: 2,
+        chapterEnd: 5,
+      },
+      label: "Director's cut",
+    });
+    access.catalog.completeCatalogReview(
+      archive.id,
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+        .updatedAt,
+      "reviewed_with_selections",
+    );
+
+    const otherDisc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "unrelated-reviewed-archive",
+    });
+    access.catalog.updateDetectedDiscStatus(otherDisc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(otherDisc.id, "approved");
+    const otherArchive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: otherDisc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Other Reviewed Archive.iso",
+      fingerprint: "unrelated-reviewed-archive",
+    });
+    const otherItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Other reviewed movie",
+    });
+    access.catalog.createDiscSelection({
+      originalDiscArchiveId: otherArchive.id,
+      mediaItemId: otherItem.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    access.catalog.completeCatalogReview(
+      otherArchive.id,
+      access.catalog.listOriginalDiscArchives({ ids: [otherArchive.id] })[0]!
+        .updatedAt,
+      "reviewed_with_selections",
+    );
+
+    const readReview = async () => {
+      const response = await createCatalogReviewRoute(
+        new Request(`${trustedOrigin}/api/catalog-reviews/${archive.id}`),
+        archive.id,
+        () => access,
+        () => trustedOrigin,
+      );
+      expect(response.status).toBe(200);
+      return response.json() as Promise<CatalogReviewDto>;
+    };
+    const initialReview = await readReview();
+    expect(renderCatalogReview(initialReview)).toContain(
+      "Label: Director&#x27;s cut",
+    );
+
+    const invalid = await createCatalogReviewRoute(
+      createMutationRequest(`/api/catalog-reviews/${archive.id}`, {
+        action: "update_disc_selection",
+        discSelectionId: selection.id,
+        changes: { label: "   " },
+      }),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    expect(invalid.status).toBe(400);
+    expect(access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0])
+      .toMatchObject({ catalogReviewOutcome: "reviewed_with_selections" });
+
+    const updated = await createCatalogReviewRoute(
+      createMutationRequest(`/api/catalog-reviews/${archive.id}`, {
+        action: "update_disc_selection",
+        discSelectionId: selection.id,
+        changes: { mediaItemId: correctedItem.id },
+      }),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    expect(updated.status).toBe(200);
+    await expect(updated.json()).resolves.toEqual({
+      message: "Mapping changed; review required",
+      discSelection: {
+        id: selection.id,
+        mediaItemId: correctedItem.id,
+        sourceIdentity: {
+          kind: "dvd_chapters",
+          titleNumber: 1,
+          chapterStart: 2,
+          chapterEnd: 5,
+        },
+        label: "Director's cut",
+      },
+    });
+    expect(access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0])
+      .toMatchObject({
+        catalogReviewOutcome: "needs_review",
+        catalogReviewedAt: null,
+      });
+    expect(access.catalog.listOriginalDiscArchives({ ids: [otherArchive.id] })[0])
+      .toMatchObject({
+        catalogReviewOutcome: "reviewed_with_selections",
+        catalogReviewedAt: expect.any(Date),
+      });
+
+    const cleared = await createCatalogReviewRoute(
+      createMutationRequest(`/api/catalog-reviews/${archive.id}`, {
+        action: "update_disc_selection",
+        discSelectionId: selection.id,
+        changes: { label: null },
+      }),
+      archive.id,
+      () => access,
+      () => trustedOrigin,
+    );
+    expect(cleared.status).toBe(200);
+    const finalReview = await readReview();
+    expect(finalReview.discSelections).toEqual([
+      expect.objectContaining({
+        id: selection.id,
+        mediaItemId: correctedItem.id,
+        sourceIdentity: {
+          kind: "dvd_chapters",
+          titleNumber: 1,
+          chapterStart: 2,
+          chapterEnd: 5,
+        },
+        label: null,
+      }),
+    ]);
   });
 
   it("saves a running Disc Selection Correction before cancellation finishes", async () => {

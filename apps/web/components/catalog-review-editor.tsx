@@ -19,6 +19,7 @@ import type {
   EpisodicMappingProposal,
   MappingProposal,
   SaveMediaItemInput,
+  UpdateDiscSelectionInput,
 } from "./catalog-review-model";
 import type { CatalogReviewReplacementEncodeInput } from "../lib/catalog-review-command";
 import { useCatalogReviewState } from "./catalog-review-state";
@@ -55,6 +56,7 @@ interface CatalogReviewViewProps {
   onSaveMediaItem(input: SaveMediaItemInput): void;
   onDeleteMediaItem(id: string): void;
   onCreateDiscSelection(input: CreateDiscSelectionInput): void;
+  onUpdateDiscSelection(id: string, changes: UpdateDiscSelectionInput): void;
   onDeleteDiscSelection(id: string): void;
   onCompleteReview(
     outcome: CompletedCatalogReviewOutcome,
@@ -92,6 +94,7 @@ export function CatalogReviewView({
   onSaveMediaItem,
   onDeleteMediaItem,
   onCreateDiscSelection,
+  onUpdateDiscSelection,
   onDeleteDiscSelection,
   onCompleteReview,
 }: CatalogReviewViewProps) {
@@ -202,6 +205,7 @@ export function CatalogReviewView({
             onCorrectionHistoryPage={onCorrectionHistoryPage}
             onSelectionKindChange={onSelectionKindChange}
             onCreate={onCreateDiscSelection}
+            onUpdate={onUpdateDiscSelection}
             onDelete={onDeleteDiscSelection}
           />
           <CatalogReviewCompletion
@@ -269,6 +273,7 @@ export function CatalogReviewEditor({
       onSaveMediaItem={review.saveMediaItem}
       onDeleteMediaItem={review.deleteMediaItem}
       onCreateDiscSelection={review.createDiscSelection}
+      onUpdateDiscSelection={review.updateDiscSelection}
       onDeleteDiscSelection={review.deleteDiscSelection}
       onCompleteReview={review.completeReview}
     />

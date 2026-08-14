@@ -293,6 +293,7 @@ function createDiscSelectionCorrectionFixture(input: {
   databasePath?: string;
   correctedItemCount?: number;
   contentIdFill?: string;
+  selectionLabel?: string;
 }) {
   const access = openTestDatabase(input.databasePath);
   const drive = access.catalog.upsertOpticalDrive({
@@ -340,6 +341,9 @@ function createDiscSelectionCorrectionFixture(input: {
     originalDiscArchiveId: archive.id,
     mediaItemId: mistakenItem.id,
     sourceIdentity: { kind: "main_feature" },
+    ...(input.selectionLabel === undefined
+      ? {}
+      : { label: input.selectionLabel }),
   });
   completeCatalogReview(access, archive.id);
   return {
@@ -1870,6 +1874,80 @@ describe("data-access facade", () => {
         outputPath: "/media/movies/Newly Found Episode.mkv",
       }),
     ).toMatchObject({ status: "queued" });
+    access.close();
+  });
+
+  it("updates a job-free Disc Selection in place while distinguishing omission from label clearing", () => {
+    const {
+      access,
+      archive,
+      correctedItems: [correctedItem],
+      mistakenSelection,
+    } = createDiscSelectionCorrectionFixture({
+      key: "job-free-selection-update",
+      selectionLabel: "Director's cut",
+    });
+    if (!correctedItem) {
+      throw new Error("Expected a Media Item update target");
+    }
+    const reviewedRevision = access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]!.updatedAt;
+
+    const updated = access.catalog.updateDiscSelection(
+      mistakenSelection.id,
+      {
+        originalDiscArchiveId: archive.id,
+        mediaItemId: correctedItem.id,
+      },
+    );
+
+    expect(updated).toMatchObject({
+      id: mistakenSelection.id,
+      mediaItemId: correctedItem.id,
+      sourceIdentity: { kind: "main_feature" },
+      label: "Director's cut",
+    });
+    expect(
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0],
+    ).toMatchObject({
+      catalogReviewOutcome: "needs_review",
+      catalogReviewedAt: null,
+      updatedAt: expect.any(Date),
+    });
+    expect(
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+        .updatedAt.getTime(),
+    ).toBeGreaterThan(reviewedRevision.getTime());
+
+    const cleared = access.catalog.updateDiscSelection(updated.id, {
+      originalDiscArchiveId: archive.id,
+      label: null,
+    });
+    expect(cleared).toMatchObject({
+      id: mistakenSelection.id,
+      mediaItemId: correctedItem.id,
+      sourceIdentity: { kind: "main_feature" },
+      label: null,
+    });
+    expect(() =>
+      access.catalog.updateDiscSelection(cleared.id, {
+        originalDiscArchiveId: archive.id,
+      } as unknown as Parameters<
+        typeof access.catalog.updateDiscSelection
+      >[1])
+    ).toThrow("Disc Selection update requires at least one change");
+    access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: correctedItem.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    });
+    expect(() =>
+      access.catalog.updateDiscSelection(cleared.id, {
+        originalDiscArchiveId: archive.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+      })
+    ).toThrow("A Disc Selection already maps this exact DVD source");
     access.close();
   });
 

@@ -397,14 +397,86 @@ describe("Catalog Review API", () => {
     expect(body.discSelections).toEqual([
       expect.objectContaining({
         id: selection.id,
+        label: "Original label",
         actionAvailability: {
           state: "editable",
-          availableActions: ["correct", "edit_label", "remove"],
+          availableActions: ["update", "remove"],
           reason: null,
           relatedEncodeJob: null,
         },
       }),
     ]);
+
+    completeCatalogReview(access, archive.id);
+    const correctedMovie = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Corrected editable selection",
+    });
+    const mutate = (body: unknown) => createCatalogReviewRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+        },
+        body: JSON.stringify(body),
+      }),
+      archive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+    const updateResponse = await mutate({
+      action: "update_disc_selection",
+      discSelectionId: selection.id,
+      changes: { mediaItemId: correctedMovie.id },
+    });
+    expect(updateResponse.status).toBe(200);
+    await expect(updateResponse.json()).resolves.toEqual({
+      message: "Mapping changed; review required",
+      discSelection: {
+        id: selection.id,
+        mediaItemId: correctedMovie.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+        label: "Original label",
+      },
+    });
+    expect(access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0])
+      .toMatchObject({
+        catalogReviewOutcome: "needs_review",
+        catalogReviewedAt: null,
+      });
+
+    const blankLabelResponse = await mutate({
+      action: "update_disc_selection",
+      discSelectionId: selection.id,
+      changes: { label: "   " },
+    });
+    expect(blankLabelResponse.status).toBe(400);
+    expect(access.catalog.listDiscSelections({ ids: [selection.id] })[0])
+      .toMatchObject({ label: "Original label" });
+
+    const clearLabelResponse = await mutate({
+      action: "update_disc_selection",
+      discSelectionId: selection.id,
+      changes: { label: null },
+    });
+    expect(clearLabelResponse.status).toBe(200);
+    await expect(clearLabelResponse.json()).resolves.toMatchObject({
+      message: "Mapping changed; review required",
+      discSelection: {
+        id: selection.id,
+        mediaItemId: correctedMovie.id,
+        sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+        label: null,
+      },
+    });
+
+    expect((await mutate({
+      action: "update_disc_selection",
+      discSelectionId: selection.id,
+      changes: {},
+    })).status).toBe(400);
 
     const sqlite = new DatabaseSync(databasePath);
     sqlite.prepare(`
@@ -621,6 +693,30 @@ describe("Catalog Review API", () => {
     const catalogRevision = access.catalog.listOriginalDiscArchives({
       ids: [archive.id],
     })[0]!.updatedAt.toISOString();
+
+    const directUpdateResponse = await createCatalogReviewRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+        },
+        body: JSON.stringify({
+          action: "update_disc_selection",
+          discSelectionId: mistakenSelection.id,
+          changes: { label: "Must use supersession" },
+        }),
+      }),
+      archive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+    expect(directUpdateResponse.status).toBe(409);
+    await expect(directUpdateResponse.json()).resolves.toEqual({
+      error:
+        `Disc Selection ${mistakenSelection.id} cannot be updated because Encode Job history must keep its provenance (job ${completed.id})`,
+    });
 
     const correctionResponse = await createCatalogReviewRoute(
       new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`, {
@@ -1397,6 +1493,30 @@ describe("Catalog Review API", () => {
         },
       }),
     ]));
+
+    const ordinaryUpdateResponse = await createCatalogReviewRoute(
+      new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Host: "localhost:3000",
+          Origin: "http://localhost:3000",
+        },
+        body: JSON.stringify({
+          action: "update_disc_selection",
+          discSelectionId: selection.id,
+          changes: { label: "Must use unsafe repair" },
+        }),
+      }),
+      archive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+    expect(ordinaryUpdateResponse.status).toBe(409);
+    await expect(ordinaryUpdateResponse.json()).resolves.toEqual({
+      error:
+        `Disc Selection ${selection.id} needs unsafe legacy repair, not ordinary update`,
+    });
 
     const repairResponse = await createCatalogReviewRoute(
       new Request(`http://localhost:3000/api/catalog-reviews/${archive.id}`, {
