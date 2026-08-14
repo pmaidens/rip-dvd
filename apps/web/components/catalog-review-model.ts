@@ -2,6 +2,7 @@ import type { DvdTitle } from "@rip-dvd/data-access/dvd-scan";
 import type {
   CatalogReviewCoverage,
   CatalogReviewOutcome,
+  ArchiveIntegrity,
   DiscSelectionSourceIdentityInput,
   DiscSelectionKind,
   EncodeJobStatus,
@@ -163,6 +164,7 @@ export interface CatalogReviewDto {
     discLabel: string;
     discKind: string;
     archiveFormat: string;
+    integrity: ArchiveIntegrity;
     archivedAt: string;
     catalogReviewedAt: string | null;
     catalogReviewOutcome: CatalogReviewOutcome;

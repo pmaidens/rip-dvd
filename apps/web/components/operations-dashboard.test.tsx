@@ -77,6 +77,7 @@ it("keeps an open review revision stable across unchanged SSE heartbeats", () =>
         discLabel: "DISC",
         discKind: "dvd",
         archiveFormat: "iso",
+        integrity: "unknown",
         archivedAt: "2026-08-13T12:00:00.000Z",
         catalogReviewedAt: null,
         catalogReviewOutcome: "needs_review",
@@ -550,6 +551,7 @@ describe("DashboardView", () => {
               discLabel: "REVIEWED_DISC",
               discKind: "dvd",
               archiveFormat: "iso",
+              integrity: "unknown",
               archivedAt: "2026-08-10T12:00:00.000Z",
               catalogReviewedAt: "2026-08-11T12:00:00.000Z",
               catalogReviewOutcome: "reviewed_with_selections",
@@ -683,6 +685,7 @@ describe("DashboardView", () => {
             discLabel: "BONUS_DISC",
             discKind: "dvd",
             archiveFormat: "iso",
+            integrity: "unknown",
             archivedAt: "2026-07-22T07:00:00.000Z",
             catalogReviewedAt: null,
             catalogReviewOutcome: "needs_review",
@@ -708,6 +711,7 @@ describe("DashboardView", () => {
     expect(html).toContain("42%");
     expect(html).toContain("My Movie");
     expect(html).toContain("BONUS_DISC");
+    expect(html).toContain("Archive integrity: Unknown read quality");
     expect(html).toContain("Review catalog");
     expect(html).toContain("Previous pending reviews");
     expect(html).toContain("Next pending reviews");
@@ -979,6 +983,7 @@ describe("DashboardView", () => {
                 discLabel: "UNREADABLE_DISC",
                 discKind: "dvd",
                 archiveFormat: "iso",
+                integrity: "unknown",
                 archivedAt: "2026-08-06T19:00:00.000Z",
                 catalogReviewedAt: null,
                 catalogReviewOutcome: "needs_review",
@@ -1085,6 +1090,7 @@ describe("DashboardView", () => {
             discLabel: "NEEDS_REVIEW",
             discKind: "dvd",
             archiveFormat: "iso",
+            integrity: "unknown",
             archivedAt: "2026-07-22T07:00:00.000Z",
             catalogReviewedAt: null,
             catalogReviewOutcome: "needs_review",

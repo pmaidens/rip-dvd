@@ -25,6 +25,7 @@ import {
 import { decodeDvdTitleMap } from "./dvd-scan.js";
 import {
   createDataAccess,
+  createCleanReadArchiveIntegrityEvidence,
   DomainInvariantError,
   ENCODE_JOB_LEASE_DURATION_MS,
   StaleJobAttemptError,
@@ -891,6 +892,9 @@ try {
     );
     service.archiveJobs.publish(concurrentClaim, {
       archivePath: concurrentArchivePath,
+      integrityEvidence: createCleanReadArchiveIntegrityEvidence(
+        "test-clean-v1",
+      ),
       sizeBytes: 4_700_000_000,
     });
     const concurrentArchive = service.catalog
@@ -1263,6 +1267,9 @@ try {
     );
     service.archiveJobs.publish(claim, {
       archivePath: repairedArchivePath,
+      integrityEvidence: createCleanReadArchiveIntegrityEvidence(
+        "test-clean-v1",
+      ),
       sizeBytes: 4_700_000_000,
     });
     const replacementArchive = service.catalog
@@ -3261,6 +3268,9 @@ try {
     );
     service.archiveJobs.publish(claim, {
       archivePath: publishedArchivePath,
+      integrityEvidence: createCleanReadArchiveIntegrityEvidence(
+        "test-clean-v1",
+      ),
       sizeBytes: 4_700_000_000,
     });
     const archive = service.catalog.listOriginalDiscArchives()[0]!;

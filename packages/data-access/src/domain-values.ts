@@ -7,6 +7,12 @@ export const DISC_KINDS = ["dvd", "blu_ray", "audio_cd"] as const;
 
 export const ARCHIVE_FORMATS = ["iso"] as const;
 
+export const ARCHIVE_INTEGRITIES = [
+  "unknown",
+  "clean_read",
+  "watchable_salvage",
+] as const;
+
 export const CATALOG_REVIEW_OUTCOMES = [
   "needs_review",
   "reviewed_with_selections",

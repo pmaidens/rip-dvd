@@ -21,7 +21,11 @@ import {
 } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
-import type { ArchiveJobProgress } from "@rip-dvd/data-access";
+import {
+  createUnknownArchiveIntegrityEvidence,
+  type ArchiveIntegrityEvidence,
+  type ArchiveJobProgress,
+} from "@rip-dvd/data-access";
 import {
   isDvdFingerprint,
   isDvdMetadataFingerprint,
@@ -34,6 +38,12 @@ import {
   createBoundedSingleFlightCoordinator,
   type ActiveBoundedProcess,
 } from "./bounded-child-process.js";
+import {
+  createCleanDvdRecoveryResult,
+  type DvdRecoveryResult,
+  type DvdValidationResult,
+  validateDvdRecoveryResult,
+} from "./dvd-recovery-contracts.js";
 
 const MAX_ARCHIVE_PATH_BYTES = 4_096;
 const MAX_ARCHIVE_RECOVERY_ENTRIES = 4_096;
@@ -60,7 +70,7 @@ export interface DvdCopyRequest {
 }
 
 export interface DvdCopyRunner {
-  copy(request: DvdCopyRequest): Promise<void>;
+  copy(request: DvdCopyRequest): Promise<DvdRecoveryResult>;
   isActive(devicePath: string, outputPath: string): boolean;
   withDeviceInactive(
     devicePath: string,
@@ -186,7 +196,7 @@ export function createNodeDvdCopyRunner({
   const activeCopiesByDevicePath = new Map<string, number>();
   const coordinator = createBoundedSingleFlightCoordinator<
     DvdCopyRequest,
-    void
+    DvdRecoveryResult
   >({
     exhaustedCapacityError: "A DVD archive copy is already active",
     invalidCapacityError: "DVD archive copy capacity is invalid",
@@ -194,7 +204,7 @@ export function createNodeDvdCopyRunner({
     validateReuse() {
       throw new Error("DVD archive copy is still active");
     },
-    start(request): ActiveBoundedProcess<void> {
+    start(request): ActiveBoundedProcess<DvdRecoveryResult> {
       const lockDescriptor = openDeviceLock(request.devicePath);
       let child: DvdCopyChildProcess;
       try {
@@ -235,10 +245,10 @@ export function createNodeDvdCopyRunner({
       let authorizationBuffer = "";
       let progressBuffer = "";
       let diagnostics = "";
-      let resolveResult!: () => void;
+      let resolveResult!: (result: DvdRecoveryResult) => void;
       let rejectResult!: (reason: unknown) => void;
       let resolveClosed!: () => void;
-      const result = new Promise<void>((resolve, reject) => {
+      const result = new Promise<DvdRecoveryResult>((resolve, reject) => {
         resolveResult = resolve;
         rejectResult = reject;
       });
@@ -251,10 +261,10 @@ export function createNodeDvdCopyRunner({
           rejectResult(error);
         }
       };
-      const resolveOperation = () => {
+      const resolveOperation = (recoveryResult: DvdRecoveryResult) => {
         if (!operationSettled) {
           operationSettled = true;
-          resolveResult();
+          resolveResult(recoveryResult);
         }
       };
       const confirmClosed = () => {
@@ -372,7 +382,7 @@ export function createNodeDvdCopyRunner({
           return;
         }
         if (code === 0) {
-          resolveOperation();
+          resolveOperation(createCleanDvdRecoveryResult(request.sizeBytes));
           return;
         }
         const detail = optionalBoundedText(diagnostics, 500);
@@ -751,6 +761,7 @@ export interface PreserveDvdArchiveOptions {
 
 export interface PreservedDvdArchive {
   archivePath: string;
+  integrityEvidence: ArchiveIntegrityEvidence;
   recovered: boolean;
   sizeBytes: number;
 }
@@ -906,7 +917,12 @@ export async function preserveDvdArchive({
     signal.throwIfAborted();
     await sync(root);
     signal.throwIfAborted();
-    return { archivePath, recovered: true, sizeBytes: safeSizeBytes };
+    return {
+      archivePath,
+      integrityEvidence: createUnknownArchiveIntegrityEvidence(),
+      recovered: true,
+      sizeBytes: safeSizeBytes,
+    };
   }
 
   if (runner.isActive(safeDevicePath, partialPath)) {
@@ -914,9 +930,10 @@ export async function preserveDvdArchive({
   }
   await movePartialAside(partialPath);
   let finalPublished = false;
+  let validation: DvdValidationResult | undefined;
   try {
     onProgress({ phase: "copying", progressPercent: 0 });
-    await runner.copy({
+    const recoveryResult = await runner.copy({
       authorizeStart: authorizeCopy,
       devicePath: safeDevicePath,
       outputPath: partialPath,
@@ -935,6 +952,10 @@ export async function preserveDvdArchive({
         });
       },
     });
+    validation = validateDvdRecoveryResult(
+      recoveryResult,
+      safeSizeBytes,
+    );
     signal.throwIfAborted();
     const partialMetadata = await lstat(partialPath);
     if (
@@ -966,5 +987,13 @@ export async function preserveDvdArchive({
     }
     throw error;
   }
-  return { archivePath, recovered: false, sizeBytes: safeSizeBytes };
+  if (validation === undefined) {
+    throw new Error("DVD recovery result was not validated");
+  }
+  return {
+    archivePath,
+    integrityEvidence: validation.integrityEvidence,
+    recovered: false,
+    sizeBytes: safeSizeBytes,
+  };
 }

@@ -84,6 +84,7 @@ describe("Catalog Review API", () => {
         discLabel: "EPISODE_DISC",
         discKind: "dvd",
         archiveFormat: "iso",
+        integrity: "unknown",
         archivedAt: archive.archivedAt.toISOString(),
         catalogReviewedAt: null,
         catalogReviewOutcome: "needs_review",

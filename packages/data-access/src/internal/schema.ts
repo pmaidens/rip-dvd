@@ -15,6 +15,7 @@ import {
   ARCHIVE_REQUEST_STATUSES,
   ARCHIVE_RUNNING_PROGRESS_PHASES,
   ARCHIVE_FORMATS,
+  ARCHIVE_INTEGRITIES,
   CATALOG_REVIEW_OUTCOMES,
   DETECTED_DISC_STATUSES,
   DISC_INSPECTION_ATTEMPT_OUTCOMES,
@@ -48,6 +49,7 @@ import type {
   OpticalDriveId,
   OriginalDiscArchiveId,
   RetainedEncodeOutputId,
+  UnreadableSectorRange,
 } from "../types.js";
 
 const createdAt = () => integer("created_at", { mode: "timestamp_ms" }).notNull();
@@ -331,6 +333,14 @@ export const originalDiscArchives = sqliteTable(
     archivePath: text("archive_path").notNull(),
     fingerprint: text("fingerprint").notNull(),
     sizeBytes: integer("size_bytes"),
+    integrity: text("integrity", { enum: ARCHIVE_INTEGRITIES })
+      .notNull()
+      .default("unknown"),
+    integrityPolicyVersion: text("integrity_policy_version"),
+    badSectorCount: integer("bad_sector_count"),
+    badAreaCount: integer("bad_area_count"),
+    badSectorRanges: text("bad_sector_ranges", { mode: "json" })
+      .$type<readonly UnreadableSectorRange[]>(),
     archivedAt: integer("archived_at", { mode: "timestamp_ms" }).notNull(),
     catalogReviewedAt: integer("catalog_reviewed_at", {
       mode: "timestamp_ms",
@@ -371,6 +381,14 @@ export const originalDiscArchives = sqliteTable(
     check(
       "original_disc_archives_size_check",
       sql`${table.sizeBytes} is null or ${table.sizeBytes} >= 0`,
+    ),
+    check(
+      "original_disc_archives_integrity_check",
+      sql`${table.integrity} in (${sqliteStringLiterals(ARCHIVE_INTEGRITIES)})`,
+    ),
+    check(
+      "original_disc_archives_integrity_evidence_check",
+      sql`(${table.integrity} = 'unknown' and ${table.integrityPolicyVersion} is null and ${table.badSectorCount} is null and ${table.badAreaCount} is null and ${table.badSectorRanges} is null) or (${table.integrity} = 'clean_read' and ${table.integrityPolicyVersion} is not null and ${table.badSectorCount} is not null and ${table.badAreaCount} is not null and ${table.badSectorRanges} is not null and length(${table.integrityPolicyVersion}) between 1 and 128 and ${table.badSectorCount} = 0 and ${table.badAreaCount} = 0 and json(${table.badSectorRanges}) = json('[]')) or (${table.integrity} = 'watchable_salvage' and ${table.integrityPolicyVersion} is not null and ${table.badSectorCount} is not null and ${table.badAreaCount} is not null and ${table.badSectorRanges} is not null and length(${table.integrityPolicyVersion}) between 1 and 128 and ${table.badSectorCount} > 0 and ${table.badAreaCount} > 0 and json_valid(${table.badSectorRanges}) and json_type(${table.badSectorRanges}) = 'array')`,
     ),
     check(
       "original_disc_archives_catalog_review_outcome_check",

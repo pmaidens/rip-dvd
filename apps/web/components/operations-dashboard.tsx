@@ -25,6 +25,7 @@ import {
   watchDashboardActivity,
   type DashboardStreamStatus,
 } from "../lib/dashboard-activity";
+import { archiveIntegrityLabel } from "../lib/archive-integrity";
 import { displayTerm } from "../lib/display-term";
 import { isTerminalEncodeJobStatus } from "../lib/encode-job-status";
 import { CatalogReviewEditor } from "./catalog-review-editor";
@@ -1255,6 +1256,9 @@ export function DashboardView({
                 <p>
                   {displayTerm(archive.discKind)} ·{" "}
                   {archive.archiveFormat.toUpperCase()}
+                </p>
+                <p>
+                  Archive integrity: {archiveIntegrityLabel(archive.integrity)}
                 </p>
               </div>
               <span
