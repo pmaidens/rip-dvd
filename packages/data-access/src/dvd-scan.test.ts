@@ -4,6 +4,8 @@ import {
   decodeArchivedDvdTitles,
   decodeDvdTitleMap,
   isDvdContentId,
+  isDvdFingerprint,
+  isDvdMetadataFingerprint,
   MAX_DVD_AUDIO_STREAMS_PER_TITLE,
   MAX_DVD_SCAN_INTEGER,
   MAX_DVD_TITLES,
@@ -14,6 +16,11 @@ describe("versioned DVD title-map contract", () => {
     expect(isDvdContentId(`sha256:${"a".repeat(64)}`)).toBe(true);
     expect(isDvdContentId(`sha256:${"A".repeat(64)}`)).toBe(false);
     expect(isDvdContentId("sha256:short")).toBe(false);
+    expect(isDvdMetadataFingerprint(`dvdmeta-sha256:${"b".repeat(64)}`)).toBe(
+      true,
+    );
+    expect(isDvdFingerprint(`dvdmeta-sha256:${"b".repeat(64)}`)).toBe(true);
+    expect(isDvdContentId(`dvdmeta-sha256:${"b".repeat(64)}`)).toBe(false);
   });
 
   it("decodes bounded reviewable stream metadata from schema version 2", () => {

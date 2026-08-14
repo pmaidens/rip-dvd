@@ -16,7 +16,6 @@ import {
   DiscInspectionError,
   type ClassifiedDiscInspectionError,
 } from "./disc-inspection-error.js";
-import { createDiscInspectionRateEstimator } from "./disc-inspection-rate.js";
 
 export interface CompletedDiscInspection {
   binding: BoundOpticalDrive;
@@ -162,30 +161,10 @@ export async function runDiscInspection({
   }, Math.floor(DISC_INSPECTION_LEASE_DURATION_MS / 3));
   heartbeat.unref();
 
-  const estimator = createDiscInspectionRateEstimator();
   let totalBytes: number | null = null;
   try {
     const scan = await hardware.scanDvd(binding, inspectionSignal, {
       expectedMediaGeneration: mediaGeneration,
-      onBytesHashed(bytesHashed) {
-        if (totalBytes === null) {
-          throw new DiscInspectionError(
-            "retry",
-            "unknown",
-            "DVD hash progress preceded metadata findings",
-          );
-        }
-        const estimate = estimator.update(
-          bytesHashed,
-          totalBytes,
-          Date.now(),
-        );
-        access.discInspections.record(claim, {
-          type: "hash_progress",
-          bytesHashed,
-          ...estimate,
-        });
-      },
       onMetadata(metadata) {
         totalBytes = metadata.totalBytes;
         access.discInspections.record(claim, {
@@ -226,12 +205,6 @@ export async function runDiscInspection({
           0,
         ),
         totalBytes,
-      });
-      access.discInspections.record(claim, {
-        type: "hash_progress",
-        bytesHashed: totalBytes,
-        bytesPerSecond: null,
-        etaSeconds: null,
       });
       access.discInspections.record(claim, { type: "confirming_media" });
     }

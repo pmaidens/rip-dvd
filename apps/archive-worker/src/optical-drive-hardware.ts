@@ -16,10 +16,6 @@ import {
 import { createBoundOpticalDriveIdentity } from "./optical-drive-identity.js";
 import { createOpticalDriveScanCache } from "./optical-drive-scan-cache.js";
 import {
-  nodeDiscContentReader,
-  type DiscContentReader,
-} from "./optical-disc-content.js";
-import {
   nodeMediaGenerationObserver,
   type MediaGenerationObserver,
 } from "./optical-media-generation.js";
@@ -52,7 +48,6 @@ export {
 } from "./optical-media-generation.js";
 
 interface LinuxOpticalDriveHardwareOptions {
-  contentReader?: DiscContentReader;
   deviceInstanceObserver?: MediaGenerationObserver;
   mediaGenerationObserver?: MediaGenerationObserver;
   platform?: NodeJS.Platform;
@@ -62,7 +57,6 @@ interface LinuxOpticalDriveHardwareOptions {
 export function createLinuxOpticalDriveHardware({
   platform = operatingSystem(),
   runner = nodeCommandRunner,
-  contentReader = nodeDiscContentReader,
   mediaGenerationObserver = nodeMediaGenerationObserver,
   deviceInstanceObserver = mediaGenerationObserver,
 }: LinuxOpticalDriveHardwareOptions = {}): OpticalDriveHardware {
@@ -70,7 +64,6 @@ export function createLinuxOpticalDriveHardware({
   const identity = createBoundOpticalDriveIdentity(deviceInstanceObserver);
   const scanner = createOpticalDriveDvdScanner({
     cache: scanCache,
-    contentReader,
     identity,
     mediaGenerationObserver,
     runner,

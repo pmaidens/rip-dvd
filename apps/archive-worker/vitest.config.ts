@@ -16,6 +16,15 @@ export default defineConfig({
         ),
       },
       {
+        find: "@rip-dvd/data-access/dvd-metadata-fingerprint",
+        replacement: fileURLToPath(
+          new URL(
+            "../../packages/data-access/src/dvd-metadata-fingerprint.ts",
+            import.meta.url,
+          ),
+        ),
+      },
+      {
         find: "@rip-dvd/data-access/dvd-scan",
         replacement: fileURLToPath(
           new URL("../../packages/data-access/src/dvd-scan.ts", import.meta.url),

@@ -94,7 +94,13 @@ import {
   type ValidatedMediaItem,
 } from "./media-item-validation.js";
 import { serializeDiscSelectionSourceIdentity } from "../disc-selection-source-identity.js";
-import { isDvdContentId, MAX_DVD_TITLES } from "../dvd-scan.js";
+import { createDvdMetadataFingerprint } from "../dvd-metadata-fingerprint.js";
+import {
+  decodeDvdTitleMap,
+  isDvdContentId,
+  isDvdMetadataFingerprint,
+  MAX_DVD_TITLES,
+} from "../dvd-scan.js";
 import {
   ARCHIVE_RUNNING_PROGRESS_PHASES,
   ENCODE_PROGRESS_PHASES,
@@ -244,6 +250,8 @@ const detectedDiscUsesCurrentDvdContentId = sql<boolean>`
   and substr(${detectedDiscs.fingerprint}, 1, 7) = 'sha256:'
   and substr(${detectedDiscs.fingerprint}, 8) not glob '*[^0-9a-f]*'
 `;
+
+const DVD_METADATA_FINGERPRINT_RECONCILIATION_LIMIT = 4_096;
 
 const replacementEncodeJobRecords = alias(
   encodeJobs,
@@ -1322,15 +1330,12 @@ export function createDataAccessInternal(
     );
   }
 
-  /**
-   * Matches an Original Disc Archive by either its stored legacy/current
-   * fingerprint or a recorded current content-ID alias.
-   */
+  /** Matches stored identities and metadata-derived compatibility identities. */
   function findOriginalArchiveByFingerprintOrContentIdAlias(
     fingerprintOrContentIdAlias: string,
     querySource: Pick<typeof database, "select"> = database,
   ) {
-    return querySource
+    const direct = querySource
       .select({
         detectedDiscId: originalDiscArchives.detectedDiscId,
         discKind: originalDiscArchives.discKind,
@@ -1357,6 +1362,61 @@ export function createDataAccessInternal(
         ),
       )
       .get();
+    if (direct !== undefined || !isDvdMetadataFingerprint(
+      fingerprintOrContentIdAlias,
+    )) {
+      return direct;
+    }
+
+    const candidates = querySource
+      .select({
+        detectedDiscId: originalDiscArchives.detectedDiscId,
+        discKind: originalDiscArchives.discKind,
+        id: originalDiscArchives.id,
+        scanData: detectedDiscs.scanData,
+        sizeBytes: originalDiscArchives.sizeBytes,
+        volumeLabel: detectedDiscs.volumeLabel,
+      })
+      .from(originalDiscArchives)
+      .innerJoin(
+        detectedDiscs,
+        eq(detectedDiscs.id, originalDiscArchives.detectedDiscId),
+      )
+      .where(and(
+        eq(originalDiscArchives.discKind, "dvd"),
+        isNotNull(originalDiscArchives.sizeBytes),
+      ))
+      .orderBy(asc(originalDiscArchives.id))
+      .limit(DVD_METADATA_FINGERPRINT_RECONCILIATION_LIMIT + 1)
+      .all();
+    if (candidates.length > DVD_METADATA_FINGERPRINT_RECONCILIATION_LIMIT) {
+      throw new DomainInvariantError(
+        "DVD metadata fingerprint reconciliation exceeds its safety limit",
+      );
+    }
+    const matches = candidates.flatMap((candidate) => {
+      const scan = decodeDvdTitleMap(candidate.scanData);
+      if (scan === null || candidate.sizeBytes === null) {
+        return [];
+      }
+      return createDvdMetadataFingerprint({
+        sizeBytes: candidate.sizeBytes,
+        titles: scan.titles,
+        volumeLabel: candidate.volumeLabel ?? undefined,
+      }) === fingerprintOrContentIdAlias
+        ? [{
+            detectedDiscId: candidate.detectedDiscId,
+            discKind: candidate.discKind,
+            id: candidate.id,
+          }]
+        : [];
+    });
+    if (matches.length > 1) {
+      throw new DomainInvariantError(
+        "DVD metadata fingerprint matches multiple Original Disc Archives",
+      );
+    }
+    return matches[0];
   }
 
   function hasUnresolvedLegacyDvdArchiveIdentity(
@@ -5171,7 +5231,7 @@ export function createDataAccessInternal(
 
           if (event.type === "metadata") {
             const update = {
-              phase: "hashing_content" as const,
+              phase: "confirming_media" as const,
               volumeLabel: event.volumeLabel?.trim().slice(0, 255) || null,
               titleCount: optionalSafeInteger(event.titleCount, "titleCount", 0),
               chapterCount: optionalSafeInteger(
@@ -5193,7 +5253,7 @@ export function createDataAccessInternal(
                 event.totalBytes,
                 "totalBytes",
               ),
-              bytesHashed: 0,
+              bytesHashed: null,
               bytesPerSecond: null,
               etaSeconds: null,
               phaseStartedAt: timestamp,
@@ -5214,14 +5274,6 @@ export function createDataAccessInternal(
               "disc inspection",
               current.id,
             );
-            inspectionProgress.set(current.id, {
-              latestBytes: 0,
-              latestBytesPerSecond: null,
-              latestEtaSeconds: null,
-              persistedAt: timestamp.getTime(),
-              persistedBytes: 0,
-              token: claim.claimToken,
-            });
             return updated;
           }
 
@@ -5421,7 +5473,7 @@ export function createDataAccessInternal(
                   detectedDiscId: disc.id,
                   status: "completed",
                   consecutiveFailureCount: 0,
-                  bytesHashed: current.totalBytes,
+                  bytesHashed: current.bytesHashed,
                   bytesPerSecond: null,
                   etaSeconds: null,
                   retryAt: null,

@@ -17,6 +17,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { completeCatalogReview } from "./catalog.test-support.js";
 import { createRawDvdContentIdHasher } from "./dvd-content-id.js";
+import { createDvdMetadataFingerprint } from "./dvd-metadata-fingerprint.js";
 import {
   ARCHIVE_JOB_LEASE_DURATION_MS,
   DISC_INSPECTION_LEASE_DURATION_MS,
@@ -8313,6 +8314,90 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     access.close();
   });
 
+  it("recognizes a legacy raw-hash archive by its metadata fingerprint without another read", () => {
+    const access = openTestDatabase();
+    const firstDrive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const secondDrive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr1",
+      isPresent: true,
+    });
+    const rawFingerprint = `sha256:${"a".repeat(64)}`;
+    const volumeLabel = "LEGACY_ARCHIVE";
+    const sizeBytes = 4_700_000_000;
+    const titles = [{
+      number: 1,
+      durationSeconds: 5_400,
+      chapters: 18,
+      audioStreams: [{
+        id: 1,
+        languageCode: "en",
+        language: "English",
+        format: "ac3",
+        channels: 6,
+      }],
+      subtitles: [{
+        id: 1,
+        languageCode: "en",
+        language: "English",
+        content: "Normal",
+      }],
+    }];
+    const firstDisc = access.catalog.registerDetectedDisc({
+      opticalDriveId: firstDrive.id,
+      discKind: "dvd",
+      fingerprint: rawFingerprint,
+      volumeLabel,
+      scanData: {
+        schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+        contentId: rawFingerprint,
+        titles,
+      },
+    });
+    access.catalog.updateDetectedDiscStatus(firstDisc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(firstDisc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: firstDisc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Legacy Archive.iso",
+      fingerprint: rawFingerprint,
+      sizeBytes,
+    });
+    const metadataFingerprint = createDvdMetadataFingerprint({
+      sizeBytes,
+      titles,
+      volumeLabel,
+    });
+
+    const rediscovered = access.catalog.registerDetectedDisc({
+      opticalDriveId: secondDrive.id,
+      discKind: "dvd",
+      fingerprint: metadataFingerprint,
+      volumeLabel,
+      scanData: {
+        schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+        contentId: metadataFingerprint,
+        titles,
+      },
+    });
+
+    expect(rediscovered).toMatchObject({
+      opticalDriveId: secondDrive.id,
+      fingerprint: metadataFingerprint,
+      status: "archived",
+    });
+    expect(() =>
+      access.archiveRequests.create({ detectedDiscId: rediscovered.id }),
+    ).toThrow(DomainInvariantError);
+    expect(access.catalog.listOriginalDiscArchives()).toEqual([
+      expect.objectContaining({ id: archive.id, fingerprint: rawFingerprint }),
+    ]);
+    access.close();
+  });
+
   it("rejects contradictory cross-drive kinds before archive publication", () => {
     const access = openTestDatabase();
     const firstDrive = access.catalog.upsertOpticalDrive({
@@ -8664,7 +8749,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     access.close();
   });
 
-  it("persists inspection findings, monotonic hash progress, retry history, and manual reset", () => {
+  it("persists inspection findings and retains legacy hash-progress compatibility", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-11T01:00:00.000Z"));
     const access = openTestDatabase();
@@ -8689,10 +8774,10 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       totalBytes: 1_000,
     });
     expect(metadata).toMatchObject({
-      phase: "hashing_content",
+      phase: "confirming_media",
       volumeLabel: "LANGUAGE_DISC",
       totalBytes: 1_000,
-      bytesHashed: 0,
+      bytesHashed: null,
     });
     expect(
       access.discInspections.record(started.claim!, {
