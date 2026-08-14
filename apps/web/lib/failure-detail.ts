@@ -1,3 +1,5 @@
+import { DVD_SALVAGE_REJECTION_DESCRIPTIONS } from "@rip-dvd/data-access";
+
 interface FailureReasonRule {
   pattern: RegExp;
   reason: string;
@@ -153,15 +155,18 @@ const FAILURE_REASON_RULES: readonly FailureReasonRule[] = [
 const UNCLASSIFIED_FAILURE_REASON =
   "The worker reported an unclassified failure. Check the worker logs for the full diagnostic.";
 
+const DVD_SALVAGE_REJECTION_PATTERN = new RegExp(
+  `^DVD salvage rejected: unreadable sectors affect (${Object.values(
+    DVD_SALVAGE_REJECTION_DESCRIPTIONS,
+  ).map((description) => description.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")}); (\\d{1,7}) sectors? in (\\d{1,7}) areas?; LBAs (.{1,200})$`,
+);
+
 function formatByteOffset(byteOffset: string): string {
   return byteOffset.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 }
 
 function formatArchiveRescueFailure(errorMessage: string): string | null {
-  const rejection =
-    /^DVD salvage rejected: unreadable sectors affect (filesystem metadata|filesystem directory data|DVD IFO data|DVD backup data|DVD menu data|DVD navigation data|referenced DVD content|an ambiguous DVD region|an unmappable DVD region|consecutive unreadable sectors|damage beyond the automatic salvage policy limit); (\d{1,7}) sectors? in (\d{1,7}) areas?; LBAs (.{1,200})$/.exec(
-      errorMessage,
-    );
+  const rejection = DVD_SALVAGE_REJECTION_PATTERN.exec(errorMessage);
   if (
     rejection?.[1] !== undefined &&
     rejection[2] !== undefined &&

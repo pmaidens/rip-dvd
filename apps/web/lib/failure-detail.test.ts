@@ -55,6 +55,11 @@ describe("formatFailureDetail", () => {
       "Automatic salvage validation rejected damage to DVD navigation data; the image remains available for another recovery attempt with 1 unreadable sector across 1 area (LBAs 20).",
     ],
     [
+      "decoder salvage rejection",
+      "DVD salvage rejected: unreadable sectors affect an incomplete decoded title duration; 1 sector in 1 area; LBAs 20",
+      "Automatic salvage validation rejected damage to an incomplete decoded title duration; the image remains available for another recovery attempt with 1 unreadable sector across 1 area (LBAs 20).",
+    ],
+    [
       "timeout",
       "DVD archive copy timed out",
       "The worker operation timed out.",
