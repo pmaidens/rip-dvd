@@ -25,7 +25,10 @@ import {
   watchDashboardActivity,
   type DashboardStreamStatus,
 } from "../lib/dashboard-activity";
-import { archiveIntegrityLabel } from "../lib/archive-integrity";
+import {
+  archiveIntegrityDetail,
+  archiveIntegrityLabel,
+} from "../lib/archive-integrity";
 import { displayTerm } from "../lib/display-term";
 import { isTerminalEncodeJobStatus } from "../lib/encode-job-status";
 import { CatalogReviewEditor } from "./catalog-review-editor";
@@ -1260,6 +1263,9 @@ export function DashboardView({
                 <p>
                   Archive integrity: {archiveIntegrityLabel(archive.integrity)}
                 </p>
+                {archiveIntegrityDetail(archive) ? (
+                  <p>{archiveIntegrityDetail(archive)}</p>
+                ) : null}
               </div>
               <span
                 className="attention-mark"

@@ -23,12 +23,14 @@ import { dirname, join, resolve } from "node:path";
 
 import {
   createUnknownArchiveIntegrityEvidence,
+  createWatchableSalvageArchiveIntegrityEvidence,
   type ArchiveIntegrityEvidence,
   type ArchiveJobProgress,
 } from "@rip-dvd/data-access";
 import {
   isDvdFingerprint,
   isDvdMetadataFingerprint,
+  type DvdTitleMap,
 } from "@rip-dvd/data-access/dvd-scan";
 
 import { requireDvdContentSize } from "./dvd-content-policy.js";
@@ -46,6 +48,11 @@ import {
   type DvdValidationResult,
   validateDvdRecoveryResult,
 } from "./dvd-recovery-contracts.js";
+import {
+  DVD_UNUSED_SPACE_SALVAGE_POLICY_VERSION,
+  formatRejectedDvdSalvage,
+  type DvdSalvageValidator,
+} from "./dvd-salvage-validator.js";
 
 const MAX_ARCHIVE_PATH_BYTES = 4_096;
 const MAX_ARCHIVE_RECOVERY_ENTRIES = 4_096;
@@ -776,8 +783,10 @@ export interface PreserveDvdArchiveOptions {
   authorizeCopy?(): void;
   devicePath: string;
   fingerprint: string;
+  expectedTitleMap?: DvdTitleMap;
   originalsLibraryPath: string;
   runner: DvdCopyRunner;
+  salvageValidator?: DvdSalvageValidator;
   signal: AbortSignal;
   sizeBytes: number;
   sync?(path: string): Promise<void>;
@@ -879,8 +888,10 @@ export async function preserveDvdArchive({
   authorizeCopy,
   devicePath,
   fingerprint,
+  expectedTitleMap,
   originalsLibraryPath,
   runner,
+  salvageValidator,
   signal,
   sizeBytes,
   sync = syncPath,
@@ -998,10 +1009,42 @@ export async function preserveDvdArchive({
       onProgress({ phase: "verifying", progressPercent: 99 });
       await sync(partialPath);
       signal.throwIfAborted();
-      await movePartialAside(partialPath);
-      await sync(root);
-      retainedForValidation = true;
-      throw new Error(formatUnvalidatedDvdRecovery(validation.recoveryResult));
+      let salvageValidation;
+      if (salvageValidator !== undefined) {
+        if (expectedTitleMap === undefined) {
+          throw new Error(
+            "DVD salvage validation requires the inspected title map",
+          );
+        }
+        salvageValidation = await salvageValidator.validate({
+          expectedTitleMap,
+          imagePath: partialPath,
+          recoveryResult: validation.recoveryResult,
+          signal,
+        });
+      }
+      signal.throwIfAborted();
+      if (salvageValidation?.outcome === "accepted") {
+        validation = {
+          outcome: "publish",
+          integrityEvidence: createWatchableSalvageArchiveIntegrityEvidence(
+            DVD_UNUSED_SPACE_SALVAGE_POLICY_VERSION,
+            validation.recoveryResult.unrecoveredSectorRanges,
+          ),
+        };
+      } else {
+        await movePartialAside(partialPath);
+        await sync(root);
+        retainedForValidation = true;
+        throw new Error(
+          salvageValidation?.outcome === "rejected"
+            ? formatRejectedDvdSalvage(
+                salvageValidation.reason,
+                validation.recoveryResult,
+              )
+            : formatUnvalidatedDvdRecovery(validation.recoveryResult),
+        );
+      }
     }
     onProgress({ phase: "finalizing", progressPercent: 99 });
     await sync(partialPath);

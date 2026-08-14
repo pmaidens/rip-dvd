@@ -98,6 +98,7 @@ import {
   type DiscSelectionSourceIdentityColumns,
 } from "../disc-selection-source-identity.js";
 import { createDvdMetadataFingerprint } from "../dvd-metadata-fingerprint.js";
+import { createWatchableSalvageArchiveIntegrityEvidence } from "../archive-integrity.js";
 import {
   decodeArchivedDvdTitles,
   decodeDvdTitleMap,
@@ -6776,7 +6777,7 @@ export function createDataAccessInternal(
             );
           }
           integrityPolicyVersion = null;
-        } else {
+        } else if (integrityEvidence.integrity === "clean_read") {
           integrityPolicyVersion = requireNonEmpty(
             integrityEvidence.policyVersion,
             "integrityEvidence.policyVersion",
@@ -6790,6 +6791,25 @@ export function createDataAccessInternal(
           ) {
             throw new DomainInvariantError(
               "Clean-read Archive Integrity evidence is invalid",
+            );
+          }
+        } else {
+          integrityPolicyVersion = requireNonEmpty(
+            integrityEvidence.policyVersion,
+            "integrityEvidence.policyVersion",
+          );
+          const validatedEvidence =
+            createWatchableSalvageArchiveIntegrityEvidence(
+              integrityPolicyVersion,
+              integrityEvidence.badSectorRanges,
+            );
+          if (
+            validatedEvidence.badSectorCount !==
+              integrityEvidence.badSectorCount ||
+            validatedEvidence.badAreaCount !== integrityEvidence.badAreaCount
+          ) {
+            throw new DomainInvariantError(
+              "Watchable-salvage Archive Integrity evidence is invalid",
             );
           }
         }

@@ -158,6 +158,24 @@ function formatByteOffset(byteOffset: string): string {
 }
 
 function formatArchiveRescueFailure(errorMessage: string): string | null {
+  const rejection =
+    /^DVD salvage rejected: unreadable sectors affect (filesystem metadata|filesystem directory data|DVD IFO data|DVD backup data|DVD menu data|DVD navigation data|referenced DVD content|an ambiguous DVD region|an unmappable DVD region|consecutive unreadable sectors|damage beyond the automatic salvage policy limit); (\d{1,7}) sectors? in (\d{1,7}) areas?; LBAs (.{1,200})$/.exec(
+      errorMessage,
+    );
+  if (
+    rejection?.[1] !== undefined &&
+    rejection[2] !== undefined &&
+    rejection[3] !== undefined &&
+    rejection[4] !== undefined &&
+    /^\d{1,7}(?:-\d{1,7})?(?:, \d{1,7}(?:-\d{1,7})?){0,7}(?:, and \d{1,7} more)?$/.test(
+      rejection[4],
+    ) &&
+    Number(rejection[2]) > 0 &&
+    Number(rejection[3]) > 0
+  ) {
+    const ranges = rejection[4].replace(/(\d+)-(\d+)/g, "$1–$2");
+    return `Automatic salvage validation rejected damage to ${rejection[1]}; the image remains available for another recovery attempt with ${rejection[2]} unreadable ${Number(rejection[2]) === 1 ? "sector" : "sectors"} across ${rejection[3]} ${Number(rejection[3]) === 1 ? "area" : "areas"} (LBAs ${ranges}).`;
+  }
   const damage =
     /^DVD rescue requires validation: (\d{1,7}) unreadable sectors? in (\d{1,7}) areas?; LBAs (.{1,200})$/.exec(
       errorMessage,

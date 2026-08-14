@@ -3,6 +3,7 @@ import type {
   CatalogReviewCoverage,
   CatalogReviewOutcome,
   ArchiveIntegrity,
+  UnreadableSectorRange,
   DiscSelectionSourceIdentityInput,
   DiscSelectionKind,
   EncodeJobStatus,
@@ -165,6 +166,9 @@ export interface CatalogReviewDto {
     discKind: string;
     archiveFormat: string;
     integrity: ArchiveIntegrity;
+    badSectorCount: number | null;
+    badAreaCount: number | null;
+    badSectorRanges: readonly UnreadableSectorRange[] | null;
     archivedAt: string;
     catalogReviewedAt: string | null;
     catalogReviewOutcome: CatalogReviewOutcome;
