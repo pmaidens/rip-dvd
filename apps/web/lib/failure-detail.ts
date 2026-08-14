@@ -159,7 +159,7 @@ function formatByteOffset(byteOffset: string): string {
 
 function formatArchiveRescueFailure(errorMessage: string): string | null {
   const rejection =
-    /^DVD salvage rejected: unreadable sectors affect (filesystem metadata|filesystem directory data|DVD IFO data|DVD backup data|DVD menu data|DVD navigation data|referenced DVD content|an ambiguous DVD region|an unmappable DVD region|consecutive unreadable sectors|damage beyond the automatic salvage policy limit); (\d{1,7}) sectors? in (\d{1,7}) areas?; LBAs (.{1,200})$/.exec(
+    /^DVD salvage rejected: unreadable sectors affect (filesystem metadata|filesystem directory data|DVD IFO data|DVD backup data|DVD menu data|DVD navigation data|referenced DVD content|an ambiguous DVD region|an unmappable DVD region|consecutive unreadable sectors|damage beyond the automatic salvage policy limit|a missing decoded audio or video stream|an incomplete decoded title duration|decoding failures beyond the automatic salvage policy limit|incomplete DVD title traversal); (\d{1,7}) sectors? in (\d{1,7}) areas?; LBAs (.{1,200})$/.exec(
       errorMessage,
     );
   if (

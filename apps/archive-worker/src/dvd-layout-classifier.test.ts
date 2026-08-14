@@ -26,11 +26,13 @@ function writeBothEndian16(buffer: Buffer, offset: number, value: number) {
 }
 
 function isoDirectoryRecord({
+  byteCount = DVD_SECTOR_SIZE_BYTES,
   extendedAttributeSectorCount = 0,
   extentLba,
   identifier,
   isDirectory,
 }: {
+  byteCount?: number;
   extendedAttributeSectorCount?: number;
   extentLba: number;
   identifier: Buffer;
@@ -42,7 +44,7 @@ function isoDirectoryRecord({
   record[0] = recordLength;
   record[1] = extendedAttributeSectorCount;
   writeBothEndian32(record, 2, extentLba);
-  writeBothEndian32(record, 10, DVD_SECTOR_SIZE_BYTES);
+  writeBothEndian32(record, 10, byteCount);
   record[25] = isDirectory ? 2 : 0;
   writeBothEndian16(record, 28, 1);
   record[32] = identifier.byteLength;
@@ -65,6 +67,7 @@ function writeSyntheticIsoLayout(
     lastFileExtendedAttributeSectorCount = 0,
     pathTableLba,
     rootLba,
+    videoFiles,
     videoDirectoryLba,
     volumeSpaceSize,
   }: {
@@ -72,6 +75,11 @@ function writeSyntheticIsoLayout(
     lastFileExtendedAttributeSectorCount?: number;
     pathTableLba: number;
     rootLba: number;
+    videoFiles?: readonly {
+      byteCount?: number;
+      extentLba: number;
+      name: string;
+    }[];
     videoDirectoryLba: number;
     volumeSpaceSize: number;
   },
@@ -125,6 +133,16 @@ function writeSyntheticIsoLayout(
       isDirectory: true,
     }),
   ]);
+  const defaultVideoFiles: readonly {
+    byteCount?: number;
+    extentLba: number;
+    name: string;
+  }[] = [
+    { extentLba: fileStartLba, name: "VIDEO_TS.IFO" },
+    { extentLba: fileStartLba + 1, name: "VIDEO_TS.BUP" },
+    { extentLba: fileStartLba + 2, name: "VIDEO_TS.VOB" },
+    { extentLba: fileStartLba + 3, name: "VTS_01_1.VOB" },
+  ];
   writeDirectory(image, videoDirectoryLba, [
     isoDirectoryRecord({
       extentLba: videoDirectoryLba,
@@ -136,28 +154,37 @@ function writeSyntheticIsoLayout(
       identifier: Buffer.from([1]),
       isDirectory: true,
     }),
-    isoDirectoryRecord({
-      extentLba: fileStartLba,
-      identifier: Buffer.from("VIDEO_TS.IFO;1"),
-      isDirectory: false,
-    }),
-    isoDirectoryRecord({
-      extentLba: fileStartLba + 1,
-      identifier: Buffer.from("VIDEO_TS.BUP;1"),
-      isDirectory: false,
-    }),
-    isoDirectoryRecord({
-      extentLba: fileStartLba + 2,
-      identifier: Buffer.from("VIDEO_TS.VOB;1"),
-      isDirectory: false,
-    }),
-    isoDirectoryRecord({
-      extendedAttributeSectorCount: lastFileExtendedAttributeSectorCount,
-      extentLba: fileStartLba + 3,
-      identifier: Buffer.from("VTS_01_1.VOB;1"),
-      isDirectory: false,
-    }),
+    ...(videoFiles ?? defaultVideoFiles).map((file, index, files) =>
+      isoDirectoryRecord({
+        byteCount: file.byteCount,
+        extendedAttributeSectorCount:
+          index === files.length - 1
+            ? lastFileExtendedAttributeSectorCount
+            : 0,
+        extentLba: file.extentLba,
+        identifier: Buffer.from(`${file.name};1`),
+        isDirectory: false,
+      })
+    ),
   ]);
+}
+
+function writeTitleVobuAddressMap(
+  image: Buffer,
+  ifoLba: number,
+  vobuStartSectors: readonly number[],
+) {
+  const ifo = image.subarray(
+    ifoLba * DVD_SECTOR_SIZE_BYTES,
+    (ifoLba + 2) * DVD_SECTOR_SIZE_BYTES,
+  );
+  ifo.write("DVDVIDEO-VTS", 0, "ascii");
+  ifo.writeUInt32BE(1, 0xe4);
+  const addressMap = ifo.subarray(DVD_SECTOR_SIZE_BYTES);
+  addressMap.writeUInt32BE(3 + vobuStartSectors.length * 4, 0);
+  for (const [index, startSector] of vobuStartSectors.entries()) {
+    addressMap.writeUInt32BE(startSector, 4 + index * 4);
+  }
 }
 
 function writeUdfTag(buffer: Buffer, identifier: number) {
@@ -391,6 +418,41 @@ function createSyntheticDvdImage(badLba: number): {
   return writeFixture(image, badLba);
 }
 
+function createSyntheticPayloadDvdImage(
+  badLba: number,
+  vobuStartSectors: readonly number[] = [0, 3],
+): {
+  imagePath: string;
+  sizeBytes: number;
+} {
+  const image = Buffer.alloc(96 * DVD_SECTOR_SIZE_BYTES);
+  writeSyntheticIsoLayout(image, {
+    fileStartLba: 22,
+    pathTableLba: 18,
+    rootLba: 20,
+    videoDirectoryLba: 21,
+    videoFiles: [
+      { extentLba: 22, name: "VIDEO_TS.IFO" },
+      { extentLba: 23, name: "VIDEO_TS.BUP" },
+      { extentLba: 24, name: "VIDEO_TS.VOB" },
+      {
+        byteCount: 2 * DVD_SECTOR_SIZE_BYTES,
+        extentLba: 25,
+        name: "VTS_01_0.IFO",
+      },
+      { extentLba: 27, name: "VTS_01_0.BUP" },
+      {
+        byteCount: 6 * DVD_SECTOR_SIZE_BYTES,
+        extentLba: 28,
+        name: "VTS_01_1.VOB",
+      },
+    ],
+    volumeSpaceSize: 90,
+  });
+  writeTitleVobuAddressMap(image, 25, vobuStartSectors);
+  return writeFixture(image, badLba);
+}
+
 function createSyntheticUdfDvdImage(badLba: number): {
   imagePath: string;
   sizeBytes: number;
@@ -418,6 +480,39 @@ describe("DVD layout damage classification", () => {
     })).resolves.toEqual({ outcome: "accepted" });
   });
 
+  it("identifies isolated MPEG payload damage in a title VOB", async () => {
+    const fixture = createSyntheticPayloadDvdImage(29);
+
+    await expect(classifyDvdImageDamage({
+      ...fixture,
+      expectedByteCount: fixture.sizeBytes,
+      unreadableSectorRanges: [{ startLba: 29, sectorCount: 1 }],
+    })).resolves.toEqual({
+      affectedTitleSetNumbers: [1],
+      outcome: "accepted",
+    });
+  });
+
+  it("rejects a substituted VOB navigation pack", async () => {
+    const fixture = createSyntheticPayloadDvdImage(31);
+
+    await expect(classifyDvdImageDamage({
+      ...fixture,
+      expectedByteCount: fixture.sizeBytes,
+      unreadableSectorRanges: [{ startLba: 31, sectorCount: 1 }],
+    })).resolves.toEqual({ outcome: "rejected", reason: "navigation" });
+  });
+
+  it("fails closed when the title VOBU address map is malformed", async () => {
+    const fixture = createSyntheticPayloadDvdImage(29, [0, 0]);
+
+    await expect(classifyDvdImageDamage({
+      ...fixture,
+      expectedByteCount: fixture.sizeBytes,
+      unreadableSectorRanges: [{ startLba: 29, sectorCount: 1 }],
+    })).rejects.toThrow("DVD title VOBU address map is malformed");
+  });
+
   it.each([
     [1, "ambiguous"],
     [30, "ambiguous"],
@@ -426,7 +521,7 @@ describe("DVD layout damage classification", () => {
     [22, "ifo"],
     [23, "bup"],
     [24, "menu"],
-    [25, "referenced_content"],
+    [25, "ambiguous"],
     [63, "unmappable"],
   ] as const)("rejects structural damage at LBA %i as %s", async (badLba, reason) => {
     const fixture = createSyntheticDvdImage(badLba);
@@ -479,7 +574,7 @@ describe("DVD layout damage classification", () => {
       unreadableSectorRanges: [{ startLba: 26, sectorCount: 1 }],
     })).resolves.toEqual({
       outcome: "rejected",
-      reason: "referenced_content",
+      reason: "ambiguous",
     });
   });
 });

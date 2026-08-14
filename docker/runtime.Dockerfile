@@ -169,7 +169,7 @@ COPY --chown=node:node docker/worker-priority-entrypoint.sh ./scripts/worker-pri
 
 FROM worker-runtime-base AS archive-worker
 RUN apt-get update \
-  && apt-get install --yes --no-install-recommends libssl3 lsdvd util-linux \
+  && apt-get install --yes --no-install-recommends handbrake-cli libssl3 lsdvd util-linux \
   && rm -rf /var/lib/apt/lists/* \
   && lsblk --json --output PATH,TYPE,TRAN,VENDOR,MODEL,SERIAL >/dev/null \
   && node -e "const { constants } = require('node:fs'); if (!Number.isInteger(constants.O_NONBLOCK)) process.exit(1)"
@@ -179,13 +179,14 @@ COPY --from=dvdcss-reader-builder /usr/local/bin/rip-dvd-dvdcss-reader /usr/loca
 COPY --from=dvdcss-reader-builder /usr/local/lib/libdvdcss.so.2.4.0 /usr/local/lib/libdvdcss.so.2
 COPY --from=dvdcss-reader-builder /usr/local/lib/libdvdcss-sg-io.so.0 /usr/local/lib/libdvdcss-sg-io.so.0
 COPY docker/lsdvd-with-css.sh /usr/local/bin/rip-dvd-lsdvd
+COPY docker/handbrake-with-css.sh /usr/local/bin/rip-dvd-handbrake
 COPY --from=dvdcss-reader-builder /tmp/libdvdcss.tar.xz /usr/share/doc/rip-dvd-dvdcss-reader/libdvdcss-1.6.0.tar.xz
 COPY --from=dvdcss-reader-builder /tmp/libdvdcss-source/COPYING /usr/share/doc/rip-dvd-dvdcss-reader/COPYING
 COPY docker/dvdcss-reader.c /usr/share/doc/rip-dvd-dvdcss-reader/dvdcss-reader.c
 COPY docker/libdvdcss-sg-io.h /usr/share/doc/rip-dvd-dvdcss-reader/libdvdcss-sg-io.h
 COPY docker/libdvdcss-sg-io.c /usr/share/doc/rip-dvd-dvdcss-reader/libdvdcss-sg-io.c
 COPY --from=archive-worker-builder --chown=node:node /archive-worker ./apps/archive-worker
-RUN chmod 0555 /usr/local/bin/rip-dvd-lsdvd \
+RUN chmod 0555 /usr/local/bin/rip-dvd-handbrake /usr/local/bin/rip-dvd-lsdvd \
   && ldconfig \
   && ldconfig -p | grep --quiet 'libdvdcss.so.2'
 ENV DVDCSS_CACHE="off"

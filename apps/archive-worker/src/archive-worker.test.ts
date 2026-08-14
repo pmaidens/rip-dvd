@@ -379,6 +379,13 @@ describe("archive worker polling", () => {
     ["referenced_content", "referenced DVD content"],
     ["ambiguous", "an ambiguous DVD region"],
     ["unmappable", "an unmappable DVD region"],
+    ["decoder_stream", "a missing decoded audio or video stream"],
+    ["decoder_duration", "an incomplete decoded title duration"],
+    [
+      "decoder_rate",
+      "decoding failures beyond the automatic salvage policy limit",
+    ],
+    ["decoder_incomplete", "incomplete DVD title traversal"],
   ] as const)(
     "retains a rescued image rejected for %s damage",
     async (reason, description) => {
@@ -574,7 +581,7 @@ describe("archive worker polling", () => {
     expect(archive).toMatchObject({
       detectedDiscId: disc.id,
       integrity: "watchable_salvage",
-      integrityPolicyVersion: "dvd-unused-space-v1",
+      integrityPolicyVersion: "dvd-watchable-salvage-v1",
       badSectorCount: 1,
       badAreaCount: 1,
       badSectorRanges: [{ startLba: 1, sectorCount: 1 }],

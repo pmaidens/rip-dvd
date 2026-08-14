@@ -763,8 +763,9 @@ The smoke command removes only its short-lived write-probe containers and
 deliberately retains the worker containers, uniquely named volumes, and
 temporary bind directories for non-destructive inspection.
 
-The archive worker image includes `lsblk` and `lsdvd`; the encode worker image
-includes HandBrake and ffmpeg. The archive worker discovers Linux block devices
+The archive worker image includes `lsblk`, `lsdvd`, and HandBrake for bounded
+DVD salvage validation; the encode worker image includes HandBrake and ffmpeg.
+The archive worker discovers Linux block devices
 reported as optical drives, records attached/missing and last-seen state in
 SQLite, and scans DVDs only in enabled drives. The configured
 `RIP_DVD_ARCHIVE_DEVICE_PATH` receives the enabled default when its physical
