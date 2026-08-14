@@ -18,13 +18,48 @@
 
 /* Some USB optical bridges reject larger READ(10) transfer lengths. */
 #define READ_BLOCKS 31
+#define RECOVERY_READ_ATTEMPTS 2
 #define MAX_DVD_CONTENT_BYTES UINT64_C(9000000000)
 #define HASH_PROGRESS_INTERVAL_BYTES UINT64_C(67108864)
 #define HASH_PROGRESS_INTERVAL_NS INT64_C(1000000000)
+#define RECOVERY_POLICY_VERSION "dvd-recovery-v1"
+#define RECOVERY_RESULT_PREFIX "rip-dvd-recovery-result "
+
+#ifdef RIP_DVD_READER_TESTING
+#define MAX_TEST_FAULTS 64
+
+struct test_fault {
+    uint64_t lba;
+    int remaining_failures;
+};
+#endif
 
 enum operation {
     OPERATION_HASH,
     OPERATION_COPY,
+};
+
+enum backend_read_status {
+    BACKEND_READ_SUCCESS,
+    BACKEND_READ_MEDIA_ERROR,
+    BACKEND_READ_END,
+    BACKEND_READ_FATAL,
+};
+
+struct backend_read_result {
+    enum backend_read_status status;
+    int blocks_read;
+};
+
+struct read_backend {
+    dvdcss_t dvdcss;
+#ifdef RIP_DVD_READER_TESTING
+    int test_source_fd;
+    unsigned int test_delay_ms;
+    size_t test_fault_count;
+    struct test_fault test_faults[MAX_TEST_FAULTS];
+    int use_test_source;
+#endif
 };
 
 struct operation_state {
@@ -33,6 +68,14 @@ struct operation_state {
     int output_fd;
     uint64_t last_progress_bytes;
     struct timespec last_progress_at;
+};
+
+struct recovery_state {
+    unsigned char *bad_sector_bitmap;
+    size_t bitmap_byte_count;
+    uint64_t bad_sector_count;
+    uint64_t bad_area_count;
+    int emit_malformed_result;
 };
 
 static int fail_errno(const char *operation);
@@ -124,8 +167,189 @@ static int consume(struct operation_state *state, const unsigned char *buffer,
     return 0;
 }
 
-static int read_disc(dvdcss_t dvdcss, uint64_t size_bytes,
-                     struct operation_state *state)
+#ifdef RIP_DVD_READER_TESTING
+static int delay_test_read(unsigned int delay_ms)
+{
+    if (delay_ms == 0) {
+        return 0;
+    }
+    struct timespec remaining = {
+        .tv_sec = (time_t)(delay_ms / 1000),
+        .tv_nsec = (long)(delay_ms % 1000) * 1000000L,
+    };
+    while (nanosleep(&remaining, &remaining) != 0) {
+        if (errno != EINTR) {
+            return fail_errno("DVD test read delay failed");
+        }
+    }
+    return 0;
+}
+
+static int test_read_should_fail(struct read_backend *backend,
+                                 uint64_t lba, int block_count)
+{
+    int should_fail = 0;
+    uint64_t end_lba = lba + (uint64_t)block_count;
+    for (size_t index = 0; index < backend->test_fault_count; index++) {
+        struct test_fault *fault = &backend->test_faults[index];
+        if (fault->lba < lba || fault->lba >= end_lba ||
+            fault->remaining_failures == 0) {
+            continue;
+        }
+        should_fail = 1;
+        if (fault->remaining_failures > 0) {
+            fault->remaining_failures -= 1;
+        }
+    }
+    return should_fail;
+}
+#endif
+
+static struct backend_read_result backend_read(
+    struct read_backend *backend, unsigned char *buffer, uint64_t lba,
+    int block_count, int absolute)
+{
+#ifdef RIP_DVD_READER_TESTING
+    if (backend->use_test_source) {
+        fprintf(stderr, "test-read %" PRIu64 " %d\n", lba, block_count);
+        if (delay_test_read(backend->test_delay_ms) != 0) {
+            return (struct backend_read_result){ .status = BACKEND_READ_FATAL };
+        }
+        if (test_read_should_fail(backend, lba, block_count)) {
+            return (struct backend_read_result){
+                .status = BACKEND_READ_MEDIA_ERROR,
+            };
+        }
+        size_t length = (size_t)block_count * DVDCSS_BLOCK_SIZE;
+        ssize_t bytes_read;
+        do {
+            bytes_read = pread(backend->test_source_fd, buffer, length,
+                               (off_t)(lba * DVDCSS_BLOCK_SIZE));
+        } while (bytes_read < 0 && errno == EINTR);
+        if (bytes_read < 0) {
+            fail_errno("DVD test source read failed");
+            return (struct backend_read_result){ .status = BACKEND_READ_FATAL };
+        }
+        if (bytes_read == 0) {
+            return (struct backend_read_result){ .status = BACKEND_READ_END };
+        }
+        if (bytes_read % DVDCSS_BLOCK_SIZE != 0) {
+            fprintf(stderr, "DVD test source returned a partial sector\n");
+            return (struct backend_read_result){ .status = BACKEND_READ_FATAL };
+        }
+        return (struct backend_read_result){
+            .status = BACKEND_READ_SUCCESS,
+            .blocks_read = (int)(bytes_read / DVDCSS_BLOCK_SIZE),
+        };
+    }
+#endif
+    if (absolute &&
+        dvdcss_seek(backend->dvdcss, (int)lba, DVDCSS_NOFLAGS) < 0) {
+        const char *detail = dvdcss_error(backend->dvdcss);
+        fprintf(stderr, "DVD content seek failed at LBA %" PRIu64 "%s%s\n",
+                lba, detail ? ": " : "", detail ? detail : "");
+        return (struct backend_read_result){ .status = BACKEND_READ_FATAL };
+    }
+    int result =
+        dvdcss_read(backend->dvdcss, buffer, block_count, DVDCSS_NOFLAGS);
+    if (result < 0) {
+        return (struct backend_read_result){
+            .status = BACKEND_READ_MEDIA_ERROR,
+        };
+    }
+    if (result == 0) {
+        return (struct backend_read_result){ .status = BACKEND_READ_END };
+    }
+    return (struct backend_read_result){
+        .status = BACKEND_READ_SUCCESS,
+        .blocks_read = result,
+    };
+}
+
+static int consume_blocks(struct operation_state *state,
+                          const unsigned char *buffer, int block_count,
+                          uint64_t *bytes_processed)
+{
+    size_t byte_count = (size_t)block_count * DVDCSS_BLOCK_SIZE;
+    *bytes_processed += byte_count;
+    return consume(state, buffer, byte_count, *bytes_processed);
+}
+
+static int sector_is_bad(const struct recovery_state *recovery, uint64_t lba)
+{
+    size_t byte_index = (size_t)(lba / 8);
+    unsigned int bit_index = (unsigned int)(lba % 8);
+    return (recovery->bad_sector_bitmap[byte_index] &
+            (unsigned char)(1U << bit_index)) != 0;
+}
+
+static void mark_bad_sector(struct recovery_state *recovery, uint64_t lba)
+{
+    size_t byte_index = (size_t)(lba / 8);
+    unsigned int bit_index = (unsigned int)(lba % 8);
+    recovery->bad_sector_bitmap[byte_index] |=
+        (unsigned char)(1U << bit_index);
+    recovery->bad_sector_count += 1;
+    if (lba == 0 || !sector_is_bad(recovery, lba - 1)) {
+        recovery->bad_area_count += 1;
+    }
+}
+
+static int recover_range(struct read_backend *backend,
+                         struct operation_state *state,
+                         struct recovery_state *recovery,
+                         unsigned char *buffer, uint64_t start_lba,
+                         int block_count, uint64_t *bytes_processed)
+{
+    for (int attempt = 0; attempt < RECOVERY_READ_ATTEMPTS; attempt++) {
+        struct backend_read_result result =
+            backend_read(backend, buffer, start_lba, block_count, 1);
+        if (result.status == BACKEND_READ_FATAL) {
+            return 1;
+        }
+        if (result.status == BACKEND_READ_END) {
+            fprintf(stderr,
+                    "DVD content read ended before the declared media size\n");
+            return 1;
+        }
+        if (result.status == BACKEND_READ_MEDIA_ERROR) {
+            continue;
+        }
+        if (consume_blocks(state, buffer, result.blocks_read,
+                           bytes_processed) != 0) {
+            return 1;
+        }
+        if (result.blocks_read == block_count) {
+            return 0;
+        }
+        return recover_range(backend, state, recovery, buffer,
+                             start_lba + (uint64_t)result.blocks_read,
+                             block_count - result.blocks_read,
+                             bytes_processed);
+    }
+
+    if (block_count == 1) {
+        memset(buffer, 0, DVDCSS_BLOCK_SIZE);
+        if (consume_blocks(state, buffer, 1, bytes_processed) != 0) {
+            return 1;
+        }
+        mark_bad_sector(recovery, start_lba);
+        return 0;
+    }
+
+    int left_block_count = block_count / 2;
+    if (recover_range(backend, state, recovery, buffer, start_lba,
+                      left_block_count, bytes_processed) != 0) {
+        return 1;
+    }
+    return recover_range(backend, state, recovery, buffer,
+                         start_lba + (uint64_t)left_block_count,
+                         block_count - left_block_count, bytes_processed);
+}
+
+static int read_disc(struct read_backend *backend, uint64_t size_bytes,
+                     struct operation_state *state,
+                     struct recovery_state *recovery)
 {
     void *allocation = NULL;
     if (posix_memalign(&allocation, DVDCSS_BLOCK_SIZE,
@@ -135,35 +359,54 @@ static int read_disc(dvdcss_t dvdcss, uint64_t size_bytes,
     }
     unsigned char *buffer = allocation;
     uint64_t blocks_remaining = size_bytes / DVDCSS_BLOCK_SIZE;
-    uint64_t bytes_read = 0;
+    uint64_t bytes_processed = 0;
+    int require_absolute_read = 0;
     int status = 0;
     while (blocks_remaining > 0) {
         int requested = blocks_remaining > READ_BLOCKS
                             ? READ_BLOCKS
                             : (int)blocks_remaining;
-        int result = dvdcss_read(dvdcss, buffer, requested, DVDCSS_NOFLAGS);
-        if (result < 0) {
-            status = fail_dvdcss_read(dvdcss, bytes_read);
-            break;
-        }
-        if (result == 0) {
-            fprintf(stderr, "DVD content read ended before the declared media size\n");
+        uint64_t start_lba = bytes_processed / DVDCSS_BLOCK_SIZE;
+        struct backend_read_result result =
+            backend_read(backend, buffer, start_lba, requested,
+                         require_absolute_read);
+        require_absolute_read = 0;
+        if (result.status == BACKEND_READ_FATAL) {
             status = 1;
             break;
         }
-        size_t byte_count = (size_t)result * DVDCSS_BLOCK_SIZE;
-        bytes_read += byte_count;
-        if (consume(state, buffer, byte_count, bytes_read) != 0) {
+        if (result.status == BACKEND_READ_END) {
+            fprintf(stderr,
+                    "DVD content read ended before the declared media size\n");
             status = 1;
             break;
         }
-        blocks_remaining -= (uint64_t)result;
+        if (result.status == BACKEND_READ_MEDIA_ERROR) {
+            if (recovery == NULL) {
+                status = fail_dvdcss_read(backend->dvdcss, bytes_processed);
+                break;
+            }
+            if (recover_range(backend, state, recovery, buffer, start_lba,
+                              requested, &bytes_processed) != 0) {
+                status = 1;
+                break;
+            }
+            blocks_remaining -= (uint64_t)requested;
+            require_absolute_read = blocks_remaining > 0;
+            continue;
+        }
+        if (consume_blocks(state, buffer, result.blocks_read,
+                           &bytes_processed) != 0) {
+            status = 1;
+            break;
+        }
+        blocks_remaining -= (uint64_t)result.blocks_read;
     }
     free(allocation);
     return status;
 }
 
-static int run_hash(dvdcss_t dvdcss, uint64_t size_bytes)
+static int run_hash(struct read_backend *backend, uint64_t size_bytes)
 {
     EVP_MD_CTX *hash = EVP_MD_CTX_new();
     if (hash == NULL || EVP_DigestInit_ex(hash, EVP_sha256(), NULL) != 1) {
@@ -172,7 +415,8 @@ static int run_hash(dvdcss_t dvdcss, uint64_t size_bytes)
         return 1;
     }
     char size_text[32];
-    int size_length = snprintf(size_text, sizeof(size_text), "%" PRIu64, size_bytes);
+    int size_length =
+        snprintf(size_text, sizeof(size_text), "%" PRIu64, size_bytes);
     static const char prefix[] = "rip-dvd-content-v2";
     if (size_length <= 0 || (size_t)size_length >= sizeof(size_text) ||
         EVP_DigestUpdate(hash, prefix, sizeof(prefix)) != 1 ||
@@ -191,7 +435,7 @@ static int run_hash(dvdcss_t dvdcss, uint64_t size_bytes)
         EVP_MD_CTX_free(hash);
         return fail_errno("DVD hash progress clock failed");
     }
-    int status = read_disc(dvdcss, size_bytes, &state);
+    int status = read_disc(backend, size_bytes, &state, NULL);
     if (status == 0 && state.last_progress_bytes != size_bytes) {
         status = emit_hash_progress(&state, size_bytes, 1);
     }
@@ -209,11 +453,42 @@ static int run_hash(dvdcss_t dvdcss, uint64_t size_bytes)
     for (unsigned int index = 0; index < digest_length; index++) {
         printf("%02x", digest[index]);
     }
-    return fflush(stdout) == 0 ? 0 : fail_errno("DVD content hash output failed");
+    return fflush(stdout) == 0 ? 0 :
+        fail_errno("DVD content hash output failed");
 }
 
-static int run_copy(dvdcss_t dvdcss, const char *output_path,
-                    uint64_t size_bytes)
+static int emit_recovery_result(uint64_t size_bytes,
+                                const struct recovery_state *recovery)
+{
+    if (recovery->emit_malformed_result) {
+        fprintf(stderr, RECOVERY_RESULT_PREFIX "{malformed}\n");
+        return ferror(stderr) == 0 ? 0 :
+            fail_errno("DVD recovery result output failed");
+    }
+    uint64_t recovered_byte_count =
+        size_bytes - recovery->bad_sector_count * DVDCSS_BLOCK_SIZE;
+    fprintf(stderr,
+            RECOVERY_RESULT_PREFIX
+            "{\"protocolVersion\":1,\"declaredByteCount\":%" PRIu64
+            ",\"recoveredByteCount\":%" PRIu64
+            ",\"recoveryPolicyVersion\":\"" RECOVERY_POLICY_VERSION
+            "\",\"badSectorCount\":%" PRIu64
+            ",\"badAreaCount\":%" PRIu64
+            ",\"badSectorBitmapHex\":\"",
+            size_bytes, recovered_byte_count, recovery->bad_sector_count,
+            recovery->bad_area_count);
+    if (recovery->bad_sector_count > 0) {
+        for (size_t index = 0; index < recovery->bitmap_byte_count; index++) {
+            fprintf(stderr, "%02x", recovery->bad_sector_bitmap[index]);
+        }
+    }
+    fprintf(stderr, "\"}\n");
+    return ferror(stderr) == 0 ? 0 :
+        fail_errno("DVD recovery result output failed");
+}
+
+static int run_copy(struct read_backend *backend, const char *output_path,
+                    uint64_t size_bytes, int emit_malformed_result)
 {
     int output_fd = open(output_path,
                          O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
@@ -221,18 +496,37 @@ static int run_copy(dvdcss_t dvdcss, const char *output_path,
     if (output_fd < 0) {
         return fail_errno("DVD archive output open failed");
     }
+    uint64_t total_sector_count = size_bytes / DVDCSS_BLOCK_SIZE;
+    size_t bitmap_byte_count = (size_t)((total_sector_count + 7) / 8);
+    unsigned char *bad_sector_bitmap = calloc(bitmap_byte_count, 1);
+    if (bad_sector_bitmap == NULL) {
+        close(output_fd);
+        fprintf(stderr, "DVD recovery map allocation failed\n");
+        return 1;
+    }
+    struct recovery_state recovery = {
+        .bad_sector_bitmap = bad_sector_bitmap,
+        .bitmap_byte_count = bitmap_byte_count,
+        .bad_sector_count = 0,
+        .bad_area_count = 0,
+        .emit_malformed_result = emit_malformed_result,
+    };
     struct operation_state state = {
         .operation = OPERATION_COPY,
         .hash = NULL,
         .output_fd = output_fd,
     };
-    int status = read_disc(dvdcss, size_bytes, &state);
+    int status = read_disc(backend, size_bytes, &state, &recovery);
     if (status == 0 && fsync(output_fd) != 0) {
         status = fail_errno("DVD archive sync failed");
     }
     if (close(output_fd) != 0 && status == 0) {
         status = fail_errno("DVD archive close failed");
     }
+    if (status == 0) {
+        status = emit_recovery_result(size_bytes, &recovery);
+    }
+    free(bad_sector_bitmap);
     return status;
 }
 
@@ -254,12 +548,149 @@ static int await_copy_authorization(void)
     return 0;
 }
 
+#ifdef RIP_DVD_READER_TESTING
+static int parse_test_delay(const char *text, unsigned int *delay_ms)
+{
+    char *end = NULL;
+    errno = 0;
+    unsigned long value = strtoul(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0' || value > 1000) {
+        fprintf(stderr, "DVD test read delay is invalid\n");
+        return 1;
+    }
+    *delay_ms = (unsigned int)value;
+    return 0;
+}
+
+static int parse_test_faults(char *text, uint64_t total_sector_count,
+                             struct read_backend *backend)
+{
+    if (strcmp(text, "none") == 0) {
+        return 0;
+    }
+    char *save = NULL;
+    for (char *entry = strtok_r(text, ",", &save); entry != NULL;
+         entry = strtok_r(NULL, ",", &save)) {
+        if (backend->test_fault_count >= MAX_TEST_FAULTS) {
+            fprintf(stderr, "DVD test fault count is invalid\n");
+            return 1;
+        }
+        char *separator = strchr(entry, ':');
+        if (separator == NULL || strchr(separator + 1, ':') != NULL) {
+            fprintf(stderr, "DVD test fault is invalid\n");
+            return 1;
+        }
+        *separator = '\0';
+        char *lba_end = NULL;
+        errno = 0;
+        unsigned long long lba_value = strtoull(entry, &lba_end, 10);
+        if (errno != 0 || lba_end == entry || *lba_end != '\0' ||
+            (uint64_t)lba_value >= total_sector_count) {
+            fprintf(stderr, "DVD test fault LBA is invalid\n");
+            return 1;
+        }
+        int remaining_failures = -1;
+        if (strcmp(separator + 1, "always") != 0) {
+            char *count_end = NULL;
+            errno = 0;
+            long count = strtol(separator + 1, &count_end, 10);
+            if (errno != 0 || count_end == separator + 1 ||
+                *count_end != '\0' || count <= 0 || count > 1000) {
+                fprintf(stderr, "DVD test fault retry count is invalid\n");
+                return 1;
+            }
+            remaining_failures = (int)count;
+        }
+        for (size_t index = 0; index < backend->test_fault_count; index++) {
+            if (backend->test_faults[index].lba == (uint64_t)lba_value) {
+                fprintf(stderr, "DVD test fault LBA is duplicated\n");
+                return 1;
+            }
+        }
+        backend->test_faults[backend->test_fault_count] =
+            (struct test_fault){
+                .lba = (uint64_t)lba_value,
+                .remaining_failures = remaining_failures,
+            };
+        backend->test_fault_count += 1;
+    }
+    return 0;
+}
+
+static int run_test_copy(int argc, char **argv)
+{
+    if (argc != 8) {
+        fprintf(stderr,
+                "usage: %s copy-test SOURCE OUTPUT SIZE FAULTS DELAY MODE\n",
+                argv[0]);
+        return 2;
+    }
+    uint64_t size_bytes = 0;
+    if (parse_size(argv[4], &size_bytes) != 0) {
+        return 2;
+    }
+    int malformed_result;
+    if (strcmp(argv[7], "valid") == 0) {
+        malformed_result = 0;
+    } else if (strcmp(argv[7], "malformed") == 0) {
+        malformed_result = 1;
+    } else {
+        fprintf(stderr, "DVD test result mode is invalid\n");
+        return 2;
+    }
+    struct read_backend backend = {
+        .dvdcss = NULL,
+        .test_source_fd = -1,
+        .use_test_source = 1,
+    };
+    if (parse_test_delay(argv[6], &backend.test_delay_ms) != 0) {
+        return 2;
+    }
+    char *faults = strdup(argv[5]);
+    if (faults == NULL) {
+        fprintf(stderr, "DVD test fault allocation failed\n");
+        return 1;
+    }
+    int fault_status = parse_test_faults(
+        faults, size_bytes / DVDCSS_BLOCK_SIZE, &backend);
+    free(faults);
+    if (fault_status != 0) {
+        return 2;
+    }
+    backend.test_source_fd =
+        open(argv[2], O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (backend.test_source_fd < 0) {
+        return fail_errno("DVD test source open failed");
+    }
+    struct stat source;
+    if (fstat(backend.test_source_fd, &source) != 0 ||
+        !S_ISREG(source.st_mode)) {
+        close(backend.test_source_fd);
+        fprintf(stderr, "DVD test source is invalid\n");
+        return 1;
+    }
+    int status = run_copy(&backend, argv[3], size_bytes, malformed_result);
+    if (close(backend.test_source_fd) != 0 && status == 0) {
+        status = fail_errno("DVD test source close failed");
+    }
+    return status;
+}
+#endif
+
 int main(int argc, char **argv)
 {
-    int authorized_copy = argc > 1 && strcmp(argv[1], "copy-authorized") == 0;
+#ifdef RIP_DVD_READER_TESTING
+    if (argc > 1 && strcmp(argv[1], "copy-test") == 0) {
+        return run_test_copy(argc, argv);
+    }
+#endif
+    int authorized_copy = argc > 1 &&
+        strcmp(argv[1], "copy-authorized") == 0;
     if (argc < 4 || (strcmp(argv[1], "hash") != 0 &&
                      strcmp(argv[1], "copy") != 0 && !authorized_copy)) {
-        fprintf(stderr, "usage: %s hash DEVICE SIZE | copy DEVICE OUTPUT SIZE\n", argv[0]);
+        fprintf(stderr,
+                "usage: %s hash DEVICE SIZE | copy DEVICE OUTPUT SIZE\n",
+                argv[0]);
         return 2;
     }
     enum operation operation = strcmp(argv[1], "hash") == 0
@@ -271,7 +702,8 @@ int main(int argc, char **argv)
         return 2;
     }
     uint64_t size_bytes = 0;
-    if (parse_size(argv[operation == OPERATION_HASH ? 3 : 4], &size_bytes) != 0) {
+    if (parse_size(argv[operation == OPERATION_HASH ? 3 : 4],
+                   &size_bytes) != 0) {
         return 2;
     }
     if (authorized_copy && await_copy_authorization() != 0) {
@@ -282,9 +714,10 @@ int main(int argc, char **argv)
         fprintf(stderr, "DVD content open failed\n");
         return 1;
     }
+    struct read_backend backend = { .dvdcss = dvdcss };
     int status = operation == OPERATION_HASH
-                     ? run_hash(dvdcss, size_bytes)
-                     : run_copy(dvdcss, argv[3], size_bytes);
+                     ? run_hash(&backend, size_bytes)
+                     : run_copy(&backend, argv[3], size_bytes, 0);
     if (dvdcss_close(dvdcss) != 0 && status == 0) {
         fprintf(stderr, "DVD content close failed\n");
         status = 1;

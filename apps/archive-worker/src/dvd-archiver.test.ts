@@ -24,13 +24,65 @@ import {
   withCancelledDvdArchiveInactive,
   type DvdCopyRunner,
 } from "./dvd-archiver.js";
-import { createCleanDvdRecoveryResult } from "./dvd-recovery-contracts.js";
+import {
+  createCleanDvdRecoveryResult,
+  createDamagedDvdRecoveryResult,
+  DVD_RECOVERY_RESULT_PREFIX,
+} from "./dvd-recovery-contracts.js";
 
 const temporaryDirectories: string[] = [];
 const orphanedWriterPids: number[] = [];
 const supportsLinuxWriterOwnership =
   existsSync("/proc/self/fd") &&
   spawnSync("flock", ["--version"], { stdio: "ignore" }).status === 0;
+
+function emitCleanRecoveryProtocol(
+  stderr: EventEmitter,
+  declaredByteCount: number,
+): void {
+  stderr.emit(
+    "data",
+    Buffer.from(
+      `${DVD_RECOVERY_RESULT_PREFIX}${JSON.stringify({
+        protocolVersion: 1,
+        declaredByteCount,
+        recoveredByteCount: declaredByteCount,
+        recoveryPolicyVersion: "dvd-recovery-v1",
+        badSectorCount: 0,
+        badAreaCount: 0,
+        badSectorBitmapHex: "",
+      })}\n`,
+    ),
+  );
+}
+
+function createMockDvdCopyChild() {
+  const stderr = Object.assign(new EventEmitter(), { destroy: vi.fn() });
+  const authorizationReady = Object.assign(new EventEmitter(), {
+    destroy: vi.fn(),
+  });
+  const authorizationStart = { destroy: vi.fn(), end: vi.fn() };
+  return Object.assign(new EventEmitter(), {
+    stderr,
+    stdio: [
+      null,
+      null,
+      stderr,
+      null,
+      authorizationReady,
+      authorizationStart,
+    ] as [
+      null,
+      null,
+      typeof stderr,
+      null,
+      typeof authorizationReady,
+      typeof authorizationStart,
+    ],
+    kill: vi.fn(() => true),
+    unref: vi.fn(),
+  });
+}
 
 function createOriginalsLibrary(): string {
   const directory = mkdtempSync(join(tmpdir(), "rip-dvd-archive-"));
@@ -573,6 +625,7 @@ describe("DVD archive publication", () => {
       Buffer.from("rip-dvd-copy-authorization-ready\n"),
     );
     stderr.emit("data", Buffer.from("4 bytes copied, 1 s\r9 bytes copied, 2 s\n"));
+    emitCleanRecoveryProtocol(stderr, 9);
     child.emit("close", 0, null);
     await completion;
 
@@ -605,6 +658,80 @@ describe("DVD archive publication", () => {
     );
     expect(authorizationStart.end).toHaveBeenCalledWith("1");
     expect(copied).toEqual([4, 9]);
+  });
+
+  it("consumes structured unreadable-sector evidence from the native reader", async () => {
+    const originalsLibraryPath = createOriginalsLibrary();
+    const child = createMockDvdCopyChild();
+    const runner = createNodeDvdCopyRunner({
+      requireInactive: () => undefined,
+      spawnProcess: vi.fn(() => child),
+    });
+    const sizeBytes = 4 * 2_048;
+    const completion = runner.copy({
+      devicePath: "/dev/zero",
+      outputPath: join(originalsLibraryPath, ".disc.iso.rip-dvd-partial"),
+      sizeBytes,
+      signal: new AbortController().signal,
+      onBytesCopied: () => undefined,
+    });
+
+    child.stdio[4].emit(
+      "data",
+      Buffer.from("rip-dvd-copy-authorization-ready\n"),
+    );
+    child.stderr.emit(
+      "data",
+      Buffer.from(
+        `${DVD_RECOVERY_RESULT_PREFIX}${JSON.stringify({
+          protocolVersion: 1,
+          declaredByteCount: sizeBytes,
+          recoveredByteCount: 2 * 2_048,
+          recoveryPolicyVersion: "dvd-recovery-v1",
+          badSectorCount: 2,
+          badAreaCount: 1,
+          badSectorBitmapHex: "06",
+        })}\n`,
+      ),
+    );
+    child.emit("close", 0, null);
+
+    await expect(completion).resolves.toEqual(
+      createDamagedDvdRecoveryResult(sizeBytes, [
+        { startLba: 1, sectorCount: 2 },
+      ]),
+    );
+  });
+
+  it("rejects a malformed native recovery result", async () => {
+    const originalsLibraryPath = createOriginalsLibrary();
+    const child = createMockDvdCopyChild();
+    const runner = createNodeDvdCopyRunner({
+      requireInactive: () => undefined,
+      spawnProcess: vi.fn(() => child),
+    });
+    const completion = runner.copy({
+      devicePath: "/dev/zero",
+      outputPath: join(originalsLibraryPath, ".disc.iso.rip-dvd-partial"),
+      sizeBytes: 2_048,
+      signal: new AbortController().signal,
+      onBytesCopied: () => undefined,
+    });
+    const assertion = expect(completion).rejects.toThrow(
+      "DVD recovery helper result is malformed",
+    );
+
+    child.stdio[4].emit(
+      "data",
+      Buffer.from("rip-dvd-copy-authorization-ready\n"),
+    );
+    child.stderr.emit(
+      "data",
+      Buffer.from(`${DVD_RECOVERY_RESULT_PREFIX}{not-json}\n`),
+    );
+    child.emit("close", 0, null);
+
+    await assertion;
   });
 
   it("preserves a copy failure diagnostic after extensive progress", async () => {
@@ -732,6 +859,7 @@ describe("DVD archive publication", () => {
         "data",
         Buffer.from("rip-dvd-copy-authorization-ready\n"),
       );
+      emitCleanRecoveryProtocol(child.stderr, 9);
       child.emit("close", 0, null);
     }
     await expect(Promise.all(copies)).resolves.toEqual([
@@ -973,6 +1101,7 @@ describe("DVD archive publication", () => {
       "data",
       Buffer.from("rip-dvd-copy-authorization-ready\n"),
     );
+    emitCleanRecoveryProtocol(children[1]!.stderr, 9);
     children[1]!.emit("close", 0, null);
     await expect(retry).resolves.toEqual(createCleanDvdRecoveryResult(9));
   });
@@ -1128,6 +1257,52 @@ describe("DVD archive publication", () => {
       `${digest}.iso`,
     ))).toBe(false);
     expect(readFileSync(`${partialPath}.failed`)).toEqual(content);
+  });
+
+  it("retains a rescued image for validation without publishing it", async () => {
+    const originalsLibraryPath = createOriginalsLibrary();
+    const content = Buffer.alloc(4 * 2_048, 7);
+    const digest = "7".repeat(64);
+    const progress: ArchiveJobProgress[] = [];
+    let partialPath: string | undefined;
+    const runner: DvdCopyRunner = {
+      copy: vi.fn(async ({ outputPath, sizeBytes }) => {
+        partialPath = outputPath;
+        writeFileSync(outputPath, content);
+        return createDamagedDvdRecoveryResult(sizeBytes, [
+          { startLba: 1, sectorCount: 1 },
+          { startLba: 3, sectorCount: 1 },
+        ]);
+      }),
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    };
+    const verifySource = vi.fn(async () => undefined);
+
+    await expect(
+      preserveDvdArchive({
+        devicePath: "/dev/sr0",
+        fingerprint: `sha256:${digest}`,
+        originalsLibraryPath,
+        runner,
+        signal: new AbortController().signal,
+        sizeBytes: content.byteLength,
+        verifySource,
+        onProgress: (value) => progress.push(value),
+      }),
+    ).rejects.toThrow(
+      "DVD rescue requires validation: 2 unreadable sectors in 2 areas; LBAs 1, 3",
+    );
+
+    const root = realpathSync(originalsLibraryPath);
+    expect(existsSync(join(root, `${digest}.iso`))).toBe(false);
+    expect(readFileSync(`${partialPath}.failed`)).toEqual(content);
+    expect(verifySource).toHaveBeenCalledOnce();
+    expect(progress.at(-1)).toEqual({
+      phase: "verifying",
+      progressPercent: 99,
+    });
   });
 
   it("moves a failed partial image aside without publishing an archive", async () => {

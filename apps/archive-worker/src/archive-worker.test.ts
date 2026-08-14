@@ -26,7 +26,10 @@ import {
   type OpticalDriveHardware,
 } from "./archive-worker.js";
 import type { DvdCopyRunner } from "./dvd-archiver.js";
-import { createCleanDvdRecoveryResult } from "./dvd-recovery-contracts.js";
+import {
+  createCleanDvdRecoveryResult,
+  createDamagedDvdRecoveryResult,
+} from "./dvd-recovery-contracts.js";
 import { DiscInspectionError } from "./disc-inspection-error.js";
 import {
   createLinuxOpticalDriveHardware,
@@ -361,6 +364,99 @@ describe("archive worker polling", () => {
     });
     expect(readFileSync(archive.archivePath, "utf8")).toBe("dvd-image");
     expect(existsSync(`${archive.archivePath}.failed`)).toBe(false);
+  });
+
+  it("retains an unvalidated rescued image and reports bounded damage evidence", async () => {
+    const access = openTestDataAccess();
+    const originalsLibraryPath = mkdtempSync(
+      join(tmpdir(), "rip-dvd-originals-rescue-"),
+    );
+    temporaryDirectories.push(originalsLibraryPath);
+    const fingerprint = `dvdmeta-sha256:${"7".repeat(64)}`;
+    const scanData = {
+      schemaVersion: 2 as const,
+      contentId: fingerprint,
+      titles: [
+        {
+          number: 1,
+          durationSeconds: 3_600,
+          chapters: 10,
+          audioStreams: [],
+          subtitles: [],
+        },
+      ],
+    };
+    const discoveredDrive = {
+      devicePath: "/dev/sr0",
+      displayName: "Rescue drive",
+      vendor: "Pioneer",
+      product: "DVD-RW",
+      serialNumber: "ARCHIVE-RESCUE-001",
+    };
+    const drive = access.catalog.reconcileOpticalDrives([
+      { ...discoveredDrive, isConfiguredDevice: true },
+    ])[0]!;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint,
+      scanData,
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    const request = access.archiveRequests.create({ detectedDiscId: disc.id });
+    const sizeBytes = 4 * 2_048;
+    const rescuedImage = Buffer.alloc(sizeBytes, 5);
+    rescuedImage.fill(0, 2_048, 4_096);
+    let rescuedPartialPath: string | undefined;
+    const copyRunner: DvdCopyRunner = {
+      copy: vi.fn(async ({ outputPath }) => {
+        rescuedPartialPath = outputPath;
+        writeFileSync(outputPath, rescuedImage);
+        return createDamagedDvdRecoveryResult(sizeBytes, [
+          { startLba: 1, sectorCount: 1 },
+        ]);
+      }),
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    };
+
+    await pollArchiveWorker({
+      access,
+      configuredDevicePath: "/dev/sr0",
+      copyRunner,
+      hardware: {
+        ...stableDeviceBinding(),
+        discover: vi.fn().mockResolvedValue([discoveredDrive]),
+        scanDvd: vi.fn().mockResolvedValue({
+          fingerprint,
+          scanData,
+          sizeBytes,
+        }),
+      },
+      log: vi.fn(),
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+      workerId: "archive-worker-rescue-test",
+    });
+
+    const failure = access.archiveJobs.list(["failed"])[0]!;
+    expect(failure).toMatchObject({
+      archiveRequestId: request.id,
+      status: "failed",
+      progressPhase: "verifying",
+      progressPercent: 99,
+      errorMessage:
+        "DVD rescue requires validation: 1 unreadable sector in 1 area; LBAs 1",
+      originalDiscArchiveId: null,
+    });
+    expect(failure.errorMessage).not.toContain(originalsLibraryPath);
+    expect(failure.errorMessage).not.toContain(discoveredDrive.devicePath);
+    expect(access.archiveRequests.list(["needs_attention"])).toEqual([
+      expect.objectContaining({ id: request.id }),
+    ]);
+    expect(access.catalog.listOriginalDiscArchives()).toEqual([]);
+    expect(readFileSync(`${rescuedPartialPath}.failed`)).toEqual(rescuedImage);
   });
 
   it("copies requested work on different drives within configured concurrency", async () => {
