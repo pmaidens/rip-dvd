@@ -17,7 +17,7 @@ One started attempt to fulfill an Archive Request by preserving its Detected Dis
 _Avoid_: Rip job, copy job
 
 **Archive Request**:
-An operator's durable intent to preserve a Detected Disc. It may wait for the matching disc and may produce more than one Archive Job attempt.
+An operator's durable intent to preserve a Detected Disc. It may wait for the matching disc, may produce more than one Archive Job attempt, and owns any resumable DVD rescue state shared by those attempts.
 _Avoid_: Queued Archive Job, approval
 
 **Archive Integrity**:

@@ -33,6 +33,16 @@ export type DvdRecoveryResult =
   | CleanDvdRecoveryResult
   | DamagedDvdRecoveryResult;
 
+export interface DvdRecoveryProtocolPayload {
+  protocolVersion: 1;
+  declaredByteCount: number;
+  recoveredByteCount: number;
+  recoveryPolicyVersion: typeof DVD_RECOVERY_POLICY_VERSION;
+  badSectorCount: number;
+  badAreaCount: number;
+  badSectorBitmapHex: string;
+}
+
 export interface PublishableDvdValidationResult {
   outcome: "publish";
   integrityEvidence:
@@ -177,6 +187,71 @@ export function validateDvdRecoveryResult(
     };
   }
   throw new Error("DVD recovery result is invalid");
+}
+
+export function validateResumedDvdRecoveryResult(
+  result: unknown,
+  prior: DamagedDvdRecoveryResult,
+  expectedByteCount: number,
+): DvdValidationResult {
+  const validation = validateDvdRecoveryResult(result, expectedByteCount);
+  if (validation.outcome === "requires_validation") {
+    let priorIndex = 0;
+    for (const range of validation.recoveryResult.unrecoveredSectorRanges) {
+      while (
+        priorIndex < prior.unrecoveredSectorRanges.length &&
+        prior.unrecoveredSectorRanges[priorIndex]!.startLba +
+          prior.unrecoveredSectorRanges[priorIndex]!.sectorCount <=
+          range.startLba
+      ) {
+        priorIndex += 1;
+      }
+      const priorRange = prior.unrecoveredSectorRanges[priorIndex];
+      if (
+        priorRange === undefined ||
+        range.startLba < priorRange.startLba ||
+        range.startLba + range.sectorCount >
+          priorRange.startLba + priorRange.sectorCount
+      ) {
+        throw new Error("Resumed DVD recovery result is invalid");
+      }
+    }
+  }
+  return validation;
+}
+
+export function formatDvdRecoveryResumeBitmap(
+  result: DamagedDvdRecoveryResult,
+): string {
+  const totalSectorCount = result.declaredByteCount / DVD_SECTOR_SIZE_BYTES;
+  const bitmap = Buffer.alloc(Math.ceil(totalSectorCount / 8));
+  for (const range of result.unrecoveredSectorRanges) {
+    for (
+      let lba = range.startLba;
+      lba < range.startLba + range.sectorCount;
+      lba += 1
+    ) {
+      bitmap[Math.floor(lba / 8)]! |= 1 << (lba % 8);
+    }
+  }
+  return bitmap.toString("hex");
+}
+
+export function createDvdRecoveryProtocolPayload(
+  result: DvdRecoveryResult,
+): DvdRecoveryProtocolPayload {
+  return {
+    protocolVersion: 1,
+    declaredByteCount: result.declaredByteCount,
+    recoveredByteCount: result.recoveredByteCount,
+    recoveryPolicyVersion: result.recoveryPolicyVersion,
+    badSectorCount: result.badSectorCount,
+    badAreaCount: result.badAreaCount,
+    badSectorBitmapHex:
+      result.outcome === "clean"
+        ? ""
+        : formatDvdRecoveryResumeBitmap(result),
+  };
 }
 
 function parseBadSectorBitmap(
