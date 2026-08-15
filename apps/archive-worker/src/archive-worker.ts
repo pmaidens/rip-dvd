@@ -223,8 +223,9 @@ async function pollArchiveWorkerWithDriveAdmission(
       const detectedDiscId = completed.inspection.detectedDiscId;
       if (
         detectedDiscId === null ||
-        access.archiveRequests.listRelevantForDetectedDiscs([detectedDiscId])[0]
-          ?.status !== "pending"
+        access.archiveRequests.findPendingForDetectedDiscIdentity(
+          detectedDiscId,
+        ) === null
       ) {
         return;
       }

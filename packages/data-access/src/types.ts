@@ -975,6 +975,9 @@ export interface ArchiveRequestAccess {
   listRelevantForDetectedDiscs(
     detectedDiscIds: readonly DetectedDiscId[],
   ): ArchiveRequest[];
+  findPendingForDetectedDiscIdentity(
+    detectedDiscId: DetectedDiscId,
+  ): ArchiveRequest | null;
 }
 
 export interface EncodeJobAccess {

@@ -18,6 +18,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { completeCatalogReview } from "./catalog.test-support.js";
 import { createRawDvdContentIdHasher } from "./dvd-content-id.js";
 import { createDvdMetadataFingerprint } from "./dvd-metadata-fingerprint.js";
+import { decodeDvdTitleMap } from "./dvd-scan.js";
 import {
   ARCHIVE_JOB_LEASE_DURATION_MS,
   DISC_INSPECTION_LEASE_DURATION_MS,
@@ -268,6 +269,9 @@ function completeDiscInspection(
     >[0]["opticalDriveId"];
     mediaGeneration: string;
     fingerprint: string;
+    scanData?: unknown;
+    sizeBytes?: number;
+    volumeLabel?: string;
   },
 ) {
   const started = access.discInspections.beginOrResume({
@@ -277,10 +281,34 @@ function completeDiscInspection(
   if (!started.claim) {
     throw new Error("Expected a new Disc Inspection claim");
   }
+  if (input.sizeBytes !== undefined) {
+    const titleMap = decodeDvdTitleMap(input.scanData);
+    access.discInspections.record(started.claim, {
+      type: "metadata",
+      volumeLabel: input.volumeLabel ?? null,
+      titleCount: titleMap?.titles.length ?? 0,
+      chapterCount:
+        titleMap?.titles.reduce((total, title) => total + title.chapters, 0) ?? 0,
+      audioStreamCount:
+        titleMap?.titles.reduce(
+          (total, title) => total + title.audioStreams.length,
+          0,
+        ) ?? 0,
+      subtitleStreamCount:
+        titleMap?.titles.reduce(
+          (total, title) => total + title.subtitles.length,
+          0,
+        ) ?? 0,
+      totalBytes: input.sizeBytes,
+    });
+  }
   const disc = access.catalog.registerDetectedDisc({
     opticalDriveId: input.opticalDriveId,
     discKind: "dvd",
     fingerprint: input.fingerprint,
+    scanData: input.scanData,
+    sizeBytes: input.sizeBytes,
+    volumeLabel: input.volumeLabel,
   });
   const scanned = disc.status === "detected"
     ? access.catalog.updateDetectedDiscStatus(disc.id, "scanned")
@@ -10319,6 +10347,233 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     access.close();
   });
 
+  it("continues an Archive Request on another matching Optical Drive", () => {
+    const access = openTestDatabase();
+    const firstDrive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const secondDrive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr1",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const fingerprint = `dvdmeta-sha256:${"4".repeat(64)}`;
+    const scanData = {
+      schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+      contentId: fingerprint,
+      titles: [{
+        number: 1,
+        durationSeconds: 3_600,
+        chapters: 10,
+        audioStreams: [],
+        subtitles: [],
+      }],
+    };
+    const first = completeDiscInspection(access, {
+      opticalDriveId: firstDrive.id,
+      mediaGeneration: "generation-1",
+      fingerprint,
+      scanData,
+      sizeBytes: 4 * 2_048,
+      volumeLabel: "MATCHING_DISC",
+    });
+    const request = access.archiveRequests.create({
+      detectedDiscId: first.disc.id,
+    });
+    const firstAttempt = access.archiveJobs.startForInspection(
+      first.inspection.id,
+      "worker-1",
+    )!;
+    access.archiveJobs.fail(firstAttempt, "unreadable sector");
+    access.archiveRequests.retry(request.id);
+
+    const second = completeDiscInspection(access, {
+      opticalDriveId: secondDrive.id,
+      mediaGeneration: "generation-2",
+      fingerprint,
+      scanData,
+      sizeBytes: 4 * 2_048,
+      volumeLabel: "MATCHING_DISC",
+    });
+    expect(
+      access.archiveRequests.findPendingForDetectedDiscIdentity(second.disc.id),
+    ).toMatchObject({ id: request.id });
+    const secondAttempt = access.archiveJobs.startForInspection(
+      second.inspection.id,
+      "worker-2",
+    );
+
+    expect(secondAttempt).toMatchObject({
+      archiveRequestId: request.id,
+      attemptOrdinal: 2,
+      detectedDiscId: second.disc.id,
+      status: "running",
+    });
+    const attempts = access.archiveJobs.list();
+    expect(attempts.map(({ id, detectedDiscId }) => ({ id, detectedDiscId })))
+      .toEqual([
+        { id: firstAttempt.id, detectedDiscId: first.disc.id },
+        { id: secondAttempt!.id, detectedDiscId: second.disc.id },
+      ]);
+    expect(
+      access.catalog
+        .listDetectedDiscs(undefined, {
+          ids: attempts.map(({ detectedDiscId }) => detectedDiscId),
+        })
+        .map(({ id, opticalDriveId }) => ({ id, opticalDriveId })),
+    ).toEqual([
+      { id: first.disc.id, opticalDriveId: firstDrive.id },
+      { id: second.disc.id, opticalDriveId: secondDrive.id },
+    ]);
+    expect(JSON.stringify(attempts)).not.toContain("/dev/sr");
+    access.close();
+  });
+
+  it("rejects incomplete or mismatched alternate-drive identity evidence", () => {
+    const access = openTestDatabase();
+    const fingerprint = `dvdmeta-sha256:${"5".repeat(64)}`;
+    const scanData = {
+      schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+      contentId: fingerprint,
+      titles: [{
+        number: 1,
+        durationSeconds: 3_600,
+        chapters: 10,
+        audioStreams: [],
+        subtitles: [],
+      }],
+    };
+    const completeEvidence = ({
+      devicePath,
+      evidenceFingerprint,
+      evidenceScanData,
+      mediaGeneration,
+      totalBytes,
+    }: {
+      devicePath: string;
+      evidenceFingerprint: string;
+      evidenceScanData?: unknown;
+      mediaGeneration: string;
+      totalBytes?: number;
+    }) => {
+      const drive = access.catalog.upsertOpticalDrive({
+        devicePath,
+        isEnabled: true,
+        isPresent: true,
+      });
+      return {
+        ...completeDiscInspection(access, {
+          fingerprint: evidenceFingerprint,
+          mediaGeneration,
+          opticalDriveId: drive.id,
+          scanData: evidenceScanData,
+          sizeBytes: totalBytes,
+          volumeLabel: "IDENTITY_EVIDENCE",
+        }),
+        drive,
+      };
+    };
+    const source = completeEvidence({
+      devicePath: "/dev/source",
+      evidenceFingerprint: fingerprint,
+      evidenceScanData: scanData,
+      mediaGeneration: "source-generation",
+      totalBytes: 4 * 2_048,
+    });
+    const request = access.archiveRequests.create({
+      detectedDiscId: source.disc.id,
+    });
+    const missingTitleMap = completeEvidence({
+      devicePath: "/dev/missing-title-map",
+      evidenceFingerprint: fingerprint,
+      mediaGeneration: "missing-title-map-generation",
+      totalBytes: 4 * 2_048,
+    });
+    const wrongSize = completeEvidence({
+      devicePath: "/dev/wrong-size",
+      evidenceFingerprint: fingerprint,
+      evidenceScanData: scanData,
+      mediaGeneration: "wrong-size-generation",
+      totalBytes: 5 * 2_048,
+    });
+    const otherFingerprint = `dvdmeta-sha256:${"6".repeat(64)}`;
+    const mismatchedFingerprint = completeEvidence({
+      devicePath: "/dev/wrong-fingerprint",
+      evidenceFingerprint: otherFingerprint,
+      evidenceScanData: {
+        ...scanData,
+        contentId: otherFingerprint,
+      },
+      mediaGeneration: "wrong-fingerprint-generation",
+      totalBytes: 4 * 2_048,
+    });
+
+    for (const candidate of [
+      missingTitleMap,
+      wrongSize,
+      mismatchedFingerprint,
+    ]) {
+      expect(
+        access.archiveJobs.startForInspection(
+          candidate.inspection.id,
+          `worker-${candidate.drive.devicePath}`,
+        ),
+      ).toBeNull();
+    }
+    expect(access.archiveJobs.list()).toEqual([]);
+    expect(access.archiveRequests.list(["pending"])).toEqual([
+      expect.objectContaining({ id: request.id }),
+    ]);
+    access.close();
+  });
+
+  it("rejects ambiguous matching requests before starting an Archive Job", () => {
+    const access = openTestDatabase();
+    const fingerprint = `dvdmeta-sha256:${"7".repeat(64)}`;
+    const scanData = {
+      schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+      contentId: fingerprint,
+      titles: [{
+        number: 1,
+        durationSeconds: 3_600,
+        chapters: 10,
+        audioStreams: [],
+        subtitles: [],
+      }],
+    };
+    const completeEvidence = (devicePath: string, mediaGeneration: string) => {
+      const drive = access.catalog.upsertOpticalDrive({
+        devicePath,
+        isEnabled: true,
+        isPresent: true,
+      });
+      return completeDiscInspection(access, {
+        fingerprint,
+        mediaGeneration,
+        opticalDriveId: drive.id,
+        scanData,
+        sizeBytes: 4 * 2_048,
+        volumeLabel: "AMBIGUOUS_DISC",
+      });
+    };
+    const first = completeEvidence("/dev/request-source-1", "generation-1");
+    const second = completeEvidence("/dev/request-source-2", "generation-2");
+    const candidate = completeEvidence("/dev/candidate", "generation-3");
+    access.archiveRequests.create({ detectedDiscId: first.disc.id });
+    access.archiveRequests.create({ detectedDiscId: second.disc.id });
+
+    expect(() =>
+      access.archiveJobs.startForInspection(
+        candidate.inspection.id,
+        "ambiguous-worker",
+      )
+    ).toThrow("Disc identity matches multiple pending Archive Requests");
+    expect(access.archiveJobs.list()).toEqual([]);
+    access.close();
+  });
+
   it("flushes coalesced Archive Job progress on failure, abort, and recovery", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-12T06:00:00.000Z"));
@@ -10896,7 +11151,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     access.close();
   });
 
-  it("excludes simultaneous multi-process starts for the same fingerprint or Optical Drive", async () => {
+  it("excludes simultaneous multi-process starts through an alternate drive", async () => {
     const databasePath = createTestDatabasePath();
     const access = openTestDatabase(databasePath);
     const firstDrive = access.catalog.upsertOpticalDrive({
@@ -10909,25 +11164,42 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       isEnabled: true,
       isPresent: true,
     });
+    const fingerprint = `dvdmeta-sha256:${"8".repeat(64)}`;
+    const scanData = {
+      schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+      contentId: fingerprint,
+      titles: [{
+        number: 1,
+        durationSeconds: 3_600,
+        chapters: 10,
+        audioStreams: [],
+        subtitles: [],
+      }],
+    };
     const first = completeDiscInspection(access, {
       opticalDriveId: firstDrive.id,
       mediaGeneration: "701",
-      fingerprint: "shared-fingerprint",
+      fingerprint,
+      scanData,
+      sizeBytes: 4 * 2_048,
+      volumeLabel: "CONCURRENT_ALTERNATE",
     });
     const second = completeDiscInspection(access, {
       opticalDriveId: secondDrive.id,
       mediaGeneration: "702",
-      fingerprint: "shared-fingerprint",
+      fingerprint,
+      scanData,
+      sizeBytes: 4 * 2_048,
+      volumeLabel: "CONCURRENT_ALTERNATE",
     });
     access.archiveRequests.create({ detectedDiscId: first.disc.id });
-    access.archiveRequests.create({ detectedDiscId: second.disc.id });
 
     const results = await runBarrierWorkers({
       databasePath,
       mode: "operation",
       operations: [
-        { operation: "start-archive", discInspectionId: first.inspection.id },
-        { operation: "start-archive", discInspectionId: first.inspection.id },
+        { operation: "start-archive", discInspectionId: second.inspection.id },
+        { operation: "start-archive", discInspectionId: second.inspection.id },
         { operation: "start-archive", discInspectionId: second.inspection.id },
         { operation: "start-archive", discInspectionId: second.inspection.id },
       ],
@@ -10940,7 +11212,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     );
     expect(outcomes.filter((outcome) => outcome === "started")).toHaveLength(1);
     expect(outcomes.filter((outcome) => outcome === "skipped")).toHaveLength(3);
-    expect(access.archiveJobs.list(["running"])).toHaveLength(1);
+    expect(access.archiveJobs.list(["running"])).toEqual([
+      expect.objectContaining({ detectedDiscId: second.disc.id }),
+    ]);
     access.close();
   });
 
