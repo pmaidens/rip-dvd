@@ -224,6 +224,17 @@ export function createNodeDvdCopyRunner({
   const copyKey = (devicePath: string, outputPath: string) =>
     JSON.stringify([devicePath, outputPath]);
   const activeCopiesByDevicePath = new Map<string, number>();
+  const activeCopiesByOutputPath = new Map<string, number>();
+  const incrementActiveCopy = (activeCopies: Map<string, number>, key: string) =>
+    activeCopies.set(key, (activeCopies.get(key) ?? 0) + 1);
+  const decrementActiveCopy = (activeCopies: Map<string, number>, key: string) => {
+    const remaining = (activeCopies.get(key) ?? 1) - 1;
+    if (remaining === 0) {
+      activeCopies.delete(key);
+    } else {
+      activeCopies.set(key, remaining);
+    }
+  };
   const coordinator = createBoundedSingleFlightCoordinator<
     DvdCopyRequest,
     DvdRecoveryResult
@@ -502,16 +513,11 @@ export function createNodeDvdCopyRunner({
         );
       });
 
-      const activeCopies = activeCopiesByDevicePath.get(request.devicePath) ?? 0;
-      activeCopiesByDevicePath.set(request.devicePath, activeCopies + 1);
+      incrementActiveCopy(activeCopiesByDevicePath, request.devicePath);
+      incrementActiveCopy(activeCopiesByOutputPath, request.outputPath);
       void closed.then(() => {
-        const remainingCopies =
-          (activeCopiesByDevicePath.get(request.devicePath) ?? 1) - 1;
-        if (remainingCopies === 0) {
-          activeCopiesByDevicePath.delete(request.devicePath);
-        } else {
-          activeCopiesByDevicePath.set(request.devicePath, remainingCopies);
-        }
+        decrementActiveCopy(activeCopiesByDevicePath, request.devicePath);
+        decrementActiveCopy(activeCopiesByOutputPath, request.outputPath);
       });
 
       return { result, closed, cancel };
@@ -521,6 +527,10 @@ export function createNodeDvdCopyRunner({
   return {
     copy(request) {
       const safeDevicePath = requireSafeOpticalDevicePath(request.devicePath);
+      if (activeCopiesByOutputPath.has(request.outputPath)) {
+        return Promise.reject(new Error("DVD archive copy is still active"));
+      }
+      requirePartialInactive(request.outputPath);
       requireInactive(safeDevicePath);
       return coordinator.run(copyKey(safeDevicePath, request.outputPath), request, {
         signal: request.signal,
@@ -529,9 +539,25 @@ export function createNodeDvdCopyRunner({
       });
     },
     isActive(devicePath, outputPath) {
-      return coordinator.isActive(
-        copyKey(requireSafeOpticalDevicePath(devicePath), outputPath),
-      );
+      const safeDevicePath = requireSafeOpticalDevicePath(devicePath);
+      if (
+        activeCopiesByOutputPath.has(outputPath) ||
+        coordinator.isActive(copyKey(safeDevicePath, outputPath))
+      ) {
+        return true;
+      }
+      try {
+        requirePartialInactive(outputPath);
+        return false;
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message === "DVD archive copy is still active"
+        ) {
+          return true;
+        }
+        throw error;
+      }
     },
     withDeviceInactive(devicePath, mutation) {
       const safeDevicePath = requireSafeOpticalDevicePath(devicePath);
