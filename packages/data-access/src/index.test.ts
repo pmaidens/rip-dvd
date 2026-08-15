@@ -10398,8 +10398,10 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       volumeLabel: "MATCHING_DISC",
     });
     expect(
-      access.archiveRequests.findPendingForDetectedDiscIdentity(second.disc.id),
-    ).toMatchObject({ id: request.id });
+      access.archiveRequests.hasPendingRequestForDetectedDiscFingerprint(
+        second.disc.id,
+      ),
+    ).toBe(true);
     const secondAttempt = access.archiveJobs.startForInspection(
       second.inspection.id,
       "worker-2",

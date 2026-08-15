@@ -223,9 +223,9 @@ async function pollArchiveWorkerWithDriveAdmission(
       const detectedDiscId = completed.inspection.detectedDiscId;
       if (
         detectedDiscId === null ||
-        access.archiveRequests.findPendingForDetectedDiscIdentity(
+        !access.archiveRequests.hasPendingRequestForDetectedDiscFingerprint(
           detectedDiscId,
-        ) === null
+        )
       ) {
         return;
       }

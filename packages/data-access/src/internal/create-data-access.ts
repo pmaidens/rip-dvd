@@ -6196,7 +6196,7 @@ export function createDataAccessInternal(
           });
         },
 
-        findPendingForDetectedDiscIdentity(detectedDiscId) {
+        hasPendingRequestForDetectedDiscFingerprint(detectedDiscId) {
           const disc = database
             .select({
               discKind: detectedDiscs.discKind,
@@ -6206,10 +6206,10 @@ export function createDataAccessInternal(
             .where(eq(detectedDiscs.id, detectedDiscId))
             .get();
           if (disc === undefined) {
-            return null;
+            return false;
           }
           return database
-            .select({ request: archiveRequests })
+            .select({ id: archiveRequests.id })
             .from(archiveRequests)
             .innerJoin(
               requestedDetectedDiscRecords,
@@ -6231,7 +6231,7 @@ export function createDataAccessInternal(
               asc(archiveRequests.id),
             )
             .limit(1)
-            .get()?.request ?? null;
+            .get() !== undefined;
         },
       },
 
