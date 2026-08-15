@@ -26,7 +26,7 @@ function createOriginalsLibrary(): string {
 async function expectExclusiveLock(lock: DvdRescueWorkspaceLock) {
   const originalsLibraryPath = createOriginalsLibrary();
   const options = {
-    archiveRequestId: "archive-request:disc:lock-test",
+    fingerprint: `dvdmeta-sha256:${"1".repeat(64)}`,
     originalsLibraryPath,
     signal: new AbortController().signal,
   };
@@ -88,7 +88,7 @@ describe("DVD rescue workspace lock", () => {
     async () => {
       const originalsLibraryPath = createOriginalsLibrary();
       await createNodeDvdRescueWorkspaceLock().withLock({
-        archiveRequestId: "archive-request:disc:dedicated-lock-directory",
+        fingerprint: `dvdmeta-sha256:${"2".repeat(64)}`,
         originalsLibraryPath,
         signal: new AbortController().signal,
         task: async () => undefined,
@@ -103,7 +103,7 @@ describe("DVD rescue workspace lock", () => {
       );
       expect(lstatSync(lockDirectory).mode & 0o077).toBe(0);
       expect(readdirSync(lockDirectory)).toEqual([
-        expect.stringMatching(/^\.[0-9a-f]{64}\.rip-dvd-rescue\.json\.lock$/),
+        expect.stringMatching(/^\.[0-9a-f]{64}\.rip-dvd-fingerprint\.lock$/),
       ]);
     },
   );
@@ -122,7 +122,7 @@ describe("DVD rescue workspace lock", () => {
     });
 
     await expect(lock.withLock({
-      archiveRequestId: "archive-request:disc:wedged-lock-helper",
+      fingerprint: `dvdmeta-sha256:${"3".repeat(64)}`,
       originalsLibraryPath: createOriginalsLibrary(),
       signal: new AbortController().signal,
       task: async () => undefined,
@@ -149,7 +149,7 @@ describe("DVD rescue workspace lock", () => {
     const controller = new AbortController();
     const interrupted = new Error("worker shutdown during lock acquisition");
     const pending = lock.withLock({
-      archiveRequestId: "archive-request:disc:cancelled-lock-helper",
+      fingerprint: `dvdmeta-sha256:${"4".repeat(64)}`,
       originalsLibraryPath: createOriginalsLibrary(),
       signal: controller.signal,
       task: async () => undefined,

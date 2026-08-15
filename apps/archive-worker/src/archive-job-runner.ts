@@ -112,7 +112,7 @@ export async function runArchiveJob({
       }
     };
     await rescueWorkspaceLock.withLock({
-      archiveRequestId: claim.archiveRequestId,
+      fingerprint: disc.fingerprint,
       originalsLibraryPath,
       signal: archiveSignal,
       task: async () => {
@@ -158,7 +158,7 @@ export async function runArchiveJob({
           try {
             await quarantinePublishedArchive(
               preserved.archivePath,
-              authorizeClaim,
+              preserved.archiveFilesystemIdentity,
             );
           } catch (quarantineError) {
             const quarantineMessage =
