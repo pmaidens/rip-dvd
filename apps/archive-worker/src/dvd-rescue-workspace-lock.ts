@@ -16,8 +16,34 @@ import {
 import { dvdRescueWorkspacePaths } from "./dvd-rescue-workspace.js";
 
 const FLOCK_CONFLICT_EXIT_CODE = 75;
+const WORKSPACE_LOCK_ACQUISITION_TIMEOUT_MS = 5_000;
 export const DVD_RESCUE_WORKSPACE_LOCK_DIRECTORY_NAME =
   ".rip-dvd-rescue-locks";
+
+interface WorkspaceLockReadablePipe {
+  destroy(): void;
+  on(event: "data", listener: (chunk: Buffer) => void): void;
+}
+
+interface WorkspaceLockChildProcess {
+  stderr: WorkspaceLockReadablePipe | null;
+  kill(signal: NodeJS.Signals): boolean;
+  once(event: "error", listener: (error: Error) => void): void;
+  once(
+    event: "close",
+    listener: (code: number | null, signal: NodeJS.Signals | null) => void,
+  ): void;
+  unref(): void;
+}
+
+type SpawnWorkspaceLockProcess = (
+  executable: string,
+  arguments_: readonly string[],
+  options: {
+    shell: false;
+    stdio: ["ignore", "ignore", "pipe", number];
+  },
+) => WorkspaceLockChildProcess;
 
 export interface DvdRescueWorkspaceLock {
   withLock<Result>(options: {
@@ -92,8 +118,14 @@ function openWorkspaceLock(path: string): number {
   }
 }
 
-async function acquireWorkspaceLock(descriptor: number): Promise<void> {
-  const child = spawn(
+async function acquireWorkspaceLock(
+  descriptor: number,
+  signal: AbortSignal,
+  timeoutMs: number,
+  spawnLockProcess: SpawnWorkspaceLockProcess,
+): Promise<void> {
+  signal.throwIfAborted();
+  const child = spawnLockProcess(
     "flock",
     [
       "--exclusive",
@@ -110,7 +142,11 @@ async function acquireWorkspaceLock(descriptor: number): Promise<void> {
   let diagnostics = "";
   const childDiagnostics = child.stderr;
   if (childDiagnostics === null) {
-    child.kill("SIGKILL");
+    try {
+      child.kill("SIGKILL");
+    } finally {
+      child.unref();
+    }
     throw new Error("DVD rescue workspace lock streams are unavailable");
   }
   childDiagnostics.on("data", (chunk: Buffer) => {
@@ -121,6 +157,17 @@ async function acquireWorkspaceLock(descriptor: number): Promise<void> {
     | { code: number | null; signal: NodeJS.Signals | null }
   >((resolveOutcome) => {
     let settled = false;
+    let acquisitionTimeout: NodeJS.Timeout | undefined;
+    const stopHelper = () => {
+      childDiagnostics.destroy();
+      try {
+        child.kill("SIGKILL");
+      } finally {
+        child.unref();
+      }
+    };
+    const removeAbortListener = () =>
+      signal.removeEventListener("abort", onAbort);
     const settle = (
       result:
         | { error: Error }
@@ -128,11 +175,36 @@ async function acquireWorkspaceLock(descriptor: number): Promise<void> {
     ) => {
       if (!settled) {
         settled = true;
+        clearTimeout(acquisitionTimeout);
+        removeAbortListener();
         resolveOutcome(result);
       }
     };
+    const onAbort = () => {
+      let interruption: Error;
+      try {
+        signal.throwIfAborted();
+        interruption = new Error("DVD rescue workspace lock was cancelled");
+      } catch (error) {
+        interruption =
+          error instanceof Error
+            ? error
+            : new Error("DVD rescue workspace lock was cancelled");
+      }
+      settle({ error: interruption });
+      stopHelper();
+    };
     child.once("error", (error) => settle({ error }));
     child.once("close", (code, signal) => settle({ code, signal }));
+    signal.addEventListener("abort", onAbort, { once: true });
+    acquisitionTimeout = setTimeout(() => {
+      settle({ error: new Error("DVD rescue workspace lock timed out") });
+      stopHelper();
+    }, timeoutMs);
+    acquisitionTimeout.unref();
+    if (signal.aborted) {
+      onAbort();
+    }
   });
   if ("error" in outcome) {
     throw outcome.error;
@@ -152,7 +224,19 @@ async function acquireWorkspaceLock(descriptor: number): Promise<void> {
   }
 }
 
-export function createNodeDvdRescueWorkspaceLock(): DvdRescueWorkspaceLock {
+export function createNodeDvdRescueWorkspaceLock({
+  acquisitionTimeoutMs = WORKSPACE_LOCK_ACQUISITION_TIMEOUT_MS,
+  spawnLockProcess = spawn as unknown as SpawnWorkspaceLockProcess,
+}: {
+  acquisitionTimeoutMs?: number;
+  spawnLockProcess?: SpawnWorkspaceLockProcess;
+} = {}): DvdRescueWorkspaceLock {
+  if (
+    !Number.isSafeInteger(acquisitionTimeoutMs) ||
+    acquisitionTimeoutMs <= 0
+  ) {
+    throw new Error("DVD rescue workspace lock timeout is invalid");
+  }
   return {
     async withLock({
       archiveRequestId,
@@ -169,7 +253,12 @@ export function createNodeDvdRescueWorkspaceLock(): DvdRescueWorkspaceLock {
       const lockPath = join(lockDirectory, `${mapName}.lock`);
       const descriptor = openWorkspaceLock(lockPath);
       try {
-        await acquireWorkspaceLock(descriptor);
+        await acquireWorkspaceLock(
+          descriptor,
+          signal,
+          acquisitionTimeoutMs,
+          spawnLockProcess,
+        );
         signal.throwIfAborted();
         return await task();
       } finally {

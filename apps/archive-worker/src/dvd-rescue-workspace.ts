@@ -44,6 +44,8 @@ interface DvdRescueMap {
   recoveryProtocol: DvdRecoveryProtocolPayload;
 }
 
+type AuthorizeMutation = () => void | Promise<void>;
+
 function filesystemIdentity(metadata: Awaited<ReturnType<typeof lstat>>): string {
   if (
     !Number.isSafeInteger(metadata.dev) ||
@@ -100,10 +102,14 @@ async function optionalMetadata(path: string) {
   }
 }
 
-async function quarantinePath(path: string): Promise<boolean> {
+async function quarantinePath(
+  path: string,
+  authorizeMutation?: AuthorizeMutation,
+): Promise<boolean> {
   if ((await optionalMetadata(path)) === null) {
     return false;
   }
+  await authorizeMutation?.();
   await rename(path, `${path}.invalid-${randomUUID()}`);
   return true;
 }
@@ -112,16 +118,17 @@ async function quarantineWorkspaceFiles(
   root: string,
   paths: Pick<DvdRescueWorkspace, "imagePath" | "mapPath">,
   correlatedArchivePath?: string,
+  authorizeMutation?: AuthorizeMutation,
 ): Promise<void> {
   const archiveChanged =
     correlatedArchivePath === undefined
       ? false
-      : await quarantinePath(correlatedArchivePath);
+      : await quarantinePath(correlatedArchivePath, authorizeMutation);
   if (archiveChanged) {
     await syncPath(root);
   }
-  const mapChanged = await quarantinePath(paths.mapPath);
-  const imageChanged = await quarantinePath(paths.imagePath);
+  const mapChanged = await quarantinePath(paths.mapPath, authorizeMutation);
+  const imageChanged = await quarantinePath(paths.imagePath, authorizeMutation);
   if (mapChanged || imageChanged) {
     await syncPath(root);
   }
@@ -222,6 +229,7 @@ async function writeMapAtomically(
   root: string,
   mapPath: string,
   map: DvdRescueMap,
+  authorizeMutation?: AuthorizeMutation,
 ): Promise<void> {
   const serialized = `${JSON.stringify(map)}\n`;
   if (Buffer.byteLength(serialized) > MAX_RESCUE_MAP_BYTES) {
@@ -242,6 +250,7 @@ async function writeMapAtomically(
     await handle.sync();
     await handle.close();
     handle = undefined;
+    await authorizeMutation?.();
     await rename(temporaryPath, mapPath);
     await syncPath(root);
   } catch (error) {
@@ -255,6 +264,7 @@ export async function loadDvdRescueWorkspace(
   root: string,
   identity: DvdRescueIdentity,
   correlatedArchivePath?: string,
+  authorizeMutation?: AuthorizeMutation,
 ): Promise<DvdRescueWorkspace | null> {
   const paths = dvdRescueWorkspacePaths(root, identity.archiveRequestId);
   if (
@@ -333,6 +343,7 @@ export async function loadDvdRescueWorkspace(
       ) {
         throw new Error("Prepared DVD rescue image is invalid");
       }
+      await authorizeMutation?.();
       await rename(preparedImagePath, paths.imagePath);
       await syncPath(root);
       imageMetadata = await lstat(paths.imagePath);
@@ -370,6 +381,7 @@ export async function loadDvdRescueWorkspace(
           map.imageFilesystemIdentity,
           recoveryResult,
         ),
+        authorizeMutation,
       );
     }
     return {
@@ -379,7 +391,12 @@ export async function loadDvdRescueWorkspace(
     };
   } catch (error) {
     try {
-      await quarantineWorkspaceFiles(root, paths, correlatedArchivePath);
+      await quarantineWorkspaceFiles(
+        root,
+        paths,
+        correlatedArchivePath,
+        authorizeMutation,
+      );
     } catch (quarantineError) {
       throw new Error("DVD rescue state could not be quarantined", {
         cause: quarantineError,
@@ -400,6 +417,7 @@ export async function commitDvdRescueWorkspace(
   identity: DvdRescueIdentity,
   sourceImagePath: string,
   recoveryResult: DvdRecoveryResult,
+  authorizeMutation?: AuthorizeMutation,
 ): Promise<DvdRescueWorkspace> {
   const paths = dvdRescueWorkspacePaths(root, identity.archiveRequestId);
   if (
@@ -428,7 +446,9 @@ export async function commitDvdRescueWorkspace(
         recoveryResult,
         basename(sourceImagePath),
       ),
+      authorizeMutation,
     );
+    await authorizeMutation?.();
     await rename(sourceImagePath, paths.imagePath);
     await syncPath(root);
     await writeMapAtomically(
@@ -439,6 +459,7 @@ export async function commitDvdRescueWorkspace(
         imageFilesystemIdentity,
         recoveryResult,
       ),
+      authorizeMutation,
     );
     return { ...paths, imageFilesystemIdentity, recoveryResult };
   } catch (error) {
@@ -453,6 +474,7 @@ export async function updateDvdRescueWorkspace(
   identity: DvdRescueIdentity,
   workspace: DvdRescueWorkspace,
   recoveryResult: DvdRecoveryResult,
+  authorizeMutation?: AuthorizeMutation,
 ): Promise<DvdRescueWorkspace> {
   const expectedPaths = dvdRescueWorkspacePaths(root, identity.archiveRequestId);
   if (
@@ -486,6 +508,7 @@ export async function updateDvdRescueWorkspace(
         workspace.imageFilesystemIdentity,
         recoveryResult,
       ),
+      authorizeMutation,
     );
   } catch (error) {
     throw new Error("DVD rescue state could not be updated", { cause: error });

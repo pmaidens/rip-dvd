@@ -1,9 +1,10 @@
 import { spawnSync } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { lstatSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   createInProcessDvdRescueWorkspaceLock,
@@ -106,4 +107,60 @@ describe("DVD rescue workspace lock", () => {
       ]);
     },
   );
+
+  it("bounds a workspace lock helper that never closes", async () => {
+    const stderr = Object.assign(new EventEmitter(), { destroy: vi.fn() });
+    const child = Object.assign(new EventEmitter(), {
+      stderr,
+      kill: vi.fn(() => true),
+      unref: vi.fn(),
+    });
+    const spawnLockProcess = vi.fn(() => child);
+    const lock = createNodeDvdRescueWorkspaceLock({
+      acquisitionTimeoutMs: 10,
+      spawnLockProcess,
+    });
+
+    await expect(lock.withLock({
+      archiveRequestId: "archive-request:disc:wedged-lock-helper",
+      originalsLibraryPath: createOriginalsLibrary(),
+      signal: new AbortController().signal,
+      task: async () => undefined,
+    })).rejects.toThrow("DVD rescue workspace lock timed out");
+
+    expect(spawnLockProcess).toHaveBeenCalledOnce();
+    expect(child.kill).toHaveBeenCalledWith("SIGKILL");
+    expect(stderr.destroy).toHaveBeenCalledOnce();
+    expect(child.unref).toHaveBeenCalledOnce();
+  });
+
+  it("cancels a workspace lock helper that never closes", async () => {
+    const stderr = Object.assign(new EventEmitter(), { destroy: vi.fn() });
+    const child = Object.assign(new EventEmitter(), {
+      stderr,
+      kill: vi.fn(() => true),
+      unref: vi.fn(),
+    });
+    const spawnLockProcess = vi.fn(() => child);
+    const lock = createNodeDvdRescueWorkspaceLock({
+      acquisitionTimeoutMs: 60_000,
+      spawnLockProcess,
+    });
+    const controller = new AbortController();
+    const interrupted = new Error("worker shutdown during lock acquisition");
+    const pending = lock.withLock({
+      archiveRequestId: "archive-request:disc:cancelled-lock-helper",
+      originalsLibraryPath: createOriginalsLibrary(),
+      signal: controller.signal,
+      task: async () => undefined,
+    });
+    await vi.waitFor(() => expect(spawnLockProcess).toHaveBeenCalledOnce());
+
+    controller.abort(interrupted);
+
+    await expect(pending).rejects.toBe(interrupted);
+    expect(child.kill).toHaveBeenCalledWith("SIGKILL");
+    expect(stderr.destroy).toHaveBeenCalledOnce();
+    expect(child.unref).toHaveBeenCalledOnce();
+  });
 });

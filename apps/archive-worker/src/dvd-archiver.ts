@@ -907,7 +907,10 @@ async function syncPath(path: string): Promise<void> {
   }
 }
 
-async function movePartialAside(partialPath: string): Promise<void> {
+async function movePartialAside(
+  partialPath: string,
+  authorizeMutation?: () => void | Promise<void>,
+): Promise<void> {
   let metadata;
   try {
     metadata = await lstat(partialPath);
@@ -931,11 +934,13 @@ async function movePartialAside(partialPath: string): Promise<void> {
       throw error;
     }
   }
+  await authorizeMutation?.();
   await rename(partialPath, failedPath);
 }
 
 export async function quarantinePublishedArchive(
   archivePath: string,
+  authorizeMutation?: () => void | Promise<void>,
 ): Promise<void> {
   const metadata = await optionalMetadata(archivePath);
   if (metadata === null) {
@@ -957,8 +962,10 @@ export async function quarantinePublishedArchive(
     failedMetadata.dev === metadata.dev &&
     failedMetadata.ino === metadata.ino
   ) {
+    await authorizeMutation?.();
     await unlink(archivePath);
   } else {
+    await authorizeMutation?.();
     await rename(archivePath, failedPath);
   }
   await syncPath(dirname(archivePath));
@@ -1119,7 +1126,12 @@ export async function preserveDvdArchive({
   let rescueWorkspace =
     rescueIdentity === undefined
       ? null
-      : await loadDvdRescueWorkspace(root, rescueIdentity, archivePath);
+      : await loadDvdRescueWorkspace(
+          root,
+          rescueIdentity,
+          archivePath,
+          authorizeMutation,
+        );
   const recoveryPaths = [
     legacyPartialPath,
     ...discoverAttemptPartialPaths(root, digest),
@@ -1131,7 +1143,7 @@ export async function preserveDvdArchive({
     requirePartialInactive(recoveryPath);
   }
   for (const recoveryPath of recoveryPaths) {
-    await movePartialAside(recoveryPath);
+    await movePartialAside(recoveryPath, authorizeMutation);
   }
 
   const existingArchive = await optionalMetadata(archivePath);
@@ -1164,7 +1176,7 @@ export async function preserveDvdArchive({
     if (salvageDecision.outcome === "reject") {
       await authorizeMutation?.();
       signal.throwIfAborted();
-      await quarantinePublishedArchive(archivePath);
+      await quarantinePublishedArchive(archivePath, authorizeMutation);
       throw salvageDecision.error;
     }
     await verifySource();
@@ -1225,6 +1237,9 @@ export async function preserveDvdArchive({
     signal.throwIfAborted();
     onProgress({ phase: "finalizing", progressPercent: 99 });
     await sync(rescueWorkspace.imagePath);
+    signal.throwIfAborted();
+    await authorizeMutation?.();
+    signal.throwIfAborted();
     let publishedByThisAttempt = false;
     try {
       if (existingArchive === null) {
@@ -1288,7 +1303,7 @@ export async function preserveDvdArchive({
     throw new Error("DVD archive copy is still active");
   }
   if (rescueWorkspace === null) {
-    await movePartialAside(partialPath);
+    await movePartialAside(partialPath, authorizeMutation);
   }
   let finalPublished = false;
   let retainedForValidation = false;
@@ -1346,6 +1361,8 @@ export async function preserveDvdArchive({
       onProgress({ phase: "verifying", progressPercent: 99 });
       await sync(partialPath);
       signal.throwIfAborted();
+      await authorizeMutation?.();
+      signal.throwIfAborted();
       if (rescueIdentity !== undefined) {
         rescueWorkspace =
           rescueWorkspace === null
@@ -1354,12 +1371,14 @@ export async function preserveDvdArchive({
                 rescueIdentity,
                 partialPath,
                 validation.recoveryResult,
+                authorizeMutation,
               )
             : await updateDvdRescueWorkspace(
                 root,
                 rescueIdentity,
                 rescueWorkspace,
                 validation.recoveryResult,
+                authorizeMutation,
               );
         partialPath = rescueWorkspace.imagePath;
         retainedForValidation = true;
@@ -1382,7 +1401,7 @@ export async function preserveDvdArchive({
         signal.throwIfAborted();
       } else {
         if (rescueWorkspace === null) {
-          await movePartialAside(partialPath);
+          await movePartialAside(partialPath, authorizeMutation);
           await sync(root);
         }
         retainedForValidation = true;
@@ -1391,14 +1410,20 @@ export async function preserveDvdArchive({
     }
     onProgress({ phase: "finalizing", progressPercent: 99 });
     await sync(partialPath);
+    signal.throwIfAborted();
+    await authorizeMutation?.();
+    signal.throwIfAborted();
     if (rescueWorkspace !== null) {
       rescueWorkspace = await updateDvdRescueWorkspace(
         root,
         rescueIdentity!,
         rescueWorkspace,
         recoveryResult,
+        authorizeMutation,
       );
     }
+    await authorizeMutation?.();
+    signal.throwIfAborted();
     // A hard link publishes the fully-synced inode without the overwrite
     // behavior of POSIX rename. Both paths are in the same bounded directory.
     await link(partialPath, archivePath);
