@@ -4,6 +4,7 @@ import {
   createDamagedDvdRecoveryResult,
   formatUnvalidatedDvdRecovery,
   validateDvdRecoveryResult,
+  validateResumedDvdRecoveryResult,
 } from "./dvd-recovery-contracts.js";
 
 describe("DVD recovery results", () => {
@@ -78,5 +79,21 @@ describe("DVD recovery results", () => {
       "DVD rescue requires validation: 10 unreadable sectors in 10 areas; LBAs 0, 2, 4, 6, 8, 10, 12, 14, and 2 more",
     );
     expect(result.unrecoveredSectorRanges).toEqual(ranges);
+  });
+
+  it("rejects a resumed result that introduces newly unreadable sectors", () => {
+    const prior = createDamagedDvdRecoveryResult(4 * 2_048, [
+      { startLba: 1, sectorCount: 1 },
+    ]);
+
+    expect(() =>
+      validateResumedDvdRecoveryResult(
+        createDamagedDvdRecoveryResult(4 * 2_048, [
+          { startLba: 2, sectorCount: 1 },
+        ]),
+        prior,
+        4 * 2_048,
+      ),
+    ).toThrow("Resumed DVD recovery result is invalid");
   });
 });

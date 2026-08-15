@@ -6,6 +6,7 @@ import type { OpticalDriveHardware } from "./archive-worker-contracts.js";
 import { confirmAuthorizedDrive } from "./authorized-optical-drive.js";
 import type { CompletedDiscInspection } from "./disc-inspection-runner.js";
 import type { DvdSalvageValidator } from "./dvd-salvage-validator.js";
+import type { DvdRescueWorkspaceLock } from "./dvd-rescue-workspace-lock.js";
 import {
   preserveDvdArchive,
   quarantinePublishedArchive,
@@ -20,6 +21,7 @@ export interface RunArchiveJobOptions {
   hardware: OpticalDriveHardware;
   log(message: string): void;
   originalsLibraryPath: string;
+  rescueWorkspaceLock: DvdRescueWorkspaceLock;
   salvageValidator?: DvdSalvageValidator;
   signal: AbortSignal;
   workerId: string;
@@ -33,6 +35,7 @@ export async function runArchiveJob({
   hardware,
   log,
   originalsLibraryPath,
+  rescueWorkspaceLock,
   salvageValidator,
   signal,
   workerId,
@@ -77,62 +80,99 @@ export async function runArchiveJob({
   }, 1_000);
   cancellationPoll.unref();
 
-  let publishedArchivePath: string | undefined;
   try {
-    const preserved = await preserveDvdArchive({
-      authorizeCopy: () => {
+    const authorizeClaim = () => {
+      archiveSignal.throwIfAborted();
+      if (access.archiveJobs.isCancellationRequested(claim)) {
+        const cancellation = new Error(
+          "Archive Request cancellation requested",
+        );
+        claimController.abort(cancellation);
         archiveSignal.throwIfAborted();
-        if (access.archiveJobs.isCancellationRequested(claim)) {
-          const cancellation = new Error(
-            "Archive Request cancellation requested",
-          );
-          claimController.abort(cancellation);
-          archiveSignal.throwIfAborted();
-        }
-        access.archiveJobs.renewClaim(claim);
-      },
-      devicePath: binding.drive.devicePath,
-      expectedTitleMap: scanData,
+      }
+      access.archiveJobs.renewClaim(claim);
+      archiveSignal.throwIfAborted();
+    };
+    const verifySource = async () => {
+      await confirmAuthorizedDrive({
+        access,
+        configuredCanonicalPath,
+        expected: binding.drive,
+        hardware,
+        phase: "DVD persistence",
+        signal: archiveSignal,
+      });
+      await hardware.confirmOpticalDrive(binding, archiveSignal);
+      const observedGeneration = await hardware.observeMediaGeneration(
+        binding,
+        archiveSignal,
+      );
+      if (observedGeneration !== mediaGeneration) {
+        throw new Error("DVD medium changed during archiving");
+      }
+    };
+    await rescueWorkspaceLock.withLock({
       fingerprint: disc.fingerprint,
       originalsLibraryPath,
-      runner: copyRunner,
-      salvageValidator,
       signal: archiveSignal,
-      sizeBytes: archiveSizeBytes,
-      onProgress: (progress) => {
-        access.archiveJobs.updateProgress(claim, progress);
-      },
-      verifySource: async () => {
-        await confirmAuthorizedDrive({
-          access,
-          configuredCanonicalPath,
-          expected: binding.drive,
-          hardware,
-          phase: "DVD persistence",
+      task: async () => {
+        authorizeClaim();
+        const preserved = await preserveDvdArchive({
+          archiveRequestId: claim.archiveRequestId,
+          authorizeCopy: async () => {
+            authorizeClaim();
+            await verifySource();
+            archiveSignal.throwIfAborted();
+          },
+          authorizeMutation: authorizeClaim,
+          devicePath: binding.drive.devicePath,
+          expectedTitleMap: scanData,
+          fingerprint: disc.fingerprint,
+          originalsLibraryPath,
+          runner: copyRunner,
+          salvageValidator,
           signal: archiveSignal,
+          sizeBytes: archiveSizeBytes,
+          onProgress: (progress) => {
+            access.archiveJobs.updateProgress(claim, progress);
+          },
+          verifySource,
         });
-        await hardware.confirmOpticalDrive(binding, archiveSignal);
-        const observedGeneration = await hardware.observeMediaGeneration(
-          binding,
-          archiveSignal,
-        );
-        if (observedGeneration !== mediaGeneration) {
-          throw new Error("DVD medium changed during archiving");
+        try {
+          authorizeClaim();
+          access.archiveJobs.publish(claim, {
+            archivePath: preserved.archivePath,
+            integrityEvidence: preserved.integrityEvidence,
+            sizeBytes: preserved.sizeBytes,
+          });
+          try {
+            await preserved.finalizePublication?.();
+          } catch (cleanupError) {
+            const cleanupMessage =
+              cleanupError instanceof Error
+                ? cleanupError.message
+                : String(cleanupError);
+            log(`Completed DVD rescue cleanup deferred: ${cleanupMessage}`);
+          }
+        } catch (error) {
+          try {
+            await quarantinePublishedArchive(
+              preserved.archivePath,
+              preserved.archiveFilesystemIdentity,
+            );
+          } catch (quarantineError) {
+            const quarantineMessage =
+              quarantineError instanceof Error
+                ? quarantineError.message
+                : String(quarantineError);
+            log(
+              `Published DVD archive cleanup deferred: ${quarantineMessage}`,
+            );
+          }
+          throw error;
         }
       },
     });
-    publishedArchivePath = preserved.archivePath;
-    try {
-      access.archiveJobs.publish(claim, {
-        archivePath: preserved.archivePath,
-        integrityEvidence: preserved.integrityEvidence,
-        sizeBytes: preserved.sizeBytes,
-      });
-    } catch (error) {
-      await quarantinePublishedArchive(preserved.archivePath);
-      publishedArchivePath = undefined;
-      throw error;
-    }
   } catch (error) {
     let cancellationRequested =
       archiveSignal.aborted &&
@@ -155,9 +195,6 @@ export async function runArchiveJob({
         ? failureError.message
         : String(failureError);
       log(`Archive Job failure state could not be persisted: ${failureMessage}`);
-    }
-    if (publishedArchivePath !== undefined) {
-      await quarantinePublishedArchive(publishedArchivePath);
     }
     if (signal.aborted) {
       throw error;

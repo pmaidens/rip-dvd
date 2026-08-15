@@ -4,6 +4,7 @@ import { once } from "node:events";
 import {
   existsSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -73,6 +74,26 @@ function runTestCopy(name, faults, mode = "valid") {
       faults,
       "0",
       mode,
+    ],
+    { encoding: "utf8" },
+  );
+  return { ...result, outputPath };
+}
+
+function runTestResume(outputPath, faults, bitmapHex) {
+  const output = statSync(outputPath);
+  const result = spawnSync(
+    testExecutable,
+    [
+      "resume-test",
+      sourcePath,
+      outputPath,
+      String(content.byteLength),
+      faults,
+      "0",
+      "valid",
+      bitmapHex,
+      `${output.dev}:${output.ino}`,
     ],
     { encoding: "utf8" },
   );
@@ -184,6 +205,148 @@ if (
   !isolatedReads.some(({ lba, blocks }) => lba === 5 && blocks === 1)
 ) {
   throw new Error(`libdvdcss isolated recovery check failed: ${isolated.stderr}`);
+}
+
+const persistentResumePath = prepareOutput(
+  "/tmp/rip-dvd-reader-persistent-resume.img",
+);
+const contaminatedPersistentResumeContent = Buffer.from(isolatedContent);
+contaminatedPersistentResumeContent.fill(91, 5 * 2_048, 6 * 2_048);
+writeFileSync(persistentResumePath, contaminatedPersistentResumeContent);
+const persistentResume = runTestResume(
+  persistentResumePath,
+  "5:always",
+  isolatedResult.badSectorBitmapHex,
+);
+const persistentResumeResult = recoveryResult(persistentResume.stderr);
+if (
+  persistentResume.status !== 0 ||
+  !readFileSync(persistentResumePath)
+    .subarray(5 * 2_048, 6 * 2_048)
+    .equals(Buffer.alloc(2_048)) ||
+  persistentResumeResult.badSectorCount !== 1 ||
+  persistentResumeResult.badSectorBitmapHex !==
+    isolatedResult.badSectorBitmapHex ||
+  JSON.stringify(testReads(persistentResume.stderr)) !==
+    JSON.stringify([
+      { lba: 5, blocks: 1 },
+      { lba: 5, blocks: 1 },
+    ])
+) {
+  throw new Error(
+    `libdvdcss persistent resume check failed: ${persistentResume.stderr}`,
+  );
+}
+
+const fullyMappedResumePath = prepareOutput(
+  "/tmp/rip-dvd-reader-fully-mapped-resume.img",
+);
+writeFileSync(fullyMappedResumePath, Buffer.alloc(content.byteLength, 37));
+const fullyMappedResume = runTestResume(
+  fullyMappedResumePath,
+  "none",
+  Buffer.alloc(content.byteLength / 2_048 / 8, 0xff).toString("hex"),
+);
+const fullyMappedProgress = fullyMappedResume.stderr
+  .trim()
+  .split("\n")
+  .filter((line) => / bytes copied$/.test(line));
+if (
+  fullyMappedResume.status !== 0 ||
+  !readFileSync(fullyMappedResumePath).equals(content) ||
+  fullyMappedProgress.length > 2 ||
+  fullyMappedProgress.at(-1) !== `${content.byteLength} bytes copied`
+) {
+  throw new Error(
+    `libdvdcss reader resume progress check failed: ${fullyMappedResume.stderr}`,
+  );
+}
+
+const resumed = runTestResume(
+  isolated.outputPath,
+  "none",
+  isolatedResult.badSectorBitmapHex,
+);
+if (
+  resumed.status !== 0 ||
+  !readFileSync(resumed.outputPath).equals(content) ||
+  recoveryResult(resumed.stderr).badSectorCount !== 0 ||
+  JSON.stringify(testReads(resumed.stderr)) !==
+    JSON.stringify([{ lba: 5, blocks: 1 }])
+) {
+  throw new Error(`libdvdcss resumed recovery check failed: ${resumed.stderr}`);
+}
+
+const authorizedResume = spawn(
+  executable,
+  [
+    "resume-authorized",
+    sourcePath,
+    persistentResumePath,
+    String(content.byteLength),
+    `${statSync(persistentResumePath).dev}:${statSync(persistentResumePath).ino}`,
+  ],
+  { stdio: ["ignore", "ignore", "pipe", "ignore", "pipe", "pipe"] },
+);
+let authorizedResumeStderr = "";
+authorizedResume.stderr.on("data", (chunk) => {
+  authorizedResumeStderr += chunk.toString("utf8");
+});
+const [resumeReady] = await once(authorizedResume.stdio[4], "data");
+if (
+  resumeReady.toString("utf8") !== "rip-dvd-copy-authorization-ready\n"
+) {
+  throw new Error("libdvdcss reader resume authorization did not become ready");
+}
+authorizedResume.stdio[5].end(`1${isolatedResult.badSectorBitmapHex}`);
+const [authorizedResumeStatus] = await once(authorizedResume, "close");
+if (
+  authorizedResumeStatus !== 0 ||
+  !readFileSync(persistentResumePath).equals(content) ||
+  recoveryResult(authorizedResumeStderr).badSectorCount !== 0
+) {
+  throw new Error(
+    `libdvdcss reader authorized resume check failed: ${authorizedResumeStderr}`,
+  );
+}
+
+const replacementRacePath = prepareOutput(
+  "/tmp/rip-dvd-reader-replacement-race.img",
+);
+writeFileSync(replacementRacePath, isolatedContent);
+const expectedReplacementIdentity = statSync(replacementRacePath);
+const replacementContent = Buffer.alloc(content.byteLength, 91);
+const replacementCandidatePath = prepareOutput(`${replacementRacePath}.new`);
+writeFileSync(replacementCandidatePath, replacementContent);
+renameSync(replacementCandidatePath, replacementRacePath);
+const replacementRace = spawn(
+  executable,
+  [
+    "resume-authorized",
+    sourcePath,
+    replacementRacePath,
+    String(content.byteLength),
+    `${expectedReplacementIdentity.dev}:${expectedReplacementIdentity.ino}`,
+  ],
+  { stdio: ["ignore", "ignore", "pipe", "ignore", "pipe", "pipe"] },
+);
+let replacementRaceStderr = "";
+replacementRace.stderr.on("data", (chunk) => {
+  replacementRaceStderr += chunk.toString("utf8");
+});
+await once(replacementRace.stdio[4], "data");
+replacementRace.stdio[5].end(`1${isolatedResult.badSectorBitmapHex}`);
+const [replacementRaceStatus] = await once(replacementRace, "close");
+if (
+  replacementRaceStatus === 0 ||
+  !replacementRaceStderr.includes(
+    "DVD rescue image does not match its recovery map",
+  ) ||
+  !readFileSync(replacementRacePath).equals(replacementContent)
+) {
+  throw new Error(
+    `libdvdcss reader replacement race check failed: ${replacementRaceStderr}`,
+  );
 }
 
 const contiguous = runTestCopy("contiguous", "5:always,6:always");
