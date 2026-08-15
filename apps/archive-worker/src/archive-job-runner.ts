@@ -156,7 +156,10 @@ export async function runArchiveJob({
           }
         } catch (error) {
           try {
-            await quarantinePublishedArchive(preserved.archivePath);
+            await quarantinePublishedArchive(
+              preserved.archivePath,
+              authorizeClaim,
+            );
           } catch (quarantineError) {
             const quarantineMessage =
               quarantineError instanceof Error
