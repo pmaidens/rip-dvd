@@ -866,7 +866,7 @@ export async function withCancelledDvdArchiveInactive({
   return archiveRequestId === undefined
     ? task()
     : workspaceLock.withLock({
-        archiveRequestId,
+        fingerprint,
         originalsLibraryPath: root,
         signal,
         task,
@@ -892,6 +892,7 @@ export interface PreserveDvdArchiveOptions {
 
 export interface PreservedDvdArchive {
   archivePath: string;
+  archiveFilesystemIdentity: string;
   finalizePublication?(): Promise<void>;
   integrityEvidence: ArchiveIntegrityEvidence;
   recovered: boolean;
@@ -940,6 +941,7 @@ async function movePartialAside(
 
 export async function quarantinePublishedArchive(
   archivePath: string,
+  expectedFilesystemIdentity: string,
   authorizeMutation?: () => void | Promise<void>,
 ): Promise<void> {
   const metadata = await optionalMetadata(archivePath);
@@ -949,6 +951,9 @@ export async function quarantinePublishedArchive(
   if (!metadata.isFile() || metadata.isSymbolicLink()) {
     throw new Error("Published DVD archive path is not a regular file");
   }
+  if (filesystemIdentity(metadata) !== expectedFilesystemIdentity) {
+    throw new Error("Published DVD archive changed before cleanup");
+  }
   const failedPath = `${archivePath}.failed`;
   const failedMetadata = await optionalMetadata(failedPath);
   if (
@@ -957,15 +962,18 @@ export async function quarantinePublishedArchive(
   ) {
     throw new Error("Published DVD archive failed path is not a regular file");
   }
+  const revalidated = await lstat(archivePath);
+  if (filesystemIdentity(revalidated) !== expectedFilesystemIdentity) {
+    throw new Error("Published DVD archive changed before cleanup");
+  }
+  await authorizeMutation?.();
   if (
     failedMetadata !== null &&
-    failedMetadata.dev === metadata.dev &&
-    failedMetadata.ino === metadata.ino
+    failedMetadata.dev === revalidated.dev &&
+    failedMetadata.ino === revalidated.ino
   ) {
-    await authorizeMutation?.();
     await unlink(archivePath);
   } else {
-    await authorizeMutation?.();
     await rename(archivePath, failedPath);
   }
   await syncPath(dirname(archivePath));
@@ -980,6 +988,20 @@ async function optionalMetadata(path: string) {
     }
     throw error;
   }
+}
+
+function filesystemIdentity(
+  metadata: Awaited<ReturnType<typeof lstat>>,
+): string {
+  if (
+    !Number.isSafeInteger(metadata.dev) ||
+    !Number.isSafeInteger(metadata.ino) ||
+    metadata.dev < 0 ||
+    metadata.ino <= 0
+  ) {
+    throw new Error("DVD archive filesystem identity is invalid");
+  }
+  return `${metadata.dev}:${metadata.ino}`;
 }
 
 function matchesRescueImageIdentity(
@@ -1176,7 +1198,11 @@ export async function preserveDvdArchive({
     if (salvageDecision.outcome === "reject") {
       await authorizeMutation?.();
       signal.throwIfAborted();
-      await quarantinePublishedArchive(archivePath, authorizeMutation);
+      await quarantinePublishedArchive(
+        archivePath,
+        rescueWorkspace.imageFilesystemIdentity,
+        authorizeMutation,
+      );
       throw salvageDecision.error;
     }
     await verifySource();
@@ -1191,7 +1217,11 @@ export async function preserveDvdArchive({
         lstat(rescueWorkspace.imagePath),
       ]);
     } catch {
-      await quarantinePublishedArchive(archivePath, authorizeMutation);
+      await quarantinePublishedArchive(
+        archivePath,
+        rescueWorkspace.imageFilesystemIdentity,
+        authorizeMutation,
+      );
       throw new Error("Existing DVD archive conflicts with rescue state");
     }
     if (
@@ -1206,7 +1236,11 @@ export async function preserveDvdArchive({
         safeSizeBytes,
       )
     ) {
-      await quarantinePublishedArchive(archivePath, authorizeMutation);
+      await quarantinePublishedArchive(
+        archivePath,
+        rescueWorkspace.imageFilesystemIdentity,
+        authorizeMutation,
+      );
       throw new Error("Existing DVD archive conflicts with rescue state");
     }
     onProgress({ phase: "finalizing", progressPercent: 99 });
@@ -1214,6 +1248,7 @@ export async function preserveDvdArchive({
     const committedWorkspace = rescueWorkspace;
     return {
       archivePath,
+      archiveFilesystemIdentity: committedWorkspace.imageFilesystemIdentity,
       finalizePublication: () =>
         removeDvdRescueWorkspace(root, committedWorkspace),
       integrityEvidence: salvageDecision.integrityEvidence,
@@ -1241,12 +1276,15 @@ export async function preserveDvdArchive({
     await authorizeMutation?.();
     signal.throwIfAborted();
     let publishedByThisAttempt = false;
+    let linkedArchiveFilesystemIdentity =
+      rescueWorkspace.imageFilesystemIdentity;
     try {
       if (existingArchive === null) {
         await link(rescueWorkspace.imagePath, archivePath);
         publishedByThisAttempt = true;
       }
       const publishedArchive = await lstat(archivePath);
+      linkedArchiveFilesystemIdentity = filesystemIdentity(publishedArchive);
       if (
         !matchesRescueImageIdentity(
           publishedArchive,
@@ -1259,13 +1297,17 @@ export async function preserveDvdArchive({
       await sync(root);
     } catch (error) {
       if (publishedByThisAttempt) {
-        await quarantinePublishedArchive(archivePath, authorizeMutation);
+        await quarantinePublishedArchive(
+          archivePath,
+          linkedArchiveFilesystemIdentity,
+        );
       }
       throw error;
     }
     const committedWorkspace = rescueWorkspace;
     return {
       archivePath,
+      archiveFilesystemIdentity: linkedArchiveFilesystemIdentity,
       finalizePublication: () =>
         removeDvdRescueWorkspace(root, committedWorkspace),
       integrityEvidence: validation.integrityEvidence,
@@ -1283,19 +1325,31 @@ export async function preserveDvdArchive({
     if (existingArchive.size !== safeSizeBytes) {
       throw new Error("Existing DVD archive does not match the Detected Disc");
     }
-    await verifySource();
+    const existingArchiveFilesystemIdentity =
+      filesystemIdentity(existingArchive);
+    if (archiveRequestId === undefined) {
+      await verifySource();
+      signal.throwIfAborted();
+      onProgress({ phase: "finalizing", progressPercent: 99 });
+      await sync(archivePath);
+      signal.throwIfAborted();
+      await sync(root);
+      signal.throwIfAborted();
+      return {
+        archivePath,
+        archiveFilesystemIdentity: existingArchiveFilesystemIdentity,
+        integrityEvidence: createUnknownArchiveIntegrityEvidence(),
+        recovered: true,
+        sizeBytes: safeSizeBytes,
+      };
+    }
+    await authorizeMutation?.();
     signal.throwIfAborted();
-    onProgress({ phase: "finalizing", progressPercent: 99 });
-    await sync(archivePath);
-    signal.throwIfAborted();
-    await sync(root);
-    signal.throwIfAborted();
-    return {
+    await quarantinePublishedArchive(
       archivePath,
-      integrityEvidence: createUnknownArchiveIntegrityEvidence(),
-      recovered: true,
-      sizeBytes: safeSizeBytes,
-    };
+      existingArchiveFilesystemIdentity,
+      authorizeMutation,
+    );
   }
 
   let partialPath = rescueWorkspace?.imagePath ?? attemptPartialPath;
@@ -1306,6 +1360,7 @@ export async function preserveDvdArchive({
     await movePartialAside(partialPath, authorizeMutation);
   }
   let finalPublished = false;
+  let publishedArchiveFilesystemIdentity: string | undefined;
   let retainedForValidation = false;
   let validation: DvdValidationResult | undefined;
   try {
@@ -1424,11 +1479,15 @@ export async function preserveDvdArchive({
     }
     await authorizeMutation?.();
     signal.throwIfAborted();
+    publishedArchiveFilesystemIdentity =
+      rescueWorkspace?.imageFilesystemIdentity ??
+      filesystemIdentity(partialMetadata);
     // A hard link publishes the fully-synced inode without the overwrite
     // behavior of POSIX rename. Both paths are in the same bounded directory.
     await link(partialPath, archivePath);
     finalPublished = true;
     const publishedArchive = await lstat(archivePath);
+    publishedArchiveFilesystemIdentity = filesystemIdentity(publishedArchive);
     if (
       rescueWorkspace === null
         ? !publishedArchive.isFile() ||
@@ -1457,7 +1516,10 @@ export async function preserveDvdArchive({
       (rescuePaths !== undefined &&
         (await optionalMetadata(rescuePaths.mapPath)) !== null);
     if (finalPublished) {
-      await quarantinePublishedArchive(archivePath, authorizeMutation);
+      await quarantinePublishedArchive(
+        archivePath,
+        publishedArchiveFilesystemIdentity!,
+      );
       if (!hasRequestOwnedRescueState) {
         await movePartialAside(partialPath);
       }
@@ -1475,6 +1537,7 @@ export async function preserveDvdArchive({
   }
   return {
     archivePath,
+    archiveFilesystemIdentity: publishedArchiveFilesystemIdentity!,
     ...(rescueWorkspace === null
       ? {}
       : {

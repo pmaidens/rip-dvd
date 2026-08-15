@@ -901,10 +901,15 @@ initial copies are moved to a `.failed` recovery path. A complete DVD image
 with unreadable sectors instead becomes a durable, request-owned rescue image
 and bounded recovery map. A retry reads only the unresolved sectors, restores
 zeros for sectors that remain unreadable, and atomically replaces the map after
-the image is synced. The worker holds a per-request filesystem lock and renews
-the current Archive Job claim before rescue recovery, mutation, and publication,
-so an expired attempt cannot overlap its successor. Rescue progress is
+the image is synced. The worker holds a fingerprint-scoped filesystem lock and
+renews the current Archive Job claim before rescue recovery, mutation, and
+publication, so an expired attempt cannot overlap a successor that targets the
+same archive path. Rescue progress is
 throttled, and the workspace is removed only after catalog publication.
+Publication rollback remains under that fingerprint lock and quarantines only
+the exact filesystem inode published by the failed attempt. A later live
+Archive Request that finds an unowned fingerprint-named orphan quarantines and
+recopies it instead of recording historical `unknown` integrity evidence.
 Older attempts remain grouped in Archive Job history. Before
 retrying, the worker examines at most 4,096 entries in the canonical originals
 directory for exact same-fingerprint attempt-unique partials, fails closed if

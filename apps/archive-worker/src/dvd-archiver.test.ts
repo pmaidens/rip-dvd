@@ -1363,6 +1363,7 @@ describe("DVD archive publication", () => {
         realpathSync(originalsLibraryPath),
         `dvdmeta-${digest}.iso`,
       ),
+      archiveFilesystemIdentity: expect.stringMatching(/^\d+:[1-9]\d*$/),
       integrityEvidence: {
         integrity: "clean_read",
         policyVersion: "dvd-recovery-v1",
@@ -1790,7 +1791,7 @@ describe("DVD archive publication", () => {
     expect(existsSync(join(root, `dvdmeta-${digest}.iso`))).toBe(false);
   });
 
-  it("does not let stale rollback quarantine a published fingerprint", async () => {
+  it("quarantines its own published inode after rollback authority expires", async () => {
     const originalsLibraryPath = createOriginalsLibrary();
     const root = realpathSync(originalsLibraryPath);
     const digest = "c".repeat(64);
@@ -1829,11 +1830,66 @@ describe("DVD archive publication", () => {
       },
       verifySource: async () => undefined,
       onProgress: () => undefined,
-    })).rejects.toBe(staleClaim);
+    })).rejects.toThrow("archive directory sync failed after publication");
 
     const archivePath = join(root, `dvdmeta-${digest}.iso`);
-    expect(readFileSync(archivePath)).toEqual(content);
-    expect(existsSync(`${archivePath}.failed`)).toBe(false);
+    expect(existsSync(archivePath)).toBe(false);
+    expect(readFileSync(`${archivePath}.failed`)).toEqual(content);
+  });
+
+  it("recopies a cross-request orphan instead of publishing unknown evidence", async () => {
+    const originalsLibraryPath = createOriginalsLibrary();
+    const root = realpathSync(originalsLibraryPath);
+    const digest = "d".repeat(64);
+    const sizeBytes = 2 * 2_048;
+    const orphanImage = Buffer.alloc(sizeBytes, 14);
+    const replacementImage = Buffer.alloc(sizeBytes, 15);
+    const fingerprint = `dvdmeta-sha256:${digest}`;
+    const first = await preserveDvdArchive({
+      archiveRequestId: "archive-request:disc:orphan-owner",
+      devicePath: "/dev/sr0",
+      fingerprint,
+      originalsLibraryPath,
+      runner: {
+        copy: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, orphanImage);
+          return createCleanDvdRecoveryResult(sizeBytes);
+        }),
+        isActive: () => false,
+        withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+        waitForInactive: vi.fn(async () => undefined),
+      },
+      signal: new AbortController().signal,
+      sizeBytes,
+      verifySource: async () => undefined,
+      onProgress: () => undefined,
+    });
+    const replacementCopy = vi.fn(async ({ outputPath }) => {
+      writeFileSync(outputPath, replacementImage);
+      return createCleanDvdRecoveryResult(sizeBytes);
+    });
+
+    const recovered = await preserveDvdArchive({
+      archiveRequestId: "archive-request:disc:orphan-successor",
+      devicePath: "/dev/sr0",
+      fingerprint,
+      originalsLibraryPath,
+      runner: {
+        copy: replacementCopy,
+        isActive: () => false,
+        withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+        waitForInactive: vi.fn(async () => undefined),
+      },
+      signal: new AbortController().signal,
+      sizeBytes,
+      verifySource: async () => undefined,
+      onProgress: () => undefined,
+    });
+
+    expect(replacementCopy).toHaveBeenCalledOnce();
+    expect(recovered.integrityEvidence.integrity).toBe("clean_read");
+    expect(readFileSync(recovered.archivePath)).toEqual(replacementImage);
+    expect(readFileSync(`${first.archivePath}.failed`)).toEqual(orphanImage);
   });
 
   it("fences a stale claim at the rescue-map replacement", async () => {
@@ -2641,6 +2697,7 @@ describe("DVD archive publication", () => {
       }),
     ).resolves.toEqual({
       archivePath,
+      archiveFilesystemIdentity: expect.stringMatching(/^\d+:[1-9]\d*$/),
       integrityEvidence: {
         integrity: "unknown",
         policyVersion: null,

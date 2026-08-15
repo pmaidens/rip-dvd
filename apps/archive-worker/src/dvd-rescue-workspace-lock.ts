@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import {
   closeSync,
@@ -7,13 +8,15 @@ import {
   openSync,
 } from "node:fs";
 import { lstat, mkdir, realpath } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { join } from "node:path";
+
+import { isDvdFingerprint } from "@rip-dvd/data-access/dvd-scan";
+
 import { optionalBoundedText } from "./bounded-text.js";
 import {
   MAX_ARCHIVE_PATH_BYTES,
   requireSafeArchiveRoot,
 } from "./archive-root.js";
-import { dvdRescueWorkspacePaths } from "./dvd-rescue-workspace.js";
 
 const FLOCK_CONFLICT_EXIT_CODE = 75;
 const WORKSPACE_LOCK_ACQUISITION_TIMEOUT_MS = 5_000;
@@ -47,11 +50,19 @@ type SpawnWorkspaceLockProcess = (
 
 export interface DvdRescueWorkspaceLock {
   withLock<Result>(options: {
-    archiveRequestId: string;
+    fingerprint: string;
     originalsLibraryPath: string;
     signal: AbortSignal;
     task(): Promise<Result>;
   }): Promise<Result>;
+}
+
+function fingerprintLockName(fingerprint: string): string {
+  if (!isDvdFingerprint(fingerprint)) {
+    throw new Error("Detected Disc fingerprint is invalid");
+  }
+  const key = createHash("sha256").update(fingerprint, "utf8").digest("hex");
+  return `.${key}.rip-dvd-fingerprint.lock`;
 }
 
 async function requireSafeWorkspaceLockDirectory(root: string): Promise<string> {
@@ -239,7 +250,7 @@ export function createNodeDvdRescueWorkspaceLock({
   }
   return {
     async withLock({
-      archiveRequestId,
+      fingerprint,
       originalsLibraryPath,
       signal,
       task,
@@ -247,10 +258,7 @@ export function createNodeDvdRescueWorkspaceLock({
       signal.throwIfAborted();
       const root = await requireSafeArchiveRoot(originalsLibraryPath);
       const lockDirectory = await requireSafeWorkspaceLockDirectory(root);
-      const mapName = basename(
-        dvdRescueWorkspacePaths(root, archiveRequestId).mapPath,
-      );
-      const lockPath = join(lockDirectory, `${mapName}.lock`);
+      const lockPath = join(lockDirectory, fingerprintLockName(fingerprint));
       const descriptor = openWorkspaceLock(lockPath);
       try {
         await acquireWorkspaceLock(
@@ -272,14 +280,14 @@ export function createInProcessDvdRescueWorkspaceLock(): DvdRescueWorkspaceLock 
   const activeLocks = new Set<string>();
   return {
     async withLock({
-      archiveRequestId,
+      fingerprint,
       originalsLibraryPath,
       signal,
       task,
     }) {
       signal.throwIfAborted();
       const root = await requireSafeArchiveRoot(originalsLibraryPath);
-      const lockPath = `${dvdRescueWorkspacePaths(root, archiveRequestId).mapPath}.lock`;
+      const lockPath = join(root, fingerprintLockName(fingerprint));
       if (activeLocks.has(lockPath)) {
         throw new Error("DVD rescue workspace is already active");
       }
