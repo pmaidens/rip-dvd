@@ -975,6 +975,9 @@ export interface ArchiveRequestAccess {
   listRelevantForDetectedDiscs(
     detectedDiscIds: readonly DetectedDiscId[],
   ): ArchiveRequest[];
+  hasPendingRequestForDetectedDiscFingerprint(
+    detectedDiscId: DetectedDiscId,
+  ): boolean;
 }
 
 export interface EncodeJobAccess {

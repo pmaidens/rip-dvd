@@ -341,6 +341,10 @@ const claimPredecessorEncodeJobRecords = alias(
   encodeJobs,
   "claim_predecessor_encode_jobs",
 );
+const requestedDetectedDiscRecords = alias(
+  detectedDiscs,
+  "requested_detected_discs",
+);
 
 const unresolvedLegacyDvdArchiveIdentity = and(
   eq(originalDiscArchives.discKind, "dvd"),
@@ -6191,6 +6195,44 @@ export function createDataAccessInternal(
             return request === undefined ? [] : [request];
           });
         },
+
+        hasPendingRequestForDetectedDiscFingerprint(detectedDiscId) {
+          const disc = database
+            .select({
+              discKind: detectedDiscs.discKind,
+              fingerprint: detectedDiscs.fingerprint,
+            })
+            .from(detectedDiscs)
+            .where(eq(detectedDiscs.id, detectedDiscId))
+            .get();
+          if (disc === undefined) {
+            return false;
+          }
+          return database
+            .select({ id: archiveRequests.id })
+            .from(archiveRequests)
+            .innerJoin(
+              requestedDetectedDiscRecords,
+              eq(
+                requestedDetectedDiscRecords.id,
+                archiveRequests.detectedDiscId,
+              ),
+            )
+            .where(
+              and(
+                eq(archiveRequests.status, "pending"),
+                eq(requestedDetectedDiscRecords.discKind, disc.discKind),
+                eq(requestedDetectedDiscRecords.fingerprint, disc.fingerprint),
+              ),
+            )
+            .orderBy(
+              desc(archiveRequests.priority),
+              asc(archiveRequests.createdAt),
+              asc(archiveRequests.id),
+            )
+            .limit(1)
+            .get() !== undefined;
+        },
       },
 
       archiveJobs: {
@@ -6208,9 +6250,22 @@ export function createDataAccessInternal(
             eq(detectedDiscs.id, discInspections.detectedDiscId),
           )
           .innerJoin(
+            requestedDetectedDiscRecords,
+            and(
+              eq(
+                requestedDetectedDiscRecords.fingerprint,
+                detectedDiscs.fingerprint,
+              ),
+              eq(requestedDetectedDiscRecords.discKind, detectedDiscs.discKind),
+            ),
+          )
+          .innerJoin(
             archiveRequests,
             and(
-              eq(archiveRequests.detectedDiscId, detectedDiscs.id),
+              eq(
+                archiveRequests.detectedDiscId,
+                requestedDetectedDiscRecords.id,
+              ),
               eq(archiveRequests.status, "pending"),
             ),
           )
@@ -6274,13 +6329,26 @@ export function createDataAccessInternal(
             "detected disc",
             inspection.disc_inspections.detectedDiscId,
           );
-          const request = transaction
-            .select()
+          const requestCandidates = transaction
+            .select({
+              request: archiveRequests,
+              requestedDiscId: requestedDetectedDiscRecords.id,
+              requestedDiscScanData: requestedDetectedDiscRecords.scanData,
+              requestedDiscStatus: requestedDetectedDiscRecords.status,
+            })
             .from(archiveRequests)
+            .innerJoin(
+              requestedDetectedDiscRecords,
+              eq(
+                requestedDetectedDiscRecords.id,
+                archiveRequests.detectedDiscId,
+              ),
+            )
             .where(
               and(
-                eq(archiveRequests.detectedDiscId, disc.id),
                 eq(archiveRequests.status, "pending"),
+                eq(requestedDetectedDiscRecords.discKind, disc.discKind),
+                eq(requestedDetectedDiscRecords.fingerprint, disc.fingerprint),
               ),
             )
             .orderBy(
@@ -6288,14 +6356,71 @@ export function createDataAccessInternal(
               asc(archiveRequests.createdAt),
               asc(archiveRequests.id),
             )
-            .get();
-          if (!request) {
-            return null;
-          }
-          if (disc.status !== "approved") {
+            .all();
+          const exactRequest = requestCandidates.find(
+            (candidate) => candidate.requestedDiscId === disc.id,
+          );
+          if (
+            exactRequest !== undefined &&
+            exactRequest.requestedDiscStatus !== "approved"
+          ) {
             throw new DomainInvariantError(
-              `pending Archive Request references a ${disc.status} Detected Disc`,
+              `pending Archive Request references a ${exactRequest.requestedDiscStatus} Detected Disc`,
             );
+          }
+          const currentTitleMap = decodeDvdTitleMap(disc.scanData);
+          const matchingRequests = requestCandidates.filter((candidate) => {
+            if (candidate.requestedDiscId === disc.id) {
+              return true;
+            }
+            if (
+              disc.discKind !== "dvd" ||
+              inspection.disc_inspections.totalBytes === null ||
+              currentTitleMap === null ||
+              currentTitleMap.contentId !== disc.fingerprint ||
+              candidate.requestedDiscStatus !== "approved"
+            ) {
+              return false;
+            }
+            const requestedTitleMap = decodeDvdTitleMap(
+              candidate.requestedDiscScanData,
+            );
+            if (
+              requestedTitleMap === null ||
+              requestedTitleMap.contentId !== disc.fingerprint
+            ) {
+              return false;
+            }
+            const sourceSizes = new Set(
+              transaction
+                .select({ totalBytes: discInspections.totalBytes })
+                .from(discInspections)
+                .where(
+                  and(
+                    eq(
+                      discInspections.detectedDiscId,
+                      candidate.requestedDiscId,
+                    ),
+                    eq(discInspections.status, "completed"),
+                    isNotNull(discInspections.totalBytes),
+                  ),
+                )
+                .all()
+                .map(({ totalBytes }) => totalBytes),
+            );
+            return (
+              sourceSizes.size === 1 &&
+              sourceSizes.has(inspection.disc_inspections.totalBytes)
+            );
+          });
+          if (matchingRequests.length > 1) {
+            throw new DomainInvariantError(
+              "Disc identity matches multiple pending Archive Requests",
+            );
+          }
+          const request = matchingRequests[0]?.request;
+          if (request === undefined) {
+            return null;
           }
           if (
             findOriginalArchiveByFingerprintOrContentIdAlias(

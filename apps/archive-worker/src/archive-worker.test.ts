@@ -224,12 +224,15 @@ async function exerciseWatchabilityWorkerScenario({
 
   return {
     access,
+    drive,
     fingerprint,
     originalsLibraryPath,
     request,
     rescuedImage,
     rescuedPartialPath,
+    scanData,
     salvageValidator,
+    sizeBytes,
   };
 }
 
@@ -1337,6 +1340,357 @@ describe("archive worker polling", () => {
     });
     expect(readFileSync(archive.archivePath)).toEqual(recoveredImage);
     expect(existsSync(rescueImagePath)).toBe(false);
+  });
+
+  it("combines rescue progress from another matching Optical Drive", async () => {
+    const scenario = await exerciseWatchabilityWorkerScenario({
+      ranges: [
+        { startLba: 1, sectorCount: 1 },
+        { startLba: 3, sectorCount: 1 },
+      ],
+      validation: { outcome: "rejected", reason: "ambiguous" },
+    });
+    const {
+      access,
+      drive: initialDrive,
+      fingerprint,
+      originalsLibraryPath,
+      request,
+      rescuedImage: initialImage,
+      scanData,
+      sizeBytes,
+    } = scenario;
+    const initialRecovery = createDamagedDvdRecoveryResult(sizeBytes, [
+      { startLba: 1, sectorCount: 1 },
+      { startLba: 3, sectorCount: 1 },
+    ]);
+    const partiallyImprovedRecovery = createDamagedDvdRecoveryResult(
+      sizeBytes,
+      [{ startLba: 3, sectorCount: 1 }],
+    );
+    const partiallyImprovedImage = Buffer.from(initialImage);
+    partiallyImprovedImage.fill(7, 2_048, 4_096);
+    const recoveredImage = Buffer.alloc(sizeBytes, 7);
+    const workspaceLock = createInProcessDvdRescueWorkspaceLock();
+    const alternateDrive = {
+      devicePath: "/dev/sr1",
+      displayName: "Alternate rescue drive",
+      serialNumber: "ALTERNATE-RESCUE-002",
+    };
+    const persistedAlternateDrive = access.catalog.upsertOpticalDrive({
+      ...alternateDrive,
+      isEnabled: true,
+      isPresent: true,
+    });
+    access.archiveRequests.retry(request.id);
+    const rescuePaths = dvdRescueWorkspacePaths(
+      realpathSync(originalsLibraryPath),
+      request.id,
+    );
+    const alternateCopy = vi.fn(async ({
+      authorizeStart,
+      devicePath,
+      outputPath,
+      resumeFrom,
+    }: Parameters<DvdCopyRunner["copy"]>[0]) => {
+      expect(devicePath).toBe(alternateDrive.devicePath);
+      expect(outputPath).toBe(rescuePaths.imagePath);
+      expect(resumeFrom).toEqual(initialRecovery);
+      expect(readFileSync(outputPath)).toEqual(initialImage);
+      await authorizeStart?.();
+      writeFileSync(outputPath, partiallyImprovedImage);
+      return partiallyImprovedRecovery;
+    });
+    const alternateHardware: OpticalDriveHardware = {
+      ...stableDeviceBinding(),
+      discover: vi.fn().mockResolvedValue([alternateDrive]),
+      scanDvd: vi.fn().mockResolvedValue({
+        fingerprint,
+        scanData,
+        sizeBytes,
+      }),
+    };
+
+    await pollArchiveWorker({
+      access,
+      configuredDevicePath: "/dev/sr0",
+      copyRunner: {
+        copy: alternateCopy,
+        isActive: () => false,
+        withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+        waitForInactive: vi.fn(async () => undefined),
+      },
+      hardware: alternateHardware,
+      log: vi.fn(),
+      originalsLibraryPath,
+      rescueWorkspaceLock: workspaceLock,
+      signal: new AbortController().signal,
+      workerId: "archive-worker-alternate-drive-partial",
+    });
+
+    expect(alternateCopy).toHaveBeenCalledOnce();
+    expect(access.archiveJobs.list(["failed"]).at(-1)).toMatchObject({
+      archiveRequestId: request.id,
+      attemptOrdinal: 2,
+      errorMessage:
+        "DVD rescue requires validation: 1 unreadable sector in 1 area; LBAs 3",
+    });
+    expect(readFileSync(rescuePaths.imagePath)).toEqual(partiallyImprovedImage);
+
+    access.archiveRequests.retry(request.id);
+    const finalCopy = vi.fn(async ({
+      authorizeStart,
+      devicePath,
+      outputPath,
+      resumeFrom,
+    }: Parameters<DvdCopyRunner["copy"]>[0]) => {
+      expect(devicePath).toBe(alternateDrive.devicePath);
+      expect(outputPath).toBe(rescuePaths.imagePath);
+      expect(resumeFrom).toEqual(partiallyImprovedRecovery);
+      expect(readFileSync(outputPath)).toEqual(partiallyImprovedImage);
+      await authorizeStart?.();
+      writeFileSync(outputPath, recoveredImage);
+      return createCleanDvdRecoveryResult(sizeBytes);
+    });
+
+    await pollArchiveWorker({
+      access,
+      configuredDevicePath: "/dev/sr0",
+      copyRunner: {
+        copy: finalCopy,
+        isActive: () => false,
+        withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+        waitForInactive: vi.fn(async () => undefined),
+      },
+      hardware: alternateHardware,
+      log: vi.fn(),
+      originalsLibraryPath,
+      rescueWorkspaceLock: workspaceLock,
+      signal: new AbortController().signal,
+      workerId: "archive-worker-alternate-drive-complete",
+    });
+
+    expect(finalCopy).toHaveBeenCalledOnce();
+    expect(access.archiveRequests.list(["fulfilled"])).toEqual([
+      expect.objectContaining({ id: request.id }),
+    ]);
+    const archive = access.catalog.listOriginalDiscArchives()[0]!;
+    expect(archive).toMatchObject({
+      integrity: "clean_read",
+    });
+    expect(readFileSync(archive.archivePath)).toEqual(recoveredImage);
+    expect(existsSync(rescuePaths.imagePath)).toBe(false);
+    expect(existsSync(rescuePaths.mapPath)).toBe(false);
+
+    const attempts = access.archiveJobs.list();
+    expect(archive.detectedDiscId).toBe(attempts.at(-1)!.detectedDiscId);
+    const observedDiscs = access.catalog.listDetectedDiscs(undefined, {
+      ids: attempts.map(({ detectedDiscId }) => detectedDiscId),
+    });
+    const driveByDiscId = new Map(
+      observedDiscs.map((disc) => [disc.id, disc.opticalDriveId]),
+    );
+    expect(
+      attempts.map(({ attemptOrdinal, detectedDiscId }) => ({
+        attemptOrdinal,
+        opticalDriveId: driveByDiscId.get(detectedDiscId),
+      })),
+    ).toEqual([
+      { attemptOrdinal: 1, opticalDriveId: initialDrive.id },
+      { attemptOrdinal: 2, opticalDriveId: persistedAlternateDrive.id },
+      { attemptOrdinal: 3, opticalDriveId: persistedAlternateDrive.id },
+    ]);
+    expect(JSON.stringify(attempts)).not.toContain("/dev/sr");
+  });
+
+  it.each(["missing", "mismatched"] as const)(
+    "preserves rescue state when alternate-drive identity is %s",
+    async (identityCase) => {
+      const scenario = await exerciseWatchabilityWorkerScenario({
+        ranges: [{ startLba: 1, sectorCount: 1 }],
+        validation: { outcome: "rejected", reason: "ambiguous" },
+      });
+      scenario.access.archiveRequests.retry(scenario.request.id);
+      const rescuePaths = dvdRescueWorkspacePaths(
+        realpathSync(scenario.originalsLibraryPath),
+        scenario.request.id,
+      );
+      const originalImage = readFileSync(rescuePaths.imagePath);
+      const originalMap = readFileSync(rescuePaths.mapPath);
+      const alternateDrive = {
+        devicePath: "/dev/sr1",
+        displayName: "Unproven alternate drive",
+        serialNumber: `UNPROVEN-ALTERNATE-${identityCase}`,
+      };
+      scenario.access.catalog.upsertOpticalDrive({
+        ...alternateDrive,
+        isEnabled: true,
+        isPresent: true,
+      });
+      const copy = vi.fn();
+      const otherFingerprint = `dvdmeta-sha256:${"8".repeat(64)}`;
+      const scanData = {
+        schemaVersion: 2 as const,
+        contentId: otherFingerprint,
+        titles: [{
+          number: 1,
+          durationSeconds: 3_600,
+          chapters: 10,
+          audioStreams: [],
+          subtitles: [],
+        }],
+      };
+
+      await pollArchiveWorker({
+        access: scenario.access,
+        configuredDevicePath: "/dev/sr0",
+        copyRunner: {
+          copy,
+          isActive: () => false,
+          withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+          waitForInactive: vi.fn(async () => undefined),
+        },
+        hardware: {
+          ...stableDeviceBinding(),
+          discover: vi.fn().mockResolvedValue([alternateDrive]),
+          scanDvd: vi.fn().mockResolvedValue(
+            identityCase === "missing"
+              ? null
+              : {
+                  fingerprint: otherFingerprint,
+                  scanData,
+                  sizeBytes: originalImage.byteLength,
+                },
+          ),
+        },
+        log: vi.fn(),
+        originalsLibraryPath: scenario.originalsLibraryPath,
+        rescueWorkspaceLock: createInProcessDvdRescueWorkspaceLock(),
+        signal: new AbortController().signal,
+        workerId: `archive-worker-unproven-${identityCase}`,
+      });
+
+      expect(copy).not.toHaveBeenCalled();
+      expect(readFileSync(rescuePaths.imagePath)).toEqual(originalImage);
+      expect(readFileSync(rescuePaths.mapPath)).toEqual(originalMap);
+      expect(scenario.access.archiveJobs.list()).toHaveLength(1);
+      expect(scenario.access.archiveRequests.list(["pending"])).toEqual([
+        expect.objectContaining({ id: scenario.request.id }),
+      ]);
+      expect(scenario.access.catalog.listOriginalDiscArchives()).toEqual([]);
+    },
+  );
+
+  it("cancels an alternate-drive rescue without changing saved state", async () => {
+    const scenario = await exerciseWatchabilityWorkerScenario({
+      ranges: [{ startLba: 1, sectorCount: 1 }],
+      validation: { outcome: "rejected", reason: "ambiguous" },
+    });
+    scenario.access.archiveRequests.retry(scenario.request.id);
+    const rescuePaths = dvdRescueWorkspacePaths(
+      realpathSync(scenario.originalsLibraryPath),
+      scenario.request.id,
+    );
+    const originalImage = readFileSync(rescuePaths.imagePath);
+    const originalMap = readFileSync(rescuePaths.mapPath);
+    const alternateDrive = {
+      devicePath: "/dev/sr1",
+      displayName: "Cancellation alternate drive",
+      serialNumber: "ALTERNATE-CANCEL-001",
+    };
+    scenario.access.catalog.upsertOpticalDrive({
+      ...alternateDrive,
+      isEnabled: true,
+      isPresent: true,
+    });
+    const scanData = {
+      schemaVersion: 2 as const,
+      contentId: scenario.fingerprint,
+      titles: [{
+        number: 1,
+        durationSeconds: 3_600,
+        chapters: 10,
+        audioStreams: [],
+        subtitles: [],
+      }],
+    };
+    vi.useFakeTimers();
+    let copyStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      copyStarted = resolve;
+    });
+    let copyActive = false;
+    let confirmCopyClosed!: () => void;
+    const copyClosed = new Promise<void>((resolve) => {
+      confirmCopyClosed = () => {
+        copyActive = false;
+        resolve();
+      };
+    });
+    const copyRunner: DvdCopyRunner = {
+      isActive: () => copyActive,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => copyClosed),
+      copy: vi.fn(({ devicePath, outputPath, resumeFrom, signal }) => {
+        expect(devicePath).toBe(alternateDrive.devicePath);
+        expect(outputPath).toBe(rescuePaths.imagePath);
+        expect(resumeFrom).toBeDefined();
+        copyActive = true;
+        copyStarted();
+        return new Promise<never>((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), {
+            once: true,
+          });
+        });
+      }),
+    };
+    const log = vi.fn();
+    const polling = pollArchiveWorker({
+      access: scenario.access,
+      configuredDevicePath: "/dev/sr0",
+      copyRunner,
+      hardware: {
+        ...stableDeviceBinding(),
+        discover: vi.fn().mockResolvedValue([alternateDrive]),
+        scanDvd: vi.fn().mockResolvedValue({
+          fingerprint: scenario.fingerprint,
+          scanData,
+          sizeBytes: originalImage.byteLength,
+        }),
+      },
+      log,
+      originalsLibraryPath: scenario.originalsLibraryPath,
+      rescueWorkspaceLock: createInProcessDvdRescueWorkspaceLock(),
+      signal: new AbortController().signal,
+      workerId: "archive-worker-alternate-cancellation",
+    });
+    await started;
+
+    expect(
+      scenario.access.archiveRequests.cancel(scenario.request.id).status,
+    ).toBe("cancellation_requested");
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => {
+      expect(copyRunner.waitForInactive).toHaveBeenCalledOnce();
+    });
+    confirmCopyClosed();
+    await polling;
+
+    expect(scenario.access.archiveJobs.list(["aborted"])).toEqual([
+      expect.objectContaining({
+        attemptOrdinal: 2,
+        errorMessage: "Archive cancelled by operator",
+      }),
+    ]);
+    expect(scenario.access.archiveRequests.list(["cancelled"])).toEqual([
+      expect.objectContaining({ id: scenario.request.id }),
+    ]);
+    expect(readFileSync(rescuePaths.imagePath)).toEqual(originalImage);
+    expect(readFileSync(rescuePaths.mapPath)).toEqual(originalMap);
+    expect(scenario.access.catalog.listOriginalDiscArchives()).toEqual([]);
+    expect(log).toHaveBeenCalledWith(
+      `DVD archive cancelled for ${alternateDrive.devicePath}`,
+    );
   });
 
   it("rejects mismatched rescue state before a later Archive Job reads the disc", async () => {
