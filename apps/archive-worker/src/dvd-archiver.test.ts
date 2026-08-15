@@ -1033,6 +1033,65 @@ describe("DVD archive publication", () => {
     ]);
   });
 
+  it("keeps rescue-output exclusion across different devices", async () => {
+    const originalsLibraryPath = createOriginalsLibrary();
+    const child = createMockDvdCopyChild();
+    const runner = createNodeDvdCopyRunner({
+      maxActiveCopies: 2,
+      requireInactive: () => undefined,
+      spawnProcess: vi.fn(() => child),
+    });
+    const outputPath = join(
+      originalsLibraryPath,
+      ".request-owned.rip-dvd-rescue.iso",
+    );
+    const copy = runner.copy({
+      devicePath: "/dev/zero",
+      outputPath,
+      sizeBytes: 9,
+      signal: new AbortController().signal,
+      onBytesCopied: () => undefined,
+    });
+
+    expect(runner.isActive("/dev/null", outputPath)).toBe(true);
+
+    child.stdio[4].emit(
+      "data",
+      Buffer.from("rip-dvd-copy-authorization-ready\n"),
+    );
+    emitCleanRecoveryProtocol(child.stderr, 9);
+    child.emit("close", 0, null);
+    await expect(copy).resolves.toEqual(createCleanDvdRecoveryResult(9));
+    expect(runner.isActive("/dev/null", outputPath)).toBe(false);
+  });
+
+  it.runIf(supportsLinuxWriterOwnership)(
+    "detects an orphaned rescue writer through another device",
+    async () => {
+      const originalsLibraryPath = createOriginalsLibrary();
+      const outputPath = join(
+        originalsLibraryPath,
+        ".request-owned.rip-dvd-rescue.iso",
+      );
+      const readyPath = join(originalsLibraryPath, ".orphaned-writer-ready");
+      const writerPid = await startOrphanedWriter(
+        "-",
+        outputPath,
+        readyPath,
+      );
+      const runner = createNodeDvdCopyRunner({
+        requireInactive: () => undefined,
+      });
+
+      expect(runner.isActive("/dev/null", outputPath)).toBe(true);
+
+      await stopOrphanedWriter(
+        writerPid,
+        () => !runner.isActive("/dev/null", outputPath),
+      );
+    },
+  );
+
   it("scopes cancellation-recovery exclusion to the matching device tombstone", async () => {
     vi.useFakeTimers();
     const originalsLibraryPath = createOriginalsLibrary();
