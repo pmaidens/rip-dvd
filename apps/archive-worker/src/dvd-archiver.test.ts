@@ -1790,6 +1790,52 @@ describe("DVD archive publication", () => {
     expect(existsSync(join(root, `dvdmeta-${digest}.iso`))).toBe(false);
   });
 
+  it("does not let stale rollback quarantine a published fingerprint", async () => {
+    const originalsLibraryPath = createOriginalsLibrary();
+    const root = realpathSync(originalsLibraryPath);
+    const digest = "c".repeat(64);
+    const sizeBytes = 2 * 2_048;
+    const content = Buffer.alloc(sizeBytes, 12);
+    let authorityLost = false;
+    const staleClaim = new Error("Stale Archive Job rollback attempt");
+    const authorizeMutation = vi.fn(() => {
+      if (authorityLost) {
+        throw staleClaim;
+      }
+    });
+
+    await expect(preserveDvdArchive({
+      archiveRequestId: "archive-request:disc:stale-rollback",
+      authorizeMutation,
+      devicePath: "/dev/sr0",
+      fingerprint: `dvdmeta-sha256:${digest}`,
+      originalsLibraryPath,
+      runner: {
+        copy: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, content);
+          return createCleanDvdRecoveryResult(sizeBytes);
+        }),
+        isActive: () => false,
+        withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+        waitForInactive: vi.fn(async () => undefined),
+      },
+      signal: new AbortController().signal,
+      sizeBytes,
+      sync: async (path) => {
+        if (path === root) {
+          authorityLost = true;
+          throw new Error("archive directory sync failed after publication");
+        }
+      },
+      verifySource: async () => undefined,
+      onProgress: () => undefined,
+    })).rejects.toBe(staleClaim);
+
+    const archivePath = join(root, `dvdmeta-${digest}.iso`);
+    expect(readFileSync(archivePath)).toEqual(content);
+    expect(existsSync(`${archivePath}.failed`)).toBe(false);
+  });
+
   it("fences a stale claim at the rescue-map replacement", async () => {
     const originalsLibraryPath = createOriginalsLibrary();
     const root = realpathSync(originalsLibraryPath);

@@ -1191,7 +1191,7 @@ export async function preserveDvdArchive({
         lstat(rescueWorkspace.imagePath),
       ]);
     } catch {
-      await quarantinePublishedArchive(archivePath);
+      await quarantinePublishedArchive(archivePath, authorizeMutation);
       throw new Error("Existing DVD archive conflicts with rescue state");
     }
     if (
@@ -1206,7 +1206,7 @@ export async function preserveDvdArchive({
         safeSizeBytes,
       )
     ) {
-      await quarantinePublishedArchive(archivePath);
+      await quarantinePublishedArchive(archivePath, authorizeMutation);
       throw new Error("Existing DVD archive conflicts with rescue state");
     }
     onProgress({ phase: "finalizing", progressPercent: 99 });
@@ -1259,7 +1259,7 @@ export async function preserveDvdArchive({
       await sync(root);
     } catch (error) {
       if (publishedByThisAttempt) {
-        await quarantinePublishedArchive(archivePath);
+        await quarantinePublishedArchive(archivePath, authorizeMutation);
       }
       throw error;
     }
@@ -1457,7 +1457,7 @@ export async function preserveDvdArchive({
       (rescuePaths !== undefined &&
         (await optionalMetadata(rescuePaths.mapPath)) !== null);
     if (finalPublished) {
-      await quarantinePublishedArchive(archivePath);
+      await quarantinePublishedArchive(archivePath, authorizeMutation);
       if (!hasRequestOwnedRescueState) {
         await movePartialAside(partialPath);
       }

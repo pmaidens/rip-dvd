@@ -122,7 +122,11 @@ async function exerciseWatchabilityWorkerScenario({
   titleCount = 1,
   validation,
 }: {
-  beforePoll?: (access: ReturnType<typeof openTestDataAccess>) => void;
+  beforePoll?: (
+    access: ReturnType<typeof openTestDataAccess>,
+    originalsLibraryPath: string,
+    fingerprint: string,
+  ) => void;
   ranges: readonly { sectorCount: number; startLba: number }[];
   titleCount?: number;
   validation:
@@ -196,7 +200,7 @@ async function exerciseWatchabilityWorkerScenario({
     waitForInactive: vi.fn(async () => undefined),
   };
   const salvageValidator = { validate: vi.fn().mockResolvedValue(validation) };
-  beforePoll?.(access);
+  beforePoll?.(access, originalsLibraryPath, fingerprint);
 
   await pollArchiveWorker({
     access,
@@ -990,6 +994,50 @@ describe("archive worker polling", () => {
     );
     expect(readFileSync(rescuePaths.imagePath)).toEqual(scenario.rescuedImage);
     expect(existsSync(rescuePaths.mapPath)).toBe(true);
+  });
+
+  it("does not quarantine a successor fingerprint after rollback authority is lost", async () => {
+    const successorImage = Buffer.alloc(4 * 2_048, 13);
+    let archivePath: string | undefined;
+    const staleClaim = new Error("Stale Archive Job rollback attempt");
+    const scenario = await exerciseWatchabilityWorkerScenario({
+      beforePoll(access, originalsLibraryPath, fingerprint) {
+        archivePath = join(
+          realpathSync(originalsLibraryPath),
+          `dvdmeta-${fingerprint.slice(fingerprint.lastIndexOf(":") + 1)}.iso`,
+        );
+        const renewClaim = access.archiveJobs.renewClaim.bind(
+          access.archiveJobs,
+        );
+        let rollbackAuthorityLost = false;
+        vi.spyOn(access.archiveJobs, "renewClaim").mockImplementation((claim) => {
+          if (rollbackAuthorityLost) {
+            throw staleClaim;
+          }
+          return renewClaim(claim);
+        });
+        vi.spyOn(access.archiveJobs, "publish").mockImplementation(() => {
+          unlinkSync(archivePath!);
+          writeFileSync(archivePath!, successorImage);
+          rollbackAuthorityLost = true;
+          throw new Error("catalog publication lost to successor");
+        });
+      },
+      ranges: [{ startLba: 1, sectorCount: 1 }],
+      validation: {
+        badSectorCountsByTitle: [{ badSectorCount: 1, titleNumber: 1 }],
+        outcome: "accepted",
+      },
+    });
+
+    expect(scenario.access.archiveJobs.list(["failed"])).toEqual([
+      expect.objectContaining({
+        archiveRequestId: scenario.request.id,
+        errorMessage: "catalog publication lost to successor",
+      }),
+    ]);
+    expect(readFileSync(archivePath!)).toEqual(successorImage);
+    expect(existsSync(`${archivePath}.failed`)).toBe(false);
   });
 
   it("resumes retained rescue work after a worker restart and publishes a clean read", async () => {
