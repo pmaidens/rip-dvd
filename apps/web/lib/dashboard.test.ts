@@ -498,10 +498,7 @@ describe("readDashboardSnapshot", () => {
       "HandBrake failed while reading '/private/media/secret file.iso': output /media/movies/partial.mkv",
     );
 
-    access.discInspections.beginOrResume({
-      opticalDriveId: drive.id,
-      mediaGeneration: "dashboard-inspection",
-    });
+    completeDiscInspection(access, waitingDisc, "dashboard-inspection");
     const dashboard = readDashboardSnapshot(access);
 
     expect(dashboard.opticalDrives).toEqual({
@@ -596,6 +593,57 @@ describe("readDashboardSnapshot", () => {
     });
   });
 
+  it("only lists discs and Archive Jobs for media still in a drive", () => {
+    const access = dataAccessFixture.create();
+    const activeDrive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      displayName: "Active drive",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const removedDrive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr1",
+      displayName: "Empty drive",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const activeDisc = access.catalog.registerDetectedDisc({
+      opticalDriveId: activeDrive.id,
+      discKind: "dvd",
+      fingerprint: "active-dashboard-disc",
+      volumeLabel: "ACTIVE_DISC",
+    });
+    const removedDisc = access.catalog.registerDetectedDisc({
+      opticalDriveId: removedDrive.id,
+      discKind: "dvd",
+      fingerprint: "removed-dashboard-disc",
+      volumeLabel: "REMOVED_DISC",
+    });
+    for (const disc of [activeDisc, removedDisc]) {
+      access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    }
+    const activeJob = startArchiveJob(access, activeDisc, "active-worker");
+    access.archiveJobs.fail(activeJob, "active read failed");
+    const removedJob = startArchiveJob(access, removedDisc, "removed-worker");
+    access.archiveJobs.fail(removedJob, "removed read failed");
+
+    access.discInspections.clearCurrent({
+      opticalDriveId: removedDrive.id,
+      reasonCode: "no_medium",
+    });
+
+    const dashboard = readDashboardSnapshot(access);
+
+    expect(dashboard.detectedDiscs).toEqual({
+      status: "loaded",
+      items: [expect.objectContaining({ id: activeDisc.id })],
+    });
+    expect(dashboard.archiveJobs).toEqual({
+      status: "loaded",
+      items: [expect.objectContaining({ id: activeJob.id })],
+    });
+  });
+
   it("collapses completed inspection detail only after its Archive Request is fulfilled", () => {
     const access = dataAccessFixture.create();
     const drive = access.catalog.upsertOpticalDrive({
@@ -657,13 +705,13 @@ describe("readDashboardSnapshot", () => {
 
   it("keeps each displayed request linked to its latest attempt across activity bounds", () => {
     const access = dataAccessFixture.create();
-    const drive = access.catalog.upsertOpticalDrive({
-      devicePath: "/dev/sr0",
-      displayName: "Archive drive",
-      isEnabled: true,
-      isPresent: true,
-    });
     const seedFailure = (fingerprint: string, message: string) => {
+      const drive = access.catalog.upsertOpticalDrive({
+        devicePath: `/dev/${fingerprint.toLowerCase()}`,
+        displayName: `${fingerprint} drive`,
+        isEnabled: true,
+        isPresent: true,
+      });
       const disc = access.catalog.registerDetectedDisc({
         opticalDriveId: drive.id,
         discKind: "dvd",

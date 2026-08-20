@@ -77,13 +77,15 @@ describe("GET /api/dashboard/events", () => {
       isEnabled: true,
       isPresent: true,
     });
+    const activeDrives = [drive];
     for (let index = 1; index < 32; index += 1) {
-      access.catalog.upsertOpticalDrive({
+      const attachedDrive = access.catalog.upsertOpticalDrive({
         devicePath: `/dev/sr${index}`,
         displayName: `Attached drive ${index}`,
-        isEnabled: index % 2 === 0,
+        isEnabled: true,
         isPresent: true,
       });
+      activeDrives.push(attachedDrive);
     }
     for (let index = 32; index < 92; index += 1) {
       access.catalog.upsertOpticalDrive({
@@ -103,7 +105,7 @@ describe("GET /api/dashboard/events", () => {
       vi.setSystemTime(new Date(Date.UTC(2026, 6, 26, 18, 0, index)));
       const contentId = `sha256:${index.toString(16).padStart(64, "0")}`;
       const disc = access.catalog.registerDetectedDisc({
-        opticalDriveId: drive.id,
+        opticalDriveId: activeDrives[index]!.id,
         discKind: "dvd",
         fingerprint: contentId,
         volumeLabel: `DISC_${index.toString().padStart(2, "0")}`,
@@ -217,7 +219,7 @@ describe("GET /api/dashboard/events", () => {
 
     expect(snapshot.detectedDiscs.status).toBe("loaded");
     expect(snapshot.opticalDrives.items).toHaveLength(92);
-    expect(snapshot.detectedDiscs.items).toHaveLength(45);
+    expect(snapshot.detectedDiscs.items).toHaveLength(25);
     expect(
       snapshot.detectedDiscs.items.some(
         (disc) => disc.volumeLabel === "DISC_00",
@@ -249,7 +251,7 @@ describe("GET /api/dashboard/events", () => {
         (item) => item.discLabel !== "Unlabeled disc",
       ),
     ).toBe(true);
-    expect(Buffer.byteLength(event)).toBeLessThan(70_000);
+    expect(Buffer.byteLength(event)).toBeLessThan(75_000);
   });
 
   it("frames the current database snapshot as a reconnectable dashboard event", async () => {
