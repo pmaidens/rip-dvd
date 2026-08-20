@@ -2665,6 +2665,21 @@ export function createDataAccessInternal(
       persistedAt: number;
     }
   >();
+  const archiveProgressPatchForClaim = (
+    archiveJobId: ArchiveJobId,
+    claimToken: ArchiveJobClaimToken | null,
+  ) => {
+    const progress = archiveProgress.get(archiveJobId);
+    if (claimToken === null || progress?.token !== claimToken) {
+      return {};
+    }
+    return {
+      progressPhase: progress.latestPhase,
+      progressPercent: progress.latestPercent,
+      progressBytes: progress.latestBytes,
+      lastProgressAt: progress.lastProgressAt,
+    };
+  };
   const inspectionProgress = new Map<
     DiscInspectionId,
     {
@@ -6602,24 +6617,14 @@ export function createDataAccessInternal(
           }
           const terminalJobs: ArchiveJob[] = [];
           for (const candidate of expired) {
-            const cachedProgress = archiveProgress.get(candidate.id);
-            const latestProgress =
-              candidate.claimToken !== null &&
-              cachedProgress?.token === candidate.claimToken
-                ? cachedProgress
-                : undefined;
             const failedJob = transaction
               .update(archiveJobs)
               .set({
                 status: "failed",
-                ...(latestProgress === undefined
-                  ? {}
-                  : {
-                      progressPhase: latestProgress.latestPhase,
-                      progressPercent: latestProgress.latestPercent,
-                      progressBytes: latestProgress.latestBytes,
-                      lastProgressAt: latestProgress.lastProgressAt,
-                    }),
+                ...archiveProgressPatchForClaim(
+                  candidate.id,
+                  candidate.claimToken,
+                ),
                 completedAt: timestamp,
                 errorMessage: "Archive worker lease expired",
                 updatedAt: timestamp,
@@ -6717,22 +6722,11 @@ export function createDataAccessInternal(
           timestamp.getTime() - ARCHIVE_JOB_LEASE_DURATION_MS,
         );
         const completed = database.transaction((transaction) => {
-          const cachedProgress = archiveProgress.get(claim.id);
-          const latestProgress = cachedProgress?.token === claim.claimToken
-            ? cachedProgress
-            : undefined;
           const job = transaction
             .update(archiveJobs)
             .set({
               status: "aborted",
-              ...(latestProgress === undefined
-                ? {}
-                : {
-                    progressPhase: latestProgress.latestPhase,
-                    progressPercent: latestProgress.latestPercent,
-                    progressBytes: latestProgress.latestBytes,
-                    lastProgressAt: latestProgress.lastProgressAt,
-                  }),
+              ...archiveProgressPatchForClaim(claim.id, claim.claimToken),
               completedAt: timestamp,
               errorMessage: "Archive cancelled after worker recovery",
               updatedAt: timestamp,
@@ -7193,10 +7187,6 @@ export function createDataAccessInternal(
           "errorMessage",
         ).slice(0, 500);
         const failed = database.transaction((transaction) => {
-          const cachedProgress = archiveProgress.get(claim.id);
-          const latestProgress = cachedProgress?.token === claim.claimToken
-            ? cachedProgress
-            : undefined;
           const request = transaction
             .select({ status: archiveRequests.status })
             .from(archiveRequests)
@@ -7219,14 +7209,7 @@ export function createDataAccessInternal(
             .update(archiveJobs)
             .set({
               status: cancellationWins ? "aborted" : "failed",
-              ...(latestProgress === undefined
-                ? {}
-                : {
-                    progressPhase: latestProgress.latestPhase,
-                    progressPercent: latestProgress.latestPercent,
-                    progressBytes: latestProgress.latestBytes,
-                    lastProgressAt: latestProgress.lastProgressAt,
-                  }),
+              ...archiveProgressPatchForClaim(claim.id, claim.claimToken),
               completedAt: timestamp,
               errorMessage: cancellationWins
                 ? "Archive cancelled by operator"
@@ -7285,22 +7268,11 @@ export function createDataAccessInternal(
           "errorMessage",
         ).slice(0, 500);
         const aborted = database.transaction((transaction) => {
-          const cachedProgress = archiveProgress.get(claim.id);
-          const latestProgress = cachedProgress?.token === claim.claimToken
-            ? cachedProgress
-            : undefined;
           const job = transaction
             .update(archiveJobs)
             .set({
               status: "aborted",
-              ...(latestProgress === undefined
-                ? {}
-                : {
-                    progressPhase: latestProgress.latestPhase,
-                    progressPercent: latestProgress.latestPercent,
-                    progressBytes: latestProgress.latestBytes,
-                    lastProgressAt: latestProgress.lastProgressAt,
-                  }),
+              ...archiveProgressPatchForClaim(claim.id, claim.claimToken),
               completedAt: timestamp,
               errorMessage,
               updatedAt: timestamp,

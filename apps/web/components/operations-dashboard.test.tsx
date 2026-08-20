@@ -1004,7 +1004,7 @@ describe("DashboardView", () => {
     const snapshot = {
       generatedAt: "2026-08-10T20:00:00.000Z",
       discApprovals: { count: 0, items: [] },
-      failedArchives: { count: 0, items: [] },
+      archiveRequestsNeedingAttention: { count: 0, items: [] },
       failedEncodes: { count: 0, items: [] },
       catalogReviews: { count: 0, items: [] },
       filesystemProblems: { count: 0, items: [] },
@@ -1318,7 +1318,7 @@ describe("ActionOverview", () => {
               count: 1,
               items: [{ id: "disc-action", label: "NEEDS_APPROVAL" }],
             },
-            failedArchives: {
+            archiveRequestsNeedingAttention: {
               count: 1,
               items: [{ id: "archive-failed", label: "ARCHIVE_FAILED" }],
             },
@@ -1378,7 +1378,7 @@ describe("ActionOverview", () => {
           snapshot: {
             generatedAt: "2026-08-10T20:00:00.000Z",
             discApprovals: { count: 0, items: [] },
-            failedArchives: { count: 0, items: [] },
+            archiveRequestsNeedingAttention: { count: 0, items: [] },
             failedEncodes: { count: 0, items: [] },
             catalogReviews: { count: 0, items: [] },
             filesystemProblems: { count: 0, items: [] },

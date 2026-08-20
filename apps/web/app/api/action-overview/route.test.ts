@@ -112,7 +112,7 @@ describe("Action overview API", () => {
     const beforePublication = await createActionOverviewRoute(
       () => access,
     ).json();
-    expect(beforePublication.failedArchives).toEqual({
+    expect(beforePublication.archiveRequestsNeedingAttention).toEqual({
       count: 1,
       items: [
         { id: fixture.failedRequestId, label: "FAILED_DUPLICATE" },
@@ -125,7 +125,10 @@ describe("Action overview API", () => {
     expect(access.archiveJobs.list(["failed"])).toEqual([
       expect.objectContaining({ id: fixture.failedJob.id }),
     ]);
-    expect(body.failedArchives).toEqual({ count: 0, items: [] });
+    expect(body.archiveRequestsNeedingAttention).toEqual({
+      count: 0,
+      items: [],
+    });
   });
 
   it("includes a running Archive Job that has stopped advancing", async () => {
@@ -150,7 +153,7 @@ describe("Action overview API", () => {
     vi.advanceTimersByTime(5 * 60_000);
     const body = await createActionOverviewRoute(() => access).json();
 
-    expect(body.failedArchives).toEqual({
+    expect(body.archiveRequestsNeedingAttention).toEqual({
       count: 1,
       items: [{ id: job.archiveRequestId, label: "BARBIE" }],
     });

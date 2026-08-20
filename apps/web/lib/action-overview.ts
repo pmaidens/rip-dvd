@@ -21,7 +21,7 @@ export interface ActionOverviewCategory {
 export interface ActionOverviewSnapshot {
   generatedAt: string;
   discApprovals: ActionOverviewCategory;
-  failedArchives: ActionOverviewCategory;
+  archiveRequestsNeedingAttention: ActionOverviewCategory;
   failedEncodes: ActionOverviewCategory;
   catalogReviews: ActionOverviewCategory;
   filesystemProblems: ActionOverviewCategory;
@@ -139,7 +139,7 @@ function readSnapshot(access: ConsistentReadAccess): ActionOverviewSnapshot {
         occurredAt: disc.detectedAt,
       })),
     ),
-    failedArchives: category([
+    archiveRequestsNeedingAttention: category([
       ...archiveRequestsNeedingAttention.map((request) => ({
         id: request.id,
         label:

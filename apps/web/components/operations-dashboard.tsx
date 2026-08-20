@@ -896,7 +896,10 @@ function AttentionCard({
 
 export function ActionOverview({ state }: { state: ActionOverviewLoadState }) {
   const detectedDiscs = attentionState(state, "discApprovals");
-  const archiveRequests = attentionState(state, "failedArchives");
+  const archiveRequests = attentionState(
+    state,
+    "archiveRequestsNeedingAttention",
+  );
   const encodeJobs = attentionState(state, "failedEncodes");
   const catalogReview = attentionState(state, "catalogReviews");
   const filesystemProblems = attentionState(state, "filesystemProblems");
