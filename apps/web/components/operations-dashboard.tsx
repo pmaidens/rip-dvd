@@ -21,6 +21,7 @@ import type {
   DashboardSectionResult,
   DashboardStatus,
 } from "../lib/dashboard";
+import { assessArchiveProgress } from "../lib/archive-progress-health";
 import {
   watchDashboardActivity,
   type DashboardStreamStatus,
@@ -328,6 +329,69 @@ function useCurrentTime(intervalMs: number): number {
     return () => clearInterval(timer);
   }, [intervalMs]);
   return currentTime;
+}
+
+function formatProgressAge(durationSeconds: number): string {
+  const totalMinutes = Math.floor(durationSeconds / 60);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+
+  if (hours === 0) {
+    return `${totalMinutes}m`;
+  }
+  return minutes === 0 ? `${hours}h` : `${hours}h ${minutes}m`;
+}
+
+function ArchiveJobItem({
+  job,
+  busy,
+  onCancel,
+}: {
+  job: DashboardArchiveJob;
+  busy: boolean;
+  onCancel: (archiveRequestId: string) => void;
+}) {
+  const currentTime = useCurrentTime(job.status === "running" ? 5_000 : 0);
+  const progressHealth = job.lastProgressAt
+    ? assessArchiveProgress(
+        { status: job.status, lastProgressAt: job.lastProgressAt },
+        currentTime,
+      )
+    : { status: "advancing" as const };
+
+  return (
+    <DashboardJobItem
+      title={job.discLabel}
+      subtitle={job.opticalDriveName}
+      status={job.status}
+      progressPercent={job.progressPercent}
+      progressDetail={archiveProgressDetail(job)}
+      failureDetail={job.failureDetail}
+      annotation={
+        progressHealth.status === "not_advancing" ? (
+          <div className="archive-progress-warning" role="alert">
+            <strong>Not advancing</strong>
+            <p>
+              No data copied for {formatProgressAge(progressHealth.durationSeconds)}
+            </p>
+            <p>The Optical Drive may be retrying an unreadable area.</p>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => onCancel(job.archiveRequestId)}
+            >
+              {busy ? "Cancelling…" : "Cancel archive"}
+            </button>
+          </div>
+        ) : null
+      }
+      action={
+        <p className="item-time">
+          Attempt {job.attemptOrdinal} · {job.attemptOrdinal} total
+        </p>
+      }
+    />
+  );
 }
 
 function DiscInspectionItem({
@@ -858,7 +922,7 @@ export function ActionOverview({ state }: { state: ActionOverviewLoadState }) {
         <AttentionCard
           eyebrow="Preservation"
           title="Archive requests"
-          description="Requests whose latest attempt needs an operator retry."
+          description="Requests whose latest attempt needs a retry or has stopped advancing."
           href="/discs"
           linkLabel="Open archive requests"
           state={archiveRequests}
@@ -1025,19 +1089,10 @@ export function DashboardView({
         emptyMessage="No Archive Jobs exist for discs currently in a drive."
         renderItem={(group) => (
           <div key={group.archiveRequestId} className="archive-attempt-group">
-            <DashboardJobItem
-              title={group.latest.discLabel}
-              subtitle={group.latest.opticalDriveName}
-              status={group.latest.status}
-              progressPercent={group.latest.progressPercent}
-              progressDetail={archiveProgressDetail(group.latest)}
-              failureDetail={group.latest.failureDetail}
-              action={
-                <p className="item-time">
-                  Attempt {group.latest.attemptOrdinal} ·{" "}
-                  {group.latest.attemptOrdinal} total
-                </p>
-              }
+            <ArchiveJobItem
+              job={group.latest}
+              busy={busyWorkflowId === group.archiveRequestId}
+              onCancel={onCancelArchiveRequest}
             />
             {group.older.length > 0 ? (
               <details className="archive-attempt-history">

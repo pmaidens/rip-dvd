@@ -26,6 +26,7 @@ await runConfiguredAsyncWorker(
         configuredDevicePath: config.archiveDevicePath,
         copyRunner: createNodeDvdCopyRunner({
           maxActiveCopies: config.archiveWorkerConcurrency,
+          stallTimeoutMs: config.archiveCopyStallTimeoutMs,
         }),
         hardware: createLinuxOpticalDriveHardware(),
         log,

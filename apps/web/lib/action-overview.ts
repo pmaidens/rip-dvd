@@ -4,6 +4,8 @@ import type {
   FilesystemVerificationStatus,
 } from "@rip-dvd/data-access";
 
+import { assessArchiveProgress } from "./archive-progress-health";
+
 const PREVIEW_LIMIT = 3;
 
 export interface ActionOverviewItem {
@@ -61,10 +63,18 @@ function mediaLabel(
 }
 
 function readSnapshot(access: ConsistentReadAccess): ActionOverviewSnapshot {
+  const generatedAt = new Date();
   const discsAwaitingApproval = access.catalog.listDetectedDiscs(["scanned"]);
   const archiveRequestsNeedingAttention = access.archiveRequests.list([
     "needs_attention",
   ]);
+  const archiveJobsNotAdvancing = access.archiveJobs
+    .list(["running"])
+    .filter(
+      (archiveJob) =>
+        assessArchiveProgress(archiveJob, generatedAt).status ===
+        "not_advancing",
+    );
   const allArchives = access.catalog.listOriginalDiscArchives();
   const allEncodeJobs = access.encodeJobs.list();
   const failedEncodeJobs = allEncodeJobs.filter(
@@ -83,6 +93,7 @@ function readSnapshot(access: ConsistentReadAccess): ActionOverviewSnapshot {
   const detectedDiscIds = [
     ...new Set([
       ...archiveRequestsNeedingAttention.map((request) => request.detectedDiscId),
+      ...archiveJobsNotAdvancing.map((archiveJob) => archiveJob.detectedDiscId),
       ...catalogReviewArchives.map((archive) => archive.detectedDiscId),
       ...archiveProblems.map((archive) => archive.detectedDiscId),
     ]),
@@ -120,7 +131,7 @@ function readSnapshot(access: ConsistentReadAccess): ActionOverviewSnapshot {
   };
 
   return {
-    generatedAt: new Date().toISOString(),
+    generatedAt: generatedAt.toISOString(),
     discApprovals: category(
       discsAwaitingApproval.map((disc) => ({
         id: disc.id,
@@ -128,14 +139,21 @@ function readSnapshot(access: ConsistentReadAccess): ActionOverviewSnapshot {
         occurredAt: disc.detectedAt,
       })),
     ),
-    failedArchives: category(
-      archiveRequestsNeedingAttention.map((request) => ({
+    failedArchives: category([
+      ...archiveRequestsNeedingAttention.map((request) => ({
         id: request.id,
         label:
           discsById.get(request.detectedDiscId)?.volumeLabel ?? "Unlabeled disc",
         occurredAt: request.updatedAt,
       })),
-    ),
+      ...archiveJobsNotAdvancing.map((archiveJob) => ({
+        id: archiveJob.archiveRequestId,
+        label:
+          discsById.get(archiveJob.detectedDiscId)?.volumeLabel ??
+          "Unlabeled disc",
+        occurredAt: archiveJob.lastProgressAt,
+      })),
+    ]),
     failedEncodes: category(
       failedEncodeJobs.map((job) => ({
         id: job.id,

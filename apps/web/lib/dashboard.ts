@@ -98,6 +98,7 @@ export interface DashboardDetectedDiscDetails {
 
 export interface DashboardArchiveJob {
   id: string;
+  activityRevision?: string;
   detectedDiscId: string;
   archiveRequestId: string;
   attemptOrdinal: number;
@@ -106,6 +107,8 @@ export interface DashboardArchiveJob {
   status: ArchiveJobStatus;
   progressPhase: ArchiveProgressPhase;
   progressPercent: number;
+  progressBytes?: number;
+  lastProgressAt?: string;
   failureDetail?: string | null;
 }
 
@@ -726,6 +729,8 @@ function readDashboardSnapshotRecords(
               status: job.status,
               progressPhase: job.progressPhase,
               progressPercent: job.progressPercent,
+              progressBytes: job.progressBytes,
+              lastProgressAt: job.lastProgressAt.toISOString(),
               failureDetail: formatFailureDetail(job.errorMessage),
             };
           }),

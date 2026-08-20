@@ -65,6 +65,11 @@ describe("formatFailureDetail", () => {
       "The worker operation timed out.",
     ],
     [
+      "archive progress cutoff",
+      "DVD archive copy stalled",
+      "The archive copy stopped because no data was copied during the configured stall interval.",
+    ],
+    [
       "cleanup",
       "encode failed; cleanup failed at ../partial/output.mkv",
       "The worker could not clean up a partial output.",
