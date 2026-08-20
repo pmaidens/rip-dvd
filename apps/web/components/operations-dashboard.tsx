@@ -688,6 +688,12 @@ function DetectedDiscItem({
     );
   }
 
+  const canRequestArchive =
+    disc.status === "scanned" ||
+    (disc.status === "approved" &&
+      disc.archiveRequest?.status === "cancelled");
+  const isReplacementRequest = disc.archiveRequest?.status === "cancelled";
+
   return (
     <article className="operation-item">
       <div className="item-heading">
@@ -698,7 +704,7 @@ function DetectedDiscItem({
         <StatusBadge value={disc.status} />
       </div>
       <DetectedDiscDetails disc={disc} />
-      {disc.status === "scanned" ? (
+      {canRequestArchive ? (
         <button
           type="button"
           disabled={approvingDetectedDiscId !== null}
@@ -706,7 +712,9 @@ function DetectedDiscItem({
         >
           {approvingDetectedDiscId === disc.id
             ? "Requesting…"
-            : "Request archive"}
+            : isReplacementRequest
+              ? "Request archive again"
+              : "Request archive"}
         </button>
       ) : null}
       {disc.archiveRequest ? (

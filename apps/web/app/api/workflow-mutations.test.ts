@@ -4,12 +4,17 @@ import { useDataAccessFixture } from "../../test/data-access-fixture";
 import { startArchiveJob } from "../../test/archive-job-fixture";
 import { createArchiveRequestCancellationRoute } from "./archive-requests/[id]/route";
 import { createArchiveRequestRetryRoute } from "./archive-requests/[id]/retry/route";
+import { createArchiveRequestsRoute } from "./archive-requests/route";
 import { createDiscInspectionRetryRoute } from "./disc-inspections/[id]/retry/route";
 
 const fixture = useDataAccessFixture();
 const trustedOrigin = "http://localhost:3000";
 
-function mutation(path: string, method: "POST" | "DELETE" = "POST") {
+function mutation(
+  path: string,
+  method: "POST" | "DELETE" = "POST",
+  body: unknown = {},
+) {
   return new Request(`${trustedOrigin}${path}`, {
     method,
     headers: {
@@ -18,7 +23,7 @@ function mutation(path: string, method: "POST" | "DELETE" = "POST") {
       Origin: trustedOrigin,
       "Sec-Fetch-Site": "same-origin",
     },
-    body: "{}",
+    body: JSON.stringify(body),
   });
 }
 
@@ -54,6 +59,35 @@ describe("Disc Inspection and Archive Request mutation routes", () => {
     await expect(response.json()).resolves.toEqual({
       archiveRequest: { id: archiveRequest.id, status: "cancelled" },
     });
+  });
+
+  it("creates a new Archive Request after the previous request was cancelled", async () => {
+    const { access, disc } = scannedDisc();
+    const cancelled = access.archiveRequests.cancel(
+      access.archiveRequests.create({ detectedDiscId: disc.id }).id,
+    );
+
+    const response = await createArchiveRequestsRoute(
+      mutation("/api/archive-requests", "POST", {
+        detectedDiscId: disc.id,
+      }),
+      () => access,
+      () => trustedOrigin,
+    );
+
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toMatchObject({
+      archiveRequest: {
+        detectedDiscId: disc.id,
+        status: "pending",
+      },
+    });
+    expect(access.archiveRequests.list(["cancelled"])).toEqual([
+      expect.objectContaining({ id: cancelled.id }),
+    ]);
+    expect(access.archiveRequests.list(["pending"])).toEqual([
+      expect.objectContaining({ detectedDiscId: disc.id }),
+    ]);
   });
 
   it("retries a request needing attention without rewriting its prior attempt", async () => {
