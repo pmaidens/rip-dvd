@@ -29,7 +29,10 @@ import {
   type DvdTitle,
 } from "@rip-dvd/data-access/dvd-scan";
 
-import { DASHBOARD_ACTIVE_JOB_LIMIT } from "./dashboard-bounds";
+import {
+  DASHBOARD_ACTIVE_DISC_LIMIT,
+  DASHBOARD_ACTIVE_JOB_LIMIT,
+} from "./dashboard-bounds";
 import { isTerminalEncodeJobStatus } from "./encode-job-status";
 import { formatFailureDetail } from "./failure-detail";
 
@@ -327,11 +330,18 @@ function readDashboardSnapshotRecords(
   );
   const currentDetectedDiscIds =
     discInspectionSource.status === "loaded"
-      ? discInspectionSource.value.flatMap((inspection) =>
-          inspection.detectedDiscId === null
-            ? []
-            : [inspection.detectedDiscId],
-        )
+      ? discInspectionSource.value
+          .flatMap((inspection) =>
+            inspection.detectedDiscId === null
+              ? []
+              : [inspection.detectedDiscId],
+          )
+          .slice(
+            0,
+            activityLimit === undefined
+              ? undefined
+              : DASHBOARD_ACTIVE_DISC_LIMIT,
+          )
       : null;
   const detectedDiscSource = currentDetectedDiscIds === null
     ? { status: "error" as const }
@@ -341,18 +351,18 @@ function readDashboardSnapshotRecords(
         }),
       );
   const archiveJobSource = readSource(() =>
-    access.archiveJobs.list(
-      undefined,
-      activityLimit === undefined
-        ? undefined
+    access.archiveJobs.list(undefined, {
+      detectedDiscIds: currentDetectedDiscIds ?? [],
+      ...(activityLimit === undefined
+        ? {}
         : {
             policy: {
               mode: "active-and-history",
               activeLimit: DASHBOARD_ACTIVE_JOB_LIMIT,
               historyLimit: activityLimit,
             },
-      },
-    ),
+          }),
+    }),
   );
   const displayedDetectedDiscIds = detectedDiscSource.status === "loaded"
     ? detectedDiscSource.value.map((disc) => disc.id)

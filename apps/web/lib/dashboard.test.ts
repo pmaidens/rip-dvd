@@ -17,9 +17,10 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { readDashboardSnapshot } from "./dashboard";
+import { DASHBOARD_ACTIVE_DISC_LIMIT } from "./dashboard-bounds";
 import {
   completeDiscInspection,
   seedFailedArchiveJobAndQueuedDuplicate,
@@ -32,6 +33,10 @@ import {
 } from "../test/data-access-fixture";
 
 const dataAccessFixture = useDataAccessFixture();
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 function seedEncodeJob(
   access: LegacySidecarDataAccess,
@@ -642,6 +647,77 @@ describe("readDashboardSnapshot", () => {
       status: "loaded",
       items: [expect.objectContaining({ id: activeJob.id })],
     });
+  });
+
+  it("filters removed-disc Archive Jobs before applying the history bound", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-20T18:00:00.000Z"));
+    const access = dataAccessFixture.create();
+    const activeDrive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/active",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const activeDisc = access.catalog.registerDetectedDisc({
+      opticalDriveId: activeDrive.id,
+      discKind: "dvd",
+      fingerprint: "older-active-disc",
+    });
+    access.catalog.updateDetectedDiscStatus(activeDisc.id, "scanned");
+    const activeJob = startArchiveJob(access, activeDisc, "active-worker");
+    access.archiveJobs.fail(activeJob, "older active failure");
+
+    vi.setSystemTime(new Date("2026-08-20T18:01:00.000Z"));
+    const removedDrive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/removed",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const removedDisc = access.catalog.registerDetectedDisc({
+      opticalDriveId: removedDrive.id,
+      discKind: "dvd",
+      fingerprint: "newer-removed-disc",
+    });
+    access.catalog.updateDetectedDiscStatus(removedDisc.id, "scanned");
+    const removedJob = startArchiveJob(access, removedDisc, "removed-worker");
+    access.archiveJobs.fail(removedJob, "newer removed failure");
+    access.discInspections.clearCurrent({
+      opticalDriveId: removedDrive.id,
+      reasonCode: "no_medium",
+    });
+
+    expect(readDashboardSnapshot(access, { activityLimit: 1 }).archiveJobs)
+      .toEqual({
+        status: "loaded",
+        items: [expect.objectContaining({ id: activeJob.id })],
+      });
+  });
+
+  it("caps current Detected Discs in activity snapshots", () => {
+    const access = dataAccessFixture.create();
+    for (let index = 0; index <= DASHBOARD_ACTIVE_DISC_LIMIT; index += 1) {
+      const drive = access.catalog.upsertOpticalDrive({
+        devicePath: `/dev/activity-${index}`,
+        isEnabled: true,
+        isPresent: true,
+      });
+      const disc = access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint: `activity-disc-${index}`,
+      });
+      access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+      completeDiscInspection(access, disc, `activity-generation-${index}`);
+    }
+
+    const snapshot = readDashboardSnapshot(access, { activityLimit: 20 });
+
+    expect(snapshot.detectedDiscs.status).toBe("loaded");
+    expect(
+      snapshot.detectedDiscs.status === "loaded"
+        ? snapshot.detectedDiscs.items
+        : [],
+    ).toHaveLength(DASHBOARD_ACTIVE_DISC_LIMIT);
   });
 
   it("collapses completed inspection detail only after its Archive Request is fulfilled", () => {
