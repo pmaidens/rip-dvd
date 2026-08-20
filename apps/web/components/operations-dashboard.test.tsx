@@ -387,8 +387,10 @@ describe("DashboardView", () => {
     expectEverySection(html);
     expect(html.match(/data-state="empty"/g)).toHaveLength(5);
     expect(html).toContain("No Optical Drives have been discovered.");
-    expect(html).toContain("No Detected Discs are currently known.");
-    expect(html).toContain("No Archive Jobs are recorded.");
+    expect(html).toContain("No discs are currently in an Optical Drive.");
+    expect(html).toContain(
+      "No Archive Jobs exist for discs currently in a drive.",
+    );
     expect(html).toContain("No Encode Jobs are recorded.");
     expect(html).toContain("No Original Disc Archives need catalog review.");
   });

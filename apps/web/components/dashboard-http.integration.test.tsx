@@ -134,7 +134,7 @@ describe("database-backed dashboard over HTTP", () => {
     expect(html.match(/data-state="empty"/g)).toHaveLength(4);
     expect(html).toContain("Archive drive");
     expect(html).toContain("Pioneer BDR-XD08");
-    expect(html).toContain("No Detected Discs are currently known.");
+    expect(html).toContain("No discs are currently in an Optical Drive.");
     expect(html).not.toContain("/dev/sr0");
   });
 

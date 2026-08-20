@@ -996,7 +996,7 @@ export function DashboardView({
             title="Detected Discs"
             eyebrow="Intake"
             state={archivedOrCancelledRequestDiscsLast(state.detectedDiscs)}
-            emptyMessage="No Detected Discs are currently known."
+            emptyMessage="No discs are currently in an Optical Drive."
             renderItem={(disc) => (
               <DetectedDiscItem
                 key={disc.id}
@@ -1014,7 +1014,7 @@ export function DashboardView({
         title="Archive Jobs"
         eyebrow="Preservation queue"
         state={archiveJobGroups}
-        emptyMessage="No Archive Jobs are recorded."
+        emptyMessage="No Archive Jobs exist for discs currently in a drive."
         renderItem={(group) => (
           <div key={group.archiveRequestId} className="archive-attempt-group">
             <DashboardJobItem

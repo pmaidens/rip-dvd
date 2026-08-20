@@ -927,10 +927,11 @@ archived**. Matching nonterminal Archive Requests are fulfilled by that
 provenance and no duplicate execution attempt starts.
 
 The dashboard's HTTP snapshot carries review details. One-second SSE activity
-events retain up to 100 live Detected Discs and jobs ahead of 20 terminal-history
-records, include every present or enabled Optical Drive plus at most 20 disabled
-missing-history drives, and carry no title maps. Bounded relationship rows
-preserve labels. The browser
+events retain up to 100 Detected Discs identified by current Disc Inspections.
+Archive Jobs are filtered to those inserted discs before the active and
+20-record terminal-history bounds are applied. Events include every present or
+enabled Optical Drive plus at most 20 disabled missing-history drives and carry
+no title maps. Bounded relationship rows preserve labels. The browser
 merges unchanged summaries into its cache and reloads HTTP details when a disc
 is first observed or rescanned.
 

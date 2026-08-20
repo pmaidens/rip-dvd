@@ -719,6 +719,10 @@ export interface DetectedDiscListOptions extends ChronologicalListOptions {
   ids?: readonly DetectedDiscId[];
 }
 
+export interface ArchiveJobListOptions extends ChronologicalListOptions {
+  detectedDiscIds?: readonly DetectedDiscId[];
+}
+
 export interface OriginalDiscArchiveListCursor {
   direction: "newer" | "older";
   archivedAt: Date;
@@ -918,7 +922,7 @@ export interface ArchiveJobAccess {
   finalizeExpiredCancellation(claim: RunningArchiveJob): ArchiveJob;
   list(
     statuses?: ArchiveJobStatus[],
-    options?: ChronologicalListOptions,
+    options?: ArchiveJobListOptions,
   ): ArchiveJob[];
   listLatestForRequests(
     archiveRequestIds: readonly ArchiveRequestId[],

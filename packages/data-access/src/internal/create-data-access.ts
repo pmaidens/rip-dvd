@@ -123,6 +123,7 @@ import type {
   ArchiveJobClaimToken,
   ArchiveJobId,
   ArchiveJob,
+  ArchiveJobListOptions,
   ArchiveJobStatus,
   ArchiveJobProgress,
   ArchiveRequestId,
@@ -1920,27 +1921,50 @@ export function createDataAccessInternal(
     throw new RecordNotFoundError("encoding profile", id);
   }
 
+  function archiveJobListCondition(
+    statuses: ArchiveJobStatus[] | undefined,
+    options: ArchiveJobListOptions | undefined,
+  ) {
+    if (options?.detectedDiscIds?.length === 0) {
+      return null;
+    }
+    return and(
+      statuses?.length ? inArray(archiveJobs.status, statuses) : undefined,
+      options?.detectedDiscIds
+        ? inArray(archiveJobs.detectedDiscId, [...options.detectedDiscIds])
+        : undefined,
+    );
+  }
+
   const listArchiveJobs = createBoundedChronologicalList<
     ArchiveJob,
     ArchiveJobStatus,
-    ChronologicalListOptions
+    ArchiveJobListOptions
   >({
     activeStatuses: ["running"],
     historyStatuses: ["completed", "failed", "aborted"],
     chronologicalAt: (job) => job.updatedAt,
-    readAll(statuses) {
+    readAll(statuses, options) {
+      const condition = archiveJobListCondition(statuses, options);
+      if (condition === null) {
+        return [];
+      }
       return database
         .select()
         .from(archiveJobs)
-        .where(statuses?.length ? inArray(archiveJobs.status, statuses) : undefined)
+        .where(condition)
         .orderBy(asc(archiveJobs.createdAt), asc(archiveJobs.id))
         .all();
     },
-    readNewest(statuses, limit) {
+    readNewest(statuses, limit, options) {
+      const condition = archiveJobListCondition(statuses, options);
+      if (condition === null) {
+        return [];
+      }
       return database
         .select()
         .from(archiveJobs)
-        .where(statuses?.length ? inArray(archiveJobs.status, statuses) : undefined)
+        .where(condition)
         .orderBy(desc(archiveJobs.updatedAt), desc(archiveJobs.id))
         .limit(limit)
         .all();
