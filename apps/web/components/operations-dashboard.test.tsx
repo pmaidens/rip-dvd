@@ -733,12 +733,12 @@ describe("DashboardView", () => {
     expect(html).not.toContain("/media/");
   });
 
-  it("compacts already archived discs at the bottom in expandable rows", async () => {
+  it("moves archived Detected Discs and Detected Discs with cancelled Archive Requests to the bottom", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     const detectedDisc = (
       id: string,
       volumeLabel: string,
-      status: "archived" | "scanned" | "rejected",
+      status: "approved" | "archived" | "scanned" | "rejected",
     ) => ({
       id,
       volumeLabel,
@@ -764,6 +764,17 @@ describe("DashboardView", () => {
               items: [
                 detectedDisc("archived-a", "ARCHIVED_A", "archived"),
                 detectedDisc("scanned", "SCANNED", "scanned"),
+                {
+                  ...detectedDisc("cancelled", "CANCELLED", "approved"),
+                  archiveRequest: {
+                    id: "cancelled-request",
+                    status: "cancelled" as const,
+                    attemptCount: 0,
+                    latestFailureDetail: null,
+                    createdAt: "2026-07-22T08:00:00.000Z",
+                    updatedAt: "2026-07-22T08:01:00.000Z",
+                  },
+                },
                 detectedDisc("archived-b", "ARCHIVED_B", "archived"),
                 detectedDisc("rejected", "REJECTED", "rejected"),
               ],
@@ -781,7 +792,13 @@ describe("DashboardView", () => {
       rows.map(
         (row) => row.querySelector("h3, summary strong")?.textContent,
       ),
-    ).toEqual(["SCANNED", "REJECTED", "ARCHIVED_A", "ARCHIVED_B"]);
+    ).toEqual([
+      "SCANNED",
+      "REJECTED",
+      "ARCHIVED_A",
+      "CANCELLED",
+      "ARCHIVED_B",
+    ]);
 
     const disclosures = container.querySelectorAll<HTMLDetailsElement>(
       "details.archived-disc",
