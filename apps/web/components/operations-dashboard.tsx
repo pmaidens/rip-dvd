@@ -352,12 +352,9 @@ function ArchiveJobItem({
   onCancel: (archiveRequestId: string) => void;
 }) {
   const currentTime = useCurrentTime(job.status === "running" ? 5_000 : 0);
-  const progressHealth = job.lastProgressAt
-    ? assessArchiveProgress(
-        { status: job.status, lastProgressAt: job.lastProgressAt },
-        currentTime,
-      )
-    : { status: "advancing" as const };
+  const progressHealth = job.status === "running"
+    ? assessArchiveProgress(job, currentTime)
+    : null;
 
   return (
     <DashboardJobItem
@@ -368,7 +365,7 @@ function ArchiveJobItem({
       progressDetail={archiveProgressDetail(job)}
       failureDetail={job.failureDetail}
       annotation={
-        progressHealth.status === "not_advancing" ? (
+        progressHealth?.status === "not_advancing" ? (
           <div className="archive-progress-warning" role="alert">
             <strong>Not advancing</strong>
             <p>

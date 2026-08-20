@@ -6,15 +6,10 @@ export type ArchiveProgressHealth =
 
 export function assessArchiveProgress(
   archiveJob: {
-    status: string;
     lastProgressAt: Date | string;
   },
   now: Date | number = Date.now(),
 ): ArchiveProgressHealth {
-  if (archiveJob.status !== "running") {
-    return { status: "advancing" };
-  }
-
   const nowMs = now instanceof Date ? now.getTime() : now;
   const lastProgressAtMs = new Date(archiveJob.lastProgressAt).getTime();
   const durationMs = Math.max(0, nowMs - lastProgressAtMs);

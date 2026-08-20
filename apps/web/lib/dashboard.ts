@@ -107,8 +107,8 @@ export interface DashboardArchiveJob {
   status: ArchiveJobStatus;
   progressPhase: ArchiveProgressPhase;
   progressPercent: number;
-  progressBytes?: number;
-  lastProgressAt?: string;
+  progressBytes: number;
+  lastProgressAt: string;
   failureDetail?: string | null;
 }
 
