@@ -926,7 +926,9 @@ describe("data-access facade", () => {
     const predecessorNames = readdirSync(migrationsRoot)
       .filter((name) => /^\d/.test(name))
       .filter(
-        (name) => name !== "20260812151540_disc-inspection-archive-requests",
+        (name) =>
+          name !== "20260812151540_disc-inspection-archive-requests" &&
+          name !== "20260820215821_redundant_jocasta",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -7606,6 +7608,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
+        name: "20260820215821_redundant_jocasta",
+      },
+      {
         name: "20260814225652_familiar_bug",
       },
       {
@@ -7631,9 +7636,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260812160800_explicit-archive-only-review",
-      },
-      {
-        name: "20260812151540_disc-inspection-archive-requests",
       },
     ]);
     expect(
@@ -10650,6 +10652,77 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         progressPercent: 71,
       }),
     ]);
+    access.close();
+  });
+
+  it("tracks Archive Job forward progress separately from lease renewal", () => {
+    vi.useFakeTimers();
+    const startedAt = new Date("2026-08-20T20:04:10.000Z");
+    vi.setSystemTime(startedAt);
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/archive-forward-progress",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const { disc, inspection } = completeDiscInspection(access, {
+      opticalDriveId: drive.id,
+      mediaGeneration: "archive-forward-progress",
+      fingerprint: "archive-forward-progress",
+    });
+    access.archiveRequests.create({ detectedDiscId: disc.id });
+    const claim = access.archiveJobs.startForInspection(
+      inspection.id,
+      "archive-forward-progress-worker",
+    )!;
+
+    expect(claim).toMatchObject({
+      progressBytes: 0,
+      lastProgressAt: startedAt,
+    });
+
+    vi.advanceTimersByTime(20_000);
+    const renewed = access.archiveJobs.renewClaim(claim);
+    expect(renewed.updatedAt).toEqual(new Date("2026-08-20T20:04:30.000Z"));
+    expect(renewed.lastProgressAt).toEqual(startedAt);
+
+    vi.advanceTimersByTime(40_000);
+    const advanced = access.archiveJobs.updateProgress(claim, {
+      phase: "copying",
+      progressPercent: 9,
+      progressBytes: 638_000_000,
+    });
+    expect(advanced).toMatchObject({
+      progressBytes: 638_000_000,
+      lastProgressAt: new Date("2026-08-20T20:05:10.000Z"),
+    });
+
+    vi.advanceTimersByTime(20_000);
+    access.archiveJobs.renewClaim(claim);
+    vi.advanceTimersByTime(40_000);
+    const unchanged = access.archiveJobs.updateProgress(claim, {
+      phase: "copying",
+      progressPercent: 9,
+      progressBytes: 638_000_000,
+    });
+    expect(unchanged.updatedAt).toEqual(new Date("2026-08-20T20:06:10.000Z"));
+    expect(unchanged.lastProgressAt).toEqual(
+      new Date("2026-08-20T20:05:10.000Z"),
+    );
+
+    vi.advanceTimersByTime(20_000);
+    access.archiveJobs.renewClaim(claim);
+    vi.advanceTimersByTime(40_000);
+    expect(
+      access.archiveJobs.updateProgress(claim, {
+        phase: "copying",
+        progressPercent: 9,
+        progressBytes: 638_002_048,
+      }),
+    ).toMatchObject({
+      progressBytes: 638_002_048,
+      lastProgressAt: new Date("2026-08-20T20:07:10.000Z"),
+    });
     access.close();
   });
 

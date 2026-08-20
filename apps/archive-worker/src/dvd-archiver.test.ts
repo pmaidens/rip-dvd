@@ -1330,6 +1330,52 @@ describe("DVD archive publication", () => {
     await expect(retry).resolves.toEqual(createCleanDvdRecoveryResult(9));
   });
 
+  it("stops a DVD copy after copied bytes stop advancing", async () => {
+    vi.useFakeTimers();
+    const child = createMockDvdCopyChild();
+    const runner = createNodeDvdCopyRunner({
+      requireInactive: () => undefined,
+      spawnProcess: vi.fn(() => child),
+      stallTimeoutMs: 100,
+      timeoutMs: 1_000,
+    });
+    const outputPath = join(
+      createOriginalsLibrary(),
+      ".stalled.iso.rip-dvd-partial",
+    );
+    let outcome: unknown;
+    void runner.copy({
+      devicePath: "/dev/zero",
+      outputPath,
+      sizeBytes: 1_000,
+      signal: new AbortController().signal,
+      onBytesCopied: () => undefined,
+    }).then(
+      () => {
+        outcome = "resolved";
+      },
+      (error: unknown) => {
+        outcome = error;
+      },
+    );
+    child.stdio[4].emit(
+      "data",
+      Buffer.from("rip-dvd-copy-authorization-ready\n"),
+    );
+
+    await vi.advanceTimersByTimeAsync(90);
+    child.stderr.emit("data", Buffer.from("10 bytes\n"));
+    await vi.advanceTimersByTimeAsync(90);
+    expect(outcome).toBeUndefined();
+
+    child.stderr.emit("data", Buffer.from("10 bytes\n"));
+    await vi.advanceTimersByTimeAsync(10);
+    expect(outcome).toEqual(new Error("DVD archive copy stalled"));
+    expect(child.kill).toHaveBeenCalledWith("SIGKILL");
+    child.emit("close", null, "SIGKILL");
+    await runner.waitForInactive("/dev/zero", outputPath);
+  });
+
   it("contains progress callback failures and waits for the reader to close", async () => {
     const originalsLibraryPath = createOriginalsLibrary();
     const stderr = Object.assign(new EventEmitter(), { destroy: vi.fn() });
@@ -1440,8 +1486,8 @@ describe("DVD archive publication", () => {
     expect(progress).toEqual([
       { phase: "preparing", progressPercent: 0 },
       { phase: "copying", progressPercent: 0 },
-      { phase: "copying", progressPercent: 44 },
-      { phase: "copying", progressPercent: 99 },
+      { phase: "copying", progressPercent: 44, progressBytes: 4 },
+      { phase: "copying", progressPercent: 99, progressBytes: 9 },
       { phase: "finalizing", progressPercent: 99 },
     ]);
     expect(verifySource).toHaveBeenCalledOnce();

@@ -617,6 +617,9 @@ export const archiveJobs = sqliteTable(
       .notNull()
       .default("preparing"),
     progressPercent: integer("progress_percent").notNull().default(0),
+    progressBytes: integer("progress_bytes").notNull().default(0),
+    lastProgressAt: integer("last_progress_at", { mode: "timestamp_ms" })
+      .notNull(),
     claimedBy: text("claimed_by"),
     claimToken: text("claim_token").$type<ArchiveJobClaimToken>(),
     claimedAt: integer("claimed_at", { mode: "timestamp_ms" }),
@@ -646,6 +649,10 @@ export const archiveJobs = sqliteTable(
     check(
       "archive_jobs_progress_check",
       sql`${table.progressPercent} between 0 and 100`,
+    ),
+    check(
+      "archive_jobs_progress_bytes_check",
+      sql`typeof(${table.progressBytes}) = 'integer' and ${table.progressBytes} >= 0`,
     ),
     check(
       "archive_jobs_progress_phase_check",

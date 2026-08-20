@@ -31,6 +31,11 @@ const FAILURE_REASON_RULES: readonly FailureReasonRule[] = [
     reason: "The worker reported an input/output error.",
   },
   {
+    pattern: /DVD archive copy stalled/i,
+    reason:
+      "The archive copy stopped because no data was copied during the configured stall interval.",
+  },
+  {
     pattern: /timed out|timeout/i,
     reason: "The worker operation timed out.",
   },

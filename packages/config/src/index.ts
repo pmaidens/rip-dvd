@@ -5,6 +5,7 @@ export interface RuntimeConfig {
   archiveDevicePath: string;
   webTrustedOrigin: string;
   workerPollIntervalMs: number;
+  archiveCopyStallTimeoutMs: number;
   archiveWorkerConcurrency: number;
   encodeWorkerConcurrency: number;
 }
@@ -14,6 +15,7 @@ type Environment = Readonly<Record<string, string | undefined>>;
 const DEFAULT_ARCHIVE_DEVICE_PATH = "/dev/sr0";
 const DEFAULT_WEB_TRUSTED_ORIGIN = "http://localhost:3000";
 const DEFAULT_WORKER_POLL_INTERVAL_MS = 5_000;
+const DEFAULT_ARCHIVE_COPY_STALL_TIMEOUT_MS = 30 * 60_000;
 const DEFAULT_ARCHIVE_WORKER_CONCURRENCY = 2;
 const DEFAULT_ENCODE_WORKER_CONCURRENCY = 1;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
@@ -114,6 +116,11 @@ export function loadConfig(environment: Environment = process.env): RuntimeConfi
       environment,
       "RIP_DVD_WORKER_POLL_INTERVAL_MS",
       DEFAULT_WORKER_POLL_INTERVAL_MS,
+    ),
+    archiveCopyStallTimeoutMs: timerDelayMilliseconds(
+      environment,
+      "RIP_DVD_ARCHIVE_STALL_TIMEOUT_MS",
+      DEFAULT_ARCHIVE_COPY_STALL_TIMEOUT_MS,
     ),
     archiveWorkerConcurrency: positiveInteger(
       environment,

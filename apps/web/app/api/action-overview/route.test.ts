@@ -1,6 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { seedFailedArchiveJobAndQueuedDuplicate } from "../../../test/archive-job-fixture";
+import {
+  seedFailedArchiveJobAndQueuedDuplicate,
+  startArchiveJob,
+} from "../../../test/archive-job-fixture";
 import {
   completeCatalogReview,
   useDataAccessFixture,
@@ -8,6 +11,8 @@ import {
 import { createActionOverviewRoute } from "./route";
 
 const dataAccessFixture = useDataAccessFixture();
+
+afterEach(() => vi.useRealTimers());
 
 describe("Action overview API", () => {
   it("counts all failed jobs and reviewed-archive filesystem problems", async () => {
@@ -107,7 +112,7 @@ describe("Action overview API", () => {
     const beforePublication = await createActionOverviewRoute(
       () => access,
     ).json();
-    expect(beforePublication.failedArchives).toEqual({
+    expect(beforePublication.archiveRequestsNeedingAttention).toEqual({
       count: 1,
       items: [
         { id: fixture.failedRequestId, label: "FAILED_DUPLICATE" },
@@ -120,7 +125,38 @@ describe("Action overview API", () => {
     expect(access.archiveJobs.list(["failed"])).toEqual([
       expect.objectContaining({ id: fixture.failedJob.id }),
     ]);
-    expect(body.failedArchives).toEqual({ count: 0, items: [] });
+    expect(body.archiveRequestsNeedingAttention).toEqual({
+      count: 0,
+      items: [],
+    });
+  });
+
+  it("includes a running Archive Job that has stopped advancing", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-20T20:04:10.000Z"));
+    const access = dataAccessFixture.create();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/stalled-action-overview",
+      displayName: "Upper drive",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "stalled-action-overview-disc",
+      volumeLabel: "BARBIE",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    const job = startArchiveJob(access, disc, "stalled-action-overview-worker");
+
+    vi.advanceTimersByTime(5 * 60_000);
+    const body = await createActionOverviewRoute(() => access).json();
+
+    expect(body.archiveRequestsNeedingAttention).toEqual({
+      count: 1,
+      items: [{ id: job.archiveRequestId, label: "BARBIE" }],
+    });
   });
 
   it("fails closed when the catalog is unavailable", async () => {
