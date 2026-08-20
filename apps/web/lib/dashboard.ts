@@ -707,36 +707,29 @@ function readDashboardSnapshotRecords(
     drivesById === null ||
     discsById === null
       ? unavailable<DashboardArchiveJob>()
-      : (() => {
-          const currentDetectedDiscIdSet = new Set(currentDetectedDiscIds);
-          return loaded(
-            archiveJobSource.value
-              .filter((job) =>
-                currentDetectedDiscIdSet.has(job.detectedDiscId)
-              )
-              .map((job) => {
-                const disc = discsById.get(job.detectedDiscId);
-                const drive = disc
-                  ? drivesById.get(disc.opticalDriveId)
-                  : undefined;
-                return {
-                  id: job.id,
-                  activityRevision: job.updatedAt.toISOString(),
-                  archiveRequestId: job.archiveRequestId,
-                  attemptOrdinal: job.attemptOrdinal,
-                  detectedDiscId: job.detectedDiscId,
-                  discLabel: disc?.volumeLabel ?? "Unlabeled disc",
-                  opticalDriveName: drive
-                    ? driveDisplayName(drive)
-                    : "Unknown Optical Drive",
-                  status: job.status,
-                  progressPhase: job.progressPhase,
-                  progressPercent: job.progressPercent,
-                  failureDetail: formatFailureDetail(job.errorMessage),
-                };
-              }),
-          );
-        })();
+      : loaded(
+          archiveJobSource.value.map((job) => {
+            const disc = discsById.get(job.detectedDiscId);
+            const drive = disc
+              ? drivesById.get(disc.opticalDriveId)
+              : undefined;
+            return {
+              id: job.id,
+              activityRevision: job.updatedAt.toISOString(),
+              archiveRequestId: job.archiveRequestId,
+              attemptOrdinal: job.attemptOrdinal,
+              detectedDiscId: job.detectedDiscId,
+              discLabel: disc?.volumeLabel ?? "Unlabeled disc",
+              opticalDriveName: drive
+                ? driveDisplayName(drive)
+                : "Unknown Optical Drive",
+              status: job.status,
+              progressPhase: job.progressPhase,
+              progressPercent: job.progressPercent,
+              failureDetail: formatFailureDetail(job.errorMessage),
+            };
+          }),
+        );
 
   const encodeJobs =
     encodeJobSource.status === "error" ||
