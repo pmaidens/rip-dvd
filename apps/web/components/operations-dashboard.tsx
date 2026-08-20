@@ -570,19 +570,19 @@ function DashboardSection<T>({
   );
 }
 
-function terminalDetectedDiscsLast(
+function archivedOrCancelledRequestDiscsLast(
   state: DashboardSectionLoadState<DashboardDetectedDisc>,
 ): DashboardSectionLoadState<DashboardDetectedDisc> {
   if (state.status !== "loaded") {
     return state;
   }
-  const isTerminal = (disc: DashboardDetectedDisc) =>
+  const shouldMoveToEnd = (disc: DashboardDetectedDisc) =>
     disc.status === "archived" || disc.archiveRequest?.status === "cancelled";
   return {
     ...state,
     items: [
-      ...state.items.filter((disc) => !isTerminal(disc)),
-      ...state.items.filter(isTerminal),
+      ...state.items.filter((disc) => !shouldMoveToEnd(disc)),
+      ...state.items.filter(shouldMoveToEnd),
     ],
   };
 }
@@ -995,7 +995,7 @@ export function DashboardView({
           <DashboardSection
             title="Detected Discs"
             eyebrow="Intake"
-            state={terminalDetectedDiscsLast(state.detectedDiscs)}
+            state={archivedOrCancelledRequestDiscsLast(state.detectedDiscs)}
             emptyMessage="No Detected Discs are currently known."
             renderItem={(disc) => (
               <DetectedDiscItem

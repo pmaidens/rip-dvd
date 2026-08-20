@@ -733,7 +733,7 @@ describe("DashboardView", () => {
     expect(html).not.toContain("/media/");
   });
 
-  it("moves archived discs and discs with cancelled requests to the bottom", async () => {
+  it("moves archived Detected Discs and Detected Discs with cancelled Archive Requests to the bottom", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     const detectedDisc = (
       id: string,
