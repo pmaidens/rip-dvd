@@ -1373,6 +1373,7 @@ function deferred<T>(): Deferred<T> {
 
 function mutationDashboardState(
   encodeJobStatus: "failed" | "queued" = "failed",
+  cancelledArchiveRequest = false,
 ): DashboardSnapshot {
   return {
     generatedAt: "2026-08-10T20:00:00.000Z",
@@ -1384,11 +1385,23 @@ function mutationDashboardState(
           id: "disc-1",
           volumeLabel: "READY_TO_ARCHIVE",
           discKind: "dvd",
-          status: "scanned",
+          status: cancelledArchiveRequest ? "approved" : "scanned",
           opticalDriveName: "Upper drive",
           fingerprint: "sha256:ready-to-archive",
           titles: [],
           detectedAt: "2026-08-10T19:00:00.000Z",
+          ...(cancelledArchiveRequest
+            ? {
+                archiveRequest: {
+                  id: "cancelled-request",
+                  status: "cancelled" as const,
+                  attemptCount: 0,
+                  latestFailureDetail: null,
+                  createdAt: "2026-08-10T19:01:00.000Z",
+                  updatedAt: "2026-08-10T19:02:00.000Z",
+                },
+              }
+            : {}),
         },
       ],
     },
@@ -1438,6 +1451,16 @@ const dashboardMutationCases = [
     errorMessage: "Archive Request creation failed. Try again.",
   },
   {
+    action: "replacement Archive Request creation",
+    page: "discs",
+    readyLabel: "Request archive again",
+    busyLabel: "Requesting…",
+    requestPath: "/api/archive-requests",
+    requestMethod: "POST",
+    errorMessage: "Archive Request creation failed. Try again.",
+    cancelledArchiveRequest: true,
+  },
+  {
     action: "Encode Job requeue",
     page: "encoding",
     readyLabel: "Retry encode",
@@ -1474,6 +1497,7 @@ async function renderMutationDashboard(
       "encodeJobStatus" in mutationCase
         ? mutationCase.encodeJobStatus
         : "failed",
+      "cancelledArchiveRequest" in mutationCase,
     ));
     onStreamStatus?.("live");
     return () => undefined;
