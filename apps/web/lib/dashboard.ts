@@ -325,49 +325,48 @@ function readDashboardSnapshotRecords(
         : { historicalLimit: activityLimit },
     ),
   );
-  const detectedDiscSource = readSource(() =>
-    access.catalog.listDetectedDiscs(
-      undefined,
-      activityLimit === undefined
-        ? undefined
-        : {
-            policy: {
-              mode: "active-and-history",
-              activeLimit: DASHBOARD_ACTIVE_DISC_LIMIT,
-              historyLimit: activityLimit,
-            },
-          },
-    ),
-  );
   const discInspectionSource = readSource(() =>
     access.discInspections.list({ currentOnly: true }),
   );
+  const currentDetectedDiscIds =
+    discInspectionSource.status === "loaded"
+      ? discInspectionSource.value
+          .flatMap((inspection) =>
+            inspection.detectedDiscId === null
+              ? []
+              : [inspection.detectedDiscId],
+          )
+          .slice(
+            0,
+            activityLimit === undefined
+              ? undefined
+              : DASHBOARD_ACTIVE_DISC_LIMIT,
+          )
+      : null;
+  const detectedDiscSource = currentDetectedDiscIds === null
+    ? { status: "error" as const }
+    : readSource(() =>
+        access.catalog.listDetectedDiscs(undefined, {
+          ids: currentDetectedDiscIds,
+        }),
+      );
   const archiveJobSource = readSource(() =>
-    access.archiveJobs.list(
-      undefined,
-      activityLimit === undefined
-        ? undefined
+    access.archiveJobs.list(undefined, {
+      detectedDiscIds: currentDetectedDiscIds ?? [],
+      ...(activityLimit === undefined
+        ? {}
         : {
             policy: {
               mode: "active-and-history",
               activeLimit: DASHBOARD_ACTIVE_JOB_LIMIT,
               historyLimit: activityLimit,
             },
-      },
-    ),
+          }),
+    }),
   );
-  const displayedDetectedDiscIds = [
-    ...(detectedDiscSource.status === "loaded"
-      ? detectedDiscSource.value.map((disc) => disc.id)
-      : []),
-    ...(discInspectionSource.status === "loaded"
-      ? discInspectionSource.value.flatMap((inspection) =>
-          inspection.detectedDiscId === null
-            ? []
-            : [inspection.detectedDiscId],
-        )
-      : []),
-  ];
+  const displayedDetectedDiscIds = detectedDiscSource.status === "loaded"
+    ? detectedDiscSource.value.map((disc) => disc.id)
+    : [];
   const archiveRequestSource = readSource(() =>
     activityLimit === undefined
       ? access.archiveRequests.list()
@@ -704,34 +703,33 @@ function readDashboardSnapshotRecords(
 
   const archiveJobs =
     archiveJobSource.status === "error" ||
+    currentDetectedDiscIds === null ||
     drivesById === null ||
     discsById === null
       ? unavailable<DashboardArchiveJob>()
-      : (() => {
-          return loaded(
-            archiveJobSource.value.map((job) => {
-              const disc = discsById.get(job.detectedDiscId);
-              const drive = disc
-                ? drivesById.get(disc.opticalDriveId)
-                : undefined;
-              return {
-                id: job.id,
-                activityRevision: job.updatedAt.toISOString(),
-                archiveRequestId: job.archiveRequestId,
-                attemptOrdinal: job.attemptOrdinal,
-                detectedDiscId: job.detectedDiscId,
-                discLabel: disc?.volumeLabel ?? "Unlabeled disc",
-                opticalDriveName: drive
-                  ? driveDisplayName(drive)
-                  : "Unknown Optical Drive",
-                status: job.status,
-                progressPhase: job.progressPhase,
-                progressPercent: job.progressPercent,
-                failureDetail: formatFailureDetail(job.errorMessage),
-              };
-            }),
-          );
-        })();
+      : loaded(
+          archiveJobSource.value.map((job) => {
+            const disc = discsById.get(job.detectedDiscId);
+            const drive = disc
+              ? drivesById.get(disc.opticalDriveId)
+              : undefined;
+            return {
+              id: job.id,
+              activityRevision: job.updatedAt.toISOString(),
+              archiveRequestId: job.archiveRequestId,
+              attemptOrdinal: job.attemptOrdinal,
+              detectedDiscId: job.detectedDiscId,
+              discLabel: disc?.volumeLabel ?? "Unlabeled disc",
+              opticalDriveName: drive
+                ? driveDisplayName(drive)
+                : "Unknown Optical Drive",
+              status: job.status,
+              progressPhase: job.progressPhase,
+              progressPercent: job.progressPercent,
+              failureDetail: formatFailureDetail(job.errorMessage),
+            };
+          }),
+        );
 
   const encodeJobs =
     encodeJobSource.status === "error" ||

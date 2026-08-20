@@ -40,9 +40,11 @@ content-ID validation instead of maintaining separate scan shapes.
 
 Bounded dashboard reads keep current state ahead of history: every present or
 enabled Optical Drive is returned before a capped history of disabled missing
-drives. Detected Discs awaiting review, current Disc Inspections, nonterminal
-Archive Requests, and Archive/Encode Job attempts remain bounded before recent
-terminal history is added.
+drives. The dashboard identifies inserted Detected Discs through current Disc
+Inspections, caps that set before loading details, and filters Archive Jobs to
+those Detected Discs before applying active and terminal-history bounds.
+Nonterminal Archive Requests and Encode Job attempts remain bounded before
+recent terminal history is added.
 Pending catalog review pages use an archived-time and archive-ID keyset cursor,
 so completing a visible review does not shift or duplicate later pages.
 
