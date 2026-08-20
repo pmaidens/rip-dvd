@@ -510,6 +510,8 @@ export interface ArchiveJob {
   priority: number;
   progressPhase: ArchiveProgressPhase;
   progressPercent: number;
+  progressBytes: number;
+  lastProgressAt: Date;
   claimedBy: string | null;
   claimToken: ArchiveJobClaimToken | null;
   claimedAt: Date | null;
@@ -653,6 +655,7 @@ export type DiscInspectionEvent =
 export interface ArchiveJobProgress {
   phase: ArchiveRunningProgressPhase;
   progressPercent: number;
+  progressBytes?: number;
 }
 
 export type RunningEncodeJob = EncodeJob & {

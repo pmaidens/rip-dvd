@@ -78,6 +78,7 @@ const MAX_COPY_PROTOCOL_BYTES = 1_200_000;
 const MAX_PROC_ENTRIES = 4_096;
 const MAX_PROC_FILE_DESCRIPTORS = 65_536;
 const COPY_TIMEOUT_MS = 12 * 60 * 60_000;
+const COPY_STALL_TIMEOUT_MS = 30 * 60_000;
 const COPY_AUTHORIZATION_READY_TIMEOUT_MS = 5_000;
 const COPY_START_AUTHORIZATION_TIMEOUT_MS = 5 * 60_000;
 const DEVICE_RECOVERY_LOCK_TIMEOUT_MS = 5_000;
@@ -203,6 +204,7 @@ export function createNodeDvdCopyRunner({
   requireInactive = requireDeviceInactive,
   spawnLockProcess = spawn as unknown as SpawnDvdDeviceLockProcess,
   spawnProcess = spawn as unknown as SpawnDvdCopyProcess,
+  stallTimeoutMs = COPY_STALL_TIMEOUT_MS,
   timeoutMs = COPY_TIMEOUT_MS,
 }: {
   deviceLockTimeoutMs?: number;
@@ -210,6 +212,7 @@ export function createNodeDvdCopyRunner({
   requireInactive?: (devicePath: string) => void;
   spawnLockProcess?: SpawnDvdDeviceLockProcess;
   spawnProcess?: SpawnDvdCopyProcess;
+  stallTimeoutMs?: number;
   timeoutMs?: number;
 } = {}): DvdCopyRunner {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
@@ -220,6 +223,9 @@ export function createNodeDvdCopyRunner({
     deviceLockTimeoutMs <= 0
   ) {
     throw new Error("DVD archive recovery lock timeout is invalid");
+  }
+  if (!Number.isSafeInteger(stallTimeoutMs) || stallTimeoutMs <= 0) {
+    throw new Error("DVD archive copy stall timeout is invalid");
   }
   const copyKey = (devicePath: string, outputPath: string) =>
     JSON.stringify([devicePath, outputPath]);
@@ -301,11 +307,13 @@ export function createNodeDvdCopyRunner({
       let authorizationSettled = false;
       let authorizationBuffer = "";
       let progressBuffer = "";
+      let highestCopiedBytes = 0;
       let diagnostics = "";
       let recoveryResultPayload: string | undefined;
       let resolveResult!: (result: DvdRecoveryResult) => void;
       let rejectResult!: (reason: unknown) => void;
       let resolveClosed!: () => void;
+      let stallTimeout: ReturnType<typeof setTimeout> | undefined;
       const result = new Promise<DvdRecoveryResult>((resolve, reject) => {
         resolveResult = resolve;
         rejectResult = reject;
@@ -336,6 +344,7 @@ export function createNodeDvdCopyRunner({
           return;
         }
         cancellationRequested = true;
+        clearTimeout(stallTimeout);
         child.stderr.destroy();
         child.stdio[4].destroy();
         child.stdio[5].destroy();
@@ -347,6 +356,14 @@ export function createNodeDvdCopyRunner({
           // continues to protect the live output path.
           child.unref();
         }
+      };
+      const armStallTimeout = () => {
+        clearTimeout(stallTimeout);
+        stallTimeout = setTimeout(() => {
+          rejectOperation(new Error("DVD archive copy stalled"));
+          cancel();
+        }, stallTimeoutMs);
+        stallTimeout.unref();
       };
       const authorizationReadyTimeout = setTimeout(() => {
         if (!authorizationSettled) {
@@ -393,6 +410,7 @@ export function createNodeDvdCopyRunner({
               ? "1"
               : `1${formatDvdRecoveryResumeBitmap(request.resumeFrom)}`,
           );
+          armStallTimeout();
         };
         const rejectAuthorization = (error: unknown) => {
           if (authorizationSettled) {
@@ -443,6 +461,10 @@ export function createNodeDvdCopyRunner({
           const match = /^\s*(\d+)\s+bytes\b/.exec(segment);
           const bytes = match ? Number(match[1]) : Number.NaN;
           if (Number.isSafeInteger(bytes) && bytes >= 0) {
+            if (bytes > highestCopiedBytes) {
+              highestCopiedBytes = bytes;
+              armStallTimeout();
+            }
             request.onBytesCopied(bytes);
           } else {
             appendDiagnostic(segment);
@@ -473,6 +495,7 @@ export function createNodeDvdCopyRunner({
       child.once("close", (code, signal) => {
         clearTimeout(authorizationReadyTimeout);
         clearTimeout(startAuthorizationTimeout);
+        clearTimeout(stallTimeout);
         confirmClosed();
         if (cancellationRequested) {
           rejectOperation(new Error("DVD archive copy was cancelled"));
@@ -1403,6 +1426,7 @@ export async function preserveDvdArchive({
         }
         onProgress({
           phase: "copying",
+          progressBytes: bytes,
           progressPercent: Math.min(
             99,
             Math.floor((bytes * 100) / safeSizeBytes),

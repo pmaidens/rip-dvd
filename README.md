@@ -357,6 +357,10 @@ Docker Compose defaults. Compose fixes the database and library paths to
 `/data/rip-dvd.sqlite`, `/media/movies`, and `/media/originals` so they always
 remain inside the declared persistent mounts. Direct, non-Compose launches can
 still set those three `RIP_DVD_*_PATH` variables through the shared loader.
+The archive worker also stops a copy after 30 minutes without an increase in
+copied bytes. Set `RIP_DVD_ARCHIVE_STALL_TIMEOUT_MS` to a positive millisecond
+value to change that cutoff. This watchdog is separate from the overall archive
+operation timeout.
 
 ### TypeScript roadmap and implementation frontier
 

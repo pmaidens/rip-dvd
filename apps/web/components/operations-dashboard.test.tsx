@@ -660,6 +660,8 @@ describe("DashboardView", () => {
             status: "failed",
             progressPhase: "copying",
             progressPercent: 42,
+            progressBytes: 42,
+            lastProgressAt: "2026-07-22T07:58:00.000Z",
             failureDetail: "DVD archive copy failed: Input/output error",
           },
         ],
@@ -842,6 +844,8 @@ describe("DashboardView", () => {
                   status: "failed",
                   progressPhase: "copying",
                   progressPercent: 28,
+                  progressBytes: 28,
+                  lastProgressAt: "2026-07-22T07:58:00.000Z",
                   failureDetail: "DVD archive copy failed: Input/output error",
                 },
               ],
@@ -878,6 +882,8 @@ describe("DashboardView", () => {
             status: "failed",
             progressPhase: "copying",
             progressPercent: 20,
+            progressBytes: 20,
+            lastProgressAt: "2026-07-22T07:58:00.000Z",
           },
           {
             id: "superseded-archive-job",
@@ -889,6 +895,8 @@ describe("DashboardView", () => {
             status: "failed",
             progressPhase: "copying",
             progressPercent: 30,
+            progressBytes: 30,
+            lastProgressAt: "2026-07-22T07:58:00.000Z",
           },
         ],
       },
@@ -923,6 +931,8 @@ describe("DashboardView", () => {
           status,
           progressPhase,
           progressPercent: 99,
+          progressBytes: index,
+          lastProgressAt: "2026-07-22T07:58:00.000Z",
         })),
       },
       encodeJobs: { status: "loaded", items: [] },
@@ -932,6 +942,60 @@ describe("DashboardView", () => {
     for (const [, , detail] of phases) {
       expect(html).toContain(detail);
     }
+  });
+
+  it("warns and offers cancellation when an Archive Job has not advanced", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-20T20:10:10.000Z"));
+    const state: DashboardLoadState = {
+      opticalDrives: { status: "loaded", items: [] },
+      detectedDiscs: { status: "loaded", items: [] },
+      archiveJobs: {
+        status: "loaded",
+        items: [{
+          id: "stalled-archive-job",
+          detectedDiscId: "stalled-disc",
+          archiveRequestId: "stalled-request",
+          attemptOrdinal: 1,
+          discLabel: "BARBIE",
+          opticalDriveName: "Upper drive",
+          status: "running",
+          progressPhase: "copying",
+          progressPercent: 9,
+          progressBytes: 638_000_000,
+          lastProgressAt: "2026-08-20T20:04:10.000Z",
+        }],
+      },
+      encodeJobs: { status: "loaded", items: [] },
+      catalogReview: { status: "loaded", items: [] },
+    };
+    const html = render(state);
+
+    expect(html).toContain("Not advancing");
+    expect(html).toContain("No data copied for 6m");
+    expect(html).toContain("The Optical Drive may be retrying an unreadable area.");
+    expect(html).toContain("Cancel archive");
+
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const onCancelArchiveRequest = vi.fn();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <DashboardView
+          state={state}
+          onCancelArchiveRequest={onCancelArchiveRequest}
+        />,
+      );
+    });
+    await act(async () => {
+      [...container.querySelectorAll("button")]
+        .find((button) => button.textContent === "Cancel archive")
+        ?.click();
+    });
+    expect(onCancelArchiveRequest).toHaveBeenCalledWith("stalled-request");
+    await act(async () => root.unmount());
   });
 
   it("submits a same-origin JSON Archive Request", async () => {
@@ -950,7 +1014,7 @@ describe("DashboardView", () => {
     const snapshot = {
       generatedAt: "2026-08-10T20:00:00.000Z",
       discApprovals: { count: 0, items: [] },
-      failedArchives: { count: 0, items: [] },
+      archiveRequestsNeedingAttention: { count: 0, items: [] },
       failedEncodes: { count: 0, items: [] },
       catalogReviews: { count: 0, items: [] },
       filesystemProblems: { count: 0, items: [] },
@@ -1264,7 +1328,7 @@ describe("ActionOverview", () => {
               count: 1,
               items: [{ id: "disc-action", label: "NEEDS_APPROVAL" }],
             },
-            failedArchives: {
+            archiveRequestsNeedingAttention: {
               count: 1,
               items: [{ id: "archive-failed", label: "ARCHIVE_FAILED" }],
             },
@@ -1324,7 +1388,7 @@ describe("ActionOverview", () => {
           snapshot: {
             generatedAt: "2026-08-10T20:00:00.000Z",
             discApprovals: { count: 0, items: [] },
-            failedArchives: { count: 0, items: [] },
+            archiveRequestsNeedingAttention: { count: 0, items: [] },
             failedEncodes: { count: 0, items: [] },
             catalogReviews: { count: 0, items: [] },
             filesystemProblems: { count: 0, items: [] },
@@ -1560,6 +1624,7 @@ async function renderMutationDashboard(
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.mocked(watchDashboardActivity).mockReset();
   vi.unstubAllGlobals();
   document.body.replaceChildren();
