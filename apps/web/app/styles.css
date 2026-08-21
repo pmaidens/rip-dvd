@@ -1724,6 +1724,58 @@ h3 {
   border-top: 1px solid #1b342e;
 }
 
+.disc-scan-summary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.65rem;
+  margin: -0.45rem -0.5rem;
+  padding: 0.45rem 0.5rem;
+  border-radius: 0.45rem;
+  color: #a8bbb5;
+  cursor: pointer;
+  font-size: 0.72rem;
+  font-weight: 700;
+  list-style: none;
+}
+
+.disc-scan-summary::-webkit-details-marker {
+  display: none;
+}
+
+.disc-scan-summary::before {
+  width: 0.36rem;
+  height: 0.36rem;
+  border-right: 2px solid #6f8f85;
+  border-bottom: 2px solid #6f8f85;
+  content: "";
+  transform: rotate(-45deg);
+  transition: transform 140ms ease;
+}
+
+.disc-scan[open] .disc-scan-summary::before {
+  transform: rotate(45deg) translate(-0.08rem, -0.08rem);
+}
+
+.disc-scan-summary:hover {
+  background: rgba(27, 52, 46, 0.35);
+}
+
+.disc-scan-summary:focus-visible {
+  outline: 3px solid #d2a14b;
+  outline-offset: 1px;
+}
+
+.disc-scan-summary span:last-child {
+  color: #829790;
+  font-size: 0.68rem;
+  font-weight: 500;
+}
+
+.disc-scan-details {
+  padding-top: 1.15rem;
+}
+
 .disc-fingerprint {
   display: grid;
   gap: 0.3rem;
