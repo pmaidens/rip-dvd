@@ -1718,10 +1718,62 @@ h3 {
   margin-top: 0;
 }
 
-.disc-scan {
+.disc-inspection {
   margin-top: 1rem;
   padding-top: 1rem;
   border-top: 1px solid #1b342e;
+}
+
+.disc-inspection-summary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.65rem;
+  margin: -0.45rem -0.5rem;
+  padding: 0.45rem 0.5rem;
+  border-radius: 0.45rem;
+  color: #a8bbb5;
+  cursor: pointer;
+  font-size: 0.72rem;
+  font-weight: 700;
+  list-style: none;
+}
+
+.disc-inspection-summary::-webkit-details-marker {
+  display: none;
+}
+
+.disc-inspection-summary::before {
+  width: 0.36rem;
+  height: 0.36rem;
+  border-right: 2px solid #6f8f85;
+  border-bottom: 2px solid #6f8f85;
+  content: "";
+  transform: rotate(-45deg);
+  transition: transform 140ms ease;
+}
+
+.disc-inspection[open] .disc-inspection-summary::before {
+  transform: rotate(45deg) translate(-0.08rem, -0.08rem);
+}
+
+.disc-inspection-summary:hover {
+  background: rgba(27, 52, 46, 0.35);
+}
+
+.disc-inspection-summary:focus-visible {
+  outline: 3px solid #d2a14b;
+  outline-offset: 1px;
+}
+
+.disc-inspection-summary span:last-child {
+  color: #829790;
+  font-size: 0.68rem;
+  font-weight: 500;
+}
+
+.disc-inspection-details {
+  padding-top: 1.15rem;
 }
 
 .disc-fingerprint {
