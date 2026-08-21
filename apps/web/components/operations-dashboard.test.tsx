@@ -722,7 +722,7 @@ describe("DashboardView", () => {
     expect(html).toContain("English · Normal · 0x20");
     expect(html).toContain("sha256:reviewable-disc");
     expect(html).toContain('<details class="disc-inspection">');
-    expect(html).toContain("Inspection details");
+    expect(html).toContain("Disc Inspection details");
     expect(html).toContain("1 title");
     expect(html).toContain("42%");
     expect(html).toContain("My Movie");

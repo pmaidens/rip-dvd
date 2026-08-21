@@ -723,7 +723,7 @@ function DetectedDiscDetails({
       {collapseInspection ? (
         <details className="disc-inspection">
           <summary className="disc-inspection-summary">
-            <span>Inspection details</span>
+            <span>Disc Inspection details</span>
             <span>{countLabel(disc.titles.length, "title")}</span>
           </summary>
           <div className="disc-inspection-details">{inspectionDetails}</div>
