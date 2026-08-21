@@ -648,69 +648,89 @@ function archivedOrCancelledRequestDiscsLast(
   };
 }
 
-function DetectedDiscDetails({ disc }: { disc: DashboardDetectedDisc }) {
+function DetectedDiscDetails({
+  disc,
+  collapseInspection = true,
+}: {
+  disc: DashboardDetectedDisc;
+  collapseInspection?: boolean;
+}) {
+  const inspectionDetails = (
+    <>
+      <p className="disc-fingerprint">
+        <span>Fingerprint</span>
+        <code>{disc.fingerprint}</code>
+      </p>
+      {disc.titles.length > 0 ? (
+        <ol className="dvd-title-map" aria-label="DVD title map">
+          {disc.titles.map((title) => (
+            <li key={title.number}>
+              <div>
+                <strong>Title {title.number}</strong>
+                <span>{formatDuration(title.durationSeconds)}</span>
+              </div>
+              <p>
+                {countLabel(title.chapters, "chapter")} ·{" "}
+                {countLabel(title.audioStreams.length, "audio", "audio")} ·{" "}
+                {countLabel(title.subtitles.length, "subtitle")}
+              </p>
+              {title.audioStreams.length > 0 ? (
+                <ul className="dvd-stream-list" aria-label="Audio streams">
+                  {title.audioStreams.map((stream) => (
+                    <li key={stream.id}>
+                      {[
+                        streamLanguage(stream),
+                        stream.format,
+                        stream.channels
+                          ? countLabel(stream.channels, "channel")
+                          : undefined,
+                        formatStreamId(stream.id),
+                      ]
+                        .filter(Boolean)
+                        .join(" · ")}
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+              {title.subtitles.length > 0 ? (
+                <ul className="dvd-stream-list" aria-label="Subtitle streams">
+                  {title.subtitles.map((stream) => (
+                    <li key={stream.id}>
+                      {[
+                        streamLanguage(stream),
+                        stream.content,
+                        formatStreamId(stream.id),
+                      ]
+                        .filter(Boolean)
+                        .join(" · ")}
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </li>
+          ))}
+        </ol>
+      ) : null}
+    </>
+  );
+
   return (
     <>
       <div className="item-footer">
         <span>{displayTerm(disc.discKind)}</span>
         <span>{formatTimestamp(disc.detectedAt)}</span>
       </div>
-      <div className="disc-scan">
-        <p className="disc-fingerprint">
-          <span>Fingerprint</span>
-          <code>{disc.fingerprint}</code>
-        </p>
-        {disc.titles.length > 0 ? (
-          <ol className="dvd-title-map" aria-label="DVD title map">
-            {disc.titles.map((title) => (
-              <li key={title.number}>
-                <div>
-                  <strong>Title {title.number}</strong>
-                  <span>{formatDuration(title.durationSeconds)}</span>
-                </div>
-                <p>
-                  {countLabel(title.chapters, "chapter")} ·{" "}
-                  {countLabel(title.audioStreams.length, "audio", "audio")} ·{" "}
-                  {countLabel(title.subtitles.length, "subtitle")}
-                </p>
-                {title.audioStreams.length > 0 ? (
-                  <ul className="dvd-stream-list" aria-label="Audio streams">
-                    {title.audioStreams.map((stream) => (
-                      <li key={stream.id}>
-                        {[
-                          streamLanguage(stream),
-                          stream.format,
-                          stream.channels
-                            ? countLabel(stream.channels, "channel")
-                            : undefined,
-                          formatStreamId(stream.id),
-                        ]
-                          .filter(Boolean)
-                          .join(" · ")}
-                      </li>
-                    ))}
-                  </ul>
-                ) : null}
-                {title.subtitles.length > 0 ? (
-                  <ul className="dvd-stream-list" aria-label="Subtitle streams">
-                    {title.subtitles.map((stream) => (
-                      <li key={stream.id}>
-                        {[
-                          streamLanguage(stream),
-                          stream.content,
-                          formatStreamId(stream.id),
-                        ]
-                          .filter(Boolean)
-                          .join(" · ")}
-                      </li>
-                    ))}
-                  </ul>
-                ) : null}
-              </li>
-            ))}
-          </ol>
-        ) : null}
-      </div>
+      {collapseInspection ? (
+        <details className="disc-inspection">
+          <summary className="disc-inspection-summary">
+            <span>Disc Inspection details</span>
+            <span>{countLabel(disc.titles.length, "title")}</span>
+          </summary>
+          <div className="disc-inspection-details">{inspectionDetails}</div>
+        </details>
+      ) : (
+        <div className="disc-inspection">{inspectionDetails}</div>
+      )}
     </>
   );
 }
@@ -742,7 +762,7 @@ function DetectedDiscItem({
             <StatusBadge value={disc.status} />
           </summary>
           <div className="archived-disc-details">
-            <DetectedDiscDetails disc={disc} />
+            <DetectedDiscDetails disc={disc} collapseInspection={false} />
           </div>
         </details>
       </article>

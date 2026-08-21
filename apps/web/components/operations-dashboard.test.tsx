@@ -721,6 +721,9 @@ describe("DashboardView", () => {
     expect(html).toContain("Francais · dts · 2 channels · 0x89");
     expect(html).toContain("English · Normal · 0x20");
     expect(html).toContain("sha256:reviewable-disc");
+    expect(html).toContain('<details class="disc-inspection">');
+    expect(html).toContain("Disc Inspection details");
+    expect(html).toContain("1 title");
     expect(html).toContain("42%");
     expect(html).toContain("My Movie");
     expect(html).toContain("BONUS_DISC");
@@ -815,6 +818,17 @@ describe("DashboardView", () => {
       disclosures[0].querySelector("summary")?.click();
     });
     expect(disclosures[0].open).toBe(true);
+
+    const inspectionDisclosures =
+      container.querySelectorAll<HTMLDetailsElement>("details.disc-inspection");
+    expect(inspectionDisclosures).toHaveLength(3);
+    expect(inspectionDisclosures[0].open).toBe(false);
+    expect(inspectionDisclosures[0].textContent).toContain("sha256:scanned");
+
+    await act(async () => {
+      inspectionDisclosures[0].querySelector("summary")?.click();
+    });
+    expect(inspectionDisclosures[0].open).toBe(true);
 
     await act(async () => root.unmount());
   });
