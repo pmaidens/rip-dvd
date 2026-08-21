@@ -721,7 +721,7 @@ function DetectedDiscDetails({
         <span>{formatTimestamp(disc.detectedAt)}</span>
       </div>
       {collapseInspection ? (
-        <details className="disc-scan">
+        <details className="disc-inspection">
           <summary className="disc-inspection-summary">
             <span>Inspection details</span>
             <span>{countLabel(disc.titles.length, "title")}</span>
@@ -729,7 +729,7 @@ function DetectedDiscDetails({
           <div className="disc-inspection-details">{inspectionDetails}</div>
         </details>
       ) : (
-        <div className="disc-scan">{inspectionDetails}</div>
+        <div className="disc-inspection">{inspectionDetails}</div>
       )}
     </>
   );

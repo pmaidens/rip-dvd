@@ -1718,7 +1718,7 @@ h3 {
   margin-top: 0;
 }
 
-.disc-scan {
+.disc-inspection {
   margin-top: 1rem;
   padding-top: 1rem;
   border-top: 1px solid #1b342e;
@@ -1753,7 +1753,7 @@ h3 {
   transition: transform 140ms ease;
 }
 
-.disc-scan[open] .disc-inspection-summary::before {
+.disc-inspection[open] .disc-inspection-summary::before {
   transform: rotate(45deg) translate(-0.08rem, -0.08rem);
 }
 
