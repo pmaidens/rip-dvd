@@ -650,12 +650,12 @@ function archivedOrCancelledRequestDiscsLast(
 
 function DetectedDiscDetails({
   disc,
-  collapseScan = true,
+  collapseInspection = true,
 }: {
   disc: DashboardDetectedDisc;
-  collapseScan?: boolean;
+  collapseInspection?: boolean;
 }) {
-  const scanDetails = (
+  const inspectionDetails = (
     <>
       <p className="disc-fingerprint">
         <span>Fingerprint</span>
@@ -720,16 +720,16 @@ function DetectedDiscDetails({
         <span>{displayTerm(disc.discKind)}</span>
         <span>{formatTimestamp(disc.detectedAt)}</span>
       </div>
-      {collapseScan ? (
+      {collapseInspection ? (
         <details className="disc-scan">
-          <summary className="disc-scan-summary">
-            <span>Scan details</span>
+          <summary className="disc-inspection-summary">
+            <span>Inspection details</span>
             <span>{countLabel(disc.titles.length, "title")}</span>
           </summary>
-          <div className="disc-scan-details">{scanDetails}</div>
+          <div className="disc-inspection-details">{inspectionDetails}</div>
         </details>
       ) : (
-        <div className="disc-scan">{scanDetails}</div>
+        <div className="disc-scan">{inspectionDetails}</div>
       )}
     </>
   );
@@ -762,7 +762,7 @@ function DetectedDiscItem({
             <StatusBadge value={disc.status} />
           </summary>
           <div className="archived-disc-details">
-            <DetectedDiscDetails disc={disc} collapseScan={false} />
+            <DetectedDiscDetails disc={disc} collapseInspection={false} />
           </div>
         </details>
       </article>

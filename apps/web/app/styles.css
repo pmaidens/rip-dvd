@@ -1724,7 +1724,7 @@ h3 {
   border-top: 1px solid #1b342e;
 }
 
-.disc-scan-summary {
+.disc-inspection-summary {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
@@ -1739,11 +1739,11 @@ h3 {
   list-style: none;
 }
 
-.disc-scan-summary::-webkit-details-marker {
+.disc-inspection-summary::-webkit-details-marker {
   display: none;
 }
 
-.disc-scan-summary::before {
+.disc-inspection-summary::before {
   width: 0.36rem;
   height: 0.36rem;
   border-right: 2px solid #6f8f85;
@@ -1753,26 +1753,26 @@ h3 {
   transition: transform 140ms ease;
 }
 
-.disc-scan[open] .disc-scan-summary::before {
+.disc-scan[open] .disc-inspection-summary::before {
   transform: rotate(45deg) translate(-0.08rem, -0.08rem);
 }
 
-.disc-scan-summary:hover {
+.disc-inspection-summary:hover {
   background: rgba(27, 52, 46, 0.35);
 }
 
-.disc-scan-summary:focus-visible {
+.disc-inspection-summary:focus-visible {
   outline: 3px solid #d2a14b;
   outline-offset: 1px;
 }
 
-.disc-scan-summary span:last-child {
+.disc-inspection-summary span:last-child {
   color: #829790;
   font-size: 0.68rem;
   font-weight: 500;
 }
 
-.disc-scan-details {
+.disc-inspection-details {
   padding-top: 1.15rem;
 }
 

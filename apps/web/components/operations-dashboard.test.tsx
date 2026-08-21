@@ -722,7 +722,7 @@ describe("DashboardView", () => {
     expect(html).toContain("English · Normal · 0x20");
     expect(html).toContain("sha256:reviewable-disc");
     expect(html).toContain('<details class="disc-scan">');
-    expect(html).toContain("Scan details");
+    expect(html).toContain("Inspection details");
     expect(html).toContain("1 title");
     expect(html).toContain("42%");
     expect(html).toContain("My Movie");
@@ -819,17 +819,16 @@ describe("DashboardView", () => {
     });
     expect(disclosures[0].open).toBe(true);
 
-    const scanDisclosures = container.querySelectorAll<HTMLDetailsElement>(
-      "details.disc-scan",
-    );
-    expect(scanDisclosures).toHaveLength(3);
-    expect(scanDisclosures[0].open).toBe(false);
-    expect(scanDisclosures[0].textContent).toContain("sha256:scanned");
+    const inspectionDisclosures =
+      container.querySelectorAll<HTMLDetailsElement>("details.disc-scan");
+    expect(inspectionDisclosures).toHaveLength(3);
+    expect(inspectionDisclosures[0].open).toBe(false);
+    expect(inspectionDisclosures[0].textContent).toContain("sha256:scanned");
 
     await act(async () => {
-      scanDisclosures[0].querySelector("summary")?.click();
+      inspectionDisclosures[0].querySelector("summary")?.click();
     });
-    expect(scanDisclosures[0].open).toBe(true);
+    expect(inspectionDisclosures[0].open).toBe(true);
 
     await act(async () => root.unmount());
   });
