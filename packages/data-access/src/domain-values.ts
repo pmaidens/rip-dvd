@@ -86,6 +86,7 @@ export const ARCHIVE_READ_FAILURE_CATEGORIES = [
   "hardware_error",
   "transport_error",
   "protection_error",
+  "out_of_range",
 ] as const;
 
 export const ARCHIVE_FAILURE_DETAIL_VERSIONS = [

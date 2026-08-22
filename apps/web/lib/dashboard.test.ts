@@ -904,6 +904,21 @@ describe("readDashboardSnapshot", () => {
       hostStatus: 0,
       driverStatus: 8,
       senseKey: 5,
+      asc: 32,
+      ascq: 0,
+    });
+    const boundary = createFailure("BOUNDARY_READ");
+    access.archiveJobs.failWithReadFailure(boundary.job, {
+      stage: "rescue_resume",
+      category: "out_of_range",
+      classifierVersion: "scsi-read-classifier-v1",
+      failingLba: 2_048,
+      requestedBlockCount: 31,
+      retryCount: 0,
+      scsiStatus: 2,
+      hostStatus: 0,
+      driverStatus: 8,
+      senseKey: 5,
       asc: 33,
       ascq: 0,
     });
@@ -930,7 +945,14 @@ describe("readDashboardSnapshot", () => {
           failureDetail:
             "The Optical Drive returned an unclassified read failure. Retry the Archive Request; if it fails again, inspect the disc and drive.",
           failureDiagnostic:
-            "Initial copy · LBA 1024 · requested 16 blocks · retry 2 · SCSI/host/driver 2/0/8 · sense key/ASC/ASCQ 5/33/0 · classifier scsi-read-classifier-v1",
+            "Initial copy · LBA 1024 · requested 16 blocks · retry 2 · SCSI/host/driver 2/0/8 · sense key/ASC/ASCQ 5/32/0 · classifier scsi-read-classifier-v1",
+        }),
+        expect.objectContaining({
+          id: boundary.job.id,
+          failureDetail:
+            "The Optical Drive reported a capacity or readable-boundary mismatch. Retry the Archive Request or manually choose another Optical Drive.",
+          failureDiagnostic:
+            "Rescue resume · LBA 2048 · requested 31 blocks · retry 0 · SCSI/host/driver 2/0/8 · sense key/ASC/ASCQ 5/33/0 · classifier scsi-read-classifier-v1",
         }),
         expect.objectContaining({
           id: historical.job.id,

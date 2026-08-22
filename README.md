@@ -944,11 +944,16 @@ SSE. Failed attempts move their request to `needs_attention`; manual retry
 returns the request to `pending` and the next execution creates another Archive
 Job attempt. Cooperative cancellation stops the external copy, records the
 attempt `aborted`, and records the request `cancelled`. Failed or interrupted
-initial copies are moved to a `.failed` recovery path. A complete DVD image
-with unreadable sectors instead becomes a durable, request-owned rescue image
-and bounded recovery map. A retry reads only the unresolved sectors, restores
-zeros for sectors that remain unreadable, and atomically replaces the map after
-the image is synced. The worker holds a fingerprint-scoped filesystem lock and
+ordinary initial copies are moved to a `.failed` recovery path. A
+reader-confirmed out-of-range boundary instead retains only its synchronized,
+sector-aligned valid prefix as request-owned rescue evidence. Its map remains
+noncanonical until source identity and media generation pass the final
+retention fence; an interrupted or rejected staging transaction cannot be
+resumed as valid. A complete DVD image with unreadable sectors similarly
+becomes a durable, request-owned rescue image and bounded recovery map. A retry
+reads only the unresolved sectors, restores zeros for sectors that remain
+unreadable, and atomically replaces the map after the image is synced. The
+worker holds a fingerprint-scoped filesystem lock and
 renews the current Archive Job claim before rescue recovery, mutation, and
 publication, so an expired attempt cannot overlap a successor that targets the
 same archive path. Rescue progress is
