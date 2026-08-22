@@ -141,11 +141,6 @@ function isOptionalBoundedInteger(
     (isSafeNonNegativeInteger(value) && value <= maximum);
 }
 
-function isSupportedSenseResponseCode(value: unknown): value is number | null {
-  return value === null || value === 0x70 || value === 0x71 ||
-    value === 0x72 || value === 0x73;
-}
-
 const DVD_READ_FAILURE_PROTOCOL_KEYS = [
   "asc",
   "ascq",
@@ -188,7 +183,7 @@ export function parseDvdReadFailureResultProtocol(
     !isOptionalBoundedInteger(candidate.scsiStatus, 0xff) ||
     !isOptionalBoundedInteger(candidate.hostStatus, 0xffff) ||
     !isOptionalBoundedInteger(candidate.driverStatus, 0xffff) ||
-    !isSupportedSenseResponseCode(candidate.senseResponseCode) ||
+    !isOptionalBoundedInteger(candidate.senseResponseCode, 0xff) ||
     !isOptionalBoundedInteger(candidate.senseKey, 0x0f) ||
     !isOptionalBoundedInteger(candidate.asc, 0xff) ||
     !isOptionalBoundedInteger(candidate.ascq, 0xff) ||

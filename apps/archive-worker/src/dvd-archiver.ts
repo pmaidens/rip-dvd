@@ -584,6 +584,15 @@ export function createNodeDvdCopyRunner({
           }
           return;
         }
+        if (
+          code === DVD_READ_FAILURE_EXIT_STATUS ||
+          readFailureResultPayload !== undefined
+        ) {
+          rejectOperation(
+            new Error("DVD read failure helper result is invalid"),
+          );
+          return;
+        }
         const detail = optionalBoundedText(diagnostics, 500);
         rejectOperation(
           new Error(
