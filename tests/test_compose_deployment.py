@@ -298,6 +298,27 @@ class ComposeDeploymentTests(unittest.TestCase):
             ],
         )
 
+    def test_web_builder_has_archive_worker_test_dependencies_only_at_build_time(
+        self,
+    ) -> None:
+        dockerfile = (ROOT / "docker" / "runtime.Dockerfile").read_text()
+        web_builder = dockerfile.split(
+            "FROM shared-builder AS web-builder", maxsplit=1
+        )[1].split("FROM shared-builder AS archive-worker-builder", maxsplit=1)[0]
+        web_runtime = dockerfile.split("FROM runtime-base AS web", maxsplit=1)[
+            1
+        ].split("FROM runtime-base AS worker-runtime-base", maxsplit=1)[0]
+
+        archive_source_copy = (
+            "COPY apps/archive-worker/src apps/archive-worker/src"
+        )
+        self.assertIn(archive_source_copy, web_builder)
+        self.assertLess(
+            web_builder.index(archive_source_copy),
+            web_builder.index("RUN pnpm --filter @rip-dvd/web build"),
+        )
+        self.assertNotIn("apps/archive-worker", web_runtime)
+
     def test_start_resolves_local_hardware_before_migration(self) -> None:
         start_script = (ROOT / "scripts" / "compose-start.sh").read_text()
 
