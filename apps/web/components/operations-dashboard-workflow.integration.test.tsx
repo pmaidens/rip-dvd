@@ -16,7 +16,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
-  pollArchiveWorker,
+  pollArchiveWorker as pollArchiveWorkerOnce,
   type OpticalDriveHardware,
 } from "../../archive-worker/src/archive-worker.js";
 import type { DvdCopyRunner } from "../../archive-worker/src/dvd-archiver.js";
@@ -27,6 +27,9 @@ import {
 import {
   dvdRescueWorkspacePaths,
 } from "../../archive-worker/src/dvd-rescue-workspace.js";
+import {
+  createInProcessDvdRescueWorkspaceLock,
+} from "../../archive-worker/src/dvd-rescue-workspace-lock.js";
 import {
   pollEncodeWorker,
   type HandBrakeRunner,
@@ -61,6 +64,7 @@ const trustedOrigin = "http://localhost:3000";
 const temporaryDirectories: string[] = [];
 const openAccess: DataAccess[] = [];
 const openEventStreams: AbortController[] = [];
+const testRescueWorkspaceLock = createInProcessDvdRescueWorkspaceLock();
 
 afterEach(() => {
   for (const controller of openEventStreams.splice(0)) {
@@ -245,6 +249,35 @@ function createGate(): {
   };
 }
 
+async function pollArchiveWorker(
+  options: Parameters<typeof pollArchiveWorkerOnce>[0],
+): Promise<void> {
+  const alreadyUsingFakeTimers = vi.isFakeTimers();
+  if (!alreadyUsingFakeTimers) {
+    vi.useFakeTimers({ toFake: ["Date"] });
+  }
+  const firstObservationAt = Date.now();
+  try {
+    for (const elapsedMs of [0, 2_500, 5_000]) {
+      vi.setSystemTime(new Date(firstObservationAt + elapsedMs));
+      await pollArchiveWorkerOnce({
+        ...options,
+        rescueWorkspaceLock:
+          options.rescueWorkspaceLock ?? testRescueWorkspaceLock,
+      });
+      if (!options.access.discInspections.list({ currentOnly: true }).some(
+        (inspection) => inspection.phase === "settling",
+      )) {
+        return;
+      }
+    }
+  } finally {
+    if (!alreadyUsingFakeTimers) {
+      vi.useRealTimers();
+    }
+  }
+}
+
 describe("end-to-end operations dashboard workflow", () => {
   it("presents bounded watchable-salvage evidence after unused-space validation", async () => {
     const root = mkdtempSync(join(tmpdir(), "rip-dvd-salvage-workflow-"));
@@ -281,6 +314,10 @@ describe("end-to-end operations dashboard workflow", () => {
       }),
       confirmOpticalDrive: vi.fn(async (_binding, signal) => {
         signal.throwIfAborted();
+      }),
+      observeMedia: vi.fn().mockResolvedValue({
+        mediaGeneration: "salvage-generation",
+        capacityBytes: 4_096,
       }),
       observeMediaGeneration: vi.fn().mockResolvedValue("salvage-generation"),
       scanDvd: vi.fn().mockResolvedValue({
@@ -330,6 +367,7 @@ describe("end-to-end operations dashboard workflow", () => {
       workerId: "salvage-workflow-worker",
     });
 
+    expect(access.archiveJobs.list(["failed"])).toEqual([]);
     const dashboard = await readDashboard(access);
     expect(dashboard.html).toContain("Archive integrity: Watchable salvage");
     expect(dashboard.html).toContain(
@@ -414,6 +452,10 @@ describe("end-to-end operations dashboard workflow", () => {
         }),
         confirmOpticalDrive: vi.fn(async (_binding, signal) => {
           signal.throwIfAborted();
+        }),
+        observeMedia: vi.fn().mockResolvedValue({
+          mediaGeneration: "salvage-rejected-generation",
+          capacityBytes: 4_096,
         }),
         observeMediaGeneration: vi.fn().mockResolvedValue(
           "salvage-rejected-generation",
@@ -1185,6 +1227,10 @@ describe("end-to-end operations dashboard workflow", () => {
       }),
       confirmOpticalDrive: vi.fn(async (_binding, signal) => {
         signal.throwIfAborted();
+      }),
+      observeMedia: vi.fn().mockResolvedValue({
+        mediaGeneration: "workflow-generation",
+        capacityBytes: 2_048,
       }),
       observeMediaGeneration: vi.fn().mockResolvedValue("workflow-generation"),
       scanDvd: vi.fn().mockResolvedValue({

@@ -1,5 +1,37 @@
 import { createCleanReadArchiveIntegrityEvidence } from "@rip-dvd/data-access";
 import type { LegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
+import { vi } from "vitest";
+
+export function beginSettledDiscInspectionForTest(
+  access: LegacySidecarDataAccess,
+  input: Parameters<
+    LegacySidecarDataAccess["discInspections"]["beginOrResume"]
+  >[0],
+) {
+  const alreadyUsingFakeTimers = vi.isFakeTimers();
+  if (!alreadyUsingFakeTimers) {
+    vi.useFakeTimers({ toFake: ["Date"] });
+  }
+  const firstObservationAt = Date.now();
+  access.discInspections.beginOrResume(input);
+  vi.setSystemTime(new Date(firstObservationAt + 2_500));
+  access.discInspections.beginOrResume(input);
+  vi.setSystemTime(new Date(firstObservationAt + 5_000));
+  const settled = access.discInspections.beginOrResume(input);
+  if (settled.claim === null) {
+    throw new Error("Expected a settled Disc Inspection claim");
+  }
+  return {
+    ...settled,
+    restoreSystemTime() {
+      if (alreadyUsingFakeTimers) {
+        vi.setSystemTime(new Date(firstObservationAt));
+      } else {
+        vi.useRealTimers();
+      }
+    },
+  };
+}
 
 export function startArchiveJob(
   access: LegacySidecarDataAccess,
@@ -16,9 +48,10 @@ export function completeDiscInspection(
   disc: ReturnType<LegacySidecarDataAccess["catalog"]["registerDetectedDisc"]>,
   mediaGeneration: string,
 ) {
-  const started = access.discInspections.beginOrResume({
+  const started = beginSettledDiscInspectionForTest(access, {
     opticalDriveId: disc.opticalDriveId,
     mediaGeneration,
+    mediaCapacityBytes: 2_048,
   });
   access.discInspections.record(started.claim!, {
     type: "metadata",
@@ -29,10 +62,12 @@ export function completeDiscInspection(
     subtitleStreamCount: 0,
     totalBytes: 9,
   });
-  return access.discInspections.record(started.claim!, {
+  const completed = access.discInspections.record(started.claim!, {
     type: "complete",
     detectedDiscId: disc.id,
   });
+  started.restoreSystemTime();
+  return completed;
 }
 
 export function seedFailedArchiveJobAndQueuedDuplicate(

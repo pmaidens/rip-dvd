@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
 import {
-  pollArchiveWorker,
+  pollArchiveWorker as pollArchiveWorkerOnce,
   type OpticalDriveHardware,
 } from "../../archive-worker/src/archive-worker.js";
 
@@ -16,6 +16,31 @@ import { DashboardView } from "./operations-dashboard";
 
 const dataAccessFixture = useDataAccessFixture();
 
+async function pollArchiveWorker(
+  options: Parameters<typeof pollArchiveWorkerOnce>[0],
+): Promise<void> {
+  const alreadyUsingFakeTimers = vi.isFakeTimers();
+  if (!alreadyUsingFakeTimers) {
+    vi.useFakeTimers({ toFake: ["Date"] });
+  }
+  const firstObservationAt = Date.now();
+  try {
+    for (const elapsedMs of [0, 2_500, 5_000]) {
+      vi.setSystemTime(new Date(firstObservationAt + elapsedMs));
+      await pollArchiveWorkerOnce(options);
+      if (!options.access.discInspections.list({ currentOnly: true }).some(
+        (inspection) => inspection.phase === "settling",
+      )) {
+        return;
+      }
+    }
+  } finally {
+    if (!alreadyUsingFakeTimers) {
+      vi.useRealTimers();
+    }
+  }
+}
+
 describe("database-backed dashboard over HTTP", () => {
   it("renders persisted discovery and scan results including an already archived match", async () => {
     const access = dataAccessFixture.create();
@@ -26,6 +51,10 @@ describe("database-backed dashboard over HTTP", () => {
       }),
       confirmOpticalDrive: vi.fn(async (_binding, signal) => {
         signal.throwIfAborted();
+      }),
+      observeMedia: vi.fn().mockResolvedValue({
+        mediaGeneration: "dashboard-generation",
+        capacityBytes: 2_048,
       }),
       observeMediaGeneration: vi.fn().mockResolvedValue("dashboard-generation"),
       discover: vi.fn().mockResolvedValue([
@@ -110,7 +139,7 @@ describe("database-backed dashboard over HTTP", () => {
     expect(html).toContain(
       "sha256:2222222222222222222222222222222222222222222222222222222222222222",
     );
-    expect(hardware.discover).toHaveBeenCalledTimes(4);
+    expect(hardware.discover).toHaveBeenCalledTimes(10);
     expect(hardware.scanDvd).toHaveBeenCalledOnce();
   });
 

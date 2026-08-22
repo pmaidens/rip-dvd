@@ -89,6 +89,7 @@ export const DISC_INSPECTION_STATUSES = [
 ] as const;
 
 export const DISC_INSPECTION_PHASES = [
+  "settling",
   "reading_metadata",
   "hashing_content",
   "confirming_media",

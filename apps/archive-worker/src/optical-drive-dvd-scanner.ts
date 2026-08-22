@@ -47,6 +47,7 @@ export interface DiscInspectionMetadata {
 }
 
 export interface DiscInspectionScanOptions {
+  expectedMediaCapacityBytes?: number;
   expectedMediaGeneration?: string;
   onMetadata?(metadata: DiscInspectionMetadata): void;
   onPhase?(phase: "reading_metadata" | "confirming_media"): void;
@@ -201,34 +202,38 @@ async function readDvdIdentity(
   metadata: NonNullable<Awaited<ReturnType<typeof inspectDvd>>>,
   options: DiscInspectionScanOptions,
 ): Promise<{ fingerprint: string; sizeBytes: number }> {
-  const sizeResult = await runner.run(
-    "blockdev",
-    ["--getsize64", devicePath],
-    {
-      maxBufferBytes: 128,
-      signal,
-      timeoutMs: OPTICAL_DRIVE_COMMAND_TIMEOUT_MS,
-    },
-  );
-  if (sizeResult.exitCode !== 0) {
-    const failure = commandFailure("blockdev", sizeResult);
-    throw new DiscInspectionError(
-      "retry",
-      "content_size_failed",
-      failure.message,
-      { cause: failure },
-    );
-  }
   let sizeBytes: number;
-  try {
-    sizeBytes = requireDvdContentSize(Number(sizeResult.stdout.trim()));
-  } catch (error) {
-    throw new DiscInspectionError(
-      "fail",
-      "invalid_content",
-      "blockdev returned an invalid DVD size",
-      { cause: error },
+  if (options.expectedMediaCapacityBytes === undefined) {
+    const sizeResult = await runner.run(
+      "blockdev",
+      ["--getsize64", devicePath],
+      {
+        maxBufferBytes: 128,
+        signal,
+        timeoutMs: OPTICAL_DRIVE_COMMAND_TIMEOUT_MS,
+      },
     );
+    if (sizeResult.exitCode !== 0) {
+      const failure = commandFailure("blockdev", sizeResult);
+      throw new DiscInspectionError(
+        "retry",
+        "content_size_failed",
+        failure.message,
+        { cause: failure },
+      );
+    }
+    try {
+      sizeBytes = requireDvdContentSize(Number(sizeResult.stdout.trim()));
+    } catch (error) {
+      throw new DiscInspectionError(
+        "fail",
+        "invalid_content",
+        "blockdev returned an invalid DVD size",
+        { cause: error },
+      );
+    }
+  } else {
+    sizeBytes = requireDvdContentSize(options.expectedMediaCapacityBytes);
   }
   options.onMetadata?.({
     audioStreamCount: metadata.titles.reduce(
