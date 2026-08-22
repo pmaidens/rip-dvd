@@ -133,6 +133,7 @@ describe("DVD recovery results", () => {
           retryOrdinal: 0,
           declaredByteCount: 40 * 2_048,
           firstFailingLba: 35,
+          retainedImageByteCount: 31 * 2_048,
         }),
         40 * 2_048,
       ),
@@ -153,12 +154,15 @@ describe("DVD recovery results", () => {
       retryOrdinal: 0,
       declaredByteCount: 40 * 2_048,
       firstFailingLba: 35,
+      retainedImageByteCount: 31 * 2_048,
     });
   });
 
   it.each([
     ["wrong declared size", { declaredByteCount: 39 * 2_048 }],
     ["conflicting boundary", { firstFailingLba: 34 }],
+    ["unaligned retained prefix", { retainedImageByteCount: 31 * 2_048 + 1 }],
+    ["retained suffix past failure", { retainedImageByteCount: 36 * 2_048 }],
     ["wrong sense category", { senseKey: 3 }],
   ])("rejects out-of-range evidence with %s", (_label, replacement) => {
     expect(() =>
@@ -180,6 +184,7 @@ describe("DVD recovery results", () => {
           retryOrdinal: 0,
           declaredByteCount: 40 * 2_048,
           firstFailingLba: 35,
+          retainedImageByteCount: 31 * 2_048,
           ...replacement,
         }),
         40 * 2_048,

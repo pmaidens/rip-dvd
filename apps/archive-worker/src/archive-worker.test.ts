@@ -45,6 +45,9 @@ import {
   type NonBoundaryDvdReadFailureResult,
   type UnknownDvdReadFailureResult,
 } from "./dvd-recovery-contracts.js";
+import {
+  createOutOfRangeDvdReadFailure,
+} from "./dvd-read-failure.test-support.js";
 import { dvdRescueWorkspacePaths } from "./dvd-rescue-workspace.js";
 import {
   createInProcessDvdRescueWorkspaceLock,
@@ -206,30 +209,6 @@ const dvdReadFailureCases = [
   category: ArchiveReadFailureCategory;
   evidence: Partial<ConstructorParameters<typeof DvdReadFailureError>[0]>;
 }[];
-
-function outOfRangeDvdReadFailure(
-  declaredByteCount: number,
-  firstFailingLba: number,
-) {
-  return new DvdReadFailureError({
-    protocolVersion: 1,
-    classifierVersion: "scsi-read-classifier-v1",
-    category: "out_of_range",
-    scsiStatus: 2,
-    hostStatus: 0,
-    driverStatus: 8,
-    senseResponseCode: 0x70,
-    senseKey: 5,
-    asc: 0x21,
-    ascq: 0,
-    informationLba: firstFailingLba,
-    requestedLba: 0,
-    requestedBlockCount: 4,
-    retryOrdinal: 0,
-    declaredByteCount,
-    firstFailingLba,
-  });
-}
 
 function pollArchiveWorkerOnce(options: PollArchiveWorkerOptions): Promise<void> {
   return pollArchiveWorkerWithDefaults({
@@ -1229,7 +1208,10 @@ describe("archive worker polling", () => {
       copy: vi.fn(async ({ authorizeStart, outputPath }) => {
         await authorizeStart?.();
         writeFileSync(outputPath, retainedPrefix);
-        throw outOfRangeDvdReadFailure(sizeBytes, 2);
+        throw createOutOfRangeDvdReadFailure({
+          declaredByteCount: sizeBytes,
+          firstFailingLba: 2,
+        });
       }),
       isActive: () => false,
       withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
@@ -1310,7 +1292,12 @@ describe("archive worker polling", () => {
         });
         await authorizeStart?.();
         writeFileSync(outputPath, extendedPrefix);
-        throw outOfRangeDvdReadFailure(sizeBytes, 3);
+        throw createOutOfRangeDvdReadFailure({
+          declaredByteCount: sizeBytes,
+          firstFailingLba: 3,
+          requestedBlockCount: 2,
+          requestedLba: 2,
+        });
       }),
       isActive: () => false,
       withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
@@ -1346,7 +1333,10 @@ describe("archive worker polling", () => {
   it("persists boundary evidence when prefix retention itself fails", async () => {
     const sizeBytes = 4 * 2_048;
     const scenario = await exerciseReadFailureFence({
-      readFailure: outOfRangeDvdReadFailure(sizeBytes, 2),
+      readFailure: createOutOfRangeDvdReadFailure({
+        declaredByteCount: sizeBytes,
+        firstFailingLba: 2,
+      }),
     });
 
     expect(scenario.access.archiveJobs.list(["failed"])).toEqual([

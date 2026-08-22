@@ -201,6 +201,7 @@ function rescueStateFromMap(
   );
   if (
     boundaryFailure.category !== "out_of_range" ||
+    map.imageByteCount !== boundaryFailure.retainedImageByteCount ||
     (map.recoveryProtocol === null &&
       map.imageByteCount! >
         boundaryFailure.firstFailingLba * DVD_SECTOR_SIZE_BYTES) ||
@@ -644,6 +645,7 @@ export async function commitDvdBoundaryRescueWorkspace(
       imageMetadata.isSymbolicLink() ||
       imageMetadata.size < 0 ||
       imageMetadata.size % DVD_SECTOR_SIZE_BYTES !== 0 ||
+      imageMetadata.size !== boundaryFailure.retainedImageByteCount ||
       imageMetadata.size >
         boundaryFailure.firstFailingLba * DVD_SECTOR_SIZE_BYTES
     ) {
@@ -687,11 +689,10 @@ export async function recordDvdBoundaryFailure(
     workspace.mapPath !== expectedPaths.mapPath ||
     !imageMetadata.isFile() ||
     imageMetadata.isSymbolicLink() ||
+    imageMetadata.size !== boundaryFailure.retainedImageByteCount ||
     (continuesBoundaryPrefix
       ? imageMetadata.size < workspace.imageByteCount ||
-        imageMetadata.size % DVD_SECTOR_SIZE_BYTES !== 0 ||
-        imageMetadata.size >
-          boundaryFailure.firstFailingLba * DVD_SECTOR_SIZE_BYTES
+        imageMetadata.size % DVD_SECTOR_SIZE_BYTES !== 0
       : imageMetadata.size !== workspace.imageByteCount) ||
     filesystemIdentity(imageMetadata) !== workspace.imageFilesystemIdentity
   ) {

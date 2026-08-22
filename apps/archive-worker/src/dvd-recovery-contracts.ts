@@ -46,6 +46,7 @@ export interface OutOfRangeDvdReadFailureResult
   category: "out_of_range";
   declaredByteCount: number;
   firstFailingLba: number;
+  retainedImageByteCount: number;
   informationLba: number;
   scsiStatus: 2;
   hostStatus: 0;
@@ -202,6 +203,7 @@ const DVD_OUT_OF_RANGE_FAILURE_PROTOCOL_KEYS = [
   ...DVD_READ_FAILURE_PROTOCOL_KEYS,
   "declaredByteCount",
   "firstFailingLba",
+  "retainedImageByteCount",
 ].sort();
 
 export function parseDvdReadFailureResultProtocol(
@@ -283,6 +285,12 @@ export function parseDvdReadFailureResultProtocol(
     (candidate.declaredByteCount !== expectedByteCount ||
       !isSafeNonNegativeInteger(candidate.firstFailingLba) ||
       candidate.firstFailingLba !== candidate.informationLba ||
+      !isSafeNonNegativeInteger(candidate.retainedImageByteCount) ||
+      candidate.retainedImageByteCount > expectedByteCount ||
+      candidate.retainedImageByteCount % DVD_SECTOR_SIZE_BYTES !== 0 ||
+      (candidate.retainedImageByteCount !== expectedByteCount &&
+        candidate.retainedImageByteCount >
+          candidate.firstFailingLba * DVD_SECTOR_SIZE_BYTES) ||
       candidate.scsiStatus !== 0x02 ||
       candidate.hostStatus !== 0 ||
       (candidate.driverStatus !== 0x00 && candidate.driverStatus !== 0x08) ||

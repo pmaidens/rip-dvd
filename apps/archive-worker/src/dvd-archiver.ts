@@ -180,6 +180,8 @@ function dvdCopyContinuationProtocol(
     continuation.imageByteCount < 0 ||
     continuation.imageByteCount >= sizeBytes ||
     continuation.imageByteCount % DVD_SECTOR_SIZE_BYTES !== 0 ||
+    continuation.imageByteCount !==
+      continuation.readFailure.retainedImageByteCount ||
     continuation.imageByteCount >
       continuation.readFailure.firstFailingLba * DVD_SECTOR_SIZE_BYTES
   ) {
