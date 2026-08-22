@@ -15,16 +15,45 @@ const testExecutable = "/tmp/rip-dvd-dvdcss-reader-test";
 const sourcePath = "/tmp/rip-dvd-reader-source.img";
 const recoveryResultPrefix = "rip-dvd-recovery-result ";
 const readFailureResultPrefix = "rip-dvd-read-failure ";
-const fixedMediumSense = "f00003000000050a00000000110000000000";
-const descriptorMediumSense = "720311000000000c000a80000000000000000005";
-const fixedRetriesExhaustedSense = "f00003000000050a00000000110100000000";
-const descriptorRetriesExhaustedSense =
-  "720311010000000c000a80000000000000000005";
 const content = Buffer.alloc(40 * 2_048);
 for (let index = 0; index < content.length; index += 1) {
   content[index] = index % 251;
 }
 writeFileSync(sourcePath, content);
+
+function fixedMediumSense(lba, ascq = 0) {
+  const sense = Buffer.alloc(18);
+  sense[0] = 0xf0;
+  sense[2] = 0x03;
+  sense.writeUInt32BE(lba, 3);
+  sense[7] = 10;
+  sense[12] = 0x11;
+  sense[13] = ascq;
+  return sense.toString("hex");
+}
+
+function descriptorMediumSense(lba, ascq = 0) {
+  const sense = Buffer.alloc(20);
+  sense[0] = 0x72;
+  sense[1] = 0x03;
+  sense[2] = 0x11;
+  sense[3] = ascq;
+  sense[7] = 12;
+  sense[8] = 0;
+  sense[9] = 10;
+  sense[10] = 0x80;
+  sense.writeBigUInt64BE(BigInt(lba), 12);
+  return sense.toString("hex");
+}
+
+function rawCompletionFault(lba, remainingFailures, sense) {
+  return `raw@${lba}@${remainingFailures}@2@0@8@${sense.length / 2}@${sense}`;
+}
+
+const fixedMediumAtFive = fixedMediumSense(5);
+const descriptorMediumAtFive = descriptorMediumSense(5);
+const fixedRetriesExhaustedAtFive = fixedMediumSense(5, 1);
+const descriptorRetriesExhaustedAtFive = descriptorMediumSense(5, 1);
 
 function prepareOutput(path) {
   rmSync(path, { force: true });
@@ -194,7 +223,10 @@ if (
   throw new Error("libdvdcss reader authorized copy check failed");
 }
 
-const retry = runTestCopy("retry", "5:1");
+const retry = runTestCopy(
+  "retry",
+  rawCompletionFault(5, 1, fixedMediumAtFive),
+);
 const retryReads = testReads(retry.stderr);
 if (
   retry.status !== 0 ||
@@ -207,14 +239,14 @@ if (
 }
 
 for (const [name, sense] of [
-  ["fixed-medium", fixedMediumSense],
-  ["descriptor-medium", descriptorMediumSense],
-  ["fixed-retries-exhausted", fixedRetriesExhaustedSense],
-  ["descriptor-retries-exhausted", descriptorRetriesExhaustedSense],
+  ["fixed-medium", fixedMediumAtFive],
+  ["descriptor-medium", descriptorMediumAtFive],
+  ["fixed-retries-exhausted", fixedRetriesExhaustedAtFive],
+  ["descriptor-retries-exhausted", descriptorRetriesExhaustedAtFive],
 ]) {
   const exactMedium = runTestCopy(
     name,
-    `raw@5@always@2@0@8@${sense.length / 2}@${sense}`,
+    rawCompletionFault(5, "always", sense),
   );
   const exactMediumResult = recoveryResult(exactMedium.stderr);
   if (
@@ -231,7 +263,7 @@ for (const [name, sense] of [
 
 const transientExactMedium = runTestCopy(
   "transient-exact-medium",
-  `raw@5@1@2@0@8@${fixedMediumSense.length / 2}@${fixedMediumSense}`,
+  rawCompletionFault(5, 1, fixedMediumAtFive),
 );
 if (
   transientExactMedium.status !== 0 ||
@@ -292,11 +324,11 @@ const malformedUnknownFixtures = [
   ["inconsistent", "raw@5@always@2@0@8@8@700003000000000a"],
   [
     "fixed-undeclared-trailing-byte",
-    `raw@5@always@2@0@8@19@${fixedMediumSense}ff`,
+    `raw@5@always@2@0@8@19@${fixedMediumAtFive}ff`,
   ],
   [
     "descriptor-undeclared-trailing-byte",
-    `raw@5@always@2@0@8@21@${descriptorMediumSense}ff`,
+    `raw@5@always@2@0@8@21@${descriptorMediumAtFive}ff`,
   ],
   [
     "fixed-declared-length-excludes-asc",
@@ -333,11 +365,11 @@ const malformedUnknownFixtures = [
   ["unsupported", "raw@5@always@2@0@8@1@7f"],
   [
     "driver-status-reserved-upper-bit",
-    `raw@5@always@2@0@264@${fixedMediumSense.length / 2}@${fixedMediumSense}`,
+    `raw@5@always@2@0@264@${fixedMediumAtFive.length / 2}@${fixedMediumAtFive}`,
   ],
   [
     "driver-status-abort-suggestion",
-    `raw@5@always@2@0@40@${fixedMediumSense.length / 2}@${fixedMediumSense}`,
+    `raw@5@always@2@0@40@${fixedMediumAtFive.length / 2}@${fixedMediumAtFive}`,
   ],
   [
     "descriptor-response-reserved-bit",
@@ -381,7 +413,7 @@ const malformedUnknownFixtures = [
   ],
   [
     "contradictory",
-    `raw@5@always@0@0@0@${fixedMediumSense.length / 2}@${fixedMediumSense}`,
+    `raw@5@always@0@0@0@${fixedMediumAtFive.length / 2}@${fixedMediumAtFive}`,
   ],
 ];
 for (const [name, fault] of malformedUnknownFixtures) {
@@ -410,8 +442,8 @@ for (const [name, fault] of malformedUnknownFixtures) {
 }
 
 for (const [name, sense] of [
-  ["fixed", fixedMediumSense],
-  ["descriptor", descriptorMediumSense],
+  ["fixed", fixedMediumAtFive],
+  ["descriptor", descriptorMediumAtFive],
 ]) {
   const contradictoryInformation = runTestCopy(
     `unknown-${name}-information-lba`,
@@ -437,7 +469,10 @@ for (const [name, sense] of [
   }
 }
 
-const isolated = runTestCopy("isolated", "5:always");
+const isolated = runTestCopy(
+  "isolated",
+  rawCompletionFault(5, "always", fixedMediumAtFive),
+);
 const isolatedResult = recoveryResult(isolated.stderr);
 const isolatedContent = readFileSync(isolated.outputPath);
 const isolatedReads = testReads(isolated.stderr);
@@ -463,7 +498,7 @@ contaminatedPersistentResumeContent.fill(91, 5 * 2_048, 6 * 2_048);
 writeFileSync(persistentResumePath, contaminatedPersistentResumeContent);
 const persistentResume = runTestResume(
   persistentResumePath,
-  "5:always",
+  rawCompletionFault(5, "always", descriptorMediumAtFive),
   isolatedResult.badSectorBitmapHex,
 );
 const persistentResumeResult = recoveryResult(persistentResume.stderr);
@@ -540,7 +575,7 @@ if (
 
 const resumed = runTestResume(
   isolated.outputPath,
-  "none",
+  rawCompletionFault(5, 1, fixedMediumAtFive),
   isolatedResult.badSectorBitmapHex,
 );
 if (
@@ -548,7 +583,10 @@ if (
   !readFileSync(resumed.outputPath).equals(content) ||
   recoveryResult(resumed.stderr).badSectorCount !== 0 ||
   JSON.stringify(testReads(resumed.stderr)) !==
-    JSON.stringify([{ lba: 5, blocks: 1 }])
+    JSON.stringify([
+      { lba: 5, blocks: 1 },
+      { lba: 5, blocks: 1 },
+    ])
 ) {
   throw new Error(`libdvdcss resumed recovery check failed: ${resumed.stderr}`);
 }
@@ -625,7 +663,13 @@ if (
   );
 }
 
-const contiguous = runTestCopy("contiguous", "5:always,6:always");
+const contiguous = runTestCopy(
+  "contiguous",
+  [
+    rawCompletionFault(5, "always", fixedMediumAtFive),
+    rawCompletionFault(6, "always", descriptorMediumSense(6)),
+  ].join(","),
+);
 const contiguousResult = recoveryResult(contiguous.stderr);
 const contiguousContent = readFileSync(contiguous.outputPath);
 if (
