@@ -4477,6 +4477,75 @@ describe("archive worker polling", () => {
     access.close();
   });
 
+  it.each([
+    { name: "throws", result: "throw" },
+    { name: "reports no medium", result: "no_medium" },
+  ] as const)(
+    "records timeout when the initial capacity probe $name at the deadline",
+    async ({ result }) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-08-22T16:45:00.000Z"));
+      const access = openTestDataAccess();
+      const scanDvd = vi.fn();
+      const observeMedia: OpticalDriveHardware["observeMedia"] = vi.fn(
+        async (_binding, _signal, options) => {
+          options?.onMediaGeneration("late-probe-generation");
+          const [inspection] = access.discInspections.list({
+            currentOnly: true,
+          });
+          vi.setSystemTime(new Date(
+            inspection!.settlingStartedAt!.getTime() +
+              DISC_INSPECTION_SETTLING_TIMEOUT_MS,
+          ));
+          if (result === "throw") {
+            throw new Error("late capacity probe failure");
+          }
+          return null;
+        },
+      );
+      const hardware: OpticalDriveHardware = {
+        ...stableDeviceBinding(),
+        discover: vi.fn().mockResolvedValue([{
+          devicePath: "/dev/sr0",
+          serialNumber: "SETTLING-LATE-PROBE-001",
+        }]),
+        observeMedia,
+        scanDvd,
+      };
+
+      await pollArchiveWorkerOnce({
+        access,
+        configuredDevicePath: "/dev/sr0",
+        hardware,
+        log: vi.fn(),
+        signal: new AbortController().signal,
+      });
+
+      const [inspection] = access.discInspections.list();
+      expect(inspection).toMatchObject({
+        status: "running",
+        phase: "retry_wait",
+        attemptCount: 1,
+        consecutiveFailureCount: 1,
+        reasonCode: "drive_not_ready",
+        diagnostic: "Optical Drive did not settle within 30 seconds",
+        claimToken: null,
+        claimUpdatedAt: null,
+      });
+      expect(access.discInspections.listAttempts(inspection!.id)).toEqual([
+        expect.objectContaining({
+          attemptNumber: 1,
+          outcome: "failed",
+          phase: "settling",
+          reasonCode: "drive_not_ready",
+        }),
+      ]);
+      expect(observeMedia).toHaveBeenCalledOnce();
+      expect(scanDvd).not.toHaveBeenCalled();
+      access.close();
+    },
+  );
+
   it("keeps invalid capacity observations settling until the exact timeout", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-22T17:00:00.000Z"));

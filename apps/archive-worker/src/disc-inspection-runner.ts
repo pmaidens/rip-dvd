@@ -279,7 +279,9 @@ export async function runDiscInspection({
       throw error;
     }
     if (
-      settlingDeadlineController.signal.aborted &&
+      (settlingDeadlineController.signal.aborted ||
+        (preparedStart !== undefined &&
+          settlingDeadlineExpired(preparedStart.inspection))) &&
       preparedStart?.claim !== null &&
       preparedStart?.claim !== undefined
     ) {
@@ -339,6 +341,16 @@ export async function runDiscInspection({
     throw error;
   }
   if (mediaObservation === null) {
+    if (
+      preparedStart?.claim !== null &&
+      preparedStart?.claim !== undefined &&
+      (settlingDeadlineController.signal.aborted ||
+        settlingDeadlineExpired(preparedStart.inspection))
+    ) {
+      persistSettlingTimeout(preparedStart.inspection, preparedStart.claim);
+      clearSettlingDeadline();
+      return null;
+    }
     if (preparedStart?.claim !== null && preparedStart?.claim !== undefined) {
       if (newlyStartedUnprovenInspectionId !== undefined) {
         access.discInspections.clearCurrent({
