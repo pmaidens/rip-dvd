@@ -1149,7 +1149,8 @@ describe("data-access facade", () => {
           name !== "20260822142722_disc-inspection-settling" &&
           name !== "20260822175220_striped_kabuki" &&
           name !== "20260822183552_bounded-disc-settling" &&
-          name !== "20260822185006_burly_northstar",
+          name !== "20260822185006_burly_northstar" &&
+          name !== "20260822185139_soft_carmella_unuscione",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -8008,7 +8009,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
-        name: "20260822185006_burly_northstar",
+        name: "20260822185139_soft_carmella_unuscione",
       },
       {
         name: "20260822183552_bounded-disc-settling",
@@ -11010,7 +11011,27 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     access.close();
   });
 
-  it("keeps unknown read evidence immutable on the Archive Job attempt that observed it", () => {
+  it.each([
+    {
+      category: "unknown",
+      errorMessage: "The Optical Drive returned an unclassified read failure",
+    },
+    {
+      category: "hardware_error",
+      errorMessage: "The Optical Drive reported a hardware fault",
+    },
+    {
+      category: "transport_error",
+      errorMessage: "Communication with the Optical Drive failed",
+    },
+    {
+      category: "protection_error",
+      errorMessage: "DVD copy protection or region access failed",
+    },
+  ] as const)("keeps $category evidence immutable on the Archive Job attempt that observed it", ({
+    category,
+    errorMessage,
+  }) => {
     const access = openTestDatabase();
     const drive = access.catalog.upsertOpticalDrive({
       devicePath: "/dev/sr0",
@@ -11031,7 +11052,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(
       access.archiveJobs.failWithReadFailure(first, {
         stage: "initial_copy",
-        category: "unknown",
+        category,
         classifierVersion: "scsi-read-classifier-v1",
         failingLba: 1_024,
         requestedBlockCount: 16,
@@ -11045,10 +11066,10 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       }),
     ).toMatchObject({
       status: "failed",
-      errorMessage: "The Optical Drive returned an unclassified read failure",
+      errorMessage,
       failureDetailVersion: "archive-failure-detail-v1",
       readFailureStage: "initial_copy",
-      readFailureCategory: "unknown",
+      readFailureCategory: category,
       readFailureClassifierVersion: "scsi-read-classifier-v1",
       readFailureLba: 1_024,
       readFailureRequestedBlockCount: 16,

@@ -959,66 +959,113 @@ describe("readDashboardSnapshot", () => {
   it.each([
     {
       category: "not_ready",
-      detail:
+      failureDetail:
         "The Optical Drive was not ready to read the disc. Check that the disc is inserted and the drive is available, then retry the Archive Request.",
-      senseKey: 0x02,
-      asc: 0x04,
-      ascq: 0x01,
-    },
-    {
-      category: "unit_attention",
-      detail:
-        "The Optical Drive reported a media-state change. Confirm that the expected disc is still inserted, then retry the Archive Request.",
-      senseKey: 0x06,
-      asc: 0x28,
-      ascq: 0x00,
-    },
-  ] as const)(
-    "gives path-free $category guidance with the numeric tuple kept secondary",
-    ({ category, detail, senseKey, asc, ascq }) => {
-      const access = dataAccessFixture.create();
-      const drive = access.catalog.upsertOpticalDrive({
-        devicePath: `/dev/private-${category}`,
-        displayName: `${category} drive`,
-        isEnabled: true,
-        isPresent: true,
-      });
-      const disc = access.catalog.registerDetectedDisc({
-        opticalDriveId: drive.id,
-        discKind: "dvd",
-        fingerprint: `${category}-fingerprint`,
-        volumeLabel: category,
-      });
-      access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
-      const job = startArchiveJob(access, disc, `${category}-worker`);
-      access.archiveJobs.failWithReadFailure(job, {
-        stage: "rescue_resume",
-        category,
-        classifierVersion: "scsi-read-classifier-v1",
-        failingLba: 1_024,
-        requestedBlockCount: 1,
-        retryCount: 0,
+      status: {
         scsiStatus: 2,
         hostStatus: 0,
         driverStatus: 8,
-        senseKey,
-        asc,
-        ascq,
-      });
-
-      const snapshot = readDashboardSnapshot(access);
-      expect(snapshot.archiveJobs).toEqual({
-        status: "loaded",
-        items: [expect.objectContaining({
-          id: job.id,
-          failureDetail: detail,
-          failureDiagnostic:
-            `Rescue resume · LBA 1024 · requested 1 blocks · retry 0 · SCSI/host/driver 2/0/8 · sense key/ASC/ASCQ ${senseKey}/${asc}/${ascq} · classifier scsi-read-classifier-v1`,
-        })],
-      });
-      expect(JSON.stringify(snapshot)).not.toContain(`private-${category}`);
+        senseKey: 0x02,
+        asc: 0x04,
+        ascq: 0x01,
+      },
     },
-  );
+    {
+      category: "unit_attention",
+      failureDetail:
+        "The Optical Drive reported a media-state change. Confirm that the expected disc is still inserted, then retry the Archive Request.",
+      status: {
+        scsiStatus: 2,
+        hostStatus: 0,
+        driverStatus: 8,
+        senseKey: 0x06,
+        asc: 0x28,
+        ascq: 0x00,
+      },
+    },
+    {
+      category: "hardware_error",
+      failureDetail:
+        "The Optical Drive reported a hardware fault. Retry the Archive Request; if it fails again with another disc, inspect or replace the Optical Drive.",
+      status: {
+        scsiStatus: 2,
+        hostStatus: 0,
+        driverStatus: 8,
+        senseKey: 4,
+        asc: 68,
+        ascq: 0,
+      },
+    },
+    {
+      category: "transport_error",
+      failureDetail:
+        "Communication with the Optical Drive failed. Check the drive connection and host passthrough, then retry the Archive Request.",
+      status: {
+        scsiStatus: 2,
+        hostStatus: 7,
+        driverStatus: 0,
+        senseKey: 3,
+        asc: 17,
+        ascq: 0,
+      },
+    },
+    {
+      category: "protection_error",
+      failureDetail:
+        "DVD copy protection or region access failed. Check DVD CSS support and the Optical Drive region, then retry the Archive Request.",
+      status: {
+        scsiStatus: 2,
+        hostStatus: 0,
+        driverStatus: 8,
+        senseKey: 5,
+        asc: 111,
+        ascq: 4,
+      },
+    },
+  ] as const)("projects path-free $category guidance with bounded evidence", ({
+    category,
+    failureDetail,
+    status,
+  }) => {
+    const access = dataAccessFixture.create();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/private-drive",
+      displayName: "Archive drive",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: `${category}-fingerprint`,
+      volumeLabel: category,
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    const job = startArchiveJob(access, disc, `${category}-worker`);
+    access.archiveJobs.failWithReadFailure(job, {
+      stage: "rescue_resume",
+      category,
+      classifierVersion: "scsi-read-classifier-v1",
+      failingLba: 2_048,
+      requestedBlockCount: 1,
+      retryCount: 3,
+      ...status,
+    });
+
+    const snapshot = readDashboardSnapshot(access);
+    expect(snapshot.archiveJobs).toEqual({
+      status: "loaded",
+      items: expect.arrayContaining([
+        expect.objectContaining({
+          id: job.id,
+          failureDetail,
+          failureDiagnostic:
+            `Rescue resume · LBA 2048 · requested 1 blocks · retry 3 · SCSI/host/driver ${status.scsiStatus}/${status.hostStatus}/${status.driverStatus} · sense key/ASC/ASCQ ${status.senseKey}/${status.asc}/${status.ascq} · classifier scsi-read-classifier-v1`,
+        }),
+      ]),
+    });
+    expect(JSON.stringify(snapshot)).not.toContain("private-drive");
+  });
 
   it("projects an invalid native terminal outcome without publishing or inferring evidence", async () => {
     const access = dataAccessFixture.create();

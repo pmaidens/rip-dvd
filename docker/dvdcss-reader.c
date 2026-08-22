@@ -74,6 +74,9 @@ enum read_failure_category {
     READ_FAILURE_UNKNOWN,
     READ_FAILURE_NOT_READY,
     READ_FAILURE_UNIT_ATTENTION,
+    READ_FAILURE_HARDWARE_ERROR,
+    READ_FAILURE_TRANSPORT_ERROR,
+    READ_FAILURE_PROTECTION_ERROR,
 };
 
 struct decoded_sense {
@@ -91,6 +94,7 @@ struct decoded_sense {
 };
 
 struct read_failure {
+    enum read_failure_category category;
     struct rip_dvd_scsi_completion completion;
     struct decoded_sense sense;
     enum read_failure_category category;
@@ -427,33 +431,70 @@ static int is_recognized_dvd_medium_read_error(
            sense->ascq == 0x06;
 }
 
+static int is_recognized_host_transport_failure(uint16_t host_status)
+{
+    return (host_status >= 0x01 && host_status <= 0x12) ||
+           host_status == 0x14;
+}
+
+static int is_recognized_driver_transport_failure(uint16_t driver_status)
+{
+    return driver_status >= 0x01 && driver_status <= 0x07;
+}
+
+static int is_recognized_dvd_protection_error(
+    const struct decoded_sense *sense)
+{
+    if (sense->sense_key == 0x07) {
+        return 1;
+    }
+    return sense->sense_key == 0x05 && sense->asc == 0x6f &&
+           sense->ascq <= 0x05;
+}
+
 static enum backend_read_status classify_read_failure(
     const struct rip_dvd_scsi_completion *completion,
-    struct decoded_sense *sense,
-    enum read_failure_category *category)
+    struct read_failure *failure)
 {
-    *category = READ_FAILURE_UNKNOWN;
-    *sense = decode_sense(completion);
-    if (!completion->captured || !completion->command_completed ||
-        !sense->well_formed || completion->scsi_status != 0x02 ||
+    failure->category = READ_FAILURE_UNKNOWN;
+    failure->completion = *completion;
+    failure->sense = decode_sense(completion);
+    if (!completion->captured || !completion->command_completed) {
+        return BACKEND_READ_TERMINAL_FAILURE;
+    }
+    if (is_recognized_host_transport_failure(completion->host_status) ||
+        (completion->host_status == 0 &&
+         is_recognized_driver_transport_failure(
+             completion->driver_status))) {
+        failure->category = READ_FAILURE_TRANSPORT_ERROR;
+        return BACKEND_READ_TERMINAL_FAILURE;
+    }
+    const struct decoded_sense *sense = &failure->sense;
+    if (!sense->well_formed || completion->scsi_status != 0x02 ||
         completion->host_status != 0 ||
         (completion->driver_status != 0x00 &&
          completion->driver_status != 0x08) ||
-        (sense->response_code != 0x70 && sense->response_code != 0x72)) {
+        (sense->response_code != 0x70 && sense->response_code != 0x72) ||
+        !sense->has_sense_key || !sense->has_asc || !sense->has_ascq) {
         return BACKEND_READ_TERMINAL_FAILURE;
     }
     if (sense->sense_key == 0x02) {
-        *category = READ_FAILURE_NOT_READY;
+        failure->category = READ_FAILURE_NOT_READY;
         return BACKEND_READ_TERMINAL_FAILURE;
     }
     if (sense->sense_key == 0x06) {
-        *category = READ_FAILURE_UNIT_ATTENTION;
+        failure->category = READ_FAILURE_UNIT_ATTENTION;
         return BACKEND_READ_TERMINAL_FAILURE;
     }
-    if (!is_recognized_dvd_medium_read_error(sense)) {
-        return BACKEND_READ_TERMINAL_FAILURE;
+    if (is_recognized_dvd_medium_read_error(sense)) {
+        return BACKEND_READ_MEDIUM_ERROR;
     }
-    return BACKEND_READ_MEDIUM_ERROR;
+    if (sense->sense_key == 0x04) {
+        failure->category = READ_FAILURE_HARDWARE_ERROR;
+    } else if (is_recognized_dvd_protection_error(sense)) {
+        failure->category = READ_FAILURE_PROTECTION_ERROR;
+    }
+    return BACKEND_READ_TERMINAL_FAILURE;
 }
 
 static const char *read_failure_category_name(
@@ -464,6 +505,12 @@ static const char *read_failure_category_name(
         return "not_ready";
     case READ_FAILURE_UNIT_ATTENTION:
         return "unit_attention";
+    case READ_FAILURE_HARDWARE_ERROR:
+        return "hardware_error";
+    case READ_FAILURE_TRANSPORT_ERROR:
+        return "transport_error";
+    case READ_FAILURE_PROTECTION_ERROR:
+        return "protection_error";
     case READ_FAILURE_UNKNOWN:
         return "unknown";
     }
@@ -757,17 +804,12 @@ static struct backend_read_result backend_read(
     if (transport.status == TRANSPORT_READ_FATAL) {
         return (struct backend_read_result){ .status = BACKEND_READ_FATAL };
     }
-    struct decoded_sense sense;
-    enum read_failure_category category;
+    struct read_failure failure;
     enum backend_read_status status =
-        classify_read_failure(&transport.completion, &sense, &category);
+        classify_read_failure(&transport.completion, &failure);
     return (struct backend_read_result){
         .status = status,
-        .failure = {
-            .completion = transport.completion,
-            .sense = sense,
-            .category = category,
-        },
+        .failure = failure,
     };
 }
 

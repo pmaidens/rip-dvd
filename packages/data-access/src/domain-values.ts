@@ -83,6 +83,9 @@ export const ARCHIVE_READ_FAILURE_CATEGORIES = [
   "unknown",
   "not_ready",
   "unit_attention",
+  "hardware_error",
+  "transport_error",
+  "protection_error",
 ] as const;
 
 export const ARCHIVE_FAILURE_DETAIL_VERSIONS = [

@@ -130,6 +130,7 @@ import type {
   ArchiveJobListOptions,
   ArchiveJobStatus,
   ArchiveJobProgress,
+  ArchiveReadFailureCategory,
   ArchiveRequestId,
   ArchiveRequestStatus,
   CatalogReviewCoverage,
@@ -209,6 +210,14 @@ const DISC_SELECTION_SUPERSESSION_HISTORY_LIMIT = 101;
 const DISC_SELECTION_CORRECTION_ENCODE_JOB_LINK_LIMIT = 101;
 const DISC_SELECTION_CORRECTION_RETAINED_OUTPUT_SUMMARY_LIMIT = 101;
 const MEDIA_ITEM_SEARCH_LIMIT = 100;
+const ARCHIVE_READ_FAILURE_MESSAGES = {
+  unknown: "The Optical Drive returned an unclassified read failure",
+  not_ready: "The Optical Drive was not ready to read the disc",
+  unit_attention: "The Optical Drive reported a media change",
+  hardware_error: "The Optical Drive reported a hardware fault",
+  transport_error: "Communication with the Optical Drive failed",
+  protection_error: "DVD copy protection or region access failed",
+} satisfies Record<ArchiveReadFailureCategory, string>;
 
 interface DiscSelectionSourceOverlapTracker {
   chapterRangesByTitle: Map<number, Array<readonly [number, number]>>;
@@ -8075,11 +8084,7 @@ export function createDataAccessInternal(
       failWithReadFailure(claim, evidence) {
         return failArchiveJob(
           claim,
-          {
-            unknown: "The Optical Drive returned an unclassified read failure",
-            not_ready: "The Optical Drive was not ready to read the disc",
-            unit_attention: "The Optical Drive reported a media change",
-          }[evidence.category],
+          ARCHIVE_READ_FAILURE_MESSAGES[evidence.category],
           evidence,
         );
       },
