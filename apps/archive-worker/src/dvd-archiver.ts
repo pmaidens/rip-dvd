@@ -1708,12 +1708,20 @@ export async function preserveDvdArchive({
     const isOutOfRangeFailure =
       isReadFailure && error.readFailure.category === "out_of_range";
     let retentionError: unknown = null;
+    const recordRetentionError = (caughtRetentionError: unknown): void => {
+      retentionError = retentionError === null
+        ? caughtRetentionError
+        : new AggregateError(
+            [retentionError, caughtRetentionError],
+            "DVD boundary evidence retention failed",
+          );
+    };
     if (isOutOfRangeFailure && rescueIdentity !== undefined) {
       await revalidateReadFailure?.();
       try {
         await sync(partialPath);
       } catch (caughtRetentionError) {
-        retentionError = caughtRetentionError;
+        recordRetentionError(caughtRetentionError);
       }
       signal.throwIfAborted();
       await revalidateReadFailure?.();
@@ -1736,31 +1744,38 @@ export async function preserveDvdArchive({
               );
           partialPath = rescueWorkspace.imagePath;
         } catch (caughtRetentionError) {
-          retentionError = caughtRetentionError;
+          recordRetentionError(caughtRetentionError);
         }
       }
       await revalidateReadFailure?.();
     } else if (isReadFailure) {
       await revalidateReadFailure?.();
     }
-    const hasRequestOwnedRescueState =
-      rescueWorkspace !== null ||
-      (rescuePaths !== undefined &&
-        (await optionalMetadata(rescuePaths.mapPath)) !== null);
-    if (finalPublished) {
-      await quarantinePublishedArchive(
-        archivePath,
-        publishedArchiveFilesystemIdentity!,
-      );
-      if (!hasRequestOwnedRescueState) {
+    try {
+      const hasRequestOwnedRescueState =
+        rescueWorkspace !== null ||
+        (rescuePaths !== undefined &&
+          (await optionalMetadata(rescuePaths.mapPath)) !== null);
+      if (finalPublished) {
+        await quarantinePublishedArchive(
+          archivePath,
+          publishedArchiveFilesystemIdentity!,
+        );
+        if (!hasRequestOwnedRescueState) {
+          await movePartialAside(partialPath);
+        }
+      } else if (
+        !hasRequestOwnedRescueState &&
+        !retainedForValidation &&
+        !runner.isActive(safeDevicePath, partialPath)
+      ) {
         await movePartialAside(partialPath);
       }
-    } else if (
-      !hasRequestOwnedRescueState &&
-      !retainedForValidation &&
-      !runner.isActive(safeDevicePath, partialPath)
-    ) {
-      await movePartialAside(partialPath);
+    } catch (cleanupError) {
+      if (!isOutOfRangeFailure) {
+        throw cleanupError;
+      }
+      recordRetentionError(cleanupError);
     }
     throw isReadFailure
       ? new DvdArchiveReadFailureError(

@@ -529,6 +529,13 @@ static const char *read_failure_category_name(
     return "unknown";
 }
 
+static int backend_read_has_terminal_failure_result(
+    enum backend_read_status status)
+{
+    return status == BACKEND_READ_TERMINAL_FAILURE ||
+        status == BACKEND_READ_OUT_OF_RANGE_ERROR;
+}
+
 static void format_optional_u64(char text[32], int present, uint64_t value)
 {
     if (present) {
@@ -587,43 +594,42 @@ static int emit_read_failure_result(
     format_optional_u64(ascq, sense->has_ascq, sense->ascq);
     format_optional_u64(information_lba, sense->has_information_lba,
                         sense->information_lba);
-    char output[1024];
-    int length;
+    char boundary_fields[160];
+    int boundary_length;
+    const char *category;
     if (failure->status == BACKEND_READ_OUT_OF_RANGE_ERROR) {
-        length = snprintf(
-            output, sizeof(output), READ_FAILURE_RESULT_PREFIX
-            "{\"protocolVersion\":1,\"classifierVersion\":\""
-            READ_FAILURE_CLASSIFIER_VERSION
-            "\",\"category\":\"out_of_range\",\"scsiStatus\":%s"
-            ",\"hostStatus\":%s,\"driverStatus\":%s"
-            ",\"senseResponseCode\":%s,\"senseKey\":%s"
-            ",\"asc\":%s,\"ascq\":%s,\"informationLba\":%s"
-            ",\"requestedLba\":%" PRIu64
-            ",\"requestedBlockCount\":%" PRIu32
-            ",\"retryOrdinal\":%" PRIu32
+        category = "out_of_range";
+        boundary_length = snprintf(
+            boundary_fields, sizeof(boundary_fields),
             ",\"declaredByteCount\":%" PRIu64
             ",\"firstFailingLba\":%" PRIu64 "}\n",
-            scsi_status, host_status, driver_status, response_code, sense_key,
-            asc, ascq, information_lba, completion->requested_lba,
-            completion->requested_block_count, completion->retry_ordinal,
             declared_byte_count, sense->information_lba);
     } else {
-        length = snprintf(
-            output, sizeof(output), READ_FAILURE_RESULT_PREFIX
-            "{\"protocolVersion\":1,\"classifierVersion\":\""
-            READ_FAILURE_CLASSIFIER_VERSION
-            "\",\"category\":\"%s\",\"scsiStatus\":%s"
-            ",\"hostStatus\":%s,\"driverStatus\":%s"
-            ",\"senseResponseCode\":%s,\"senseKey\":%s"
-            ",\"asc\":%s,\"ascq\":%s,\"informationLba\":%s"
-            ",\"requestedLba\":%" PRIu64
-            ",\"requestedBlockCount\":%" PRIu32
-            ",\"retryOrdinal\":%" PRIu32 "}\n",
-            read_failure_category_name(failure->category), scsi_status,
-            host_status, driver_status, response_code, sense_key, asc, ascq,
-            information_lba, completion->requested_lba,
-            completion->requested_block_count, completion->retry_ordinal);
+        category = read_failure_category_name(failure->category);
+        memcpy(boundary_fields, "}\n", 3);
+        boundary_length = 2;
     }
+    if (boundary_length <= 0 ||
+        (size_t)boundary_length >= sizeof(boundary_fields)) {
+        fprintf(stderr, "DVD read failure result exceeded its bound\n");
+        return 1;
+    }
+    char output[1024];
+    int length = snprintf(
+        output, sizeof(output), READ_FAILURE_RESULT_PREFIX
+        "{\"protocolVersion\":1,\"classifierVersion\":\""
+        READ_FAILURE_CLASSIFIER_VERSION
+        "\",\"category\":\"%s\",\"scsiStatus\":%s"
+        ",\"hostStatus\":%s,\"driverStatus\":%s"
+        ",\"senseResponseCode\":%s,\"senseKey\":%s"
+        ",\"asc\":%s,\"ascq\":%s,\"informationLba\":%s"
+        ",\"requestedLba\":%" PRIu64
+        ",\"requestedBlockCount\":%" PRIu32
+        ",\"retryOrdinal\":%" PRIu32 "%s",
+        category, scsi_status, host_status, driver_status, response_code,
+        sense_key, asc, ascq, information_lba, completion->requested_lba,
+        completion->requested_block_count, completion->retry_ordinal,
+        boundary_fields);
     if (length <= 0 || (size_t)length >= sizeof(output)) {
         fprintf(stderr, "DVD read failure result exceeded its bound\n");
         return 1;
@@ -900,8 +906,7 @@ static int recover_range(struct read_backend *backend,
         if (result.status == BACKEND_READ_MEDIUM_ERROR) {
             continue;
         }
-        if (result.status == BACKEND_READ_TERMINAL_FAILURE ||
-            result.status == BACKEND_READ_OUT_OF_RANGE_ERROR) {
+        if (backend_read_has_terminal_failure_result(result.status)) {
             return emit_read_failure_result(&result.failure, recovery,
                                             declared_byte_count);
         }
@@ -993,8 +998,7 @@ static int read_disc(struct read_backend *backend, uint64_t size_bytes,
             require_absolute_read = blocks_remaining > 0;
             continue;
         }
-        if (result.status == BACKEND_READ_TERMINAL_FAILURE ||
-            result.status == BACKEND_READ_OUT_OF_RANGE_ERROR) {
+        if (backend_read_has_terminal_failure_result(result.status)) {
             status = emit_read_failure_result(&result.failure, recovery,
                                               size_bytes);
             break;
@@ -1299,8 +1303,7 @@ static int run_resume(struct read_backend *backend, const char *output_path,
             if (result.status == BACKEND_READ_MEDIUM_ERROR) {
                 continue;
             }
-            if (result.status == BACKEND_READ_TERMINAL_FAILURE ||
-                result.status == BACKEND_READ_OUT_OF_RANGE_ERROR) {
+            if (backend_read_has_terminal_failure_result(result.status)) {
                 status = emit_read_failure_result(&result.failure, &recovery,
                                                   size_bytes);
                 break;
