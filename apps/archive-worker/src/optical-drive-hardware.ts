@@ -13,6 +13,8 @@ import {
   MAX_OPTICAL_DRIVE_COMMAND_OUTPUT_BYTES,
   nodeCommandRunner,
   OPTICAL_DRIVE_COMMAND_TIMEOUT_MS,
+  reportsDriveUnavailable,
+  reportsNoMedium,
   type CommandRunner,
 } from "./optical-drive-command-runner.js";
 import { decodeLsblkOpticalDrives } from "./optical-drive-discovery.js";
@@ -137,6 +139,16 @@ export function createLinuxOpticalDriveHardware({
         },
       );
       if (capacityResult.exitCode !== 0) {
+        if (reportsNoMedium(capacityResult)) {
+          return null;
+        }
+        if (reportsDriveUnavailable(capacityResult)) {
+          throw new DiscInspectionError(
+            "retry",
+            "drive_unavailable",
+            "Optical Drive is unavailable during settling",
+          );
+        }
         const failure = commandFailure("blockdev", capacityResult);
         throw new DiscInspectionError(
           "retry",

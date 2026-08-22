@@ -103,6 +103,18 @@ export function createNodeCommandRunner(
 
 export const nodeCommandRunner = createNodeCommandRunner();
 
+export function reportsNoMedium(result: CommandResult): boolean {
+  return /no medium found|medium not present/i.test(
+    `${result.stdout}\n${result.stderr}`,
+  );
+}
+
+export function reportsDriveUnavailable(result: CommandResult): boolean {
+  return /permission denied|operation not permitted|access denied|not authorized|no such (?:file or directory|device(?: or address)?)/i.test(
+    `${result.stdout}\n${result.stderr}`,
+  );
+}
+
 export function commandFailure(tool: string, result: CommandResult): Error {
   const detail = (result.stderr || result.stdout)
     .replaceAll(/[\r\n]+/g, " ")

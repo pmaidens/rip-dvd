@@ -15,6 +15,7 @@ import {
   commandFailure,
   MAX_OPTICAL_DRIVE_COMMAND_OUTPUT_BYTES,
   OPTICAL_DRIVE_COMMAND_TIMEOUT_MS,
+  reportsNoMedium,
   type CommandResult,
   type CommandRunner,
 } from "./optical-drive-command-runner.js";
@@ -152,7 +153,7 @@ async function inspectDvd(
   );
   if (result.exitCode !== 0) {
     const output = `${result.stdout}\n${result.stderr}`;
-    if (/no medium found|medium not present/i.test(output)) {
+    if (reportsNoMedium(result)) {
       throw new DiscInspectionError(
         "abort",
         "no_medium",

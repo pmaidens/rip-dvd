@@ -113,28 +113,64 @@ export async function runDiscInspection({
   log,
   signal,
 }: RunDiscInspectionOptions): Promise<CompletedDiscInspection | null> {
-  const confirmedBeforeScan = await confirmAuthorizedDrive({
-    access,
-    configuredCanonicalPath,
-    expected: expectedDrive,
-    hardware,
-    phase: "DVD scanning",
-    signal,
-  });
-  const binding = await hardware.bindOpticalDrive(
-    confirmedBeforeScan.discovered,
-    signal,
-  );
-  await confirmAuthorizedDrive({
-    access,
-    configuredCanonicalPath,
-    expected: binding.drive,
-    hardware,
-    phase: "DVD scanning",
-    signal,
-  });
+  let confirmedBeforeScan: Awaited<ReturnType<typeof confirmAuthorizedDrive>>;
+  let binding: BoundOpticalDrive;
+  let mediaObservation: Awaited<
+    ReturnType<OpticalDriveHardware["observeMedia"]>
+  >;
+  try {
+    confirmedBeforeScan = await confirmAuthorizedDrive({
+      access,
+      configuredCanonicalPath,
+      expected: expectedDrive,
+      hardware,
+      phase: "DVD scanning",
+      signal,
+    });
+    binding = await hardware.bindOpticalDrive(
+      confirmedBeforeScan.discovered,
+      signal,
+    );
+    await confirmAuthorizedDrive({
+      access,
+      configuredCanonicalPath,
+      expected: binding.drive,
+      hardware,
+      phase: "DVD scanning",
+      signal,
+    });
+    mediaObservation = await hardware.observeMedia(binding, signal);
+  } catch (error) {
+    if (signal.aborted) {
+      throw error;
+    }
+    const classified = classifyDiscInspectionError(error);
+    if (
+      classified.reasonCode === "no_medium" ||
+      classified.reasonCode === "drive_identity_changed" ||
+      classified.reasonCode === "drive_unavailable"
+    ) {
+      access.discInspections.clearCurrent({
+        opticalDriveId: drive.id,
+        reasonCode: classified.reasonCode,
+      });
+      if (classified.reasonCode !== "no_medium") {
+        const message = error instanceof Error ? error.message : String(error);
+        log(`DVD scan failed for ${drive.devicePath}: ${message}`);
+      }
+      return null;
+    }
+    throw error;
+  }
+  if (mediaObservation === null) {
+    access.discInspections.clearCurrent({
+      opticalDriveId: drive.id,
+      reasonCode: "no_medium",
+    });
+    return null;
+  }
   const { mediaGeneration, capacityBytes: mediaCapacityBytes } =
-    await hardware.observeMedia(binding, signal);
+    mediaObservation;
   const startedInspection = access.discInspections.beginOrResume({
     opticalDriveId: drive.id,
     mediaGeneration,
