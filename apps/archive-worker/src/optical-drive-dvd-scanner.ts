@@ -279,6 +279,7 @@ export function createOpticalDriveDvdScanner({
         safeDevicePath,
         signal,
       );
+      cache.observe(safeDevicePath, generationBefore);
       if (
         options.expectedMediaGeneration !== undefined &&
         options.expectedMediaGeneration !== generationBefore
@@ -313,6 +314,7 @@ export function createOpticalDriveDvdScanner({
           safeDevicePath,
           signal,
         );
+        cache.observe(safeDevicePath, generationAfter);
         if (generationBefore !== generationAfter) {
           throw mediaChanged("DVD medium changed during scanning");
         }
@@ -333,6 +335,7 @@ export function createOpticalDriveDvdScanner({
         safeDevicePath,
         signal,
       );
+      cache.observe(safeDevicePath, generationAfter);
       if (generationBefore !== generationAfter) {
         throw mediaChanged("DVD medium changed during scanning");
       }
