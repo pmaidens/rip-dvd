@@ -319,7 +319,7 @@ static struct decoded_sense decode_sense(
             return decoded;
         }
         size_t declared_length = 8U + sense[7];
-        if (declared_length < 14 || declared_length > length ||
+        if (declared_length < 14 || declared_length != length ||
             (sense[2] & 0xe0) != 0) {
             return decoded;
         }
@@ -352,7 +352,7 @@ static struct decoded_sense decode_sense(
     decoded.has_ascq = 1;
     decoded.ascq = sense[3];
     size_t declared_length = 8U + sense[7];
-    if (declared_length > length || (sense[1] & 0xf0) != 0 ||
+    if (declared_length != length || (sense[1] & 0xf0) != 0 ||
         sense[4] != 0 || sense[5] != 0 || sense[6] != 0) {
         return decoded;
     }
