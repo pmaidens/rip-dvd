@@ -297,7 +297,35 @@ const malformedUnknownFixtures = [
     "fixed-declared-length-excludes-asc",
     "raw@5@always@2@0@8@14@f000030000000504000000001100",
   ],
+  [
+    "fixed-reserved-sense-key-bit",
+    "raw@5@always@2@0@8@18@f00013000000050a00000000110000000000",
+  ],
+  [
+    "fixed-sense-key-specific-reserved-bit",
+    "raw@5@always@2@0@8@18@f00003000000050a00000000110000400000",
+  ],
+  [
+    "fixed-declared-vendor-byte",
+    "raw@5@always@2@0@8@19@f00003000000050b00000000110000000000ff",
+  ],
+  [
+    "fixed-command-specific-information",
+    "raw@5@always@2@0@8@18@f00003000000050a01000000110000000000",
+  ],
+  [
+    "fixed-invalid-information",
+    "raw@5@always@2@0@8@18@700003000000050a00000000110000000000",
+  ],
   ["unsupported", "raw@5@always@2@0@8@1@7f"],
+  [
+    "driver-status-reserved-upper-bit",
+    `raw@5@always@2@0@264@${fixedMediumSense.length / 2}@${fixedMediumSense}`,
+  ],
+  [
+    "driver-status-abort-suggestion",
+    `raw@5@always@2@0@40@${fixedMediumSense.length / 2}@${fixedMediumSense}`,
+  ],
   [
     "descriptor-response-reserved-bit",
     "raw@5@always@2@0@8@8@f203110000000000",
@@ -321,6 +349,10 @@ const malformedUnknownFixtures = [
   [
     "descriptor-information-reserved-bits",
     "raw@5@always@2@0@8@20@720311000000000c000a81000000000000000005",
+  ],
+  [
+    "descriptor-invalid-information",
+    "raw@5@always@2@0@8@20@720311000000000c000a00000000000000000005",
   ],
   [
     "descriptor-reserved-byte",
