@@ -151,6 +151,9 @@ export const discInspections = sqliteTable(
       .references(() => detectedDiscs.id, { onDelete: "restrict" }),
     mediaGeneration: text("media_generation").notNull(),
     mediaCapacityBytes: integer("media_capacity_bytes"),
+    settlingBaselineCapacityBytes: integer(
+      "settling_baseline_capacity_bytes",
+    ),
     stableObservationCount: integer("stable_observation_count"),
     settlingQuietWindowStartedAt: integer("settling_quiet_window_started_at", {
       mode: "timestamp_ms",
@@ -222,7 +225,7 @@ export const discInspections = sqliteTable(
     ),
     check(
       "disc_inspections_settling_evidence_check",
-      sql`((${table.mediaCapacityBytes} is null and ${table.stableObservationCount} is null and ${table.settlingQuietWindowStartedAt} is null and ${table.settlingStartedAt} is null and ${table.settlingResetCount} is null) or (${table.mediaCapacityBytes} is null and ${table.stableObservationCount} = 0 and ${table.settlingQuietWindowStartedAt} is null and ${table.settlingStartedAt} is not null and typeof(${table.settlingResetCount}) = 'integer' and ${table.settlingResetCount} between 0 and 10000) or (typeof(${table.mediaCapacityBytes}) = 'integer' and ${table.mediaCapacityBytes} > 0 and ${table.mediaCapacityBytes} <= 9000000000 and ${table.mediaCapacityBytes} % 2048 = 0 and typeof(${table.stableObservationCount}) = 'integer' and ${table.stableObservationCount} between 1 and 3 and ${table.settlingQuietWindowStartedAt} is not null and ${table.settlingStartedAt} is not null and ${table.settlingQuietWindowStartedAt} >= ${table.settlingStartedAt} and typeof(${table.settlingResetCount}) = 'integer' and ${table.settlingResetCount} between 0 and 10000)) and (${table.phase} <> 'settling' or ${table.settlingStartedAt} is not null)`,
+      sql`((${table.mediaCapacityBytes} is null and ${table.settlingBaselineCapacityBytes} is null and ${table.stableObservationCount} is null and ${table.settlingQuietWindowStartedAt} is null and ${table.settlingStartedAt} is null and ${table.settlingResetCount} is null) or (${table.mediaCapacityBytes} is null and (${table.settlingBaselineCapacityBytes} is null or (typeof(${table.settlingBaselineCapacityBytes}) = 'integer' and ${table.settlingBaselineCapacityBytes} > 0 and ${table.settlingBaselineCapacityBytes} <= 9000000000 and ${table.settlingBaselineCapacityBytes} % 2048 = 0)) and ${table.stableObservationCount} = 0 and ${table.settlingQuietWindowStartedAt} is null and ${table.settlingStartedAt} is not null and typeof(${table.settlingResetCount}) = 'integer' and ${table.settlingResetCount} between 0 and 10000) or (typeof(${table.mediaCapacityBytes}) = 'integer' and ${table.mediaCapacityBytes} > 0 and ${table.mediaCapacityBytes} <= 9000000000 and ${table.mediaCapacityBytes} % 2048 = 0 and ${table.settlingBaselineCapacityBytes} is null and typeof(${table.stableObservationCount}) = 'integer' and ${table.stableObservationCount} between 1 and 3 and ${table.settlingQuietWindowStartedAt} is not null and ${table.settlingStartedAt} is not null and ${table.settlingQuietWindowStartedAt} >= ${table.settlingStartedAt} and typeof(${table.settlingResetCount}) = 'integer' and ${table.settlingResetCount} between 0 and 10000)) and (${table.phase} <> 'settling' or ${table.settlingStartedAt} is not null)`,
     ),
     check(
       "disc_inspections_attempt_count_check",

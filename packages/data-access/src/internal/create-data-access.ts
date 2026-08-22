@@ -403,10 +403,13 @@ function initialDiscSettlingState(
   timestamp: Date,
   mediaCapacityBytes: number | null,
   settlingResetCount = 0,
+  settlingBaselineCapacityBytes: number | null = null,
 ) {
   return {
     phase: "settling" as const,
     mediaCapacityBytes,
+    settlingBaselineCapacityBytes:
+      mediaCapacityBytes === null ? settlingBaselineCapacityBytes : null,
     stableObservationCount: mediaCapacityBytes === null ? 0 : 1,
     settlingQuietWindowStartedAt:
       mediaCapacityBytes === null ? null : timestamp,
@@ -415,6 +418,28 @@ function initialDiscSettlingState(
     phaseStartedAt: timestamp,
     attemptStartedAt: timestamp,
   };
+}
+
+function retainedSettlingCapacityBaseline({
+  currentBaselineCapacityBytes,
+  currentCapacityBytes,
+  currentMediaGeneration,
+  mediaCapacityBytes,
+  mediaGeneration,
+}: {
+  currentBaselineCapacityBytes: number | null;
+  currentCapacityBytes: number | null;
+  currentMediaGeneration: string;
+  mediaCapacityBytes: number | null;
+  mediaGeneration: string;
+}): number | null {
+  if (
+    mediaCapacityBytes !== null ||
+    currentMediaGeneration !== mediaGeneration
+  ) {
+    return null;
+  }
+  return currentCapacityBytes ?? currentBaselineCapacityBytes;
 }
 
 function requireDiscSettlingObservation(input: {
@@ -5869,6 +5894,15 @@ export function createDataAccessInternal(
                     ...initialDiscSettlingState(
                       timestamp,
                       mediaCapacityBytes,
+                      0,
+                      retainedSettlingCapacityBaseline({
+                        currentBaselineCapacityBytes:
+                          current.settlingBaselineCapacityBytes,
+                        currentCapacityBytes: current.mediaCapacityBytes,
+                        currentMediaGeneration: current.mediaGeneration,
+                        mediaCapacityBytes,
+                        mediaGeneration,
+                      }),
                     ),
                     attemptCount: current.attemptCount + 1,
                     consecutiveFailureCount: 0,
@@ -5939,8 +5973,12 @@ export function createDataAccessInternal(
               const evidenceChanged =
                 current.mediaGeneration !== mediaGeneration ||
                 (mediaCapacityBytes !== null &&
-                  current.mediaCapacityBytes !== null &&
-                  current.mediaCapacityBytes !== mediaCapacityBytes);
+                  ((current.mediaCapacityBytes !== null &&
+                    current.mediaCapacityBytes !== mediaCapacityBytes) ||
+                    (current.mediaCapacityBytes === null &&
+                      current.settlingBaselineCapacityBytes !== null &&
+                      current.settlingBaselineCapacityBytes !==
+                        mediaCapacityBytes)));
               const settlingResetCount = evidenceChanged
                 ? Math.min(
                     MAX_DISC_INSPECTION_SETTLING_RESET_COUNT,
@@ -5958,6 +5996,14 @@ export function createDataAccessInternal(
                       timestamp,
                       mediaCapacityBytes,
                       settlingResetCount,
+                      retainedSettlingCapacityBaseline({
+                        currentBaselineCapacityBytes:
+                          current.settlingBaselineCapacityBytes,
+                        currentCapacityBytes: current.mediaCapacityBytes,
+                        currentMediaGeneration: current.mediaGeneration,
+                        mediaCapacityBytes,
+                        mediaGeneration,
+                      }),
                     ),
                     attemptCount: current.attemptCount +
                       (recoveringExpiredClaim ? 1 : 0),
@@ -6002,6 +6048,15 @@ export function createDataAccessInternal(
                     ...initialDiscSettlingState(
                       timestamp,
                       mediaCapacityBytes,
+                      0,
+                      retainedSettlingCapacityBaseline({
+                        currentBaselineCapacityBytes:
+                          current.settlingBaselineCapacityBytes,
+                        currentCapacityBytes: current.mediaCapacityBytes,
+                        currentMediaGeneration: current.mediaGeneration,
+                        mediaCapacityBytes,
+                        mediaGeneration,
+                      }),
                     ),
                     attemptCount: current.attemptCount + 1,
                     bytesHashed: null,
@@ -6171,10 +6226,24 @@ export function createDataAccessInternal(
             mediaCapacityBytes !== null &&
             current.mediaGeneration === mediaGeneration &&
             current.mediaCapacityBytes === mediaCapacityBytes;
+          const baselineCapacityChanged =
+            mediaCapacityBytes !== null &&
+            current.settlingBaselineCapacityBytes !== null &&
+            current.settlingBaselineCapacityBytes !== mediaCapacityBytes;
           const evidenceReset =
             current.mediaGeneration !== mediaGeneration ||
             (current.mediaCapacityBytes !== null &&
-              current.mediaCapacityBytes !== mediaCapacityBytes);
+              current.mediaCapacityBytes !== mediaCapacityBytes) ||
+            baselineCapacityChanged;
+          const settlingBaselineCapacityBytes =
+            retainedSettlingCapacityBaseline({
+              currentBaselineCapacityBytes:
+                current.settlingBaselineCapacityBytes,
+              currentCapacityBytes: current.mediaCapacityBytes,
+              currentMediaGeneration: current.mediaGeneration,
+              mediaCapacityBytes,
+              mediaGeneration,
+            });
           const stableObservationCount = mediaCapacityBytes === null
             ? 0
             : matchingValidEvidence
@@ -6203,6 +6272,7 @@ export function createDataAccessInternal(
               .set({
                 mediaGeneration,
                 mediaCapacityBytes,
+                settlingBaselineCapacityBytes,
                 stableObservationCount,
                 settlingQuietWindowStartedAt: quietWindowStartedAt,
                 settlingResetCount: evidenceReset

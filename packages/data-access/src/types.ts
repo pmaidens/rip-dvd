@@ -139,6 +139,7 @@ export interface DiscInspection {
   detectedDiscId: DetectedDiscId | null;
   mediaGeneration: string;
   mediaCapacityBytes: number | null;
+  settlingBaselineCapacityBytes: number | null;
   stableObservationCount: number | null;
   settlingQuietWindowStartedAt: Date | null;
   settlingStartedAt: Date | null;

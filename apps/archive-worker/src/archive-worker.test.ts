@@ -2865,6 +2865,12 @@ describe("archive worker polling", () => {
       recoveredMediaGeneration: "generation-b",
       expectedResetCount: 1,
     },
+    {
+      name: "changed capacity with a matching generation",
+      recoveredCapacityBytes: 4_096,
+      recoveredMediaGeneration: "generation-a",
+      expectedResetCount: 1,
+    },
   ])(
     "recovers an expired settling claim with $name and a fresh quiet window",
     async ({
@@ -2911,10 +2917,13 @@ describe("archive worker polling", () => {
       const hardware: OpticalDriveHardware = {
         ...stableDeviceBinding(),
         discover: vi.fn().mockResolvedValue([discoveredDrive]),
-        observeMedia: vi.fn(async () => ({
-          mediaGeneration,
-          capacityBytes: mediaCapacityBytes,
-        })),
+        observeMedia: vi.fn(async (_binding, _signal, options) => {
+          options?.onMediaGeneration(mediaGeneration);
+          return {
+            mediaGeneration,
+            capacityBytes: mediaCapacityBytes,
+          };
+        }),
         observeMediaGeneration: vi.fn(async () => mediaGeneration),
         scanDvd,
       };
@@ -4650,42 +4659,133 @@ describe("archive worker polling", () => {
     access.close();
   });
 
-  it("rejects a valid readiness observation returned exactly at the deadline", async () => {
+  it.each([
+    { name: "valid", returnsNoMedium: false },
+    { name: "no-medium", returnsNoMedium: true },
+  ])(
+    "rejects a $name readiness result returned exactly at the deadline",
+    async ({ returnsNoMedium }) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-08-22T17:15:00.000Z"));
+      const access = openTestDataAccess();
+      const mediaCapacityBytes = 4_700_372_992;
+      let observationCount = 0;
+      const observeMedia: OpticalDriveHardware["observeMedia"] = vi.fn(
+        async (_binding, _signal, options) => {
+          observationCount += 1;
+          options?.onMediaGeneration("deadline-generation");
+          if (observationCount === 3) {
+            const [inspection] = access.discInspections.list({
+              currentOnly: true,
+            });
+            vi.setSystemTime(new Date(
+              inspection!.settlingStartedAt!.getTime() +
+                DISC_INSPECTION_SETTLING_TIMEOUT_MS,
+            ));
+            if (returnsNoMedium) {
+              return null;
+            }
+          }
+          return {
+            mediaGeneration: "deadline-generation",
+            capacityBytes: mediaCapacityBytes,
+          };
+        },
+      );
+      const scanDvd = vi.fn();
+      const hardware: OpticalDriveHardware = {
+        ...stableDeviceBinding(),
+        discover: vi.fn().mockResolvedValue([{
+          devicePath: "/dev/sr0",
+          serialNumber: "SETTLING-DEADLINE-001",
+        }]),
+        observeMedia,
+        observeMediaGeneration: vi.fn().mockResolvedValue(
+          "deadline-generation",
+        ),
+        scanDvd,
+      };
+      const settlingWaits = createControlledSettlingWaits();
+      const polling = pollArchiveWorkerOnce({
+        access,
+        configuredDevicePath: "/dev/sr0",
+        hardware,
+        log: vi.fn(),
+        signal: new AbortController().signal,
+        waitForNextSettlingObservation: settlingWaits.wait,
+      });
+
+      await settlingWaits.waitUntilPending();
+      const inspectionId = access.discInspections.list({
+        currentOnly: true,
+      })[0]!.id;
+      settlingWaits.releaseNext();
+      await settlingWaits.waitUntilPending();
+      settlingWaits.releaseNext();
+      await polling;
+
+      expect(access.discInspections.list({ ids: [inspectionId] })).toEqual([
+        expect.objectContaining({
+          status: "running",
+          phase: "retry_wait",
+          stableObservationCount: 2,
+          consecutiveFailureCount: 1,
+          reasonCode: "drive_not_ready",
+          diagnostic: "Optical Drive did not settle within 30 seconds",
+          titleCount: null,
+          totalBytes: null,
+        }),
+      ]);
+      expect(access.discInspections.listAttempts(inspectionId)).toEqual([
+        expect.objectContaining({
+          attemptNumber: 1,
+          outcome: "failed",
+          phase: "settling",
+          reasonCode: "drive_not_ready",
+        }),
+      ]);
+      expect(observeMedia).toHaveBeenCalledTimes(3);
+      expect(scanDvd).not.toHaveBeenCalled();
+      access.close();
+    },
+  );
+
+  it("records timeout when failure classification crosses the deadline", async () => {
     vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-08-22T17:15:00.000Z"));
+    vi.setSystemTime(new Date("2026-08-22T17:20:00.000Z"));
     const access = openTestDataAccess();
     const mediaCapacityBytes = 4_700_372_992;
     let observationCount = 0;
     const observeMedia: OpticalDriveHardware["observeMedia"] = vi.fn(
       async (_binding, _signal, options) => {
         observationCount += 1;
-        options?.onMediaGeneration("deadline-generation");
-        if (observationCount === 3) {
-          const [inspection] = access.discInspections.list({
-            currentOnly: true,
-          });
-          vi.setSystemTime(new Date(
-            inspection!.settlingStartedAt!.getTime() +
-              DISC_INSPECTION_SETTLING_TIMEOUT_MS,
-          ));
+        options?.onMediaGeneration("classification-generation");
+        if (observationCount === 2) {
+          throw new Error("readiness observation failed");
         }
         return {
-          mediaGeneration: "deadline-generation",
+          mediaGeneration: "classification-generation",
           capacityBytes: mediaCapacityBytes,
         };
       },
     );
+    const observeMediaGeneration = vi.fn(async () => {
+      const [inspection] = access.discInspections.list({ currentOnly: true });
+      vi.setSystemTime(new Date(
+        inspection!.settlingStartedAt!.getTime() +
+          DISC_INSPECTION_SETTLING_TIMEOUT_MS,
+      ));
+      return "classification-generation";
+    });
     const scanDvd = vi.fn();
     const hardware: OpticalDriveHardware = {
       ...stableDeviceBinding(),
       discover: vi.fn().mockResolvedValue([{
         devicePath: "/dev/sr0",
-        serialNumber: "SETTLING-DEADLINE-001",
+        serialNumber: "SETTLING-CLASSIFICATION-001",
       }]),
       observeMedia,
-      observeMediaGeneration: vi.fn().mockResolvedValue(
-        "deadline-generation",
-      ),
+      observeMediaGeneration,
       scanDvd,
     };
     const settlingWaits = createControlledSettlingWaits();
@@ -4703,20 +4803,16 @@ describe("archive worker polling", () => {
       currentOnly: true,
     })[0]!.id;
     settlingWaits.releaseNext();
-    await settlingWaits.waitUntilPending();
-    settlingWaits.releaseNext();
     await polling;
 
     expect(access.discInspections.list({ ids: [inspectionId] })).toEqual([
       expect.objectContaining({
         status: "running",
         phase: "retry_wait",
-        stableObservationCount: 2,
+        stableObservationCount: 1,
         consecutiveFailureCount: 1,
         reasonCode: "drive_not_ready",
         diagnostic: "Optical Drive did not settle within 30 seconds",
-        titleCount: null,
-        totalBytes: null,
       }),
     ]);
     expect(access.discInspections.listAttempts(inspectionId)).toEqual([
@@ -4727,7 +4823,7 @@ describe("archive worker polling", () => {
         reasonCode: "drive_not_ready",
       }),
     ]);
-    expect(observeMedia).toHaveBeenCalledTimes(3);
+    expect(observeMediaGeneration).toHaveBeenCalledOnce();
     expect(scanDvd).not.toHaveBeenCalled();
     access.close();
   });

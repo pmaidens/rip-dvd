@@ -51,6 +51,11 @@ const DISC_INSPECTION_SETTLING_TIMEOUT_DIAGNOSTIC =
   `Optical Drive did not settle within ${
     DISC_INSPECTION_SETTLING_TIMEOUT_MS / 1_000
   } seconds`;
+const DISC_INSPECTION_SETTLING_TIMEOUT_FAILURE = {
+  kind: "retry",
+  reasonCode: "drive_not_ready",
+  diagnostic: DISC_INSPECTION_SETTLING_TIMEOUT_DIAGNOSTIC,
+} satisfies ClassifiedDiscInspectionError;
 
 async function waitForNextSettlingObservation(
   intervalMs: number,
@@ -191,11 +196,7 @@ export async function runDiscInspection({
     persistInspectionFailure({
       access,
       claim,
-      classified: {
-        kind: "retry",
-        reasonCode: "drive_not_ready",
-        diagnostic: DISC_INSPECTION_SETTLING_TIMEOUT_DIAGNOSTIC,
-      },
+      classified: DISC_INSPECTION_SETTLING_TIMEOUT_FAILURE,
       consecutiveFailureCount: inspection.consecutiveFailureCount,
     });
   let confirmedBeforeScan: Awaited<ReturnType<typeof confirmAuthorizedDrive>>;
@@ -463,15 +464,15 @@ export async function runDiscInspection({
         binding,
         inspectionSignal,
       );
+      if (!armSettlingDeadline(inspection)) {
+        inspectionSignal.throwIfAborted();
+      }
       if (observation === null) {
         access.discInspections.record(claim, {
           type: "abort",
           reasonCode: "no_medium",
         });
         return null;
-      }
-      if (!armSettlingDeadline(inspection)) {
-        inspectionSignal.throwIfAborted();
       }
       const observed = access.discInspections.recordSettlingObservation(
         claim,
@@ -586,27 +587,33 @@ export async function runDiscInspection({
       (settlingFailure.reasonCode === "no_medium" ||
         settlingFailure.reasonCode === "drive_identity_changed" ||
         settlingFailure.reasonCode === "drive_unavailable");
-    const classified: ClassifiedDiscInspectionError =
+    let classified: ClassifiedDiscInspectionError;
+    if (
       (settlingDeadlineController.signal.aborted ||
-          settlingDeadlineExpired(inspection)) &&
-        inspection.phase === "settling"
-        ? {
-            kind: "retry",
-            reasonCode: "drive_not_ready",
-            diagnostic: DISC_INSPECTION_SETTLING_TIMEOUT_DIAGNOSTIC,
-          }
-        : settlingEndedByDriveState
-        ? {
-            kind: "abort",
-            reasonCode: settlingFailure.reasonCode,
-          }
-        : await classifyFailureAfterMediaObservation({
-            binding,
-            error,
-            expectedMediaGeneration: settledMediaGeneration,
-            hardware,
-            signal,
-          });
+        settlingDeadlineExpired(inspection)) &&
+      inspection.phase === "settling"
+    ) {
+      classified = DISC_INSPECTION_SETTLING_TIMEOUT_FAILURE;
+    } else if (settlingEndedByDriveState) {
+      classified = {
+        kind: "abort",
+        reasonCode: settlingFailure.reasonCode,
+      };
+    } else {
+      const observedClassification = await classifyFailureAfterMediaObservation({
+        binding,
+        error,
+        expectedMediaGeneration: settledMediaGeneration,
+        hardware,
+        signal: inspectionSignal,
+      });
+      signal.throwIfAborted();
+      classified = inspection.phase === "settling" &&
+          (settlingDeadlineController.signal.aborted ||
+            settlingDeadlineExpired(inspection))
+        ? DISC_INSPECTION_SETTLING_TIMEOUT_FAILURE
+        : observedClassification;
+    }
     try {
       persistInspectionFailure({
         access,
