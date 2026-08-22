@@ -1,5 +1,7 @@
 import type {
+  ARCHIVE_FAILURE_DETAIL_VERSIONS,
   ARCHIVE_JOB_STATUSES,
+  ARCHIVE_READ_FAILURE_STAGES,
   ARCHIVE_REQUEST_STATUSES,
   ARCHIVE_RUNNING_PROGRESS_PHASES,
   ARCHIVE_FORMATS,
@@ -43,6 +45,8 @@ export interface TmdbIdentity {
 export type DiscSelectionKind = (typeof DISC_SELECTION_KINDS)[number];
 export type MediaDomain = (typeof MEDIA_DOMAINS)[number];
 export type ArchiveJobStatus = (typeof ARCHIVE_JOB_STATUSES)[number];
+export type ArchiveReadFailureStage =
+  (typeof ARCHIVE_READ_FAILURE_STAGES)[number];
 export type ArchiveRequestStatus = (typeof ARCHIVE_REQUEST_STATUSES)[number];
 export type DiscInspectionStatus = (typeof DISC_INSPECTION_STATUSES)[number];
 export type DiscInspectionPhase = (typeof DISC_INSPECTION_PHASES)[number];
@@ -540,8 +544,36 @@ export interface ArchiveJob {
   startedAt: Date | null;
   completedAt: Date | null;
   errorMessage: string | null;
+  failureDetailVersion: (typeof ARCHIVE_FAILURE_DETAIL_VERSIONS)[number] | null;
+  readFailureStage: ArchiveReadFailureStage | null;
+  readFailureCategory: "unknown" | null;
+  readFailureClassifierVersion: string | null;
+  readFailureLba: number | null;
+  readFailureRequestedBlockCount: number | null;
+  readFailureRetryCount: number | null;
+  readFailureScsiStatus: number | null;
+  readFailureHostStatus: number | null;
+  readFailureDriverStatus: number | null;
+  readFailureSenseKey: number | null;
+  readFailureAsc: number | null;
+  readFailureAscq: number | null;
   createdAt: Date;
   updatedAt: Date;
+}
+
+export interface UnknownArchiveReadFailureEvidence {
+  stage: ArchiveReadFailureStage;
+  category: "unknown";
+  classifierVersion: string;
+  failingLba: number;
+  requestedBlockCount: number;
+  retryCount: number;
+  scsiStatus: number | null;
+  hostStatus: number | null;
+  driverStatus: number | null;
+  senseKey: number | null;
+  asc: number | null;
+  ascq: number | null;
 }
 
 export interface EncodeJob {
@@ -974,6 +1006,10 @@ export interface ArchiveJobAccess {
     },
   ): ArchiveJob;
   fail(claim: RunningArchiveJob, errorMessage: string): ArchiveJob;
+  failWithReadFailure(
+    claim: RunningArchiveJob,
+    evidence: UnknownArchiveReadFailureEvidence,
+  ): ArchiveJob;
   abort(claim: RunningArchiveJob, errorMessage: string): ArchiveJob;
 }
 

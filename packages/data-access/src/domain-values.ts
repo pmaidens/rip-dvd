@@ -74,6 +74,15 @@ export const ARCHIVE_JOB_STATUSES = [
   "aborted",
 ] as const;
 
+export const ARCHIVE_READ_FAILURE_STAGES = [
+  "initial_copy",
+  "rescue_resume",
+] as const;
+
+export const ARCHIVE_FAILURE_DETAIL_VERSIONS = [
+  "archive-failure-detail-v1",
+] as const;
+
 export const ARCHIVE_REQUEST_STATUSES = [
   "pending",
   "running",

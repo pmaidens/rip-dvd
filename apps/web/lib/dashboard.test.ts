@@ -11,18 +11,25 @@ import {
 import {
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { createNodeDvdCopyRunner } from "../../archive-worker/src/dvd-archiver";
+import { DVD_READ_FAILURE_RESULT_PREFIX } from "../../archive-worker/src/dvd-recovery-contracts";
 
 import { readDashboardSnapshot } from "./dashboard";
 import { DASHBOARD_ACTIVE_DISC_LIMIT } from "./dashboard-bounds";
 import {
   completeDiscInspection,
+  pollArchiveWorkerForTest,
   seedFailedArchiveJobAndQueuedDuplicate,
   startArchiveJob,
 } from "../test/archive-job-fixture";
@@ -865,6 +872,265 @@ describe("readDashboardSnapshot", () => {
         }),
       ]),
     });
+  });
+
+  it("projects structured and historical Archive Job read diagnostics without paths", () => {
+    const { access, databasePath } = dataAccessFixture.createWithDatabasePath();
+    const createFailure = (name: string) => {
+      const drive = access.catalog.upsertOpticalDrive({
+        devicePath: `/dev/${name}`,
+        displayName: `${name} drive`,
+        isEnabled: true,
+        isPresent: true,
+      });
+      const disc = access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint: `${name}-fingerprint`,
+        volumeLabel: name,
+      });
+      access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+      return { disc, job: startArchiveJob(access, disc, `${name}-worker`) };
+    };
+    const structured = createFailure("STRUCTURED_READ");
+    access.archiveJobs.failWithReadFailure(structured.job, {
+      stage: "initial_copy",
+      category: "unknown",
+      classifierVersion: "scsi-read-classifier-v1",
+      failingLba: 1_024,
+      requestedBlockCount: 16,
+      retryCount: 2,
+      scsiStatus: 2,
+      hostStatus: 0,
+      driverStatus: 8,
+      senseKey: 5,
+      asc: 33,
+      ascq: 0,
+    });
+    const historical = createFailure("HISTORICAL_READ");
+    access.archiveJobs.fail(
+      historical.job,
+      "old read failure at /media/private.iso on /dev/secret-drive",
+    );
+    const sqlite = new DatabaseSync(databasePath);
+    try {
+      sqlite.prepare(
+        "update archive_jobs set failure_detail_version = null where id = ?",
+      ).run(historical.job.id);
+    } finally {
+      sqlite.close();
+    }
+
+    const snapshot = readDashboardSnapshot(access);
+    expect(snapshot.archiveJobs).toEqual({
+      status: "loaded",
+      items: expect.arrayContaining([
+        expect.objectContaining({
+          id: structured.job.id,
+          failureDetail:
+            "The Optical Drive returned an unclassified read failure. Retry the Archive Request; if it fails again, inspect the disc and drive.",
+          failureDiagnostic:
+            "Initial copy · LBA 1024 · requested 16 blocks · retry 2 · SCSI/host/driver 2/0/8 · sense key/ASC/ASCQ 5/33/0 · classifier scsi-read-classifier-v1",
+        }),
+        expect.objectContaining({
+          id: historical.job.id,
+          failureDetail:
+            "The Archive Job failed with an unknown diagnostic because structured read evidence is unavailable.",
+          failureDiagnostic: "Structured read evidence unavailable.",
+        }),
+      ]),
+    });
+    expect(snapshot.detectedDiscs).toEqual({
+      status: "loaded",
+      items: expect.arrayContaining([
+        expect.objectContaining({
+          id: structured.disc.id,
+          archiveRequest: expect.objectContaining({
+            latestFailureDetail:
+              "The Optical Drive returned an unclassified read failure. Retry the Archive Request; if it fails again, inspect the disc and drive.",
+          }),
+        }),
+      ]),
+    });
+    expect(JSON.stringify(snapshot)).not.toContain("private.iso");
+    expect(JSON.stringify(snapshot)).not.toContain("secret-drive");
+  });
+
+  it("projects an invalid native terminal outcome without publishing or inferring evidence", async () => {
+    const access = dataAccessFixture.create();
+    const originalsLibraryPath = mkdtempSync(
+      join(tmpdir(), "rip-dvd-dashboard-invalid-terminal-"),
+    );
+    const discoveredDrive = {
+      devicePath: "/dev/zero",
+      vendor: "Pioneer",
+      product: "DVD-RW",
+      serialNumber: "INVALID-TERMINAL-001",
+    };
+    const drive = access.catalog.reconcileOpticalDrives([
+      { ...discoveredDrive, isConfiguredDevice: true },
+    ])[0]!;
+    const fingerprint = `dvdmeta-sha256:${"4".repeat(64)}`;
+    const scanData = {
+      schemaVersion: 2 as const,
+      contentId: fingerprint,
+      titles: [{
+        number: 1,
+        durationSeconds: 3_600,
+        chapters: 10,
+        audioStreams: [],
+        subtitles: [],
+      }],
+    };
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint,
+      scanData,
+      volumeLabel: "INVALID_TERMINAL",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    const request = access.archiveRequests.create({ detectedDiscId: disc.id });
+    const stderr = Object.assign(new EventEmitter(), { destroy: vi.fn() });
+    const authorizationReady = Object.assign(new EventEmitter(), {
+      destroy: vi.fn(),
+    });
+    const authorizationStart = { destroy: vi.fn(), end: vi.fn() };
+    const child = Object.assign(new EventEmitter(), {
+      stderr,
+      stdio: [
+        null,
+        null,
+        stderr,
+        null,
+        authorizationReady,
+        authorizationStart,
+      ] as [
+        null,
+        null,
+        typeof stderr,
+        null,
+        typeof authorizationReady,
+        typeof authorizationStart,
+      ],
+      kill: vi.fn(() => true),
+      unref: vi.fn(),
+    });
+    const copyRunner = createNodeDvdCopyRunner({
+      requireInactive: () => undefined,
+      spawnProcess: vi.fn(() => {
+        queueMicrotask(() => {
+          authorizationReady.emit(
+            "data",
+            Buffer.from("rip-dvd-copy-authorization-ready\n"),
+          );
+          stderr.emit(
+            "data",
+            Buffer.from(
+              `${DVD_READ_FAILURE_RESULT_PREFIX}${JSON.stringify({
+                protocolVersion: 1,
+                classifierVersion: "scsi-read-classifier-v1",
+                category: "unknown",
+                scsiStatus: 2,
+                hostStatus: 0,
+                driverStatus: 8,
+                senseResponseCode: 112,
+                senseKey: 5,
+                asc: 33,
+                ascq: 0,
+                informationLba: 1,
+                requestedLba: 0,
+                requestedBlockCount: 4,
+                retryOrdinal: 0,
+                diagnosticPath: "/dev/private-drive",
+              })}\n`,
+            ),
+          );
+          child.emit("close", 3, null);
+        });
+        return child;
+      }),
+    });
+    const salvageValidator = { validate: vi.fn() };
+    const log = vi.fn();
+
+    try {
+      await pollArchiveWorkerForTest({
+        access,
+        configuredDevicePath: discoveredDrive.devicePath,
+        copyRunner,
+        hardware: {
+          bindOpticalDrive: vi.fn(async (discovered, signal) => {
+            signal.throwIfAborted();
+            return {
+              deviceInstanceToken: "invalid-terminal-device",
+              drive: discovered,
+            };
+          }),
+          confirmOpticalDrive: vi.fn(async (_binding, signal) => {
+            signal.throwIfAborted();
+          }),
+          observeMedia: vi.fn(async (_binding, signal) => {
+            signal.throwIfAborted();
+            return {
+              mediaGeneration: "invalid-terminal-generation",
+              capacityBytes: 2_048,
+            };
+          }),
+          observeMediaGeneration: vi.fn(async (_binding, signal) => {
+            signal.throwIfAborted();
+            return "invalid-terminal-generation";
+          }),
+          discover: vi.fn().mockResolvedValue([discoveredDrive]),
+          scanDvd: vi.fn().mockResolvedValue({
+            fingerprint,
+            scanData,
+            sizeBytes: 9,
+          }),
+        },
+        log,
+        originalsLibraryPath,
+        salvageValidator,
+        signal: new AbortController().signal,
+        workerId: "dashboard-invalid-terminal",
+      });
+
+      expect(log).toHaveBeenCalledWith(
+        "DVD archive failed for /dev/zero: DVD read failure helper result is malformed",
+      );
+
+      expect(access.archiveJobs.list(["failed"])).toEqual([
+        expect.objectContaining({
+          archiveRequestId: request.id,
+          originalDiscArchiveId: null,
+          readFailureStage: null,
+          readFailureCategory: null,
+          readFailureClassifierVersion: null,
+        }),
+      ]);
+      expect(access.archiveRequests.list(["needs_attention"])).toEqual([
+        expect.objectContaining({ id: request.id }),
+      ]);
+      expect(access.catalog.listOriginalDiscArchives()).toEqual([]);
+      expect(salvageValidator.validate).not.toHaveBeenCalled();
+      expect(readdirSync(originalsLibraryPath)).toEqual([]);
+
+      const snapshot = readDashboardSnapshot(access);
+      expect(snapshot.archiveJobs).toEqual({
+        status: "loaded",
+        items: expect.arrayContaining([
+          expect.objectContaining({
+            failureDetail:
+              "The worker reported an unclassified failure. Check the worker logs for the full diagnostic.",
+            failureDiagnostic: "Structured read evidence unavailable.",
+            id: expect.any(String),
+          }),
+        ]),
+      });
+      expect(JSON.stringify(snapshot)).not.toContain("private-drive");
+    } finally {
+      rmSync(originalsLibraryPath, { force: true, recursive: true });
+    }
   });
 
   it("does not combine dashboard records from opposite sides of a worker commit", () => {

@@ -109,6 +109,8 @@ import {
   MAX_DVD_TITLES,
 } from "../dvd-scan.js";
 import {
+  ARCHIVE_FAILURE_DETAIL_VERSIONS,
+  ARCHIVE_READ_FAILURE_STAGES,
   ARCHIVE_RUNNING_PROGRESS_PHASES,
   ENCODE_PROGRESS_PHASES,
 } from "../domain-values.js";
@@ -172,6 +174,7 @@ import type {
   RunningArchiveJob,
   RunningEncodeJob,
   TmdbIdentity,
+  UnknownArchiveReadFailureEvidence,
 } from "../types.js";
 import {
   ARCHIVE_JOB_LEASE_DURATION_MS,
@@ -1741,6 +1744,19 @@ export function createDataAccessInternal(
     return value;
   }
 
+  function requireSafeIntegerInRange(
+    value: number,
+    field: string,
+    minimum: number,
+    maximum = Number.MAX_SAFE_INTEGER,
+  ): number {
+    const validated = optionalSafeInteger(value, field, minimum, maximum);
+    if (validated === null || validated === undefined) {
+      throw new DomainInvariantError(`${field} must be present`);
+    }
+    return validated;
+  }
+
   function requireReviewableDiscSelections(
     archiveId: OriginalDiscArchiveId,
     querySource: Pick<typeof database, "select"> = database,
@@ -2921,6 +2937,191 @@ export function createDataAccessInternal(
       progressBytes: progress.latestBytes,
       lastProgressAt: progress.lastProgressAt,
     };
+  };
+  const archiveReadFailurePatch = (
+    evidence: UnknownArchiveReadFailureEvidence,
+  ) => {
+    if (!ARCHIVE_READ_FAILURE_STAGES.includes(evidence.stage)) {
+      throw new DomainInvariantError("read failure stage is unsupported");
+    }
+    if (evidence.category !== "unknown") {
+      throw new DomainInvariantError("read failure category is unsupported");
+    }
+    const classifierVersion = requireNonEmpty(
+      evidence.classifierVersion,
+      "read failure classifierVersion",
+    );
+    if (classifierVersion.length > 128) {
+      throw new DomainInvariantError(
+        "read failure classifierVersion exceeds 128 characters",
+      );
+    }
+    const scsiStatus = optionalSafeInteger(
+      evidence.scsiStatus,
+      "read failure scsiStatus",
+      0,
+      0xff,
+    ) ?? null;
+    const hostStatus = optionalSafeInteger(
+      evidence.hostStatus,
+      "read failure hostStatus",
+      0,
+      0xffff,
+    ) ?? null;
+    const driverStatus = optionalSafeInteger(
+      evidence.driverStatus,
+      "read failure driverStatus",
+      0,
+      0xffff,
+    ) ?? null;
+    if (
+      [scsiStatus, hostStatus, driverStatus].some((value) => value === null) &&
+      [scsiStatus, hostStatus, driverStatus].some((value) => value !== null)
+    ) {
+      throw new DomainInvariantError(
+        "read failure transport status must be complete or unavailable",
+      );
+    }
+    const asc = optionalSafeInteger(
+      evidence.asc,
+      "read failure asc",
+      0,
+      0xff,
+    ) ?? null;
+    const ascq = optionalSafeInteger(
+      evidence.ascq,
+      "read failure ascq",
+      0,
+      0xff,
+    ) ?? null;
+    if ((asc === null) !== (ascq === null)) {
+      throw new DomainInvariantError(
+        "read failure ASC and ASCQ must both be present or unavailable",
+      );
+    }
+    return {
+      readFailureStage: evidence.stage,
+      readFailureCategory: evidence.category,
+      readFailureClassifierVersion: classifierVersion,
+      readFailureLba: requireSafeIntegerInRange(
+        evidence.failingLba,
+        "read failure failingLba",
+        0,
+      ),
+      readFailureRequestedBlockCount: requireSafeIntegerInRange(
+        evidence.requestedBlockCount,
+        "read failure requestedBlockCount",
+        1,
+        0xffff_ffff,
+      ),
+      readFailureRetryCount: requireSafeIntegerInRange(
+        evidence.retryCount,
+        "read failure retryCount",
+        0,
+        0xffff_ffff,
+      ),
+      readFailureScsiStatus: scsiStatus,
+      readFailureHostStatus: hostStatus,
+      readFailureDriverStatus: driverStatus,
+      readFailureSenseKey: optionalSafeInteger(
+        evidence.senseKey,
+        "read failure senseKey",
+        0,
+        0x0f,
+      ) ?? null,
+      readFailureAsc: asc,
+      readFailureAscq: ascq,
+    };
+  };
+  const failArchiveJob = (
+    claim: RunningArchiveJob,
+    errorMessageInput: string,
+    readFailure?: UnknownArchiveReadFailureEvidence,
+  ): ArchiveJob => {
+    const timestamp = now();
+    const errorMessage = requireNonEmpty(
+      errorMessageInput,
+      "errorMessage",
+    ).slice(0, 500);
+    const readFailureValues = readFailure === undefined
+      ? undefined
+      : archiveReadFailurePatch(readFailure);
+    const failed = database.transaction((transaction) => {
+      const request = transaction
+        .select({ status: archiveRequests.status })
+        .from(archiveRequests)
+        .where(
+          and(
+            eq(archiveRequests.id, claim.archiveRequestId),
+            inArray(archiveRequests.status, [
+              "running",
+              "cancellation_requested",
+            ]),
+          ),
+        )
+        .get();
+      if (!request) {
+        throw new StaleJobAttemptError("archive job", claim.id);
+      }
+      const cancellationWins = request.status === "cancellation_requested";
+      const job = transaction
+        .update(archiveJobs)
+        .set({
+          status: cancellationWins ? "aborted" : "failed",
+          ...archiveProgressPatchForClaim(claim.id, claim.claimToken),
+          ...(cancellationWins
+            ? {}
+            : {
+                failureDetailVersion: ARCHIVE_FAILURE_DETAIL_VERSIONS[0],
+                ...readFailureValues,
+              }),
+          completedAt: timestamp,
+          errorMessage: cancellationWins
+            ? "Archive cancelled by operator"
+            : errorMessage,
+          updatedAt: timestamp,
+        })
+        .where(
+          and(
+            eq(archiveJobs.id, claim.id),
+            eq(archiveJobs.status, "running"),
+            eq(archiveJobs.claimToken, claim.claimToken),
+            gt(
+              archiveJobs.updatedAt,
+              new Date(timestamp.getTime() - ARCHIVE_JOB_LEASE_DURATION_MS),
+            ),
+          ),
+        )
+        .returning()
+        .get();
+      if (!job) {
+        throw new StaleJobAttemptError("archive job", claim.id);
+      }
+      requireRow(
+        transaction
+          .update(archiveRequests)
+          .set(cancellationWins
+            ? {
+                status: "cancelled",
+                cancelledAt: timestamp,
+                updatedAt: timestamp,
+              }
+            : { status: "needs_attention", updatedAt: timestamp })
+          .where(
+            and(
+              eq(archiveRequests.id, job.archiveRequestId),
+              eq(archiveRequests.status, request.status),
+            ),
+          )
+          .returning({ id: archiveRequests.id })
+          .get(),
+        "archive request",
+        job.archiveRequestId,
+      );
+      return job;
+    }, { behavior: "immediate" });
+    archiveProgress.delete(claim.id);
+    return failed;
   };
   const inspectionProgress = new Map<
     DiscInspectionId,
@@ -7135,6 +7336,7 @@ export function createDataAccessInternal(
                 ),
                 completedAt: timestamp,
                 errorMessage: "Archive worker lease expired",
+                failureDetailVersion: ARCHIVE_FAILURE_DETAIL_VERSIONS[0],
                 updatedAt: timestamp,
               })
               .where(
@@ -7689,84 +7891,15 @@ export function createDataAccessInternal(
       },
 
       fail(claim, errorMessageInput) {
-        const timestamp = now();
-        const errorMessage = requireNonEmpty(
-          errorMessageInput,
-          "errorMessage",
-        ).slice(0, 500);
-        const failed = database.transaction((transaction) => {
-          const request = transaction
-            .select({ status: archiveRequests.status })
-            .from(archiveRequests)
-            .where(
-              and(
-                eq(archiveRequests.id, claim.archiveRequestId),
-                inArray(archiveRequests.status, [
-                  "running",
-                  "cancellation_requested",
-                ]),
-              ),
-            )
-            .get();
-          if (!request) {
-            throw new StaleJobAttemptError("archive job", claim.id);
-          }
-          const cancellationWins =
-            request.status === "cancellation_requested";
-          const job = transaction
-            .update(archiveJobs)
-            .set({
-              status: cancellationWins ? "aborted" : "failed",
-              ...archiveProgressPatchForClaim(claim.id, claim.claimToken),
-              completedAt: timestamp,
-              errorMessage: cancellationWins
-                ? "Archive cancelled by operator"
-                : errorMessage,
-              updatedAt: timestamp,
-            })
-            .where(
-              and(
-                eq(archiveJobs.id, claim.id),
-                eq(archiveJobs.status, "running"),
-                eq(archiveJobs.claimToken, claim.claimToken),
-                gt(
-                  archiveJobs.updatedAt,
-                  new Date(
-                    timestamp.getTime() - ARCHIVE_JOB_LEASE_DURATION_MS,
-                  ),
-                ),
-              ),
-            )
-            .returning()
-            .get();
-          if (!job) {
-            throw new StaleJobAttemptError("archive job", claim.id);
-          }
-          requireRow(
-            transaction
-              .update(archiveRequests)
-              .set(cancellationWins
-                ? {
-                    status: "cancelled",
-                    cancelledAt: timestamp,
-                    updatedAt: timestamp,
-                  }
-                : { status: "needs_attention", updatedAt: timestamp })
-              .where(
-                and(
-                  eq(archiveRequests.id, job.archiveRequestId),
-                  eq(archiveRequests.status, request.status),
-                ),
-              )
-              .returning({ id: archiveRequests.id })
-              .get(),
-            "archive request",
-            job.archiveRequestId,
-          );
-          return job;
-        }, { behavior: "immediate" });
-        archiveProgress.delete(claim.id);
-        return failed;
+        return failArchiveJob(claim, errorMessageInput);
+      },
+
+      failWithReadFailure(claim, evidence) {
+        return failArchiveJob(
+          claim,
+          "The Optical Drive returned an unclassified read failure",
+          evidence,
+        );
       },
 
       abort(claim, errorMessageInput) {
