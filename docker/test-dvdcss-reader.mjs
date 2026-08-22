@@ -17,6 +17,9 @@ const recoveryResultPrefix = "rip-dvd-recovery-result ";
 const readFailureResultPrefix = "rip-dvd-read-failure ";
 const fixedMediumSense = "f00003000000050a00000000110000000000";
 const descriptorMediumSense = "720311000000000c000a80000000000000000005";
+const fixedRetriesExhaustedSense = "f00003000000050a00000000110100000000";
+const descriptorRetriesExhaustedSense =
+  "720311010000000c000a80000000000000000005";
 const content = Buffer.alloc(40 * 2_048);
 for (let index = 0; index < content.length; index += 1) {
   content[index] = index % 251;
@@ -206,6 +209,8 @@ if (
 for (const [name, sense] of [
   ["fixed-medium", fixedMediumSense],
   ["descriptor-medium", descriptorMediumSense],
+  ["fixed-retries-exhausted", fixedRetriesExhaustedSense],
+  ["descriptor-retries-exhausted", descriptorRetriesExhaustedSense],
 ]) {
   const exactMedium = runTestCopy(
     name,
@@ -317,6 +322,14 @@ const malformedUnknownFixtures = [
     "fixed-invalid-information",
     "raw@5@always@2@0@8@18@700003000000050a00000000110000000000",
   ],
+  [
+    "fixed-contradictory-medium-tuple",
+    "raw@5@always@2@0@8@18@f00003000000050a00000000210000000000",
+  ],
+  [
+    "fixed-unrecognized-medium-tuple",
+    "raw@5@always@2@0@8@18@f00003000000050a000000007f7f00000000",
+  ],
   ["unsupported", "raw@5@always@2@0@8@1@7f"],
   [
     "driver-status-reserved-upper-bit",
@@ -353,6 +366,14 @@ const malformedUnknownFixtures = [
   [
     "descriptor-invalid-information",
     "raw@5@always@2@0@8@20@720311000000000c000a00000000000000000005",
+  ],
+  [
+    "descriptor-contradictory-medium-tuple",
+    "raw@5@always@2@0@8@20@720321000000000c000a80000000000000000005",
+  ],
+  [
+    "descriptor-unrecognized-medium-tuple",
+    "raw@5@always@2@0@8@20@72037f7f0000000c000a80000000000000000005",
   ],
   [
     "descriptor-reserved-byte",
