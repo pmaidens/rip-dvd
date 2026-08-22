@@ -3,7 +3,9 @@ import { createHash } from "node:crypto";
 import { once } from "node:events";
 import {
   existsSync,
+  readdirSync,
   readFileSync,
+  readlinkSync,
   renameSync,
   rmSync,
   statSync,
@@ -13,13 +15,17 @@ import {
 const executable = "/usr/local/bin/rip-dvd-dvdcss-reader";
 const testExecutable = "/tmp/rip-dvd-dvdcss-reader-test";
 const sourcePath = "/tmp/rip-dvd-reader-source.img";
+const replacementSourcePath = "/tmp/rip-dvd-reader-replacement-source.img";
 const recoveryResultPrefix = "rip-dvd-recovery-result ";
 const readFailureResultPrefix = "rip-dvd-read-failure ";
+const scsiSessionResultPrefix = "rip-dvd-scsi-session-result ";
+const scsiExitResultPrefix = "rip-dvd-scsi-exit-result ";
 const content = Buffer.alloc(40 * 2_048);
 for (let index = 0; index < content.length; index += 1) {
   content[index] = index % 251;
 }
 writeFileSync(sourcePath, content);
+writeFileSync(replacementSourcePath, Buffer.alloc(content.byteLength, 173));
 
 function fixedMediumSense(lba, ascq = 0) {
   const sense = Buffer.alloc(18);
@@ -60,26 +66,33 @@ function prepareOutput(path) {
   return path;
 }
 
-function recoveryResult(stderr) {
+function prefixedResult(stderr, prefix, label) {
   const lines = stderr.trim().split("\n");
-  const results = lines.filter((line) =>
-    line.startsWith(recoveryResultPrefix)
-  );
+  const results = lines.filter((line) => line.startsWith(prefix));
   if (results.length !== 1) {
-    throw new Error(`expected one recovery result, received: ${stderr}`);
+    throw new Error(`expected one ${label}, received: ${stderr}`);
   }
-  return JSON.parse(results[0].slice(recoveryResultPrefix.length));
+  return JSON.parse(results[0].slice(prefix.length));
+}
+
+function recoveryResult(stderr) {
+  return prefixedResult(stderr, recoveryResultPrefix, "recovery result");
 }
 
 function readFailureResult(stderr) {
-  const lines = stderr.trim().split("\n");
-  const results = lines.filter((line) =>
-    line.startsWith(readFailureResultPrefix)
+  return prefixedResult(
+    stderr,
+    readFailureResultPrefix,
+    "read failure result",
   );
-  if (results.length !== 1) {
-    throw new Error(`expected one read failure result, received: ${stderr}`);
-  }
-  return JSON.parse(results[0].slice(readFailureResultPrefix.length));
+}
+
+function scsiSessionResult(stderr) {
+  return prefixedResult(
+    stderr,
+    scsiSessionResultPrefix,
+    "SCSI session result",
+  );
 }
 
 function badSectorRanges(result, totalSectorCount) {
@@ -146,6 +159,62 @@ function runTestResume(outputPath, faults, bitmapHex) {
   return { ...result, outputPath };
 }
 
+function runScsiSessionTest(scenario) {
+  return spawnSync(
+    testExecutable,
+    ["scsi-session-test", scenario, sourcePath, replacementSourcePath],
+    { encoding: "utf8" },
+  );
+}
+
+function assertScsiMetrics(result, label, expected, parse = scsiSessionResult) {
+  const actual = parse(result.stderr);
+  if (
+    result.status !== 0 ||
+    JSON.stringify(actual) !== JSON.stringify(expected)
+  ) {
+    throw new Error(`libdvdcss ${label} check failed: ${result.stderr}`);
+  }
+}
+
+function waitForStderrMarker(child, stderr, marker, label) {
+  return new Promise((resolve, reject) => {
+    const finish = (error) => {
+      clearTimeout(timeout);
+      child.stderr.off("data", onData);
+      child.off("close", onClose);
+      child.off("error", onError);
+      if (error) {
+        reject(error);
+      } else {
+        resolve();
+      }
+    };
+    const onData = () => {
+      if (stderr().includes(marker)) {
+        finish();
+      }
+    };
+    const onClose = (status, signal) => {
+      finish(
+        new Error(
+          `${label} exited before ${marker}: status=${status} signal=${signal} stderr=${stderr()}`,
+        ),
+      );
+    };
+    const onError = (error) => finish(error);
+    const timeout = setTimeout(() => {
+      child.kill("SIGTERM");
+      finish(new Error(`${label} timed out waiting for ${marker}: ${stderr()}`));
+    }, 10_000);
+
+    child.stderr.on("data", onData);
+    child.once("close", onClose);
+    child.once("error", onError);
+    onData();
+  });
+}
+
 const expectedHash = createHash("sha256")
   .update("rip-dvd-content-v2\0")
   .update(String(content.byteLength))
@@ -198,6 +267,188 @@ if (
 ) {
   throw new Error(`libdvdcss reader copy check failed: ${copy.stderr}`);
 }
+
+const cleanSession = runTestCopy("clean-session", "none");
+assertScsiMetrics(cleanSession, "clean SCSI session", {
+  discoveryCount: 1,
+  openCount: 1,
+  closeCount: 1,
+  contentReadCount: 2,
+  requestSenseCount: 0,
+  diagnosticCommandCount: 0,
+  requests: [
+    { lba: 0, blocks: 31 },
+    { lba: 31, blocks: 9 },
+  ],
+});
+if (
+  !readFileSync(cleanSession.outputPath).equals(content) ||
+  JSON.stringify(testReads(cleanSession.stderr)) !==
+    JSON.stringify([
+      { lba: 0, blocks: 31 },
+      { lba: 31, blocks: 9 },
+    ])
+) {
+  throw new Error(
+    `libdvdcss clean SCSI session check failed: ${cleanSession.stderr}`,
+  );
+}
+
+const wrappedAutosense = runTestCopy(
+  "wrapped-autosense",
+  "none",
+  "wrapped-medium-error",
+);
+assertScsiMetrics(wrappedAutosense, "wrapped autosense recovery", {
+  discoveryCount: 1,
+  openCount: 1,
+  closeCount: 1,
+  contentReadCount: 3,
+  requestSenseCount: 0,
+  diagnosticCommandCount: 0,
+  requests: [
+    { lba: 0, blocks: 31 },
+    { lba: 0, blocks: 31 },
+    { lba: 31, blocks: 9 },
+  ],
+});
+const wrappedAutosenseResult = recoveryResult(wrappedAutosense.stderr);
+if (
+  !readFileSync(wrappedAutosense.outputPath).equals(content) ||
+  wrappedAutosenseResult.badSectorCount !== 0 ||
+  wrappedAutosenseResult.badAreaCount !== 0 ||
+  wrappedAutosenseResult.badSectorBitmapHex !== "" ||
+  JSON.stringify(testReads(wrappedAutosense.stderr)) !==
+    JSON.stringify([
+      { lba: 0, blocks: 31 },
+      { lba: 0, blocks: 31 },
+      { lba: 31, blocks: 9 },
+    ])
+) {
+  throw new Error(
+    `libdvdcss wrapped autosense recovery check failed: ${wrappedAutosense.stderr}`,
+  );
+}
+
+const overlappingSources = runScsiSessionTest("source-change");
+assertScsiMetrics(overlappingSources, "overlapping source session", {
+  discoveryCount: 2,
+  openCount: 2,
+  closeCount: 2,
+  contentReadCount: 3,
+  requestSenseCount: 0,
+  diagnosticCommandCount: 0,
+  requests: [
+    { lba: 0, blocks: 31 },
+    { lba: 0, blocks: 31 },
+    { lba: 0, blocks: 31 },
+  ],
+});
+
+const reusedSource = runScsiSessionTest("descriptor-reuse");
+assertScsiMetrics(reusedSource, "descriptor reuse invalidation", {
+  discoveryCount: 2,
+  openCount: 2,
+  closeCount: 2,
+  contentReadCount: 2,
+  requestSenseCount: 0,
+  diagnosticCommandCount: 0,
+  requests: [
+    { lba: 0, blocks: 31 },
+    { lba: 0, blocks: 31 },
+  ],
+});
+
+const changedDrive = runScsiSessionTest("drive-identity-change");
+assertScsiMetrics(changedDrive, "optical drive identity invalidation", {
+  discoveryCount: 2,
+  openCount: 2,
+  closeCount: 2,
+  contentReadCount: 2,
+  requestSenseCount: 0,
+  diagnosticCommandCount: 0,
+  requests: [
+    { lba: 0, blocks: 31 },
+    { lba: 0, blocks: 31 },
+  ],
+});
+
+const changedSgIdentity = runScsiSessionTest("sg-identity-change");
+assertScsiMetrics(changedSgIdentity, "SCSI-generic identity mismatch", {
+  discoveryCount: 1,
+  openCount: 1,
+  closeCount: 1,
+  contentReadCount: 1,
+  requestSenseCount: 0,
+  diagnosticCommandCount: 0,
+  requests: [{ lba: 0, blocks: 31 }],
+});
+
+const failedIdentityCheck = runScsiSessionTest("identity-check-failure");
+assertScsiMetrics(failedIdentityCheck, "source identity failure caching", {
+  discoveryCount: 1,
+  openCount: 1,
+  closeCount: 1,
+  contentReadCount: 1,
+  requestSenseCount: 0,
+  diagnosticCommandCount: 0,
+  requests: [{ lba: 0, blocks: 31 }],
+});
+
+const concurrentSources = runScsiSessionTest("concurrent-sources");
+assertScsiMetrics(concurrentSources, "concurrent per-read evidence", {
+  discoveryCount: 2,
+  openCount: 2,
+  closeCount: 2,
+  contentReadCount: 2,
+  requestSenseCount: 0,
+  diagnosticCommandCount: 0,
+  requests: [
+    { lba: 0, blocks: 31 },
+    { lba: 0, blocks: 31 },
+  ],
+});
+
+for (const [scenario, openCount] of [
+  ["discovery-failure", 0],
+  ["open-failure", 1],
+]) {
+  const unavailableSession = runScsiSessionTest(scenario);
+  assertScsiMetrics(unavailableSession, `${scenario} retry suppression`, {
+    discoveryCount: 1,
+    openCount,
+    closeCount: 0,
+    contentReadCount: 0,
+    requestSenseCount: 0,
+    diagnosticCommandCount: 0,
+    requests: [],
+  });
+}
+
+const failedSession = runScsiSessionTest("read-failure");
+assertScsiMetrics(failedSession, "failed SCSI session cleanup", {
+  discoveryCount: 1,
+  openCount: 1,
+  closeCount: 1,
+  contentReadCount: 1,
+  requestSenseCount: 0,
+  diagnosticCommandCount: 0,
+  requests: [{ lba: 0, blocks: 31 }],
+});
+
+const normalExitSession = runScsiSessionTest("normal-exit");
+assertScsiMetrics(
+  normalExitSession,
+  "normal-exit cleanup",
+  {
+    discoveryCount: 1,
+    openCount: 1,
+    closeCount: 1,
+    contentReadCount: 1,
+  },
+  (stderr) =>
+    prefixedResult(stderr, scsiExitResultPrefix, "SCSI exit result"),
+);
 
 const authorizedCopyPath = prepareOutput(
   "/tmp/rip-dvd-reader-authorized-copy.img",
@@ -710,8 +961,8 @@ const cancellation = spawn(
     cancellationPath,
     String(content.byteLength),
     "none",
-    "100",
-    "valid",
+    "0",
+    "cancellation",
   ],
   { stdio: ["ignore", "ignore", "pipe"] },
 );
@@ -719,7 +970,22 @@ let cancellationStderr = "";
 cancellation.stderr.on("data", (chunk) => {
   cancellationStderr += chunk.toString("utf8");
 });
-await once(cancellation.stderr, "data");
+await waitForStderrMarker(
+  cancellation,
+  () => cancellationStderr,
+  "test-read ",
+  "libdvdcss cancellation fixture",
+);
+const cancellationFdDirectory = `/proc/${cancellation.pid}/fd`;
+const sourceDescriptorCount = readdirSync(cancellationFdDirectory).filter(
+  (descriptor) => {
+    try {
+      return readlinkSync(`${cancellationFdDirectory}/${descriptor}`) === sourcePath;
+    } catch {
+      return false;
+    }
+  },
+).length;
 cancellation.kill("SIGTERM");
 const [cancellationStatus, cancellationSignal] = await once(
   cancellation,
@@ -728,6 +994,8 @@ const [cancellationStatus, cancellationSignal] = await once(
 if (
   cancellationStatus !== null ||
   cancellationSignal !== "SIGTERM" ||
+  sourceDescriptorCount !== 2 ||
+  existsSync(cancellationFdDirectory) ||
   !existsSync(cancellationPath) ||
   statSync(cancellationPath).size >= content.byteLength ||
   cancellationStderr.includes(recoveryResultPrefix)
@@ -754,15 +1022,15 @@ const interruptedReadFailure = spawn(
   { stdio: ["ignore", "ignore", "pipe"] },
 );
 let interruptedReadFailureStderr = "";
-await new Promise((resolve, reject) => {
-  interruptedReadFailure.stderr.on("data", (chunk) => {
-    interruptedReadFailureStderr += chunk.toString("utf8");
-    if (interruptedReadFailureStderr.includes(readFailureResultPrefix)) {
-      resolve();
-    }
-  });
-  interruptedReadFailure.once("error", reject);
+interruptedReadFailure.stderr.on("data", (chunk) => {
+  interruptedReadFailureStderr += chunk.toString("utf8");
 });
+await waitForStderrMarker(
+  interruptedReadFailure,
+  () => interruptedReadFailureStderr,
+  readFailureResultPrefix,
+  "libdvdcss interrupted read-failure fixture",
+);
 interruptedReadFailure.kill("SIGTERM");
 const [interruptedStatus, interruptedSignal] = await once(
   interruptedReadFailure,
