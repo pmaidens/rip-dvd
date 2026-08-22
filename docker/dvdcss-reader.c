@@ -365,25 +365,24 @@ static struct decoded_sense decode_sense(
         if (descriptor_length > declared_length - offset) {
             return decoded;
         }
-        if (sense[offset] == 0x00) {
-            if (sense[offset + 1] != 0x0a || information_descriptor_seen) {
+        if (sense[offset] != 0x00 || sense[offset + 1] != 0x0a ||
+            information_descriptor_seen) {
+            return decoded;
+        }
+        information_descriptor_seen = 1;
+        if ((sense[offset + 2] & 0x7f) != 0 ||
+            sense[offset + 3] != 0) {
+            return decoded;
+        }
+        if ((sense[offset + 2] & 0x80) != 0) {
+            uint64_t information_lba =
+                read_big_endian_u64(sense + offset + 4);
+            if (!information_lba_matches_request(
+                    completion, information_lba)) {
                 return decoded;
             }
-            information_descriptor_seen = 1;
-            if ((sense[offset + 2] & 0x7f) != 0 ||
-                sense[offset + 3] != 0) {
-                return decoded;
-            }
-            if ((sense[offset + 2] & 0x80) != 0) {
-                uint64_t information_lba =
-                    read_big_endian_u64(sense + offset + 4);
-                if (!information_lba_matches_request(
-                        completion, information_lba)) {
-                    return decoded;
-                }
-                decoded.has_information_lba = 1;
-                decoded.information_lba = information_lba;
-            }
+            decoded.has_information_lba = 1;
+            decoded.information_lba = information_lba;
         }
         offset += descriptor_length;
     }
