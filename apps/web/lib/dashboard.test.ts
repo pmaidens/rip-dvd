@@ -867,6 +867,78 @@ describe("readDashboardSnapshot", () => {
     });
   });
 
+  it("projects structured and historical Archive Job read diagnostics without paths", () => {
+    const access = dataAccessFixture.create();
+    const createFailure = (name: string) => {
+      const drive = access.catalog.upsertOpticalDrive({
+        devicePath: `/dev/${name}`,
+        displayName: `${name} drive`,
+        isEnabled: true,
+        isPresent: true,
+      });
+      const disc = access.catalog.registerDetectedDisc({
+        opticalDriveId: drive.id,
+        discKind: "dvd",
+        fingerprint: `${name}-fingerprint`,
+        volumeLabel: name,
+      });
+      access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+      return { disc, job: startArchiveJob(access, disc, `${name}-worker`) };
+    };
+    const structured = createFailure("STRUCTURED_READ");
+    access.archiveJobs.failWithReadFailure(structured.job, {
+      stage: "initial_copy",
+      category: "unknown",
+      classifierVersion: "scsi-read-classifier-v1",
+      failingLba: 1_024,
+      requestedBlockCount: 16,
+      retryCount: 2,
+      scsiStatus: 2,
+      hostStatus: 0,
+      driverStatus: 8,
+      senseKey: 5,
+      asc: 33,
+      ascq: 0,
+    });
+    const historical = createFailure("HISTORICAL_READ");
+    access.archiveJobs.fail(
+      historical.job,
+      "old read failure at /media/private.iso on /dev/secret-drive",
+    );
+
+    const snapshot = readDashboardSnapshot(access);
+    expect(snapshot.archiveJobs).toEqual({
+      status: "loaded",
+      items: expect.arrayContaining([
+        expect.objectContaining({
+          id: structured.job.id,
+          failureDetail:
+            "The Optical Drive returned an unclassified read failure. Retry the Archive Request; if it fails again, inspect the disc and drive.",
+          failureDiagnostic:
+            "Initial copy · LBA 1024 · requested 16 blocks · retry 2 · SCSI/host/driver 2/0/8 · sense key/ASC/ASCQ 5/33/0 · classifier scsi-read-classifier-v1",
+        }),
+        expect.objectContaining({
+          id: historical.job.id,
+          failureDiagnostic: "Structured read evidence unavailable.",
+        }),
+      ]),
+    });
+    expect(snapshot.detectedDiscs).toEqual({
+      status: "loaded",
+      items: expect.arrayContaining([
+        expect.objectContaining({
+          id: structured.disc.id,
+          archiveRequest: expect.objectContaining({
+            latestFailureDetail:
+              "The Optical Drive returned an unclassified read failure. Retry the Archive Request; if it fails again, inspect the disc and drive.",
+          }),
+        }),
+      ]),
+    });
+    expect(JSON.stringify(snapshot)).not.toContain("private.iso");
+    expect(JSON.stringify(snapshot)).not.toContain("secret-drive");
+  });
+
   it("does not combine dashboard records from opposite sides of a worker commit", () => {
     const [reader, writer] = dataAccessFixture.createPair();
     const drive = writer.catalog.upsertOpticalDrive({

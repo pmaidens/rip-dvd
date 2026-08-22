@@ -24,6 +24,7 @@ import {
   createWatchableSalvageArchiveIntegrityEvidence,
   type ArchiveIntegrityEvidence,
   type ArchiveJobProgress,
+  type ArchiveReadFailureStage,
 } from "@rip-dvd/data-access";
 import {
   isDvdFingerprint,
@@ -43,10 +44,13 @@ import {
   type ActiveBoundedProcess,
 } from "./bounded-child-process.js";
 import {
+  DvdReadFailureError,
+  DVD_READ_FAILURE_RESULT_PREFIX,
   DVD_RECOVERY_RESULT_PREFIX,
   formatUnvalidatedDvdRecovery,
   formatDvdRecoveryResumeBitmap,
   parseDvdRecoveryResultProtocol,
+  parseDvdReadFailureResultProtocol,
   type DamagedDvdRecoveryResult,
   type DvdRecoveryResult,
   type DvdValidationResult,
@@ -83,6 +87,7 @@ const COPY_AUTHORIZATION_READY_TIMEOUT_MS = 5_000;
 const COPY_START_AUTHORIZATION_TIMEOUT_MS = 5 * 60_000;
 const DEVICE_RECOVERY_LOCK_TIMEOUT_MS = 5_000;
 const FLOCK_CONFLICT_EXIT_CODE = 75;
+const DVD_READ_FAILURE_EXIT_STATUS = 3;
 
 function dvdArchiveStem(fingerprint: string): string {
   const digest = fingerprint.slice(fingerprint.lastIndexOf(":") + 1);
@@ -108,6 +113,19 @@ export interface DvdCopyRunner {
     mutation: () => undefined,
   ): Promise<void>;
   waitForInactive(devicePath: string, outputPath: string): Promise<void>;
+}
+
+export class DvdArchiveReadFailureError extends DvdReadFailureError {
+  readonly stage: ArchiveReadFailureStage;
+
+  constructor(
+    stage: ArchiveReadFailureStage,
+    readFailure: DvdReadFailureError["readFailure"],
+  ) {
+    super(readFailure);
+    this.name = "DvdArchiveReadFailureError";
+    this.stage = stage;
+  }
 }
 
 interface DvdCopyChildProcess {
@@ -310,6 +328,7 @@ export function createNodeDvdCopyRunner({
       let highestCopiedBytes = 0;
       let diagnostics = "";
       let recoveryResultPayload: string | undefined;
+      let readFailureResultPayload: string | undefined;
       let resolveResult!: (result: DvdRecoveryResult) => void;
       let rejectResult!: (reason: unknown) => void;
       let resolveClosed!: () => void;
@@ -450,11 +469,26 @@ export function createNodeDvdCopyRunner({
         progressBuffer = flush ? "" : (segments.pop() ?? "");
         for (const segment of segments) {
           if (segment.startsWith(DVD_RECOVERY_RESULT_PREFIX)) {
-            if (recoveryResultPayload !== undefined) {
-              throw new Error("DVD recovery helper result is malformed");
+            if (
+              recoveryResultPayload !== undefined ||
+              readFailureResultPayload !== undefined
+            ) {
+              throw new Error("DVD terminal helper result is malformed");
             }
             recoveryResultPayload = segment.slice(
               DVD_RECOVERY_RESULT_PREFIX.length,
+            );
+            continue;
+          }
+          if (segment.startsWith(DVD_READ_FAILURE_RESULT_PREFIX)) {
+            if (
+              recoveryResultPayload !== undefined ||
+              readFailureResultPayload !== undefined
+            ) {
+              throw new Error("DVD terminal helper result is malformed");
+            }
+            readFailureResultPayload = segment.slice(
+              DVD_READ_FAILURE_RESULT_PREFIX.length,
             );
             continue;
           }
@@ -512,7 +546,10 @@ export function createNodeDvdCopyRunner({
           return;
         }
         if (code === 0) {
-          if (recoveryResultPayload === undefined) {
+          if (
+            recoveryResultPayload === undefined ||
+            readFailureResultPayload !== undefined
+          ) {
             rejectOperation(new Error("DVD recovery helper result is missing"));
             return;
           }
@@ -521,6 +558,25 @@ export function createNodeDvdCopyRunner({
               parseDvdRecoveryResultProtocol(
                 recoveryResultPayload,
                 request.sizeBytes,
+              ),
+            );
+          } catch (error) {
+            rejectOperation(error);
+          }
+          return;
+        }
+        if (
+          code === DVD_READ_FAILURE_EXIT_STATUS &&
+          readFailureResultPayload !== undefined &&
+          recoveryResultPayload === undefined
+        ) {
+          try {
+            rejectOperation(
+              new DvdReadFailureError(
+                parseDvdReadFailureResultProtocol(
+                  readFailureResultPayload,
+                  request.sizeBytes,
+                ),
               ),
             );
           } catch (error) {
@@ -1412,6 +1468,10 @@ export async function preserveDvdArchive({
   let publishedArchiveFilesystemIdentity: string | undefined;
   let retainedForValidation = false;
   let validation: DvdValidationResult | undefined;
+  const readFailureStage: ArchiveReadFailureStage =
+    rescueWorkspace?.recoveryResult.outcome === "damaged"
+      ? "rescue_resume"
+      : "initial_copy";
   try {
     onProgress({ phase: "copying", progressPercent: 0 });
     const recoveryResult = await runner.copy({
@@ -1580,7 +1640,9 @@ export async function preserveDvdArchive({
     ) {
       await movePartialAside(partialPath);
     }
-    throw error;
+    throw error instanceof DvdReadFailureError
+      ? new DvdArchiveReadFailureError(readFailureStage, error.readFailure)
+      : error;
   }
   if (validation === undefined) {
     throw new Error("DVD recovery result was not validated");

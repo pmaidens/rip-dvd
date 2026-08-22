@@ -38,6 +38,7 @@ import type { DvdCopyRunner } from "./dvd-archiver.js";
 import {
   createCleanDvdRecoveryResult,
   createDamagedDvdRecoveryResult,
+  DvdReadFailureError,
 } from "./dvd-recovery-contracts.js";
 import { dvdRescueWorkspacePaths } from "./dvd-rescue-workspace.js";
 import {
@@ -56,6 +57,28 @@ import {
 
 const temporaryDirectories: string[] = [];
 const testRescueWorkspaceLock = createInProcessDvdRescueWorkspaceLock();
+
+function unknownDvdReadFailure(
+  overrides: Partial<ConstructorParameters<typeof DvdReadFailureError>[0]> = {},
+) {
+  return new DvdReadFailureError({
+    protocolVersion: 1,
+    classifierVersion: "scsi-read-classifier-v1",
+    category: "unknown",
+    scsiStatus: 2,
+    hostStatus: 0,
+    driverStatus: 8,
+    senseResponseCode: 0x70,
+    senseKey: 5,
+    asc: 33,
+    ascq: 0,
+    informationLba: 1,
+    requestedLba: 0,
+    requestedBlockCount: 4,
+    retryOrdinal: 2,
+    ...overrides,
+  });
+}
 
 function pollArchiveWorkerOnce(options: PollArchiveWorkerOptions): Promise<void> {
   return pollArchiveWorkerWithDefaults({
@@ -369,6 +392,7 @@ async function exerciseWatchabilityWorkerScenario({
 
   return {
     access,
+    discoveredDrive,
     drive,
     fingerprint,
     originalsLibraryPath,
@@ -379,6 +403,90 @@ async function exerciseWatchabilityWorkerScenario({
     salvageValidator,
     sizeBytes,
   };
+}
+
+async function exerciseUnknownReadFence({
+  beforeFailure,
+  observeMediaGeneration,
+}: {
+  beforeFailure?: (
+    access: ReturnType<typeof openTestDataAccess>,
+    requestId: ReturnType<
+      ReturnType<typeof openTestDataAccess>["archiveRequests"]["create"]
+    >["id"],
+  ) => void;
+  observeMediaGeneration?: () => Promise<string>;
+} = {}) {
+  const access = openTestDataAccess();
+  const originalsLibraryPath = mkdtempSync(
+    join(tmpdir(), "rip-dvd-originals-read-fence-"),
+  );
+  temporaryDirectories.push(originalsLibraryPath);
+  const fingerprint = `dvdmeta-sha256:${"3".repeat(64)}`;
+  const scanData = {
+    schemaVersion: 2 as const,
+    contentId: fingerprint,
+    titles: [{
+      number: 1,
+      durationSeconds: 3_600,
+      chapters: 10,
+      audioStreams: [],
+      subtitles: [],
+    }],
+  };
+  const discoveredDrive = {
+    devicePath: "/dev/sr0",
+    vendor: "Pioneer",
+    product: "DVD-RW",
+    serialNumber: "READ-FENCE-001",
+  };
+  const drive = access.catalog.reconcileOpticalDrives([
+    { ...discoveredDrive, isConfiguredDevice: true },
+  ])[0]!;
+  const disc = access.catalog.registerDetectedDisc({
+    opticalDriveId: drive.id,
+    discKind: "dvd",
+    fingerprint,
+    scanData,
+  });
+  access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+  const request = access.archiveRequests.create({ detectedDiscId: disc.id });
+  const binding = stableDeviceBinding();
+  const log = vi.fn();
+  const copyRunner: DvdCopyRunner = {
+    copy: vi.fn(async ({ authorizeStart }) => {
+      await authorizeStart?.();
+      beforeFailure?.(access, request.id);
+      throw unknownDvdReadFailure();
+    }),
+    isActive: () => false,
+    withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+    waitForInactive: vi.fn(async () => undefined),
+  };
+
+  await pollArchiveWorker({
+    access,
+    configuredDevicePath: discoveredDrive.devicePath,
+    copyRunner,
+    hardware: {
+      ...binding,
+      ...(observeMediaGeneration === undefined
+        ? {}
+        : { observeMediaGeneration }),
+      discover: vi.fn().mockResolvedValue([discoveredDrive]),
+      scanDvd: vi.fn().mockResolvedValue({
+        fingerprint,
+        scanData,
+        sizeBytes: 4 * 2_048,
+      }),
+    },
+    log,
+    originalsLibraryPath,
+    signal: new AbortController().signal,
+    workerId: "archive-worker-read-fence",
+  });
+
+  return { access, log, request };
 }
 
 afterEach(() => {
@@ -685,6 +793,248 @@ describe("archive worker polling", () => {
     expect(readFileSync(archive.archivePath, "utf8")).toBe("dvd-image");
     expect(existsSync(`${archive.archivePath}.failed`)).toBe(false);
     expect(salvageValidator.validate).not.toHaveBeenCalled();
+  });
+
+  it("persists one unknown read diagnosis for the initial Archive Job attempt", async () => {
+    const access = openTestDataAccess();
+    const originalsLibraryPath = mkdtempSync(
+      join(tmpdir(), "rip-dvd-originals-unknown-read-"),
+    );
+    temporaryDirectories.push(originalsLibraryPath);
+    const fingerprint = `dvdmeta-sha256:${"2".repeat(64)}`;
+    const scanData = {
+      schemaVersion: 2 as const,
+      contentId: fingerprint,
+      titles: [{
+        number: 1,
+        durationSeconds: 3_600,
+        chapters: 10,
+        audioStreams: [],
+        subtitles: [],
+      }],
+    };
+    const discoveredDrive = {
+      devicePath: "/dev/sr0",
+      vendor: "Pioneer",
+      product: "DVD-RW",
+      serialNumber: "UNKNOWN-READ-001",
+    };
+    const drive = access.catalog.reconcileOpticalDrives([
+      { ...discoveredDrive, isConfiguredDevice: true },
+    ])[0]!;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint,
+      scanData,
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    const request = access.archiveRequests.create({ detectedDiscId: disc.id });
+    const sizeBytes = 4 * 2_048;
+    const copyRunner: DvdCopyRunner = {
+      copy: vi.fn(async ({ authorizeStart }) => {
+        await authorizeStart?.();
+        throw unknownDvdReadFailure();
+      }),
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    };
+    const salvageValidator = { validate: vi.fn() };
+
+    await pollArchiveWorker({
+      access,
+      configuredDevicePath: discoveredDrive.devicePath,
+      copyRunner,
+      hardware: {
+        ...stableDeviceBinding(),
+        discover: vi.fn().mockResolvedValue([discoveredDrive]),
+        scanDvd: vi.fn().mockResolvedValue({
+          fingerprint,
+          scanData,
+          sizeBytes,
+        }),
+      },
+      log: vi.fn(),
+      originalsLibraryPath,
+      salvageValidator,
+      signal: new AbortController().signal,
+      workerId: "archive-worker-unknown-read",
+    });
+
+    expect(access.archiveJobs.list(["failed"])).toEqual([
+      expect.objectContaining({
+        archiveRequestId: request.id,
+        originalDiscArchiveId: null,
+        readFailureStage: "initial_copy",
+        readFailureCategory: "unknown",
+        readFailureClassifierVersion: "scsi-read-classifier-v1",
+        readFailureLba: 1,
+        readFailureRequestedBlockCount: 4,
+        readFailureRetryCount: 2,
+        readFailureScsiStatus: 2,
+        readFailureHostStatus: 0,
+        readFailureDriverStatus: 8,
+        readFailureSenseKey: 5,
+        readFailureAsc: 33,
+        readFailureAscq: 0,
+      }),
+    ]);
+    expect(access.archiveRequests.list(["needs_attention"])).toEqual([
+      expect.objectContaining({ id: request.id }),
+    ]);
+    expect(access.catalog.listOriginalDiscArchives()).toEqual([]);
+    expect(salvageValidator.validate).not.toHaveBeenCalled();
+    expect(readdirSync(originalsLibraryPath)).toEqual([]);
+  });
+
+  it("records an unknown resumed read on only the resumed Archive Job attempt", async () => {
+    const scenario = await exerciseWatchabilityWorkerScenario({
+      ranges: [{ startLba: 1, sectorCount: 1 }],
+      validation: { outcome: "rejected", reason: "referenced_content" },
+    });
+    scenario.access.archiveRequests.retry(scenario.request.id);
+    const copyRunner: DvdCopyRunner = {
+      copy: vi.fn(async ({ authorizeStart, resumeFrom }) => {
+        expect(resumeFrom).toEqual(
+          createDamagedDvdRecoveryResult(scenario.sizeBytes, [
+            { startLba: 1, sectorCount: 1 },
+          ]),
+        );
+        await authorizeStart?.();
+        throw unknownDvdReadFailure({
+          informationLba: null,
+          requestedLba: 1,
+          requestedBlockCount: 1,
+          retryOrdinal: 3,
+          senseResponseCode: null,
+          senseKey: null,
+          asc: null,
+          ascq: null,
+        });
+      }),
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    };
+    const salvageValidator = { validate: vi.fn() };
+
+    await pollArchiveWorker({
+      access: scenario.access,
+      configuredDevicePath: scenario.discoveredDrive.devicePath,
+      copyRunner,
+      hardware: {
+        ...stableDeviceBinding(),
+        discover: vi.fn().mockResolvedValue([scenario.discoveredDrive]),
+        scanDvd: vi.fn().mockResolvedValue({
+          fingerprint: scenario.fingerprint,
+          scanData: scenario.scanData,
+          sizeBytes: scenario.sizeBytes,
+        }),
+      },
+      log: vi.fn(),
+      originalsLibraryPath: scenario.originalsLibraryPath,
+      salvageValidator,
+      signal: new AbortController().signal,
+      workerId: "archive-worker-unknown-resumed-read",
+    });
+
+    expect(copyRunner.copy).toHaveBeenCalledOnce();
+    expect(salvageValidator.validate).not.toHaveBeenCalled();
+    const failedAttempts = scenario.access.archiveJobs.list(["failed"]);
+    expect(failedAttempts).toHaveLength(2);
+    expect(failedAttempts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        attemptOrdinal: 1,
+        readFailureCategory: null,
+      }),
+      expect.objectContaining({
+        attemptOrdinal: 2,
+        readFailureStage: "rescue_resume",
+        readFailureCategory: "unknown",
+        readFailureLba: 1,
+        readFailureRequestedBlockCount: 1,
+        readFailureRetryCount: 3,
+        readFailureSenseKey: null,
+        readFailureAsc: null,
+        readFailureAscq: null,
+      }),
+    ]));
+    expect(scenario.access.catalog.listOriginalDiscArchives()).toEqual([]);
+  });
+
+  it("does not persist read evidence when cancellation wins the terminal race", async () => {
+    const scenario = await exerciseUnknownReadFence({
+      beforeFailure(access, requestId) {
+        access.archiveRequests.cancel(requestId);
+      },
+    });
+
+    expect(scenario.access.archiveJobs.list()).toEqual([
+      expect.objectContaining({
+        status: "aborted",
+        readFailureStage: null,
+        readFailureCategory: null,
+        readFailureClassifierVersion: null,
+      }),
+    ]);
+    expect(scenario.access.archiveRequests.list(["cancelled"])).toEqual([
+      expect.objectContaining({ id: scenario.request.id }),
+    ]);
+  });
+
+  it("does not persist read evidence after source replacement", async () => {
+    let failureObserved = false;
+    const scenario = await exerciseUnknownReadFence({
+      beforeFailure() {
+        failureObserved = true;
+      },
+      observeMediaGeneration: vi.fn(async () =>
+        failureObserved
+          ? "replacement-media-generation"
+          : "test-media-generation"
+      ),
+    });
+
+    expect(scenario.access.archiveJobs.list(["failed"])).toEqual([
+      expect.objectContaining({
+        errorMessage: "DVD medium changed during archiving",
+        readFailureStage: null,
+        readFailureCategory: null,
+        readFailureClassifierVersion: null,
+      }),
+    ]);
+    expect(scenario.access.archiveRequests.list(["needs_attention"]))
+      .toEqual([expect.objectContaining({ id: scenario.request.id })]);
+  });
+
+  it("does not persist read evidence after the Archive Job claim expires", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-08-22T12:00:00.000Z"));
+    const scenario = await exerciseUnknownReadFence({
+      beforeFailure() {
+        vi.setSystemTime(
+          new Date(Date.now() + ARCHIVE_JOB_LEASE_DURATION_MS + 1),
+        );
+      },
+    });
+
+    expect(scenario.access.archiveJobs.list(["running"])).toEqual([
+      expect.objectContaining({
+        readFailureStage: null,
+        readFailureCategory: null,
+        readFailureClassifierVersion: null,
+      }),
+    ]);
+    expect(scenario.access.archiveJobs.recoverExpiredClaims()).toEqual([
+      expect.objectContaining({
+        errorMessage: "Archive worker lease expired",
+        readFailureStage: null,
+        readFailureCategory: null,
+      }),
+    ]);
+    expect(scenario.access.archiveRequests.list(["needs_attention"]))
+      .toEqual([expect.objectContaining({ id: scenario.request.id })]);
   });
 
   it.each(salvageFailureCases)(

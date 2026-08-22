@@ -1,6 +1,7 @@
 import type {
   ArchiveFormat,
   ArchiveIntegrity,
+  ArchiveJob,
   ArchiveJobStatus,
   ArchiveProgressPhase,
   ArchiveRequestStatus,
@@ -110,6 +111,7 @@ export interface DashboardArchiveJob {
   progressBytes: number;
   lastProgressAt: string;
   failureDetail?: string | null;
+  failureDiagnostic?: string | null;
 }
 
 export interface DashboardEncodeJob {
@@ -308,6 +310,51 @@ type OpticalDriveRecord = ReturnType<
 
 function driveDisplayName(drive: OpticalDriveRecord): string {
   return drive.displayName ?? "Unnamed Optical Drive";
+}
+
+const UNKNOWN_READ_FAILURE_DETAIL =
+  "The Optical Drive returned an unclassified read failure. Retry the Archive Request; if it fails again, inspect the disc and drive.";
+const MISSING_READ_FAILURE_DIAGNOSTIC =
+  "Structured read evidence unavailable.";
+
+function diagnosticTuple(values: readonly (number | null)[]): string {
+  return values.map((value) => value ?? "–").join("/");
+}
+
+function archiveJobFailure(job: ArchiveJob | undefined): {
+  failureDetail: string | null;
+  failureDiagnostic?: string;
+} {
+  if (job?.readFailureCategory === "unknown") {
+    return {
+      failureDetail: UNKNOWN_READ_FAILURE_DETAIL,
+      failureDiagnostic: [
+        job.readFailureStage === "rescue_resume"
+          ? "Rescue resume"
+          : "Initial copy",
+        `LBA ${job.readFailureLba}`,
+        `requested ${job.readFailureRequestedBlockCount} blocks`,
+        `retry ${job.readFailureRetryCount}`,
+        `SCSI/host/driver ${diagnosticTuple([
+          job.readFailureScsiStatus,
+          job.readFailureHostStatus,
+          job.readFailureDriverStatus,
+        ])}`,
+        `sense key/ASC/ASCQ ${diagnosticTuple([
+          job.readFailureSenseKey,
+          job.readFailureAsc,
+          job.readFailureAscq,
+        ])}`,
+        `classifier ${job.readFailureClassifierVersion}`,
+      ].join(" · "),
+    };
+  }
+  return {
+    failureDetail: formatFailureDetail(job?.errorMessage ?? null),
+    ...(job?.status === "failed"
+      ? { failureDiagnostic: MISSING_READ_FAILURE_DIAGNOSTIC }
+      : {}),
+  };
 }
 
 function readDashboardSnapshotRecords(
@@ -693,9 +740,8 @@ function readDashboardSnapshotRecords(
                   id: request.id,
                   status: request.status,
                   attemptCount: latestJob?.attemptOrdinal ?? 0,
-                  latestFailureDetail: formatFailureDetail(
-                    latestJob?.errorMessage ?? null,
-                  ),
+                  latestFailureDetail: archiveJobFailure(latestJob)
+                    .failureDetail,
                   createdAt: request.createdAt.toISOString(),
                   updatedAt: request.updatedAt.toISOString(),
                 },
@@ -716,6 +762,7 @@ function readDashboardSnapshotRecords(
             const drive = disc
               ? drivesById.get(disc.opticalDriveId)
               : undefined;
+            const failure = archiveJobFailure(job);
             return {
               id: job.id,
               activityRevision: job.updatedAt.toISOString(),
@@ -731,7 +778,7 @@ function readDashboardSnapshotRecords(
               progressPercent: job.progressPercent,
               progressBytes: job.progressBytes,
               lastProgressAt: job.lastProgressAt.toISOString(),
-              failureDetail: formatFailureDetail(job.errorMessage),
+              ...failure,
             };
           }),
         );

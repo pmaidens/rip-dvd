@@ -17,6 +17,7 @@ export * from "./errors.js";
 export * from "./dvd-scan.js";
 export {
   ARCHIVE_INTEGRITIES,
+  ARCHIVE_READ_FAILURE_STAGES,
   CATALOG_REVIEW_OUTCOMES,
   DISC_SELECTION_KINDS,
   DVD_SALVAGE_REJECTION_DESCRIPTIONS,
