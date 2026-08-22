@@ -328,6 +328,8 @@ const READ_FAILURE_DETAILS: Record<
     "Communication with the Optical Drive failed. Check the drive connection and host passthrough, then retry the Archive Request.",
   protection_error:
     "DVD copy protection or region access failed. Check DVD CSS support and the Optical Drive region, then retry the Archive Request.",
+  out_of_range:
+    "The Optical Drive reported a capacity or readable-boundary mismatch. Retry the Archive Request or manually choose another Optical Drive.",
 };
 const MISSING_READ_FAILURE_DETAIL =
   "The Archive Job failed with an unknown diagnostic because structured read evidence is unavailable.";

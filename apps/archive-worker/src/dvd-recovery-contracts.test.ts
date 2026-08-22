@@ -113,6 +113,103 @@ describe("DVD recovery results", () => {
       ).toMatchObject({ category: "unknown", driverStatus });
     },
   );
+  it("accepts a bounded out-of-range terminal result", () => {
+    expect(
+      parseDvdReadFailureResultProtocol(
+        JSON.stringify({
+          protocolVersion: 1,
+          classifierVersion: "scsi-read-classifier-v1",
+          category: "out_of_range",
+          scsiStatus: 2,
+          hostStatus: 0,
+          driverStatus: 8,
+          senseResponseCode: 112,
+          senseKey: 5,
+          asc: 33,
+          ascq: 0,
+          informationLba: 35,
+          requestedLba: 31,
+          requestedBlockCount: 9,
+          retryOrdinal: 0,
+          declaredByteCount: 40 * 2_048,
+          firstFailingLba: 35,
+        }),
+        40 * 2_048,
+      ),
+    ).toEqual({
+      protocolVersion: 1,
+      classifierVersion: "scsi-read-classifier-v1",
+      category: "out_of_range",
+      scsiStatus: 2,
+      hostStatus: 0,
+      driverStatus: 8,
+      senseResponseCode: 112,
+      senseKey: 5,
+      asc: 33,
+      ascq: 0,
+      informationLba: 35,
+      requestedLba: 31,
+      requestedBlockCount: 9,
+      retryOrdinal: 0,
+      declaredByteCount: 40 * 2_048,
+      firstFailingLba: 35,
+    });
+  });
+
+  it.each([
+    ["wrong declared size", { declaredByteCount: 39 * 2_048 }],
+    ["conflicting boundary", { firstFailingLba: 34 }],
+    ["wrong sense category", { senseKey: 3 }],
+  ])("rejects out-of-range evidence with %s", (_label, replacement) => {
+    expect(() =>
+      parseDvdReadFailureResultProtocol(
+        JSON.stringify({
+          protocolVersion: 1,
+          classifierVersion: "scsi-read-classifier-v1",
+          category: "out_of_range",
+          scsiStatus: 2,
+          hostStatus: 0,
+          driverStatus: 8,
+          senseResponseCode: 112,
+          senseKey: 5,
+          asc: 33,
+          ascq: 0,
+          informationLba: 35,
+          requestedLba: 31,
+          requestedBlockCount: 9,
+          retryOrdinal: 0,
+          declaredByteCount: 40 * 2_048,
+          firstFailingLba: 35,
+          ...replacement,
+        }),
+        40 * 2_048,
+      ),
+    ).toThrow("DVD read failure helper result is malformed");
+  });
+
+  it("rejects out-of-range evidence mislabeled as unknown", () => {
+    expect(() =>
+      parseDvdReadFailureResultProtocol(
+        JSON.stringify({
+          protocolVersion: 1,
+          classifierVersion: "scsi-read-classifier-v1",
+          category: "unknown",
+          scsiStatus: 2,
+          hostStatus: 0,
+          driverStatus: 8,
+          senseResponseCode: 112,
+          senseKey: 5,
+          asc: 33,
+          ascq: 0,
+          informationLba: 35,
+          requestedLba: 31,
+          requestedBlockCount: 9,
+          retryOrdinal: 0,
+        }),
+        40 * 2_048,
+      ),
+    ).toThrow("DVD read failure helper result is malformed");
+  });
 
   it("requires validation for normalized unreadable sector evidence", () => {
     const result = createDamagedDvdRecoveryResult(8_192, [

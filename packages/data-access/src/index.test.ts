@@ -11020,7 +11020,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         hostStatus: 0,
         driverStatus: 8,
         senseKey: 5,
-        asc: 33,
+        asc: 32,
         ascq: 0,
       },
     },
@@ -11351,6 +11351,55 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       sqlite.close();
     },
   );
+
+  it("persists out-of-range evidence without relabeling it as disc damage", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const { disc, inspection } = completeDiscInspection(access, {
+      opticalDriveId: drive.id,
+      mediaGeneration: "out-of-range-generation",
+      fingerprint: "out-of-range-disc",
+    });
+    const request = access.archiveRequests.create({ detectedDiscId: disc.id });
+    const job = access.archiveJobs.startForInspection(
+      inspection.id,
+      "boundary-worker",
+    )!;
+
+    expect(access.archiveJobs.failWithReadFailure(job, {
+      stage: "initial_copy",
+      category: "out_of_range",
+      classifierVersion: "scsi-read-classifier-v1",
+      failingLba: 2_048,
+      requestedBlockCount: 31,
+      retryCount: 0,
+      scsiStatus: 2,
+      hostStatus: 0,
+      driverStatus: 8,
+      senseKey: 5,
+      asc: 33,
+      ascq: 0,
+    })).toMatchObject({
+      status: "failed",
+      errorMessage:
+        "The Optical Drive reported a readable-boundary disagreement",
+      failureDetailVersion: "archive-failure-detail-v1",
+      readFailureCategory: "out_of_range",
+      readFailureLba: 2_048,
+      readFailureSenseKey: 5,
+      readFailureAsc: 33,
+      readFailureAscq: 0,
+    });
+    expect(access.archiveRequests.list(["needs_attention"])).toEqual([
+      expect.objectContaining({ id: request.id }),
+    ]);
+    expect(access.catalog.listOriginalDiscArchives()).toEqual([]);
+    access.close();
+  });
 
   it("continues an Archive Request on another matching Optical Drive", () => {
     const access = openTestDatabase();

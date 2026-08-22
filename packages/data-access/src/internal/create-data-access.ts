@@ -219,6 +219,8 @@ const ARCHIVE_READ_FAILURE_MESSAGES = {
   hardware_error: "The Optical Drive reported a hardware fault",
   transport_error: "Communication with the Optical Drive failed",
   protection_error: "DVD copy protection or region access failed",
+  out_of_range:
+    "The Optical Drive reported a readable-boundary disagreement",
 } satisfies Record<ArchiveReadFailureCategory, string>;
 
 interface DiscSelectionSourceOverlapTracker {
