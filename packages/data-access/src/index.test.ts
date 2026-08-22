@@ -1150,7 +1150,8 @@ describe("data-access facade", () => {
           name !== "20260822175220_striped_kabuki" &&
           name !== "20260822183552_bounded-disc-settling" &&
           name !== "20260822185006_burly_northstar" &&
-          name !== "20260822193801_safe_proteus",
+          name !== "20260822193801_safe_proteus" &&
+          name !== "20260822201215_thick_madame_web",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -8009,6 +8010,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
+        name: "20260822201215_thick_madame_web",
+      },
+      {
         name: "20260822193801_safe_proteus",
       },
       {
@@ -8034,9 +8038,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260814192709_steep_king_cobra",
-      },
-      {
-        name: "20260814152555_allow-intentional-exact-overlaps",
       },
     ]);
     expect(
