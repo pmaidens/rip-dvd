@@ -18,6 +18,7 @@ import type {
   MEDIA_DOMAINS,
   MEDIA_ITEM_KINDS,
   RETAINED_ENCODE_OUTPUT_STATES,
+  TMDB_MEDIA_TYPES,
 } from "./domain-values.js";
 import type {
   DiscSelectionSourceIdentity,
@@ -34,6 +35,11 @@ export type CompletedCatalogReviewOutcome = Exclude<
 export type DiscKind = (typeof DISC_KINDS)[number];
 export type DetectedDiscStatus = (typeof DETECTED_DISC_STATUSES)[number];
 export type MediaItemKind = (typeof MEDIA_ITEM_KINDS)[number];
+export type TmdbMediaType = (typeof TMDB_MEDIA_TYPES)[number];
+export interface TmdbIdentity {
+  mediaType: TmdbMediaType;
+  tmdbId: number;
+}
 export type DiscSelectionKind = (typeof DISC_SELECTION_KINDS)[number];
 export type MediaDomain = (typeof MEDIA_DOMAINS)[number];
 export type ArchiveJobStatus = (typeof ARCHIVE_JOB_STATUSES)[number];
@@ -423,6 +429,7 @@ export interface CreateMediaItemInput {
   year?: number;
   seasonNumber?: number;
   episodeNumber?: number;
+  tmdbIdentity?: TmdbIdentity;
 }
 
 interface CreateMappingProposalBaseInput {
@@ -442,8 +449,11 @@ export type CreateMappingProposalInput = CreateMappingProposalBaseInput & (
   | {
     mediaItem?: never;
     existingMediaItemId: MediaItemId;
+    existingMediaItemTmdbIdentity?: TmdbIdentity;
   }
-);
+) & {
+  completeReview?: boolean;
+};
 
 export interface CreatedMappingProposal {
   mediaItem: MediaItem;
@@ -455,10 +465,12 @@ export type EpisodicMappingTvShowTarget =
     choice: "create_new";
     title: string;
     year?: number;
+    tmdbIdentity?: TmdbIdentity;
   }
   | {
     choice: "use_existing";
     mediaItemId: MediaItemId;
+    tmdbIdentity?: TmdbIdentity;
   };
 
 export type EpisodicMappingSeasonTarget =
@@ -476,6 +488,7 @@ export interface EpisodicMappingEpisodeInput {
   titleNumber: number;
   title: string;
   episodeNumber: number;
+  existingMediaItemId?: MediaItemId;
   label?: string;
 }
 
@@ -485,6 +498,7 @@ export interface CreateEpisodicMappingProposalInput {
   tvShow: EpisodicMappingTvShowTarget;
   season: EpisodicMappingSeasonTarget;
   episodes: readonly EpisodicMappingEpisodeInput[];
+  completeReview?: boolean;
 }
 
 export interface CreatedEpisodicMappingProposal {
@@ -841,9 +855,12 @@ export interface CatalogAccess {
   }): MediaItemMaintenance[];
   listMediaItems(options?: {
     ids?: readonly MediaItemId[];
+    parentId?: MediaItemId;
     limit?: number;
     offset?: number;
   }): MediaItem[];
+  findMediaItemByTmdbIdentity(input: TmdbIdentity): MediaItem | null;
+  findTmdbIdentityByMediaItemId(id: MediaItemId): TmdbIdentity | null;
   searchMediaItems(options: {
     query: string;
     limit: number;

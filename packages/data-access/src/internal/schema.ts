@@ -30,6 +30,7 @@ import {
   MEDIA_DOMAINS,
   MEDIA_ITEM_KINDS,
   RETAINED_ENCODE_OUTPUT_STATES,
+  TMDB_MEDIA_TYPES,
 } from "../domain-values.js";
 import type {
   ArchiveRequestId,
@@ -491,6 +492,38 @@ export const mediaItems = sqliteTable(
     check(
       "media_items_episode_number_check",
       sql`${table.episodeNumber} is null or ${table.episodeNumber} > 0`,
+    ),
+  ],
+);
+
+export const mediaItemTmdbIdentities = sqliteTable(
+  "media_item_tmdb_identities",
+  {
+    mediaItemId: text("media_item_id")
+      .$type<MediaItemId>()
+      .notNull()
+      .primaryKey()
+      .references(() => mediaItems.id, { onDelete: "cascade" }),
+    mediaType: text("media_type", { enum: TMDB_MEDIA_TYPES }).notNull(),
+    tmdbId: integer("tmdb_id").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    check(
+      "media_item_tmdb_identities_id_not_null",
+      sql`${table.mediaItemId} is not null`,
+    ),
+    uniqueIndex("media_item_tmdb_identities_identity_unique").on(
+      table.mediaType,
+      table.tmdbId,
+    ),
+    check(
+      "media_item_tmdb_identities_type_check",
+      sql`${table.mediaType} in (${sqliteStringLiterals(TMDB_MEDIA_TYPES)})`,
+    ),
+    check(
+      "media_item_tmdb_identities_id_check",
+      sql`typeof(${table.tmdbId}) = 'integer' and ${table.tmdbId} > 0`,
     ),
   ],
 );

@@ -27,6 +27,7 @@ const validCommands = {
       choice: "create_new",
       title: "Example Show",
       year: 2004,
+      tmdbIdentity: { mediaType: "tv_show", tmdbId: 44_001 },
     },
     season: {
       choice: "create_new",
@@ -46,6 +47,7 @@ const validCommands = {
         episodeNumber: 9,
       },
     ],
+    completeReview: true,
   },
   create_mapping_proposal: {
     action: "create_mapping_proposal",
@@ -70,6 +72,7 @@ const validCommands = {
       },
       label: "Featurette",
     },
+    completeReview: true,
   },
   create_media_item: {
     action: "create_media_item",
@@ -159,6 +162,7 @@ describe("catalog review command contract", () => {
       target: {
         choice: "use_existing",
         mediaItemId: "media-item-1",
+        tmdbIdentity: { mediaType: "movie", tmdbId: 10_350 },
       },
       discSelection: {
         sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
@@ -171,12 +175,20 @@ describe("catalog review command contract", () => {
         target: {
           choice: "use_existing",
           mediaItemId: "media-item-1",
+          tmdbIdentity: { mediaType: "movie", tmdbId: 10_350 },
         },
         discSelection: {
           sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
         },
       },
     });
+  });
+
+  it("accepts only the explicit automatic completion flag", () => {
+    expect(parseCommand({
+      ...validCommands.create_mapping_proposal,
+      completeReview: false,
+    })).toEqual({ ok: false, error: "Invalid Mapping Proposal" });
   });
 
   it("parses the explicit Archive-only Review outcome", () => {

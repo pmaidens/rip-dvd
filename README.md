@@ -266,13 +266,29 @@ The join command uses ffmpeg concat mode with stream copy, so it does not re-enc
 rip-dvd join part1.mkv part2.mkv --output "Movie.mkv" --delete-parts
 ```
 
-## Optional TMDb Lookup
+## Optional TMDB lookup
 
-Set `TMDB_API_KEY` to let the tool look up a movie title and year from the disc label:
+Set a TMDB v3 API key to let the CLI and web Catalog identify movies and TV
+shows from disc volume labels. Docker Compose forwards the key to the web
+service.
 
 ```bash
 export TMDB_API_KEY="your-api-key"
 rip-dvd rip
+```
+
+For the web Catalog, restart the web service after setting the value:
+
+```bash
+docker compose up -d web
+```
+
+The web Catalog also accepts a TMDB API read access token instead of a v3 API
+key:
+
+```bash
+export TMDB_API_TOKEN="your-api-read-access-token"
+docker compose up -d web
 ```
 
 Manual `--name` and `--year` arguments always take priority.
@@ -586,6 +602,18 @@ mapped Media Item titles, and filters **Reviewed with selections** from
 bounded mapped-item summary. **Review catalog** and **Open review** use the same
 workbench, with the archived DVD's complete read-only title map beside editable
 Media Items and reviewed Disc Selections.
+For a new, unmapped archive, Catalog first tries to identify the movie or TV
+show automatically. It cleans disc, season, volume, and year markers from the volume
+label, searches both movies and TV shows in TMDB, and checks the result against
+the DVD title durations. A movie proposal maps the Media Item to HandBrake's
+main-feature selector, so the operator never has to choose a DVD title number.
+A TV proposal uses a season hint, episode runtimes, disc number, and DVD title
+order to name and number the likely episodes. One confirmation creates the
+movie mapping or complete episode batch and finishes the review. Catalog stores
+the TMDB identity on new movies and TV shows so later discs can reuse edited
+local entries without matching their titles again. Menus, short clips, and
+unknown extras remain in the Original Disc Archive. The manual workbench
+remains available when TMDB is unavailable or the evidence is ambiguous.
 Media Items support movie, TV show, season, episode, trailer, and bonus-feature
 hierarchies. A Disc Selection maps one Media Item to the DVD main feature, one
 DVD title, or an inclusive chapter range within a scanned title. Completing

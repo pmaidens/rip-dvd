@@ -50,7 +50,10 @@ services:
       context: .
       dockerfile: docker/runtime.Dockerfile
       target: web
-    environment: *runtime-environment
+    environment:
+      <<: *runtime-environment
+      TMDB_API_KEY: ${TMDB_API_KEY:-}
+      TMDB_API_TOKEN: ${TMDB_API_TOKEN:-}
     ports:
       - "${RIP_DVD_WEB_BIND_ADDRESS:-127.0.0.1}:${RIP_DVD_WEB_PORT:-3000}:3000"
     volumes:

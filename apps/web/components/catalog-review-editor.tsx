@@ -3,14 +3,14 @@
 import type { CompletedCatalogReviewOutcome } from "@rip-dvd/data-access";
 
 import { archiveIntegrityLabel } from "../lib/archive-integrity";
+import type { AutomaticCatalogProposal } from "../lib/catalog-automation";
+import { formatVolumeLabel } from "../lib/catalog-label";
 import { ArchiveIntegrityDescription } from "./archive-integrity-description";
 import { displayTerm } from "../lib/display-term";
 import { CatalogReviewCompletion } from "./catalog-review-completion";
+import { CatalogReviewAutomation } from "./catalog-review-automation";
 import { CatalogReviewDiscSelections } from "./catalog-review-disc-selections";
-import {
-  CatalogReviewEvidence,
-  formatVolumeLabel,
-} from "./catalog-review-evidence";
+import { CatalogReviewEvidence } from "./catalog-review-evidence";
 import { CatalogReviewMediaItems } from "./catalog-review-media-items";
 import type {
   CatalogReviewLoadState,
@@ -57,6 +57,7 @@ interface CatalogReviewViewProps {
   onCreateEpisodicMappingProposal?(
     input: CreateEpisodicMappingProposalInput,
   ): void;
+  onAcceptAutomaticCatalogProposal?(proposal: AutomaticCatalogProposal): void;
   onSaveMediaItem(input: SaveMediaItemInput): void;
   onDeleteMediaItem(id: string): void;
   onCreateDiscSelection(input: CreateDiscSelectionInput): void;
@@ -97,6 +98,7 @@ export function CatalogReviewView({
   onStartEpisodicMappingProposal,
   onCancelEpisodicMappingProposal,
   onCreateEpisodicMappingProposal,
+  onAcceptAutomaticCatalogProposal = () => undefined,
   onSaveMediaItem,
   onDeleteMediaItem,
   onCreateDiscSelection,
@@ -166,83 +168,104 @@ export function CatalogReviewView({
         </div>
       ) : null}
 
-      <div className="catalog-editor-grid">
-        <CatalogReviewEvidence
-          coverage={review.coverage}
-          volumeLabel={review.archive.discLabel}
-          titles={review.rawScan.titles}
-          mediaItems={review.mediaItems}
-          activeMappingProposal={activeMappingProposal}
-          activeEpisodicMappingProposal={activeEpisodicMappingProposal}
-          isSaving={isSaving}
-          mappingProposalError={mappingProposalError}
-          onStartMappingProposal={onStartMappingProposal}
-          onCancelMappingProposal={onCancelMappingProposal}
-          onCreateMappingProposal={onCreateMappingProposal}
-          onStartEpisodicMappingProposal={onStartEpisodicMappingProposal}
-          onCancelEpisodicMappingProposal={onCancelEpisodicMappingProposal}
-          onCreateEpisodicMappingProposal={onCreateEpisodicMappingProposal}
-        />
+      <CatalogReviewAutomation
+        review={review}
+        isSaving={isSaving}
+        onAcceptProposal={onAcceptAutomaticCatalogProposal}
+        onCompleteReview={onCompleteReview}
+      />
 
-        <CatalogReviewMediaItems
-          archiveId={review.archive.id}
-          mediaItems={review.mediaItems}
-          mappedMediaItemIds={review.discSelections.map(
-            (selection) => selection.mediaItemId,
-          )}
-          editingMediaItemId={editingMediaItemId}
-          isSaving={isSaving}
-          onEdit={onEditMediaItem}
-          onCancelEdit={onCancelEdit}
-          onSave={onSaveMediaItem}
-          onDelete={onDeleteMediaItem}
-        />
-
-        <section
-          className="catalog-pane catalog-selections"
-          aria-labelledby="reviewed-selections"
-        >
-          <CatalogReviewDiscSelections
-            discSelections={review.discSelections}
-            page={review.discSelectionsPage}
-            correctionHistory={review.correctionHistory}
-            correctionHistoryPage={review.correctionHistoryPage}
-            correctionEncodeHistory={review.correctionEncodeHistory}
-            correctionEncodeHistoryPage={review.correctionEncodeHistoryPage}
-            correctionRetainedOutputHistory={
-              review.correctionRetainedOutputHistory
-            }
-            correctionRetainedOutputHistoryPage={
-              review.correctionRetainedOutputHistoryPage
-            }
-            mediaItems={review.mediaItems}
-            rawTitles={review.rawScan.titles}
-            selectionKind={selectionKind}
-            isSaving={isSaving}
-            onPage={onDiscSelectionsPage}
-            onCorrectionHistoryPage={onCorrectionHistoryPage}
-            onCorrectionEncodeHistoryPage={onCorrectionEncodeHistoryPage}
-            onCorrectionRetainedOutputHistoryPage={
-              onCorrectionRetainedOutputHistoryPage
-            }
-            onSelectionKindChange={onSelectionKindChange}
-            onCreate={onCreateDiscSelection}
-            onUpdate={onUpdateDiscSelection}
-            onDelete={onDeleteDiscSelection}
-          />
-          <CatalogReviewCompletion
-            isSaving={isSaving}
+      <details
+        className="catalog-manual-workbench"
+        open={
+          review.reviewOutcome !== "needs_review" ||
+            review.automaticCataloging?.configured !== true
+            ? true
+            : undefined
+        }
+      >
+        <summary>
+          <span>Manual catalog tools</span>
+          <small>Use these for ambiguous discs, extras, and corrections.</small>
+        </summary>
+        <div className="catalog-editor-grid">
+          <CatalogReviewEvidence
             coverage={review.coverage}
-            reviewOutcome={review.reviewOutcome}
-            archiveOnlySelected={archiveOnlySelected}
-            replacementPlan={review.replacementPlan}
-            onArchiveOnlyChange={onArchiveOnlyChange}
-            onReplacementJobsPage={onReplacementJobsPage}
-            onReplacementProfilesPage={onReplacementProfilesPage}
-            onComplete={onCompleteReview}
+            volumeLabel={review.archive.discLabel}
+            titles={review.rawScan.titles}
+            mediaItems={review.mediaItems}
+            activeMappingProposal={activeMappingProposal}
+            activeEpisodicMappingProposal={activeEpisodicMappingProposal}
+            isSaving={isSaving}
+            mappingProposalError={mappingProposalError}
+            onStartMappingProposal={onStartMappingProposal}
+            onCancelMappingProposal={onCancelMappingProposal}
+            onCreateMappingProposal={onCreateMappingProposal}
+            onStartEpisodicMappingProposal={onStartEpisodicMappingProposal}
+            onCancelEpisodicMappingProposal={onCancelEpisodicMappingProposal}
+            onCreateEpisodicMappingProposal={onCreateEpisodicMappingProposal}
           />
-        </section>
-      </div>
+
+          <CatalogReviewMediaItems
+            archiveId={review.archive.id}
+            mediaItems={review.mediaItems}
+            mappedMediaItemIds={review.discSelections.map(
+              (selection) => selection.mediaItemId,
+            )}
+            editingMediaItemId={editingMediaItemId}
+            isSaving={isSaving}
+            onEdit={onEditMediaItem}
+            onCancelEdit={onCancelEdit}
+            onSave={onSaveMediaItem}
+            onDelete={onDeleteMediaItem}
+          />
+
+          <section
+            className="catalog-pane catalog-selections"
+            aria-labelledby="reviewed-selections"
+          >
+            <CatalogReviewDiscSelections
+              discSelections={review.discSelections}
+              page={review.discSelectionsPage}
+              correctionHistory={review.correctionHistory}
+              correctionHistoryPage={review.correctionHistoryPage}
+              correctionEncodeHistory={review.correctionEncodeHistory}
+              correctionEncodeHistoryPage={review.correctionEncodeHistoryPage}
+              correctionRetainedOutputHistory={
+                review.correctionRetainedOutputHistory
+              }
+              correctionRetainedOutputHistoryPage={
+                review.correctionRetainedOutputHistoryPage
+              }
+              mediaItems={review.mediaItems}
+              rawTitles={review.rawScan.titles}
+              selectionKind={selectionKind}
+              isSaving={isSaving}
+              onPage={onDiscSelectionsPage}
+              onCorrectionHistoryPage={onCorrectionHistoryPage}
+              onCorrectionEncodeHistoryPage={onCorrectionEncodeHistoryPage}
+              onCorrectionRetainedOutputHistoryPage={
+                onCorrectionRetainedOutputHistoryPage
+              }
+              onSelectionKindChange={onSelectionKindChange}
+              onCreate={onCreateDiscSelection}
+              onUpdate={onUpdateDiscSelection}
+              onDelete={onDeleteDiscSelection}
+            />
+            <CatalogReviewCompletion
+              isSaving={isSaving}
+              coverage={review.coverage}
+              reviewOutcome={review.reviewOutcome}
+              archiveOnlySelected={archiveOnlySelected}
+              replacementPlan={review.replacementPlan}
+              onArchiveOnlyChange={onArchiveOnlyChange}
+              onReplacementJobsPage={onReplacementJobsPage}
+              onReplacementProfilesPage={onReplacementProfilesPage}
+              onComplete={onCompleteReview}
+            />
+          </section>
+        </div>
+      </details>
     </section>
   );
 }
@@ -298,6 +321,7 @@ export function CatalogReviewEditor({
       onStartEpisodicMappingProposal={review.startEpisodicMappingProposal}
       onCancelEpisodicMappingProposal={review.cancelEpisodicMappingProposal}
       onCreateEpisodicMappingProposal={review.createEpisodicMappingProposal}
+      onAcceptAutomaticCatalogProposal={review.acceptAutomaticCatalogProposal}
       onSaveMediaItem={review.saveMediaItem}
       onDeleteMediaItem={review.deleteMediaItem}
       onCreateDiscSelection={review.createDiscSelection}

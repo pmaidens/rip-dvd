@@ -29,6 +29,7 @@ import {
   trustedMutationRequestProblem,
 } from "../../../../lib/server/trusted-mutation-request";
 import { mediaOutputPath } from "../../../../lib/server/media-output-path";
+import { tmdbCredentialFromEnvironment } from "../../../../lib/server/tmdb-catalog-adapter";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -119,6 +120,9 @@ function createMediaItemInput(
     ...(input.episodeNumber === null || input.episodeNumber === undefined
       ? {}
       : { episodeNumber: input.episodeNumber }),
+    ...(input.tmdbIdentity === undefined
+      ? {}
+      : { tmdbIdentity: input.tmdbIdentity }),
   };
 }
 
@@ -167,6 +171,7 @@ function readCatalogReview(
   access: DataAccess,
   id: OriginalDiscArchiveId,
   coordinates: CatalogReviewPageCoordinates,
+  automaticCatalogingConfigured: boolean,
 ) {
   const {
     discSelectionOffset,
@@ -351,6 +356,9 @@ function readCatalogReview(
     );
     return {
       catalogRevision: archive.updatedAt.toISOString(),
+      automaticCataloging: {
+        configured: automaticCatalogingConfigured,
+      },
       archive: {
         id: archive.id,
         discLabel: disc.volumeLabel ?? "Unlabeled disc",
@@ -478,6 +486,8 @@ export async function createCatalogReviewRoute(
   getAccess: () => DataAccess = getDataAccess,
   getTrustedOrigin: () => string = () => loadConfig().webTrustedOrigin,
   getMediaLibraryPath: () => string = () => loadConfig().mediaLibraryPath,
+  isAutomaticCatalogingConfigured: () => boolean = () =>
+    tmdbCredentialFromEnvironment() !== null,
 ): Promise<Response> {
   if (request.method !== "GET" && request.method !== "POST") {
     return response({ error: "Method not allowed" }, 405);
@@ -533,6 +543,7 @@ export async function createCatalogReviewRoute(
           replacementOffset,
           replacementProfileOffset,
         },
+        isAutomaticCatalogingConfigured(),
       );
       return review === null
         ? response({ error: "Original Disc Archive not found" }, 404)
@@ -595,10 +606,16 @@ export async function createCatalogReviewRoute(
                     command.tvShow.year === undefined
                   ? {}
                   : { year: command.tvShow.year }),
+                ...(command.tvShow.tmdbIdentity === undefined
+                  ? {}
+                  : { tmdbIdentity: command.tvShow.tmdbIdentity }),
               }
             : {
                 choice: "use_existing",
                 mediaItemId: command.tvShow.mediaItemId as MediaItemId,
+                ...(command.tvShow.tmdbIdentity === undefined
+                  ? {}
+                  : { tmdbIdentity: command.tvShow.tmdbIdentity }),
               },
           season: command.season.choice === "create_new"
             ? command.season
@@ -606,10 +623,23 @@ export async function createCatalogReviewRoute(
                 choice: "use_existing",
                 mediaItemId: command.season.mediaItemId as MediaItemId,
               },
-          episodes: command.episodes,
+          episodes: command.episodes.map(({
+            existingMediaItemId,
+            ...episode
+          }) => ({
+            ...episode,
+            ...(existingMediaItemId === undefined
+              ? {}
+              : {
+                existingMediaItemId: existingMediaItemId as MediaItemId,
+              }),
+          })),
+          ...(command.completeReview ? { completeReview: true } : {}),
         });
         return response({
-          message: "Mapping changed; review required",
+          message: command.completeReview
+            ? "Cataloged and review completed"
+            : "Mapping changed; review required",
           tvShow: serializeMediaItem(proposal.tvShow),
           season: serializeMediaItem(proposal.season),
           episodes: proposal.episodes.map((episode) => ({
@@ -628,11 +658,20 @@ export async function createCatalogReviewRoute(
             : {
               existingMediaItemId:
                 command.target.mediaItemId as MediaItemId,
+              ...(command.target.tmdbIdentity === undefined
+                ? {}
+                : {
+                  existingMediaItemTmdbIdentity:
+                    command.target.tmdbIdentity,
+                }),
             }),
           discSelection: command.discSelection,
+          ...(command.completeReview ? { completeReview: true } : {}),
         });
         return response({
-          message: "Mapping changed; review required",
+          message: command.completeReview
+            ? "Cataloged and review completed"
+            : "Mapping changed; review required",
           mediaItem: serializeMediaItem(proposal.mediaItem),
           discSelection: serializeDiscSelection(proposal.discSelection),
         }, 201);
