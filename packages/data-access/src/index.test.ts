@@ -8012,6 +8012,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         name: "20260822191832_volatile_starhawk",
       },
       {
+        name: "20260822185006_burly_northstar",
+      },
+      {
         name: "20260822183552_bounded-disc-settling",
       },
       {
@@ -8034,9 +8037,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260814152555_allow-intentional-exact-overlaps",
-      },
-      {
-        name: "20260813194303_corrected-publication-authority",
       },
     ]);
     expect(
