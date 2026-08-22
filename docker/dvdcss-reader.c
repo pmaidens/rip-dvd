@@ -408,6 +408,17 @@ static struct decoded_sense decode_sense(
     return decoded;
 }
 
+static int is_recognized_dvd_medium_read_error(
+    const struct decoded_sense *sense)
+{
+    if (sense->sense_key != 0x03 || sense->asc != 0x11) {
+        return 0;
+    }
+    return sense->ascq == 0x00 || sense->ascq == 0x01 ||
+           sense->ascq == 0x02 || sense->ascq == 0x05 ||
+           sense->ascq == 0x06;
+}
+
 static enum backend_read_status classify_read_failure(
     const struct rip_dvd_scsi_completion *completion,
     struct decoded_sense *sense)
@@ -419,7 +430,7 @@ static enum backend_read_status classify_read_failure(
         (completion->driver_status != 0x00 &&
          completion->driver_status != 0x08) ||
         (sense->response_code != 0x70 && sense->response_code != 0x72) ||
-        sense->sense_key != 0x03) {
+        !is_recognized_dvd_medium_read_error(sense)) {
         return BACKEND_READ_UNKNOWN_ERROR;
     }
     return BACKEND_READ_MEDIA_ERROR;
