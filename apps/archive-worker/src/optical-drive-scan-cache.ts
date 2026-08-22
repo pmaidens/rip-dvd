@@ -7,6 +7,7 @@ import type { ScannedDvd } from "./archive-worker.js";
 const NO_MEDIUM_CACHE_TTL_MS = 1_000;
 
 export interface OpticalDriveScanCache {
+  observe(devicePath: string, mediaGeneration: string): void;
   find(
     devicePath: string,
     mediaGeneration: string,
@@ -30,9 +31,19 @@ export function createOpticalDriveScanCache(): OpticalDriveScanCache {
   >();
 
   return {
+    observe(devicePath, mediaGeneration) {
+      const cached = scans.get(devicePath);
+      if (cached !== undefined && cached.mediaGeneration !== mediaGeneration) {
+        scans.delete(devicePath);
+      }
+    },
+
     find(devicePath, mediaGeneration) {
       const cached = scans.get(devicePath);
       if (cached?.mediaGeneration !== mediaGeneration) {
+        if (cached !== undefined) {
+          scans.delete(devicePath);
+        }
         return undefined;
       }
       if (

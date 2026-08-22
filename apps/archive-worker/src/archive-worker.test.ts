@@ -3321,6 +3321,425 @@ describe("archive worker polling", () => {
     access.close();
   });
 
+  it.each([
+    {
+      name: "media generation",
+      observations: [
+        { mediaGeneration: "generation-a", capacityBytes: 4_700_372_992 },
+        { mediaGeneration: "generation-a", capacityBytes: 4_700_372_992 },
+        { mediaGeneration: "generation-b", capacityBytes: 4_700_372_992 },
+        { mediaGeneration: "generation-b", capacityBytes: 4_700_372_992 },
+        { mediaGeneration: "generation-b", capacityBytes: 4_700_372_992 },
+      ],
+    },
+    {
+      name: "declared capacity",
+      observations: [
+        { mediaGeneration: "generation-a", capacityBytes: 4_700_372_992 },
+        { mediaGeneration: "generation-a", capacityBytes: 4_700_372_992 },
+        { mediaGeneration: "generation-a", capacityBytes: 4_700_375_040 },
+        { mediaGeneration: "generation-a", capacityBytes: 4_700_375_040 },
+        { mediaGeneration: "generation-a", capacityBytes: 4_700_375_040 },
+      ],
+    },
+  ])(
+    "absorbs provisional $name churn into one active Disc Inspection attempt",
+    async ({ observations }) => {
+      vi.useFakeTimers();
+      const startedAt = new Date("2026-08-22T18:30:00.000Z");
+      vi.setSystemTime(startedAt);
+      const access = openTestDataAccess();
+      const fingerprint = `sha256:${"c".repeat(64)}`;
+      const finalObservation = observations.at(-1)!;
+      const scanDvd = vi.fn(async (_binding, _signal, options) => {
+        options?.onPhase?.("reading_metadata");
+        options?.onMetadata?.({
+          audioStreamCount: 0,
+          chapterCount: 1,
+          subtitleStreamCount: 0,
+          titleCount: 1,
+          totalBytes: finalObservation.capacityBytes,
+          volumeLabel: "SETTLED_AFTER_CHURN",
+        });
+        options?.onPhase?.("confirming_media");
+        return {
+          fingerprint,
+          scanData: {
+            schemaVersion: 2 as const,
+            contentId: fingerprint,
+            titles: [{
+              number: 1,
+              durationSeconds: 60,
+              chapters: 1,
+              audioStreams: [],
+              subtitles: [],
+            }],
+          },
+          sizeBytes: finalObservation.capacityBytes,
+          volumeLabel: "SETTLED_AFTER_CHURN",
+        };
+      });
+      const observeMedia = vi.fn();
+      for (const observation of observations) {
+        observeMedia.mockResolvedValueOnce(observation);
+      }
+      const hardware: OpticalDriveHardware = {
+        ...stableDeviceBinding(),
+        discover: vi.fn().mockResolvedValue([{
+          devicePath: "/dev/sr0",
+          displayName: "Churning drive",
+          serialNumber: "SETTLING-CHURN-001",
+        }]),
+        observeMedia,
+        observeMediaGeneration: vi.fn(
+          async () => finalObservation.mediaGeneration,
+        ),
+        scanDvd,
+      };
+      const poll = () => pollArchiveWorkerOnce({
+        access,
+        configuredDevicePath: "/dev/sr0",
+        hardware,
+        log: vi.fn(),
+        signal: new AbortController().signal,
+      });
+
+      await poll();
+      vi.advanceTimersByTime(2_500);
+      await poll();
+      const inspectionId = access.discInspections.list({
+        currentOnly: true,
+      })[0]!.id;
+
+      vi.advanceTimersByTime(2_500);
+      await poll();
+
+      expect(access.discInspections.list()).toEqual([
+        expect.objectContaining({
+          id: inspectionId,
+          attemptCount: 1,
+          status: "running",
+          phase: "settling",
+          mediaGeneration: finalObservation.mediaGeneration,
+          mediaCapacityBytes: finalObservation.capacityBytes,
+          stableObservationCount: 1,
+          settlingQuietWindowStartedAt: new Date(
+            startedAt.getTime() + 5_000,
+          ),
+          settlingStartedAt: startedAt,
+          settlingResetCount: 1,
+          titleCount: null,
+        }),
+      ]);
+      expect(access.discInspections.listAttempts(inspectionId)).toEqual([]);
+      expect(scanDvd).not.toHaveBeenCalled();
+      expect(access.catalog.listDetectedDiscs()).toEqual([]);
+
+      vi.advanceTimersByTime(2_500);
+      await poll();
+      vi.advanceTimersByTime(2_500);
+      await poll();
+
+      expect(scanDvd).toHaveBeenCalledOnce();
+      expect(access.discInspections.list()).toEqual([
+        expect.objectContaining({
+          id: inspectionId,
+          attemptCount: 1,
+          status: "completed",
+          mediaGeneration: finalObservation.mediaGeneration,
+          mediaCapacityBytes: finalObservation.capacityBytes,
+          stableObservationCount: 3,
+          settlingResetCount: 1,
+        }),
+      ]);
+      expect(access.discInspections.listAttempts(inspectionId)).toEqual([
+        expect.objectContaining({
+          attemptNumber: 1,
+          outcome: "completed",
+        }),
+      ]);
+      expect(access.catalog.listDetectedDiscs()).toEqual([
+        expect.objectContaining({
+          fingerprint,
+          volumeLabel: "SETTLED_AFTER_CHURN",
+        }),
+      ]);
+      access.close();
+    },
+  );
+
+  it("does not reuse cached metadata after an A-to-B-to-A generation sequence", async () => {
+    vi.useFakeTimers();
+    const startedAt = new Date("2026-08-22T18:45:00.000Z");
+    vi.setSystemTime(startedAt);
+    const access = openTestDataAccess();
+    const mediaCapacityBytes = 4_700_372_992;
+    let metadataReadCount = 0;
+    const runner: CommandRunner = {
+      run: vi.fn(async (executable) => {
+        if (executable === "lsblk") {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              blockdevices: [{
+                path: "/dev/sr0",
+                type: "rom",
+                vendor: "Pioneer",
+                model: "DVD-RW",
+                serial: "SETTLING-ABA-001",
+              }],
+            }),
+            stderr: "",
+          };
+        }
+        if (executable === "blockdev") {
+          return {
+            exitCode: 0,
+            stdout: `${mediaCapacityBytes}\n`,
+            stderr: "",
+          };
+        }
+        if (executable === "rip-dvd-lsdvd") {
+          metadataReadCount += 1;
+          return {
+            exitCode: 0,
+            stdout: [
+              `Disc Title: ${
+                metadataReadCount === 1 ? "FIRST_DISC_A" : "RETURNED_DISC_A"
+              }`,
+              "Title: 01, Length: 00:01:00.000 Chapters: 1, Cells: 1, Audio streams: 0, Subpictures: 0",
+            ].join("\n"),
+            stderr: "",
+          };
+        }
+        throw new Error(`Unexpected command: ${executable}`);
+      }),
+    };
+    let generationObservationCount = 0;
+    let forcedGeneration: string | null = null;
+    const mediaGenerationObserver = {
+      observe: vi.fn(async () => {
+        if (forcedGeneration !== null) {
+          return forcedGeneration;
+        }
+        generationObservationCount += 1;
+        if (generationObservationCount <= 5) {
+          return "generation-a";
+        }
+        if (generationObservationCount <= 8) {
+          return "generation-b";
+        }
+        return "generation-a";
+      }),
+    };
+    const hardware = createLinuxOpticalDriveHardware({
+      platform: "linux",
+      runner,
+      mediaGenerationObserver,
+      deviceInstanceObserver: {
+        observe: vi.fn().mockResolvedValue("device-instance-1"),
+      },
+    });
+    const poll = () => pollArchiveWorkerOnce({
+      access,
+      configuredDevicePath: "/dev/sr0",
+      hardware,
+      log: vi.fn(),
+      signal: new AbortController().signal,
+    });
+
+    await poll();
+    const firstInspectionId = access.discInspections.list({
+      currentOnly: true,
+    })[0]!.id;
+    vi.advanceTimersByTime(2_500);
+    await poll();
+    vi.advanceTimersByTime(2_500);
+    await poll();
+
+    expect(metadataReadCount).toBe(1);
+    expect(access.catalog.listDetectedDiscs()).toEqual([]);
+    expect(access.discInspections.list({ ids: [firstInspectionId] })).toEqual([
+      expect.objectContaining({
+        status: "aborted",
+        reasonCode: "media_changed",
+      }),
+    ]);
+    expect(access.discInspections.listAttempts(firstInspectionId)).toEqual([
+      expect.objectContaining({
+        attemptNumber: 1,
+        outcome: "aborted",
+        reasonCode: "media_changed",
+      }),
+    ]);
+
+    vi.advanceTimersByTime(2_500);
+    await poll();
+    const resumedInspectionId = access.discInspections.list({
+      currentOnly: true,
+    })[0]!.id;
+    expect(resumedInspectionId).not.toBe(firstInspectionId);
+
+    vi.advanceTimersByTime(2_500);
+    await poll();
+    expect(access.discInspections.list({ currentOnly: true })).toEqual([
+      expect.objectContaining({
+        id: resumedInspectionId,
+        attemptCount: 1,
+        phase: "settling",
+        mediaGeneration: "generation-a",
+        stableObservationCount: 1,
+        settlingResetCount: 1,
+      }),
+    ]);
+    expect(access.discInspections.listAttempts(resumedInspectionId)).toEqual([]);
+
+    vi.advanceTimersByTime(2_500);
+    await poll();
+    vi.advanceTimersByTime(2_500);
+    await poll();
+
+    expect(metadataReadCount).toBe(2);
+    expect(access.discInspections.list({ currentOnly: true })).toEqual([
+      expect.objectContaining({
+        id: resumedInspectionId,
+        attemptCount: 1,
+        status: "completed",
+        mediaGeneration: "generation-a",
+        settlingResetCount: 1,
+      }),
+    ]);
+    expect(access.catalog.listDetectedDiscs()).toEqual([
+      expect.objectContaining({ volumeLabel: "RETURNED_DISC_A" }),
+    ]);
+
+    vi.advanceTimersByTime(2_500);
+    await poll();
+    expect(metadataReadCount).toBe(2);
+    expect(access.discInspections.list({ currentOnly: true })).toEqual([
+      expect.objectContaining({ id: resumedInspectionId, status: "completed" }),
+    ]);
+
+    forcedGeneration = "generation-c";
+    vi.advanceTimersByTime(2_500);
+    await poll();
+    expect(metadataReadCount).toBe(2);
+    expect(access.discInspections.list({ currentOnly: true })).toEqual([
+      expect.objectContaining({
+        id: expect.not.stringMatching(resumedInspectionId),
+        phase: "settling",
+        status: "running",
+        mediaGeneration: "generation-c",
+      }),
+    ]);
+    access.close();
+  });
+
+  it.each([
+    {
+      checkpoint: "before metadata collection",
+      changedObservation: 4,
+      expectedMetadataReads: 0,
+    },
+    {
+      checkpoint: "after metadata collection",
+      changedObservation: 5,
+      expectedMetadataReads: 1,
+    },
+    {
+      checkpoint: "before Detected Disc registration",
+      changedObservation: 6,
+      expectedMetadataReads: 1,
+    },
+  ])(
+    "aborts a generation change $checkpoint",
+    async ({ changedObservation, expectedMetadataReads }) => {
+      const access = openTestDataAccess();
+      const run = vi.fn(async (executable: string) => {
+        if (executable === "lsblk") {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              blockdevices: [{
+                path: "/dev/sr0",
+                type: "rom",
+                vendor: "Pioneer",
+                model: "DVD-RW",
+                serial: "SETTLING-FENCE-001",
+              }],
+            }),
+            stderr: "",
+          };
+        }
+        if (executable === "blockdev") {
+          return {
+            exitCode: 0,
+            stdout: "4700372992\n",
+            stderr: "",
+          };
+        }
+        if (executable === "rip-dvd-lsdvd") {
+          return {
+            exitCode: 0,
+            stdout: [
+              "Disc Title: FENCED_DISC",
+              "Title: 01, Length: 00:01:00.000 Chapters: 1, Cells: 1, Audio streams: 0, Subpictures: 0",
+            ].join("\n"),
+            stderr: "",
+          };
+        }
+        throw new Error(`Unexpected command: ${executable}`);
+      });
+      const runner: CommandRunner = { run };
+      let generationObservationCount = 0;
+      const hardware = createLinuxOpticalDriveHardware({
+        platform: "linux",
+        runner,
+        mediaGenerationObserver: {
+          observe: vi.fn(async () => {
+            generationObservationCount += 1;
+            return generationObservationCount >= changedObservation
+              ? "generation-b"
+              : "generation-a";
+          }),
+        },
+        deviceInstanceObserver: {
+          observe: vi.fn().mockResolvedValue("device-instance-1"),
+        },
+      });
+
+      await pollArchiveWorker({
+        access,
+        configuredDevicePath: "/dev/sr0",
+        hardware,
+        log: vi.fn(),
+        signal: new AbortController().signal,
+      });
+
+      const [inspection] = access.discInspections.list();
+      expect(inspection).toMatchObject({
+        attemptCount: 1,
+        status: "aborted",
+        reasonCode: "media_changed",
+        mediaGeneration: "generation-a",
+      });
+      expect(access.discInspections.listAttempts(inspection!.id)).toEqual([
+        expect.objectContaining({
+          attemptNumber: 1,
+          outcome: "aborted",
+          reasonCode: "media_changed",
+        }),
+      ]);
+      expect(
+        run.mock.calls.filter(([executable]) =>
+          executable === "rip-dvd-lsdvd"
+        ),
+      ).toHaveLength(expectedMetadataReads);
+      expect(access.catalog.listDetectedDiscs()).toEqual([]);
+      access.close();
+    },
+  );
+
   it("keeps three matching observations inside five seconds in settling", async () => {
     vi.useFakeTimers();
     const startedAt = new Date("2026-08-22T19:00:00.000Z");
