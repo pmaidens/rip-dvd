@@ -213,9 +213,8 @@ export async function runArchiveJob({
         access.archiveJobs.abort(claim, "Archive cancelled by operator");
       } else if (readFailure !== null) {
         const evidence = readFailure.readFailure;
-        const terminalJob = access.archiveJobs.failWithReadFailure(claim, {
+        const commonEvidence = {
           stage: readFailure.stage,
-          category: evidence.category,
           classifierVersion: evidence.classifierVersion,
           failingLba: evidence.informationLba ?? evidence.requestedLba,
           requestedBlockCount: evidence.requestedBlockCount,
@@ -226,6 +225,10 @@ export async function runArchiveJob({
           senseKey: evidence.senseKey,
           asc: evidence.asc,
           ascq: evidence.ascq,
+        };
+        const terminalJob = access.archiveJobs.failWithReadFailure(claim, {
+          ...commonEvidence,
+          category: evidence.category,
         });
         cancellationRequested = terminalJob.status === "aborted";
       } else {

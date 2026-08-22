@@ -126,7 +126,8 @@ function createSyntheticDvdCopyRunner({
     async copy(request: DvdCopyRequest): Promise<DvdRecoveryResult> {
       await request.authorizeStart?.();
       request.signal.throwIfAborted();
-      const arguments_ = request.resumeFrom === undefined
+      const continuation = request.continuation;
+      const arguments_ = continuation === undefined
         ? [
             "copy-test",
             sourcePath,
@@ -136,17 +137,29 @@ function createSyntheticDvdCopyRunner({
             "0",
             "valid",
           ]
-        : [
-            "resume-test",
-            sourcePath,
-            request.outputPath,
-            String(request.sizeBytes),
-            faults,
-            "0",
-            "valid",
-            formatDvdRecoveryResumeBitmap(request.resumeFrom),
-            request.resumeImageFilesystemIdentity ?? "",
-          ];
+        : continuation.kind === "boundary"
+          ? [
+              "resume-boundary-test",
+              sourcePath,
+              request.outputPath,
+              String(request.sizeBytes),
+              faults,
+              "0",
+              "valid",
+              String(continuation.imageByteCount),
+              continuation.imageFilesystemIdentity,
+            ]
+          : [
+              "resume-test",
+              sourcePath,
+              request.outputPath,
+              String(request.sizeBytes),
+              faults,
+              "0",
+              "valid",
+              formatDvdRecoveryResumeBitmap(continuation.recoveryResult),
+              continuation.imageFilesystemIdentity,
+            ];
       const completion = spawnSync(nativeTestExecutable, arguments_, {
         encoding: "utf8",
         timeout: 10_000,
@@ -280,6 +293,55 @@ describe.runIf(nativeTestExecutable !== "")(
       });
       expect(readFileSync(preserved.archivePath)).toEqual(fixture.content);
       expect(salvageValidator.validate).not.toHaveBeenCalled();
+    });
+
+    it("rolls back same-attempt zero-fill before retaining a boundary prefix", async () => {
+      const archiveRequestId = "21111111-1111-4111-8111-111111111111";
+      const fixture = createFixture(archiveRequestId);
+      const initialRunner = createSyntheticDvdCopyRunner({
+        faults: [
+          rawCompletionFault(5, "always", fixedMediumSense(5)),
+          rawCompletionFault(35, "always", fixedSense(35, 0x05, 0x21)),
+        ].join(","),
+        sourcePath: fixture.sourcePath,
+      });
+
+      await expect(preserveDvdArchive({
+        ...fixture.baseOptions,
+        runner: initialRunner,
+      })).rejects.toMatchObject({
+        stage: "initial_copy",
+        readFailure: {
+          category: "out_of_range",
+          firstFailingLba: 35,
+          retainedImageByteCount: 5 * 2_048,
+        },
+      });
+
+      const rescuePaths = dvdRescueWorkspacePaths(
+        realpathSync(fixture.originalsLibraryPath),
+        archiveRequestId,
+      );
+      expect(readFileSync(rescuePaths.imagePath)).toEqual(
+        fixture.content.subarray(0, 5 * 2_048),
+      );
+      expect(initialRunner.results).toEqual([]);
+
+      const resumeRunner = createSyntheticDvdCopyRunner({
+        faults: "none",
+        sourcePath: fixture.sourcePath,
+      });
+      const salvageValidator = { validate: vi.fn() };
+      const preserved = await preserveDvdArchive({
+        ...fixture.baseOptions,
+        runner: resumeRunner,
+        salvageValidator,
+      });
+
+      expect(readFileSync(preserved.archivePath)).toEqual(fixture.content);
+      expect(preserved.integrityEvidence.integrity).toBe("clean_read");
+      expect(salvageValidator.validate).not.toHaveBeenCalled();
+      await preserved.finalizePublication?.();
     });
 
     it.each(distinguishedReadFailures)("keeps $category out of initial recovery and publication", async ({
@@ -487,8 +549,7 @@ describe.runIf(nativeTestExecutable !== "")(
       const fixture = createFixture(
         "44444444-4444-4444-8444-444444444444",
       );
-      const illegalRequestSense =
-        "f00005000000050a00000000210000000000";
+      const illegalRequestSense = fixedSense(5, 0x05, 0x20);
       const runner = createSyntheticDvdCopyRunner({
         faults: rawCompletionFault(5, "always", illegalRequestSense),
         sourcePath: fixture.sourcePath,

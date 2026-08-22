@@ -47,6 +47,7 @@ import {
   DvdReadFailureError,
   DVD_READ_FAILURE_RESULT_PREFIX,
   DVD_RECOVERY_RESULT_PREFIX,
+  DVD_SECTOR_SIZE_BYTES,
   formatUnvalidatedDvdRecovery,
   formatDvdRecoveryResumeBitmap,
   parseDvdRecoveryResultProtocol,
@@ -54,6 +55,7 @@ import {
   type DamagedDvdRecoveryResult,
   type DvdRecoveryResult,
   type DvdValidationResult,
+  type OutOfRangeDvdReadFailureResult,
   validateDvdRecoveryResult,
   validateResumedDvdRecoveryResult,
 } from "./dvd-recovery-contracts.js";
@@ -63,9 +65,12 @@ import {
   type DvdSalvageValidator,
 } from "./dvd-salvage-validator.js";
 import {
+  commitDvdBoundaryRescueWorkspace,
   commitDvdRescueWorkspace,
+  dvdBoundaryRetentionMapPath,
   dvdRescueWorkspacePaths,
   loadDvdRescueWorkspace,
+  recordDvdBoundaryFailure,
   removeDvdRescueWorkspace,
   type DvdRescueIdentity,
   type DvdRescueWorkspace,
@@ -94,15 +99,27 @@ function dvdArchiveStem(fingerprint: string): string {
   return isDvdMetadataFingerprint(fingerprint) ? `dvdmeta-${digest}` : digest;
 }
 
+export type DvdCopyContinuation =
+  | {
+      kind: "damaged";
+      imageFilesystemIdentity: string;
+      recoveryResult: DamagedDvdRecoveryResult;
+    }
+  | {
+      kind: "boundary";
+      imageByteCount: number;
+      imageFilesystemIdentity: string;
+      readFailure: OutOfRangeDvdReadFailureResult;
+    };
+
 export interface DvdCopyRequest {
   authorizeStart?(): void | Promise<void>;
+  continuation?: DvdCopyContinuation;
   devicePath: string;
   outputPath: string;
-  resumeImageFilesystemIdentity?: string;
   sizeBytes: number;
   signal: AbortSignal;
   onBytesCopied(bytes: number): void;
-  resumeFrom?: DamagedDvdRecoveryResult;
 }
 
 export interface DvdCopyRunner {
@@ -116,16 +133,91 @@ export interface DvdCopyRunner {
 }
 
 export class DvdArchiveReadFailureError extends DvdReadFailureError {
+  readonly retentionError: unknown | null;
   readonly stage: ArchiveReadFailureStage;
 
   constructor(
     stage: ArchiveReadFailureStage,
     readFailure: DvdReadFailureError["readFailure"],
+    retentionError: unknown = null,
   ) {
     super(readFailure);
     this.name = "DvdArchiveReadFailureError";
+    this.retentionError = retentionError;
     this.stage = stage;
   }
+}
+
+function dvdCopyContinuationProtocol(
+  continuation: DvdCopyContinuation | undefined,
+  sizeBytes: number,
+): {
+  authorizationPayload: string;
+  helperOperation:
+    | "copy-authorized"
+    | "resume-authorized"
+    | "resume-boundary-authorized";
+  imageFilesystemIdentity?: string;
+} {
+  if (continuation === undefined) {
+    return {
+      authorizationPayload: "1",
+      helperOperation: "copy-authorized",
+    };
+  }
+  if (!/^\d+:[1-9]\d*$/.test(continuation.imageFilesystemIdentity)) {
+    throw new Error("DVD rescue image identity is invalid");
+  }
+  if (continuation.kind === "damaged") {
+    return {
+      authorizationPayload:
+        `1${formatDvdRecoveryResumeBitmap(continuation.recoveryResult)}`,
+      helperOperation: "resume-authorized",
+      imageFilesystemIdentity: continuation.imageFilesystemIdentity,
+    };
+  }
+  if (
+    !Number.isSafeInteger(continuation.imageByteCount) ||
+    continuation.imageByteCount < 0 ||
+    continuation.imageByteCount >= sizeBytes ||
+    continuation.imageByteCount % DVD_SECTOR_SIZE_BYTES !== 0 ||
+    continuation.imageByteCount !==
+      continuation.readFailure.retainedImageByteCount ||
+    continuation.imageByteCount >
+      continuation.readFailure.firstFailingLba * DVD_SECTOR_SIZE_BYTES
+  ) {
+    throw new Error("DVD rescue boundary continuation is invalid");
+  }
+  return {
+    authorizationPayload: `1${continuation.imageByteCount}`,
+    helperOperation: "resume-boundary-authorized",
+    imageFilesystemIdentity: continuation.imageFilesystemIdentity,
+  };
+}
+
+function dvdCopyContinuationFromWorkspace(
+  workspace: DvdRescueWorkspace | null,
+): DvdCopyContinuation | undefined {
+  if (workspace?.recoveryResult?.outcome === "damaged") {
+    return {
+      kind: "damaged",
+      imageFilesystemIdentity: workspace.imageFilesystemIdentity,
+      recoveryResult: workspace.recoveryResult,
+    };
+  }
+  if (
+    workspace !== null &&
+    workspace.boundaryFailure !== null &&
+    workspace.recoveryResult === null
+  ) {
+    return {
+      kind: "boundary",
+      imageByteCount: workspace.imageByteCount,
+      imageFilesystemIdentity: workspace.imageFilesystemIdentity,
+      readFailure: workspace.boundaryFailure,
+    };
+  }
+  return undefined;
 }
 
 interface DvdCopyChildProcess {
@@ -270,19 +362,13 @@ export function createNodeDvdCopyRunner({
       throw new Error("DVD archive copy is still active");
     },
     start(request): ActiveBoundedProcess<DvdRecoveryResult> {
+      const continuationProtocol = dvdCopyContinuationProtocol(
+        request.continuation,
+        request.sizeBytes,
+      );
       const lockDescriptor = openDeviceLock(request.devicePath);
       let child: DvdCopyChildProcess;
       try {
-        const resumeImageFilesystemIdentity =
-          request.resumeFrom === undefined
-            ? undefined
-            : request.resumeImageFilesystemIdentity;
-        if (
-          request.resumeFrom !== undefined &&
-          !/^\d+:[1-9]\d*$/.test(resumeImageFilesystemIdentity ?? "")
-        ) {
-          throw new Error("DVD rescue image identity is invalid");
-        }
         child = spawnProcess(
           "flock",
           [
@@ -293,15 +379,13 @@ export function createNodeDvdCopyRunner({
             String(FLOCK_CONFLICT_EXIT_CODE),
             "/proc/self/fd/3",
             "rip-dvd-dvdcss-reader",
-            request.resumeFrom === undefined
-              ? "copy-authorized"
-              : "resume-authorized",
+            continuationProtocol.helperOperation,
             requireSafeOpticalDevicePath(request.devicePath),
             request.outputPath,
             String(requireDvdContentSize(request.sizeBytes)),
-            ...(resumeImageFilesystemIdentity === undefined
+            ...(continuationProtocol.imageFilesystemIdentity === undefined
               ? []
-              : [resumeImageFilesystemIdentity]),
+              : [continuationProtocol.imageFilesystemIdentity]),
           ],
           {
             shell: false,
@@ -424,11 +508,7 @@ export function createNodeDvdCopyRunner({
           }
           authorizationSettled = true;
           clearTimeout(startAuthorizationTimeout);
-          child.stdio[5].end(
-            request.resumeFrom === undefined
-              ? "1"
-              : `1${formatDvdRecoveryResumeBitmap(request.resumeFrom)}`,
-          );
+          child.stdio[5].end(continuationProtocol.authorizationPayload);
           armStallTimeout();
         };
         const rejectAuthorization = (error: unknown) => {
@@ -1236,6 +1316,10 @@ export async function preserveDvdArchive({
     rescueIdentity === undefined
       ? undefined
       : dvdRescueWorkspacePaths(root, rescueIdentity.archiveRequestId);
+  const boundaryRetentionMapPath =
+    rescueIdentity === undefined
+      ? undefined
+      : dvdBoundaryRetentionMapPath(root, rescueIdentity.archiveRequestId);
   if (
     dirname(archivePath) !== root ||
     dirname(legacyPartialPath) !== root ||
@@ -1243,12 +1327,16 @@ export async function preserveDvdArchive({
     (rescuePaths !== undefined &&
       (dirname(rescuePaths.imagePath) !== root ||
         dirname(rescuePaths.mapPath) !== root)) ||
+    (boundaryRetentionMapPath !== undefined &&
+      dirname(boundaryRetentionMapPath) !== root) ||
     Buffer.byteLength(archivePath) > MAX_ARCHIVE_PATH_BYTES ||
     Buffer.byteLength(legacyPartialPath) > MAX_ARCHIVE_PATH_BYTES ||
     Buffer.byteLength(attemptPartialPath) > MAX_ARCHIVE_PATH_BYTES ||
     (rescuePaths !== undefined &&
       (Buffer.byteLength(rescuePaths.imagePath) > MAX_ARCHIVE_PATH_BYTES ||
         Buffer.byteLength(rescuePaths.mapPath) > MAX_ARCHIVE_PATH_BYTES)) ||
+    (boundaryRetentionMapPath !== undefined &&
+      Buffer.byteLength(boundaryRetentionMapPath) > MAX_ARCHIVE_PATH_BYTES) ||
     Buffer.byteLength(`${archivePath}.failed`) > MAX_ARCHIVE_PATH_BYTES ||
     Buffer.byteLength(`${attemptPartialPath}.failed`) > MAX_ARCHIVE_PATH_BYTES
   ) {
@@ -1286,7 +1374,7 @@ export async function preserveDvdArchive({
 
   const existingArchive = await optionalMetadata(archivePath);
   if (
-    rescueWorkspace?.recoveryResult.outcome === "damaged" &&
+    rescueWorkspace?.recoveryResult?.outcome === "damaged" &&
     existingArchive !== null
   ) {
     if (
@@ -1372,7 +1460,7 @@ export async function preserveDvdArchive({
       sizeBytes: safeSizeBytes,
     };
   }
-  if (rescueWorkspace?.recoveryResult.outcome === "clean") {
+  if (rescueWorkspace?.recoveryResult?.outcome === "clean") {
     const validation = validateDvdRecoveryResult(
       rescueWorkspace.recoveryResult,
       safeSizeBytes,
@@ -1479,14 +1567,16 @@ export async function preserveDvdArchive({
   let publishedArchiveFilesystemIdentity: string | undefined;
   let retainedForValidation = false;
   let validation: DvdValidationResult | undefined;
+  const copyContinuation = dvdCopyContinuationFromWorkspace(rescueWorkspace);
   const readFailureStage: ArchiveReadFailureStage =
-    rescueWorkspace?.recoveryResult.outcome === "damaged"
-      ? "rescue_resume"
-      : "initial_copy";
+    copyContinuation === undefined ? "initial_copy" : "rescue_resume";
   try {
     onProgress({ phase: "copying", progressPercent: 0 });
     const recoveryResult = await runner.copy({
       authorizeStart: authorizeCopy,
+      ...(copyContinuation === undefined
+        ? {}
+        : { continuation: copyContinuation }),
       devicePath: safeDevicePath,
       outputPath: partialPath,
       sizeBytes: safeSizeBytes,
@@ -1504,16 +1594,9 @@ export async function preserveDvdArchive({
           ),
         });
       },
-      ...(rescueWorkspace?.recoveryResult.outcome === "damaged"
-        ? {
-            resumeFrom: rescueWorkspace.recoveryResult,
-            resumeImageFilesystemIdentity:
-              rescueWorkspace.imageFilesystemIdentity,
-          }
-        : {}),
     });
     validation =
-      rescueWorkspace?.recoveryResult.outcome === "damaged"
+      rescueWorkspace?.recoveryResult?.outcome === "damaged"
         ? validateResumedDvdRecoveryResult(
             recoveryResult,
             rescueWorkspace.recoveryResult,
@@ -1633,30 +1716,99 @@ export async function preserveDvdArchive({
     // control until OS-level closure releases the copy tombstone.
     await runner.waitForInactive(safeDevicePath, partialPath);
     const isReadFailure = error instanceof DvdReadFailureError;
-    if (isReadFailure) {
+    const isOutOfRangeFailure =
+      isReadFailure && error.readFailure.category === "out_of_range";
+    let retentionError: unknown = null;
+    const recordRetentionError = (caughtRetentionError: unknown): void => {
+      retentionError = retentionError === null
+        ? caughtRetentionError
+        : new AggregateError(
+            [retentionError, caughtRetentionError],
+            "DVD boundary evidence retention failed",
+          );
+    };
+    if (isOutOfRangeFailure && rescueIdentity !== undefined) {
+      await revalidateReadFailure?.();
+      try {
+        await sync(partialPath);
+      } catch (caughtRetentionError) {
+        recordRetentionError(caughtRetentionError);
+      }
+      signal.throwIfAborted();
+      await revalidateReadFailure?.();
+      if (retentionError === null) {
+        let retentionFenceFailed = false;
+        let retentionFenceError: unknown;
+        const finalizeRetention = async (): Promise<void> => {
+          try {
+            await revalidateReadFailure?.();
+          } catch (caughtRetentionFenceError) {
+            retentionFenceFailed = true;
+            retentionFenceError = caughtRetentionFenceError;
+            throw caughtRetentionFenceError;
+          }
+        };
+        try {
+          rescueWorkspace = rescueWorkspace === null
+            ? await commitDvdBoundaryRescueWorkspace(
+                root,
+                rescueIdentity,
+                partialPath,
+                error.readFailure,
+                authorizeMutation,
+                finalizeRetention,
+              )
+            : await recordDvdBoundaryFailure(
+                root,
+                rescueIdentity,
+                rescueWorkspace,
+                error.readFailure,
+                authorizeMutation,
+                finalizeRetention,
+              );
+          partialPath = rescueWorkspace.imagePath;
+        } catch (caughtRetentionError) {
+          if (retentionFenceFailed) {
+            throw retentionFenceError;
+          }
+          recordRetentionError(caughtRetentionError);
+        }
+      }
+    } else if (isReadFailure) {
       await revalidateReadFailure?.();
     }
-    const hasRequestOwnedRescueState =
-      rescueWorkspace !== null ||
-      (rescuePaths !== undefined &&
-        (await optionalMetadata(rescuePaths.mapPath)) !== null);
-    if (finalPublished) {
-      await quarantinePublishedArchive(
-        archivePath,
-        publishedArchiveFilesystemIdentity!,
-      );
-      if (!hasRequestOwnedRescueState) {
+    try {
+      const hasRequestOwnedRescueState =
+        rescueWorkspace !== null ||
+        (rescuePaths !== undefined &&
+          (await optionalMetadata(rescuePaths.mapPath)) !== null);
+      if (finalPublished) {
+        await quarantinePublishedArchive(
+          archivePath,
+          publishedArchiveFilesystemIdentity!,
+        );
+        if (!hasRequestOwnedRescueState) {
+          await movePartialAside(partialPath);
+        }
+      } else if (
+        !hasRequestOwnedRescueState &&
+        !retainedForValidation &&
+        !runner.isActive(safeDevicePath, partialPath)
+      ) {
         await movePartialAside(partialPath);
       }
-    } else if (
-      !hasRequestOwnedRescueState &&
-      !retainedForValidation &&
-      !runner.isActive(safeDevicePath, partialPath)
-    ) {
-      await movePartialAside(partialPath);
+    } catch (cleanupError) {
+      if (!isOutOfRangeFailure) {
+        throw cleanupError;
+      }
+      recordRetentionError(cleanupError);
     }
     throw isReadFailure
-      ? new DvdArchiveReadFailureError(readFailureStage, error.readFailure)
+      ? new DvdArchiveReadFailureError(
+          readFailureStage,
+          error.readFailure,
+          retentionError,
+        )
       : error;
   }
   if (validation === undefined) {
