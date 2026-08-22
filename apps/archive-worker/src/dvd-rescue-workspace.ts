@@ -82,6 +82,14 @@ function archiveRequestPathKey(archiveRequestId: string): string {
     .digest("hex");
 }
 
+export function dvdBoundaryRetentionMapPath(
+  root: string,
+  archiveRequestId: string,
+): string {
+  const requestPathKey = archiveRequestPathKey(archiveRequestId);
+  return join(root, `.${requestPathKey}.rip-dvd-rescue.json.retaining`);
+}
+
 export function dvdRescueWorkspacePaths(
   root: string,
   archiveRequestId: string,
@@ -128,6 +136,7 @@ async function quarantinePath(
 async function quarantineWorkspaceFiles(
   root: string,
   paths: Pick<DvdRescueWorkspace, "imagePath" | "mapPath">,
+  retentionMapPath: string,
   correlatedArchivePath?: string,
   authorizeMutation?: AuthorizeMutation,
 ): Promise<void> {
@@ -138,9 +147,13 @@ async function quarantineWorkspaceFiles(
   if (archiveChanged) {
     await syncPath(root);
   }
+  const retentionMapChanged = await quarantinePath(
+    retentionMapPath,
+    authorizeMutation,
+  );
   const mapChanged = await quarantinePath(paths.mapPath, authorizeMutation);
   const imageChanged = await quarantinePath(paths.imagePath, authorizeMutation);
-  if (mapChanged || imageChanged) {
+  if (retentionMapChanged || mapChanged || imageChanged) {
     await syncPath(root);
   }
 }
@@ -365,6 +378,53 @@ async function commitPreparedDvdRescueWorkspace(
   return { ...paths, ...state, imageFilesystemIdentity };
 }
 
+async function commitPreparedDvdBoundaryRescueWorkspace(
+  root: string,
+  identity: DvdRescueIdentity,
+  paths: Pick<DvdRescueWorkspace, "imagePath" | "mapPath">,
+  sourceImagePath: string,
+  imageFilesystemIdentity: string,
+  state: DvdRescueState,
+  authorizeMutation?: AuthorizeMutation,
+  finalizeRetention?: AuthorizeMutation,
+): Promise<DvdRescueWorkspace> {
+  const retentionMapPath = dvdBoundaryRetentionMapPath(
+    root,
+    identity.archiveRequestId,
+  );
+  try {
+    await writeMapAtomically(
+      root,
+      retentionMapPath,
+      createRescueMap(identity, imageFilesystemIdentity, state),
+      authorizeMutation,
+    );
+    await authorizeMutation?.();
+    await rename(sourceImagePath, paths.imagePath);
+    await syncPath(root);
+    await finalizeRetention?.();
+    await authorizeMutation?.();
+    await rename(retentionMapPath, paths.mapPath);
+    await syncPath(root);
+    return { ...paths, ...state, imageFilesystemIdentity };
+  } catch (error) {
+    try {
+      await quarantineWorkspaceFiles(
+        root,
+        paths,
+        retentionMapPath,
+        undefined,
+        authorizeMutation,
+      );
+    } catch (quarantineError) {
+      throw new Error("DVD rescue boundary state could not be quarantined", {
+        cause: new AggregateError([error, quarantineError]),
+      });
+    }
+    throw error;
+  }
+}
+
 export async function loadDvdRescueWorkspace(
   root: string,
   identity: DvdRescueIdentity,
@@ -372,6 +432,10 @@ export async function loadDvdRescueWorkspace(
   authorizeMutation?: AuthorizeMutation,
 ): Promise<DvdRescueWorkspace | null> {
   const paths = dvdRescueWorkspacePaths(root, identity.archiveRequestId);
+  const retentionMapPath = dvdBoundaryRetentionMapPath(
+    root,
+    identity.archiveRequestId,
+  );
   if (
     correlatedArchivePath !== undefined &&
     dirname(correlatedArchivePath) !== root
@@ -380,17 +444,34 @@ export async function loadDvdRescueWorkspace(
   }
   let imageMetadata: Awaited<ReturnType<typeof optionalMetadata>>;
   let mapMetadata: Awaited<ReturnType<typeof optionalMetadata>>;
+  let retentionMapMetadata: Awaited<ReturnType<typeof optionalMetadata>>;
   try {
-    [imageMetadata, mapMetadata] = await Promise.all([
+    [imageMetadata, mapMetadata, retentionMapMetadata] = await Promise.all([
       optionalMetadata(paths.imagePath),
       optionalMetadata(paths.mapPath),
+      optionalMetadata(retentionMapPath),
     ]);
   } catch (error) {
     throw new Error("DVD rescue state could not be inspected", {
       cause: error,
     });
   }
-  if (imageMetadata === null && mapMetadata === null) {
+  if (retentionMapMetadata !== null && mapMetadata !== null) {
+    try {
+      await quarantinePath(retentionMapPath, authorizeMutation);
+      await syncPath(root);
+      retentionMapMetadata = null;
+    } catch (error) {
+      throw new Error("DVD rescue state could not be quarantined", {
+        cause: error,
+      });
+    }
+  }
+  if (
+    imageMetadata === null &&
+    mapMetadata === null &&
+    retentionMapMetadata === null
+  ) {
     return null;
   }
   try {
@@ -503,6 +584,7 @@ export async function loadDvdRescueWorkspace(
       await quarantineWorkspaceFiles(
         root,
         paths,
+        retentionMapPath,
         correlatedArchivePath,
         authorizeMutation,
       );
@@ -629,12 +711,18 @@ export async function commitDvdBoundaryRescueWorkspace(
   sourceImagePath: string,
   boundaryFailure: OutOfRangeDvdReadFailureResult,
   authorizeMutation?: AuthorizeMutation,
+  finalizeRetention?: AuthorizeMutation,
 ): Promise<DvdRescueWorkspace> {
   const paths = dvdRescueWorkspacePaths(root, identity.archiveRequestId);
+  const retentionMapPath = dvdBoundaryRetentionMapPath(
+    root,
+    identity.archiveRequestId,
+  );
   if (
     dirname(sourceImagePath) !== root ||
     (await optionalMetadata(paths.imagePath)) !== null ||
-    (await optionalMetadata(paths.mapPath)) !== null
+    (await optionalMetadata(paths.mapPath)) !== null ||
+    (await optionalMetadata(retentionMapPath)) !== null
   ) {
     throw new Error("DVD rescue workspace cannot be committed safely");
   }
@@ -657,7 +745,7 @@ export async function commitDvdBoundaryRescueWorkspace(
       imageByteCount: imageMetadata.size,
       recoveryResult: null,
     };
-    return await commitPreparedDvdRescueWorkspace(
+    return await commitPreparedDvdBoundaryRescueWorkspace(
       root,
       identity,
       paths,
@@ -665,6 +753,7 @@ export async function commitDvdBoundaryRescueWorkspace(
       imageFilesystemIdentity,
       state,
       authorizeMutation,
+      finalizeRetention,
     );
   } catch (error) {
     throw new Error("DVD rescue boundary state could not be committed", {
@@ -679,6 +768,7 @@ export async function recordDvdBoundaryFailure(
   workspace: DvdRescueWorkspace,
   boundaryFailure: OutOfRangeDvdReadFailureResult,
   authorizeMutation?: AuthorizeMutation,
+  finalizeRetention?: AuthorizeMutation,
 ): Promise<DvdRescueWorkspace> {
   const expectedPaths = dvdRescueWorkspacePaths(root, identity.archiveRequestId);
   const imageMetadata = await lstat(workspace.imagePath);
@@ -705,10 +795,15 @@ export async function recordDvdBoundaryFailure(
       : workspace.imageByteCount,
     recoveryResult: workspace.recoveryResult,
   };
+  const retentionMapPath = dvdBoundaryRetentionMapPath(
+    root,
+    identity.archiveRequestId,
+  );
+  let mapCommitted = false;
   try {
     await writeMapAtomically(
       root,
-      workspace.mapPath,
+      retentionMapPath,
       createRescueMap(
         identity,
         workspace.imageFilesystemIdentity,
@@ -716,7 +811,29 @@ export async function recordDvdBoundaryFailure(
       ),
       authorizeMutation,
     );
+    await finalizeRetention?.();
+    await authorizeMutation?.();
+    await rename(retentionMapPath, workspace.mapPath);
+    mapCommitted = true;
+    await syncPath(root);
   } catch (error) {
+    try {
+      if (mapCommitted) {
+        await quarantineWorkspaceFiles(
+          root,
+          expectedPaths,
+          retentionMapPath,
+          undefined,
+          authorizeMutation,
+        );
+      } else if (await quarantinePath(retentionMapPath, authorizeMutation)) {
+        await syncPath(root);
+      }
+    } catch (quarantineError) {
+      throw new Error("DVD rescue boundary state could not be quarantined", {
+        cause: new AggregateError([error, quarantineError]),
+      });
+    }
     throw new Error("DVD rescue boundary state could not be updated", {
       cause: error,
     });

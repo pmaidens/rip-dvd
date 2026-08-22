@@ -2,6 +2,7 @@ import {
   ARCHIVE_READ_FAILURE_CATEGORIES,
   classifyArchiveReadFailureEvidence,
   createCleanReadArchiveIntegrityEvidence,
+  isArchiveReadFailureEvidenceConsistent,
   type ArchiveReadFailureCategory,
   type CleanReadArchiveIntegrityEvidence,
   type UnreadableSectorRange,
@@ -266,17 +267,22 @@ export function parseDvdReadFailureResultProtocol(
         candidate.asc !== null ||
         candidate.ascq !== null ||
         candidate.informationLba !== null)) ||
-    (candidate.asc === null) !== (candidate.ascq === null) ||
-    (candidate.category === "unknown" &&
-      candidate.scsiStatus === 0x02 &&
-      candidate.hostStatus === 0 &&
-      (candidate.driverStatus === 0x00 || candidate.driverStatus === 0x08) &&
-      (candidate.senseResponseCode === 0x70 ||
-        candidate.senseResponseCode === 0x72) &&
-      candidate.senseKey === 0x05 &&
-      candidate.asc === 0x21 &&
-      candidate.ascq === 0 &&
-      candidate.informationLba !== null)
+    (candidate.asc === null) !== (candidate.ascq === null)
+  ) {
+    throw new Error("DVD read failure helper result is malformed");
+  }
+  const candidateEvidence = candidate as unknown as DvdReadFailureResult;
+  const hasOutOfRangeSenseEvidence =
+    isArchiveReadFailureEvidenceConsistent({
+      ...candidateEvidence,
+      category: "out_of_range",
+    });
+  if (
+    candidate.category === "unknown" &&
+    hasOutOfRangeSenseEvidence &&
+    (candidate.senseResponseCode === 0x70 ||
+      candidate.senseResponseCode === 0x72) &&
+    candidate.informationLba !== null
   ) {
     throw new Error("DVD read failure helper result is malformed");
   }
@@ -291,14 +297,10 @@ export function parseDvdReadFailureResultProtocol(
       (candidate.retainedImageByteCount !== expectedByteCount &&
         candidate.retainedImageByteCount >
           candidate.firstFailingLba * DVD_SECTOR_SIZE_BYTES) ||
-      candidate.scsiStatus !== 0x02 ||
-      candidate.hostStatus !== 0 ||
-      (candidate.driverStatus !== 0x00 && candidate.driverStatus !== 0x08) ||
+      !isArchiveReadFailureEvidenceConsistent(candidateEvidence) ||
       (candidate.senseResponseCode !== 0x70 &&
         candidate.senseResponseCode !== 0x72) ||
-      candidate.senseKey !== 0x05 ||
-      candidate.asc !== 0x21 ||
-      candidate.ascq !== 0)
+      candidate.informationLba === null)
   ) {
     throw new Error("DVD read failure helper result is malformed");
   }
