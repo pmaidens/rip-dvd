@@ -460,7 +460,11 @@ function DiscInspectionItem({
         {displayTerm(inspection.phase)}
       </span>
       <div>
-        {inspection.status === "running" && inspection.phase === "reading_metadata" ? (
+        {inspection.status === "running" && inspection.phase === "settling" ? (
+          <p>
+            Settling inserted DVD · {formatDuration(elapsedSeconds)} elapsed
+          </p>
+        ) : inspection.status === "running" && inspection.phase === "reading_metadata" ? (
           <>
             <IndeterminateProgress label="Reading DVD metadata" />
             <p>

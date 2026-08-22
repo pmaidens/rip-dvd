@@ -15,7 +15,10 @@ import { Worker } from "node:worker_threads";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { completeCatalogReview } from "./catalog.test-support.js";
+import {
+  beginSettledDiscInspectionForTest as beginSettledDiscInspection,
+  completeCatalogReview,
+} from "./catalog.test-support.js";
 import { createRawDvdContentIdHasher } from "./dvd-content-id.js";
 import { createDvdMetadataFingerprint } from "./dvd-metadata-fingerprint.js";
 import { decodeDvdTitleMap } from "./dvd-scan.js";
@@ -274,9 +277,10 @@ function completeDiscInspection(
     volumeLabel?: string;
   },
 ) {
-  const started = access.discInspections.beginOrResume({
+  const started = beginSettledDiscInspection(access, {
     opticalDriveId: input.opticalDriveId,
     mediaGeneration: input.mediaGeneration,
+    mediaCapacityBytes: 2_048,
   });
   if (!started.claim) {
     throw new Error("Expected a new Disc Inspection claim");
@@ -317,6 +321,7 @@ function completeDiscInspection(
     type: "complete",
     detectedDiscId: scanned.id,
   });
+  started.restoreSystemTime();
   return { claim: started.claim, disc: scanned, inspection };
 }
 
@@ -641,6 +646,132 @@ describe("data-access facade", () => {
     reopened.close();
   });
 
+  it("migrates historical Disc Inspections without inventing settling evidence", () => {
+    const databasePath = createTestDatabasePath();
+    const sqlite = new DatabaseSync(databasePath);
+    const migrationsRoot = new URL("../drizzle/", import.meta.url);
+    const settlingMigration = "20260822142722_disc-inspection-settling";
+    const predecessorNames = readdirSync(migrationsRoot)
+      .filter((name) => /^\d/.test(name) && name < settlingMigration)
+      .sort();
+    for (const migrationName of predecessorNames) {
+      const migration = readFileSync(
+        new URL(`../drizzle/${migrationName}/migration.sql`, import.meta.url),
+        "utf8",
+      );
+      for (const statement of migration.split("--> statement-breakpoint")) {
+        if (statement.trim()) {
+          sqlite.exec(statement);
+        }
+      }
+    }
+    sqlite.exec(`
+      create table __drizzle_migrations (
+        id integer primary key,
+        hash text not null,
+        created_at numeric,
+        name text,
+        applied_at text
+      );
+    `);
+    const recordMigration = sqlite.prepare(`
+      insert into __drizzle_migrations (hash, created_at, name)
+      values (?, 0, ?)
+    `);
+    for (const migrationName of predecessorNames) {
+      recordMigration.run(`pre-settling-${migrationName}`, migrationName);
+    }
+    sqlite.exec(`
+      insert into optical_drives (
+        id, device_path, is_enabled, is_present, last_seen_at, created_at,
+        updated_at
+      ) values
+        ('running-drive', '/dev/running', 1, 1, 1, 1, 1),
+        ('completed-drive', '/dev/completed', 1, 1, 1, 1, 1),
+        ('failed-drive', '/dev/failed', 1, 1, 1, 1, 1),
+        ('aborted-drive', '/dev/aborted', 1, 1, 1, 1, 1);
+      insert into detected_discs (
+        id, optical_drive_id, disc_kind, fingerprint, status, detected_at,
+        created_at, updated_at
+      ) values (
+        'completed-disc', 'completed-drive', 'dvd', 'completed-fingerprint',
+        'scanned', 1, 1, 1
+      );
+      insert into disc_inspections (
+        id, optical_drive_id, detected_disc_id, media_generation, is_current,
+        status, phase, phase_started_at, attempt_started_at, started_at,
+        completed_at, created_at, updated_at
+      ) values
+        ('running-inspection', 'running-drive', null, 'running-generation', 1,
+          'running', 'reading_metadata', 1, 1, 1, null, 1, 1),
+        ('completed-inspection', 'completed-drive', 'completed-disc',
+          'completed-generation', 1, 'completed', 'confirming_media',
+          1, 1, 1, 2, 1, 2),
+        ('failed-inspection', 'failed-drive', null, 'failed-generation', 1,
+          'failed', 'reading_metadata', 1, 1, 1, 2, 1, 2),
+        ('aborted-inspection', 'aborted-drive', null, 'aborted-generation', 0,
+          'aborted', 'confirming_media', 1, 1, 1, 2, 1, 2);
+    `);
+    sqlite.close();
+
+    const migrated = openTestDatabase(databasePath);
+    expect(
+      migrated.discInspections.list().map((inspection) => ({
+        id: inspection.id,
+        status: inspection.status,
+        phase: inspection.phase,
+        mediaCapacityBytes: inspection.mediaCapacityBytes,
+        stableObservationCount: inspection.stableObservationCount,
+        settlingQuietWindowStartedAt:
+          inspection.settlingQuietWindowStartedAt,
+        settlingStartedAt: inspection.settlingStartedAt,
+        settlingResetCount: inspection.settlingResetCount,
+      })),
+    ).toEqual(expect.arrayContaining([
+      {
+        id: "running-inspection",
+        status: "running",
+        phase: "reading_metadata",
+        mediaCapacityBytes: null,
+        stableObservationCount: null,
+        settlingQuietWindowStartedAt: null,
+        settlingStartedAt: null,
+        settlingResetCount: null,
+      },
+      {
+        id: "completed-inspection",
+        status: "completed",
+        phase: "confirming_media",
+        mediaCapacityBytes: null,
+        stableObservationCount: null,
+        settlingQuietWindowStartedAt: null,
+        settlingStartedAt: null,
+        settlingResetCount: null,
+      },
+      {
+        id: "failed-inspection",
+        status: "failed",
+        phase: "reading_metadata",
+        mediaCapacityBytes: null,
+        stableObservationCount: null,
+        settlingQuietWindowStartedAt: null,
+        settlingStartedAt: null,
+        settlingResetCount: null,
+      },
+      {
+        id: "aborted-inspection",
+        status: "aborted",
+        phase: "confirming_media",
+        mediaCapacityBytes: null,
+        stableObservationCount: null,
+        settlingQuietWindowStartedAt: null,
+        settlingStartedAt: null,
+        settlingResetCount: null,
+      },
+    ]));
+    migrated.close();
+  });
+
   it("migrates historical Original Disc Archives to unknown integrity", () => {
     const databasePath = createTestDatabasePath();
     const sqlite = new DatabaseSync(databasePath);
@@ -928,7 +1059,8 @@ describe("data-access facade", () => {
       .filter(
         (name) =>
           name !== "20260812151540_disc-inspection-archive-requests" &&
-          name !== "20260820215821_redundant_jocasta",
+          name !== "20260820215821_redundant_jocasta" &&
+          name !== "20260822142722_disc-inspection-settling",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -7608,6 +7740,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
+        name: "20260822142722_disc-inspection-settling",
+      },
+      {
         name: "20260820215821_redundant_jocasta",
       },
       {
@@ -7633,9 +7768,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260812170422_furry_gateway",
-      },
-      {
-        name: "20260812160800_explicit-archive-only-review",
       },
     ]);
     expect(
@@ -9875,7 +10007,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     sqlite.close();
   });
 
-  it("keeps one current Disc Inspection per insertion and fences stale leases", () => {
+  it("persists stable settling evidence and fences stale leases", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-11T00:00:00.000Z"));
     const access = openTestDatabase();
@@ -9888,25 +10020,56 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     const first = access.discInspections.beginOrResume({
       opticalDriveId: drive.id,
       mediaGeneration: "101",
+      mediaCapacityBytes: 2_048,
     });
-    expect(first.claim).not.toBeNull();
+    expect(first.claim).toBeNull();
     expect(first.inspection).toMatchObject({
       attemptCount: 1,
       isCurrent: true,
-      phase: "reading_metadata",
+      phase: "settling",
+      mediaGeneration: "101",
+      mediaCapacityBytes: 2_048,
+      stableObservationCount: 1,
+      settlingQuietWindowStartedAt: new Date("2026-08-11T00:00:00.000Z"),
+      settlingStartedAt: new Date("2026-08-11T00:00:00.000Z"),
+      settlingResetCount: 0,
       status: "running",
     });
     expect(
       access.discInspections.beginOrResume({
         opticalDriveId: drive.id,
         mediaGeneration: "101",
+        mediaCapacityBytes: 2_048,
       }),
-    ).toMatchObject({ inspection: { id: first.inspection.id }, claim: null });
+    ).toMatchObject({
+      inspection: {
+        id: first.inspection.id,
+        phase: "settling",
+        stableObservationCount: 2,
+      },
+      claim: null,
+    });
+
+    vi.advanceTimersByTime(5_000);
+    const settled = access.discInspections.beginOrResume({
+      opticalDriveId: drive.id,
+      mediaGeneration: "101",
+      mediaCapacityBytes: 2_048,
+    });
+    expect(settled).toMatchObject({
+      inspection: {
+        id: first.inspection.id,
+        phase: "reading_metadata",
+        stableObservationCount: 3,
+      },
+      claim: { id: first.inspection.id },
+    });
 
     vi.advanceTimersByTime(DISC_INSPECTION_LEASE_DURATION_MS + 1);
     const resumed = access.discInspections.beginOrResume({
       opticalDriveId: drive.id,
       mediaGeneration: "101",
+      mediaCapacityBytes: 2_048,
     });
     expect(resumed).toMatchObject({
       inspection: { id: first.inspection.id, attemptCount: 2 },
@@ -9920,18 +10083,22 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       }),
     ]);
     expect(() =>
-      access.discInspections.renew(first.claim!),
+      access.discInspections.renew(settled.claim!),
     ).toThrow(StaleJobAttemptError);
 
     const replacement = access.discInspections.beginOrResume({
       opticalDriveId: drive.id,
       mediaGeneration: "102",
+      mediaCapacityBytes: 2_048,
     });
     expect(replacement.inspection.id).not.toBe(first.inspection.id);
+    expect(replacement.claim).toBeNull();
     expect(access.discInspections.list({ currentOnly: true })).toEqual([
       expect.objectContaining({
         id: replacement.inspection.id,
         mediaGeneration: "102",
+        phase: "settling",
+        stableObservationCount: 1,
       }),
     ]);
     expect(
@@ -9955,9 +10122,10 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       isEnabled: true,
       isPresent: true,
     });
-    let started = access.discInspections.beginOrResume({
+    let started = beginSettledDiscInspection(access, {
       opticalDriveId: drive.id,
       mediaGeneration: "201",
+      mediaCapacityBytes: 2_048,
     });
     expect(started.claim).not.toBeNull();
 
@@ -10045,9 +10213,10 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
           status: "running",
         });
         vi.advanceTimersByTime(1_001);
-        started = access.discInspections.beginOrResume({
+        started = beginSettledDiscInspection(access, {
           opticalDriveId: drive.id,
           mediaGeneration: "201",
+          mediaCapacityBytes: 2_048,
         });
         expect(started.claim).not.toBeNull();
       } else {
@@ -10065,9 +10234,10 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       manualRetryRequestedAt: expect.any(Date),
       status: "failed",
     });
-    const manualAttempt = access.discInspections.beginOrResume({
+    const manualAttempt = beginSettledDiscInspection(access, {
       opticalDriveId: drive.id,
       mediaGeneration: "201",
+      mediaCapacityBytes: 2_048,
     });
     expect(manualAttempt).toMatchObject({
       inspection: {
@@ -10092,9 +10262,10 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         isEnabled: true,
         isPresent: true,
       });
-      const started = access.discInspections.beginOrResume({
+      const started = beginSettledDiscInspection(access, {
         opticalDriveId: drive.id,
         mediaGeneration: `inspection-progress-${terminalType}`,
+        mediaCapacityBytes: 2_048,
       });
       access.discInspections.record(started.claim!, {
         type: "metadata",
@@ -10155,9 +10326,10 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       isEnabled: true,
       isPresent: true,
     });
-    const started = access.discInspections.beginOrResume({
+    const started = beginSettledDiscInspection(access, {
       opticalDriveId: drive.id,
       mediaGeneration: "failed-insertion",
+      mediaCapacityBytes: 2_048,
     });
     access.discInspections.record(started.claim!, {
       type: "fail",
@@ -10173,13 +10345,14 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     const replacement = access.discInspections.beginOrResume({
       opticalDriveId: drive.id,
       mediaGeneration: "replacement-insertion",
+      mediaCapacityBytes: 2_048,
     });
     expect(replacement).toMatchObject({
       inspection: {
         mediaGeneration: "replacement-insertion",
         status: "running",
       },
-      claim: { id: replacement.inspection.id },
+      claim: null,
     });
     expect(replacement.inspection.id).not.toBe(started.inspection.id);
     expect(access.discInspections.list({ ids: [started.inspection.id] }))

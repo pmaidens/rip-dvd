@@ -1,5 +1,33 @@
 import { createCleanReadArchiveIntegrityEvidence } from "@rip-dvd/data-access";
 import type { LegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
+import {
+  beginSettledDiscInspectionForTest,
+  pollDiscSettlingForTest,
+} from "@rip-dvd/data-access/test-support";
+
+import {
+  pollArchiveWorker,
+  type PollArchiveWorkerOptions,
+} from "../../archive-worker/src/archive-worker.js";
+import {
+  createInProcessDvdRescueWorkspaceLock,
+} from "../../archive-worker/src/dvd-rescue-workspace-lock.js";
+
+const testRescueWorkspaceLock = createInProcessDvdRescueWorkspaceLock();
+
+export async function pollArchiveWorkerForTest(
+  options: PollArchiveWorkerOptions,
+): Promise<void> {
+  await pollDiscSettlingForTest(options.access, async () => {
+    await pollArchiveWorker({
+      ...options,
+      rescueWorkspaceLock:
+        options.rescueWorkspaceLock ?? testRescueWorkspaceLock,
+    });
+  });
+}
+
+export { beginSettledDiscInspectionForTest };
 
 export function startArchiveJob(
   access: LegacySidecarDataAccess,
@@ -16,9 +44,10 @@ export function completeDiscInspection(
   disc: ReturnType<LegacySidecarDataAccess["catalog"]["registerDetectedDisc"]>,
   mediaGeneration: string,
 ) {
-  const started = access.discInspections.beginOrResume({
+  const started = beginSettledDiscInspectionForTest(access, {
     opticalDriveId: disc.opticalDriveId,
     mediaGeneration,
+    mediaCapacityBytes: 2_048,
   });
   access.discInspections.record(started.claim!, {
     type: "metadata",
@@ -29,10 +58,12 @@ export function completeDiscInspection(
     subtitleStreamCount: 0,
     totalBytes: 9,
   });
-  return access.discInspections.record(started.claim!, {
+  const completed = access.discInspections.record(started.claim!, {
     type: "complete",
     detectedDiscId: disc.id,
   });
+  started.restoreSystemTime();
+  return completed;
 }
 
 export function seedFailedArchiveJobAndQueuedDuplicate(
