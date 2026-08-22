@@ -1150,7 +1150,7 @@ describe("data-access facade", () => {
           name !== "20260822175220_striped_kabuki" &&
           name !== "20260822183552_bounded-disc-settling" &&
           name !== "20260822185006_burly_northstar" &&
-          name !== "20260822191832_volatile_starhawk",
+          name !== "20260822193801_safe_proteus",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -8009,7 +8009,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
-        name: "20260822191832_volatile_starhawk",
+        name: "20260822193801_safe_proteus",
       },
       {
         name: "20260822185006_burly_northstar",
@@ -11288,6 +11288,69 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     ]);
     access.close();
   });
+
+  it.each([
+    { category: "not_ready", senseKey: 0x02, asc: 0x04, ascq: 0x01 },
+    { category: "unit_attention", senseKey: 0x06, asc: 0x28, ascq: 0x00 },
+    { category: "hardware_error", senseKey: 0x04, asc: 0x44, ascq: 0x00 },
+    { category: "protection_error", senseKey: 0x07, asc: 0x27, ascq: 0x00 },
+  ] as const)(
+    "rejects null required $category evidence at the SQLite boundary",
+    ({ category, senseKey, asc, ascq }) => {
+      const databasePath = createTestDatabasePath();
+      const access = openTestDatabase(databasePath);
+      const drive = access.catalog.upsertOpticalDrive({
+        devicePath: `/dev/${category}-constraint`,
+        isEnabled: true,
+        isPresent: true,
+      });
+      const { disc, inspection } = completeDiscInspection(access, {
+        opticalDriveId: drive.id,
+        mediaGeneration: `${category}-constraint`,
+        fingerprint: `${category}-constraint`,
+      });
+      access.archiveRequests.create({ detectedDiscId: disc.id });
+      const job = access.archiveJobs.startForInspection(
+        inspection.id,
+        `${category}-constraint-worker`,
+      )!;
+      access.archiveJobs.failWithReadFailure(job, {
+        stage: "initial_copy",
+        category,
+        classifierVersion: "scsi-read-classifier-v1",
+        failingLba: 1_024,
+        requestedBlockCount: 16,
+        retryCount: 2,
+        scsiStatus: 2,
+        hostStatus: 0,
+        driverStatus: 8,
+        senseKey,
+        asc,
+        ascq,
+      });
+      access.close();
+
+      const sqlite = new DatabaseSync(databasePath);
+      const constraint = /archive_jobs_read_failure_category_evidence_check/;
+      expect(() =>
+        sqlite.prepare(`
+          update archive_jobs
+          set read_failure_scsi_status = null,
+              read_failure_host_status = null,
+              read_failure_driver_status = null
+          where id = ?
+        `).run(job.id),
+      ).toThrow(constraint);
+      expect(() =>
+        sqlite.prepare(`
+          update archive_jobs
+          set read_failure_sense_key = null
+          where id = ?
+        `).run(job.id),
+      ).toThrow(constraint);
+      sqlite.close();
+    },
+  );
 
   it("continues an Archive Request on another matching Optical Drive", () => {
     const access = openTestDatabase();
