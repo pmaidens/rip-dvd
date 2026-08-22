@@ -46,18 +46,18 @@ RUN curl --fail --location --silent --show-error \
 COPY docker/dvdcss-reader.c /tmp/dvdcss-reader.c
 COPY docker/test-dvdcss-reader.mjs /tmp/test-dvdcss-reader.mjs
 RUN gcc -std=c17 -O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong \
-    -Wall -Wextra -Werror -Wformat=2 \
+    -Wall -Wextra -Werror -Wformat=2 -pthread \
     /tmp/dvdcss-reader.c /tmp/libdvdcss-sg-io.c \
     --output /usr/local/bin/rip-dvd-dvdcss-reader \
     $(pkg-config --cflags --libs libdvdcss) -lcrypto \
   && gcc -std=c17 -O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong \
     -DRIP_DVD_READER_TESTING \
-    -Wall -Wextra -Werror -Wformat=2 \
+    -Wall -Wextra -Werror -Wformat=2 -pthread \
     /tmp/dvdcss-reader.c /tmp/libdvdcss-sg-io.c \
     --output /tmp/rip-dvd-dvdcss-reader-test \
     $(pkg-config --cflags --libs libdvdcss) -lcrypto \
   && gcc -std=c17 -O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong \
-    -Wall -Wextra -Werror -Wformat=2 -fPIC -shared \
+    -Wall -Wextra -Werror -Wformat=2 -pthread -fPIC -shared \
     /tmp/libdvdcss-sg-io.c \
     -Wl,-soname,libdvdcss-sg-io.so.0 -Wl,-z,defs \
     --output /usr/local/lib/libdvdcss-sg-io.so.0 \
