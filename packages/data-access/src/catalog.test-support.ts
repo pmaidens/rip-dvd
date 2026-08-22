@@ -1,40 +1,12 @@
-import { vi } from "vitest";
-
 import type {
   DataAccess,
   DetectedDisc,
   OriginalDiscArchiveId,
   RunningArchiveJob,
 } from "./types.js";
+import { beginSettledDiscInspectionForTest } from "./disc-settling-fixture.js";
 
-export function beginSettledDiscInspectionForTest(
-  access: DataAccess,
-  input: Parameters<DataAccess["discInspections"]["beginOrResume"]>[0],
-) {
-  const alreadyUsingFakeTimers = vi.isFakeTimers();
-  if (!alreadyUsingFakeTimers) {
-    vi.useFakeTimers({ toFake: ["Date"] });
-  }
-  const firstObservationAt = Date.now();
-  access.discInspections.beginOrResume(input);
-  vi.setSystemTime(new Date(firstObservationAt + 2_500));
-  access.discInspections.beginOrResume(input);
-  vi.setSystemTime(new Date(firstObservationAt + 5_000));
-  const settled = access.discInspections.beginOrResume(input);
-  if (settled.claim === null) {
-    throw new Error("Expected a settled Disc Inspection claim");
-  }
-  return {
-    ...settled,
-    restoreSystemTime() {
-      if (alreadyUsingFakeTimers) {
-        vi.setSystemTime(new Date(firstObservationAt));
-      } else {
-        vi.useRealTimers();
-      }
-    },
-  };
-}
+export { beginSettledDiscInspectionForTest };
 
 export function completeCatalogReview(
   access: DataAccess,

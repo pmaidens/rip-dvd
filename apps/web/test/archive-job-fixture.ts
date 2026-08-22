@@ -1,6 +1,9 @@
 import { createCleanReadArchiveIntegrityEvidence } from "@rip-dvd/data-access";
 import type { LegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
-import { vi } from "vitest";
+import {
+  beginSettledDiscInspectionForTest,
+  pollDiscSettlingForTest,
+} from "@rip-dvd/data-access/test-support";
 
 import {
   pollArchiveWorker,
@@ -15,62 +18,16 @@ const testRescueWorkspaceLock = createInProcessDvdRescueWorkspaceLock();
 export async function pollArchiveWorkerForTest(
   options: PollArchiveWorkerOptions,
 ): Promise<void> {
-  const alreadyUsingFakeTimers = vi.isFakeTimers();
-  if (!alreadyUsingFakeTimers) {
-    vi.useFakeTimers({ toFake: ["Date"] });
-  }
-  const firstObservationAt = Date.now();
-  try {
-    for (const elapsedMs of [0, 2_500, 5_000]) {
-      vi.setSystemTime(new Date(firstObservationAt + elapsedMs));
-      await pollArchiveWorker({
-        ...options,
-        rescueWorkspaceLock:
-          options.rescueWorkspaceLock ?? testRescueWorkspaceLock,
-      });
-      if (!options.access.discInspections.list({ currentOnly: true }).some(
-        (inspection) => inspection.phase === "settling",
-      )) {
-        return;
-      }
-    }
-  } finally {
-    if (!alreadyUsingFakeTimers) {
-      vi.useRealTimers();
-    }
-  }
+  await pollDiscSettlingForTest(options.access, async () => {
+    await pollArchiveWorker({
+      ...options,
+      rescueWorkspaceLock:
+        options.rescueWorkspaceLock ?? testRescueWorkspaceLock,
+    });
+  });
 }
 
-export function beginSettledDiscInspectionForTest(
-  access: LegacySidecarDataAccess,
-  input: Parameters<
-    LegacySidecarDataAccess["discInspections"]["beginOrResume"]
-  >[0],
-) {
-  const alreadyUsingFakeTimers = vi.isFakeTimers();
-  if (!alreadyUsingFakeTimers) {
-    vi.useFakeTimers({ toFake: ["Date"] });
-  }
-  const firstObservationAt = Date.now();
-  access.discInspections.beginOrResume(input);
-  vi.setSystemTime(new Date(firstObservationAt + 2_500));
-  access.discInspections.beginOrResume(input);
-  vi.setSystemTime(new Date(firstObservationAt + 5_000));
-  const settled = access.discInspections.beginOrResume(input);
-  if (settled.claim === null) {
-    throw new Error("Expected a settled Disc Inspection claim");
-  }
-  return {
-    ...settled,
-    restoreSystemTime() {
-      if (alreadyUsingFakeTimers) {
-        vi.setSystemTime(new Date(firstObservationAt));
-      } else {
-        vi.useRealTimers();
-      }
-    },
-  };
-}
+export { beginSettledDiscInspectionForTest };
 
 export function startArchiveJob(
   access: LegacySidecarDataAccess,
