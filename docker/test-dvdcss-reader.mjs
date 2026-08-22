@@ -661,24 +661,27 @@ for (const [name, sense] of [
   }
 }
 
-const continuedBoundary = runTestCopy(
-  "continued-boundary-initial",
+const boundaryDriveA = runTestCopy(
+  "cross-drive-boundary-drive-a",
   rawCompletionFault(35, "always", fixedOutOfRangeSense(35)),
 );
-const continuedBoundaryResult = runTestBoundaryResume(
-  continuedBoundary.outputPath,
+const boundaryRescueIdentity = statSync(boundaryDriveA.outputPath);
+const boundaryMatchingDrive = runTestBoundaryResume(
+  boundaryDriveA.outputPath,
   "none",
   31 * 2_048,
 );
 if (
-  continuedBoundaryResult.status !== 0 ||
-  !readFileSync(continuedBoundary.outputPath).equals(content) ||
-  recoveryResult(continuedBoundaryResult.stderr).badSectorCount !== 0 ||
-  JSON.stringify(testReads(continuedBoundaryResult.stderr)) !==
-    JSON.stringify([{ lba: 31, blocks: 9 }])
+  boundaryMatchingDrive.status !== 0 ||
+  !readFileSync(boundaryDriveA.outputPath).equals(content) ||
+  recoveryResult(boundaryMatchingDrive.stderr).badSectorCount !== 0 ||
+  JSON.stringify(testReads(boundaryMatchingDrive.stderr)) !==
+    JSON.stringify([{ lba: 31, blocks: 9 }]) ||
+  statSync(boundaryDriveA.outputPath).dev !== boundaryRescueIdentity.dev ||
+  statSync(boundaryDriveA.outputPath).ino !== boundaryRescueIdentity.ino
 ) {
   throw new Error(
-    `libdvdcss boundary continuation check failed: ${continuedBoundaryResult.stderr}`,
+    `libdvdcss cross-drive boundary continuation check failed: ${boundaryMatchingDrive.stderr}`,
   );
 }
 
@@ -1134,6 +1137,78 @@ if (
 ) {
   throw new Error(
     `libdvdcss persistent resume check failed: ${persistentResume.stderr}`,
+  );
+}
+
+const driveACompletionSet = [
+  rawCompletionFault(5, "always", fixedMediumSense(5)),
+  rawCompletionFault(9, "always", descriptorMediumSense(9)),
+].join(",");
+const driveA = runTestCopy("cross-drive-rescue-drive-a", driveACompletionSet);
+const driveAResult = recoveryResult(driveA.stderr);
+const sharedRescueIdentity = statSync(driveA.outputPath);
+if (
+  driveA.status !== 0 ||
+  JSON.stringify(badSectorRanges(driveAResult, 40)) !==
+    JSON.stringify([
+      { startLba: 5, sectorCount: 1 },
+      { startLba: 9, sectorCount: 1 },
+    ])
+) {
+  throw new Error(
+    `libdvdcss cross-drive initial rescue check failed: ${driveA.stderr}`,
+  );
+}
+
+const driveBCompletionSet = rawCompletionFault(
+  9,
+  "always",
+  fixedMediumSense(9),
+);
+const driveB = runTestResume(
+  driveA.outputPath,
+  driveBCompletionSet,
+  driveAResult.badSectorBitmapHex,
+);
+const driveBResult = recoveryResult(driveB.stderr);
+const driveBImage = readFileSync(driveA.outputPath);
+if (
+  driveB.status !== 0 ||
+  JSON.stringify(badSectorRanges(driveBResult, 40)) !==
+    JSON.stringify([{ startLba: 9, sectorCount: 1 }]) ||
+  JSON.stringify(testReads(driveB.stderr)) !==
+    JSON.stringify([
+      { lba: 5, blocks: 1 },
+      { lba: 9, blocks: 1 },
+      { lba: 9, blocks: 1 },
+    ]) ||
+  !driveBImage.subarray(5 * 2_048, 6 * 2_048)
+    .equals(content.subarray(5 * 2_048, 6 * 2_048)) ||
+  !driveBImage.subarray(9 * 2_048, 10 * 2_048).equals(Buffer.alloc(2_048)) ||
+  statSync(driveA.outputPath).dev !== sharedRescueIdentity.dev ||
+  statSync(driveA.outputPath).ino !== sharedRescueIdentity.ino
+) {
+  throw new Error(
+    `libdvdcss cross-drive partial rescue check failed: ${driveB.stderr}`,
+  );
+}
+
+const finalMatchingDrive = runTestResume(
+  driveA.outputPath,
+  "none",
+  driveBResult.badSectorBitmapHex,
+);
+if (
+  finalMatchingDrive.status !== 0 ||
+  !readFileSync(driveA.outputPath).equals(content) ||
+  recoveryResult(finalMatchingDrive.stderr).badSectorCount !== 0 ||
+  JSON.stringify(testReads(finalMatchingDrive.stderr)) !==
+    JSON.stringify([{ lba: 9, blocks: 1 }]) ||
+  statSync(driveA.outputPath).dev !== sharedRescueIdentity.dev ||
+  statSync(driveA.outputPath).ino !== sharedRescueIdentity.ino
+) {
+  throw new Error(
+    `libdvdcss cross-drive complete rescue check failed: ${finalMatchingDrive.stderr}`,
   );
 }
 
