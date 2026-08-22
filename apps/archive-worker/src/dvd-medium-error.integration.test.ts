@@ -491,8 +491,7 @@ describe.runIf(nativeTestExecutable !== "")(
       const fixture = createFixture(
         "44444444-4444-4444-8444-444444444444",
       );
-      const illegalRequestSense =
-        "f00005000000050a00000000210000000000";
+      const illegalRequestSense = fixedSense(5, 0x05, 0x20);
       const runner = createSyntheticDvdCopyRunner({
         faults: rawCompletionFault(5, "always", illegalRequestSense),
         sourcePath: fixture.sourcePath,
