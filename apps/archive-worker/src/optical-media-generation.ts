@@ -9,6 +9,11 @@ import {
   type BoundedChildProcessLauncher,
 } from "./bounded-child-process.js";
 import { optionalBoundedText } from "./bounded-text.js";
+import { DiscInspectionError } from "./disc-inspection-error.js";
+import {
+  textReportsDriveUnavailable,
+  textReportsNoMedium,
+} from "./optical-drive-command-runner.js";
 
 const DEFAULT_OBSERVATION_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_ACTIVE_PROBES = 32;
@@ -130,11 +135,36 @@ export function createNodeMediaGenerationObserver(
       // Opening the block device makes Linux run the optical driver's media
       // event check. Keep the handle open until the resulting disk sequence is
       // read so a passive sysfs value is never used as the cache authority.
-      const value = await activeProbes.run(safeDevicePath, safeDevicePath, {
-        signal,
-        timeoutError: "Optical Drive media observation timed out",
-        timeoutMs: observationTimeoutMs,
-      });
+      let value: string;
+      try {
+        value = await activeProbes.run(safeDevicePath, safeDevicePath, {
+          signal,
+          timeoutError: "Optical Drive media observation timed out",
+          timeoutMs: observationTimeoutMs,
+        });
+      } catch (error) {
+        if (signal.aborted) {
+          throw error;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        if (textReportsNoMedium(message)) {
+          throw new DiscInspectionError(
+            "abort",
+            "no_medium",
+            "No medium is present in the Optical Drive",
+            { cause: error },
+          );
+        }
+        if (textReportsDriveUnavailable(message)) {
+          throw new DiscInspectionError(
+            "retry",
+            "drive_unavailable",
+            "Optical Drive is unavailable during media observation",
+            { cause: error },
+          );
+        }
+        throw error;
+      }
       return requireMediaGeneration(value);
     },
   };

@@ -48,8 +48,11 @@ import {
 import { DiscInspectionError } from "./disc-inspection-error.js";
 import {
   createLinuxOpticalDriveHardware,
+  createNodeMediaGenerationObserver,
   type CommandResult,
   type CommandRunner,
+  type MediaGenerationObserver,
+  type MediaGenerationProbeLauncher,
 } from "./optical-drive-hardware.js";
 
 const temporaryDirectories: string[] = [];
@@ -137,12 +140,16 @@ interface SimulatedLinuxOpticalDrive extends DiscoveredOpticalDrive {
 
 function createLinuxSettlingHardware({
   capacityResult,
+  deviceInstanceObserver,
   drives,
   mediaGeneration,
+  mediaGenerationObserver,
 }: {
   capacityResult(devicePath: string): CommandResult;
+  deviceInstanceObserver?: MediaGenerationObserver;
   drives(): readonly SimulatedLinuxOpticalDrive[];
   mediaGeneration: string;
+  mediaGenerationObserver?: MediaGenerationObserver;
 }) {
   const runner: CommandRunner = {
     run: vi.fn(async (executable, arguments_) => {
@@ -170,10 +177,10 @@ function createLinuxSettlingHardware({
   };
   return {
     hardware: createLinuxOpticalDriveHardware({
-      deviceInstanceObserver: {
+      deviceInstanceObserver: deviceInstanceObserver ?? {
         observe: vi.fn(async (devicePath) => `${devicePath}-instance`),
       },
-      mediaGenerationObserver: {
+      mediaGenerationObserver: mediaGenerationObserver ?? {
         observe: vi.fn().mockResolvedValue(mediaGeneration),
       },
       platform: "linux",
@@ -3472,6 +3479,143 @@ describe("archive worker polling", () => {
         reasonCode: "drive_unavailable",
       }),
     ]);
+    expect(runner.run).not.toHaveBeenCalledWith(
+      "rip-dvd-lsdvd",
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(access.catalog.listDetectedDiscs()).toEqual([]);
+    access.close();
+  });
+
+  it("keeps media probe no-medium failures as ordinary empty polling", async () => {
+    const access = openTestDataAccess();
+    const probeLauncher: MediaGenerationProbeLauncher = {
+      start: vi.fn(() => {
+        const result = Promise.reject(
+          new Error("ENOMEDIUM: no medium found, open '/dev/sr0'"),
+        );
+        return {
+          cancel: vi.fn(),
+          closed: result.then(() => undefined, () => undefined),
+          result,
+        };
+      }),
+    };
+    const mediaGenerationObserver = createNodeMediaGenerationObserver({
+      probeLauncher,
+    });
+    const { hardware, runner } = createLinuxSettlingHardware({
+      capacityResult: () => ({
+        exitCode: 0,
+        stdout: "4700372992\n",
+        stderr: "",
+      }),
+      deviceInstanceObserver: mediaGenerationObserver,
+      drives: () => [{
+        devicePath: "/dev/sr0",
+        product: "DVD-RW",
+        serialNumber: "PROBE-EMPTY-001",
+        vendor: "Pioneer",
+      }],
+      mediaGeneration: "71",
+      mediaGenerationObserver,
+    });
+    const log = vi.fn();
+
+    await pollArchiveWorkerOnce({
+      access,
+      configuredDevicePath: "/dev/sr0",
+      hardware,
+      log,
+      signal: new AbortController().signal,
+    });
+
+    expect(access.discInspections.list()).toEqual([]);
+    expect(access.catalog.listDetectedDiscs()).toEqual([]);
+    expect(
+      vi.mocked(runner.run).mock.calls.filter(
+        ([executable]) => executable === "blockdev",
+      ),
+    ).toHaveLength(0);
+    expect(runner.run).not.toHaveBeenCalledWith(
+      "rip-dvd-lsdvd",
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(log).not.toHaveBeenCalled();
+    access.close();
+  });
+
+  it("classifies media probe permission loss before blockdev as drive_unavailable", async () => {
+    const access = openTestDataAccess();
+    let accessible = true;
+    const probeLauncher: MediaGenerationProbeLauncher = {
+      start: vi.fn(() => {
+        const result = accessible
+          ? Promise.resolve("61\n")
+          : Promise.reject(
+              new Error("EACCES: permission denied, open '/dev/sr0'"),
+            );
+        return {
+          cancel: vi.fn(),
+          closed: result.then(() => undefined, () => undefined),
+          result,
+        };
+      }),
+    };
+    const mediaGenerationObserver = createNodeMediaGenerationObserver({
+      probeLauncher,
+    });
+    const { hardware, runner } = createLinuxSettlingHardware({
+      capacityResult: () => ({
+        exitCode: 0,
+        stdout: "4700372992\n",
+        stderr: "",
+      }),
+      deviceInstanceObserver: mediaGenerationObserver,
+      drives: () => [{
+        devicePath: "/dev/sr0",
+        product: "DVD-RW",
+        serialNumber: "PROBE-UNAVAILABLE-001",
+        vendor: "Pioneer",
+      }],
+      mediaGeneration: "61",
+      mediaGenerationObserver,
+    });
+    const options = {
+      access,
+      configuredDevicePath: "/dev/sr0",
+      hardware,
+      log: vi.fn(),
+      signal: new AbortController().signal,
+    };
+
+    await pollArchiveWorkerOnce(options);
+    const settling = access.discInspections.list({ currentOnly: true })[0]!;
+    accessible = false;
+    await pollArchiveWorkerOnce(options);
+
+    expect(access.discInspections.list({ ids: [settling.id] })).toEqual([
+      expect.objectContaining({
+        diagnostic: null,
+        isCurrent: false,
+        reasonCode: "drive_unavailable",
+        status: "aborted",
+      }),
+    ]);
+    expect(access.discInspections.listAttempts(settling.id)).toEqual([
+      expect.objectContaining({
+        outcome: "aborted",
+        phase: "settling",
+        reasonCode: "drive_unavailable",
+      }),
+    ]);
+    expect(
+      vi.mocked(runner.run).mock.calls.filter(
+        ([executable]) => executable === "blockdev",
+      ),
+    ).toHaveLength(1);
     expect(runner.run).not.toHaveBeenCalledWith(
       "rip-dvd-lsdvd",
       expect.anything(),

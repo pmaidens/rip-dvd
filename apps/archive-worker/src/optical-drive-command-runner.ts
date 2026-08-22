@@ -103,14 +103,24 @@ export function createNodeCommandRunner(
 
 export const nodeCommandRunner = createNodeCommandRunner();
 
+export function textReportsNoMedium(value: string): boolean {
+  return /\bENOMEDIUM\b|no medium found|medium not present/i.test(value);
+}
+
 export function reportsNoMedium(result: CommandResult): boolean {
-  return /no medium found|medium not present/i.test(
+  return textReportsNoMedium(
     `${result.stdout}\n${result.stderr}`,
   );
 }
 
+export function textReportsDriveUnavailable(value: string): boolean {
+  return /\b(?:EACCES|EPERM|ENOENT|ENODEV)\b|permission denied|operation not permitted|access denied|not authorized|no such (?:file or directory|device(?: or address)?)/i.test(
+    value,
+  );
+}
+
 export function reportsDriveUnavailable(result: CommandResult): boolean {
-  return /permission denied|operation not permitted|access denied|not authorized|no such (?:file or directory|device(?: or address)?)/i.test(
+  return textReportsDriveUnavailable(
     `${result.stdout}\n${result.stderr}`,
   );
 }
