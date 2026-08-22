@@ -11,7 +11,9 @@ import {
 } from "drizzle-orm/sqlite-core";
 
 import {
+  ARCHIVE_FAILURE_DETAIL_VERSIONS,
   ARCHIVE_JOB_STATUSES,
+  ARCHIVE_READ_FAILURE_STAGES,
   ARCHIVE_REQUEST_STATUSES,
   ARCHIVE_RUNNING_PROGRESS_PHASES,
   ARCHIVE_FORMATS,
@@ -36,6 +38,7 @@ import type {
   ArchiveRequestId,
   ArchiveJobId,
   ArchiveJobClaimToken,
+  ArchiveReadFailureStage,
   DetectedDiscId,
   DiscInspectionAttemptId,
   DiscInspectionClaimToken,
@@ -672,6 +675,27 @@ export const archiveJobs = sqliteTable(
     startedAt: integer("started_at", { mode: "timestamp_ms" }),
     completedAt: integer("completed_at", { mode: "timestamp_ms" }),
     errorMessage: text("error_message"),
+    failureDetailVersion: text("failure_detail_version", {
+      enum: ARCHIVE_FAILURE_DETAIL_VERSIONS,
+    }),
+    readFailureStage: text("read_failure_stage", {
+      enum: ARCHIVE_READ_FAILURE_STAGES,
+    }).$type<ArchiveReadFailureStage>(),
+    readFailureCategory: text("read_failure_category", {
+      enum: ["unknown"] as const,
+    }),
+    readFailureClassifierVersion: text("read_failure_classifier_version"),
+    readFailureLba: integer("read_failure_lba"),
+    readFailureRequestedBlockCount: integer(
+      "read_failure_requested_block_count",
+    ),
+    readFailureRetryCount: integer("read_failure_retry_count"),
+    readFailureScsiStatus: integer("read_failure_scsi_status"),
+    readFailureHostStatus: integer("read_failure_host_status"),
+    readFailureDriverStatus: integer("read_failure_driver_status"),
+    readFailureSenseKey: integer("read_failure_sense_key"),
+    readFailureAsc: integer("read_failure_asc"),
+    readFailureAscq: integer("read_failure_ascq"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -711,6 +735,14 @@ export const archiveJobs = sqliteTable(
     check(
       "archive_jobs_attempt_shape_check",
       sql`(${table.status} = 'running' and ${table.claimedBy} is not null and ${table.claimToken} is not null and ${table.claimedAt} is not null and ${table.startedAt} is not null and ${table.completedAt} is null) or (${table.status} <> 'running' and ${table.startedAt} is not null and ${table.completedAt} is not null)`,
+    ),
+    check(
+      "archive_jobs_failure_detail_version_check",
+      sql`${table.failureDetailVersion} is null or (${table.status} = 'failed' and ${table.failureDetailVersion} in (${sqliteStringLiterals(ARCHIVE_FAILURE_DETAIL_VERSIONS)}))`,
+    ),
+    check(
+      "archive_jobs_read_failure_shape_check",
+      sql`(${table.readFailureCategory} is null and ${table.readFailureStage} is null and ${table.readFailureClassifierVersion} is null and ${table.readFailureLba} is null and ${table.readFailureRequestedBlockCount} is null and ${table.readFailureRetryCount} is null and ${table.readFailureScsiStatus} is null and ${table.readFailureHostStatus} is null and ${table.readFailureDriverStatus} is null and ${table.readFailureSenseKey} is null and ${table.readFailureAsc} is null and ${table.readFailureAscq} is null) or (${table.status} = 'failed' and ${table.readFailureStage} in (${sqliteStringLiterals(ARCHIVE_READ_FAILURE_STAGES)}) and ${table.readFailureCategory} = 'unknown' and typeof(${table.readFailureClassifierVersion}) = 'text' and length(${table.readFailureClassifierVersion}) between 1 and 128 and typeof(${table.readFailureLba}) = 'integer' and ${table.readFailureLba} >= 0 and typeof(${table.readFailureRequestedBlockCount}) = 'integer' and ${table.readFailureRequestedBlockCount} between 1 and 4294967295 and typeof(${table.readFailureRetryCount}) = 'integer' and ${table.readFailureRetryCount} between 0 and 4294967295 and (${table.readFailureScsiStatus} is null or (typeof(${table.readFailureScsiStatus}) = 'integer' and ${table.readFailureScsiStatus} between 0 and 255)) and (${table.readFailureHostStatus} is null or (typeof(${table.readFailureHostStatus}) = 'integer' and ${table.readFailureHostStatus} between 0 and 65535)) and (${table.readFailureDriverStatus} is null or (typeof(${table.readFailureDriverStatus}) = 'integer' and ${table.readFailureDriverStatus} between 0 and 65535)) and (${table.readFailureSenseKey} is null or (typeof(${table.readFailureSenseKey}) = 'integer' and ${table.readFailureSenseKey} between 0 and 15)) and (${table.readFailureAsc} is null or (typeof(${table.readFailureAsc}) = 'integer' and ${table.readFailureAsc} between 0 and 255)) and (${table.readFailureAscq} is null or (typeof(${table.readFailureAscq}) = 'integer' and ${table.readFailureAscq} between 0 and 255)) and ((${table.readFailureScsiStatus} is null and ${table.readFailureHostStatus} is null and ${table.readFailureDriverStatus} is null) or (${table.readFailureScsiStatus} is not null and ${table.readFailureHostStatus} is not null and ${table.readFailureDriverStatus} is not null)) and ((${table.readFailureAsc} is null and ${table.readFailureAscq} is null) or (${table.readFailureAsc} is not null and ${table.readFailureAscq} is not null)))`,
     ),
   ],
 );

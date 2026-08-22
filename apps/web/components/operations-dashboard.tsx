@@ -187,6 +187,7 @@ interface DashboardJobItemProps {
   progressPercent: number;
   progressDetail?: string | null;
   failureDetail?: string | null;
+  failureDiagnostic?: string | null;
   annotation?: React.ReactNode;
   action?: React.ReactNode;
   verification?: FilesystemVerificationDisplay;
@@ -199,6 +200,7 @@ function DashboardJobItem({
   progressPercent,
   progressDetail,
   failureDetail,
+  failureDiagnostic,
   annotation,
   action,
   verification,
@@ -227,6 +229,12 @@ function DashboardJobItem({
           <div className="job-failure-detail">
             <strong>Failure details</strong>
             <p>{failureDetail ?? "No additional details were recorded."}</p>
+            {failureDiagnostic ? (
+              <>
+                <strong>Structured diagnostic</strong>
+                <p>{failureDiagnostic}</p>
+              </>
+            ) : null}
           </div>
         </details>
       ) : null}
@@ -364,6 +372,7 @@ function ArchiveJobItem({
       progressPercent={job.progressPercent}
       progressDetail={archiveProgressDetail(job)}
       failureDetail={job.failureDetail}
+      failureDiagnostic={job.failureDiagnostic}
       annotation={
         progressHealth?.status === "not_advancing" ? (
           <div className="archive-progress-warning" role="alert">
@@ -1131,6 +1140,9 @@ export function DashboardView({
                       {displayTerm(attempt.status)}
                       {attempt.failureDetail
                         ? ` · ${attempt.failureDetail}`
+                        : ""}
+                      {attempt.failureDiagnostic
+                        ? ` · ${attempt.failureDiagnostic}`
                         : ""}
                     </li>
                   ))}

@@ -29,6 +29,8 @@ import {
 import {
   createCleanDvdRecoveryResult,
   createDamagedDvdRecoveryResult,
+  DvdReadFailureError,
+  DVD_READ_FAILURE_RESULT_PREFIX,
   DVD_RECOVERY_RESULT_PREFIX,
 } from "./dvd-recovery-contracts.js";
 import { dvdRescueWorkspacePaths } from "./dvd-rescue-workspace.js";
@@ -804,6 +806,301 @@ describe("DVD archive publication", () => {
         { startLba: 1, sectorCount: 2 },
       ]),
     );
+  });
+
+  it("returns one complete unknown read failure from the native reader", async () => {
+    const originalsLibraryPath = createOriginalsLibrary();
+    const child = createMockDvdCopyChild();
+    const runner = createNodeDvdCopyRunner({
+      requireInactive: () => undefined,
+      spawnProcess: vi.fn(() => child),
+    });
+    const sizeBytes = 4 * 2_048;
+    const completion = runner.copy({
+      devicePath: "/dev/zero",
+      outputPath: join(originalsLibraryPath, ".disc.iso.rip-dvd-partial"),
+      sizeBytes,
+      signal: new AbortController().signal,
+      onBytesCopied: () => undefined,
+    });
+
+    child.stdio[4].emit(
+      "data",
+      Buffer.from("rip-dvd-copy-authorization-ready\n"),
+    );
+    child.stderr.emit(
+      "data",
+      Buffer.from(
+        `${DVD_READ_FAILURE_RESULT_PREFIX}${JSON.stringify({
+          protocolVersion: 1,
+          classifierVersion: "scsi-read-classifier-v1",
+          category: "unknown",
+          scsiStatus: 2,
+          hostStatus: 0,
+          driverStatus: 8,
+          senseResponseCode: 112,
+          senseKey: 5,
+          asc: 33,
+          ascq: 0,
+          informationLba: 1,
+          requestedLba: 0,
+          requestedBlockCount: 4,
+          retryOrdinal: 0,
+        })}\n`,
+      ),
+    );
+    child.emit("close", 3, null);
+
+    await expect(completion).rejects.toMatchObject({
+      message: "DVD read failed with structured unknown evidence",
+      readFailure: {
+        protocolVersion: 1,
+        classifierVersion: "scsi-read-classifier-v1",
+        category: "unknown",
+        informationLba: 1,
+        requestedLba: 0,
+        requestedBlockCount: 4,
+        retryOrdinal: 0,
+        scsiStatus: 2,
+        hostStatus: 0,
+        driverStatus: 8,
+        senseResponseCode: 112,
+        senseKey: 5,
+        asc: 33,
+        ascq: 0,
+      },
+    });
+  });
+
+  it("retains an unsupported bounded sense response as unknown evidence", async () => {
+    const child = createMockDvdCopyChild();
+    const runner = createNodeDvdCopyRunner({
+      requireInactive: () => undefined,
+      spawnProcess: vi.fn(() => child),
+    });
+    const completion = runner.copy({
+      devicePath: "/dev/zero",
+      outputPath: join(
+        createOriginalsLibrary(),
+        ".unsupported-sense.iso.rip-dvd-partial",
+      ),
+      sizeBytes: 4 * 2_048,
+      signal: new AbortController().signal,
+      onBytesCopied: () => undefined,
+    });
+
+    child.stdio[4].emit(
+      "data",
+      Buffer.from("rip-dvd-copy-authorization-ready\n"),
+    );
+    child.stderr.emit(
+      "data",
+      Buffer.from(
+        `${DVD_READ_FAILURE_RESULT_PREFIX}${JSON.stringify({
+          protocolVersion: 1,
+          classifierVersion: "scsi-read-classifier-v1",
+          category: "unknown",
+          scsiStatus: 2,
+          hostStatus: 0,
+          driverStatus: 8,
+          senseResponseCode: 0x7f,
+          senseKey: null,
+          asc: null,
+          ascq: null,
+          informationLba: null,
+          requestedLba: 0,
+          requestedBlockCount: 4,
+          retryOrdinal: 0,
+        })}\n`,
+      ),
+    );
+    child.emit("close", 3, null);
+
+    await expect(completion).rejects.toMatchObject({
+      readFailure: expect.objectContaining({
+        category: "unknown",
+        senseResponseCode: 0x7f,
+        senseKey: null,
+        asc: null,
+        ascq: null,
+      }),
+    });
+  });
+
+  it.each([
+    {
+      name: "duplicate",
+      lines: (payload: string) => [payload, payload],
+      status: 3,
+    },
+    {
+      name: "contradictory",
+      lines: (payload: string) => [
+        payload,
+        `${DVD_RECOVERY_RESULT_PREFIX}${JSON.stringify({
+          protocolVersion: 1,
+          declaredByteCount: 4 * 2_048,
+          recoveredByteCount: 4 * 2_048,
+          recoveryPolicyVersion: "dvd-recovery-v1",
+          badSectorCount: 0,
+          badAreaCount: 0,
+          badSectorBitmapHex: "",
+        })}`,
+      ],
+      status: 3,
+    },
+    {
+      name: "partial",
+      lines: () => [`${DVD_READ_FAILURE_RESULT_PREFIX}{"protocolVersion":1`],
+      status: 3,
+    },
+    {
+      name: "missing",
+      lines: () => [],
+      status: 3,
+    },
+    {
+      name: "unsupported classifier version",
+      mutate: { classifierVersion: "scsi-read-classifier-v2" },
+      status: 3,
+    },
+    {
+      name: "unsupported category",
+      mutate: { category: "medium_error" },
+      status: 3,
+    },
+    {
+      name: "unsupported exit status",
+      status: 4,
+    },
+    {
+      name: "extra raw helper field",
+      mutate: { rawSenseBuffer: "private-unbounded-output" },
+      status: 3,
+    },
+    {
+      name: "inconsistent information LBA",
+      mutate: { informationLba: 4 },
+      status: 3,
+    },
+    {
+      name: "partial transport status",
+      mutate: { hostStatus: null },
+      status: 3,
+    },
+  ])("fails closed on a $name terminal outcome", async ({ lines, mutate, status }) => {
+    const child = createMockDvdCopyChild();
+    const runner = createNodeDvdCopyRunner({
+      requireInactive: () => undefined,
+      spawnProcess: vi.fn(() => child),
+    });
+    const completion = runner.copy({
+      devicePath: "/dev/zero",
+      outputPath: join(
+        createOriginalsLibrary(),
+        ".invalid-read-failure.iso.rip-dvd-partial",
+      ),
+      sizeBytes: 4 * 2_048,
+      signal: new AbortController().signal,
+      onBytesCopied: () => undefined,
+    });
+    const payload = `${DVD_READ_FAILURE_RESULT_PREFIX}${JSON.stringify({
+      protocolVersion: 1,
+      classifierVersion: "scsi-read-classifier-v1",
+      category: "unknown",
+      scsiStatus: 2,
+      hostStatus: 0,
+      driverStatus: 8,
+      senseResponseCode: 112,
+      senseKey: 5,
+      asc: 33,
+      ascq: 0,
+      informationLba: 1,
+      requestedLba: 0,
+      requestedBlockCount: 4,
+      retryOrdinal: 0,
+      ...mutate,
+    })}`;
+
+    child.stdio[4].emit(
+      "data",
+      Buffer.from("rip-dvd-copy-authorization-ready\n"),
+    );
+    for (const line of lines?.(payload) ?? [payload]) {
+      child.stderr.emit("data", Buffer.from(`${line}\n`));
+    }
+    child.emit("close", status, null);
+
+    const error = await completion.catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(DvdReadFailureError);
+  });
+
+  it.each([
+    { name: "missing terminal", includeTerminal: false, status: 3 },
+    { name: "mismatched exit", includeTerminal: true, status: 4 },
+  ])("does not retain raw stderr for a $name", async ({
+    includeTerminal,
+    status,
+  }) => {
+    const child = createMockDvdCopyChild();
+    const runner = createNodeDvdCopyRunner({
+      requireInactive: () => undefined,
+      spawnProcess: vi.fn(() => child),
+    });
+    const completion = runner.copy({
+      devicePath: "/dev/zero",
+      outputPath: join(
+        createOriginalsLibrary(),
+        ".private-terminal.iso.rip-dvd-partial",
+      ),
+      sizeBytes: 4 * 2_048,
+      signal: new AbortController().signal,
+      onBytesCopied: () => undefined,
+    });
+
+    child.stdio[4].emit(
+      "data",
+      Buffer.from("rip-dvd-copy-authorization-ready\n"),
+    );
+    if (includeTerminal) {
+      child.stderr.emit(
+        "data",
+        Buffer.from(
+          `${DVD_READ_FAILURE_RESULT_PREFIX}${JSON.stringify({
+            protocolVersion: 1,
+            classifierVersion: "scsi-read-classifier-v1",
+            category: "unknown",
+            scsiStatus: 2,
+            hostStatus: 0,
+            driverStatus: 8,
+            senseResponseCode: 0x70,
+            senseKey: 5,
+            asc: 33,
+            ascq: 0,
+            informationLba: 1,
+            requestedLba: 0,
+            requestedBlockCount: 4,
+            retryOrdinal: 0,
+          })}\n`,
+        ),
+      );
+    }
+    child.stderr.emit(
+      "data",
+      Buffer.from(
+        "SG_IO raw sense deadbeef on /dev/private-drive for /media/private.iso\n",
+      ),
+    );
+    child.emit("close", status, null);
+
+    const error = await completion.catch((reason: unknown) => reason);
+    expect(error).toEqual(
+      new Error("DVD read failure helper result is invalid"),
+    );
+    expect(String(error)).not.toContain("private-drive");
+    expect(String(error)).not.toContain("private.iso");
+    expect(String(error)).not.toContain("deadbeef");
   });
 
   it("authorizes the native reader to retry only unresolved rescue sectors", async () => {
@@ -2641,6 +2938,59 @@ describe("DVD archive publication", () => {
     expect(readFileSync(`${copiedPartialPath}.failed`, "utf8")).toBe(
       "partial evidence",
     );
+  });
+
+  it("revalidates a structured read failure before moving its partial image", async () => {
+    const originalsLibraryPath = createOriginalsLibrary();
+    const digest = "3".repeat(64);
+    const authorityLost = new Error("Archive Job authority expired");
+    let copiedPartialPath: string | undefined;
+    const revalidateReadFailure = vi.fn(() => {
+      throw authorityLost;
+    });
+    const runner: DvdCopyRunner = {
+      copy: vi.fn(async ({ outputPath }) => {
+        copiedPartialPath = outputPath;
+        writeFileSync(outputPath, "uncommitted read failure");
+        throw new DvdReadFailureError({
+          protocolVersion: 1,
+          classifierVersion: "scsi-read-classifier-v1",
+          category: "unknown",
+          scsiStatus: 2,
+          hostStatus: 0,
+          driverStatus: 8,
+          senseResponseCode: 0x70,
+          senseKey: 5,
+          asc: 33,
+          ascq: 0,
+          informationLba: 1,
+          requestedLba: 0,
+          requestedBlockCount: 4,
+          retryOrdinal: 2,
+        });
+      }),
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    };
+
+    await expect(preserveDvdArchive({
+      devicePath: "/dev/sr0",
+      fingerprint: `sha256:${digest}`,
+      originalsLibraryPath,
+      revalidateReadFailure,
+      runner,
+      signal: new AbortController().signal,
+      sizeBytes: 4 * 2_048,
+      verifySource: async () => undefined,
+      onProgress: () => undefined,
+    })).rejects.toBe(authorityLost);
+
+    expect(revalidateReadFailure).toHaveBeenCalledOnce();
+    expect(readFileSync(copiedPartialPath!, "utf8")).toBe(
+      "uncommitted read failure",
+    );
+    expect(existsSync(`${copiedPartialPath}.failed`)).toBe(false);
   });
 
   it.runIf(supportsLinuxWriterOwnership)(

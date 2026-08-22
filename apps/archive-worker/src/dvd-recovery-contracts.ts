@@ -8,6 +8,36 @@ import {
 export const DVD_SECTOR_SIZE_BYTES = 2_048;
 export const DVD_RECOVERY_POLICY_VERSION = "dvd-recovery-v1";
 export const DVD_RECOVERY_RESULT_PREFIX = "rip-dvd-recovery-result ";
+export const DVD_READ_FAILURE_CLASSIFIER_VERSION =
+  "scsi-read-classifier-v1";
+export const DVD_READ_FAILURE_RESULT_PREFIX = "rip-dvd-read-failure ";
+
+export interface UnknownDvdReadFailureResult {
+  protocolVersion: 1;
+  classifierVersion: typeof DVD_READ_FAILURE_CLASSIFIER_VERSION;
+  category: "unknown";
+  scsiStatus: number | null;
+  hostStatus: number | null;
+  driverStatus: number | null;
+  senseResponseCode: number | null;
+  senseKey: number | null;
+  asc: number | null;
+  ascq: number | null;
+  informationLba: number | null;
+  requestedLba: number;
+  requestedBlockCount: number;
+  retryOrdinal: number;
+}
+
+export class DvdReadFailureError extends Error {
+  readonly readFailure: UnknownDvdReadFailureResult;
+
+  constructor(readFailure: UnknownDvdReadFailureResult) {
+    super("DVD read failed with structured unknown evidence");
+    this.name = "DvdReadFailureError";
+    this.readFailure = readFailure;
+  }
+}
 
 export interface CleanDvdRecoveryResult {
   outcome: "clean";
@@ -101,6 +131,93 @@ export function createDamagedDvdRecoveryResult(
 
 function isSafeNonNegativeInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+function isOptionalBoundedInteger(
+  value: unknown,
+  maximum: number,
+): value is number | null {
+  return value === null ||
+    (isSafeNonNegativeInteger(value) && value <= maximum);
+}
+
+const DVD_READ_FAILURE_PROTOCOL_KEYS = [
+  "asc",
+  "ascq",
+  "category",
+  "classifierVersion",
+  "driverStatus",
+  "hostStatus",
+  "informationLba",
+  "protocolVersion",
+  "requestedBlockCount",
+  "requestedLba",
+  "retryOrdinal",
+  "scsiStatus",
+  "senseKey",
+  "senseResponseCode",
+] as const;
+
+export function parseDvdReadFailureResultProtocol(
+  payload: string,
+  expectedByteCount: number,
+): UnknownDvdReadFailureResult {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payload);
+  } catch {
+    throw new Error("DVD read failure helper result is malformed");
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("DVD read failure helper result is malformed");
+  }
+  const candidate = parsed as Record<string, unknown>;
+  const keys = Object.keys(candidate).sort();
+  const totalSectorCount = expectedByteCount / DVD_SECTOR_SIZE_BYTES;
+  if (
+    keys.length !== DVD_READ_FAILURE_PROTOCOL_KEYS.length ||
+    keys.some((key, index) => key !== DVD_READ_FAILURE_PROTOCOL_KEYS[index]) ||
+    candidate.protocolVersion !== 1 ||
+    candidate.classifierVersion !== DVD_READ_FAILURE_CLASSIFIER_VERSION ||
+    candidate.category !== "unknown" ||
+    !isOptionalBoundedInteger(candidate.scsiStatus, 0xff) ||
+    !isOptionalBoundedInteger(candidate.hostStatus, 0xffff) ||
+    !isOptionalBoundedInteger(candidate.driverStatus, 0xffff) ||
+    !isOptionalBoundedInteger(candidate.senseResponseCode, 0xff) ||
+    !isOptionalBoundedInteger(candidate.senseKey, 0x0f) ||
+    !isOptionalBoundedInteger(candidate.asc, 0xff) ||
+    !isOptionalBoundedInteger(candidate.ascq, 0xff) ||
+    !isOptionalBoundedInteger(candidate.informationLba, Number.MAX_SAFE_INTEGER) ||
+    !isSafeNonNegativeInteger(candidate.requestedLba) ||
+    !isSafeNonNegativeInteger(candidate.requestedBlockCount) ||
+    candidate.requestedBlockCount === 0 ||
+    candidate.requestedBlockCount > 0xffff_ffff ||
+    !isSafeNonNegativeInteger(candidate.retryOrdinal) ||
+    candidate.retryOrdinal > 0xffff_ffff ||
+    !Number.isSafeInteger(totalSectorCount) ||
+    totalSectorCount <= 0 ||
+    candidate.requestedLba >= totalSectorCount ||
+    candidate.requestedLba + candidate.requestedBlockCount > totalSectorCount ||
+    (candidate.informationLba !== null &&
+      (candidate.informationLba < candidate.requestedLba ||
+        candidate.informationLba >=
+          candidate.requestedLba + candidate.requestedBlockCount)) ||
+    ((candidate.scsiStatus === null ||
+      candidate.hostStatus === null ||
+      candidate.driverStatus === null) &&
+      (candidate.scsiStatus !== null ||
+        candidate.hostStatus !== null ||
+        candidate.driverStatus !== null)) ||
+    (candidate.senseResponseCode === null &&
+      (candidate.senseKey !== null ||
+        candidate.asc !== null ||
+        candidate.ascq !== null ||
+        candidate.informationLba !== null)) ||
+    (candidate.asc === null) !== (candidate.ascq === null)
+  ) {
+    throw new Error("DVD read failure helper result is malformed");
+  }
+  return candidate as unknown as UnknownDvdReadFailureResult;
 }
 
 function isNormalizedDamagedResult(

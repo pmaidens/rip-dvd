@@ -772,6 +772,92 @@ describe("data-access facade", () => {
     migrated.close();
   });
 
+  it("migrates historical Archive Jobs without inventing read-failure evidence", () => {
+    const databasePath = createTestDatabasePath();
+    const sqlite = new DatabaseSync(databasePath);
+    const migrationsRoot = new URL("../drizzle/", import.meta.url);
+    const readFailureMigration = "20260822175220_striped_kabuki";
+    const predecessorNames = readdirSync(migrationsRoot)
+      .filter((name) => /^\d/.test(name) && name < readFailureMigration)
+      .sort();
+    for (const migrationName of predecessorNames) {
+      const migration = readFileSync(
+        new URL(`../drizzle/${migrationName}/migration.sql`, import.meta.url),
+        "utf8",
+      );
+      for (const statement of migration.split("--> statement-breakpoint")) {
+        if (statement.trim()) {
+          sqlite.exec(statement);
+        }
+      }
+    }
+    sqlite.exec(`
+      create table __drizzle_migrations (
+        id integer primary key,
+        hash text not null,
+        created_at numeric,
+        name text,
+        applied_at text
+      );
+    `);
+    const recordMigration = sqlite.prepare(`
+      insert into __drizzle_migrations (hash, created_at, name)
+      values (?, 0, ?)
+    `);
+    for (const migrationName of predecessorNames) {
+      recordMigration.run(`pre-read-failure-${migrationName}`, migrationName);
+    }
+    sqlite.exec(`
+      insert into optical_drives (
+        id, device_path, is_enabled, is_present, last_seen_at, created_at,
+        updated_at
+      ) values ('historical-drive', '/dev/historical', 1, 1, 1, 1, 1);
+      insert into detected_discs (
+        id, optical_drive_id, disc_kind, fingerprint, status, detected_at,
+        created_at, updated_at
+      ) values (
+        'historical-disc', 'historical-drive', 'dvd',
+        'historical-fingerprint', 'approved', 1, 1, 1
+      );
+      insert into archive_requests (
+        id, detected_disc_id, status, priority, created_at, updated_at
+      ) values (
+        'historical-request', 'historical-disc', 'needs_attention', 0, 1, 2
+      );
+      insert into archive_jobs (
+        id, archive_request_id, detected_disc_id, attempt_ordinal, status,
+        priority, progress_phase, progress_percent, progress_bytes,
+        last_progress_at, started_at, completed_at, error_message, created_at,
+        updated_at
+      ) values (
+        'historical-job', 'historical-request', 'historical-disc', 1, 'failed',
+        0, 'copying', 25, 2048, 2, 1, 2, 'legacy read error', 1, 2
+      );
+    `);
+    sqlite.close();
+
+    const migrated = openTestDatabase(databasePath);
+    expect(migrated.archiveJobs.list()).toEqual([
+      expect.objectContaining({
+        id: "historical-job",
+        failureDetailVersion: null,
+        readFailureStage: null,
+        readFailureCategory: null,
+        readFailureClassifierVersion: null,
+        readFailureLba: null,
+        readFailureRequestedBlockCount: null,
+        readFailureRetryCount: null,
+        readFailureScsiStatus: null,
+        readFailureHostStatus: null,
+        readFailureDriverStatus: null,
+        readFailureSenseKey: null,
+        readFailureAsc: null,
+        readFailureAscq: null,
+      }),
+    ]);
+    migrated.close();
+  });
+
   it("migrates historical Original Disc Archives to unknown integrity", () => {
     const databasePath = createTestDatabasePath();
     const sqlite = new DatabaseSync(databasePath);
@@ -1060,7 +1146,8 @@ describe("data-access facade", () => {
         (name) =>
           name !== "20260812151540_disc-inspection-archive-requests" &&
           name !== "20260820215821_redundant_jocasta" &&
-          name !== "20260822142722_disc-inspection-settling",
+          name !== "20260822142722_disc-inspection-settling" &&
+          name !== "20260822175220_striped_kabuki",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -7906,6 +7993,10 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       { name: "attempt_ordinal" },
       { name: "claim_token" },
       { name: "progress_phase" },
+      { name: "failure_detail_version" },
+      { name: "read_failure_category" },
+      { name: "read_failure_classifier_version" },
+      { name: "read_failure_lba" },
     ]));
     expect(
       sqlite
@@ -7914,6 +8005,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         )
         .all(),
     ).toEqual([
+      {
+        name: "20260822175220_striped_kabuki",
+      },
       {
         name: "20260822142722_disc-inspection-settling",
       },
@@ -7940,9 +8034,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260813142411_corrected-encode-replacements",
-      },
-      {
-        name: "20260812180200_hard_smiling_tiger",
       },
     ]);
     expect(
@@ -10821,6 +10912,92 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     expect(access.archiveJobs.list()).toEqual([
       expect.objectContaining({ attemptOrdinal: 1, status: "failed" }),
       expect.objectContaining({ attemptOrdinal: 2, status: "aborted" }),
+    ]);
+    access.close();
+  });
+
+  it("keeps unknown read evidence immutable on the Archive Job attempt that observed it", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const { disc, inspection } = completeDiscInspection(access, {
+      opticalDriveId: drive.id,
+      mediaGeneration: "unknown-read-generation",
+      fingerprint: "unknown-read-disc",
+    });
+    const request = access.archiveRequests.create({ detectedDiscId: disc.id });
+    const first = access.archiveJobs.startForInspection(
+      inspection.id,
+      "worker-1",
+    )!;
+
+    expect(
+      access.archiveJobs.failWithReadFailure(first, {
+        stage: "initial_copy",
+        category: "unknown",
+        classifierVersion: "scsi-read-classifier-v1",
+        failingLba: 1_024,
+        requestedBlockCount: 16,
+        retryCount: 2,
+        scsiStatus: 2,
+        hostStatus: 0,
+        driverStatus: 8,
+        senseKey: 5,
+        asc: 33,
+        ascq: 0,
+      }),
+    ).toMatchObject({
+      status: "failed",
+      errorMessage: "The Optical Drive returned an unclassified read failure",
+      failureDetailVersion: "archive-failure-detail-v1",
+      readFailureStage: "initial_copy",
+      readFailureCategory: "unknown",
+      readFailureClassifierVersion: "scsi-read-classifier-v1",
+      readFailureLba: 1_024,
+      readFailureRequestedBlockCount: 16,
+      readFailureRetryCount: 2,
+      readFailureScsiStatus: 2,
+      readFailureHostStatus: 0,
+      readFailureDriverStatus: 8,
+      readFailureSenseKey: 5,
+      readFailureAsc: 33,
+      readFailureAscq: 0,
+    });
+
+    access.archiveRequests.retry(request.id);
+    const second = access.archiveJobs.startForInspection(
+      inspection.id,
+      "worker-2",
+    )!;
+    access.archiveJobs.fail(second, "A later attempt failed differently");
+
+    expect(access.archiveJobs.list()).toEqual([
+      expect.objectContaining({
+        id: first.id,
+        attemptOrdinal: 1,
+        readFailureLba: 1_024,
+        readFailureRetryCount: 2,
+      }),
+      expect.objectContaining({
+        id: second.id,
+        attemptOrdinal: 2,
+        failureDetailVersion: "archive-failure-detail-v1",
+        readFailureStage: null,
+        readFailureCategory: null,
+        readFailureClassifierVersion: null,
+        readFailureLba: null,
+        readFailureRequestedBlockCount: null,
+        readFailureRetryCount: null,
+        readFailureScsiStatus: null,
+        readFailureHostStatus: null,
+        readFailureDriverStatus: null,
+        readFailureSenseKey: null,
+        readFailureAsc: null,
+        readFailureAscq: null,
+      }),
     ]);
     access.close();
   });
