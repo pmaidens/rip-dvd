@@ -1,5 +1,6 @@
 import {
   closeSync,
+  existsSync,
   mkdirSync,
   openSync,
   realpathSync,
@@ -550,6 +551,121 @@ function acquireMigrationLock(databasePath: string): () => void {
   }
 }
 
+const RECORDED_DISC_SETTLING_MIGRATION =
+  "20260822142722_disc-inspection-settling";
+const BOUNDED_DISC_SETTLING_MIGRATION =
+  "20260822183552_bounded-disc-settling";
+const DISC_SETTLING_COMPATIBILITY_COLUMNS = [
+  {
+    name: "media_capacity_bytes",
+    sql: "ALTER TABLE `disc_inspections` ADD `media_capacity_bytes` integer",
+  },
+  {
+    name: "stable_observation_count",
+    sql: "ALTER TABLE `disc_inspections` ADD `stable_observation_count` integer",
+  },
+  {
+    name: "settling_quiet_window_started_at",
+    sql: "ALTER TABLE `disc_inspections` ADD `settling_quiet_window_started_at` integer",
+  },
+  {
+    name: "settling_started_at",
+    sql: "ALTER TABLE `disc_inspections` ADD `settling_started_at` integer",
+  },
+  {
+    name: "settling_reset_count",
+    sql: "ALTER TABLE `disc_inspections` ADD `settling_reset_count` integer",
+  },
+] as const;
+
+function reconcileRecordedDiscSettlingSchema(
+  sqlite: DatabaseSync,
+  migrationsFolder: string,
+): void {
+  if (
+    !existsSync(
+      join(
+        migrationsFolder,
+        BOUNDED_DISC_SETTLING_MIGRATION,
+        "migration.sql",
+      ),
+    )
+  ) {
+    return;
+  }
+
+  const migrationTable = sqlite
+    .prepare(`
+      SELECT 1
+      FROM sqlite_schema
+      WHERE type = 'table' AND name = '__drizzle_migrations'
+    `)
+    .get();
+  if (migrationTable === undefined) {
+    return;
+  }
+
+  const migrationColumns = new Set(
+    (
+      sqlite
+        .prepare("SELECT name FROM pragma_table_info('__drizzle_migrations')")
+        .all() as Array<{ name: string }>
+    ).map(({ name }) => name),
+  );
+  if (!migrationColumns.has("name")) {
+    return;
+  }
+
+  const recordedMigrations = new Set(
+    (
+      sqlite
+        .prepare(`
+          SELECT name
+          FROM __drizzle_migrations
+          WHERE name IN (?, ?)
+        `)
+        .all(
+          RECORDED_DISC_SETTLING_MIGRATION,
+          BOUNDED_DISC_SETTLING_MIGRATION,
+        ) as Array<{ name: string }>
+    ).map(({ name }) => name),
+  );
+  if (
+    !recordedMigrations.has(RECORDED_DISC_SETTLING_MIGRATION) ||
+    recordedMigrations.has(BOUNDED_DISC_SETTLING_MIGRATION)
+  ) {
+    return;
+  }
+
+  const discInspectionColumns = new Set(
+    (
+      sqlite
+        .prepare("SELECT name FROM pragma_table_info('disc_inspections')")
+        .all() as Array<{ name: string }>
+    ).map(({ name }) => name),
+  );
+  const missingColumns = DISC_SETTLING_COMPATIBILITY_COLUMNS.filter(
+    ({ name }) => !discInspectionColumns.has(name),
+  );
+  if (missingColumns.length === 0) {
+    return;
+  }
+
+  // Drizzle skips migration names already in its journal without comparing
+  // hashes. Restore the nullable predecessor columns that journal says exist
+  // before the pending bounded-settling migration selects them.
+  sqlite.exec("BEGIN");
+  try {
+    for (const column of missingColumns) {
+      sqlite.exec(column.sql);
+    }
+    sqlite.exec("COMMIT");
+  } catch (error) {
+    sqlite.exec("ROLLBACK");
+    throw error;
+  }
+}
+
 function openMigratedDatabase(
   databasePath: string,
   migrationsFolder: string,
@@ -589,6 +705,7 @@ function openMigratedDatabase(
     }
     sqlite.exec("PRAGMA synchronous = NORMAL");
 
+    reconcileRecordedDiscSettlingSchema(sqlite, migrationsFolder);
     const database = drizzle({ client: sqlite });
     sqlite.exec("PRAGMA foreign_keys = OFF");
     migrate(database, { migrationsFolder });

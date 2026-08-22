@@ -58,5 +58,30 @@ INSERT INTO `__new_disc_inspections`(`id`, `optical_drive_id`, `detected_disc_id
 DROP TABLE `disc_inspections`;--> statement-breakpoint
 ALTER TABLE `__new_disc_inspections` RENAME TO `disc_inspections`;--> statement-breakpoint
 PRAGMA foreign_keys=ON;--> statement-breakpoint
+PRAGMA foreign_keys=OFF;--> statement-breakpoint
+CREATE TABLE `__new_disc_inspection_attempts` (
+	`id` text PRIMARY KEY,
+	`disc_inspection_id` text NOT NULL,
+	`attempt_number` integer NOT NULL,
+	`outcome` text NOT NULL,
+	`phase` text NOT NULL,
+	`reason_code` text,
+	`diagnostic` text,
+	`started_at` integer NOT NULL,
+	`ended_at` integer NOT NULL,
+	CONSTRAINT `fk_disc_inspection_attempts_disc_inspection_id_disc_inspections_id_fk` FOREIGN KEY (`disc_inspection_id`) REFERENCES `disc_inspections`(`id`) ON DELETE RESTRICT,
+	CONSTRAINT "disc_inspection_attempts_id_not_null" CHECK("id" is not null),
+	CONSTRAINT "disc_inspection_attempts_number_check" CHECK(typeof("attempt_number") = 'integer' and "attempt_number" > 0),
+	CONSTRAINT "disc_inspection_attempts_outcome_check" CHECK("outcome" in ('completed', 'failed', 'aborted', 'interrupted')),
+	CONSTRAINT "disc_inspection_attempts_phase_check" CHECK("phase" in ('settling', 'reading_metadata', 'hashing_content', 'confirming_media', 'retry_wait')),
+	CONSTRAINT "disc_inspection_attempts_reason_check" CHECK("reason_code" is null or "reason_code" in ('no_medium', 'media_changed', 'drive_identity_changed', 'drive_unavailable', 'drive_not_ready', 'metadata_read_failed', 'invalid_metadata', 'content_size_failed', 'content_read_failed', 'invalid_content', 'worker_interrupted', 'operator_cancelled', 'unknown'))
+);
+--> statement-breakpoint
+INSERT INTO `__new_disc_inspection_attempts`(`id`, `disc_inspection_id`, `attempt_number`, `outcome`, `phase`, `reason_code`, `diagnostic`, `started_at`, `ended_at`) SELECT `id`, `disc_inspection_id`, `attempt_number`, `outcome`, `phase`, `reason_code`, `diagnostic`, `started_at`, `ended_at` FROM `disc_inspection_attempts`;--> statement-breakpoint
+DROP TABLE `disc_inspection_attempts`;--> statement-breakpoint
+ALTER TABLE `__new_disc_inspection_attempts` RENAME TO `disc_inspection_attempts`;--> statement-breakpoint
+PRAGMA foreign_keys=ON;--> statement-breakpoint
 CREATE UNIQUE INDEX `disc_inspections_current_drive_unique` ON `disc_inspections` (`optical_drive_id`) WHERE "disc_inspections"."is_current" = 1;--> statement-breakpoint
 CREATE INDEX `disc_inspections_status_idx` ON `disc_inspections` (`status`,`updated_at`);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `disc_inspection_attempts_number_unique` ON `disc_inspection_attempts` (`disc_inspection_id`,`attempt_number`);
