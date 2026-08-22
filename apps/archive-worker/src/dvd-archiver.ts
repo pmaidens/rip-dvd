@@ -988,6 +988,7 @@ export interface PreserveDvdArchiveOptions {
   originalsLibraryPath: string;
   runner: DvdCopyRunner;
   salvageValidator?: DvdSalvageValidator;
+  revalidateReadFailure?(): void | Promise<void>;
   signal: AbortSignal;
   sizeBytes: number;
   sync?(path: string): Promise<void>;
@@ -1192,6 +1193,7 @@ export async function preserveDvdArchive({
   originalsLibraryPath,
   runner,
   salvageValidator,
+  revalidateReadFailure,
   signal,
   sizeBytes,
   sync = syncPath,
@@ -1621,6 +1623,10 @@ export async function preserveDvdArchive({
     // A rejected operation is not proof that the helper exited. Do not return
     // control until OS-level closure releases the copy tombstone.
     await runner.waitForInactive(safeDevicePath, partialPath);
+    const isReadFailure = error instanceof DvdReadFailureError;
+    if (isReadFailure) {
+      await revalidateReadFailure?.();
+    }
     const hasRequestOwnedRescueState =
       rescueWorkspace !== null ||
       (rescuePaths !== undefined &&
@@ -1640,7 +1646,7 @@ export async function preserveDvdArchive({
     ) {
       await movePartialAside(partialPath);
     }
-    throw error instanceof DvdReadFailureError
+    throw isReadFailure
       ? new DvdArchiveReadFailureError(readFailureStage, error.readFailure)
       : error;
   }

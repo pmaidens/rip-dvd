@@ -1,4 +1,5 @@
 import type {
+  ARCHIVE_FAILURE_DETAIL_VERSIONS,
   ARCHIVE_JOB_STATUSES,
   ARCHIVE_READ_FAILURE_STAGES,
   ARCHIVE_REQUEST_STATUSES,
@@ -543,6 +544,7 @@ export interface ArchiveJob {
   startedAt: Date | null;
   completedAt: Date | null;
   errorMessage: string | null;
+  failureDetailVersion: (typeof ARCHIVE_FAILURE_DETAIL_VERSIONS)[number] | null;
   readFailureStage: ArchiveReadFailureStage | null;
   readFailureCategory: "unknown" | null;
   readFailureClassifierVersion: string | null;

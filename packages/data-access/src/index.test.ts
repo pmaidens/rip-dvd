@@ -840,6 +840,7 @@ describe("data-access facade", () => {
     expect(migrated.archiveJobs.list()).toEqual([
       expect.objectContaining({
         id: "historical-job",
+        failureDetailVersion: null,
         readFailureStage: null,
         readFailureCategory: null,
         readFailureClassifierVersion: null,
@@ -10953,6 +10954,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     ).toMatchObject({
       status: "failed",
       errorMessage: "The Optical Drive returned an unclassified read failure",
+      failureDetailVersion: "archive-failure-detail-v1",
       readFailureStage: "initial_copy",
       readFailureCategory: "unknown",
       readFailureClassifierVersion: "scsi-read-classifier-v1",
@@ -10984,6 +10986,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       expect.objectContaining({
         id: second.id,
         attemptOrdinal: 2,
+        failureDetailVersion: "archive-failure-detail-v1",
         readFailureStage: null,
         readFailureCategory: null,
         readFailureClassifierVersion: null,

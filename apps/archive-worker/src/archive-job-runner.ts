@@ -111,6 +111,11 @@ export async function runArchiveJob({
       throw new Error("DVD medium changed during archiving");
     }
   };
+  const revalidateReadFailure = async () => {
+    authorizeClaim();
+    await verifySource();
+    authorizeClaim();
+  };
 
   try {
     await rescueWorkspaceLock.withLock({
@@ -133,6 +138,7 @@ export async function runArchiveJob({
           originalsLibraryPath,
           runner: copyRunner,
           salvageValidator,
+          revalidateReadFailure,
           signal: archiveSignal,
           sizeBytes: archiveSizeBytes,
           onProgress: (progress) => {
@@ -186,9 +192,7 @@ export async function runArchiveJob({
       : null;
     if (readFailure !== null && !signal.aborted && !cancellationRequested) {
       try {
-        authorizeClaim();
-        await verifySource();
-        authorizeClaim();
+        await revalidateReadFailure();
       } catch (revalidationError) {
         error = revalidationError;
         readFailure = null;
@@ -209,7 +213,7 @@ export async function runArchiveJob({
         access.archiveJobs.abort(claim, "Archive cancelled by operator");
       } else if (readFailure !== null) {
         const evidence = readFailure.readFailure;
-        access.archiveJobs.failWithReadFailure(claim, {
+        const terminalJob = access.archiveJobs.failWithReadFailure(claim, {
           stage: readFailure.stage,
           category: evidence.category,
           classifierVersion: evidence.classifierVersion,
@@ -223,6 +227,7 @@ export async function runArchiveJob({
           asc: evidence.asc,
           ascq: evidence.ascq,
         });
+        cancellationRequested = terminalJob.status === "aborted";
       } else {
         const terminalJob = access.archiveJobs.fail(claim, message);
         cancellationRequested = terminalJob.status === "aborted";

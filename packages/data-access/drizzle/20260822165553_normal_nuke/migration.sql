@@ -10,6 +10,7 @@ ALTER TABLE `archive_jobs` ADD `read_failure_driver_status` integer;--> statemen
 ALTER TABLE `archive_jobs` ADD `read_failure_sense_key` integer;--> statement-breakpoint
 ALTER TABLE `archive_jobs` ADD `read_failure_asc` integer;--> statement-breakpoint
 ALTER TABLE `archive_jobs` ADD `read_failure_ascq` integer;--> statement-breakpoint
+ALTER TABLE `archive_jobs` ADD `failure_detail_version` text;--> statement-breakpoint
 PRAGMA foreign_keys=OFF;--> statement-breakpoint
 CREATE TABLE `__new_archive_jobs` (
 	`id` text PRIMARY KEY,
@@ -29,6 +30,7 @@ CREATE TABLE `__new_archive_jobs` (
 	`started_at` integer,
 	`completed_at` integer,
 	`error_message` text,
+	`failure_detail_version` text,
 	`read_failure_stage` text,
 	`read_failure_category` text,
 	`read_failure_classifier_version` text,
@@ -53,6 +55,7 @@ CREATE TABLE `__new_archive_jobs` (
 	CONSTRAINT "archive_jobs_progress_phase_check" CHECK("progress_phase" in ('preparing', 'copying', 'verifying', 'finalizing')),
 	CONSTRAINT "archive_jobs_attempt_ordinal_check" CHECK(typeof("attempt_ordinal") = 'integer' and "attempt_ordinal" > 0),
 	CONSTRAINT "archive_jobs_attempt_shape_check" CHECK(("status" = 'running' and "claimed_by" is not null and "claim_token" is not null and "claimed_at" is not null and "started_at" is not null and "completed_at" is null) or ("status" <> 'running' and "started_at" is not null and "completed_at" is not null)),
+	CONSTRAINT "archive_jobs_failure_detail_version_check" CHECK("failure_detail_version" is null or ("status" = 'failed' and "failure_detail_version" in ('archive-failure-detail-v1'))),
 	CONSTRAINT "archive_jobs_read_failure_shape_check" CHECK(("read_failure_category" is null and "read_failure_stage" is null and "read_failure_classifier_version" is null and "read_failure_lba" is null and "read_failure_requested_block_count" is null and "read_failure_retry_count" is null and "read_failure_scsi_status" is null and "read_failure_host_status" is null and "read_failure_driver_status" is null and "read_failure_sense_key" is null and "read_failure_asc" is null and "read_failure_ascq" is null) or ("status" = 'failed' and "read_failure_stage" in ('initial_copy', 'rescue_resume') and "read_failure_category" = 'unknown' and typeof("read_failure_classifier_version") = 'text' and length("read_failure_classifier_version") between 1 and 128 and typeof("read_failure_lba") = 'integer' and "read_failure_lba" >= 0 and typeof("read_failure_requested_block_count") = 'integer' and "read_failure_requested_block_count" between 1 and 4294967295 and typeof("read_failure_retry_count") = 'integer' and "read_failure_retry_count" between 0 and 4294967295 and ("read_failure_scsi_status" is null or (typeof("read_failure_scsi_status") = 'integer' and "read_failure_scsi_status" between 0 and 255)) and ("read_failure_host_status" is null or (typeof("read_failure_host_status") = 'integer' and "read_failure_host_status" between 0 and 65535)) and ("read_failure_driver_status" is null or (typeof("read_failure_driver_status") = 'integer' and "read_failure_driver_status" between 0 and 65535)) and ("read_failure_sense_key" is null or (typeof("read_failure_sense_key") = 'integer' and "read_failure_sense_key" between 0 and 15)) and ("read_failure_asc" is null or (typeof("read_failure_asc") = 'integer' and "read_failure_asc" between 0 and 255)) and ("read_failure_ascq" is null or (typeof("read_failure_ascq") = 'integer' and "read_failure_ascq" between 0 and 255)) and (("read_failure_scsi_status" is null and "read_failure_host_status" is null and "read_failure_driver_status" is null) or ("read_failure_scsi_status" is not null and "read_failure_host_status" is not null and "read_failure_driver_status" is not null)) and (("read_failure_asc" is null and "read_failure_ascq" is null) or ("read_failure_asc" is not null and "read_failure_ascq" is not null))))
 );
 --> statement-breakpoint
