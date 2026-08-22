@@ -1150,7 +1150,7 @@ describe("data-access facade", () => {
           name !== "20260822175220_striped_kabuki" &&
           name !== "20260822183552_bounded-disc-settling" &&
           name !== "20260822185006_burly_northstar" &&
-          name !== "20260822185139_soft_carmella_unuscione",
+          name !== "20260822191832_volatile_starhawk",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -8009,7 +8009,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
-        name: "20260822185139_soft_carmella_unuscione",
+        name: "20260822191832_volatile_starhawk",
       },
       {
         name: "20260822183552_bounded-disc-settling",
