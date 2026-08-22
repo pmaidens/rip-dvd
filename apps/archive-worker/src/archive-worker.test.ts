@@ -2508,7 +2508,7 @@ describe("archive worker polling", () => {
     expect(existsSync(rescueImagePath)).toBe(false);
   });
 
-  it("combines rescue progress from another matching Optical Drive", async () => {
+  it("preserves cross-drive rescue outcomes and per-attempt evidence", async () => {
     const scenario = await exerciseWatchabilityWorkerScenario({
       ranges: [
         { startLba: 1, sectorCount: 1 },
@@ -2548,6 +2548,15 @@ describe("archive worker polling", () => {
       isEnabled: true,
       isPresent: true,
     });
+    expect(access.catalog.listOriginalDiscArchives()).toEqual([]);
+    expect(access.archiveJobs.list()).toEqual([
+      expect.objectContaining({
+        attemptOrdinal: 1,
+        errorMessage:
+          "DVD salvage rejected: unreadable sectors affect an ambiguous DVD region; 2 sectors in 2 areas; LBAs 1, 3",
+        readFailureCategory: null,
+      }),
+    ]);
     access.archiveRequests.retry(request.id);
     const rescuePaths = dvdRescueWorkspacePaths(
       realpathSync(originalsLibraryPath),
@@ -2609,15 +2618,120 @@ describe("archive worker polling", () => {
         "DVD rescue requires validation: 1 unreadable sector in 1 area; LBAs 3",
     });
     expect(readFileSync(rescuePaths.imagePath)).toEqual(partiallyImprovedImage);
+    const driveAJob = access.archiveJobs.list()
+      .find(({ attemptOrdinal }) => attemptOrdinal === 1)!;
+    const driveBJob = access.archiveJobs.list()
+      .find(({ attemptOrdinal }) => attemptOrdinal === 2)!;
+
+    const structuredFailureAttempts = [
+      {
+        category: "hardware_error" as const,
+        drive: {
+          devicePath: "/dev/sr2",
+          displayName: "Hardware-failure rescue drive",
+          serialNumber: "FAILED-RESCUE-003",
+        },
+      },
+      {
+        category: "protection_error" as const,
+        drive: {
+          devicePath: "/dev/sr3",
+          displayName: "Protection-failure rescue drive",
+          serialNumber: "FAILED-RESCUE-004",
+        },
+      },
+    ];
+    const persistedFailureDrives = [];
+    const structuredFailureJobs = [];
+    for (const [index, failureAttempt] of
+      structuredFailureAttempts.entries()) {
+      access.archiveRequests.retry(request.id);
+      persistedFailureDrives.push(access.catalog.upsertOpticalDrive({
+        ...failureAttempt.drive,
+        isEnabled: true,
+        isPresent: true,
+      }));
+      const failedCopy = vi.fn(async ({
+        authorizeStart,
+        continuation,
+        devicePath,
+        outputPath,
+      }: Parameters<DvdCopyRunner["copy"]>[0]) => {
+        expect(devicePath).toBe(failureAttempt.drive.devicePath);
+        expect(outputPath).toBe(rescuePaths.imagePath);
+        expect(continuation).toMatchObject({
+          kind: "damaged",
+          recoveryResult: partiallyImprovedRecovery,
+        });
+        expect(readFileSync(outputPath)).toEqual(partiallyImprovedImage);
+        await authorizeStart?.();
+        throw dvdReadFailure(failureAttempt.category, {
+          informationLba: 3,
+          requestedLba: 3,
+          requestedBlockCount: 1,
+          retryOrdinal: index,
+        });
+      });
+
+      await pollArchiveWorker({
+        access,
+        configuredDevicePath: "/dev/sr0",
+        copyRunner: {
+          copy: failedCopy,
+          isActive: () => false,
+          withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+          waitForInactive: vi.fn(async () => undefined),
+        },
+        hardware: {
+          ...stableDeviceBinding(),
+          discover: vi.fn().mockResolvedValue([failureAttempt.drive]),
+          scanDvd: vi.fn().mockResolvedValue({
+            fingerprint,
+            scanData,
+            sizeBytes,
+          }),
+        },
+        log: vi.fn(),
+        originalsLibraryPath,
+        rescueWorkspaceLock: workspaceLock,
+        signal: new AbortController().signal,
+        workerId: `archive-worker-${failureAttempt.category}-rescue`,
+      });
+
+      expect(failedCopy).toHaveBeenCalledOnce();
+      expect(readFileSync(rescuePaths.imagePath)).toEqual(
+        partiallyImprovedImage,
+      );
+      const failedJob = access.archiveJobs.list()
+        .find(({ attemptOrdinal }) => attemptOrdinal === index + 3)!;
+      expect(failedJob).toMatchObject({
+        readFailureStage: "rescue_resume",
+        readFailureCategory: failureAttempt.category,
+        readFailureLba: 3,
+        readFailureRequestedBlockCount: 1,
+        readFailureRetryCount: index,
+      });
+      structuredFailureJobs.push(failedJob);
+    }
 
     access.archiveRequests.retry(request.id);
+    const finalDrive = {
+      devicePath: "/dev/sr4",
+      displayName: "Final matching rescue drive",
+      serialNumber: "FINAL-RESCUE-005",
+    };
+    const persistedFinalDrive = access.catalog.upsertOpticalDrive({
+      ...finalDrive,
+      isEnabled: true,
+      isPresent: true,
+    });
     const finalCopy = vi.fn(async ({
       authorizeStart,
       devicePath,
       outputPath,
       continuation,
     }: Parameters<DvdCopyRunner["copy"]>[0]) => {
-      expect(devicePath).toBe(alternateDrive.devicePath);
+      expect(devicePath).toBe(finalDrive.devicePath);
       expect(outputPath).toBe(rescuePaths.imagePath);
       expect(continuation).toMatchObject({
         kind: "damaged",
@@ -2638,7 +2752,15 @@ describe("archive worker polling", () => {
         withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
         waitForInactive: vi.fn(async () => undefined),
       },
-      hardware: alternateHardware,
+      hardware: {
+        ...stableDeviceBinding(),
+        discover: vi.fn().mockResolvedValue([finalDrive]),
+        scanDvd: vi.fn().mockResolvedValue({
+          fingerprint,
+          scanData,
+          sizeBytes,
+        }),
+      },
       log: vi.fn(),
       originalsLibraryPath,
       rescueWorkspaceLock: workspaceLock,
@@ -2661,6 +2783,24 @@ describe("archive worker polling", () => {
     const attempts = access.archiveJobs
       .list()
       .sort((left, right) => left.attemptOrdinal - right.attemptOrdinal);
+    expect(attempts[0]).toEqual(driveAJob);
+    expect(attempts[1]).toEqual(driveBJob);
+    expect(attempts.slice(2, 4)).toEqual(structuredFailureJobs);
+    expect(attempts.map(({ status }) => status)).toEqual([
+      "failed",
+      "failed",
+      "failed",
+      "failed",
+      "completed",
+    ]);
+    expect(attempts.map(({ readFailureCategory }) => readFailureCategory))
+      .toEqual([
+        null,
+        null,
+        "hardware_error",
+        "protection_error",
+        null,
+      ]);
     expect(archive.detectedDiscId).toBe(attempts.at(-1)!.detectedDiscId);
     const observedDiscs = access.catalog.listDetectedDiscs(undefined, {
       ids: attempts.map(({ detectedDiscId }) => detectedDiscId),
@@ -2676,7 +2816,9 @@ describe("archive worker polling", () => {
     ).toEqual([
       { attemptOrdinal: 1, opticalDriveId: initialDrive.id },
       { attemptOrdinal: 2, opticalDriveId: persistedAlternateDrive.id },
-      { attemptOrdinal: 3, opticalDriveId: persistedAlternateDrive.id },
+      { attemptOrdinal: 3, opticalDriveId: persistedFailureDrives[0]!.id },
+      { attemptOrdinal: 4, opticalDriveId: persistedFailureDrives[1]!.id },
+      { attemptOrdinal: 5, opticalDriveId: persistedFinalDrive.id },
     ]);
     expect(JSON.stringify(attempts)).not.toContain("/dev/sr");
   });
