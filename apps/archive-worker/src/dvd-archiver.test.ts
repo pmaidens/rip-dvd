@@ -811,6 +811,7 @@ describe("DVD archive publication", () => {
   it.each([
     {
       category: "unknown",
+      message: "DVD read failed with structured unknown evidence",
       status: {
         scsiStatus: 2,
         hostStatus: 0,
@@ -823,6 +824,7 @@ describe("DVD archive publication", () => {
     },
     {
       category: "hardware_error",
+      message: "DVD read failed after an Optical Drive hardware fault",
       status: {
         scsiStatus: 2,
         hostStatus: 0,
@@ -835,6 +837,7 @@ describe("DVD archive publication", () => {
     },
     {
       category: "transport_error",
+      message: "DVD read failed while communicating with the Optical Drive",
       status: {
         scsiStatus: 2,
         hostStatus: 7,
@@ -847,6 +850,7 @@ describe("DVD archive publication", () => {
     },
     {
       category: "protection_error",
+      message: "DVD read failed because DVD access was protected",
       status: {
         scsiStatus: 2,
         hostStatus: 0,
@@ -859,6 +863,7 @@ describe("DVD archive publication", () => {
     },
   ] as const)("returns one complete $category read failure from the native reader", async ({
     category,
+    message,
     status,
   }) => {
     const originalsLibraryPath = createOriginalsLibrary();
@@ -898,7 +903,7 @@ describe("DVD archive publication", () => {
     child.emit("close", 3, null);
 
     await expect(completion).rejects.toMatchObject({
-      message: `DVD read failed with structured ${category} evidence`,
+      message,
       readFailure: {
         protocolVersion: 1,
         classifierVersion: "scsi-read-classifier-v1",
