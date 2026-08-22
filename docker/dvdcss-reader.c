@@ -29,6 +29,7 @@
 #define READ_FAILURE_CLASSIFIER_VERSION "scsi-read-classifier-v1"
 #define READ_FAILURE_RESULT_PREFIX "rip-dvd-read-failure "
 #define READ_FAILURE_EXIT_STATUS 3
+#define SUPPORTED_FIXED_SENSE_LENGTH 18U
 
 #ifdef RIP_DVD_READER_TESTING
 #define MAX_TEST_FAULTS 64
@@ -287,6 +288,16 @@ static uint32_t read_big_endian_u32(const uint8_t bytes[4])
     return value;
 }
 
+static int bytes_are_zero(const uint8_t *bytes, size_t length)
+{
+    for (size_t index = 0; index < length; index++) {
+        if (bytes[index] != 0) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static int information_lba_matches_request(
     const struct rip_dvd_scsi_completion *completion,
     uint64_t information_lba)
@@ -319,8 +330,11 @@ static struct decoded_sense decode_sense(
             return decoded;
         }
         size_t declared_length = 8U + sense[7];
-        if (declared_length < 14 || declared_length != length ||
-            (sense[2] & 0xe0) != 0) {
+        if (length != SUPPORTED_FIXED_SENSE_LENGTH ||
+            declared_length != length || sense[1] != 0 ||
+            (sense[2] & 0xf0) != 0 ||
+            !bytes_are_zero(sense + 8, 4) || sense[14] != 0 ||
+            !bytes_are_zero(sense + 15, 3)) {
             return decoded;
         }
         decoded.has_asc = 1;
@@ -335,6 +349,8 @@ static struct decoded_sense decode_sense(
             }
             decoded.has_information_lba = 1;
             decoded.information_lba = information_lba;
+        } else if (!bytes_are_zero(sense + 3, 4)) {
+            return decoded;
         }
         decoded.well_formed = 1;
         return decoded;
@@ -383,6 +399,8 @@ static struct decoded_sense decode_sense(
             }
             decoded.has_information_lba = 1;
             decoded.information_lba = information_lba;
+        } else if (!bytes_are_zero(sense + offset + 4, 8)) {
+            return decoded;
         }
         offset += descriptor_length;
     }
@@ -398,8 +416,8 @@ static enum backend_read_status classify_read_failure(
     if (!completion->captured || !completion->command_completed ||
         !sense->well_formed || completion->scsi_status != 0x02 ||
         completion->host_status != 0 ||
-        ((completion->driver_status & 0x0f) != 0x00 &&
-         (completion->driver_status & 0x0f) != 0x08) ||
+        (completion->driver_status != 0x00 &&
+         completion->driver_status != 0x08) ||
         (sense->response_code != 0x70 && sense->response_code != 0x72) ||
         sense->sense_key != 0x03) {
         return BACKEND_READ_UNKNOWN_ERROR;
