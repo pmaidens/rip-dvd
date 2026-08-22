@@ -83,6 +83,9 @@ export type EncodeOutputFilesystemIdentity = string & {
 
 export const ARCHIVE_JOB_LEASE_DURATION_MS = 60_000;
 export const DISC_INSPECTION_LEASE_DURATION_MS = 60_000;
+export const DISC_INSPECTION_SETTLING_OBSERVATION_TARGET = 3;
+export const DISC_INSPECTION_SETTLING_QUIET_WINDOW_MS = 5_000;
+export const DVD_LOGICAL_SECTOR_BYTES = 2_048;
 export const ENCODE_JOB_LEASE_DURATION_MS = 60_000;
 
 export interface ServiceHealth {
@@ -124,6 +127,11 @@ export interface DiscInspection {
   opticalDriveId: OpticalDriveId;
   detectedDiscId: DetectedDiscId | null;
   mediaGeneration: string;
+  mediaCapacityBytes: number | null;
+  stableObservationCount: number | null;
+  settlingQuietWindowStartedAt: Date | null;
+  settlingStartedAt: Date | null;
+  settlingResetCount: number | null;
   isCurrent: boolean;
   status: DiscInspectionStatus;
   phase: DiscInspectionPhase;
@@ -951,6 +959,7 @@ export interface DiscInspectionAccess {
   beginOrResume(input: {
     opticalDriveId: OpticalDriveId;
     mediaGeneration: string;
+    mediaCapacityBytes: number;
   }): DiscInspectionStart;
   renew(claim: DiscInspectionClaim): DiscInspection;
   record(claim: DiscInspectionClaim, event: DiscInspectionEvent): DiscInspection;

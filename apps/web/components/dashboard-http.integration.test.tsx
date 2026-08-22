@@ -1,16 +1,16 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
-import {
-  pollArchiveWorker,
-  type OpticalDriveHardware,
-} from "../../archive-worker/src/archive-worker.js";
+import type { OpticalDriveHardware } from "../../archive-worker/src/archive-worker.js";
 
 import type { DashboardSnapshot } from "../lib/dashboard";
 import {
   useDataAccessFixture,
   withSnapshotOverrides,
 } from "../test/data-access-fixture";
+import {
+  pollArchiveWorkerForTest as pollArchiveWorker,
+} from "../test/archive-job-fixture";
 import { createDashboardResponse } from "../app/api/dashboard/route";
 import { DashboardView } from "./operations-dashboard";
 
@@ -26,6 +26,10 @@ describe("database-backed dashboard over HTTP", () => {
       }),
       confirmOpticalDrive: vi.fn(async (_binding, signal) => {
         signal.throwIfAborted();
+      }),
+      observeMedia: vi.fn().mockResolvedValue({
+        mediaGeneration: "dashboard-generation",
+        capacityBytes: 2_048,
       }),
       observeMediaGeneration: vi.fn().mockResolvedValue("dashboard-generation"),
       discover: vi.fn().mockResolvedValue([
@@ -110,7 +114,7 @@ describe("database-backed dashboard over HTTP", () => {
     expect(html).toContain(
       "sha256:2222222222222222222222222222222222222222222222222222222222222222",
     );
-    expect(hardware.discover).toHaveBeenCalledTimes(4);
+    expect(hardware.discover).toHaveBeenCalledTimes(10);
     expect(hardware.scanDvd).toHaveBeenCalledOnce();
   });
 

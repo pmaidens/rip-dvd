@@ -15,10 +15,7 @@ import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidec
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import {
-  pollArchiveWorker,
-  type OpticalDriveHardware,
-} from "../../archive-worker/src/archive-worker.js";
+import type { OpticalDriveHardware } from "../../archive-worker/src/archive-worker.js";
 import type { DvdCopyRunner } from "../../archive-worker/src/dvd-archiver.js";
 import {
   createCleanDvdRecoveryResult,
@@ -31,6 +28,9 @@ import {
   pollEncodeWorker,
   type HandBrakeRunner,
 } from "../../encode-worker/src/encode-worker.js";
+import {
+  pollArchiveWorkerForTest as pollArchiveWorker,
+} from "../test/archive-job-fixture";
 import { createArchiveRequestsRoute } from "../app/api/archive-requests/route";
 import { createCatalogReviewRoute } from "../app/api/catalog-reviews/[id]/route";
 import { createMediaItemSearchRoute } from "../app/api/media-items/route";
@@ -282,6 +282,10 @@ describe("end-to-end operations dashboard workflow", () => {
       confirmOpticalDrive: vi.fn(async (_binding, signal) => {
         signal.throwIfAborted();
       }),
+      observeMedia: vi.fn().mockResolvedValue({
+        mediaGeneration: "salvage-generation",
+        capacityBytes: 4_096,
+      }),
       observeMediaGeneration: vi.fn().mockResolvedValue("salvage-generation"),
       scanDvd: vi.fn().mockResolvedValue({
         fingerprint,
@@ -330,6 +334,7 @@ describe("end-to-end operations dashboard workflow", () => {
       workerId: "salvage-workflow-worker",
     });
 
+    expect(access.archiveJobs.list(["failed"])).toEqual([]);
     const dashboard = await readDashboard(access);
     expect(dashboard.html).toContain("Archive integrity: Watchable salvage");
     expect(dashboard.html).toContain(
@@ -414,6 +419,10 @@ describe("end-to-end operations dashboard workflow", () => {
         }),
         confirmOpticalDrive: vi.fn(async (_binding, signal) => {
           signal.throwIfAborted();
+        }),
+        observeMedia: vi.fn().mockResolvedValue({
+          mediaGeneration: "salvage-rejected-generation",
+          capacityBytes: 4_096,
         }),
         observeMediaGeneration: vi.fn().mockResolvedValue(
           "salvage-rejected-generation",
@@ -1185,6 +1194,10 @@ describe("end-to-end operations dashboard workflow", () => {
       }),
       confirmOpticalDrive: vi.fn(async (_binding, signal) => {
         signal.throwIfAborted();
+      }),
+      observeMedia: vi.fn().mockResolvedValue({
+        mediaGeneration: "workflow-generation",
+        capacityBytes: 2_048,
       }),
       observeMediaGeneration: vi.fn().mockResolvedValue("workflow-generation"),
       scanDvd: vi.fn().mockResolvedValue({

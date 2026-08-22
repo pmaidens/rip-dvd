@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import { useDataAccessFixture } from "../../test/data-access-fixture";
-import { startArchiveJob } from "../../test/archive-job-fixture";
+import {
+  beginSettledDiscInspectionForTest,
+  startArchiveJob,
+} from "../../test/archive-job-fixture";
 import { createArchiveRequestCancellationRoute } from "./archive-requests/[id]/route";
 import { createArchiveRequestRetryRoute } from "./archive-requests/[id]/retry/route";
 import { createArchiveRequestsRoute } from "./archive-requests/route";
@@ -113,14 +116,16 @@ describe("Disc Inspection and Archive Request mutation routes", () => {
 
   it("requests retry of the same current failed Disc Inspection", async () => {
     const { access, drive } = scannedDisc();
-    const started = access.discInspections.beginOrResume({
+    const started = beginSettledDiscInspectionForTest(access, {
       opticalDriveId: drive.id,
       mediaGeneration: "route-generation",
+      mediaCapacityBytes: 2_048,
     });
     const failed = access.discInspections.record(started.claim!, {
       type: "fail",
       reasonCode: "invalid_metadata",
     });
+    started.restoreSystemTime();
 
     const response = await createDiscInspectionRetryRoute(
       mutation(`/api/disc-inspections/${failed.id}/retry`),

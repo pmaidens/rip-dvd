@@ -133,10 +133,12 @@ export async function runDiscInspection({
     phase: "DVD scanning",
     signal,
   });
-  const mediaGeneration = await hardware.observeMediaGeneration(binding, signal);
+  const { mediaGeneration, capacityBytes: mediaCapacityBytes } =
+    await hardware.observeMedia(binding, signal);
   const startedInspection = access.discInspections.beginOrResume({
     opticalDriveId: drive.id,
     mediaGeneration,
+    mediaCapacityBytes,
   });
   if (startedInspection.claim === null) {
     const inspection = startedInspection.inspection;
@@ -164,6 +166,7 @@ export async function runDiscInspection({
   let totalBytes: number | null = null;
   try {
     const scan = await hardware.scanDvd(binding, inspectionSignal, {
+      expectedMediaCapacityBytes: mediaCapacityBytes,
       expectedMediaGeneration: mediaGeneration,
       onMetadata(metadata) {
         totalBytes = metadata.totalBytes;

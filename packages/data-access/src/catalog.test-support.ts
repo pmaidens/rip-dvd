@@ -4,6 +4,9 @@ import type {
   OriginalDiscArchiveId,
   RunningArchiveJob,
 } from "./types.js";
+import { beginSettledDiscInspectionForTest } from "./disc-settling-fixture.js";
+
+export { beginSettledDiscInspectionForTest };
 
 export function completeCatalogReview(
   access: DataAccess,
@@ -25,9 +28,10 @@ export function startArchiveJobForTest(
   workerId: string,
 ): RunningArchiveJob {
   access.archiveRequests.create({ detectedDiscId: disc.id });
-  const started = access.discInspections.beginOrResume({
+  const started = beginSettledDiscInspectionForTest(access, {
     opticalDriveId: disc.opticalDriveId,
     mediaGeneration: `test-generation:${disc.id}`,
+    mediaCapacityBytes: 2_048,
   });
   let inspection = started.inspection;
   if (started.claim) {
@@ -36,6 +40,7 @@ export function startArchiveJobForTest(
       detectedDiscId: disc.id,
     });
   }
+  started.restoreSystemTime();
   const claim = access.archiveJobs.startForInspection(inspection.id, workerId);
   if (!claim) {
     throw new Error("Expected an Archive Job attempt to start");

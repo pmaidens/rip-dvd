@@ -251,14 +251,21 @@ distinct count and at most three titles.
 ## Inspections, requests, and job attempts
 
 `discInspections.beginOrResume()` admits one current insertion per Optical
-Drive. Drive identity and media generation fence replacement, while a renewable
-claim token fences stale worker callbacks. Structured metadata, hash bytes,
-rate/ETA, attempt history, retry deadlines, reason codes, and bounded diagnostics
-are persisted without display strings. The fifth consecutive transient failure
-is terminal. `requestRetry()` persists operator intent while the inspection
-remains failed; only `beginOrResume()` with freshly observed matching media
-generation reopens it and resets the consecutive budget. Lifetime attempts are
-preserved. Removal and replacement abort rather than fail.
+Drive. A first valid generation and DVD-sector-aligned capacity observation
+starts it in `settling`; three matching observations spanning at least five
+seconds persist on that same inspection before one atomic transition to
+`reading_metadata` grants a renewable claim. Generation evidence remains
+provisional during settling and becomes the immutable media fence at that
+transition. Historical inspections retain their lifecycle state with no
+invented settling evidence. Drive identity and the settled media generation
+fence replacement, while the claim token fences stale worker callbacks.
+Structured metadata, hash bytes, rate/ETA, attempt history, retry deadlines,
+reason codes, and bounded diagnostics are persisted without display strings.
+The fifth consecutive transient failure is terminal. `requestRetry()` persists
+operator intent while the inspection remains failed; only `beginOrResume()`
+with freshly observed matching media generation reopens it and resets the
+consecutive budget. Lifetime attempts are preserved. Removal and replacement
+abort rather than fail.
 
 `archiveRequests.create()` atomically approves a scanned Detected Disc and
 records durable intent without creating an Archive Job. Pending requests wait

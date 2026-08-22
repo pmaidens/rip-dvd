@@ -22,6 +22,10 @@ import {
 } from "@rip-dvd/data-access";
 import { createRawDvdContentIdHasher } from "@rip-dvd/data-access/dvd-content-id";
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
+import {
+  beginSettledDiscInspectionForTest,
+  pollDiscSettlingForTest,
+} from "@rip-dvd/data-access/test-support";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -50,12 +54,18 @@ import {
 const temporaryDirectories: string[] = [];
 const testRescueWorkspaceLock = createInProcessDvdRescueWorkspaceLock();
 
-function pollArchiveWorker(options: PollArchiveWorkerOptions): Promise<void> {
+function pollArchiveWorkerOnce(options: PollArchiveWorkerOptions): Promise<void> {
   return pollArchiveWorkerWithDefaults({
     ...options,
     rescueWorkspaceLock:
       options.rescueWorkspaceLock ?? testRescueWorkspaceLock,
   });
+}
+
+async function pollArchiveWorker(options: PollArchiveWorkerOptions): Promise<void> {
+  await pollDiscSettlingForTest(options.access, () =>
+    pollArchiveWorkerOnce(options),
+  );
 }
 
 function runArchiveWorker(options: RunArchiveWorkerOptions): Promise<void> {
@@ -112,8 +122,37 @@ function stableDeviceBinding() {
         signal.throwIfAborted();
       },
     ),
+    observeMedia: vi.fn(async () => ({
+      mediaGeneration: "test-media-generation",
+      capacityBytes: 2_048,
+    })),
     observeMediaGeneration: vi.fn(async () => "test-media-generation"),
   };
+}
+
+function beginSettledDiscInspection(
+  access: ReturnType<typeof openTestDataAccess>,
+  input: Parameters<
+    ReturnType<typeof openTestDataAccess>["discInspections"]["beginOrResume"]
+  >[0],
+) {
+  return beginSettledDiscInspectionForTest(access, input);
+}
+
+function beginNearlySettledDiscInspection(
+  access: ReturnType<typeof openTestDataAccess>,
+  input: Parameters<
+    ReturnType<typeof openTestDataAccess>["discInspections"]["beginOrResume"]
+  >[0],
+) {
+  if (!vi.isFakeTimers()) {
+    vi.useFakeTimers({ toFake: ["Date"] });
+  }
+  const firstObservationAt = Date.now();
+  access.discInspections.beginOrResume(input);
+  vi.setSystemTime(new Date(firstObservationAt + 2_500));
+  access.discInspections.beginOrResume(input);
+  vi.setSystemTime(new Date(firstObservationAt + 5_000));
 }
 
 async function exerciseWatchabilityWorkerScenario({
@@ -346,7 +385,7 @@ describe("archive worker polling", () => {
       signal: new AbortController().signal,
     });
 
-    expect(observeMediaGeneration).toHaveBeenCalledTimes(2);
+    expect(observeMediaGeneration).toHaveBeenCalledTimes(1);
     const abortedInspections = access.discInspections.list();
     expect(abortedInspections).toEqual([
       expect.objectContaining({
@@ -415,7 +454,7 @@ describe("archive worker polling", () => {
         signal: new AbortController().signal,
       });
 
-      expect(observeMediaGeneration).toHaveBeenCalledTimes(2);
+      expect(observeMediaGeneration).toHaveBeenCalledTimes(1);
       const [inspection] = access.discInspections.list();
       expect(inspection).toMatchObject({
         status: "aborted",
@@ -1191,7 +1230,11 @@ describe("archive worker polling", () => {
     expect(access.archiveRequests.list(["needs_attention"])).toEqual([
       expect.objectContaining({ id: request.id }),
     ]);
-    expect(access.archiveJobs.list(["failed"]).at(-1)).toMatchObject({
+    expect(
+      access.archiveJobs
+        .list(["failed"])
+        .find(({ attemptOrdinal }) => attemptOrdinal === 2),
+    ).toMatchObject({
       attemptOrdinal: 2,
       errorMessage:
         "DVD rescue requires validation: 1 unreadable sector in 1 area; LBAs 3",
@@ -1264,7 +1307,11 @@ describe("archive worker polling", () => {
     expect(access.archiveRequests.list(["needs_attention"])).toEqual([
       expect.objectContaining({ id: request.id }),
     ]);
-    expect(access.archiveJobs.list(["failed"]).at(-1)).toMatchObject({
+    expect(
+      access.archiveJobs
+        .list(["failed"])
+        .find(({ attemptOrdinal }) => attemptOrdinal === 3),
+    ).toMatchObject({
       attemptOrdinal: 3,
       errorMessage: "catalog publication failed",
     });
@@ -1297,7 +1344,11 @@ describe("archive worker polling", () => {
     expect(access.archiveRequests.list(["needs_attention"])).toEqual([
       expect.objectContaining({ id: request.id }),
     ]);
-    expect(access.archiveJobs.list(["failed"]).at(-1)).toMatchObject({
+    expect(
+      access.archiveJobs
+        .list(["failed"])
+        .find(({ attemptOrdinal }) => attemptOrdinal === 4),
+    ).toMatchObject({
       attemptOrdinal: 4,
       errorMessage: "catalog publication failed again",
     });
@@ -1323,7 +1374,11 @@ describe("archive worker polling", () => {
     expect(access.archiveRequests.list(["fulfilled"])).toEqual([
       expect.objectContaining({ id: request.id }),
     ]);
-    expect(access.archiveJobs.list()).toEqual([
+    expect(
+      access.archiveJobs
+        .list()
+        .sort((left, right) => left.attemptOrdinal - right.attemptOrdinal),
+    ).toEqual([
       expect.objectContaining({ status: "failed", attemptOrdinal: 1 }),
       expect.objectContaining({ status: "failed", attemptOrdinal: 2 }),
       expect.objectContaining({ status: "failed", attemptOrdinal: 3 }),
@@ -1429,7 +1484,11 @@ describe("archive worker polling", () => {
     });
 
     expect(alternateCopy).toHaveBeenCalledOnce();
-    expect(access.archiveJobs.list(["failed"]).at(-1)).toMatchObject({
+    expect(
+      access.archiveJobs
+        .list(["failed"])
+        .find(({ attemptOrdinal }) => attemptOrdinal === 2),
+    ).toMatchObject({
       archiveRequestId: request.id,
       attemptOrdinal: 2,
       errorMessage:
@@ -1482,7 +1541,9 @@ describe("archive worker polling", () => {
     expect(existsSync(rescuePaths.imagePath)).toBe(false);
     expect(existsSync(rescuePaths.mapPath)).toBe(false);
 
-    const attempts = access.archiveJobs.list();
+    const attempts = access.archiveJobs
+      .list()
+      .sort((left, right) => left.attemptOrdinal - right.attemptOrdinal);
     expect(archive.detectedDiscId).toBe(attempts.at(-1)!.detectedDiscId);
     const observedDiscs = access.catalog.listDetectedDiscs(undefined, {
       ids: attempts.map(({ detectedDiscId }) => detectedDiscId),
@@ -1796,7 +1857,11 @@ describe("archive worker polling", () => {
     });
 
     expect(copy).not.toHaveBeenCalled();
-    expect(access.archiveJobs.list(["failed"]).at(-1)).toMatchObject({
+    expect(
+      access.archiveJobs
+        .list(["failed"])
+        .find(({ attemptOrdinal }) => attemptOrdinal === 2),
+    ).toMatchObject({
       attemptOrdinal: 2,
       errorMessage: "DVD rescue state does not match the Archive Request",
     });
@@ -1921,7 +1986,14 @@ describe("archive worker polling", () => {
       originalsLibraryPath,
       signal: new AbortController().signal,
     };
-    const poll = pollArchiveWorker(pollOptions);
+    for (const drive of drives) {
+      beginNearlySettledDiscInspection(access, {
+        opticalDriveId: drive.id,
+        mediaGeneration: "test-media-generation",
+        mediaCapacityBytes: 2_048,
+      });
+    }
+    const poll = pollArchiveWorkerOnce(pollOptions);
 
     await vi.waitFor(() => expect(copy).toHaveBeenCalledTimes(2));
     expect(maximumActiveCopies).toBe(2);
@@ -1986,9 +2058,10 @@ describe("archive worker polling", () => {
         sizeBytes: Buffer.byteLength(content),
       });
       access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
-      const started = access.discInspections.beginOrResume({
+      const started = beginSettledDiscInspection(access, {
         opticalDriveId: drive.id,
         mediaGeneration: "test-media-generation",
+        mediaCapacityBytes: 2_048,
       });
       access.discInspections.record(started.claim!, {
         type: "metadata",
@@ -2086,15 +2159,16 @@ describe("archive worker polling", () => {
       { ...fastDiscoveredDrive, isConfiguredDevice: true },
       slowDiscoveredDrive,
     ]);
-    access.catalog.upsertOpticalDrive({
+    const slowDrive = access.catalog.upsertOpticalDrive({
       devicePath: slowDiscoveredDrive.devicePath,
       isEnabled: true,
       isPresent: true,
       serialNumber: slowDiscoveredDrive.serialNumber,
     });
-    const started = access.discInspections.beginOrResume({
+    const started = beginSettledDiscInspection(access, {
       opticalDriveId: fastDrive!.id,
       mediaGeneration: "test-media-generation",
+      mediaCapacityBytes: 2_048,
     });
     const disc = access.catalog.registerDetectedDisc({
       opticalDriveId: fastDrive!.id,
@@ -2113,9 +2187,14 @@ describe("archive worker polling", () => {
       totalBytes: 9,
       volumeLabel: "START_LATENCY",
     });
-    const inspection = access.discInspections.record(started.claim!, {
+    access.discInspections.record(started.claim!, {
       type: "complete",
       detectedDiscId: disc.id,
+    });
+    beginNearlySettledDiscInspection(access, {
+      opticalDriveId: slowDrive.id,
+      mediaGeneration: "test-media-generation",
+      mediaCapacityBytes: 2_048,
     });
     const startForInspectionSpy = vi.spyOn(
       access.archiveJobs,
@@ -2225,9 +2304,10 @@ describe("archive worker polling", () => {
         isConfiguredDevice: true,
       },
     ])[0]!;
-    const original = access.discInspections.beginOrResume({
+    const original = beginSettledDiscInspection(access, {
       opticalDriveId: drive.id,
       mediaGeneration: "test-media-generation",
+      mediaCapacityBytes: 2_048,
     });
 
     const pollOptions = {
@@ -2288,7 +2368,12 @@ describe("archive worker polling", () => {
     );
     const log = vi.fn();
 
-    const polling = pollArchiveWorker({
+    beginNearlySettledDiscInspection(access, {
+      opticalDriveId: drive.id,
+      mediaGeneration: "test-media-generation",
+      mediaCapacityBytes: 2_048,
+    });
+    const polling = pollArchiveWorkerOnce({
       access,
       configuredDevicePath: "/dev/sr0",
       hardware: {
@@ -2931,9 +3016,10 @@ describe("archive worker polling", () => {
       serialNumber: "ARCHIVE-CANCEL-RECOVERY-001",
       isConfiguredDevice: true,
     }])[0]!;
-    const started = access.discInspections.beginOrResume({
+    const started = beginSettledDiscInspection(access, {
       opticalDriveId: drive.id,
       mediaGeneration: "cancelled-worker-insertion",
+      mediaCapacityBytes: 2_048,
     });
     const fingerprint = `sha256:${"a".repeat(64)}`;
     const disc = access.catalog.registerDetectedDisc({
@@ -3063,7 +3149,7 @@ describe("archive worker polling", () => {
         displayName: "Kitchen USB drive",
         isEnabled: true,
         isPresent: true,
-        lastSeenAt: new Date("2026-07-26T18:00:00.000Z"),
+        lastSeenAt: new Date("2026-07-26T18:00:05.000Z"),
       }),
     ]);
     expect(access.catalog.listDetectedDiscs()).toEqual([
@@ -3100,14 +3186,194 @@ describe("archive worker polling", () => {
     access.close();
   });
 
+  it("settles three matching media observations over five seconds before scanning", async () => {
+    vi.useFakeTimers();
+    const startedAt = new Date("2026-08-22T18:00:00.000Z");
+    vi.setSystemTime(startedAt);
+    const access = openTestDataAccess();
+    const mediaCapacityBytes = 4_700_372_992;
+    const run = vi.fn(async (executable: string) => {
+      if (executable === "lsblk") {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            blockdevices: [{
+              path: "/dev/sr0",
+              type: "rom",
+              vendor: "Pioneer",
+              model: "DVD-RW",
+              serial: "SETTLING-001",
+            }],
+          }),
+          stderr: "",
+        };
+      }
+      if (executable === "blockdev") {
+        return {
+          exitCode: 0,
+          stdout: `${mediaCapacityBytes}\n`,
+          stderr: "",
+        };
+      }
+      if (executable === "rip-dvd-lsdvd") {
+        expect(access.discInspections.list({ currentOnly: true })).toEqual([
+          expect.objectContaining({
+            phase: "reading_metadata",
+            mediaGeneration: "test-media-generation",
+            mediaCapacityBytes,
+            stableObservationCount: 3,
+            settlingQuietWindowStartedAt: startedAt,
+            settlingStartedAt: startedAt,
+            settlingResetCount: 0,
+          }),
+        ]);
+        return {
+          exitCode: 0,
+          stdout: [
+            "Disc Title: SETTLED_DISC",
+            "Title: 01, Length: 00:01:00.000 Chapters: 1, Cells: 1, Audio streams: 0, Subpictures: 0",
+          ].join("\n"),
+          stderr: "",
+        };
+      }
+      throw new Error(`Unexpected command: ${executable}`);
+    });
+    const runner: CommandRunner = { run };
+    const hardware = createLinuxOpticalDriveHardware({
+      platform: "linux",
+      runner,
+      mediaGenerationObserver: {
+        observe: vi.fn().mockResolvedValue("test-media-generation"),
+      },
+    });
+    const poll = () => pollArchiveWorkerOnce({
+      access,
+      configuredDevicePath: "/dev/sr0",
+      hardware,
+      log: vi.fn(),
+      signal: new AbortController().signal,
+    });
+
+    await poll();
+    const inspectionId = access.discInspections.list({ currentOnly: true })[0]!.id;
+    expect(access.discInspections.list({ currentOnly: true })).toEqual([
+      expect.objectContaining({
+        id: inspectionId,
+        phase: "settling",
+        mediaGeneration: "test-media-generation",
+        mediaCapacityBytes,
+        stableObservationCount: 1,
+        settlingQuietWindowStartedAt: startedAt,
+        settlingStartedAt: startedAt,
+        settlingResetCount: 0,
+        totalBytes: null,
+        bytesPerSecond: null,
+        etaSeconds: null,
+      }),
+    ]);
+    expect(
+      run.mock.calls.filter(([executable]) =>
+        executable === "rip-dvd-lsdvd"
+      ),
+    ).toHaveLength(0);
+
+    vi.advanceTimersByTime(2_500);
+    await poll();
+    expect(access.discInspections.list({ currentOnly: true })).toEqual([
+      expect.objectContaining({
+        id: inspectionId,
+        phase: "settling",
+        stableObservationCount: 2,
+      }),
+    ]);
+    expect(
+      run.mock.calls.filter(([executable]) =>
+        executable === "rip-dvd-lsdvd"
+      ),
+    ).toHaveLength(0);
+
+    vi.advanceTimersByTime(2_500);
+    await poll();
+
+    expect(
+      run.mock.calls.filter(([executable]) =>
+        executable === "rip-dvd-lsdvd"
+      ),
+    ).toHaveLength(1);
+    expect(
+      run.mock.calls.filter(([executable]) => executable === "blockdev"),
+    ).toHaveLength(3);
+    expect(access.discInspections.list({ currentOnly: true })).toEqual([
+      expect.objectContaining({
+        id: inspectionId,
+        status: "completed",
+        mediaGeneration: "test-media-generation",
+        mediaCapacityBytes,
+        stableObservationCount: 3,
+      }),
+    ]);
+    expect(access.catalog.listDetectedDiscs()).toEqual([
+      expect.objectContaining({
+        fingerprint: expect.stringMatching(/^dvdmeta-sha256:/),
+        volumeLabel: "SETTLED_DISC",
+      }),
+    ]);
+    access.close();
+  });
+
+  it("keeps three matching observations inside five seconds in settling", async () => {
+    vi.useFakeTimers();
+    const startedAt = new Date("2026-08-22T19:00:00.000Z");
+    vi.setSystemTime(startedAt);
+    const access = openTestDataAccess();
+    const scanDvd = vi.fn();
+    const hardware: OpticalDriveHardware = {
+      ...stableDeviceBinding(),
+      discover: vi.fn().mockResolvedValue([{
+        devicePath: "/dev/sr0",
+        displayName: "Settling drive",
+        serialNumber: "SETTLING-002",
+      }]),
+      observeMedia: vi.fn().mockResolvedValue({
+        mediaGeneration: "test-media-generation",
+        capacityBytes: 4_700_372_992,
+      }),
+      scanDvd,
+    };
+    const poll = () => pollArchiveWorkerOnce({
+      access,
+      configuredDevicePath: "/dev/sr0",
+      hardware,
+      log: vi.fn(),
+      signal: new AbortController().signal,
+    });
+
+    await poll();
+    vi.advanceTimersByTime(2_000);
+    await poll();
+    vi.advanceTimersByTime(2_000);
+    await poll();
+
+    expect(access.discInspections.list({ currentOnly: true })).toEqual([
+      expect.objectContaining({
+        phase: "settling",
+        stableObservationCount: 3,
+        settlingQuietWindowStartedAt: startedAt,
+        settlingStartedAt: startedAt,
+      }),
+    ]);
+    expect(scanDvd).not.toHaveBeenCalled();
+    expect(access.catalog.listDetectedDiscs()).toEqual([]);
+    access.close();
+  });
+
   it("does not persist a disc when authorized hardware is replaced during scanning", async () => {
     const access = openTestDataAccess();
     const log = vi.fn();
-    let discoveryCount = 0;
+    let dvdMetadataRead = false;
     const runner: CommandRunner = {
       run: vi.fn(async (executable) => {
         if (executable === "lsblk") {
-          discoveryCount += 1;
           return {
             exitCode: 0,
             stdout: JSON.stringify({
@@ -3117,8 +3383,7 @@ describe("archive worker polling", () => {
                   type: "rom",
                   vendor: "Pioneer",
                   model: "DVD-RW",
-                  serial:
-                    discoveryCount <= 3 ? "OLD-DRIVE" : "NEW-DRIVE",
+                  serial: dvdMetadataRead ? "NEW-DRIVE" : "OLD-DRIVE",
                 },
               ],
             }),
@@ -3126,6 +3391,7 @@ describe("archive worker polling", () => {
           };
         }
         if (executable === "rip-dvd-lsdvd") {
+          dvdMetadataRead = true;
           return {
             exitCode: 0,
             stdout: [
@@ -3136,7 +3402,7 @@ describe("archive worker polling", () => {
           };
         }
         if (executable === "blockdev") {
-          return { exitCode: 0, stdout: "1024\n", stderr: "" };
+          return { exitCode: 0, stdout: "2048\n", stderr: "" };
         }
         throw new Error(`Unexpected command: ${executable}`);
       }),
@@ -3333,7 +3599,7 @@ describe("archive worker polling", () => {
           };
         }
         if (executable === "blockdev") {
-          return { exitCode: 0, stdout: "1024\n", stderr: "" };
+          return { exitCode: 0, stdout: "2048\n", stderr: "" };
         }
         throw new Error(`Unexpected command: ${executable}`);
       }),
@@ -3408,11 +3674,12 @@ describe("archive worker polling", () => {
           };
         }
         if (executable === "blockdev") {
-          return { exitCode: 0, stdout: "1024\n", stderr: "" };
+          return { exitCode: 0, stdout: "2048\n", stderr: "" };
         }
         throw new Error(`Unexpected command: ${executable}`);
       }),
     };
+    let deviceObservationCount = 0;
     const hardware = createLinuxOpticalDriveHardware({
       platform: "linux",
       runner,
@@ -3420,11 +3687,10 @@ describe("archive worker polling", () => {
         observe: vi.fn().mockResolvedValue("7"),
       },
       deviceInstanceObserver: {
-        observe: vi
-          .fn()
-          .mockResolvedValueOnce("41")
-          .mockResolvedValueOnce("41")
-          .mockResolvedValue("43"),
+        observe: vi.fn(async () => {
+          deviceObservationCount += 1;
+          return deviceObservationCount <= 6 ? "41" : "43";
+        }),
       },
     });
 
@@ -3569,21 +3835,8 @@ describe("archive worker polling", () => {
       const originalDevicePath = realpathSync(originalPath);
       const replacementDevicePath = realpathSync(replacementPath);
       const access = openTestDataAccess();
-      const discover = vi
-        .fn()
-        .mockResolvedValueOnce([
+      const discover = vi.fn().mockResolvedValue([
           { devicePath: originalDevicePath, serialNumber: "OLD-001" },
-          { devicePath: replacementDevicePath, serialNumber: "NEW-002" },
-        ])
-        .mockResolvedValueOnce([
-          { devicePath: originalDevicePath, serialNumber: "OLD-001" },
-          { devicePath: replacementDevicePath, serialNumber: "NEW-002" },
-        ])
-        .mockResolvedValueOnce([
-          { devicePath: originalDevicePath, serialNumber: "OLD-001" },
-          { devicePath: replacementDevicePath, serialNumber: "NEW-002" },
-        ])
-        .mockResolvedValue([
           { devicePath: replacementDevicePath, serialNumber: "NEW-002" },
         ]);
       const scanDvd = vi.fn().mockResolvedValue(null);
@@ -3598,6 +3851,9 @@ describe("archive worker polling", () => {
       await pollArchiveWorker(options);
       unlinkSync(configuredAliasPath);
       symlinkSync(replacementPath, configuredAliasPath);
+      discover.mockResolvedValue([
+        { devicePath: replacementDevicePath, serialNumber: "NEW-002" },
+      ]);
       await pollArchiveWorker(options);
       await pollArchiveWorker(options);
 
@@ -3698,13 +3954,7 @@ describe("archive worker polling", () => {
     vi.setSystemTime(new Date("2026-07-26T18:00:00.000Z"));
     const access = openTestDataAccess();
     const attachedDrive = [{ devicePath: "/dev/sr0", serialNumber: "DRIVE-1" }];
-    const discover = vi.fn()
-      .mockResolvedValueOnce(attachedDrive)
-      .mockResolvedValueOnce(attachedDrive)
-      .mockResolvedValueOnce(attachedDrive)
-      .mockResolvedValueOnce(attachedDrive)
-      .mockResolvedValueOnce([])
-      .mockResolvedValue(attachedDrive);
+    const discover = vi.fn().mockResolvedValue(attachedDrive);
     const scanDvd = vi.fn().mockResolvedValue({
       fingerprint:
         "sha256:4444444444444444444444444444444444444444444444444444444444444444",
@@ -3763,8 +4013,10 @@ describe("archive worker polling", () => {
     ).not.toContainEqual(expect.objectContaining({ id: returningDisc.id }));
 
     vi.setSystemTime(new Date("2026-07-28T18:00:00.000Z"));
+    discover.mockResolvedValueOnce([]);
     await pollArchiveWorker(options);
     vi.setSystemTime(new Date("2026-07-29T18:00:00.000Z"));
+    discover.mockResolvedValue(attachedDrive);
     await pollArchiveWorker(options);
 
     expect(
@@ -3779,7 +4031,7 @@ describe("archive worker polling", () => {
       expect.objectContaining({
         id: returningDisc.id,
         status: "archived",
-        detectedAt: new Date("2026-07-29T18:00:00.000Z"),
+        detectedAt: new Date("2026-07-29T18:00:05.000Z"),
       }),
     );
     expect(access.archiveJobs.list()).toEqual([]);
@@ -4041,7 +4293,14 @@ describe("archive worker polling", () => {
         activeScans -= 1;
         return null;
       });
-      const polling = pollArchiveWorker({
+      for (const drive of access.catalog.listOpticalDrives()) {
+        beginNearlySettledDiscInspection(access, {
+          opticalDriveId: drive.id,
+          mediaGeneration: "test-media-generation",
+          mediaCapacityBytes: 2_048,
+        });
+      }
+      const polling = pollArchiveWorkerOnce({
         access,
         ...(concurrency === undefined ? {} : { concurrency }),
         configuredDevicePath: "/dev/sr0",
@@ -4076,6 +4335,18 @@ describe("archive worker polling", () => {
   it("cancels an in-flight scan and stops polling during shutdown", async () => {
     const access = openTestDataAccess();
     const controller = new AbortController();
+    const drive = access.catalog.reconcileOpticalDrives([
+      {
+        devicePath: "/dev/sr0",
+        serialNumber: "CANCEL-001",
+        isConfiguredDevice: true,
+      },
+    ])[0]!;
+    beginNearlySettledDiscInspection(access, {
+      opticalDriveId: drive.id,
+      mediaGeneration: "test-media-generation",
+      mediaCapacityBytes: 2_048,
+    });
     const scanDvd = vi.fn(
       async (_binding: unknown, signal: AbortSignal) => {
         controller.abort(new Error("worker shutdown"));

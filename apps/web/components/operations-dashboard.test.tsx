@@ -176,6 +176,27 @@ describe("DashboardView", () => {
     expect(metadataHtml).toContain('aria-label="Reading DVD metadata"');
     expect(metadataHtml).not.toContain("aria-valuenow");
 
+    const settlingHtml = renderToStaticMarkup(
+      <DashboardView state={{
+        ...state,
+        opticalDrives: {
+          ...state.opticalDrives,
+          items: [{
+            ...state.opticalDrives.items[0]!,
+            currentInspection: {
+              ...inspection,
+              phase: "settling" as const,
+            },
+          }],
+        },
+      }} />,
+    );
+    expect(settlingHtml).toContain("Settling inserted DVD");
+    expect(settlingHtml).toContain("elapsed");
+    expect(settlingHtml).not.toContain('role="progressbar"');
+    expect(settlingHtml).not.toContain("/dev/");
+    expect(settlingHtml).not.toContain("remaining");
+
     const hashHtml = renderToStaticMarkup(
       <DashboardView state={{
         ...state,
