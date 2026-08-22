@@ -776,7 +776,7 @@ describe("data-access facade", () => {
     const databasePath = createTestDatabasePath();
     const sqlite = new DatabaseSync(databasePath);
     const migrationsRoot = new URL("../drizzle/", import.meta.url);
-    const readFailureMigration = "20260822165553_normal_nuke";
+    const readFailureMigration = "20260822175220_striped_kabuki";
     const predecessorNames = readdirSync(migrationsRoot)
       .filter((name) => /^\d/.test(name) && name < readFailureMigration)
       .sort();
@@ -1147,7 +1147,7 @@ describe("data-access facade", () => {
           name !== "20260812151540_disc-inspection-archive-requests" &&
           name !== "20260820215821_redundant_jocasta" &&
           name !== "20260822142722_disc-inspection-settling" &&
-          name !== "20260822165553_normal_nuke",
+          name !== "20260822175220_striped_kabuki",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -7993,6 +7993,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       { name: "attempt_ordinal" },
       { name: "claim_token" },
       { name: "progress_phase" },
+      { name: "failure_detail_version" },
       { name: "read_failure_category" },
       { name: "read_failure_classifier_version" },
       { name: "read_failure_lba" },
@@ -8005,7 +8006,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
-        name: "20260822165553_normal_nuke",
+        name: "20260822175220_striped_kabuki",
       },
       {
         name: "20260822142722_disc-inspection-settling",
@@ -8033,9 +8034,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260813142411_corrected-encode-replacements",
-      },
-      {
-        name: "20260812180200_hard_smiling_tiger",
       },
     ]);
     expect(
