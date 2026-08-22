@@ -5,7 +5,10 @@ import type { DataAccess } from "@rip-dvd/data-access";
 
 import type { OpticalDriveHardware } from "./archive-worker-contracts.js";
 import { runArchiveJob } from "./archive-job-runner.js";
-import { reconcileDiscoveredDrives } from "./authorized-optical-drive.js";
+import {
+  hasSameOpticalDriveIdentity,
+  reconcileDiscoveredDrives,
+} from "./authorized-optical-drive.js";
 import { DiscInspectionError } from "./disc-inspection-error.js";
 import { runDiscInspection } from "./disc-inspection-runner.js";
 import {
@@ -169,6 +172,7 @@ async function pollArchiveWorkerWithDriveAdmission(
   }
   const discovered = await hardware.discover(signal);
   signal.throwIfAborted();
+  const previouslyKnownDrives = access.catalog.listOpticalDrives();
   const configuredCanonicalPath =
     resolveConfiguredDevicePath(configuredDevicePath);
   const drives = reconcileDiscoveredDrives(
@@ -179,11 +183,22 @@ async function pollArchiveWorkerWithDriveAdmission(
   const discoveredByPath = new Map(
     discovered.map((drive) => [drive.devicePath, drive]),
   );
+  const previouslyKnownById = new Map(
+    previouslyKnownDrives.map((drive) => [drive.id, drive]),
+  );
   for (const drive of drives) {
-    if (!drive.isPresent) {
+    if (!drive.isPresent || !drive.isEnabled) {
+      const previousDrive = previouslyKnownById.get(drive.id);
+      const discoveredDrive = discoveredByPath.get(drive.devicePath);
+      const identityChanged =
+        previousDrive !== undefined &&
+        discoveredDrive !== undefined &&
+        !hasSameOpticalDriveIdentity(previousDrive, discoveredDrive);
       access.discInspections.clearCurrent({
         opticalDriveId: drive.id,
-        reasonCode: "drive_unavailable",
+        reasonCode: identityChanged
+          ? "drive_identity_changed"
+          : "drive_unavailable",
       });
     }
   }

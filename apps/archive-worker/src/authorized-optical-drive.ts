@@ -7,14 +7,19 @@ import type { OpticalDriveHardware } from "./archive-worker-contracts.js";
 import { DiscInspectionError } from "./disc-inspection-error.js";
 
 function normalizeHardwareEvidence(
-  value: string | undefined,
+  value: string | null | undefined,
 ): string | undefined {
   return value?.trim() || undefined;
 }
 
-function hasSameHardwareIdentity(
-  expected: DiscoveredOpticalDrive,
-  observed: DiscoveredOpticalDrive,
+interface OpticalDriveIdentityEvidence {
+  devicePath: string;
+  serialNumber?: string | null;
+}
+
+export function hasSameOpticalDriveIdentity(
+  expected: OpticalDriveIdentityEvidence,
+  observed: OpticalDriveIdentityEvidence,
 ): boolean {
   const expectedSerial = normalizeHardwareEvidence(expected.serialNumber);
   return (
@@ -62,7 +67,10 @@ export async function confirmAuthorizedDrive({
   const observed = discovered.find(
     (drive) => drive.devicePath === expected.devicePath,
   );
-  if (observed === undefined || !hasSameHardwareIdentity(expected, observed)) {
+  if (
+    observed === undefined ||
+    !hasSameOpticalDriveIdentity(expected, observed)
+  ) {
     if (observed !== undefined) {
       access.catalog.upsertOpticalDrive({
         ...observed,
