@@ -322,6 +322,12 @@ const READ_FAILURE_DETAILS: Record<
     "The Optical Drive was not ready to read the disc. Check that the disc is inserted and the drive is available, then retry the Archive Request.",
   unit_attention:
     "The Optical Drive reported a media-state change. Confirm that the expected disc is still inserted, then retry the Archive Request.",
+  hardware_error:
+    "The Optical Drive reported a hardware fault. Retry the Archive Request; if it fails again with another disc, inspect or replace the Optical Drive.",
+  transport_error:
+    "Communication with the Optical Drive failed. Check the drive connection and host passthrough, then retry the Archive Request.",
+  protection_error:
+    "DVD copy protection or region access failed. Check DVD CSS support and the Optical Drive region, then retry the Archive Request.",
 };
 const MISSING_READ_FAILURE_DETAIL =
   "The Archive Job failed with an unknown diagnostic because structured read evidence is unavailable.";

@@ -27,22 +27,22 @@ for (let index = 0; index < content.length; index += 1) {
 writeFileSync(sourcePath, content);
 writeFileSync(replacementSourcePath, Buffer.alloc(content.byteLength, 173));
 
-function fixedMediumSense(lba, ascq = 0) {
+function fixedSense(lba, senseKey, asc, ascq = 0) {
   const sense = Buffer.alloc(18);
   sense[0] = 0xf0;
-  sense[2] = 0x03;
+  sense[2] = senseKey;
   sense.writeUInt32BE(lba, 3);
   sense[7] = 10;
-  sense[12] = 0x11;
+  sense[12] = asc;
   sense[13] = ascq;
   return sense.toString("hex");
 }
 
-function descriptorMediumSense(lba, ascq = 0) {
+function descriptorSense(lba, senseKey, asc, ascq = 0) {
   const sense = Buffer.alloc(20);
   sense[0] = 0x72;
-  sense[1] = 0x03;
-  sense[2] = 0x11;
+  sense[1] = senseKey;
+  sense[2] = asc;
   sense[3] = ascq;
   sense[7] = 12;
   sense[8] = 0;
@@ -71,8 +71,21 @@ function descriptorTerminalSense(senseKey, asc, ascq) {
   return sense.toString("hex");
 }
 
-function rawCompletionFault(lba, remainingFailures, sense) {
-  return `raw@${lba}@${remainingFailures}@2@0@8@${sense.length / 2}@${sense}`;
+function fixedMediumSense(lba, ascq = 0) {
+  return fixedSense(lba, 0x03, 0x11, ascq);
+}
+
+function descriptorMediumSense(lba, ascq = 0) {
+  return descriptorSense(lba, 0x03, 0x11, ascq);
+}
+
+function rawCompletionFault(
+  lba,
+  remainingFailures,
+  sense,
+  { scsiStatus = 2, hostStatus = 0, driverStatus = 8 } = {},
+) {
+  return `raw@${lba}@${remainingFailures}@${scsiStatus}@${hostStatus}@${driverStatus}@${sense.length / 2}@${sense}`;
 }
 
 const fixedMediumAtFive = fixedMediumSense(5);
@@ -115,6 +128,39 @@ const readinessSenseFixtures = [
     asc: 0x29,
     ascq: 0x00,
     sense: descriptorTerminalSense(0x06, 0x29, 0x00),
+  },
+];
+
+const categorizedReadFailures = [
+  {
+    category: "hardware_error",
+    fixtures: [
+      ["fixed-hardware", fixedSense(5, 0x04, 0x44)],
+      ["descriptor-hardware", descriptorSense(5, 0x04, 0x44)],
+    ],
+  },
+  {
+    category: "transport_error",
+    fixtures: [
+      [
+        "fixed-host-transport-precedence",
+        fixedMediumAtFive,
+        { hostStatus: 7 },
+      ],
+      [
+        "descriptor-host-transport-precedence",
+        descriptorMediumAtFive,
+        { hostStatus: 7 },
+      ],
+      ["driver-transport", fixedMediumAtFive, { driverStatus: 6 }],
+    ],
+  },
+  {
+    category: "protection_error",
+    fixtures: [
+      ["fixed-protection", fixedSense(5, 0x05, 0x6f, 0x04)],
+      ["descriptor-protection", descriptorSense(5, 0x05, 0x6f, 0x04)],
+    ],
   },
 ];
 
@@ -589,6 +635,31 @@ if (
   );
 }
 
+for (const { category, fixtures } of categorizedReadFailures) {
+  for (const [name, sense, completion] of fixtures) {
+    const failure = runTestCopy(
+      name,
+      rawCompletionFault(5, "always", sense, completion),
+    );
+    const result = readFailureResult(failure.stderr);
+    if (
+      failure.status !== 3 ||
+      statSync(failure.outputPath).size !== 0 ||
+      failure.stderr.includes(recoveryResultPrefix) ||
+      JSON.stringify(testReads(failure.stderr)) !==
+        JSON.stringify([{ lba: 0, blocks: 31 }]) ||
+      result.category !== category ||
+      result.requestedLba !== 0 ||
+      result.requestedBlockCount !== 31 ||
+      result.retryOrdinal !== 0
+    ) {
+      throw new Error(
+        `libdvdcss ${name} classification check failed: ${failure.stderr}`,
+      );
+    }
+  }
+}
+
 const fixedUnknownSense = "f00005000000050a00000000210000000000";
 const persistentUnknown = runTestCopy(
   "persistent-unknown",
@@ -706,6 +777,18 @@ const malformedUnknownFixtures = [
   [
     "driver-status-abort-suggestion",
     `raw@5@always@2@0@40@${fixedMediumAtFive.length / 2}@${fixedMediumAtFive}`,
+  ],
+  [
+    "driver-media-status",
+    `raw@5@always@2@0@3@${fixedMediumAtFive.length / 2}@${fixedMediumAtFive}`,
+  ],
+  [
+    "driver-invalid-status",
+    `raw@5@always@2@0@5@${fixedMediumAtFive.length / 2}@${fixedMediumAtFive}`,
+  ],
+  [
+    "driver-hard-status",
+    `raw@5@always@2@0@7@${fixedMediumAtFive.length / 2}@${fixedMediumAtFive}`,
   ],
   [
     "descriptor-response-reserved-bit",
@@ -914,6 +997,35 @@ for (const fixture of readinessSenseFixtures) {
   ) {
     throw new Error(
       `libdvdcss ${fixture.name} resume check failed: ${terminal.stderr}`,
+    );
+  }
+}
+
+for (const { category, fixtures } of categorizedReadFailures) {
+  const [name, sense, completion] = fixtures[0];
+  const resumePath = prepareOutput(
+    `/tmp/rip-dvd-reader-${name}-resume.img`,
+  );
+  writeFileSync(resumePath, unknownResumeContent);
+  const failure = runTestResume(
+    resumePath,
+    rawCompletionFault(5, "always", sense, completion),
+    isolatedResult.badSectorBitmapHex,
+  );
+  const result = readFailureResult(failure.stderr);
+  if (
+    failure.status !== 3 ||
+    !readFileSync(resumePath).equals(unknownResumeContent) ||
+    failure.stderr.includes(recoveryResultPrefix) ||
+    JSON.stringify(testReads(failure.stderr)) !==
+      JSON.stringify([{ lba: 5, blocks: 1 }]) ||
+    result.category !== category ||
+    result.requestedLba !== 5 ||
+    result.requestedBlockCount !== 1 ||
+    result.retryOrdinal !== 0
+  ) {
+    throw new Error(
+      `libdvdcss ${name} resume classification check failed: ${failure.stderr}`,
     );
   }
 }
