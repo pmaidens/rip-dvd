@@ -87,6 +87,8 @@ RUN pnpm --filter @rip-dvd/config build \
 
 FROM dependencies AS validation
 COPY --from=dvdcss-reader-builder /usr/local/bin/rip-dvd-dvdcss-reader /usr/local/bin/rip-dvd-dvdcss-reader
+COPY --from=dvdcss-reader-builder /tmp/rip-dvd-dvdcss-reader-test /tmp/rip-dvd-dvdcss-reader-test
+ENV RIP_DVD_NATIVE_TEST_EXECUTABLE="/tmp/rip-dvd-dvdcss-reader-test"
 COPY . .
 RUN pnpm check \
   && pnpm db:check \
