@@ -67,6 +67,7 @@ import {
 import {
   commitDvdBoundaryRescueWorkspace,
   commitDvdRescueWorkspace,
+  dvdBoundaryRetentionMapPath,
   dvdRescueWorkspacePaths,
   loadDvdRescueWorkspace,
   recordDvdBoundaryFailure,
@@ -1315,6 +1316,10 @@ export async function preserveDvdArchive({
     rescueIdentity === undefined
       ? undefined
       : dvdRescueWorkspacePaths(root, rescueIdentity.archiveRequestId);
+  const boundaryRetentionMapPath =
+    rescueIdentity === undefined
+      ? undefined
+      : dvdBoundaryRetentionMapPath(root, rescueIdentity.archiveRequestId);
   if (
     dirname(archivePath) !== root ||
     dirname(legacyPartialPath) !== root ||
@@ -1322,12 +1327,16 @@ export async function preserveDvdArchive({
     (rescuePaths !== undefined &&
       (dirname(rescuePaths.imagePath) !== root ||
         dirname(rescuePaths.mapPath) !== root)) ||
+    (boundaryRetentionMapPath !== undefined &&
+      dirname(boundaryRetentionMapPath) !== root) ||
     Buffer.byteLength(archivePath) > MAX_ARCHIVE_PATH_BYTES ||
     Buffer.byteLength(legacyPartialPath) > MAX_ARCHIVE_PATH_BYTES ||
     Buffer.byteLength(attemptPartialPath) > MAX_ARCHIVE_PATH_BYTES ||
     (rescuePaths !== undefined &&
       (Buffer.byteLength(rescuePaths.imagePath) > MAX_ARCHIVE_PATH_BYTES ||
         Buffer.byteLength(rescuePaths.mapPath) > MAX_ARCHIVE_PATH_BYTES)) ||
+    (boundaryRetentionMapPath !== undefined &&
+      Buffer.byteLength(boundaryRetentionMapPath) > MAX_ARCHIVE_PATH_BYTES) ||
     Buffer.byteLength(`${archivePath}.failed`) > MAX_ARCHIVE_PATH_BYTES ||
     Buffer.byteLength(`${attemptPartialPath}.failed`) > MAX_ARCHIVE_PATH_BYTES
   ) {
@@ -1728,6 +1737,17 @@ export async function preserveDvdArchive({
       signal.throwIfAborted();
       await revalidateReadFailure?.();
       if (retentionError === null) {
+        let retentionFenceFailed = false;
+        let retentionFenceError: unknown;
+        const finalizeRetention = async (): Promise<void> => {
+          try {
+            await revalidateReadFailure?.();
+          } catch (caughtRetentionFenceError) {
+            retentionFenceFailed = true;
+            retentionFenceError = caughtRetentionFenceError;
+            throw caughtRetentionFenceError;
+          }
+        };
         try {
           rescueWorkspace = rescueWorkspace === null
             ? await commitDvdBoundaryRescueWorkspace(
@@ -1736,6 +1756,7 @@ export async function preserveDvdArchive({
                 partialPath,
                 error.readFailure,
                 authorizeMutation,
+                finalizeRetention,
               )
             : await recordDvdBoundaryFailure(
                 root,
@@ -1743,13 +1764,16 @@ export async function preserveDvdArchive({
                 rescueWorkspace,
                 error.readFailure,
                 authorizeMutation,
+                finalizeRetention,
               );
           partialPath = rescueWorkspace.imagePath;
         } catch (caughtRetentionError) {
+          if (retentionFenceFailed) {
+            throw retentionFenceError;
+          }
           recordRetentionError(caughtRetentionError);
         }
       }
-      await revalidateReadFailure?.();
     } else if (isReadFailure) {
       await revalidateReadFailure?.();
     }
