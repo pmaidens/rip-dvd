@@ -35,7 +35,7 @@ export interface OpticalDriveHardware {
   observeMedia(
     binding: BoundOpticalDrive,
     signal: AbortSignal,
-  ): Promise<OpticalMediaObservation>;
+  ): Promise<OpticalMediaObservation | null>;
   observeMediaGeneration(
     binding: BoundOpticalDrive,
     signal: AbortSignal,

@@ -48,6 +48,7 @@ import {
 import { DiscInspectionError } from "./disc-inspection-error.js";
 import {
   createLinuxOpticalDriveHardware,
+  type CommandResult,
   type CommandRunner,
 } from "./optical-drive-hardware.js";
 
@@ -127,6 +128,58 @@ function stableDeviceBinding() {
       capacityBytes: 2_048,
     })),
     observeMediaGeneration: vi.fn(async () => "test-media-generation"),
+  };
+}
+
+interface SimulatedLinuxOpticalDrive extends DiscoveredOpticalDrive {
+  transport?: string;
+}
+
+function createLinuxSettlingHardware({
+  capacityResult,
+  drives,
+  mediaGeneration,
+}: {
+  capacityResult(devicePath: string): CommandResult;
+  drives(): readonly SimulatedLinuxOpticalDrive[];
+  mediaGeneration: string;
+}) {
+  const runner: CommandRunner = {
+    run: vi.fn(async (executable, arguments_) => {
+      if (executable === "lsblk") {
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            blockdevices: drives().map((drive) => ({
+              path: drive.devicePath,
+              type: "rom",
+              tran: drive.transport,
+              vendor: drive.vendor,
+              model: drive.product,
+              serial: drive.serialNumber,
+            })),
+          }),
+          stderr: "",
+        };
+      }
+      if (executable === "blockdev") {
+        return capacityResult(arguments_[1]!);
+      }
+      throw new Error(`Unexpected command: ${executable}`);
+    }),
+  };
+  return {
+    hardware: createLinuxOpticalDriveHardware({
+      deviceInstanceObserver: {
+        observe: vi.fn(async (devicePath) => `${devicePath}-instance`),
+      },
+      mediaGenerationObserver: {
+        observe: vi.fn().mockResolvedValue(mediaGeneration),
+      },
+      platform: "linux",
+      runner,
+    }),
+    runner,
   };
 }
 
@@ -3183,6 +3236,298 @@ describe("archive worker polling", () => {
       }),
     ]);
     expect(access.archiveJobs.list()).toEqual([]);
+    access.close();
+  });
+
+  it("keeps stable empty enabled Optical Drives as ordinary polling state", async () => {
+    const access = openTestDataAccess();
+    const secondDrive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr1",
+      isEnabled: true,
+      isPresent: true,
+      serialNumber: "EMPTY-USB-002",
+    });
+    const discoveredDrives = [
+      {
+        devicePath: "/dev/sr0",
+        displayName: "Empty SATA drive",
+        product: "DVD-RW",
+        serialNumber: "EMPTY-SATA-001",
+        transport: "sata",
+        vendor: "Pioneer",
+      },
+      {
+        devicePath: "/dev/sr1",
+        displayName: "Empty USB drive",
+        product: "DVD-RW",
+        serialNumber: "EMPTY-USB-002",
+        transport: "usb",
+        vendor: "LG",
+      },
+    ];
+    const { hardware, runner } = createLinuxSettlingHardware({
+      capacityResult: () => ({
+        exitCode: 1,
+        stdout: "",
+        stderr: "Device not ready: no medium found",
+      }),
+      drives: () => discoveredDrives,
+      mediaGeneration: "1",
+    });
+    const log = vi.fn();
+
+    await pollArchiveWorkerOnce({
+      access,
+      concurrency: 2,
+      configuredDevicePath: "/dev/sr0",
+      hardware,
+      log,
+      signal: new AbortController().signal,
+    });
+
+    const observedPaths = vi.mocked(runner.run).mock.calls
+      .filter(([executable]) => executable === "blockdev")
+      .map(([, arguments_]) => arguments_[1]);
+    expect(observedPaths).toHaveLength(2);
+    expect(observedPaths).toEqual(expect.arrayContaining(["/dev/sr0", "/dev/sr1"]));
+    expect(access.catalog.listOpticalDrives({ ids: [secondDrive.id] })).toEqual([
+      expect.objectContaining({ isEnabled: true, isPresent: true }),
+    ]);
+    expect(access.discInspections.list()).toEqual([]);
+    expect(access.catalog.listDetectedDiscs()).toEqual([]);
+    expect(runner.run).not.toHaveBeenCalledWith(
+      "rip-dvd-lsdvd",
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(log).not.toHaveBeenCalled();
+    access.close();
+  });
+
+  it("aborts settling as no_medium when the DVD is removed", async () => {
+    const access = openTestDataAccess();
+    const discoveredDrive = {
+      devicePath: "/dev/sr0",
+      product: "DVD-RW",
+      serialNumber: "REMOVAL-001",
+      vendor: "Pioneer",
+    };
+    let mediumPresent = true;
+    const { hardware, runner } = createLinuxSettlingHardware({
+      capacityResult: () => mediumPresent
+        ? { exitCode: 0, stdout: "4700372992\n", stderr: "" }
+        : {
+            exitCode: 1,
+            stdout: "",
+            stderr: "Device not ready: medium not present",
+          },
+      drives: () => [discoveredDrive],
+      mediaGeneration: "21",
+    });
+    const options = {
+      access,
+      configuredDevicePath: "/dev/sr0",
+      hardware,
+      log: vi.fn(),
+      signal: new AbortController().signal,
+    };
+
+    await pollArchiveWorkerOnce(options);
+    const settling = access.discInspections.list({ currentOnly: true })[0]!;
+    expect(settling).toMatchObject({ phase: "settling", status: "running" });
+
+    mediumPresent = false;
+    await pollArchiveWorkerOnce(options);
+
+    expect(access.discInspections.list({ ids: [settling.id] })).toEqual([
+      expect.objectContaining({
+        diagnostic: null,
+        isCurrent: false,
+        reasonCode: "no_medium",
+        status: "aborted",
+      }),
+    ]);
+    expect(access.discInspections.listAttempts(settling.id)).toEqual([
+      expect.objectContaining({
+        outcome: "aborted",
+        phase: "settling",
+        reasonCode: "no_medium",
+      }),
+    ]);
+    expect(access.catalog.listDetectedDiscs()).toEqual([]);
+    expect(runner.run).not.toHaveBeenCalledWith(
+      "rip-dvd-lsdvd",
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(options.log).not.toHaveBeenCalled();
+    access.close();
+  });
+
+  it("aborts settling when replacement hardware takes the Optical Drive path", async () => {
+    const access = openTestDataAccess();
+    let serialNumber = "SETTLING-DRIVE-001";
+    const { hardware, runner } = createLinuxSettlingHardware({
+      capacityResult: () => ({
+        exitCode: 0,
+        stdout: "4700372992\n",
+        stderr: "",
+      }),
+      drives: () => [{
+        devicePath: "/dev/sr0",
+        product: "DVD-RW",
+        serialNumber,
+        vendor: "Pioneer",
+      }],
+      mediaGeneration: "31",
+    });
+    const options = {
+      access,
+      configuredDevicePath: "/dev/sr0",
+      hardware,
+      log: vi.fn(),
+      signal: new AbortController().signal,
+    };
+
+    await pollArchiveWorkerOnce(options);
+    const settling = access.discInspections.list({ currentOnly: true })[0]!;
+
+    serialNumber = "REPLACEMENT-DRIVE-002";
+    await pollArchiveWorkerOnce(options);
+
+    expect(access.discInspections.list({ ids: [settling.id] })).toEqual([
+      expect.objectContaining({
+        diagnostic: null,
+        isCurrent: false,
+        reasonCode: "drive_identity_changed",
+        status: "aborted",
+      }),
+    ]);
+    expect(access.discInspections.listAttempts(settling.id)).toEqual([
+      expect.objectContaining({
+        outcome: "aborted",
+        phase: "settling",
+        reasonCode: "drive_identity_changed",
+      }),
+    ]);
+    expect(access.catalog.listOpticalDrives()).toEqual([
+      expect.objectContaining({
+        isEnabled: false,
+        serialNumber: "REPLACEMENT-DRIVE-002",
+      }),
+    ]);
+    expect(access.catalog.listDetectedDiscs()).toEqual([]);
+    expect(runner.run).not.toHaveBeenCalledWith(
+      "rip-dvd-lsdvd",
+      expect.anything(),
+      expect.anything(),
+    );
+    access.close();
+  });
+
+  it("retains drive_unavailable when media observation becomes inaccessible", async () => {
+    const access = openTestDataAccess();
+    let accessible = true;
+    const { hardware, runner } = createLinuxSettlingHardware({
+      capacityResult: () => accessible
+        ? { exitCode: 0, stdout: "4700372992\n", stderr: "" }
+        : {
+            exitCode: 1,
+            stdout: "",
+            stderr: "blockdev: cannot open /dev/sr0: Permission denied",
+          },
+      drives: () => [{
+        devicePath: "/dev/sr0",
+        product: "DVD-RW",
+        serialNumber: "UNAVAILABLE-001",
+        vendor: "Pioneer",
+      }],
+      mediaGeneration: "41",
+    });
+    const options = {
+      access,
+      configuredDevicePath: "/dev/sr0",
+      hardware,
+      log: vi.fn(),
+      signal: new AbortController().signal,
+    };
+
+    await pollArchiveWorkerOnce(options);
+    const settling = access.discInspections.list({ currentOnly: true })[0]!;
+    accessible = false;
+    await pollArchiveWorkerOnce(options);
+
+    expect(access.discInspections.list({ ids: [settling.id] })).toEqual([
+      expect.objectContaining({
+        diagnostic: null,
+        isCurrent: false,
+        reasonCode: "drive_unavailable",
+        status: "aborted",
+      }),
+    ]);
+    expect(access.discInspections.listAttempts(settling.id)).toEqual([
+      expect.objectContaining({
+        outcome: "aborted",
+        phase: "settling",
+        reasonCode: "drive_unavailable",
+      }),
+    ]);
+    expect(runner.run).not.toHaveBeenCalledWith(
+      "rip-dvd-lsdvd",
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(access.catalog.listDetectedDiscs()).toEqual([]);
+    access.close();
+  });
+
+  it("aborts an unauthorized settling Optical Drive as drive_unavailable", async () => {
+    const access = openTestDataAccess();
+    const observeMedia = vi.fn().mockResolvedValue({
+      mediaGeneration: "51",
+      capacityBytes: 4_700_372_992,
+    });
+    const scanDvd = vi.fn();
+    const discoveredDrive = {
+      devicePath: "/dev/sr0",
+      product: "DVD-RW",
+      serialNumber: "UNAUTHORIZED-001",
+      vendor: "Pioneer",
+    };
+    const hardware: OpticalDriveHardware = {
+      ...stableDeviceBinding(),
+      discover: vi.fn().mockResolvedValue([discoveredDrive]),
+      observeMedia,
+      scanDvd,
+    };
+    const options = {
+      access,
+      configuredDevicePath: "/dev/sr0",
+      hardware,
+      log: vi.fn(),
+      signal: new AbortController().signal,
+    };
+
+    await pollArchiveWorkerOnce(options);
+    const settling = access.discInspections.list({ currentOnly: true })[0]!;
+    access.catalog.upsertOpticalDrive({
+      ...discoveredDrive,
+      isEnabled: false,
+      isPresent: true,
+    });
+    await pollArchiveWorkerOnce(options);
+
+    expect(access.discInspections.list({ ids: [settling.id] })).toEqual([
+      expect.objectContaining({
+        diagnostic: null,
+        isCurrent: false,
+        reasonCode: "drive_unavailable",
+        status: "aborted",
+      }),
+    ]);
+    expect(observeMedia).toHaveBeenCalledTimes(1);
+    expect(scanDvd).not.toHaveBeenCalled();
+    expect(access.catalog.listDetectedDiscs()).toEqual([]);
     access.close();
   });
 
