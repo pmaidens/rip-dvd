@@ -872,6 +872,61 @@ describe("DVD archive publication", () => {
     });
   });
 
+  it("retains an unsupported bounded sense response as unknown evidence", async () => {
+    const child = createMockDvdCopyChild();
+    const runner = createNodeDvdCopyRunner({
+      requireInactive: () => undefined,
+      spawnProcess: vi.fn(() => child),
+    });
+    const completion = runner.copy({
+      devicePath: "/dev/zero",
+      outputPath: join(
+        createOriginalsLibrary(),
+        ".unsupported-sense.iso.rip-dvd-partial",
+      ),
+      sizeBytes: 4 * 2_048,
+      signal: new AbortController().signal,
+      onBytesCopied: () => undefined,
+    });
+
+    child.stdio[4].emit(
+      "data",
+      Buffer.from("rip-dvd-copy-authorization-ready\n"),
+    );
+    child.stderr.emit(
+      "data",
+      Buffer.from(
+        `${DVD_READ_FAILURE_RESULT_PREFIX}${JSON.stringify({
+          protocolVersion: 1,
+          classifierVersion: "scsi-read-classifier-v1",
+          category: "unknown",
+          scsiStatus: 2,
+          hostStatus: 0,
+          driverStatus: 8,
+          senseResponseCode: 0x7f,
+          senseKey: null,
+          asc: null,
+          ascq: null,
+          informationLba: null,
+          requestedLba: 0,
+          requestedBlockCount: 4,
+          retryOrdinal: 0,
+        })}\n`,
+      ),
+    );
+    child.emit("close", 3, null);
+
+    await expect(completion).rejects.toMatchObject({
+      readFailure: expect.objectContaining({
+        category: "unknown",
+        senseResponseCode: 0x7f,
+        senseKey: null,
+        asc: null,
+        ascq: null,
+      }),
+    });
+  });
+
   it.each([
     {
       name: "duplicate",
@@ -912,11 +967,6 @@ describe("DVD archive publication", () => {
     {
       name: "unsupported category",
       mutate: { category: "medium_error" },
-      status: 3,
-    },
-    {
-      name: "unsupported sense response",
-      mutate: { senseResponseCode: 126 },
       status: 3,
     },
     {
@@ -984,6 +1034,73 @@ describe("DVD archive publication", () => {
     const error = await completion.catch((reason: unknown) => reason);
     expect(error).toBeInstanceOf(Error);
     expect(error).not.toBeInstanceOf(DvdReadFailureError);
+  });
+
+  it.each([
+    { name: "missing terminal", includeTerminal: false, status: 3 },
+    { name: "mismatched exit", includeTerminal: true, status: 4 },
+  ])("does not retain raw stderr for a $name", async ({
+    includeTerminal,
+    status,
+  }) => {
+    const child = createMockDvdCopyChild();
+    const runner = createNodeDvdCopyRunner({
+      requireInactive: () => undefined,
+      spawnProcess: vi.fn(() => child),
+    });
+    const completion = runner.copy({
+      devicePath: "/dev/zero",
+      outputPath: join(
+        createOriginalsLibrary(),
+        ".private-terminal.iso.rip-dvd-partial",
+      ),
+      sizeBytes: 4 * 2_048,
+      signal: new AbortController().signal,
+      onBytesCopied: () => undefined,
+    });
+
+    child.stdio[4].emit(
+      "data",
+      Buffer.from("rip-dvd-copy-authorization-ready\n"),
+    );
+    if (includeTerminal) {
+      child.stderr.emit(
+        "data",
+        Buffer.from(
+          `${DVD_READ_FAILURE_RESULT_PREFIX}${JSON.stringify({
+            protocolVersion: 1,
+            classifierVersion: "scsi-read-classifier-v1",
+            category: "unknown",
+            scsiStatus: 2,
+            hostStatus: 0,
+            driverStatus: 8,
+            senseResponseCode: 0x70,
+            senseKey: 5,
+            asc: 33,
+            ascq: 0,
+            informationLba: 1,
+            requestedLba: 0,
+            requestedBlockCount: 4,
+            retryOrdinal: 0,
+          })}\n`,
+        ),
+      );
+    }
+    child.stderr.emit(
+      "data",
+      Buffer.from(
+        "SG_IO raw sense deadbeef on /dev/private-drive for /media/private.iso\n",
+      ),
+    );
+    child.emit("close", status, null);
+
+    const error = await completion.catch((reason: unknown) => reason);
+    expect(error).toEqual(
+      new Error("DVD read failure helper result is invalid"),
+    );
+    expect(String(error)).not.toContain("private-drive");
+    expect(String(error)).not.toContain("private.iso");
+    expect(String(error)).not.toContain("deadbeef");
   });
 
   it("authorizes the native reader to retry only unresolved rescue sectors", async () => {

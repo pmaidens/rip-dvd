@@ -408,7 +408,10 @@ async function exerciseWatchabilityWorkerScenario({
 async function exerciseUnknownReadFence({
   beforeFailure,
   beforeReadFailurePersistence,
+  expectedPollError,
   observeMediaGeneration,
+  rescueWorkspaceLock,
+  signal = new AbortController().signal,
 }: {
   beforeFailure?: (
     access: ReturnType<typeof openTestDataAccess>,
@@ -422,7 +425,10 @@ async function exerciseUnknownReadFence({
       ReturnType<typeof openTestDataAccess>["archiveRequests"]["create"]
     >["id"],
   ) => void;
+  expectedPollError?: Error;
   observeMediaGeneration?: () => Promise<string>;
+  rescueWorkspaceLock?: DvdRescueWorkspaceLock;
+  signal?: AbortSignal;
 } = {}) {
   const access = openTestDataAccess();
   const originalsLibraryPath = mkdtempSync(
@@ -481,27 +487,40 @@ async function exerciseUnknownReadFence({
     );
   }
 
-  await pollArchiveWorker({
-    access,
-    configuredDevicePath: discoveredDrive.devicePath,
-    copyRunner,
-    hardware: {
-      ...binding,
-      ...(observeMediaGeneration === undefined
-        ? {}
-        : { observeMediaGeneration }),
-      discover: vi.fn().mockResolvedValue([discoveredDrive]),
-      scanDvd: vi.fn().mockResolvedValue({
-        fingerprint,
-        scanData,
-        sizeBytes: 4 * 2_048,
-      }),
-    },
-    log,
-    originalsLibraryPath,
-    signal: new AbortController().signal,
-    workerId: "archive-worker-read-fence",
-  });
+  let pollError: unknown;
+  try {
+    await pollArchiveWorker({
+      access,
+      configuredDevicePath: discoveredDrive.devicePath,
+      copyRunner,
+      hardware: {
+        ...binding,
+        ...(observeMediaGeneration === undefined
+          ? {}
+          : { observeMediaGeneration }),
+        discover: vi.fn().mockResolvedValue([discoveredDrive]),
+        scanDvd: vi.fn().mockResolvedValue({
+          fingerprint,
+          scanData,
+          sizeBytes: 4 * 2_048,
+        }),
+      },
+      log,
+      originalsLibraryPath,
+      ...(rescueWorkspaceLock === undefined ? {} : { rescueWorkspaceLock }),
+      signal,
+      workerId: "archive-worker-read-fence",
+    });
+  } catch (error) {
+    pollError = error;
+  }
+  if (expectedPollError === undefined) {
+    if (pollError !== undefined) {
+      throw pollError;
+    }
+  } else if (pollError !== expectedPollError) {
+    throw new Error("Archive worker did not propagate the expected failure");
+  }
 
   return { access, log, request };
 }
@@ -1039,6 +1058,37 @@ describe("archive worker polling", () => {
     expect(scenario.access.archiveJobs.list(["failed"])).toEqual([
       expect.objectContaining({
         errorMessage: "DVD medium changed during archiving",
+        readFailureStage: null,
+        readFailureCategory: null,
+        readFailureClassifierVersion: null,
+      }),
+    ]);
+    expect(scenario.access.archiveRequests.list(["needs_attention"]))
+      .toEqual([expect.objectContaining({ id: scenario.request.id })]);
+  });
+
+  it("does not persist read evidence when shutdown wins before final revalidation", async () => {
+    const controller = new AbortController();
+    const workerStopping = new Error("Archive worker stopping");
+    const rescueWorkspaceLock: DvdRescueWorkspaceLock = {
+      async withLock({ task }) {
+        try {
+          return await task();
+        } catch (error) {
+          controller.abort(workerStopping);
+          throw error;
+        }
+      },
+    };
+    const scenario = await exerciseUnknownReadFence({
+      expectedPollError: workerStopping,
+      rescueWorkspaceLock,
+      signal: controller.signal,
+    });
+
+    expect(scenario.access.archiveJobs.list(["failed"])).toEqual([
+      expect.objectContaining({
+        errorMessage: "Archive interrupted",
         readFailureStage: null,
         readFailureCategory: null,
         readFailureClassifierVersion: null,

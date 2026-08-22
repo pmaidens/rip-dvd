@@ -190,7 +190,7 @@ export async function runArchiveJob({
     let readFailure = error instanceof DvdArchiveReadFailureError
       ? error
       : null;
-    if (readFailure !== null && !signal.aborted && !cancellationRequested) {
+    if (readFailure !== null && !cancellationRequested) {
       try {
         await revalidateReadFailure();
       } catch (revalidationError) {
