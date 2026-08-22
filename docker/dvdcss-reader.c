@@ -97,7 +97,6 @@ struct read_failure {
     enum read_failure_category category;
     struct rip_dvd_scsi_completion completion;
     struct decoded_sense sense;
-    enum read_failure_category category;
 };
 
 struct backend_read_result {
