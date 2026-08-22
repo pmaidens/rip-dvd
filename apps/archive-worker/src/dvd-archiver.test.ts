@@ -3360,6 +3360,68 @@ describe("DVD archive publication", () => {
     expect(existsSync(join(root, `dvdmeta-${digest}.iso`))).toBe(false);
   });
 
+  it("keeps structured boundary evidence when retention cleanup also fails", async () => {
+    const originalsLibraryPath = createOriginalsLibrary();
+    const root = realpathSync(originalsLibraryPath);
+    const digest = "e".repeat(64);
+    const archiveRequestId = "failed-boundary-retention-cleanup";
+    const sizeBytes = 4 * 2_048;
+    const runner: DvdCopyRunner = {
+      copy: vi.fn(async ({ outputPath }) => {
+        writeFileSync(outputPath, Buffer.alloc(2 * 2_048, 13));
+        mkdirSync(`${outputPath}.failed`);
+        throw outOfRangeDvdReadFailure({
+          declaredByteCount: sizeBytes,
+          firstFailingLba: 2,
+        });
+      }),
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    };
+
+    const failure = await preserveDvdArchive({
+      archiveRequestId,
+      devicePath: "/dev/sr0",
+      fingerprint: `dvdmeta-sha256:${digest}`,
+      originalsLibraryPath,
+      revalidateReadFailure: async () => undefined,
+      runner,
+      signal: new AbortController().signal,
+      sizeBytes,
+      sync: async () => {
+        throw new Error("boundary prefix sync failed");
+      },
+      verifySource: async () => undefined,
+      onProgress: () => undefined,
+    }).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(DvdArchiveReadFailureError);
+    expect(failure).toMatchObject({
+      stage: "initial_copy",
+      readFailure: expect.objectContaining({
+        category: "out_of_range",
+        firstFailingLba: 2,
+      }),
+      retentionError: expect.any(AggregateError),
+    });
+    expect(
+      (failure as DvdArchiveReadFailureError).retentionError,
+    ).toMatchObject({
+      errors: [
+        expect.objectContaining({ message: "boundary prefix sync failed" }),
+        expect.objectContaining({
+          message: "DVD archive failed path is not a regular file",
+        }),
+      ],
+    });
+
+    const rescuePaths = dvdRescueWorkspacePaths(root, archiveRequestId);
+    expect(existsSync(rescuePaths.imagePath)).toBe(false);
+    expect(existsSync(rescuePaths.mapPath)).toBe(false);
+    expect(existsSync(join(root, `dvdmeta-${digest}.iso`))).toBe(false);
+  });
+
   it("continues from the retained boundary across another boundary failure", async () => {
     const originalsLibraryPath = createOriginalsLibrary();
     const root = realpathSync(originalsLibraryPath);

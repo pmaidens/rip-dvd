@@ -199,23 +199,10 @@ const DVD_READ_FAILURE_PROTOCOL_KEYS = [
 ] as const;
 
 const DVD_OUT_OF_RANGE_FAILURE_PROTOCOL_KEYS = [
-  "asc",
-  "ascq",
-  "category",
-  "classifierVersion",
+  ...DVD_READ_FAILURE_PROTOCOL_KEYS,
   "declaredByteCount",
-  "driverStatus",
   "firstFailingLba",
-  "hostStatus",
-  "informationLba",
-  "protocolVersion",
-  "requestedBlockCount",
-  "requestedLba",
-  "retryOrdinal",
-  "scsiStatus",
-  "senseKey",
-  "senseResponseCode",
-] as const;
+].sort();
 
 export function parseDvdReadFailureResultProtocol(
   payload: string,
