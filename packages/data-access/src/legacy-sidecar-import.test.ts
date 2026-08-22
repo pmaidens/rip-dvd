@@ -20,6 +20,7 @@ import {
   DomainInvariantError,
 } from "./errors.js";
 import {
+  beginSettledDiscInspectionForTest,
   completeCatalogReview,
   startArchiveJobForTest,
 } from "./catalog.test-support.js";
@@ -371,14 +372,16 @@ describe("legacy sidecar import", () => {
       );
       sqlite.close();
 
-      const started = fixture.access.discInspections.beginOrResume({
+      const started = beginSettledDiscInspectionForTest(fixture.access, {
         opticalDriveId: fixture.drive.id,
         mediaGeneration: "unreconciled-upgrade-generation",
+        mediaCapacityBytes: 2_048,
       });
       const inspection = fixture.access.discInspections.record(started.claim!, {
         type: "complete",
         detectedDiscId: fixture.disc.id,
       });
+      started.restoreSystemTime();
       expect(() =>
         fixture.access.archiveJobs.startForInspection(
           inspection.id,

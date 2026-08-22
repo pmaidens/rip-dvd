@@ -16,6 +16,11 @@ export interface BoundOpticalDrive {
   readonly drive: DiscoveredOpticalDrive;
 }
 
+export interface OpticalMediaObservation {
+  mediaGeneration: string;
+  capacityBytes: number;
+}
+
 export interface OpticalDriveHardware {
   discover(signal: AbortSignal): Promise<readonly DiscoveredOpticalDrive[]>;
   bindOpticalDrive(
@@ -27,6 +32,10 @@ export interface OpticalDriveHardware {
     signal: AbortSignal,
     options?: DiscInspectionScanOptions,
   ): Promise<ScannedDvd | null>;
+  observeMedia(
+    binding: BoundOpticalDrive,
+    signal: AbortSignal,
+  ): Promise<OpticalMediaObservation>;
   observeMediaGeneration(
     binding: BoundOpticalDrive,
     signal: AbortSignal,

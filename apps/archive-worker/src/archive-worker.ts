@@ -20,6 +20,7 @@ import {
 
 export type {
   BoundOpticalDrive,
+  OpticalMediaObservation,
   OpticalDriveHardware,
   ScannedDvd,
 } from "./archive-worker-contracts.js";
