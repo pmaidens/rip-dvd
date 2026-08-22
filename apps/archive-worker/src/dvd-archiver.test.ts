@@ -33,8 +33,11 @@ import {
   DvdReadFailureError,
   DVD_READ_FAILURE_RESULT_PREFIX,
   DVD_RECOVERY_RESULT_PREFIX,
-  type OutOfRangeDvdReadFailureResult,
 } from "./dvd-recovery-contracts.js";
+import {
+  createOutOfRangeDvdReadFailure,
+  createOutOfRangeDvdReadFailureResult,
+} from "./dvd-read-failure.test-support.js";
 import { dvdRescueWorkspacePaths } from "./dvd-rescue-workspace.js";
 import {
   DVD_RESCUE_WORKSPACE_LOCK_DIRECTORY_NAME,
@@ -98,43 +101,6 @@ function createOriginalsLibrary(): string {
   const directory = mkdtempSync(join(tmpdir(), "rip-dvd-archive-"));
   temporaryDirectories.push(directory);
   return directory;
-}
-
-function outOfRangeDvdReadFailureResult({
-  declaredByteCount,
-  firstFailingLba,
-  requestedBlockCount = 4,
-  requestedLba = 0,
-}: {
-  declaredByteCount: number;
-  firstFailingLba: number;
-  requestedBlockCount?: number;
-  requestedLba?: number;
-}): OutOfRangeDvdReadFailureResult {
-  return {
-    protocolVersion: 1,
-    classifierVersion: "scsi-read-classifier-v1",
-    category: "out_of_range",
-    scsiStatus: 2,
-    hostStatus: 0,
-    driverStatus: 8,
-    senseResponseCode: 0x70,
-    senseKey: 5,
-    asc: 33,
-    ascq: 0,
-    informationLba: firstFailingLba,
-    requestedLba,
-    requestedBlockCount,
-    retryOrdinal: 0,
-    declaredByteCount,
-    firstFailingLba,
-  };
-}
-
-function outOfRangeDvdReadFailure(
-  options: Parameters<typeof outOfRangeDvdReadFailureResult>[0],
-): DvdReadFailureError {
-  return new DvdReadFailureError(outOfRangeDvdReadFailureResult(options));
 }
 
 async function createInterruptedDamagedPublication(
@@ -1043,7 +1009,7 @@ describe("DVD archive publication", () => {
       spawnProcess: vi.fn(() => child),
     });
     const sizeBytes = 40 * 2_048;
-    const readFailure = outOfRangeDvdReadFailureResult({
+    const readFailure = createOutOfRangeDvdReadFailureResult({
       declaredByteCount: sizeBytes,
       firstFailingLba: 35,
       requestedBlockCount: 9,
@@ -1417,7 +1383,7 @@ describe("DVD archive publication", () => {
         kind: "boundary",
         imageByteCount: 2 * 2_048,
         imageFilesystemIdentity: "1:2",
-        readFailure: outOfRangeDvdReadFailureResult({
+        readFailure: createOutOfRangeDvdReadFailureResult({
           declaredByteCount: sizeBytes,
           firstFailingLba: 2,
         }),
@@ -3252,7 +3218,7 @@ describe("DVD archive publication", () => {
     const runner: DvdCopyRunner = {
       copy: vi.fn(async ({ outputPath }) => {
         writeFileSync(outputPath, prefix);
-        throw outOfRangeDvdReadFailure({
+        throw createOutOfRangeDvdReadFailure({
           declaredByteCount: sizeBytes,
           firstFailingLba: 2,
         });
@@ -3316,7 +3282,7 @@ describe("DVD archive publication", () => {
     const runner: DvdCopyRunner = {
       copy: vi.fn(async ({ outputPath }) => {
         writeFileSync(outputPath, Buffer.alloc(2 * 2_048, 13));
-        throw outOfRangeDvdReadFailure({
+        throw createOutOfRangeDvdReadFailure({
           declaredByteCount: sizeBytes,
           firstFailingLba: 2,
         });
@@ -3360,6 +3326,52 @@ describe("DVD archive publication", () => {
     expect(existsSync(join(root, `dvdmeta-${digest}.iso`))).toBe(false);
   });
 
+  it("rejects a boundary prefix that does not match the retained length", async () => {
+    const originalsLibraryPath = createOriginalsLibrary();
+    const root = realpathSync(originalsLibraryPath);
+    const digest = "7".repeat(64);
+    const archiveRequestId = "mismatched-boundary-prefix-length";
+    const sizeBytes = 4 * 2_048;
+    const runner: DvdCopyRunner = {
+      copy: vi.fn(async ({ outputPath }) => {
+        writeFileSync(outputPath, Buffer.alloc(2 * 2_048, 13));
+        throw createOutOfRangeDvdReadFailure({
+          declaredByteCount: sizeBytes,
+          firstFailingLba: 2,
+          retainedImageByteCount: 2_048,
+        });
+      }),
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    };
+
+    const failure = await preserveDvdArchive({
+      archiveRequestId,
+      devicePath: "/dev/sr0",
+      fingerprint: `dvdmeta-sha256:${digest}`,
+      originalsLibraryPath,
+      revalidateReadFailure: async () => undefined,
+      runner,
+      signal: new AbortController().signal,
+      sizeBytes,
+      verifySource: async () => undefined,
+      onProgress: () => undefined,
+    }).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(DvdArchiveReadFailureError);
+    expect(failure).toMatchObject({
+      readFailure: expect.objectContaining({ category: "out_of_range" }),
+      retentionError: expect.objectContaining({
+        message: "DVD rescue boundary state could not be committed",
+      }),
+    });
+    const rescuePaths = dvdRescueWorkspacePaths(root, archiveRequestId);
+    expect(existsSync(rescuePaths.imagePath)).toBe(false);
+    expect(existsSync(rescuePaths.mapPath)).toBe(false);
+    expect(existsSync(join(root, `dvdmeta-${digest}.iso`))).toBe(false);
+  });
+
   it("keeps structured boundary evidence when retention cleanup also fails", async () => {
     const originalsLibraryPath = createOriginalsLibrary();
     const root = realpathSync(originalsLibraryPath);
@@ -3370,7 +3382,7 @@ describe("DVD archive publication", () => {
       copy: vi.fn(async ({ outputPath }) => {
         writeFileSync(outputPath, Buffer.alloc(2 * 2_048, 13));
         mkdirSync(`${outputPath}.failed`);
-        throw outOfRangeDvdReadFailure({
+        throw createOutOfRangeDvdReadFailure({
           declaredByteCount: sizeBytes,
           firstFailingLba: 2,
         });
@@ -3453,7 +3465,7 @@ describe("DVD archive publication", () => {
       ...baseOptions,
       runner: runner(vi.fn(async ({ outputPath }) => {
         writeFileSync(outputPath, firstPrefix);
-        throw outOfRangeDvdReadFailure({
+        throw createOutOfRangeDvdReadFailure({
           declaredByteCount: sizeBytes,
           firstFailingLba: 2,
         });
@@ -3473,7 +3485,7 @@ describe("DVD archive publication", () => {
           imageByteCount: 2 * 2_048,
         });
         writeFileSync(outputPath, secondPrefix);
-        throw outOfRangeDvdReadFailure({
+        throw createOutOfRangeDvdReadFailure({
           declaredByteCount: sizeBytes,
           firstFailingLba: 3,
           requestedBlockCount: 2,
@@ -3575,11 +3587,12 @@ describe("DVD archive publication", () => {
           recoveryResult: damaged,
         });
         writeFileSync(outputPath, recoveredBeforeBoundary);
-        throw outOfRangeDvdReadFailure({
+        throw createOutOfRangeDvdReadFailure({
           declaredByteCount: sizeBytes,
           firstFailingLba: 3,
           requestedBlockCount: 1,
           requestedLba: 3,
+          retainedImageByteCount: sizeBytes,
         });
       }),
       isActive: () => false,

@@ -840,6 +840,7 @@ for (const [name, sense] of [
     result.category !== "out_of_range" ||
     result.declaredByteCount !== content.byteLength ||
     result.firstFailingLba !== 35 ||
+    result.retainedImageByteCount !== 31 * 2_048 ||
     result.informationLba !== 35 ||
     result.requestedLba !== 31 ||
     result.requestedBlockCount !== 9 ||
@@ -849,6 +850,46 @@ for (const [name, sense] of [
       `libdvdcss ${name} boundary check failed: ${outOfRange.stderr}`,
     );
   }
+}
+
+const damagedThenBoundary = runTestCopy(
+  "medium-then-out-of-range",
+  [
+    rawCompletionFault(5, "always", fixedMediumAtFive),
+    rawCompletionFault(35, "always", fixedOutOfRangeSense(35)),
+  ].join(","),
+);
+const damagedThenBoundaryResult = readFailureResult(
+  damagedThenBoundary.stderr,
+);
+if (
+  damagedThenBoundary.status !== 3 ||
+  damagedThenBoundaryResult.category !== "out_of_range" ||
+  damagedThenBoundaryResult.firstFailingLba !== 35 ||
+  damagedThenBoundaryResult.retainedImageByteCount !== 5 * 2_048 ||
+  statSync(damagedThenBoundary.outputPath).size !== 5 * 2_048 ||
+  !readFileSync(damagedThenBoundary.outputPath).equals(
+    content.subarray(0, 5 * 2_048),
+  ) ||
+  damagedThenBoundary.stderr.includes(recoveryResultPrefix)
+) {
+  throw new Error(
+    `libdvdcss medium-then-boundary rollback check failed: ${damagedThenBoundary.stderr}`,
+  );
+}
+const resumedAfterDamagedBoundary = runTestBoundaryResume(
+  damagedThenBoundary.outputPath,
+  "none",
+  damagedThenBoundaryResult.retainedImageByteCount,
+);
+if (
+  resumedAfterDamagedBoundary.status !== 0 ||
+  !readFileSync(resumedAfterDamagedBoundary.outputPath).equals(content) ||
+  recoveryResult(resumedAfterDamagedBoundary.stderr).badSectorCount !== 0
+) {
+  throw new Error(
+    `libdvdcss medium-then-boundary resume check failed: ${resumedAfterDamagedBoundary.stderr}`,
+  );
 }
 
 for (const excludedSectorCount of [114_301, 73_400]) {
@@ -869,6 +910,7 @@ for (const excludedSectorCount of [114_301, 73_400]) {
     result.category !== "out_of_range" ||
     result.firstFailingLba !== boundaryLba ||
     result.declaredByteCount !== declaredSectorCount * 2_048 ||
+    result.retainedImageByteCount !== statSync(outOfRange.outputPath).size ||
     testReads(outOfRange.stderr).length !== 2 ||
     outOfRange.stderr.includes(recoveryResultPrefix)
   ) {
@@ -1203,7 +1245,8 @@ if (
     JSON.stringify([{ lba: 5, blocks: 1 }]) ||
   outOfRangeResumeResult.category !== "out_of_range" ||
   outOfRangeResumeResult.firstFailingLba !== 5 ||
-  outOfRangeResumeResult.declaredByteCount !== content.byteLength
+  outOfRangeResumeResult.declaredByteCount !== content.byteLength ||
+  outOfRangeResumeResult.retainedImageByteCount !== content.byteLength
 ) {
   throw new Error(
     `libdvdcss out-of-range resume check failed: ${outOfRangeResume.stderr}`,

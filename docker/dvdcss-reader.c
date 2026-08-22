@@ -145,6 +145,8 @@ struct recovery_state {
     size_t bitmap_byte_count;
     uint64_t bad_sector_count;
     uint64_t bad_area_count;
+    int boundary_failure;
+    uint64_t boundary_retained_image_byte_count;
     int emit_malformed_result;
     int interrupt_read_failure_result;
 };
@@ -567,9 +569,8 @@ static int write_terminal_output(const char *output, size_t length)
 }
 
 static int emit_read_failure_result(
-    const struct read_failure *failure,
-    const struct recovery_state *recovery,
-    uint64_t declared_byte_count)
+    const struct read_failure *failure, struct recovery_state *recovery,
+    uint64_t declared_byte_count, uint64_t retained_image_byte_count)
 {
     const struct rip_dvd_scsi_completion *completion = &failure->completion;
     const struct decoded_sense *sense = &failure->sense;
@@ -602,8 +603,15 @@ static int emit_read_failure_result(
         boundary_length = snprintf(
             boundary_fields, sizeof(boundary_fields),
             ",\"declaredByteCount\":%" PRIu64
-            ",\"firstFailingLba\":%" PRIu64 "}\n",
-            declared_byte_count, sense->information_lba);
+            ",\"firstFailingLba\":%" PRIu64
+            ",\"retainedImageByteCount\":%" PRIu64 "}\n",
+            declared_byte_count, sense->information_lba,
+            retained_image_byte_count);
+        if (recovery != NULL) {
+            recovery->boundary_failure = 1;
+            recovery->boundary_retained_image_byte_count =
+                retained_image_byte_count;
+        }
     } else {
         category = read_failure_category_name(failure->category);
         memcpy(boundary_fields, "}\n", 3);
@@ -883,6 +891,44 @@ static void mark_bad_sector(struct recovery_state *recovery, uint64_t lba)
     }
 }
 
+static uint64_t boundary_retained_image_byte_count(
+    const struct recovery_state *recovery, uint64_t bytes_processed)
+{
+    if (recovery == NULL || recovery->bad_sector_count == 0) {
+        return bytes_processed;
+    }
+    for (size_t byte_index = 0;
+         byte_index < recovery->bitmap_byte_count; byte_index++) {
+        unsigned char byte = recovery->bad_sector_bitmap[byte_index];
+        if (byte == 0) {
+            continue;
+        }
+        for (unsigned int bit_index = 0; bit_index < 8; bit_index++) {
+            if ((byte & (unsigned char)(1U << bit_index)) != 0) {
+                uint64_t first_bad_lba =
+                    (uint64_t)byte_index * 8 + bit_index;
+                uint64_t first_bad_byte = first_bad_lba * DVDCSS_BLOCK_SIZE;
+                return first_bad_byte < bytes_processed
+                    ? first_bad_byte : bytes_processed;
+            }
+        }
+    }
+    return bytes_processed;
+}
+
+static void rollback_boundary_image(int output_fd,
+                                    const struct recovery_state *recovery)
+{
+    if (!recovery->boundary_failure) {
+        return;
+    }
+    if (ftruncate(
+            output_fd,
+            (off_t)recovery->boundary_retained_image_byte_count) != 0) {
+        fail_errno("DVD boundary rescue rollback failed");
+    }
+}
+
 static int recover_range(struct read_backend *backend,
                          struct operation_state *state,
                          struct recovery_state *recovery,
@@ -907,8 +953,10 @@ static int recover_range(struct read_backend *backend,
             continue;
         }
         if (backend_read_has_terminal_failure_result(result.status)) {
-            return emit_read_failure_result(&result.failure, recovery,
-                                            declared_byte_count);
+            return emit_read_failure_result(
+                &result.failure, recovery, declared_byte_count,
+                boundary_retained_image_byte_count(
+                    recovery, *bytes_processed));
         }
         if (consume_blocks(state, buffer, result.blocks_read,
                            bytes_processed) != 0) {
@@ -999,8 +1047,10 @@ static int read_disc(struct read_backend *backend, uint64_t size_bytes,
             continue;
         }
         if (backend_read_has_terminal_failure_result(result.status)) {
-            status = emit_read_failure_result(&result.failure, recovery,
-                                              size_bytes);
+            status = emit_read_failure_result(
+                &result.failure, recovery, size_bytes,
+                boundary_retained_image_byte_count(
+                    recovery, bytes_processed));
             break;
         }
         if (consume_blocks(state, buffer, result.blocks_read,
@@ -1129,6 +1179,7 @@ static int run_copy(struct read_backend *backend, const char *output_path,
         .output_fd = output_fd,
     };
     int status = read_disc(backend, size_bytes, &state, &recovery, 0);
+    rollback_boundary_image(output_fd, &recovery);
     if (status == 0 && fsync(output_fd) != 0) {
         status = fail_errno("DVD archive sync failed");
     }
@@ -1304,8 +1355,8 @@ static int run_resume(struct read_backend *backend, const char *output_path,
                 continue;
             }
             if (backend_read_has_terminal_failure_result(result.status)) {
-                status = emit_read_failure_result(&result.failure, &recovery,
-                                                  size_bytes);
+                status = emit_read_failure_result(
+                    &result.failure, &recovery, size_bytes, size_bytes);
                 break;
             }
             if (result.blocks_read != 1 ||
@@ -1419,6 +1470,7 @@ static int run_boundary_resume(
     };
     int status = read_disc(
         backend, size_bytes, &state, &recovery, image_byte_count);
+    rollback_boundary_image(output_fd, &recovery);
     if (status == 0 && fsync(output_fd) != 0) {
         status = fail_errno("DVD boundary rescue image sync failed");
     }
