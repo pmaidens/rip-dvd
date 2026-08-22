@@ -19,6 +19,7 @@ import {
   DISC_INSPECTION_SETTLING_TIMEOUT_MS,
   type DiscInspectionId,
   DVD_SALVAGE_REJECTION_DESCRIPTIONS,
+  type ArchiveReadFailureCategory,
   type DiscoveredOpticalDrive,
   type DvdSalvageRejectionReason,
 } from "@rip-dvd/data-access";
@@ -60,10 +61,6 @@ import {
 const temporaryDirectories: string[] = [];
 const testRescueWorkspaceLock = createInProcessDvdRescueWorkspaceLock();
 
-type DvdReadFailureCategory = ConstructorParameters<
-  typeof DvdReadFailureError
->[0]["category"];
-
 const readinessReadFailureCases = [
   {
     category: "not_ready",
@@ -85,17 +82,51 @@ const terminalReadFailureCategories = [
   "unknown",
   "not_ready",
   "unit_attention",
-] as const satisfies readonly DvdReadFailureCategory[];
+  "hardware_error",
+  "transport_error",
+  "protection_error",
+] as const satisfies readonly ArchiveReadFailureCategory[];
 
 function dvdReadFailure(
-  category: DvdReadFailureCategory,
+  categoryOrOverrides:
+    | ArchiveReadFailureCategory
+    | Partial<ConstructorParameters<typeof DvdReadFailureError>[0]> = "unknown",
   overrides: Partial<ConstructorParameters<typeof DvdReadFailureError>[0]> = {},
 ) {
+  const category = typeof categoryOrOverrides === "string"
+    ? categoryOrOverrides
+    : categoryOrOverrides.category ?? "unknown";
+  const mergedOverrides = typeof categoryOrOverrides === "string"
+    ? overrides
+    : categoryOrOverrides;
   const decoded = category === "not_ready"
     ? { senseResponseCode: 0x70, senseKey: 0x02, asc: 0x04, ascq: 0x01 }
     : category === "unit_attention"
       ? { senseResponseCode: 0x72, senseKey: 0x06, asc: 0x28, ascq: 0x00 }
-      : { senseResponseCode: 0x70, senseKey: 0x05, asc: 0x21, ascq: 0x00 };
+      : category === "hardware_error"
+        ? { senseResponseCode: 0x70, senseKey: 0x04, asc: 0x44, ascq: 0x00 }
+        : category === "transport_error"
+          ? {
+              senseResponseCode: 0x70,
+              senseKey: 0x03,
+              asc: 0x11,
+              ascq: 0x00,
+              hostStatus: 0x07,
+              driverStatus: 0,
+            }
+          : category === "protection_error"
+            ? {
+                senseResponseCode: 0x72,
+                senseKey: 0x05,
+                asc: 0x6f,
+                ascq: 0x04,
+              }
+            : {
+                senseResponseCode: 0x70,
+                senseKey: 0x05,
+                asc: 0x21,
+                ascq: 0x00,
+              };
   return new DvdReadFailureError({
     protocolVersion: 1,
     classifierVersion: "scsi-read-classifier-v1",
@@ -108,7 +139,7 @@ function dvdReadFailure(
     requestedLba: 0,
     requestedBlockCount: 4,
     retryOrdinal: 2,
-    ...overrides,
+    ...mergedOverrides,
   });
 }
 
@@ -117,6 +148,60 @@ function unknownDvdReadFailure(
 ) {
   return dvdReadFailure("unknown", overrides);
 }
+
+const dvdReadFailureCases = [
+  {
+    category: "unknown",
+    evidence: {
+      scsiStatus: 2,
+      hostStatus: 0,
+      driverStatus: 8,
+      senseResponseCode: 0x70,
+      senseKey: 5,
+      asc: 33,
+      ascq: 0,
+    },
+  },
+  {
+    category: "hardware_error",
+    evidence: {
+      scsiStatus: 2,
+      hostStatus: 0,
+      driverStatus: 8,
+      senseResponseCode: 0x70,
+      senseKey: 4,
+      asc: 68,
+      ascq: 0,
+    },
+  },
+  {
+    category: "transport_error",
+    evidence: {
+      scsiStatus: 2,
+      hostStatus: 7,
+      driverStatus: 0,
+      senseResponseCode: 0x70,
+      senseKey: 3,
+      asc: 17,
+      ascq: 0,
+    },
+  },
+  {
+    category: "protection_error",
+    evidence: {
+      scsiStatus: 2,
+      hostStatus: 0,
+      driverStatus: 8,
+      senseResponseCode: 0x72,
+      senseKey: 5,
+      asc: 111,
+      ascq: 4,
+    },
+  },
+] as const satisfies readonly {
+  category: ArchiveReadFailureCategory;
+  evidence: Partial<ConstructorParameters<typeof DvdReadFailureError>[0]>;
+}[];
 
 function pollArchiveWorkerOnce(options: PollArchiveWorkerOptions): Promise<void> {
   return pollArchiveWorkerWithDefaults({
@@ -942,10 +1027,13 @@ describe("archive worker polling", () => {
     expect(salvageValidator.validate).not.toHaveBeenCalled();
   });
 
-  it("persists one unknown read diagnosis for the initial Archive Job attempt", async () => {
+  it.each(dvdReadFailureCases)("persists one $category diagnosis for the initial Archive Job attempt", async ({
+    category,
+    evidence,
+  }) => {
     const access = openTestDataAccess();
     const originalsLibraryPath = mkdtempSync(
-      join(tmpdir(), "rip-dvd-originals-unknown-read-"),
+      join(tmpdir(), `rip-dvd-originals-${category}-`),
     );
     temporaryDirectories.push(originalsLibraryPath);
     const fingerprint = `dvdmeta-sha256:${"2".repeat(64)}`;
@@ -964,7 +1052,7 @@ describe("archive worker polling", () => {
       devicePath: "/dev/sr0",
       vendor: "Pioneer",
       product: "DVD-RW",
-      serialNumber: "UNKNOWN-READ-001",
+      serialNumber: `READ-FAILURE-${category}`,
     };
     const drive = access.catalog.reconcileOpticalDrives([
       { ...discoveredDrive, isConfiguredDevice: true },
@@ -981,7 +1069,7 @@ describe("archive worker polling", () => {
     const copyRunner: DvdCopyRunner = {
       copy: vi.fn(async ({ authorizeStart }) => {
         await authorizeStart?.();
-        throw unknownDvdReadFailure();
+        throw dvdReadFailure({ category, ...evidence });
       }),
       isActive: () => false,
       withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
@@ -1006,7 +1094,7 @@ describe("archive worker polling", () => {
       originalsLibraryPath,
       salvageValidator,
       signal: new AbortController().signal,
-      workerId: "archive-worker-unknown-read",
+      workerId: `archive-worker-${category}`,
     });
 
     expect(access.archiveJobs.list(["failed"])).toEqual([
@@ -1014,17 +1102,17 @@ describe("archive worker polling", () => {
         archiveRequestId: request.id,
         originalDiscArchiveId: null,
         readFailureStage: "initial_copy",
-        readFailureCategory: "unknown",
+        readFailureCategory: category,
         readFailureClassifierVersion: "scsi-read-classifier-v1",
         readFailureLba: 1,
         readFailureRequestedBlockCount: 4,
         readFailureRetryCount: 2,
-        readFailureScsiStatus: 2,
-        readFailureHostStatus: 0,
-        readFailureDriverStatus: 8,
-        readFailureSenseKey: 5,
-        readFailureAsc: 33,
-        readFailureAscq: 0,
+        readFailureScsiStatus: evidence.scsiStatus,
+        readFailureHostStatus: evidence.hostStatus,
+        readFailureDriverStatus: evidence.driverStatus,
+        readFailureSenseKey: evidence.senseKey,
+        readFailureAsc: evidence.asc,
+        readFailureAscq: evidence.ascq,
       }),
     ]);
     expect(access.archiveRequests.list(["needs_attention"])).toEqual([
@@ -1071,7 +1159,10 @@ describe("archive worker polling", () => {
     },
   );
 
-  it("records an unknown resumed read on only the resumed Archive Job attempt", async () => {
+  it.each(dvdReadFailureCases)("records $category on only the resumed Archive Job attempt", async ({
+    category,
+    evidence,
+  }) => {
     const scenario = await exerciseWatchabilityWorkerScenario({
       ranges: [{ startLba: 1, sectorCount: 1 }],
       validation: { outcome: "rejected", reason: "referenced_content" },
@@ -1085,15 +1176,13 @@ describe("archive worker polling", () => {
           ]),
         );
         await authorizeStart?.();
-        throw unknownDvdReadFailure({
+        throw dvdReadFailure({
+          category,
+          ...evidence,
           informationLba: null,
           requestedLba: 1,
           requestedBlockCount: 1,
           retryOrdinal: 3,
-          senseResponseCode: null,
-          senseKey: null,
-          asc: null,
-          ascq: null,
         });
       }),
       isActive: () => false,
@@ -1119,7 +1208,7 @@ describe("archive worker polling", () => {
       originalsLibraryPath: scenario.originalsLibraryPath,
       salvageValidator,
       signal: new AbortController().signal,
-      workerId: "archive-worker-unknown-resumed-read",
+      workerId: `archive-worker-${category}-resumed-read`,
     });
 
     expect(copyRunner.copy).toHaveBeenCalledOnce();
@@ -1134,15 +1223,21 @@ describe("archive worker polling", () => {
       expect.objectContaining({
         attemptOrdinal: 2,
         readFailureStage: "rescue_resume",
-        readFailureCategory: "unknown",
+        readFailureCategory: category,
         readFailureLba: 1,
         readFailureRequestedBlockCount: 1,
         readFailureRetryCount: 3,
-        readFailureSenseKey: null,
-        readFailureAsc: null,
-        readFailureAscq: null,
+        readFailureScsiStatus: evidence.scsiStatus,
+        readFailureHostStatus: evidence.hostStatus,
+        readFailureDriverStatus: evidence.driverStatus,
+        readFailureSenseKey: evidence.senseKey,
+        readFailureAsc: evidence.asc,
+        readFailureAscq: evidence.ascq,
       }),
     ]));
+    expect(scenario.access.archiveRequests.list(["needs_attention"])).toEqual([
+      expect.objectContaining({ id: scenario.request.id }),
+    ]);
     expect(scenario.access.catalog.listOriginalDiscArchives()).toEqual([]);
   });
 

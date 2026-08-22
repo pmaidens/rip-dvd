@@ -808,7 +808,59 @@ describe("DVD archive publication", () => {
     );
   });
 
-  it("returns one complete unknown read failure from the native reader", async () => {
+  it.each([
+    {
+      category: "unknown",
+      status: {
+        scsiStatus: 2,
+        hostStatus: 0,
+        driverStatus: 8,
+        senseResponseCode: 112,
+        senseKey: 5,
+        asc: 33,
+        ascq: 0,
+      },
+    },
+    {
+      category: "hardware_error",
+      status: {
+        scsiStatus: 2,
+        hostStatus: 0,
+        driverStatus: 8,
+        senseResponseCode: 112,
+        senseKey: 4,
+        asc: 68,
+        ascq: 0,
+      },
+    },
+    {
+      category: "transport_error",
+      status: {
+        scsiStatus: 2,
+        hostStatus: 7,
+        driverStatus: 0,
+        senseResponseCode: 112,
+        senseKey: 3,
+        asc: 17,
+        ascq: 0,
+      },
+    },
+    {
+      category: "protection_error",
+      status: {
+        scsiStatus: 2,
+        hostStatus: 0,
+        driverStatus: 8,
+        senseResponseCode: 114,
+        senseKey: 5,
+        asc: 111,
+        ascq: 4,
+      },
+    },
+  ] as const)("returns one complete $category read failure from the native reader", async ({
+    category,
+    status,
+  }) => {
     const originalsLibraryPath = createOriginalsLibrary();
     const child = createMockDvdCopyChild();
     const runner = createNodeDvdCopyRunner({
@@ -834,14 +886,8 @@ describe("DVD archive publication", () => {
         `${DVD_READ_FAILURE_RESULT_PREFIX}${JSON.stringify({
           protocolVersion: 1,
           classifierVersion: "scsi-read-classifier-v1",
-          category: "unknown",
-          scsiStatus: 2,
-          hostStatus: 0,
-          driverStatus: 8,
-          senseResponseCode: 112,
-          senseKey: 5,
-          asc: 33,
-          ascq: 0,
+          category,
+          ...status,
           informationLba: 1,
           requestedLba: 0,
           requestedBlockCount: 4,
@@ -852,22 +898,16 @@ describe("DVD archive publication", () => {
     child.emit("close", 3, null);
 
     await expect(completion).rejects.toMatchObject({
-      message: "DVD read failed with structured unknown evidence",
+      message: `DVD read failed with structured ${category} evidence`,
       readFailure: {
         protocolVersion: 1,
         classifierVersion: "scsi-read-classifier-v1",
-        category: "unknown",
+        category,
         informationLba: 1,
         requestedLba: 0,
         requestedBlockCount: 4,
         retryOrdinal: 0,
-        scsiStatus: 2,
-        hostStatus: 0,
-        driverStatus: 8,
-        senseResponseCode: 112,
-        senseKey: 5,
-        asc: 33,
-        ascq: 0,
+        ...status,
       },
     });
   });
