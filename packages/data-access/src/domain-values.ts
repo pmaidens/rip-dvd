@@ -56,6 +56,8 @@ export const MAX_MEDIA_ITEM_HIERARCHY_DEPTH = 32;
 
 export const MEDIA_DOMAINS = ["dvd_video", "audio"] as const;
 
+export const TMDB_MEDIA_TYPES = ["movie", "tv_show"] as const;
+
 export const ENCODE_JOB_STATUSES = [
   "queued",
   "running",

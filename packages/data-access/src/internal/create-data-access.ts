@@ -63,6 +63,7 @@ import {
   encodeJobs,
   encodingProfiles,
   legacyCutoverStagedSidecars,
+  mediaItemTmdbIdentities,
   mediaItems,
   opticalDrives,
   originalDiscArchiveContentIds,
@@ -164,11 +165,13 @@ import type {
   MediaDomain,
   MediaItemMaintenance,
   MediaItemId,
+  MediaItemKind,
   OpticalDriveId,
   OriginalDiscArchiveId,
   RetainedEncodeOutputId,
   RunningArchiveJob,
   RunningEncodeJob,
+  TmdbIdentity,
 } from "../types.js";
 import {
   ARCHIVE_JOB_LEASE_DURATION_MS,
@@ -206,6 +209,18 @@ interface DiscSelectionSourceOverlapTracker {
   chapterRangesByTitle: Map<number, Array<readonly [number, number]>>;
   hasMainFeature: boolean;
   wholeTitles: Set<number>;
+}
+
+interface MappingProposalReviewTransition {
+  originalDiscArchiveId: OriginalDiscArchiveId;
+  catalogRevision: Date;
+  completeReview?: boolean;
+}
+
+function isValidTmdbIdentity(identity: TmdbIdentity): boolean {
+  return (identity.mediaType === "movie" || identity.mediaType === "tv_show") &&
+    Number.isSafeInteger(identity.tmdbId) &&
+    identity.tmdbId > 0;
 }
 
 function addDiscSelectionSourceToOverlapTracker(
@@ -1471,6 +1486,168 @@ export function createDataAccessInternal(
         .get(),
       "media item",
       input.id,
+    );
+  }
+
+  function ensureMediaItemTmdbIdentity(
+    transaction: CatalogTransaction,
+    mediaItem: { id: MediaItemId; kind: MediaItemKind },
+    identity: TmdbIdentity | undefined,
+    timestamp: Date,
+  ): void {
+    if (identity === undefined) return;
+    if (
+      !isValidTmdbIdentity(identity) ||
+      mediaItem.kind !== identity.mediaType
+    ) {
+      throw new DomainInvariantError(
+        "TMDB identity must match a Movie or TV Show Media Item",
+      );
+    }
+    const current = transaction
+      .select({
+        mediaType: mediaItemTmdbIdentities.mediaType,
+        tmdbId: mediaItemTmdbIdentities.tmdbId,
+      })
+      .from(mediaItemTmdbIdentities)
+      .where(eq(mediaItemTmdbIdentities.mediaItemId, mediaItem.id))
+      .get();
+    if (current) {
+      if (
+        current.mediaType === identity.mediaType &&
+        current.tmdbId === identity.tmdbId
+      ) {
+        return;
+      }
+      throw new DomainInvariantError(
+        "Media Item already has a different TMDB identity",
+      );
+    }
+    transaction.insert(mediaItemTmdbIdentities).values({
+      mediaItemId: mediaItem.id,
+      mediaType: identity.mediaType,
+      tmdbId: identity.tmdbId,
+      createdAt: timestamp,
+    }).run();
+  }
+
+  function finishCatalogReviewAfterMapping(
+    transaction: CatalogTransaction,
+    id: OriginalDiscArchiveId,
+    catalogRevision: Date,
+    timestamp: Date,
+  ): void {
+    const archive = requireReviewableDiscSelections(id, transaction);
+    completeCatalogReviewTransition(
+      transaction,
+      archive,
+      catalogRevision,
+      "reviewed_with_selections",
+      timestamp,
+      {
+        staleMessage:
+          "Catalog review changed; reload before accepting the automatic proposal",
+      },
+    );
+  }
+
+  function completeCatalogReviewTransition(
+    transaction: CatalogTransaction,
+    archive: typeof originalDiscArchives.$inferSelect,
+    catalogRevision: Date,
+    outcome: CompletedCatalogReviewOutcome,
+    timestamp: Date,
+    options: {
+      allowIdempotentCompletion?: boolean;
+      staleMessage?: string;
+    } = {},
+  ): typeof originalDiscArchives.$inferSelect {
+    const staleMessage = options.staleMessage ??
+      "Catalog review changed; reload before completing review";
+    if (archive.legacyCutoverPending) {
+      throw new DomainInvariantError(
+        "Catalog review cannot be completed while legacy cutover repair is pending",
+      );
+    }
+    if (archive.updatedAt.getTime() !== catalogRevision.getTime()) {
+      throw new DomainInvariantError(staleMessage);
+    }
+    if (archive.catalogReviewedAt !== null) {
+      if (
+        options.allowIdempotentCompletion &&
+        archive.catalogReviewOutcome === outcome
+      ) {
+        return archive;
+      }
+      if (options.allowIdempotentCompletion) {
+        throw new DomainInvariantError(
+          "Catalog review already has a different completed outcome",
+        );
+      }
+      throw new DomainInvariantError(staleMessage);
+    }
+    const completed = transaction
+      .update(originalDiscArchives)
+      .set({
+        catalogReviewedAt: timestamp,
+        catalogReviewOutcome: outcome,
+        updatedAt: nextCatalogMutationTimestamp(timestamp),
+      })
+      .where(and(
+        eq(originalDiscArchives.id, archive.id),
+        eq(originalDiscArchives.updatedAt, catalogRevision),
+        isNull(originalDiscArchives.catalogReviewedAt),
+        eq(originalDiscArchives.catalogReviewOutcome, "needs_review"),
+      ))
+      .returning()
+      .get();
+    if (!completed) {
+      throw new DomainInvariantError(staleMessage);
+    }
+    return completed;
+  }
+
+  function validateMappingProposalReviewTransition(
+    input: MappingProposalReviewTransition,
+    proposalName: "Mapping Proposal" | "Episodic Mapping Proposal",
+  ): void {
+    if (
+      !(input.catalogRevision instanceof Date) ||
+      !Number.isSafeInteger(input.catalogRevision.getTime())
+    ) {
+      throw new DomainInvariantError(
+        `${proposalName} catalog revision must be a valid timestamp`,
+      );
+    }
+    if (
+      input.completeReview !== undefined &&
+      typeof input.completeReview !== "boolean"
+    ) {
+      throw new DomainInvariantError(
+        `${proposalName} completion choice must be a boolean`,
+      );
+    }
+  }
+
+  function applyMappingProposalReviewTransition(
+    transaction: CatalogTransaction,
+    input: MappingProposalReviewTransition,
+    timestamp: Date,
+  ): void {
+    if (input.completeReview) {
+      finishCatalogReviewAfterMapping(
+        transaction,
+        input.originalDiscArchiveId,
+        input.catalogRevision,
+        timestamp,
+      );
+      return;
+    }
+    reopenCatalogReview(
+      transaction,
+      input.originalDiscArchiveId,
+      timestamp,
+      input.catalogRevision,
     );
   }
 
@@ -3687,47 +3864,14 @@ export function createDataAccessInternal(
             validatedArchive,
             transaction,
           );
-          if (archive.legacyCutoverPending) {
-            throw new DomainInvariantError(
-              "Catalog review cannot be completed while legacy cutover repair is pending",
-            );
-          }
-          if (archive.updatedAt.getTime() !== catalogRevision.getTime()) {
-            throw new DomainInvariantError(
-              "Catalog review changed; reload before completing review",
-            );
-          }
-          if (archive.catalogReviewedAt !== null) {
-            if (archive.catalogReviewOutcome === outcome) {
-              return archive;
-            }
-            throw new DomainInvariantError(
-              "Catalog review already has a different completed outcome",
-            );
-          }
-          const completed = transaction
-            .update(originalDiscArchives)
-            .set({
-              catalogReviewedAt: timestamp,
-              catalogReviewOutcome: outcome,
-              updatedAt: nextCatalogMutationTimestamp(timestamp),
-            })
-            .where(
-              and(
-                eq(originalDiscArchives.id, id),
-                eq(originalDiscArchives.updatedAt, catalogRevision),
-                isNull(originalDiscArchives.catalogReviewedAt),
-                eq(originalDiscArchives.catalogReviewOutcome, "needs_review"),
-              ),
-            )
-            .returning()
-            .get();
-          if (!completed) {
-            throw new DomainInvariantError(
-              "Catalog review changed; reload before completing review",
-            );
-          }
-          return completed;
+          return completeCatalogReviewTransition(
+            transaction,
+            archive,
+            catalogRevision,
+            outcome,
+            timestamp,
+            { allowIdempotentCompletion: true },
+          );
         }, { behavior: "immediate" });
       },
 
@@ -3791,21 +3935,13 @@ export function createDataAccessInternal(
             validatedArchive,
             transaction,
           );
-          if (archive.legacyCutoverPending) {
-            throw new DomainInvariantError(
-              "Catalog review cannot be completed while legacy cutover repair is pending",
-            );
-          }
-          if (archive.updatedAt.getTime() !== catalogRevision.getTime()) {
-            throw new DomainInvariantError(
-              "Catalog review changed; reload before completing review",
-            );
-          }
-          if (archive.catalogReviewedAt !== null) {
-            throw new DomainInvariantError(
-              "Catalog review changed; reload before completing review",
-            );
-          }
+          const completed = completeCatalogReviewTransition(
+            transaction,
+            archive,
+            catalogRevision,
+            outcome,
+            timestamp,
+          );
 
           const replacementEncodeJobs: EncodeJob[] = [];
           for (const input of replacements) {
@@ -3920,26 +4056,6 @@ export function createDataAccessInternal(
             timestamp.getTime(),
           );
 
-          const completed = transaction
-            .update(originalDiscArchives)
-            .set({
-              catalogReviewedAt: timestamp,
-              catalogReviewOutcome: outcome,
-              updatedAt: nextCatalogMutationTimestamp(timestamp),
-            })
-            .where(and(
-              eq(originalDiscArchives.id, id),
-              eq(originalDiscArchives.updatedAt, catalogRevision),
-              isNull(originalDiscArchives.catalogReviewedAt),
-              eq(originalDiscArchives.catalogReviewOutcome, "needs_review"),
-            ))
-            .returning()
-            .get();
-          if (!completed) {
-            throw new DomainInvariantError(
-              "Catalog review changed; reload before completing review",
-            );
-          }
           return { archive: completed, replacementEncodeJobs };
         }, { behavior: "immediate" });
       },
@@ -3947,23 +4063,24 @@ export function createDataAccessInternal(
       createMediaItem(input) {
         const timestamp = now();
         const id = newId<MediaItemId>();
-        return database.transaction((transaction) =>
-          insertValidatedMediaItem(
+        return database.transaction((transaction) => {
+          const mediaItem = insertValidatedMediaItem(
             transaction,
             { ...input, id },
             timestamp,
-          ), { behavior: "immediate" });
+          );
+          ensureMediaItemTmdbIdentity(
+            transaction,
+            mediaItem,
+            input.tmdbIdentity,
+            timestamp,
+          );
+          return mediaItem;
+        }, { behavior: "immediate" });
       },
 
       createMappingProposal(input) {
-        if (
-          !(input.catalogRevision instanceof Date) ||
-          !Number.isSafeInteger(input.catalogRevision.getTime())
-        ) {
-          throw new DomainInvariantError(
-            "Mapping Proposal catalog revision must be a valid timestamp",
-          );
-        }
+        validateMappingProposalReviewTransition(input, "Mapping Proposal");
         const timestamp = now();
         const mediaItemId = newId<MediaItemId>();
         const discSelectionId = newId<DiscSelectionId>();
@@ -4009,6 +4126,21 @@ export function createDataAccessInternal(
               "media item",
               input.existingMediaItemId,
             );
+          if (input.existingMediaItemId === undefined) {
+            ensureMediaItemTmdbIdentity(
+              transaction,
+              mediaItem,
+              input.mediaItem.tmdbIdentity,
+              timestamp,
+            );
+          } else {
+            ensureMediaItemTmdbIdentity(
+              transaction,
+              mediaItem,
+              input.existingMediaItemTmdbIdentity,
+              timestamp,
+            );
+          }
           const discSelection = insertDiscSelection(
             transaction,
             {
@@ -4021,25 +4153,20 @@ export function createDataAccessInternal(
             timestamp,
             { rejectSourceOverlap: true },
           );
-          reopenCatalogReview(
+          applyMappingProposalReviewTransition(
             transaction,
-            input.originalDiscArchiveId,
+            input,
             timestamp,
-            input.catalogRevision,
           );
           return { mediaItem, discSelection };
         }, { behavior: "immediate" });
       },
 
       createEpisodicMappingProposal(input) {
-        if (
-          !(input.catalogRevision instanceof Date) ||
-          !Number.isSafeInteger(input.catalogRevision.getTime())
-        ) {
-          throw new DomainInvariantError(
-            "Episodic Mapping Proposal catalog revision must be a valid timestamp",
-          );
-        }
+        validateMappingProposalReviewTransition(
+          input,
+          "Episodic Mapping Proposal",
+        );
         if (
           !Array.isArray(input.episodes) ||
           input.episodes.length === 0 ||
@@ -4131,6 +4258,12 @@ export function createDataAccessInternal(
               "Episodic Mapping Proposal requires a TV Show",
             );
           }
+          ensureMediaItemTmdbIdentity(
+            transaction,
+            tvShow,
+            input.tvShow.tmdbIdentity,
+            timestamp,
+          );
 
           const season = input.season.choice === "create_new"
             ? createMediaItem({
@@ -4151,12 +4284,23 @@ export function createDataAccessInternal(
           }
 
           const episodes = input.episodes.map((episode) => {
-            const mediaItem = createMediaItem({
-              parentId: season.id,
-              kind: "episode",
-              title: episode.title,
-              episodeNumber: episode.episodeNumber,
-            });
+            const mediaItem = episode.existingMediaItemId === undefined
+              ? createMediaItem({
+                  parentId: season.id,
+                  kind: "episode",
+                  title: episode.title,
+                  episodeNumber: episode.episodeNumber,
+                })
+              : readMediaItem(episode.existingMediaItemId);
+            if (
+              mediaItem.kind !== "episode" ||
+              mediaItem.parentId !== season.id ||
+              mediaItem.episodeNumber !== episode.episodeNumber
+            ) {
+              throw new DomainInvariantError(
+                "Episodic Mapping Proposal existing Episode must match the selected Season and episode number",
+              );
+            }
             validateAssistedMappingShape(transaction, {
               parentId: mediaItem.parentId,
               kind: mediaItem.kind,
@@ -4185,11 +4329,10 @@ export function createDataAccessInternal(
             );
             return { mediaItem, discSelection };
           });
-          reopenCatalogReview(
+          applyMappingProposalReviewTransition(
             transaction,
-            input.originalDiscArchiveId,
+            input,
             timestamp,
-            input.catalogRevision,
           );
           return { tvShow, season, episodes };
         }, { behavior: "immediate" });
@@ -4233,6 +4376,16 @@ export function createDataAccessInternal(
                 input.title === undefined ? "preserve" : "trim",
             },
           );
+          const tmdbIdentity = transaction
+            .select({ mediaType: mediaItemTmdbIdentities.mediaType })
+            .from(mediaItemTmdbIdentities)
+            .where(eq(mediaItemTmdbIdentities.mediaItemId, id))
+            .get();
+          if (tmdbIdentity && tmdbIdentity.mediaType !== values.kind) {
+            throw new DomainInvariantError(
+              "Media Item kind must match its TMDB identity",
+            );
+          }
           return requireRow(
             transaction
               .update(mediaItems)
@@ -4300,9 +4453,14 @@ export function createDataAccessInternal(
           .select()
           .from(mediaItems)
           .where(
-            options?.ids
-              ? inArray(mediaItems.id, [...options.ids])
-              : undefined,
+            and(
+              options?.ids
+                ? inArray(mediaItems.id, [...options.ids])
+                : undefined,
+              options?.parentId
+                ? eq(mediaItems.parentId, options.parentId)
+                : undefined,
+            ),
           )
           .orderBy(
             asc(mediaItems.parentId),
@@ -4314,6 +4472,37 @@ export function createDataAccessInternal(
           options,
           "Media Item",
         );
+      },
+
+      findMediaItemByTmdbIdentity(input) {
+        if (!isValidTmdbIdentity(input)) {
+          throw new DomainInvariantError("TMDB identity is invalid");
+        }
+        const match = database
+          .select({ mediaItem: mediaItems })
+          .from(mediaItemTmdbIdentities)
+          .innerJoin(
+            mediaItems,
+            eq(mediaItems.id, mediaItemTmdbIdentities.mediaItemId),
+          )
+          .where(and(
+            eq(mediaItemTmdbIdentities.mediaType, input.mediaType),
+            eq(mediaItemTmdbIdentities.tmdbId, input.tmdbId),
+          ))
+          .get();
+        return match?.mediaItem ?? null;
+      },
+
+      findTmdbIdentityByMediaItemId(id) {
+        const identity = database
+          .select({
+            mediaType: mediaItemTmdbIdentities.mediaType,
+            tmdbId: mediaItemTmdbIdentities.tmdbId,
+          })
+          .from(mediaItemTmdbIdentities)
+          .where(eq(mediaItemTmdbIdentities.mediaItemId, id))
+          .get();
+        return identity ?? null;
       },
 
       searchMediaItems(options) {

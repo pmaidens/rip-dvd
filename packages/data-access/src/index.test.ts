@@ -622,7 +622,7 @@ describe("data-access facade", () => {
         "disc_selection_supersessions",
       ]),
     );
-    expect(identifierTables).toHaveLength(16);
+    expect(identifierTables).toHaveLength(17);
     expect(
       identifierTables.every(({ name, sql }) =>
         name === "legacy_cutover_staged_sidecars"
@@ -1586,7 +1586,7 @@ describe("data-access facade", () => {
       ids: [archive.id],
     })[0]!.updatedAt;
     const existingItem = access.catalog.createMediaItem({
-      kind: "other",
+      kind: "movie",
       title: "Existing catalog identity",
     });
     const itemCountBeforeReuse = access.catalog.listMediaItems().length;
@@ -1594,6 +1594,10 @@ describe("data-access facade", () => {
       originalDiscArchiveId: archive.id,
       catalogRevision: revisionAfterExtra,
       existingMediaItemId: existingItem.id,
+      existingMediaItemTmdbIdentity: {
+        mediaType: "movie",
+        tmdbId: 77_001,
+      },
       discSelection: {
         sourceIdentity: { kind: "dvd_title", titleNumber: 4 },
       },
@@ -1606,6 +1610,12 @@ describe("data-access facade", () => {
       },
     });
     expect(access.catalog.listMediaItems()).toHaveLength(itemCountBeforeReuse);
+    expect(access.catalog.findMediaItemByTmdbIdentity({
+      mediaType: "movie",
+      tmdbId: 77_001,
+    })).toEqual(existingItem);
+    expect(access.catalog.findTmdbIdentityByMediaItemId(existingItem.id))
+      .toEqual({ mediaType: "movie", tmdbId: 77_001 });
     const revisionAfterReuse = access.catalog.listOriginalDiscArchives({
       ids: [archive.id],
     })[0]!.updatedAt;
@@ -1619,6 +1629,159 @@ describe("data-access facade", () => {
     })).toThrow(
       "Assisted Mapping requires a numbered Season beneath a TV Show",
     );
+    access.close();
+  });
+
+  it("accepts an automatic movie proposal and completes its review atomically", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isPresent: true,
+    });
+    const contentId = `sha256:${"1".repeat(64)}`;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: contentId,
+      scanData: {
+        schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+        contentId,
+        titles: [1, 2].map((number) => ({
+          number,
+          durationSeconds: 5_400,
+          chapters: 12,
+          audioStreams: [],
+          subtitles: [],
+        })),
+      },
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Automatic Movie.iso",
+      fingerprint: contentId,
+    });
+
+    const accepted = access.catalog.createMappingProposal({
+      originalDiscArchiveId: archive.id,
+      catalogRevision: archive.updatedAt,
+      mediaItem: {
+        kind: "movie",
+        title: "Automatic Movie",
+        year: 1999,
+        tmdbIdentity: { mediaType: "movie", tmdbId: 10_350 },
+      },
+      discSelection: { sourceIdentity: { kind: "main_feature" } },
+      completeReview: true,
+    });
+
+    expect(access.catalog.findMediaItemByTmdbIdentity({
+      mediaType: "movie",
+      tmdbId: 10_350,
+    })).toEqual(accepted.mediaItem);
+    expect(() =>
+      access.catalog.updateMediaItem(accepted.mediaItem.id, {
+        kind: "other",
+      })
+    ).toThrow("Media Item kind must match its TMDB identity");
+    expect(access.catalog.findMediaItemByTmdbIdentity({
+      mediaType: "movie",
+      tmdbId: 10_350,
+    })).toEqual(accepted.mediaItem);
+    expect(access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0])
+      .toMatchObject({
+        catalogReviewOutcome: "reviewed_with_selections",
+        catalogReviewedAt: expect.any(Date),
+      });
+
+    const beforeRejectedAcceptance = {
+      mediaItems: access.catalog.listMediaItems(),
+      selections: access.catalog.listDiscSelections({
+        originalDiscArchiveId: archive.id,
+      }),
+    };
+    const currentRevision = access.catalog.listOriginalDiscArchives({
+      ids: [archive.id],
+    })[0]!.updatedAt;
+    expect(() => access.catalog.createMappingProposal({
+      originalDiscArchiveId: archive.id,
+      catalogRevision: currentRevision,
+      mediaItem: { kind: "movie", title: "Must roll back" },
+      discSelection: {
+        sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+      },
+      completeReview: true,
+    })).toThrow("reload before accepting the automatic proposal");
+    expect(access.catalog.listMediaItems()).toEqual(
+      beforeRejectedAcceptance.mediaItems,
+    );
+    expect(access.catalog.listDiscSelections({
+      originalDiscArchiveId: archive.id,
+    })).toEqual(beforeRejectedAcceptance.selections);
+    access.close();
+  });
+
+  it("rolls back automatic acceptance while legacy cutover is pending", () => {
+    const databasePath = createTestDatabasePath();
+    const access = openTestDatabase(databasePath);
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/automatic-legacy",
+      isPresent: true,
+    });
+    const contentId = `sha256:${"a".repeat(64)}`;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: contentId,
+      scanData: {
+        schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+        contentId,
+        titles: [{
+          number: 1,
+          durationSeconds: 5_400,
+          chapters: 12,
+          audioStreams: [],
+          subtitles: [],
+        }],
+      },
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: "/media/originals/Automatic Legacy.iso",
+      fingerprint: contentId,
+    });
+    const sqlite = new DatabaseSync(databasePath);
+    sqlite.prepare(`
+      update original_disc_archives
+      set legacy_cutover_pending = 1
+      where id = ?
+    `).run(archive.id);
+    sqlite.close();
+
+    expect(() => access.catalog.createMappingProposal({
+      originalDiscArchiveId: archive.id,
+      catalogRevision: archive.updatedAt,
+      mediaItem: { kind: "movie", title: "Must roll back" },
+      discSelection: { sourceIdentity: { kind: "main_feature" } },
+      completeReview: true,
+    })).toThrow("legacy cutover repair is pending");
+    expect(access.catalog.listMediaItems()).toEqual([]);
+    expect(access.catalog.listDiscSelections({
+      originalDiscArchiveId: archive.id,
+    })).toEqual([]);
+    expect(access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0])
+      .toMatchObject({
+        catalogReviewedAt: null,
+        catalogReviewOutcome: "needs_review",
+        legacyCutoverPending: true,
+      });
     access.close();
   });
 
@@ -1951,13 +2114,24 @@ describe("data-access facade", () => {
       title: "Existing Season",
       seasonNumber: 1,
     });
+    const existingEpisode = access.catalog.createMediaItem({
+      parentId: firstSeason.id,
+      kind: "episode",
+      title: "Locally edited first episode",
+      episodeNumber: 1,
+    });
 
     const reused = access.catalog.createEpisodicMappingProposal({
       originalDiscArchiveId: archive.id,
       catalogRevision: archive.updatedAt,
       tvShow: { choice: "use_existing", mediaItemId: show.id },
       season: { choice: "use_existing", mediaItemId: firstSeason.id },
-      episodes: [{ titleNumber: 1, title: "First", episodeNumber: 1 }],
+      episodes: [{
+        titleNumber: 1,
+        title: "First",
+        episodeNumber: 1,
+        existingMediaItemId: existingEpisode.id,
+      }],
     });
     const revision = access.catalog.listOriginalDiscArchives({
       ids: [archive.id],
@@ -1977,6 +2151,7 @@ describe("data-access facade", () => {
     expect(reused).toMatchObject({
       tvShow: { id: show.id },
       season: { id: firstSeason.id },
+      episodes: [{ mediaItem: { id: existingEpisode.id } }],
     });
     expect(createdSeason).toMatchObject({
       tvShow: { id: show.id },
@@ -7743,6 +7918,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         name: "20260822142722_disc-inspection-settling",
       },
       {
+        name: "20260822062343_media-item-tmdb-identities",
+      },
+      {
         name: "20260820215821_redundant_jocasta",
       },
       {
@@ -7765,9 +7943,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260812180200_hard_smiling_tiger",
-      },
-      {
-        name: "20260812170422_furry_gateway",
       },
     ]);
     expect(

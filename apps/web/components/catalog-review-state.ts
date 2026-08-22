@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { CompletedCatalogReviewOutcome } from "@rip-dvd/data-access";
 
+import type { AutomaticCatalogProposal } from "../lib/catalog-automation";
 import type { CatalogReviewCommand } from "../lib/catalog-review-command";
 import type { CatalogReviewReplacementEncodeInput } from "../lib/catalog-review-command";
 import type {
@@ -457,6 +458,24 @@ export function useCatalogReviewState({
     }, "mapping_proposal");
   }
 
+  function acceptAutomaticCatalogProposal(proposal: AutomaticCatalogProposal) {
+    if (state.status !== "loaded") return;
+    const command: CatalogReviewCommand = proposal.kind === "movie"
+      ? {
+        action: "create_mapping_proposal",
+        catalogRevision: state.review.catalogRevision,
+        ...proposal.input,
+        completeReview: true,
+      }
+      : {
+        action: "create_episodic_mapping_proposal",
+        catalogRevision: state.review.catalogRevision,
+        ...proposal.input,
+        completeReview: true,
+      };
+    void mutate(command, true);
+  }
+
   return {
     state,
     activeMappingProposal,
@@ -503,6 +522,7 @@ export function useCatalogReviewState({
     },
     createEpisodicMappingProposal,
     createMappingProposal,
+    acceptAutomaticCatalogProposal,
     saveMediaItem,
     deleteMediaItem: (mediaItemId: string) =>
       void mutate({ action: "delete_media_item", mediaItemId }),

@@ -4,6 +4,7 @@ import type {
   EncodeJobId,
   EncodingProfileId,
   MediaItemKind,
+  TmdbIdentity,
 } from "@rip-dvd/data-access";
 import {
   MAX_DVD_SCAN_INTEGER,
@@ -37,6 +38,7 @@ export interface CatalogReviewMediaItemInput {
   year?: number | null;
   seasonNumber?: number | null;
   episodeNumber?: number | null;
+  tmdbIdentity?: TmdbIdentity;
 }
 
 type AtLeastOne<T> = {
@@ -44,7 +46,7 @@ type AtLeastOne<T> = {
 }[keyof T];
 
 export type CatalogReviewMediaItemChanges = AtLeastOne<
-  CatalogReviewMediaItemInput
+  Omit<CatalogReviewMediaItemInput, "tmdbIdentity">
 >;
 
 interface CatalogReviewDiscSelectionBase {
@@ -83,6 +85,7 @@ export type CatalogReviewMappingTarget =
   | {
     choice: "use_existing";
     mediaItemId: string;
+    tmdbIdentity?: TmdbIdentity;
   };
 
 export type CatalogReviewEpisodicTvShowTarget =
@@ -90,10 +93,12 @@ export type CatalogReviewEpisodicTvShowTarget =
     choice: "create_new";
     title: string;
     year?: number | null;
+    tmdbIdentity?: TmdbIdentity;
   }
   | {
     choice: "use_existing";
     mediaItemId: string;
+    tmdbIdentity?: TmdbIdentity;
   };
 
 export type CatalogReviewEpisodicSeasonTarget =
@@ -111,6 +116,7 @@ export interface CatalogReviewEpisodicEpisodeInput {
   titleNumber: number;
   title: string;
   episodeNumber: number;
+  existingMediaItemId?: string;
   label?: string;
 }
 
@@ -128,12 +134,14 @@ export type CatalogReviewCommand =
       tvShow: CatalogReviewEpisodicTvShowTarget;
       season: CatalogReviewEpisodicSeasonTarget;
       episodes: CatalogReviewEpisodicEpisodeInput[];
+      completeReview?: true;
     }
   | {
       action: "create_mapping_proposal";
       catalogRevision: string;
       target: CatalogReviewMappingTarget;
       discSelection: CatalogReviewProposedDiscSelectionInput;
+      completeReview?: true;
     }
   | {
       action: "create_media_item";
@@ -266,6 +274,35 @@ function optionalInteger(
     : undefined;
 }
 
+function parseTmdbIdentity(value: unknown): TmdbIdentity | null {
+  const identity = asRecord(value);
+  const mediaType = boundedString(identity?.mediaType, 32);
+  const tmdbId = optionalInteger(identity?.tmdbId, 1);
+  return identity &&
+      (mediaType === "movie" || mediaType === "tv_show") &&
+      typeof tmdbId === "number" &&
+      hasOnlyFields(identity, ["mediaType", "tmdbId"])
+    ? { mediaType, tmdbId }
+    : null;
+}
+
+function parseOptionalTmdbIdentity(
+  value: unknown,
+  expectedMediaType?: TmdbIdentity["mediaType"],
+): TmdbIdentity | null | undefined {
+  if (value === undefined) return undefined;
+  const identity = parseTmdbIdentity(value);
+  return identity !== null &&
+      (expectedMediaType === undefined ||
+        identity.mediaType === expectedMediaType)
+    ? identity
+    : null;
+}
+
+function parseOptionalCompletion(value: unknown): true | null | undefined {
+  return value === undefined ? undefined : value === true ? true : null;
+}
+
 function invalid(
   error: CatalogReviewCommandValidationError,
   targetedDiscSelectionId?: string,
@@ -288,6 +325,7 @@ function parseMediaItemInput(
   const year = optionalInteger(input?.year, 1800, 9999);
   const seasonNumber = optionalInteger(input?.seasonNumber, 0);
   const episodeNumber = optionalInteger(input?.episodeNumber, 1);
+  const tmdbIdentity = parseOptionalTmdbIdentity(input?.tmdbIdentity);
   if (
     !input ||
     !kind ||
@@ -296,7 +334,10 @@ function parseMediaItemInput(
     (input.parentId !== undefined && input.parentId !== null && !parentId) ||
     (input.year !== undefined && year === undefined) ||
     (input.seasonNumber !== undefined && seasonNumber === undefined) ||
-    (input.episodeNumber !== undefined && episodeNumber === undefined)
+    (input.episodeNumber !== undefined && episodeNumber === undefined) ||
+    (input.tmdbIdentity !== undefined &&
+      (!tmdbIdentity ||
+        tmdbIdentity.mediaType !== kind))
   ) {
     return null;
   }
@@ -311,6 +352,9 @@ function parseMediaItemInput(
     ...(input.episodeNumber === undefined
       ? {}
       : { episodeNumber: episodeNumber ?? null }),
+    ...(input.tmdbIdentity === undefined
+      ? {}
+      : { tmdbIdentity: tmdbIdentity! }),
   };
 }
 
@@ -431,11 +475,20 @@ function parseMappingTarget(
   }
   if (choice === "use_existing") {
     const mediaItemId = boundedString(target.mediaItemId);
+    const tmdbIdentity = parseOptionalTmdbIdentity(target.tmdbIdentity);
     return mediaItemId &&
+        (target.tmdbIdentity === undefined || tmdbIdentity !== null) &&
         Object.keys(target).every((field) =>
-          field === "choice" || field === "mediaItemId"
+          field === "choice" || field === "mediaItemId" ||
+          field === "tmdbIdentity"
         )
-      ? { choice, mediaItemId }
+      ? {
+        choice,
+        mediaItemId,
+        ...(target.tmdbIdentity === undefined
+          ? {}
+          : { tmdbIdentity: tmdbIdentity! }),
+      }
       : null;
   }
   return null;
@@ -460,21 +513,40 @@ function parseEpisodicTvShowTarget(
   if (choice === "create_new") {
     const title = boundedString(target.title);
     const year = optionalInteger(target.year, 1800, 9999);
+    const tmdbIdentity = parseOptionalTmdbIdentity(
+      target.tmdbIdentity,
+      "tv_show",
+    );
     return title &&
         (target.year === undefined || year !== undefined) &&
-        hasOnlyFields(target, ["choice", "title", "year"])
+        (target.tmdbIdentity === undefined || tmdbIdentity !== null) &&
+        hasOnlyFields(target, ["choice", "title", "year", "tmdbIdentity"])
       ? {
           choice,
           title,
           ...(target.year === undefined ? {} : { year: year ?? null }),
+          ...(tmdbIdentity === undefined || tmdbIdentity === null
+            ? {}
+            : { tmdbIdentity }),
         }
       : null;
   }
   if (choice === "use_existing") {
     const mediaItemId = boundedString(target.mediaItemId);
+    const tmdbIdentity = parseOptionalTmdbIdentity(
+      target.tmdbIdentity,
+      "tv_show",
+    );
     return mediaItemId &&
-        hasOnlyFields(target, ["choice", "mediaItemId"])
-      ? { choice, mediaItemId }
+        (target.tmdbIdentity === undefined || tmdbIdentity !== null) &&
+        hasOnlyFields(target, ["choice", "mediaItemId", "tmdbIdentity"])
+      ? {
+        choice,
+        mediaItemId,
+        ...(tmdbIdentity === undefined || tmdbIdentity === null
+          ? {}
+          : { tmdbIdentity }),
+      }
       : null;
   }
   return null;
@@ -527,6 +599,9 @@ function parseEpisodicEpisodes(
     );
     const title = boundedString(entry?.title);
     const episodeNumber = optionalInteger(entry?.episodeNumber, 1);
+    const existingMediaItemId = entry?.existingMediaItemId === undefined
+      ? undefined
+      : boundedString(entry.existingMediaItemId);
     const label = entry?.label === undefined
       ? undefined
       : boundedString(entry.label);
@@ -535,12 +610,14 @@ function parseEpisodicEpisodes(
       typeof titleNumber !== "number" ||
       !title ||
       typeof episodeNumber !== "number" ||
+      (entry.existingMediaItemId !== undefined && !existingMediaItemId) ||
       (entry.label !== undefined && !label) ||
       selectedTitleNumbers.has(titleNumber) ||
       !hasOnlyFields(entry, [
         "titleNumber",
         "title",
         "episodeNumber",
+        "existingMediaItemId",
         "label",
       ])
     ) {
@@ -551,6 +628,7 @@ function parseEpisodicEpisodes(
       titleNumber,
       title,
       episodeNumber,
+      ...(existingMediaItemId ? { existingMediaItemId } : {}),
       ...(label ? { label } : {}),
     });
   }
@@ -693,7 +771,9 @@ export function parseCatalogReviewCommand(
       const tvShow = parseEpisodicTvShowTarget(body.tvShow);
       const season = parseEpisodicSeasonTarget(body.season);
       const episodes = parseEpisodicEpisodes(body.episodes);
-      return revision && tvShow && season && episodes
+      const completeReview = parseOptionalCompletion(body.completeReview);
+      return revision && tvShow && season && episodes &&
+          completeReview !== null
         ? {
             ok: true,
             command: {
@@ -702,6 +782,7 @@ export function parseCatalogReviewCommand(
               tvShow,
               season,
               episodes,
+              ...(completeReview ? { completeReview } : {}),
             },
           }
         : invalid("Invalid Episodic Mapping Proposal");
@@ -712,7 +793,8 @@ export function parseCatalogReviewCommand(
       const discSelection = parseProposedDiscSelectionInput(
         body.discSelection,
       );
-      return revision && target && discSelection
+      const completeReview = parseOptionalCompletion(body.completeReview);
+      return revision && target && discSelection && completeReview !== null
         ? {
             ok: true,
             command: {
@@ -720,6 +802,7 @@ export function parseCatalogReviewCommand(
               catalogRevision: revision,
               target,
               discSelection,
+              ...(completeReview ? { completeReview } : {}),
             },
           }
         : invalid("Invalid Mapping Proposal");
