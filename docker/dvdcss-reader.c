@@ -339,7 +339,7 @@ static struct decoded_sense decode_sense(
         decoded.well_formed = 1;
         return decoded;
     }
-    if (decoded.response_code != 0x72 && decoded.response_code != 0x73) {
+    if (sense[0] != 0x72 && sense[0] != 0x73) {
         return decoded;
     }
     if (length < 8) {

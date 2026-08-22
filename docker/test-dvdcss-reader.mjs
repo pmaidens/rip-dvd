@@ -291,6 +291,10 @@ const malformedUnknownFixtures = [
   ],
   ["unsupported", "raw@5@always@2@0@8@1@7f"],
   [
+    "descriptor-response-reserved-bit",
+    "raw@5@always@2@0@8@8@f203110000000000",
+  ],
+  [
     "descriptor-header-reserved-byte-4",
     "raw@5@always@2@0@8@20@720311000100000c000a80000000000000000005",
   ],
