@@ -1,10 +1,9 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "c173954a-b7fd-4ee1-b84b-436fe2a882c1",
+  "id": "cc0b0ccc-386b-45f0-9813-945211f38bdc",
   "prevIds": [
-    "675267c6-4a50-4496-975c-8032ac82aa4c",
-    "acdea439-5542-4da1-8b9c-5c495680d37e"
+    "da414cbb-70ed-4f16-8401-1370def7ec2c"
   ],
   "ddl": [
     {
@@ -242,6 +241,136 @@
       "default": null,
       "generated": null,
       "name": "error_message",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "failure_detail_version",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "read_failure_stage",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "read_failure_category",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "read_failure_classifier_version",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "read_failure_lba",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "read_failure_requested_block_count",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "read_failure_retry_count",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "read_failure_scsi_status",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "read_failure_host_status",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "read_failure_driver_status",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "read_failure_sense_key",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "read_failure_asc",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "read_failure_ascq",
       "entityType": "columns",
       "table": "archive_jobs"
     },
@@ -3122,6 +3251,18 @@
     {
       "value": "(\"status\" = 'running' and \"claimed_by\" is not null and \"claim_token\" is not null and \"claimed_at\" is not null and \"started_at\" is not null and \"completed_at\" is null) or (\"status\" <> 'running' and \"started_at\" is not null and \"completed_at\" is not null)",
       "name": "archive_jobs_attempt_shape_check",
+      "entityType": "checks",
+      "table": "archive_jobs"
+    },
+    {
+      "value": "\"failure_detail_version\" is null or (\"status\" = 'failed' and \"failure_detail_version\" in ('archive-failure-detail-v1'))",
+      "name": "archive_jobs_failure_detail_version_check",
+      "entityType": "checks",
+      "table": "archive_jobs"
+    },
+    {
+      "value": "(\"read_failure_category\" is null and \"read_failure_stage\" is null and \"read_failure_classifier_version\" is null and \"read_failure_lba\" is null and \"read_failure_requested_block_count\" is null and \"read_failure_retry_count\" is null and \"read_failure_scsi_status\" is null and \"read_failure_host_status\" is null and \"read_failure_driver_status\" is null and \"read_failure_sense_key\" is null and \"read_failure_asc\" is null and \"read_failure_ascq\" is null) or (\"status\" = 'failed' and \"read_failure_stage\" in ('initial_copy', 'rescue_resume') and \"read_failure_category\" = 'unknown' and typeof(\"read_failure_classifier_version\") = 'text' and length(\"read_failure_classifier_version\") between 1 and 128 and typeof(\"read_failure_lba\") = 'integer' and \"read_failure_lba\" >= 0 and typeof(\"read_failure_requested_block_count\") = 'integer' and \"read_failure_requested_block_count\" between 1 and 4294967295 and typeof(\"read_failure_retry_count\") = 'integer' and \"read_failure_retry_count\" between 0 and 4294967295 and (\"read_failure_scsi_status\" is null or (typeof(\"read_failure_scsi_status\") = 'integer' and \"read_failure_scsi_status\" between 0 and 255)) and (\"read_failure_host_status\" is null or (typeof(\"read_failure_host_status\") = 'integer' and \"read_failure_host_status\" between 0 and 65535)) and (\"read_failure_driver_status\" is null or (typeof(\"read_failure_driver_status\") = 'integer' and \"read_failure_driver_status\" between 0 and 65535)) and (\"read_failure_sense_key\" is null or (typeof(\"read_failure_sense_key\") = 'integer' and \"read_failure_sense_key\" between 0 and 15)) and (\"read_failure_asc\" is null or (typeof(\"read_failure_asc\") = 'integer' and \"read_failure_asc\" between 0 and 255)) and (\"read_failure_ascq\" is null or (typeof(\"read_failure_ascq\") = 'integer' and \"read_failure_ascq\" between 0 and 255)) and ((\"read_failure_scsi_status\" is null and \"read_failure_host_status\" is null and \"read_failure_driver_status\" is null) or (\"read_failure_scsi_status\" is not null and \"read_failure_host_status\" is not null and \"read_failure_driver_status\" is not null)) and ((\"read_failure_asc\" is null and \"read_failure_ascq\" is null) or (\"read_failure_asc\" is not null and \"read_failure_ascq\" is not null)))",
+      "name": "archive_jobs_read_failure_shape_check",
       "entityType": "checks",
       "table": "archive_jobs"
     },

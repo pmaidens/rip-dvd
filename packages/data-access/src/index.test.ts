@@ -1147,9 +1147,8 @@ describe("data-access facade", () => {
           name !== "20260812151540_disc-inspection-archive-requests" &&
           name !== "20260820215821_redundant_jocasta" &&
           name !== "20260822142722_disc-inspection-settling" &&
-          name !== "20260822174107_unready-disc-settling" &&
           name !== "20260822175220_striped_kabuki" &&
-          name !== "20260822182910_settling-capacity-baseline",
+          name !== "20260822183552_bounded-disc-settling",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -8008,13 +8007,10 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
-        name: "20260822182910_settling-capacity-baseline",
+        name: "20260822183552_bounded-disc-settling",
       },
       {
         name: "20260822175220_striped_kabuki",
-      },
-      {
-        name: "20260822174107_unready-disc-settling",
       },
       {
         name: "20260822142722_disc-inspection-settling",
@@ -8036,6 +8032,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260813194303_corrected-publication-authority",
+      },
+      {
+        name: "20260813174634_retained-corrected-outputs",
       },
     ]);
     expect(
