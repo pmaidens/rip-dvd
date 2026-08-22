@@ -18,7 +18,7 @@ export interface BoundOpticalDrive {
 
 export interface OpticalMediaObservation {
   mediaGeneration: string;
-  capacityBytes: number;
+  capacityBytes: number | null;
 }
 
 export interface OpticalDriveHardware {
@@ -35,6 +35,9 @@ export interface OpticalDriveHardware {
   observeMedia(
     binding: BoundOpticalDrive,
     signal: AbortSignal,
+    options?: {
+      onMediaGeneration(mediaGeneration: string): void;
+    },
   ): Promise<OpticalMediaObservation | null>;
   observeMediaGeneration(
     binding: BoundOpticalDrive,
