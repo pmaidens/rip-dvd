@@ -95,6 +95,12 @@ export function classifyArchiveReadFailureEvidence(
 export function isArchiveReadFailureEvidenceConsistent(
   evidence: ArchiveReadFailureClassificationEvidence,
 ): boolean {
+  if (evidence.category === "out_of_range") {
+    return isTargetSenseCompletion(evidence) &&
+      evidence.senseKey === 0x05 &&
+      evidence.asc === 0x21 &&
+      evidence.ascq === 0x00;
+  }
   return evidence.category === "unknown" ||
     classifyArchiveReadFailureEvidence(evidence) === evidence.category;
 }

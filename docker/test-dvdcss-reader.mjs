@@ -79,6 +79,14 @@ function descriptorMediumSense(lba, ascq = 0) {
   return descriptorSense(lba, 0x03, 0x11, ascq);
 }
 
+function fixedOutOfRangeSense(lba) {
+  return fixedSense(lba, 0x05, 0x21);
+}
+
+function descriptorOutOfRangeSense(lba) {
+  return descriptorSense(lba, 0x05, 0x21);
+}
+
 function rawCompletionFault(
   lba,
   remainingFailures,
@@ -242,6 +250,24 @@ function runTestCopy(name, faults, mode = "valid") {
   return { ...result, outputPath };
 }
 
+function runTestCopyWithDeclaredSectors(name, faults, declaredSectorCount) {
+  const outputPath = prepareOutput(`/tmp/rip-dvd-reader-${name}.img`);
+  const result = spawnSync(
+    testExecutable,
+    [
+      "copy-test",
+      sourcePath,
+      outputPath,
+      String(declaredSectorCount * 2_048),
+      faults,
+      "0",
+      "valid",
+    ],
+    { encoding: "utf8" },
+  );
+  return { ...result, outputPath };
+}
+
 function runTestResume(outputPath, faults, bitmapHex) {
   const output = statSync(outputPath);
   const result = spawnSync(
@@ -316,6 +342,26 @@ function waitForStderrMarker(child, stderr, marker, label) {
     child.once("error", onError);
     onData();
   });
+}
+
+function runTestBoundaryResume(outputPath, faults, imageByteCount) {
+  const output = statSync(outputPath);
+  const result = spawnSync(
+    testExecutable,
+    [
+      "resume-boundary-test",
+      sourcePath,
+      outputPath,
+      String(content.byteLength),
+      faults,
+      "0",
+      "valid",
+      String(imageByteCount),
+      `${output.dev}:${output.ino}`,
+    ],
+    { encoding: "utf8" },
+  );
+  return { ...result, outputPath };
 }
 
 const expectedHash = createHash("sha256")
@@ -615,6 +661,55 @@ for (const [name, sense] of [
   }
 }
 
+const continuedBoundary = runTestCopy(
+  "continued-boundary-initial",
+  rawCompletionFault(35, "always", fixedOutOfRangeSense(35)),
+);
+const continuedBoundaryResult = runTestBoundaryResume(
+  continuedBoundary.outputPath,
+  "none",
+  31 * 2_048,
+);
+if (
+  continuedBoundaryResult.status !== 0 ||
+  !readFileSync(continuedBoundary.outputPath).equals(content) ||
+  recoveryResult(continuedBoundaryResult.stderr).badSectorCount !== 0 ||
+  JSON.stringify(testReads(continuedBoundaryResult.stderr)) !==
+    JSON.stringify([{ lba: 31, blocks: 9 }])
+) {
+  throw new Error(
+    `libdvdcss boundary continuation check failed: ${continuedBoundaryResult.stderr}`,
+  );
+}
+
+const rolledBackBoundary = runTestCopy(
+  "rolled-back-boundary-initial",
+  rawCompletionFault(35, "always", fixedOutOfRangeSense(35)),
+);
+const committedBoundaryByteCount = 31 * 2_048;
+writeFileSync(
+  rolledBackBoundary.outputPath,
+  Buffer.concat([
+    content.subarray(0, committedBoundaryByteCount),
+    Buffer.alloc(2 * 2_048, 255),
+  ]),
+);
+const rolledBackBoundaryResult = runTestBoundaryResume(
+  rolledBackBoundary.outputPath,
+  "none",
+  committedBoundaryByteCount,
+);
+if (
+  rolledBackBoundaryResult.status !== 0 ||
+  !readFileSync(rolledBackBoundary.outputPath).equals(content) ||
+  JSON.stringify(testReads(rolledBackBoundaryResult.stderr)) !==
+    JSON.stringify([{ lba: 31, blocks: 9 }])
+) {
+  throw new Error(
+    `libdvdcss boundary rollback check failed: ${rolledBackBoundaryResult.stderr}`,
+  );
+}
+
 const transientExactMedium = runTestCopy(
   "transient-exact-medium",
   rawCompletionFault(5, 1, fixedMediumAtFive),
@@ -660,7 +755,7 @@ for (const { category, fixtures } of categorizedReadFailures) {
   }
 }
 
-const fixedUnknownSense = "f00005000000050a00000000210000000000";
+const fixedUnknownSense = "f00005000000050a00000000200000000000";
 const persistentUnknown = runTestCopy(
   "persistent-unknown",
   `raw@5@always@2@0@8@${fixedUnknownSense.length / 2}@${fixedUnknownSense}`,
@@ -682,7 +777,7 @@ if (
       driverStatus: 8,
       senseResponseCode: 112,
       senseKey: 5,
-      asc: 33,
+      asc: 32,
       ascq: 0,
       informationLba: 5,
       requestedLba: 0,
@@ -719,6 +814,66 @@ for (const fixture of readinessSenseFixtures) {
   ) {
     throw new Error(
       `libdvdcss ${fixture.name} initial-copy check failed: ${terminal.stderr}`,
+    );
+  }
+}
+
+for (const [name, sense] of [
+  ["fixed-out-of-range", fixedOutOfRangeSense(35)],
+  ["descriptor-out-of-range", descriptorOutOfRangeSense(35)],
+]) {
+  const outOfRange = runTestCopy(
+    name,
+    rawCompletionFault(35, "always", sense),
+  );
+  const result = readFailureResult(outOfRange.stderr);
+  if (
+    outOfRange.status !== 3 ||
+    statSync(outOfRange.outputPath).size !== 31 * 2_048 ||
+    !readFileSync(outOfRange.outputPath).equals(content.subarray(0, 31 * 2_048)) ||
+    outOfRange.stderr.includes(recoveryResultPrefix) ||
+    JSON.stringify(testReads(outOfRange.stderr)) !==
+      JSON.stringify([
+        { lba: 0, blocks: 31 },
+        { lba: 31, blocks: 9 },
+      ]) ||
+    result.category !== "out_of_range" ||
+    result.declaredByteCount !== content.byteLength ||
+    result.firstFailingLba !== 35 ||
+    result.informationLba !== 35 ||
+    result.requestedLba !== 31 ||
+    result.requestedBlockCount !== 9 ||
+    result.retryOrdinal !== 0
+  ) {
+    throw new Error(
+      `libdvdcss ${name} boundary check failed: ${outOfRange.stderr}`,
+    );
+  }
+}
+
+for (const excludedSectorCount of [114_301, 73_400]) {
+  const boundaryLba = content.byteLength / 2_048;
+  const declaredSectorCount = boundaryLba + excludedSectorCount;
+  const outOfRange = runTestCopyWithDeclaredSectors(
+    `out-of-range-suffix-${excludedSectorCount}`,
+    rawCompletionFault(
+      boundaryLba,
+      "always",
+      fixedOutOfRangeSense(boundaryLba),
+    ),
+    declaredSectorCount,
+  );
+  const result = readFailureResult(outOfRange.stderr);
+  if (
+    outOfRange.status !== 3 ||
+    result.category !== "out_of_range" ||
+    result.firstFailingLba !== boundaryLba ||
+    result.declaredByteCount !== declaredSectorCount * 2_048 ||
+    testReads(outOfRange.stderr).length !== 2 ||
+    outOfRange.stderr.includes(recoveryResultPrefix)
+  ) {
+    throw new Error(
+      `libdvdcss ${excludedSectorCount}-sector suffix regression failed: ${outOfRange.stderr}`,
     );
   }
 }
@@ -1028,6 +1183,31 @@ for (const { category, fixtures } of categorizedReadFailures) {
       `libdvdcss ${name} resume classification check failed: ${failure.stderr}`,
     );
   }
+}
+
+const outOfRangeResumePath = prepareOutput(
+  "/tmp/rip-dvd-reader-out-of-range-resume.img",
+);
+writeFileSync(outOfRangeResumePath, unknownResumeContent);
+const outOfRangeResume = runTestResume(
+  outOfRangeResumePath,
+  rawCompletionFault(5, "always", descriptorOutOfRangeSense(5)),
+  isolatedResult.badSectorBitmapHex,
+);
+const outOfRangeResumeResult = readFailureResult(outOfRangeResume.stderr);
+if (
+  outOfRangeResume.status !== 3 ||
+  !readFileSync(outOfRangeResumePath).equals(unknownResumeContent) ||
+  outOfRangeResume.stderr.includes(recoveryResultPrefix) ||
+  JSON.stringify(testReads(outOfRangeResume.stderr)) !==
+    JSON.stringify([{ lba: 5, blocks: 1 }]) ||
+  outOfRangeResumeResult.category !== "out_of_range" ||
+  outOfRangeResumeResult.firstFailingLba !== 5 ||
+  outOfRangeResumeResult.declaredByteCount !== content.byteLength
+) {
+  throw new Error(
+    `libdvdcss out-of-range resume check failed: ${outOfRangeResume.stderr}`,
+  );
 }
 
 const fullyMappedResumePath = prepareOutput(

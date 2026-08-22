@@ -47,6 +47,7 @@ import {
   DvdReadFailureError,
   DVD_READ_FAILURE_RESULT_PREFIX,
   DVD_RECOVERY_RESULT_PREFIX,
+  DVD_SECTOR_SIZE_BYTES,
   formatUnvalidatedDvdRecovery,
   formatDvdRecoveryResumeBitmap,
   parseDvdRecoveryResultProtocol,
@@ -54,6 +55,7 @@ import {
   type DamagedDvdRecoveryResult,
   type DvdRecoveryResult,
   type DvdValidationResult,
+  type OutOfRangeDvdReadFailureResult,
   validateDvdRecoveryResult,
   validateResumedDvdRecoveryResult,
 } from "./dvd-recovery-contracts.js";
@@ -63,9 +65,11 @@ import {
   type DvdSalvageValidator,
 } from "./dvd-salvage-validator.js";
 import {
+  commitDvdBoundaryRescueWorkspace,
   commitDvdRescueWorkspace,
   dvdRescueWorkspacePaths,
   loadDvdRescueWorkspace,
+  recordDvdBoundaryFailure,
   removeDvdRescueWorkspace,
   type DvdRescueIdentity,
   type DvdRescueWorkspace,
@@ -99,6 +103,10 @@ export interface DvdCopyRequest {
   devicePath: string;
   outputPath: string;
   resumeImageFilesystemIdentity?: string;
+  resumeFromBoundary?: {
+    imageByteCount: number;
+    readFailure: OutOfRangeDvdReadFailureResult;
+  };
   sizeBytes: number;
   signal: AbortSignal;
   onBytesCopied(bytes: number): void;
@@ -273,15 +281,36 @@ export function createNodeDvdCopyRunner({
       const lockDescriptor = openDeviceLock(request.devicePath);
       let child: DvdCopyChildProcess;
       try {
+        if (
+          request.resumeFrom !== undefined &&
+          request.resumeFromBoundary !== undefined
+        ) {
+          throw new Error("DVD rescue continuation is ambiguous");
+        }
         const resumeImageFilesystemIdentity =
-          request.resumeFrom === undefined
+          request.resumeFrom === undefined &&
+          request.resumeFromBoundary === undefined
             ? undefined
             : request.resumeImageFilesystemIdentity;
         if (
-          request.resumeFrom !== undefined &&
+          (request.resumeFrom !== undefined ||
+            request.resumeFromBoundary !== undefined) &&
           !/^\d+:[1-9]\d*$/.test(resumeImageFilesystemIdentity ?? "")
         ) {
           throw new Error("DVD rescue image identity is invalid");
+        }
+        if (
+          request.resumeFromBoundary !== undefined &&
+          (!Number.isSafeInteger(request.resumeFromBoundary.imageByteCount) ||
+            request.resumeFromBoundary.imageByteCount < 0 ||
+            request.resumeFromBoundary.imageByteCount >= request.sizeBytes ||
+            request.resumeFromBoundary.imageByteCount %
+                DVD_SECTOR_SIZE_BYTES !== 0 ||
+            request.resumeFromBoundary.imageByteCount >
+              request.resumeFromBoundary.readFailure.firstFailingLba *
+                DVD_SECTOR_SIZE_BYTES)
+        ) {
+          throw new Error("DVD rescue boundary continuation is invalid");
         }
         child = spawnProcess(
           "flock",
@@ -293,9 +322,11 @@ export function createNodeDvdCopyRunner({
             String(FLOCK_CONFLICT_EXIT_CODE),
             "/proc/self/fd/3",
             "rip-dvd-dvdcss-reader",
-            request.resumeFrom === undefined
-              ? "copy-authorized"
-              : "resume-authorized",
+            request.resumeFrom !== undefined
+              ? "resume-authorized"
+              : request.resumeFromBoundary !== undefined
+                ? "resume-boundary-authorized"
+                : "copy-authorized",
             requireSafeOpticalDevicePath(request.devicePath),
             request.outputPath,
             String(requireDvdContentSize(request.sizeBytes)),
@@ -425,9 +456,11 @@ export function createNodeDvdCopyRunner({
           authorizationSettled = true;
           clearTimeout(startAuthorizationTimeout);
           child.stdio[5].end(
-            request.resumeFrom === undefined
-              ? "1"
-              : `1${formatDvdRecoveryResumeBitmap(request.resumeFrom)}`,
+            request.resumeFrom !== undefined
+              ? `1${formatDvdRecoveryResumeBitmap(request.resumeFrom)}`
+              : request.resumeFromBoundary !== undefined
+                ? `1${request.resumeFromBoundary.imageByteCount}`
+                : "1",
           );
           armStallTimeout();
         };
@@ -1286,7 +1319,7 @@ export async function preserveDvdArchive({
 
   const existingArchive = await optionalMetadata(archivePath);
   if (
-    rescueWorkspace?.recoveryResult.outcome === "damaged" &&
+    rescueWorkspace?.recoveryResult?.outcome === "damaged" &&
     existingArchive !== null
   ) {
     if (
@@ -1372,7 +1405,7 @@ export async function preserveDvdArchive({
       sizeBytes: safeSizeBytes,
     };
   }
-  if (rescueWorkspace?.recoveryResult.outcome === "clean") {
+  if (rescueWorkspace?.recoveryResult?.outcome === "clean") {
     const validation = validateDvdRecoveryResult(
       rescueWorkspace.recoveryResult,
       safeSizeBytes,
@@ -1480,7 +1513,7 @@ export async function preserveDvdArchive({
   let retainedForValidation = false;
   let validation: DvdValidationResult | undefined;
   const readFailureStage: ArchiveReadFailureStage =
-    rescueWorkspace?.recoveryResult.outcome === "damaged"
+    rescueWorkspace?.recoveryResult?.outcome === "damaged"
       ? "rescue_resume"
       : "initial_copy";
   try {
@@ -1504,16 +1537,27 @@ export async function preserveDvdArchive({
           ),
         });
       },
-      ...(rescueWorkspace?.recoveryResult.outcome === "damaged"
+      ...(rescueWorkspace?.recoveryResult?.outcome === "damaged"
         ? {
             resumeFrom: rescueWorkspace.recoveryResult,
             resumeImageFilesystemIdentity:
               rescueWorkspace.imageFilesystemIdentity,
           }
-        : {}),
+        : rescueWorkspace?.boundaryFailure !== null &&
+            rescueWorkspace?.boundaryFailure !== undefined &&
+            rescueWorkspace.recoveryResult === null
+          ? {
+              resumeFromBoundary: {
+                imageByteCount: rescueWorkspace.imageByteCount,
+                readFailure: rescueWorkspace.boundaryFailure,
+              },
+              resumeImageFilesystemIdentity:
+                rescueWorkspace.imageFilesystemIdentity,
+            }
+          : {}),
     });
     validation =
-      rescueWorkspace?.recoveryResult.outcome === "damaged"
+      rescueWorkspace?.recoveryResult?.outcome === "damaged"
         ? validateResumedDvdRecoveryResult(
             recoveryResult,
             rescueWorkspace.recoveryResult,
@@ -1633,7 +1677,31 @@ export async function preserveDvdArchive({
     // control until OS-level closure releases the copy tombstone.
     await runner.waitForInactive(safeDevicePath, partialPath);
     const isReadFailure = error instanceof DvdReadFailureError;
-    if (isReadFailure) {
+    const isOutOfRangeFailure =
+      isReadFailure && error.readFailure.category === "out_of_range";
+    if (isOutOfRangeFailure && rescueIdentity !== undefined) {
+      await revalidateReadFailure?.();
+      await sync(partialPath);
+      signal.throwIfAborted();
+      await revalidateReadFailure?.();
+      rescueWorkspace = rescueWorkspace === null
+        ? await commitDvdBoundaryRescueWorkspace(
+            root,
+            rescueIdentity,
+            partialPath,
+            error.readFailure,
+            authorizeMutation,
+          )
+        : await recordDvdBoundaryFailure(
+            root,
+            rescueIdentity,
+            rescueWorkspace,
+            error.readFailure,
+            authorizeMutation,
+          );
+      partialPath = rescueWorkspace.imagePath;
+      await revalidateReadFailure?.();
+    } else if (isReadFailure) {
       await revalidateReadFailure?.();
     }
     const hasRequestOwnedRescueState =

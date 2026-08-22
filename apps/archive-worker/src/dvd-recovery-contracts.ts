@@ -15,10 +15,9 @@ export const DVD_READ_FAILURE_CLASSIFIER_VERSION =
   "scsi-read-classifier-v1";
 export const DVD_READ_FAILURE_RESULT_PREFIX = "rip-dvd-read-failure ";
 
-export interface DvdReadFailureResult {
+interface DvdReadFailureResultBase {
   protocolVersion: 1;
   classifierVersion: typeof DVD_READ_FAILURE_CLASSIFIER_VERSION;
-  category: ArchiveReadFailureCategory;
   scsiStatus: number | null;
   hostStatus: number | null;
   driverStatus: number | null;
@@ -32,6 +31,35 @@ export interface DvdReadFailureResult {
   retryOrdinal: number;
 }
 
+export interface UnknownDvdReadFailureResult
+  extends DvdReadFailureResultBase {
+  category: "unknown";
+}
+
+export interface NonBoundaryDvdReadFailureResult
+  extends DvdReadFailureResultBase {
+  category: Exclude<ArchiveReadFailureCategory, "out_of_range">;
+}
+
+export interface OutOfRangeDvdReadFailureResult
+  extends DvdReadFailureResultBase {
+  category: "out_of_range";
+  declaredByteCount: number;
+  firstFailingLba: number;
+  informationLba: number;
+  scsiStatus: 2;
+  hostStatus: 0;
+  driverStatus: 0 | 8;
+  senseResponseCode: 0x70 | 0x72;
+  senseKey: 0x05;
+  asc: 0x21;
+  ascq: 0;
+}
+
+export type DvdReadFailureResult =
+  | NonBoundaryDvdReadFailureResult
+  | OutOfRangeDvdReadFailureResult;
+
 export class DvdReadFailureError extends Error {
   readonly readFailure: DvdReadFailureResult;
 
@@ -44,6 +72,7 @@ export class DvdReadFailureError extends Error {
       hardware_error: "DVD read failed after an Optical Drive hardware fault",
       transport_error: "DVD read failed while communicating with the Optical Drive",
       protection_error: "DVD read failed because DVD access was protected",
+      out_of_range: "DVD read stopped at the readable boundary",
     }[readFailure.category]);
     this.name = "DvdReadFailureError";
     this.readFailure = readFailure;
@@ -169,6 +198,25 @@ const DVD_READ_FAILURE_PROTOCOL_KEYS = [
   "senseResponseCode",
 ] as const;
 
+const DVD_OUT_OF_RANGE_FAILURE_PROTOCOL_KEYS = [
+  "asc",
+  "ascq",
+  "category",
+  "classifierVersion",
+  "declaredByteCount",
+  "driverStatus",
+  "firstFailingLba",
+  "hostStatus",
+  "informationLba",
+  "protocolVersion",
+  "requestedBlockCount",
+  "requestedLba",
+  "retryOrdinal",
+  "scsiStatus",
+  "senseKey",
+  "senseResponseCode",
+] as const;
+
 export function parseDvdReadFailureResultProtocol(
   payload: string,
   expectedByteCount: number,
@@ -184,10 +232,13 @@ export function parseDvdReadFailureResultProtocol(
   }
   const candidate = parsed as Record<string, unknown>;
   const keys = Object.keys(candidate).sort();
+  const expectedKeys = candidate.category === "out_of_range"
+    ? DVD_OUT_OF_RANGE_FAILURE_PROTOCOL_KEYS
+    : DVD_READ_FAILURE_PROTOCOL_KEYS;
   const totalSectorCount = expectedByteCount / DVD_SECTOR_SIZE_BYTES;
   if (
-    keys.length !== DVD_READ_FAILURE_PROTOCOL_KEYS.length ||
-    keys.some((key, index) => key !== DVD_READ_FAILURE_PROTOCOL_KEYS[index]) ||
+    keys.length !== expectedKeys.length ||
+    keys.some((key, index) => key !== expectedKeys[index]) ||
     candidate.protocolVersion !== 1 ||
     candidate.classifierVersion !== DVD_READ_FAILURE_CLASSIFIER_VERSION ||
     !ARCHIVE_READ_FAILURE_CATEGORIES.includes(
@@ -226,11 +277,40 @@ export function parseDvdReadFailureResultProtocol(
         candidate.asc !== null ||
         candidate.ascq !== null ||
         candidate.informationLba !== null)) ||
-    (candidate.asc === null) !== (candidate.ascq === null)
+    (candidate.asc === null) !== (candidate.ascq === null) ||
+    (candidate.category === "unknown" &&
+      candidate.scsiStatus === 0x02 &&
+      candidate.hostStatus === 0 &&
+      (candidate.driverStatus === 0x00 || candidate.driverStatus === 0x08) &&
+      (candidate.senseResponseCode === 0x70 ||
+        candidate.senseResponseCode === 0x72) &&
+      candidate.senseKey === 0x05 &&
+      candidate.asc === 0x21 &&
+      candidate.ascq === 0 &&
+      candidate.informationLba !== null)
   ) {
     throw new Error("DVD read failure helper result is malformed");
   }
-  const result = candidate as unknown as DvdReadFailureResult;
+  if (
+    candidate.category === "out_of_range" &&
+    (candidate.declaredByteCount !== expectedByteCount ||
+      !isSafeNonNegativeInteger(candidate.firstFailingLba) ||
+      candidate.firstFailingLba !== candidate.informationLba ||
+      candidate.scsiStatus !== 0x02 ||
+      candidate.hostStatus !== 0 ||
+      (candidate.driverStatus !== 0x00 && candidate.driverStatus !== 0x08) ||
+      (candidate.senseResponseCode !== 0x70 &&
+        candidate.senseResponseCode !== 0x72) ||
+      candidate.senseKey !== 0x05 ||
+      candidate.asc !== 0x21 ||
+      candidate.ascq !== 0)
+  ) {
+    throw new Error("DVD read failure helper result is malformed");
+  }
+  if (candidate.category === "out_of_range") {
+    return candidate as unknown as OutOfRangeDvdReadFailureResult;
+  }
+  const result = candidate as unknown as NonBoundaryDvdReadFailureResult;
   const evidenceClassification = classifyArchiveReadFailureEvidence(result);
   const normalizedCategory =
     evidenceClassification === "transport_error"

@@ -9,8 +9,10 @@ import {
   DVD_RECOVERY_POLICY_VERSION,
   DVD_SECTOR_SIZE_BYTES,
   createDvdRecoveryProtocolPayload,
+  type OutOfRangeDvdReadFailureResult,
   type DvdRecoveryResult,
   type DvdRecoveryProtocolPayload,
+  parseDvdReadFailureResultProtocol,
   parseDvdRecoveryResultProtocol,
 } from "./dvd-recovery-contracts.js";
 
@@ -25,23 +27,27 @@ export interface DvdRescueIdentity {
 }
 
 export interface DvdRescueWorkspace {
+  boundaryFailure: OutOfRangeDvdReadFailureResult | null;
+  imageByteCount: number;
   imageFilesystemIdentity: string;
   imagePath: string;
   mapPath: string;
-  recoveryResult: DvdRecoveryResult;
+  recoveryResult: DvdRecoveryResult | null;
 }
 
 interface DvdRescueMap {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   archiveRequestId: string;
   fingerprint: string;
   declaredByteCount: number;
   sectorSizeBytes: typeof DVD_SECTOR_SIZE_BYTES;
   totalSectorCount: number;
   recoveryPolicyVersion: typeof DVD_RECOVERY_POLICY_VERSION;
+  imageByteCount?: number;
   imageFilesystemIdentity: string;
   preparedImageBasename?: string;
-  recoveryProtocol: DvdRecoveryProtocolPayload;
+  recoveryProtocol: DvdRecoveryProtocolPayload | null;
+  boundaryFailureProtocol?: OutOfRangeDvdReadFailureResult;
 }
 
 type AuthorizeMutation = () => void | Promise<void>;
@@ -134,15 +140,18 @@ async function quarantineWorkspaceFiles(
   }
 }
 
-function recoveryResultFromRescueMap(
+function rescueStateFromMap(
   value: unknown,
   identity: DvdRescueIdentity,
-): DvdRecoveryResult {
+): Pick<
+  DvdRescueWorkspace,
+  "boundaryFailure" | "imageByteCount" | "recoveryResult"
+> {
   if (
     typeof value !== "object" ||
     value === null ||
     !("schemaVersion" in value) ||
-    value.schemaVersion !== 1 ||
+    (value.schemaVersion !== 1 && value.schemaVersion !== 2) ||
     !("archiveRequestId" in value) ||
     value.archiveRequestId !== identity.archiveRequestId ||
     !("fingerprint" in value) ||
@@ -161,31 +170,95 @@ function recoveryResultFromRescueMap(
   ) {
     throw new Error("DVD rescue state does not match the Archive Request");
   }
-  return parseDvdRecoveryResultProtocol(
-    JSON.stringify(value.recoveryProtocol),
+  const map = value as DvdRescueMap;
+  if (map.schemaVersion === 1) {
+    if (map.recoveryProtocol === null || map.boundaryFailureProtocol !== undefined) {
+      throw new Error("DVD rescue state does not match the Archive Request");
+    }
+    return {
+      boundaryFailure: null,
+      imageByteCount: identity.sizeBytes,
+      recoveryResult: parseDvdRecoveryResultProtocol(
+        JSON.stringify(map.recoveryProtocol),
+        identity.sizeBytes,
+      ),
+    };
+  }
+  if (
+    !Number.isSafeInteger(map.imageByteCount) ||
+    map.imageByteCount! < 0 ||
+    map.imageByteCount! > identity.sizeBytes ||
+    map.imageByteCount! % DVD_SECTOR_SIZE_BYTES !== 0 ||
+    map.boundaryFailureProtocol === undefined
+  ) {
+    throw new Error("DVD rescue state does not match the Archive Request");
+  }
+  const boundaryFailure = parseDvdReadFailureResultProtocol(
+    JSON.stringify(map.boundaryFailureProtocol),
     identity.sizeBytes,
   );
+  if (
+    boundaryFailure.category !== "out_of_range" ||
+    (map.recoveryProtocol === null &&
+      map.imageByteCount! >
+        boundaryFailure.firstFailingLba * DVD_SECTOR_SIZE_BYTES) ||
+    (map.recoveryProtocol !== null && map.imageByteCount !== identity.sizeBytes)
+  ) {
+    throw new Error("DVD rescue state does not match the Archive Request");
+  }
+  return {
+    boundaryFailure,
+    imageByteCount: map.imageByteCount!,
+    recoveryResult: map.recoveryProtocol === null
+      ? null
+      : parseDvdRecoveryResultProtocol(
+          JSON.stringify(map.recoveryProtocol),
+          identity.sizeBytes,
+        ),
+  };
 }
 
 function createRescueMap(
   identity: DvdRescueIdentity,
   imageFilesystemIdentity: string,
-  recoveryResult: DvdRecoveryResult,
+  state: Pick<
+    DvdRescueWorkspace,
+    "boundaryFailure" | "imageByteCount" | "recoveryResult"
+  >,
   preparedImageBasename?: string,
 ): DvdRescueMap {
-  const recoveryProtocol = createDvdRecoveryProtocolPayload(recoveryResult);
-  parseDvdRecoveryResultProtocol(
-    JSON.stringify(recoveryProtocol),
-    identity.sizeBytes,
-  );
+  const recoveryProtocol = state.recoveryResult === null
+    ? null
+    : createDvdRecoveryProtocolPayload(state.recoveryResult);
+  if (recoveryProtocol !== null) {
+    parseDvdRecoveryResultProtocol(
+      JSON.stringify(recoveryProtocol),
+      identity.sizeBytes,
+    );
+  }
+  if (state.boundaryFailure !== null) {
+    const parsed = parseDvdReadFailureResultProtocol(
+      JSON.stringify(state.boundaryFailure),
+      identity.sizeBytes,
+    );
+    if (parsed.category !== "out_of_range") {
+      throw new Error("DVD rescue boundary evidence is invalid");
+    }
+  }
   return {
-    schemaVersion: 1,
+    schemaVersion: state.boundaryFailure === null ? 1 : 2,
     archiveRequestId: identity.archiveRequestId,
     fingerprint: identity.fingerprint,
     declaredByteCount: identity.sizeBytes,
     sectorSizeBytes: DVD_SECTOR_SIZE_BYTES,
     totalSectorCount: identity.sizeBytes / DVD_SECTOR_SIZE_BYTES,
     recoveryPolicyVersion: DVD_RECOVERY_POLICY_VERSION,
+    ...(state.boundaryFailure === null
+      ? {}
+      : {
+          imageByteCount: state.imageByteCount,
+          boundaryFailureProtocol: state.boundaryFailure,
+        }),
     imageFilesystemIdentity,
     ...(preparedImageBasename === undefined ? {} : { preparedImageBasename }),
     recoveryProtocol,
@@ -322,7 +395,7 @@ export async function loadDvdRescueWorkspace(
       await handle.close();
     }
     const parsed = JSON.parse(text) as unknown;
-    const recoveryResult = recoveryResultFromRescueMap(parsed, identity);
+    const state = rescueStateFromMap(parsed, identity);
     const map = parsed as DvdRescueMap;
     const preparedImagePath =
       "preparedImageBasename" in map
@@ -337,7 +410,7 @@ export async function loadDvdRescueWorkspace(
       if (
         !preparedImageMetadata.isFile() ||
         preparedImageMetadata.isSymbolicLink() ||
-        preparedImageMetadata.size !== identity.sizeBytes ||
+        preparedImageMetadata.size !== state.imageByteCount ||
         filesystemIdentity(preparedImageMetadata) !==
           map.imageFilesystemIdentity
       ) {
@@ -358,7 +431,11 @@ export async function loadDvdRescueWorkspace(
       imageMetadata === null ||
       !imageMetadata.isFile() ||
       imageMetadata.isSymbolicLink() ||
-      imageMetadata.size !== identity.sizeBytes
+      (state.recoveryResult === null
+        ? imageMetadata.size < state.imageByteCount ||
+          imageMetadata.size > identity.sizeBytes ||
+          imageMetadata.size % DVD_SECTOR_SIZE_BYTES !== 0
+        : imageMetadata.size !== state.imageByteCount)
     ) {
       throw new Error("DVD rescue image is invalid");
     }
@@ -379,15 +456,15 @@ export async function loadDvdRescueWorkspace(
         createRescueMap(
           identity,
           map.imageFilesystemIdentity,
-          recoveryResult,
+          state,
         ),
         authorizeMutation,
       );
     }
     return {
       ...paths,
+      ...state,
       imageFilesystemIdentity: map.imageFilesystemIdentity,
-      recoveryResult,
     };
   } catch (error) {
     try {
@@ -437,13 +514,18 @@ export async function commitDvdRescueWorkspace(
       throw new Error("DVD rescue image is invalid");
     }
     const imageFilesystemIdentity = filesystemIdentity(imageMetadata);
+    const state = {
+      boundaryFailure: null,
+      imageByteCount: identity.sizeBytes,
+      recoveryResult,
+    };
     await writeMapAtomically(
       root,
       paths.mapPath,
       createRescueMap(
         identity,
         imageFilesystemIdentity,
-        recoveryResult,
+        state,
         basename(sourceImagePath),
       ),
       authorizeMutation,
@@ -457,11 +539,11 @@ export async function commitDvdRescueWorkspace(
       createRescueMap(
         identity,
         imageFilesystemIdentity,
-        recoveryResult,
+        state,
       ),
       authorizeMutation,
     );
-    return { ...paths, imageFilesystemIdentity, recoveryResult };
+    return { ...paths, ...state, imageFilesystemIdentity };
   } catch (error) {
     throw new Error("DVD rescue state could not be committed", {
       cause: error,
@@ -506,14 +588,136 @@ export async function updateDvdRescueWorkspace(
       createRescueMap(
         identity,
         workspace.imageFilesystemIdentity,
-        recoveryResult,
+        {
+          boundaryFailure: null,
+          imageByteCount: identity.sizeBytes,
+          recoveryResult,
+        },
       ),
       authorizeMutation,
     );
   } catch (error) {
     throw new Error("DVD rescue state could not be updated", { cause: error });
   }
-  return { ...workspace, recoveryResult };
+  return {
+    ...workspace,
+    boundaryFailure: null,
+    imageByteCount: identity.sizeBytes,
+    recoveryResult,
+  };
+}
+
+export async function commitDvdBoundaryRescueWorkspace(
+  root: string,
+  identity: DvdRescueIdentity,
+  sourceImagePath: string,
+  boundaryFailure: OutOfRangeDvdReadFailureResult,
+  authorizeMutation?: AuthorizeMutation,
+): Promise<DvdRescueWorkspace> {
+  const paths = dvdRescueWorkspacePaths(root, identity.archiveRequestId);
+  if (
+    dirname(sourceImagePath) !== root ||
+    (await optionalMetadata(paths.imagePath)) !== null ||
+    (await optionalMetadata(paths.mapPath)) !== null
+  ) {
+    throw new Error("DVD rescue workspace cannot be committed safely");
+  }
+  try {
+    const imageMetadata = await lstat(sourceImagePath);
+    if (
+      !imageMetadata.isFile() ||
+      imageMetadata.isSymbolicLink() ||
+      imageMetadata.size < 0 ||
+      imageMetadata.size % DVD_SECTOR_SIZE_BYTES !== 0 ||
+      imageMetadata.size >
+        boundaryFailure.firstFailingLba * DVD_SECTOR_SIZE_BYTES
+    ) {
+      throw new Error("DVD rescue boundary image is invalid");
+    }
+    const imageFilesystemIdentity = filesystemIdentity(imageMetadata);
+    const state = {
+      boundaryFailure,
+      imageByteCount: imageMetadata.size,
+      recoveryResult: null,
+    };
+    await writeMapAtomically(
+      root,
+      paths.mapPath,
+      createRescueMap(
+        identity,
+        imageFilesystemIdentity,
+        state,
+        basename(sourceImagePath),
+      ),
+      authorizeMutation,
+    );
+    await authorizeMutation?.();
+    await rename(sourceImagePath, paths.imagePath);
+    await syncPath(root);
+    await writeMapAtomically(
+      root,
+      paths.mapPath,
+      createRescueMap(identity, imageFilesystemIdentity, state),
+      authorizeMutation,
+    );
+    return { ...paths, ...state, imageFilesystemIdentity };
+  } catch (error) {
+    throw new Error("DVD rescue boundary state could not be committed", {
+      cause: error,
+    });
+  }
+}
+
+export async function recordDvdBoundaryFailure(
+  root: string,
+  identity: DvdRescueIdentity,
+  workspace: DvdRescueWorkspace,
+  boundaryFailure: OutOfRangeDvdReadFailureResult,
+  authorizeMutation?: AuthorizeMutation,
+): Promise<DvdRescueWorkspace> {
+  const expectedPaths = dvdRescueWorkspacePaths(root, identity.archiveRequestId);
+  const imageMetadata = await lstat(workspace.imagePath);
+  const continuesBoundaryPrefix =
+    workspace.boundaryFailure !== null && workspace.recoveryResult === null;
+  if (
+    workspace.imagePath !== expectedPaths.imagePath ||
+    workspace.mapPath !== expectedPaths.mapPath ||
+    !imageMetadata.isFile() ||
+    imageMetadata.isSymbolicLink() ||
+    (continuesBoundaryPrefix
+      ? imageMetadata.size < workspace.imageByteCount ||
+        imageMetadata.size % DVD_SECTOR_SIZE_BYTES !== 0 ||
+        imageMetadata.size >
+          boundaryFailure.firstFailingLba * DVD_SECTOR_SIZE_BYTES
+      : imageMetadata.size !== workspace.imageByteCount) ||
+    filesystemIdentity(imageMetadata) !== workspace.imageFilesystemIdentity
+  ) {
+    throw new Error("DVD rescue image changed during boundary retention");
+  }
+  const state = {
+    boundaryFailure,
+    imageByteCount: continuesBoundaryPrefix
+      ? imageMetadata.size
+      : workspace.imageByteCount,
+    recoveryResult: workspace.recoveryResult,
+  };
+  try {
+    await writeMapAtomically(
+      root,
+      workspace.mapPath,
+      createRescueMap(
+        identity,
+        workspace.imageFilesystemIdentity,
+        state,
+      ),
+      authorizeMutation,
+    );
+  } catch (error) {
+    throw new Error("DVD rescue boundary state could not be updated", {
+      cause: error,
+    });
+  }
+  return { ...workspace, ...state };
 }
 
 export async function removeDvdRescueWorkspace(

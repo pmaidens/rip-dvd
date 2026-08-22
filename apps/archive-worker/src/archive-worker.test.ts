@@ -42,6 +42,8 @@ import {
   createCleanDvdRecoveryResult,
   createDamagedDvdRecoveryResult,
   DvdReadFailureError,
+  type NonBoundaryDvdReadFailureResult,
+  type UnknownDvdReadFailureResult,
 } from "./dvd-recovery-contracts.js";
 import { dvdRescueWorkspacePaths } from "./dvd-rescue-workspace.js";
 import {
@@ -60,6 +62,8 @@ import {
 
 const temporaryDirectories: string[] = [];
 const testRescueWorkspaceLock = createInProcessDvdRescueWorkspaceLock();
+
+type DvdReadFailureCategory = NonBoundaryDvdReadFailureResult["category"];
 
 const readinessReadFailureCases = [
   {
@@ -89,9 +93,9 @@ const terminalReadFailureCategories = [
 
 function dvdReadFailure(
   categoryOrOverrides:
-    | ArchiveReadFailureCategory
-    | Partial<ConstructorParameters<typeof DvdReadFailureError>[0]> = "unknown",
-  overrides: Partial<ConstructorParameters<typeof DvdReadFailureError>[0]> = {},
+    | DvdReadFailureCategory
+    | Partial<NonBoundaryDvdReadFailureResult> = "unknown",
+  overrides: Partial<NonBoundaryDvdReadFailureResult> = {},
 ) {
   const category = typeof categoryOrOverrides === "string"
     ? categoryOrOverrides
@@ -124,7 +128,7 @@ function dvdReadFailure(
             : {
                 senseResponseCode: 0x70,
                 senseKey: 0x05,
-                asc: 0x21,
+                asc: 0x20,
                 ascq: 0x00,
               };
   return new DvdReadFailureError({
@@ -144,7 +148,7 @@ function dvdReadFailure(
 }
 
 function unknownDvdReadFailure(
-  overrides: Partial<ConstructorParameters<typeof DvdReadFailureError>[0]> = {},
+  overrides: Partial<UnknownDvdReadFailureResult> = {},
 ) {
   return dvdReadFailure("unknown", overrides);
 }
@@ -158,7 +162,7 @@ const dvdReadFailureCases = [
       driverStatus: 8,
       senseResponseCode: 0x70,
       senseKey: 5,
-      asc: 33,
+      asc: 32,
       ascq: 0,
     },
   },
@@ -202,6 +206,30 @@ const dvdReadFailureCases = [
   category: ArchiveReadFailureCategory;
   evidence: Partial<ConstructorParameters<typeof DvdReadFailureError>[0]>;
 }[];
+
+function outOfRangeDvdReadFailure(
+  declaredByteCount: number,
+  firstFailingLba: number,
+) {
+  return new DvdReadFailureError({
+    protocolVersion: 1,
+    classifierVersion: "scsi-read-classifier-v1",
+    category: "out_of_range",
+    scsiStatus: 2,
+    hostStatus: 0,
+    driverStatus: 8,
+    senseResponseCode: 0x70,
+    senseKey: 5,
+    asc: 0x21,
+    ascq: 0,
+    informationLba: firstFailingLba,
+    requestedLba: 0,
+    requestedBlockCount: 4,
+    retryOrdinal: 0,
+    declaredByteCount,
+    firstFailingLba,
+  });
+}
 
 function pollArchiveWorkerOnce(options: PollArchiveWorkerOptions): Promise<void> {
   return pollArchiveWorkerWithDefaults({
@@ -1158,6 +1186,116 @@ describe("archive worker polling", () => {
       expect(scenario.access.catalog.listOriginalDiscArchives()).toEqual([]);
     },
   );
+
+  it("retains an out-of-range prefix and records a boundary diagnosis", async () => {
+    const access = openTestDataAccess();
+    const originalsLibraryPath = mkdtempSync(
+      join(tmpdir(), "rip-dvd-originals-out-of-range-"),
+    );
+    temporaryDirectories.push(originalsLibraryPath);
+    const fingerprint = `dvdmeta-sha256:${"6".repeat(64)}`;
+    const scanData = {
+      schemaVersion: 2 as const,
+      contentId: fingerprint,
+      titles: [{
+        number: 1,
+        durationSeconds: 3_600,
+        chapters: 10,
+        audioStreams: [],
+        subtitles: [],
+      }],
+    };
+    const discoveredDrive = {
+      devicePath: "/dev/sr0",
+      vendor: "Pioneer",
+      product: "DVD-RW",
+      serialNumber: "OUT-OF-RANGE-001",
+    };
+    const drive = access.catalog.reconcileOpticalDrives([
+      { ...discoveredDrive, isConfiguredDevice: true },
+    ])[0]!;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint,
+      scanData,
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    const request = access.archiveRequests.create({ detectedDiscId: disc.id });
+    const sizeBytes = 4 * 2_048;
+    const retainedPrefix = Buffer.alloc(2 * 2_048, 47);
+    const copyRunner: DvdCopyRunner = {
+      copy: vi.fn(async ({ authorizeStart, outputPath }) => {
+        await authorizeStart?.();
+        writeFileSync(outputPath, retainedPrefix);
+        throw outOfRangeDvdReadFailure(sizeBytes, 2);
+      }),
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    };
+    const salvageValidator = { validate: vi.fn() };
+
+    await pollArchiveWorker({
+      access,
+      configuredDevicePath: discoveredDrive.devicePath,
+      copyRunner,
+      hardware: {
+        ...stableDeviceBinding(),
+        discover: vi.fn().mockResolvedValue([discoveredDrive]),
+        scanDvd: vi.fn().mockResolvedValue({
+          fingerprint,
+          scanData,
+          sizeBytes,
+        }),
+      },
+      log: vi.fn(),
+      originalsLibraryPath,
+      salvageValidator,
+      signal: new AbortController().signal,
+      workerId: "archive-worker-out-of-range",
+    });
+
+    expect(access.archiveJobs.list(["failed"])).toEqual([
+      expect.objectContaining({
+        archiveRequestId: request.id,
+        originalDiscArchiveId: null,
+        readFailureStage: "initial_copy",
+        readFailureCategory: "out_of_range",
+        readFailureClassifierVersion: "scsi-read-classifier-v1",
+        readFailureLba: 2,
+        readFailureRequestedBlockCount: 4,
+        readFailureRetryCount: 0,
+        readFailureScsiStatus: 2,
+        readFailureHostStatus: 0,
+        readFailureDriverStatus: 8,
+        readFailureSenseKey: 5,
+        readFailureAsc: 33,
+        readFailureAscq: 0,
+      }),
+    ]);
+    expect(access.archiveRequests.list(["needs_attention"])).toEqual([
+      expect.objectContaining({ id: request.id }),
+    ]);
+    expect(access.catalog.listOriginalDiscArchives()).toEqual([]);
+    expect(salvageValidator.validate).not.toHaveBeenCalled();
+    const rescuePaths = dvdRescueWorkspacePaths(
+      realpathSync(originalsLibraryPath),
+      request.id,
+    );
+    expect(readFileSync(rescuePaths.imagePath)).toEqual(retainedPrefix);
+    expect(JSON.parse(readFileSync(rescuePaths.mapPath, "utf8"))).toMatchObject({
+      schemaVersion: 2,
+      declaredByteCount: sizeBytes,
+      imageByteCount: retainedPrefix.byteLength,
+      recoveryProtocol: null,
+      boundaryFailureProtocol: expect.objectContaining({
+        category: "out_of_range",
+        declaredByteCount: sizeBytes,
+        firstFailingLba: 2,
+      }),
+    });
+  });
 
   it.each(dvdReadFailureCases)("records $category on only the resumed Archive Job attempt", async ({
     category,
