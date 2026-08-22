@@ -35,6 +35,11 @@ export interface DvdRescueWorkspace {
   recoveryResult: DvdRecoveryResult | null;
 }
 
+type DvdRescueState = Pick<
+  DvdRescueWorkspace,
+  "boundaryFailure" | "imageByteCount" | "recoveryResult"
+>;
+
 interface DvdRescueMap {
   schemaVersion: 1 | 2;
   archiveRequestId: string;
@@ -143,10 +148,7 @@ async function quarantineWorkspaceFiles(
 function rescueStateFromMap(
   value: unknown,
   identity: DvdRescueIdentity,
-): Pick<
-  DvdRescueWorkspace,
-  "boundaryFailure" | "imageByteCount" | "recoveryResult"
-> {
+): DvdRescueState {
   if (
     typeof value !== "object" ||
     value === null ||
@@ -221,10 +223,7 @@ function rescueStateFromMap(
 function createRescueMap(
   identity: DvdRescueIdentity,
   imageFilesystemIdentity: string,
-  state: Pick<
-    DvdRescueWorkspace,
-    "boundaryFailure" | "imageByteCount" | "recoveryResult"
-  >,
+  state: DvdRescueState,
   preparedImageBasename?: string,
 ): DvdRescueMap {
   const recoveryProtocol = state.recoveryResult === null
@@ -331,6 +330,38 @@ async function writeMapAtomically(
     await unlink(temporaryPath).catch(() => undefined);
     throw error;
   }
+}
+
+async function commitPreparedDvdRescueWorkspace(
+  root: string,
+  identity: DvdRescueIdentity,
+  paths: Pick<DvdRescueWorkspace, "imagePath" | "mapPath">,
+  sourceImagePath: string,
+  imageFilesystemIdentity: string,
+  state: DvdRescueState,
+  authorizeMutation?: AuthorizeMutation,
+): Promise<DvdRescueWorkspace> {
+  await writeMapAtomically(
+    root,
+    paths.mapPath,
+    createRescueMap(
+      identity,
+      imageFilesystemIdentity,
+      state,
+      basename(sourceImagePath),
+    ),
+    authorizeMutation,
+  );
+  await authorizeMutation?.();
+  await rename(sourceImagePath, paths.imagePath);
+  await syncPath(root);
+  await writeMapAtomically(
+    root,
+    paths.mapPath,
+    createRescueMap(identity, imageFilesystemIdentity, state),
+    authorizeMutation,
+  );
+  return { ...paths, ...state, imageFilesystemIdentity };
 }
 
 export async function loadDvdRescueWorkspace(
@@ -519,31 +550,15 @@ export async function commitDvdRescueWorkspace(
       imageByteCount: identity.sizeBytes,
       recoveryResult,
     };
-    await writeMapAtomically(
+    return await commitPreparedDvdRescueWorkspace(
       root,
-      paths.mapPath,
-      createRescueMap(
-        identity,
-        imageFilesystemIdentity,
-        state,
-        basename(sourceImagePath),
-      ),
+      identity,
+      paths,
+      sourceImagePath,
+      imageFilesystemIdentity,
+      state,
       authorizeMutation,
     );
-    await authorizeMutation?.();
-    await rename(sourceImagePath, paths.imagePath);
-    await syncPath(root);
-    await writeMapAtomically(
-      root,
-      paths.mapPath,
-      createRescueMap(
-        identity,
-        imageFilesystemIdentity,
-        state,
-      ),
-      authorizeMutation,
-    );
-    return { ...paths, ...state, imageFilesystemIdentity };
   } catch (error) {
     throw new Error("DVD rescue state could not be committed", {
       cause: error,
@@ -640,27 +655,15 @@ export async function commitDvdBoundaryRescueWorkspace(
       imageByteCount: imageMetadata.size,
       recoveryResult: null,
     };
-    await writeMapAtomically(
+    return await commitPreparedDvdRescueWorkspace(
       root,
-      paths.mapPath,
-      createRescueMap(
-        identity,
-        imageFilesystemIdentity,
-        state,
-        basename(sourceImagePath),
-      ),
+      identity,
+      paths,
+      sourceImagePath,
+      imageFilesystemIdentity,
+      state,
       authorizeMutation,
     );
-    await authorizeMutation?.();
-    await rename(sourceImagePath, paths.imagePath);
-    await syncPath(root);
-    await writeMapAtomically(
-      root,
-      paths.mapPath,
-      createRescueMap(identity, imageFilesystemIdentity, state),
-      authorizeMutation,
-    );
-    return { ...paths, ...state, imageFilesystemIdentity };
   } catch (error) {
     throw new Error("DVD rescue boundary state could not be committed", {
       cause: error,

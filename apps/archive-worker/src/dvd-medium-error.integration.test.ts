@@ -126,7 +126,11 @@ function createSyntheticDvdCopyRunner({
     async copy(request: DvdCopyRequest): Promise<DvdRecoveryResult> {
       await request.authorizeStart?.();
       request.signal.throwIfAborted();
-      const arguments_ = request.resumeFrom === undefined
+      const continuation = request.continuation;
+      if (continuation?.kind === "boundary") {
+        throw new Error("Medium-error test does not support boundary continuation");
+      }
+      const arguments_ = continuation === undefined
         ? [
             "copy-test",
             sourcePath,
@@ -144,8 +148,8 @@ function createSyntheticDvdCopyRunner({
             faults,
             "0",
             "valid",
-            formatDvdRecoveryResumeBitmap(request.resumeFrom),
-            request.resumeImageFilesystemIdentity ?? "",
+            formatDvdRecoveryResumeBitmap(continuation.recoveryResult),
+            continuation.imageFilesystemIdentity,
           ];
       const completion = spawnSync(nativeTestExecutable, arguments_, {
         encoding: "utf8",
