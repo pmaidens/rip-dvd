@@ -15,7 +15,10 @@ import { Worker } from "node:worker_threads";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { completeCatalogReview } from "./catalog.test-support.js";
+import {
+  beginSettledDiscInspectionForTest as beginSettledDiscInspection,
+  completeCatalogReview,
+} from "./catalog.test-support.js";
 import { createRawDvdContentIdHasher } from "./dvd-content-id.js";
 import { createDvdMetadataFingerprint } from "./dvd-metadata-fingerprint.js";
 import { decodeDvdTitleMap } from "./dvd-scan.js";
@@ -259,37 +262,6 @@ function createTestMigrationsFolder(): string {
 
 function openTestDatabase(databasePath = createTestDatabasePath()) {
   return createLegacySidecarDataAccess({ databasePath });
-}
-
-function beginSettledDiscInspection(
-  access: ReturnType<typeof openTestDatabase>,
-  input: Parameters<
-    ReturnType<typeof openTestDatabase>["discInspections"]["beginOrResume"]
-  >[0],
-) {
-  const alreadyUsingFakeTimers = vi.isFakeTimers();
-  if (!alreadyUsingFakeTimers) {
-    vi.useFakeTimers({ toFake: ["Date"] });
-  }
-  const firstObservationAt = Date.now();
-  access.discInspections.beginOrResume(input);
-  vi.setSystemTime(new Date(firstObservationAt + 2_500));
-  access.discInspections.beginOrResume(input);
-  vi.setSystemTime(new Date(firstObservationAt + 5_000));
-  const settled = access.discInspections.beginOrResume(input);
-  if (settled.claim === null) {
-    throw new Error("Expected a settled Disc Inspection claim");
-  }
-  return {
-    ...settled,
-    restoreSystemTime() {
-      if (alreadyUsingFakeTimers) {
-        vi.setSystemTime(new Date(firstObservationAt));
-      } else {
-        vi.useRealTimers();
-      }
-    },
-  };
 }
 
 function completeDiscInspection(
