@@ -10007,7 +10007,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     sqlite.close();
   });
 
-  it("persists stable settling evidence and fences stale leases", () => {
+  it("claims settling and only lets the owner advance readiness evidence", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-11T00:00:00.000Z"));
     const access = openTestDatabase();
@@ -10022,7 +10022,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       mediaGeneration: "101",
       mediaCapacityBytes: 2_048,
     });
-    expect(first.claim).toBeNull();
+    expect(first.claim).not.toBeNull();
     expect(first.inspection).toMatchObject({
       attemptCount: 1,
       isCurrent: true,
@@ -10045,17 +10045,52 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       inspection: {
         id: first.inspection.id,
         phase: "settling",
-        stableObservationCount: 2,
+        stableObservationCount: 1,
       },
       claim: null,
     });
+    expect(() =>
+      access.discInspections.record(first.claim!, {
+        type: "metadata",
+        volumeLabel: "TOO_EARLY",
+        titleCount: 1,
+        chapterCount: 1,
+        audioStreamCount: 0,
+        subtitleStreamCount: 0,
+        totalBytes: 2_048,
+      }),
+    ).toThrow(DomainInvariantError);
+    expect(access.discInspections.list({ ids: [first.inspection.id] })).toEqual([
+      expect.objectContaining({
+        phase: "settling",
+        stableObservationCount: 1,
+        volumeLabel: null,
+      }),
+    ]);
 
-    vi.advanceTimersByTime(5_000);
-    const settled = access.discInspections.beginOrResume({
-      opticalDriveId: drive.id,
-      mediaGeneration: "101",
-      mediaCapacityBytes: 2_048,
+    vi.advanceTimersByTime(2_500);
+    expect(
+      access.discInspections.recordSettlingObservation(first.claim!, {
+        mediaGeneration: "101",
+        mediaCapacityBytes: 2_048,
+      }),
+    ).toMatchObject({
+      inspection: {
+        id: first.inspection.id,
+        phase: "settling",
+        stableObservationCount: 2,
+      },
+      claim: { id: first.inspection.id },
     });
+
+    vi.advanceTimersByTime(2_500);
+    const settled = access.discInspections.recordSettlingObservation(
+      first.claim!,
+      {
+        mediaGeneration: "101",
+        mediaCapacityBytes: 2_048,
+      },
+    );
     expect(settled).toMatchObject({
       inspection: {
         id: first.inspection.id,
@@ -10064,50 +10099,143 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       claim: { id: first.inspection.id },
     });
+    access.close();
+  });
 
-    vi.advanceTimersByTime(DISC_INSPECTION_LEASE_DURATION_MS + 1);
-    const resumed = access.discInspections.beginOrResume({
+  it("recovers an expired settling claim with a fresh quiet-window proof", () => {
+    vi.useFakeTimers();
+    const startedAt = new Date("2026-08-11T00:15:00.000Z");
+    vi.setSystemTime(startedAt);
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const original = access.discInspections.beginOrResume({
       opticalDriveId: drive.id,
-      mediaGeneration: "101",
+      mediaGeneration: "201",
       mediaCapacityBytes: 2_048,
     });
-    expect(resumed).toMatchObject({
-      inspection: { id: first.inspection.id, attemptCount: 2 },
-      claim: { id: first.inspection.id },
+
+    vi.advanceTimersByTime(2_500);
+    access.discInspections.recordSettlingObservation(original.claim!, {
+      mediaGeneration: "201",
+      mediaCapacityBytes: 2_048,
     });
-    expect(access.discInspections.listAttempts(first.inspection.id)).toEqual([
+    vi.setSystemTime(
+      new Date(
+        startedAt.getTime() + 2_500 + DISC_INSPECTION_LEASE_DURATION_MS + 1,
+      ),
+    );
+    const recoveredAt = new Date(Date.now());
+    const recovered = access.discInspections.beginOrResume({
+      opticalDriveId: drive.id,
+      mediaGeneration: "201",
+      mediaCapacityBytes: 2_048,
+    });
+    expect(recovered).toMatchObject({
+      inspection: {
+        id: original.inspection.id,
+        attemptCount: 2,
+        phase: "settling",
+        stableObservationCount: 1,
+        settlingQuietWindowStartedAt: recoveredAt,
+        settlingStartedAt: recoveredAt,
+      },
+      claim: { id: original.inspection.id },
+    });
+    expect(recovered.claim?.claimToken).not.toBe(original.claim?.claimToken);
+    expect(access.discInspections.listAttempts(original.inspection.id)).toEqual([
       expect.objectContaining({
         attemptNumber: 1,
         outcome: "interrupted",
+        phase: "settling",
         reasonCode: "worker_interrupted",
       }),
     ]);
-    expect(() =>
-      access.discInspections.renew(settled.claim!),
-    ).toThrow(StaleJobAttemptError);
+    expect(
+      access.discInspections.beginOrResume({
+        opticalDriveId: drive.id,
+        mediaGeneration: "201",
+        mediaCapacityBytes: 2_048,
+      }),
+    ).toMatchObject({
+      inspection: { stableObservationCount: 1 },
+      claim: null,
+    });
 
-    const replacement = access.discInspections.beginOrResume({
-      opticalDriveId: drive.id,
-      mediaGeneration: "102",
+    vi.advanceTimersByTime(2_500);
+    access.discInspections.recordSettlingObservation(recovered.claim!, {
+      mediaGeneration: "201",
       mediaCapacityBytes: 2_048,
     });
-    expect(replacement.inspection.id).not.toBe(first.inspection.id);
-    expect(replacement.claim).toBeNull();
-    expect(access.discInspections.list({ currentOnly: true })).toEqual([
+    vi.advanceTimersByTime(2_500);
+    expect(
+      access.discInspections.recordSettlingObservation(recovered.claim!, {
+        mediaGeneration: "201",
+        mediaCapacityBytes: 2_048,
+      }),
+    ).toMatchObject({
+      inspection: {
+        id: original.inspection.id,
+        attemptCount: 2,
+        phase: "reading_metadata",
+        stableObservationCount: 3,
+      },
+    });
+
+    expect(() =>
+      access.discInspections.renew(original.claim!),
+    ).toThrow(StaleJobAttemptError);
+    access.close();
+  });
+
+  it("resets changed provisional evidence while recovering the same insertion", () => {
+    vi.useFakeTimers();
+    const startedAt = new Date("2026-08-11T00:30:00.000Z");
+    vi.setSystemTime(startedAt);
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const original = access.discInspections.beginOrResume({
+      opticalDriveId: drive.id,
+      mediaGeneration: "301",
+      mediaCapacityBytes: 2_048,
+    });
+    vi.advanceTimersByTime(DISC_INSPECTION_LEASE_DURATION_MS + 1);
+    const recovered = access.discInspections.beginOrResume({
+      opticalDriveId: drive.id,
+      mediaGeneration: "302",
+      mediaCapacityBytes: 4_096,
+    });
+
+    expect(access.discInspections.list()).toEqual([
       expect.objectContaining({
-        id: replacement.inspection.id,
-        mediaGeneration: "102",
+        id: original.inspection.id,
+        attemptCount: 2,
+        mediaGeneration: "302",
+        mediaCapacityBytes: 4_096,
         phase: "settling",
         stableObservationCount: 1,
+        settlingQuietWindowStartedAt: new Date(Date.now()),
+        settlingResetCount: 1,
       }),
     ]);
-    expect(
-      access.discInspections.list({ ids: [first.inspection.id] }),
-    ).toEqual([
+    expect(recovered.claim).toEqual(
       expect.objectContaining({
-        id: first.inspection.id,
-        isCurrent: false,
-        status: "aborted",
+        id: original.inspection.id,
+        mediaGeneration: "302",
+      }),
+    );
+    expect(access.discInspections.listAttempts(original.inspection.id)).toEqual([
+      expect.objectContaining({
+        attemptNumber: 1,
+        outcome: "interrupted",
+        phase: "settling",
       }),
     ]);
     access.close();
@@ -10352,7 +10480,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         mediaGeneration: "replacement-insertion",
         status: "running",
       },
-      claim: null,
+      claim: { id: expect.any(String) },
     });
     expect(replacement.inspection.id).not.toBe(started.inspection.id);
     expect(access.discInspections.list({ ids: [started.inspection.id] }))

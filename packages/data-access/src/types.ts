@@ -622,6 +622,11 @@ export interface DiscInspectionStart {
   claim: DiscInspectionClaim | null;
 }
 
+export interface ClaimedDiscInspectionStart {
+  inspection: DiscInspection;
+  claim: DiscInspectionClaim;
+}
+
 export type DiscInspectionEvent =
   | {
       type: "metadata";
@@ -961,6 +966,13 @@ export interface DiscInspectionAccess {
     mediaGeneration: string;
     mediaCapacityBytes: number;
   }): DiscInspectionStart;
+  recordSettlingObservation(
+    claim: DiscInspectionClaim,
+    input: {
+      mediaGeneration: string;
+      mediaCapacityBytes: number;
+    },
+  ): ClaimedDiscInspectionStart;
   renew(claim: DiscInspectionClaim): DiscInspection;
   record(claim: DiscInspectionClaim, event: DiscInspectionEvent): DiscInspection;
   requestRetry(id: DiscInspectionId): DiscInspection;

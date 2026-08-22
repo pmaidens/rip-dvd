@@ -39,6 +39,10 @@ export interface PollArchiveWorkerOptions {
   rescueWorkspaceLock?: DvdRescueWorkspaceLock;
   salvageValidator?: DvdSalvageValidator;
   signal: AbortSignal;
+  waitForNextSettlingObservation?: (
+    intervalMs: number,
+    signal: AbortSignal,
+  ) => Promise<void>;
   workerId?: string;
 }
 
@@ -127,6 +131,7 @@ async function pollArchiveWorkerWithDriveAdmission(
     rescueWorkspaceLock = defaultDvdRescueWorkspaceLock,
     salvageValidator,
     signal,
+    waitForNextSettlingObservation,
     workerId = "archive-worker",
   }: PollArchiveWorkerOptions,
   admission?: DrivePollAdmission,
@@ -228,6 +233,7 @@ async function pollArchiveWorkerWithDriveAdmission(
         hardware,
         log,
         signal,
+        waitForNextSettlingObservation,
       });
       if (
         completed === null ||

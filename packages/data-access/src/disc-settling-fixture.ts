@@ -21,49 +21,29 @@ function startDiscSettlingClockForTest() {
   };
 }
 
-export async function pollDiscSettlingForTest(
-  access: DiscSettlingTestDataAccess,
-  observe: () => Promise<void>,
-): Promise<void> {
-  const clock = startDiscSettlingClockForTest();
-  try {
-    for (const elapsedMs of SETTLING_OBSERVATION_ELAPSED_MS) {
-      clock.setObservationTime(elapsedMs);
-      await observe();
-      if (
-        !access.discInspections
-          .list({ currentOnly: true })
-          .some(
-            (inspection) =>
-              inspection.status === "running" &&
-              inspection.phase === "settling",
-          )
-      ) {
-        return;
-      }
-    }
-  } finally {
-    if (!clock.alreadyUsingFakeTimers) {
-      vi.useRealTimers();
-    }
-  }
-}
-
 export function beginSettledDiscInspectionForTest(
   access: DiscSettlingTestDataAccess,
   input: Parameters<DataAccess["discInspections"]["beginOrResume"]>[0],
 ) {
   const clock = startDiscSettlingClockForTest();
-  let settled = access.discInspections.beginOrResume(input);
+  const started = access.discInspections.beginOrResume(input);
+  if (started.claim === null) {
+    throw new Error("Expected a claimed settling Disc Inspection");
+  }
+  let claim = started.claim;
+  let inspection = started.inspection;
   for (const elapsedMs of SETTLING_OBSERVATION_ELAPSED_MS.slice(1)) {
     clock.setObservationTime(elapsedMs);
-    settled = access.discInspections.beginOrResume(input);
-  }
-  if (settled.claim === null) {
-    throw new Error("Expected a settled Disc Inspection claim");
+    const observed = access.discInspections.recordSettlingObservation(claim, {
+      mediaGeneration: input.mediaGeneration,
+      mediaCapacityBytes: input.mediaCapacityBytes,
+    });
+    claim = observed.claim;
+    inspection = observed.inspection;
   }
   return {
-    ...settled,
+    inspection,
+    claim,
     restoreSystemTime() {
       if (clock.alreadyUsingFakeTimers) {
         vi.setSystemTime(new Date(clock.firstObservationAt));

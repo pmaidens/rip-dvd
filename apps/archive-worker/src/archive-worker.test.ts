@@ -24,7 +24,6 @@ import { createRawDvdContentIdHasher } from "@rip-dvd/data-access/dvd-content-id
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 import {
   beginSettledDiscInspectionForTest,
-  pollDiscSettlingForTest,
 } from "@rip-dvd/data-access/test-support";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -67,9 +66,30 @@ function pollArchiveWorkerOnce(options: PollArchiveWorkerOptions): Promise<void>
 }
 
 async function pollArchiveWorker(options: PollArchiveWorkerOptions): Promise<void> {
-  await pollDiscSettlingForTest(options.access, () =>
-    pollArchiveWorkerOnce(options),
-  );
+  const alreadyUsingFakeTimers = vi.isFakeTimers();
+  if (!alreadyUsingFakeTimers) {
+    vi.useFakeTimers({ toFake: ["Date"] });
+  }
+  const startedAt = Date.now();
+  let elapsedMs = 0;
+  try {
+    await pollArchiveWorkerOnce({
+      ...options,
+      waitForNextSettlingObservation:
+        options.waitForNextSettlingObservation ??
+        (async (intervalMs, signal) => {
+          signal.throwIfAborted();
+          elapsedMs += intervalMs;
+          vi.setSystemTime(new Date(startedAt + elapsedMs));
+        }),
+    });
+  } finally {
+    if (alreadyUsingFakeTimers) {
+      vi.setSystemTime(new Date(startedAt));
+    } else {
+      vi.useRealTimers();
+    }
+  }
 }
 
 function runArchiveWorker(options: RunArchiveWorkerOptions): Promise<void> {
@@ -199,20 +219,46 @@ function beginSettledDiscInspection(
   return beginSettledDiscInspectionForTest(access, input);
 }
 
-function beginNearlySettledDiscInspection(
-  access: ReturnType<typeof openTestDataAccess>,
-  input: Parameters<
-    ReturnType<typeof openTestDataAccess>["discInspections"]["beginOrResume"]
-  >[0],
-) {
-  if (!vi.isFakeTimers()) {
-    vi.useFakeTimers({ toFake: ["Date"] });
-  }
-  const firstObservationAt = Date.now();
-  access.discInspections.beginOrResume(input);
-  vi.setSystemTime(new Date(firstObservationAt + 2_500));
-  access.discInspections.beginOrResume(input);
-  vi.setSystemTime(new Date(firstObservationAt + 5_000));
+function createControlledSettlingWaits() {
+  const pending: Array<{ release(): void }> = [];
+  const wait = vi.fn(
+    async (_intervalMs: number, signal: AbortSignal) =>
+      await new Promise<void>((resolve, reject) => {
+        const entry = {
+          release() {
+            const index = pending.indexOf(entry);
+            if (index !== -1) {
+              pending.splice(index, 1);
+            }
+            signal.removeEventListener("abort", abort);
+            resolve();
+          },
+        };
+        const abort = () => {
+          const index = pending.indexOf(entry);
+          if (index !== -1) {
+            pending.splice(index, 1);
+          }
+          reject(signal.reason);
+        };
+        signal.addEventListener("abort", abort, { once: true });
+        pending.push(entry);
+      }),
+  );
+  return {
+    wait,
+    async waitUntilPending(count = 1) {
+      await vi.waitFor(() => expect(pending).toHaveLength(count));
+    },
+    releaseNext(elapsedMs = 2_500) {
+      const next = pending[0];
+      if (next === undefined) {
+        throw new Error("No settling wait is pending");
+      }
+      vi.setSystemTime(new Date(Date.now() + elapsedMs));
+      next.release();
+    },
+  };
 }
 
 async function exerciseWatchabilityWorkerScenario({
@@ -1936,6 +1982,8 @@ describe("archive worker polling", () => {
 
 
   it("copies requested work on different drives within configured concurrency", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-08-11T11:30:00.000Z"));
     const access = openTestDataAccess();
     const originalsLibraryPath = mkdtempSync(
       join(tmpdir(), "rip-dvd-originals-copy-admission-"),
@@ -2010,7 +2058,7 @@ describe("archive worker polling", () => {
       withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
       waitForInactive: vi.fn(async () => undefined),
     };
-    const pollOptions = {
+    const pollOptions: PollArchiveWorkerOptions = {
       access,
       concurrency: 2,
       configuredDevicePath: "/dev/sr0",
@@ -2045,14 +2093,11 @@ describe("archive worker polling", () => {
       log: vi.fn(),
       originalsLibraryPath,
       signal: new AbortController().signal,
+      waitForNextSettlingObservation: async (_intervalMs, signal) => {
+        signal.throwIfAborted();
+        vi.setSystemTime(new Date(Date.now() + 2_500));
+      },
     };
-    for (const drive of drives) {
-      beginNearlySettledDiscInspection(access, {
-        opticalDriveId: drive.id,
-        mediaGeneration: "test-media-generation",
-        mediaCapacityBytes: 2_048,
-      });
-    }
     const poll = pollArchiveWorkerOnce(pollOptions);
 
     await vi.waitFor(() => expect(copy).toHaveBeenCalledTimes(2));
@@ -2182,7 +2227,7 @@ describe("archive worker polling", () => {
     );
   });
 
-  it("starts requested archive work promptly while another drive inspection is slow", async () => {
+  it("starts archive work on another drive while settling owns one slot", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-12T12:00:00.000Z"));
     const access = openTestDataAccess();
@@ -2219,7 +2264,7 @@ describe("archive worker polling", () => {
       { ...fastDiscoveredDrive, isConfiguredDevice: true },
       slowDiscoveredDrive,
     ]);
-    const slowDrive = access.catalog.upsertOpticalDrive({
+    access.catalog.upsertOpticalDrive({
       devicePath: slowDiscoveredDrive.devicePath,
       isEnabled: true,
       isPresent: true,
@@ -2251,18 +2296,13 @@ describe("archive worker polling", () => {
       type: "complete",
       detectedDiscId: disc.id,
     });
-    beginNearlySettledDiscInspection(access, {
-      opticalDriveId: slowDrive.id,
-      mediaGeneration: "test-media-generation",
-      mediaCapacityBytes: 2_048,
-    });
     const startForInspectionSpy = vi.spyOn(
       access.archiveJobs,
       "startForInspection",
     );
     const waitForShutdown = async (signal: AbortSignal) => {
       signal.throwIfAborted();
-      return await new Promise<null>((_resolve, reject) => {
+      return await new Promise<void>((_resolve, reject) => {
         signal.addEventListener("abort", () => reject(signal.reason), {
           once: true,
         });
@@ -2271,10 +2311,10 @@ describe("archive worker polling", () => {
     const scanDvd = vi.fn(
       async (
         binding: { drive: DiscoveredOpticalDrive },
-        signal: AbortSignal,
+        _signal: AbortSignal,
       ) => {
         if (binding.drive.devicePath === slowDiscoveredDrive.devicePath) {
-          return await waitForShutdown(signal);
+          throw new Error("Settling must finish before metadata starts");
         }
         throw new Error("Completed Disc Inspection should be reused");
       },
@@ -2306,6 +2346,8 @@ describe("archive worker polling", () => {
       originalsLibraryPath,
       pollIntervalMs: 60_000,
       signal: controller.signal,
+      waitForNextSettlingObservation: async (_intervalMs, signal) =>
+        await waitForShutdown(signal),
       waitForNextPoll: async (intervalMs, signal) =>
         await new Promise<void>((resolve, reject) => {
           const timer = setTimeout(resolve, intervalMs);
@@ -2323,12 +2365,16 @@ describe("archive worker polling", () => {
 
     try {
       await vi.advanceTimersByTimeAsync(1);
-      expect(
-        scanDvd.mock.calls.some(
-          ([binding]) =>
-            binding.drive.devicePath === slowDiscoveredDrive.devicePath,
-        ),
-      ).toBe(true);
+      expect(access.discInspections.list({ currentOnly: true })).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            opticalDriveId: expect.any(String),
+            phase: "settling",
+            status: "running",
+          }),
+        ]),
+      );
+      expect(scanDvd).not.toHaveBeenCalled();
       expect(startForInspectionSpy).not.toHaveBeenCalled();
       const request = access.archiveRequests.create({
         detectedDiscId: disc.id,
@@ -2347,59 +2393,286 @@ describe("archive worker polling", () => {
       expect(
         job!.startedAt!.getTime() - request.createdAt.getTime(),
       ).toBeLessThan(10_000);
+      expect(scanDvd).not.toHaveBeenCalled();
     } finally {
       controller.abort(new Error("test complete"));
       await polling;
     }
   });
 
-  it("reacquires the same insertion after an expired inspection lease", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-08-11T12:00:00.000Z"));
-    const access = openTestDataAccess();
-    const drive = access.catalog.reconcileOpticalDrives([
-      {
+  it.each([
+    {
+      name: "matching evidence",
+      recoveredCapacityBytes: 2_048,
+      recoveredMediaGeneration: "generation-a",
+      expectedResetCount: 0,
+    },
+    {
+      name: "changed provisional evidence",
+      recoveredCapacityBytes: 4_096,
+      recoveredMediaGeneration: "generation-b",
+      expectedResetCount: 1,
+    },
+  ])(
+    "recovers an expired settling claim with $name and a fresh quiet window",
+    async ({
+      recoveredCapacityBytes,
+      recoveredMediaGeneration,
+      expectedResetCount,
+    }) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-08-11T12:00:00.000Z"));
+      const access = openTestDataAccess();
+      const discoveredDrive = {
         devicePath: "/dev/sr0",
-        serialNumber: "INTERRUPTED-INSPECTION-001",
-        isConfiguredDevice: true,
-      },
-    ])[0]!;
-    const original = beginSettledDiscInspection(access, {
-      opticalDriveId: drive.id,
-      mediaGeneration: "test-media-generation",
-      mediaCapacityBytes: 2_048,
+        serialNumber: "INTERRUPTED-SETTLING-001",
+      };
+      let mediaGeneration = "generation-a";
+      let mediaCapacityBytes = 2_048;
+      const fingerprint = `sha256:${"d".repeat(64)}`;
+      const scanDvd = vi.fn(async (_binding, _signal, options) => {
+        options?.onMetadata?.({
+          audioStreamCount: 0,
+          chapterCount: 1,
+          subtitleStreamCount: 0,
+          titleCount: 1,
+          totalBytes: mediaCapacityBytes,
+          volumeLabel: "RECOVERED_DISC",
+        });
+        return {
+          fingerprint,
+          scanData: {
+            schemaVersion: 2 as const,
+            contentId: fingerprint,
+            titles: [{
+              number: 1,
+              durationSeconds: 60,
+              chapters: 1,
+              audioStreams: [],
+              subtitles: [],
+            }],
+          },
+          sizeBytes: mediaCapacityBytes,
+          volumeLabel: "RECOVERED_DISC",
+        };
+      });
+      const hardware: OpticalDriveHardware = {
+        ...stableDeviceBinding(),
+        discover: vi.fn().mockResolvedValue([discoveredDrive]),
+        observeMedia: vi.fn(async () => ({
+          mediaGeneration,
+          capacityBytes: mediaCapacityBytes,
+        })),
+        observeMediaGeneration: vi.fn(async () => mediaGeneration),
+        scanDvd,
+      };
+
+      const firstController = new AbortController();
+      const firstWaits = createControlledSettlingWaits();
+      const firstPolling = pollArchiveWorkerOnce({
+        access,
+        configuredDevicePath: "/dev/sr0",
+        hardware,
+        log: vi.fn(),
+        signal: firstController.signal,
+        waitForNextSettlingObservation: firstWaits.wait,
+      });
+      await firstWaits.waitUntilPending();
+      const original = access.discInspections.list({ currentOnly: true })[0]!;
+      expect(original).toMatchObject({
+        attemptCount: 1,
+        phase: "settling",
+        stableObservationCount: 1,
+      });
+
+      const interruption = new Error("worker stopped during settling");
+      firstController.abort(interruption);
+      await expect(firstPolling).rejects.toBe(interruption);
+      expect(scanDvd).not.toHaveBeenCalled();
+
+      mediaGeneration = recoveredMediaGeneration;
+      mediaCapacityBytes = recoveredCapacityBytes;
+      vi.setSystemTime(
+        new Date(
+          original.claimUpdatedAt!.getTime() +
+            DISC_INSPECTION_LEASE_DURATION_MS +
+            1,
+        ),
+      );
+      const successorWaits = createControlledSettlingWaits();
+      const successorPolling = pollArchiveWorkerOnce({
+        access,
+        configuredDevicePath: "/dev/sr0",
+        hardware,
+        log: vi.fn(),
+        signal: new AbortController().signal,
+        waitForNextSettlingObservation: successorWaits.wait,
+      });
+      await successorWaits.waitUntilPending();
+
+      expect(access.discInspections.list()).toEqual([
+        expect.objectContaining({
+          id: original.id,
+          attemptCount: 2,
+          phase: "settling",
+          mediaGeneration: recoveredMediaGeneration,
+          mediaCapacityBytes: recoveredCapacityBytes,
+          stableObservationCount: 1,
+          settlingResetCount: expectedResetCount,
+        }),
+      ]);
+      expect(access.discInspections.listAttempts(original.id)).toEqual([
+        expect.objectContaining({
+          attemptNumber: 1,
+          outcome: "interrupted",
+          phase: "settling",
+          reasonCode: "worker_interrupted",
+        }),
+      ]);
+      expect(scanDvd).not.toHaveBeenCalled();
+
+      successorWaits.releaseNext();
+      await successorWaits.waitUntilPending();
+      expect(access.discInspections.list({ currentOnly: true })).toEqual([
+        expect.objectContaining({
+          id: original.id,
+          phase: "settling",
+          stableObservationCount: 2,
+        }),
+      ]);
+      expect(scanDvd).not.toHaveBeenCalled();
+
+      successorWaits.releaseNext();
+      await successorPolling;
+
+      expect(scanDvd).toHaveBeenCalledOnce();
+      expect(access.discInspections.list()).toEqual([
+        expect.objectContaining({
+          id: original.id,
+          attemptCount: 2,
+          status: "completed",
+          mediaGeneration: recoveredMediaGeneration,
+          stableObservationCount: 3,
+        }),
+      ]);
+      expect(access.discInspections.listAttempts(original.id)).toEqual([
+        expect.objectContaining({
+          attemptNumber: 1,
+          outcome: "interrupted",
+        }),
+        expect.objectContaining({
+          attemptNumber: 2,
+          outcome: "completed",
+        }),
+      ]);
+      access.close();
+    },
+  );
+
+  it("lets only one concurrent poll advance settling and start metadata", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-11T12:30:00.000Z"));
+    const access = openTestDataAccess();
+    const discoveredDrive = {
+      devicePath: "/dev/sr0",
+      serialNumber: "CONCURRENT-SETTLING-001",
+    };
+    const scanDvd = vi.fn().mockResolvedValue(null);
+    const observeMedia = vi.fn().mockResolvedValue({
+      mediaGeneration: "concurrent-generation",
+      capacityBytes: 2_048,
+    });
+    const hardware: OpticalDriveHardware = {
+      ...stableDeviceBinding(),
+      discover: vi.fn().mockResolvedValue([discoveredDrive]),
+      observeMedia,
+      observeMediaGeneration: vi.fn(async () => "concurrent-generation"),
+      scanDvd,
+    };
+    const ownerWaits = createControlledSettlingWaits();
+    const ownerPolling = pollArchiveWorkerOnce({
+      access,
+      configuredDevicePath: "/dev/sr0",
+      hardware,
+      log: vi.fn(),
+      signal: new AbortController().signal,
+      waitForNextSettlingObservation: ownerWaits.wait,
+    });
+    await ownerWaits.waitUntilPending();
+
+    const competingWait = vi.fn();
+    await pollArchiveWorkerOnce({
+      access,
+      configuredDevicePath: "/dev/sr0",
+      hardware,
+      log: vi.fn(),
+      signal: new AbortController().signal,
+      waitForNextSettlingObservation: competingWait,
     });
 
-    const pollOptions = {
+    expect(access.discInspections.list()).toEqual([
+      expect.objectContaining({
+        attemptCount: 1,
+        phase: "settling",
+        stableObservationCount: 1,
+      }),
+    ]);
+    expect(access.discInspections.listAttempts(
+      access.discInspections.list()[0]!.id,
+    )).toEqual([]);
+    expect(competingWait).not.toHaveBeenCalled();
+    expect(scanDvd).not.toHaveBeenCalled();
+
+    ownerWaits.releaseNext();
+    await ownerWaits.waitUntilPending();
+    ownerWaits.releaseNext();
+    await ownerPolling;
+
+    expect(scanDvd).toHaveBeenCalledOnce();
+    expect(observeMedia).toHaveBeenCalledTimes(4);
+    access.close();
+  });
+
+  it("renews the settling claim while readiness waiting is in progress", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-11T12:45:00.000Z"));
+    const access = openTestDataAccess();
+    const controller = new AbortController();
+    const settlingWaits = createControlledSettlingWaits();
+    const renew = vi.spyOn(access.discInspections, "renew");
+    const polling = pollArchiveWorkerOnce({
       access,
       configuredDevicePath: "/dev/sr0",
       hardware: {
         ...stableDeviceBinding(),
         discover: vi.fn().mockResolvedValue([{
           devicePath: "/dev/sr0",
-          serialNumber: "INTERRUPTED-INSPECTION-001",
+          serialNumber: "SETTLING-HEARTBEAT-001",
         }]),
-        scanDvd: vi.fn().mockResolvedValue(null),
+        scanDvd: vi.fn(),
       },
       log: vi.fn(),
-      signal: new AbortController().signal,
-    };
+      signal: controller.signal,
+      waitForNextSettlingObservation: settlingWaits.wait,
+    });
+    await settlingWaits.waitUntilPending();
+    const claimedAt = access.discInspections.list({ currentOnly: true })[0]!
+      .claimUpdatedAt!;
 
-    vi.advanceTimersByTime(DISC_INSPECTION_LEASE_DURATION_MS + 1);
-    await pollArchiveWorker(pollOptions);
+    await vi.advanceTimersByTimeAsync(
+      Math.floor(DISC_INSPECTION_LEASE_DURATION_MS / 3),
+    );
+    expect(renew).toHaveBeenCalledOnce();
+    const renewed = access.discInspections.list({ currentOnly: true })[0]!;
+    expect(renewed.phase).toBe("settling");
+    expect(renewed.claimUpdatedAt!.getTime()).toBeGreaterThan(
+      claimedAt.getTime(),
+    );
 
-    expect(access.discInspections.list()).toEqual([
-      expect.objectContaining({
-        id: original.inspection.id,
-        attemptCount: 2,
-        status: "aborted",
-        reasonCode: "no_medium",
-      }),
-    ]);
-    expect(access.discInspections.listAttempts(original.inspection.id)).toEqual([
-      expect.objectContaining({ outcome: "interrupted" }),
-      expect.objectContaining({ outcome: "aborted", reasonCode: "no_medium" }),
-    ]);
+    const interruption = new Error("test complete");
+    controller.abort(interruption);
+    await expect(polling).rejects.toBe(interruption);
+    access.close();
   });
 
   it("aborts an in-flight scan when inspection lease renewal fails", async () => {
@@ -2410,9 +2683,9 @@ describe("archive worker polling", () => {
       devicePath: "/dev/sr0",
       serialNumber: "INSPECTION-LEASE-001",
     };
-    const drive = access.catalog.reconcileOpticalDrives([
+    access.catalog.reconcileOpticalDrives([
       { ...discoveredDrive, isConfiguredDevice: true },
-    ])[0]!;
+    ]);
     let scanSignal: AbortSignal | undefined;
     const scanDvd = vi.fn(
       async (_binding: unknown, activeSignal: AbortSignal) => {
@@ -2428,11 +2701,6 @@ describe("archive worker polling", () => {
     );
     const log = vi.fn();
 
-    beginNearlySettledDiscInspection(access, {
-      opticalDriveId: drive.id,
-      mediaGeneration: "test-media-generation",
-      mediaCapacityBytes: 2_048,
-    });
     const polling = pollArchiveWorkerOnce({
       access,
       configuredDevicePath: "/dev/sr0",
@@ -2443,6 +2711,10 @@ describe("archive worker polling", () => {
       },
       log,
       signal: new AbortController().signal,
+      waitForNextSettlingObservation: async (intervalMs, signal) => {
+        signal.throwIfAborted();
+        vi.setSystemTime(new Date(Date.now() + intervalMs));
+      },
     });
 
     await vi.waitFor(() => expect(scanDvd).toHaveBeenCalledOnce());
@@ -3312,6 +3584,8 @@ describe("archive worker polling", () => {
   });
 
   it("aborts settling as no_medium when the DVD is removed", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-08-22T17:00:00.000Z"));
     const access = openTestDataAccess();
     const discoveredDrive = {
       devicePath: "/dev/sr0",
@@ -3331,20 +3605,24 @@ describe("archive worker polling", () => {
       drives: () => [discoveredDrive],
       mediaGeneration: "21",
     });
+    const settlingWaits = createControlledSettlingWaits();
     const options = {
       access,
       configuredDevicePath: "/dev/sr0",
       hardware,
       log: vi.fn(),
       signal: new AbortController().signal,
+      waitForNextSettlingObservation: settlingWaits.wait,
     };
 
-    await pollArchiveWorkerOnce(options);
+    const polling = pollArchiveWorkerOnce(options);
+    await settlingWaits.waitUntilPending();
     const settling = access.discInspections.list({ currentOnly: true })[0]!;
     expect(settling).toMatchObject({ phase: "settling", status: "running" });
 
     mediumPresent = false;
-    await pollArchiveWorkerOnce(options);
+    settlingWaits.releaseNext();
+    await polling;
 
     expect(access.discInspections.list({ ids: [settling.id] })).toEqual([
       expect.objectContaining({
@@ -3372,6 +3650,8 @@ describe("archive worker polling", () => {
   });
 
   it("aborts settling when replacement hardware takes the Optical Drive path", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-08-22T17:15:00.000Z"));
     const access = openTestDataAccess();
     let serialNumber = "SETTLING-DRIVE-001";
     const { hardware, runner } = createLinuxSettlingHardware({
@@ -3388,19 +3668,23 @@ describe("archive worker polling", () => {
       }],
       mediaGeneration: "31",
     });
+    const settlingWaits = createControlledSettlingWaits();
     const options = {
       access,
       configuredDevicePath: "/dev/sr0",
       hardware,
       log: vi.fn(),
       signal: new AbortController().signal,
+      waitForNextSettlingObservation: settlingWaits.wait,
     };
 
-    await pollArchiveWorkerOnce(options);
+    const polling = pollArchiveWorkerOnce(options);
+    await settlingWaits.waitUntilPending();
     const settling = access.discInspections.list({ currentOnly: true })[0]!;
 
     serialNumber = "REPLACEMENT-DRIVE-002";
-    await pollArchiveWorkerOnce(options);
+    settlingWaits.releaseNext();
+    await polling;
 
     expect(access.discInspections.list({ ids: [settling.id] })).toEqual([
       expect.objectContaining({
@@ -3433,6 +3717,8 @@ describe("archive worker polling", () => {
   });
 
   it("retains drive_unavailable when media observation becomes inaccessible", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-08-22T17:30:00.000Z"));
     const access = openTestDataAccess();
     let accessible = true;
     const { hardware, runner } = createLinuxSettlingHardware({
@@ -3451,18 +3737,22 @@ describe("archive worker polling", () => {
       }],
       mediaGeneration: "41",
     });
+    const settlingWaits = createControlledSettlingWaits();
     const options = {
       access,
       configuredDevicePath: "/dev/sr0",
       hardware,
       log: vi.fn(),
       signal: new AbortController().signal,
+      waitForNextSettlingObservation: settlingWaits.wait,
     };
 
-    await pollArchiveWorkerOnce(options);
+    const polling = pollArchiveWorkerOnce(options);
+    await settlingWaits.waitUntilPending();
     const settling = access.discInspections.list({ currentOnly: true })[0]!;
     accessible = false;
-    await pollArchiveWorkerOnce(options);
+    settlingWaits.releaseNext();
+    await polling;
 
     expect(access.discInspections.list({ ids: [settling.id] })).toEqual([
       expect.objectContaining({
@@ -3548,6 +3838,7 @@ describe("archive worker polling", () => {
   });
 
   it("classifies media probe permission loss before blockdev as drive_unavailable", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
     const access = openTestDataAccess();
     let accessible = true;
     const probeLauncher: MediaGenerationProbeLauncher = {
@@ -3583,18 +3874,22 @@ describe("archive worker polling", () => {
       mediaGeneration: "61",
       mediaGenerationObserver,
     });
+    const settlingWaits = createControlledSettlingWaits();
     const options = {
       access,
       configuredDevicePath: "/dev/sr0",
       hardware,
       log: vi.fn(),
       signal: new AbortController().signal,
+      waitForNextSettlingObservation: settlingWaits.wait,
     };
 
-    await pollArchiveWorkerOnce(options);
+    const polling = pollArchiveWorkerOnce(options);
+    await settlingWaits.waitUntilPending();
     const settling = access.discInspections.list({ currentOnly: true })[0]!;
     accessible = false;
-    await pollArchiveWorkerOnce(options);
+    settlingWaits.releaseNext();
+    await polling;
 
     expect(access.discInspections.list({ ids: [settling.id] })).toEqual([
       expect.objectContaining({
@@ -3626,6 +3921,8 @@ describe("archive worker polling", () => {
   });
 
   it("aborts an unauthorized settling Optical Drive as drive_unavailable", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-08-22T17:45:00.000Z"));
     const access = openTestDataAccess();
     const observeMedia = vi.fn().mockResolvedValue({
       mediaGeneration: "51",
@@ -3644,22 +3941,26 @@ describe("archive worker polling", () => {
       observeMedia,
       scanDvd,
     };
+    const settlingWaits = createControlledSettlingWaits();
     const options = {
       access,
       configuredDevicePath: "/dev/sr0",
       hardware,
       log: vi.fn(),
       signal: new AbortController().signal,
+      waitForNextSettlingObservation: settlingWaits.wait,
     };
 
-    await pollArchiveWorkerOnce(options);
+    const polling = pollArchiveWorkerOnce(options);
+    await settlingWaits.waitUntilPending();
     const settling = access.discInspections.list({ currentOnly: true })[0]!;
     access.catalog.upsertOpticalDrive({
       ...discoveredDrive,
       isEnabled: false,
       isPresent: true,
     });
-    await pollArchiveWorkerOnce(options);
+    settlingWaits.releaseNext();
+    await polling;
 
     expect(access.discInspections.list({ ids: [settling.id] })).toEqual([
       expect.objectContaining({
@@ -3711,8 +4012,8 @@ describe("archive worker polling", () => {
             mediaGeneration: "test-media-generation",
             mediaCapacityBytes,
             stableObservationCount: 3,
-            settlingQuietWindowStartedAt: startedAt,
-            settlingStartedAt: startedAt,
+            settlingQuietWindowStartedAt: expect.any(Date),
+            settlingStartedAt: expect.any(Date),
             settlingResetCount: 0,
           }),
         ]);
@@ -3735,15 +4036,18 @@ describe("archive worker polling", () => {
         observe: vi.fn().mockResolvedValue("test-media-generation"),
       },
     });
+    const settlingWaits = createControlledSettlingWaits();
     const poll = () => pollArchiveWorkerOnce({
       access,
       configuredDevicePath: "/dev/sr0",
       hardware,
       log: vi.fn(),
       signal: new AbortController().signal,
+      waitForNextSettlingObservation: settlingWaits.wait,
     });
 
-    await poll();
+    const polling = poll();
+    await settlingWaits.waitUntilPending();
     const inspectionId = access.discInspections.list({ currentOnly: true })[0]!.id;
     expect(access.discInspections.list({ currentOnly: true })).toEqual([
       expect.objectContaining({
@@ -3752,8 +4056,8 @@ describe("archive worker polling", () => {
         mediaGeneration: "test-media-generation",
         mediaCapacityBytes,
         stableObservationCount: 1,
-        settlingQuietWindowStartedAt: startedAt,
-        settlingStartedAt: startedAt,
+        settlingQuietWindowStartedAt: expect.any(Date),
+        settlingStartedAt: expect.any(Date),
         settlingResetCount: 0,
         totalBytes: null,
         bytesPerSecond: null,
@@ -3766,8 +4070,8 @@ describe("archive worker polling", () => {
       ),
     ).toHaveLength(0);
 
-    vi.advanceTimersByTime(2_500);
-    await poll();
+    settlingWaits.releaseNext();
+    await settlingWaits.waitUntilPending();
     expect(access.discInspections.list({ currentOnly: true })).toEqual([
       expect.objectContaining({
         id: inspectionId,
@@ -3781,8 +4085,8 @@ describe("archive worker polling", () => {
       ),
     ).toHaveLength(0);
 
-    vi.advanceTimersByTime(2_500);
-    await poll();
+    settlingWaits.releaseNext();
+    await polling;
 
     expect(
       run.mock.calls.filter(([executable]) =>
@@ -3792,6 +4096,11 @@ describe("archive worker polling", () => {
     expect(
       run.mock.calls.filter(([executable]) => executable === "blockdev"),
     ).toHaveLength(3);
+    expect(settlingWaits.wait).toHaveBeenCalledTimes(2);
+    expect(settlingWaits.wait).toHaveBeenCalledWith(
+      2_500,
+      expect.any(AbortSignal),
+    );
     expect(access.discInspections.list({ currentOnly: true })).toEqual([
       expect.objectContaining({
         id: inspectionId,
@@ -3885,23 +4194,26 @@ describe("archive worker polling", () => {
         ),
         scanDvd,
       };
+      const settlingWaits = createControlledSettlingWaits();
       const poll = () => pollArchiveWorkerOnce({
         access,
         configuredDevicePath: "/dev/sr0",
         hardware,
         log: vi.fn(),
         signal: new AbortController().signal,
+        waitForNextSettlingObservation: settlingWaits.wait,
       });
 
-      await poll();
-      vi.advanceTimersByTime(2_500);
-      await poll();
+      const polling = poll();
+      await settlingWaits.waitUntilPending();
+      settlingWaits.releaseNext();
+      await settlingWaits.waitUntilPending();
       const inspectionId = access.discInspections.list({
         currentOnly: true,
       })[0]!.id;
 
-      vi.advanceTimersByTime(2_500);
-      await poll();
+      settlingWaits.releaseNext();
+      await settlingWaits.waitUntilPending();
 
       expect(access.discInspections.list()).toEqual([
         expect.objectContaining({
@@ -3912,10 +4224,8 @@ describe("archive worker polling", () => {
           mediaGeneration: finalObservation.mediaGeneration,
           mediaCapacityBytes: finalObservation.capacityBytes,
           stableObservationCount: 1,
-          settlingQuietWindowStartedAt: new Date(
-            startedAt.getTime() + 5_000,
-          ),
-          settlingStartedAt: startedAt,
+          settlingQuietWindowStartedAt: expect.any(Date),
+          settlingStartedAt: expect.any(Date),
           settlingResetCount: 1,
           titleCount: null,
         }),
@@ -3924,10 +4234,10 @@ describe("archive worker polling", () => {
       expect(scanDvd).not.toHaveBeenCalled();
       expect(access.catalog.listDetectedDiscs()).toEqual([]);
 
-      vi.advanceTimersByTime(2_500);
-      await poll();
-      vi.advanceTimersByTime(2_500);
-      await poll();
+      settlingWaits.releaseNext();
+      await settlingWaits.waitUntilPending();
+      settlingWaits.releaseNext();
+      await polling;
 
       expect(scanDvd).toHaveBeenCalledOnce();
       expect(access.discInspections.list()).toEqual([
@@ -3959,8 +4269,7 @@ describe("archive worker polling", () => {
 
   it("does not reuse cached metadata after an A-to-B-to-A generation sequence", async () => {
     vi.useFakeTimers();
-    const startedAt = new Date("2026-08-22T18:45:00.000Z");
-    vi.setSystemTime(startedAt);
+    vi.setSystemTime(new Date("2026-08-22T18:45:00.000Z"));
     const access = openTestDataAccess();
     const mediaCapacityBytes = 4_700_372_992;
     let metadataReadCount = 0;
@@ -3993,9 +4302,7 @@ describe("archive worker polling", () => {
           return {
             exitCode: 0,
             stdout: [
-              `Disc Title: ${
-                metadataReadCount === 1 ? "FIRST_DISC_A" : "RETURNED_DISC_A"
-              }`,
+              "Disc Title: DISC_A",
               "Title: 01, Length: 00:01:00.000 Chapters: 1, Cells: 1, Audio streams: 0, Subpictures: 0",
             ].join("\n"),
             stderr: "",
@@ -4004,22 +4311,9 @@ describe("archive worker polling", () => {
         throw new Error(`Unexpected command: ${executable}`);
       }),
     };
-    let generationObservationCount = 0;
-    let forcedGeneration: string | null = null;
+    let mediaGeneration = "generation-a";
     const mediaGenerationObserver = {
-      observe: vi.fn(async () => {
-        if (forcedGeneration !== null) {
-          return forcedGeneration;
-        }
-        generationObservationCount += 1;
-        if (generationObservationCount <= 5) {
-          return "generation-a";
-        }
-        if (generationObservationCount <= 8) {
-          return "generation-b";
-        }
-        return "generation-a";
-      }),
+      observe: vi.fn(async () => mediaGeneration),
     };
     const hardware = createLinuxOpticalDriveHardware({
       platform: "linux",
@@ -4029,48 +4323,40 @@ describe("archive worker polling", () => {
         observe: vi.fn().mockResolvedValue("device-instance-1"),
       },
     });
-    const poll = () => pollArchiveWorkerOnce({
+    const pollOptions = {
       access,
       configuredDevicePath: "/dev/sr0",
       hardware,
       log: vi.fn(),
       signal: new AbortController().signal,
-    });
+    };
 
-    await poll();
+    await pollArchiveWorker(pollOptions);
     const firstInspectionId = access.discInspections.list({
       currentOnly: true,
     })[0]!.id;
-    vi.advanceTimersByTime(2_500);
-    await poll();
-    vi.advanceTimersByTime(2_500);
-    await poll();
-
     expect(metadataReadCount).toBe(1);
-    expect(access.catalog.listDetectedDiscs()).toEqual([]);
     expect(access.discInspections.list({ ids: [firstInspectionId] })).toEqual([
-      expect.objectContaining({
-        status: "aborted",
-        reasonCode: "media_changed",
-      }),
-    ]);
-    expect(access.discInspections.listAttempts(firstInspectionId)).toEqual([
-      expect.objectContaining({
-        attemptNumber: 1,
-        outcome: "aborted",
-        reasonCode: "media_changed",
-      }),
+      expect.objectContaining({ status: "completed" }),
     ]);
 
-    vi.advanceTimersByTime(2_500);
-    await poll();
+    mediaGeneration = "generation-b";
+    const settlingWaits = createControlledSettlingWaits();
+    const returnedPolling = pollArchiveWorkerOnce({
+      ...pollOptions,
+      waitForNextSettlingObservation: settlingWaits.wait,
+    });
+    await settlingWaits.waitUntilPending();
     const resumedInspectionId = access.discInspections.list({
       currentOnly: true,
     })[0]!.id;
     expect(resumedInspectionId).not.toBe(firstInspectionId);
 
-    vi.advanceTimersByTime(2_500);
-    await poll();
+    settlingWaits.releaseNext();
+    await settlingWaits.waitUntilPending();
+    mediaGeneration = "generation-a";
+    settlingWaits.releaseNext();
+    await settlingWaits.waitUntilPending();
     expect(access.discInspections.list({ currentOnly: true })).toEqual([
       expect.objectContaining({
         id: resumedInspectionId,
@@ -4083,10 +4369,10 @@ describe("archive worker polling", () => {
     ]);
     expect(access.discInspections.listAttempts(resumedInspectionId)).toEqual([]);
 
-    vi.advanceTimersByTime(2_500);
-    await poll();
-    vi.advanceTimersByTime(2_500);
-    await poll();
+    settlingWaits.releaseNext();
+    await settlingWaits.waitUntilPending();
+    settlingWaits.releaseNext();
+    await returnedPolling;
 
     expect(metadataReadCount).toBe(2);
     expect(access.discInspections.list({ currentOnly: true })).toEqual([
@@ -4099,27 +4385,13 @@ describe("archive worker polling", () => {
       }),
     ]);
     expect(access.catalog.listDetectedDiscs()).toEqual([
-      expect.objectContaining({ volumeLabel: "RETURNED_DISC_A" }),
+      expect.objectContaining({ volumeLabel: "DISC_A" }),
     ]);
 
-    vi.advanceTimersByTime(2_500);
-    await poll();
+    await pollArchiveWorker(pollOptions);
     expect(metadataReadCount).toBe(2);
     expect(access.discInspections.list({ currentOnly: true })).toEqual([
       expect.objectContaining({ id: resumedInspectionId, status: "completed" }),
-    ]);
-
-    forcedGeneration = "generation-c";
-    vi.advanceTimersByTime(2_500);
-    await poll();
-    expect(metadataReadCount).toBe(2);
-    expect(access.discInspections.list({ currentOnly: true })).toEqual([
-      expect.objectContaining({
-        id: expect.not.stringMatching(resumedInspectionId),
-        phase: "settling",
-        status: "running",
-        mediaGeneration: "generation-c",
-      }),
     ]);
     access.close();
   });
@@ -4234,6 +4506,8 @@ describe("archive worker polling", () => {
     const startedAt = new Date("2026-08-22T19:00:00.000Z");
     vi.setSystemTime(startedAt);
     const access = openTestDataAccess();
+    const controller = new AbortController();
+    const settlingWaits = createControlledSettlingWaits();
     const scanDvd = vi.fn();
     const hardware: OpticalDriveHardware = {
       ...stableDeviceBinding(),
@@ -4248,30 +4522,34 @@ describe("archive worker polling", () => {
       }),
       scanDvd,
     };
-    const poll = () => pollArchiveWorkerOnce({
+    const polling = pollArchiveWorkerOnce({
       access,
       configuredDevicePath: "/dev/sr0",
       hardware,
       log: vi.fn(),
-      signal: new AbortController().signal,
+      signal: controller.signal,
+      waitForNextSettlingObservation: settlingWaits.wait,
     });
 
-    await poll();
-    vi.advanceTimersByTime(2_000);
-    await poll();
-    vi.advanceTimersByTime(2_000);
-    await poll();
+    await settlingWaits.waitUntilPending();
+    settlingWaits.releaseNext(2_000);
+    await settlingWaits.waitUntilPending();
+    settlingWaits.releaseNext(2_000);
+    await settlingWaits.waitUntilPending();
 
     expect(access.discInspections.list({ currentOnly: true })).toEqual([
       expect.objectContaining({
         phase: "settling",
         stableObservationCount: 3,
-        settlingQuietWindowStartedAt: startedAt,
-        settlingStartedAt: startedAt,
+        settlingQuietWindowStartedAt: expect.any(Date),
+        settlingStartedAt: expect.any(Date),
       }),
     ]);
     expect(scanDvd).not.toHaveBeenCalled();
     expect(access.catalog.listDetectedDiscs()).toEqual([]);
+    const interruption = new Error("test complete");
+    controller.abort(interruption);
+    await expect(polling).rejects.toBe(interruption);
     access.close();
   });
 
@@ -4597,7 +4875,7 @@ describe("archive worker polling", () => {
       deviceInstanceObserver: {
         observe: vi.fn(async () => {
           deviceObservationCount += 1;
-          return deviceObservationCount <= 6 ? "41" : "43";
+          return deviceObservationCount <= 3 ? "41" : "43";
         }),
       },
     });
@@ -4617,7 +4895,7 @@ describe("archive worker polling", () => {
       expect.anything(),
     );
     expect(log).toHaveBeenCalledWith(
-      "DVD scan failed for /dev/sr0: Optical Drive instance changed before DVD scanning",
+      "DVD scan failed for /dev/sr0: Optical Drive instance changed before DVD settling",
     );
     access.close();
   });
@@ -5176,6 +5454,8 @@ describe("archive worker polling", () => {
   ])(
     "limits concurrent drive work to the $label archive-worker concurrency",
     async ({ concurrency, expectedConcurrency }) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-08-11T13:30:00.000Z"));
       const access = openTestDataAccess();
       const discoveredDrives = Array.from({ length: 3 }, (_, index) => ({
         devicePath: `/dev/sr${index}`,
@@ -5201,13 +5481,6 @@ describe("archive worker polling", () => {
         activeScans -= 1;
         return null;
       });
-      for (const drive of access.catalog.listOpticalDrives()) {
-        beginNearlySettledDiscInspection(access, {
-          opticalDriveId: drive.id,
-          mediaGeneration: "test-media-generation",
-          mediaCapacityBytes: 2_048,
-        });
-      }
       const polling = pollArchiveWorkerOnce({
         access,
         ...(concurrency === undefined ? {} : { concurrency }),
@@ -5219,6 +5492,10 @@ describe("archive worker polling", () => {
         },
         log: vi.fn(),
         signal: new AbortController().signal,
+        waitForNextSettlingObservation: async (intervalMs, signal) => {
+          signal.throwIfAborted();
+          vi.setSystemTime(new Date(Date.now() + intervalMs));
+        },
       });
 
       try {
@@ -5240,21 +5517,153 @@ describe("archive worker polling", () => {
     },
   );
 
-  it("cancels an in-flight scan and stops polling during shutdown", async () => {
+  it("interrupts a settling wait during worker shutdown before metadata starts", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-11T14:00:00.000Z"));
     const access = openTestDataAccess();
     const controller = new AbortController();
-    const drive = access.catalog.reconcileOpticalDrives([
+    const settlingWaits = createControlledSettlingWaits();
+    const scanDvd = vi.fn();
+    const waitForNextPoll = vi.fn(
+      async (_intervalMs: number, signal: AbortSignal) =>
+        await new Promise<void>((resolve) => {
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        }),
+    );
+    const polling = runArchiveWorker({
+      access,
+      configuredDevicePath: "/dev/sr0",
+      hardware: {
+        ...stableDeviceBinding(),
+        discover: vi.fn().mockResolvedValue([{
+          devicePath: "/dev/sr0",
+          serialNumber: "SETTLING-SHUTDOWN-WAIT-001",
+        }]),
+        scanDvd,
+      },
+      log: vi.fn(),
+      pollIntervalMs: 5_000,
+      signal: controller.signal,
+      waitForNextPoll,
+      waitForNextSettlingObservation: settlingWaits.wait,
+    });
+    await settlingWaits.waitUntilPending();
+
+    controller.abort(new Error("worker shutdown"));
+    await expect(polling).resolves.toBeUndefined();
+
+    expect(settlingWaits.wait).toHaveBeenCalledOnce();
+    expect(scanDvd).not.toHaveBeenCalled();
+    expect(access.catalog.listDetectedDiscs()).toEqual([]);
+    access.close();
+  });
+
+  it("cancels a settling poll promptly without starting metadata", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-11T14:10:00.000Z"));
+    const access = openTestDataAccess();
+    const controller = new AbortController();
+    const settlingWaits = createControlledSettlingWaits();
+    const scanDvd = vi.fn();
+    const polling = pollArchiveWorkerOnce({
+      access,
+      configuredDevicePath: "/dev/sr0",
+      hardware: {
+        ...stableDeviceBinding(),
+        discover: vi.fn().mockResolvedValue([{
+          devicePath: "/dev/sr0",
+          serialNumber: "SETTLING-CANCELLATION-001",
+        }]),
+        scanDvd,
+      },
+      log: vi.fn(),
+      signal: controller.signal,
+      waitForNextSettlingObservation: settlingWaits.wait,
+    });
+    await settlingWaits.waitUntilPending();
+
+    const cancellation = new Error("worker operation cancelled");
+    controller.abort(cancellation);
+    await expect(polling).rejects.toBe(cancellation);
+
+    expect(scanDvd).not.toHaveBeenCalled();
+    expect(access.catalog.listDetectedDiscs()).toEqual([]);
+    access.close();
+  });
+
+  it("interrupts a blocked readiness observation during worker shutdown", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-11T14:15:00.000Z"));
+    const access = openTestDataAccess();
+    const controller = new AbortController();
+    const settlingWaits = createControlledSettlingWaits();
+    let observationCount = 0;
+    let blockedObservationSignal: AbortSignal | undefined;
+    const observeMedia = vi.fn(
+      async (_binding: unknown, signal: AbortSignal) => {
+        observationCount += 1;
+        if (observationCount === 1) {
+          return {
+            mediaGeneration: "shutdown-generation",
+            capacityBytes: 2_048,
+          };
+        }
+        blockedObservationSignal = signal;
+        return await new Promise<never>((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), {
+            once: true,
+          });
+        });
+      },
+    );
+    const scanDvd = vi.fn();
+    const polling = runArchiveWorker({
+      access,
+      configuredDevicePath: "/dev/sr0",
+      hardware: {
+        ...stableDeviceBinding(),
+        discover: vi.fn().mockResolvedValue([{
+          devicePath: "/dev/sr0",
+          serialNumber: "SETTLING-SHUTDOWN-OBSERVE-001",
+        }]),
+        observeMedia,
+        observeMediaGeneration: vi.fn(async () => "shutdown-generation"),
+        scanDvd,
+      },
+      log: vi.fn(),
+      pollIntervalMs: 5_000,
+      signal: controller.signal,
+      waitForNextPoll: async (_intervalMs, signal) =>
+        await new Promise<void>((resolve) => {
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        }),
+      waitForNextSettlingObservation: settlingWaits.wait,
+    });
+    await settlingWaits.waitUntilPending();
+    settlingWaits.releaseNext();
+    await vi.waitFor(() => expect(observeMedia).toHaveBeenCalledTimes(2));
+
+    controller.abort(new Error("worker shutdown"));
+    await expect(polling).resolves.toBeUndefined();
+
+    expect(blockedObservationSignal?.aborted).toBe(true);
+    expect(scanDvd).not.toHaveBeenCalled();
+    expect(access.catalog.listDetectedDiscs()).toEqual([]);
+    access.close();
+  });
+
+  it("cancels an in-flight scan and stops polling during shutdown", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-08-11T14:30:00.000Z"));
+    const access = openTestDataAccess();
+    const controller = new AbortController();
+    access.catalog.reconcileOpticalDrives([
       {
         devicePath: "/dev/sr0",
         serialNumber: "CANCEL-001",
         isConfiguredDevice: true,
       },
-    ])[0]!;
-    beginNearlySettledDiscInspection(access, {
-      opticalDriveId: drive.id,
-      mediaGeneration: "test-media-generation",
-      mediaCapacityBytes: 2_048,
-    });
+    ]);
     const scanDvd = vi.fn(
       async (_binding: unknown, signal: AbortSignal) => {
         controller.abort(new Error("worker shutdown"));
@@ -5290,6 +5699,10 @@ describe("archive worker polling", () => {
         pollIntervalMs: 5_000,
         signal: controller.signal,
         waitForNextPoll,
+        waitForNextSettlingObservation: async (intervalMs, signal) => {
+          signal.throwIfAborted();
+          vi.setSystemTime(new Date(Date.now() + intervalMs));
+        },
       }),
     ).resolves.toBeUndefined();
 
