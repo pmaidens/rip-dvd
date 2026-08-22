@@ -1094,6 +1094,21 @@ describe("DVD archive publication", () => {
       status: 3,
     },
     {
+      name: "hardware category with non-hardware sense",
+      mutate: { category: "hardware_error" },
+      status: 3,
+    },
+    {
+      name: "transport category without a transport completion",
+      mutate: { category: "transport_error" },
+      status: 3,
+    },
+    {
+      name: "protection category with non-protection sense",
+      mutate: { category: "protection_error" },
+      status: 3,
+    },
+    {
       name: "unsupported exit status",
       status: 4,
     },

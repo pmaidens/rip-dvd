@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  DvdArchiveReadFailureError,
   preserveDvdArchive,
   type DvdCopyRequest,
   type DvdCopyRunner,
@@ -22,8 +23,11 @@ import {
 import {
   createCleanDvdRecoveryResult,
   createDamagedDvdRecoveryResult,
+  DvdReadFailureError,
+  DVD_READ_FAILURE_RESULT_PREFIX,
   DVD_RECOVERY_RESULT_PREFIX,
   formatDvdRecoveryResumeBitmap,
+  parseDvdReadFailureResultProtocol,
   parseDvdRecoveryResultProtocol,
   type DvdRecoveryResult,
 } from "./dvd-recovery-contracts.js";
@@ -33,21 +37,33 @@ const nativeTestExecutable =
   process.env.RIP_DVD_NATIVE_TEST_EXECUTABLE ?? "";
 const temporaryDirectories: string[] = [];
 
-function fixedMediumSense(lba: number): string {
+function fixedSense(
+  lba: number,
+  senseKey: number,
+  asc: number,
+  ascq = 0,
+): string {
   const sense = Buffer.alloc(18);
   sense[0] = 0xf0;
-  sense[2] = 0x03;
+  sense[2] = senseKey;
   sense.writeUInt32BE(lba, 3);
   sense[7] = 10;
-  sense[12] = 0x11;
+  sense[12] = asc;
+  sense[13] = ascq;
   return sense.toString("hex");
 }
 
-function descriptorMediumSense(lba: number): string {
+function descriptorSense(
+  lba: number,
+  senseKey: number,
+  asc: number,
+  ascq = 0,
+): string {
   const sense = Buffer.alloc(20);
   sense[0] = 0x72;
-  sense[1] = 0x03;
-  sense[2] = 0x11;
+  sense[1] = senseKey;
+  sense[2] = asc;
+  sense[3] = ascq;
   sense[7] = 12;
   sense[9] = 10;
   sense[10] = 0x80;
@@ -55,13 +71,43 @@ function descriptorMediumSense(lba: number): string {
   return sense.toString("hex");
 }
 
+function fixedMediumSense(lba: number): string {
+  return fixedSense(lba, 0x03, 0x11);
+}
+
+function descriptorMediumSense(lba: number): string {
+  return descriptorSense(lba, 0x03, 0x11);
+}
+
 function rawCompletionFault(
   lba: number,
   remainingFailures: number | "always",
   sense: string,
+  { scsiStatus = 2, hostStatus = 0, driverStatus = 8 } = {},
 ): string {
-  return `raw@${lba}@${remainingFailures}@2@0@8@${sense.length / 2}@${sense}`;
+  return `raw@${lba}@${remainingFailures}@${scsiStatus}@${hostStatus}@${driverStatus}@${sense.length / 2}@${sense}`;
 }
+
+const distinguishedReadFailures = [
+  {
+    category: "hardware_error",
+    fault: rawCompletionFault(5, "always", fixedSense(5, 0x04, 0x44)),
+  },
+  {
+    category: "transport_error",
+    fault: rawCompletionFault(5, "always", fixedMediumSense(5), {
+      hostStatus: 7,
+    }),
+  },
+  {
+    category: "protection_error",
+    fault: rawCompletionFault(
+      5,
+      "always",
+      descriptorSense(5, 0x05, 0x6f, 0x04),
+    ),
+  },
+] as const;
 
 interface SyntheticDvdCopyRunner extends DvdCopyRunner {
   results: DvdRecoveryResult[];
@@ -113,6 +159,18 @@ function createSyntheticDvdCopyRunner({
         if (match !== null) {
           request.onBytesCopied(Number(match[1]));
         }
+      }
+      const readFailurePayloads = completion.stderr
+        .split("\n")
+        .filter((line) => line.startsWith(DVD_READ_FAILURE_RESULT_PREFIX))
+        .map((line) => line.slice(DVD_READ_FAILURE_RESULT_PREFIX.length));
+      if (completion.status === 3 && readFailurePayloads.length === 1) {
+        throw new DvdReadFailureError(
+          parseDvdReadFailureResultProtocol(
+            readFailurePayloads[0]!,
+            request.sizeBytes,
+          ),
+        );
       }
       if (completion.status !== 0) {
         throw new Error(
@@ -221,6 +279,44 @@ describe.runIf(nativeTestExecutable !== "")(
         badSectorRanges: [],
       });
       expect(readFileSync(preserved.archivePath)).toEqual(fixture.content);
+      expect(salvageValidator.validate).not.toHaveBeenCalled();
+    });
+
+    it.each(distinguishedReadFailures)("keeps $category out of initial recovery and publication", async ({
+      category,
+      fault,
+    }) => {
+      const fixture = createFixture(
+        category === "hardware_error"
+          ? "51111111-1111-4111-8111-111111111111"
+          : category === "transport_error"
+            ? "52222222-2222-4222-8222-222222222222"
+            : "53333333-3333-4333-8333-333333333333",
+      );
+      const runner = createSyntheticDvdCopyRunner({
+        faults: fault,
+        sourcePath: fixture.sourcePath,
+      });
+      const salvageValidator = { validate: vi.fn() };
+
+      const error = await preserveDvdArchive({
+        ...fixture.baseOptions,
+        runner,
+        salvageValidator,
+      }).catch((reason: unknown) => reason);
+
+      expect(error).toBeInstanceOf(DvdArchiveReadFailureError);
+      expect(error).toMatchObject({
+        stage: "initial_copy",
+        readFailure: { category },
+      });
+      expect(runner.results).toEqual([]);
+      expect(existsSync(fixture.archivePath)).toBe(false);
+      expect(
+        readdirSync(realpathSync(fixture.originalsLibraryPath)).some((name) =>
+          name.endsWith(".rip-dvd-rescue.iso"),
+        ),
+      ).toBe(false);
       expect(salvageValidator.validate).not.toHaveBeenCalled();
     });
 
@@ -340,6 +436,53 @@ describe.runIf(nativeTestExecutable !== "")(
       await preserved.finalizePublication?.();
     });
 
+    it.each(distinguishedReadFailures)("keeps $category out of resumed recovery and publication", async ({
+      category,
+      fault,
+    }) => {
+      const archiveRequestId = category === "hardware_error"
+        ? "61111111-1111-4111-8111-111111111111"
+        : category === "transport_error"
+          ? "62222222-2222-4222-8222-222222222222"
+          : "63333333-3333-4333-8333-333333333333";
+      const fixture = createFixture(archiveRequestId);
+      const initialRunner = createSyntheticDvdCopyRunner({
+        faults: rawCompletionFault(5, "always", fixedMediumSense(5)),
+        sourcePath: fixture.sourcePath,
+      });
+      await expect(
+        preserveDvdArchive({ ...fixture.baseOptions, runner: initialRunner }),
+      ).rejects.toThrow("DVD rescue requires validation");
+      const rescuePaths = dvdRescueWorkspacePaths(
+        realpathSync(fixture.originalsLibraryPath),
+        archiveRequestId,
+      );
+      const rescueImageBeforeFailure = readFileSync(rescuePaths.imagePath);
+      const resumeRunner = createSyntheticDvdCopyRunner({
+        faults: fault,
+        sourcePath: fixture.sourcePath,
+      });
+      const salvageValidator = { validate: vi.fn() };
+
+      const error = await preserveDvdArchive({
+        ...fixture.baseOptions,
+        runner: resumeRunner,
+        salvageValidator,
+      }).catch((reason: unknown) => reason);
+
+      expect(error).toBeInstanceOf(DvdArchiveReadFailureError);
+      expect(error).toMatchObject({
+        stage: "rescue_resume",
+        readFailure: { category },
+      });
+      expect(resumeRunner.results).toEqual([]);
+      expect(readFileSync(rescuePaths.imagePath)).toEqual(
+        rescueImageBeforeFailure,
+      );
+      expect(existsSync(fixture.archivePath)).toBe(false);
+      expect(salvageValidator.validate).not.toHaveBeenCalled();
+    });
+
     it("keeps a non-media completion out of recovery and publication", async () => {
       const fixture = createFixture(
         "44444444-4444-4444-8444-444444444444",
@@ -358,7 +501,10 @@ describe.runIf(nativeTestExecutable !== "")(
           runner,
           salvageValidator,
         }),
-      ).rejects.toThrow("Synthetic DVD reader failed");
+      ).rejects.toMatchObject({
+        stage: "initial_copy",
+        readFailure: { category: "unknown" },
+      });
 
       expect(runner.results).toEqual([]);
       expect(existsSync(fixture.archivePath)).toBe(false);
