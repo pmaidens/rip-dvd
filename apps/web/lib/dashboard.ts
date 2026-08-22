@@ -314,6 +314,8 @@ function driveDisplayName(drive: OpticalDriveRecord): string {
 
 const UNKNOWN_READ_FAILURE_DETAIL =
   "The Optical Drive returned an unclassified read failure. Retry the Archive Request; if it fails again, inspect the disc and drive.";
+const MISSING_READ_FAILURE_DETAIL =
+  "The Archive Job failed with an unknown diagnostic because structured read evidence is unavailable.";
 const MISSING_READ_FAILURE_DIAGNOSTIC =
   "Structured read evidence unavailable.";
 
@@ -347,6 +349,12 @@ function archiveJobFailure(job: ArchiveJob | undefined): {
         ])}`,
         `classifier ${job.readFailureClassifierVersion}`,
       ].join(" · "),
+    };
+  }
+  if (job?.status === "failed" && job.failureDetailVersion === null) {
+    return {
+      failureDetail: MISSING_READ_FAILURE_DETAIL,
+      failureDiagnostic: MISSING_READ_FAILURE_DIAGNOSTIC,
     };
   }
   return {

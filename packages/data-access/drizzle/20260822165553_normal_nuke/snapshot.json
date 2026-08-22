@@ -1,9 +1,9 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "7cc66731-5829-40a8-8e1f-d0740ae8c05f",
+  "id": "65431d5b-f818-4968-b67f-cd6a0a5d0e5b",
   "prevIds": [
-    "f60c8ff6-a1ff-4acb-b66e-6f0b1d0a26b2"
+    "7cc66731-5829-40a8-8e1f-d0740ae8c05f"
   ],
   "ddl": [
     {
@@ -237,6 +237,16 @@
       "default": null,
       "generated": null,
       "name": "error_message",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "failure_detail_version",
       "entityType": "columns",
       "table": "archive_jobs"
     },
@@ -3145,6 +3155,12 @@
     {
       "value": "(\"status\" = 'running' and \"claimed_by\" is not null and \"claim_token\" is not null and \"claimed_at\" is not null and \"started_at\" is not null and \"completed_at\" is null) or (\"status\" <> 'running' and \"started_at\" is not null and \"completed_at\" is not null)",
       "name": "archive_jobs_attempt_shape_check",
+      "entityType": "checks",
+      "table": "archive_jobs"
+    },
+    {
+      "value": "\"failure_detail_version\" is null or (\"status\" = 'failed' and \"failure_detail_version\" in ('archive-failure-detail-v1'))",
+      "name": "archive_jobs_failure_detail_version_check",
       "entityType": "checks",
       "table": "archive_jobs"
     },

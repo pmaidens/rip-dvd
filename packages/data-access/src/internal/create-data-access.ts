@@ -109,6 +109,7 @@ import {
   MAX_DVD_TITLES,
 } from "../dvd-scan.js";
 import {
+  ARCHIVE_FAILURE_DETAIL_VERSIONS,
   ARCHIVE_READ_FAILURE_STAGES,
   ARCHIVE_RUNNING_PROGRESS_PHASES,
   ENCODE_PROGRESS_PHASES,
@@ -3068,7 +3069,12 @@ export function createDataAccessInternal(
         .set({
           status: cancellationWins ? "aborted" : "failed",
           ...archiveProgressPatchForClaim(claim.id, claim.claimToken),
-          ...(cancellationWins ? {} : readFailureValues),
+          ...(cancellationWins
+            ? {}
+            : {
+                failureDetailVersion: ARCHIVE_FAILURE_DETAIL_VERSIONS[0],
+                ...readFailureValues,
+              }),
           completedAt: timestamp,
           errorMessage: cancellationWins
             ? "Archive cancelled by operator"
@@ -7330,6 +7336,7 @@ export function createDataAccessInternal(
                 ),
                 completedAt: timestamp,
                 errorMessage: "Archive worker lease expired",
+                failureDetailVersion: ARCHIVE_FAILURE_DETAIL_VERSIONS[0],
                 updatedAt: timestamp,
               })
               .where(

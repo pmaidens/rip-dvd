@@ -407,9 +407,16 @@ async function exerciseWatchabilityWorkerScenario({
 
 async function exerciseUnknownReadFence({
   beforeFailure,
+  beforeReadFailurePersistence,
   observeMediaGeneration,
 }: {
   beforeFailure?: (
+    access: ReturnType<typeof openTestDataAccess>,
+    requestId: ReturnType<
+      ReturnType<typeof openTestDataAccess>["archiveRequests"]["create"]
+    >["id"],
+  ) => void;
+  beforeReadFailurePersistence?: (
     access: ReturnType<typeof openTestDataAccess>,
     requestId: ReturnType<
       ReturnType<typeof openTestDataAccess>["archiveRequests"]["create"]
@@ -463,6 +470,16 @@ async function exerciseUnknownReadFence({
     withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
     waitForInactive: vi.fn(async () => undefined),
   };
+  if (beforeReadFailurePersistence !== undefined) {
+    const persistReadFailure =
+      access.archiveJobs.failWithReadFailure.bind(access.archiveJobs);
+    vi.spyOn(access.archiveJobs, "failWithReadFailure").mockImplementation(
+      (claim, evidence) => {
+        beforeReadFailurePersistence(access, request.id);
+        return persistReadFailure(claim, evidence);
+      },
+    );
+  }
 
   await pollArchiveWorker({
     access,
@@ -981,6 +998,29 @@ describe("archive worker polling", () => {
     expect(scenario.access.archiveRequests.list(["cancelled"])).toEqual([
       expect.objectContaining({ id: scenario.request.id }),
     ]);
+  });
+
+  it("reports cancellation when it wins the structured persistence race", async () => {
+    const scenario = await exerciseUnknownReadFence({
+      beforeReadFailurePersistence(access, requestId) {
+        access.archiveRequests.cancel(requestId);
+      },
+    });
+
+    expect(scenario.access.archiveJobs.list()).toEqual([
+      expect.objectContaining({
+        status: "aborted",
+        readFailureStage: null,
+        readFailureCategory: null,
+        readFailureClassifierVersion: null,
+      }),
+    ]);
+    expect(scenario.access.archiveRequests.list(["cancelled"])).toEqual([
+      expect.objectContaining({ id: scenario.request.id }),
+    ]);
+    expect(scenario.log).toHaveBeenCalledWith(
+      "DVD archive cancelled for /dev/sr0",
+    );
   });
 
   it("does not persist read evidence after source replacement", async () => {

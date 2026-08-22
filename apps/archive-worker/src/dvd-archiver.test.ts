@@ -2823,6 +2823,59 @@ describe("DVD archive publication", () => {
     );
   });
 
+  it("revalidates a structured read failure before moving its partial image", async () => {
+    const originalsLibraryPath = createOriginalsLibrary();
+    const digest = "3".repeat(64);
+    const authorityLost = new Error("Archive Job authority expired");
+    let copiedPartialPath: string | undefined;
+    const revalidateReadFailure = vi.fn(() => {
+      throw authorityLost;
+    });
+    const runner: DvdCopyRunner = {
+      copy: vi.fn(async ({ outputPath }) => {
+        copiedPartialPath = outputPath;
+        writeFileSync(outputPath, "uncommitted read failure");
+        throw new DvdReadFailureError({
+          protocolVersion: 1,
+          classifierVersion: "scsi-read-classifier-v1",
+          category: "unknown",
+          scsiStatus: 2,
+          hostStatus: 0,
+          driverStatus: 8,
+          senseResponseCode: 0x70,
+          senseKey: 5,
+          asc: 33,
+          ascq: 0,
+          informationLba: 1,
+          requestedLba: 0,
+          requestedBlockCount: 4,
+          retryOrdinal: 2,
+        });
+      }),
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    };
+
+    await expect(preserveDvdArchive({
+      devicePath: "/dev/sr0",
+      fingerprint: `sha256:${digest}`,
+      originalsLibraryPath,
+      revalidateReadFailure,
+      runner,
+      signal: new AbortController().signal,
+      sizeBytes: 4 * 2_048,
+      verifySource: async () => undefined,
+      onProgress: () => undefined,
+    })).rejects.toBe(authorityLost);
+
+    expect(revalidateReadFailure).toHaveBeenCalledOnce();
+    expect(readFileSync(copiedPartialPath!, "utf8")).toBe(
+      "uncommitted read failure",
+    );
+    expect(existsSync(`${copiedPartialPath}.failed`)).toBe(false);
+  });
+
   it.runIf(supportsLinuxWriterOwnership)(
     "does not quarantine or retry a partial while its reader is active",
     async () => {

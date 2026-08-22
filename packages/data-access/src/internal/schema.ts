@@ -11,6 +11,7 @@ import {
 } from "drizzle-orm/sqlite-core";
 
 import {
+  ARCHIVE_FAILURE_DETAIL_VERSIONS,
   ARCHIVE_JOB_STATUSES,
   ARCHIVE_READ_FAILURE_STAGES,
   ARCHIVE_REQUEST_STATUSES,
@@ -674,6 +675,9 @@ export const archiveJobs = sqliteTable(
     startedAt: integer("started_at", { mode: "timestamp_ms" }),
     completedAt: integer("completed_at", { mode: "timestamp_ms" }),
     errorMessage: text("error_message"),
+    failureDetailVersion: text("failure_detail_version", {
+      enum: ARCHIVE_FAILURE_DETAIL_VERSIONS,
+    }),
     readFailureStage: text("read_failure_stage", {
       enum: ARCHIVE_READ_FAILURE_STAGES,
     }).$type<ArchiveReadFailureStage>(),
@@ -731,6 +735,10 @@ export const archiveJobs = sqliteTable(
     check(
       "archive_jobs_attempt_shape_check",
       sql`(${table.status} = 'running' and ${table.claimedBy} is not null and ${table.claimToken} is not null and ${table.claimedAt} is not null and ${table.startedAt} is not null and ${table.completedAt} is null) or (${table.status} <> 'running' and ${table.startedAt} is not null and ${table.completedAt} is not null)`,
+    ),
+    check(
+      "archive_jobs_failure_detail_version_check",
+      sql`${table.failureDetailVersion} is null or (${table.status} = 'failed' and ${table.failureDetailVersion} in (${sqliteStringLiterals(ARCHIVE_FAILURE_DETAIL_VERSIONS)}))`,
     ),
     check(
       "archive_jobs_read_failure_shape_check",
