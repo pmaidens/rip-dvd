@@ -65,9 +65,15 @@ enum test_result_mode {
 enum backend_read_status {
     BACKEND_READ_SUCCESS,
     BACKEND_READ_MEDIUM_ERROR,
-    BACKEND_READ_UNKNOWN_ERROR,
+    BACKEND_READ_TERMINAL_FAILURE,
     BACKEND_READ_END,
     BACKEND_READ_FATAL,
+};
+
+enum read_failure_category {
+    READ_FAILURE_UNKNOWN,
+    READ_FAILURE_NOT_READY,
+    READ_FAILURE_UNIT_ATTENTION,
 };
 
 struct decoded_sense {
@@ -87,6 +93,7 @@ struct decoded_sense {
 struct read_failure {
     struct rip_dvd_scsi_completion completion;
     struct decoded_sense sense;
+    enum read_failure_category category;
 };
 
 struct backend_read_result {
@@ -422,19 +429,45 @@ static int is_recognized_dvd_medium_read_error(
 
 static enum backend_read_status classify_read_failure(
     const struct rip_dvd_scsi_completion *completion,
-    struct decoded_sense *sense)
+    struct decoded_sense *sense,
+    enum read_failure_category *category)
 {
+    *category = READ_FAILURE_UNKNOWN;
     *sense = decode_sense(completion);
     if (!completion->captured || !completion->command_completed ||
         !sense->well_formed || completion->scsi_status != 0x02 ||
         completion->host_status != 0 ||
         (completion->driver_status != 0x00 &&
          completion->driver_status != 0x08) ||
-        (sense->response_code != 0x70 && sense->response_code != 0x72) ||
-        !is_recognized_dvd_medium_read_error(sense)) {
-        return BACKEND_READ_UNKNOWN_ERROR;
+        (sense->response_code != 0x70 && sense->response_code != 0x72)) {
+        return BACKEND_READ_TERMINAL_FAILURE;
+    }
+    if (sense->sense_key == 0x02) {
+        *category = READ_FAILURE_NOT_READY;
+        return BACKEND_READ_TERMINAL_FAILURE;
+    }
+    if (sense->sense_key == 0x06) {
+        *category = READ_FAILURE_UNIT_ATTENTION;
+        return BACKEND_READ_TERMINAL_FAILURE;
+    }
+    if (!is_recognized_dvd_medium_read_error(sense)) {
+        return BACKEND_READ_TERMINAL_FAILURE;
     }
     return BACKEND_READ_MEDIUM_ERROR;
+}
+
+static const char *read_failure_category_name(
+    enum read_failure_category category)
+{
+    switch (category) {
+    case READ_FAILURE_NOT_READY:
+        return "not_ready";
+    case READ_FAILURE_UNIT_ATTENTION:
+        return "unit_attention";
+    case READ_FAILURE_UNKNOWN:
+        return "unknown";
+    }
+    return "unknown";
 }
 
 static void format_optional_u64(char text[32], int present, uint64_t value)
@@ -499,15 +532,16 @@ static int emit_read_failure_result(
         output, sizeof(output), READ_FAILURE_RESULT_PREFIX
         "{\"protocolVersion\":1,\"classifierVersion\":\""
         READ_FAILURE_CLASSIFIER_VERSION
-        "\",\"category\":\"unknown\",\"scsiStatus\":%s"
+        "\",\"category\":\"%s\",\"scsiStatus\":%s"
         ",\"hostStatus\":%s,\"driverStatus\":%s"
         ",\"senseResponseCode\":%s,\"senseKey\":%s"
         ",\"asc\":%s,\"ascq\":%s,\"informationLba\":%s"
         ",\"requestedLba\":%" PRIu64
         ",\"requestedBlockCount\":%" PRIu32
         ",\"retryOrdinal\":%" PRIu32 "}\n",
-        scsi_status, host_status, driver_status, response_code, sense_key,
-        asc, ascq, information_lba, completion->requested_lba,
+        read_failure_category_name(failure->category), scsi_status,
+        host_status, driver_status, response_code, sense_key, asc, ascq,
+        information_lba, completion->requested_lba,
         completion->requested_block_count, completion->retry_ordinal);
     if (length <= 0 || (size_t)length >= sizeof(output)) {
         fprintf(stderr, "DVD read failure result exceeded its bound\n");
@@ -724,13 +758,15 @@ static struct backend_read_result backend_read(
         return (struct backend_read_result){ .status = BACKEND_READ_FATAL };
     }
     struct decoded_sense sense;
+    enum read_failure_category category;
     enum backend_read_status status =
-        classify_read_failure(&transport.completion, &sense);
+        classify_read_failure(&transport.completion, &sense, &category);
     return (struct backend_read_result){
         .status = status,
         .failure = {
             .completion = transport.completion,
             .sense = sense,
+            .category = category,
         },
     };
 }
@@ -786,7 +822,7 @@ static int recover_range(struct read_backend *backend,
         if (result.status == BACKEND_READ_MEDIUM_ERROR) {
             continue;
         }
-        if (result.status == BACKEND_READ_UNKNOWN_ERROR) {
+        if (result.status == BACKEND_READ_TERMINAL_FAILURE) {
             return emit_read_failure_result(&result.failure, recovery);
         }
         if (consume_blocks(state, buffer, result.blocks_read,
@@ -873,7 +909,7 @@ static int read_disc(struct read_backend *backend, uint64_t size_bytes,
             require_absolute_read = blocks_remaining > 0;
             continue;
         }
-        if (result.status == BACKEND_READ_UNKNOWN_ERROR) {
+        if (result.status == BACKEND_READ_TERMINAL_FAILURE) {
             status = emit_read_failure_result(&result.failure, recovery);
             break;
         }
@@ -1177,7 +1213,7 @@ static int run_resume(struct read_backend *backend, const char *output_path,
             if (result.status == BACKEND_READ_MEDIUM_ERROR) {
                 continue;
             }
-            if (result.status == BACKEND_READ_UNKNOWN_ERROR) {
+            if (result.status == BACKEND_READ_TERMINAL_FAILURE) {
                 status = emit_read_failure_result(&result.failure, &recovery);
                 break;
             }

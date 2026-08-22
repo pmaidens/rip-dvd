@@ -60,26 +60,62 @@ import {
 const temporaryDirectories: string[] = [];
 const testRescueWorkspaceLock = createInProcessDvdRescueWorkspaceLock();
 
-function unknownDvdReadFailure(
+type DvdReadFailureCategory = ConstructorParameters<
+  typeof DvdReadFailureError
+>[0]["category"];
+
+const readinessReadFailureCases = [
+  {
+    category: "not_ready",
+    senseResponseCode: 0x70,
+    senseKey: 0x02,
+    asc: 0x04,
+    ascq: 0x01,
+  },
+  {
+    category: "unit_attention",
+    senseResponseCode: 0x72,
+    senseKey: 0x06,
+    asc: 0x28,
+    ascq: 0x00,
+  },
+] as const;
+
+const terminalReadFailureCategories = [
+  "unknown",
+  "not_ready",
+  "unit_attention",
+] as const satisfies readonly DvdReadFailureCategory[];
+
+function dvdReadFailure(
+  category: DvdReadFailureCategory,
   overrides: Partial<ConstructorParameters<typeof DvdReadFailureError>[0]> = {},
 ) {
+  const decoded = category === "not_ready"
+    ? { senseResponseCode: 0x70, senseKey: 0x02, asc: 0x04, ascq: 0x01 }
+    : category === "unit_attention"
+      ? { senseResponseCode: 0x72, senseKey: 0x06, asc: 0x28, ascq: 0x00 }
+      : { senseResponseCode: 0x70, senseKey: 0x05, asc: 0x21, ascq: 0x00 };
   return new DvdReadFailureError({
     protocolVersion: 1,
     classifierVersion: "scsi-read-classifier-v1",
-    category: "unknown",
+    category,
     scsiStatus: 2,
     hostStatus: 0,
     driverStatus: 8,
-    senseResponseCode: 0x70,
-    senseKey: 5,
-    asc: 33,
-    ascq: 0,
+    ...decoded,
     informationLba: 1,
     requestedLba: 0,
     requestedBlockCount: 4,
     retryOrdinal: 2,
     ...overrides,
   });
+}
+
+function unknownDvdReadFailure(
+  overrides: Partial<ConstructorParameters<typeof DvdReadFailureError>[0]> = {},
+) {
+  return dvdReadFailure("unknown", overrides);
 }
 
 function pollArchiveWorkerOnce(options: PollArchiveWorkerOptions): Promise<void> {
@@ -414,12 +450,13 @@ async function exerciseWatchabilityWorkerScenario({
   };
 }
 
-async function exerciseUnknownReadFence({
+async function exerciseReadFailureFence({
   beforeFailure,
   beforeReadFailurePersistence,
   expectedPollError,
   observeMediaGeneration,
   rescueWorkspaceLock,
+  readFailure = unknownDvdReadFailure(),
   signal = new AbortController().signal,
 }: {
   beforeFailure?: (
@@ -437,6 +474,7 @@ async function exerciseUnknownReadFence({
   expectedPollError?: Error;
   observeMediaGeneration?: () => Promise<string>;
   rescueWorkspaceLock?: DvdRescueWorkspaceLock;
+  readFailure?: DvdReadFailureError;
   signal?: AbortSignal;
 } = {}) {
   const access = openTestDataAccess();
@@ -479,7 +517,7 @@ async function exerciseUnknownReadFence({
     copy: vi.fn(async ({ authorizeStart }) => {
       await authorizeStart?.();
       beforeFailure?.(access, request.id);
-      throw unknownDvdReadFailure();
+      throw readFailure;
     }),
     isActive: () => false,
     withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
@@ -532,6 +570,70 @@ async function exerciseUnknownReadFence({
   }
 
   return { access, log, request };
+}
+
+async function exerciseReadinessResume(
+  failureCase: (typeof readinessReadFailureCases)[number],
+  sourceChanges: boolean,
+) {
+  const scenario = await exerciseWatchabilityWorkerScenario({
+    ranges: [{ startLba: 1, sectorCount: 1 }],
+    validation: { outcome: "rejected", reason: "referenced_content" },
+  });
+  scenario.access.archiveRequests.retry(scenario.request.id);
+  let failureObserved = false;
+  const copyRunner: DvdCopyRunner = {
+    copy: vi.fn(async ({ authorizeStart, resumeFrom }) => {
+      expect(resumeFrom).toEqual(
+        createDamagedDvdRecoveryResult(scenario.sizeBytes, [
+          { startLba: 1, sectorCount: 1 },
+        ]),
+      );
+      await authorizeStart?.();
+      failureObserved = true;
+      throw dvdReadFailure(failureCase.category, {
+        informationLba: null,
+        requestedLba: 1,
+        requestedBlockCount: 1,
+        retryOrdinal: 0,
+        senseResponseCode: failureCase.senseResponseCode,
+        senseKey: failureCase.senseKey,
+        asc: failureCase.asc,
+        ascq: failureCase.ascq,
+      });
+    }),
+    isActive: () => false,
+    withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+    waitForInactive: vi.fn(async () => undefined),
+  };
+  const salvageValidator = { validate: vi.fn() };
+
+  await pollArchiveWorker({
+    access: scenario.access,
+    configuredDevicePath: scenario.discoveredDrive.devicePath,
+    copyRunner,
+    hardware: {
+      ...stableDeviceBinding(),
+      discover: vi.fn().mockResolvedValue([scenario.discoveredDrive]),
+      observeMediaGeneration: vi.fn(async () =>
+        sourceChanges && failureObserved
+          ? "replacement-media-generation"
+          : "test-media-generation"
+      ),
+      scanDvd: vi.fn().mockResolvedValue({
+        fingerprint: scenario.fingerprint,
+        scanData: scenario.scanData,
+        sizeBytes: scenario.sizeBytes,
+      }),
+    },
+    log: vi.fn(),
+    originalsLibraryPath: scenario.originalsLibraryPath,
+    salvageValidator,
+    signal: new AbortController().signal,
+    workerId: `archive-worker-${failureCase.category}-resumed-read`,
+  });
+
+  return { copyRunner, salvageValidator, scenario };
 }
 
 afterEach(() => {
@@ -933,6 +1035,42 @@ describe("archive worker polling", () => {
     expect(readdirSync(originalsLibraryPath)).toEqual([]);
   });
 
+  it.each(readinessReadFailureCases)(
+    "persists a stable $category diagnosis for the initial Archive Job attempt",
+    async (failureCase) => {
+      const scenario = await exerciseReadFailureFence({
+        readFailure: dvdReadFailure(failureCase.category, {
+          informationLba: null,
+          requestedLba: 1,
+          requestedBlockCount: 1,
+          retryOrdinal: 0,
+          senseResponseCode: failureCase.senseResponseCode,
+          senseKey: failureCase.senseKey,
+          asc: failureCase.asc,
+          ascq: failureCase.ascq,
+        }),
+      });
+
+      expect(scenario.access.archiveJobs.list(["failed"])).toEqual([
+        expect.objectContaining({
+          archiveRequestId: scenario.request.id,
+          originalDiscArchiveId: null,
+          readFailureStage: "initial_copy",
+          readFailureCategory: failureCase.category,
+          readFailureLba: 1,
+          readFailureRequestedBlockCount: 1,
+          readFailureRetryCount: 0,
+          readFailureSenseKey: failureCase.senseKey,
+          readFailureAsc: failureCase.asc,
+          readFailureAscq: failureCase.ascq,
+        }),
+      ]);
+      expect(scenario.access.archiveRequests.list(["needs_attention"]))
+        .toEqual([expect.objectContaining({ id: scenario.request.id })]);
+      expect(scenario.access.catalog.listOriginalDiscArchives()).toEqual([]);
+    },
+  );
+
   it("records an unknown resumed read on only the resumed Archive Job attempt", async () => {
     const scenario = await exerciseWatchabilityWorkerScenario({
       ranges: [{ startLba: 1, sectorCount: 1 }],
@@ -1008,52 +1146,115 @@ describe("archive worker polling", () => {
     expect(scenario.access.catalog.listOriginalDiscArchives()).toEqual([]);
   });
 
-  it("does not persist read evidence when cancellation wins the terminal race", async () => {
-    const scenario = await exerciseUnknownReadFence({
-      beforeFailure(access, requestId) {
-        access.archiveRequests.cancel(requestId);
-      },
-    });
+  it.each(readinessReadFailureCases)(
+    "persists a stable $category diagnosis during rescue resume",
+    async (failureCase) => {
+      const { copyRunner, salvageValidator, scenario } =
+        await exerciseReadinessResume(failureCase, false);
 
-    expect(scenario.access.archiveJobs.list()).toEqual([
-      expect.objectContaining({
-        status: "aborted",
-        readFailureStage: null,
-        readFailureCategory: null,
-        readFailureClassifierVersion: null,
-      }),
-    ]);
-    expect(scenario.access.archiveRequests.list(["cancelled"])).toEqual([
-      expect.objectContaining({ id: scenario.request.id }),
-    ]);
-  });
+      expect(copyRunner.copy).toHaveBeenCalledOnce();
+      expect(salvageValidator.validate).not.toHaveBeenCalled();
+      expect(scenario.access.archiveJobs.list(["failed"])).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            attemptOrdinal: 1,
+            readFailureCategory: null,
+          }),
+          expect.objectContaining({
+            attemptOrdinal: 2,
+            readFailureStage: "rescue_resume",
+            readFailureCategory: failureCase.category,
+            readFailureLba: 1,
+            readFailureRequestedBlockCount: 1,
+            readFailureRetryCount: 0,
+            readFailureSenseKey: failureCase.senseKey,
+            readFailureAsc: failureCase.asc,
+            readFailureAscq: failureCase.ascq,
+          }),
+        ]),
+      );
+      expect(scenario.access.catalog.listOriginalDiscArchives()).toEqual([]);
+    },
+  );
 
-  it("reports cancellation when it wins the structured persistence race", async () => {
-    const scenario = await exerciseUnknownReadFence({
-      beforeReadFailurePersistence(access, requestId) {
-        access.archiveRequests.cancel(requestId);
-      },
-    });
+  it.each(readinessReadFailureCases)(
+    "lets a source change win over $category during rescue resume",
+    async (failureCase) => {
+      const { salvageValidator, scenario } = await exerciseReadinessResume(
+        failureCase,
+        true,
+      );
 
-    expect(scenario.access.archiveJobs.list()).toEqual([
-      expect.objectContaining({
-        status: "aborted",
-        readFailureStage: null,
-        readFailureCategory: null,
-        readFailureClassifierVersion: null,
-      }),
-    ]);
-    expect(scenario.access.archiveRequests.list(["cancelled"])).toEqual([
-      expect.objectContaining({ id: scenario.request.id }),
-    ]);
-    expect(scenario.log).toHaveBeenCalledWith(
-      "DVD archive cancelled for /dev/sr0",
-    );
-  });
+      expect(salvageValidator.validate).not.toHaveBeenCalled();
+      expect(scenario.access.archiveJobs.list(["failed"])).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            attemptOrdinal: 2,
+            errorMessage: "DVD medium changed during archiving",
+            readFailureStage: null,
+            readFailureCategory: null,
+            readFailureClassifierVersion: null,
+          }),
+        ]),
+      );
+      expect(scenario.access.catalog.listOriginalDiscArchives()).toEqual([]);
+    },
+  );
+
+  it.each(terminalReadFailureCategories)(
+    "does not persist %s evidence when cancellation wins the terminal race",
+    async (category) => {
+      const scenario = await exerciseReadFailureFence({
+        beforeFailure(access, requestId) {
+          access.archiveRequests.cancel(requestId);
+        },
+        readFailure: dvdReadFailure(category),
+      });
+
+      expect(scenario.access.archiveJobs.list()).toEqual([
+        expect.objectContaining({
+          status: "aborted",
+          readFailureStage: null,
+          readFailureCategory: null,
+          readFailureClassifierVersion: null,
+        }),
+      ]);
+      expect(scenario.access.archiveRequests.list(["cancelled"])).toEqual([
+        expect.objectContaining({ id: scenario.request.id }),
+      ]);
+    },
+  );
+
+  it.each(terminalReadFailureCategories)(
+    "reports cancellation when it wins the %s persistence race",
+    async (category) => {
+      const scenario = await exerciseReadFailureFence({
+        beforeReadFailurePersistence(access, requestId) {
+          access.archiveRequests.cancel(requestId);
+        },
+        readFailure: dvdReadFailure(category),
+      });
+
+      expect(scenario.access.archiveJobs.list()).toEqual([
+        expect.objectContaining({
+          status: "aborted",
+          readFailureStage: null,
+          readFailureCategory: null,
+          readFailureClassifierVersion: null,
+        }),
+      ]);
+      expect(scenario.access.archiveRequests.list(["cancelled"])).toEqual([
+        expect.objectContaining({ id: scenario.request.id }),
+      ]);
+      expect(scenario.log).toHaveBeenCalledWith(
+        "DVD archive cancelled for /dev/sr0",
+      );
+    },
+  );
 
   it("does not persist read evidence after source replacement", async () => {
     let failureObserved = false;
-    const scenario = await exerciseUnknownReadFence({
+    const scenario = await exerciseReadFailureFence({
       beforeFailure() {
         failureObserved = true;
       },
@@ -1076,68 +1277,115 @@ describe("archive worker polling", () => {
       .toEqual([expect.objectContaining({ id: scenario.request.id })]);
   });
 
-  it("does not persist read evidence when shutdown wins before final revalidation", async () => {
-    const controller = new AbortController();
-    const workerStopping = new Error("Archive worker stopping");
-    const rescueWorkspaceLock: DvdRescueWorkspaceLock = {
-      async withLock({ task }) {
-        try {
-          return await task();
-        } catch (error) {
-          controller.abort(workerStopping);
-          throw error;
-        }
-      },
-    };
-    const scenario = await exerciseUnknownReadFence({
-      expectedPollError: workerStopping,
-      rescueWorkspaceLock,
-      signal: controller.signal,
-    });
+  it.each(readinessReadFailureCases)(
+    "lets a source change win over $category during initial copy",
+    async (failureCase) => {
+      let failureObserved = false;
+      const scenario = await exerciseReadFailureFence({
+        beforeFailure() {
+          failureObserved = true;
+        },
+        readFailure: dvdReadFailure(failureCase.category, {
+          informationLba: null,
+          requestedLba: 1,
+          requestedBlockCount: 1,
+          retryOrdinal: 0,
+          senseResponseCode: failureCase.senseResponseCode,
+          senseKey: failureCase.senseKey,
+          asc: failureCase.asc,
+          ascq: failureCase.ascq,
+        }),
+        observeMediaGeneration: vi.fn(async () =>
+          failureObserved
+            ? "replacement-media-generation"
+            : "test-media-generation"
+        ),
+      });
 
-    expect(scenario.access.archiveJobs.list(["failed"])).toEqual([
-      expect.objectContaining({
-        errorMessage: "Archive interrupted",
-        readFailureStage: null,
-        readFailureCategory: null,
-        readFailureClassifierVersion: null,
-      }),
-    ]);
-    expect(scenario.access.archiveRequests.list(["needs_attention"]))
-      .toEqual([expect.objectContaining({ id: scenario.request.id })]);
-  });
+      expect(scenario.access.archiveJobs.list(["failed"])).toEqual([
+        expect.objectContaining({
+          errorMessage: "DVD medium changed during archiving",
+          readFailureStage: null,
+          readFailureCategory: null,
+          readFailureClassifierVersion: null,
+        }),
+      ]);
+      expect(scenario.access.archiveRequests.list(["needs_attention"]))
+        .toEqual([expect.objectContaining({ id: scenario.request.id })]);
+      expect(scenario.access.catalog.listOriginalDiscArchives()).toEqual([]);
+    },
+  );
 
-  it("does not persist read evidence after the Archive Job claim expires", async () => {
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(new Date("2026-08-22T12:00:00.000Z"));
-    let claimExpiredAt: Date | undefined;
-    const scenario = await exerciseUnknownReadFence({
-      beforeFailure() {
-        claimExpiredAt = new Date(
-          Date.now() + ARCHIVE_JOB_LEASE_DURATION_MS + 1,
-        );
-        vi.setSystemTime(claimExpiredAt);
-      },
-    });
+  it.each(terminalReadFailureCategories)(
+    "does not persist %s evidence when shutdown wins before final revalidation",
+    async (category) => {
+      const controller = new AbortController();
+      const workerStopping = new Error("Archive worker stopping");
+      const rescueWorkspaceLock: DvdRescueWorkspaceLock = {
+        async withLock({ task }) {
+          try {
+            return await task();
+          } catch (error) {
+            controller.abort(workerStopping);
+            throw error;
+          }
+        },
+      };
+      const scenario = await exerciseReadFailureFence({
+        expectedPollError: workerStopping,
+        readFailure: dvdReadFailure(category),
+        rescueWorkspaceLock,
+        signal: controller.signal,
+      });
 
-    expect(scenario.access.archiveJobs.list(["running"])).toEqual([
-      expect.objectContaining({
-        readFailureStage: null,
-        readFailureCategory: null,
-        readFailureClassifierVersion: null,
-      }),
-    ]);
-    vi.setSystemTime(claimExpiredAt!);
-    expect(scenario.access.archiveJobs.recoverExpiredClaims()).toEqual([
-      expect.objectContaining({
-        errorMessage: "Archive worker lease expired",
-        readFailureStage: null,
-        readFailureCategory: null,
-      }),
-    ]);
-    expect(scenario.access.archiveRequests.list(["needs_attention"]))
-      .toEqual([expect.objectContaining({ id: scenario.request.id })]);
-  });
+      expect(scenario.access.archiveJobs.list(["failed"])).toEqual([
+        expect.objectContaining({
+          errorMessage: "Archive interrupted",
+          readFailureStage: null,
+          readFailureCategory: null,
+          readFailureClassifierVersion: null,
+        }),
+      ]);
+      expect(scenario.access.archiveRequests.list(["needs_attention"]))
+        .toEqual([expect.objectContaining({ id: scenario.request.id })]);
+    },
+  );
+
+  it.each(terminalReadFailureCategories)(
+    "does not persist %s evidence after the Archive Job claim expires",
+    async (category) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-08-22T12:00:00.000Z"));
+      let claimExpiredAt: Date | undefined;
+      const scenario = await exerciseReadFailureFence({
+        beforeFailure() {
+          claimExpiredAt = new Date(
+            Date.now() + ARCHIVE_JOB_LEASE_DURATION_MS + 1,
+          );
+          vi.setSystemTime(claimExpiredAt);
+        },
+        readFailure: dvdReadFailure(category),
+      });
+
+      expect(scenario.access.archiveJobs.list(["running"])).toEqual([
+        expect.objectContaining({
+          readFailureStage: null,
+          readFailureCategory: null,
+          readFailureClassifierVersion: null,
+        }),
+      ]);
+      vi.setSystemTime(claimExpiredAt!);
+      expect(scenario.access.archiveJobs.recoverExpiredClaims()).toEqual([
+        expect.objectContaining({
+          errorMessage: "Archive worker lease expired",
+          readFailureStage: null,
+          readFailureCategory: null,
+        }),
+      ]);
+      expect(scenario.access.archiveRequests.list(["needs_attention"]))
+        .toEqual([expect.objectContaining({ id: scenario.request.id })]);
+    },
+  );
 
   it.each(salvageFailureCases)(
     "retains a rescued image after $name",

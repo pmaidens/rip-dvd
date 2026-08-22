@@ -79,6 +79,12 @@ export const ARCHIVE_READ_FAILURE_STAGES = [
   "rescue_resume",
 ] as const;
 
+export const ARCHIVE_READ_FAILURE_CATEGORIES = [
+  "unknown",
+  "not_ready",
+  "unit_attention",
+] as const;
+
 export const ARCHIVE_FAILURE_DETAIL_VERSIONS = [
   "archive-failure-detail-v1",
 ] as const;

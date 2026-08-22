@@ -110,6 +110,7 @@ import {
 } from "../dvd-scan.js";
 import {
   ARCHIVE_FAILURE_DETAIL_VERSIONS,
+  ARCHIVE_READ_FAILURE_CATEGORIES,
   ARCHIVE_READ_FAILURE_STAGES,
   ARCHIVE_RUNNING_PROGRESS_PHASES,
   ENCODE_PROGRESS_PHASES,
@@ -174,7 +175,7 @@ import type {
   RunningArchiveJob,
   RunningEncodeJob,
   TmdbIdentity,
-  UnknownArchiveReadFailureEvidence,
+  ArchiveReadFailureEvidence,
 } from "../types.js";
 import {
   ARCHIVE_JOB_LEASE_DURATION_MS,
@@ -2969,12 +2970,12 @@ export function createDataAccessInternal(
     };
   };
   const archiveReadFailurePatch = (
-    evidence: UnknownArchiveReadFailureEvidence,
+    evidence: ArchiveReadFailureEvidence,
   ) => {
     if (!ARCHIVE_READ_FAILURE_STAGES.includes(evidence.stage)) {
       throw new DomainInvariantError("read failure stage is unsupported");
     }
-    if (evidence.category !== "unknown") {
+    if (!ARCHIVE_READ_FAILURE_CATEGORIES.includes(evidence.category)) {
       throw new DomainInvariantError("read failure category is unsupported");
     }
     const classifierVersion = requireNonEmpty(
@@ -3029,6 +3030,24 @@ export function createDataAccessInternal(
         "read failure ASC and ASCQ must both be present or unavailable",
       );
     }
+    const senseKey = optionalSafeInteger(
+      evidence.senseKey,
+      "read failure senseKey",
+      0,
+      0x0f,
+    ) ?? null;
+    if (
+      evidence.category !== "unknown" &&
+      (scsiStatus !== 2 ||
+        hostStatus !== 0 ||
+        (driverStatus !== 0 && driverStatus !== 8) ||
+        senseKey !== (evidence.category === "not_ready" ? 0x02 : 0x06) ||
+        asc === null)
+    ) {
+      throw new DomainInvariantError(
+        "read failure category contradicts its completion evidence",
+      );
+    }
     return {
       readFailureStage: evidence.stage,
       readFailureCategory: evidence.category,
@@ -3053,12 +3072,7 @@ export function createDataAccessInternal(
       readFailureScsiStatus: scsiStatus,
       readFailureHostStatus: hostStatus,
       readFailureDriverStatus: driverStatus,
-      readFailureSenseKey: optionalSafeInteger(
-        evidence.senseKey,
-        "read failure senseKey",
-        0,
-        0x0f,
-      ) ?? null,
+      readFailureSenseKey: senseKey,
       readFailureAsc: asc,
       readFailureAscq: ascq,
     };
@@ -3066,7 +3080,7 @@ export function createDataAccessInternal(
   const failArchiveJob = (
     claim: RunningArchiveJob,
     errorMessageInput: string,
-    readFailure?: UnknownArchiveReadFailureEvidence,
+    readFailure?: ArchiveReadFailureEvidence,
   ): ArchiveJob => {
     const timestamp = now();
     const errorMessage = requireNonEmpty(
@@ -8061,7 +8075,11 @@ export function createDataAccessInternal(
       failWithReadFailure(claim, evidence) {
         return failArchiveJob(
           claim,
-          "The Optical Drive returned an unclassified read failure",
+          {
+            unknown: "The Optical Drive returned an unclassified read failure",
+            not_ready: "The Optical Drive was not ready to read the disc",
+            unit_attention: "The Optical Drive reported a media change",
+          }[evidence.category],
           evidence,
         );
       },
