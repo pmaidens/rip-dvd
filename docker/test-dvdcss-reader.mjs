@@ -286,6 +286,14 @@ const malformedUnknownFixtures = [
   ["oversized", "raw@5@always@2@0@8@253@-"],
   ["inconsistent", "raw@5@always@2@0@8@8@700003000000000a"],
   [
+    "fixed-undeclared-trailing-byte",
+    `raw@5@always@2@0@8@19@${fixedMediumSense}ff`,
+  ],
+  [
+    "descriptor-undeclared-trailing-byte",
+    `raw@5@always@2@0@8@21@${descriptorMediumSense}ff`,
+  ],
+  [
     "fixed-declared-length-excludes-asc",
     "raw@5@always@2@0@8@14@f000030000000504000000001100",
   ],
