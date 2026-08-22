@@ -100,6 +100,7 @@ import {
 } from "../disc-selection-source-identity.js";
 import { createDvdMetadataFingerprint } from "../dvd-metadata-fingerprint.js";
 import { createWatchableSalvageArchiveIntegrityEvidence } from "../archive-integrity.js";
+import { isArchiveReadFailureEvidenceConsistent } from "../archive-read-failure.js";
 import {
   decodeArchivedDvdTitles,
   decodeDvdTitleMap,
@@ -3045,16 +3046,17 @@ export function createDataAccessInternal(
       0,
       0x0f,
     ) ?? null;
-    if (
-      evidence.category !== "unknown" &&
-      (scsiStatus !== 2 ||
-        hostStatus !== 0 ||
-        (driverStatus !== 0 && driverStatus !== 8) ||
-        senseKey !== (evidence.category === "not_ready" ? 0x02 : 0x06) ||
-        asc === null)
-    ) {
+    if (!isArchiveReadFailureEvidenceConsistent({
+      category: evidence.category,
+      scsiStatus,
+      hostStatus,
+      driverStatus,
+      senseKey,
+      asc,
+      ascq,
+    })) {
       throw new DomainInvariantError(
-        "read failure category contradicts its completion evidence",
+        "read failure evidence does not match category",
       );
     }
     return {

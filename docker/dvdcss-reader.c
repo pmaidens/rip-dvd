@@ -439,7 +439,8 @@ static int is_recognized_host_transport_failure(uint16_t host_status)
 
 static int is_recognized_driver_transport_failure(uint16_t driver_status)
 {
-    return driver_status >= 0x01 && driver_status <= 0x07;
+    return driver_status == 0x01 || driver_status == 0x02 ||
+           driver_status == 0x04 || driver_status == 0x06;
 }
 
 static int is_recognized_dvd_protection_error(

@@ -1,6 +1,7 @@
 import {
   ARCHIVE_READ_FAILURE_CATEGORIES,
   createCleanReadArchiveIntegrityEvidence,
+  isArchiveReadFailureEvidenceConsistent,
   type ArchiveReadFailureCategory,
   type CleanReadArchiveIntegrityEvidence,
   type UnreadableSectorRange,
@@ -230,40 +231,15 @@ export function parseDvdReadFailureResultProtocol(
     throw new Error("DVD read failure helper result is malformed");
   }
   const result = candidate as unknown as DvdReadFailureResult;
-  const transportFailure = result.scsiStatus !== null &&
-    result.hostStatus !== null &&
-    result.driverStatus !== null &&
-    (((result.hostStatus >= 0x01 && result.hostStatus <= 0x12) ||
-      result.hostStatus === 0x14) ||
-      (result.hostStatus === 0 &&
-        (result.driverStatus === 0x01 ||
-          result.driverStatus === 0x02 ||
-          result.driverStatus === 0x04 ||
-          result.driverStatus === 0x06)));
-  const classifiableSense =
-    result.scsiStatus === 0x02 &&
-    result.hostStatus === 0 &&
-    (result.driverStatus === 0 || result.driverStatus === 0x08) &&
-    (result.senseResponseCode === 0x70 ||
-      result.senseResponseCode === 0x72) &&
-    result.asc !== null;
-  const normalizedCategory: ArchiveReadFailureCategory = transportFailure
-    ? "transport_error"
-    : classifiableSense && result.senseKey === 0x02
-      ? "not_ready"
-      : classifiableSense && result.senseKey === 0x06
-        ? "unit_attention"
-        : classifiableSense && result.senseKey === 0x04
-          ? "hardware_error"
-          : classifiableSense &&
-              (result.senseKey === 0x07 ||
-                (result.senseKey === 0x05 &&
-                  result.asc === 0x6f &&
-                  result.ascq !== null &&
-                  result.ascq <= 0x05))
-            ? "protection_error"
-            : "unknown";
-  if (result.category !== normalizedCategory) {
+  if (
+    !isArchiveReadFailureEvidenceConsistent(result) ||
+    ((result.category === "not_ready" ||
+      result.category === "unit_attention" ||
+      result.category === "hardware_error" ||
+      result.category === "protection_error") &&
+      result.senseResponseCode !== 0x70 &&
+      result.senseResponseCode !== 0x72)
+  ) {
     throw new Error("DVD read failure helper result is malformed");
   }
   return result;

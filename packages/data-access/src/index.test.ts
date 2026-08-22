@@ -11015,22 +11015,55 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     {
       category: "unknown",
       errorMessage: "The Optical Drive returned an unclassified read failure",
+      evidence: {
+        scsiStatus: 2,
+        hostStatus: 0,
+        driverStatus: 8,
+        senseKey: 5,
+        asc: 33,
+        ascq: 0,
+      },
     },
     {
       category: "hardware_error",
       errorMessage: "The Optical Drive reported a hardware fault",
+      evidence: {
+        scsiStatus: 2,
+        hostStatus: 0,
+        driverStatus: 8,
+        senseKey: 4,
+        asc: 68,
+        ascq: 0,
+      },
     },
     {
       category: "transport_error",
       errorMessage: "Communication with the Optical Drive failed",
+      evidence: {
+        scsiStatus: 2,
+        hostStatus: 7,
+        driverStatus: 0,
+        senseKey: 3,
+        asc: 17,
+        ascq: 0,
+      },
     },
     {
       category: "protection_error",
       errorMessage: "DVD copy protection or region access failed",
+      evidence: {
+        scsiStatus: 2,
+        hostStatus: 0,
+        driverStatus: 8,
+        senseKey: 5,
+        asc: 111,
+        ascq: 4,
+      },
     },
   ] as const)("keeps $category evidence immutable on the Archive Job attempt that observed it", ({
     category,
     errorMessage,
+    evidence,
   }) => {
     const access = openTestDatabase();
     const drive = access.catalog.upsertOpticalDrive({
@@ -11057,12 +11090,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         failingLba: 1_024,
         requestedBlockCount: 16,
         retryCount: 2,
-        scsiStatus: 2,
-        hostStatus: 0,
-        driverStatus: 8,
-        senseKey: 5,
-        asc: 33,
-        ascq: 0,
+        ...evidence,
       }),
     ).toMatchObject({
       status: "failed",
@@ -11074,12 +11102,12 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       readFailureLba: 1_024,
       readFailureRequestedBlockCount: 16,
       readFailureRetryCount: 2,
-      readFailureScsiStatus: 2,
-      readFailureHostStatus: 0,
-      readFailureDriverStatus: 8,
-      readFailureSenseKey: 5,
-      readFailureAsc: 33,
-      readFailureAscq: 0,
+      readFailureScsiStatus: evidence.scsiStatus,
+      readFailureHostStatus: evidence.hostStatus,
+      readFailureDriverStatus: evidence.driverStatus,
+      readFailureSenseKey: evidence.senseKey,
+      readFailureAsc: evidence.asc,
+      readFailureAscq: evidence.ascq,
     });
 
     access.archiveRequests.retry(request.id);
@@ -11185,6 +11213,81 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       access.close();
     },
   );
+
+  it.each([
+    {
+      category: "hardware_error",
+      evidence: {
+        scsiStatus: null,
+        hostStatus: null,
+        driverStatus: null,
+        senseKey: null,
+        asc: null,
+        ascq: null,
+      },
+    },
+    {
+      category: "transport_error",
+      evidence: {
+        scsiStatus: 2,
+        hostStatus: 0,
+        driverStatus: 8,
+        senseKey: 3,
+        asc: 17,
+        ascq: 0,
+      },
+    },
+    {
+      category: "protection_error",
+      evidence: {
+        scsiStatus: 2,
+        hostStatus: 0,
+        driverStatus: 8,
+        senseKey: 5,
+        asc: 33,
+        ascq: 0,
+      },
+    },
+  ] as const)("rejects $category evidence that contradicts its category", ({
+    category,
+    evidence,
+  }) => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const { disc, inspection } = completeDiscInspection(access, {
+      opticalDriveId: drive.id,
+      mediaGeneration: `${category}-generation`,
+      fingerprint: `${category}-disc`,
+    });
+    const request = access.archiveRequests.create({ detectedDiscId: disc.id });
+    const job = access.archiveJobs.startForInspection(
+      inspection.id,
+      `${category}-worker`,
+    )!;
+
+    expect(() =>
+      access.archiveJobs.failWithReadFailure(job, {
+        stage: "initial_copy",
+        category,
+        classifierVersion: "scsi-read-classifier-v1",
+        failingLba: 1_024,
+        requestedBlockCount: 16,
+        retryCount: 2,
+        ...evidence,
+      }),
+    ).toThrow("read failure evidence does not match category");
+    expect(access.archiveJobs.list(["running"])).toEqual([
+      expect.objectContaining({ id: job.id }),
+    ]);
+    expect(access.archiveRequests.list(["running"])).toEqual([
+      expect.objectContaining({ id: request.id }),
+    ]);
+    access.close();
+  });
 
   it("continues an Archive Request on another matching Optical Drive", () => {
     const access = openTestDatabase();

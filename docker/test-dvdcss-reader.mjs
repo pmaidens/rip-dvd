@@ -779,6 +779,18 @@ const malformedUnknownFixtures = [
     `raw@5@always@2@0@40@${fixedMediumAtFive.length / 2}@${fixedMediumAtFive}`,
   ],
   [
+    "driver-media-status",
+    `raw@5@always@2@0@3@${fixedMediumAtFive.length / 2}@${fixedMediumAtFive}`,
+  ],
+  [
+    "driver-invalid-status",
+    `raw@5@always@2@0@5@${fixedMediumAtFive.length / 2}@${fixedMediumAtFive}`,
+  ],
+  [
+    "driver-hard-status",
+    `raw@5@always@2@0@7@${fixedMediumAtFive.length / 2}@${fixedMediumAtFive}`,
+  ],
+  [
     "descriptor-response-reserved-bit",
     "raw@5@always@2@0@8@8@f203110000000000",
   ],
