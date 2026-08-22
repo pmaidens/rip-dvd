@@ -55,6 +55,12 @@ enum operation {
     OPERATION_COPY,
 };
 
+enum test_result_mode {
+    TEST_RESULT_VALID,
+    TEST_RESULT_MALFORMED_RECOVERY,
+    TEST_RESULT_INTERRUPTED_READ_FAILURE,
+};
+
 enum backend_read_status {
     BACKEND_READ_SUCCESS,
     BACKEND_READ_MEDIA_ERROR,
@@ -326,12 +332,13 @@ static struct decoded_sense decode_sense(
             return decoded;
         }
         if ((sense[0] & 0x80) != 0) {
-            decoded.has_information_lba = 1;
-            decoded.information_lba = read_big_endian_u32(sense + 3);
+            uint64_t information_lba = read_big_endian_u32(sense + 3);
             if (!information_lba_matches_request(
-                    completion, decoded.information_lba)) {
+                    completion, information_lba)) {
                 return decoded;
             }
+            decoded.has_information_lba = 1;
+            decoded.information_lba = information_lba;
         }
         decoded.well_formed = 1;
         return decoded;
@@ -366,13 +373,19 @@ static struct decoded_sense decode_sense(
                 return decoded;
             }
             information_descriptor_seen = 1;
+            if ((sense[offset + 2] & 0x7f) != 0 ||
+                sense[offset + 3] != 0) {
+                return decoded;
+            }
             if ((sense[offset + 2] & 0x80) != 0) {
-                decoded.has_information_lba = 1;
-                decoded.information_lba = read_big_endian_u64(sense + offset + 4);
+                uint64_t information_lba =
+                    read_big_endian_u64(sense + offset + 4);
                 if (!information_lba_matches_request(
-                        completion, decoded.information_lba)) {
+                        completion, information_lba)) {
                     return decoded;
                 }
+                decoded.has_information_lba = 1;
+                decoded.information_lba = information_lba;
             }
         }
         offset += descriptor_length;
@@ -927,7 +940,8 @@ static int emit_recovery_result(uint64_t size_bytes,
 }
 
 static int run_copy(struct read_backend *backend, const char *output_path,
-                    uint64_t size_bytes, int test_result_mode)
+                    uint64_t size_bytes,
+                    enum test_result_mode test_result_mode)
 {
     int output_fd = open(output_path,
                          O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
@@ -948,8 +962,10 @@ static int run_copy(struct read_backend *backend, const char *output_path,
         .bitmap_byte_count = bitmap_byte_count,
         .bad_sector_count = 0,
         .bad_area_count = 0,
-        .emit_malformed_result = test_result_mode == 1,
-        .interrupt_read_failure_result = test_result_mode == 2,
+        .emit_malformed_result =
+            test_result_mode == TEST_RESULT_MALFORMED_RECOVERY,
+        .interrupt_read_failure_result =
+            test_result_mode == TEST_RESULT_INTERRUPTED_READ_FAILURE,
     };
     struct operation_state state = {
         .operation = OPERATION_COPY,
@@ -1052,7 +1068,7 @@ static int run_resume(struct read_backend *backend, const char *output_path,
                       const unsigned char *prior_bad_sector_bitmap,
                       uint64_t prior_bad_sector_count,
                       const char *expected_filesystem_identity,
-                      int test_result_mode)
+                      enum test_result_mode test_result_mode)
 {
     uintmax_t expected_device = 0;
     uintmax_t expected_inode = 0;
@@ -1090,8 +1106,10 @@ static int run_resume(struct read_backend *backend, const char *output_path,
         .bitmap_byte_count = bitmap_byte_count,
         .bad_sector_count = 0,
         .bad_area_count = 0,
-        .emit_malformed_result = test_result_mode == 1,
-        .interrupt_read_failure_result = test_result_mode == 2,
+        .emit_malformed_result =
+            test_result_mode == TEST_RESULT_MALFORMED_RECOVERY,
+        .interrupt_read_failure_result =
+            test_result_mode == TEST_RESULT_INTERRUPTED_READ_FAILURE,
     };
     uint64_t bytes_processed =
         size_bytes - prior_bad_sector_count * DVDCSS_BLOCK_SIZE;
@@ -1419,18 +1437,18 @@ static int initialize_test_backend(const char *source_path,
                                    const char *delay_text,
                                    const char *result_mode,
                                    uint64_t *size_bytes,
-                                   int *malformed_result,
+                                   enum test_result_mode *test_result_mode,
                                    struct read_backend *backend)
 {
     if (parse_size(size_text, size_bytes) != 0) {
         return 2;
     }
     if (strcmp(result_mode, "valid") == 0) {
-        *malformed_result = 0;
+        *test_result_mode = TEST_RESULT_VALID;
     } else if (strcmp(result_mode, "malformed") == 0) {
-        *malformed_result = 1;
+        *test_result_mode = TEST_RESULT_MALFORMED_RECOVERY;
     } else if (strcmp(result_mode, "interrupted-read-failure") == 0) {
-        *malformed_result = 2;
+        *test_result_mode = TEST_RESULT_INTERRUPTED_READ_FAILURE;
     } else {
         fprintf(stderr, "DVD test result mode is invalid\n");
         return 2;
@@ -1489,15 +1507,15 @@ static int run_test_copy(int argc, char **argv)
         return 2;
     }
     uint64_t size_bytes = 0;
-    int malformed_result;
+    enum test_result_mode test_result_mode;
     struct read_backend backend;
     int setup_status = initialize_test_backend(
         argv[2], argv[4], argv[5], argv[6], argv[7], &size_bytes,
-        &malformed_result, &backend);
+        &test_result_mode, &backend);
     if (setup_status != 0) {
         return setup_status;
     }
-    int status = run_copy(&backend, argv[3], size_bytes, malformed_result);
+    int status = run_copy(&backend, argv[3], size_bytes, test_result_mode);
     return close_test_backend(&backend, status);
 }
 
@@ -1510,11 +1528,11 @@ static int run_test_resume(int argc, char **argv)
         return 2;
     }
     uint64_t size_bytes = 0;
-    int malformed_result;
+    enum test_result_mode test_result_mode;
     struct read_backend backend;
     int setup_status = initialize_test_backend(
         argv[2], argv[4], argv[5], argv[6], argv[7], &size_bytes,
-        &malformed_result, &backend);
+        &test_result_mode, &backend);
     if (setup_status != 0) {
         return setup_status;
     }
@@ -1531,7 +1549,7 @@ static int run_test_resume(int argc, char **argv)
     }
     int status = run_resume(&backend, argv[3], size_bytes, resume_bitmap,
                             resume_bad_sector_count, argv[9],
-                            malformed_result);
+                            test_result_mode);
     free(resume_bitmap);
     return close_test_backend(&backend, status);
 }
@@ -1593,9 +1611,10 @@ int main(int argc, char **argv)
         status = run_hash(&backend, size_bytes);
     } else if (authorized_resume) {
         status = run_resume(&backend, argv[3], size_bytes, resume_bitmap,
-                            resume_bad_sector_count, argv[5], 0);
+                            resume_bad_sector_count, argv[5],
+                            TEST_RESULT_VALID);
     } else {
-        status = run_copy(&backend, argv[3], size_bytes, 0);
+        status = run_copy(&backend, argv[3], size_bytes, TEST_RESULT_VALID);
     }
     free(resume_bitmap);
     if (dvdcss_close(dvdcss) != 0 && status == 0) {
