@@ -379,6 +379,22 @@ export type { PublicationMutationRecoveryLock };
 
 export type LegacySidecarMigrationAdapter = LegacySidecarImportAccessFactory;
 
+function initialDiscSettlingState(
+  timestamp: Date,
+  mediaCapacityBytes: number,
+) {
+  return {
+    phase: "settling" as const,
+    mediaCapacityBytes,
+    stableObservationCount: 1,
+    settlingQuietWindowStartedAt: timestamp,
+    settlingStartedAt: timestamp,
+    settlingResetCount: 0,
+    phaseStartedAt: timestamp,
+    attemptStartedAt: timestamp,
+  };
+}
+
 function acquireMigrationLock(databasePath: string): () => void {
   const lockPath = `${resolve(databasePath)}.migrate.lock`;
   const deadline = Date.now() + MIGRATION_LOCK_TIMEOUT_MS;
@@ -5400,12 +5416,10 @@ export function createDataAccessInternal(
                   .update(discInspections)
                   .set({
                     status: "running",
-                    phase: "settling",
-                    mediaCapacityBytes,
-                    stableObservationCount: 1,
-                    settlingQuietWindowStartedAt: timestamp,
-                    settlingStartedAt: timestamp,
-                    settlingResetCount: 0,
+                    ...initialDiscSettlingState(
+                      timestamp,
+                      mediaCapacityBytes,
+                    ),
                     attemptCount: current.attemptCount + 1,
                     consecutiveFailureCount: 0,
                     retryAt: null,
@@ -5415,8 +5429,6 @@ export function createDataAccessInternal(
                     claimToken: null,
                     claimUpdatedAt: null,
                     completedAt: null,
-                    phaseStartedAt: timestamp,
-                    attemptStartedAt: timestamp,
                     updatedAt: timestamp,
                   })
                   .where(
@@ -5509,12 +5521,10 @@ export function createDataAccessInternal(
                 transaction
                   .update(discInspections)
                   .set({
-                    phase: "settling",
-                    mediaCapacityBytes,
-                    stableObservationCount: 1,
-                    settlingQuietWindowStartedAt: timestamp,
-                    settlingStartedAt: timestamp,
-                    settlingResetCount: 0,
+                    ...initialDiscSettlingState(
+                      timestamp,
+                      mediaCapacityBytes,
+                    ),
                     attemptCount: current.attemptCount + 1,
                     bytesHashed: null,
                     bytesPerSecond: null,
@@ -5524,8 +5534,6 @@ export function createDataAccessInternal(
                     diagnostic: null,
                     claimToken: null,
                     claimUpdatedAt: null,
-                    phaseStartedAt: timestamp,
-                    attemptStartedAt: timestamp,
                     updatedAt: timestamp,
                   })
                   .where(
@@ -5623,13 +5631,7 @@ export function createDataAccessInternal(
                 id,
                 opticalDriveId: input.opticalDriveId,
                 mediaGeneration,
-                mediaCapacityBytes,
-                stableObservationCount: 1,
-                settlingQuietWindowStartedAt: timestamp,
-                settlingStartedAt: timestamp,
-                settlingResetCount: 0,
-                phaseStartedAt: timestamp,
-                attemptStartedAt: timestamp,
+                ...initialDiscSettlingState(timestamp, mediaCapacityBytes),
                 startedAt: timestamp,
                 createdAt: timestamp,
                 updatedAt: timestamp,
