@@ -52,6 +52,25 @@ function descriptorMediumSense(lba, ascq = 0) {
   return sense.toString("hex");
 }
 
+function fixedTerminalSense(senseKey, asc, ascq) {
+  const sense = Buffer.alloc(18);
+  sense[0] = 0x70;
+  sense[2] = senseKey;
+  sense[7] = 10;
+  sense[12] = asc;
+  sense[13] = ascq;
+  return sense.toString("hex");
+}
+
+function descriptorTerminalSense(senseKey, asc, ascq) {
+  const sense = Buffer.alloc(8);
+  sense[0] = 0x72;
+  sense[1] = senseKey;
+  sense[2] = asc;
+  sense[3] = ascq;
+  return sense.toString("hex");
+}
+
 function rawCompletionFault(lba, remainingFailures, sense) {
   return `raw@${lba}@${remainingFailures}@2@0@8@${sense.length / 2}@${sense}`;
 }
@@ -60,6 +79,44 @@ const fixedMediumAtFive = fixedMediumSense(5);
 const descriptorMediumAtFive = descriptorMediumSense(5);
 const fixedRetriesExhaustedAtFive = fixedMediumSense(5, 1);
 const descriptorRetriesExhaustedAtFive = descriptorMediumSense(5, 1);
+const readinessSenseFixtures = [
+  {
+    name: "fixed-not-ready",
+    category: "not_ready",
+    responseCode: 0x70,
+    senseKey: 0x02,
+    asc: 0x04,
+    ascq: 0x01,
+    sense: fixedTerminalSense(0x02, 0x04, 0x01),
+  },
+  {
+    name: "descriptor-not-ready",
+    category: "not_ready",
+    responseCode: 0x72,
+    senseKey: 0x02,
+    asc: 0x04,
+    ascq: 0x02,
+    sense: descriptorTerminalSense(0x02, 0x04, 0x02),
+  },
+  {
+    name: "fixed-unit-attention",
+    category: "unit_attention",
+    responseCode: 0x70,
+    senseKey: 0x06,
+    asc: 0x28,
+    ascq: 0x00,
+    sense: fixedTerminalSense(0x06, 0x28, 0x00),
+  },
+  {
+    name: "descriptor-unit-attention",
+    category: "unit_attention",
+    responseCode: 0x72,
+    senseKey: 0x06,
+    asc: 0x29,
+    ascq: 0x00,
+    sense: descriptorTerminalSense(0x06, 0x29, 0x00),
+  },
+];
 
 function prepareOutput(path) {
   rmSync(path, { force: true });
@@ -567,6 +624,34 @@ if (
   );
 }
 
+for (const fixture of readinessSenseFixtures) {
+  const terminal = runTestCopy(
+    fixture.name,
+    rawCompletionFault(5, "always", fixture.sense),
+  );
+  const result = readFailureResult(terminal.stderr);
+  if (
+    terminal.status !== 3 ||
+    statSync(terminal.outputPath).size !== 0 ||
+    terminal.stderr.includes(recoveryResultPrefix) ||
+    JSON.stringify(testReads(terminal.stderr)) !==
+      JSON.stringify([{ lba: 0, blocks: 31 }]) ||
+    result.category !== fixture.category ||
+    result.senseResponseCode !== fixture.responseCode ||
+    result.senseKey !== fixture.senseKey ||
+    result.asc !== fixture.asc ||
+    result.ascq !== fixture.ascq ||
+    result.informationLba !== null ||
+    result.requestedLba !== 0 ||
+    result.requestedBlockCount !== 31 ||
+    result.retryOrdinal !== 0
+  ) {
+    throw new Error(
+      `libdvdcss ${fixture.name} initial-copy check failed: ${terminal.stderr}`,
+    );
+  }
+}
+
 const malformedUnknownFixtures = [
   ["missing", "generic@5@always"],
   ["empty", "raw@5@always@2@0@8@0@-"],
@@ -798,6 +883,39 @@ if (
   throw new Error(
     `libdvdcss unknown resume check failed: ${unknownResume.stderr}`,
   );
+}
+
+for (const fixture of readinessSenseFixtures) {
+  const readinessResumePath = prepareOutput(
+    `/tmp/rip-dvd-reader-${fixture.name}-resume.img`,
+  );
+  writeFileSync(readinessResumePath, unknownResumeContent);
+  const terminal = runTestResume(
+    readinessResumePath,
+    rawCompletionFault(5, "always", fixture.sense),
+    isolatedResult.badSectorBitmapHex,
+  );
+  const result = readFailureResult(terminal.stderr);
+  if (
+    terminal.status !== 3 ||
+    !readFileSync(readinessResumePath).equals(unknownResumeContent) ||
+    terminal.stderr.includes(recoveryResultPrefix) ||
+    JSON.stringify(testReads(terminal.stderr)) !==
+      JSON.stringify([{ lba: 5, blocks: 1 }]) ||
+    result.category !== fixture.category ||
+    result.senseResponseCode !== fixture.responseCode ||
+    result.senseKey !== fixture.senseKey ||
+    result.asc !== fixture.asc ||
+    result.ascq !== fixture.ascq ||
+    result.informationLba !== null ||
+    result.requestedLba !== 5 ||
+    result.requestedBlockCount !== 1 ||
+    result.retryOrdinal !== 0
+  ) {
+    throw new Error(
+      `libdvdcss ${fixture.name} resume check failed: ${terminal.stderr}`,
+    );
+  }
 }
 
 const fullyMappedResumePath = prepareOutput(

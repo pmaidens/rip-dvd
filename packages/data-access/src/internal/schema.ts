@@ -13,6 +13,7 @@ import {
 import {
   ARCHIVE_FAILURE_DETAIL_VERSIONS,
   ARCHIVE_JOB_STATUSES,
+  ARCHIVE_READ_FAILURE_CATEGORIES,
   ARCHIVE_READ_FAILURE_STAGES,
   ARCHIVE_REQUEST_STATUSES,
   ARCHIVE_RUNNING_PROGRESS_PHASES,
@@ -38,6 +39,7 @@ import type {
   ArchiveRequestId,
   ArchiveJobId,
   ArchiveJobClaimToken,
+  ArchiveReadFailureCategory,
   ArchiveReadFailureStage,
   DetectedDiscId,
   DiscInspectionAttemptId,
@@ -685,8 +687,8 @@ export const archiveJobs = sqliteTable(
       enum: ARCHIVE_READ_FAILURE_STAGES,
     }).$type<ArchiveReadFailureStage>(),
     readFailureCategory: text("read_failure_category", {
-      enum: ["unknown"] as const,
-    }),
+      enum: ARCHIVE_READ_FAILURE_CATEGORIES,
+    }).$type<ArchiveReadFailureCategory>(),
     readFailureClassifierVersion: text("read_failure_classifier_version"),
     readFailureLba: integer("read_failure_lba"),
     readFailureRequestedBlockCount: integer(
@@ -745,7 +747,11 @@ export const archiveJobs = sqliteTable(
     ),
     check(
       "archive_jobs_read_failure_shape_check",
-      sql`(${table.readFailureCategory} is null and ${table.readFailureStage} is null and ${table.readFailureClassifierVersion} is null and ${table.readFailureLba} is null and ${table.readFailureRequestedBlockCount} is null and ${table.readFailureRetryCount} is null and ${table.readFailureScsiStatus} is null and ${table.readFailureHostStatus} is null and ${table.readFailureDriverStatus} is null and ${table.readFailureSenseKey} is null and ${table.readFailureAsc} is null and ${table.readFailureAscq} is null) or (${table.status} = 'failed' and ${table.readFailureStage} in (${sqliteStringLiterals(ARCHIVE_READ_FAILURE_STAGES)}) and ${table.readFailureCategory} = 'unknown' and typeof(${table.readFailureClassifierVersion}) = 'text' and length(${table.readFailureClassifierVersion}) between 1 and 128 and typeof(${table.readFailureLba}) = 'integer' and ${table.readFailureLba} >= 0 and typeof(${table.readFailureRequestedBlockCount}) = 'integer' and ${table.readFailureRequestedBlockCount} between 1 and 4294967295 and typeof(${table.readFailureRetryCount}) = 'integer' and ${table.readFailureRetryCount} between 0 and 4294967295 and (${table.readFailureScsiStatus} is null or (typeof(${table.readFailureScsiStatus}) = 'integer' and ${table.readFailureScsiStatus} between 0 and 255)) and (${table.readFailureHostStatus} is null or (typeof(${table.readFailureHostStatus}) = 'integer' and ${table.readFailureHostStatus} between 0 and 65535)) and (${table.readFailureDriverStatus} is null or (typeof(${table.readFailureDriverStatus}) = 'integer' and ${table.readFailureDriverStatus} between 0 and 65535)) and (${table.readFailureSenseKey} is null or (typeof(${table.readFailureSenseKey}) = 'integer' and ${table.readFailureSenseKey} between 0 and 15)) and (${table.readFailureAsc} is null or (typeof(${table.readFailureAsc}) = 'integer' and ${table.readFailureAsc} between 0 and 255)) and (${table.readFailureAscq} is null or (typeof(${table.readFailureAscq}) = 'integer' and ${table.readFailureAscq} between 0 and 255)) and ((${table.readFailureScsiStatus} is null and ${table.readFailureHostStatus} is null and ${table.readFailureDriverStatus} is null) or (${table.readFailureScsiStatus} is not null and ${table.readFailureHostStatus} is not null and ${table.readFailureDriverStatus} is not null)) and ((${table.readFailureAsc} is null and ${table.readFailureAscq} is null) or (${table.readFailureAsc} is not null and ${table.readFailureAscq} is not null)))`,
+      sql`(${table.readFailureCategory} is null and ${table.readFailureStage} is null and ${table.readFailureClassifierVersion} is null and ${table.readFailureLba} is null and ${table.readFailureRequestedBlockCount} is null and ${table.readFailureRetryCount} is null and ${table.readFailureScsiStatus} is null and ${table.readFailureHostStatus} is null and ${table.readFailureDriverStatus} is null and ${table.readFailureSenseKey} is null and ${table.readFailureAsc} is null and ${table.readFailureAscq} is null) or (${table.status} = 'failed' and ${table.readFailureStage} in (${sqliteStringLiterals(ARCHIVE_READ_FAILURE_STAGES)}) and ${table.readFailureCategory} in (${sqliteStringLiterals(ARCHIVE_READ_FAILURE_CATEGORIES)}) and typeof(${table.readFailureClassifierVersion}) = 'text' and length(${table.readFailureClassifierVersion}) between 1 and 128 and typeof(${table.readFailureLba}) = 'integer' and ${table.readFailureLba} >= 0 and typeof(${table.readFailureRequestedBlockCount}) = 'integer' and ${table.readFailureRequestedBlockCount} between 1 and 4294967295 and typeof(${table.readFailureRetryCount}) = 'integer' and ${table.readFailureRetryCount} between 0 and 4294967295 and (${table.readFailureScsiStatus} is null or (typeof(${table.readFailureScsiStatus}) = 'integer' and ${table.readFailureScsiStatus} between 0 and 255)) and (${table.readFailureHostStatus} is null or (typeof(${table.readFailureHostStatus}) = 'integer' and ${table.readFailureHostStatus} between 0 and 65535)) and (${table.readFailureDriverStatus} is null or (typeof(${table.readFailureDriverStatus}) = 'integer' and ${table.readFailureDriverStatus} between 0 and 65535)) and (${table.readFailureSenseKey} is null or (typeof(${table.readFailureSenseKey}) = 'integer' and ${table.readFailureSenseKey} between 0 and 15)) and (${table.readFailureAsc} is null or (typeof(${table.readFailureAsc}) = 'integer' and ${table.readFailureAsc} between 0 and 255)) and (${table.readFailureAscq} is null or (typeof(${table.readFailureAscq}) = 'integer' and ${table.readFailureAscq} between 0 and 255)) and ((${table.readFailureScsiStatus} is null and ${table.readFailureHostStatus} is null and ${table.readFailureDriverStatus} is null) or (${table.readFailureScsiStatus} is not null and ${table.readFailureHostStatus} is not null and ${table.readFailureDriverStatus} is not null)) and ((${table.readFailureAsc} is null and ${table.readFailureAscq} is null) or (${table.readFailureAsc} is not null and ${table.readFailureAscq} is not null)))`,
+    ),
+    check(
+      "archive_jobs_read_failure_category_evidence_check",
+      sql`${table.readFailureCategory} is null or ${table.readFailureCategory} = 'unknown' or (${table.readFailureCategory} = 'not_ready' and ${table.readFailureScsiStatus} = 2 and ${table.readFailureHostStatus} = 0 and ${table.readFailureDriverStatus} in (0, 8) and ${table.readFailureSenseKey} = 2 and ${table.readFailureAsc} is not null and ${table.readFailureAscq} is not null) or (${table.readFailureCategory} = 'unit_attention' and ${table.readFailureScsiStatus} = 2 and ${table.readFailureHostStatus} = 0 and ${table.readFailureDriverStatus} in (0, 8) and ${table.readFailureSenseKey} = 6 and ${table.readFailureAsc} is not null and ${table.readFailureAscq} is not null)`,
     ),
   ],
 );

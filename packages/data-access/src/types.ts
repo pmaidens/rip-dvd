@@ -1,6 +1,7 @@
 import type {
   ARCHIVE_FAILURE_DETAIL_VERSIONS,
   ARCHIVE_JOB_STATUSES,
+  ARCHIVE_READ_FAILURE_CATEGORIES,
   ARCHIVE_READ_FAILURE_STAGES,
   ARCHIVE_REQUEST_STATUSES,
   ARCHIVE_RUNNING_PROGRESS_PHASES,
@@ -47,6 +48,8 @@ export type MediaDomain = (typeof MEDIA_DOMAINS)[number];
 export type ArchiveJobStatus = (typeof ARCHIVE_JOB_STATUSES)[number];
 export type ArchiveReadFailureStage =
   (typeof ARCHIVE_READ_FAILURE_STAGES)[number];
+export type ArchiveReadFailureCategory =
+  (typeof ARCHIVE_READ_FAILURE_CATEGORIES)[number];
 export type ArchiveRequestStatus = (typeof ARCHIVE_REQUEST_STATUSES)[number];
 export type DiscInspectionStatus = (typeof DISC_INSPECTION_STATUSES)[number];
 export type DiscInspectionPhase = (typeof DISC_INSPECTION_PHASES)[number];
@@ -548,7 +551,7 @@ export interface ArchiveJob {
   errorMessage: string | null;
   failureDetailVersion: (typeof ARCHIVE_FAILURE_DETAIL_VERSIONS)[number] | null;
   readFailureStage: ArchiveReadFailureStage | null;
-  readFailureCategory: "unknown" | null;
+  readFailureCategory: ArchiveReadFailureCategory | null;
   readFailureClassifierVersion: string | null;
   readFailureLba: number | null;
   readFailureRequestedBlockCount: number | null;
@@ -563,9 +566,9 @@ export interface ArchiveJob {
   updatedAt: Date;
 }
 
-export interface UnknownArchiveReadFailureEvidence {
+export interface ArchiveReadFailureEvidence {
   stage: ArchiveReadFailureStage;
-  category: "unknown";
+  category: ArchiveReadFailureCategory;
   classifierVersion: string;
   failingLba: number;
   requestedBlockCount: number;
@@ -1010,7 +1013,7 @@ export interface ArchiveJobAccess {
   fail(claim: RunningArchiveJob, errorMessage: string): ArchiveJob;
   failWithReadFailure(
     claim: RunningArchiveJob,
-    evidence: UnknownArchiveReadFailureEvidence,
+    evidence: ArchiveReadFailureEvidence,
   ): ArchiveJob;
   abort(claim: RunningArchiveJob, errorMessage: string): ArchiveJob;
 }

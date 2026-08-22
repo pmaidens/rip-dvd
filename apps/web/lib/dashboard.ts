@@ -312,8 +312,17 @@ function driveDisplayName(drive: OpticalDriveRecord): string {
   return drive.displayName ?? "Unnamed Optical Drive";
 }
 
-const UNKNOWN_READ_FAILURE_DETAIL =
-  "The Optical Drive returned an unclassified read failure. Retry the Archive Request; if it fails again, inspect the disc and drive.";
+const READ_FAILURE_DETAILS: Record<
+  NonNullable<ArchiveJob["readFailureCategory"]>,
+  string
+> = {
+  unknown:
+    "The Optical Drive returned an unclassified read failure. Retry the Archive Request; if it fails again, inspect the disc and drive.",
+  not_ready:
+    "The Optical Drive was not ready to read the disc. Check that the disc is inserted and the drive is available, then retry the Archive Request.",
+  unit_attention:
+    "The Optical Drive reported a media-state change. Confirm that the expected disc is still inserted, then retry the Archive Request.",
+};
 const MISSING_READ_FAILURE_DETAIL =
   "The Archive Job failed with an unknown diagnostic because structured read evidence is unavailable.";
 const MISSING_READ_FAILURE_DIAGNOSTIC =
@@ -327,9 +336,9 @@ function archiveJobFailure(job: ArchiveJob | undefined): {
   failureDetail: string | null;
   failureDiagnostic?: string;
 } {
-  if (job?.readFailureCategory === "unknown") {
+  if (job?.readFailureCategory) {
     return {
-      failureDetail: UNKNOWN_READ_FAILURE_DETAIL,
+      failureDetail: READ_FAILURE_DETAILS[job.readFailureCategory],
       failureDiagnostic: [
         job.readFailureStage === "rescue_resume"
           ? "Rescue resume"
