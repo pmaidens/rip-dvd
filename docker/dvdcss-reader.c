@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -112,6 +113,7 @@ struct read_backend {
 #ifdef RIP_DVD_READER_TESTING
     int test_source_fd;
     unsigned int test_delay_ms;
+    int test_wait_for_cancellation;
     size_t test_fault_count;
     struct test_fault test_faults[MAX_TEST_FAULTS];
     int use_test_source;
@@ -551,6 +553,21 @@ static int delay_test_read(unsigned int delay_ms)
     return 0;
 }
 
+static int finish_test_read_attempt(struct read_backend *backend,
+                                    uint64_t lba, int block_count)
+{
+    fprintf(stderr, "test-read %" PRIu64 " %d\n", lba, block_count);
+    if (backend->test_wait_for_cancellation) {
+        if (fflush(stderr) != 0) {
+            return fail_errno("DVD test cancellation output failed");
+        }
+        for (;;) {
+            pause();
+        }
+    }
+    return delay_test_read(backend->test_delay_ms);
+}
+
 static struct test_fault *test_fault_for_read(struct read_backend *backend,
                                               uint64_t lba, int block_count)
 {
@@ -573,12 +590,6 @@ static struct transport_read_result test_transport_read(
     struct read_backend *backend, unsigned char *buffer, uint64_t lba,
     int block_count, uint32_t retry_ordinal)
 {
-    fprintf(stderr, "test-read %" PRIu64 " %d\n", lba, block_count);
-    if (delay_test_read(backend->test_delay_ms) != 0) {
-        return (struct transport_read_result){
-            .status = TRANSPORT_READ_FATAL,
-        };
-    }
     struct test_fault *fault = test_fault_for_read(backend, lba, block_count);
     if (fault != NULL) {
         struct rip_dvd_scsi_completion completion = {
@@ -597,21 +608,39 @@ static struct transport_read_result test_transport_read(
             completion.sense_length = fault->sense_length;
             memcpy(completion.sense, fault->sense, fault->sense_length);
         }
+        if (finish_test_read_attempt(backend, lba, block_count) != 0) {
+            return (struct transport_read_result){
+                .status = TRANSPORT_READ_FATAL,
+            };
+        }
         return (struct transport_read_result){
             .status = TRANSPORT_READ_FAILURE,
             .completion = completion,
         };
     }
     size_t length = (size_t)block_count * DVDCSS_BLOCK_SIZE;
-    ssize_t bytes_read;
-    do {
-        bytes_read = pread(backend->test_source_fd, buffer, length,
-                           (off_t)(lba * DVDCSS_BLOCK_SIZE));
-    } while (bytes_read < 0 && errno == EINTR);
-    if (bytes_read < 0) {
-        fail_errno("DVD test source read failed");
+    off_t offset = (off_t)(lba * DVDCSS_BLOCK_SIZE);
+    if (lseek(backend->test_source_fd, offset, SEEK_SET) != offset) {
+        fail_errno("DVD test source seek failed");
         return (struct transport_read_result){
             .status = TRANSPORT_READ_FATAL,
+        };
+    }
+    rip_dvd_scsi_read_scope_begin(lba, (uint32_t)block_count, retry_ordinal);
+    ssize_t bytes_read =
+        rip_dvd_scsi_test_invoke_wrapped_read(
+            backend->test_source_fd, buffer, length);
+    struct rip_dvd_scsi_completion completion = { 0 };
+    rip_dvd_scsi_read_scope_end(&completion);
+    if (finish_test_read_attempt(backend, lba, block_count) != 0) {
+        return (struct transport_read_result){
+            .status = TRANSPORT_READ_FATAL,
+        };
+    }
+    if (bytes_read < 0) {
+        return (struct transport_read_result){
+            .status = TRANSPORT_READ_FAILURE,
+            .completion = completion,
         };
     }
     if (bytes_read == 0) {
@@ -1422,8 +1451,16 @@ static int initialize_test_backend(const char *source_path,
     if (parse_size(size_text, size_bytes) != 0) {
         return 2;
     }
+    int wait_for_cancellation = 0;
+    int fail_wrapped_content_read = 0;
     if (strcmp(result_mode, "valid") == 0) {
         *test_result_mode = TEST_RESULT_VALID;
+    } else if (strcmp(result_mode, "cancellation") == 0) {
+        *test_result_mode = TEST_RESULT_VALID;
+        wait_for_cancellation = 1;
+    } else if (strcmp(result_mode, "wrapped-medium-error") == 0) {
+        *test_result_mode = TEST_RESULT_VALID;
+        fail_wrapped_content_read = 1;
     } else if (strcmp(result_mode, "malformed") == 0) {
         *test_result_mode = TEST_RESULT_MALFORMED_RECOVERY;
     } else if (strcmp(result_mode, "interrupted-read-failure") == 0) {
@@ -1435,6 +1472,7 @@ static int initialize_test_backend(const char *source_path,
     *backend = (struct read_backend){
         .dvdcss = NULL,
         .test_source_fd = -1,
+        .test_wait_for_cancellation = wait_for_cancellation,
         .use_test_source = 1,
     };
     if (parse_test_delay(delay_text, &backend->test_delay_ms) != 0) {
@@ -1464,7 +1502,38 @@ static int initialize_test_backend(const char *source_path,
         fprintf(stderr, "DVD test source is invalid\n");
         return 1;
     }
+    rip_dvd_scsi_test_adapter_begin();
+    if (fail_wrapped_content_read) {
+        rip_dvd_scsi_test_adapter_fail_content_read(1);
+    }
     return 0;
+}
+
+static int emit_test_scsi_session_result(void)
+{
+    struct rip_dvd_scsi_test_metrics metrics;
+    rip_dvd_scsi_test_adapter_snapshot(&metrics);
+    fprintf(stderr,
+            "rip-dvd-scsi-session-result "
+            "{\"discoveryCount\":%" PRIu32
+            ",\"openCount\":%" PRIu32
+            ",\"closeCount\":%" PRIu32
+            ",\"contentReadCount\":%" PRIu32
+            ",\"requestSenseCount\":%" PRIu32
+            ",\"diagnosticCommandCount\":%" PRIu32
+            ",\"requests\":[",
+            metrics.discovery_count, metrics.open_count, metrics.close_count,
+            metrics.content_read_count, metrics.request_sense_count,
+            metrics.diagnostic_command_count);
+    for (size_t index = 0; index < metrics.request_count; index++) {
+        fprintf(stderr,
+                "%s{\"lba\":%" PRIu64 ",\"blocks\":%" PRIu32 "}",
+                index == 0 ? "" : ",", metrics.requests[index].lba,
+                metrics.requests[index].block_count);
+    }
+    fprintf(stderr, "]}\n");
+    return ferror(stderr) == 0 ? 0 :
+        fail_errno("DVD test SCSI session output failed");
 }
 
 static int close_test_backend(struct read_backend *backend, int status)
@@ -1474,6 +1543,306 @@ static int close_test_backend(struct read_backend *backend, int status)
         status = fail_errno("DVD test source close failed");
     }
     backend->test_source_fd = -1;
+    if (emit_test_scsi_session_result() != 0 && status == 0) {
+        status = 1;
+    }
+    return status;
+}
+
+static int open_scsi_test_source(const char *path)
+{
+    int descriptor = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (descriptor < 0) {
+        fail_errno("DVD SCSI test source open failed");
+        return -1;
+    }
+    struct stat identity;
+    if (fstat(descriptor, &identity) != 0 || !S_ISREG(identity.st_mode)) {
+        close(descriptor);
+        fprintf(stderr, "DVD SCSI test source is invalid\n");
+        return -1;
+    }
+    return descriptor;
+}
+
+static int run_scsi_test_read(int descriptor, int expect_failure)
+{
+    unsigned char buffer[READ_BLOCKS * DVDCSS_BLOCK_SIZE];
+    if (lseek(descriptor, 0, SEEK_SET) != 0) {
+        return fail_errno("DVD SCSI test source seek failed");
+    }
+    rip_dvd_scsi_read_scope_begin(0, READ_BLOCKS, 0);
+    ssize_t result = rip_dvd_scsi_test_invoke_wrapped_read(
+        descriptor, buffer, sizeof(buffer));
+    struct rip_dvd_scsi_completion completion = { 0 };
+    rip_dvd_scsi_read_scope_end(&completion);
+    if (!expect_failure) {
+        return result == (ssize_t)sizeof(buffer) ? 0 : 1;
+    }
+    return result < 0 && completion.captured &&
+        completion.command_completed && completion.descriptor == descriptor &&
+        completion.requested_lba == 0 &&
+        completion.requested_block_count == READ_BLOCKS &&
+        completion.retry_ordinal == 0 && completion.sense_length == 18
+            ? 0
+            : 1;
+}
+
+struct concurrent_scsi_gate {
+    pthread_mutex_t mutex;
+    pthread_cond_t condition;
+    int ready_count;
+    int started;
+};
+
+struct concurrent_scsi_read {
+    int descriptor;
+    uint32_t retry_ordinal;
+    struct concurrent_scsi_gate *gate;
+    int status;
+};
+
+static void *run_concurrent_scsi_test_read(void *argument)
+{
+    struct concurrent_scsi_read *read = argument;
+    unsigned char buffer[READ_BLOCKS * DVDCSS_BLOCK_SIZE];
+    rip_dvd_scsi_read_scope_begin(0, READ_BLOCKS, read->retry_ordinal);
+    pthread_mutex_lock(&read->gate->mutex);
+    read->gate->ready_count += 1;
+    pthread_cond_broadcast(&read->gate->condition);
+    while (!read->gate->started) {
+        pthread_cond_wait(&read->gate->condition, &read->gate->mutex);
+    }
+    pthread_mutex_unlock(&read->gate->mutex);
+
+    ssize_t result = rip_dvd_scsi_test_invoke_wrapped_read(
+        read->descriptor, buffer, sizeof(buffer));
+    struct rip_dvd_scsi_completion completion = { 0 };
+    rip_dvd_scsi_read_scope_end(&completion);
+    read->status = result == (ssize_t)sizeof(buffer) && completion.captured &&
+        completion.command_completed &&
+        completion.descriptor == read->descriptor &&
+        completion.requested_lba == 0 &&
+        completion.requested_block_count == READ_BLOCKS &&
+        completion.retry_ordinal == read->retry_ordinal
+            ? 0
+            : 1;
+    return NULL;
+}
+
+static int run_concurrent_scsi_test_reads(
+    int first_descriptor, int second_descriptor)
+{
+    struct concurrent_scsi_gate gate;
+    int error = pthread_mutex_init(&gate.mutex, NULL);
+    if (error != 0) {
+        errno = error;
+        return fail_errno("DVD concurrent SCSI test mutex setup failed");
+    }
+    error = pthread_cond_init(&gate.condition, NULL);
+    if (error != 0) {
+        pthread_mutex_destroy(&gate.mutex);
+        errno = error;
+        return fail_errno("DVD concurrent SCSI test gate setup failed");
+    }
+    gate.ready_count = 0;
+    gate.started = 0;
+    struct concurrent_scsi_read reads[2] = {
+        { .descriptor = first_descriptor, .retry_ordinal = 3, .gate = &gate },
+        { .descriptor = second_descriptor, .retry_ordinal = 7, .gate = &gate },
+    };
+    pthread_t threads[2];
+    size_t created_count = 0;
+    for (; created_count < 2; created_count++) {
+        error = pthread_create(
+            &threads[created_count], NULL, run_concurrent_scsi_test_read,
+            &reads[created_count]);
+        if (error != 0) {
+            break;
+        }
+    }
+    pthread_mutex_lock(&gate.mutex);
+    while (created_count == 2 && gate.ready_count < 2) {
+        pthread_cond_wait(&gate.condition, &gate.mutex);
+    }
+    gate.started = 1;
+    pthread_cond_broadcast(&gate.condition);
+    pthread_mutex_unlock(&gate.mutex);
+
+    int status = error == 0 ? 0 : 1;
+    for (size_t index = 0; index < created_count; index++) {
+        int join_error = pthread_join(threads[index], NULL);
+        if (join_error != 0 || reads[index].status != 0) {
+            status = 1;
+        }
+    }
+    pthread_cond_destroy(&gate.condition);
+    pthread_mutex_destroy(&gate.mutex);
+    if (error != 0) {
+        errno = error;
+        return fail_errno("DVD concurrent SCSI test thread setup failed");
+    }
+    return status;
+}
+
+enum scsi_test_scenario {
+    SCSI_TEST_SCENARIO_INVALID,
+    SCSI_TEST_SCENARIO_SOURCE_CHANGE,
+    SCSI_TEST_SCENARIO_DRIVE_IDENTITY_CHANGE,
+    SCSI_TEST_SCENARIO_SG_IDENTITY_CHANGE,
+    SCSI_TEST_SCENARIO_IDENTITY_CHECK_FAILURE,
+    SCSI_TEST_SCENARIO_CONCURRENT_SOURCES,
+    SCSI_TEST_SCENARIO_DESCRIPTOR_REUSE,
+    SCSI_TEST_SCENARIO_DISCOVERY_FAILURE,
+    SCSI_TEST_SCENARIO_OPEN_FAILURE,
+    SCSI_TEST_SCENARIO_READ_FAILURE,
+    SCSI_TEST_SCENARIO_NORMAL_EXIT,
+};
+
+static enum scsi_test_scenario parse_scsi_test_scenario(const char *value)
+{
+    if (strcmp(value, "source-change") == 0) {
+        return SCSI_TEST_SCENARIO_SOURCE_CHANGE;
+    }
+    if (strcmp(value, "drive-identity-change") == 0) {
+        return SCSI_TEST_SCENARIO_DRIVE_IDENTITY_CHANGE;
+    }
+    if (strcmp(value, "sg-identity-change") == 0) {
+        return SCSI_TEST_SCENARIO_SG_IDENTITY_CHANGE;
+    }
+    if (strcmp(value, "identity-check-failure") == 0) {
+        return SCSI_TEST_SCENARIO_IDENTITY_CHECK_FAILURE;
+    }
+    if (strcmp(value, "concurrent-sources") == 0) {
+        return SCSI_TEST_SCENARIO_CONCURRENT_SOURCES;
+    }
+    if (strcmp(value, "descriptor-reuse") == 0) {
+        return SCSI_TEST_SCENARIO_DESCRIPTOR_REUSE;
+    }
+    if (strcmp(value, "discovery-failure") == 0) {
+        return SCSI_TEST_SCENARIO_DISCOVERY_FAILURE;
+    }
+    if (strcmp(value, "open-failure") == 0) {
+        return SCSI_TEST_SCENARIO_OPEN_FAILURE;
+    }
+    if (strcmp(value, "read-failure") == 0) {
+        return SCSI_TEST_SCENARIO_READ_FAILURE;
+    }
+    if (strcmp(value, "normal-exit") == 0) {
+        return SCSI_TEST_SCENARIO_NORMAL_EXIT;
+    }
+    return SCSI_TEST_SCENARIO_INVALID;
+}
+
+static int run_test_scsi_session(int argc, char **argv)
+{
+    enum scsi_test_scenario scenario = argc == 5
+        ? parse_scsi_test_scenario(argv[2])
+        : SCSI_TEST_SCENARIO_INVALID;
+    if (scenario == SCSI_TEST_SCENARIO_INVALID) {
+        fprintf(stderr,
+                "usage: %s scsi-session-test "
+                "source-change|drive-identity-change|"
+                "sg-identity-change|identity-check-failure|"
+                "concurrent-sources|"
+                "descriptor-reuse|discovery-failure|"
+                "open-failure|read-failure|normal-exit SOURCE REPLACEMENT\n",
+                argv[0]);
+        return 2;
+    }
+    int first_descriptor = open_scsi_test_source(argv[3]);
+    int second_descriptor = -1;
+    if (first_descriptor < 0) {
+        return 1;
+    }
+    if (scenario == SCSI_TEST_SCENARIO_SOURCE_CHANGE ||
+        scenario == SCSI_TEST_SCENARIO_CONCURRENT_SOURCES ||
+        scenario == SCSI_TEST_SCENARIO_DESCRIPTOR_REUSE) {
+        second_descriptor = open_scsi_test_source(argv[4]);
+        if (second_descriptor < 0) {
+            close(first_descriptor);
+            return 1;
+        }
+    }
+
+    rip_dvd_scsi_test_adapter_begin();
+    int expect_failure = scenario == SCSI_TEST_SCENARIO_READ_FAILURE;
+    if (expect_failure) {
+        rip_dvd_scsi_test_adapter_fail_content_read(1);
+    } else if (scenario == SCSI_TEST_SCENARIO_DISCOVERY_FAILURE) {
+        rip_dvd_scsi_test_adapter_fail_discovery();
+    } else if (scenario == SCSI_TEST_SCENARIO_OPEN_FAILURE) {
+        rip_dvd_scsi_test_adapter_fail_open();
+    } else if (scenario == SCSI_TEST_SCENARIO_IDENTITY_CHECK_FAILURE) {
+        rip_dvd_scsi_test_adapter_fail_source_identity_check(2);
+    }
+    int status = scenario == SCSI_TEST_SCENARIO_CONCURRENT_SOURCES
+        ? run_concurrent_scsi_test_reads(first_descriptor, second_descriptor)
+        : run_scsi_test_read(first_descriptor, expect_failure);
+
+    if (status == 0 &&
+        (scenario == SCSI_TEST_SCENARIO_DISCOVERY_FAILURE ||
+         scenario == SCSI_TEST_SCENARIO_OPEN_FAILURE)) {
+        status = run_scsi_test_read(first_descriptor, 0);
+    }
+
+    if (status == 0 && scenario == SCSI_TEST_SCENARIO_SOURCE_CHANGE) {
+        status = run_scsi_test_read(second_descriptor, 0);
+        if (status == 0) {
+            status = run_scsi_test_read(first_descriptor, 0);
+        }
+    } else if (status == 0 &&
+               scenario == SCSI_TEST_SCENARIO_DRIVE_IDENTITY_CHANGE) {
+        rip_dvd_scsi_test_adapter_change_drive_identity();
+        status = run_scsi_test_read(first_descriptor, 0);
+    } else if (status == 0 &&
+               scenario == SCSI_TEST_SCENARIO_SG_IDENTITY_CHANGE) {
+        rip_dvd_scsi_test_adapter_change_sg_drive_identity();
+        status = run_scsi_test_read(first_descriptor, 0);
+        if (status == 0) {
+            status = run_scsi_test_read(first_descriptor, 0);
+        }
+    } else if (status == 0 &&
+               scenario == SCSI_TEST_SCENARIO_IDENTITY_CHECK_FAILURE) {
+        status = run_scsi_test_read(first_descriptor, 0);
+        if (status == 0) {
+            status = run_scsi_test_read(first_descriptor, 0);
+        }
+    } else if (status == 0 &&
+               scenario == SCSI_TEST_SCENARIO_DESCRIPTOR_REUSE) {
+        int reused_descriptor = first_descriptor;
+        if (rip_dvd_scsi_test_abandon_source_descriptor(first_descriptor) != 0) {
+            status = fail_errno("DVD SCSI test source abandon failed");
+        }
+        first_descriptor = -1;
+        if (status == 0 && second_descriptor != reused_descriptor) {
+            if (dup2(second_descriptor, reused_descriptor) < 0) {
+                status = fail_errno("DVD SCSI test descriptor reuse failed");
+            } else {
+                close(second_descriptor);
+                second_descriptor = reused_descriptor;
+            }
+        }
+        if (status == 0) {
+            status = run_scsi_test_read(second_descriptor, 0);
+        }
+    }
+
+    if (status == 0 && scenario == SCSI_TEST_SCENARIO_NORMAL_EXIT) {
+        rip_dvd_scsi_test_adapter_report_cleanup_at_exit();
+        first_descriptor = -1;
+        return 0;
+    }
+
+    if (first_descriptor >= 0 && close(first_descriptor) != 0 && status == 0) {
+        status = fail_errno("DVD SCSI test source close failed");
+    }
+    if (second_descriptor >= 0 && close(second_descriptor) != 0 && status == 0) {
+        status = fail_errno("DVD SCSI test replacement close failed");
+    }
+    if (emit_test_scsi_session_result() != 0 && status == 0) {
+        status = 1;
+    }
     return status;
 }
 
@@ -1537,6 +1906,9 @@ static int run_test_resume(int argc, char **argv)
 int main(int argc, char **argv)
 {
 #ifdef RIP_DVD_READER_TESTING
+    if (argc > 1 && strcmp(argv[1], "scsi-session-test") == 0) {
+        return run_test_scsi_session(argc, argv);
+    }
     if (argc > 1 && strcmp(argv[1], "copy-test") == 0) {
         return run_test_copy(argc, argv);
     }
