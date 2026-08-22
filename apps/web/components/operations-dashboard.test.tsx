@@ -881,7 +881,10 @@ describe("DashboardView", () => {
                   progressPercent: 28,
                   progressBytes: 28,
                   lastProgressAt: "2026-07-22T07:58:00.000Z",
-                  failureDetail: "DVD archive copy failed: Input/output error",
+                  failureDetail:
+                    "The Optical Drive returned an unclassified read failure. Retry the Archive Request; if it fails again, inspect the disc and drive.",
+                  failureDiagnostic:
+                    "Initial copy · LBA 1024 · requested 16 blocks · retry 2 · SCSI/host/driver 2/0/8 · sense key/ASC/ASCQ 5/33/0 · classifier scsi-read-classifier-v1",
                 },
               ],
             },
@@ -897,6 +900,12 @@ describe("DashboardView", () => {
     expect(disclosure?.open).toBe(false);
     await act(async () => summary?.click());
     expect(disclosure?.open).toBe(true);
+    expect(disclosure?.textContent).toContain(
+      "The Optical Drive returned an unclassified read failure",
+    );
+    expect(disclosure?.textContent).toContain(
+      "Initial copy · LBA 1024 · requested 16 blocks · retry 2",
+    );
     await act(async () => root.unmount());
   });
 

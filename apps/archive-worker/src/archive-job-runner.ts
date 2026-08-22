@@ -8,6 +8,7 @@ import type { CompletedDiscInspection } from "./disc-inspection-runner.js";
 import type { DvdSalvageValidator } from "./dvd-salvage-validator.js";
 import type { DvdRescueWorkspaceLock } from "./dvd-rescue-workspace-lock.js";
 import {
+  DvdArchiveReadFailureError,
   preserveDvdArchive,
   quarantinePublishedArchive,
   type DvdCopyRunner,
@@ -80,37 +81,38 @@ export async function runArchiveJob({
   }, 1_000);
   cancellationPoll.unref();
 
-  try {
-    const authorizeClaim = () => {
-      archiveSignal.throwIfAborted();
-      if (access.archiveJobs.isCancellationRequested(claim)) {
-        const cancellation = new Error(
-          "Archive Request cancellation requested",
-        );
-        claimController.abort(cancellation);
-        archiveSignal.throwIfAborted();
-      }
-      access.archiveJobs.renewClaim(claim);
-      archiveSignal.throwIfAborted();
-    };
-    const verifySource = async () => {
-      await confirmAuthorizedDrive({
-        access,
-        configuredCanonicalPath,
-        expected: binding.drive,
-        hardware,
-        phase: "DVD persistence",
-        signal: archiveSignal,
-      });
-      await hardware.confirmOpticalDrive(binding, archiveSignal);
-      const observedGeneration = await hardware.observeMediaGeneration(
-        binding,
-        archiveSignal,
+  const authorizeClaim = () => {
+    archiveSignal.throwIfAborted();
+    if (access.archiveJobs.isCancellationRequested(claim)) {
+      const cancellation = new Error(
+        "Archive Request cancellation requested",
       );
-      if (observedGeneration !== mediaGeneration) {
-        throw new Error("DVD medium changed during archiving");
-      }
-    };
+      claimController.abort(cancellation);
+      archiveSignal.throwIfAborted();
+    }
+    access.archiveJobs.renewClaim(claim);
+    archiveSignal.throwIfAborted();
+  };
+  const verifySource = async () => {
+    await confirmAuthorizedDrive({
+      access,
+      configuredCanonicalPath,
+      expected: binding.drive,
+      hardware,
+      phase: "DVD persistence",
+      signal: archiveSignal,
+    });
+    await hardware.confirmOpticalDrive(binding, archiveSignal);
+    const observedGeneration = await hardware.observeMediaGeneration(
+      binding,
+      archiveSignal,
+    );
+    if (observedGeneration !== mediaGeneration) {
+      throw new Error("DVD medium changed during archiving");
+    }
+  };
+
+  try {
     await rescueWorkspaceLock.withLock({
       fingerprint: disc.fingerprint,
       originalsLibraryPath,
@@ -173,11 +175,30 @@ export async function runArchiveJob({
         }
       },
     });
-  } catch (error) {
+  } catch (caughtError) {
+    let error = caughtError;
     let cancellationRequested =
       archiveSignal.aborted &&
       archiveSignal.reason instanceof Error &&
       archiveSignal.reason.message === "Archive Request cancellation requested";
+    let readFailure = error instanceof DvdArchiveReadFailureError
+      ? error
+      : null;
+    if (readFailure !== null && !signal.aborted && !cancellationRequested) {
+      try {
+        authorizeClaim();
+        await verifySource();
+        authorizeClaim();
+      } catch (revalidationError) {
+        error = revalidationError;
+        readFailure = null;
+        cancellationRequested =
+          archiveSignal.aborted &&
+          archiveSignal.reason instanceof Error &&
+          archiveSignal.reason.message ===
+            "Archive Request cancellation requested";
+      }
+    }
     const message = signal.aborted
       ? "Archive interrupted"
       : error instanceof Error
@@ -186,6 +207,22 @@ export async function runArchiveJob({
     try {
       if (cancellationRequested) {
         access.archiveJobs.abort(claim, "Archive cancelled by operator");
+      } else if (readFailure !== null) {
+        const evidence = readFailure.readFailure;
+        access.archiveJobs.failWithReadFailure(claim, {
+          stage: readFailure.stage,
+          category: evidence.category,
+          classifierVersion: evidence.classifierVersion,
+          failingLba: evidence.informationLba ?? evidence.requestedLba,
+          requestedBlockCount: evidence.requestedBlockCount,
+          retryCount: evidence.retryOrdinal,
+          scsiStatus: evidence.scsiStatus,
+          hostStatus: evidence.hostStatus,
+          driverStatus: evidence.driverStatus,
+          senseKey: evidence.senseKey,
+          asc: evidence.asc,
+          ascq: evidence.ascq,
+        });
       } else {
         const terminalJob = access.archiveJobs.fail(claim, message);
         cancellationRequested = terminalJob.status === "aborted";
