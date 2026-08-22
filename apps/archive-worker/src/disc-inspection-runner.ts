@@ -10,6 +10,7 @@ import {
   DISC_INSPECTION_LEASE_DURATION_MS,
   DISC_INSPECTION_SETTLING_OBSERVATION_TARGET,
   DISC_INSPECTION_SETTLING_QUIET_WINDOW_MS,
+  DISC_INSPECTION_SETTLING_TIMEOUT_MS,
 } from "@rip-dvd/data-access";
 
 import type {
@@ -46,6 +47,15 @@ export interface RunDiscInspectionOptions {
 const DISC_INSPECTION_SETTLING_OBSERVATION_INTERVAL_MS =
   DISC_INSPECTION_SETTLING_QUIET_WINDOW_MS /
   (DISC_INSPECTION_SETTLING_OBSERVATION_TARGET - 1);
+const DISC_INSPECTION_SETTLING_TIMEOUT_DIAGNOSTIC =
+  `Optical Drive did not settle within ${
+    DISC_INSPECTION_SETTLING_TIMEOUT_MS / 1_000
+  } seconds`;
+const DISC_INSPECTION_SETTLING_TIMEOUT_FAILURE = {
+  kind: "retry",
+  reasonCode: "drive_not_ready",
+  diagnostic: DISC_INSPECTION_SETTLING_TIMEOUT_DIAGNOSTIC,
+} satisfies ClassifiedDiscInspectionError;
 
 async function waitForNextSettlingObservation(
   intervalMs: number,
@@ -136,8 +146,65 @@ export async function runDiscInspection({
   waitForNextSettlingObservation: waitForSettling =
     waitForNextSettlingObservation,
 }: RunDiscInspectionOptions): Promise<CompletedDiscInspection | null> {
+  const settlingDeadlineController = new AbortController();
+  const readinessSignal = AbortSignal.any([
+    signal,
+    settlingDeadlineController.signal,
+  ]);
+  let settlingDeadlineTimer: ReturnType<typeof setTimeout> | null = null;
+  const clearSettlingDeadline = () => {
+    if (settlingDeadlineTimer !== null) {
+      clearTimeout(settlingDeadlineTimer);
+      settlingDeadlineTimer = null;
+    }
+  };
+  const armSettlingDeadline = (inspection: DiscInspection): boolean => {
+    if (inspection.phase !== "settling" || inspection.settlingStartedAt === null) {
+      return true;
+    }
+    const remainingMs =
+      inspection.settlingStartedAt.getTime() +
+      DISC_INSPECTION_SETTLING_TIMEOUT_MS -
+      Date.now();
+    if (remainingMs <= 0) {
+      settlingDeadlineController.abort(
+        new Error(DISC_INSPECTION_SETTLING_TIMEOUT_DIAGNOSTIC),
+      );
+      return false;
+    }
+    if (settlingDeadlineTimer !== null) {
+      clearSettlingDeadline();
+    }
+    settlingDeadlineTimer = setTimeout(() => {
+      settlingDeadlineController.abort(
+        new Error(DISC_INSPECTION_SETTLING_TIMEOUT_DIAGNOSTIC),
+      );
+    }, remainingMs);
+    settlingDeadlineTimer.unref();
+    return true;
+  };
+  const settlingDeadlineExpired = (inspection: DiscInspection): boolean =>
+    inspection.phase === "settling" &&
+    inspection.settlingStartedAt !== null &&
+    Date.now() >=
+      inspection.settlingStartedAt.getTime() +
+        DISC_INSPECTION_SETTLING_TIMEOUT_MS;
+  const persistSettlingTimeout = (
+    inspection: DiscInspection,
+    claim: Parameters<DataAccess["discInspections"]["record"]>[0],
+  ) =>
+    persistInspectionFailure({
+      access,
+      claim,
+      classified: DISC_INSPECTION_SETTLING_TIMEOUT_FAILURE,
+      consecutiveFailureCount: inspection.consecutiveFailureCount,
+    });
   let confirmedBeforeScan: Awaited<ReturnType<typeof confirmAuthorizedDrive>>;
   let binding: BoundOpticalDrive;
+  let preparedStart:
+    | ReturnType<DataAccess["discInspections"]["beginOrResume"]>
+    | undefined;
+  let newlyStartedUnprovenInspectionId: DiscInspection["id"] | undefined;
   let mediaObservation: Awaited<
     ReturnType<OpticalDriveHardware["observeMedia"]>
   >;
@@ -148,11 +215,11 @@ export async function runDiscInspection({
       expected: expectedDrive,
       hardware,
       phase: "DVD scanning",
-      signal,
+      signal: readinessSignal,
     });
     binding = await hardware.bindOpticalDrive(
       confirmedBeforeScan.discovered,
-      signal,
+      readinessSignal,
     );
     await confirmAuthorizedDrive({
       access,
@@ -160,12 +227,68 @@ export async function runDiscInspection({
       expected: binding.drive,
       hardware,
       phase: "DVD scanning",
-      signal,
+      signal: readinessSignal,
     });
-    mediaObservation = await hardware.observeMedia(binding, signal);
+    mediaObservation = await hardware.observeMedia(binding, readinessSignal, {
+      onMediaGeneration(mediaGeneration) {
+        const current = access.discInspections
+          .list({ currentOnly: true })
+          .find((inspection) => inspection.opticalDriveId === drive.id);
+        const retryIsEligible =
+          current?.status === "running" &&
+          current.phase === "retry_wait" &&
+          (current.retryAt === null || current.retryAt.getTime() <= Date.now());
+        const manualRetryIsEligible =
+          current?.status === "failed" &&
+          current.manualRetryRequestedAt !== null;
+        const observedGenerationChanged =
+          current !== undefined &&
+          current.mediaGeneration !== mediaGeneration;
+        const settlingClaimIsRecoverable =
+          current?.status === "running" &&
+          current.phase === "settling" &&
+          (current.claimToken === null ||
+            current.claimUpdatedAt === null ||
+            current.claimUpdatedAt.getTime() <=
+              Date.now() - DISC_INSPECTION_LEASE_DURATION_MS);
+        if (
+          current === undefined ||
+          observedGenerationChanged ||
+          retryIsEligible ||
+          manualRetryIsEligible ||
+          settlingClaimIsRecoverable
+        ) {
+          preparedStart = access.discInspections.beginOrResume({
+            opticalDriveId: drive.id,
+            mediaGeneration,
+            mediaCapacityBytes: null,
+          });
+          if (
+            current === undefined ||
+            preparedStart.inspection.id !== current.id
+          ) {
+            newlyStartedUnprovenInspectionId = preparedStart.inspection.id;
+          }
+          if (preparedStart.claim !== null) {
+            armSettlingDeadline(preparedStart.inspection);
+          }
+        }
+      },
+    });
   } catch (error) {
     if (signal.aborted) {
       throw error;
+    }
+    if (
+      (settlingDeadlineController.signal.aborted ||
+        (preparedStart !== undefined &&
+          settlingDeadlineExpired(preparedStart.inspection))) &&
+      preparedStart?.claim !== null &&
+      preparedStart?.claim !== undefined
+    ) {
+      persistSettlingTimeout(preparedStart.inspection, preparedStart.claim);
+      clearSettlingDeadline();
+      return null;
     }
     const classified = classifyDiscInspectionError(error);
     if (
@@ -173,38 +296,131 @@ export async function runDiscInspection({
       classified.reasonCode === "drive_identity_changed" ||
       classified.reasonCode === "drive_unavailable"
     ) {
-      access.discInspections.clearCurrent({
-        opticalDriveId: drive.id,
-        reasonCode: classified.reasonCode,
-      });
+      if (preparedStart?.claim !== null && preparedStart?.claim !== undefined) {
+        if (
+          classified.reasonCode === "no_medium" &&
+          newlyStartedUnprovenInspectionId !== undefined
+        ) {
+          access.discInspections.clearCurrent({
+            opticalDriveId: drive.id,
+            reasonCode: classified.reasonCode,
+            discardUnprovenInspectionId: newlyStartedUnprovenInspectionId,
+          });
+        } else {
+          access.discInspections.record(preparedStart.claim, {
+            type: "abort",
+            reasonCode: classified.reasonCode,
+          });
+        }
+      } else {
+        access.discInspections.clearCurrent({
+          opticalDriveId: drive.id,
+          reasonCode: classified.reasonCode,
+        });
+      }
       if (classified.reasonCode !== "no_medium") {
         const message = error instanceof Error ? error.message : String(error);
         log(`DVD scan failed for ${drive.devicePath}: ${message}`);
       }
+      clearSettlingDeadline();
       return null;
     }
+    if (preparedStart?.claim !== null && preparedStart?.claim !== undefined) {
+      persistInspectionFailure({
+        access,
+        claim: preparedStart.claim,
+        classified,
+        consecutiveFailureCount:
+          preparedStart.inspection.consecutiveFailureCount,
+      });
+      const message = error instanceof Error ? error.message : String(error);
+      log(`DVD scan failed for ${drive.devicePath}: ${message}`);
+      clearSettlingDeadline();
+      return null;
+    }
+    clearSettlingDeadline();
     throw error;
   }
   if (mediaObservation === null) {
-    access.discInspections.clearCurrent({
-      opticalDriveId: drive.id,
-      reasonCode: "no_medium",
-    });
+    if (
+      preparedStart?.claim !== null &&
+      preparedStart?.claim !== undefined &&
+      (settlingDeadlineController.signal.aborted ||
+        settlingDeadlineExpired(preparedStart.inspection))
+    ) {
+      persistSettlingTimeout(preparedStart.inspection, preparedStart.claim);
+      clearSettlingDeadline();
+      return null;
+    }
+    if (preparedStart?.claim !== null && preparedStart?.claim !== undefined) {
+      if (newlyStartedUnprovenInspectionId !== undefined) {
+        access.discInspections.clearCurrent({
+          opticalDriveId: drive.id,
+          reasonCode: "no_medium",
+          discardUnprovenInspectionId: newlyStartedUnprovenInspectionId,
+        });
+      } else {
+        access.discInspections.record(preparedStart.claim, {
+          type: "abort",
+          reasonCode: "no_medium",
+        });
+      }
+    } else {
+      access.discInspections.clearCurrent({
+        opticalDriveId: drive.id,
+        reasonCode: "no_medium",
+      });
+    }
+    clearSettlingDeadline();
     return null;
   }
   const { mediaGeneration, capacityBytes: mediaCapacityBytes } =
     mediaObservation;
-  const startedInspection = access.discInspections.beginOrResume({
-    opticalDriveId: drive.id,
-    mediaGeneration,
-    mediaCapacityBytes,
-  });
+  let startedInspection: ReturnType<
+    DataAccess["discInspections"]["beginOrResume"]
+  >;
+  if (preparedStart?.claim === null || preparedStart === undefined) {
+    startedInspection = access.discInspections.beginOrResume({
+      opticalDriveId: drive.id,
+      mediaGeneration,
+      mediaCapacityBytes,
+    });
+  } else {
+    if (!armSettlingDeadline(preparedStart.inspection)) {
+      persistSettlingTimeout(preparedStart.inspection, preparedStart.claim);
+      clearSettlingDeadline();
+      return null;
+    }
+    try {
+      startedInspection = access.discInspections.recordSettlingObservation(
+        preparedStart.claim,
+        { mediaGeneration, mediaCapacityBytes },
+      );
+    } catch (error) {
+      if (settlingDeadlineExpired(preparedStart.inspection)) {
+        persistSettlingTimeout(preparedStart.inspection, preparedStart.claim);
+        clearSettlingDeadline();
+        return null;
+      }
+      clearSettlingDeadline();
+      throw error;
+    }
+  }
   if (startedInspection.claim === null) {
     const inspection = startedInspection.inspection;
     if (inspection.status !== "completed" || inspection.detectedDiscId === null) {
+      clearSettlingDeadline();
       return null;
     }
     return { binding, inspection, mediaGeneration };
+  }
+  if (!armSettlingDeadline(startedInspection.inspection)) {
+    persistSettlingTimeout(
+      startedInspection.inspection,
+      startedInspection.claim,
+    );
+    clearSettlingDeadline();
+    return null;
   }
 
   let claim = startedInspection.claim;
@@ -215,6 +431,7 @@ export async function runDiscInspection({
   const inspectionSignal = AbortSignal.any([
     signal,
     inspectionController.signal,
+    settlingDeadlineController.signal,
   ]);
   const heartbeat = setInterval(() => {
     try {
@@ -232,6 +449,9 @@ export async function runDiscInspection({
         DISC_INSPECTION_SETTLING_OBSERVATION_INTERVAL_MS,
         inspectionSignal,
       );
+      if (!armSettlingDeadline(inspection)) {
+        inspectionSignal.throwIfAborted();
+      }
       await confirmAuthorizedDrive({
         access,
         configuredCanonicalPath,
@@ -244,6 +464,9 @@ export async function runDiscInspection({
         binding,
         inspectionSignal,
       );
+      if (!armSettlingDeadline(inspection)) {
+        inspectionSignal.throwIfAborted();
+      }
       if (observation === null) {
         access.discInspections.record(claim, {
           type: "abort",
@@ -263,6 +486,7 @@ export async function runDiscInspection({
       settledMediaGeneration = inspection.mediaGeneration;
       settledMediaCapacityBytes = inspection.mediaCapacityBytes;
     }
+    clearSettlingDeadline();
     if (settledMediaCapacityBytes === null) {
       throw new Error("Settled Disc Inspection has no declared capacity");
     }
@@ -363,18 +587,33 @@ export async function runDiscInspection({
       (settlingFailure.reasonCode === "no_medium" ||
         settlingFailure.reasonCode === "drive_identity_changed" ||
         settlingFailure.reasonCode === "drive_unavailable");
-    const classified: ClassifiedDiscInspectionError = settlingEndedByDriveState
-      ? {
-          kind: "abort",
-          reasonCode: settlingFailure.reasonCode,
-        }
-      : await classifyFailureAfterMediaObservation({
-          binding,
-          error,
-          expectedMediaGeneration: settledMediaGeneration,
-          hardware,
-          signal,
-        });
+    let classified: ClassifiedDiscInspectionError;
+    if (
+      (settlingDeadlineController.signal.aborted ||
+        settlingDeadlineExpired(inspection)) &&
+      inspection.phase === "settling"
+    ) {
+      classified = DISC_INSPECTION_SETTLING_TIMEOUT_FAILURE;
+    } else if (settlingEndedByDriveState) {
+      classified = {
+        kind: "abort",
+        reasonCode: settlingFailure.reasonCode,
+      };
+    } else {
+      const observedClassification = await classifyFailureAfterMediaObservation({
+        binding,
+        error,
+        expectedMediaGeneration: settledMediaGeneration,
+        hardware,
+        signal: inspectionSignal,
+      });
+      signal.throwIfAborted();
+      classified = inspection.phase === "settling" &&
+          (settlingDeadlineController.signal.aborted ||
+            settlingDeadlineExpired(inspection))
+        ? DISC_INSPECTION_SETTLING_TIMEOUT_FAILURE
+        : observedClassification;
+    }
     try {
       persistInspectionFailure({
         access,
@@ -396,5 +635,6 @@ export async function runDiscInspection({
     return null;
   } finally {
     clearInterval(heartbeat);
+    clearSettlingDeadline();
   }
 }

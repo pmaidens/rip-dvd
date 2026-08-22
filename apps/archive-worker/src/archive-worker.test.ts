@@ -16,6 +16,8 @@ import { join } from "node:path";
 import {
   ARCHIVE_JOB_LEASE_DURATION_MS,
   DISC_INSPECTION_LEASE_DURATION_MS,
+  DISC_INSPECTION_SETTLING_TIMEOUT_MS,
+  type DiscInspectionId,
   DVD_SALVAGE_REJECTION_DESCRIPTIONS,
   type DiscoveredOpticalDrive,
   type DvdSalvageRejectionReason,
@@ -188,14 +190,17 @@ function createLinuxSettlingHardware({
   mediaGeneration,
   mediaGenerationObserver,
 }: {
-  capacityResult(devicePath: string): CommandResult;
+  capacityResult(
+    devicePath: string,
+    signal: AbortSignal,
+  ): CommandResult | Promise<CommandResult>;
   deviceInstanceObserver?: MediaGenerationObserver;
   drives(): readonly SimulatedLinuxOpticalDrive[];
-  mediaGeneration: string;
+  mediaGeneration: string | (() => string);
   mediaGenerationObserver?: MediaGenerationObserver;
 }) {
   const runner: CommandRunner = {
-    run: vi.fn(async (executable, arguments_) => {
+    run: vi.fn(async (executable, arguments_, options) => {
       if (executable === "lsblk") {
         return {
           exitCode: 0,
@@ -213,7 +218,7 @@ function createLinuxSettlingHardware({
         };
       }
       if (executable === "blockdev") {
-        return capacityResult(arguments_[1]!);
+        return await capacityResult(arguments_[1]!, options.signal);
       }
       throw new Error(`Unexpected command: ${executable}`);
     }),
@@ -224,7 +229,11 @@ function createLinuxSettlingHardware({
         observe: vi.fn(async (devicePath) => `${devicePath}-instance`),
       },
       mediaGenerationObserver: mediaGenerationObserver ?? {
-        observe: vi.fn().mockResolvedValue(mediaGeneration),
+        observe: vi.fn(async () =>
+          typeof mediaGeneration === "function"
+            ? mediaGeneration()
+            : mediaGeneration
+        ),
       },
       platform: "linux",
       runner,
@@ -2856,6 +2865,12 @@ describe("archive worker polling", () => {
       recoveredMediaGeneration: "generation-b",
       expectedResetCount: 1,
     },
+    {
+      name: "changed capacity with a matching generation",
+      recoveredCapacityBytes: 4_096,
+      recoveredMediaGeneration: "generation-a",
+      expectedResetCount: 1,
+    },
   ])(
     "recovers an expired settling claim with $name and a fresh quiet window",
     async ({
@@ -2902,10 +2917,13 @@ describe("archive worker polling", () => {
       const hardware: OpticalDriveHardware = {
         ...stableDeviceBinding(),
         discover: vi.fn().mockResolvedValue([discoveredDrive]),
-        observeMedia: vi.fn(async () => ({
-          mediaGeneration,
-          capacityBytes: mediaCapacityBytes,
-        })),
+        observeMedia: vi.fn(async (_binding, _signal, options) => {
+          options?.onMediaGeneration(mediaGeneration);
+          return {
+            mediaGeneration,
+            capacityBytes: mediaCapacityBytes,
+          };
+        }),
         observeMediaGeneration: vi.fn(async () => mediaGeneration),
         scanDvd,
       };
@@ -4416,6 +4434,534 @@ describe("archive worker polling", () => {
     expect(observeMedia).toHaveBeenCalledTimes(1);
     expect(scanDvd).not.toHaveBeenCalled();
     expect(access.catalog.listDetectedDiscs()).toEqual([]);
+    access.close();
+  });
+
+  it("persists a claimed capacity-probe failure through normal retry state", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-22T16:30:00.000Z"));
+    const access = openTestDataAccess();
+    const log = vi.fn();
+    const { hardware } = createLinuxSettlingHardware({
+      capacityResult: () => {
+        throw new Error("capacity probe crashed");
+      },
+      drives: () => [{
+        devicePath: "/dev/sr0",
+        serialNumber: "SETTLING-PROBE-FAILURE-001",
+      }],
+      mediaGeneration: "probe-failure-generation",
+    });
+
+    await pollArchiveWorkerOnce({
+      access,
+      configuredDevicePath: "/dev/sr0",
+      hardware,
+      log,
+      signal: new AbortController().signal,
+    });
+
+    const [inspection] = access.discInspections.list();
+    expect(inspection).toMatchObject({
+      status: "running",
+      phase: "retry_wait",
+      attemptCount: 1,
+      consecutiveFailureCount: 1,
+      reasonCode: "unknown",
+      diagnostic: "capacity probe crashed",
+      claimToken: null,
+      claimUpdatedAt: null,
+    });
+    expect(access.discInspections.listAttempts(inspection!.id)).toEqual([
+      expect.objectContaining({
+        attemptNumber: 1,
+        outcome: "failed",
+        phase: "settling",
+        reasonCode: "unknown",
+      }),
+    ]);
+    expect(log).toHaveBeenCalledWith(
+      "DVD scan failed for /dev/sr0: capacity probe crashed",
+    );
+    access.close();
+  });
+
+  it.each([
+    { name: "throws", result: "throw" },
+    { name: "reports no medium", result: "no_medium" },
+  ] as const)(
+    "records timeout when the initial capacity probe $name at the deadline",
+    async ({ result }) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-08-22T16:45:00.000Z"));
+      const access = openTestDataAccess();
+      const scanDvd = vi.fn();
+      const observeMedia: OpticalDriveHardware["observeMedia"] = vi.fn(
+        async (_binding, _signal, options) => {
+          options?.onMediaGeneration("late-probe-generation");
+          const [inspection] = access.discInspections.list({
+            currentOnly: true,
+          });
+          vi.setSystemTime(new Date(
+            inspection!.settlingStartedAt!.getTime() +
+              DISC_INSPECTION_SETTLING_TIMEOUT_MS,
+          ));
+          if (result === "throw") {
+            throw new Error("late capacity probe failure");
+          }
+          return null;
+        },
+      );
+      const hardware: OpticalDriveHardware = {
+        ...stableDeviceBinding(),
+        discover: vi.fn().mockResolvedValue([{
+          devicePath: "/dev/sr0",
+          serialNumber: "SETTLING-LATE-PROBE-001",
+        }]),
+        observeMedia,
+        scanDvd,
+      };
+
+      await pollArchiveWorkerOnce({
+        access,
+        configuredDevicePath: "/dev/sr0",
+        hardware,
+        log: vi.fn(),
+        signal: new AbortController().signal,
+      });
+
+      const [inspection] = access.discInspections.list();
+      expect(inspection).toMatchObject({
+        status: "running",
+        phase: "retry_wait",
+        attemptCount: 1,
+        consecutiveFailureCount: 1,
+        reasonCode: "drive_not_ready",
+        diagnostic: "Optical Drive did not settle within 30 seconds",
+        claimToken: null,
+        claimUpdatedAt: null,
+      });
+      expect(access.discInspections.listAttempts(inspection!.id)).toEqual([
+        expect.objectContaining({
+          attemptNumber: 1,
+          outcome: "failed",
+          phase: "settling",
+          reasonCode: "drive_not_ready",
+        }),
+      ]);
+      expect(observeMedia).toHaveBeenCalledOnce();
+      expect(scanDvd).not.toHaveBeenCalled();
+      access.close();
+    },
+  );
+
+  it("keeps invalid capacity observations settling until the exact timeout", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-22T17:00:00.000Z"));
+    const access = openTestDataAccess();
+    const capacityResults: CommandResult[] = [
+      { exitCode: 0, stdout: "0\n", stderr: "" },
+      { exitCode: 0, stdout: "-2048\n", stderr: "" },
+      { exitCode: 0, stdout: "not-a-number\n", stderr: "" },
+      { exitCode: 0, stdout: "2049\n", stderr: "" },
+      { exitCode: 0, stdout: "Infinity\n", stderr: "" },
+      { exitCode: 0, stdout: "0x1269c0000\n", stderr: "" },
+      { exitCode: 1, stdout: "", stderr: "capacity unavailable" },
+    ];
+    let capacityIndex = 0;
+    const { hardware, runner } = createLinuxSettlingHardware({
+      capacityResult: () =>
+        capacityResults[Math.min(
+          capacityIndex++,
+          capacityResults.length - 1,
+        )]!,
+      drives: () => [{
+        devicePath: "/dev/sr0",
+        serialNumber: "SETTLING-INVALID-001",
+      }],
+      mediaGeneration: "invalid-capacity-generation",
+    });
+    const settlingWaits = createControlledSettlingWaits();
+    const polling = pollArchiveWorkerOnce({
+      access,
+      configuredDevicePath: "/dev/sr0",
+      hardware,
+      log: vi.fn(),
+      signal: new AbortController().signal,
+      waitForNextSettlingObservation: settlingWaits.wait,
+    });
+
+    await settlingWaits.waitUntilPending();
+    const inspectionId = access.discInspections.list({
+      currentOnly: true,
+    })[0]!.id;
+    for (let index = 1; index < capacityResults.length; index += 1) {
+      settlingWaits.releaseNext(1_000);
+      await settlingWaits.waitUntilPending();
+      expect(access.discInspections.list({ ids: [inspectionId] })).toEqual([
+        expect.objectContaining({
+          phase: "settling",
+          mediaCapacityBytes: null,
+          stableObservationCount: 0,
+          settlingQuietWindowStartedAt: null,
+          titleCount: null,
+          totalBytes: null,
+        }),
+      ]);
+    }
+
+    const settlingStartedAt = access.discInspections.list({
+      ids: [inspectionId],
+    })[0]!.settlingStartedAt!;
+    await vi.advanceTimersByTimeAsync(
+      settlingStartedAt.getTime() +
+        DISC_INSPECTION_SETTLING_TIMEOUT_MS -
+        Date.now() -
+        1,
+    );
+    expect(access.discInspections.list({ ids: [inspectionId] })).toEqual([
+      expect.objectContaining({
+        phase: "settling",
+        status: "running",
+        consecutiveFailureCount: 0,
+      }),
+    ]);
+    expect(access.discInspections.listAttempts(inspectionId)).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await polling;
+
+    expect(access.discInspections.list()).toEqual([
+      expect.objectContaining({
+        id: inspectionId,
+        status: "running",
+        phase: "retry_wait",
+        consecutiveFailureCount: 1,
+        reasonCode: "drive_not_ready",
+        diagnostic: "Optical Drive did not settle within 30 seconds",
+        titleCount: null,
+        totalBytes: null,
+      }),
+    ]);
+    expect(access.discInspections.listAttempts(inspectionId)).toEqual([
+      expect.objectContaining({
+        attemptNumber: 1,
+        outcome: "failed",
+        phase: "settling",
+        reasonCode: "drive_not_ready",
+      }),
+    ]);
+    expect(runner.run).not.toHaveBeenCalledWith(
+      "rip-dvd-lsdvd",
+      expect.anything(),
+      expect.anything(),
+    );
+    access.close();
+  });
+
+  it.each([
+    { name: "valid", returnsNoMedium: false },
+    { name: "no-medium", returnsNoMedium: true },
+  ])(
+    "rejects a $name readiness result returned exactly at the deadline",
+    async ({ returnsNoMedium }) => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-08-22T17:15:00.000Z"));
+      const access = openTestDataAccess();
+      const mediaCapacityBytes = 4_700_372_992;
+      let observationCount = 0;
+      const observeMedia: OpticalDriveHardware["observeMedia"] = vi.fn(
+        async (_binding, _signal, options) => {
+          observationCount += 1;
+          options?.onMediaGeneration("deadline-generation");
+          if (observationCount === 3) {
+            const [inspection] = access.discInspections.list({
+              currentOnly: true,
+            });
+            vi.setSystemTime(new Date(
+              inspection!.settlingStartedAt!.getTime() +
+                DISC_INSPECTION_SETTLING_TIMEOUT_MS,
+            ));
+            if (returnsNoMedium) {
+              return null;
+            }
+          }
+          return {
+            mediaGeneration: "deadline-generation",
+            capacityBytes: mediaCapacityBytes,
+          };
+        },
+      );
+      const scanDvd = vi.fn();
+      const hardware: OpticalDriveHardware = {
+        ...stableDeviceBinding(),
+        discover: vi.fn().mockResolvedValue([{
+          devicePath: "/dev/sr0",
+          serialNumber: "SETTLING-DEADLINE-001",
+        }]),
+        observeMedia,
+        observeMediaGeneration: vi.fn().mockResolvedValue(
+          "deadline-generation",
+        ),
+        scanDvd,
+      };
+      const settlingWaits = createControlledSettlingWaits();
+      const polling = pollArchiveWorkerOnce({
+        access,
+        configuredDevicePath: "/dev/sr0",
+        hardware,
+        log: vi.fn(),
+        signal: new AbortController().signal,
+        waitForNextSettlingObservation: settlingWaits.wait,
+      });
+
+      await settlingWaits.waitUntilPending();
+      const inspectionId = access.discInspections.list({
+        currentOnly: true,
+      })[0]!.id;
+      settlingWaits.releaseNext();
+      await settlingWaits.waitUntilPending();
+      settlingWaits.releaseNext();
+      await polling;
+
+      expect(access.discInspections.list({ ids: [inspectionId] })).toEqual([
+        expect.objectContaining({
+          status: "running",
+          phase: "retry_wait",
+          stableObservationCount: 2,
+          consecutiveFailureCount: 1,
+          reasonCode: "drive_not_ready",
+          diagnostic: "Optical Drive did not settle within 30 seconds",
+          titleCount: null,
+          totalBytes: null,
+        }),
+      ]);
+      expect(access.discInspections.listAttempts(inspectionId)).toEqual([
+        expect.objectContaining({
+          attemptNumber: 1,
+          outcome: "failed",
+          phase: "settling",
+          reasonCode: "drive_not_ready",
+        }),
+      ]);
+      expect(observeMedia).toHaveBeenCalledTimes(3);
+      expect(scanDvd).not.toHaveBeenCalled();
+      access.close();
+    },
+  );
+
+  it("records timeout when failure classification crosses the deadline", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-22T17:20:00.000Z"));
+    const access = openTestDataAccess();
+    const mediaCapacityBytes = 4_700_372_992;
+    let observationCount = 0;
+    const observeMedia: OpticalDriveHardware["observeMedia"] = vi.fn(
+      async (_binding, _signal, options) => {
+        observationCount += 1;
+        options?.onMediaGeneration("classification-generation");
+        if (observationCount === 2) {
+          throw new Error("readiness observation failed");
+        }
+        return {
+          mediaGeneration: "classification-generation",
+          capacityBytes: mediaCapacityBytes,
+        };
+      },
+    );
+    const observeMediaGeneration = vi.fn(async () => {
+      const [inspection] = access.discInspections.list({ currentOnly: true });
+      vi.setSystemTime(new Date(
+        inspection!.settlingStartedAt!.getTime() +
+          DISC_INSPECTION_SETTLING_TIMEOUT_MS,
+      ));
+      return "classification-generation";
+    });
+    const scanDvd = vi.fn();
+    const hardware: OpticalDriveHardware = {
+      ...stableDeviceBinding(),
+      discover: vi.fn().mockResolvedValue([{
+        devicePath: "/dev/sr0",
+        serialNumber: "SETTLING-CLASSIFICATION-001",
+      }]),
+      observeMedia,
+      observeMediaGeneration,
+      scanDvd,
+    };
+    const settlingWaits = createControlledSettlingWaits();
+    const polling = pollArchiveWorkerOnce({
+      access,
+      configuredDevicePath: "/dev/sr0",
+      hardware,
+      log: vi.fn(),
+      signal: new AbortController().signal,
+      waitForNextSettlingObservation: settlingWaits.wait,
+    });
+
+    await settlingWaits.waitUntilPending();
+    const inspectionId = access.discInspections.list({
+      currentOnly: true,
+    })[0]!.id;
+    settlingWaits.releaseNext();
+    await polling;
+
+    expect(access.discInspections.list({ ids: [inspectionId] })).toEqual([
+      expect.objectContaining({
+        status: "running",
+        phase: "retry_wait",
+        stableObservationCount: 1,
+        consecutiveFailureCount: 1,
+        reasonCode: "drive_not_ready",
+        diagnostic: "Optical Drive did not settle within 30 seconds",
+      }),
+    ]);
+    expect(access.discInspections.listAttempts(inspectionId)).toEqual([
+      expect.objectContaining({
+        attemptNumber: 1,
+        outcome: "failed",
+        phase: "settling",
+        reasonCode: "drive_not_ready",
+      }),
+    ]);
+    expect(observeMediaGeneration).toHaveBeenCalledOnce();
+    expect(scanDvd).not.toHaveBeenCalled();
+    access.close();
+  });
+
+  it("bounds blocked capacity probes across terminal failure and manual retry", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-22T17:30:00.000Z"));
+    const access = openTestDataAccess();
+    let mediaGeneration = "blocked-generation-1";
+    let blockCapacity = true;
+    let probeCount = 0;
+    const probeWaiters: Array<() => void> = [];
+    const waitForProbe = async (expectedCount: number) => {
+      if (probeCount >= expectedCount) {
+        return;
+      }
+      await new Promise<void>((resolve) => probeWaiters.push(resolve));
+    };
+    const { hardware, runner } = createLinuxSettlingHardware({
+      capacityResult: async (_devicePath, activeSignal) => {
+        probeCount += 1;
+        probeWaiters.splice(0).forEach((resolve) => resolve());
+        if (!blockCapacity) {
+          return { exitCode: 0, stdout: "unavailable\n", stderr: "" };
+        }
+        return await new Promise<CommandResult>((_resolve, reject) => {
+          const abort = () => reject(activeSignal.reason);
+          if (activeSignal.aborted) {
+            abort();
+            return;
+          }
+          activeSignal.addEventListener("abort", abort, { once: true });
+        });
+      },
+      drives: () => [{
+        devicePath: "/dev/sr0",
+        serialNumber: "SETTLING-BLOCKED-001",
+      }],
+      mediaGeneration: () => mediaGeneration,
+    });
+    const poll = (signal = new AbortController().signal) =>
+      pollArchiveWorkerOnce({
+        access,
+        configuredDevicePath: "/dev/sr0",
+        hardware,
+        log: vi.fn(),
+        signal,
+      });
+
+    let inspectionId: DiscInspectionId | undefined;
+    for (let failure = 1; failure <= 5; failure += 1) {
+      const polling = poll();
+      await waitForProbe(failure);
+      const currentBeforeTimeout = access.discInspections.list({
+        currentOnly: true,
+      })[0]!;
+      inspectionId ??= currentBeforeTimeout.id;
+      expect(currentBeforeTimeout).toMatchObject({
+        id: inspectionId,
+        attemptCount: failure,
+        status: "running",
+        phase: "settling",
+        mediaGeneration,
+        mediaCapacityBytes: null,
+        stableObservationCount: 0,
+        consecutiveFailureCount: failure - 1,
+      });
+
+      await vi.advanceTimersByTimeAsync(
+        DISC_INSPECTION_SETTLING_TIMEOUT_MS - 1,
+      );
+      expect(access.discInspections.listAttempts(inspectionId)).toHaveLength(
+        failure - 1,
+      );
+      await vi.advanceTimersByTimeAsync(1);
+      await polling;
+
+      const failed = access.discInspections.list({ ids: [inspectionId] })[0]!;
+      expect(failed).toMatchObject({
+        id: inspectionId,
+        status: failure === 5 ? "failed" : "running",
+        phase: failure === 5 ? "settling" : "retry_wait",
+        consecutiveFailureCount: failure,
+        reasonCode: "drive_not_ready",
+      });
+      expect(access.discInspections.listAttempts(inspectionId)).toHaveLength(
+        failure,
+      );
+      if (failure < 5) {
+        vi.setSystemTime(failed.retryAt!);
+        mediaGeneration = `blocked-generation-${failure + 1}`;
+      }
+    }
+
+    blockCapacity = false;
+    mediaGeneration = "terminal-generation-churn";
+    await poll();
+    expect(access.discInspections.list()).toEqual([
+      expect.objectContaining({
+        id: inspectionId,
+        status: "failed",
+        attemptCount: 5,
+        consecutiveFailureCount: 5,
+        reasonCode: "drive_not_ready",
+      }),
+    ]);
+
+    access.discInspections.requestRetry(inspectionId!);
+    blockCapacity = true;
+    mediaGeneration = "manual-retry-generation";
+    const controller = new AbortController();
+    const manualPolling = poll(controller.signal);
+    await waitForProbe(7);
+    expect(access.discInspections.list()).toEqual([
+      expect.objectContaining({
+        id: inspectionId,
+        status: "running",
+        phase: "settling",
+        attemptCount: 6,
+        consecutiveFailureCount: 0,
+        mediaGeneration,
+        mediaCapacityBytes: null,
+        stableObservationCount: 0,
+        settlingQuietWindowStartedAt: null,
+        titleCount: null,
+        totalBytes: null,
+      }),
+    ]);
+    expect(access.discInspections.listAttempts(inspectionId!)).toHaveLength(5);
+    expect(runner.run).not.toHaveBeenCalledWith(
+      "rip-dvd-lsdvd",
+      expect.anything(),
+      expect.anything(),
+    );
+
+    const interruption = new Error("test complete");
+    controller.abort(interruption);
+    await expect(manualPolling).rejects.toBe(interruption);
     access.close();
   });
 

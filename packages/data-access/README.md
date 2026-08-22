@@ -251,26 +251,32 @@ distinct count and at most three titles.
 ## Inspections, requests, and job attempts
 
 `discInspections.beginOrResume()` admits one current insertion per Optical
-Drive. A first valid generation and DVD-sector-aligned capacity observation
-starts it in `settling` with a renewable claim. Only that claim may record the
-next readiness observation, so concurrent workers cannot advance the quiet
-window or start metadata twice. Three matching observations spanning at least
-five seconds move the same claim atomically to `reading_metadata`. Generation
-evidence remains provisional during settling. Generation or capacity churn
-restarts the quiet window and stable-observation count on the same inspection
-and attempt without recording aborted history. Recovering an expired settling
-claim records the predecessor attempt as interrupted, issues one successor
-claim on the same inspection, and starts the full quiet-window proof again.
+Drive. The first observed media generation starts it in `settling` with a
+renewable claim, even while capacity is unavailable or invalid. Only that claim
+may record the next readiness observation, so concurrent workers cannot advance
+the quiet window or start metadata twice. Three consecutive matching valid
+generation and DVD-sector-aligned capacity observations spanning at least five
+seconds move the same claim atomically to `reading_metadata`. Invalid evidence
+breaks consecutiveness without advancing the proof. Generation or valid
+capacity churn restarts the quiet window and stable-observation count on the
+same inspection and attempt without recording aborted history. A settling
+attempt is bounded to 30 seconds from its first generation observation;
+expiration records `drive_not_ready` and the existing retry transition in one
+transaction. Recovering an expired settling claim records the predecessor
+attempt as interrupted, issues one successor claim on the same inspection, and
+starts both the attempt bound and full quiet-window proof again.
 The generation becomes the immutable media fence at the transition to
 `reading_metadata`. Historical inspections retain their lifecycle state with
 no invented settling evidence. Drive identity and the settled media generation
 fence replacement, while the claim token fences stale worker callbacks.
 Structured metadata, hash bytes, rate/ETA, attempt history, retry deadlines,
 reason codes, and bounded diagnostics are persisted without display strings.
-The fifth consecutive transient failure is terminal. `requestRetry()` persists
-operator intent while the inspection remains failed; only `beginOrResume()`
-with freshly observed matching media generation reopens it and resets the
-consecutive budget. Lifetime attempts are preserved. Removal and replacement
+The fifth consecutive transient failure is terminal. Automatic and manual
+retry keep the same insertion record while settling evidence is provisional,
+but each begins a fresh bounded settling attempt. `requestRetry()` persists
+operator intent while the inspection remains failed; `beginOrResume()` reopens
+it after the worker observes the drive and resets the consecutive budget.
+Lifetime attempts are preserved. Removal and replacement after settlement
 abort rather than fail.
 
 `archiveRequests.create()` atomically approves a scanned Detected Disc and

@@ -869,10 +869,15 @@ encode containers retain no device access. This worker does not eject media.
 The worker checks for completed current Disc Inspections that match pending
 Archive Requests at the configured poll interval capped at five seconds. An
 empty drive is a normal state. A settling Disc Inspection holds a renewable
-claim while it waits for readiness observations, then carries that claim into
-metadata reading. Concurrent polls cannot advance the same Optical Drive.
-Expired settling recovery records the prior attempt as interrupted and restarts
-the full quiet-window proof on the same insertion. A long-running inspection or
+claim from the first observed media generation while it waits for readiness
+observations, then carries that claim into metadata reading. Invalid or
+unavailable capacity is settling evidence but never advances readiness. Three
+consecutive matching observations spanning five seconds are required, and the
+attempt records `drive_not_ready` through normal retry handling if the proof is
+not complete within 30 seconds. Concurrent polls cannot advance the same
+Optical Drive. Expired settling recovery records the prior attempt as
+interrupted and restarts the bound and full quiet-window proof on the same
+insertion. A long-running inspection or
 archive holds only its own drive and one configured concurrency slot, so idle
 capacity continues polling other drives. Scanner failures are logged per drive
 without hiding other drives. Eligible completed inspections are considered in
@@ -912,17 +917,20 @@ cancellation-aware. The archive copy is the workflow's only complete sequential
 read of the physical disc.
 One durable Disc Inspection represents the current insertion and owns metadata
 findings, settling evidence, retries, and terminal inspection outcome. It is
-resumed only while Optical Drive identity and Linux media-generation evidence
-prove the same insertion. A restarted worker keeps that inspection but must
-collect a new complete quiet-window proof before running `lsdvd`. Shutdown and
+resumed while readiness evidence remains provisional; generation churn during
+settling or its retries resets proof without creating another insertion record.
+After settlement, Optical Drive identity and Linux media-generation evidence
+fence the insertion. A restarted worker keeps that inspection but must collect
+a new complete quiet-window proof before running `lsdvd`. Shutdown and
 cancellation abort settlement waits and readiness probes through the worker's
 shared signal. The dashboard nests its indeterminate metadata phase, retry
-state, and safe failure reason under the Optical Drive. Determinate byte progress
-belongs to the later Archive Job copy.
+state, and safe failure reason under the Optical Drive. Determinate byte
+progress belongs to the later Archive Job copy.
 Manual inspection retry is durable intent: the route leaves the inspection
 failed until the worker independently observes the drive again. Matching
-media-generation evidence reopens the same inspection and resets only its
-consecutive failure budget; changed or removed media never consumes that retry.
+readiness evidence reopens the same inspection, resets its consecutive failure
+budget, and requires a fresh bounded settling proof; removed media does not
+consume that retry.
 
 Requesting preservation atomically marks a scanned disc approved and creates a
 pending Archive Request, not an Archive Job. A completed current inspection is
