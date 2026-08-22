@@ -383,6 +383,7 @@ export type LegacySidecarMigrationAdapter = LegacySidecarImportAccessFactory;
 function initialDiscSettlingState(
   timestamp: Date,
   mediaCapacityBytes: number,
+  settlingResetCount = 0,
 ) {
   return {
     phase: "settling" as const,
@@ -390,9 +391,53 @@ function initialDiscSettlingState(
     stableObservationCount: 1,
     settlingQuietWindowStartedAt: timestamp,
     settlingStartedAt: timestamp,
-    settlingResetCount: 0,
+    settlingResetCount,
     phaseStartedAt: timestamp,
     attemptStartedAt: timestamp,
+  };
+}
+
+function requireDiscSettlingObservation(input: {
+  mediaGeneration: string;
+  mediaCapacityBytes: number;
+}) {
+  const mediaGeneration = requireNonEmpty(
+    input.mediaGeneration,
+    "mediaGeneration",
+  );
+  const mediaCapacityBytes = requirePositiveSafeInteger(
+    input.mediaCapacityBytes,
+    "mediaCapacityBytes",
+  );
+  if (mediaGeneration.length > 64) {
+    throw new DomainInvariantError(
+      "mediaGeneration must contain at most 64 characters",
+    );
+  }
+  if (
+    mediaCapacityBytes > 9_000_000_000 ||
+    mediaCapacityBytes % DVD_LOGICAL_SECTOR_BYTES !== 0
+  ) {
+    throw new DomainInvariantError(
+      "mediaCapacityBytes must be a DVD-sector-aligned capacity no larger than 9000000000",
+    );
+  }
+  return { mediaGeneration, mediaCapacityBytes };
+}
+
+function createDiscInspectionClaim(
+  inspection: {
+    id: DiscInspectionId;
+    opticalDriveId: OpticalDriveId;
+    mediaGeneration: string;
+  },
+  claimToken: DiscInspectionClaimToken,
+): DiscInspectionClaim {
+  return {
+    id: inspection.id,
+    opticalDriveId: inspection.opticalDriveId,
+    mediaGeneration: inspection.mediaGeneration,
+    claimToken,
   };
 }
 
@@ -5304,27 +5349,8 @@ export function createDataAccessInternal(
     discInspections: {
       beginOrResume(input) {
         const timestamp = now();
-        const mediaGeneration = requireNonEmpty(
-          input.mediaGeneration,
-          "mediaGeneration",
-        );
-        const mediaCapacityBytes = requirePositiveSafeInteger(
-          input.mediaCapacityBytes,
-          "mediaCapacityBytes",
-        );
-        if (mediaGeneration.length > 64) {
-          throw new DomainInvariantError(
-            "mediaGeneration must contain at most 64 characters",
-          );
-        }
-        if (
-          mediaCapacityBytes > 9_000_000_000 ||
-          mediaCapacityBytes % DVD_LOGICAL_SECTOR_BYTES !== 0
-        ) {
-          throw new DomainInvariantError(
-            "mediaCapacityBytes must be a DVD-sector-aligned capacity no larger than 9000000000",
-          );
-        }
+        const { mediaGeneration, mediaCapacityBytes } =
+          requireDiscSettlingObservation(input);
         return database.transaction((transaction) => {
           const drive = requireRow(
             transaction
@@ -5351,60 +5377,10 @@ export function createDataAccessInternal(
             )
             .get();
           if (
-            current?.status === "running" &&
-            current.phase === "settling" &&
-            (current.mediaGeneration !== mediaGeneration ||
-              current.mediaCapacityBytes !== mediaCapacityBytes)
+            current &&
+            current.mediaGeneration !== mediaGeneration &&
+            (current.status !== "running" || current.phase !== "settling")
           ) {
-            const reset = transaction
-              .update(discInspections)
-              .set({
-                mediaGeneration,
-                mediaCapacityBytes,
-                stableObservationCount: 1,
-                settlingQuietWindowStartedAt: timestamp,
-                settlingResetCount: Math.min(
-                  MAX_DISC_INSPECTION_SETTLING_RESET_COUNT,
-                  (current.settlingResetCount ?? 0) + 1,
-                ),
-                updatedAt: timestamp,
-              })
-              .where(
-                and(
-                  eq(discInspections.id, current.id),
-                  eq(discInspections.opticalDriveId, input.opticalDriveId),
-                  eq(discInspections.mediaGeneration, current.mediaGeneration),
-                  current.mediaCapacityBytes === null
-                    ? isNull(discInspections.mediaCapacityBytes)
-                    : eq(
-                        discInspections.mediaCapacityBytes,
-                        current.mediaCapacityBytes,
-                      ),
-                  eq(discInspections.status, "running"),
-                  eq(discInspections.phase, "settling"),
-                  eq(discInspections.isCurrent, true),
-                  isNull(discInspections.detectedDiscId),
-                  isNull(discInspections.volumeLabel),
-                  isNull(discInspections.titleCount),
-                  isNull(discInspections.chapterCount),
-                  isNull(discInspections.audioStreamCount),
-                  isNull(discInspections.subtitleStreamCount),
-                  isNull(discInspections.totalBytes),
-                  isNull(discInspections.bytesHashed),
-                  isNull(discInspections.bytesPerSecond),
-                  isNull(discInspections.etaSeconds),
-                  isNull(discInspections.claimToken),
-                  isNull(discInspections.claimUpdatedAt),
-                ),
-              )
-              .returning()
-              .get();
-            if (reset) {
-              inspectionProgress.delete(reset.id);
-              return { inspection: reset, claim: null };
-            }
-          }
-          if (current && current.mediaGeneration !== mediaGeneration) {
             if (current.status === "running") {
               transaction
                 .insert(discInspectionAttempts)
@@ -5466,6 +5442,7 @@ export function createDataAccessInternal(
               current.status === "failed" &&
               current.manualRetryRequestedAt !== null
             ) {
+              const claimToken = newId<DiscInspectionClaimToken>();
               const restarted = requireRow(
                 transaction
                   .update(discInspections)
@@ -5481,8 +5458,8 @@ export function createDataAccessInternal(
                     manualRetryRequestedAt: null,
                     reasonCode: null,
                     diagnostic: null,
-                    claimToken: null,
-                    claimUpdatedAt: null,
+                    claimToken,
+                    claimUpdatedAt: timestamp,
                     completedAt: null,
                     updatedAt: timestamp,
                   })
@@ -5499,7 +5476,10 @@ export function createDataAccessInternal(
                 "disc inspection",
                 current.id,
               );
-              return { inspection: restarted, claim: null };
+              return {
+                inspection: restarted,
+                claim: createDiscInspectionClaim(restarted, claimToken),
+              };
             }
             if (current.status !== "running") {
               return { inspection: current, claim: null };
@@ -5511,38 +5491,64 @@ export function createDataAccessInternal(
               return { inspection: current, claim: null };
             }
             if (current.phase === "settling") {
-              if (current.mediaCapacityBytes !== mediaCapacityBytes) {
+              const expiredBefore = new Date(
+                timestamp.getTime() - DISC_INSPECTION_LEASE_DURATION_MS,
+              );
+              if (
+                current.claimToken !== null &&
+                current.claimUpdatedAt !== null &&
+                current.claimUpdatedAt > expiredBefore
+              ) {
                 return { inspection: current, claim: null };
               }
-              const stableObservationCount = Math.min(
-                DISC_INSPECTION_SETTLING_OBSERVATION_TARGET,
-                (current.stableObservationCount ?? 0) + 1,
-              );
-              const quietWindowStartedAt =
-                current.settlingQuietWindowStartedAt ?? timestamp;
-              const quietWindowElapsed =
-                timestamp.getTime() - quietWindowStartedAt.getTime();
-              const settled =
-                stableObservationCount >=
-                  DISC_INSPECTION_SETTLING_OBSERVATION_TARGET &&
-                quietWindowElapsed >=
-                  DISC_INSPECTION_SETTLING_QUIET_WINDOW_MS;
-              const claimToken = settled
-                ? newId<DiscInspectionClaimToken>()
-                : null;
-              const observed = requireRow(
+              const recoveringExpiredClaim = current.claimToken !== null;
+              if (recoveringExpiredClaim) {
+                transaction
+                  .insert(discInspectionAttempts)
+                  .values({
+                    id: newId<DiscInspectionAttemptId>(),
+                    discInspectionId: current.id,
+                    attemptNumber: current.attemptCount,
+                    outcome: "interrupted",
+                    phase: "settling",
+                    reasonCode: "worker_interrupted",
+                    startedAt: current.attemptStartedAt,
+                    endedAt: timestamp,
+                  })
+                  .onConflictDoNothing()
+                  .run();
+              }
+              const evidenceChanged =
+                current.mediaGeneration !== mediaGeneration ||
+                current.mediaCapacityBytes !== mediaCapacityBytes;
+              const settlingResetCount = evidenceChanged
+                ? Math.min(
+                    MAX_DISC_INSPECTION_SETTLING_RESET_COUNT,
+                    (current.settlingResetCount ?? 0) + 1,
+                  )
+                : (current.settlingResetCount ?? 0);
+              inspectionProgress.delete(current.id);
+              const claimToken = newId<DiscInspectionClaimToken>();
+              const resumed = requireRow(
                 transaction
                   .update(discInspections)
                   .set({
-                    stableObservationCount,
-                    ...(settled
-                      ? {
-                          phase: "reading_metadata" as const,
-                          claimToken,
-                          claimUpdatedAt: timestamp,
-                          phaseStartedAt: timestamp,
-                        }
-                      : {}),
+                    mediaGeneration,
+                    ...initialDiscSettlingState(
+                      timestamp,
+                      mediaCapacityBytes,
+                      settlingResetCount,
+                    ),
+                    attemptCount: current.attemptCount +
+                      (recoveringExpiredClaim ? 1 : 0),
+                    bytesHashed: null,
+                    bytesPerSecond: null,
+                    etaSeconds: null,
+                    retryAt: null,
+                    reasonCode: null,
+                    diagnostic: null,
+                    claimToken,
+                    claimUpdatedAt: timestamp,
                     updatedAt: timestamp,
                   })
                   .where(
@@ -5551,7 +5557,9 @@ export function createDataAccessInternal(
                       eq(discInspections.status, "running"),
                       eq(discInspections.phase, "settling"),
                       eq(discInspections.isCurrent, true),
-                      isNull(discInspections.claimToken),
+                      current.claimToken === null
+                        ? isNull(discInspections.claimToken)
+                        : eq(discInspections.claimToken, current.claimToken),
                     ),
                   )
                   .returning()
@@ -5560,18 +5568,12 @@ export function createDataAccessInternal(
                 current.id,
               );
               return {
-                inspection: observed,
-                claim: claimToken === null
-                  ? null
-                  : {
-                      id: observed.id,
-                      opticalDriveId: observed.opticalDriveId,
-                      mediaGeneration: observed.mediaGeneration,
-                      claimToken,
-                    },
+                inspection: resumed,
+                claim: createDiscInspectionClaim(resumed, claimToken),
               };
             }
             if (current.phase === "retry_wait") {
+              const claimToken = newId<DiscInspectionClaimToken>();
               const restarted = requireRow(
                 transaction
                   .update(discInspections)
@@ -5587,8 +5589,8 @@ export function createDataAccessInternal(
                     retryAt: null,
                     reasonCode: null,
                     diagnostic: null,
-                    claimToken: null,
-                    claimUpdatedAt: null,
+                    claimToken,
+                    claimUpdatedAt: timestamp,
                     updatedAt: timestamp,
                   })
                   .where(
@@ -5605,7 +5607,10 @@ export function createDataAccessInternal(
                 "disc inspection",
                 current.id,
               );
-              return { inspection: restarted, claim: null };
+              return {
+                inspection: restarted,
+                claim: createDiscInspectionClaim(restarted, claimToken),
+              };
             }
             const expiredBefore = new Date(
               timestamp.getTime() - DISC_INSPECTION_LEASE_DURATION_MS,
@@ -5669,16 +5674,12 @@ export function createDataAccessInternal(
             );
             return {
               inspection: resumed,
-              claim: {
-                id: resumed.id,
-                opticalDriveId: resumed.opticalDriveId,
-                mediaGeneration: resumed.mediaGeneration,
-                claimToken,
-              },
+              claim: createDiscInspectionClaim(resumed, claimToken),
             };
           }
 
           const id = newId<DiscInspectionId>();
+          const claimToken = newId<DiscInspectionClaimToken>();
           const inspection = requireRow(
             transaction
               .insert(discInspections)
@@ -5687,6 +5688,8 @@ export function createDataAccessInternal(
                 opticalDriveId: input.opticalDriveId,
                 mediaGeneration,
                 ...initialDiscSettlingState(timestamp, mediaCapacityBytes),
+                claimToken,
+                claimUpdatedAt: timestamp,
                 startedAt: timestamp,
                 createdAt: timestamp,
                 updatedAt: timestamp,
@@ -5698,7 +5701,134 @@ export function createDataAccessInternal(
           );
           return {
             inspection,
-            claim: null,
+            claim: createDiscInspectionClaim(inspection, claimToken),
+          };
+        }, { behavior: "immediate" });
+      },
+
+      recordSettlingObservation(claim, input) {
+        const timestamp = now();
+        const { mediaGeneration, mediaCapacityBytes } =
+          requireDiscSettlingObservation(input);
+        return database.transaction((transaction) => {
+          const current = transaction
+            .select()
+            .from(discInspections)
+            .where(
+              and(
+                eq(discInspections.id, claim.id),
+                eq(discInspections.opticalDriveId, claim.opticalDriveId),
+                eq(discInspections.mediaGeneration, claim.mediaGeneration),
+                eq(discInspections.status, "running"),
+                eq(discInspections.phase, "settling"),
+                eq(discInspections.isCurrent, true),
+                eq(discInspections.claimToken, claim.claimToken),
+                gt(
+                  discInspections.claimUpdatedAt,
+                  new Date(
+                    timestamp.getTime() - DISC_INSPECTION_LEASE_DURATION_MS,
+                  ),
+                ),
+              ),
+            )
+            .get();
+          if (!current) {
+            throw new StaleJobAttemptError("disc inspection", claim.id);
+          }
+
+          const evidenceChanged =
+            current.mediaGeneration !== mediaGeneration ||
+            current.mediaCapacityBytes !== mediaCapacityBytes;
+          const stableObservationCount = evidenceChanged
+            ? 1
+            : Math.min(
+                DISC_INSPECTION_SETTLING_OBSERVATION_TARGET,
+                (current.stableObservationCount ?? 0) + 1,
+              );
+          const quietWindowStartedAt = evidenceChanged
+            ? timestamp
+            : (current.settlingQuietWindowStartedAt ?? timestamp);
+          const quietWindowElapsed =
+            timestamp.getTime() - quietWindowStartedAt.getTime();
+          const settled =
+            stableObservationCount >=
+              DISC_INSPECTION_SETTLING_OBSERVATION_TARGET &&
+            quietWindowElapsed >= DISC_INSPECTION_SETTLING_QUIET_WINDOW_MS;
+          const observed = requireRow(
+            transaction
+              .update(discInspections)
+              .set({
+                mediaGeneration,
+                mediaCapacityBytes,
+                stableObservationCount,
+                settlingQuietWindowStartedAt: quietWindowStartedAt,
+                settlingResetCount: evidenceChanged
+                  ? Math.min(
+                      MAX_DISC_INSPECTION_SETTLING_RESET_COUNT,
+                      (current.settlingResetCount ?? 0) + 1,
+                    )
+                  : current.settlingResetCount,
+                ...(settled
+                  ? {
+                      phase: "reading_metadata" as const,
+                      phaseStartedAt: timestamp,
+                    }
+                  : {}),
+                claimUpdatedAt: timestamp,
+                updatedAt: timestamp,
+              })
+              .where(
+                and(
+                  eq(discInspections.id, current.id),
+                  eq(discInspections.opticalDriveId, claim.opticalDriveId),
+                  eq(discInspections.mediaGeneration, claim.mediaGeneration),
+                  eq(discInspections.status, "running"),
+                  eq(discInspections.phase, "settling"),
+                  eq(discInspections.isCurrent, true),
+                  eq(discInspections.claimToken, claim.claimToken),
+                  evidenceChanged
+                    ? isNull(discInspections.detectedDiscId)
+                    : undefined,
+                  evidenceChanged
+                    ? isNull(discInspections.volumeLabel)
+                    : undefined,
+                  evidenceChanged
+                    ? isNull(discInspections.titleCount)
+                    : undefined,
+                  evidenceChanged
+                    ? isNull(discInspections.chapterCount)
+                    : undefined,
+                  evidenceChanged
+                    ? isNull(discInspections.audioStreamCount)
+                    : undefined,
+                  evidenceChanged
+                    ? isNull(discInspections.subtitleStreamCount)
+                    : undefined,
+                  evidenceChanged
+                    ? isNull(discInspections.totalBytes)
+                    : undefined,
+                  evidenceChanged
+                    ? isNull(discInspections.bytesHashed)
+                    : undefined,
+                  evidenceChanged
+                    ? isNull(discInspections.bytesPerSecond)
+                    : undefined,
+                  evidenceChanged
+                    ? isNull(discInspections.etaSeconds)
+                    : undefined,
+                ),
+              )
+              .returning()
+              .get(),
+            "disc inspection",
+            current.id,
+          );
+          if (evidenceChanged) {
+            inspectionProgress.delete(current.id);
+          }
+          return {
+            inspection: observed,
+            claim: createDiscInspectionClaim(observed, claim.claimToken),
           };
         }, { behavior: "immediate" });
       },
@@ -5761,6 +5891,16 @@ export function createDataAccessInternal(
             .get();
           if (!current) {
             throw new StaleJobAttemptError("disc inspection", claim.id);
+          }
+          if (
+            current.phase === "settling" &&
+            event.type !== "retry" &&
+            event.type !== "fail" &&
+            event.type !== "abort"
+          ) {
+            throw new DomainInvariantError(
+              "Disc Inspection must finish settling before recording work progress",
+            );
           }
           const recordAttempt = (
             outcome: "completed" | "failed" | "aborted",

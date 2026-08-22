@@ -840,14 +840,18 @@ encode containers retain no device access. This worker does not eject media.
 
 The worker checks for completed current Disc Inspections that match pending
 Archive Requests at the configured poll interval capped at five seconds. An
-empty drive is a normal state. A long-running inspection or archive holds only
-its own drive and one configured concurrency slot, so idle capacity continues
-polling other drives. Scanner failures are logged per drive without hiding other
-drives. Eligible completed inspections are considered in Archive Request
-priority order before a configured concurrency slot starts work. Native copy
-capacity matches that worker concurrency, while device-inode locks and durable
-job fences prevent overlapping work for the same drive or stale attempt. A
-failed discovery does not mark every known drive missing.
+empty drive is a normal state. A settling Disc Inspection holds a renewable
+claim while it waits for readiness observations, then carries that claim into
+metadata reading. Concurrent polls cannot advance the same Optical Drive.
+Expired settling recovery records the prior attempt as interrupted and restarts
+the full quiet-window proof on the same insertion. A long-running inspection or
+archive holds only its own drive and one configured concurrency slot, so idle
+capacity continues polling other drives. Scanner failures are logged per drive
+without hiding other drives. Eligible completed inspections are considered in
+Archive Request priority order before a configured concurrency slot starts
+work. Native copy capacity matches that worker concurrency, while device-inode
+locks and durable job fences prevent overlapping work for the same drive or
+stale attempt. A failed discovery does not mark every known drive missing.
 Successful DVD
 Disc Inspections use the packaged `rip-dvd-lsdvd` command so they can read
 metadata from CSS-protected media through the bridge-patched `libdvdcss`
@@ -879,11 +883,14 @@ Reads are shell-free, size-capped, incremental, timed out, and
 cancellation-aware. The archive copy is the workflow's only complete sequential
 read of the physical disc.
 One durable Disc Inspection represents the current insertion and owns metadata
-findings, retries, and terminal inspection outcome.
-It is resumed only while drive identity and Linux media-generation evidence
-prove the same insertion. The dashboard nests its indeterminate metadata phase,
-retry state, and safe failure reason under the Optical Drive. Determinate byte
-progress belongs to the later Archive Job copy.
+findings, settling evidence, retries, and terminal inspection outcome. It is
+resumed only while Optical Drive identity and Linux media-generation evidence
+prove the same insertion. A restarted worker keeps that inspection but must
+collect a new complete quiet-window proof before running `lsdvd`. Shutdown and
+cancellation abort settlement waits and readiness probes through the worker's
+shared signal. The dashboard nests its indeterminate metadata phase, retry
+state, and safe failure reason under the Optical Drive. Determinate byte progress
+belongs to the later Archive Job copy.
 Manual inspection retry is durable intent: the route leaves the inspection
 failed until the worker independently observes the drive again. Matching
 media-generation evidence reopens the same inspection and resets only its
