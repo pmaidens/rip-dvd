@@ -14,6 +14,9 @@ const executable = "/usr/local/bin/rip-dvd-dvdcss-reader";
 const testExecutable = "/tmp/rip-dvd-dvdcss-reader-test";
 const sourcePath = "/tmp/rip-dvd-reader-source.img";
 const recoveryResultPrefix = "rip-dvd-recovery-result ";
+const readFailureResultPrefix = "rip-dvd-read-failure ";
+const fixedMediumSense = "f00003000000050a00000000110000000000";
+const descriptorMediumSense = "720311000000000c000a80000000000000000005";
 const content = Buffer.alloc(40 * 2_048);
 for (let index = 0; index < content.length; index += 1) {
   content[index] = index % 251;
@@ -34,6 +37,17 @@ function recoveryResult(stderr) {
     throw new Error(`expected one recovery result, received: ${stderr}`);
   }
   return JSON.parse(results[0].slice(recoveryResultPrefix.length));
+}
+
+function readFailureResult(stderr) {
+  const lines = stderr.trim().split("\n");
+  const results = lines.filter((line) =>
+    line.startsWith(readFailureResultPrefix)
+  );
+  if (results.length !== 1) {
+    throw new Error(`expected one read failure result, received: ${stderr}`);
+  }
+  return JSON.parse(results[0].slice(readFailureResultPrefix.length));
 }
 
 function badSectorRanges(result, totalSectorCount) {
@@ -189,6 +203,113 @@ if (
   throw new Error(`libdvdcss retry check failed: ${retry.stderr}`);
 }
 
+for (const [name, sense] of [
+  ["fixed-medium", fixedMediumSense],
+  ["descriptor-medium", descriptorMediumSense],
+]) {
+  const exactMedium = runTestCopy(
+    name,
+    `raw@5@always@2@0@8@${sense.length / 2}@${sense}`,
+  );
+  const exactMediumResult = recoveryResult(exactMedium.stderr);
+  if (
+    exactMedium.status !== 0 ||
+    exactMediumResult.badSectorCount !== 1 ||
+    JSON.stringify(badSectorRanges(exactMediumResult, 40)) !==
+      JSON.stringify([{ startLba: 5, sectorCount: 1 }])
+  ) {
+    throw new Error(
+      `libdvdcss ${name} classification check failed: ${exactMedium.stderr}`,
+    );
+  }
+}
+
+const transientExactMedium = runTestCopy(
+  "transient-exact-medium",
+  `raw@5@1@2@0@8@${fixedMediumSense.length / 2}@${fixedMediumSense}`,
+);
+if (
+  transientExactMedium.status !== 0 ||
+  !readFileSync(transientExactMedium.outputPath).equals(content) ||
+  recoveryResult(transientExactMedium.stderr).badSectorCount !== 0 ||
+  JSON.stringify(testReads(transientExactMedium.stderr)) !==
+    JSON.stringify([
+      { lba: 0, blocks: 31 },
+      { lba: 0, blocks: 31 },
+      { lba: 31, blocks: 9 },
+    ])
+) {
+  throw new Error(
+    `libdvdcss transient raw completion check failed: ${transientExactMedium.stderr}`,
+  );
+}
+
+const fixedUnknownSense = "f00005000000050a00000000210000000000";
+const persistentUnknown = runTestCopy(
+  "persistent-unknown",
+  `raw@5@always@2@0@8@${fixedUnknownSense.length / 2}@${fixedUnknownSense}`,
+);
+const persistentUnknownResult = readFailureResult(persistentUnknown.stderr);
+if (
+  persistentUnknown.status !== 3 ||
+  statSync(persistentUnknown.outputPath).size !== 0 ||
+  persistentUnknown.stderr.includes(recoveryResultPrefix) ||
+  JSON.stringify(testReads(persistentUnknown.stderr)) !==
+    JSON.stringify([{ lba: 0, blocks: 31 }]) ||
+  JSON.stringify(persistentUnknownResult) !==
+    JSON.stringify({
+      protocolVersion: 1,
+      classifierVersion: "scsi-read-classifier-v1",
+      category: "unknown",
+      scsiStatus: 2,
+      hostStatus: 0,
+      driverStatus: 8,
+      senseResponseCode: 112,
+      senseKey: 5,
+      asc: 33,
+      ascq: 0,
+      informationLba: 5,
+      requestedLba: 0,
+      requestedBlockCount: 31,
+      retryOrdinal: 0,
+    })
+) {
+  throw new Error(
+    `libdvdcss persistent unknown check failed: ${persistentUnknown.stderr}`,
+  );
+}
+
+const malformedUnknownFixtures = [
+  ["missing", "generic@5@always"],
+  ["empty", "raw@5@always@2@0@8@0@-"],
+  ["truncated", "raw@5@always@2@0@8@7@70000300000000"],
+  ["oversized", "raw@5@always@2@0@8@253@-"],
+  ["inconsistent", "raw@5@always@2@0@8@8@700003000000000a"],
+  ["unsupported", "raw@5@always@2@0@8@1@7f"],
+  [
+    "contradictory",
+    `raw@5@always@0@0@0@${fixedMediumSense.length / 2}@${fixedMediumSense}`,
+  ],
+];
+for (const [name, fault] of malformedUnknownFixtures) {
+  const malformedUnknown = runTestCopy(`unknown-${name}`, fault);
+  const result = readFailureResult(malformedUnknown.stderr);
+  if (
+    malformedUnknown.status !== 3 ||
+    result.category !== "unknown" ||
+    result.classifierVersion !== "scsi-read-classifier-v1" ||
+    result.requestedLba !== 0 ||
+    result.requestedBlockCount !== 31 ||
+    result.retryOrdinal !== 0 ||
+    malformedUnknown.stderr.includes(recoveryResultPrefix) ||
+    testReads(malformedUnknown.stderr).length !== 1
+  ) {
+    throw new Error(
+      `libdvdcss ${name} unknown evidence check failed: ${malformedUnknown.stderr}`,
+    );
+  }
+}
+
 const isolated = runTestCopy("isolated", "5:always");
 const isolatedResult = recoveryResult(isolated.stderr);
 const isolatedContent = readFileSync(isolated.outputPath);
@@ -235,6 +356,34 @@ if (
 ) {
   throw new Error(
     `libdvdcss persistent resume check failed: ${persistentResume.stderr}`,
+  );
+}
+
+const unknownResumePath = prepareOutput(
+  "/tmp/rip-dvd-reader-unknown-resume.img",
+);
+const unknownResumeContent = Buffer.from(contaminatedPersistentResumeContent);
+writeFileSync(unknownResumePath, unknownResumeContent);
+const unknownResume = runTestResume(
+  unknownResumePath,
+  `raw@5@always@2@0@8@${fixedUnknownSense.length / 2}@${fixedUnknownSense}`,
+  isolatedResult.badSectorBitmapHex,
+);
+const unknownResumeResult = readFailureResult(unknownResume.stderr);
+if (
+  unknownResume.status !== 3 ||
+  !readFileSync(unknownResumePath).equals(unknownResumeContent) ||
+  unknownResume.stderr.includes(recoveryResultPrefix) ||
+  JSON.stringify(testReads(unknownResume.stderr)) !==
+    JSON.stringify([{ lba: 5, blocks: 1 }]) ||
+  unknownResumeResult.category !== "unknown" ||
+  unknownResumeResult.informationLba !== 5 ||
+  unknownResumeResult.requestedLba !== 5 ||
+  unknownResumeResult.requestedBlockCount !== 1 ||
+  unknownResumeResult.retryOrdinal !== 0
+) {
+  throw new Error(
+    `libdvdcss unknown resume check failed: ${unknownResume.stderr}`,
   );
 }
 
@@ -414,6 +563,55 @@ if (
 ) {
   throw new Error(
     `libdvdcss cancellation check failed: ${cancellationStderr}`,
+  );
+}
+
+const interruptedReadFailurePath = prepareOutput(
+  "/tmp/rip-dvd-reader-interrupted-read-failure.img",
+);
+const interruptedReadFailure = spawn(
+  testExecutable,
+  [
+    "copy-test",
+    sourcePath,
+    interruptedReadFailurePath,
+    String(content.byteLength),
+    `raw@5@always@2@0@8@${fixedUnknownSense.length / 2}@${fixedUnknownSense}`,
+    "0",
+    "interrupted-read-failure",
+  ],
+  { stdio: ["ignore", "ignore", "pipe"] },
+);
+let interruptedReadFailureStderr = "";
+await new Promise((resolve, reject) => {
+  interruptedReadFailure.stderr.on("data", (chunk) => {
+    interruptedReadFailureStderr += chunk.toString("utf8");
+    if (interruptedReadFailureStderr.includes(readFailureResultPrefix)) {
+      resolve();
+    }
+  });
+  interruptedReadFailure.once("error", reject);
+});
+interruptedReadFailure.kill("SIGTERM");
+const [interruptedStatus, interruptedSignal] = await once(
+  interruptedReadFailure,
+  "close",
+);
+let interruptedResultAccepted = false;
+try {
+  readFailureResult(interruptedReadFailureStderr);
+  interruptedResultAccepted = true;
+} catch {
+  // A partial terminal record must not parse.
+}
+if (
+  interruptedStatus !== null ||
+  interruptedSignal !== "SIGTERM" ||
+  interruptedResultAccepted ||
+  interruptedReadFailureStderr.includes(recoveryResultPrefix)
+) {
+  throw new Error(
+    `libdvdcss interrupted read failure check failed: ${interruptedReadFailureStderr}`,
   );
 }
 
