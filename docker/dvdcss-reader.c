@@ -36,7 +36,6 @@
 
 struct test_fault {
     enum {
-        TEST_FAULT_MEDIUM_ERROR,
         TEST_FAULT_RAW_COMPLETION,
         TEST_FAULT_GENERIC_FAILURE,
     } kind;
@@ -64,7 +63,7 @@ enum test_result_mode {
 
 enum backend_read_status {
     BACKEND_READ_SUCCESS,
-    BACKEND_READ_MEDIA_ERROR,
+    BACKEND_READ_MEDIUM_ERROR,
     BACKEND_READ_UNKNOWN_ERROR,
     BACKEND_READ_END,
     BACKEND_READ_FATAL,
@@ -433,7 +432,7 @@ static enum backend_read_status classify_read_failure(
         !is_recognized_dvd_medium_read_error(sense)) {
         return BACKEND_READ_UNKNOWN_ERROR;
     }
-    return BACKEND_READ_MEDIA_ERROR;
+    return BACKEND_READ_MEDIUM_ERROR;
 }
 
 static void format_optional_u64(char text[32], int present, uint64_t value)
@@ -570,27 +569,6 @@ static struct test_fault *test_fault_for_read(struct read_backend *backend,
     return NULL;
 }
 
-static void create_test_medium_completion(
-    struct rip_dvd_scsi_completion *completion,
-    const struct test_fault *fault)
-{
-    completion->captured = 1;
-    completion->command_completed = 1;
-    completion->descriptor = -1;
-    completion->scsi_status = 0x02;
-    completion->driver_status = 0x08;
-    completion->sense_reported_length = 18;
-    completion->sense_length = 18;
-    completion->sense[0] = 0xf0;
-    completion->sense[2] = 0x03;
-    completion->sense[3] = (uint8_t)(fault->lba >> 24);
-    completion->sense[4] = (uint8_t)(fault->lba >> 16);
-    completion->sense[5] = (uint8_t)(fault->lba >> 8);
-    completion->sense[6] = (uint8_t)fault->lba;
-    completion->sense[7] = 10;
-    completion->sense[12] = 0x11;
-}
-
 static struct transport_read_result test_transport_read(
     struct read_backend *backend, unsigned char *buffer, uint64_t lba,
     int block_count, uint32_t retry_ordinal)
@@ -609,9 +587,7 @@ static struct transport_read_result test_transport_read(
             .requested_block_count = (uint32_t)block_count,
             .retry_ordinal = retry_ordinal,
         };
-        if (fault->kind == TEST_FAULT_MEDIUM_ERROR) {
-            create_test_medium_completion(&completion, fault);
-        } else if (fault->kind == TEST_FAULT_RAW_COMPLETION) {
+        if (fault->kind == TEST_FAULT_RAW_COMPLETION) {
             completion.captured = 1;
             completion.command_completed = 1;
             completion.scsi_status = fault->scsi_status;
@@ -778,7 +754,7 @@ static int recover_range(struct read_backend *backend,
                     "DVD content read ended before the declared media size\n");
             return 1;
         }
-        if (result.status == BACKEND_READ_MEDIA_ERROR) {
+        if (result.status == BACKEND_READ_MEDIUM_ERROR) {
             continue;
         }
         if (result.status == BACKEND_READ_UNKNOWN_ERROR) {
@@ -852,7 +828,7 @@ static int read_disc(struct read_backend *backend, uint64_t size_bytes,
             status = 1;
             break;
         }
-        if (result.status == BACKEND_READ_MEDIA_ERROR) {
+        if (result.status == BACKEND_READ_MEDIUM_ERROR) {
             if (recovery == NULL) {
                 status = fail_dvdcss_read(backend->dvdcss, bytes_processed);
                 break;
@@ -1169,7 +1145,7 @@ static int run_resume(struct read_backend *backend, const char *output_path,
                 status = 1;
                 break;
             }
-            if (result.status == BACKEND_READ_MEDIA_ERROR) {
+            if (result.status == BACKEND_READ_MEDIUM_ERROR) {
                 continue;
             }
             if (result.status == BACKEND_READ_UNKNOWN_ERROR) {
@@ -1402,25 +1378,6 @@ static int parse_exact_test_fault(char *entry, uint64_t total_sector_count,
     return 0;
 }
 
-static int parse_legacy_test_fault(char *entry, uint64_t total_sector_count,
-                                   struct test_fault *fault)
-{
-    char *separator = strchr(entry, ':');
-    if (separator == NULL || strchr(separator + 1, ':') != NULL) {
-        return 1;
-    }
-    *separator = '\0';
-    uint64_t lba = 0;
-    if (parse_test_integer(entry, total_sector_count - 1, &lba) != 0 ||
-        parse_test_remaining_failures(separator + 1,
-                                      &fault->remaining_failures) != 0) {
-        return 1;
-    }
-    fault->kind = TEST_FAULT_MEDIUM_ERROR;
-    fault->lba = lba;
-    return 0;
-}
-
 static int parse_test_faults(char *text, uint64_t total_sector_count,
                              struct read_backend *backend)
 {
@@ -1435,11 +1392,8 @@ static int parse_test_faults(char *text, uint64_t total_sector_count,
             return 1;
         }
         struct test_fault fault = { 0 };
-        int parse_status = strchr(entry, '@') == NULL
-                               ? parse_legacy_test_fault(
-                                     entry, total_sector_count, &fault)
-                               : parse_exact_test_fault(
-                                     entry, total_sector_count, &fault);
+        int parse_status =
+            parse_exact_test_fault(entry, total_sector_count, &fault);
         if (parse_status != 0) {
             fprintf(stderr, "DVD test fault is invalid\n");
             return 1;
