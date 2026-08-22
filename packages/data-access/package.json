@@ -33,6 +33,10 @@
     "./legacy-sidecars": {
       "types": "./src/legacy-sidecars.ts",
       "default": "./dist/legacy-sidecars.js"
+    },
+    "./test-support": {
+      "types": "./src/disc-settling-fixture.ts",
+      "default": "./dist/disc-settling-fixture.js"
     }
   },
   "files": ["dist", "drizzle"],

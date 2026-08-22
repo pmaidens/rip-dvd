@@ -22,6 +22,10 @@ import {
 } from "@rip-dvd/data-access";
 import { createRawDvdContentIdHasher } from "@rip-dvd/data-access/dvd-content-id";
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
+import {
+  beginSettledDiscInspectionForTest,
+  pollDiscSettlingForTest,
+} from "@rip-dvd/data-access/test-support";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -59,30 +63,9 @@ function pollArchiveWorkerOnce(options: PollArchiveWorkerOptions): Promise<void>
 }
 
 async function pollArchiveWorker(options: PollArchiveWorkerOptions): Promise<void> {
-  const alreadyUsingFakeTimers = vi.isFakeTimers();
-  if (!alreadyUsingFakeTimers) {
-    vi.useFakeTimers({ toFake: ["Date"] });
-  }
-  const firstObservationAt = Date.now();
-  try {
-    await pollArchiveWorkerOnce(options);
-    for (const elapsedMs of [2_500, 5_000]) {
-      const isSettling = options.access.discInspections
-        .list({ currentOnly: true })
-        .some((inspection) =>
-          inspection.status === "running" && inspection.phase === "settling"
-        );
-      if (!isSettling) {
-        return;
-      }
-      vi.setSystemTime(new Date(firstObservationAt + elapsedMs));
-      await pollArchiveWorkerOnce(options);
-    }
-  } finally {
-    if (!alreadyUsingFakeTimers) {
-      vi.useRealTimers();
-    }
-  }
+  await pollDiscSettlingForTest(options.access, () =>
+    pollArchiveWorkerOnce(options),
+  );
 }
 
 function runArchiveWorker(options: RunArchiveWorkerOptions): Promise<void> {
@@ -153,19 +136,7 @@ function beginSettledDiscInspection(
     ReturnType<typeof openTestDataAccess>["discInspections"]["beginOrResume"]
   >[0],
 ) {
-  if (!vi.isFakeTimers()) {
-    vi.useFakeTimers({ toFake: ["Date"] });
-  }
-  const firstObservationAt = Date.now();
-  access.discInspections.beginOrResume(input);
-  vi.setSystemTime(new Date(firstObservationAt + 2_500));
-  access.discInspections.beginOrResume(input);
-  vi.setSystemTime(new Date(firstObservationAt + 5_000));
-  const settled = access.discInspections.beginOrResume(input);
-  if (settled.claim === null) {
-    throw new Error("Expected a settled Disc Inspection claim");
-  }
-  return settled;
+  return beginSettledDiscInspectionForTest(access, input);
 }
 
 function beginNearlySettledDiscInspection(
