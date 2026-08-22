@@ -287,6 +287,14 @@ const malformedUnknownFixtures = [
   ["inconsistent", "raw@5@always@2@0@8@8@700003000000000a"],
   ["unsupported", "raw@5@always@2@0@8@1@7f"],
   [
+    "descriptor-reserved-bits",
+    "raw@5@always@2@0@8@20@720311000000000c000a81000000000000000005",
+  ],
+  [
+    "descriptor-reserved-byte",
+    "raw@5@always@2@0@8@20@720311000000000c000a80010000000000000005",
+  ],
+  [
     "contradictory",
     `raw@5@always@0@0@0@${fixedMediumSense.length / 2}@${fixedMediumSense}`,
   ],
@@ -306,6 +314,34 @@ for (const [name, fault] of malformedUnknownFixtures) {
   ) {
     throw new Error(
       `libdvdcss ${name} unknown evidence check failed: ${malformedUnknown.stderr}`,
+    );
+  }
+}
+
+for (const [name, sense] of [
+  ["fixed", fixedMediumSense],
+  ["descriptor", descriptorMediumSense],
+]) {
+  const contradictoryInformation = runTestCopy(
+    `unknown-${name}-information-lba`,
+    `raw@35@always@2@0@8@${sense.length / 2}@${sense}`,
+  );
+  const result = readFailureResult(contradictoryInformation.stderr);
+  if (
+    contradictoryInformation.status !== 3 ||
+    result.category !== "unknown" ||
+    result.informationLba !== null ||
+    result.requestedLba !== 31 ||
+    result.requestedBlockCount !== 9 ||
+    contradictoryInformation.stderr.includes(recoveryResultPrefix) ||
+    JSON.stringify(testReads(contradictoryInformation.stderr)) !==
+      JSON.stringify([
+        { lba: 0, blocks: 31 },
+        { lba: 31, blocks: 9 },
+      ])
+  ) {
+    throw new Error(
+      `libdvdcss contradictory ${name} information check failed: ${contradictoryInformation.stderr}`,
     );
   }
 }
