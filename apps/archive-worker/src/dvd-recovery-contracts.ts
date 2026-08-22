@@ -1,5 +1,7 @@
 import {
+  ARCHIVE_READ_FAILURE_CATEGORIES,
   createCleanReadArchiveIntegrityEvidence,
+  type ArchiveReadFailureCategory,
   type CleanReadArchiveIntegrityEvidence,
   type UnreadableSectorRange,
   type WatchableSalvageArchiveIntegrityEvidence,
@@ -12,10 +14,10 @@ export const DVD_READ_FAILURE_CLASSIFIER_VERSION =
   "scsi-read-classifier-v1";
 export const DVD_READ_FAILURE_RESULT_PREFIX = "rip-dvd-read-failure ";
 
-export interface UnknownDvdReadFailureResult {
+export interface DvdReadFailureResult {
   protocolVersion: 1;
   classifierVersion: typeof DVD_READ_FAILURE_CLASSIFIER_VERSION;
-  category: "unknown";
+  category: ArchiveReadFailureCategory;
   scsiStatus: number | null;
   hostStatus: number | null;
   driverStatus: number | null;
@@ -30,10 +32,15 @@ export interface UnknownDvdReadFailureResult {
 }
 
 export class DvdReadFailureError extends Error {
-  readonly readFailure: UnknownDvdReadFailureResult;
+  readonly readFailure: DvdReadFailureResult;
 
-  constructor(readFailure: UnknownDvdReadFailureResult) {
-    super("DVD read failed with structured unknown evidence");
+  constructor(readFailure: DvdReadFailureResult) {
+    super({
+      unknown: "DVD read failed with structured unknown evidence",
+      not_ready: "DVD read failed because the Optical Drive was not ready",
+      unit_attention:
+        "DVD read failed after an Optical Drive media-state change",
+    }[readFailure.category]);
     this.name = "DvdReadFailureError";
     this.readFailure = readFailure;
   }
@@ -161,7 +168,7 @@ const DVD_READ_FAILURE_PROTOCOL_KEYS = [
 export function parseDvdReadFailureResultProtocol(
   payload: string,
   expectedByteCount: number,
-): UnknownDvdReadFailureResult {
+): DvdReadFailureResult {
   let parsed: unknown;
   try {
     parsed = JSON.parse(payload);
@@ -179,7 +186,9 @@ export function parseDvdReadFailureResultProtocol(
     keys.some((key, index) => key !== DVD_READ_FAILURE_PROTOCOL_KEYS[index]) ||
     candidate.protocolVersion !== 1 ||
     candidate.classifierVersion !== DVD_READ_FAILURE_CLASSIFIER_VERSION ||
-    candidate.category !== "unknown" ||
+    !ARCHIVE_READ_FAILURE_CATEGORIES.includes(
+      candidate.category as ArchiveReadFailureCategory,
+    ) ||
     !isOptionalBoundedInteger(candidate.scsiStatus, 0xff) ||
     !isOptionalBoundedInteger(candidate.hostStatus, 0xffff) ||
     !isOptionalBoundedInteger(candidate.driverStatus, 0xffff) ||
@@ -217,7 +226,24 @@ export function parseDvdReadFailureResultProtocol(
   ) {
     throw new Error("DVD read failure helper result is malformed");
   }
-  return candidate as unknown as UnknownDvdReadFailureResult;
+  const result = candidate as unknown as DvdReadFailureResult;
+  const classifiableSense =
+    result.scsiStatus === 0x02 &&
+    result.hostStatus === 0 &&
+    (result.driverStatus === 0 || result.driverStatus === 0x08) &&
+    (result.senseResponseCode === 0x70 ||
+      result.senseResponseCode === 0x72) &&
+    result.asc !== null;
+  const normalizedCategory: ArchiveReadFailureCategory = classifiableSense &&
+      result.senseKey === 0x02
+    ? "not_ready"
+    : classifiableSense && result.senseKey === 0x06
+      ? "unit_attention"
+      : "unknown";
+  if (result.category !== normalizedCategory) {
+    throw new Error("DVD read failure helper result is malformed");
+  }
+  return result;
 }
 
 function isNormalizedDamagedResult(

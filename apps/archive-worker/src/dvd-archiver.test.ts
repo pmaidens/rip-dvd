@@ -872,6 +872,85 @@ describe("DVD archive publication", () => {
     });
   });
 
+  it.each([
+    {
+      category: "not_ready",
+      message: "DVD read failed because the Optical Drive was not ready",
+      senseResponseCode: 0x70,
+      senseKey: 0x02,
+      asc: 0x04,
+      ascq: 0x01,
+    },
+    {
+      category: "unit_attention",
+      message: "DVD read failed after an Optical Drive media-state change",
+      senseResponseCode: 0x72,
+      senseKey: 0x06,
+      asc: 0x28,
+      ascq: 0x00,
+    },
+  ] as const)(
+    "returns one complete $category read failure from the native reader",
+    async ({ category, message, senseResponseCode, senseKey, asc, ascq }) => {
+      const child = createMockDvdCopyChild();
+      const runner = createNodeDvdCopyRunner({
+        requireInactive: () => undefined,
+        spawnProcess: vi.fn(() => child),
+      });
+      const completion = runner.copy({
+        devicePath: "/dev/zero",
+        outputPath: join(
+          createOriginalsLibrary(),
+          `.${category}.iso.rip-dvd-partial`,
+        ),
+        sizeBytes: 4 * 2_048,
+        signal: new AbortController().signal,
+        onBytesCopied: () => undefined,
+      });
+
+      child.stdio[4].emit(
+        "data",
+        Buffer.from("rip-dvd-copy-authorization-ready\n"),
+      );
+      child.stderr.emit(
+        "data",
+        Buffer.from(
+          `${DVD_READ_FAILURE_RESULT_PREFIX}${JSON.stringify({
+            protocolVersion: 1,
+            classifierVersion: "scsi-read-classifier-v1",
+            category,
+            scsiStatus: 2,
+            hostStatus: 0,
+            driverStatus: 8,
+            senseResponseCode,
+            senseKey,
+            asc,
+            ascq,
+            informationLba: null,
+            requestedLba: 0,
+            requestedBlockCount: 4,
+            retryOrdinal: 0,
+          })}\n`,
+        ),
+      );
+      child.emit("close", 3, null);
+
+      await expect(completion).rejects.toMatchObject({
+        message,
+        readFailure: {
+          category,
+          senseResponseCode,
+          senseKey,
+          asc,
+          ascq,
+          requestedLba: 0,
+          requestedBlockCount: 4,
+          retryOrdinal: 0,
+        },
+      });
+    },
+  );
+
   it("retains an unsupported bounded sense response as unknown evidence", async () => {
     const child = createMockDvdCopyChild();
     const runner = createNodeDvdCopyRunner({
@@ -967,6 +1046,11 @@ describe("DVD archive publication", () => {
     {
       name: "unsupported category",
       mutate: { category: "medium_error" },
+      status: 3,
+    },
+    {
+      name: "category and sense mismatch",
+      mutate: { category: "not_ready" },
       status: 3,
     },
     {

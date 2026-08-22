@@ -1148,7 +1148,8 @@ describe("data-access facade", () => {
           name !== "20260820215821_redundant_jocasta" &&
           name !== "20260822142722_disc-inspection-settling" &&
           name !== "20260822175220_striped_kabuki" &&
-          name !== "20260822183552_bounded-disc-settling",
+          name !== "20260822183552_bounded-disc-settling" &&
+          name !== "20260822185006_burly_northstar",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -8007,6 +8008,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
+        name: "20260822185006_burly_northstar",
+      },
+      {
         name: "20260822183552_bounded-disc-settling",
       },
       {
@@ -8032,9 +8036,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260813194303_corrected-publication-authority",
-      },
-      {
-        name: "20260813174634_retained-corrected-outputs",
       },
     ]);
     expect(
@@ -11094,6 +11095,75 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     ]);
     access.close();
   });
+
+  it.each([
+    {
+      category: "not_ready",
+      errorMessage: "The Optical Drive was not ready to read the disc",
+      senseKey: 0x02,
+      asc: 0x04,
+      ascq: 0x01,
+    },
+    {
+      category: "unit_attention",
+      errorMessage: "The Optical Drive reported a media change",
+      senseKey: 0x06,
+      asc: 0x28,
+      ascq: 0x00,
+    },
+  ] as const)(
+    "persists exact $category evidence and leaves the Archive Request retryable",
+    ({ category, errorMessage, senseKey, asc, ascq }) => {
+      const access = openTestDatabase();
+      const drive = access.catalog.upsertOpticalDrive({
+        devicePath: "/dev/sr0",
+        isEnabled: true,
+        isPresent: true,
+      });
+      const { disc, inspection } = completeDiscInspection(access, {
+        opticalDriveId: drive.id,
+        mediaGeneration: `${category}-generation`,
+        fingerprint: `${category}-disc`,
+      });
+      const request = access.archiveRequests.create({ detectedDiscId: disc.id });
+      const claim = access.archiveJobs.startForInspection(
+        inspection.id,
+        `${category}-worker`,
+      )!;
+
+      expect(access.archiveJobs.failWithReadFailure(claim, {
+        stage: "initial_copy",
+        category,
+        classifierVersion: "scsi-read-classifier-v1",
+        failingLba: 2_048,
+        requestedBlockCount: 31,
+        retryCount: 0,
+        scsiStatus: 2,
+        hostStatus: 0,
+        driverStatus: 8,
+        senseKey,
+        asc,
+        ascq,
+      })).toMatchObject({
+        status: "failed",
+        errorMessage,
+        failureDetailVersion: "archive-failure-detail-v1",
+        readFailureStage: "initial_copy",
+        readFailureCategory: category,
+        readFailureLba: 2_048,
+        readFailureRequestedBlockCount: 31,
+        readFailureRetryCount: 0,
+        readFailureSenseKey: senseKey,
+        readFailureAsc: asc,
+        readFailureAscq: ascq,
+      });
+      expect(access.archiveRequests.list(["needs_attention"])).toEqual([
+        expect.objectContaining({ id: request.id }),
+      ]);
+      expect(access.catalog.listOriginalDiscArchives()).toEqual([]);
+      access.close();
+    },
+  );
 
   it("continues an Archive Request on another matching Optical Drive", () => {
     const access = openTestDatabase();
