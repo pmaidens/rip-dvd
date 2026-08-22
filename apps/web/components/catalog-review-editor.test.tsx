@@ -169,6 +169,99 @@ function renderCatalogReviewEditor(archiveId: string): void {
 }
 
 describe("CatalogReviewEditor", () => {
+  it("accepts an automatic movie proposal and completes review in one request", async () => {
+    const review = catalogReview({
+      archiveId: "archive-a",
+      discLabel: "THE_IRON_GIANT_1999",
+    });
+    review.automaticCataloging = { configured: true };
+    review.mediaItems = [];
+    review.discSelections = [];
+    review.coverage = {
+      discSelectionCount: 0,
+      mediaItemsWithSelections: 0,
+      mappedTitles: 0,
+      partiallyMappedTitles: 0,
+      unmappedTitles: 1,
+      mainFeatureSelections: 0,
+      titles: [{ titleNumber: 1, status: "unmapped", hasOverlap: false }],
+    };
+    const proposal = {
+      kind: "movie" as const,
+      title: "The Iron Giant",
+      year: 1999,
+      tmdbId: 10_350,
+      confidence: "high" as const,
+      explanation: "The label and feature-length title agree.",
+      scannedTitleCount: 1,
+      input: {
+        target: {
+          choice: "create_new" as const,
+          mediaItem: {
+            kind: "movie" as const,
+            title: "The Iron Giant",
+            year: 1999,
+            tmdbIdentity: { mediaType: "movie" as const, tmdbId: 10_350 },
+          },
+        },
+        discSelection: { sourceIdentity: { kind: "main_feature" as const } },
+      },
+    };
+    const commands: unknown[] = [];
+    const onCompleted = vi.fn();
+    vi.stubGlobal("fetch", vi.fn(async (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      if (init?.method === "POST") {
+        commands.push(JSON.parse(String(init.body)) as unknown);
+        return Response.json({ message: "Cataloged and review completed" }, {
+          status: 201,
+        });
+      }
+      if (String(input).endsWith("/suggestion")) {
+        return Response.json({
+          status: "ready",
+          hints: {
+            query: "The Iron Giant",
+            formattedLabel: "The Iron Giant 1999",
+            year: 1999,
+            seasonNumber: null,
+            discNumber: null,
+            discCount: null,
+            likelyKind: "movie",
+          },
+          proposal,
+        });
+      }
+      return Response.json(review);
+    }));
+
+    await act(async () => {
+      root.render(
+        <CatalogReviewEditor
+          archiveId="archive-a"
+          onClose={() => undefined}
+          onCompleted={onCompleted}
+        />,
+      );
+    });
+    await act(async () => await Promise.resolve());
+    const accept = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Use this and continue",
+    );
+    if (!accept) throw new Error("Expected automatic acceptance action");
+    await act(async () => accept.click());
+
+    expect(commands).toEqual([{
+      action: "create_mapping_proposal",
+      catalogRevision: review.catalogRevision,
+      ...proposal.input,
+      completeReview: true,
+    }]);
+    expect(onCompleted).toHaveBeenCalledOnce();
+  });
+
   it("submits only explicitly selected replacement encodes with operator overrides", async () => {
     const review = catalogReview({
       archiveId: "archive-a",

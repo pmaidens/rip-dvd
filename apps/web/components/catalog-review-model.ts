@@ -160,6 +160,9 @@ export type CatalogReviewDiscSelectionActionAvailability =
 
 export interface CatalogReviewDto {
   catalogRevision: string;
+  automaticCataloging?: {
+    configured: boolean;
+  };
   archive: {
     id: string;
     discLabel: string;

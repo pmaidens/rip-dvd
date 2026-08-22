@@ -6,10 +6,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
 import titleSuggestionPolicy from "../../../fixtures/title-suggestion-policy.json";
+import { formatVolumeLabel } from "../lib/catalog-label";
 
 import {
   CatalogReviewEvidence,
-  formatVolumeLabel,
   titleSuggestion,
 } from "./catalog-review-evidence";
 

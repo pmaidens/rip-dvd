@@ -217,6 +217,20 @@ describe("Catalog Review Mapping Proposal layout", () => {
   });
 });
 
+describe("automatic Catalog proposal layout", () => {
+  it("stacks proposal details on mobile and keeps the action keyboard-visible", () => {
+    expect(selectorDeclarations(".catalog-automation-heading")).toMatch(
+      /display:\s*flex/,
+    );
+    expect(selectorDeclarations("button:focus-visible")).toMatch(
+      /outline:\s*3px solid #d2a14b/,
+    );
+    expect(styles.replace(/\s+/g, " ")).toMatch(
+      /@media \(max-width: 47rem\).*\.catalog-automation-summary, \.catalog-automation-episodes \{ grid-template-columns: 1fr;.*\.catalog-automation\.is-ready, \.catalog-automation-heading \{ align-items: stretch; flex-direction: column;/,
+    );
+  });
+});
+
 describe("Catalog Review evidence presentation", () => {
   it("keeps title evidence wrap-safe with keyboard-visible disclosures", () => {
     expect(selectorDeclarations(".catalog-title-evidence")).toMatch(

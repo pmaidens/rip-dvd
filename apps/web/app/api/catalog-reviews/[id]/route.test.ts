@@ -79,6 +79,7 @@ describe("Catalog Review API", () => {
     expect(response.headers.get("Cache-Control")).toBe("no-store");
     await expect(response.json()).resolves.toEqual({
       catalogRevision: archive.updatedAt.toISOString(),
+      automaticCataloging: { configured: false },
       archive: {
         id: archive.id,
         discLabel: "EPISODE_DISC",
@@ -2804,6 +2805,7 @@ describe("Catalog Review API", () => {
         choice: "create_new",
         title: "Route Show",
         year: 2004,
+        tmdbIdentity: { mediaType: "tv_show", tmdbId: 44_001 },
       },
       season: {
         choice: "create_new",
@@ -2815,6 +2817,7 @@ describe("Catalog Review API", () => {
         { titleNumber: 5, title: "Fifth", episodeNumber: 7 },
         { titleNumber: 8, title: "Eighth", episodeNumber: 6 },
       ],
+      completeReview: true,
     };
     const failed = await mutate({
       ...validProposal,
@@ -2833,7 +2836,7 @@ describe("Catalog Review API", () => {
 
     expect(response.status).toBe(201);
     await expect(response.json()).resolves.toMatchObject({
-      message: "Mapping changed; review required",
+      message: "Cataloged and review completed",
       tvShow: { kind: "tv_show", title: "Route Show" },
       season: { kind: "season", seasonNumber: 2 },
       episodes: [
@@ -2861,6 +2864,15 @@ describe("Catalog Review API", () => {
     expect(access.catalog.listDiscSelections({
       originalDiscArchiveId: archive.id,
     })).toHaveLength(3);
+    expect(access.catalog.findMediaItemByTmdbIdentity({
+      mediaType: "tv_show",
+      tmdbId: 44_001,
+    })).toMatchObject({ kind: "tv_show", title: "Route Show" });
+    expect(access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0])
+      .toMatchObject({
+        catalogReviewOutcome: "reviewed_with_selections",
+        catalogReviewedAt: expect.any(Date),
+      });
   });
 
   it("creates and edits nested Media Items, maps episode ranges, and completes review", async () => {
