@@ -1,45 +1,20 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
-import {
-  pollArchiveWorker as pollArchiveWorkerOnce,
-  type OpticalDriveHardware,
-} from "../../archive-worker/src/archive-worker.js";
+import type { OpticalDriveHardware } from "../../archive-worker/src/archive-worker.js";
 
 import type { DashboardSnapshot } from "../lib/dashboard";
 import {
   useDataAccessFixture,
   withSnapshotOverrides,
 } from "../test/data-access-fixture";
+import {
+  pollArchiveWorkerForTest as pollArchiveWorker,
+} from "../test/archive-job-fixture";
 import { createDashboardResponse } from "../app/api/dashboard/route";
 import { DashboardView } from "./operations-dashboard";
 
 const dataAccessFixture = useDataAccessFixture();
-
-async function pollArchiveWorker(
-  options: Parameters<typeof pollArchiveWorkerOnce>[0],
-): Promise<void> {
-  const alreadyUsingFakeTimers = vi.isFakeTimers();
-  if (!alreadyUsingFakeTimers) {
-    vi.useFakeTimers({ toFake: ["Date"] });
-  }
-  const firstObservationAt = Date.now();
-  try {
-    for (const elapsedMs of [0, 2_500, 5_000]) {
-      vi.setSystemTime(new Date(firstObservationAt + elapsedMs));
-      await pollArchiveWorkerOnce(options);
-      if (!options.access.discInspections.list({ currentOnly: true }).some(
-        (inspection) => inspection.phase === "settling",
-      )) {
-        return;
-      }
-    }
-  } finally {
-    if (!alreadyUsingFakeTimers) {
-      vi.useRealTimers();
-    }
-  }
-}
 
 describe("database-backed dashboard over HTTP", () => {
   it("renders persisted discovery and scan results including an already archived match", async () => {

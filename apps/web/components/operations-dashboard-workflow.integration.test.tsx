@@ -15,10 +15,7 @@ import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidec
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import {
-  pollArchiveWorker as pollArchiveWorkerOnce,
-  type OpticalDriveHardware,
-} from "../../archive-worker/src/archive-worker.js";
+import type { OpticalDriveHardware } from "../../archive-worker/src/archive-worker.js";
 import type { DvdCopyRunner } from "../../archive-worker/src/dvd-archiver.js";
 import {
   createCleanDvdRecoveryResult,
@@ -28,12 +25,12 @@ import {
   dvdRescueWorkspacePaths,
 } from "../../archive-worker/src/dvd-rescue-workspace.js";
 import {
-  createInProcessDvdRescueWorkspaceLock,
-} from "../../archive-worker/src/dvd-rescue-workspace-lock.js";
-import {
   pollEncodeWorker,
   type HandBrakeRunner,
 } from "../../encode-worker/src/encode-worker.js";
+import {
+  pollArchiveWorkerForTest as pollArchiveWorker,
+} from "../test/archive-job-fixture";
 import { createArchiveRequestsRoute } from "../app/api/archive-requests/route";
 import { createCatalogReviewRoute } from "../app/api/catalog-reviews/[id]/route";
 import { createMediaItemSearchRoute } from "../app/api/media-items/route";
@@ -64,7 +61,6 @@ const trustedOrigin = "http://localhost:3000";
 const temporaryDirectories: string[] = [];
 const openAccess: DataAccess[] = [];
 const openEventStreams: AbortController[] = [];
-const testRescueWorkspaceLock = createInProcessDvdRescueWorkspaceLock();
 
 afterEach(() => {
   for (const controller of openEventStreams.splice(0)) {
@@ -247,35 +243,6 @@ function createGate(): {
       await waiting;
     },
   };
-}
-
-async function pollArchiveWorker(
-  options: Parameters<typeof pollArchiveWorkerOnce>[0],
-): Promise<void> {
-  const alreadyUsingFakeTimers = vi.isFakeTimers();
-  if (!alreadyUsingFakeTimers) {
-    vi.useFakeTimers({ toFake: ["Date"] });
-  }
-  const firstObservationAt = Date.now();
-  try {
-    for (const elapsedMs of [0, 2_500, 5_000]) {
-      vi.setSystemTime(new Date(firstObservationAt + elapsedMs));
-      await pollArchiveWorkerOnce({
-        ...options,
-        rescueWorkspaceLock:
-          options.rescueWorkspaceLock ?? testRescueWorkspaceLock,
-      });
-      if (!options.access.discInspections.list({ currentOnly: true }).some(
-        (inspection) => inspection.phase === "settling",
-      )) {
-        return;
-      }
-    }
-  } finally {
-    if (!alreadyUsingFakeTimers) {
-      vi.useRealTimers();
-    }
-  }
 }
 
 describe("end-to-end operations dashboard workflow", () => {
