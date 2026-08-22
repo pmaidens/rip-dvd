@@ -2,8 +2,8 @@ import { createCleanReadArchiveIntegrityEvidence } from "@rip-dvd/data-access";
 import type { LegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 import {
   beginSettledDiscInspectionForTest,
-  pollDiscSettlingForTest,
 } from "@rip-dvd/data-access/test-support";
+import { vi } from "vitest";
 
 import {
   pollArchiveWorker,
@@ -18,13 +18,32 @@ const testRescueWorkspaceLock = createInProcessDvdRescueWorkspaceLock();
 export async function pollArchiveWorkerForTest(
   options: PollArchiveWorkerOptions,
 ): Promise<void> {
-  await pollDiscSettlingForTest(options.access, async () => {
+  const alreadyUsingFakeTimers = vi.isFakeTimers();
+  if (!alreadyUsingFakeTimers) {
+    vi.useFakeTimers({ toFake: ["Date"] });
+  }
+  const startedAt = Date.now();
+  let elapsedMs = 0;
+  try {
     await pollArchiveWorker({
       ...options,
       rescueWorkspaceLock:
         options.rescueWorkspaceLock ?? testRescueWorkspaceLock,
+      waitForNextSettlingObservation:
+        options.waitForNextSettlingObservation ??
+        (async (intervalMs, signal) => {
+          signal.throwIfAborted();
+          elapsedMs += intervalMs;
+          vi.setSystemTime(new Date(startedAt + elapsedMs));
+        }),
     });
-  });
+  } finally {
+    if (alreadyUsingFakeTimers) {
+      vi.setSystemTime(new Date(startedAt));
+    } else {
+      vi.useRealTimers();
+    }
+  }
 }
 
 export { beginSettledDiscInspectionForTest };

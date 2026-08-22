@@ -1,10 +1,16 @@
+import { setTimeout as delay } from "node:timers/promises";
+
 import type {
   DataAccess,
   DiscInspection,
   DiscoveredOpticalDrive,
   OpticalDrive,
 } from "@rip-dvd/data-access";
-import { DISC_INSPECTION_LEASE_DURATION_MS } from "@rip-dvd/data-access";
+import {
+  DISC_INSPECTION_LEASE_DURATION_MS,
+  DISC_INSPECTION_SETTLING_OBSERVATION_TARGET,
+  DISC_INSPECTION_SETTLING_QUIET_WINDOW_MS,
+} from "@rip-dvd/data-access";
 
 import type {
   BoundOpticalDrive,
@@ -31,6 +37,21 @@ export interface RunDiscInspectionOptions {
   hardware: OpticalDriveHardware;
   log(message: string): void;
   signal: AbortSignal;
+  waitForNextSettlingObservation?: (
+    intervalMs: number,
+    signal: AbortSignal,
+  ) => Promise<void>;
+}
+
+const DISC_INSPECTION_SETTLING_OBSERVATION_INTERVAL_MS =
+  DISC_INSPECTION_SETTLING_QUIET_WINDOW_MS /
+  (DISC_INSPECTION_SETTLING_OBSERVATION_TARGET - 1);
+
+async function waitForNextSettlingObservation(
+  intervalMs: number,
+  signal: AbortSignal,
+): Promise<void> {
+  await delay(intervalMs, undefined, { signal });
 }
 
 async function classifyFailureAfterMediaObservation({
@@ -112,6 +133,8 @@ export async function runDiscInspection({
   hardware,
   log,
   signal,
+  waitForNextSettlingObservation: waitForSettling =
+    waitForNextSettlingObservation,
 }: RunDiscInspectionOptions): Promise<CompletedDiscInspection | null> {
   let confirmedBeforeScan: Awaited<ReturnType<typeof confirmAuthorizedDrive>>;
   let binding: BoundOpticalDrive;
@@ -184,7 +207,10 @@ export async function runDiscInspection({
     return { binding, inspection, mediaGeneration };
   }
 
-  const claim = startedInspection.claim;
+  let claim = startedInspection.claim;
+  let inspection = startedInspection.inspection;
+  let settledMediaGeneration = inspection.mediaGeneration;
+  let settledMediaCapacityBytes = inspection.mediaCapacityBytes;
   const inspectionController = new AbortController();
   const inspectionSignal = AbortSignal.any([
     signal,
@@ -201,9 +227,48 @@ export async function runDiscInspection({
 
   let totalBytes: number | null = null;
   try {
+    while (inspection.phase === "settling") {
+      await waitForSettling(
+        DISC_INSPECTION_SETTLING_OBSERVATION_INTERVAL_MS,
+        inspectionSignal,
+      );
+      await confirmAuthorizedDrive({
+        access,
+        configuredCanonicalPath,
+        expected: binding.drive,
+        hardware,
+        phase: "DVD scanning",
+        signal: inspectionSignal,
+      });
+      const observation = await hardware.observeMedia(
+        binding,
+        inspectionSignal,
+      );
+      if (observation === null) {
+        access.discInspections.record(claim, {
+          type: "abort",
+          reasonCode: "no_medium",
+        });
+        return null;
+      }
+      const observed = access.discInspections.recordSettlingObservation(
+        claim,
+        {
+          mediaGeneration: observation.mediaGeneration,
+          mediaCapacityBytes: observation.capacityBytes,
+        },
+      );
+      claim = observed.claim;
+      inspection = observed.inspection;
+      settledMediaGeneration = inspection.mediaGeneration;
+      settledMediaCapacityBytes = inspection.mediaCapacityBytes;
+    }
+    if (settledMediaCapacityBytes === null) {
+      throw new Error("Settled Disc Inspection has no declared capacity");
+    }
     const scan = await hardware.scanDvd(binding, inspectionSignal, {
-      expectedMediaCapacityBytes: mediaCapacityBytes,
-      expectedMediaGeneration: mediaGeneration,
+      expectedMediaCapacityBytes: settledMediaCapacityBytes,
+      expectedMediaGeneration: settledMediaGeneration,
       onMetadata(metadata) {
         totalBytes = metadata.totalBytes;
         access.discInspections.record(claim, {
@@ -260,7 +325,7 @@ export async function runDiscInspection({
       binding,
       inspectionSignal,
     );
-    if (observedGeneration !== mediaGeneration) {
+    if (observedGeneration !== settledMediaGeneration) {
       throw new DiscInspectionError(
         "abort",
         "media_changed",
@@ -279,29 +344,44 @@ export async function runDiscInspection({
     if (disc.status === "detected") {
       access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
     }
-    const inspection = access.discInspections.record(claim, {
+    inspection = access.discInspections.record(claim, {
       type: "complete",
       detectedDiscId: disc.id,
     });
-    return { binding, inspection, mediaGeneration };
+    return {
+      binding,
+      inspection,
+      mediaGeneration: settledMediaGeneration,
+    };
   } catch (error) {
     if (signal.aborted) {
       throw error;
     }
-    const classified = await classifyFailureAfterMediaObservation({
-      binding,
-      error,
-      expectedMediaGeneration: mediaGeneration,
-      hardware,
-      signal,
-    });
+    const settlingFailure = classifyDiscInspectionError(error);
+    const settlingEndedByDriveState =
+      inspection.phase === "settling" &&
+      (settlingFailure.reasonCode === "no_medium" ||
+        settlingFailure.reasonCode === "drive_identity_changed" ||
+        settlingFailure.reasonCode === "drive_unavailable");
+    const classified: ClassifiedDiscInspectionError = settlingEndedByDriveState
+      ? {
+          kind: "abort",
+          reasonCode: settlingFailure.reasonCode,
+        }
+      : await classifyFailureAfterMediaObservation({
+          binding,
+          error,
+          expectedMediaGeneration: settledMediaGeneration,
+          hardware,
+          signal,
+        });
     try {
       persistInspectionFailure({
         access,
         claim,
         classified,
         consecutiveFailureCount:
-          startedInspection.inspection.consecutiveFailureCount,
+          inspection.consecutiveFailureCount,
       });
     } catch (persistenceError) {
       const persistenceMessage = persistenceError instanceof Error

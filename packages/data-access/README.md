@@ -252,16 +252,19 @@ distinct count and at most three titles.
 
 `discInspections.beginOrResume()` admits one current insertion per Optical
 Drive. A first valid generation and DVD-sector-aligned capacity observation
-starts it in `settling`; three matching observations spanning at least five
-seconds persist on that same inspection before one atomic transition to
-`reading_metadata` grants a renewable claim. Generation evidence remains
-provisional during settling. Generation or capacity churn restarts the quiet
-window and stable-observation count on the same inspection and attempt without
-recording aborted history. The generation becomes the immutable media fence at
-the transition to `reading_metadata`. Historical inspections retain their
-lifecycle state with no invented settling evidence. Drive identity and the
-settled media generation fence replacement, while the claim token fences stale
-worker callbacks.
+starts it in `settling` with a renewable claim. Only that claim may record the
+next readiness observation, so concurrent workers cannot advance the quiet
+window or start metadata twice. Three matching observations spanning at least
+five seconds move the same claim atomically to `reading_metadata`. Generation
+evidence remains provisional during settling. Generation or capacity churn
+restarts the quiet window and stable-observation count on the same inspection
+and attempt without recording aborted history. Recovering an expired settling
+claim records the predecessor attempt as interrupted, issues one successor
+claim on the same inspection, and starts the full quiet-window proof again.
+The generation becomes the immutable media fence at the transition to
+`reading_metadata`. Historical inspections retain their lifecycle state with
+no invented settling evidence. Drive identity and the settled media generation
+fence replacement, while the claim token fences stale worker callbacks.
 Structured metadata, hash bytes, rate/ETA, attempt history, retry deadlines,
 reason codes, and bounded diagnostics are persisted without display strings.
 The fifth consecutive transient failure is terminal. `requestRetry()` persists
