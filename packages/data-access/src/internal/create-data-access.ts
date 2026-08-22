@@ -181,6 +181,7 @@ import {
   DISC_INSPECTION_LEASE_DURATION_MS,
   DISC_INSPECTION_SETTLING_OBSERVATION_TARGET,
   DISC_INSPECTION_SETTLING_QUIET_WINDOW_MS,
+  DISC_INSPECTION_SETTLING_TIMEOUT_MS,
   DVD_LOGICAL_SECTOR_BYTES,
   ENCODE_JOB_LEASE_DURATION_MS,
 } from "../types.js";
@@ -6154,6 +6155,16 @@ export function createDataAccessInternal(
             .get();
           if (!current) {
             throw new StaleJobAttemptError("disc inspection", claim.id);
+          }
+          if (
+            current.settlingStartedAt === null ||
+            timestamp.getTime() >=
+              current.settlingStartedAt.getTime() +
+                DISC_INSPECTION_SETTLING_TIMEOUT_MS
+          ) {
+            throw new DomainInvariantError(
+              "Disc Inspection settling deadline has expired",
+            );
           }
 
           const matchingValidEvidence =
