@@ -95,6 +95,7 @@ export const ARCHIVE_JOB_LEASE_DURATION_MS = 60_000;
 export const DISC_INSPECTION_LEASE_DURATION_MS = 60_000;
 export const DISC_INSPECTION_SETTLING_OBSERVATION_TARGET = 3;
 export const DISC_INSPECTION_SETTLING_QUIET_WINDOW_MS = 5_000;
+export const DISC_INSPECTION_SETTLING_TIMEOUT_MS = 30_000;
 export const DVD_LOGICAL_SECTOR_BYTES = 2_048;
 export const ENCODE_JOB_LEASE_DURATION_MS = 60_000;
 
@@ -1017,13 +1018,13 @@ export interface DiscInspectionAccess {
   beginOrResume(input: {
     opticalDriveId: OpticalDriveId;
     mediaGeneration: string;
-    mediaCapacityBytes: number;
+    mediaCapacityBytes: number | null;
   }): DiscInspectionStart;
   recordSettlingObservation(
     claim: DiscInspectionClaim,
     input: {
       mediaGeneration: string;
-      mediaCapacityBytes: number;
+      mediaCapacityBytes: number | null;
     },
   ): ClaimedDiscInspectionStart;
   renew(claim: DiscInspectionClaim): DiscInspection;
@@ -1033,6 +1034,7 @@ export interface DiscInspectionAccess {
     opticalDriveId: OpticalDriveId;
     mediaGeneration?: string;
     reasonCode?: DiscInspectionReasonCode;
+    discardUnprovenInspectionId?: DiscInspectionId;
   }): DiscInspection | null;
   list(options?: {
     currentOnly?: boolean;

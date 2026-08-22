@@ -1147,6 +1147,7 @@ describe("data-access facade", () => {
           name !== "20260812151540_disc-inspection-archive-requests" &&
           name !== "20260820215821_redundant_jocasta" &&
           name !== "20260822142722_disc-inspection-settling" &&
+          name !== "20260822174107_unready-disc-settling" &&
           name !== "20260822175220_striped_kabuki",
       )
       .sort();
@@ -8009,6 +8010,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         name: "20260822175220_striped_kabuki",
       },
       {
+        name: "20260822174107_unready-disc-settling",
+      },
+      {
         name: "20260822142722_disc-inspection-settling",
       },
       {
@@ -8031,9 +8035,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260813174634_retained-corrected-outputs",
-      },
-      {
-        name: "20260813142411_corrected-encode-replacements",
       },
     ]);
     expect(
@@ -10364,6 +10365,98 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         stableObservationCount: 3,
       },
       claim: { id: first.inspection.id },
+    });
+    access.close();
+  });
+
+  it("requires three fresh matching valid observations after invalid evidence", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-11T00:10:00.000Z"));
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/sr0",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const started = access.discInspections.beginOrResume({
+      opticalDriveId: drive.id,
+      mediaGeneration: "unready-101",
+      mediaCapacityBytes: null,
+    });
+    expect(started).toMatchObject({
+      inspection: {
+        phase: "settling",
+        mediaCapacityBytes: null,
+        stableObservationCount: 0,
+        settlingQuietWindowStartedAt: null,
+        settlingStartedAt: new Date("2026-08-11T00:10:00.000Z"),
+      },
+      claim: { id: started.inspection.id },
+    });
+
+    vi.advanceTimersByTime(2_500);
+    expect(
+      access.discInspections.recordSettlingObservation(started.claim!, {
+        mediaGeneration: "unready-101",
+        mediaCapacityBytes: 2_048,
+      }),
+    ).toMatchObject({
+      inspection: {
+        phase: "settling",
+        stableObservationCount: 1,
+      },
+    });
+    vi.advanceTimersByTime(2_500);
+    expect(
+      access.discInspections.recordSettlingObservation(started.claim!, {
+        mediaGeneration: "unready-101",
+        mediaCapacityBytes: 2_048,
+      }),
+    ).toMatchObject({
+      inspection: {
+        phase: "settling",
+        stableObservationCount: 2,
+      },
+    });
+
+    vi.advanceTimersByTime(1_000);
+    expect(
+      access.discInspections.recordSettlingObservation(started.claim!, {
+        mediaGeneration: "unready-101",
+        mediaCapacityBytes: null,
+      }),
+    ).toMatchObject({
+      inspection: {
+        phase: "settling",
+        mediaCapacityBytes: null,
+        stableObservationCount: 0,
+        settlingQuietWindowStartedAt: null,
+        settlingResetCount: 1,
+      },
+    });
+
+    vi.advanceTimersByTime(2_500);
+    access.discInspections.recordSettlingObservation(started.claim!, {
+      mediaGeneration: "unready-101",
+      mediaCapacityBytes: 2_048,
+    });
+    vi.advanceTimersByTime(2_500);
+    access.discInspections.recordSettlingObservation(started.claim!, {
+      mediaGeneration: "unready-101",
+      mediaCapacityBytes: 2_048,
+    });
+    vi.advanceTimersByTime(2_500);
+    expect(
+      access.discInspections.recordSettlingObservation(started.claim!, {
+        mediaGeneration: "unready-101",
+        mediaCapacityBytes: 2_048,
+      }),
+    ).toMatchObject({
+      inspection: {
+        phase: "reading_metadata",
+        stableObservationCount: 3,
+        settlingResetCount: 1,
+      },
     });
     access.close();
   });

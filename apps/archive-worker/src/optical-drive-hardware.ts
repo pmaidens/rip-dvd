@@ -4,10 +4,7 @@ import { DVD_LOGICAL_SECTOR_BYTES } from "@rip-dvd/data-access";
 
 import type { OpticalDriveHardware } from "./archive-worker.js";
 import { DiscInspectionError } from "./disc-inspection-error.js";
-import {
-  MAX_DVD_CONTENT_BYTES,
-  requireDvdContentSize,
-} from "./dvd-content-policy.js";
+import { requireDvdContentSize } from "./dvd-content-policy.js";
 import {
   commandFailure,
   MAX_OPTICAL_DRIVE_COMMAND_OUTPUT_BYTES,
@@ -118,7 +115,7 @@ export function createLinuxOpticalDriveHardware({
       return scanner.scan(binding, signal, options);
     },
 
-    async observeMedia(binding, signal) {
+    async observeMedia(binding, signal, options) {
       const safeDevicePath = await identity.requireCurrent(
         binding,
         "before DVD settling",
@@ -129,6 +126,7 @@ export function createLinuxOpticalDriveHardware({
         signal,
       );
       scanCache.observe(safeDevicePath, mediaGeneration);
+      options?.onMediaGeneration(mediaGeneration);
       const capacityResult = await runner.run(
         "blockdev",
         ["--getsize64", safeDevicePath],
@@ -149,28 +147,21 @@ export function createLinuxOpticalDriveHardware({
             "Optical Drive is unavailable during settling",
           );
         }
-        const failure = commandFailure("blockdev", capacityResult);
-        throw new DiscInspectionError(
-          "retry",
-          "drive_not_ready",
-          failure.message,
-          { cause: failure },
-        );
+        return { mediaGeneration, capacityBytes: null };
+      }
+      const serializedCapacity = capacityResult.stdout.trim();
+      if (!/^\d+$/.test(serializedCapacity)) {
+        return { mediaGeneration, capacityBytes: null };
       }
       try {
         return {
           mediaGeneration,
           capacityBytes: requireSettlingMediaCapacity(
-            Number(capacityResult.stdout.trim()),
+            Number(serializedCapacity),
           ),
         };
-      } catch (error) {
-        throw new DiscInspectionError(
-          "retry",
-          "drive_not_ready",
-          `Optical Drive reported an invalid DVD capacity (maximum ${MAX_DVD_CONTENT_BYTES} bytes)`,
-          { cause: error },
-        );
+      } catch {
+        return { mediaGeneration, capacityBytes: null };
       }
     },
 
