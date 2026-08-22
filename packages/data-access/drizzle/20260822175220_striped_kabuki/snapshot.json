@@ -1,9 +1,10 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "65431d5b-f818-4968-b67f-cd6a0a5d0e5b",
+  "id": "da414cbb-70ed-4f16-8401-1370def7ec2c",
   "prevIds": [
-    "7cc66731-5829-40a8-8e1f-d0740ae8c05f"
+    "acdea439-5542-4da1-8b9c-5c495680d37e",
+    "f60c8ff6-a1ff-4acb-b66e-6f0b1d0a26b2"
   ],
   "ddl": [
     {
@@ -48,6 +49,10 @@
     },
     {
       "name": "legacy_cutover_staged_sidecars",
+      "entityType": "tables"
+    },
+    {
+      "name": "media_item_tmdb_identities",
       "entityType": "tables"
     },
     {
@@ -1646,6 +1651,46 @@
       "autoincrement": false,
       "default": null,
       "generated": null,
+      "name": "media_item_id",
+      "entityType": "columns",
+      "table": "media_item_tmdb_identities"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "media_type",
+      "entityType": "columns",
+      "table": "media_item_tmdb_identities"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "tmdb_id",
+      "entityType": "columns",
+      "table": "media_item_tmdb_identities"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "table": "media_item_tmdb_identities"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
       "name": "id",
       "entityType": "columns",
       "table": "media_items"
@@ -2422,6 +2467,21 @@
     },
     {
       "columns": [
+        "media_item_id"
+      ],
+      "tableTo": "media_items",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_media_item_tmdb_identities_media_item_id_media_items_id_fk",
+      "entityType": "fks",
+      "table": "media_item_tmdb_identities"
+    },
+    {
+      "columns": [
         "parent_id"
       ],
       "tableTo": "media_items",
@@ -2593,6 +2653,15 @@
       "nameExplicit": false,
       "name": "encoding_profiles_pk",
       "table": "encoding_profiles",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "media_item_id"
+      ],
+      "nameExplicit": false,
+      "name": "media_item_tmdb_identities_pk",
+      "table": "media_item_tmdb_identities",
       "entityType": "pks"
     },
     {
@@ -2989,6 +3058,24 @@
       "name": "legacy_cutover_staged_sidecars_library_idx",
       "entityType": "indexes",
       "table": "legacy_cutover_staged_sidecars"
+    },
+    {
+      "columns": [
+        {
+          "value": "media_type",
+          "isExpression": false
+        },
+        {
+          "value": "tmdb_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "media_item_tmdb_identities_identity_unique",
+      "entityType": "indexes",
+      "table": "media_item_tmdb_identities"
     },
     {
       "columns": [
@@ -3445,6 +3532,24 @@
       "name": "encoding_profiles_version_check",
       "entityType": "checks",
       "table": "encoding_profiles"
+    },
+    {
+      "value": "\"media_item_id\" is not null",
+      "name": "media_item_tmdb_identities_id_not_null",
+      "entityType": "checks",
+      "table": "media_item_tmdb_identities"
+    },
+    {
+      "value": "\"media_type\" in ('movie', 'tv_show')",
+      "name": "media_item_tmdb_identities_type_check",
+      "entityType": "checks",
+      "table": "media_item_tmdb_identities"
+    },
+    {
+      "value": "typeof(\"tmdb_id\") = 'integer' and \"tmdb_id\" > 0",
+      "name": "media_item_tmdb_identities_id_check",
+      "entityType": "checks",
+      "table": "media_item_tmdb_identities"
     },
     {
       "value": "\"id\" is not null",

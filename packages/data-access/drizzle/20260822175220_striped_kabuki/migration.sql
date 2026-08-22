@@ -1,3 +1,4 @@
+ALTER TABLE `archive_jobs` ADD `failure_detail_version` text;--> statement-breakpoint
 ALTER TABLE `archive_jobs` ADD `read_failure_stage` text;--> statement-breakpoint
 ALTER TABLE `archive_jobs` ADD `read_failure_category` text;--> statement-breakpoint
 ALTER TABLE `archive_jobs` ADD `read_failure_classifier_version` text;--> statement-breakpoint
@@ -10,7 +11,6 @@ ALTER TABLE `archive_jobs` ADD `read_failure_driver_status` integer;--> statemen
 ALTER TABLE `archive_jobs` ADD `read_failure_sense_key` integer;--> statement-breakpoint
 ALTER TABLE `archive_jobs` ADD `read_failure_asc` integer;--> statement-breakpoint
 ALTER TABLE `archive_jobs` ADD `read_failure_ascq` integer;--> statement-breakpoint
-ALTER TABLE `archive_jobs` ADD `failure_detail_version` text;--> statement-breakpoint
 PRAGMA foreign_keys=OFF;--> statement-breakpoint
 CREATE TABLE `__new_archive_jobs` (
 	`id` text PRIMARY KEY,

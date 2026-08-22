@@ -1051,11 +1051,13 @@ describe("archive worker polling", () => {
   it("does not persist read evidence after the Archive Job claim expires", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-08-22T12:00:00.000Z"));
+    let claimExpiredAt: Date | undefined;
     const scenario = await exerciseUnknownReadFence({
       beforeFailure() {
-        vi.setSystemTime(
-          new Date(Date.now() + ARCHIVE_JOB_LEASE_DURATION_MS + 1),
+        claimExpiredAt = new Date(
+          Date.now() + ARCHIVE_JOB_LEASE_DURATION_MS + 1,
         );
+        vi.setSystemTime(claimExpiredAt);
       },
     });
 
@@ -1066,6 +1068,7 @@ describe("archive worker polling", () => {
         readFailureClassifierVersion: null,
       }),
     ]);
+    vi.setSystemTime(claimExpiredAt!);
     expect(scenario.access.archiveJobs.recoverExpiredClaims()).toEqual([
       expect.objectContaining({
         errorMessage: "Archive worker lease expired",
