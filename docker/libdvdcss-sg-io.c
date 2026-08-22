@@ -133,13 +133,12 @@ static int open_sg_device(int block_descriptor)
 
 static void capture_read_completion(int block_descriptor,
                                     const sg_io_hdr_t *io,
-                                    const uint8_t *sense,
-                                    int command_completed)
+                                    const uint8_t *sense)
 {
     struct rip_dvd_scsi_completion *completion =
         &current_read_scope.completion;
     completion->captured = 1;
-    completion->command_completed = command_completed;
+    completion->command_completed = 1;
     completion->descriptor = block_descriptor;
     completion->scsi_status = io->status;
     completion->host_status = io->host_status;
@@ -207,7 +206,9 @@ ssize_t dvdcss_linux_read(int descriptor, void *buffer, size_t length)
     int result = ioctl(sg_descriptor, SG_IO, &io);
     int saved_errno = errno;
     close(sg_descriptor);
-    capture_read_completion(descriptor, &io, sense, result == 0);
+    if (result == 0) {
+        capture_read_completion(descriptor, &io, sense);
+    }
     if (result < 0 || (io.info & SG_INFO_OK_MASK) != SG_INFO_OK ||
         io.resid < 0 || (uint32_t)io.resid > io.dxfer_len) {
         errno = result < 0 ? saved_errno : EIO;

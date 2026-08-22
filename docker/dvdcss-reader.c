@@ -315,14 +315,6 @@ static struct decoded_sense decode_sense(
             decoded.has_sense_key = 1;
             decoded.sense_key = sense[2] & 0x0f;
         }
-        if (length >= 13) {
-            decoded.has_asc = 1;
-            decoded.asc = sense[12];
-        }
-        if (length >= 14) {
-            decoded.has_ascq = 1;
-            decoded.ascq = sense[13];
-        }
         if (length < 8) {
             return decoded;
         }
@@ -331,6 +323,10 @@ static struct decoded_sense decode_sense(
             (sense[2] & 0xe0) != 0) {
             return decoded;
         }
+        decoded.has_asc = 1;
+        decoded.asc = sense[12];
+        decoded.has_ascq = 1;
+        decoded.ascq = sense[13];
         if ((sense[0] & 0x80) != 0) {
             uint64_t information_lba = read_big_endian_u32(sense + 3);
             if (!information_lba_matches_request(
@@ -356,7 +352,8 @@ static struct decoded_sense decode_sense(
     decoded.has_ascq = 1;
     decoded.ascq = sense[3];
     size_t declared_length = 8U + sense[7];
-    if (declared_length > length || (sense[1] & 0xf0) != 0) {
+    if (declared_length > length || (sense[1] & 0xf0) != 0 ||
+        sense[4] != 0 || sense[5] != 0 || sense[6] != 0) {
         return decoded;
     }
     int information_descriptor_seen = 0;

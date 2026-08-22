@@ -285,9 +285,25 @@ const malformedUnknownFixtures = [
   ["truncated", "raw@5@always@2@0@8@7@70000300000000"],
   ["oversized", "raw@5@always@2@0@8@253@-"],
   ["inconsistent", "raw@5@always@2@0@8@8@700003000000000a"],
+  [
+    "fixed-declared-length-excludes-asc",
+    "raw@5@always@2@0@8@14@f000030000000504000000001100",
+  ],
   ["unsupported", "raw@5@always@2@0@8@1@7f"],
   [
-    "descriptor-reserved-bits",
+    "descriptor-header-reserved-byte-4",
+    "raw@5@always@2@0@8@20@720311000100000c000a80000000000000000005",
+  ],
+  [
+    "descriptor-header-reserved-byte-5",
+    "raw@5@always@2@0@8@20@720311000001000c000a80000000000000000005",
+  ],
+  [
+    "descriptor-header-reserved-byte-6",
+    "raw@5@always@2@0@8@20@720311000000010c000a80000000000000000005",
+  ],
+  [
+    "descriptor-information-reserved-bits",
     "raw@5@always@2@0@8@20@720311000000000c000a81000000000000000005",
   ],
   [
@@ -309,6 +325,12 @@ for (const [name, fault] of malformedUnknownFixtures) {
     result.requestedLba !== 0 ||
     result.requestedBlockCount !== 31 ||
     result.retryOrdinal !== 0 ||
+    (name === "missing" &&
+      (result.scsiStatus !== null ||
+        result.hostStatus !== null ||
+        result.driverStatus !== null)) ||
+    (name === "fixed-declared-length-excludes-asc" &&
+      (result.asc !== null || result.ascq !== null)) ||
     malformedUnknown.stderr.includes(recoveryResultPrefix) ||
     testReads(malformedUnknown.stderr).length !== 1
   ) {
