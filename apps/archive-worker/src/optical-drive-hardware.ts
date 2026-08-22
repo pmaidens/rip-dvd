@@ -126,6 +126,7 @@ export function createLinuxOpticalDriveHardware({
         safeDevicePath,
         signal,
       );
+      scanCache.observe(safeDevicePath, mediaGeneration);
       const capacityResult = await runner.run(
         "blockdev",
         ["--getsize64", safeDevicePath],
@@ -167,7 +168,12 @@ export function createLinuxOpticalDriveHardware({
         "before DVD scanning",
         signal,
       );
-      return mediaGenerationObserver.observe(safeDevicePath, signal);
+      const mediaGeneration = await mediaGenerationObserver.observe(
+        safeDevicePath,
+        signal,
+      );
+      scanCache.observe(safeDevicePath, mediaGeneration);
+      return mediaGeneration;
     },
 
     async confirmOpticalDrive(binding, signal) {

@@ -193,6 +193,7 @@ const JOB_RECOVERY_LIMIT = 100;
 const RELATED_ACTIVITY_ROOT_LIMIT = 256;
 const LEGACY_ARCHIVE_RECONCILIATION_LIMIT = 4;
 const LEGACY_ARCHIVE_RECONCILIATION_BYTES = 9_000_000_000;
+const MAX_DISC_INSPECTION_SETTLING_RESET_COUNT = 10_000;
 const DISC_SELECTION_REVIEW_BATCH_SIZE = 100;
 const DISC_SELECTION_ACTION_AVAILABILITY_LIMIT = 100;
 const DISC_SELECTION_SUPERSESSION_LIMIT = 100;
@@ -5349,6 +5350,60 @@ export function createDataAccessInternal(
               ),
             )
             .get();
+          if (
+            current?.status === "running" &&
+            current.phase === "settling" &&
+            (current.mediaGeneration !== mediaGeneration ||
+              current.mediaCapacityBytes !== mediaCapacityBytes)
+          ) {
+            const reset = transaction
+              .update(discInspections)
+              .set({
+                mediaGeneration,
+                mediaCapacityBytes,
+                stableObservationCount: 1,
+                settlingQuietWindowStartedAt: timestamp,
+                settlingResetCount: Math.min(
+                  MAX_DISC_INSPECTION_SETTLING_RESET_COUNT,
+                  (current.settlingResetCount ?? 0) + 1,
+                ),
+                updatedAt: timestamp,
+              })
+              .where(
+                and(
+                  eq(discInspections.id, current.id),
+                  eq(discInspections.opticalDriveId, input.opticalDriveId),
+                  eq(discInspections.mediaGeneration, current.mediaGeneration),
+                  current.mediaCapacityBytes === null
+                    ? isNull(discInspections.mediaCapacityBytes)
+                    : eq(
+                        discInspections.mediaCapacityBytes,
+                        current.mediaCapacityBytes,
+                      ),
+                  eq(discInspections.status, "running"),
+                  eq(discInspections.phase, "settling"),
+                  eq(discInspections.isCurrent, true),
+                  isNull(discInspections.detectedDiscId),
+                  isNull(discInspections.volumeLabel),
+                  isNull(discInspections.titleCount),
+                  isNull(discInspections.chapterCount),
+                  isNull(discInspections.audioStreamCount),
+                  isNull(discInspections.subtitleStreamCount),
+                  isNull(discInspections.totalBytes),
+                  isNull(discInspections.bytesHashed),
+                  isNull(discInspections.bytesPerSecond),
+                  isNull(discInspections.etaSeconds),
+                  isNull(discInspections.claimToken),
+                  isNull(discInspections.claimUpdatedAt),
+                ),
+              )
+              .returning()
+              .get();
+            if (reset) {
+              inspectionProgress.delete(reset.id);
+              return { inspection: reset, claim: null };
+            }
+          }
           if (current && current.mediaGeneration !== mediaGeneration) {
             if (current.status === "running") {
               transaction
