@@ -5,6 +5,8 @@
 #include <dvdcss/dvdcss.h>
 #include <openssl/evp.h>
 
+#include "libdvdcss-sg-io.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -24,13 +26,28 @@
 #define PROGRESS_INTERVAL_NS INT64_C(1000000000)
 #define RECOVERY_POLICY_VERSION "dvd-recovery-v1"
 #define RECOVERY_RESULT_PREFIX "rip-dvd-recovery-result "
+#define READ_FAILURE_CLASSIFIER_VERSION "scsi-read-classifier-v1"
+#define READ_FAILURE_RESULT_PREFIX "rip-dvd-read-failure "
+#define READ_FAILURE_EXIT_STATUS 3
+#define SUPPORTED_FIXED_SENSE_LENGTH 18U
 
 #ifdef RIP_DVD_READER_TESTING
 #define MAX_TEST_FAULTS 64
 
 struct test_fault {
+    enum {
+        TEST_FAULT_MEDIUM_ERROR,
+        TEST_FAULT_RAW_COMPLETION,
+        TEST_FAULT_GENERIC_FAILURE,
+    } kind;
     uint64_t lba;
     int remaining_failures;
+    uint8_t scsi_status;
+    uint16_t host_status;
+    uint16_t driver_status;
+    size_t sense_reported_length;
+    size_t sense_length;
+    uint8_t sense[RIP_DVD_SCSI_MAX_SENSE_BYTES];
 };
 #endif
 
@@ -39,16 +56,56 @@ enum operation {
     OPERATION_COPY,
 };
 
+enum test_result_mode {
+    TEST_RESULT_VALID,
+    TEST_RESULT_MALFORMED_RECOVERY,
+    TEST_RESULT_INTERRUPTED_READ_FAILURE,
+};
+
 enum backend_read_status {
     BACKEND_READ_SUCCESS,
     BACKEND_READ_MEDIA_ERROR,
+    BACKEND_READ_UNKNOWN_ERROR,
     BACKEND_READ_END,
     BACKEND_READ_FATAL,
+};
+
+struct decoded_sense {
+    int well_formed;
+    int has_response_code;
+    uint8_t response_code;
+    int has_sense_key;
+    uint8_t sense_key;
+    int has_asc;
+    uint8_t asc;
+    int has_ascq;
+    uint8_t ascq;
+    int has_information_lba;
+    uint64_t information_lba;
+};
+
+struct read_failure {
+    struct rip_dvd_scsi_completion completion;
+    struct decoded_sense sense;
 };
 
 struct backend_read_result {
     enum backend_read_status status;
     int blocks_read;
+    struct read_failure failure;
+};
+
+enum transport_read_status {
+    TRANSPORT_READ_SUCCESS,
+    TRANSPORT_READ_FAILURE,
+    TRANSPORT_READ_END,
+    TRANSPORT_READ_FATAL,
+};
+
+struct transport_read_result {
+    enum transport_read_status status;
+    int blocks_read;
+    struct rip_dvd_scsi_completion completion;
 };
 
 struct read_backend {
@@ -76,6 +133,7 @@ struct recovery_state {
     uint64_t bad_sector_count;
     uint64_t bad_area_count;
     int emit_malformed_result;
+    int interrupt_read_failure_result;
 };
 
 static int fail_errno(const char *operation);
@@ -212,6 +270,270 @@ static int consume(struct operation_state *state, const unsigned char *buffer,
     return 0;
 }
 
+static uint64_t read_big_endian_u64(const uint8_t bytes[8])
+{
+    uint64_t value = 0;
+    for (size_t index = 0; index < 8; index++) {
+        value = (value << 8) | bytes[index];
+    }
+    return value;
+}
+
+static uint32_t read_big_endian_u32(const uint8_t bytes[4])
+{
+    uint32_t value = 0;
+    for (size_t index = 0; index < 4; index++) {
+        value = (value << 8) | bytes[index];
+    }
+    return value;
+}
+
+static int bytes_are_zero(const uint8_t *bytes, size_t length)
+{
+    for (size_t index = 0; index < length; index++) {
+        if (bytes[index] != 0) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static int information_lba_matches_request(
+    const struct rip_dvd_scsi_completion *completion,
+    uint64_t information_lba)
+{
+    return information_lba >= completion->requested_lba &&
+        information_lba - completion->requested_lba <
+            completion->requested_block_count;
+}
+
+static struct decoded_sense decode_sense(
+    const struct rip_dvd_scsi_completion *completion)
+{
+    struct decoded_sense decoded = { 0 };
+    if (!completion->captured ||
+        completion->sense_reported_length > RIP_DVD_SCSI_MAX_SENSE_BYTES ||
+        completion->sense_reported_length != completion->sense_length ||
+        completion->sense_length == 0) {
+        return decoded;
+    }
+    const uint8_t *sense = completion->sense;
+    size_t length = completion->sense_length;
+    decoded.has_response_code = 1;
+    decoded.response_code = sense[0] & 0x7f;
+    if (decoded.response_code == 0x70 || decoded.response_code == 0x71) {
+        if (length >= 3) {
+            decoded.has_sense_key = 1;
+            decoded.sense_key = sense[2] & 0x0f;
+        }
+        if (length < 8) {
+            return decoded;
+        }
+        size_t declared_length = 8U + sense[7];
+        if (length != SUPPORTED_FIXED_SENSE_LENGTH ||
+            declared_length != length || sense[1] != 0 ||
+            (sense[2] & 0xf0) != 0 ||
+            !bytes_are_zero(sense + 8, 4) || sense[14] != 0 ||
+            !bytes_are_zero(sense + 15, 3)) {
+            return decoded;
+        }
+        decoded.has_asc = 1;
+        decoded.asc = sense[12];
+        decoded.has_ascq = 1;
+        decoded.ascq = sense[13];
+        if ((sense[0] & 0x80) != 0) {
+            uint64_t information_lba = read_big_endian_u32(sense + 3);
+            if (!information_lba_matches_request(
+                    completion, information_lba)) {
+                return decoded;
+            }
+            decoded.has_information_lba = 1;
+            decoded.information_lba = information_lba;
+        } else if (!bytes_are_zero(sense + 3, 4)) {
+            return decoded;
+        }
+        decoded.well_formed = 1;
+        return decoded;
+    }
+    if (sense[0] != 0x72 && sense[0] != 0x73) {
+        return decoded;
+    }
+    if (length < 8) {
+        return decoded;
+    }
+    decoded.has_sense_key = 1;
+    decoded.sense_key = sense[1] & 0x0f;
+    decoded.has_asc = 1;
+    decoded.asc = sense[2];
+    decoded.has_ascq = 1;
+    decoded.ascq = sense[3];
+    size_t declared_length = 8U + sense[7];
+    if (declared_length != length || (sense[1] & 0xf0) != 0 ||
+        sense[4] != 0 || sense[5] != 0 || sense[6] != 0) {
+        return decoded;
+    }
+    int information_descriptor_seen = 0;
+    for (size_t offset = 8; offset < declared_length;) {
+        if (declared_length - offset < 2) {
+            return decoded;
+        }
+        size_t descriptor_length = 2U + sense[offset + 1];
+        if (descriptor_length > declared_length - offset) {
+            return decoded;
+        }
+        if (sense[offset] != 0x00 || sense[offset + 1] != 0x0a ||
+            information_descriptor_seen) {
+            return decoded;
+        }
+        information_descriptor_seen = 1;
+        if ((sense[offset + 2] & 0x7f) != 0 ||
+            sense[offset + 3] != 0) {
+            return decoded;
+        }
+        if ((sense[offset + 2] & 0x80) != 0) {
+            uint64_t information_lba =
+                read_big_endian_u64(sense + offset + 4);
+            if (!information_lba_matches_request(
+                    completion, information_lba)) {
+                return decoded;
+            }
+            decoded.has_information_lba = 1;
+            decoded.information_lba = information_lba;
+        } else if (!bytes_are_zero(sense + offset + 4, 8)) {
+            return decoded;
+        }
+        offset += descriptor_length;
+    }
+    decoded.well_formed = 1;
+    return decoded;
+}
+
+static int is_recognized_dvd_medium_read_error(
+    const struct decoded_sense *sense)
+{
+    if (sense->sense_key != 0x03 || sense->asc != 0x11) {
+        return 0;
+    }
+    return sense->ascq == 0x00 || sense->ascq == 0x01 ||
+           sense->ascq == 0x02 || sense->ascq == 0x05 ||
+           sense->ascq == 0x06;
+}
+
+static enum backend_read_status classify_read_failure(
+    const struct rip_dvd_scsi_completion *completion,
+    struct decoded_sense *sense)
+{
+    *sense = decode_sense(completion);
+    if (!completion->captured || !completion->command_completed ||
+        !sense->well_formed || completion->scsi_status != 0x02 ||
+        completion->host_status != 0 ||
+        (completion->driver_status != 0x00 &&
+         completion->driver_status != 0x08) ||
+        (sense->response_code != 0x70 && sense->response_code != 0x72) ||
+        !is_recognized_dvd_medium_read_error(sense)) {
+        return BACKEND_READ_UNKNOWN_ERROR;
+    }
+    return BACKEND_READ_MEDIA_ERROR;
+}
+
+static void format_optional_u64(char text[32], int present, uint64_t value)
+{
+    if (present) {
+        snprintf(text, 32, "%" PRIu64, value);
+    } else {
+        memcpy(text, "null", 5);
+    }
+}
+
+static int write_terminal_output(const char *output, size_t length)
+{
+    size_t written = 0;
+    while (written < length) {
+        ssize_t result = write(STDERR_FILENO, output + written,
+                               length - written);
+        if (result < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return fail_errno("DVD terminal result output failed");
+        }
+        if (result == 0) {
+            fprintf(stderr, "DVD terminal result output ended early\n");
+            return 1;
+        }
+        written += (size_t)result;
+    }
+    return 0;
+}
+
+static int emit_read_failure_result(
+    const struct read_failure *failure,
+    const struct recovery_state *recovery)
+{
+    const struct rip_dvd_scsi_completion *completion = &failure->completion;
+    const struct decoded_sense *sense = &failure->sense;
+    char scsi_status[32];
+    char host_status[32];
+    char driver_status[32];
+    char response_code[32];
+    char sense_key[32];
+    char asc[32];
+    char ascq[32];
+    char information_lba[32];
+    format_optional_u64(scsi_status, completion->captured,
+                        completion->scsi_status);
+    format_optional_u64(host_status, completion->captured,
+                        completion->host_status);
+    format_optional_u64(driver_status, completion->captured,
+                        completion->driver_status);
+    format_optional_u64(response_code, sense->has_response_code,
+                        sense->response_code);
+    format_optional_u64(sense_key, sense->has_sense_key, sense->sense_key);
+    format_optional_u64(asc, sense->has_asc, sense->asc);
+    format_optional_u64(ascq, sense->has_ascq, sense->ascq);
+    format_optional_u64(information_lba, sense->has_information_lba,
+                        sense->information_lba);
+    char output[1024];
+    int length = snprintf(
+        output, sizeof(output), READ_FAILURE_RESULT_PREFIX
+        "{\"protocolVersion\":1,\"classifierVersion\":\""
+        READ_FAILURE_CLASSIFIER_VERSION
+        "\",\"category\":\"unknown\",\"scsiStatus\":%s"
+        ",\"hostStatus\":%s,\"driverStatus\":%s"
+        ",\"senseResponseCode\":%s,\"senseKey\":%s"
+        ",\"asc\":%s,\"ascq\":%s,\"informationLba\":%s"
+        ",\"requestedLba\":%" PRIu64
+        ",\"requestedBlockCount\":%" PRIu32
+        ",\"retryOrdinal\":%" PRIu32 "}\n",
+        scsi_status, host_status, driver_status, response_code, sense_key,
+        asc, ascq, information_lba, completion->requested_lba,
+        completion->requested_block_count, completion->retry_ordinal);
+    if (length <= 0 || (size_t)length >= sizeof(output)) {
+        fprintf(stderr, "DVD read failure result exceeded its bound\n");
+        return 1;
+    }
+#ifdef RIP_DVD_READER_TESTING
+    if (recovery != NULL && recovery->interrupt_read_failure_result) {
+        size_t partial_length = (size_t)length - 2;
+        if (write_terminal_output(output, partial_length) != 0) {
+            return 1;
+        }
+        sleep(5);
+        if (write_terminal_output(output + partial_length,
+                                  (size_t)length - partial_length) != 0) {
+            return 1;
+        }
+        return READ_FAILURE_EXIT_STATUS;
+    }
+#else
+    (void)recovery;
+#endif
+    if (write_terminal_output(output, (size_t)length) != 0) {
+        return 1;
+    }
+    return READ_FAILURE_EXIT_STATUS;
+}
+
 #ifdef RIP_DVD_READER_TESTING
 static int delay_test_read(unsigned int delay_ms)
 {
@@ -230,10 +552,9 @@ static int delay_test_read(unsigned int delay_ms)
     return 0;
 }
 
-static int test_read_should_fail(struct read_backend *backend,
-                                 uint64_t lba, int block_count)
+static struct test_fault *test_fault_for_read(struct read_backend *backend,
+                                              uint64_t lba, int block_count)
 {
-    int should_fail = 0;
     uint64_t end_lba = lba + (uint64_t)block_count;
     for (size_t index = 0; index < backend->test_fault_count; index++) {
         struct test_fault *fault = &backend->test_faults[index];
@@ -241,73 +562,171 @@ static int test_read_should_fail(struct read_backend *backend,
             fault->remaining_failures == 0) {
             continue;
         }
-        should_fail = 1;
         if (fault->remaining_failures > 0) {
             fault->remaining_failures -= 1;
         }
+        return fault;
     }
-    return should_fail;
+    return NULL;
+}
+
+static void create_test_medium_completion(
+    struct rip_dvd_scsi_completion *completion,
+    const struct test_fault *fault)
+{
+    completion->captured = 1;
+    completion->command_completed = 1;
+    completion->descriptor = -1;
+    completion->scsi_status = 0x02;
+    completion->driver_status = 0x08;
+    completion->sense_reported_length = 18;
+    completion->sense_length = 18;
+    completion->sense[0] = 0xf0;
+    completion->sense[2] = 0x03;
+    completion->sense[3] = (uint8_t)(fault->lba >> 24);
+    completion->sense[4] = (uint8_t)(fault->lba >> 16);
+    completion->sense[5] = (uint8_t)(fault->lba >> 8);
+    completion->sense[6] = (uint8_t)fault->lba;
+    completion->sense[7] = 10;
+    completion->sense[12] = 0x11;
+}
+
+static struct transport_read_result test_transport_read(
+    struct read_backend *backend, unsigned char *buffer, uint64_t lba,
+    int block_count, uint32_t retry_ordinal)
+{
+    fprintf(stderr, "test-read %" PRIu64 " %d\n", lba, block_count);
+    if (delay_test_read(backend->test_delay_ms) != 0) {
+        return (struct transport_read_result){
+            .status = TRANSPORT_READ_FATAL,
+        };
+    }
+    struct test_fault *fault = test_fault_for_read(backend, lba, block_count);
+    if (fault != NULL) {
+        struct rip_dvd_scsi_completion completion = {
+            .descriptor = -1,
+            .requested_lba = lba,
+            .requested_block_count = (uint32_t)block_count,
+            .retry_ordinal = retry_ordinal,
+        };
+        if (fault->kind == TEST_FAULT_MEDIUM_ERROR) {
+            create_test_medium_completion(&completion, fault);
+        } else if (fault->kind == TEST_FAULT_RAW_COMPLETION) {
+            completion.captured = 1;
+            completion.command_completed = 1;
+            completion.scsi_status = fault->scsi_status;
+            completion.host_status = fault->host_status;
+            completion.driver_status = fault->driver_status;
+            completion.sense_reported_length = fault->sense_reported_length;
+            completion.sense_length = fault->sense_length;
+            memcpy(completion.sense, fault->sense, fault->sense_length);
+        }
+        return (struct transport_read_result){
+            .status = TRANSPORT_READ_FAILURE,
+            .completion = completion,
+        };
+    }
+    size_t length = (size_t)block_count * DVDCSS_BLOCK_SIZE;
+    ssize_t bytes_read;
+    do {
+        bytes_read = pread(backend->test_source_fd, buffer, length,
+                           (off_t)(lba * DVDCSS_BLOCK_SIZE));
+    } while (bytes_read < 0 && errno == EINTR);
+    if (bytes_read < 0) {
+        fail_errno("DVD test source read failed");
+        return (struct transport_read_result){
+            .status = TRANSPORT_READ_FATAL,
+        };
+    }
+    if (bytes_read == 0) {
+        return (struct transport_read_result){
+            .status = TRANSPORT_READ_END,
+        };
+    }
+    if (bytes_read % DVDCSS_BLOCK_SIZE != 0) {
+        fprintf(stderr, "DVD test source returned a partial sector\n");
+        return (struct transport_read_result){
+            .status = TRANSPORT_READ_FATAL,
+        };
+    }
+    return (struct transport_read_result){
+        .status = TRANSPORT_READ_SUCCESS,
+        .blocks_read = (int)(bytes_read / DVDCSS_BLOCK_SIZE),
+    };
 }
 #endif
 
-static struct backend_read_result backend_read(
+static struct transport_read_result dvdcss_transport_read(
     struct read_backend *backend, unsigned char *buffer, uint64_t lba,
-    int block_count, int absolute)
+    int block_count, int absolute, uint32_t retry_ordinal)
 {
-#ifdef RIP_DVD_READER_TESTING
-    if (backend->use_test_source) {
-        fprintf(stderr, "test-read %" PRIu64 " %d\n", lba, block_count);
-        if (delay_test_read(backend->test_delay_ms) != 0) {
-            return (struct backend_read_result){ .status = BACKEND_READ_FATAL };
-        }
-        if (test_read_should_fail(backend, lba, block_count)) {
-            return (struct backend_read_result){
-                .status = BACKEND_READ_MEDIA_ERROR,
-            };
-        }
-        size_t length = (size_t)block_count * DVDCSS_BLOCK_SIZE;
-        ssize_t bytes_read;
-        do {
-            bytes_read = pread(backend->test_source_fd, buffer, length,
-                               (off_t)(lba * DVDCSS_BLOCK_SIZE));
-        } while (bytes_read < 0 && errno == EINTR);
-        if (bytes_read < 0) {
-            fail_errno("DVD test source read failed");
-            return (struct backend_read_result){ .status = BACKEND_READ_FATAL };
-        }
-        if (bytes_read == 0) {
-            return (struct backend_read_result){ .status = BACKEND_READ_END };
-        }
-        if (bytes_read % DVDCSS_BLOCK_SIZE != 0) {
-            fprintf(stderr, "DVD test source returned a partial sector\n");
-            return (struct backend_read_result){ .status = BACKEND_READ_FATAL };
-        }
-        return (struct backend_read_result){
-            .status = BACKEND_READ_SUCCESS,
-            .blocks_read = (int)(bytes_read / DVDCSS_BLOCK_SIZE),
-        };
-    }
-#endif
     if (absolute &&
         dvdcss_seek(backend->dvdcss, (int)lba, DVDCSS_NOFLAGS) < 0) {
         const char *detail = dvdcss_error(backend->dvdcss);
         fprintf(stderr, "DVD content seek failed at LBA %" PRIu64 "%s%s\n",
                 lba, detail ? ": " : "", detail ? detail : "");
-        return (struct backend_read_result){ .status = BACKEND_READ_FATAL };
+        return (struct transport_read_result){
+            .status = TRANSPORT_READ_FATAL,
+        };
     }
+    rip_dvd_scsi_read_scope_begin(lba, (uint32_t)block_count, retry_ordinal);
     int result =
         dvdcss_read(backend->dvdcss, buffer, block_count, DVDCSS_NOFLAGS);
+    struct rip_dvd_scsi_completion completion = { 0 };
+    rip_dvd_scsi_read_scope_end(&completion);
     if (result < 0) {
-        return (struct backend_read_result){
-            .status = BACKEND_READ_MEDIA_ERROR,
+        return (struct transport_read_result){
+            .status = TRANSPORT_READ_FAILURE,
+            .completion = completion,
         };
     }
     if (result == 0) {
+        return (struct transport_read_result){
+            .status = TRANSPORT_READ_END,
+        };
+    }
+    return (struct transport_read_result){
+        .status = TRANSPORT_READ_SUCCESS,
+        .blocks_read = result,
+    };
+}
+
+static struct backend_read_result backend_read(
+    struct read_backend *backend, unsigned char *buffer, uint64_t lba,
+    int block_count, int absolute, uint32_t retry_ordinal)
+{
+    struct transport_read_result transport;
+#ifdef RIP_DVD_READER_TESTING
+    if (backend->use_test_source) {
+        transport = test_transport_read(
+            backend, buffer, lba, block_count, retry_ordinal);
+    } else
+#endif
+    {
+        transport = dvdcss_transport_read(
+            backend, buffer, lba, block_count, absolute, retry_ordinal);
+    }
+    if (transport.status == TRANSPORT_READ_SUCCESS) {
+        return (struct backend_read_result){
+            .status = BACKEND_READ_SUCCESS,
+            .blocks_read = transport.blocks_read,
+        };
+    }
+    if (transport.status == TRANSPORT_READ_END) {
         return (struct backend_read_result){ .status = BACKEND_READ_END };
     }
+    if (transport.status == TRANSPORT_READ_FATAL) {
+        return (struct backend_read_result){ .status = BACKEND_READ_FATAL };
+    }
+    struct decoded_sense sense;
+    enum backend_read_status status =
+        classify_read_failure(&transport.completion, &sense);
     return (struct backend_read_result){
-        .status = BACKEND_READ_SUCCESS,
-        .blocks_read = result,
+        .status = status,
+        .failure = {
+            .completion = transport.completion,
+            .sense = sense,
+        },
     };
 }
 
@@ -344,11 +763,13 @@ static int recover_range(struct read_backend *backend,
                          struct operation_state *state,
                          struct recovery_state *recovery,
                          unsigned char *buffer, uint64_t start_lba,
-                         int block_count, uint64_t *bytes_processed)
+                         int block_count, uint64_t *bytes_processed,
+                         uint32_t first_retry_ordinal)
 {
     for (int attempt = 0; attempt < RECOVERY_READ_ATTEMPTS; attempt++) {
         struct backend_read_result result =
-            backend_read(backend, buffer, start_lba, block_count, 1);
+            backend_read(backend, buffer, start_lba, block_count, 1,
+                         first_retry_ordinal + (uint32_t)attempt);
         if (result.status == BACKEND_READ_FATAL) {
             return 1;
         }
@@ -360,6 +781,9 @@ static int recover_range(struct read_backend *backend,
         if (result.status == BACKEND_READ_MEDIA_ERROR) {
             continue;
         }
+        if (result.status == BACKEND_READ_UNKNOWN_ERROR) {
+            return emit_read_failure_result(&result.failure, recovery);
+        }
         if (consume_blocks(state, buffer, result.blocks_read,
                            bytes_processed) != 0) {
             return 1;
@@ -370,7 +794,7 @@ static int recover_range(struct read_backend *backend,
         return recover_range(backend, state, recovery, buffer,
                              start_lba + (uint64_t)result.blocks_read,
                              block_count - result.blocks_read,
-                             bytes_processed);
+                             bytes_processed, 0);
     }
 
     if (block_count == 1) {
@@ -383,13 +807,15 @@ static int recover_range(struct read_backend *backend,
     }
 
     int left_block_count = block_count / 2;
-    if (recover_range(backend, state, recovery, buffer, start_lba,
-                      left_block_count, bytes_processed) != 0) {
-        return 1;
+    int left_status = recover_range(backend, state, recovery, buffer,
+                                    start_lba, left_block_count,
+                                    bytes_processed, 0);
+    if (left_status != 0) {
+        return left_status;
     }
     return recover_range(backend, state, recovery, buffer,
                          start_lba + (uint64_t)left_block_count,
-                         block_count - left_block_count, bytes_processed);
+                         block_count - left_block_count, bytes_processed, 0);
 }
 
 static int read_disc(struct read_backend *backend, uint64_t size_bytes,
@@ -414,7 +840,7 @@ static int read_disc(struct read_backend *backend, uint64_t size_bytes,
         uint64_t start_lba = bytes_processed / DVDCSS_BLOCK_SIZE;
         struct backend_read_result result =
             backend_read(backend, buffer, start_lba, requested,
-                         require_absolute_read);
+                         require_absolute_read, 0);
         require_absolute_read = 0;
         if (result.status == BACKEND_READ_FATAL) {
             status = 1;
@@ -431,14 +857,20 @@ static int read_disc(struct read_backend *backend, uint64_t size_bytes,
                 status = fail_dvdcss_read(backend->dvdcss, bytes_processed);
                 break;
             }
-            if (recover_range(backend, state, recovery, buffer, start_lba,
-                              requested, &bytes_processed) != 0) {
-                status = 1;
+            int recovery_status = recover_range(
+                backend, state, recovery, buffer, start_lba, requested,
+                &bytes_processed, 1);
+            if (recovery_status != 0) {
+                status = recovery_status;
                 break;
             }
             blocks_remaining -= (uint64_t)requested;
             require_absolute_read = blocks_remaining > 0;
             continue;
+        }
+        if (result.status == BACKEND_READ_UNKNOWN_ERROR) {
+            status = emit_read_failure_result(&result.failure, recovery);
+            break;
         }
         if (consume_blocks(state, buffer, result.blocks_read,
                            &bytes_processed) != 0) {
@@ -533,7 +965,8 @@ static int emit_recovery_result(uint64_t size_bytes,
 }
 
 static int run_copy(struct read_backend *backend, const char *output_path,
-                    uint64_t size_bytes, int emit_malformed_result)
+                    uint64_t size_bytes,
+                    enum test_result_mode test_result_mode)
 {
     int output_fd = open(output_path,
                          O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
@@ -554,7 +987,10 @@ static int run_copy(struct read_backend *backend, const char *output_path,
         .bitmap_byte_count = bitmap_byte_count,
         .bad_sector_count = 0,
         .bad_area_count = 0,
-        .emit_malformed_result = emit_malformed_result,
+        .emit_malformed_result =
+            test_result_mode == TEST_RESULT_MALFORMED_RECOVERY,
+        .interrupt_read_failure_result =
+            test_result_mode == TEST_RESULT_INTERRUPTED_READ_FAILURE,
     };
     struct operation_state state = {
         .operation = OPERATION_COPY,
@@ -657,7 +1093,7 @@ static int run_resume(struct read_backend *backend, const char *output_path,
                       const unsigned char *prior_bad_sector_bitmap,
                       uint64_t prior_bad_sector_count,
                       const char *expected_filesystem_identity,
-                      int emit_malformed_result)
+                      enum test_result_mode test_result_mode)
 {
     uintmax_t expected_device = 0;
     uintmax_t expected_inode = 0;
@@ -695,7 +1131,10 @@ static int run_resume(struct read_backend *backend, const char *output_path,
         .bitmap_byte_count = bitmap_byte_count,
         .bad_sector_count = 0,
         .bad_area_count = 0,
-        .emit_malformed_result = emit_malformed_result,
+        .emit_malformed_result =
+            test_result_mode == TEST_RESULT_MALFORMED_RECOVERY,
+        .interrupt_read_failure_result =
+            test_result_mode == TEST_RESULT_INTERRUPTED_READ_FAILURE,
     };
     uint64_t bytes_processed =
         size_bytes - prior_bad_sector_count * DVDCSS_BLOCK_SIZE;
@@ -718,7 +1157,8 @@ static int run_resume(struct read_backend *backend, const char *output_path,
         int recovered = 0;
         for (int attempt = 0; attempt < RECOVERY_READ_ATTEMPTS; attempt++) {
             struct backend_read_result result =
-                backend_read(backend, buffer, lba, 1, 1);
+                backend_read(backend, buffer, lba, 1, 1,
+                             (uint32_t)attempt);
             if (result.status == BACKEND_READ_FATAL) {
                 status = 1;
                 break;
@@ -731,6 +1171,10 @@ static int run_resume(struct read_backend *backend, const char *output_path,
             }
             if (result.status == BACKEND_READ_MEDIA_ERROR) {
                 continue;
+            }
+            if (result.status == BACKEND_READ_UNKNOWN_ERROR) {
+                status = emit_read_failure_result(&result.failure, &recovery);
+                break;
             }
             if (result.blocks_read != 1 ||
                 write_all_at(output_fd, buffer, DVDCSS_BLOCK_SIZE,
@@ -858,6 +1302,125 @@ static int parse_test_delay(const char *text, unsigned int *delay_ms)
     return 0;
 }
 
+static int parse_test_integer(const char *text, uint64_t maximum,
+                              uint64_t *value)
+{
+    char *end = NULL;
+    errno = 0;
+    unsigned long long parsed = strtoull(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0' || parsed > maximum) {
+        return 1;
+    }
+    *value = parsed;
+    return 0;
+}
+
+static int parse_test_remaining_failures(const char *text,
+                                         int *remaining_failures)
+{
+    if (strcmp(text, "always") == 0) {
+        *remaining_failures = -1;
+        return 0;
+    }
+    uint64_t count = 0;
+    if (parse_test_integer(text, 1000, &count) != 0 || count == 0) {
+        return 1;
+    }
+    *remaining_failures = (int)count;
+    return 0;
+}
+
+static int parse_test_sense(const char *text, struct test_fault *fault)
+{
+    if (strcmp(text, "-") == 0) {
+        return 0;
+    }
+    size_t text_length = strlen(text);
+    if (text_length == 0 || text_length % 2 != 0 ||
+        text_length / 2 > RIP_DVD_SCSI_MAX_SENSE_BYTES) {
+        return 1;
+    }
+    for (size_t index = 0; index < text_length / 2; index++) {
+        int high = hex_digit_value(text[index * 2]);
+        int low = hex_digit_value(text[index * 2 + 1]);
+        if (high < 0 || low < 0) {
+            return 1;
+        }
+        fault->sense[index] = (uint8_t)((high << 4) | low);
+    }
+    fault->sense_length = text_length / 2;
+    return 0;
+}
+
+static int parse_exact_test_fault(char *entry, uint64_t total_sector_count,
+                                  struct test_fault *fault)
+{
+    char *parts[8] = { 0 };
+    size_t part_count = 0;
+    char *save = NULL;
+    for (char *part = strtok_r(entry, "@", &save); part != NULL;
+         part = strtok_r(NULL, "@", &save)) {
+        if (part_count >= sizeof(parts) / sizeof(parts[0])) {
+            return 1;
+        }
+        parts[part_count++] = part;
+    }
+    size_t expected_parts =
+        part_count > 0 && strcmp(parts[0], "generic") == 0 ? 3 : 8;
+    if (part_count != expected_parts ||
+        (strcmp(parts[0], "raw") != 0 &&
+         strcmp(parts[0], "generic") != 0)) {
+        return 1;
+    }
+    uint64_t lba = 0;
+    if (parse_test_integer(parts[1], total_sector_count - 1, &lba) != 0 ||
+        parse_test_remaining_failures(parts[2],
+                                      &fault->remaining_failures) != 0) {
+        return 1;
+    }
+    fault->lba = lba;
+    if (strcmp(parts[0], "generic") == 0) {
+        fault->kind = TEST_FAULT_GENERIC_FAILURE;
+        return 0;
+    }
+    uint64_t scsi_status = 0;
+    uint64_t host_status = 0;
+    uint64_t driver_status = 0;
+    uint64_t sense_reported_length = 0;
+    if (parse_test_integer(parts[3], UINT8_MAX, &scsi_status) != 0 ||
+        parse_test_integer(parts[4], UINT16_MAX, &host_status) != 0 ||
+        parse_test_integer(parts[5], UINT16_MAX, &driver_status) != 0 ||
+        parse_test_integer(parts[6], 4096, &sense_reported_length) != 0 ||
+        parse_test_sense(parts[7], fault) != 0) {
+        return 1;
+    }
+    fault->kind = TEST_FAULT_RAW_COMPLETION;
+    fault->scsi_status = (uint8_t)scsi_status;
+    fault->host_status = (uint16_t)host_status;
+    fault->driver_status = (uint16_t)driver_status;
+    fault->sense_reported_length = (size_t)sense_reported_length;
+    return 0;
+}
+
+static int parse_legacy_test_fault(char *entry, uint64_t total_sector_count,
+                                   struct test_fault *fault)
+{
+    char *separator = strchr(entry, ':');
+    if (separator == NULL || strchr(separator + 1, ':') != NULL) {
+        return 1;
+    }
+    *separator = '\0';
+    uint64_t lba = 0;
+    if (parse_test_integer(entry, total_sector_count - 1, &lba) != 0 ||
+        parse_test_remaining_failures(separator + 1,
+                                      &fault->remaining_failures) != 0) {
+        return 1;
+    }
+    fault->kind = TEST_FAULT_MEDIUM_ERROR;
+    fault->lba = lba;
+    return 0;
+}
+
 static int parse_test_faults(char *text, uint64_t total_sector_count,
                              struct read_backend *backend)
 {
@@ -871,43 +1434,23 @@ static int parse_test_faults(char *text, uint64_t total_sector_count,
             fprintf(stderr, "DVD test fault count is invalid\n");
             return 1;
         }
-        char *separator = strchr(entry, ':');
-        if (separator == NULL || strchr(separator + 1, ':') != NULL) {
+        struct test_fault fault = { 0 };
+        int parse_status = strchr(entry, '@') == NULL
+                               ? parse_legacy_test_fault(
+                                     entry, total_sector_count, &fault)
+                               : parse_exact_test_fault(
+                                     entry, total_sector_count, &fault);
+        if (parse_status != 0) {
             fprintf(stderr, "DVD test fault is invalid\n");
             return 1;
         }
-        *separator = '\0';
-        char *lba_end = NULL;
-        errno = 0;
-        unsigned long long lba_value = strtoull(entry, &lba_end, 10);
-        if (errno != 0 || lba_end == entry || *lba_end != '\0' ||
-            (uint64_t)lba_value >= total_sector_count) {
-            fprintf(stderr, "DVD test fault LBA is invalid\n");
-            return 1;
-        }
-        int remaining_failures = -1;
-        if (strcmp(separator + 1, "always") != 0) {
-            char *count_end = NULL;
-            errno = 0;
-            long count = strtol(separator + 1, &count_end, 10);
-            if (errno != 0 || count_end == separator + 1 ||
-                *count_end != '\0' || count <= 0 || count > 1000) {
-                fprintf(stderr, "DVD test fault retry count is invalid\n");
-                return 1;
-            }
-            remaining_failures = (int)count;
-        }
         for (size_t index = 0; index < backend->test_fault_count; index++) {
-            if (backend->test_faults[index].lba == (uint64_t)lba_value) {
+            if (backend->test_faults[index].lba == fault.lba) {
                 fprintf(stderr, "DVD test fault LBA is duplicated\n");
                 return 1;
             }
         }
-        backend->test_faults[backend->test_fault_count] =
-            (struct test_fault){
-                .lba = (uint64_t)lba_value,
-                .remaining_failures = remaining_failures,
-            };
+        backend->test_faults[backend->test_fault_count] = fault;
         backend->test_fault_count += 1;
     }
     return 0;
@@ -919,16 +1462,18 @@ static int initialize_test_backend(const char *source_path,
                                    const char *delay_text,
                                    const char *result_mode,
                                    uint64_t *size_bytes,
-                                   int *malformed_result,
+                                   enum test_result_mode *test_result_mode,
                                    struct read_backend *backend)
 {
     if (parse_size(size_text, size_bytes) != 0) {
         return 2;
     }
     if (strcmp(result_mode, "valid") == 0) {
-        *malformed_result = 0;
+        *test_result_mode = TEST_RESULT_VALID;
     } else if (strcmp(result_mode, "malformed") == 0) {
-        *malformed_result = 1;
+        *test_result_mode = TEST_RESULT_MALFORMED_RECOVERY;
+    } else if (strcmp(result_mode, "interrupted-read-failure") == 0) {
+        *test_result_mode = TEST_RESULT_INTERRUPTED_READ_FAILURE;
     } else {
         fprintf(stderr, "DVD test result mode is invalid\n");
         return 2;
@@ -987,15 +1532,15 @@ static int run_test_copy(int argc, char **argv)
         return 2;
     }
     uint64_t size_bytes = 0;
-    int malformed_result;
+    enum test_result_mode test_result_mode;
     struct read_backend backend;
     int setup_status = initialize_test_backend(
         argv[2], argv[4], argv[5], argv[6], argv[7], &size_bytes,
-        &malformed_result, &backend);
+        &test_result_mode, &backend);
     if (setup_status != 0) {
         return setup_status;
     }
-    int status = run_copy(&backend, argv[3], size_bytes, malformed_result);
+    int status = run_copy(&backend, argv[3], size_bytes, test_result_mode);
     return close_test_backend(&backend, status);
 }
 
@@ -1008,11 +1553,11 @@ static int run_test_resume(int argc, char **argv)
         return 2;
     }
     uint64_t size_bytes = 0;
-    int malformed_result;
+    enum test_result_mode test_result_mode;
     struct read_backend backend;
     int setup_status = initialize_test_backend(
         argv[2], argv[4], argv[5], argv[6], argv[7], &size_bytes,
-        &malformed_result, &backend);
+        &test_result_mode, &backend);
     if (setup_status != 0) {
         return setup_status;
     }
@@ -1029,7 +1574,7 @@ static int run_test_resume(int argc, char **argv)
     }
     int status = run_resume(&backend, argv[3], size_bytes, resume_bitmap,
                             resume_bad_sector_count, argv[9],
-                            malformed_result);
+                            test_result_mode);
     free(resume_bitmap);
     return close_test_backend(&backend, status);
 }
@@ -1091,9 +1636,10 @@ int main(int argc, char **argv)
         status = run_hash(&backend, size_bytes);
     } else if (authorized_resume) {
         status = run_resume(&backend, argv[3], size_bytes, resume_bitmap,
-                            resume_bad_sector_count, argv[5], 0);
+                            resume_bad_sector_count, argv[5],
+                            TEST_RESULT_VALID);
     } else {
-        status = run_copy(&backend, argv[3], size_bytes, 0);
+        status = run_copy(&backend, argv[3], size_bytes, TEST_RESULT_VALID);
     }
     free(resume_bitmap);
     if (dvdcss_close(dvdcss) != 0 && status == 0) {

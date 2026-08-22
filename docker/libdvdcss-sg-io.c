@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 
 #define _GNU_SOURCE
+#define RIP_DVD_SG_IO_IMPLEMENTATION
+
+#include "libdvdcss-sg-io.h"
 
 #include <linux/cdrom.h>
 #include <scsi/sg.h>
@@ -28,7 +31,41 @@
 #define DVD_REPORT_ASF 0x05
 #define DVD_REPORT_RPC 0x08
 #define DVDCSS_INVALIDATE_AGID 0x3f
+#define DVD_LOGICAL_BLOCK_BYTES 2048U
+#define SCSI_READ_10 0x28
 #define SG_COMMAND_TIMEOUT_MS 15000U
+
+struct read_scope {
+    int active;
+    struct rip_dvd_scsi_completion completion;
+};
+
+static _Thread_local struct read_scope current_read_scope;
+
+void rip_dvd_scsi_read_scope_begin(uint64_t requested_lba,
+                                   uint32_t requested_block_count,
+                                   uint32_t retry_ordinal)
+{
+    current_read_scope = (struct read_scope){
+        .active = 1,
+        .completion = {
+            .descriptor = -1,
+            .requested_lba = requested_lba,
+            .requested_block_count = requested_block_count,
+            .retry_ordinal = retry_ordinal,
+        },
+    };
+}
+
+int rip_dvd_scsi_read_scope_end(struct rip_dvd_scsi_completion *completion)
+{
+    if (!current_read_scope.active) {
+        return 0;
+    }
+    *completion = current_read_scope.completion;
+    current_read_scope = (struct read_scope){ 0 };
+    return completion->captured;
+}
 
 static int resolve_sg_device(int block_descriptor, char path[PATH_MAX])
 {
@@ -92,6 +129,98 @@ static int open_sg_device(int block_descriptor)
         return -1;
     }
     return open(path, O_RDONLY | O_CLOEXEC);
+}
+
+static void capture_read_completion(int block_descriptor,
+                                    const sg_io_hdr_t *io,
+                                    const uint8_t *sense)
+{
+    struct rip_dvd_scsi_completion *completion =
+        &current_read_scope.completion;
+    completion->captured = 1;
+    completion->command_completed = 1;
+    completion->descriptor = block_descriptor;
+    completion->scsi_status = io->status;
+    completion->host_status = io->host_status;
+    completion->driver_status = io->driver_status;
+    completion->sense_reported_length = io->sb_len_wr;
+    completion->sense_length = io->sb_len_wr;
+    if (completion->sense_length > RIP_DVD_SCSI_MAX_SENSE_BYTES) {
+        completion->sense_length = RIP_DVD_SCSI_MAX_SENSE_BYTES;
+    }
+    memcpy(completion->sense, sense, completion->sense_length);
+}
+
+static int set_read_position(int descriptor, ssize_t bytes_read)
+{
+    if (bytes_read < 0 || lseek(descriptor, bytes_read, SEEK_CUR) < 0) {
+        return -1;
+    }
+    return 0;
+}
+
+ssize_t dvdcss_linux_read(int descriptor, void *buffer, size_t length)
+{
+    struct rip_dvd_scsi_completion *expected =
+        &current_read_scope.completion;
+    if (!current_read_scope.active ||
+        expected->requested_lba > UINT32_MAX ||
+        expected->requested_block_count == 0 ||
+        expected->requested_block_count > UINT16_MAX ||
+        length != (size_t)expected->requested_block_count *
+                      DVD_LOGICAL_BLOCK_BYTES) {
+        return read(descriptor, buffer, length);
+    }
+    off_t offset = lseek(descriptor, 0, SEEK_CUR);
+    if (offset < 0 || (uint64_t)offset % DVD_LOGICAL_BLOCK_BYTES != 0 ||
+        (uint64_t)offset / DVD_LOGICAL_BLOCK_BYTES !=
+            expected->requested_lba) {
+        return read(descriptor, buffer, length);
+    }
+    int sg_descriptor = open_sg_device(descriptor);
+    if (sg_descriptor < 0) {
+        return read(descriptor, buffer, length);
+    }
+    uint8_t command[10] = { 0 };
+    uint32_t lba = (uint32_t)expected->requested_lba;
+    uint16_t block_count = (uint16_t)expected->requested_block_count;
+    command[0] = SCSI_READ_10;
+    command[2] = (uint8_t)(lba >> 24);
+    command[3] = (uint8_t)(lba >> 16);
+    command[4] = (uint8_t)(lba >> 8);
+    command[5] = (uint8_t)lba;
+    command[7] = (uint8_t)(block_count >> 8);
+    command[8] = (uint8_t)block_count;
+    uint8_t sense[RIP_DVD_SCSI_MAX_SENSE_BYTES] = { 0 };
+    sg_io_hdr_t io = {
+        .interface_id = 'S',
+        .dxfer_direction = SG_DXFER_FROM_DEV,
+        .cmd_len = sizeof(command),
+        .mx_sb_len = sizeof(sense),
+        .dxfer_len = length,
+        .dxferp = buffer,
+        .cmdp = command,
+        .sbp = sense,
+        .timeout = SG_COMMAND_TIMEOUT_MS,
+    };
+    int result = ioctl(sg_descriptor, SG_IO, &io);
+    int saved_errno = errno;
+    close(sg_descriptor);
+    if (result == 0) {
+        capture_read_completion(descriptor, &io, sense);
+    }
+    if (result < 0 || (io.info & SG_INFO_OK_MASK) != SG_INFO_OK ||
+        io.resid < 0 || (uint32_t)io.resid > io.dxfer_len) {
+        errno = result < 0 ? saved_errno : EIO;
+        return -1;
+    }
+    ssize_t bytes_read = (ssize_t)(io.dxfer_len - (uint32_t)io.resid);
+    if ((size_t)bytes_read % DVD_LOGICAL_BLOCK_BYTES != 0 ||
+        set_read_position(descriptor, bytes_read) < 0) {
+        errno = EIO;
+        return -1;
+    }
+    return bytes_read;
 }
 
 static int send_sg_command(int block_descriptor,
