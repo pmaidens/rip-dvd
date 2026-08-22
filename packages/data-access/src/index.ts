@@ -5,7 +5,14 @@ import {
 import type { DataAccess } from "./types.js";
 
 export { createDiscSelectionSourceIdentity } from "./disc-selection-source-identity.js";
-export { isArchiveReadFailureEvidenceConsistent } from "./archive-read-failure.js";
+export {
+  classifyArchiveReadFailureEvidence,
+  isArchiveReadFailureEvidenceConsistent,
+} from "./archive-read-failure.js";
+export type {
+  ArchiveReadFailureEvidenceClassification,
+  ArchiveReadFailureScsiEvidence,
+} from "./archive-read-failure.js";
 export {
   createCleanReadArchiveIntegrityEvidence,
   createUnknownArchiveIntegrityEvidence,

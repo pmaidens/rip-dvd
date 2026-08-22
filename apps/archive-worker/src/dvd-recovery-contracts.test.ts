@@ -2,12 +2,118 @@ import { describe, expect, it } from "vitest";
 
 import {
   createDamagedDvdRecoveryResult,
+  DVD_READ_FAILURE_CLASSIFIER_VERSION,
   formatUnvalidatedDvdRecovery,
+  parseDvdReadFailureResultProtocol,
   validateDvdRecoveryResult,
   validateResumedDvdRecoveryResult,
 } from "./dvd-recovery-contracts.js";
 
+function readFailureProtocolPayload(
+  overrides: Record<string, unknown> = {},
+): string {
+  return JSON.stringify({
+    protocolVersion: 1,
+    classifierVersion: DVD_READ_FAILURE_CLASSIFIER_VERSION,
+    category: "unknown",
+    scsiStatus: 0x02,
+    hostStatus: 0,
+    driverStatus: 0x08,
+    senseResponseCode: 0x70,
+    senseKey: 0x05,
+    asc: 0x21,
+    ascq: 0,
+    informationLba: null,
+    requestedLba: 0,
+    requestedBlockCount: 4,
+    retryOrdinal: 0,
+    ...overrides,
+  });
+}
+
 describe("DVD recovery results", () => {
+  it.each([
+    {
+      category: "not_ready",
+      status: { hostStatus: 0, senseKey: 0x02, asc: 0x04, ascq: 0x01 },
+    },
+    {
+      category: "unit_attention",
+      status: { hostStatus: 0, senseKey: 0x06, asc: 0x28, ascq: 0x00 },
+    },
+    {
+      category: "hardware_error",
+      status: { hostStatus: 0, senseKey: 0x04, asc: 0x44, ascq: 0x00 },
+    },
+    {
+      category: "transport_error",
+      status: { hostStatus: 0x07, senseKey: 0x04, asc: 0x44, ascq: 0x00 },
+    },
+    {
+      category: "protection_error",
+      status: { hostStatus: 0, senseKey: 0x05, asc: 0x6f, ascq: 0x04 },
+    },
+    {
+      category: "recognized_medium_error",
+      status: { hostStatus: 0, senseKey: 0x03, asc: 0x11, ascq: 0x05 },
+    },
+  ] as const)(
+    "rejects $category evidence labeled as an unknown terminal failure",
+    ({ status }) => {
+      expect(() =>
+        parseDvdReadFailureResultProtocol(
+          readFailureProtocolPayload(status),
+          4 * 2_048,
+        ),
+      ).toThrow("DVD read failure helper result is malformed");
+    },
+  );
+
+  it.each([
+    { driverStatus: 0x01, label: "0x01" },
+    { driverStatus: 0x02, label: "0x02" },
+    { driverStatus: 0x04, label: "0x04" },
+    { driverStatus: 0x06, label: "0x06" },
+  ])(
+    "rejects driver transport status $label labeled as unknown",
+    ({ driverStatus }) => {
+      expect(() =>
+        parseDvdReadFailureResultProtocol(
+          readFailureProtocolPayload({
+            driverStatus,
+            senseResponseCode: null,
+            senseKey: null,
+            asc: null,
+            ascq: null,
+          }),
+          4 * 2_048,
+        ),
+      ).toThrow("DVD read failure helper result is malformed");
+    },
+  );
+
+  it.each([
+    { driverStatus: 0x03, label: "0x03" },
+    { driverStatus: 0x05, label: "0x05" },
+    { driverStatus: 0x07, label: "0x07" },
+  ])(
+    "does not treat driver status $label as transport evidence",
+    ({ driverStatus }) => {
+      expect(
+        parseDvdReadFailureResultProtocol(
+          readFailureProtocolPayload({
+            driverStatus,
+            senseResponseCode: null,
+            senseKey: null,
+            asc: null,
+            ascq: null,
+          }),
+          4 * 2_048,
+        ),
+      ).toMatchObject({ category: "unknown", driverStatus });
+    },
+  );
+
   it("requires validation for normalized unreadable sector evidence", () => {
     const result = createDamagedDvdRecoveryResult(8_192, [
       { startLba: 1, sectorCount: 1 },

@@ -1,7 +1,7 @@
 import {
   ARCHIVE_READ_FAILURE_CATEGORIES,
+  classifyArchiveReadFailureEvidence,
   createCleanReadArchiveIntegrityEvidence,
-  isArchiveReadFailureEvidenceConsistent,
   type ArchiveReadFailureCategory,
   type CleanReadArchiveIntegrityEvidence,
   type UnreadableSectorRange,
@@ -231,14 +231,16 @@ export function parseDvdReadFailureResultProtocol(
     throw new Error("DVD read failure helper result is malformed");
   }
   const result = candidate as unknown as DvdReadFailureResult;
+  const evidenceClassification = classifyArchiveReadFailureEvidence(result);
+  const normalizedCategory =
+    evidenceClassification === "transport_error"
+      ? "transport_error"
+      : result.senseResponseCode === 0x70 || result.senseResponseCode === 0x72
+        ? evidenceClassification
+        : "unknown";
   if (
-    !isArchiveReadFailureEvidenceConsistent(result) ||
-    ((result.category === "not_ready" ||
-      result.category === "unit_attention" ||
-      result.category === "hardware_error" ||
-      result.category === "protection_error") &&
-      result.senseResponseCode !== 0x70 &&
-      result.senseResponseCode !== 0x72)
+    normalizedCategory === "recognized_medium_error" ||
+    result.category !== normalizedCategory
   ) {
     throw new Error("DVD read failure helper result is malformed");
   }
