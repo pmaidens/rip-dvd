@@ -1,5 +1,6 @@
 import {
   ARCHIVE_READ_FAILURE_CATEGORIES,
+  classifyArchiveReadFailureEvidence,
   createCleanReadArchiveIntegrityEvidence,
   type ArchiveReadFailureCategory,
   type CleanReadArchiveIntegrityEvidence,
@@ -40,6 +41,9 @@ export class DvdReadFailureError extends Error {
       not_ready: "DVD read failed because the Optical Drive was not ready",
       unit_attention:
         "DVD read failed after an Optical Drive media-state change",
+      hardware_error: "DVD read failed after an Optical Drive hardware fault",
+      transport_error: "DVD read failed while communicating with the Optical Drive",
+      protection_error: "DVD read failed because DVD access was protected",
     }[readFailure.category]);
     this.name = "DvdReadFailureError";
     this.readFailure = readFailure;
@@ -227,20 +231,17 @@ export function parseDvdReadFailureResultProtocol(
     throw new Error("DVD read failure helper result is malformed");
   }
   const result = candidate as unknown as DvdReadFailureResult;
-  const classifiableSense =
-    result.scsiStatus === 0x02 &&
-    result.hostStatus === 0 &&
-    (result.driverStatus === 0 || result.driverStatus === 0x08) &&
-    (result.senseResponseCode === 0x70 ||
-      result.senseResponseCode === 0x72) &&
-    result.asc !== null;
-  const normalizedCategory: ArchiveReadFailureCategory = classifiableSense &&
-      result.senseKey === 0x02
-    ? "not_ready"
-    : classifiableSense && result.senseKey === 0x06
-      ? "unit_attention"
-      : "unknown";
-  if (result.category !== normalizedCategory) {
+  const evidenceClassification = classifyArchiveReadFailureEvidence(result);
+  const normalizedCategory =
+    evidenceClassification === "transport_error"
+      ? "transport_error"
+      : result.senseResponseCode === 0x70 || result.senseResponseCode === 0x72
+        ? evidenceClassification
+        : "unknown";
+  if (
+    normalizedCategory === "recognized_medium_error" ||
+    result.category !== normalizedCategory
+  ) {
     throw new Error("DVD read failure helper result is malformed");
   }
   return result;

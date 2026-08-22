@@ -100,6 +100,7 @@ import {
 } from "../disc-selection-source-identity.js";
 import { createDvdMetadataFingerprint } from "../dvd-metadata-fingerprint.js";
 import { createWatchableSalvageArchiveIntegrityEvidence } from "../archive-integrity.js";
+import { isArchiveReadFailureEvidenceConsistent } from "../archive-read-failure.js";
 import {
   decodeArchivedDvdTitles,
   decodeDvdTitleMap,
@@ -130,6 +131,7 @@ import type {
   ArchiveJobListOptions,
   ArchiveJobStatus,
   ArchiveJobProgress,
+  ArchiveReadFailureCategory,
   ArchiveRequestId,
   ArchiveRequestStatus,
   CatalogReviewCoverage,
@@ -209,6 +211,14 @@ const DISC_SELECTION_SUPERSESSION_HISTORY_LIMIT = 101;
 const DISC_SELECTION_CORRECTION_ENCODE_JOB_LINK_LIMIT = 101;
 const DISC_SELECTION_CORRECTION_RETAINED_OUTPUT_SUMMARY_LIMIT = 101;
 const MEDIA_ITEM_SEARCH_LIMIT = 100;
+const ARCHIVE_READ_FAILURE_MESSAGES = {
+  unknown: "The Optical Drive returned an unclassified read failure",
+  not_ready: "The Optical Drive was not ready to read the disc",
+  unit_attention: "The Optical Drive reported a media change",
+  hardware_error: "The Optical Drive reported a hardware fault",
+  transport_error: "Communication with the Optical Drive failed",
+  protection_error: "DVD copy protection or region access failed",
+} satisfies Record<ArchiveReadFailureCategory, string>;
 
 interface DiscSelectionSourceOverlapTracker {
   chapterRangesByTitle: Map<number, Array<readonly [number, number]>>;
@@ -3036,16 +3046,17 @@ export function createDataAccessInternal(
       0,
       0x0f,
     ) ?? null;
-    if (
-      evidence.category !== "unknown" &&
-      (scsiStatus !== 2 ||
-        hostStatus !== 0 ||
-        (driverStatus !== 0 && driverStatus !== 8) ||
-        senseKey !== (evidence.category === "not_ready" ? 0x02 : 0x06) ||
-        asc === null)
-    ) {
+    if (!isArchiveReadFailureEvidenceConsistent({
+      category: evidence.category,
+      scsiStatus,
+      hostStatus,
+      driverStatus,
+      senseKey,
+      asc,
+      ascq,
+    })) {
       throw new DomainInvariantError(
-        "read failure category contradicts its completion evidence",
+        "read failure evidence does not match category",
       );
     }
     return {
@@ -8075,11 +8086,7 @@ export function createDataAccessInternal(
       failWithReadFailure(claim, evidence) {
         return failArchiveJob(
           claim,
-          {
-            unknown: "The Optical Drive returned an unclassified read failure",
-            not_ready: "The Optical Drive was not ready to read the disc",
-            unit_attention: "The Optical Drive reported a media change",
-          }[evidence.category],
+          ARCHIVE_READ_FAILURE_MESSAGES[evidence.category],
           evidence,
         );
       },
