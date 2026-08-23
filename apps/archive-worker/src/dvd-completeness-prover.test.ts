@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import type { CommandRunner } from "./optical-drive-command-runner.js";
+import { MAX_DVD_CONTENT_BYTES } from "./dvd-content-policy.js";
 import { createNodeDvdCompletenessProver } from "./dvd-completeness-prover.js";
 
 const expectedTitleMap = {
@@ -74,6 +75,22 @@ function createSnapshotFactory() {
 }
 
 describe("retained DVD completeness proof process", () => {
+  it("applies the shared DVD size contract before creating a snapshot", async () => {
+    const snapshot = createSnapshotFactory();
+    const prover = createNodeDvdCompletenessProver({
+      snapshotFactory: snapshot.snapshotFactory,
+    });
+
+    await expect(prover.prove({
+      candidateBoundaryLba:
+        Math.floor(MAX_DVD_CONTENT_BYTES / 2_048) + 1,
+      expectedTitleMap,
+      imagePath: "/private/originals/retained.partial",
+      signal: new AbortController().signal,
+    })).rejects.toThrow("DVD completeness proof boundary is invalid");
+    expect(snapshot.snapshotFactory).not.toHaveBeenCalled();
+  });
+
   it("returns the maximum LBA after the complete title and stream map agrees", async () => {
     const run = createRunner();
     const snapshot = createSnapshotFactory();

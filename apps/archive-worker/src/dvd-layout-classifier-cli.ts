@@ -4,6 +4,8 @@ import {
   classifyDvdImageDamage,
   proveDvdImageLayoutCompleteness,
 } from "./dvd-layout-classifier.js";
+import { requireDvdContentSize } from "./dvd-content-policy.js";
+import { DVD_SECTOR_SIZE_BYTES } from "./dvd-recovery-contracts.js";
 
 function decodeRanges(value: string): readonly UnreadableSectorRange[] {
   let parsed: unknown;
@@ -54,6 +56,7 @@ if (arguments_[0] === "proof") {
   ) {
     throw new Error("DVD completeness classifier arguments are invalid");
   }
+  requireDvdContentSize(candidateBoundaryLba * DVD_SECTOR_SIZE_BYTES);
   const result = await proveDvdImageLayoutCompleteness({
     candidateBoundaryLba,
     imagePath,
@@ -72,6 +75,7 @@ if (arguments_[0] === "proof") {
   ) {
     throw new Error("DVD salvage classifier arguments are invalid");
   }
+  requireDvdContentSize(expectedByteCount);
 
   const result = await classifyDvdImageDamage({
     imagePath,

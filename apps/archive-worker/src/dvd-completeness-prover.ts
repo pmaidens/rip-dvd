@@ -9,7 +9,7 @@ import {
   nodeCommandRunner,
   type CommandRunner,
 } from "./optical-drive-command-runner.js";
-import { MAX_DVD_CONTENT_BYTES } from "./dvd-content-policy.js";
+import { requireDvdContentSize } from "./dvd-content-policy.js";
 import { dvdTitleMapsAgree } from "./dvd-title-map-verification.js";
 import { DVD_SECTOR_SIZE_BYTES } from "./dvd-recovery-contracts.js";
 import {
@@ -208,13 +208,20 @@ export function createNodeDvdCompletenessProver({
     }) {
       if (
         !Number.isSafeInteger(candidateBoundaryLba) ||
-        candidateBoundaryLba <= 0 ||
-        candidateBoundaryLba * DVD_SECTOR_SIZE_BYTES > MAX_DVD_CONTENT_BYTES
+        candidateBoundaryLba <= 0
       ) {
         throw new Error("DVD completeness proof boundary is invalid");
       }
+      let candidateByteCount: number;
+      try {
+        candidateByteCount = requireDvdContentSize(
+          candidateBoundaryLba * DVD_SECTOR_SIZE_BYTES,
+        );
+      } catch {
+        throw new Error("DVD completeness proof boundary is invalid");
+      }
       const snapshot = await snapshotFactory({
-        candidateByteCount: candidateBoundaryLba * DVD_SECTOR_SIZE_BYTES,
+        candidateByteCount,
         imagePath,
         signal,
       });

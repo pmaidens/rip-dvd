@@ -811,6 +811,10 @@ function writeUdfFileEntry(
   );
   entry[27] = fileType;
   entry.writeBigUInt64LE(BigInt(informationLength), 56);
+  entry.writeBigUInt64LE(
+    BigInt(Math.ceil(allocationByteCount / DVD_SECTOR_SIZE_BYTES)),
+    64,
+  );
   entry.writeUInt32LE(0, 168);
   entry.writeUInt32LE(8, 172);
   entry.writeUInt32LE(allocationByteCount, 176);
@@ -1097,6 +1101,7 @@ function relocateSyntheticUdfRootDirectory(
   child.copy(image, directoryOffset + childOffset);
   const rootFileEntryOffset = 301 * DVD_SECTOR_SIZE_BYTES;
   image.writeBigUInt64LE(BigInt(childOffset + child.byteLength), rootFileEntryOffset + 56);
+  image.writeBigUInt64LE(2n, rootFileEntryOffset + 64);
   image.writeUInt32LE(2 * DVD_SECTOR_SIZE_BYTES, rootFileEntryOffset + 176);
   image.writeUInt32LE(200, rootFileEntryOffset + 180);
 }
@@ -2187,6 +2192,54 @@ describe("retained DVD image layout completeness", () => {
     })).rejects.toThrow("DVD UDF allocation descriptors are unsupported");
   });
 
+  it("fails closed when UDF logical-block accounting disagrees", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    image.writeBigUInt64LE(2n, 301 * DVD_SECTOR_SIZE_BYTES + 64);
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD UDF file allocation accounting is malformed");
+  });
+
+  it("bounds UDF allocation descriptors in aggregate", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    const descriptorCount = 50_001;
+    const allocationDescriptorLength = descriptorCount * 8;
+    const fileEntryByteCount = Math.ceil(
+      (176 + allocationDescriptorLength) / DVD_SECTOR_SIZE_BYTES,
+    ) * DVD_SECTOR_SIZE_BYTES;
+    const fileEntry = image.subarray(
+      350 * DVD_SECTOR_SIZE_BYTES,
+      350 * DVD_SECTOR_SIZE_BYTES + fileEntryByteCount,
+    );
+    fileEntry.fill(0);
+    fileEntry[27] = 4;
+    fileEntry.writeUInt32LE(allocationDescriptorLength, 172);
+    writeUdfTag(fileEntry, 261, 50);
+    writeUdfLongAd(
+      image,
+      300 * DVD_SECTOR_SIZE_BYTES + 400,
+      fileEntryByteCount,
+      50,
+    );
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow(
+      "DVD UDF allocation descriptors exceed their aggregate safety bound",
+    );
+  });
+
   it("accepts a well-formed DVD copyright extended attribute", async () => {
     const image = syntheticCompleteDvdImage({
       includeIso: false,
@@ -3197,6 +3250,117 @@ describe("retained DVD image layout completeness", () => {
       candidateBoundaryLba: 600,
       imagePath: fixture.imagePath,
     })).rejects.toThrow("DVD program chain VOBU relationships are malformed");
+  });
+
+  it("fails closed when a cell ILVU reference exceeds its VOB", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    const playbackOffset = 360 * DVD_SECTOR_SIZE_BYTES +
+      2 * DVD_SECTOR_SIZE_BYTES + 16 + 237;
+    image[playbackOffset] = image[playbackOffset]! | 0x04;
+    image.writeUInt32BE(6, playbackOffset + 12);
+    image.copy(
+      image,
+      370 * DVD_SECTOR_SIZE_BYTES,
+      360 * DVD_SECTOR_SIZE_BYTES,
+      366 * DVD_SECTOR_SIZE_BYTES,
+    );
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD program chain cell table is malformed");
+  });
+
+  it("fails closed when a PGC begins inside its search-pointer array", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    const titlePgcitOffset = 360 * DVD_SECTOR_SIZE_BYTES +
+      2 * DVD_SECTOR_SIZE_BYTES;
+    image.writeUInt32BE(8, titlePgcitOffset + 12);
+    image.copy(
+      image,
+      370 * DVD_SECTOR_SIZE_BYTES,
+      360 * DVD_SECTOR_SIZE_BYTES,
+      366 * DVD_SECTOR_SIZE_BYTES,
+    );
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD program chain table is ambiguous");
+  });
+
+  it("fails closed when program-chain bodies overlap", async () => {
+    const chain = {
+      cells: [{ firstSector: 0, lastSector: 5 }],
+      programStartCells: [1],
+    } as const;
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+      programChains: [chain, chain],
+    });
+    const titlePgcitOffset = 360 * DVD_SECTOR_SIZE_BYTES +
+      2 * DVD_SECTOR_SIZE_BYTES;
+    const firstPgcStart = image.readUInt32BE(titlePgcitOffset + 12);
+    image.writeUInt32BE(firstPgcStart + 200, titlePgcitOffset + 20);
+    image.copy(
+      image,
+      370 * DVD_SECTOR_SIZE_BYTES,
+      360 * DVD_SECTOR_SIZE_BYTES,
+      366 * DVD_SECTOR_SIZE_BYTES,
+    );
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD program chain table is malformed");
+  });
+
+  it("fails closed when menu language-unit program-chain tables overlap", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    const tableOffset = 332 * DVD_SECTOR_SIZE_BYTES;
+    const originalPgcit = Buffer.from(image.subarray(
+      tableOffset + 16,
+      tableOffset + 297,
+    ));
+    image.fill(0, tableOffset, tableOffset + 586);
+    image.writeUInt16BE(2, tableOffset);
+    image.writeUInt32BE(585, tableOffset + 4);
+    image.write("en", tableOffset + 8, "ascii");
+    image[tableOffset + 11] = 1;
+    image.writeUInt32BE(24, tableOffset + 12);
+    image.write("fr", tableOffset + 16, "ascii");
+    image[tableOffset + 19] = 1;
+    image.writeUInt32BE(305, tableOffset + 20);
+    originalPgcit.copy(image, tableOffset + 24);
+    image.writeUInt32BE(399, tableOffset + 28);
+    originalPgcit.copy(image, tableOffset + 305);
+    image.copy(
+      image,
+      347 * DVD_SECTOR_SIZE_BYTES,
+      330 * DVD_SECTOR_SIZE_BYTES,
+      336 * DVD_SECTOR_SIZE_BYTES,
+    );
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow(
+      "DVD menu program chain tables overlap ambiguously",
+    );
   });
 
   it("fails closed on a malformed menu VOBU address map", async () => {
