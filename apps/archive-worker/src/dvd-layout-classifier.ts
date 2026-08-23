@@ -1018,45 +1018,76 @@ async function analyzeDvdImageLayout({
     };
   };
 
-  const validateDvdManagerExtentFields = (
+  const validateDvdInformationExtentFields = (
     content: Buffer,
-    dvdFiles: ReadonlyMap<string, DvdFileLayout>,
-    managerIfo: DvdFileLayout,
+    {
+      errorMessage,
+      ifo,
+      ifoDescription,
+      menuVob,
+      relatedFiles,
+      titleVob,
+    }: {
+      errorMessage: string;
+      ifo: DvdFileLayout;
+      ifoDescription: string;
+      menuVob?: DvdFileLayout;
+      relatedFiles: readonly DvdFileLayout[];
+      titleVob?: DvdFileLayout;
+    },
   ): void => {
-    const ifoRange = contiguousDvdFileRange(managerIfo, "video manager IFO");
-    const managerPaths = [
-      "VIDEO_TS/VIDEO_TS.IFO",
-      "VIDEO_TS/VIDEO_TS.BUP",
-      "VIDEO_TS/VIDEO_TS.VOB",
-    ];
-    const managerRanges = managerPaths.flatMap((path) => {
-      const file = dvdFiles.get(path);
-      return file === undefined
-        ? []
-        : [contiguousDvdFileRange(file, "video manager file")];
-    });
-    const menuVob = dvdFiles.get("VIDEO_TS/VIDEO_TS.VOB");
+    const ifoRange = contiguousDvdFileRange(ifo, ifoDescription);
+    const relatedRanges = relatedFiles.map((file) =>
+      contiguousDvdFileRange(file, `${ifoDescription} related file`)
+    );
+    const expectedLastSector = Math.max(
+      ...relatedRanges.map((range) => range.endLba),
+    ) - ifoRange.startLba - 1;
     const expectedMenuStart = menuVob === undefined
       ? 0
-      : contiguousDvdFileRange(menuVob, "video manager VOB").startLba -
+      : contiguousDvdFileRange(menuVob, `${ifoDescription} menu VOB`).startLba -
         ifoRange.startLba;
-    const expectedLastSector = Math.max(
-      ...managerRanges.map((range) => range.endLba),
-    ) - ifoRange.startLba - 1;
+    const expectedTitleStart = titleVob === undefined
+      ? undefined
+      : contiguousDvdFileRange(titleVob, "title VOB").startLba -
+        ifoRange.startLba;
     const lastByte = content.readUInt32BE(0x80);
     if (
       content.readUInt32BE(0x0c) !== expectedLastSector ||
       content.readUInt32BE(0x1c) !== ifoRange.sectorCount - 1 ||
       lastByte < 341 ||
-      lastByte >= managerIfo.byteCount ||
+      lastByte >= ifo.byteCount ||
       Math.floor(lastByte / DVD_SECTOR_SIZE_BYTES) >
         content.readUInt32BE(0x1c) ||
-      content.readUInt32BE(0xc0) !== expectedMenuStart
+      content.readUInt32BE(0xc0) !== expectedMenuStart ||
+      expectedTitleStart !== undefined &&
+        content.readUInt32BE(0xc4) !== expectedTitleStart
     ) {
-      throw new DvdExtentFieldError(
-        "DVD video manager extent fields are malformed",
-      );
+      throw new DvdExtentFieldError(errorMessage);
     }
+  };
+
+  const validateDvdManagerExtentFields = (
+    content: Buffer,
+    dvdFiles: ReadonlyMap<string, DvdFileLayout>,
+    managerIfo: DvdFileLayout,
+  ): void => {
+    const managerPaths = [
+      "VIDEO_TS/VIDEO_TS.IFO",
+      "VIDEO_TS/VIDEO_TS.BUP",
+      "VIDEO_TS/VIDEO_TS.VOB",
+    ];
+    const managerFiles = managerPaths.flatMap((path) => {
+      const file = dvdFiles.get(path);
+      return file === undefined ? [] : [file];
+    });
+    validateDvdInformationExtentFields(content, {
+      errorMessage: "DVD video manager extent fields are malformed",
+      ifo: managerIfo,
+      ifoDescription: "video manager IFO",
+      menuVob: dvdFiles.get("VIDEO_TS/VIDEO_TS.VOB"),
+      relatedFiles: managerFiles,
+    });
   };
 
   const validateDvdTitleSetExtentFields = (
@@ -1066,39 +1097,22 @@ async function analyzeDvdImageLayout({
     titleSetIfo: DvdFileLayout,
   ): void => {
     const prefix = `VIDEO_TS/VTS_${String(titleSetNumber).padStart(2, "0")}`;
-    const ifoRange = contiguousDvdFileRange(titleSetIfo, "title-set IFO");
-    const titleSetRanges = [...dvdFiles.values()].filter((file) =>
+    const titleSetFiles = [...dvdFiles.values()].filter((file) =>
       file.path.startsWith(`${prefix}_`)
-    ).map((file) => contiguousDvdFileRange(file, "title-set file"));
+    );
     const menuVob = dvdFiles.get(`${prefix}_0.VOB`);
     const titleVob = dvdFiles.get(`${prefix}_1.VOB`);
     if (titleVob === undefined) {
       throw new Error("DVD title VOB layout is incomplete");
     }
-    const expectedLastSector = Math.max(
-      ...titleSetRanges.map((range) => range.endLba),
-    ) - ifoRange.startLba - 1;
-    const expectedMenuStart = menuVob === undefined
-      ? 0
-      : contiguousDvdFileRange(menuVob, "title-set menu VOB").startLba -
-        ifoRange.startLba;
-    const expectedTitleStart = contiguousDvdFileRange(
+    validateDvdInformationExtentFields(content, {
+      errorMessage: "DVD title-set extent fields are malformed",
+      ifo: titleSetIfo,
+      ifoDescription: "title-set IFO",
+      menuVob,
+      relatedFiles: titleSetFiles,
       titleVob,
-      "title VOB",
-    ).startLba - ifoRange.startLba;
-    const lastByte = content.readUInt32BE(0x80);
-    if (
-      content.readUInt32BE(0x0c) !== expectedLastSector ||
-      content.readUInt32BE(0x1c) !== ifoRange.sectorCount - 1 ||
-      lastByte < 341 ||
-      lastByte >= titleSetIfo.byteCount ||
-      Math.floor(lastByte / DVD_SECTOR_SIZE_BYTES) >
-        content.readUInt32BE(0x1c) ||
-      content.readUInt32BE(0xc0) !== expectedMenuStart ||
-      content.readUInt32BE(0xc4) !== expectedTitleStart
-    ) {
-      throw new DvdExtentFieldError("DVD title-set extent fields are malformed");
-    }
+    });
   };
 
   const readDvdManagerTable = (
@@ -1125,9 +1139,12 @@ async function analyzeDvdImageLayout({
       return undefined;
     }
     const tableOffset = tableSector * DVD_SECTOR_SIZE_BYTES;
-    const managerInformationByteCount = content.readUInt32BE(0x80) + 1;
+    const managerInformationByteCount =
+      (content.readUInt32BE(0x1c) + 1) * DVD_SECTOR_SIZE_BYTES;
     if (
       !Number.isSafeInteger(tableOffset) ||
+      !Number.isSafeInteger(managerInformationByteCount) ||
+      managerInformationByteCount > content.byteLength ||
       tableOffset < DVD_SECTOR_SIZE_BYTES ||
       tableOffset + minimumByteCount > managerInformationByteCount
     ) {
@@ -1252,7 +1269,7 @@ async function analyzeDvdImageLayout({
       const attributeEnd = attributeOffset + attributeByteCount;
       if (
         attributeByteCount < 356 ||
-        attributeByteCount > 542 ||
+        attributeByteCount > 776 ||
         attributeEnd > attributeTable.byteLength
       ) {
         throw new Error("DVD title-set attribute table is malformed");
@@ -1265,9 +1282,12 @@ async function analyzeDvdImageLayout({
       const menuSubpictureCount = attributes[93]!;
       const titleAudioCount = attributes[267]!;
       const titleSubpictureCount = attributes[349]!;
-      const availableTitleSubpictureCount = Math.floor(
-        (attributes.byteLength - 350) / 6,
+      const availableTitleSubpictureCount = Math.min(
+        32,
+        Math.floor((attributes.byteLength - 350) / 6),
       );
+      const titleSubpictureAttributesEnd =
+        350 + availableTitleSubpictureCount * 6;
       const titleSetNumber = titleSetNumbers[index]!;
       const titleSetIfo = dvdFiles.get(
         `VIDEO_TS/VTS_${String(titleSetNumber).padStart(2, "0")}_0.IFO`,
@@ -1305,7 +1325,7 @@ async function analyzeDvdImageLayout({
         !attributes.subarray(268, 332).equals(
           titleSetContent.subarray(0x204, 0x244),
         ) ||
-        !attributes.subarray(350).equals(
+        !attributes.subarray(350, titleSubpictureAttributesEnd).equals(
           titleSetContent.subarray(
             0x256,
             0x256 + availableTitleSubpictureCount * 6,
@@ -4908,11 +4928,10 @@ async function analyzeDvdImageLayout({
     }
   };
 
-  const canonicalDvdVideoLayout = (
+  const canonicalFilesystemLayout = (
     dvdFiles: ReadonlyMap<string, DvdFileLayout>,
   ) => JSON.stringify(
     [...dvdFiles.values()]
-      .filter((file) => file.path.startsWith("VIDEO_TS/"))
       .sort((left, right) => left.path.localeCompare(right.path))
       .map((file) => ({
         byteCount: file.byteCount,
@@ -5178,7 +5197,7 @@ async function analyzeDvdImageLayout({
       }
     }
     return JSON.stringify({
-      dvdVideoLayout: canonicalDvdVideoLayout(dvdFiles),
+      filesystemLayout: canonicalFilesystemLayout(dvdFiles),
       globalTitles,
       menuNavigation,
     });

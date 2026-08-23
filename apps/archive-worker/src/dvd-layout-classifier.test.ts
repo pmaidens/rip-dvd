@@ -234,6 +234,11 @@ function writeSyntheticJolietView(
     extentLba: number;
     name: string;
   }[],
+  rootFiles: readonly {
+    byteCount?: number;
+    extentLba: number;
+    name: string;
+  }[] = [],
 ) {
   image.copy(
     image,
@@ -292,6 +297,14 @@ function writeSyntheticJolietView(
       identifier: jolietIdentifier("VIDEO_TS"),
       isDirectory: true,
     }),
+    ...rootFiles.map((file) =>
+      isoDirectoryRecord({
+        byteCount: file.byteCount,
+        extentLba: file.extentLba,
+        identifier: jolietIdentifier(`${file.name};1`),
+        isDirectory: false,
+      })
+    ),
   ]);
   writeDirectory(image, 53, [
     isoDirectoryRecord({
@@ -409,7 +422,7 @@ function writeDvdNavigationRelationships(
     0x1c,
   );
   managerIfo.writeUInt16BE(1, 0x3e);
-  managerIfo.writeUInt32BE(managerIfo.byteLength - 1, 0x80);
+  managerIfo.writeUInt32BE(341, 0x80);
   managerIfo.writeUInt32BE(managerMenuVobLba - managerIfoLba, 0xc0);
   managerIfo.writeUInt32BE(1, 0xc4);
   const titleSearchTable = managerIfo.subarray(DVD_SECTOR_SIZE_BYTES);
@@ -1419,6 +1432,31 @@ describe("retained DVD image layout completeness", () => {
     })).resolves.toEqual({ maximumReferencedLba: 599 });
   });
 
+  it("rejects a Joliet inventory that differs outside VIDEO_TS", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    writeSyntheticJolietView(
+      image,
+      [
+        { byteCount: 6 * DVD_SECTOR_SIZE_BYTES, extentLba: 330, name: "VIDEO_TS.IFO" },
+        { byteCount: 6 * DVD_SECTOR_SIZE_BYTES, extentLba: 347, name: "VIDEO_TS.BUP" },
+        { extentLba: 338, name: "VIDEO_TS.VOB" },
+        { byteCount: 6 * DVD_SECTOR_SIZE_BYTES, extentLba: 360, name: "VTS_01_0.IFO" },
+        { byteCount: 6 * DVD_SECTOR_SIZE_BYTES, extentLba: 370, name: "VTS_01_0.BUP" },
+        { byteCount: 6 * DVD_SECTOR_SIZE_BYTES, extentLba: 400, name: "VTS_01_1.VOB" },
+      ],
+      [{ extentLba: 500, name: "README.TXT" }],
+    );
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD ISO filesystem views disagree");
+  });
+
   it("rejects a Joliet view with a partial DVD-Video inventory", async () => {
     const image = syntheticCompleteDvdImage({
       includeIso: true,
@@ -2194,6 +2232,24 @@ describe("retained DVD image layout completeness", () => {
       candidateBoundaryLba: 600,
       imagePath: fixture.imagePath,
     })).rejects.toThrow(`DVD ${description} table is outside the video manager`);
+  });
+
+  it("accepts a padded 0x308-byte title-set attribute entry", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    for (const managerLba of [330, 347]) {
+      const tableOffset = (managerLba + 5) * DVD_SECTOR_SIZE_BYTES;
+      image.writeUInt32BE(787, tableOffset + 4);
+      image.writeUInt32BE(775, tableOffset + 12);
+    }
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).resolves.toEqual({ maximumReferencedLba: 599 });
   });
 
   it("fails closed when title-set attributes disagree with the manager inventory", async () => {
