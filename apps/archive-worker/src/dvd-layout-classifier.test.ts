@@ -192,12 +192,14 @@ function writeDvdNavigationRelationships(
   image: Buffer,
   {
     globalTitles,
+    includeMenuNavigation = false,
     managerIfoLba,
     programChains,
     titleSetIfoLba,
     vobuStartSectors,
   }: {
     globalTitles: readonly SyntheticGlobalTitle[];
+    includeMenuNavigation?: boolean;
     managerIfoLba: number;
     programChains: readonly SyntheticProgramChain[];
     titleSetIfoLba: number;
@@ -206,7 +208,8 @@ function writeDvdNavigationRelationships(
 ) {
   const managerIfo = image.subarray(
     managerIfoLba * DVD_SECTOR_SIZE_BYTES,
-    (managerIfoLba + 2) * DVD_SECTOR_SIZE_BYTES,
+    (managerIfoLba + (includeMenuNavigation ? 4 : 2)) *
+      DVD_SECTOR_SIZE_BYTES,
   );
   managerIfo.write("DVDVIDEO-VMG", 0, "ascii");
   managerIfo.writeUInt32BE(1, 0xc4);
@@ -219,6 +222,40 @@ function writeDvdNavigationRelationships(
     titleSearchTable.writeUInt16BE(title.parts.length, offset + 2);
     titleSearchTable[offset + 6] = 1;
     titleSearchTable[offset + 7] = title.titleSetTitleNumber;
+  }
+  if (includeMenuNavigation) {
+    managerIfo.writeUInt32BE(2, 0xc8);
+    managerIfo.writeUInt32BE(3, 0xdc);
+    const programChainUnits = managerIfo.subarray(
+      2 * DVD_SECTOR_SIZE_BYTES,
+    );
+    programChainUnits.writeUInt16BE(1, 0);
+    programChainUnits.writeUInt32BE(296, 4);
+    programChainUnits.write("en", 8, "ascii");
+    programChainUnits[11] = 1;
+    programChainUnits.writeUInt32BE(16, 12);
+    const programChainTable = programChainUnits.subarray(16);
+    programChainTable.writeUInt16BE(1, 0);
+    programChainTable.writeUInt32BE(280, 4);
+    programChainTable.writeUInt32BE(16, 12);
+    const programChain = programChainTable.subarray(16);
+    programChain[2] = 1;
+    programChain[3] = 1;
+    programChain.writeUInt16BE(236, 230);
+    programChain.writeUInt16BE(237, 232);
+    programChain.writeUInt16BE(261, 234);
+    programChain[236] = 1;
+    programChain.writeUInt32BE(0, 237 + 8);
+    programChain.writeUInt32BE(0, 237 + 12);
+    programChain.writeUInt32BE(0, 237 + 16);
+    programChain.writeUInt32BE(0, 237 + 20);
+    programChain.writeUInt16BE(1, 261);
+    programChain[264] = 1;
+    const menuAddressMap = managerIfo.subarray(
+      3 * DVD_SECTOR_SIZE_BYTES,
+    );
+    menuAddressMap.writeUInt32BE(7, 0);
+    menuAddressMap.writeUInt32BE(0, 4);
   }
 
   const ifo = image.subarray(
@@ -387,9 +424,11 @@ function writeUdfDirectory(
 function writeSyntheticUdfLayout(
   image: Buffer,
   {
+    completeNavigation = false,
     payloadTitleVobStartLba,
     volumeLastLba,
   }: {
+    completeNavigation?: boolean;
     payloadTitleVobStartLba?: number;
     volumeLastLba?: number;
   } = {},
@@ -519,12 +558,23 @@ function writeSyntheticUdfLayout(
       });
     }
   } else {
+    const controlFiles = completeNavigation
+      ? [
+          { dataLba: 30, fileEntryLba: 305, sectorCount: 4 },
+          { dataLba: 47, fileEntryLba: 306, sectorCount: 4 },
+          { dataLba: 38, fileEntryLba: 307, sectorCount: 1 },
+          { dataLba: 39, fileEntryLba: 308, sectorCount: 4 },
+          { dataLba: 51, fileEntryLba: 309, sectorCount: 4 },
+        ]
+      : [
+          { dataLba: 30, fileEntryLba: 305, sectorCount: 2 },
+          { dataLba: 32, fileEntryLba: 306, sectorCount: 1 },
+          { dataLba: 33, fileEntryLba: 307, sectorCount: 1 },
+          { dataLba: 34, fileEntryLba: 308, sectorCount: 4 },
+          { dataLba: 38, fileEntryLba: 309, sectorCount: 1 },
+        ];
     for (const file of [
-      { dataLba: 30, fileEntryLba: 305, sectorCount: 2 },
-      { dataLba: 32, fileEntryLba: 306, sectorCount: 1 },
-      { dataLba: 33, fileEntryLba: 307, sectorCount: 1 },
-      { dataLba: 34, fileEntryLba: 308, sectorCount: 4 },
-      { dataLba: 38, fileEntryLba: 309, sectorCount: 1 },
+      ...controlFiles,
       {
         dataLba: payloadTitleVobStartLba - 300,
         fileEntryLba: 310,
@@ -724,18 +774,26 @@ function syntheticCompleteDvdImage({
       videoDirectoryLba: 43,
       videoFiles: [
         {
-          byteCount: 2 * DVD_SECTOR_SIZE_BYTES,
+          byteCount: 4 * DVD_SECTOR_SIZE_BYTES,
           extentLba: 330,
           name: "VIDEO_TS.IFO",
         },
-        { extentLba: 332, name: "VIDEO_TS.BUP" },
-        { extentLba: 333, name: "VIDEO_TS.VOB" },
         {
           byteCount: 4 * DVD_SECTOR_SIZE_BYTES,
-          extentLba: 334,
+          extentLba: 347,
+          name: "VIDEO_TS.BUP",
+        },
+        { extentLba: 338, name: "VIDEO_TS.VOB" },
+        {
+          byteCount: 4 * DVD_SECTOR_SIZE_BYTES,
+          extentLba: 339,
           name: "VTS_01_0.IFO",
         },
-        { extentLba: 338, name: "VTS_01_0.BUP" },
+        {
+          byteCount: 4 * DVD_SECTOR_SIZE_BYTES,
+          extentLba: 351,
+          name: "VTS_01_0.BUP",
+        },
         {
           byteCount: 6 * DVD_SECTOR_SIZE_BYTES,
           extentLba: 400,
@@ -747,24 +805,37 @@ function syntheticCompleteDvdImage({
   }
   if (includeUdf) {
     writeSyntheticUdfLayout(image, {
+      completeNavigation: true,
       payloadTitleVobStartLba: udfTitleVobStartLba,
       volumeLastLba: 599,
     });
-    image.writeUInt32LE(150, 258 * DVD_SECTOR_SIZE_BYTES + 192);
   }
   writeDvdNavigationRelationships(image, {
     globalTitles: [{
       parts: [{ pgcNumber: 1, programNumber: 1 }],
       titleSetTitleNumber: 1,
     }],
+    includeMenuNavigation: true,
     managerIfoLba: 330,
     programChains: [{
       cells: [{ firstSector: 0, lastSector: 5 }],
       programStartCells: [1],
     }],
-    titleSetIfoLba: 334,
+    titleSetIfoLba: 339,
     vobuStartSectors: [0, 3],
   });
+  image.copy(
+    image,
+    347 * DVD_SECTOR_SIZE_BYTES,
+    330 * DVD_SECTOR_SIZE_BYTES,
+    334 * DVD_SECTOR_SIZE_BYTES,
+  );
+  image.copy(
+    image,
+    351 * DVD_SECTOR_SIZE_BYTES,
+    339 * DVD_SECTOR_SIZE_BYTES,
+    343 * DVD_SECTOR_SIZE_BYTES,
+  );
   return image;
 }
 
@@ -816,6 +887,21 @@ describe("retained DVD image layout completeness", () => {
     })).resolves.toEqual({ maximumReferencedLba: 599 });
   });
 
+  it("rejects a reserve UDF partition that crosses the candidate boundary", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    image.writeUInt32LE(590, 274 * DVD_SECTOR_SIZE_BYTES + 188);
+    image.writeUInt32LE(20, 274 * DVD_SECTOR_SIZE_BYTES + 192);
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD filesystem extent is invalid");
+  });
+
   it("accepts agreeing ISO and UDF views", async () => {
     const fixture = createSyntheticCompleteDvdImage({
       includeIso: true,
@@ -839,6 +925,87 @@ describe("retained DVD image layout completeness", () => {
       candidateBoundaryLba: 600,
       imagePath: fixture.imagePath,
     })).rejects.toThrow("DVD filesystem views disagree");
+  });
+
+  it("fails closed when a DVD-Video backup differs from its IFO", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    image[347 * DVD_SECTOR_SIZE_BYTES + 512] ^= 0xff;
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD-Video backup does not match its IFO");
+  });
+
+  it("fails closed on malformed menu program-chain navigation", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    const lastSectorOffset = 330 * DVD_SECTOR_SIZE_BYTES +
+      2 * DVD_SECTOR_SIZE_BYTES + 16 + 16 + 237 + 20;
+    image.writeUInt32BE(1, lastSectorOffset);
+    image.copy(
+      image,
+      347 * DVD_SECTOR_SIZE_BYTES,
+      330 * DVD_SECTOR_SIZE_BYTES,
+      334 * DVD_SECTOR_SIZE_BYTES,
+    );
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD program chain cell table is malformed");
+  });
+
+  it("fails closed on a malformed menu command table", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    const commandTablePointerOffset = 330 * DVD_SECTOR_SIZE_BYTES +
+      2 * DVD_SECTOR_SIZE_BYTES + 16 + 16 + 228;
+    image.writeUInt16BE(236, commandTablePointerOffset);
+    image.copy(
+      image,
+      347 * DVD_SECTOR_SIZE_BYTES,
+      330 * DVD_SECTOR_SIZE_BYTES,
+      334 * DVD_SECTOR_SIZE_BYTES,
+    );
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD program chain command table is malformed");
+  });
+
+  it("fails closed on a malformed menu VOBU address map", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    image.writeUInt32BE(
+      1,
+      330 * DVD_SECTOR_SIZE_BYTES + 3 * DVD_SECTOR_SIZE_BYTES + 4,
+    );
+    image.copy(
+      image,
+      347 * DVD_SECTOR_SIZE_BYTES,
+      330 * DVD_SECTOR_SIZE_BYTES,
+      334 * DVD_SECTOR_SIZE_BYTES,
+    );
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD menu VOBU address map is malformed");
   });
 
   it("fails closed when no supported filesystem view is present", async () => {
@@ -1019,7 +1186,7 @@ describe("retained DVD image layout completeness", () => {
       includeUdf: true,
     });
     image.writeBigUInt64LE(
-      BigInt(3 * DVD_SECTOR_SIZE_BYTES),
+      BigInt(5 * DVD_SECTOR_SIZE_BYTES),
       305 * DVD_SECTOR_SIZE_BYTES + 56,
     );
     const fixture = writeFixture(image);
