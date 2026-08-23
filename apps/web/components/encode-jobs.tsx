@@ -109,19 +109,33 @@ export function EncodeJobsView({
   onSelectionPage,
   onProfilePage,
 }: EncodeJobsViewProps) {
+  const [selectedSelectionId, setSelectedSelectionId] = useState<
+    DiscSelectionId | ""
+  >("");
+  const [outputPath, setOutputPath] = useState("");
+
+  useEffect(() => {
+    if (
+      state.status !== "loaded" ||
+      !state.selections.some(
+        (selection) => selection.id === selectedSelectionId,
+      )
+    ) {
+      setSelectedSelectionId("");
+      setOutputPath("");
+    }
+  }, [selectedSelectionId, state]);
+
   function populateOutputPath(event: React.ChangeEvent<HTMLSelectElement>) {
     if (state.status !== "loaded") {
       return;
     }
+    const selectionId = event.currentTarget.value as DiscSelectionId;
     const selection = state.selections.find(
-      (candidate) => candidate.id === event.currentTarget.value,
+      (candidate) => candidate.id === selectionId,
     );
-    const outputInput = event.currentTarget.form?.elements.namedItem(
-      "outputPath",
-    );
-    if (outputInput instanceof HTMLInputElement) {
-      outputInput.value = selection?.suggestedOutputPath ?? "";
-    }
+    setSelectedSelectionId(selectionId);
+    setOutputPath(selection?.suggestedOutputPath ?? "");
   }
 
   function submit(event: React.FormEvent<HTMLFormElement>) {
@@ -180,7 +194,7 @@ export function EncodeJobsView({
                 <select
                   name="discSelectionId"
                   required
-                  defaultValue=""
+                  value={selectedSelectionId}
                   disabled={state.selections.length === 0}
                   onChange={populateOutputPath}
                 >
@@ -219,6 +233,8 @@ export function EncodeJobsView({
                   required
                   maxLength={4096}
                   placeholder="/media/movies/Movie (2001)/Movie (2001).mkv"
+                  value={outputPath}
+                  onChange={(event) => setOutputPath(event.currentTarget.value)}
                 />
               </label>
             </div>

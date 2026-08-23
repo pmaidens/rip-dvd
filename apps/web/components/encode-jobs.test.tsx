@@ -111,7 +111,7 @@ describe("EncodeJobsView", () => {
     expect(html).toContain("Next active profiles");
   });
 
-  it("fills the final output path when a reviewed selection is chosen", async () => {
+  it("fills an editable final output path for each reviewed selection", async () => {
     const container = document.createElement("div");
     const root = createRoot(container);
 
@@ -128,6 +128,14 @@ describe("EncodeJobsView", () => {
               sourceDescription: "DVD main feature",
               suggestedOutputPath:
                 "/media/movies/Queue Me (2001)/Queue Me (2001).mkv",
+            }, {
+              id: "selection-2" as DiscSelectionId,
+              mediaItemId: "movie-2",
+              mediaTitle: "Queue Next",
+              mediaYear: 2002,
+              sourceDescription: "DVD title 2",
+              suggestedOutputPath:
+                "/media/movies/Queue Next (2002)/Queue Next (2002).mkv",
             }],
             profiles: [{
               id: "profile-v2" as EncodingProfileId,
@@ -174,6 +182,20 @@ describe("EncodeJobsView", () => {
 
     expect(outputPath.value).toBe(
       "/media/movies/Queue Me (2001)/Queue Me (2001).mkv",
+    );
+
+    await act(async () => {
+      outputPath.value = "/media/movies/Operator choice.mkv";
+      outputPath.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(outputPath.value).toBe("/media/movies/Operator choice.mkv");
+
+    await act(async () => {
+      selection.value = "selection-2";
+      selection.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(outputPath.value).toBe(
+      "/media/movies/Queue Next (2002)/Queue Next (2002).mkv",
     );
     await act(async () => root.unmount());
   });
