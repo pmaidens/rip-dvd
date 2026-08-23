@@ -250,3 +250,61 @@ it("keeps the fresh and published bounded migration paths intact", () => {
   });
   sqlite.close();
 });
+
+it("migrates historical Original Disc Archives with null boundary evidence", () => {
+  const databasePath = createDatabasePath("rip-dvd-boundary-migration-");
+  const previousMigrations = createMigrationsThrough(
+    "20260822201215_thick_madame_web",
+  );
+  const previousAccess = createDataAccess({
+    databasePath,
+    migrationsFolder: previousMigrations,
+  });
+  previousAccess.close();
+
+  const historicalSqlite = new DatabaseSync(databasePath);
+  historicalSqlite.exec(`
+    INSERT INTO optical_drives (
+      id, device_path, is_enabled, configuration_default_resolved,
+      is_configured_target, is_present, last_seen_at, created_at, updated_at
+    ) VALUES (
+      'historical-drive', '/dev/historical', 0, 1, 0, 0, 1, 1, 1
+    );
+    INSERT INTO detected_discs (
+      id, optical_drive_id, disc_kind, fingerprint, status,
+      detected_at, created_at, updated_at
+    ) VALUES (
+      'historical-disc', 'historical-drive', 'dvd',
+      'historical-boundary-fingerprint', 'archived', 1, 1, 1
+    );
+    INSERT INTO original_disc_archives (
+      id, detected_disc_id, disc_kind, archive_format, archive_path,
+      fingerprint, size_bytes, archived_at, created_at, updated_at
+    ) VALUES (
+      'historical-archive', 'historical-disc', 'dvd', 'iso',
+      '/media/originals/historical.iso', 'historical-boundary-fingerprint',
+      2048, 1, 1, 1
+    );
+  `);
+  historicalSqlite.close();
+
+  const migratedAccess = createDataAccess({ databasePath });
+  expect(migratedAccess.catalog.listOriginalDiscArchives()).toEqual([
+    expect.objectContaining({
+      id: "historical-archive",
+      sizeBytes: 2_048,
+      boundaryPolicyVersion: null,
+      boundaryReportedSizeBytes: null,
+      boundaryPublishedSizeBytes: null,
+      boundaryExcludedSectorCount: null,
+    }),
+  ]);
+  migratedAccess.close();
+
+  const migratedSqlite = new DatabaseSync(databasePath);
+  expect(migratedSqlite.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+  expect(migratedSqlite.prepare("PRAGMA quick_check").get()).toEqual({
+    quick_check: "ok",
+  });
+  migratedSqlite.close();
+});

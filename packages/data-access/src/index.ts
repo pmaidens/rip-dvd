@@ -18,6 +18,15 @@ export {
   createUnknownArchiveIntegrityEvidence,
   createWatchableSalvageArchiveIntegrityEvidence,
 } from "./archive-integrity.js";
+export {
+  archiveBoundaryEvidenceFromRecord,
+  createNormalDvdArchiveBoundaryEvidence,
+  DVD_ARCHIVE_BOUNDARY_POLICY_VERSION,
+} from "./archive-boundary.js";
+export type {
+  ArchiveBoundaryEvidence,
+  NormalDvdArchiveBoundaryEvidence,
+} from "./archive-boundary.js";
 export { normalizeMediaItemSearchTitle } from "./media-item-title-search.js";
 export { isCorrectedEncodePredecessorReady } from "./corrected-encode-readiness.js";
 

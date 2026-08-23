@@ -5,6 +5,8 @@ import { DatabaseSync } from "node:sqlite";
 
 import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import {
+  createCleanReadArchiveIntegrityEvidence,
+  createNormalDvdArchiveBoundaryEvidence,
   MAX_MEDIA_ITEM_HIERARCHY_DEPTH,
   type EncodeJobStatus,
   type MediaItem,
@@ -19,6 +21,7 @@ import {
   useDataAccessFixture,
   withSnapshotOverrides,
 } from "../../../../test/data-access-fixture";
+import { startArchiveJob } from "../../../../test/archive-job-fixture";
 import { createCatalogReviewRoute } from "./route";
 
 const dataAccessFixture = useDataAccessFixture();
@@ -32,6 +35,54 @@ describe("Catalog Review API", () => {
 
     expectTypeOf<LockedProvenance["relatedEncodeJob"]["status"]>()
       .toEqualTypeOf<EncodeJobStatus>();
+  });
+
+  it("carries normal archive-boundary provenance without a capacity correction", async () => {
+    const access = dataAccessFixture.create();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/normal-boundary",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "normal-boundary",
+      volumeLabel: "NORMAL_BOUNDARY",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    const claim = startArchiveJob(access, disc, "normal-boundary-worker");
+    access.archiveJobs.publish(claim, {
+      archivePath: "/media/originals/normal-boundary.iso",
+      boundaryEvidence: createNormalDvdArchiveBoundaryEvidence(9),
+      integrityEvidence: createCleanReadArchiveIntegrityEvidence(
+        "test-clean-v1",
+      ),
+      sizeBytes: 9,
+    });
+    const archive = access.catalog.listOriginalDiscArchives()[0]!;
+
+    const response = await createCatalogReviewRoute(
+      new Request(
+        `http://localhost:3000/api/catalog-reviews/${archive.id}`,
+      ),
+      archive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+    const review = await response.json();
+
+    expect(review.archive).toMatchObject({
+      boundaryEvidence: {
+        policyVersion: "dvd-archive-boundary-v1",
+        reportedSizeBytes: 9,
+        publishedSizeBytes: 9,
+        excludedSectorCount: 0,
+      },
+    });
+    expect(JSON.stringify(review).toLowerCase()).not.toContain(
+      "capacity correction",
+    );
   });
 
   it("returns an archived DVD's raw title map separately from reviewed catalog data", async () => {
@@ -85,6 +136,7 @@ describe("Catalog Review API", () => {
         discLabel: "EPISODE_DISC",
         discKind: "dvd",
         archiveFormat: "iso",
+        boundaryEvidence: null,
         integrity: "unknown",
         badSectorCount: null,
         badAreaCount: null,

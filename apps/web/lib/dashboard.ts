@@ -1,4 +1,5 @@
 import type {
+  ArchiveBoundaryEvidence,
   ArchiveFormat,
   ArchiveIntegrity,
   ArchiveJob,
@@ -24,7 +25,10 @@ import type {
   OriginalDiscArchiveId,
   UnreadableSectorRange,
 } from "@rip-dvd/data-access";
-import { isCorrectedEncodePredecessorReady } from "@rip-dvd/data-access";
+import {
+  archiveBoundaryEvidenceFromRecord,
+  isCorrectedEncodePredecessorReady,
+} from "@rip-dvd/data-access";
 import {
   decodeDvdTitleMap,
   type DvdTitle,
@@ -153,6 +157,7 @@ export interface DashboardCatalogReviewItem {
   discLabel: string;
   discKind: DiscKind;
   archiveFormat: ArchiveFormat;
+  boundaryEvidence?: ArchiveBoundaryEvidence;
   integrity: ArchiveIntegrity;
   badSectorCount: number | null;
   badAreaCount: number | null;
@@ -973,26 +978,31 @@ function readDashboardSnapshotRecords(
       ? unavailable<DashboardCatalogReviewItem>()
       : {
           status: "loaded" as const,
-          items: catalogReviewArchives.map((archive) => ({
-            id: archive.id,
-            activityRevision: archive.updatedAt.toISOString(),
-            discLabel: archive.discLabel,
-            discKind: archive.discKind,
-            archiveFormat: archive.archiveFormat,
-            integrity: archive.integrity,
-            badSectorCount: archive.badSectorCount,
-            badAreaCount: archive.badAreaCount,
-            badSectorRanges: archive.badSectorRanges,
-            archivedAt: archive.archivedAt.toISOString(),
-            catalogReviewedAt:
-              archive.catalogReviewedAt?.toISOString() ?? null,
-            catalogReviewOutcome: archive.catalogReviewOutcome,
-            mappedMediaItemCount: archive.mappedMediaItemCount,
-            mappedMediaItemTitles: archive.mappedMediaItemTitles,
-            verificationStatus: archive.verificationStatus,
-            verificationMessage: archive.verificationMessage,
-            verifiedAt: archive.verifiedAt?.toISOString() ?? null,
-          })),
+          items: catalogReviewArchives.map((archive) => {
+            const boundaryEvidence =
+              archiveBoundaryEvidenceFromRecord(archive);
+            return {
+              id: archive.id,
+              activityRevision: archive.updatedAt.toISOString(),
+              discLabel: archive.discLabel,
+              discKind: archive.discKind,
+              archiveFormat: archive.archiveFormat,
+              ...(boundaryEvidence === null ? {} : { boundaryEvidence }),
+              integrity: archive.integrity,
+              badSectorCount: archive.badSectorCount,
+              badAreaCount: archive.badAreaCount,
+              badSectorRanges: archive.badSectorRanges,
+              archivedAt: archive.archivedAt.toISOString(),
+              catalogReviewedAt:
+                archive.catalogReviewedAt?.toISOString() ?? null,
+              catalogReviewOutcome: archive.catalogReviewOutcome,
+              mappedMediaItemCount: archive.mappedMediaItemCount,
+              mappedMediaItemTitles: archive.mappedMediaItemTitles,
+              verificationStatus: archive.verificationStatus,
+              verificationMessage: archive.verificationMessage,
+              verifiedAt: archive.verifiedAt?.toISOString() ?? null,
+            };
+          }),
           ...(activityLimit !== undefined &&
           (catalogReviewView === "reviewed" ||
             catalogReviewCursor !== undefined ||

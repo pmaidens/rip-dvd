@@ -101,6 +101,7 @@ import {
 } from "../disc-selection-source-identity.js";
 import { createDvdMetadataFingerprint } from "../dvd-metadata-fingerprint.js";
 import { createWatchableSalvageArchiveIntegrityEvidence } from "../archive-integrity.js";
+import { validateNormalDvdArchiveBoundaryEvidence } from "../archive-boundary.js";
 import { isArchiveReadFailureEvidenceConsistent } from "../archive-read-failure.js";
 import {
   decodeArchivedDvdTitles,
@@ -7966,6 +7967,10 @@ export function createDataAccessInternal(
       publish(claim, input) {
         const archivePath = requireNonEmpty(input.archivePath, "archivePath");
         const sizeBytes = requirePositiveSafeInteger(input.sizeBytes, "sizeBytes");
+        const boundaryEvidence = validateNormalDvdArchiveBoundaryEvidence(
+          input.boundaryEvidence,
+          sizeBytes,
+        );
         const integrityEvidence = input.integrityEvidence;
         let integrityPolicyVersion: string | null;
         let badSectorCountsByTitle = null;
@@ -8104,6 +8109,13 @@ export function createDataAccessInternal(
                 archiveFormat: "iso",
                 archivePath,
                 fingerprint: disc.fingerprint,
+                boundaryPolicyVersion: boundaryEvidence.policyVersion,
+                boundaryReportedSizeBytes:
+                  boundaryEvidence.reportedSizeBytes,
+                boundaryPublishedSizeBytes:
+                  boundaryEvidence.publishedSizeBytes,
+                boundaryExcludedSectorCount:
+                  boundaryEvidence.excludedSectorCount,
                 integrity: integrityEvidence.integrity,
                 integrityPolicyVersion,
                 badSectorCount: integrityEvidence.badSectorCount,

@@ -1,0 +1,3731 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "id": "997c6fd7-a218-45d4-8b67-d0af06e59e1a",
+  "prevIds": [
+    "b05bd5fd-7499-498e-93b5-cd941269d599"
+  ],
+  "ddl": [
+    {
+      "name": "archive_jobs",
+      "entityType": "tables"
+    },
+    {
+      "name": "archive_requests",
+      "entityType": "tables"
+    },
+    {
+      "name": "corrected_encode_publication_authorities",
+      "entityType": "tables"
+    },
+    {
+      "name": "detected_discs",
+      "entityType": "tables"
+    },
+    {
+      "name": "disc_inspection_attempts",
+      "entityType": "tables"
+    },
+    {
+      "name": "disc_inspections",
+      "entityType": "tables"
+    },
+    {
+      "name": "disc_selection_supersessions",
+      "entityType": "tables"
+    },
+    {
+      "name": "disc_selections",
+      "entityType": "tables"
+    },
+    {
+      "name": "encode_jobs",
+      "entityType": "tables"
+    },
+    {
+      "name": "encoding_profiles",
+      "entityType": "tables"
+    },
+    {
+      "name": "legacy_cutover_staged_sidecars",
+      "entityType": "tables"
+    },
+    {
+      "name": "media_item_tmdb_identities",
+      "entityType": "tables"
+    },
+    {
+      "name": "media_items",
+      "entityType": "tables"
+    },
+    {
+      "name": "optical_drives",
+      "entityType": "tables"
+    },
+    {
+      "name": "original_disc_archive_content_ids",
+      "entityType": "tables"
+    },
+    {
+      "name": "original_disc_archives",
+      "entityType": "tables"
+    },
+    {
+      "name": "retained_encode_outputs",
+      "entityType": "tables"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "archive_request_id",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "detected_disc_id",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "original_disc_archive_id",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "attempt_ordinal",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "'running'",
+      "generated": null,
+      "name": "status",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "0",
+      "generated": null,
+      "name": "priority",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "'preparing'",
+      "generated": null,
+      "name": "progress_phase",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "0",
+      "generated": null,
+      "name": "progress_percent",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "0",
+      "generated": null,
+      "name": "progress_bytes",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "last_progress_at",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "claimed_by",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "claim_token",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "claimed_at",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "started_at",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "completed_at",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "error_message",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "failure_detail_version",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "read_failure_stage",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "read_failure_category",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "read_failure_classifier_version",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "read_failure_lba",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "read_failure_requested_block_count",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "read_failure_retry_count",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "read_failure_scsi_status",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "read_failure_host_status",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "read_failure_driver_status",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "read_failure_sense_key",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "read_failure_asc",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "read_failure_ascq",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "updated_at",
+      "entityType": "columns",
+      "table": "archive_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "archive_requests"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "detected_disc_id",
+      "entityType": "columns",
+      "table": "archive_requests"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "'pending'",
+      "generated": null,
+      "name": "status",
+      "entityType": "columns",
+      "table": "archive_requests"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "0",
+      "generated": null,
+      "name": "priority",
+      "entityType": "columns",
+      "table": "archive_requests"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "cancellation_requested_at",
+      "entityType": "columns",
+      "table": "archive_requests"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "fulfilled_at",
+      "entityType": "columns",
+      "table": "archive_requests"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "cancelled_at",
+      "entityType": "columns",
+      "table": "archive_requests"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "table": "archive_requests"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "updated_at",
+      "entityType": "columns",
+      "table": "archive_requests"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "replacement_encode_job_id",
+      "entityType": "columns",
+      "table": "corrected_encode_publication_authorities"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "claim_token",
+      "entityType": "columns",
+      "table": "corrected_encode_publication_authorities"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "retained_output_path",
+      "entityType": "columns",
+      "table": "corrected_encode_publication_authorities"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "filesystem_identity",
+      "entityType": "columns",
+      "table": "corrected_encode_publication_authorities"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "detected_discs"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "optical_drive_id",
+      "entityType": "columns",
+      "table": "detected_discs"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "disc_kind",
+      "entityType": "columns",
+      "table": "detected_discs"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "fingerprint",
+      "entityType": "columns",
+      "table": "detected_discs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "volume_label",
+      "entityType": "columns",
+      "table": "detected_discs"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "'detected'",
+      "generated": null,
+      "name": "status",
+      "entityType": "columns",
+      "table": "detected_discs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "scan_data",
+      "entityType": "columns",
+      "table": "detected_discs"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "detected_at",
+      "entityType": "columns",
+      "table": "detected_discs"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "table": "detected_discs"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "updated_at",
+      "entityType": "columns",
+      "table": "detected_discs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "disc_inspection_attempts"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "disc_inspection_id",
+      "entityType": "columns",
+      "table": "disc_inspection_attempts"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "attempt_number",
+      "entityType": "columns",
+      "table": "disc_inspection_attempts"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "outcome",
+      "entityType": "columns",
+      "table": "disc_inspection_attempts"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "phase",
+      "entityType": "columns",
+      "table": "disc_inspection_attempts"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "reason_code",
+      "entityType": "columns",
+      "table": "disc_inspection_attempts"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "diagnostic",
+      "entityType": "columns",
+      "table": "disc_inspection_attempts"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "started_at",
+      "entityType": "columns",
+      "table": "disc_inspection_attempts"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "ended_at",
+      "entityType": "columns",
+      "table": "disc_inspection_attempts"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "disc_inspections"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "optical_drive_id",
+      "entityType": "columns",
+      "table": "disc_inspections"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "detected_disc_id",
+      "entityType": "columns",
+      "table": "disc_inspections"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "media_generation",
+      "entityType": "columns",
+      "table": "disc_inspections"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "media_capacity_bytes",
+      "entityType": "columns",
+      "table": "disc_inspections"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "settling_baseline_capacity_bytes",
+      "entityType": "columns",
+      "table": "disc_inspections"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "stable_observation_count",
+      "entityType": "columns",
+      "table": "disc_inspections"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "settling_quiet_window_started_at",
+      "entityType": "columns",
+      "table": "disc_inspections"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "settling_started_at",
+      "entityType": "columns",
+      "table": "disc_inspections"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "settling_reset_count",
+      "entityType": "columns",
+      "table": "disc_inspections"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "true",
+      "generated": null,
+      "name": "is_current",
+      "entityType": "columns",
+      "table": "disc_inspections"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "'running'",
+      "generated": null,
+      "name": "status",
+      "entityType": "columns",
+      "table": "disc_inspections"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "'settling'",
+      "generated": null,
+      "name": "phase",
+      "entityType": "columns",
+      "table": "disc_inspections"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "1",
+      "generated": null,
+      "name": "attempt_count",
+      "entityType": "columns",
+      "table": "disc_inspections"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "0",
+      "generated": null,
+      "name": "consecutive_failure_count",
+      "entityType": "columns",
+      "table": "disc_inspections"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "volume_label",
+      "entityType": "columns",
+      "table": "disc_inspections"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "title_count",
+      "entityType": "columns",
+      "table": "disc_inspections"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "chapter_count",
+      "entityType": "columns",
+      "table": "disc_inspections"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "audio_stream_count",
+      "entityType": "columns",
+      "table": "disc_inspections"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "subtitle_stream_count",
+      "entityType": "columns",
+      "table": "disc_inspections"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "total_bytes",
+      "entityType": "columns",
+      "table": "disc_inspections"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "bytes_hashed",
+      "entityType": "columns",
+      "table": "disc_inspections"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "bytes_per_second",
+      "entityType": "columns",
+      "table": "disc_inspections"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "eta_seconds",
+      "entityType": "columns",
+      "table": "disc_inspections"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "retry_at",
+      "entityType": "columns",
+      "table": "disc_inspections"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "manual_retry_requested_at",
+      "entityType": "columns",
+      "table": "disc_inspections"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "reason_code",
+      "entityType": "columns",
+      "table": "disc_inspections"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "diagnostic",
+      "entityType": "columns",
+      "table": "disc_inspections"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "claim_token",
+      "entityType": "columns",
+      "table": "disc_inspections"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "claim_updated_at",
+      "entityType": "columns",
+      "table": "disc_inspections"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "phase_started_at",
+      "entityType": "columns",
+      "table": "disc_inspections"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "attempt_started_at",
+      "entityType": "columns",
+      "table": "disc_inspections"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "started_at",
+      "entityType": "columns",
+      "table": "disc_inspections"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "completed_at",
+      "entityType": "columns",
+      "table": "disc_inspections"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "table": "disc_inspections"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "updated_at",
+      "entityType": "columns",
+      "table": "disc_inspections"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "superseded_disc_selection_id",
+      "entityType": "columns",
+      "table": "disc_selection_supersessions"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "replacement_disc_selection_id",
+      "entityType": "columns",
+      "table": "disc_selection_supersessions"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "reason",
+      "entityType": "columns",
+      "table": "disc_selection_supersessions"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "table": "disc_selection_supersessions"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "disc_selections"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "original_disc_archive_id",
+      "entityType": "columns",
+      "table": "disc_selections"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "media_item_id",
+      "entityType": "columns",
+      "table": "disc_selections"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "source_key",
+      "entityType": "columns",
+      "table": "disc_selections"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "kind",
+      "entityType": "columns",
+      "table": "disc_selections"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "title_number",
+      "entityType": "columns",
+      "table": "disc_selections"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "chapter_start",
+      "entityType": "columns",
+      "table": "disc_selections"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "chapter_end",
+      "entityType": "columns",
+      "table": "disc_selections"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "label",
+      "entityType": "columns",
+      "table": "disc_selections"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "true",
+      "generated": null,
+      "name": "is_catalog_active",
+      "entityType": "columns",
+      "table": "disc_selections"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "table": "disc_selections"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "updated_at",
+      "entityType": "columns",
+      "table": "disc_selections"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "encode_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "predecessor_encode_job_id",
+      "entityType": "columns",
+      "table": "encode_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "disc_selection_id",
+      "entityType": "columns",
+      "table": "encode_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "encoding_profile_id",
+      "entityType": "columns",
+      "table": "encode_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "output_path",
+      "entityType": "columns",
+      "table": "encode_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "true",
+      "generated": null,
+      "name": "reserves_output_path",
+      "entityType": "columns",
+      "table": "encode_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "'queued'",
+      "generated": null,
+      "name": "status",
+      "entityType": "columns",
+      "table": "encode_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "0",
+      "generated": null,
+      "name": "priority",
+      "entityType": "columns",
+      "table": "encode_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "false",
+      "generated": null,
+      "name": "replace_existing_output",
+      "entityType": "columns",
+      "table": "encode_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "replacement_output_identity",
+      "entityType": "columns",
+      "table": "encode_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "partial_cleanup_output_path",
+      "entityType": "columns",
+      "table": "encode_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "partial_cleanup_claim_token",
+      "entityType": "columns",
+      "table": "encode_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "partial_cleanup_lease_token",
+      "entityType": "columns",
+      "table": "encode_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "false",
+      "generated": null,
+      "name": "publication_pending",
+      "entityType": "columns",
+      "table": "encode_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "false",
+      "generated": null,
+      "name": "publication_completion_pending",
+      "entityType": "columns",
+      "table": "encode_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "progress_phase",
+      "entityType": "columns",
+      "table": "encode_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "0",
+      "generated": null,
+      "name": "progress_percent",
+      "entityType": "columns",
+      "table": "encode_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "progress_eta_seconds",
+      "entityType": "columns",
+      "table": "encode_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "claimed_by",
+      "entityType": "columns",
+      "table": "encode_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "claim_token",
+      "entityType": "columns",
+      "table": "encode_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "claimed_at",
+      "entityType": "columns",
+      "table": "encode_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "started_at",
+      "entityType": "columns",
+      "table": "encode_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "completed_at",
+      "entityType": "columns",
+      "table": "encode_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "error_message",
+      "entityType": "columns",
+      "table": "encode_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "verification_status",
+      "entityType": "columns",
+      "table": "encode_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "verification_message",
+      "entityType": "columns",
+      "table": "encode_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "verified_at",
+      "entityType": "columns",
+      "table": "encode_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "table": "encode_jobs"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "updated_at",
+      "entityType": "columns",
+      "table": "encode_jobs"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "encoding_profiles"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "key",
+      "entityType": "columns",
+      "table": "encoding_profiles"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "display_name",
+      "entityType": "columns",
+      "table": "encoding_profiles"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "media_domain",
+      "entityType": "columns",
+      "table": "encoding_profiles"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "version",
+      "entityType": "columns",
+      "table": "encoding_profiles"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "false",
+      "generated": null,
+      "name": "is_active",
+      "entityType": "columns",
+      "table": "encoding_profiles"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "settings",
+      "entityType": "columns",
+      "table": "encoding_profiles"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "table": "encoding_profiles"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "updated_at",
+      "entityType": "columns",
+      "table": "encoding_profiles"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "originals_library_path",
+      "entityType": "columns",
+      "table": "legacy_cutover_staged_sidecars"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "sidecar_path",
+      "entityType": "columns",
+      "table": "legacy_cutover_staged_sidecars"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "archive_path",
+      "entityType": "columns",
+      "table": "legacy_cutover_staged_sidecars"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "fingerprint",
+      "entityType": "columns",
+      "table": "legacy_cutover_staged_sidecars"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "media_item_id",
+      "entityType": "columns",
+      "table": "media_item_tmdb_identities"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "media_type",
+      "entityType": "columns",
+      "table": "media_item_tmdb_identities"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "tmdb_id",
+      "entityType": "columns",
+      "table": "media_item_tmdb_identities"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "table": "media_item_tmdb_identities"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "media_items"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "parent_id",
+      "entityType": "columns",
+      "table": "media_items"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "kind",
+      "entityType": "columns",
+      "table": "media_items"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "title",
+      "entityType": "columns",
+      "table": "media_items"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "year",
+      "entityType": "columns",
+      "table": "media_items"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "season_number",
+      "entityType": "columns",
+      "table": "media_items"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "episode_number",
+      "entityType": "columns",
+      "table": "media_items"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "table": "media_items"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "updated_at",
+      "entityType": "columns",
+      "table": "media_items"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "optical_drives"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "device_path",
+      "entityType": "columns",
+      "table": "optical_drives"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "display_name",
+      "entityType": "columns",
+      "table": "optical_drives"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "vendor",
+      "entityType": "columns",
+      "table": "optical_drives"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "product",
+      "entityType": "columns",
+      "table": "optical_drives"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "serial_number",
+      "entityType": "columns",
+      "table": "optical_drives"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "false",
+      "generated": null,
+      "name": "is_enabled",
+      "entityType": "columns",
+      "table": "optical_drives"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "true",
+      "generated": null,
+      "name": "configuration_default_resolved",
+      "entityType": "columns",
+      "table": "optical_drives"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "false",
+      "generated": null,
+      "name": "is_configured_target",
+      "entityType": "columns",
+      "table": "optical_drives"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "true",
+      "generated": null,
+      "name": "is_present",
+      "entityType": "columns",
+      "table": "optical_drives"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "last_seen_at",
+      "entityType": "columns",
+      "table": "optical_drives"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "table": "optical_drives"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "updated_at",
+      "entityType": "columns",
+      "table": "optical_drives"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "original_disc_archive_id",
+      "entityType": "columns",
+      "table": "original_disc_archive_content_ids"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "content_id",
+      "entityType": "columns",
+      "table": "original_disc_archive_content_ids"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "original_disc_archives"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "detected_disc_id",
+      "entityType": "columns",
+      "table": "original_disc_archives"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "disc_kind",
+      "entityType": "columns",
+      "table": "original_disc_archives"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "archive_format",
+      "entityType": "columns",
+      "table": "original_disc_archives"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "archive_path",
+      "entityType": "columns",
+      "table": "original_disc_archives"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "fingerprint",
+      "entityType": "columns",
+      "table": "original_disc_archives"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "size_bytes",
+      "entityType": "columns",
+      "table": "original_disc_archives"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "boundary_policy_version",
+      "entityType": "columns",
+      "table": "original_disc_archives"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "boundary_reported_size_bytes",
+      "entityType": "columns",
+      "table": "original_disc_archives"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "boundary_published_size_bytes",
+      "entityType": "columns",
+      "table": "original_disc_archives"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "boundary_excluded_sector_count",
+      "entityType": "columns",
+      "table": "original_disc_archives"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "'unknown'",
+      "generated": null,
+      "name": "integrity",
+      "entityType": "columns",
+      "table": "original_disc_archives"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "integrity_policy_version",
+      "entityType": "columns",
+      "table": "original_disc_archives"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "bad_sector_count",
+      "entityType": "columns",
+      "table": "original_disc_archives"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "bad_area_count",
+      "entityType": "columns",
+      "table": "original_disc_archives"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "bad_sector_ranges",
+      "entityType": "columns",
+      "table": "original_disc_archives"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "bad_sector_counts_by_title",
+      "entityType": "columns",
+      "table": "original_disc_archives"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "archived_at",
+      "entityType": "columns",
+      "table": "original_disc_archives"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "catalog_reviewed_at",
+      "entityType": "columns",
+      "table": "original_disc_archives"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "'needs_review'",
+      "generated": null,
+      "name": "catalog_review_outcome",
+      "entityType": "columns",
+      "table": "original_disc_archives"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "false",
+      "generated": null,
+      "name": "legacy_cutover_pending",
+      "entityType": "columns",
+      "table": "original_disc_archives"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "verification_status",
+      "entityType": "columns",
+      "table": "original_disc_archives"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "verification_message",
+      "entityType": "columns",
+      "table": "original_disc_archives"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "verified_at",
+      "entityType": "columns",
+      "table": "original_disc_archives"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "table": "original_disc_archives"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "updated_at",
+      "entityType": "columns",
+      "table": "original_disc_archives"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "retained_encode_outputs"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "predecessor_encode_job_id",
+      "entityType": "columns",
+      "table": "retained_encode_outputs"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "replacement_encode_job_id",
+      "entityType": "columns",
+      "table": "retained_encode_outputs"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "retained_output_path",
+      "entityType": "columns",
+      "table": "retained_encode_outputs"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "filesystem_identity",
+      "entityType": "columns",
+      "table": "retained_encode_outputs"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "'retained'",
+      "generated": null,
+      "name": "state",
+      "entityType": "columns",
+      "table": "retained_encode_outputs"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "true",
+      "generated": null,
+      "name": "cleanup_eligible",
+      "entityType": "columns",
+      "table": "retained_encode_outputs"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "retained_at",
+      "entityType": "columns",
+      "table": "retained_encode_outputs"
+    },
+    {
+      "columns": [
+        "archive_request_id"
+      ],
+      "tableTo": "archive_requests",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "nameExplicit": false,
+      "name": "fk_archive_jobs_archive_request_id_archive_requests_id_fk",
+      "entityType": "fks",
+      "table": "archive_jobs"
+    },
+    {
+      "columns": [
+        "detected_disc_id"
+      ],
+      "tableTo": "detected_discs",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "nameExplicit": false,
+      "name": "fk_archive_jobs_detected_disc_id_detected_discs_id_fk",
+      "entityType": "fks",
+      "table": "archive_jobs"
+    },
+    {
+      "columns": [
+        "original_disc_archive_id"
+      ],
+      "tableTo": "original_disc_archives",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "nameExplicit": false,
+      "name": "fk_archive_jobs_original_disc_archive_id_original_disc_archives_id_fk",
+      "entityType": "fks",
+      "table": "archive_jobs"
+    },
+    {
+      "columns": [
+        "detected_disc_id"
+      ],
+      "tableTo": "detected_discs",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "nameExplicit": false,
+      "name": "fk_archive_requests_detected_disc_id_detected_discs_id_fk",
+      "entityType": "fks",
+      "table": "archive_requests"
+    },
+    {
+      "columns": [
+        "replacement_encode_job_id"
+      ],
+      "tableTo": "encode_jobs",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "nameExplicit": false,
+      "name": "fk_corrected_encode_publication_authorities_replacement_encode_job_id_encode_jobs_id_fk",
+      "entityType": "fks",
+      "table": "corrected_encode_publication_authorities"
+    },
+    {
+      "columns": [
+        "optical_drive_id"
+      ],
+      "tableTo": "optical_drives",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "nameExplicit": false,
+      "name": "fk_detected_discs_optical_drive_id_optical_drives_id_fk",
+      "entityType": "fks",
+      "table": "detected_discs"
+    },
+    {
+      "columns": [
+        "disc_inspection_id"
+      ],
+      "tableTo": "disc_inspections",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "nameExplicit": false,
+      "name": "fk_disc_inspection_attempts_disc_inspection_id_disc_inspections_id_fk",
+      "entityType": "fks",
+      "table": "disc_inspection_attempts"
+    },
+    {
+      "columns": [
+        "optical_drive_id"
+      ],
+      "tableTo": "optical_drives",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "nameExplicit": false,
+      "name": "fk_disc_inspections_optical_drive_id_optical_drives_id_fk",
+      "entityType": "fks",
+      "table": "disc_inspections"
+    },
+    {
+      "columns": [
+        "detected_disc_id"
+      ],
+      "tableTo": "detected_discs",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "nameExplicit": false,
+      "name": "fk_disc_inspections_detected_disc_id_detected_discs_id_fk",
+      "entityType": "fks",
+      "table": "disc_inspections"
+    },
+    {
+      "columns": [
+        "superseded_disc_selection_id"
+      ],
+      "tableTo": "disc_selections",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "nameExplicit": false,
+      "name": "fk_disc_selection_supersessions_superseded_disc_selection_id_disc_selections_id_fk",
+      "entityType": "fks",
+      "table": "disc_selection_supersessions"
+    },
+    {
+      "columns": [
+        "replacement_disc_selection_id"
+      ],
+      "tableTo": "disc_selections",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "nameExplicit": false,
+      "name": "fk_disc_selection_supersessions_replacement_disc_selection_id_disc_selections_id_fk",
+      "entityType": "fks",
+      "table": "disc_selection_supersessions"
+    },
+    {
+      "columns": [
+        "original_disc_archive_id"
+      ],
+      "tableTo": "original_disc_archives",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "nameExplicit": false,
+      "name": "fk_disc_selections_original_disc_archive_id_original_disc_archives_id_fk",
+      "entityType": "fks",
+      "table": "disc_selections"
+    },
+    {
+      "columns": [
+        "media_item_id"
+      ],
+      "tableTo": "media_items",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "nameExplicit": false,
+      "name": "fk_disc_selections_media_item_id_media_items_id_fk",
+      "entityType": "fks",
+      "table": "disc_selections"
+    },
+    {
+      "columns": [
+        "predecessor_encode_job_id"
+      ],
+      "tableTo": "encode_jobs",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "nameExplicit": false,
+      "name": "fk_encode_jobs_predecessor_encode_job_id_encode_jobs_id_fk",
+      "entityType": "fks",
+      "table": "encode_jobs"
+    },
+    {
+      "columns": [
+        "disc_selection_id"
+      ],
+      "tableTo": "disc_selections",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "nameExplicit": false,
+      "name": "fk_encode_jobs_disc_selection_id_disc_selections_id_fk",
+      "entityType": "fks",
+      "table": "encode_jobs"
+    },
+    {
+      "columns": [
+        "encoding_profile_id"
+      ],
+      "tableTo": "encoding_profiles",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "nameExplicit": false,
+      "name": "fk_encode_jobs_encoding_profile_id_encoding_profiles_id_fk",
+      "entityType": "fks",
+      "table": "encode_jobs"
+    },
+    {
+      "columns": [
+        "media_item_id"
+      ],
+      "tableTo": "media_items",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_media_item_tmdb_identities_media_item_id_media_items_id_fk",
+      "entityType": "fks",
+      "table": "media_item_tmdb_identities"
+    },
+    {
+      "columns": [
+        "parent_id"
+      ],
+      "tableTo": "media_items",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "nameExplicit": false,
+      "name": "fk_media_items_parent_id_media_items_id_fk",
+      "entityType": "fks",
+      "table": "media_items"
+    },
+    {
+      "columns": [
+        "original_disc_archive_id"
+      ],
+      "tableTo": "original_disc_archives",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "CASCADE",
+      "nameExplicit": false,
+      "name": "fk_original_disc_archive_content_ids_original_disc_archive_id_original_disc_archives_id_fk",
+      "entityType": "fks",
+      "table": "original_disc_archive_content_ids"
+    },
+    {
+      "columns": [
+        "detected_disc_id"
+      ],
+      "tableTo": "detected_discs",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "nameExplicit": false,
+      "name": "fk_original_disc_archives_detected_disc_id_detected_discs_id_fk",
+      "entityType": "fks",
+      "table": "original_disc_archives"
+    },
+    {
+      "columns": [
+        "predecessor_encode_job_id"
+      ],
+      "tableTo": "encode_jobs",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "nameExplicit": false,
+      "name": "fk_retained_encode_outputs_predecessor_encode_job_id_encode_jobs_id_fk",
+      "entityType": "fks",
+      "table": "retained_encode_outputs"
+    },
+    {
+      "columns": [
+        "replacement_encode_job_id"
+      ],
+      "tableTo": "encode_jobs",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "nameExplicit": false,
+      "name": "fk_retained_encode_outputs_replacement_encode_job_id_encode_jobs_id_fk",
+      "entityType": "fks",
+      "table": "retained_encode_outputs"
+    },
+    {
+      "columns": [
+        "originals_library_path",
+        "sidecar_path"
+      ],
+      "nameExplicit": false,
+      "name": "legacy_cutover_staged_sidecars_pk",
+      "entityType": "pks",
+      "table": "legacy_cutover_staged_sidecars"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "archive_jobs_pk",
+      "table": "archive_jobs",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "archive_requests_pk",
+      "table": "archive_requests",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "replacement_encode_job_id"
+      ],
+      "nameExplicit": false,
+      "name": "corrected_encode_publication_authorities_pk",
+      "table": "corrected_encode_publication_authorities",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "detected_discs_pk",
+      "table": "detected_discs",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "disc_inspection_attempts_pk",
+      "table": "disc_inspection_attempts",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "disc_inspections_pk",
+      "table": "disc_inspections",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "superseded_disc_selection_id"
+      ],
+      "nameExplicit": false,
+      "name": "disc_selection_supersessions_pk",
+      "table": "disc_selection_supersessions",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "disc_selections_pk",
+      "table": "disc_selections",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "encode_jobs_pk",
+      "table": "encode_jobs",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "encoding_profiles_pk",
+      "table": "encoding_profiles",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "media_item_id"
+      ],
+      "nameExplicit": false,
+      "name": "media_item_tmdb_identities_pk",
+      "table": "media_item_tmdb_identities",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "media_items_pk",
+      "table": "media_items",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "optical_drives_pk",
+      "table": "optical_drives",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "original_disc_archive_id"
+      ],
+      "nameExplicit": false,
+      "name": "original_disc_archive_content_ids_pk",
+      "table": "original_disc_archive_content_ids",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "original_disc_archives_pk",
+      "table": "original_disc_archives",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "retained_encode_outputs_pk",
+      "table": "retained_encode_outputs",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        {
+          "value": "archive_request_id",
+          "isExpression": false
+        },
+        {
+          "value": "attempt_ordinal",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "archive_jobs_request_attempt_unique",
+      "entityType": "indexes",
+      "table": "archive_jobs"
+    },
+    {
+      "columns": [
+        {
+          "value": "archive_request_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": "\"archive_jobs\".\"status\" = 'running'",
+      "origin": "manual",
+      "name": "archive_jobs_running_request_unique",
+      "entityType": "indexes",
+      "table": "archive_jobs"
+    },
+    {
+      "columns": [
+        {
+          "value": "archive_request_id",
+          "isExpression": false
+        },
+        {
+          "value": "attempt_ordinal",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "archive_jobs_request_idx",
+      "entityType": "indexes",
+      "table": "archive_jobs"
+    },
+    {
+      "columns": [
+        {
+          "value": "detected_disc_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": "\"archive_requests\".\"status\" in ('pending', 'running', 'needs_attention', 'cancellation_requested')",
+      "origin": "manual",
+      "name": "archive_requests_nonterminal_disc_unique",
+      "entityType": "indexes",
+      "table": "archive_requests"
+    },
+    {
+      "columns": [
+        {
+          "value": "status",
+          "isExpression": false
+        },
+        {
+          "value": "priority",
+          "isExpression": false
+        },
+        {
+          "value": "created_at",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "archive_requests_status_idx",
+      "entityType": "indexes",
+      "table": "archive_requests"
+    },
+    {
+      "columns": [
+        {
+          "value": "retained_output_path",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "corrected_encode_publication_authorities_path_unique",
+      "entityType": "indexes",
+      "table": "corrected_encode_publication_authorities"
+    },
+    {
+      "columns": [
+        {
+          "value": "optical_drive_id",
+          "isExpression": false
+        },
+        {
+          "value": "fingerprint",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "detected_discs_drive_fingerprint_unique",
+      "entityType": "indexes",
+      "table": "detected_discs"
+    },
+    {
+      "columns": [
+        {
+          "value": "status",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "detected_discs_status_idx",
+      "entityType": "indexes",
+      "table": "detected_discs"
+    },
+    {
+      "columns": [
+        {
+          "value": "disc_inspection_id",
+          "isExpression": false
+        },
+        {
+          "value": "attempt_number",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "disc_inspection_attempts_number_unique",
+      "entityType": "indexes",
+      "table": "disc_inspection_attempts"
+    },
+    {
+      "columns": [
+        {
+          "value": "optical_drive_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": "\"disc_inspections\".\"is_current\" = 1",
+      "origin": "manual",
+      "name": "disc_inspections_current_drive_unique",
+      "entityType": "indexes",
+      "table": "disc_inspections"
+    },
+    {
+      "columns": [
+        {
+          "value": "status",
+          "isExpression": false
+        },
+        {
+          "value": "updated_at",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "disc_inspections_status_idx",
+      "entityType": "indexes",
+      "table": "disc_inspections"
+    },
+    {
+      "columns": [
+        {
+          "value": "replacement_disc_selection_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "disc_selection_supersessions_replacement_unique",
+      "entityType": "indexes",
+      "table": "disc_selection_supersessions"
+    },
+    {
+      "columns": [
+        {
+          "value": "original_disc_archive_id",
+          "isExpression": false
+        },
+        {
+          "value": "source_key",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": "\"disc_selections\".\"is_catalog_active\" = 1",
+      "origin": "manual",
+      "name": "disc_selections_archive_active_source_idx",
+      "entityType": "indexes",
+      "table": "disc_selections"
+    },
+    {
+      "columns": [
+        {
+          "value": "media_item_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "disc_selections_media_item_idx",
+      "entityType": "indexes",
+      "table": "disc_selections"
+    },
+    {
+      "columns": [
+        {
+          "value": "predecessor_encode_job_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": "\"encode_jobs\".\"predecessor_encode_job_id\" is not null",
+      "origin": "manual",
+      "name": "encode_jobs_predecessor_unique",
+      "entityType": "indexes",
+      "table": "encode_jobs"
+    },
+    {
+      "columns": [
+        {
+          "value": "disc_selection_id",
+          "isExpression": false
+        },
+        {
+          "value": "encoding_profile_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": "\"encode_jobs\".\"predecessor_encode_job_id\" is null",
+      "origin": "manual",
+      "name": "encode_jobs_initial_selection_profile_unique",
+      "entityType": "indexes",
+      "table": "encode_jobs"
+    },
+    {
+      "columns": [
+        {
+          "value": "output_path",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": "\"encode_jobs\".\"reserves_output_path\" = 1",
+      "origin": "manual",
+      "name": "encode_jobs_output_path_unique",
+      "entityType": "indexes",
+      "table": "encode_jobs"
+    },
+    {
+      "columns": [
+        {
+          "value": "status",
+          "isExpression": false
+        },
+        {
+          "value": "priority",
+          "isExpression": false
+        },
+        {
+          "value": "created_at",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "encode_jobs_queue_idx",
+      "entityType": "indexes",
+      "table": "encode_jobs"
+    },
+    {
+      "columns": [
+        {
+          "value": "media_domain",
+          "isExpression": false
+        },
+        {
+          "value": "key",
+          "isExpression": false
+        },
+        {
+          "value": "version",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "encoding_profiles_domain_key_version_unique",
+      "entityType": "indexes",
+      "table": "encoding_profiles"
+    },
+    {
+      "columns": [
+        {
+          "value": "media_domain",
+          "isExpression": false
+        },
+        {
+          "value": "key",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": "\"encoding_profiles\".\"is_active\" = 1",
+      "origin": "manual",
+      "name": "encoding_profiles_one_active_version_unique",
+      "entityType": "indexes",
+      "table": "encoding_profiles"
+    },
+    {
+      "columns": [
+        {
+          "value": "originals_library_path",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "legacy_cutover_staged_sidecars_library_idx",
+      "entityType": "indexes",
+      "table": "legacy_cutover_staged_sidecars"
+    },
+    {
+      "columns": [
+        {
+          "value": "media_type",
+          "isExpression": false
+        },
+        {
+          "value": "tmdb_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "media_item_tmdb_identities_identity_unique",
+      "entityType": "indexes",
+      "table": "media_item_tmdb_identities"
+    },
+    {
+      "columns": [
+        {
+          "value": "parent_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "media_items_parent_idx",
+      "entityType": "indexes",
+      "table": "media_items"
+    },
+    {
+      "columns": [
+        {
+          "value": "device_path",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": "\"optical_drives\".\"is_present\" = true",
+      "origin": "manual",
+      "name": "optical_drives_present_device_path_unique",
+      "entityType": "indexes",
+      "table": "optical_drives"
+    },
+    {
+      "columns": [
+        {
+          "value": "content_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "original_disc_archive_content_ids_content_id_unique",
+      "entityType": "indexes",
+      "table": "original_disc_archive_content_ids"
+    },
+    {
+      "columns": [
+        {
+          "value": "detected_disc_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "original_disc_archives_detected_disc_unique",
+      "entityType": "indexes",
+      "table": "original_disc_archives"
+    },
+    {
+      "columns": [
+        {
+          "value": "archive_path",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "original_disc_archives_path_unique",
+      "entityType": "indexes",
+      "table": "original_disc_archives"
+    },
+    {
+      "columns": [
+        {
+          "value": "fingerprint",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "original_disc_archives_fingerprint_unique",
+      "entityType": "indexes",
+      "table": "original_disc_archives"
+    },
+    {
+      "columns": [
+        {
+          "value": "replacement_encode_job_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "retained_encode_outputs_replacement_idx",
+      "entityType": "indexes",
+      "table": "retained_encode_outputs"
+    },
+    {
+      "columns": [
+        {
+          "value": "retained_output_path",
+          "isExpression": false
+        }
+      ],
+      "isUnique": true,
+      "where": null,
+      "origin": "manual",
+      "name": "retained_encode_outputs_path_unique",
+      "entityType": "indexes",
+      "table": "retained_encode_outputs"
+    },
+    {
+      "columns": [
+        {
+          "value": "predecessor_encode_job_id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "retained_encode_outputs_predecessor_idx",
+      "entityType": "indexes",
+      "table": "retained_encode_outputs"
+    },
+    {
+      "value": "\"id\" is not null",
+      "name": "archive_jobs_id_not_null",
+      "entityType": "checks",
+      "table": "archive_jobs"
+    },
+    {
+      "value": "\"status\" in ('running', 'completed', 'failed', 'aborted')",
+      "name": "archive_jobs_status_check",
+      "entityType": "checks",
+      "table": "archive_jobs"
+    },
+    {
+      "value": "\"progress_percent\" between 0 and 100",
+      "name": "archive_jobs_progress_check",
+      "entityType": "checks",
+      "table": "archive_jobs"
+    },
+    {
+      "value": "typeof(\"progress_bytes\") = 'integer' and \"progress_bytes\" >= 0",
+      "name": "archive_jobs_progress_bytes_check",
+      "entityType": "checks",
+      "table": "archive_jobs"
+    },
+    {
+      "value": "\"progress_phase\" in ('preparing', 'copying', 'verifying', 'finalizing')",
+      "name": "archive_jobs_progress_phase_check",
+      "entityType": "checks",
+      "table": "archive_jobs"
+    },
+    {
+      "value": "typeof(\"attempt_ordinal\") = 'integer' and \"attempt_ordinal\" > 0",
+      "name": "archive_jobs_attempt_ordinal_check",
+      "entityType": "checks",
+      "table": "archive_jobs"
+    },
+    {
+      "value": "(\"status\" = 'running' and \"claimed_by\" is not null and \"claim_token\" is not null and \"claimed_at\" is not null and \"started_at\" is not null and \"completed_at\" is null) or (\"status\" <> 'running' and \"started_at\" is not null and \"completed_at\" is not null)",
+      "name": "archive_jobs_attempt_shape_check",
+      "entityType": "checks",
+      "table": "archive_jobs"
+    },
+    {
+      "value": "\"failure_detail_version\" is null or (\"status\" = 'failed' and \"failure_detail_version\" in ('archive-failure-detail-v1'))",
+      "name": "archive_jobs_failure_detail_version_check",
+      "entityType": "checks",
+      "table": "archive_jobs"
+    },
+    {
+      "value": "(\"read_failure_category\" is null and \"read_failure_stage\" is null and \"read_failure_classifier_version\" is null and \"read_failure_lba\" is null and \"read_failure_requested_block_count\" is null and \"read_failure_retry_count\" is null and \"read_failure_scsi_status\" is null and \"read_failure_host_status\" is null and \"read_failure_driver_status\" is null and \"read_failure_sense_key\" is null and \"read_failure_asc\" is null and \"read_failure_ascq\" is null) or (\"status\" = 'failed' and \"read_failure_stage\" in ('initial_copy', 'rescue_resume') and \"read_failure_category\" in ('unknown', 'not_ready', 'unit_attention', 'hardware_error', 'transport_error', 'protection_error', 'out_of_range') and typeof(\"read_failure_classifier_version\") = 'text' and length(\"read_failure_classifier_version\") between 1 and 128 and typeof(\"read_failure_lba\") = 'integer' and \"read_failure_lba\" >= 0 and typeof(\"read_failure_requested_block_count\") = 'integer' and \"read_failure_requested_block_count\" between 1 and 4294967295 and typeof(\"read_failure_retry_count\") = 'integer' and \"read_failure_retry_count\" between 0 and 4294967295 and (\"read_failure_scsi_status\" is null or (typeof(\"read_failure_scsi_status\") = 'integer' and \"read_failure_scsi_status\" between 0 and 255)) and (\"read_failure_host_status\" is null or (typeof(\"read_failure_host_status\") = 'integer' and \"read_failure_host_status\" between 0 and 65535)) and (\"read_failure_driver_status\" is null or (typeof(\"read_failure_driver_status\") = 'integer' and \"read_failure_driver_status\" between 0 and 65535)) and (\"read_failure_sense_key\" is null or (typeof(\"read_failure_sense_key\") = 'integer' and \"read_failure_sense_key\" between 0 and 15)) and (\"read_failure_asc\" is null or (typeof(\"read_failure_asc\") = 'integer' and \"read_failure_asc\" between 0 and 255)) and (\"read_failure_ascq\" is null or (typeof(\"read_failure_ascq\") = 'integer' and \"read_failure_ascq\" between 0 and 255)) and ((\"read_failure_scsi_status\" is null and \"read_failure_host_status\" is null and \"read_failure_driver_status\" is null) or (\"read_failure_scsi_status\" is not null and \"read_failure_host_status\" is not null and \"read_failure_driver_status\" is not null)) and ((\"read_failure_asc\" is null and \"read_failure_ascq\" is null) or (\"read_failure_asc\" is not null and \"read_failure_ascq\" is not null)))",
+      "name": "archive_jobs_read_failure_shape_check",
+      "entityType": "checks",
+      "table": "archive_jobs"
+    },
+    {
+      "value": "\"read_failure_category\" is null or \"read_failure_category\" = 'unknown' or (\"read_failure_category\" = 'not_ready' and \"read_failure_scsi_status\" is not null and \"read_failure_host_status\" is not null and \"read_failure_driver_status\" is not null and \"read_failure_sense_key\" is not null and \"read_failure_scsi_status\" = 2 and \"read_failure_host_status\" = 0 and \"read_failure_driver_status\" in (0, 8) and \"read_failure_sense_key\" = 2 and \"read_failure_asc\" is not null and \"read_failure_ascq\" is not null) or (\"read_failure_category\" = 'unit_attention' and \"read_failure_scsi_status\" is not null and \"read_failure_host_status\" is not null and \"read_failure_driver_status\" is not null and \"read_failure_sense_key\" is not null and \"read_failure_scsi_status\" = 2 and \"read_failure_host_status\" = 0 and \"read_failure_driver_status\" in (0, 8) and \"read_failure_sense_key\" = 6 and \"read_failure_asc\" is not null and \"read_failure_ascq\" is not null) or (\"read_failure_category\" = 'hardware_error' and \"read_failure_scsi_status\" is not null and \"read_failure_host_status\" is not null and \"read_failure_driver_status\" is not null and \"read_failure_sense_key\" is not null and \"read_failure_scsi_status\" = 2 and \"read_failure_host_status\" = 0 and \"read_failure_driver_status\" in (0, 8) and \"read_failure_sense_key\" = 4 and \"read_failure_asc\" is not null and \"read_failure_ascq\" is not null) or (\"read_failure_category\" = 'transport_error' and \"read_failure_scsi_status\" is not null and \"read_failure_host_status\" is not null and \"read_failure_driver_status\" is not null and ((\"read_failure_host_status\" between 1 and 18) or \"read_failure_host_status\" = 20 or (\"read_failure_host_status\" = 0 and \"read_failure_driver_status\" in (1, 2, 4, 6)))) or (\"read_failure_category\" = 'protection_error' and \"read_failure_scsi_status\" is not null and \"read_failure_host_status\" is not null and \"read_failure_driver_status\" is not null and \"read_failure_sense_key\" is not null and \"read_failure_scsi_status\" = 2 and \"read_failure_host_status\" = 0 and \"read_failure_driver_status\" in (0, 8) and \"read_failure_asc\" is not null and \"read_failure_ascq\" is not null and (\"read_failure_sense_key\" = 7 or (\"read_failure_sense_key\" = 5 and \"read_failure_asc\" = 111 and \"read_failure_ascq\" between 0 and 5))) or (\"read_failure_category\" = 'out_of_range' and \"read_failure_scsi_status\" is not null and \"read_failure_host_status\" is not null and \"read_failure_driver_status\" is not null and \"read_failure_sense_key\" is not null and \"read_failure_scsi_status\" = 2 and \"read_failure_host_status\" = 0 and \"read_failure_driver_status\" in (0, 8) and \"read_failure_sense_key\" = 5 and \"read_failure_asc\" = 33 and \"read_failure_ascq\" = 0)",
+      "name": "archive_jobs_read_failure_category_evidence_check",
+      "entityType": "checks",
+      "table": "archive_jobs"
+    },
+    {
+      "value": "\"id\" is not null",
+      "name": "archive_requests_id_not_null",
+      "entityType": "checks",
+      "table": "archive_requests"
+    },
+    {
+      "value": "\"status\" in ('pending', 'running', 'needs_attention', 'cancellation_requested', 'fulfilled', 'cancelled')",
+      "name": "archive_requests_status_check",
+      "entityType": "checks",
+      "table": "archive_requests"
+    },
+    {
+      "value": "(\"fulfilled_at\" is not null) = (\"status\" = 'fulfilled') and (\"cancelled_at\" is not null) = (\"status\" = 'cancelled') and (\"cancellation_requested_at\" is not null) = (\"status\" in ('cancellation_requested', 'cancelled'))",
+      "name": "archive_requests_terminal_fields_check",
+      "entityType": "checks",
+      "table": "archive_requests"
+    },
+    {
+      "value": "\"replacement_encode_job_id\" is not null",
+      "name": "corrected_encode_publication_authorities_id_not_null",
+      "entityType": "checks",
+      "table": "corrected_encode_publication_authorities"
+    },
+    {
+      "value": "\"id\" is not null",
+      "name": "detected_discs_id_not_null",
+      "entityType": "checks",
+      "table": "detected_discs"
+    },
+    {
+      "value": "\"disc_kind\" in ('dvd', 'blu_ray', 'audio_cd')",
+      "name": "detected_discs_kind_check",
+      "entityType": "checks",
+      "table": "detected_discs"
+    },
+    {
+      "value": "\"status\" in ('detected', 'scanned', 'approved', 'archived', 'rejected')",
+      "name": "detected_discs_status_check",
+      "entityType": "checks",
+      "table": "detected_discs"
+    },
+    {
+      "value": "\"id\" is not null",
+      "name": "disc_inspection_attempts_id_not_null",
+      "entityType": "checks",
+      "table": "disc_inspection_attempts"
+    },
+    {
+      "value": "typeof(\"attempt_number\") = 'integer' and \"attempt_number\" > 0",
+      "name": "disc_inspection_attempts_number_check",
+      "entityType": "checks",
+      "table": "disc_inspection_attempts"
+    },
+    {
+      "value": "\"outcome\" in ('completed', 'failed', 'aborted', 'interrupted')",
+      "name": "disc_inspection_attempts_outcome_check",
+      "entityType": "checks",
+      "table": "disc_inspection_attempts"
+    },
+    {
+      "value": "\"phase\" in ('settling', 'reading_metadata', 'hashing_content', 'confirming_media', 'retry_wait')",
+      "name": "disc_inspection_attempts_phase_check",
+      "entityType": "checks",
+      "table": "disc_inspection_attempts"
+    },
+    {
+      "value": "\"reason_code\" is null or \"reason_code\" in ('no_medium', 'media_changed', 'drive_identity_changed', 'drive_unavailable', 'drive_not_ready', 'metadata_read_failed', 'invalid_metadata', 'content_size_failed', 'content_read_failed', 'invalid_content', 'worker_interrupted', 'operator_cancelled', 'unknown')",
+      "name": "disc_inspection_attempts_reason_check",
+      "entityType": "checks",
+      "table": "disc_inspection_attempts"
+    },
+    {
+      "value": "\"id\" is not null",
+      "name": "disc_inspections_id_not_null",
+      "entityType": "checks",
+      "table": "disc_inspections"
+    },
+    {
+      "value": "\"status\" in ('running', 'completed', 'failed', 'aborted')",
+      "name": "disc_inspections_status_check",
+      "entityType": "checks",
+      "table": "disc_inspections"
+    },
+    {
+      "value": "\"phase\" in ('settling', 'reading_metadata', 'hashing_content', 'confirming_media', 'retry_wait')",
+      "name": "disc_inspections_phase_check",
+      "entityType": "checks",
+      "table": "disc_inspections"
+    },
+    {
+      "value": "\"reason_code\" is null or \"reason_code\" in ('no_medium', 'media_changed', 'drive_identity_changed', 'drive_unavailable', 'drive_not_ready', 'metadata_read_failed', 'invalid_metadata', 'content_size_failed', 'content_read_failed', 'invalid_content', 'worker_interrupted', 'operator_cancelled', 'unknown')",
+      "name": "disc_inspections_reason_check",
+      "entityType": "checks",
+      "table": "disc_inspections"
+    },
+    {
+      "value": "length(\"media_generation\") between 1 and 64",
+      "name": "disc_inspections_generation_check",
+      "entityType": "checks",
+      "table": "disc_inspections"
+    },
+    {
+      "value": "((\"media_capacity_bytes\" is null and \"settling_baseline_capacity_bytes\" is null and \"stable_observation_count\" is null and \"settling_quiet_window_started_at\" is null and \"settling_started_at\" is null and \"settling_reset_count\" is null) or (\"media_capacity_bytes\" is null and (\"settling_baseline_capacity_bytes\" is null or (typeof(\"settling_baseline_capacity_bytes\") = 'integer' and \"settling_baseline_capacity_bytes\" > 0 and \"settling_baseline_capacity_bytes\" <= 9000000000 and \"settling_baseline_capacity_bytes\" % 2048 = 0)) and \"stable_observation_count\" = 0 and \"settling_quiet_window_started_at\" is null and \"settling_started_at\" is not null and typeof(\"settling_reset_count\") = 'integer' and \"settling_reset_count\" between 0 and 10000) or (typeof(\"media_capacity_bytes\") = 'integer' and \"media_capacity_bytes\" > 0 and \"media_capacity_bytes\" <= 9000000000 and \"media_capacity_bytes\" % 2048 = 0 and \"settling_baseline_capacity_bytes\" is null and typeof(\"stable_observation_count\") = 'integer' and \"stable_observation_count\" between 1 and 3 and \"settling_quiet_window_started_at\" is not null and \"settling_started_at\" is not null and \"settling_quiet_window_started_at\" >= \"settling_started_at\" and typeof(\"settling_reset_count\") = 'integer' and \"settling_reset_count\" between 0 and 10000)) and (\"phase\" <> 'settling' or \"settling_started_at\" is not null)",
+      "name": "disc_inspections_settling_evidence_check",
+      "entityType": "checks",
+      "table": "disc_inspections"
+    },
+    {
+      "value": "typeof(\"attempt_count\") = 'integer' and \"attempt_count\" > 0 and typeof(\"consecutive_failure_count\") = 'integer' and \"consecutive_failure_count\" between 0 and 5 and \"consecutive_failure_count\" <= \"attempt_count\"",
+      "name": "disc_inspections_attempt_count_check",
+      "entityType": "checks",
+      "table": "disc_inspections"
+    },
+    {
+      "value": "(\"title_count\" is null or (typeof(\"title_count\") = 'integer' and \"title_count\" >= 0)) and (\"chapter_count\" is null or (typeof(\"chapter_count\") = 'integer' and \"chapter_count\" >= 0)) and (\"audio_stream_count\" is null or (typeof(\"audio_stream_count\") = 'integer' and \"audio_stream_count\" >= 0)) and (\"subtitle_stream_count\" is null or (typeof(\"subtitle_stream_count\") = 'integer' and \"subtitle_stream_count\" >= 0))",
+      "name": "disc_inspections_findings_check",
+      "entityType": "checks",
+      "table": "disc_inspections"
+    },
+    {
+      "value": "(\"total_bytes\" is null or (typeof(\"total_bytes\") = 'integer' and \"total_bytes\" >= 0)) and (\"bytes_hashed\" is null or (typeof(\"bytes_hashed\") = 'integer' and \"bytes_hashed\" >= 0 and (\"total_bytes\" is null or \"bytes_hashed\" <= \"total_bytes\")))",
+      "name": "disc_inspections_progress_check",
+      "entityType": "checks",
+      "table": "disc_inspections"
+    },
+    {
+      "value": "(\"bytes_per_second\" is null) = (\"eta_seconds\" is null) and (\"bytes_per_second\" is null or (typeof(\"bytes_per_second\") = 'integer' and \"bytes_per_second\" > 0 and typeof(\"eta_seconds\") = 'integer' and \"eta_seconds\" >= 0))",
+      "name": "disc_inspections_estimate_check",
+      "entityType": "checks",
+      "table": "disc_inspections"
+    },
+    {
+      "value": "(\"claim_token\" is null) = (\"claim_updated_at\" is null) and (\"claim_token\" is null or \"status\" = 'running')",
+      "name": "disc_inspections_claim_check",
+      "entityType": "checks",
+      "table": "disc_inspections"
+    },
+    {
+      "value": "(\"status\" = 'running') = (\"completed_at\" is null) and (\"status\" = 'completed') = (\"detected_disc_id\" is not null)",
+      "name": "disc_inspections_terminal_check",
+      "entityType": "checks",
+      "table": "disc_inspections"
+    },
+    {
+      "value": "(\"retry_at\" is null or (\"status\" = 'running' and \"phase\" = 'retry_wait')) and (\"manual_retry_requested_at\" is null or (\"status\" = 'failed' and \"is_current\" = 1))",
+      "name": "disc_inspections_retry_check",
+      "entityType": "checks",
+      "table": "disc_inspections"
+    },
+    {
+      "value": "\"superseded_disc_selection_id\" is not null",
+      "name": "disc_selection_supersessions_id_not_null",
+      "entityType": "checks",
+      "table": "disc_selection_supersessions"
+    },
+    {
+      "value": "\"superseded_disc_selection_id\" <> \"replacement_disc_selection_id\"",
+      "name": "disc_selection_supersessions_distinct_selections_check",
+      "entityType": "checks",
+      "table": "disc_selection_supersessions"
+    },
+    {
+      "value": "\"id\" is not null",
+      "name": "disc_selections_id_not_null",
+      "entityType": "checks",
+      "table": "disc_selections"
+    },
+    {
+      "value": "\"kind\" in ('main_feature', 'dvd_title', 'dvd_chapters')",
+      "name": "disc_selections_kind_check",
+      "entityType": "checks",
+      "table": "disc_selections"
+    },
+    {
+      "value": "(\"kind\" = 'main_feature' and \"title_number\" is null and \"chapter_start\" is null and \"chapter_end\" is null) or (\"kind\" = 'dvd_title' and typeof(\"title_number\") = 'integer' and \"title_number\" > 0 and \"chapter_start\" is null and \"chapter_end\" is null) or (\"kind\" = 'dvd_chapters' and typeof(\"title_number\") = 'integer' and \"title_number\" > 0 and typeof(\"chapter_start\") = 'integer' and \"chapter_start\" > 0 and typeof(\"chapter_end\") = 'integer' and \"chapter_end\" >= \"chapter_start\")",
+      "name": "disc_selections_shape_check",
+      "entityType": "checks",
+      "table": "disc_selections"
+    },
+    {
+      "value": "\"id\" is not null",
+      "name": "encode_jobs_id_not_null",
+      "entityType": "checks",
+      "table": "encode_jobs"
+    },
+    {
+      "value": "\"status\" in ('queued', 'running', 'cancellation_requested', 'completed', 'failed', 'cancelled')",
+      "name": "encode_jobs_status_check",
+      "entityType": "checks",
+      "table": "encode_jobs"
+    },
+    {
+      "value": "\"progress_percent\" between 0 and 100",
+      "name": "encode_jobs_progress_check",
+      "entityType": "checks",
+      "table": "encode_jobs"
+    },
+    {
+      "value": "\"progress_phase\" is null or \"progress_phase\" in ('scanning', 'previewing', 'encoding')",
+      "name": "encode_jobs_progress_phase_check",
+      "entityType": "checks",
+      "table": "encode_jobs"
+    },
+    {
+      "value": "\"progress_eta_seconds\" is null or (typeof(\"progress_eta_seconds\") = 'integer' and \"progress_eta_seconds\" >= 0)",
+      "name": "encode_jobs_progress_eta_check",
+      "entityType": "checks",
+      "table": "encode_jobs"
+    },
+    {
+      "value": "\"reserves_output_path\" = 1 or \"status\" in ('cancellation_requested', 'completed', 'failed', 'cancelled')",
+      "name": "encode_jobs_output_reservation_check",
+      "entityType": "checks",
+      "table": "encode_jobs"
+    },
+    {
+      "value": "\"predecessor_encode_job_id\" is null or \"predecessor_encode_job_id\" <> \"id\"",
+      "name": "encode_jobs_predecessor_distinct_check",
+      "entityType": "checks",
+      "table": "encode_jobs"
+    },
+    {
+      "value": "\"replacement_output_identity\" is null or \"replace_existing_output\" = 1",
+      "name": "encode_jobs_replacement_identity_check",
+      "entityType": "checks",
+      "table": "encode_jobs"
+    },
+    {
+      "value": "(\"partial_cleanup_output_path\" is null) = (\"partial_cleanup_claim_token\" is null)",
+      "name": "encode_jobs_partial_cleanup_pair_check",
+      "entityType": "checks",
+      "table": "encode_jobs"
+    },
+    {
+      "value": "\"publication_pending\" = 0 or \"partial_cleanup_claim_token\" is not null",
+      "name": "encode_jobs_publication_pending_cleanup_check",
+      "entityType": "checks",
+      "table": "encode_jobs"
+    },
+    {
+      "value": "\"publication_completion_pending\" = 0 or \"publication_pending\" = 1",
+      "name": "encode_jobs_publication_completion_pending_check",
+      "entityType": "checks",
+      "table": "encode_jobs"
+    },
+    {
+      "value": "\"partial_cleanup_lease_token\" is null or \"partial_cleanup_claim_token\" is not null",
+      "name": "encode_jobs_partial_cleanup_lease_check",
+      "entityType": "checks",
+      "table": "encode_jobs"
+    },
+    {
+      "value": "(\"verification_status\" is null) = (\"verification_message\" is null) and (\"verification_status\" is null) = (\"verified_at\" is null) and (\"verification_status\" is null or \"verification_status\" in ('accessible', 'missing', 'inaccessible', 'error'))",
+      "name": "encode_jobs_verification_check",
+      "entityType": "checks",
+      "table": "encode_jobs"
+    },
+    {
+      "value": "\"id\" is not null",
+      "name": "encoding_profiles_id_not_null",
+      "entityType": "checks",
+      "table": "encoding_profiles"
+    },
+    {
+      "value": "\"media_domain\" in ('dvd_video', 'audio')",
+      "name": "encoding_profiles_domain_check",
+      "entityType": "checks",
+      "table": "encoding_profiles"
+    },
+    {
+      "value": "typeof(\"version\") = 'integer' and \"version\" > 0",
+      "name": "encoding_profiles_version_check",
+      "entityType": "checks",
+      "table": "encoding_profiles"
+    },
+    {
+      "value": "\"media_item_id\" is not null",
+      "name": "media_item_tmdb_identities_id_not_null",
+      "entityType": "checks",
+      "table": "media_item_tmdb_identities"
+    },
+    {
+      "value": "\"media_type\" in ('movie', 'tv_show')",
+      "name": "media_item_tmdb_identities_type_check",
+      "entityType": "checks",
+      "table": "media_item_tmdb_identities"
+    },
+    {
+      "value": "typeof(\"tmdb_id\") = 'integer' and \"tmdb_id\" > 0",
+      "name": "media_item_tmdb_identities_id_check",
+      "entityType": "checks",
+      "table": "media_item_tmdb_identities"
+    },
+    {
+      "value": "\"id\" is not null",
+      "name": "media_items_id_not_null",
+      "entityType": "checks",
+      "table": "media_items"
+    },
+    {
+      "value": "\"kind\" in ('movie', 'tv_show', 'season', 'episode', 'trailer', 'bonus_feature', 'other')",
+      "name": "media_items_kind_check",
+      "entityType": "checks",
+      "table": "media_items"
+    },
+    {
+      "value": "\"year\" is null or \"year\" between 1800 and 9999",
+      "name": "media_items_year_check",
+      "entityType": "checks",
+      "table": "media_items"
+    },
+    {
+      "value": "\"season_number\" is null or \"season_number\" >= 0",
+      "name": "media_items_season_number_check",
+      "entityType": "checks",
+      "table": "media_items"
+    },
+    {
+      "value": "\"episode_number\" is null or \"episode_number\" > 0",
+      "name": "media_items_episode_number_check",
+      "entityType": "checks",
+      "table": "media_items"
+    },
+    {
+      "value": "\"id\" is not null",
+      "name": "optical_drives_id_not_null",
+      "entityType": "checks",
+      "table": "optical_drives"
+    },
+    {
+      "value": "\"original_disc_archive_id\" is not null",
+      "name": "original_disc_archive_content_ids_id_not_null",
+      "entityType": "checks",
+      "table": "original_disc_archive_content_ids"
+    },
+    {
+      "value": "\"id\" is not null",
+      "name": "original_disc_archives_id_not_null",
+      "entityType": "checks",
+      "table": "original_disc_archives"
+    },
+    {
+      "value": "\"disc_kind\" in ('dvd', 'blu_ray', 'audio_cd')",
+      "name": "original_disc_archives_kind_check",
+      "entityType": "checks",
+      "table": "original_disc_archives"
+    },
+    {
+      "value": "\"archive_format\" in ('iso')",
+      "name": "original_disc_archives_format_check",
+      "entityType": "checks",
+      "table": "original_disc_archives"
+    },
+    {
+      "value": "\"size_bytes\" is null or \"size_bytes\" >= 0",
+      "name": "original_disc_archives_size_check",
+      "entityType": "checks",
+      "table": "original_disc_archives"
+    },
+    {
+      "value": "(\"boundary_policy_version\" is null and \"boundary_reported_size_bytes\" is null and \"boundary_published_size_bytes\" is null and \"boundary_excluded_sector_count\" is null) or (\"disc_kind\" = 'dvd' and typeof(\"boundary_policy_version\") = 'text' and length(\"boundary_policy_version\") between 1 and 128 and typeof(\"boundary_reported_size_bytes\") = 'integer' and \"boundary_reported_size_bytes\" between 1 and 9000000000 and typeof(\"boundary_published_size_bytes\") = 'integer' and \"boundary_published_size_bytes\" = \"boundary_reported_size_bytes\" and \"boundary_published_size_bytes\" = \"size_bytes\" and typeof(\"boundary_excluded_sector_count\") = 'integer' and \"boundary_excluded_sector_count\" = 0)",
+      "name": "original_disc_archives_boundary_evidence_check",
+      "entityType": "checks",
+      "table": "original_disc_archives"
+    },
+    {
+      "value": "\"integrity\" in ('unknown', 'clean_read', 'watchable_salvage')",
+      "name": "original_disc_archives_integrity_check",
+      "entityType": "checks",
+      "table": "original_disc_archives"
+    },
+    {
+      "value": "(\"integrity\" = 'unknown' and \"integrity_policy_version\" is null and \"bad_sector_count\" is null and \"bad_area_count\" is null and \"bad_sector_ranges\" is null and \"bad_sector_counts_by_title\" is null) or (\"integrity\" = 'clean_read' and \"integrity_policy_version\" is not null and \"bad_sector_count\" is not null and \"bad_area_count\" is not null and \"bad_sector_ranges\" is not null and \"bad_sector_counts_by_title\" is null and length(\"integrity_policy_version\") between 1 and 128 and \"bad_sector_count\" = 0 and \"bad_area_count\" = 0 and json(\"bad_sector_ranges\") = json('[]')) or (\"integrity\" = 'watchable_salvage' and \"integrity_policy_version\" is not null and \"bad_sector_count\" is not null and \"bad_area_count\" is not null and \"bad_sector_ranges\" is not null and length(\"integrity_policy_version\") between 1 and 128 and \"bad_sector_count\" > 0 and \"bad_area_count\" > 0 and json_valid(\"bad_sector_ranges\") and json_type(\"bad_sector_ranges\") = 'array' and (\"integrity_policy_version\" = 'dvd-watchable-salvage-v1' or (\"bad_sector_counts_by_title\" is not null and json_valid(\"bad_sector_counts_by_title\") and json_type(\"bad_sector_counts_by_title\") = 'array')))",
+      "name": "original_disc_archives_integrity_evidence_check",
+      "entityType": "checks",
+      "table": "original_disc_archives"
+    },
+    {
+      "value": "\"catalog_review_outcome\" in ('needs_review', 'reviewed_with_selections', 'archive_only') and (\"catalog_review_outcome\" = 'needs_review') = (\"catalog_reviewed_at\" is null)",
+      "name": "original_disc_archives_catalog_review_outcome_check",
+      "entityType": "checks",
+      "table": "original_disc_archives"
+    },
+    {
+      "value": "(\"verification_status\" is null) = (\"verification_message\" is null) and (\"verification_status\" is null) = (\"verified_at\" is null) and (\"verification_status\" is null or \"verification_status\" in ('accessible', 'missing', 'inaccessible', 'error'))",
+      "name": "original_disc_archives_verification_check",
+      "entityType": "checks",
+      "table": "original_disc_archives"
+    },
+    {
+      "value": "\"id\" is not null",
+      "name": "retained_encode_outputs_id_not_null",
+      "entityType": "checks",
+      "table": "retained_encode_outputs"
+    },
+    {
+      "value": "\"predecessor_encode_job_id\" <> \"replacement_encode_job_id\"",
+      "name": "retained_encode_outputs_distinct_jobs_check",
+      "entityType": "checks",
+      "table": "retained_encode_outputs"
+    },
+    {
+      "value": "\"state\" in ('retained')",
+      "name": "retained_encode_outputs_state_check",
+      "entityType": "checks",
+      "table": "retained_encode_outputs"
+    },
+    {
+      "value": "\"cleanup_eligible\" = 1",
+      "name": "retained_encode_outputs_cleanup_eligible_check",
+      "entityType": "checks",
+      "table": "retained_encode_outputs"
+    }
+  ],
+  "renames": []
+}

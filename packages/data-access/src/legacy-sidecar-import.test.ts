@@ -28,6 +28,7 @@ import { decodeDvdTitleMap } from "./dvd-scan.js";
 import {
   createCleanReadArchiveIntegrityEvidence,
   createDataAccess,
+  createNormalDvdArchiveBoundaryEvidence,
 } from "./index.js";
 import { createLegacySidecarDataAccess } from "./legacy-sidecars.js";
 import { createTemporaryDirectoryFixture } from "./legacy-sidecar.test-support.js";
@@ -458,6 +459,7 @@ describe("legacy sidecar import", () => {
       expect(() =>
         fixture.access.archiveJobs.publish(claim, {
           archivePath: join(dirname(fixture.archivePath), "Duplicate.iso"),
+          boundaryEvidence: createNormalDvdArchiveBoundaryEvidence(14),
           integrityEvidence: createCleanReadArchiveIntegrityEvidence(
             "test-clean-v1",
           ),
