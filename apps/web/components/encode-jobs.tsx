@@ -14,6 +14,7 @@ export interface EncodeSelectionOption {
   mediaTitle: string;
   mediaYear: number | null;
   sourceDescription: string;
+  suggestedOutputPath: string | null;
 }
 
 export interface EncodeProfileOption {
@@ -108,6 +109,21 @@ export function EncodeJobsView({
   onSelectionPage,
   onProfilePage,
 }: EncodeJobsViewProps) {
+  function populateOutputPath(event: React.ChangeEvent<HTMLSelectElement>) {
+    if (state.status !== "loaded") {
+      return;
+    }
+    const selection = state.selections.find(
+      (candidate) => candidate.id === event.currentTarget.value,
+    );
+    const outputInput = event.currentTarget.form?.elements.namedItem(
+      "outputPath",
+    );
+    if (outputInput instanceof HTMLInputElement) {
+      outputInput.value = selection?.suggestedOutputPath ?? "";
+    }
+  }
+
   function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
@@ -166,6 +182,7 @@ export function EncodeJobsView({
                   required
                   defaultValue=""
                   disabled={state.selections.length === 0}
+                  onChange={populateOutputPath}
                 >
                   <option value="" disabled>Select reviewed media</option>
                   {state.selections.map((selection) => (
