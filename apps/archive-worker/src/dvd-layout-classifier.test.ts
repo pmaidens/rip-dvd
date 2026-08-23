@@ -1015,6 +1015,46 @@ describe("retained DVD image layout completeness", () => {
     );
   });
 
+  it("fails closed on an unrecorded UDF file-set descriptor extent", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    for (const logicalVolumeLba of [259, 275]) {
+      image.writeUInt32LE(
+        0x4000_0000 | DVD_SECTOR_SIZE_BYTES,
+        logicalVolumeLba * DVD_SECTOR_SIZE_BYTES + 248,
+      );
+    }
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD UDF partition address is invalid");
+  });
+
+  it("fails closed on an unrecorded UDF partition metadata extent", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    for (const partitionLba of [258, 274]) {
+      image.writeUInt32LE(
+        0x4000_0000 | DVD_SECTOR_SIZE_BYTES,
+        partitionLba * DVD_SECTOR_SIZE_BYTES + 56,
+      );
+    }
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow(
+      "DVD UDF partition metadata extent is unsupported",
+    );
+  });
+
   it("accepts agreeing ISO and UDF views", async () => {
     const fixture = createSyntheticCompleteDvdImage({
       includeIso: true,
@@ -1143,6 +1183,45 @@ describe("retained DVD image layout completeness", () => {
     })).rejects.toThrow("DVD VM link command target is invalid");
   });
 
+  it("fails closed when a title command targets a missing VMGM PGC", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    const programChainTableOffset = 339 * DVD_SECTOR_SIZE_BYTES +
+      2 * DVD_SECTOR_SIZE_BYTES;
+    const programChainOffset = programChainTableOffset + 16;
+    image.writeUInt32BE(296, programChainTableOffset + 4);
+    image.copy(
+      image,
+      programChainOffset + 252,
+      programChainOffset + 236,
+      programChainOffset + 265,
+    );
+    image.writeUInt16BE(236, programChainOffset + 228);
+    image.writeUInt16BE(252, programChainOffset + 230);
+    image.writeUInt16BE(253, programChainOffset + 232);
+    image.writeUInt16BE(277, programChainOffset + 234);
+    image.writeUInt16BE(1, programChainOffset + 236);
+    image.fill(0, programChainOffset + 238, programChainOffset + 244);
+    image.writeBigUInt64BE(
+      1n << 61n | 1n << 60n | 6n << 48n | 2n << 32n | 3n << 22n,
+      programChainOffset + 244,
+    );
+    image.copy(
+      image,
+      351 * DVD_SECTOR_SIZE_BYTES,
+      339 * DVD_SECTOR_SIZE_BYTES,
+      343 * DVD_SECTOR_SIZE_BYTES,
+    );
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD VM program chain target is invalid");
+  });
+
   it("fails closed when a PGC references an absent VOBU", async () => {
     const image = syntheticCompleteDvdImage({
       includeIso: true,
@@ -1152,6 +1231,28 @@ describe("retained DVD image layout completeness", () => {
       4,
       339 * DVD_SECTOR_SIZE_BYTES + 3 * DVD_SECTOR_SIZE_BYTES + 8,
     );
+    image.copy(
+      image,
+      351 * DVD_SECTOR_SIZE_BYTES,
+      339 * DVD_SECTOR_SIZE_BYTES,
+      343 * DVD_SECTOR_SIZE_BYTES,
+    );
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD program chain VOBU relationships are malformed");
+  });
+
+  it("fails closed when a PGC misidentifies its final VOBU", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    const lastVobuStartOffset = 339 * DVD_SECTOR_SIZE_BYTES +
+      2 * DVD_SECTOR_SIZE_BYTES + 16 + 237 + 16;
+    image.writeUInt32BE(0, lastVobuStartOffset);
     image.copy(
       image,
       351 * DVD_SECTOR_SIZE_BYTES,

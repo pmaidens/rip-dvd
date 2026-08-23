@@ -1134,6 +1134,53 @@ async function analyzeDvdImageLayout({
     return units;
   };
 
+  const managerProgramChainCountBySource = new Map<
+    "iso" | "udf",
+    Promise<number | undefined>
+  >();
+  const readManagerProgramChainCount = (
+    source: "iso" | "udf",
+  ): Promise<number | undefined> => {
+    const existing = managerProgramChainCountBySource.get(source);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const count = (async () => {
+      const dvdFiles = source === "iso" ? isoDvdFiles : udfDvdFiles;
+      const managerIfo = dvdFiles.get("VIDEO_TS/VIDEO_TS.IFO");
+      if (managerIfo === undefined) {
+        throw new Error("DVD video manager navigation file is missing");
+      }
+      const managerIfoContent = await readDvdFile(
+        managerIfo,
+        MAX_FILE_ENTRY_BYTES * 16,
+      );
+      if (
+        managerIfoContent.byteLength < DVD_SECTOR_SIZE_BYTES ||
+        managerIfoContent.toString("ascii", 0, 12) !== "DVDVIDEO-VMG"
+      ) {
+        throw new Error("DVD video manager navigation file is malformed");
+      }
+      const menuVob = dvdFiles.get("VIDEO_TS/VIDEO_TS.VOB");
+      const menuVobSectorCount = menuVob === undefined
+        ? 0
+        : menuVob.byteCount / DVD_SECTOR_SIZE_BYTES;
+      if (!Number.isInteger(menuVobSectorCount)) {
+        throw new Error("DVD menu VOB layout is malformed");
+      }
+      const units = parseMenuProgramChainUnits(
+        managerIfoContent,
+        0xc8,
+        menuVobSectorCount,
+      );
+      return units.length === 0
+        ? undefined
+        : Math.min(...units.map((unit) => unit.programChains.length));
+    })();
+    managerProgramChainCountBySource.set(source, count);
+    return count;
+  };
+
   const dvdVmBits = (
     command: string,
     start: number,
@@ -1263,8 +1310,8 @@ async function analyzeDvdImageLayout({
         const pgcNumber = dvdVmBits(command, 46, 15);
         if (
           pgcNumber <= 0 ||
-          context.managerProgramChainCount !== undefined &&
-            pgcNumber > context.managerProgramChainCount
+          context.managerProgramChainCount === undefined ||
+          pgcNumber > context.managerProgramChainCount
         ) {
           throw new Error("DVD VM program chain target is invalid");
         }
@@ -1319,11 +1366,18 @@ async function analyzeDvdImageLayout({
       programChainCount: number;
     },
   ): void => {
-    if (chain.cells.some((cell) =>
-      !context.navigationSectors.has(cell.firstSector) ||
-      !context.navigationSectors.has(cell.lastVobuStartSector)
-    )) {
-      throw new Error("DVD program chain VOBU relationships are malformed");
+    for (const cell of chain.cells) {
+      const cellVobuStarts = [...context.navigationSectors]
+        .filter((sector) =>
+          sector >= cell.firstSector && sector <= cell.lastSector
+        )
+        .sort((left, right) => left - right);
+      if (
+        cellVobuStarts[0] !== cell.firstSector ||
+        cellVobuStarts.at(-1) !== cell.lastVobuStartSector
+      ) {
+        throw new Error("DVD program chain VOBU relationships are malformed");
+      }
     }
     for (const block of chain.commandBlocks) {
       for (const command of block.commands) {
@@ -1351,8 +1405,9 @@ async function analyzeDvdImageLayout({
     source: "iso" | "udf",
     titleSetNumber: number,
     titleVobSectorCount: number,
+    managerProgramChainCount?: number,
   ) => {
-    const key = `${source}:${titleSetNumber}:${titleVobSectorCount}`;
+    const key = `${source}:${titleSetNumber}:${titleVobSectorCount}:${managerProgramChainCount ?? "unknown"}`;
     const existing = titleAssociationsBySourceAndSet.get(key);
     if (existing !== undefined) {
       return existing;
@@ -1478,10 +1533,27 @@ async function analyzeDvdImageLayout({
         titleSetNumber,
         titleVobSectorCount,
       );
+      const targetsManagerProgramChain = [...programChains.values()].some(
+        (chain) => chain.commandBlocks.some((block) =>
+          block.commands.some((command) =>
+            dvdVmBits(command, 63, 3) === 1 &&
+            dvdVmBits(command, 60, 1) === 1 &&
+            (dvdVmBits(command, 51, 4) === 6 ||
+              dvdVmBits(command, 51, 4) === 8) &&
+            dvdVmBits(command, 23, 2) === 3
+          )
+        )
+      );
+      const validatedManagerProgramChainCount =
+        managerProgramChainCount ??
+        (targetsManagerProgramChain
+          ? await readManagerProgramChainCount(source)
+          : undefined);
       for (const chain of programChains.values()) {
         validateProgramChainNavigation(chain, {
           currentTitleSetNumber: titleSetNumber,
           globalTitles: allGlobalTitles,
+          managerProgramChainCount: validatedManagerProgramChainCount,
           navigationSectors,
           programChainCount: pgcCount,
         });
@@ -1954,6 +2026,7 @@ async function analyzeDvdImageLayout({
     const extentSectorCount = sectorCountForBytes(descriptor.extentLength);
     if (
       partition === undefined ||
+      descriptor.extentType !== 0 ||
       descriptor.extentLength <= 0 ||
       !Number.isSafeInteger(
         descriptor.logicalBlockNumber + extentSectorCount,
@@ -2089,6 +2162,11 @@ async function analyzeDvdImageLayout({
           for (const headerOffset of [56, 64, 72, 80, 88]) {
             const rawLength = descriptor.readUInt32LE(headerOffset);
             const extentLength = rawLength & UDF_EXTENT_LENGTH_MASK;
+            if ((rawLength & UDF_EXTENT_TYPE_MASK) !== 0) {
+              throw new Error(
+                "DVD UDF partition metadata extent is unsupported",
+              );
+            }
             if (extentLength === 0) {
               continue;
             }
@@ -2697,6 +2775,7 @@ async function analyzeDvdImageLayout({
         source,
         titleSetNumber,
         titleVobSectorCount,
+        managerProgramChainCount,
       );
       const titleSetPrefix = `VIDEO_TS/VTS_${String(titleSetNumber).padStart(2, "0")}_0`;
       const titleSetIfoContent = await validateBackupAndReadIfo(
