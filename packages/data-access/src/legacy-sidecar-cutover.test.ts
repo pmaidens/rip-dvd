@@ -890,6 +890,7 @@ try {
       service,
       service.catalog.listDetectedDiscs(undefined, { ids: [concurrentDisc.id] })[0]!,
       "concurrent-worker",
+      4_700_000_000,
     );
     service.archiveJobs.publish(concurrentClaim, {
       archivePath: concurrentArchivePath,
@@ -1257,6 +1258,8 @@ try {
       originalsLibraryPath,
       "A-repaired.iso",
     );
+    const repairedArchiveSizeBytes =
+      readFileSync(repairedArchivePath).byteLength;
     const disc = service.catalog.registerDetectedDisc({
       opticalDriveId: drive.id,
       discKind: "dvd",
@@ -1267,9 +1270,8 @@ try {
       service,
       service.catalog.listDetectedDiscs(undefined, { ids: [disc.id] })[0]!,
       "replacement-worker",
+      repairedArchiveSizeBytes,
     );
-    const repairedArchiveSizeBytes =
-      readFileSync(repairedArchivePath).byteLength;
     service.archiveJobs.publish(claim, {
       archivePath: repairedArchivePath,
       boundaryEvidence:
@@ -3272,6 +3274,7 @@ try {
       service,
       service.catalog.listDetectedDiscs(undefined, { ids: [disc.id] })[0]!,
       "late-bootstrap-worker",
+      4_700_000_000,
     );
     service.archiveJobs.publish(claim, {
       archivePath: publishedArchivePath,

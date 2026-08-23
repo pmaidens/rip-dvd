@@ -1152,7 +1152,8 @@ describe("data-access facade", () => {
           name !== "20260822183552_bounded-disc-settling" &&
           name !== "20260822185006_burly_northstar" &&
           name !== "20260822193801_safe_proteus" &&
-          name !== "20260822201215_thick_madame_web",
+          name !== "20260822201215_thick_madame_web" &&
+          name !== "20260823160205_flat_fixer",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -7995,6 +7996,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual(expect.arrayContaining([
       { name: "archive_request_id" },
+      { name: "disc_inspection_id" },
       { name: "attempt_ordinal" },
       { name: "claim_token" },
       { name: "progress_phase" },
@@ -8010,6 +8012,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         )
         .all(),
     ).toEqual([
+      {
+        name: "20260823160205_flat_fixer",
+      },
       {
         name: "20260823142401_conscious_alice",
       },
@@ -8036,9 +8041,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260820215821_redundant_jocasta",
-      },
-      {
-        name: "20260814225652_familiar_bug",
       },
     ]);
     expect(
@@ -11791,6 +11793,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       opticalDriveId: drive.id,
       mediaGeneration: "501",
       fingerprint: "publication-disc",
+      sizeBytes: 1_000,
     });
     const request = access.archiveRequests.create({
       detectedDiscId: disc.id,
@@ -11799,6 +11802,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       inspection.id,
       "publisher",
     )!;
+    expect(claim.discInspectionId).toBe(inspection.id);
     access.archiveJobs.updateProgress(claim, {
       phase: "copying",
       progressPercent: 60,
@@ -11841,6 +11845,16 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       })).toThrow(DomainInvariantError);
       expect(access.catalog.listOriginalDiscArchives()).toEqual([]);
     }
+
+    expect(() => access.archiveJobs.publish(claim, {
+      archivePath: "/media/originals/publication.iso",
+      boundaryEvidence: createNormalDvdArchiveBoundaryEvidence(900),
+      sizeBytes: 900,
+      integrityEvidence: createCleanReadArchiveIntegrityEvidence(
+        "dvd-recovery-v1",
+      ),
+    })).toThrow(DomainInvariantError);
+    expect(access.catalog.listOriginalDiscArchives()).toEqual([]);
 
     const completed = access.archiveJobs.publish(claim, {
       archivePath: "/media/originals/publication.iso",
@@ -11897,6 +11911,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       opticalDriveId: drive.id,
       mediaGeneration: "recovered-archive",
       fingerprint: "recovered-archive",
+      sizeBytes: 1_000,
     });
     access.archiveRequests.create({ detectedDiscId: disc.id });
     const claim = access.archiveJobs.startForInspection(
@@ -11934,6 +11949,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       opticalDriveId: drive.id,
       mediaGeneration: "watchable-salvage",
       fingerprint: "watchable-salvage",
+      sizeBytes: 100_000,
     });
     const request = access.archiveRequests.create({ detectedDiscId: disc.id });
     const claim = access.archiveJobs.startForInspection(
@@ -11994,6 +12010,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       opticalDriveId: drive.id,
       mediaGeneration: "integrity-constraint",
       fingerprint: "integrity-constraint",
+      sizeBytes: 1_000,
     });
     access.archiveRequests.create({ detectedDiscId: disc.id });
     const claim = access.archiveJobs.startForInspection(

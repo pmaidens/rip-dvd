@@ -539,6 +539,7 @@ export interface EncodingProfile {
 export interface ArchiveJob {
   id: ArchiveJobId;
   archiveRequestId: ArchiveRequestId;
+  discInspectionId: DiscInspectionId | null;
   detectedDiscId: DetectedDiscId;
   originalDiscArchiveId: OriginalDiscArchiveId | null;
   attemptOrdinal: number;

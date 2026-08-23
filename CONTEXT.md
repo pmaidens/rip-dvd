@@ -24,6 +24,10 @@ _Avoid_: Queued Archive Job, approval
 The evidence-backed read quality recorded with an Original Disc Archive. Historical archives are `unknown`; a new Archive Job that observes a complete recovery with no unreadable sectors records `clean_read`; an archive accepted after automatic damage validation records `watchable_salvage`.
 _Avoid_: Bit-perfect, exact copy, Archive Job status
 
+**Archive Boundary Evidence**:
+The versioned provenance that identifies the Disc Inspection size accepted as an Original Disc Archive's complete publication boundary. Historical archives may have no Archive Boundary Evidence.
+_Avoid_: Boundary metadata, archive size note
+
 **Disc Inspection**:
 An insertion-scoped examination that establishes a disc's identity and describes its contents before preservation begins.
 _Avoid_: Hash Job, rip, metadata scan, drive inspection
