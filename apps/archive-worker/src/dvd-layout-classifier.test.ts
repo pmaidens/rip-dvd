@@ -1397,6 +1397,46 @@ describe("retained DVD image layout completeness", () => {
     })).rejects.toThrow("DVD ISO directory padding is malformed");
   });
 
+  it("fails closed on nonzero ISO directory-identifier padding", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    image[42 * DVD_SECTOR_SIZE_BYTES + 109] = 1;
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD ISO directory record is unsupported");
+  });
+
+  it("fails closed on an ISO continuation System Use entry", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    const recordOffset = 42 * DVD_SECTOR_SIZE_BYTES + 68;
+    image[recordOffset] = 70;
+    const continuationOffset = recordOffset + 42;
+    image.write("CE", continuationOffset, "ascii");
+    image[continuationOffset + 2] = 28;
+    image[continuationOffset + 3] = 1;
+    writeBothEndian32(image, continuationOffset + 4, 600);
+    writeBothEndian32(image, continuationOffset + 12, 0);
+    writeBothEndian32(
+      image,
+      continuationOffset + 20,
+      DVD_SECTOR_SIZE_BYTES,
+    );
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD ISO directory record is unsupported");
+  });
+
   it("rejects disagreeing ISO path-table copies", async () => {
     const image = syntheticCompleteDvdImage({
       includeIso: true,
@@ -1838,6 +1878,42 @@ describe("retained DVD image layout completeness", () => {
     })).rejects.toThrow("DVD UDF logical volume integrity is malformed");
   });
 
+  it("follows the first next UDF integrity extent", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    for (const logicalVolumeLba of [259, 275]) {
+      const logicalVolume = image.subarray(
+        logicalVolumeLba * DVD_SECTOR_SIZE_BYTES,
+        (logicalVolumeLba + 1) * DVD_SECTOR_SIZE_BYTES,
+      );
+      logicalVolume.writeUInt32LE(2 * DVD_SECTOR_SIZE_BYTES, 432);
+      writeUdfTag(logicalVolume, 6, logicalVolumeLba);
+    }
+    const firstIntegrity = image.subarray(
+      290 * DVD_SECTOR_SIZE_BYTES,
+      291 * DVD_SECTOR_SIZE_BYTES,
+    );
+    firstIntegrity.writeUInt32LE(DVD_SECTOR_SIZE_BYTES, 32);
+    firstIntegrity.writeUInt32LE(600, 36);
+    writeUdfTag(firstIntegrity, 9, 290);
+    const secondIntegrity = image.subarray(
+      291 * DVD_SECTOR_SIZE_BYTES,
+      292 * DVD_SECTOR_SIZE_BYTES,
+    );
+    firstIntegrity.copy(secondIntegrity);
+    secondIntegrity.writeUInt32LE(0, 32);
+    secondIntegrity.writeUInt32LE(0, 36);
+    writeUdfTag(secondIntegrity, 9, 291);
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD filesystem extent is invalid");
+  });
+
   it("fails closed when a UDF primary-volume extent crosses the boundary", async () => {
     const image = syntheticCompleteDvdImage({
       includeIso: false,
@@ -1858,6 +1934,29 @@ describe("retained DVD image layout completeness", () => {
       candidateBoundaryLba: 600,
       imagePath: fixture.imagePath,
     })).rejects.toThrow("DVD filesystem extent is invalid");
+  });
+
+  it("fails closed on a UDF predecessor volume descriptor sequence", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    for (const descriptorLba of [257, 273]) {
+      const primary = image.subarray(
+        descriptorLba * DVD_SECTOR_SIZE_BYTES,
+        (descriptorLba + 1) * DVD_SECTOR_SIZE_BYTES,
+      );
+      primary.writeUInt32LE(600, 484);
+      writeUdfTag(primary, 1, descriptorLba);
+    }
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow(
+      "DVD UDF predecessor volume descriptor sequence is unsupported",
+    );
   });
 
   it("fails closed when a UDF directory parent points at the wrong ICB", async () => {

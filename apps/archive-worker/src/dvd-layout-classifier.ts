@@ -779,10 +779,14 @@ async function analyzeDvdImageLayout({
       const flags = record[25]!;
       const extendedAttributeSectorCount = record[1]!;
       const identifierLength = record[32]!;
+      const identifierEnd = 33 + identifierLength;
+      const systemUseOffset = identifierEnd +
+        (identifierLength % 2 === 0 ? 1 : 0);
       if (
         extentLba !== extentLbaBe ||
         extentBytes !== extentBytesBe ||
-        33 + identifierLength > record.byteLength ||
+        systemUseOffset !== record.byteLength ||
+        identifierLength % 2 === 0 && record[identifierEnd] !== 0 ||
         record[26] !== 0 ||
         record[27] !== 0 ||
         (flags & 0x80) !== 0
@@ -1543,7 +1547,34 @@ async function analyzeDvdImageLayout({
 
   interface DvdVmCommand {
     encoded: string;
-    instruction: bigint;
+    fields: {
+      angleNumber: number;
+      anglePresent: boolean;
+      audioStreamNumber: number;
+      audioStreamPresent: boolean;
+      commandClass: number;
+      direct: boolean;
+      globalTitleNumber: number;
+      linkCellNumber: number;
+      linkChapterNumber: number;
+      linkProgramChainNumber: number;
+      linkProgramNumber: number;
+      linkSubOperation: number;
+      managerProgramChainNumber: number;
+      menuId: number;
+      navigationTimer: number;
+      navigationTimerProgramChainNumber: number;
+      operation: number;
+      partNumber: number;
+      resumeCellNumber: number;
+      setOperation: number;
+      specialLineNumber: number;
+      subpictureStreamPresent: boolean;
+      subpictureStreamValue: number;
+      targetKind: number;
+      targetTitleNumber: number;
+      targetTitleSetNumber: number;
+    };
     toJSON: () => string;
   }
 
@@ -1552,9 +1583,43 @@ async function analyzeDvdImageLayout({
       throw new Error("DVD VM command is truncated");
     }
     const encoded = commandBytes.toString("hex");
+    const instruction = commandBytes.readBigUInt64BE();
+    const bits = (start: number, count: number): number => {
+      const shift = BigInt(start + 1 - count);
+      return Number(
+        instruction >> shift & (1n << BigInt(count)) - 1n,
+      );
+    };
     return {
       encoded,
-      instruction: commandBytes.readBigUInt64BE(),
+      fields: {
+        angleNumber: bits(22, 7),
+        anglePresent: bits(23, 1) !== 0,
+        audioStreamNumber: bits(38, 7),
+        audioStreamPresent: bits(39, 1) !== 0,
+        commandClass: bits(63, 3),
+        direct: bits(60, 1) !== 0,
+        globalTitleNumber: bits(22, 7),
+        linkCellNumber: bits(7, 8),
+        linkChapterNumber: bits(9, 10),
+        linkProgramChainNumber: bits(14, 15),
+        linkProgramNumber: bits(6, 7),
+        linkSubOperation: bits(7, 8),
+        managerProgramChainNumber: bits(46, 15),
+        menuId: bits(19, 4),
+        navigationTimer: bits(47, 16),
+        navigationTimerProgramChainNumber: bits(30, 15),
+        operation: bits(51, 4),
+        partNumber: bits(41, 10),
+        resumeCellNumber: bits(31, 8),
+        setOperation: bits(59, 4),
+        specialLineNumber: bits(7, 8),
+        subpictureStreamPresent: bits(31, 1) !== 0,
+        subpictureStreamValue: bits(30, 7),
+        targetKind: bits(23, 2),
+        targetTitleNumber: bits(39, 8),
+        targetTitleSetNumber: bits(31, 8),
+      },
       toJSON: () => encoded,
     };
   };
@@ -2821,25 +2886,13 @@ async function analyzeDvdImageLayout({
     return count;
   };
 
-  const dvdVmBits = (
-    command: DvdVmCommand,
-    start: number,
-    count: number,
-  ): number => {
-    const shift = BigInt(start + 1 - count);
-    return Number(
-      command.instruction >> shift & (1n << BigInt(count)) - 1n,
-    );
-  };
-
   const dvdVmCommandTargetsManagerProgramChain = (
     command: DvdVmCommand,
   ): boolean =>
-    dvdVmBits(command, 63, 3) === 1 &&
-    dvdVmBits(command, 60, 1) === 1 &&
-    (dvdVmBits(command, 51, 4) === 6 ||
-      dvdVmBits(command, 51, 4) === 8) &&
-    dvdVmBits(command, 23, 2) === 3;
+    command.fields.commandClass === 1 &&
+    command.fields.direct &&
+    (command.fields.operation === 6 || command.fields.operation === 8) &&
+    command.fields.targetKind === 3;
 
   const dvdVmMenuTarget = (
     command: DvdVmCommand,
@@ -2849,14 +2902,13 @@ async function analyzeDvdImageLayout({
     titleSetNumber: number;
   } | undefined => {
     if (
-      dvdVmBits(command, 63, 3) !== 1 ||
-      dvdVmBits(command, 60, 1) !== 1 ||
-      (dvdVmBits(command, 51, 4) !== 6 &&
-        dvdVmBits(command, 51, 4) !== 8)
+      command.fields.commandClass !== 1 ||
+      !command.fields.direct ||
+      (command.fields.operation !== 6 && command.fields.operation !== 8)
     ) {
       return undefined;
     }
-    const targetKind = dvdVmBits(command, 23, 2);
+    const targetKind = command.fields.targetKind;
     if (targetKind === 1) {
       return { domain: "manager" };
     }
@@ -2865,8 +2917,8 @@ async function analyzeDvdImageLayout({
     }
     return {
       domain: "title-set",
-      titleSetNumber: dvdVmBits(command, 51, 4) === 6
-        ? dvdVmBits(command, 31, 8)
+      titleSetNumber: command.fields.operation === 6
+        ? command.fields.targetTitleSetNumber
         : currentTitleSetNumber,
     };
   };
@@ -2892,9 +2944,9 @@ async function analyzeDvdImageLayout({
     },
   ): void => {
     const validateLink = () => {
-      const operation = dvdVmBits(command, 51, 4);
+      const operation = command.fields.operation;
       if (operation === 1) {
-        const linkSubOperation = dvdVmBits(command, 7, 8);
+        const linkSubOperation = command.fields.linkSubOperation;
         if (
           !SUPPORTED_DVD_VM_LINK_SUB_OPERATIONS.has(
             linkSubOperation,
@@ -2918,13 +2970,13 @@ async function analyzeDvdImageLayout({
         return;
       }
       const target = operation === 4
-        ? dvdVmBits(command, 14, 15)
+        ? command.fields.linkProgramChainNumber
         : operation === 5
-        ? dvdVmBits(command, 9, 10)
+        ? command.fields.linkChapterNumber
         : operation === 6
-        ? dvdVmBits(command, 6, 7)
+        ? command.fields.linkProgramNumber
         : operation === 7
-        ? dvdVmBits(command, 7, 8)
+        ? command.fields.linkCellNumber
         : 0;
       const maximum = operation === 4
         ? context.programChainCount
@@ -2944,7 +2996,7 @@ async function analyzeDvdImageLayout({
       }
     };
     const validateJump = () => {
-      const operation = dvdVmBits(command, 51, 4);
+      const operation = command.fields.operation;
       if (
         (operation === 2 &&
           context.domain !== "first-play" &&
@@ -2960,20 +3012,20 @@ async function analyzeDvdImageLayout({
         return;
       }
       if (operation === 2) {
-        const titleNumber = dvdVmBits(command, 22, 7);
+        const titleNumber = command.fields.globalTitleNumber;
         if (titleNumber <= 0 || titleNumber > context.globalTitles.length) {
           throw new Error("DVD VM jump command target is invalid");
         }
         return;
       }
       if (operation === 3 || operation === 5) {
-        const titleNumber = dvdVmBits(command, 22, 7);
+        const titleNumber = command.fields.globalTitleNumber;
         const title = context.globalTitles.find((candidate) =>
           candidate.titleSetNumber === context.currentTitleSetNumber &&
           candidate.titleSetTitleNumber === titleNumber
         );
         const partNumber = operation === 5
-          ? dvdVmBits(command, 41, 10)
+          ? command.fields.partNumber
           : 1;
         if (
           title === undefined ||
@@ -2985,7 +3037,7 @@ async function analyzeDvdImageLayout({
         return;
       }
       if (operation === 6 || operation === 8) {
-        const targetKind = dvdVmBits(command, 23, 2);
+        const targetKind = command.fields.targetKind;
         if (
           operation === 6 &&
           ((targetKind === 0 &&
@@ -2994,14 +3046,14 @@ async function analyzeDvdImageLayout({
             ((targetKind === 1 || targetKind === 3) &&
               context.domain === "title") ||
             (targetKind === 2 &&
-              (dvdVmBits(command, 31, 8) === 0
+              (command.fields.targetTitleSetNumber === 0
                 ? context.domain !== "title-set-menu"
                 : context.domain === "title")))
         ) {
           throw new Error("DVD VM jump command is illegal in this domain");
         }
         const resumeCell = operation === 8
-          ? dvdVmBits(command, 31, 8)
+          ? command.fields.resumeCellNumber
           : 0;
         if (resumeCell > context.cellCount) {
           throw new Error("DVD VM call command target is invalid");
@@ -3010,7 +3062,7 @@ async function analyzeDvdImageLayout({
           return;
         }
         if (targetKind === 1) {
-          const menuId = dvdVmBits(command, 19, 4);
+          const menuId = command.fields.menuId;
           if (
             menuId < 2 ||
             menuId > 7 ||
@@ -3022,12 +3074,12 @@ async function analyzeDvdImageLayout({
         }
         if (targetKind === 2) {
           const titleSetNumber = operation === 6
-            ? dvdVmBits(command, 31, 8)
+            ? command.fields.targetTitleSetNumber
             : context.currentTitleSetNumber;
           const titleNumber = operation === 6
-            ? dvdVmBits(command, 39, 8)
+            ? command.fields.targetTitleNumber
             : 1;
-          const menuId = dvdVmBits(command, 19, 4);
+          const menuId = command.fields.menuId;
           if (
             menuId < 2 ||
             menuId > 7 ||
@@ -3044,7 +3096,7 @@ async function analyzeDvdImageLayout({
         if (!dvdVmCommandTargetsManagerProgramChain(command)) {
           throw new Error("DVD VM jump command is unsupported");
         }
-        const pgcNumber = dvdVmBits(command, 46, 15);
+        const pgcNumber = command.fields.managerProgramChainNumber;
         if (
           pgcNumber <= 0 ||
           context.managerProgramChainCount === undefined ||
@@ -3057,10 +3109,10 @@ async function analyzeDvdImageLayout({
       throw new Error("DVD VM jump command is unsupported");
     };
 
-    const commandClass = dvdVmBits(command, 63, 3);
+    const commandClass = command.fields.commandClass;
     if (commandClass === 0) {
-      const operation = dvdVmBits(command, 51, 4);
-      const line = dvdVmBits(command, 7, 8);
+      const operation = command.fields.operation;
+      const line = command.fields.specialLineNumber;
       if (
         operation > 3 ||
         (context.commandSection === "button" ||
@@ -3073,7 +3125,7 @@ async function analyzeDvdImageLayout({
       return;
     }
     if (commandClass === 1) {
-      if (dvdVmBits(command, 60, 1) === 1) {
+      if (command.fields.direct) {
         validateJump();
       } else {
         validateLink();
@@ -3081,25 +3133,25 @@ async function analyzeDvdImageLayout({
       return;
     }
     if (commandClass === 2) {
-      const systemSetOperation = dvdVmBits(command, 59, 4);
+      const systemSetOperation = command.fields.setOperation;
       if (![1, 2, 3, 6].includes(systemSetOperation)) {
         throw new Error("DVD VM system-set command is unsupported");
       }
       if (systemSetOperation === 1) {
-        if (dvdVmBits(command, 60, 1) !== 1) {
+        if (!command.fields.direct) {
           throw new Error("DVD VM indirect stream selection is unsupported");
         }
         if (
-          dvdVmBits(command, 39, 1) !== 0 &&
+          command.fields.audioStreamPresent &&
           !context.availableAudioStreamNumbers.has(
-            dvdVmBits(command, 38, 7),
+            command.fields.audioStreamNumber,
           )
         ) {
           throw new Error("DVD VM audio stream target is invalid");
         }
-        const subpicture = dvdVmBits(command, 30, 7);
+        const subpicture = command.fields.subpictureStreamValue;
         if (
-          dvdVmBits(command, 31, 1) !== 0 &&
+          command.fields.subpictureStreamPresent &&
           ((subpicture & 0x20) !== 0 ||
             !context.availableSubpictureStreamNumbers.has(
               subpicture & 0x1f,
@@ -3107,19 +3159,20 @@ async function analyzeDvdImageLayout({
         ) {
           throw new Error("DVD VM subpicture stream target is invalid");
         }
-        const angle = dvdVmBits(command, 22, 7);
+        const angle = command.fields.angleNumber;
         if (
-          dvdVmBits(command, 23, 1) !== 0 &&
+          command.fields.anglePresent &&
           (angle <= 0 || angle > context.angleCount)
         ) {
           throw new Error("DVD VM angle target is invalid");
         }
       } else if (systemSetOperation === 2) {
-        if (dvdVmBits(command, 60, 1) !== 1) {
+        if (!command.fields.direct) {
           throw new Error("DVD VM indirect navigation timer is unsupported");
         }
-        const timer = dvdVmBits(command, 47, 16);
-        const programChain = dvdVmBits(command, 30, 15);
+        const timer = command.fields.navigationTimer;
+        const programChain =
+          command.fields.navigationTimerProgramChainNumber;
         if (
           (timer === 0 && programChain !== 0) ||
           (timer !== 0 &&
@@ -3128,21 +3181,21 @@ async function analyzeDvdImageLayout({
           throw new Error("DVD VM navigation timer target is invalid");
         }
       }
-      if (dvdVmBits(command, 51, 4) !== 0) {
+      if (command.fields.operation !== 0) {
         validateLink();
       }
       return;
     }
     if (commandClass >= 3 && commandClass <= 6) {
-      if (dvdVmBits(command, 59, 4) > 11) {
+      if (command.fields.setOperation > 11) {
         throw new Error("DVD VM set command is unsupported");
       }
-      if (commandClass === 3 && dvdVmBits(command, 51, 4) !== 0) {
+      if (commandClass === 3 && command.fields.operation !== 0) {
         validateLink();
       } else if (
         commandClass >= 4 &&
         !SUPPORTED_DVD_VM_LINK_SUB_OPERATIONS.has(
-          dvdVmBits(command, 7, 8),
+          command.fields.linkSubOperation,
         )
       ) {
         throw new Error("DVD VM link command target is invalid");
@@ -4240,6 +4293,11 @@ async function analyzeDvdImageLayout({
           if (sawPrimaryVolumeDescriptor) {
             throw new Error("DVD UDF primary volume descriptor is duplicated");
           }
+          if (descriptor.readUInt32LE(484) !== 0) {
+            throw new Error(
+              "DVD UDF predecessor volume descriptor sequence is unsupported",
+            );
+          }
           sawPrimaryVolumeDescriptor = true;
           recordUdfExtentDescriptor(
             descriptor,
@@ -4481,6 +4539,9 @@ async function analyzeDvdImageLayout({
         );
         nextLength = next.nextLength;
         nextStart = next.nextStart;
+        if (nextLength !== 0) {
+          break;
+        }
       }
       if (!sawIntegrityDescriptor) {
         throw new Error("DVD UDF integrity sequence is invalid");
