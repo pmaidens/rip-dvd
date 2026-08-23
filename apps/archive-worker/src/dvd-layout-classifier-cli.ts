@@ -1,6 +1,9 @@
 import type { UnreadableSectorRange } from "@rip-dvd/data-access";
 
-import { classifyDvdImageDamage } from "./dvd-layout-classifier.js";
+import {
+  classifyDvdImageDamage,
+  proveDvdImageLayoutCompleteness,
+} from "./dvd-layout-classifier.js";
 
 function decodeRanges(value: string): readonly UnreadableSectorRange[] {
   let parsed: unknown;
@@ -39,22 +42,41 @@ function decodeRanges(value: string): readonly UnreadableSectorRange[] {
   return ranges;
 }
 
-const [imagePath, expectedByteCountText, rangesText, ...extraArguments] =
-  process.argv.slice(2);
-const expectedByteCount = Number(expectedByteCountText);
-if (
-  imagePath === undefined ||
-  rangesText === undefined ||
-  extraArguments.length > 0 ||
-  !Number.isSafeInteger(expectedByteCount) ||
-  expectedByteCount <= 0
-) {
-  throw new Error("DVD salvage classifier arguments are invalid");
-}
+const arguments_ = process.argv.slice(2);
+if (arguments_[0] === "proof") {
+  const [_, imagePath, candidateBoundaryLbaText, ...extraArguments] = arguments_;
+  const candidateBoundaryLba = Number(candidateBoundaryLbaText);
+  if (
+    imagePath === undefined ||
+    extraArguments.length > 0 ||
+    !Number.isSafeInteger(candidateBoundaryLba) ||
+    candidateBoundaryLba <= 0
+  ) {
+    throw new Error("DVD completeness classifier arguments are invalid");
+  }
+  const result = await proveDvdImageLayoutCompleteness({
+    candidateBoundaryLba,
+    imagePath,
+  });
+  process.stdout.write(`${JSON.stringify({ protocolVersion: 1, ...result })}\n`);
+} else {
+  const [imagePath, expectedByteCountText, rangesText, ...extraArguments] =
+    arguments_;
+  const expectedByteCount = Number(expectedByteCountText);
+  if (
+    imagePath === undefined ||
+    rangesText === undefined ||
+    extraArguments.length > 0 ||
+    !Number.isSafeInteger(expectedByteCount) ||
+    expectedByteCount <= 0
+  ) {
+    throw new Error("DVD salvage classifier arguments are invalid");
+  }
 
-const result = await classifyDvdImageDamage({
-  imagePath,
-  expectedByteCount,
-  unreadableSectorRanges: decodeRanges(rangesText),
-});
-process.stdout.write(`${JSON.stringify({ protocolVersion: 3, ...result })}\n`);
+  const result = await classifyDvdImageDamage({
+    imagePath,
+    expectedByteCount,
+    unreadableSectorRanges: decodeRanges(rangesText),
+  });
+  process.stdout.write(`${JSON.stringify({ protocolVersion: 3, ...result })}\n`);
+}

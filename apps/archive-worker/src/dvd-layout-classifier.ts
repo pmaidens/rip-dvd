@@ -1,3 +1,4 @@
+import { constants } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 
 import type { UnreadableSectorRange } from "@rip-dvd/data-access";
@@ -9,6 +10,7 @@ import type { DvdSalvageRejectionReason } from "./dvd-salvage-validator.js";
 
 const MAX_DESCRIPTOR_SECTORS = 256;
 const MAX_DIRECTORY_BYTES = 16 * 1_024 * 1_024;
+const MAX_DIRECTORY_DEPTH = 256;
 const MAX_DIRECTORY_ENTRIES = 100_000;
 const MAX_FILE_ENTRY_BYTES = 1_048_576;
 const UDF_EXTENT_LENGTH_MASK = 0x3fff_ffff;
@@ -27,6 +29,7 @@ interface SectorExtent {
 
 interface DvdFileLayout {
   byteCount: number;
+  embedded: boolean;
   extents: readonly {
     byteCount: number;
     startLba: number;
@@ -52,6 +55,23 @@ interface UdfLogicalVolume {
   integritySequenceLength: number;
   integritySequenceStartLba: number;
   partitionNumbersByReference: readonly number[];
+}
+
+type DvdDamageClassification = {
+  affectedTitleBadSectorCounts: readonly {
+    badSectorCount: number;
+    titleNumber: number;
+    titleSetNumber: number;
+  }[];
+  outcome: "accepted";
+} | {
+  outcome: "rejected";
+  reason: DvdSalvageRejectionReason;
+};
+
+interface DvdLayoutAnalysis {
+  damageClassification: DvdDamageClassification;
+  maximumReferencedLba: number;
 }
 
 class ClassifiedDamageError extends Error {
@@ -201,43 +221,41 @@ function decodeOstaCompressedUnicode(value: Buffer): string {
   throw new Error("DVD UDF file identifier encoding is unsupported");
 }
 
-export async function classifyDvdImageDamage({
+async function analyzeDvdImageLayout({
+  candidateBoundaryLba,
+  completenessProof,
+  exactImageByteCount,
   imagePath,
-  expectedByteCount,
   unreadableSectorRanges,
 }: {
+  candidateBoundaryLba: number;
+  completenessProof: boolean;
+  exactImageByteCount?: number;
   imagePath: string;
-  expectedByteCount: number;
   unreadableSectorRanges: readonly UnreadableSectorRange[];
-}): Promise<{
-  affectedTitleBadSectorCounts: readonly {
-    badSectorCount: number;
-    titleNumber: number;
-    titleSetNumber: number;
-  }[];
-  outcome: "accepted";
-} | {
-  outcome: "rejected";
-  reason: DvdSalvageRejectionReason;
-}> {
+}): Promise<DvdLayoutAnalysis> {
+  const retainedByteCount = candidateBoundaryLba * DVD_SECTOR_SIZE_BYTES;
   if (
-    !Number.isSafeInteger(expectedByteCount) ||
-    expectedByteCount <= 0 ||
-    expectedByteCount % DVD_SECTOR_SIZE_BYTES !== 0
+    !Number.isSafeInteger(candidateBoundaryLba) ||
+    candidateBoundaryLba <= 0 ||
+    !Number.isSafeInteger(retainedByteCount) ||
+    exactImageByteCount !== undefined &&
+      exactImageByteCount !== retainedByteCount
   ) {
-    throw new Error("DVD salvage image size is invalid");
+    throw new Error("DVD retained image boundary is invalid");
   }
   const metadata = await lstat(imagePath);
   if (
     !metadata.isFile() ||
     metadata.isSymbolicLink() ||
-    metadata.size !== expectedByteCount
+    metadata.size < retainedByteCount ||
+    exactImageByteCount !== undefined && metadata.size !== exactImageByteCount
   ) {
-    throw new Error("DVD salvage image is not the expected regular file");
+    throw new Error("DVD retained image is not the expected regular file");
   }
-  const totalSectorCount = expectedByteCount / DVD_SECTOR_SIZE_BYTES;
+  const totalSectorCount = candidateBoundaryLba;
   const badSectors = badSectorSet(unreadableSectorRanges);
-  if (badSectors.size === 0) {
+  if (!completenessProof && badSectors.size === 0) {
     throw new Error("DVD salvage damage map is empty");
   }
   for (const lba of badSectors) {
@@ -246,12 +264,38 @@ export async function classifyDvdImageDamage({
     }
   }
 
-  const handle = await open(imagePath, "r");
+  const handle = await open(
+    imagePath,
+    constants.O_RDONLY | constants.O_NOFOLLOW,
+  );
+  const openedMetadata = await handle.stat();
+  if (
+    !openedMetadata.isFile() ||
+    openedMetadata.dev !== metadata.dev ||
+    openedMetadata.ino !== metadata.ino ||
+    openedMetadata.size !== metadata.size
+  ) {
+    await handle.close();
+    throw new Error("DVD retained image changed before validation");
+  }
   const allocatedExtents: SectorExtent[] = [];
   const isoDvdFiles = new Map<string, DvdFileLayout>();
   const udfDvdFiles = new Map<string, DvdFileLayout>();
   const isoDvdPaths = new Set<string>();
   const udfDvdPaths = new Set<string>();
+  let isoDirectoryEntryCount = 0;
+  let udfDirectoryEntryCount = 0;
+  let maximumReferencedLba = -1;
+  const recordReferencedExtent = (
+    startLba: number,
+    sectorCount: number,
+  ) => {
+    requireSafeExtent(startLba, sectorCount, totalSectorCount);
+    maximumReferencedLba = Math.max(
+      maximumReferencedLba,
+      startLba + sectorCount - 1,
+    );
+  };
   const addExtent = (
     startLba: number,
     sectorCount: number,
@@ -262,7 +306,7 @@ export async function classifyDvdImageDamage({
       source: "iso" | "udf";
     },
   ) => {
-    requireSafeExtent(startLba, sectorCount, totalSectorCount);
+    recordReferencedExtent(startLba, sectorCount);
     allocatedExtents.push({ startLba, sectorCount, reason, fileLocation: file });
   };
   const classifyBeforeMetadataRead = (
@@ -331,10 +375,20 @@ export async function classifyDvdImageDamage({
     byteCount: number,
     parentPath: string,
     visited: Set<string>,
+    volumeSpaceSize: number,
+    depth = 0,
   ): Promise<void> => {
+    if (depth > MAX_DIRECTORY_DEPTH) {
+      throw new Error("DVD ISO directory depth exceeds its safety bound");
+    }
+    requireSafeExtent(
+      startLba,
+      sectorCountForBytes(byteCount),
+      volumeSpaceSize,
+    );
     const key = `${startLba}:${byteCount}`;
     if (visited.has(key)) {
-      return;
+      throw new Error("DVD ISO directory graph is cyclic or ambiguous");
     }
     visited.add(key);
     const directory = await readExtent(
@@ -344,7 +398,6 @@ export async function classifyDvdImageDamage({
       MAX_DIRECTORY_BYTES,
     );
     let offset = 0;
-    let entryCount = 0;
     while (offset < directory.byteLength) {
       const recordLength = directory[offset]!;
       if (recordLength === 0) {
@@ -352,8 +405,8 @@ export async function classifyDvdImageDamage({
           DVD_SECTOR_SIZE_BYTES;
         continue;
       }
-      entryCount += 1;
-      if (entryCount > MAX_DIRECTORY_ENTRIES || recordLength < 34 ||
+      isoDirectoryEntryCount += 1;
+      if (isoDirectoryEntryCount > MAX_DIRECTORY_ENTRIES || recordLength < 34 ||
         offset + recordLength > directory.byteLength) {
         throw new Error("DVD ISO directory is malformed");
       }
@@ -378,6 +431,25 @@ export async function classifyDvdImageDamage({
       const identifier = record.subarray(33, 33 + identifierLength);
       const isSpecial = identifierLength === 1 &&
         (identifier[0] === 0 || identifier[0] === 1);
+      if (extentBytes > 0) {
+        const dataSectorCount = sectorCountForBytes(extentBytes);
+        if (
+          !Number.isSafeInteger(
+            extendedAttributeSectorCount + dataSectorCount,
+          )
+        ) {
+          throw new Error("DVD ISO file extent is outside the volume");
+        }
+        try {
+          requireSafeExtent(
+            extentLba,
+            extendedAttributeSectorCount + dataSectorCount,
+            volumeSpaceSize,
+          );
+        } catch {
+          throw new Error("DVD ISO file extent is outside the volume");
+        }
+      }
       if (!isSpecial && extentBytes > 0) {
         const name = identifier.toString("ascii").replace(/;\d+$/, "");
         const path = `${parentPath}/${name}`.replace(/^\/+/, "");
@@ -395,12 +467,15 @@ export async function classifyDvdImageDamage({
             extentBytes,
             path,
             visited,
+            volumeSpaceSize,
+            depth + 1,
           );
         } else {
           const normalizedPath = path.toUpperCase();
           isoDvdPaths.add(normalizedPath);
           const fileLayout = {
             byteCount: extentBytes,
+            embedded: false,
             extents: [{ byteCount: extentBytes, startLba: dataLba }],
             path: normalizedPath,
           } satisfies DvdFileLayout;
@@ -1036,12 +1111,16 @@ export async function classifyDvdImageDamage({
         };
   };
 
-  const parseIso = async (): Promise<number> => {
+  const parseIso = async (): Promise<{
+    hasIso: boolean;
+    volumeSpaceSize: number;
+  }> => {
     let primaryVolumeDescriptor: Buffer | undefined;
     const filesystemDescriptors: Buffer[] = [];
     let volumeDescriptorCount = 0;
+    let sawTerminator = false;
     for (let lba = 16; lba < 16 + MAX_DESCRIPTOR_SECTORS; lba += 1) {
-      const descriptor = await readSector(lba);
+      const descriptor = await readRawSector(lba);
       if (descriptor.toString("ascii", 1, 6) !== "CD001" ||
         descriptor[6] !== 1) {
         if (volumeDescriptorCount === 0) {
@@ -1049,6 +1128,7 @@ export async function classifyDvdImageDamage({
         }
         throw new Error("DVD ISO volume descriptor sequence is malformed");
       }
+      classifyBeforeMetadataRead(lba, 1);
       volumeDescriptorCount += 1;
       const type = descriptor[0]!;
       if (type === 0 || type === 3) {
@@ -1064,11 +1144,23 @@ export async function classifyDvdImageDamage({
         filesystemDescriptors.push(descriptor);
       }
       if (type === 255) {
+        sawTerminator = true;
         break;
       }
     }
+    if (volumeDescriptorCount === 0) {
+      return { hasIso: false, volumeSpaceSize: 0 };
+    }
     if (primaryVolumeDescriptor === undefined) {
+      if (badSectors.size > 0 && [...badSectors].some((lba) =>
+        lba >= 16 && lba < 16 + MAX_DESCRIPTOR_SECTORS
+      )) {
+        throw new ClassifiedDamageError("filesystem_metadata");
+      }
       throw new Error("DVD ISO primary volume descriptor is missing");
+    }
+    if (!sawTerminator) {
+      throw new Error("DVD ISO volume descriptor sequence is malformed");
     }
     const volumeSpaceSize = primaryVolumeDescriptor.readUInt32LE(80);
     if (
@@ -1080,6 +1172,7 @@ export async function classifyDvdImageDamage({
     ) {
       throw new Error("DVD ISO volume geometry is invalid");
     }
+    recordReferencedExtent(0, volumeSpaceSize);
     for (const descriptor of filesystemDescriptors) {
       if (
         descriptor.readUInt32LE(80) !== volumeSpaceSize ||
@@ -1102,6 +1195,11 @@ export async function classifyDvdImageDamage({
         descriptor.readUInt32BE(152),
       ]) {
         if (lba > 0) {
+          try {
+            requireSafeExtent(lba, pathTableSectorCount, volumeSpaceSize);
+          } catch {
+            throw new Error("DVD ISO path table is outside the volume");
+          }
           classifyBeforeMetadataRead(lba, pathTableSectorCount);
         }
       }
@@ -1119,6 +1217,15 @@ export async function classifyDvdImageDamage({
       ) {
         throw new Error("DVD ISO root directory extent is invalid");
       }
+      try {
+        requireSafeExtent(
+          rootLba,
+          rootExtendedAttributeSectorCount + sectorCountForBytes(rootBytes),
+          volumeSpaceSize,
+        );
+      } catch {
+        throw new Error("DVD ISO root directory extent is invalid");
+      }
       if (rootExtendedAttributeSectorCount > 0) {
         addExtent(
           rootLba,
@@ -1131,9 +1238,10 @@ export async function classifyDvdImageDamage({
         rootBytes,
         "",
         new Set(),
+        volumeSpaceSize,
       );
     }
-    return volumeSpaceSize;
+    return { hasIso: true, volumeSpaceSize };
   };
 
   const partitionAbsoluteLba = (
@@ -1141,8 +1249,15 @@ export async function classifyDvdImageDamage({
     partitionsByReference: readonly UdfPartition[],
   ): number => {
     const partition = partitionsByReference[descriptor.partitionReferenceNumber];
-    if (partition === undefined ||
-      descriptor.logicalBlockNumber >= partition.sectorCount) {
+    const extentSectorCount = sectorCountForBytes(descriptor.extentLength);
+    if (
+      partition === undefined ||
+      descriptor.extentLength <= 0 ||
+      !Number.isSafeInteger(
+        descriptor.logicalBlockNumber + extentSectorCount,
+      ) ||
+      descriptor.logicalBlockNumber + extentSectorCount > partition.sectorCount
+    ) {
       throw new Error("DVD UDF partition address is invalid");
     }
     return partition.startLba + descriptor.logicalBlockNumber;
@@ -1165,6 +1280,11 @@ export async function classifyDvdImageDamage({
       identifier === "NSR02" || identifier === "NSR03"
     );
     if (nsrIndex === -1) {
+      if (recognitionDescriptors.some(({ identifier }) =>
+        identifier === "BEA01" || identifier === "TEA01"
+      )) {
+        throw new Error("DVD UDF recognition sequence is incomplete");
+      }
       return {
         damagedRecognition: recognitionDescriptors.some(({ lba }) =>
           badSectors.has(lba)
@@ -1199,8 +1319,33 @@ export async function classifyDvdImageDamage({
     }
     const anchor = await readSector(256);
     validateUdfTag(anchor, [2]);
-    for (const anchorLba of [totalSectorCount - 256, totalSectorCount - 1]) {
-      if (anchorLba >= 0 && anchorLba !== 256) {
+    const alternateAnchorLbas = [...new Set([
+      totalSectorCount - 257,
+      totalSectorCount - 1,
+    ])].filter((lba) => lba >= 0 && lba !== 256);
+    if (completenessProof) {
+      let validAnchorCount = 1;
+      for (const anchorLba of alternateAnchorLbas) {
+        const alternateAnchor = await readRawSector(anchorLba);
+        if (alternateAnchor.every((byte) => byte === 0)) {
+          continue;
+        }
+        try {
+          validateUdfTag(alternateAnchor, [2]);
+        } catch {
+          throw new Error("DVD UDF alternate anchor is malformed");
+        }
+        if (!alternateAnchor.subarray(16, 32).equals(anchor.subarray(16, 32))) {
+          throw new Error("DVD UDF anchor pointers disagree");
+        }
+        classifyBeforeMetadataRead(anchorLba, 1);
+        validAnchorCount += 1;
+      }
+      if (validAnchorCount < 2) {
+        throw new Error("DVD UDF anchor set is incomplete");
+      }
+    } else {
+      for (const anchorLba of alternateAnchorLbas) {
         classifyBeforeMetadataRead(anchorLba, 1);
       }
     }
@@ -1210,6 +1355,12 @@ export async function classifyDvdImageDamage({
     const reserveSequenceStart = anchor.readUInt32LE(28);
     const mainSequenceSectors = sectorCountForBytes(mainSequenceLength);
     const reserveSequenceSectors = sectorCountForBytes(reserveSequenceLength);
+    if (
+      completenessProof &&
+      (mainSequenceSectors < 16 || reserveSequenceSectors < 16)
+    ) {
+      throw new Error("DVD UDF volume descriptor sequence is too short");
+    }
     classifyBeforeMetadataRead(mainSequenceStart, mainSequenceSectors);
     classifyBeforeMetadataRead(reserveSequenceStart, reserveSequenceSectors);
 
@@ -1225,10 +1376,9 @@ export async function classifyDvdImageDamage({
           startLba: descriptor.readUInt32LE(188),
           sectorCount: descriptor.readUInt32LE(192),
         };
-        requireSafeExtent(
+        recordReferencedExtent(
           partition.startLba,
           partition.sectorCount,
-          totalSectorCount,
         );
         if (partitions.has(partition.number)) {
           throw new Error("DVD UDF partition number is duplicated");
@@ -1312,6 +1462,16 @@ export async function classifyDvdImageDamage({
     if (!reserveTerminatorSeen) {
       throw new Error("DVD UDF reserve descriptor sequence is incomplete");
     }
+    const orderedPartitions = [...partitions.values()].sort((left, right) =>
+      left.startLba - right.startLba
+    );
+    for (let index = 1; index < orderedPartitions.length; index += 1) {
+      const previous = orderedPartitions[index - 1]!;
+      const current = orderedPartitions[index]!;
+      if (current.startLba < previous.startLba + previous.sectorCount) {
+        throw new Error("DVD UDF partitions overlap ambiguously");
+      }
+    }
     const partitionsByReference = logicalVolume.partitionNumbersByReference.map(
       (partitionNumber) => {
         const partition = partitions.get(partitionNumber);
@@ -1371,14 +1531,18 @@ export async function classifyDvdImageDamage({
     const parseUdfNode = async (
       icb: UdfLongAllocationDescriptor,
       path: string,
+      depth = 0,
     ): Promise<void> => {
+      if (depth > MAX_DIRECTORY_DEPTH) {
+        throw new Error("DVD UDF directory depth exceeds its safety bound");
+      }
       if (icb.extentType !== 0 || icb.extentLength <= 0) {
         throw new Error("DVD UDF ICB extent is unsupported");
       }
       const icbLba = partitionAbsoluteLba(icb, partitionsByReference);
       const key = `${icb.partitionReferenceNumber}:${icb.logicalBlockNumber}`;
       if (visitedIcbs.has(key)) {
-        return;
+        throw new Error("DVD UDF allocation graph is cyclic or ambiguous");
       }
       visitedIcbs.add(key);
       const fileEntry = await readExtent(
@@ -1407,7 +1571,7 @@ export async function classifyDvdImageDamage({
       const allocationOffset = descriptorBaseOffset + extendedAttributeLength;
       if (
         allocationOffset + allocationDescriptorLength > fileEntry.byteLength ||
-        informationLength > expectedByteCount
+        informationLength > retainedByteCount
       ) {
         throw new Error("DVD UDF file entry is malformed");
       }
@@ -1445,7 +1609,7 @@ export async function classifyDvdImageDamage({
           if (extentLength === 0) {
             continue;
           }
-          if (extentType === 0xc000_0000 || extentType === 0x8000_0000) {
+          if (extentType !== 0) {
             throw new Error("DVD UDF continuation or sparse extent is unsupported");
           }
           const logicalBlockNumber = allocationType === 0
@@ -1493,6 +1657,7 @@ export async function classifyDvdImageDamage({
         udfDvdPaths.add(normalizedPath);
         const fileLayout = {
           byteCount: informationLength,
+          embedded: allocationType === 3,
           extents: dataExtents,
           path: normalizedPath,
         } satisfies DvdFileLayout;
@@ -1541,15 +1706,14 @@ export async function classifyDvdImageDamage({
         }
       }
       let offset = 0;
-      let entryCount = 0;
       while (offset < directory.byteLength) {
         if (offset + 38 > directory.byteLength) {
           throw new Error("DVD UDF directory entry is truncated");
         }
         const descriptor = directory.subarray(offset);
         validateUdfTag(descriptor, [257]);
-        entryCount += 1;
-        if (entryCount > MAX_DIRECTORY_ENTRIES) {
+        udfDirectoryEntryCount += 1;
+        if (udfDirectoryEntryCount > MAX_DIRECTORY_ENTRIES) {
           throw new Error("DVD UDF directory entry count exceeds its bound");
         }
         const fileCharacteristics = descriptor[18]!;
@@ -1574,6 +1738,7 @@ export async function classifyDvdImageDamage({
           await parseUdfNode(
             readUdfLongAllocationDescriptor(descriptor, 20),
             `${path}/${name}`.replace(/^\/+/, ""),
+            depth + 1,
           );
         }
         offset += recordLength;
@@ -1587,17 +1752,213 @@ export async function classifyDvdImageDamage({
     };
   };
 
-  try {
-    const isoVolumeSpaceSize = await parseIso();
-    const udfBounds = await parseUdf();
+  const validateFileExtentOverlaps = (
+    dvdFiles: ReadonlyMap<string, DvdFileLayout>,
+    source: "ISO" | "UDF",
+  ) => {
+    const extents = [...dvdFiles.values()].flatMap((file) => {
+      const allocatedByteCount = file.extents.reduce(
+        (total, extent) => total + extent.byteCount,
+        0,
+      );
+      if (file.embedded || file.byteCount === 0) {
+        if (file.extents.length > 0) {
+          throw new Error(`DVD ${source} file layout is ambiguous`);
+        }
+        return [];
+      }
+      if (
+        file.extents.length === 0 ||
+        allocatedByteCount < file.byteCount
+      ) {
+        throw new Error(`DVD ${source} file layout is incomplete`);
+      }
+      return file.extents.map((extent) => {
+        const sectorCount = sectorCountForBytes(extent.byteCount);
+        requireSafeExtent(extent.startLba, sectorCount, totalSectorCount);
+        return {
+          endLba: extent.startLba + sectorCount,
+          path: file.path,
+          startLba: extent.startLba,
+        };
+      });
+    }).sort((left, right) =>
+      left.startLba - right.startLba || left.endLba - right.endLba ||
+      left.path.localeCompare(right.path)
+    );
+    for (let leftIndex = 0; leftIndex < extents.length; leftIndex += 1) {
+      const left = extents[leftIndex]!;
+      for (
+        let rightIndex = leftIndex + 1;
+        rightIndex < extents.length;
+        rightIndex += 1
+      ) {
+        const right = extents[rightIndex]!;
+        if (right.startLba >= left.endLba) {
+          break;
+        }
+        if (
+          right.startLba !== left.startLba ||
+          right.endLba !== left.endLba
+        ) {
+          throw new Error(
+            `DVD ${source} file extents overlap ambiguously`,
+          );
+        }
+      }
+    }
+  };
+
+  const validateFilesDoNotOverlapStructures = () => {
+    const fileExtents = allocatedExtents.filter((extent) =>
+      extent.fileLocation !== undefined
+    );
+    const structuralExtents = allocatedExtents.filter((extent) =>
+      extent.fileLocation === undefined
+    );
+    for (const fileExtent of fileExtents) {
+      const fileEndLba = fileExtent.startLba + fileExtent.sectorCount;
+      if (structuralExtents.some((structuralExtent) => {
+        const structuralEndLba = structuralExtent.startLba +
+          structuralExtent.sectorCount;
+        return fileExtent.startLba < structuralEndLba &&
+          structuralExtent.startLba < fileEndLba;
+      })) {
+        throw new Error("DVD file and filesystem structures overlap ambiguously");
+      }
+    }
+  };
+
+  const canonicalDvdVideoLayout = (
+    dvdFiles: ReadonlyMap<string, DvdFileLayout>,
+  ) => JSON.stringify(
+    [...dvdFiles.values()]
+      .filter((file) => file.path.startsWith("VIDEO_TS/"))
+      .sort((left, right) => left.path.localeCompare(right.path))
+      .map((file) => {
+        const extents = file.extents.reduce<Array<{
+          sectorCount: number;
+          startLba: number;
+        }>>((normalized, extent) => {
+          const sectorCount = sectorCountForBytes(extent.byteCount);
+          const previous = normalized.at(-1);
+          if (
+            previous !== undefined &&
+            previous.startLba + previous.sectorCount === extent.startLba
+          ) {
+            previous.sectorCount += sectorCount;
+          } else {
+            normalized.push({ sectorCount, startLba: extent.startLba });
+          }
+          return normalized;
+        }, []);
+        return { byteCount: file.byteCount, extents, path: file.path };
+      }),
+  );
+
+  const validateCompleteDvdVideoView = async (
+    source: "iso" | "udf",
+  ): Promise<string> => {
+    const dvdFiles = source === "iso" ? isoDvdFiles : udfDvdFiles;
+    const dvdPaths = source === "iso" ? isoDvdPaths : udfDvdPaths;
     const requiredDvdPaths = [
       "VIDEO_TS/VIDEO_TS.IFO",
       "VIDEO_TS/VIDEO_TS.BUP",
     ];
-    if (requiredDvdPaths.some((path) => !isoDvdPaths.has(path)) ||
-      (udfBounds.hasUdf &&
-        requiredDvdPaths.some((path) => !udfDvdPaths.has(path)))) {
+    if (requiredDvdPaths.some((path) => !dvdPaths.has(path))) {
       throw new Error("DVD-Video control structures are missing");
+    }
+    validateFileExtentOverlaps(dvdFiles, source === "iso" ? "ISO" : "UDF");
+    const globalTitles = await parseGlobalTitles(dvdFiles);
+    const titleSetNumbers = [...new Set(
+      globalTitles.map((title) => title.titleSetNumber),
+    )].sort((left, right) => left - right);
+    for (const titleSetNumber of titleSetNumbers) {
+      const titleVobParts = [...dvdFiles.values()]
+        .map((file) => ({ file, identity: titleVobIdentity(file.path) }))
+        .filter(({ identity }) => identity?.titleSetNumber === titleSetNumber)
+        .sort((left, right) =>
+          left.identity!.partNumber - right.identity!.partNumber
+        );
+      if (
+        titleVobParts.length === 0 ||
+        titleVobParts.some(({ file, identity }, index) =>
+          identity!.partNumber !== index + 1 ||
+          file.byteCount % DVD_SECTOR_SIZE_BYTES !== 0 ||
+          file.extents.some((extent) =>
+            extent.byteCount % DVD_SECTOR_SIZE_BYTES !== 0
+          )
+        )
+      ) {
+        throw new Error("DVD title VOB layout is incomplete");
+      }
+      const titleVobSectorCount = titleVobParts.reduce(
+        (total, { file }) => total + file.byteCount / DVD_SECTOR_SIZE_BYTES,
+        0,
+      );
+      await readTitleVobuAddressMap(
+        dvdFiles,
+        titleSetNumber,
+        titleVobSectorCount,
+      );
+      await readTitleAssociations(
+        source,
+        titleSetNumber,
+        titleVobSectorCount,
+      );
+      const titleSetPrefix = `VIDEO_TS/VTS_${String(titleSetNumber).padStart(2, "0")}_0`;
+      if (
+        !dvdPaths.has(`${titleSetPrefix}.IFO`) ||
+        !dvdPaths.has(`${titleSetPrefix}.BUP`)
+      ) {
+        throw new Error("DVD title-set control structures are missing");
+      }
+    }
+    return JSON.stringify({
+      dvdVideoLayout: canonicalDvdVideoLayout(dvdFiles),
+      globalTitles,
+    });
+  };
+
+  const completeAnalysis = (
+    damageClassification: DvdDamageClassification,
+  ): DvdLayoutAnalysis => {
+    if (maximumReferencedLba < 0) {
+      throw new Error("DVD image has no referenced extents");
+    }
+    return { damageClassification, maximumReferencedLba };
+  };
+
+  try {
+    const isoBounds = await parseIso();
+    const udfBounds = await parseUdf();
+    if (!isoBounds.hasIso && !udfBounds.hasUdf) {
+      throw new Error("DVD image has no supported filesystem view");
+    }
+    const requiredDvdPaths = [
+      "VIDEO_TS/VIDEO_TS.IFO",
+      "VIDEO_TS/VIDEO_TS.BUP",
+    ];
+    if (
+      (isoBounds.hasIso &&
+        requiredDvdPaths.some((path) => !isoDvdPaths.has(path))) ||
+      (udfBounds.hasUdf &&
+        requiredDvdPaths.some((path) => !udfDvdPaths.has(path)))
+    ) {
+      throw new Error("DVD-Video control structures are missing");
+    }
+    if (completenessProof) {
+      const parsedViews: string[] = [];
+      if (isoBounds.hasIso) {
+        parsedViews.push(await validateCompleteDvdVideoView("iso"));
+      }
+      if (udfBounds.hasUdf) {
+        parsedViews.push(await validateCompleteDvdVideoView("udf"));
+      }
+      if (new Set(parsedViews).size !== 1) {
+        throw new Error("DVD filesystem views disagree");
+      }
+      validateFilesDoNotOverlapStructures();
     }
     const badSectorCountsByTitle = new Map<
       number,
@@ -1612,7 +1973,10 @@ export async function classifyDvdImageDamage({
           extent.reason !== "referenced_content"
         );
         if (structural !== undefined) {
-          return { outcome: "rejected", reason: structural.reason };
+          return completeAnalysis({
+            outcome: "rejected",
+            reason: structural.reason,
+          });
         }
         if (udfBounds.hasUdf) {
           const allocationSources = new Set(
@@ -1622,7 +1986,10 @@ export async function classifyDvdImageDamage({
             !allocationSources.has("iso") ||
             !allocationSources.has("udf")
           ) {
-            return { outcome: "rejected", reason: "ambiguous" };
+            return completeAnalysis({
+              outcome: "rejected",
+              reason: "ambiguous",
+            });
           }
         }
         const titleVobClassifications = await Promise.all(
@@ -1631,7 +1998,7 @@ export async function classifyDvdImageDamage({
         if (titleVobClassifications.some(({ outcome }) =>
           outcome === "ambiguous"
         )) {
-          return { outcome: "rejected", reason: "ambiguous" };
+          return completeAnalysis({ outcome: "rejected", reason: "ambiguous" });
         }
         const conclusiveClassifications = titleVobClassifications.filter(
           (classification) => classification.outcome !== "ambiguous",
@@ -1641,11 +2008,14 @@ export async function classifyDvdImageDamage({
             conclusiveClassifications.map(({ evidenceKey }) => evidenceKey),
           ).size !== 1
         ) {
-          return { outcome: "rejected", reason: "ambiguous" };
+          return completeAnalysis({ outcome: "rejected", reason: "ambiguous" });
         }
         const classification = conclusiveClassifications[0]!;
         if (classification.outcome === "navigation") {
-          return { outcome: "rejected", reason: "navigation" };
+          return completeAnalysis({
+            outcome: "rejected",
+            reason: "navigation",
+          });
         }
         for (const titleNumber of classification.affectedTitleNumbers) {
           const existing = badSectorCountsByTitle.get(titleNumber);
@@ -1653,7 +2023,10 @@ export async function classifyDvdImageDamage({
             existing !== undefined &&
             existing.titleSetNumber !== classification.titleSetNumber
           ) {
-            return { outcome: "rejected", reason: "ambiguous" };
+            return completeAnalysis({
+              outcome: "rejected",
+              reason: "ambiguous",
+            });
           }
           badSectorCountsByTitle.set(titleNumber, {
             badSectorCount: (existing?.badSectorCount ?? 0) + 1,
@@ -1666,19 +2039,19 @@ export async function classifyDvdImageDamage({
         udfBounds.damagedRecognition &&
         recognitionDescriptorsContainLba(badLba)
       ) {
-        return { outcome: "rejected", reason: "ambiguous" };
+        return completeAnalysis({ outcome: "rejected", reason: "ambiguous" });
       }
       if (
-        badLba >= isoVolumeSpaceSize ||
+        (isoBounds.hasIso && badLba >= isoBounds.volumeSpaceSize) ||
         (udfBounds.hasUdf && !udfBounds.partitions.some((partition) =>
           badLba >= partition.startLba &&
           badLba < partition.startLba + partition.sectorCount
         ))
       ) {
-        return { outcome: "rejected", reason: "unmappable" };
+        return completeAnalysis({ outcome: "rejected", reason: "unmappable" });
       }
       if (badLba < 16) {
-        return { outcome: "rejected", reason: "ambiguous" };
+        return completeAnalysis({ outcome: "rejected", reason: "ambiguous" });
       }
       const sector = Buffer.alloc(DVD_SECTOR_SIZE_BYTES);
       const { bytesRead } = await handle.read(
@@ -1691,9 +2064,10 @@ export async function classifyDvdImageDamage({
         throw new Error("DVD salvage substituted sector data is invalid");
       }
     }
-    return badSectorCountsByTitle.size === 0
-      ? { affectedTitleBadSectorCounts: [], outcome: "accepted" }
-      : {
+    return completeAnalysis(
+      badSectorCountsByTitle.size === 0
+        ? { affectedTitleBadSectorCounts: [], outcome: "accepted" }
+        : {
           affectedTitleBadSectorCounts: [...badSectorCountsByTitle]
             .sort(([left], [right]) => left - right)
             .map(([titleNumber, evidence]) => ({
@@ -1701,13 +2075,56 @@ export async function classifyDvdImageDamage({
               titleNumber,
             })),
           outcome: "accepted",
-        };
+        },
+    );
   } catch (error) {
     if (error instanceof ClassifiedDamageError) {
-      return { outcome: "rejected", reason: error.reason };
+      return completeAnalysis({ outcome: "rejected", reason: error.reason });
     }
     throw error;
   } finally {
     await handle.close();
   }
+}
+
+export async function proveDvdImageLayoutCompleteness({
+  candidateBoundaryLba,
+  imagePath,
+}: {
+  candidateBoundaryLba: number;
+  imagePath: string;
+}): Promise<{ maximumReferencedLba: number }> {
+  const { maximumReferencedLba } = await analyzeDvdImageLayout({
+    candidateBoundaryLba,
+    completenessProof: true,
+    imagePath,
+    unreadableSectorRanges: [],
+  });
+  return { maximumReferencedLba };
+}
+
+export async function classifyDvdImageDamage({
+  imagePath,
+  expectedByteCount,
+  unreadableSectorRanges,
+}: {
+  imagePath: string;
+  expectedByteCount: number;
+  unreadableSectorRanges: readonly UnreadableSectorRange[];
+}): Promise<DvdDamageClassification> {
+  if (
+    !Number.isSafeInteger(expectedByteCount) ||
+    expectedByteCount <= 0 ||
+    expectedByteCount % DVD_SECTOR_SIZE_BYTES !== 0
+  ) {
+    throw new Error("DVD salvage image size is invalid");
+  }
+  const { damageClassification } = await analyzeDvdImageLayout({
+    candidateBoundaryLba: expectedByteCount / DVD_SECTOR_SIZE_BYTES,
+    completenessProof: false,
+    exactImageByteCount: expectedByteCount,
+    imagePath,
+    unreadableSectorRanges,
+  });
+  return damageClassification;
 }
