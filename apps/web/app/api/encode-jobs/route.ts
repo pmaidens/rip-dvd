@@ -12,10 +12,14 @@ import {
 } from "@rip-dvd/data-access";
 
 import { getDataAccess } from "../../../lib/data-access";
+import { readMediaItemsWithAncestors } from "../../../lib/media-item-ancestor-context";
 import {
   trustedMutationRequestProblem,
 } from "../../../lib/server/trusted-mutation-request";
-import { mediaOutputPath } from "../../../lib/server/media-output-path";
+import {
+  mediaOutputPath,
+  suggestedMediaOutputPath,
+} from "../../../lib/server/media-output-path";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -92,10 +96,22 @@ function sourceDescription(selection: DiscSelection): string {
   return `DVD title ${sourceIdentity.titleNumber}, chapters ${sourceIdentity.chapterStart}–${sourceIdentity.chapterEnd}`;
 }
 
+function outputPathSelectionQualifier(
+  selection: DiscSelection,
+  hasMultipleSelections: boolean,
+): string | null {
+  if (!hasMultipleSelections) {
+    return null;
+  }
+  const description = selection.label?.trim() || sourceDescription(selection);
+  return `${description} ${selection.id.slice(-8)}`;
+}
+
 function readQueueOptions(
   access: DataAccess,
   selectionOffset: number,
   profileOffset: number,
+  mediaLibraryPath: string,
 ) {
   return access.readConsistentSnapshot((snapshot) => {
     const selectionRecords = snapshot.catalog.listDiscSelections({
@@ -114,10 +130,19 @@ function readQueueOptions(
     });
     const hasNextProfile = profileRecords.length > ENCODE_PROFILE_PAGE_SIZE;
     const profiles = profileRecords.slice(0, ENCODE_PROFILE_PAGE_SIZE);
-    const mediaItems = snapshot.catalog.listMediaItems({
-      ids: [...new Set(selections.map((selection) => selection.mediaItemId))],
-    });
+    const mediaItemIds = [
+      ...new Set(selections.map((selection) => selection.mediaItemId)),
+    ];
+    const mediaItems = readMediaItemsWithAncestors(
+      snapshot.catalog,
+      mediaItemIds,
+    );
     const mediaItemsById = new Map(mediaItems.map((item) => [item.id, item]));
+    const mediaItemIdsWithMultipleSelections = new Set(
+      snapshot.catalog.listMediaItemMaintenance({ ids: mediaItemIds })
+        .filter((item) => item.discSelectionReferenceCount > 1)
+        .map((item) => item.mediaItemId),
+    );
     return {
       selections: selections.map((selection) => {
         const mediaItem = mediaItemsById.get(selection.mediaItemId);
@@ -127,6 +152,17 @@ function readQueueOptions(
           mediaTitle: mediaItem?.title ?? "Unknown Media Item",
           mediaYear: mediaItem?.year ?? null,
           sourceDescription: sourceDescription(selection),
+          suggestedOutputPath: mediaItem === undefined
+            ? null
+            : suggestedMediaOutputPath({
+              item: mediaItem,
+              mediaItemsById,
+              mediaLibraryPath,
+              selectionQualifier: outputPathSelectionQualifier(
+                selection,
+                mediaItemIdsWithMultipleSelections.has(selection.mediaItemId),
+              ),
+            }),
         };
       }),
       profiles: profiles.map((profile) => ({
@@ -172,8 +208,19 @@ export async function createEncodeJobsRoute(
       if (profileOffset === null) {
         return response({ error: "Invalid Encoding Profile offset" }, 400);
       }
+      let config: EncodeJobsRuntimeConfig;
+      try {
+        config = getRuntimeConfig();
+      } catch {
+        return response({ error: "Encoding options are unavailable" }, 503);
+      }
       return response(
-        readQueueOptions(getAccess(), selectionOffset, profileOffset),
+        readQueueOptions(
+          getAccess(),
+          selectionOffset,
+          profileOffset,
+          config.mediaLibraryPath,
+        ),
       );
     }
 

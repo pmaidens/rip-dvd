@@ -1,3 +1,7 @@
+// @vitest-environment happy-dom
+
+import { act } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, expectTypeOf, it, vi } from "vitest";
 
@@ -67,6 +71,8 @@ describe("EncodeJobsView", () => {
             mediaTitle: "Queue Me",
             mediaYear: 2001,
             sourceDescription: "DVD main feature",
+            suggestedOutputPath:
+              "/media/movies/Queue Me (2001)/Queue Me (2001).mkv",
           }],
           profiles: [{
             id: profileId,
@@ -103,6 +109,95 @@ describe("EncodeJobsView", () => {
     expect(html).toContain('name="outputPath"');
     expect(html).toContain("Queue encode");
     expect(html).toContain("Next active profiles");
+  });
+
+  it("fills an editable final output path for each reviewed selection", async () => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <EncodeJobsView
+          state={{
+            status: "loaded",
+            selections: [{
+              id: "selection-1" as DiscSelectionId,
+              mediaItemId: "movie-1",
+              mediaTitle: "Queue Me",
+              mediaYear: 2001,
+              sourceDescription: "DVD main feature",
+              suggestedOutputPath:
+                "/media/movies/Queue Me (2001)/Queue Me (2001).mkv",
+            }, {
+              id: "selection-2" as DiscSelectionId,
+              mediaItemId: "movie-2",
+              mediaTitle: "Queue Next",
+              mediaYear: 2002,
+              sourceDescription: "DVD title 2",
+              suggestedOutputPath:
+                "/media/movies/Queue Next (2002)/Queue Next (2002).mkv",
+            }],
+            profiles: [{
+              id: "profile-v2" as EncodingProfileId,
+              displayName: "DVD library",
+              version: 2,
+            }],
+            page: {
+              offset: 0,
+              limit: 100,
+              hasPrevious: false,
+              hasNext: false,
+            },
+            profilePage: {
+              offset: 0,
+              limit: 100,
+              hasPrevious: false,
+              hasNext: false,
+            },
+          }}
+          isSaving={false}
+          requestError={null}
+          onQueue={() => undefined}
+          onRetry={() => undefined}
+          onSelectionPage={() => undefined}
+          onProfilePage={() => undefined}
+        />,
+      );
+    });
+
+    const selection = container.querySelector<HTMLSelectElement>(
+      'select[name="discSelectionId"]',
+    );
+    const outputPath = container.querySelector<HTMLInputElement>(
+      'input[name="outputPath"]',
+    );
+    if (!selection || !outputPath) {
+      throw new Error("Expected Encode Job form fields");
+    }
+
+    await act(async () => {
+      selection.value = "selection-1";
+      selection.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    expect(outputPath.value).toBe(
+      "/media/movies/Queue Me (2001)/Queue Me (2001).mkv",
+    );
+
+    await act(async () => {
+      outputPath.value = "/media/movies/Operator choice.mkv";
+      outputPath.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(outputPath.value).toBe("/media/movies/Operator choice.mkv");
+
+    await act(async () => {
+      selection.value = "selection-2";
+      selection.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(outputPath.value).toBe(
+      "/media/movies/Queue Next (2002)/Queue Next (2002).mkv",
+    );
+    await act(async () => root.unmount());
   });
 
   it("loads options and submits a same-origin JSON queue request", async () => {
