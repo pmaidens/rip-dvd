@@ -650,9 +650,10 @@ function writeUdfTag(
   identifier: number,
   location = 0,
   {
+    crcLength = 0,
     reserved = 0,
     version = 2,
-  }: { reserved?: number; version?: number } = {},
+  }: { crcLength?: number; reserved?: number; version?: number } = {},
 ) {
   buffer.writeUInt16LE(identifier, 0);
   buffer.writeUInt16LE(version, 2);
@@ -660,8 +661,18 @@ function writeUdfTag(
   buffer[5] = reserved;
   buffer.writeUInt16LE(1, 6);
   buffer.writeUInt16LE(0, 8);
-  buffer.writeUInt16LE(0, 10);
+  buffer.writeUInt16LE(crcLength, 10);
   buffer.writeUInt32LE(location, 12);
+  let crc = 0;
+  for (let index = 16; index < 16 + crcLength; index += 1) {
+    crc ^= buffer[index]! << 8;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc & 0x8000) !== 0
+        ? ((crc << 1) ^ 0x1021) & 0xffff
+        : (crc << 1) & 0xffff;
+    }
+  }
+  buffer.writeUInt16LE(crc, 8);
   let checksum = 0;
   for (let index = 0; index < 16; index += 1) {
     if (index !== 4) {
@@ -1386,6 +1397,26 @@ describe("retained DVD image layout completeness", () => {
     })).resolves.toEqual({ maximumReferencedLba: 599 });
   });
 
+  it("rejects a Joliet view with a partial DVD-Video inventory", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    writeSyntheticJolietView(image, [
+      { byteCount: 5 * DVD_SECTOR_SIZE_BYTES, extentLba: 330, name: "VIDEO_TS.IFO" },
+      { extentLba: 338, name: "VIDEO_TS.VOB" },
+      { byteCount: 6 * DVD_SECTOR_SIZE_BYTES, extentLba: 360, name: "VTS_01_0.IFO" },
+      { byteCount: 6 * DVD_SECTOR_SIZE_BYTES, extentLba: 370, name: "VTS_01_0.BUP" },
+      { byteCount: 6 * DVD_SECTOR_SIZE_BYTES, extentLba: 400, name: "VTS_01_1.VOB" },
+    ]);
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD-Video control structures are missing");
+  });
+
   it("rejects a conflicting Joliet supplementary filesystem view", async () => {
     const image = syntheticCompleteDvdImage({
       includeIso: true,
@@ -1446,6 +1477,24 @@ describe("retained DVD image layout completeness", () => {
       candidateBoundaryLba: 600,
       imagePath: fixture.imagePath,
     })).rejects.toThrow("DVD ISO special directory record is malformed");
+  });
+
+  it.each([
+    ["directory flag", 25, 0],
+    ["file unit size", 26, 1],
+    ["root identifier", 33, 1],
+  ])("rejects an ISO root record with an invalid %s", async (_field, offset, value) => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    image[16 * DVD_SECTOR_SIZE_BYTES + 156 + offset] = value;
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD ISO root directory record is invalid");
   });
 
   it("accepts a complete UDF-only layout", async () => {
@@ -1522,6 +1571,27 @@ describe("retained DVD image layout completeness", () => {
       candidateBoundaryLba: 600,
       imagePath: fixture.imagePath,
     })).rejects.toThrow("DVD filesystem extent is invalid");
+  });
+
+  it("rejects aliased UDF main and reserve descriptor sequences", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    for (const anchorLba of [256, 343, 599]) {
+      const anchor = image.subarray(
+        anchorLba * DVD_SECTOR_SIZE_BYTES,
+        (anchorLba + 1) * DVD_SECTOR_SIZE_BYTES,
+      );
+      anchor.writeUInt32LE(257, 28);
+      writeUdfTag(anchor, 2, anchorLba);
+    }
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD UDF descriptor sequences overlap");
   });
 
   it("fails closed on UDF volume descriptor continuations", async () => {
@@ -1721,6 +1791,24 @@ describe("retained DVD image layout completeness", () => {
       candidateBoundaryLba: 600,
       imagePath: fixture.imagePath,
     })).rejects.toThrow("DVD UDF directory padding is malformed");
+  });
+
+  it("rejects a UDF directory-entry CRC that crosses its record boundary", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    const directory = image.subarray(
+      302 * DVD_SECTOR_SIZE_BYTES,
+      303 * DVD_SECTOR_SIZE_BYTES,
+    );
+    writeUdfTag(directory, 257, 2, { crcLength: 40 });
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD UDF directory entry length is invalid");
   });
 
   it("fails closed on an unrecorded UDF file-set descriptor extent", async () => {
