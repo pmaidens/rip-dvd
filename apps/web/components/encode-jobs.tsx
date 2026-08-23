@@ -14,6 +14,7 @@ export interface EncodeSelectionOption {
   mediaTitle: string;
   mediaYear: number | null;
   sourceDescription: string;
+  suggestedOutputPath: string | null;
 }
 
 export interface EncodeProfileOption {
@@ -108,6 +109,35 @@ export function EncodeJobsView({
   onSelectionPage,
   onProfilePage,
 }: EncodeJobsViewProps) {
+  const [selectedSelectionId, setSelectedSelectionId] = useState<
+    DiscSelectionId | ""
+  >("");
+  const [outputPath, setOutputPath] = useState("");
+
+  useEffect(() => {
+    if (
+      state.status !== "loaded" ||
+      !state.selections.some(
+        (selection) => selection.id === selectedSelectionId,
+      )
+    ) {
+      setSelectedSelectionId("");
+      setOutputPath("");
+    }
+  }, [selectedSelectionId, state]);
+
+  function populateOutputPath(event: React.ChangeEvent<HTMLSelectElement>) {
+    if (state.status !== "loaded") {
+      return;
+    }
+    const selectionId = event.currentTarget.value as DiscSelectionId;
+    const selection = state.selections.find(
+      (candidate) => candidate.id === selectionId,
+    );
+    setSelectedSelectionId(selectionId);
+    setOutputPath(selection?.suggestedOutputPath ?? "");
+  }
+
   function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
@@ -164,8 +194,9 @@ export function EncodeJobsView({
                 <select
                   name="discSelectionId"
                   required
-                  defaultValue=""
+                  value={selectedSelectionId}
                   disabled={state.selections.length === 0}
+                  onChange={populateOutputPath}
                 >
                   <option value="" disabled>Select reviewed media</option>
                   {state.selections.map((selection) => (
@@ -202,6 +233,8 @@ export function EncodeJobsView({
                   required
                   maxLength={4096}
                   placeholder="/media/movies/Movie (2001)/Movie (2001).mkv"
+                  value={outputPath}
+                  onChange={(event) => setOutputPath(event.currentTarget.value)}
                 />
               </label>
             </div>

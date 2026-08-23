@@ -1899,9 +1899,14 @@ describe("end-to-end operations dashboard workflow", () => {
       mediaDomain: "dvd_video",
       settings: { preset: "Fast 480p30", container: "mkv" },
     });
+    const runtimeConfig = () => ({
+      mediaLibraryPath,
+      webTrustedOrigin: trustedOrigin,
+    });
     const pendingQueueOptions = await createEncodeJobsRoute(
       new Request(`${trustedOrigin}/api/encode-jobs`),
       () => access,
+      runtimeConfig,
     );
     expect((await pendingQueueOptions.json() as {
       selections: Array<{ id: string }>;
@@ -1930,6 +1935,7 @@ describe("end-to-end operations dashboard workflow", () => {
     const queueOptions = await createEncodeJobsRoute(
       new Request(`${trustedOrigin}/api/encode-jobs`),
       () => access,
+      runtimeConfig,
     );
     expect(await queueOptions.json()).toEqual(expect.objectContaining({
       profiles: expect.arrayContaining([
@@ -1941,10 +1947,6 @@ describe("end-to-end operations dashboard workflow", () => {
     }));
 
     const outputPath = join(mediaLibraryPath, "Workflow Movie (2001).mkv");
-    const runtimeConfig = () => ({
-      mediaLibraryPath,
-      webTrustedOrigin: trustedOrigin,
-    });
     const queueResponse = await createEncodeJobsRoute(
       createMutationRequest("/api/encode-jobs", {
         discSelectionId: selection.id,
