@@ -399,13 +399,13 @@ function writeDvdNavigationRelationships(
 ) {
   const managerIfo = image.subarray(
     managerIfoLba * DVD_SECTOR_SIZE_BYTES,
-    (managerIfoLba + (includeMenuNavigation ? 5 : 2)) *
+    (managerIfoLba + (includeMenuNavigation ? 6 : 2)) *
       DVD_SECTOR_SIZE_BYTES,
   );
   managerIfo.write("DVDVIDEO-VMG", 0, "ascii");
   managerIfo.writeUInt32BE(managerLastSector, 0x0c);
   managerIfo.writeUInt32BE(
-    (includeMenuNavigation ? 5 : 2) - 1,
+    (includeMenuNavigation ? 6 : 2) - 1,
     0x1c,
   );
   managerIfo.writeUInt16BE(1, 0x3e);
@@ -425,6 +425,7 @@ function writeDvdNavigationRelationships(
   }
   if (includeMenuNavigation) {
     managerIfo.writeUInt32BE(2, 0xc8);
+    managerIfo.writeUInt32BE(5, 0xd0);
     managerIfo.writeUInt32BE(4, 0xd8);
     managerIfo.writeUInt32BE(3, 0xdc);
     const programChainUnits = managerIfo.subarray(
@@ -461,6 +462,13 @@ function writeDvdNavigationRelationships(
       managerIfo.subarray(4 * DVD_SECTOR_SIZE_BYTES),
       [{ cellNumber: 1, firstSector: 0, lastSector: 0, vobId: 1 }],
     );
+    const titleSetAttributes = managerIfo.subarray(
+      5 * DVD_SECTOR_SIZE_BYTES,
+    );
+    titleSetAttributes.writeUInt16BE(1, 0);
+    titleSetAttributes.writeUInt32BE(367, 4);
+    titleSetAttributes.writeUInt32BE(12, 8);
+    titleSetAttributes.writeUInt32BE(355, 12);
   }
 
   const titleCells = [...new Map(
@@ -643,6 +651,20 @@ function writeSingleTitleProgramChainCommand(
     360 * DVD_SECTOR_SIZE_BYTES,
     366 * DVD_SECTOR_SIZE_BYTES,
   );
+}
+
+function writeSyntheticTitleSetAttributeCounts(
+  image: Buffer,
+  {
+    audioStreamCount,
+    subpictureStreamCount = 0,
+  }: { audioStreamCount: number; subpictureStreamCount?: number },
+) {
+  for (const managerLba of [330, 347]) {
+    const attributesOffset = (managerLba + 5) * DVD_SECTOR_SIZE_BYTES + 12;
+    image[attributesOffset + 267] = audioStreamCount;
+    image[attributesOffset + 349] = subpictureStreamCount;
+  }
 }
 
 function writeUdfTag(
@@ -951,8 +973,8 @@ function writeSyntheticUdfLayout(
   } else {
     const controlFiles = completeNavigation
       ? [
-          { dataLba: 30, fileEntryLba: 305, sectorCount: 5 },
-          { dataLba: 47, fileEntryLba: 306, sectorCount: 5 },
+          { dataLba: 30, fileEntryLba: 305, sectorCount: 6 },
+          { dataLba: 47, fileEntryLba: 306, sectorCount: 6 },
           { dataLba: 38, fileEntryLba: 307, sectorCount: 1 },
           { dataLba: 60, fileEntryLba: 308, sectorCount: 6 },
           { dataLba: 70, fileEntryLba: 309, sectorCount: 6 },
@@ -1220,12 +1242,12 @@ function syntheticCompleteDvdImage({
       videoDirectoryLba: 43,
       videoFiles: [
         {
-          byteCount: 5 * DVD_SECTOR_SIZE_BYTES,
+          byteCount: 6 * DVD_SECTOR_SIZE_BYTES,
           extentLba: 330,
           name: "VIDEO_TS.IFO",
         },
         {
-          byteCount: 5 * DVD_SECTOR_SIZE_BYTES,
+          byteCount: 6 * DVD_SECTOR_SIZE_BYTES,
           extentLba: 347,
           name: "VIDEO_TS.BUP",
         },
@@ -1263,7 +1285,7 @@ function syntheticCompleteDvdImage({
     }],
     includeMenuNavigation: true,
     managerIfoLba: 330,
-    managerLastSector: 21,
+    managerLastSector: 22,
     managerMenuVobLba: 338,
     programChains: [{
       cells: [{ firstSector: 0, lastSector: 5 }],
@@ -1286,7 +1308,7 @@ function syntheticCompleteDvdImage({
     image,
     347 * DVD_SECTOR_SIZE_BYTES,
     330 * DVD_SECTOR_SIZE_BYTES,
-    335 * DVD_SECTOR_SIZE_BYTES,
+    336 * DVD_SECTOR_SIZE_BYTES,
   );
   image.copy(
     image,
@@ -1382,8 +1404,8 @@ describe("retained DVD image layout completeness", () => {
       includeUdf: false,
     });
     writeSyntheticJolietView(image, [
-      { byteCount: 5 * DVD_SECTOR_SIZE_BYTES, extentLba: 330, name: "VIDEO_TS.IFO" },
-      { byteCount: 5 * DVD_SECTOR_SIZE_BYTES, extentLba: 347, name: "VIDEO_TS.BUP" },
+      { byteCount: 6 * DVD_SECTOR_SIZE_BYTES, extentLba: 330, name: "VIDEO_TS.IFO" },
+      { byteCount: 6 * DVD_SECTOR_SIZE_BYTES, extentLba: 347, name: "VIDEO_TS.BUP" },
       { extentLba: 338, name: "VIDEO_TS.VOB" },
       { byteCount: 6 * DVD_SECTOR_SIZE_BYTES, extentLba: 360, name: "VTS_01_0.IFO" },
       { byteCount: 6 * DVD_SECTOR_SIZE_BYTES, extentLba: 370, name: "VTS_01_0.BUP" },
@@ -1403,7 +1425,7 @@ describe("retained DVD image layout completeness", () => {
       includeUdf: false,
     });
     writeSyntheticJolietView(image, [
-      { byteCount: 5 * DVD_SECTOR_SIZE_BYTES, extentLba: 330, name: "VIDEO_TS.IFO" },
+      { byteCount: 6 * DVD_SECTOR_SIZE_BYTES, extentLba: 330, name: "VIDEO_TS.IFO" },
       { extentLba: 338, name: "VIDEO_TS.VOB" },
       { byteCount: 6 * DVD_SECTOR_SIZE_BYTES, extentLba: 360, name: "VTS_01_0.IFO" },
       { byteCount: 6 * DVD_SECTOR_SIZE_BYTES, extentLba: 370, name: "VTS_01_0.BUP" },
@@ -1423,8 +1445,8 @@ describe("retained DVD image layout completeness", () => {
       includeUdf: false,
     });
     writeSyntheticJolietView(image, [
-      { byteCount: 5 * DVD_SECTOR_SIZE_BYTES, extentLba: 331, name: "VIDEO_TS.IFO" },
-      { byteCount: 5 * DVD_SECTOR_SIZE_BYTES, extentLba: 347, name: "VIDEO_TS.BUP" },
+      { byteCount: 6 * DVD_SECTOR_SIZE_BYTES, extentLba: 331, name: "VIDEO_TS.IFO" },
+      { byteCount: 6 * DVD_SECTOR_SIZE_BYTES, extentLba: 347, name: "VIDEO_TS.BUP" },
       { extentLba: 338, name: "VIDEO_TS.VOB" },
       { byteCount: 6 * DVD_SECTOR_SIZE_BYTES, extentLba: 360, name: "VTS_01_0.IFO" },
       { byteCount: 6 * DVD_SECTOR_SIZE_BYTES, extentLba: 370, name: "VTS_01_0.BUP" },
@@ -1477,6 +1499,55 @@ describe("retained DVD image layout completeness", () => {
       candidateBoundaryLba: 600,
       imagePath: fixture.imagePath,
     })).rejects.toThrow("DVD ISO special directory record is malformed");
+  });
+
+  it("rejects a zero-byte ISO file whose extended attributes cross the boundary", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    const directoryOffset = 43 * DVD_SECTOR_SIZE_BYTES;
+    let entryOffset = 0;
+    while (image[directoryOffset + entryOffset] !== 0) {
+      entryOffset += image[directoryOffset + entryOffset]!;
+    }
+    isoDirectoryRecord({
+      byteCount: 0,
+      extendedAttributeSectorCount: 2,
+      extentLba: 599,
+      identifier: Buffer.from("EMPTY.DAT;1"),
+      isDirectory: false,
+    }).copy(image, directoryOffset + entryOffset);
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD ISO file extent is outside the volume");
+  });
+
+  it("rejects duplicate ISO file identifiers with identical extents", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    const directoryOffset = 43 * DVD_SECTOR_SIZE_BYTES;
+    let entryOffset = 0;
+    while (image[directoryOffset + entryOffset] !== 0) {
+      entryOffset += image[directoryOffset + entryOffset]!;
+    }
+    isoDirectoryRecord({
+      byteCount: 6 * DVD_SECTOR_SIZE_BYTES,
+      extentLba: 330,
+      identifier: Buffer.from("VIDEO_TS.IFO;1"),
+      isDirectory: false,
+    }).copy(image, directoryOffset + entryOffset);
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD ISO file layout is ambiguous");
   });
 
   it.each([
@@ -2069,7 +2140,7 @@ describe("retained DVD image layout completeness", () => {
       image,
       347 * DVD_SECTOR_SIZE_BYTES,
       330 * DVD_SECTOR_SIZE_BYTES,
-      335 * DVD_SECTOR_SIZE_BYTES,
+      336 * DVD_SECTOR_SIZE_BYTES,
     );
     const fixture = writeFixture(image);
 
@@ -2089,7 +2160,7 @@ describe("retained DVD image layout completeness", () => {
       image,
       347 * DVD_SECTOR_SIZE_BYTES,
       330 * DVD_SECTOR_SIZE_BYTES,
-      335 * DVD_SECTOR_SIZE_BYTES,
+      336 * DVD_SECTOR_SIZE_BYTES,
     );
     const fixture = writeFixture(image);
 
@@ -2097,6 +2168,51 @@ describe("retained DVD image layout completeness", () => {
       candidateBoundaryLba: 600,
       imagePath: fixture.imagePath,
     })).rejects.toThrow("DVD video manager extent fields are malformed");
+  });
+
+  it.each([
+    ["parental management", 0xcc],
+    ["title-set attribute", 0xd0],
+    ["text data manager", 0xd4],
+  ])("fails closed on a %s table outside the video manager", async (
+    description,
+    pointerOffset,
+  ) => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    for (const managerLba of [330, 347]) {
+      image.writeUInt32BE(
+        270,
+        managerLba * DVD_SECTOR_SIZE_BYTES + pointerOffset,
+      );
+    }
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow(`DVD ${description} table is outside the video manager`);
+  });
+
+  it("fails closed when title-set attributes disagree with the manager inventory", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    for (const managerLba of [330, 347]) {
+      image.writeUInt16BE(
+        2,
+        (managerLba + 5) * DVD_SECTOR_SIZE_BYTES,
+      );
+    }
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD title-set attribute table is malformed");
   });
 
   it("fails closed on a title-set sector outside its filesystem extent", async () => {
@@ -2112,7 +2228,7 @@ describe("retained DVD image layout completeness", () => {
       image,
       347 * DVD_SECTOR_SIZE_BYTES,
       330 * DVD_SECTOR_SIZE_BYTES,
-      335 * DVD_SECTOR_SIZE_BYTES,
+      336 * DVD_SECTOR_SIZE_BYTES,
     );
     const fixture = writeFixture(image);
 
@@ -2195,7 +2311,7 @@ describe("retained DVD image layout completeness", () => {
       image,
       347 * DVD_SECTOR_SIZE_BYTES,
       330 * DVD_SECTOR_SIZE_BYTES,
-      335 * DVD_SECTOR_SIZE_BYTES,
+      336 * DVD_SECTOR_SIZE_BYTES,
     );
     const fixture = writeFixture(image);
 
@@ -2215,7 +2331,7 @@ describe("retained DVD image layout completeness", () => {
       image,
       347 * DVD_SECTOR_SIZE_BYTES,
       330 * DVD_SECTOR_SIZE_BYTES,
-      335 * DVD_SECTOR_SIZE_BYTES,
+      336 * DVD_SECTOR_SIZE_BYTES,
     );
     const fixture = writeFixture(image);
 
@@ -2306,7 +2422,7 @@ describe("retained DVD image layout completeness", () => {
       image,
       347 * DVD_SECTOR_SIZE_BYTES,
       330 * DVD_SECTOR_SIZE_BYTES,
-      335 * DVD_SECTOR_SIZE_BYTES,
+      336 * DVD_SECTOR_SIZE_BYTES,
     );
     const fixture = writeFixture(image);
 
@@ -2336,6 +2452,7 @@ describe("retained DVD image layout completeness", () => {
       includeUdf: false,
     });
     image[360 * DVD_SECTOR_SIZE_BYTES + 0x203] = 1;
+    writeSyntheticTitleSetAttributeCounts(image, { audioStreamCount: 1 });
     writeSingleTitleProgramChainCommand(
       image,
       2n << 61n | 1n << 60n | 1n << 56n | 1n << 39n,
@@ -2357,6 +2474,10 @@ describe("retained DVD image layout completeness", () => {
       2 * DVD_SECTOR_SIZE_BYTES + 16;
     image[360 * DVD_SECTOR_SIZE_BYTES + 0x203] = 1;
     image[360 * DVD_SECTOR_SIZE_BYTES + 0x255] = 1;
+    writeSyntheticTitleSetAttributeCounts(image, {
+      audioStreamCount: 1,
+      subpictureStreamCount: 1,
+    });
     image.writeUInt16BE(0x8000, programChainOffset + 12);
     image.writeUInt32BE(0x8000_0000, programChainOffset + 28);
     writeSingleTitleProgramChainCommand(
@@ -2380,6 +2501,7 @@ describe("retained DVD image layout completeness", () => {
     const programChainOffset = 360 * DVD_SECTOR_SIZE_BYTES +
       2 * DVD_SECTOR_SIZE_BYTES + 16;
     image[360 * DVD_SECTOR_SIZE_BYTES + 0x203] = 1;
+    writeSyntheticTitleSetAttributeCounts(image, { audioStreamCount: 1 });
     image.writeUInt16BE(0x8000, programChainOffset + 14);
     image.copy(
       image,
@@ -2563,7 +2685,7 @@ describe("retained DVD image layout completeness", () => {
       image,
       347 * DVD_SECTOR_SIZE_BYTES,
       330 * DVD_SECTOR_SIZE_BYTES,
-      335 * DVD_SECTOR_SIZE_BYTES,
+      336 * DVD_SECTOR_SIZE_BYTES,
     );
     const fixture = writeFixture(image);
 
@@ -2652,7 +2774,7 @@ describe("retained DVD image layout completeness", () => {
       image,
       347 * DVD_SECTOR_SIZE_BYTES,
       330 * DVD_SECTOR_SIZE_BYTES,
-      335 * DVD_SECTOR_SIZE_BYTES,
+      336 * DVD_SECTOR_SIZE_BYTES,
     );
     writeSingleTitleProgramChainCommand(
       image,
@@ -2794,7 +2916,7 @@ describe("retained DVD image layout completeness", () => {
       image,
       347 * DVD_SECTOR_SIZE_BYTES,
       330 * DVD_SECTOR_SIZE_BYTES,
-      335 * DVD_SECTOR_SIZE_BYTES,
+      336 * DVD_SECTOR_SIZE_BYTES,
     );
     const fixture = writeFixture(image);
 
@@ -3016,7 +3138,7 @@ describe("retained DVD image layout completeness", () => {
       includeUdf: true,
     });
     image.writeBigUInt64LE(
-      BigInt(6 * DVD_SECTOR_SIZE_BYTES),
+      BigInt(7 * DVD_SECTOR_SIZE_BYTES),
       305 * DVD_SECTOR_SIZE_BYTES + 56,
     );
     const fixture = writeFixture(image);

@@ -709,8 +709,7 @@ async function analyzeDvdImageLayout({
     extendedAttributeSectorCount: number,
     volumeSpaceSize: number,
     identifierEncoding: "ascii" | "joliet",
-    viewDvdFiles: Map<string, DvdFileLayout>,
-    viewDvdPaths: Set<string>,
+    filesystemView: DvdFilesystemView,
     parentDirectory?: {
       byteCount: number;
       extendedAttributeSectorCount: number;
@@ -793,8 +792,8 @@ async function analyzeDvdImageLayout({
       const identifier = record.subarray(33, 33 + identifierLength);
       const isSpecial = identifierLength === 1 &&
         (identifier[0] === 0 || identifier[0] === 1);
-      if (extentBytes > 0) {
-        const dataSectorCount = sectorCountForBytes(extentBytes);
+      const dataSectorCount = sectorCountForBytes(extentBytes);
+      if (extentBytes > 0 || extendedAttributeSectorCount > 0) {
         if (
           !Number.isSafeInteger(
             extendedAttributeSectorCount + dataSectorCount,
@@ -833,7 +832,7 @@ async function analyzeDvdImageLayout({
         } else {
           sawParentRecord = true;
         }
-      } else if (extentBytes > 0) {
+      } else {
         if (recordIndex < 2) {
           throw new Error("DVD ISO file identifier is malformed");
         }
@@ -868,6 +867,9 @@ async function analyzeDvdImageLayout({
         }
         const dataLba = extentLba + extendedAttributeSectorCount;
         if ((flags & 0x02) !== 0) {
+          if (extentBytes === 0) {
+            throw new Error("DVD ISO directory extent is invalid");
+          }
           await parseIsoDirectory(
             dataLba,
             extentBytes,
@@ -878,43 +880,45 @@ async function analyzeDvdImageLayout({
             extendedAttributeSectorCount,
             volumeSpaceSize,
             identifierEncoding,
-            viewDvdFiles,
-            viewDvdPaths,
+            filesystemView,
             currentDirectory,
             depth + 1,
           );
         } else {
           const normalizedPath = path.toUpperCase();
-          viewDvdPaths.add(normalizedPath);
+          filesystemView.dvdPaths.add(normalizedPath);
           isoDvdPaths.add(normalizedPath);
           const fileLayout = {
             byteCount: extentBytes,
             embedded: false,
-            extents: [{ byteCount: extentBytes, startLba: dataLba }],
+            extents: extentBytes === 0
+              ? []
+              : [{ byteCount: extentBytes, startLba: dataLba }],
             path: normalizedPath,
           } satisfies DvdFileLayout;
           const existingFile = isoDvdFiles.get(normalizedPath);
-          const existingViewFile = viewDvdFiles.get(normalizedPath);
+          const existingViewFile = filesystemView.dvdFiles.get(normalizedPath);
           if (
-            [existingFile, existingViewFile].some((candidate) =>
-              candidate !== undefined &&
-              JSON.stringify(candidate) !== JSON.stringify(fileLayout)
-            )
+            existingViewFile !== undefined ||
+            existingFile !== undefined &&
+              JSON.stringify(existingFile) !== JSON.stringify(fileLayout)
           ) {
             throw new Error("DVD ISO file layout is ambiguous");
           }
-          viewDvdFiles.set(normalizedPath, fileLayout);
+          filesystemView.dvdFiles.set(normalizedPath, fileLayout);
           isoDvdFiles.set(normalizedPath, fileLayout);
-          addExtent(
-            dataLba,
-            sectorCountForBytes(extentBytes),
-            classifyDvdPath(path),
-            {
-              path: normalizedPath,
-              sectorOffset: 0,
-              source: "iso",
-            },
-          );
+          if (extentBytes > 0) {
+            addExtent(
+              dataLba,
+              dataSectorCount,
+              classifyDvdPath(path),
+              {
+                path: normalizedPath,
+                sectorOffset: 0,
+                source: "iso",
+              },
+            );
+          }
         }
       }
       offset += recordLength;
@@ -1095,6 +1099,326 @@ async function analyzeDvdImageLayout({
     ) {
       throw new DvdExtentFieldError("DVD title-set extent fields are malformed");
     }
+  };
+
+  const readDvdManagerTable = (
+    content: Buffer,
+    {
+      description,
+      lastByteOffset,
+      minimumByteCount,
+      pointerOffset,
+      required,
+    }: {
+      description: string;
+      lastByteOffset: number;
+      minimumByteCount: number;
+      pointerOffset: number;
+      required: boolean;
+    },
+  ): Buffer | undefined => {
+    const tableSector = content.readUInt32BE(pointerOffset);
+    if (tableSector === 0) {
+      if (required) {
+        throw new Error(`DVD ${description} table is missing`);
+      }
+      return undefined;
+    }
+    const tableOffset = tableSector * DVD_SECTOR_SIZE_BYTES;
+    const managerInformationByteCount = content.readUInt32BE(0x80) + 1;
+    if (
+      !Number.isSafeInteger(tableOffset) ||
+      tableOffset < DVD_SECTOR_SIZE_BYTES ||
+      tableOffset + minimumByteCount > managerInformationByteCount
+    ) {
+      throw new Error(`DVD ${description} table is outside the video manager`);
+    }
+    const tableByteCount = content.readUInt32BE(
+      tableOffset + lastByteOffset,
+    ) + 1;
+    if (
+      tableByteCount < minimumByteCount ||
+      tableOffset + tableByteCount > managerInformationByteCount
+    ) {
+      throw new Error(`DVD ${description} table is malformed`);
+    }
+    return content.subarray(tableOffset, tableOffset + tableByteCount);
+  };
+
+  const validateNoByteRangeOverlaps = (
+    ranges: readonly { end: number; start: number }[],
+    message: string,
+  ): void => {
+    const orderedRanges = [...ranges].sort((left, right) =>
+      left.start - right.start || left.end - right.end
+    );
+    for (let index = 1; index < orderedRanges.length; index += 1) {
+      if (orderedRanges[index]!.start < orderedRanges[index - 1]!.end) {
+        throw new Error(message);
+      }
+    }
+  };
+
+  const validateDvdParentalManagementTable = (
+    content: Buffer,
+    expectedTitleSetCount: number,
+  ): void => {
+    const parentalTable = readDvdManagerTable(content, {
+      description: "parental management",
+      lastByteOffset: 4,
+      minimumByteCount: 8,
+      pointerOffset: 0xcc,
+      required: false,
+    });
+    if (parentalTable !== undefined) {
+      const countryCount = parentalTable.readUInt16BE(0);
+      const titleSetCount = parentalTable.readUInt16BE(2);
+      const countryTableEnd = 8 + countryCount * 8;
+      const parentalMaskByteCount = (titleSetCount + 1) * 16;
+      if (
+        countryCount <= 0 ||
+        countryCount > 99 ||
+        titleSetCount !== expectedTitleSetCount ||
+        countryTableEnd > parentalTable.byteLength
+      ) {
+        throw new Error("DVD parental management table is malformed");
+      }
+      const maskRanges: Array<{ end: number; start: number }> = [];
+      const countryCodes = new Set<number>();
+      const maskOffsets = new Set<number>();
+      for (let index = 0; index < countryCount; index += 1) {
+        const countryOffset = 8 + index * 8;
+        const countryCode = parentalTable.readUInt16BE(countryOffset);
+        const maskOffset = parentalTable.readUInt16BE(countryOffset + 4);
+        if (
+          countryCode === 0 ||
+          countryCodes.has(countryCode) ||
+          maskOffsets.has(maskOffset) ||
+          parentalTable.readUInt16BE(countryOffset + 2) !== 0 ||
+          parentalTable.readUInt16BE(countryOffset + 6) !== 0 ||
+          maskOffset < countryTableEnd ||
+          maskOffset + parentalMaskByteCount > parentalTable.byteLength
+        ) {
+          throw new Error("DVD parental management table is malformed");
+        }
+        countryCodes.add(countryCode);
+        maskOffsets.add(maskOffset);
+        maskRanges.push({
+          end: maskOffset + parentalMaskByteCount,
+          start: maskOffset,
+        });
+      }
+      validateNoByteRangeOverlaps(
+        maskRanges,
+        "DVD parental management table overlaps ambiguously",
+      );
+    }
+  };
+
+  const validateDvdTitleSetAttributeTable = async (
+    content: Buffer,
+    dvdFiles: ReadonlyMap<string, DvdFileLayout>,
+    titleSetNumbers: readonly number[],
+  ): Promise<void> => {
+    const attributeTable = readDvdManagerTable(content, {
+      description: "title-set attribute",
+      lastByteOffset: 4,
+      minimumByteCount: 8,
+      pointerOffset: 0xd0,
+      required: true,
+    })!;
+    const attributeCount = attributeTable.readUInt16BE(0);
+    const attributeOffsetsEnd = 8 + attributeCount * 4;
+    if (
+      attributeCount !== titleSetNumbers.length ||
+      attributeCount <= 0 ||
+      attributeCount > 99 ||
+      attributeTable.readUInt16BE(2) !== 0 ||
+      attributeOffsetsEnd > attributeTable.byteLength
+    ) {
+      throw new Error("DVD title-set attribute table is malformed");
+    }
+    let previousAttributeEnd = attributeOffsetsEnd;
+    for (let index = 0; index < attributeCount; index += 1) {
+      const attributeOffset = attributeTable.readUInt32BE(8 + index * 4);
+      if (
+        attributeOffset < previousAttributeEnd ||
+        attributeOffset + 4 > attributeTable.byteLength
+      ) {
+        throw new Error("DVD title-set attribute table is malformed");
+      }
+      const attributeByteCount = attributeTable.readUInt32BE(attributeOffset) +
+        1;
+      const attributeEnd = attributeOffset + attributeByteCount;
+      if (
+        attributeByteCount < 356 ||
+        attributeByteCount > 542 ||
+        attributeEnd > attributeTable.byteLength
+      ) {
+        throw new Error("DVD title-set attribute table is malformed");
+      }
+      const attributes = attributeTable.subarray(
+        attributeOffset,
+        attributeEnd,
+      );
+      const menuAudioCount = attributes[11]!;
+      const menuSubpictureCount = attributes[93]!;
+      const titleAudioCount = attributes[267]!;
+      const titleSubpictureCount = attributes[349]!;
+      const availableTitleSubpictureCount = Math.floor(
+        (attributes.byteLength - 350) / 6,
+      );
+      const titleSetNumber = titleSetNumbers[index]!;
+      const titleSetIfo = dvdFiles.get(
+        `VIDEO_TS/VTS_${String(titleSetNumber).padStart(2, "0")}_0.IFO`,
+      );
+      if (titleSetIfo === undefined) {
+        throw new Error("DVD title-set attribute target is missing");
+      }
+      const titleSetContent = await readDvdControlFile(titleSetIfo);
+      if (
+        attributes[10] !== 0 ||
+        attributes.subarray(20, 93).some((byte) => byte !== 0) ||
+        attributes.subarray(100, 264).some((byte) => byte !== 0) ||
+        attributes[266] !== 0 ||
+        attributes.subarray(332, 349).some((byte) => byte !== 0) ||
+        menuAudioCount > 1 ||
+        menuSubpictureCount > 1 ||
+        titleAudioCount > 8 ||
+        titleSubpictureCount > Math.min(32, availableTitleSubpictureCount) ||
+        menuAudioCount !== titleSetContent[0x103] ||
+        menuSubpictureCount !== titleSetContent[0x155] ||
+        titleAudioCount !== titleSetContent[0x203] ||
+        titleSubpictureCount !== titleSetContent[0x255] ||
+        !attributes.subarray(8, 10).equals(
+          titleSetContent.subarray(0x100, 0x102),
+        ) ||
+        !attributes.subarray(12, 20).equals(
+          titleSetContent.subarray(0x104, 0x10c),
+        ) ||
+        !attributes.subarray(94, 100).equals(
+          titleSetContent.subarray(0x156, 0x15c),
+        ) ||
+        !attributes.subarray(264, 266).equals(
+          titleSetContent.subarray(0x200, 0x202),
+        ) ||
+        !attributes.subarray(268, 332).equals(
+          titleSetContent.subarray(0x204, 0x244),
+        ) ||
+        !attributes.subarray(350).equals(
+          titleSetContent.subarray(
+            0x256,
+            0x256 + availableTitleSubpictureCount * 6,
+          ),
+        ) ||
+        menuAudioCount === 0 &&
+          attributes.subarray(12, 20).some((byte) => byte !== 0) ||
+        menuSubpictureCount === 0 &&
+          attributes.subarray(94, 100).some((byte) => byte !== 0) ||
+        attributes.subarray(
+          268 + titleAudioCount * 8,
+          332,
+        ).some((byte) => byte !== 0) ||
+        attributes.subarray(
+          350 + titleSubpictureCount * 6,
+        ).some((byte) => byte !== 0)
+      ) {
+        throw new Error("DVD title-set attributes disagree with their IFO");
+      }
+      previousAttributeEnd = attributeEnd;
+    }
+  };
+
+  const validateDvdTextDataManagerTable = (
+    content: Buffer,
+    titleCount: number,
+  ): void => {
+    const textTable = readDvdManagerTable(content, {
+      description: "text data manager",
+      lastByteOffset: 16,
+      minimumByteCount: 20,
+      pointerOffset: 0xd4,
+      required: false,
+    });
+    if (textTable !== undefined) {
+      const languageUnitCount = textTable.readUInt16BE(14);
+      const languageUnitsEnd = 20 + languageUnitCount * 8;
+      if (
+        textTable.readUInt16BE(12) !== 0 ||
+        languageUnitCount <= 0 ||
+        languageUnitCount > 99 ||
+        languageUnitsEnd > textTable.byteLength
+      ) {
+        throw new Error("DVD text data manager table is malformed");
+      }
+      const textRanges: Array<{ end: number; start: number }> = [];
+      const languageCodes = new Set<number>();
+      const textOffsets = new Set<number>();
+      for (let index = 0; index < languageUnitCount; index += 1) {
+        const unitOffset = 20 + index * 8;
+        const languageCode = textTable.readUInt16BE(unitOffset);
+        const characterSet = textTable[unitOffset + 3]!;
+        const textOffset = textTable.readUInt32BE(unitOffset + 4);
+        if (
+          languageCode === 0 ||
+          languageCodes.has(languageCode) ||
+          textOffsets.has(textOffset) ||
+          textTable[unitOffset + 2] !== 0 ||
+          ![0, 1, 0x10, 0x11, 0x12].includes(characterSet) ||
+          textOffset < languageUnitsEnd ||
+          textOffset + 4 + (titleCount + 1) * 2 > textTable.byteLength
+        ) {
+          throw new Error("DVD text data manager table is malformed");
+        }
+        languageCodes.add(languageCode);
+        textOffsets.add(textOffset);
+        const textByteCount = textTable.readUInt32BE(textOffset) + 1;
+        if (
+          textByteCount < 4 + (titleCount + 1) * 2 ||
+          textOffset + textByteCount > textTable.byteLength
+        ) {
+          throw new Error("DVD text data manager table is malformed");
+        }
+        let previousTitleOffset = 0;
+        for (let titleIndex = 0; titleIndex <= titleCount; titleIndex += 1) {
+          const titleOffset = textTable.readUInt16BE(
+            textOffset + 4 + titleIndex * 2,
+          );
+          if (
+            titleOffset !== 0 &&
+              (titleOffset < 4 + (titleCount + 1) * 2 ||
+                titleOffset >= textByteCount ||
+                titleOffset < previousTitleOffset)
+          ) {
+            throw new Error("DVD text data manager table is malformed");
+          }
+          previousTitleOffset = Math.max(previousTitleOffset, titleOffset);
+        }
+        textRanges.push({
+          end: textOffset + textByteCount,
+          start: textOffset,
+        });
+      }
+      validateNoByteRangeOverlaps(
+        textRanges,
+        "DVD text data manager table overlaps ambiguously",
+      );
+    }
+  };
+
+  const validateDvdManagerReferencedTables = async (
+    content: Buffer,
+    dvdFiles: ReadonlyMap<string, DvdFileLayout>,
+    titleSetNumbers: readonly number[],
+    titleCount: number,
+  ): Promise<void> => {
+    validateDvdParentalManagementTable(content, titleSetNumbers.length);
+    await validateDvdTitleSetAttributeTable(
+      content,
+      dvdFiles,
+      titleSetNumbers,
+    );
+    validateDvdTextDataManagerTable(content, titleCount);
   };
 
   const parseVobuAddressMap = (
@@ -2458,14 +2782,14 @@ async function analyzeDvdImageLayout({
     return indexed;
   };
 
-  const managerProgramChainCountBySource = new Map<
+  const managerProgramChainCountByView = new Map<
     string,
     Promise<number | undefined>
   >();
   const readManagerProgramChainCount = (
     view: DvdFilesystemView,
   ): Promise<number | undefined> => {
-    const existing = managerProgramChainCountBySource.get(view.key);
+    const existing = managerProgramChainCountByView.get(view.key);
     if (existing !== undefined) {
       return existing;
     }
@@ -2473,7 +2797,7 @@ async function analyzeDvdImageLayout({
       const { programChainUnits: units } = await readManagerNavigation(view);
       return commonProgramChainCount(units);
     })();
-    managerProgramChainCountBySource.set(view.key, count);
+    managerProgramChainCountByView.set(view.key, count);
     return count;
   };
 
@@ -2895,7 +3219,7 @@ async function analyzeDvdImageLayout({
     }
   };
 
-  const titleAssociationsBySourceAndSet = new Map<
+  const titleAssociationsByViewAndSet = new Map<
     string,
     Promise<readonly {
       angleCount: number;
@@ -2930,7 +3254,7 @@ async function analyzeDvdImageLayout({
       managerMenuKey,
       titleSetMenuKey,
     ].join(":");
-    const existing = titleAssociationsBySourceAndSet.get(key);
+    const existing = titleAssociationsByViewAndSet.get(key);
     if (existing !== undefined) {
       return existing;
     }
@@ -3214,7 +3538,7 @@ async function analyzeDvdImageLayout({
         };
       });
     })();
-    titleAssociationsBySourceAndSet.set(key, associations);
+    titleAssociationsByViewAndSet.set(key, associations);
     return associations;
   };
 
@@ -3623,8 +3947,7 @@ async function analyzeDvdImageLayout({
         rootExtendedAttributeSectorCount,
         volumeSpaceSize,
         identifierEncoding,
-        filesystemView.dvdFiles,
-        filesystemView.dvdPaths,
+        filesystemView,
       );
       const pathTableLayouts = parsedPathTables[0]!;
       for (const layout of pathTableLayouts) {
@@ -4677,6 +5000,12 @@ async function analyzeDvdImageLayout({
     const titleSetNumbers = [...new Set(
       globalTitles.map((title) => title.titleSetNumber),
     )].sort((left, right) => left - right);
+    await validateDvdManagerReferencedTables(
+      managerIfoContent,
+      dvdFiles,
+      titleSetNumbers,
+      globalTitles.length,
+    );
     const filesystemTitleSetNumbers = new Set<number>();
     for (const path of dvdPaths) {
       if (!path.startsWith("VIDEO_TS/VTS_")) {
