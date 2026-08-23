@@ -1,5 +1,6 @@
 import type { DvdTitle } from "@rip-dvd/data-access/dvd-scan";
 import type {
+  ArchiveBoundaryEvidence,
   CatalogReviewCoverage,
   CatalogReviewOutcome,
   ArchiveIntegrity,
@@ -168,6 +169,7 @@ export interface CatalogReviewDto {
     discLabel: string;
     discKind: string;
     archiveFormat: string;
+    boundaryEvidence: ArchiveBoundaryEvidence | null;
     integrity: ArchiveIntegrity;
     badSectorCount: number | null;
     badAreaCount: number | null;

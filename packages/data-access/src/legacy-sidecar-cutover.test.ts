@@ -26,6 +26,7 @@ import { decodeDvdTitleMap } from "./dvd-scan.js";
 import {
   createDataAccess,
   createCleanReadArchiveIntegrityEvidence,
+  createNormalDvdArchiveBoundaryEvidence,
   DomainInvariantError,
   ENCODE_JOB_LEASE_DURATION_MS,
   StaleJobAttemptError,
@@ -892,6 +893,8 @@ try {
     );
     service.archiveJobs.publish(concurrentClaim, {
       archivePath: concurrentArchivePath,
+      boundaryEvidence:
+        createNormalDvdArchiveBoundaryEvidence(4_700_000_000),
       integrityEvidence: createCleanReadArchiveIntegrityEvidence(
         "test-clean-v1",
       ),
@@ -1265,12 +1268,16 @@ try {
       service.catalog.listDetectedDiscs(undefined, { ids: [disc.id] })[0]!,
       "replacement-worker",
     );
+    const repairedArchiveSizeBytes =
+      readFileSync(repairedArchivePath).byteLength;
     service.archiveJobs.publish(claim, {
       archivePath: repairedArchivePath,
+      boundaryEvidence:
+        createNormalDvdArchiveBoundaryEvidence(repairedArchiveSizeBytes),
       integrityEvidence: createCleanReadArchiveIntegrityEvidence(
         "test-clean-v1",
       ),
-      sizeBytes: 4_700_000_000,
+      sizeBytes: repairedArchiveSizeBytes,
     });
     const replacementArchive = service.catalog
       .listOriginalDiscArchives()
@@ -3268,6 +3275,8 @@ try {
     );
     service.archiveJobs.publish(claim, {
       archivePath: publishedArchivePath,
+      boundaryEvidence:
+        createNormalDvdArchiveBoundaryEvidence(4_700_000_000),
       integrityEvidence: createCleanReadArchiveIntegrityEvidence(
         "test-clean-v1",
       ),
