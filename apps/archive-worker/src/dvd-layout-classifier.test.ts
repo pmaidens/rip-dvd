@@ -637,11 +637,18 @@ function writeSingleTitleProgramChainCommand(
   image: Buffer,
   command: bigint,
   section: "cell" | "post" | "pre" = "pre",
+  targetProgramChainNumber = 1,
 ) {
   const programChainTableOffset = 360 * DVD_SECTOR_SIZE_BYTES +
     2 * DVD_SECTOR_SIZE_BYTES;
-  const programChainOffset = programChainTableOffset + 16;
-  image.writeUInt32BE(296, programChainTableOffset + 4);
+  const programChainStartByte = image.readUInt32BE(
+    programChainTableOffset + 8 + (targetProgramChainNumber - 1) * 8 + 4,
+  );
+  const programChainOffset = programChainTableOffset + programChainStartByte;
+  image.writeUInt32BE(
+    programChainStartByte + 280,
+    programChainTableOffset + 4,
+  );
   image.copy(
     image,
     programChainOffset + 252,
@@ -658,6 +665,36 @@ function writeSingleTitleProgramChainCommand(
     programChainOffset + 236 + ["pre", "post", "cell"].indexOf(section) * 2,
   );
   image.writeBigUInt64BE(command, programChainOffset + 244);
+  image.copy(
+    image,
+    370 * DVD_SECTOR_SIZE_BYTES,
+    360 * DVD_SECTOR_SIZE_BYTES,
+    366 * DVD_SECTOR_SIZE_BYTES,
+  );
+}
+
+function writeTitleSetMenuCommand(image: Buffer, command: bigint) {
+  const ifoOffset = 360 * DVD_SECTOR_SIZE_BYTES;
+  image.writeUInt32BE(5, ifoOffset + 0xd0);
+  image.writeUInt32BE(0, ifoOffset + 0xd4);
+  const unitTable = image.subarray(
+    (360 + 5) * DVD_SECTOR_SIZE_BYTES,
+    (360 + 6) * DVD_SECTOR_SIZE_BYTES,
+  );
+  unitTable.fill(0);
+  unitTable.writeUInt16BE(1, 0);
+  unitTable.writeUInt32BE(283, 4);
+  unitTable.write("en", 8, "ascii");
+  unitTable.writeUInt32BE(16, 12);
+  const programChainTable = unitTable.subarray(16);
+  programChainTable.writeUInt16BE(1, 0);
+  programChainTable.writeUInt32BE(267, 4);
+  programChainTable[8] = 0x82;
+  programChainTable.writeUInt32BE(16, 12);
+  const programChain = programChainTable.subarray(16);
+  programChain.writeUInt16BE(236, 228);
+  programChain.writeUInt16BE(1, 236);
+  programChain.writeBigUInt64BE(command, 244);
   image.copy(
     image,
     370 * DVD_SECTOR_SIZE_BYTES,
@@ -851,6 +888,7 @@ function writeSyntheticUdfLayout(
     [20, "TEA01"],
   ] as const) {
     image.write(identifier, lba * DVD_SECTOR_SIZE_BYTES + 1, "ascii");
+    image[lba * DVD_SECTOR_SIZE_BYTES + 6] = 1;
   }
   const anchor = image.subarray(
     256 * DVD_SECTOR_SIZE_BYTES,
@@ -1238,12 +1276,22 @@ function createSyntheticContradictoryUdfPayloadDvdImage(badLba: number): {
 }
 
 function syntheticCompleteDvdImage({
+  globalTitles = [{
+    parts: [{ pgcNumber: 1, programNumber: 1 }],
+    titleSetTitleNumber: 1,
+  }],
   includeIso,
   includeUdf,
+  programChains = [{
+    cells: [{ firstSector: 0, lastSector: 5 }],
+    programStartCells: [1],
+  }],
   udfTitleVobStartLba = 400,
 }: {
+  globalTitles?: readonly SyntheticGlobalTitle[];
   includeIso: boolean;
   includeUdf: boolean;
+  programChains?: readonly SyntheticProgramChain[];
   udfTitleVobStartLba?: number;
 }): Buffer {
   const image = Buffer.alloc(700 * DVD_SECTOR_SIZE_BYTES);
@@ -1292,18 +1340,12 @@ function syntheticCompleteDvdImage({
     });
   }
   writeDvdNavigationRelationships(image, {
-    globalTitles: [{
-      parts: [{ pgcNumber: 1, programNumber: 1 }],
-      titleSetTitleNumber: 1,
-    }],
+    globalTitles,
     includeMenuNavigation: true,
     managerIfoLba: 330,
     managerLastSector: 22,
     managerMenuVobLba: 338,
-    programChains: [{
-      cells: [{ firstSector: 0, lastSector: 5 }],
-      programStartCells: [1],
-    }],
+    programChains,
     titleSetIfoLba: 360,
     titleSetLastSector: 45,
     titleVobLba: 400,
@@ -1314,8 +1356,12 @@ function syntheticCompleteDvdImage({
     includeIso ? 400 : udfTitleVobStartLba,
     includeUdf ? udfTitleVobStartLba : 400,
   ])) {
-    writeDvdNavPack(image, titleVobStartLba, 0, 2, 3);
-    writeDvdNavPack(image, titleVobStartLba + 3, 3, 2);
+    writeDvdNavPack(image, titleVobStartLba, 0, 2, 3, {
+      cellNumber: syntheticCellNumberForSector(programChains, 0),
+    });
+    writeDvdNavPack(image, titleVobStartLba + 3, 3, 2, undefined, {
+      cellNumber: syntheticCellNumberForSector(programChains, 3),
+    });
   }
   image.copy(
     image,
@@ -1333,8 +1379,10 @@ function syntheticCompleteDvdImage({
 }
 
 function createSyntheticCompleteDvdImage(options: {
+  globalTitles?: readonly SyntheticGlobalTitle[];
   includeIso: boolean;
   includeUdf: boolean;
+  programChains?: readonly SyntheticProgramChain[];
   udfTitleVobStartLba?: number;
 }): {
   imagePath: string;
@@ -1449,6 +1497,21 @@ describe("retained DVD image layout completeness", () => {
       candidateBoundaryLba: 600,
       imagePath: fixture.imagePath,
     })).rejects.toThrow("DVD ISO path table copies disagree");
+  });
+
+  it("fails closed on nonzero ISO path-table identifier padding", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    image[40 * DVD_SECTOR_SIZE_BYTES + 9] = 1;
+    image[41 * DVD_SECTOR_SIZE_BYTES + 9] = 1;
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD ISO path table is malformed");
   });
 
   it("accepts an agreeing Joliet supplementary filesystem view", async () => {
@@ -2943,6 +3006,84 @@ describe("retained DVD image layout completeness", () => {
     })).resolves.toEqual({ maximumReferencedLba: 599 });
   });
 
+  it("accepts JumpSS VTSM zero as the current title set", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    writeTitleSetMenuCommand(
+      image,
+      1n << 61n | 1n << 60n | 6n << 48n | 1n << 32n |
+        2n << 22n | 2n << 16n,
+    );
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).resolves.toEqual({ maximumReferencedLba: 599 });
+  });
+
+  it.each([
+    ["LinkPTT", 1n << 61n | 5n << 48n | 2n],
+    [
+      "SetSTN angle",
+      2n << 61n | 1n << 60n | 1n << 56n | 1n << 23n | 2n << 16n,
+    ],
+  ])("validates %s against every title that can execute its PGC", async (
+    _description,
+    command,
+  ) => {
+    const image = syntheticCompleteDvdImage({
+      globalTitles: [
+        {
+          parts: [{ pgcNumber: 2, programNumber: 1 }],
+          titleSetTitleNumber: 1,
+        },
+        {
+          angleCount: 2,
+          parts: [
+            { pgcNumber: 1, programNumber: 1 },
+            { pgcNumber: 1, programNumber: 2 },
+          ],
+          titleSetTitleNumber: 2,
+        },
+      ],
+      includeIso: true,
+      includeUdf: false,
+      programChains: [
+        {
+          cells: [
+            {
+              blockMode: 1,
+              blockType: 1,
+              firstSector: 0,
+              lastSector: 2,
+            },
+            {
+              blockMode: 3,
+              blockType: 1,
+              firstSector: 3,
+              lastSector: 5,
+            },
+          ],
+          programStartCells: [1, 2],
+        },
+        {
+          cells: [{ firstSector: 0, lastSector: 2 }],
+          programStartCells: [1],
+        },
+      ],
+    });
+    writeSingleTitleProgramChainCommand(image, command, "pre", 2);
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow(/DVD VM (link command|angle) target is invalid/);
+  });
+
   it("fails closed on a malformed title VOB navigation pack", async () => {
     const image = syntheticCompleteDvdImage({
       includeIso: true,
@@ -3273,6 +3414,20 @@ describe("retained DVD image layout completeness", () => {
     })).rejects.toThrow("DVD UDF recognition sequence is incomplete");
   });
 
+  it("fails closed on a malformed UDF recognition descriptor", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    image[19 * DVD_SECTOR_SIZE_BYTES + 6] = 0;
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD UDF recognition descriptor is malformed");
+  });
+
   it("fails closed on an unsupported UDF allocation form", async () => {
     const image = syntheticCompleteDvdImage({
       includeIso: false,
@@ -3335,6 +3490,35 @@ describe("retained DVD image layout completeness", () => {
 describe("DVD layout damage classification", () => {
   it("accepts a substituted sector proved outside filesystem allocation", async () => {
     const fixture = createSyntheticDvdImage(50);
+
+    await expect(classifyDvdImageDamage({
+      ...fixture,
+      expectedByteCount: fixture.sizeBytes,
+      unreadableSectorRanges: [{ startLba: 50, sectorCount: 1 }],
+    })).resolves.toEqual({
+      affectedTitleBadSectorCounts: [],
+      outcome: "accepted",
+    });
+  });
+
+  it("preserves salvage classification with an ISO System Use area", async () => {
+    const image = Buffer.alloc(64 * DVD_SECTOR_SIZE_BYTES);
+    writeSyntheticIsoLayout(image, {
+      fileStartLba: 22,
+      pathTableLba: 18,
+      rootLba: 20,
+      videoDirectoryLba: 21,
+      volumeSpaceSize: 60,
+    });
+    const rootRecordOffset = 20 * DVD_SECTOR_SIZE_BYTES + 68;
+    image[rootRecordOffset] = 49;
+    const systemUseOffset = rootRecordOffset + 42;
+    image.write("SP", systemUseOffset, "ascii");
+    image[systemUseOffset + 2] = 7;
+    image[systemUseOffset + 3] = 1;
+    image[systemUseOffset + 4] = 0xbe;
+    image[systemUseOffset + 5] = 0xef;
+    const fixture = writeFixture(image, 50);
 
     await expect(classifyDvdImageDamage({
       ...fixture,
