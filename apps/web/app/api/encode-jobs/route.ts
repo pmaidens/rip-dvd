@@ -1,3 +1,5 @@
+import { join } from "node:path";
+
 import { loadConfig } from "@rip-dvd/config";
 import {
   DomainInvariantError,
@@ -92,10 +94,27 @@ function sourceDescription(selection: DiscSelection): string {
   return `DVD title ${sourceIdentity.titleNumber}, chapters ${sourceIdentity.chapterStart}–${sourceIdentity.chapterEnd}`;
 }
 
+function suggestedOutputPath(
+  title: string,
+  year: number | null,
+  mediaLibraryPath: string,
+): string | null {
+  const pathTitle = title.replaceAll("/", "-").replaceAll("\0", "").trim();
+  if (pathTitle === "" || pathTitle === "." || pathTitle === "..") {
+    return null;
+  }
+  const mediaName = year === null ? pathTitle : `${pathTitle} (${year})`;
+  return mediaOutputPath(
+    join(mediaLibraryPath, mediaName, `${mediaName}.mkv`),
+    mediaLibraryPath,
+  );
+}
+
 function readQueueOptions(
   access: DataAccess,
   selectionOffset: number,
   profileOffset: number,
+  mediaLibraryPath: string,
 ) {
   return access.readConsistentSnapshot((snapshot) => {
     const selectionRecords = snapshot.catalog.listDiscSelections({
@@ -127,6 +146,11 @@ function readQueueOptions(
           mediaTitle: mediaItem?.title ?? "Unknown Media Item",
           mediaYear: mediaItem?.year ?? null,
           sourceDescription: sourceDescription(selection),
+          suggestedOutputPath: suggestedOutputPath(
+            mediaItem?.title ?? "Unknown Media Item",
+            mediaItem?.year ?? null,
+            mediaLibraryPath,
+          ),
         };
       }),
       profiles: profiles.map((profile) => ({
@@ -172,8 +196,19 @@ export async function createEncodeJobsRoute(
       if (profileOffset === null) {
         return response({ error: "Invalid Encoding Profile offset" }, 400);
       }
+      let config: EncodeJobsRuntimeConfig;
+      try {
+        config = getRuntimeConfig();
+      } catch {
+        return response({ error: "Encoding options are unavailable" }, 503);
+      }
       return response(
-        readQueueOptions(getAccess(), selectionOffset, profileOffset),
+        readQueueOptions(
+          getAccess(),
+          selectionOffset,
+          profileOffset,
+          config.mediaLibraryPath,
+        ),
       );
     }
 

@@ -70,6 +70,10 @@ describe("Encode Jobs API", () => {
     const response = await createEncodeJobsRoute(
       new Request("http://localhost:3000/api/encode-jobs"),
       () => access,
+      () => ({
+        mediaLibraryPath: "/media/movies",
+        webTrustedOrigin: "http://localhost:3000",
+      }),
     );
 
     expect(response.status).toBe(200);
@@ -80,6 +84,8 @@ describe("Encode Jobs API", () => {
         mediaTitle: "Encode API reviewed",
         mediaYear: 2026,
         sourceDescription: "DVD main feature",
+        suggestedOutputPath:
+          "/media/movies/Encode API reviewed (2026)/Encode API reviewed (2026).mkv",
       }],
       profiles: [{
         id: activeProfile.id,
@@ -133,6 +139,10 @@ describe("Encode Jobs API", () => {
     const firstResponse = await createEncodeJobsRoute(
       new Request("http://localhost:3000/api/encode-jobs"),
       () => access,
+      () => ({
+        mediaLibraryPath: "/media/movies",
+        webTrustedOrigin: "http://localhost:3000",
+      }),
     );
     const firstPage = await firstResponse.json();
 
@@ -153,6 +163,10 @@ describe("Encode Jobs API", () => {
         "http://localhost:3000/api/encode-jobs?selectionOffset=0&profileOffset=100",
       ),
       () => access,
+      () => ({
+        mediaLibraryPath: "/media/movies",
+        webTrustedOrigin: "http://localhost:3000",
+      }),
     );
     const secondPage = await secondResponse.json();
 
