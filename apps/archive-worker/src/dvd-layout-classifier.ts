@@ -642,6 +642,7 @@ async function analyzeDvdImageLayout({
   };
   const isoFilesystemViews: DvdFilesystemView[] = [];
   let aggregateDirectoryByteCount = 0;
+  let aggregateFilesystemPathByteCount = 0;
   let dvdNavigationObjectCount = 0;
   let isoDirectoryEntryCount = 0;
   let udfAllocationDescriptorCount = 0;
@@ -658,6 +659,19 @@ async function analyzeDvdImageLayout({
       throw new Error("DVD directories exceed their aggregate safety bound");
     }
     aggregateDirectoryByteCount = nextByteCount;
+  };
+  const consumeFilesystemPath = (path: string) => {
+    const byteCount = Buffer.byteLength(path);
+    const nextByteCount = aggregateFilesystemPathByteCount + byteCount;
+    if (
+      !Number.isSafeInteger(nextByteCount) ||
+      nextByteCount > MAX_AGGREGATE_PATH_BYTES
+    ) {
+      throw new Error(
+        "DVD filesystem paths exceed their aggregate safety bound",
+      );
+    }
+    aggregateFilesystemPathByteCount = nextByteCount;
   };
   const consumeDvdNavigationObjects = (count: number) => {
     const nextCount = dvdNavigationObjectCount + count;
@@ -797,6 +811,7 @@ async function analyzeDvdImageLayout({
       throw new Error("DVD ISO directory graph is cyclic or ambiguous");
     }
     visited.add(key);
+    consumeFilesystemPath(parentPath);
     directoryLayouts.set(parentPath, {
       depth,
       extendedAttributeSectorCount,
@@ -964,6 +979,7 @@ async function analyzeDvdImageLayout({
           );
         } else {
           const normalizedPath = path.toUpperCase();
+          consumeFilesystemPath(normalizedPath);
           filesystemView.dvdPaths.add(normalizedPath);
           isoDvdPaths.add(normalizedPath);
           const fileLayout = {
@@ -2335,7 +2351,18 @@ async function analyzeDvdImageLayout({
     ) {
       throw new Error(`DVD ${domain} information size is malformed`);
     }
-    const ranges: Array<{ end: number; start: number }> = [];
+    const managementTableEnd = content.readUInt32BE(0x80) + 1;
+    if (
+      !Number.isSafeInteger(managementTableEnd) ||
+      managementTableEnd <= 0 ||
+      managementTableEnd > informationByteCount
+    ) {
+      throw new Error(`DVD ${domain} management table range is malformed`);
+    }
+    const ranges: Array<{ end: number; start: number }> = [{
+      end: managementTableEnd,
+      start: 0,
+    }];
     for (const field of tableFields) {
       const tableSector = content.readUInt32BE(field.pointerOffset);
       if (tableSector === 0) {
@@ -3858,18 +3885,22 @@ async function analyzeDvdImageLayout({
         number,
         Map<number, GlobalDvdTitle>
       >();
+      const pendingExecutableTitles: Array<{
+        pgcNumber: number;
+        title: GlobalDvdTitle;
+      }> = [];
       const addExecutableTitle = (
         pgcNumber: number,
         title: GlobalDvdTitle,
-      ): boolean => {
+      ): void => {
         const titles = executableTitlesByProgramChain.get(pgcNumber) ??
           new Map<number, GlobalDvdTitle>();
         if (titles.has(title.titleNumber)) {
-          return false;
+          return;
         }
         titles.set(title.titleNumber, title);
         executableTitlesByProgramChain.set(pgcNumber, titles);
-        return true;
+        pendingExecutableTitles.push({ pgcNumber, title });
       };
       for (const title of globalTitles) {
         for (const part of titleParts[title.titleSetTitleNumber - 1]!) {
@@ -3910,35 +3941,36 @@ async function analyzeDvdImageLayout({
         }
         buttonTargetsByCell.set(key, cellTargets);
       }
-      let addedExecutableTitle = true;
-      while (addedExecutableTitle) {
-        addedExecutableTitle = false;
-        for (const [pgcNumber, chain] of programChains) {
-          const sourceTitles = executableTitlesByProgramChain.get(pgcNumber);
-          if (sourceTitles === undefined) {
-            continue;
-          }
-          const targetProgramChains = new Set(
-            chain.programChainReferences.filter((reference) => reference > 0),
-          );
-          for (const target of programChainTargetsForCommands(
-            chain.commandBlocks.flatMap((block) => block.commands),
-          )) {
+      const targetProgramChainsBySource = new Map<
+        number,
+        ReadonlySet<number>
+      >();
+      for (const [pgcNumber, chain] of programChains) {
+        const targetProgramChains = new Set(
+          chain.programChainReferences.filter((reference) => reference > 0),
+        );
+        for (const target of programChainTargetsForCommands(
+          chain.commandBlocks.flatMap((block) => block.commands),
+        )) {
+          targetProgramChains.add(target);
+        }
+        for (const cell of chain.cells) {
+          for (const target of buttonTargetsByCell.get(
+            `${cell.vobId}:${cell.cellNumber}`,
+          ) ?? []) {
             targetProgramChains.add(target);
           }
-          for (const cell of chain.cells) {
-            for (const target of buttonTargetsByCell.get(
-              `${cell.vobId}:${cell.cellNumber}`,
-            ) ?? []) {
-              targetProgramChains.add(target);
-            }
-          }
-          for (const target of targetProgramChains) {
-            for (const title of sourceTitles.values()) {
-              addedExecutableTitle = addExecutableTitle(target, title) ||
-                addedExecutableTitle;
-            }
-          }
+        }
+        targetProgramChainsBySource.set(pgcNumber, targetProgramChains);
+      }
+      for (
+        let pendingIndex = 0;
+        pendingIndex < pendingExecutableTitles.length;
+        pendingIndex += 1
+      ) {
+        const { pgcNumber, title } = pendingExecutableTitles[pendingIndex]!;
+        for (const target of targetProgramChainsBySource.get(pgcNumber) ?? []) {
+          addExecutableTitle(target, title);
         }
       }
       for (const [pgcNumber, chain] of programChains) {
@@ -5052,6 +5084,7 @@ async function analyzeDvdImageLayout({
     }
     const rootIcb = readUdfLongAllocationDescriptor(fileSetDescriptor, 400);
 
+    const udfNodePaths = new Set<string>();
     const visitedIcbs = new Set<string>();
     const sameUdfLongAllocationDescriptor = (
       left: UdfLongAllocationDescriptor,
@@ -5080,6 +5113,12 @@ async function analyzeDvdImageLayout({
         throw new Error("DVD UDF allocation graph is cyclic or ambiguous");
       }
       visitedIcbs.add(key);
+      const normalizedPath = path.toUpperCase();
+      if (udfNodePaths.has(normalizedPath)) {
+        throw new Error("DVD UDF file layout is ambiguous");
+      }
+      udfNodePaths.add(normalizedPath);
+      consumeFilesystemPath(normalizedPath);
       const fileEntry = await readExtent(
         icbLba,
         icb.extentLength,
@@ -5149,7 +5188,6 @@ async function analyzeDvdImageLayout({
       if (isDirectory !== expectedDirectory) {
         throw new Error("DVD UDF directory entry type disagrees with its ICB");
       }
-      const normalizedPath = path.toUpperCase();
       const dataExtents: Array<{
         byteCount: number;
         fileByteOffset: number;
@@ -5289,6 +5327,7 @@ async function analyzeDvdImageLayout({
       }
       let offset = 0;
       let parentEntryCount = 0;
+      let containingExtentIndex = 0;
       while (offset < directory.byteLength) {
         const blockEnd = Math.min(
           directory.byteLength,
@@ -5306,12 +5345,20 @@ async function analyzeDvdImageLayout({
           throw new Error("DVD UDF directory entry is truncated");
         }
         const remainingDirectoryBlock = directory.subarray(offset, blockEnd);
-        const containingExtent = allocationType === 3
+        while (
+          dataExtents[containingExtentIndex] !== undefined &&
+          offset >=
+            dataExtents[containingExtentIndex]!.fileByteOffset +
+              dataExtents[containingExtentIndex]!.byteCount
+        ) {
+          containingExtentIndex += 1;
+        }
+        const candidateContainingExtent = dataExtents[containingExtentIndex];
+        const containingExtent = allocationType === 3 ||
+            candidateContainingExtent === undefined ||
+            offset < candidateContainingExtent.fileByteOffset
           ? undefined
-          : dataExtents.find((extent) =>
-            offset >= extent.fileByteOffset &&
-            offset < extent.fileByteOffset + extent.byteCount
-          );
+          : candidateContainingExtent;
         const expectedTagLocation = allocationType === 3
           ? icb.logicalBlockNumber
           : containingExtent === undefined

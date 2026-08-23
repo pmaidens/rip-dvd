@@ -424,7 +424,7 @@ function writeDvdNavigationRelationships(
     0x1c,
   );
   managerIfo.writeUInt16BE(1, 0x3e);
-  managerIfo.writeUInt32BE(341, 0x80);
+  managerIfo.writeUInt32BE(0x1ff, 0x80);
   managerIfo.writeUInt32BE(managerMenuVobLba - managerIfoLba, 0xc0);
   managerIfo.writeUInt32BE(1, 0xc4);
   const titleSearchTable = managerIfo.subarray(DVD_SECTOR_SIZE_BYTES);
@@ -506,7 +506,7 @@ function writeDvdNavigationRelationships(
   ifo.write("DVDVIDEO-VTS", 0, "ascii");
   ifo.writeUInt32BE(titleSetLastSector, 0x0c);
   ifo.writeUInt32BE((includeMenuNavigation ? 6 : 5) - 1, 0x1c);
-  ifo.writeUInt32BE(ifo.byteLength - 1, 0x80);
+  ifo.writeUInt32BE(0x3d7, 0x80);
   ifo.writeUInt32BE(titleVobLba - titleSetIfoLba, 0xc4);
   ifo.writeUInt32BE(1, 0xc8);
   ifo.writeUInt32BE(2, 0xcc);
@@ -2147,6 +2147,24 @@ describe("retained DVD image layout completeness", () => {
     })).rejects.toThrow("DVD UDF ICB hierarchy is unsupported");
   });
 
+  it("fails closed when distinct UDF names collide after normalization", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    image.write(
+      "video_ts.ifo",
+      304 * DVD_SECTOR_SIZE_BYTES + 131,
+      "ascii",
+    );
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD UDF file layout is ambiguous");
+  });
+
   it("accepts UDF directory padding between logical blocks", async () => {
     const image = syntheticCompleteDvdImage({
       includeIso: false,
@@ -2572,6 +2590,44 @@ describe("retained DVD image layout completeness", () => {
       330 * DVD_SECTOR_SIZE_BYTES,
       336 * DVD_SECTOR_SIZE_BYTES,
     );
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD manager tables overlap ambiguously");
+  });
+
+  it("fails closed when first-play navigation overlaps the manager table", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    for (const managerLba of [330, 347]) {
+      image.writeUInt32BE(
+        0x1ff,
+        managerLba * DVD_SECTOR_SIZE_BYTES + 0x84,
+      );
+    }
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD manager tables overlap ambiguously");
+  });
+
+  it("fails closed when a sector table overlaps the manager table", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    for (const managerLba of [330, 347]) {
+      image.writeUInt32BE(
+        DVD_SECTOR_SIZE_BYTES,
+        managerLba * DVD_SECTOR_SIZE_BYTES + 0x80,
+      );
+    }
     const fixture = writeFixture(image);
 
     await expect(proveDvdImageLayoutCompleteness({
