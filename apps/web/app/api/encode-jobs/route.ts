@@ -1,5 +1,3 @@
-import { join } from "node:path";
-
 import { loadConfig } from "@rip-dvd/config";
 import {
   DomainInvariantError,
@@ -14,10 +12,14 @@ import {
 } from "@rip-dvd/data-access";
 
 import { getDataAccess } from "../../../lib/data-access";
+import { readMediaItemsWithAncestors } from "../../../lib/media-item-ancestor-context";
 import {
   trustedMutationRequestProblem,
 } from "../../../lib/server/trusted-mutation-request";
-import { mediaOutputPath } from "../../../lib/server/media-output-path";
+import {
+  mediaOutputPath,
+  suggestedMediaOutputPath,
+} from "../../../lib/server/media-output-path";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -94,20 +96,15 @@ function sourceDescription(selection: DiscSelection): string {
   return `DVD title ${sourceIdentity.titleNumber}, chapters ${sourceIdentity.chapterStart}–${sourceIdentity.chapterEnd}`;
 }
 
-function suggestedOutputPath(
-  title: string,
-  year: number | null,
-  mediaLibraryPath: string,
+function outputPathSelectionQualifier(
+  selection: DiscSelection,
+  hasMultipleSelections: boolean,
 ): string | null {
-  const pathTitle = title.replaceAll("/", "-").replaceAll("\0", "").trim();
-  if (pathTitle === "" || pathTitle === "." || pathTitle === "..") {
+  if (!hasMultipleSelections) {
     return null;
   }
-  const mediaName = year === null ? pathTitle : `${pathTitle} (${year})`;
-  return mediaOutputPath(
-    join(mediaLibraryPath, mediaName, `${mediaName}.mkv`),
-    mediaLibraryPath,
-  );
+  const description = selection.label?.trim() || sourceDescription(selection);
+  return `${description} ${selection.id.slice(-8)}`;
 }
 
 function readQueueOptions(
@@ -133,10 +130,19 @@ function readQueueOptions(
     });
     const hasNextProfile = profileRecords.length > ENCODE_PROFILE_PAGE_SIZE;
     const profiles = profileRecords.slice(0, ENCODE_PROFILE_PAGE_SIZE);
-    const mediaItems = snapshot.catalog.listMediaItems({
-      ids: [...new Set(selections.map((selection) => selection.mediaItemId))],
-    });
+    const mediaItemIds = [
+      ...new Set(selections.map((selection) => selection.mediaItemId)),
+    ];
+    const mediaItems = readMediaItemsWithAncestors(
+      snapshot.catalog,
+      mediaItemIds,
+    );
     const mediaItemsById = new Map(mediaItems.map((item) => [item.id, item]));
+    const mediaItemIdsWithMultipleSelections = new Set(
+      snapshot.catalog.listMediaItemMaintenance({ ids: mediaItemIds })
+        .filter((item) => item.discSelectionReferenceCount > 1)
+        .map((item) => item.mediaItemId),
+    );
     return {
       selections: selections.map((selection) => {
         const mediaItem = mediaItemsById.get(selection.mediaItemId);
@@ -146,11 +152,17 @@ function readQueueOptions(
           mediaTitle: mediaItem?.title ?? "Unknown Media Item",
           mediaYear: mediaItem?.year ?? null,
           sourceDescription: sourceDescription(selection),
-          suggestedOutputPath: suggestedOutputPath(
-            mediaItem?.title ?? "Unknown Media Item",
-            mediaItem?.year ?? null,
-            mediaLibraryPath,
-          ),
+          suggestedOutputPath: mediaItem === undefined
+            ? null
+            : suggestedMediaOutputPath({
+              item: mediaItem,
+              mediaItemsById,
+              mediaLibraryPath,
+              selectionQualifier: outputPathSelectionQualifier(
+                selection,
+                mediaItemIdsWithMultipleSelections.has(selection.mediaItemId),
+              ),
+            }),
         };
       }),
       profiles: profiles.map((profile) => ({

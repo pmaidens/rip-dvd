@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -12,6 +14,7 @@ function createSelection(
   access: ReturnType<typeof dataAccessFixture.create>,
   suffix: string,
 ) {
+  const contentId = `sha256:${createHash("sha256").update(suffix).digest("hex")}`;
   const drive = access.catalog.upsertOpticalDrive({
     devicePath: `/dev/${suffix}`,
     isPresent: true,
@@ -19,7 +22,18 @@ function createSelection(
   const disc = access.catalog.registerDetectedDisc({
     opticalDriveId: drive.id,
     discKind: "dvd",
-    fingerprint: `encode-api-${suffix}`,
+    fingerprint: contentId,
+    scanData: {
+      schemaVersion: 2,
+      contentId,
+      titles: [1, 2, 3, 4].map((number) => ({
+        number,
+        durationSeconds: 2_400,
+        chapters: 8,
+        audioStreams: [],
+        subtitles: [],
+      })),
+    },
   });
   access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
   access.catalog.updateDetectedDiscStatus(disc.id, "approved");
@@ -28,7 +42,7 @@ function createSelection(
     discKind: "dvd",
     archiveFormat: "iso",
     archivePath: `/media/originals/Encode API ${suffix}.iso`,
-    fingerprint: `encode-api-${suffix}`,
+    fingerprint: contentId,
   });
   const item = access.catalog.createMediaItem({
     kind: "movie",
@@ -105,6 +119,91 @@ describe("Encode Jobs API", () => {
         hasNext: false,
       },
     });
+  });
+
+  it("suggests hierarchical and selection-specific final output paths", async () => {
+    const access = dataAccessFixture.create();
+    const reviewed = createSelection(access, "suggestions");
+    const alternateMovieSelection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: reviewed.archive.id,
+      mediaItemId: reviewed.item.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 2 },
+    });
+    const trailer = access.catalog.createMediaItem({
+      parentId: reviewed.item.id,
+      kind: "trailer",
+      title: "Trailer",
+    });
+    const trailerSelection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: reviewed.archive.id,
+      mediaItemId: trailer.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 3 },
+    });
+    const show = access.catalog.createMediaItem({
+      kind: "tv_show",
+      title: "Example Show",
+      year: 2020,
+    });
+    const season = access.catalog.createMediaItem({
+      parentId: show.id,
+      kind: "season",
+      title: "Season Two",
+      seasonNumber: 2,
+    });
+    const episode = access.catalog.createMediaItem({
+      parentId: season.id,
+      kind: "episode",
+      title: "Third Episode",
+      episodeNumber: 3,
+    });
+    const episodeSelection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: reviewed.archive.id,
+      mediaItemId: episode.id,
+      sourceIdentity: {
+        kind: "dvd_chapters",
+        titleNumber: 4,
+        chapterStart: 1,
+        chapterEnd: 2,
+      },
+    });
+    completeCatalogReview(access, reviewed.archive.id);
+
+    const response = await createEncodeJobsRoute(
+      new Request("http://localhost:3000/api/encode-jobs"),
+      () => access,
+      () => ({
+        mediaLibraryPath: "/media/movies",
+        webTrustedOrigin: "http://localhost:3000",
+      }),
+    );
+    const body = await response.json() as {
+      selections: Array<{ id: string; suggestedOutputPath: string }>;
+    };
+    const pathsBySelectionId = new Map(
+      body.selections.map((selection) => [
+        selection.id,
+        selection.suggestedOutputPath,
+      ]),
+    );
+    const movieDirectory = "/media/movies/Encode API suggestions (2026)";
+
+    expect(pathsBySelectionId.get(reviewed.selection.id)).toBe(
+      `${movieDirectory}/Encode API suggestions (2026) - DVD main feature ${
+        reviewed.selection.id.slice(-8)
+      }.mkv`,
+    );
+    expect(pathsBySelectionId.get(alternateMovieSelection.id)).toBe(
+      `${movieDirectory}/Encode API suggestions (2026) - DVD title 2 ${
+        alternateMovieSelection.id.slice(-8)
+      }.mkv`,
+    );
+    expect(pathsBySelectionId.get(trailerSelection.id)).toBe(
+      `${movieDirectory}/extras/Trailer.mkv`,
+    );
+    expect(pathsBySelectionId.get(episodeSelection.id)).toBe(
+      "/media/movies/Example Show (2020)/Season 02/" +
+        "Example Show (2020) - S02E03 - Third Episode.mkv",
+    );
   });
 
   it("bounds and pages active DVD profile options independently of selections", async () => {
