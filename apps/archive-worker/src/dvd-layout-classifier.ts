@@ -22,6 +22,21 @@ const DVD_PRIVATE_STREAM_2_START_CODE = 0x0000_01bf;
 const DVD_PROGRAM_STREAM_PACK_START_CODE = 0x0000_01ba;
 const UDF_EXTENT_LENGTH_MASK = 0x3fff_ffff;
 const UDF_EXTENT_TYPE_MASK = 0xc000_0000;
+const SUPPORTED_DVD_VM_LINK_SUB_OPERATIONS = new Set([
+  0,
+  1,
+  2,
+  3,
+  5,
+  6,
+  7,
+  9,
+  10,
+  11,
+  12,
+  13,
+  16,
+]);
 const REQUIRED_DVD_VIDEO_PATHS = [
   "VIDEO_TS/VIDEO_TS.IFO",
   "VIDEO_TS/VIDEO_TS.BUP",
@@ -296,6 +311,12 @@ function validateUdfTag(
   if (!expectedIdentifiers.includes(identifier)) {
     throw new Error("DVD UDF descriptor has an unexpected type");
   }
+  if (
+    ![2, 3].includes(buffer.readUInt16LE(2)) ||
+    buffer[5] !== 0
+  ) {
+    throw new Error("DVD UDF descriptor tag is malformed");
+  }
   if (buffer.readUInt32LE(12) !== expectedLocation) {
     throw new Error("DVD UDF descriptor tag location is invalid");
   }
@@ -341,6 +362,109 @@ function readUdfLongAllocationDescriptor(
     logicalBlockNumber: buffer.readUInt32LE(offset + 4),
     partitionReferenceNumber: buffer.readUInt16LE(offset + 8),
   };
+}
+
+function udfEntityIdentifier(buffer: Buffer, offset: number): string {
+  if (offset < 0 || offset + 32 > buffer.byteLength || buffer[offset] !== 0) {
+    throw new Error("DVD UDF entity identifier is malformed");
+  }
+  const rawIdentifier = buffer.subarray(offset + 1, offset + 24);
+  const terminatorIndex = rawIdentifier.indexOf(0);
+  const identifier = terminatorIndex === -1
+    ? rawIdentifier
+    : rawIdentifier.subarray(0, terminatorIndex);
+  if (
+    identifier.length === 0 ||
+    identifier.some((byte) => byte < 0x20 || byte > 0x7e) ||
+    terminatorIndex !== -1 &&
+      rawIdentifier.subarray(terminatorIndex).some((byte) => byte !== 0)
+  ) {
+    throw new Error("DVD UDF entity identifier is malformed");
+  }
+  return identifier.toString("ascii");
+}
+
+function validateDvdInlineExtendedAttributes(
+  content: Buffer,
+  expectedTagLocation: number,
+): void {
+  if (content.byteLength < 24 || content.byteLength % 4 !== 0) {
+    throw new Error("DVD UDF inline extended attributes are malformed");
+  }
+  validateUdfTag(content, [262], expectedTagLocation);
+  const implementationAttributesLocation = content.readUInt32LE(16);
+  const applicationAttributesLocation = content.readUInt32LE(20);
+  if (
+    implementationAttributesLocation !== 24 ||
+    applicationAttributesLocation < implementationAttributesLocation ||
+    applicationAttributesLocation !== content.byteLength ||
+    applicationAttributesLocation % 4 !== 0
+  ) {
+    throw new Error("DVD UDF inline extended attributes are unsupported");
+  }
+  const seenIdentifiers = new Set<string>();
+  let offset = implementationAttributesLocation;
+  while (offset < applicationAttributesLocation) {
+    if (offset + 48 > applicationAttributesLocation) {
+      throw new Error("DVD UDF inline extended attribute is truncated");
+    }
+    const attribute = content.subarray(offset);
+    const attributeLength = attribute.readUInt32LE(8);
+    const implementationUseLength = attribute.readUInt32LE(12);
+    if (
+      attribute.readUInt32LE(0) !== 2_048 ||
+      attribute[4] !== 1 ||
+      attribute.subarray(5, 8).some((byte) => byte !== 0) ||
+      attributeLength < 48 ||
+      attributeLength % 4 !== 0 ||
+      offset + attributeLength > applicationAttributesLocation ||
+      implementationUseLength > attributeLength - 48 ||
+      attributeLength >= DVD_SECTOR_SIZE_BYTES &&
+        (offset % DVD_SECTOR_SIZE_BYTES !== 0 ||
+          attributeLength % DVD_SECTOR_SIZE_BYTES !== 0)
+    ) {
+      throw new Error("DVD UDF inline extended attribute is malformed");
+    }
+    const identifier = udfEntityIdentifier(attribute, 16);
+    if (seenIdentifiers.has(identifier)) {
+      throw new Error("DVD UDF inline extended attributes are ambiguous");
+    }
+    seenIdentifiers.add(identifier);
+    let expectedImplementationUseLength: number;
+    if (identifier === "*UDF FreeEASpace") {
+      expectedImplementationUseLength = 4;
+      if (attribute.readUInt16LE(50) !== 0) {
+        throw new Error("DVD UDF free extended attribute is malformed");
+      }
+    } else if (identifier === "*UDF DVD CGMS Info") {
+      expectedImplementationUseLength = 8;
+      const copyrightManagement = attribute[50]!;
+      if (
+        (copyrightManagement & 0x4f) !== 0 ||
+        (copyrightManagement & 0x80) === 0 &&
+          (copyrightManagement & 0x30) !== 0 ||
+        attribute[51] !== 0 ||
+        attribute[52]! > 1 ||
+        attribute.subarray(53, 56).some((byte) => byte !== 0)
+      ) {
+        throw new Error("DVD UDF copyright attribute is malformed");
+      }
+    } else {
+      throw new Error("DVD UDF inline extended attribute is unsupported");
+    }
+    if (
+      implementationUseLength !== expectedImplementationUseLength ||
+      attribute.subarray(0, 48).reduce(
+          (checksum, byte) => (checksum + byte) & 0xffff,
+          0,
+        ) !== attribute.readUInt16LE(48) ||
+      attribute.subarray(48 + implementationUseLength, attributeLength)
+        .some((byte) => byte !== 0)
+    ) {
+      throw new Error("DVD UDF inline extended attribute is malformed");
+    }
+    offset += attributeLength;
+  }
 }
 
 function decodeOstaCompressedUnicode(value: Buffer): string {
@@ -1522,7 +1646,11 @@ async function analyzeDvdImageLayout({
     const validateLink = () => {
       const operation = dvdVmBits(command, 51, 4);
       if (operation === 1) {
-        if (dvdVmBits(command, 4, 5) > 0x10) {
+        if (
+          !SUPPORTED_DVD_VM_LINK_SUB_OPERATIONS.has(
+            dvdVmBits(command, 4, 5),
+          )
+        ) {
           throw new Error("DVD VM link command target is invalid");
         }
         return;
@@ -1681,7 +1809,9 @@ async function analyzeDvdImageLayout({
         validateLink();
       } else if (
         commandClass >= 4 &&
-        dvdVmBits(command, 4, 5) > 0x10
+        !SUPPORTED_DVD_VM_LINK_SUB_OPERATIONS.has(
+          dvdVmBits(command, 4, 5),
+        )
       ) {
         throw new Error("DVD VM link command target is invalid");
       }
@@ -2759,6 +2889,14 @@ async function analyzeDvdImageLayout({
       );
       const fileType = fileEntry[27]!;
       const allocationType = fileEntry.readUInt16LE(34) & 0x0007;
+      const unsupportedReferenceOffsets = identifier === 261
+        ? [112]
+        : [136, 152];
+      if (unsupportedReferenceOffsets.some((offset) =>
+        fileEntry.subarray(offset, offset + 16).some((byte) => byte !== 0)
+      )) {
+        throw new Error("DVD UDF file entry references are unsupported");
+      }
       const informationLengthBigInt = fileEntry.readBigUInt64LE(56);
       if (informationLengthBigInt > BigInt(Number.MAX_SAFE_INTEGER)) {
         throw new Error("DVD UDF file length is invalid");
@@ -2780,6 +2918,12 @@ async function analyzeDvdImageLayout({
       ) {
         throw new Error("DVD UDF file entry is malformed");
       }
+      if (extendedAttributeLength > 0) {
+        validateDvdInlineExtendedAttributes(
+          fileEntry.subarray(descriptorBaseOffset, allocationOffset),
+          icb.logicalBlockNumber,
+        );
+      }
       const isDirectory = fileType === 4;
       if (!isDirectory && fileType !== 5) {
         throw new Error("DVD UDF file type is unsupported");
@@ -2792,6 +2936,9 @@ async function analyzeDvdImageLayout({
         startLba: number;
       }> = [];
       let fileByteOffset = 0;
+      if (allocationType === 2 || allocationType > 3) {
+        throw new Error("DVD UDF allocation descriptors are unsupported");
+      }
       if (allocationType === 3) {
         if (allocationDescriptorLength < informationLength) {
           throw new Error("DVD UDF embedded file data is truncated");
@@ -2799,13 +2946,8 @@ async function analyzeDvdImageLayout({
       } else {
         const descriptorSize = allocationType === 0
           ? 8
-          : allocationType === 1
-          ? 16
-          : allocationType === 2
-          ? 20
-          : 0;
-        if (descriptorSize === 0 ||
-          allocationDescriptorLength % descriptorSize !== 0) {
+          : 16;
+        if (allocationDescriptorLength % descriptorSize !== 0) {
           throw new Error("DVD UDF allocation descriptors are unsupported");
         }
         for (
@@ -2822,16 +2964,10 @@ async function analyzeDvdImageLayout({
           if (extentType !== 0) {
             throw new Error("DVD UDF continuation or sparse extent is unsupported");
           }
-          const logicalBlockNumber = allocationType === 0
-            ? fileEntry.readUInt32LE(offset + 4)
-            : allocationType === 1
-            ? fileEntry.readUInt32LE(offset + 4)
-            : fileEntry.readUInt32LE(offset + 12);
+          const logicalBlockNumber = fileEntry.readUInt32LE(offset + 4);
           const partitionReferenceNumber = allocationType === 0
             ? icb.partitionReferenceNumber
-            : allocationType === 1
-            ? fileEntry.readUInt16LE(offset + 8)
-            : fileEntry.readUInt16LE(offset + 16);
+            : fileEntry.readUInt16LE(offset + 8);
           const startLba = partitionAbsoluteLba(
             {
               extentLength,

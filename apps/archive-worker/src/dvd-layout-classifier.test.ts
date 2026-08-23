@@ -436,10 +436,19 @@ function writeSingleTitleProgramChainCommand(
   );
 }
 
-function writeUdfTag(buffer: Buffer, identifier: number, location = 0) {
+function writeUdfTag(
+  buffer: Buffer,
+  identifier: number,
+  location = 0,
+  {
+    reserved = 0,
+    version = 2,
+  }: { reserved?: number; version?: number } = {},
+) {
   buffer.writeUInt16LE(identifier, 0);
-  buffer.writeUInt16LE(2, 2);
+  buffer.writeUInt16LE(version, 2);
   buffer[4] = 0;
+  buffer[5] = reserved;
   buffer.writeUInt16LE(1, 6);
   buffer.writeUInt16LE(0, 8);
   buffer.writeUInt16LE(0, 10);
@@ -514,6 +523,39 @@ function writeUdfFileEntry(
   entry.writeUInt32LE(allocationByteCount, 176);
   entry.writeUInt32LE(dataLba, 180);
   writeUdfTag(entry, 261, fileEntryLba - 300);
+}
+
+function addDvdCopyrightExtendedAttribute(
+  fileEntry: Buffer,
+  logicalBlockNumber: number,
+) {
+  const originalAllocationLength = fileEntry.readUInt32LE(172);
+  const originalAllocation = Buffer.from(fileEntry.subarray(
+    176,
+    176 + originalAllocationLength,
+  ));
+  const extendedAttributeLength = 80;
+  fileEntry.fill(0, 176, 176 + extendedAttributeLength);
+  const header = fileEntry.subarray(176, 200);
+  header.writeUInt32LE(24, 16);
+  header.writeUInt32LE(extendedAttributeLength, 20);
+  writeUdfTag(header, 262, logicalBlockNumber);
+  const attribute = fileEntry.subarray(200, 256);
+  attribute.writeUInt32LE(2_048, 0);
+  attribute[4] = 1;
+  attribute.writeUInt32LE(attribute.byteLength, 8);
+  attribute.writeUInt32LE(8, 12);
+  attribute.write("*UDF DVD CGMS Info", 17, "ascii");
+  attribute.writeUInt16LE(
+    attribute.subarray(0, 48).reduce(
+      (checksum, byte) => (checksum + byte) & 0xffff,
+      0,
+    ),
+    48,
+  );
+  fileEntry.writeUInt32LE(extendedAttributeLength, 168);
+  fileEntry.writeUInt32LE(originalAllocationLength, 172);
+  originalAllocation.copy(fileEntry, 176 + extendedAttributeLength);
 }
 
 function writeUdfDirectory(
@@ -1088,6 +1130,34 @@ describe("retained DVD image layout completeness", () => {
     })).rejects.toThrow("DVD UDF descriptor tag location is invalid");
   });
 
+  it.each([
+    ["descriptor version", { version: 0 }],
+    ["reserved byte", { reserved: 1 }],
+  ])("fails closed on a malformed UDF tag %s", async (
+    _field,
+    tagOptions,
+  ) => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    writeUdfTag(
+      image.subarray(
+        256 * DVD_SECTOR_SIZE_BYTES,
+        257 * DVD_SECTOR_SIZE_BYTES,
+      ),
+      2,
+      256,
+      tagOptions,
+    );
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD UDF descriptor tag is malformed");
+  });
+
   it("rejects a reserve UDF partition that crosses the candidate boundary", async () => {
     const image = syntheticCompleteDvdImage({
       includeIso: false,
@@ -1192,6 +1262,90 @@ describe("retained DVD image layout completeness", () => {
     })).rejects.toThrow(
       "DVD UDF file set descriptor references are unsupported",
     );
+  });
+
+  it.each([
+    ["file-entry extended attributes", 261, 112],
+    ["extended-file-entry extended attributes", 266, 136],
+    ["extended-file-entry stream directory", 266, 152],
+  ])("fails closed on unsupported UDF %s references", async (
+    _reference,
+    identifier,
+    referenceOffset,
+  ) => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    const fileEntry = image.subarray(
+      301 * DVD_SECTOR_SIZE_BYTES,
+      302 * DVD_SECTOR_SIZE_BYTES,
+    );
+    fileEntry[referenceOffset] = 1;
+    writeUdfTag(fileEntry, identifier, 1);
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD UDF file entry references are unsupported");
+  });
+
+  it("fails closed on UDF extended allocation descriptors", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    const rootFileEntryOffset = 301 * DVD_SECTOR_SIZE_BYTES;
+    image.writeUInt16LE(
+      image.readUInt16LE(rootFileEntryOffset + 34) | 2,
+      rootFileEntryOffset + 34,
+    );
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD UDF allocation descriptors are unsupported");
+  });
+
+  it("accepts a well-formed DVD copyright extended attribute", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    addDvdCopyrightExtendedAttribute(
+      image.subarray(
+        301 * DVD_SECTOR_SIZE_BYTES,
+        302 * DVD_SECTOR_SIZE_BYTES,
+      ),
+      1,
+    );
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).resolves.toEqual({ maximumReferencedLba: 599 });
+  });
+
+  it("fails closed on a malformed inline UDF extended attribute", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    const rootFileEntry = image.subarray(
+      301 * DVD_SECTOR_SIZE_BYTES,
+      302 * DVD_SECTOR_SIZE_BYTES,
+    );
+    addDvdCopyrightExtendedAttribute(rootFileEntry, 1);
+    rootFileEntry.writeUInt32LE(55, 200 + 8);
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD UDF inline extended attribute is malformed");
   });
 
   it("bounds UDF volume descriptor sequence reads", async () => {
@@ -1416,6 +1570,33 @@ describe("retained DVD image layout completeness", () => {
         candidateBoundaryLba: 600,
         imagePath: fixture.imagePath,
       })).rejects.toThrow("DVD VM set command is unsupported");
+    },
+  );
+
+  it.each(
+    [1n, 4n, 5n, 6n].flatMap((commandClass) =>
+      [4n, 8n, 14n, 15n].map((linkSubOperation) => [
+        commandClass,
+        linkSubOperation,
+      ] as const)
+    ),
+  )(
+    "fails closed on reserved class-%s VM LinkSub operation %s",
+    async (commandClass, linkSubOperation) => {
+      const image = syntheticCompleteDvdImage({
+        includeIso: true,
+        includeUdf: false,
+      });
+      const command = commandClass === 1n
+        ? commandClass << 61n | 1n << 48n | linkSubOperation
+        : commandClass << 61n | linkSubOperation;
+      writeSingleTitleProgramChainCommand(image, command);
+      const fixture = writeFixture(image);
+
+      await expect(proveDvdImageLayoutCompleteness({
+        candidateBoundaryLba: 600,
+        imagePath: fixture.imagePath,
+      })).rejects.toThrow("DVD VM link command target is invalid");
     },
   );
 
