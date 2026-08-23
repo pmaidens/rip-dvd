@@ -1,6 +1,7 @@
 import {
   createCleanReadArchiveIntegrityEvidence,
   createDataAccess,
+  createNormalDvdArchiveBoundaryEvidence,
   type DataAccess,
   type EncodeOutputFilesystemIdentity,
 } from "@rip-dvd/data-access";
@@ -766,6 +767,7 @@ describe("readDashboardSnapshot", () => {
     const job = access.archiveJobs.startForInspection(inspection.id, "worker-1")!;
     access.archiveJobs.publish(job, {
       archivePath: "/media/originals/completed-inspection.iso",
+      boundaryEvidence: createNormalDvdArchiveBoundaryEvidence(9),
       integrityEvidence: createCleanReadArchiveIntegrityEvidence(
         "test-clean-v1",
       ),
@@ -781,6 +783,19 @@ describe("readDashboardSnapshot", () => {
             id: inspection.id,
             archiveWorkFulfilled: true,
           }),
+        }),
+      ],
+    });
+    expect(afterArchive.catalogReview).toEqual({
+      status: "loaded",
+      items: [
+        expect.objectContaining({
+          boundaryEvidence: {
+            policyVersion: "dvd-archive-boundary-v1",
+            reportedSizeBytes: 9,
+            publishedSizeBytes: 9,
+            excludedSectorCount: 0,
+          },
         }),
       ],
     });
