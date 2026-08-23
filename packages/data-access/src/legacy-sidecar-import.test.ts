@@ -28,6 +28,7 @@ import { decodeDvdTitleMap } from "./dvd-scan.js";
 import {
   createCleanReadArchiveIntegrityEvidence,
   createDataAccess,
+  createNormalDvdArchiveBoundaryEvidence,
 } from "./index.js";
 import { createLegacySidecarDataAccess } from "./legacy-sidecars.js";
 import { createTemporaryDirectoryFixture } from "./legacy-sidecar.test-support.js";
@@ -401,7 +402,7 @@ describe("legacy sidecar import", () => {
     ["stored-size", undefined],
     ["NULL-size", null],
   ] as const)(
-    "reconciles an upgraded %s identity before publication and refuses duplicate provenance",
+    "rejects an upgraded %s publication without source-inspection boundary evidence",
     (_sizeState, legacySizeBytes) => {
       const fixture = createUnreconciledLegacyDvdFixture(
         SAME_DVD_CONTENT_ID,
@@ -458,6 +459,7 @@ describe("legacy sidecar import", () => {
       expect(() =>
         fixture.access.archiveJobs.publish(claim, {
           archivePath: join(dirname(fixture.archivePath), "Duplicate.iso"),
+          boundaryEvidence: createNormalDvdArchiveBoundaryEvidence(14),
           integrityEvidence: createCleanReadArchiveIntegrityEvidence(
             "test-clean-v1",
           ),
@@ -469,7 +471,7 @@ describe("legacy sidecar import", () => {
       expect(fixture.access.catalog.listOriginalDiscArchives()).toEqual([
         expect.objectContaining({
           archivePath: realpathSync(fixture.archivePath),
-          sizeBytes: 14,
+          sizeBytes: legacySizeBytes === null ? null : 14,
         }),
       ]);
       fixture.access.close();

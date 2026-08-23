@@ -1,4 +1,7 @@
-import { createCleanReadArchiveIntegrityEvidence } from "@rip-dvd/data-access";
+import {
+  createCleanReadArchiveIntegrityEvidence,
+  createNormalDvdArchiveBoundaryEvidence,
+} from "@rip-dvd/data-access";
 import type { LegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 import {
   beginSettledDiscInspectionForTest,
@@ -132,6 +135,7 @@ export function seedFailedArchiveJobAndQueuedDuplicate(
       );
       return access.archiveJobs.publish(publishingJob, {
         archivePath: `/media/originals/${fingerprint}.iso`,
+        boundaryEvidence: createNormalDvdArchiveBoundaryEvidence(9),
         integrityEvidence: createCleanReadArchiveIntegrityEvidence(
           "test-clean-v1",
         ),

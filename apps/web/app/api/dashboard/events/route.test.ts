@@ -1,5 +1,6 @@
 import {
   createCleanReadArchiveIntegrityEvidence,
+  createNormalDvdArchiveBoundaryEvidence,
   type DataAccess,
 } from "@rip-dvd/data-access";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -452,6 +453,7 @@ describe("GET /api/dashboard/events", () => {
     )!;
     access.archiveJobs.publish(retryClaim, {
       archivePath: "/media/originals/lifecycle.iso",
+      boundaryEvidence: createNormalDvdArchiveBoundaryEvidence(9),
       integrityEvidence: createCleanReadArchiveIntegrityEvidence(
         "test-clean-v1",
       ),

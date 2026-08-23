@@ -1,0 +1,1 @@
+ALTER TABLE `archive_jobs` ADD `disc_inspection_id` text REFERENCES disc_inspections(id) ON DELETE RESTRICT;

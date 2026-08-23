@@ -1,5 +1,8 @@
 import type { DataAccess } from "@rip-dvd/data-access";
-import { ARCHIVE_JOB_LEASE_DURATION_MS } from "@rip-dvd/data-access";
+import {
+  ARCHIVE_JOB_LEASE_DURATION_MS,
+  createNormalDvdArchiveBoundaryEvidence,
+} from "@rip-dvd/data-access";
 import { decodeDvdTitleMap } from "@rip-dvd/data-access/dvd-scan";
 
 import type { OpticalDriveHardware } from "./archive-worker-contracts.js";
@@ -150,6 +153,8 @@ export async function runArchiveJob({
           authorizeClaim();
           access.archiveJobs.publish(claim, {
             archivePath: preserved.archivePath,
+            boundaryEvidence:
+              createNormalDvdArchiveBoundaryEvidence(archiveSizeBytes),
             integrityEvidence: preserved.integrityEvidence,
             sizeBytes: preserved.sizeBytes,
           });

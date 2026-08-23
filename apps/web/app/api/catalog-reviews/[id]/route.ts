@@ -1,4 +1,5 @@
 import {
+  archiveBoundaryEvidenceFromRecord,
   decodeArchivedDvdTitles,
   DomainInvariantError,
   MEDIA_ITEM_KINDS,
@@ -364,6 +365,7 @@ function readCatalogReview(
         discLabel: disc.volumeLabel ?? "Unlabeled disc",
         discKind: archive.discKind,
         archiveFormat: archive.archiveFormat,
+        boundaryEvidence: archiveBoundaryEvidenceFromRecord(archive),
         integrity: archive.integrity,
         badSectorCount: archive.badSectorCount,
         badAreaCount: archive.badAreaCount,

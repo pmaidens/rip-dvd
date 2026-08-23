@@ -26,6 +26,7 @@ export function startArchiveJobForTest(
   access: DataAccess,
   disc: DetectedDisc,
   workerId: string,
+  reportedSizeBytes?: number,
 ): RunningArchiveJob {
   access.archiveRequests.create({ detectedDiscId: disc.id });
   const started = beginSettledDiscInspectionForTest(access, {
@@ -35,6 +36,17 @@ export function startArchiveJobForTest(
   });
   let inspection = started.inspection;
   if (started.claim) {
+    if (reportedSizeBytes !== undefined) {
+      access.discInspections.record(started.claim, {
+        type: "metadata",
+        volumeLabel: disc.volumeLabel,
+        titleCount: 0,
+        chapterCount: 0,
+        audioStreamCount: 0,
+        subtitleStreamCount: 0,
+        totalBytes: reportedSizeBytes,
+      });
+    }
     inspection = access.discInspections.record(started.claim, {
       type: "complete",
       detectedDiscId: disc.id,

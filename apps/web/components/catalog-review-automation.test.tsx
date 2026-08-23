@@ -37,6 +37,7 @@ function review(selectionCount = 0): CatalogReviewDto {
       discLabel: "THE_IRON_GIANT_1999",
       discKind: "dvd",
       archiveFormat: "iso",
+      boundaryEvidence: null,
       integrity: "clean_read",
       badSectorCount: 0,
       badAreaCount: 0,

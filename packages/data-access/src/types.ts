@@ -27,6 +27,7 @@ import type {
   DiscSelectionSourceIdentity,
   DiscSelectionSourceIdentityInput,
 } from "./disc-selection-source-identity.js";
+import type { NormalDvdArchiveBoundaryEvidence } from "./archive-boundary.js";
 
 export type ArchiveFormat = (typeof ARCHIVE_FORMATS)[number];
 export type ArchiveIntegrity = (typeof ARCHIVE_INTEGRITIES)[number];
@@ -207,6 +208,10 @@ export interface OriginalDiscArchive {
   archivePath: string;
   fingerprint: string;
   sizeBytes: number | null;
+  boundaryPolicyVersion: string | null;
+  boundaryReportedSizeBytes: number | null;
+  boundaryPublishedSizeBytes: number | null;
+  boundaryExcludedSectorCount: number | null;
   integrity: ArchiveIntegrity;
   integrityPolicyVersion: string | null;
   badSectorCount: number | null;
@@ -534,6 +539,7 @@ export interface EncodingProfile {
 export interface ArchiveJob {
   id: ArchiveJobId;
   archiveRequestId: ArchiveRequestId;
+  discInspectionId: DiscInspectionId | null;
   detectedDiscId: DetectedDiscId;
   originalDiscArchiveId: OriginalDiscArchiveId | null;
   attemptOrdinal: number;
@@ -1006,6 +1012,7 @@ export interface ArchiveJobAccess {
     claim: RunningArchiveJob,
     input: {
       archivePath: string;
+      boundaryEvidence: NormalDvdArchiveBoundaryEvidence;
       sizeBytes: number;
       integrityEvidence: ArchiveIntegrityEvidence;
     },

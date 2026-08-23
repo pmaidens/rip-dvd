@@ -356,6 +356,10 @@ export const originalDiscArchives = sqliteTable(
     archivePath: text("archive_path").notNull(),
     fingerprint: text("fingerprint").notNull(),
     sizeBytes: integer("size_bytes"),
+    boundaryPolicyVersion: text("boundary_policy_version"),
+    boundaryReportedSizeBytes: integer("boundary_reported_size_bytes"),
+    boundaryPublishedSizeBytes: integer("boundary_published_size_bytes"),
+    boundaryExcludedSectorCount: integer("boundary_excluded_sector_count"),
     integrity: text("integrity", { enum: ARCHIVE_INTEGRITIES })
       .notNull()
       .default("unknown"),
@@ -406,6 +410,10 @@ export const originalDiscArchives = sqliteTable(
     check(
       "original_disc_archives_size_check",
       sql`${table.sizeBytes} is null or ${table.sizeBytes} >= 0`,
+    ),
+    check(
+      "original_disc_archives_boundary_evidence_check",
+      sql`(${table.boundaryPolicyVersion} is null and ${table.boundaryReportedSizeBytes} is null and ${table.boundaryPublishedSizeBytes} is null and ${table.boundaryExcludedSectorCount} is null) or (${table.discKind} = 'dvd' and typeof(${table.boundaryPolicyVersion}) = 'text' and length(${table.boundaryPolicyVersion}) between 1 and 128 and typeof(${table.boundaryReportedSizeBytes}) = 'integer' and ${table.boundaryReportedSizeBytes} between 1 and 9000000000 and typeof(${table.boundaryPublishedSizeBytes}) = 'integer' and ${table.boundaryPublishedSizeBytes} = ${table.boundaryReportedSizeBytes} and ${table.boundaryPublishedSizeBytes} = ${table.sizeBytes} and typeof(${table.boundaryExcludedSectorCount}) = 'integer' and ${table.boundaryExcludedSectorCount} = 0)`,
     ),
     check(
       "original_disc_archives_integrity_check",
@@ -653,6 +661,9 @@ export const archiveJobs = sqliteTable(
       .$type<ArchiveRequestId>()
       .notNull()
       .references(() => archiveRequests.id, { onDelete: "restrict" }),
+    discInspectionId: text("disc_inspection_id")
+      .$type<DiscInspectionId>()
+      .references(() => discInspections.id, { onDelete: "restrict" }),
     detectedDiscId: text("detected_disc_id")
       .$type<DetectedDiscId>()
       .notNull()
