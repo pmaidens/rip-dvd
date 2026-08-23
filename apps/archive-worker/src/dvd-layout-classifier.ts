@@ -1673,20 +1673,16 @@ async function analyzeDvdImageLayout({
       }
       return;
     }
-    if (commandClass === 3) {
+    if (commandClass >= 3 && commandClass <= 6) {
       if (dvdVmBits(command, 59, 4) > 11) {
         throw new Error("DVD VM set command is unsupported");
       }
-      if (dvdVmBits(command, 51, 4) !== 0) {
+      if (commandClass === 3 && dvdVmBits(command, 51, 4) !== 0) {
         validateLink();
-      }
-      return;
-    }
-    if (commandClass >= 4 && commandClass <= 6) {
-      if (dvdVmBits(command, 59, 4) > 11) {
-        throw new Error("DVD VM set command is unsupported");
-      }
-      if (dvdVmBits(command, 4, 5) > 0x10) {
+      } else if (
+        commandClass >= 4 &&
+        dvdVmBits(command, 4, 5) > 0x10
+      ) {
         throw new Error("DVD VM link command target is invalid");
       }
       return;

@@ -9,6 +9,7 @@ import {
   nodeCommandRunner,
   type CommandRunner,
 } from "./optical-drive-command-runner.js";
+import { MAX_DVD_CONTENT_BYTES } from "./dvd-content-policy.js";
 import { dvdTitleMapsAgree } from "./dvd-title-map-verification.js";
 import { DVD_SECTOR_SIZE_BYTES } from "./dvd-recovery-contracts.js";
 import {
@@ -44,7 +45,6 @@ type DvdCandidateSnapshotFactory = (request: {
   signal: AbortSignal;
 }) => Promise<DvdCandidateSnapshot>;
 
-const MAX_DVD_IMAGE_BYTES = 9_000_000_000;
 const SNAPSHOT_BUFFER_BYTES = 8 * 1_024 * 1_024;
 const SNAPSHOT_TIMEOUT_MS = 5 * 60_000;
 
@@ -209,7 +209,7 @@ export function createNodeDvdCompletenessProver({
       if (
         !Number.isSafeInteger(candidateBoundaryLba) ||
         candidateBoundaryLba <= 0 ||
-        candidateBoundaryLba * DVD_SECTOR_SIZE_BYTES > MAX_DVD_IMAGE_BYTES
+        candidateBoundaryLba * DVD_SECTOR_SIZE_BYTES > MAX_DVD_CONTENT_BYTES
       ) {
         throw new Error("DVD completeness proof boundary is invalid");
       }
