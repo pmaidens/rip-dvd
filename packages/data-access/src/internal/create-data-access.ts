@@ -7552,6 +7552,7 @@ export function createDataAccessInternal(
               .values({
                 id,
                 archiveRequestId: request.id,
+                discInspectionId: inspectionId,
                 detectedDiscId: disc.id,
                 attemptOrdinal: attempt + 1,
                 status: "running",
@@ -8033,6 +8034,8 @@ export function createDataAccessInternal(
               detectedDiscId: archiveJobs.detectedDiscId,
               discKind: detectedDiscs.discKind,
               fingerprint: detectedDiscs.fingerprint,
+              sourceInspectionId: archiveJobs.discInspectionId,
+              sourceInspectionTotalBytes: discInspections.totalBytes,
             })
             .from(archiveJobs)
             .innerJoin(
@@ -8042,6 +8045,17 @@ export function createDataAccessInternal(
             .innerJoin(
               detectedDiscs,
               eq(detectedDiscs.id, archiveJobs.detectedDiscId),
+            )
+            .leftJoin(
+              discInspections,
+              and(
+                eq(discInspections.id, archiveJobs.discInspectionId),
+                eq(
+                  discInspections.detectedDiscId,
+                  archiveJobs.detectedDiscId,
+                ),
+                eq(discInspections.status, "completed"),
+              ),
             )
             .where(
               and(
@@ -8061,6 +8075,16 @@ export function createDataAccessInternal(
             .get();
           if (current === undefined) {
             throw new StaleJobAttemptError("archive job", claim.id);
+          }
+          if (
+            current.sourceInspectionId === null ||
+            current.sourceInspectionTotalBytes === null ||
+            current.sourceInspectionTotalBytes !==
+              boundaryEvidence.reportedSizeBytes
+          ) {
+            throw new DomainInvariantError(
+              "Archive Boundary Evidence does not match the source Disc Inspection",
+            );
           }
           return current;
         };

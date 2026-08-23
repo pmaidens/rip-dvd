@@ -661,6 +661,9 @@ export const archiveJobs = sqliteTable(
       .$type<ArchiveRequestId>()
       .notNull()
       .references(() => archiveRequests.id, { onDelete: "restrict" }),
+    discInspectionId: text("disc_inspection_id")
+      .$type<DiscInspectionId>()
+      .references(() => discInspections.id, { onDelete: "restrict" }),
     detectedDiscId: text("detected_disc_id")
       .$type<DetectedDiscId>()
       .notNull()
