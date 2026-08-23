@@ -1172,6 +1172,28 @@ describe("retained DVD image layout completeness", () => {
     })).rejects.toThrow("DVD UDF file set descriptor extent is truncated");
   });
 
+  it.each([
+    ["next file-set extent", 448],
+    ["system stream directory", 464],
+  ])("fails closed on an unsupported UDF %s reference", async (
+    _reference,
+    descriptorOffset,
+  ) => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    image[300 * DVD_SECTOR_SIZE_BYTES + descriptorOffset] = 1;
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow(
+      "DVD UDF file set descriptor references are unsupported",
+    );
+  });
+
   it("bounds UDF volume descriptor sequence reads", async () => {
     const image = syntheticCompleteDvdImage({
       includeIso: false,
@@ -1361,6 +1383,68 @@ describe("retained DVD image layout completeness", () => {
       candidateBoundaryLba: 600,
       imagePath: fixture.imagePath,
     })).rejects.toThrow("DVD VM link command target is invalid");
+  });
+
+  it("fails closed on a reserved VM system-set operation", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    writeSingleTitleProgramChainCommand(image, 2n << 61n | 4n << 56n);
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD VM system-set command is unsupported");
+  });
+
+  it.each([3n, 4n, 5n, 6n])(
+    "fails closed on a reserved class-%s VM set operation",
+    async (commandClass) => {
+      const image = syntheticCompleteDvdImage({
+        includeIso: true,
+        includeUdf: false,
+      });
+      writeSingleTitleProgramChainCommand(
+        image,
+        commandClass << 61n | 12n << 56n,
+      );
+      const fixture = writeFixture(image);
+
+      await expect(proveDvdImageLayoutCompleteness({
+        candidateBoundaryLba: 600,
+        imagePath: fixture.imagePath,
+      })).rejects.toThrow("DVD VM set command is unsupported");
+    },
+  );
+
+  it("fails closed when filesystem structures partially overlap", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    writeBothEndian32(
+      image,
+      16 * DVD_SECTOR_SIZE_BYTES + 156 + 10,
+      2 * DVD_SECTOR_SIZE_BYTES,
+    );
+    writeBothEndian32(
+      image,
+      42 * DVD_SECTOR_SIZE_BYTES + 10,
+      2 * DVD_SECTOR_SIZE_BYTES,
+    );
+    writeBothEndian32(
+      image,
+      42 * DVD_SECTOR_SIZE_BYTES + 34 + 10,
+      2 * DVD_SECTOR_SIZE_BYTES,
+    );
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD filesystem structures overlap ambiguously");
   });
 
   it("fails closed when a title command targets a missing VMGM PGC", async () => {

@@ -1,3 +1,14 @@
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 
 import type { CommandRunner } from "./optical-drive-command-runner.js";
@@ -51,12 +62,25 @@ function createRunner(navigationOutput = lsdvdOutput) {
     });
 }
 
+function createSnapshotFactory() {
+  const dispose = vi.fn().mockResolvedValue(undefined);
+  const verifyUnchanged = vi.fn().mockResolvedValue(undefined);
+  const snapshotFactory = vi.fn().mockResolvedValue({
+    dispose,
+    imagePath: "/private/snapshots/retained.iso",
+    verifyUnchanged,
+  });
+  return { dispose, snapshotFactory, verifyUnchanged };
+}
+
 describe("retained DVD completeness proof process", () => {
   it("returns the maximum LBA after the complete title and stream map agrees", async () => {
     const run = createRunner();
+    const snapshot = createSnapshotFactory();
     const prover = createNodeDvdCompletenessProver({
       classifierScriptPath: "/app/dvd-layout-classifier-cli.js",
       runner: { run },
+      snapshotFactory: snapshot.snapshotFactory,
     });
     const signal = new AbortController().signal;
 
@@ -72,7 +96,7 @@ describe("retained DVD completeness proof process", () => {
       [
         "/app/dvd-layout-classifier-cli.js",
         "proof",
-        "/private/originals/retained.partial",
+        "/private/snapshots/retained.iso",
         "600",
       ],
       expect.objectContaining({ signal }),
@@ -80,9 +104,92 @@ describe("retained DVD completeness proof process", () => {
     expect(run).toHaveBeenNthCalledWith(
       2,
       "rip-dvd-lsdvd",
-      ["-Oh", "-a", "-c", "-s", "/private/originals/retained.partial"],
+      ["-Oh", "-a", "-c", "-s", "/private/snapshots/retained.iso"],
       expect.objectContaining({ signal }),
     );
+    expect(snapshot.snapshotFactory).toHaveBeenCalledWith({
+      candidateByteCount: 600 * 2_048,
+      imagePath: "/private/originals/retained.partial",
+      signal,
+    });
+    expect(snapshot.verifyUnchanged).toHaveBeenCalledTimes(2);
+    expect(snapshot.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("runs both validators against one exact retained-prefix snapshot", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "dvd-proof-test-"));
+    const imagePath = join(directory, "retained.partial");
+    const candidateBoundaryLba = 600;
+    const candidateByteCount = candidateBoundaryLba * 2_048;
+    const source = Buffer.alloc(candidateByteCount + 2_048, 0x5a);
+    source.fill(0xa5, candidateByteCount);
+    writeFileSync(imagePath, source);
+    let snapshotPath: string | undefined;
+    let invocation = 0;
+    const run = vi.fn<CommandRunner["run"]>(async (
+      executable,
+      arguments_,
+    ) => {
+      invocation += 1;
+      const currentSnapshotPath = executable === process.execPath
+        ? arguments_[2]
+        : arguments_.at(-1);
+      expect(currentSnapshotPath).toBeDefined();
+      snapshotPath ??= currentSnapshotPath;
+      expect(currentSnapshotPath).toBe(snapshotPath);
+      expect(statSync(currentSnapshotPath!).size).toBe(candidateByteCount);
+      expect(readFileSync(currentSnapshotPath!).equals(
+        source.subarray(0, candidateByteCount),
+      )).toBe(true);
+      return {
+        exitCode: 0,
+        stderr: "",
+        stdout: invocation === 1
+          ? JSON.stringify({
+              maximumReferencedLba: 599,
+              protocolVersion: 1,
+            })
+          : lsdvdOutput,
+      };
+    });
+    try {
+      const prover = createNodeDvdCompletenessProver({ runner: { run } });
+
+      await expect(prover.prove({
+        candidateBoundaryLba,
+        expectedTitleMap,
+        imagePath,
+        signal: new AbortController().signal,
+      })).resolves.toEqual({ maximumReferencedLba: 599 });
+      expect(run).toHaveBeenCalledTimes(2);
+      expect(snapshotPath).toBeDefined();
+      expect(existsSync(snapshotPath!)).toBe(false);
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
+
+  it("disposes the snapshot when it changes during validation", async () => {
+    const run = createRunner();
+    const snapshot = createSnapshotFactory();
+    snapshot.verifyUnchanged.mockRejectedValueOnce(
+      new Error("DVD completeness snapshot changed during validation"),
+    );
+    const prover = createNodeDvdCompletenessProver({
+      runner: { run },
+      snapshotFactory: snapshot.snapshotFactory,
+    });
+
+    await expect(prover.prove({
+      candidateBoundaryLba: 600,
+      expectedTitleMap,
+      imagePath: "/private/originals/retained.partial",
+      signal: new AbortController().signal,
+    })).rejects.toThrow(
+      "DVD completeness snapshot changed during validation",
+    );
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(snapshot.dispose).toHaveBeenCalledTimes(1);
   });
 
   it.each([
@@ -93,7 +200,11 @@ describe("retained DVD completeness proof process", () => {
     navigationOutput,
   ) => {
     const run = createRunner(navigationOutput);
-    const prover = createNodeDvdCompletenessProver({ runner: { run } });
+    const snapshot = createSnapshotFactory();
+    const prover = createNodeDvdCompletenessProver({
+      runner: { run },
+      snapshotFactory: snapshot.snapshotFactory,
+    });
 
     await expect(prover.prove({
       candidateBoundaryLba: 600,
@@ -101,6 +212,7 @@ describe("retained DVD completeness proof process", () => {
       imagePath: "/private/originals/retained.partial",
       signal: new AbortController().signal,
     })).rejects.toThrow("DVD completeness proof changed the title map");
+    expect(snapshot.dispose).toHaveBeenCalledTimes(1);
   });
 
   it("fails closed on malformed classifier evidence", async () => {
@@ -112,7 +224,11 @@ describe("retained DVD completeness proof process", () => {
         protocolVersion: 1,
       }),
     });
-    const prover = createNodeDvdCompletenessProver({ runner: { run } });
+    const snapshot = createSnapshotFactory();
+    const prover = createNodeDvdCompletenessProver({
+      runner: { run },
+      snapshotFactory: snapshot.snapshotFactory,
+    });
 
     await expect(prover.prove({
       candidateBoundaryLba: 600,
@@ -121,5 +237,6 @@ describe("retained DVD completeness proof process", () => {
       signal: new AbortController().signal,
     })).rejects.toThrow("DVD completeness classifier returned malformed output");
     expect(run).toHaveBeenCalledTimes(1);
+    expect(snapshot.dispose).toHaveBeenCalledTimes(1);
   });
 });
