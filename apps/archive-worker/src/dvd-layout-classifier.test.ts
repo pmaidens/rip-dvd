@@ -130,6 +130,8 @@ function writeSyntheticIsoLayout(
   primaryVolumeDescriptor.write("CD001", 1, "ascii");
   primaryVolumeDescriptor[6] = 1;
   writeBothEndian32(primaryVolumeDescriptor, 80, volumeSpaceSize);
+  writeBothEndian16(primaryVolumeDescriptor, 120, 1);
+  writeBothEndian16(primaryVolumeDescriptor, 124, 1);
   writeBothEndian16(
     primaryVolumeDescriptor,
     128,
@@ -809,6 +811,8 @@ function writeUdfFileEntry(
     fileEntryLba * DVD_SECTOR_SIZE_BYTES,
     (fileEntryLba + 1) * DVD_SECTOR_SIZE_BYTES,
   );
+  entry.writeUInt16LE(4, 20);
+  entry.writeUInt16LE(1, 24);
   entry[27] = fileType;
   entry.writeBigUInt64LE(BigInt(informationLength), 56);
   entry.writeBigUInt64LE(
@@ -1421,6 +1425,34 @@ describe("retained DVD image layout completeness", () => {
     })).rejects.toThrow("DVD ISO volume geometry is invalid");
   });
 
+  it("fails closed on a multi-volume ISO descriptor", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    writeBothEndian16(image, 16 * DVD_SECTOR_SIZE_BYTES + 120, 2);
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD ISO volume geometry is invalid");
+  });
+
+  it("fails closed on a multi-volume ISO directory record", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    writeBothEndian16(image, 42 * DVD_SECTOR_SIZE_BYTES + 28, 2);
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD ISO directory record is unsupported");
+  });
+
   it("rejects an ISO path-table directory outside the volume", async () => {
     const image = syntheticCompleteDvdImage({
       includeIso: true,
@@ -1517,6 +1549,41 @@ describe("retained DVD image layout completeness", () => {
       candidateBoundaryLba: 600,
       imagePath: fixture.imagePath,
     })).rejects.toThrow("DVD ISO path table is malformed");
+  });
+
+  it("bounds ISO path-table hierarchy expansion", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    const entries = [
+      { extentLba: 42, identifier: Buffer.from([0]), parent: 1 },
+      ...Array.from({ length: 257 }, (_, index) => ({
+        extentLba: 42,
+        identifier: Buffer.from("A"),
+        parent: index + 1,
+      })),
+    ];
+    const littleEndian = isoPathTable(entries, "little-endian");
+    const bigEndian = isoPathTable(entries, "big-endian");
+    const primaryVolumeDescriptorOffset = 16 * DVD_SECTOR_SIZE_BYTES;
+    writeBothEndian32(
+      image,
+      primaryVolumeDescriptorOffset + 132,
+      littleEndian.byteLength,
+    );
+    image.writeUInt32LE(40, primaryVolumeDescriptorOffset + 140);
+    image.writeUInt32BE(44, primaryVolumeDescriptorOffset + 148);
+    littleEndian.copy(image, 40 * DVD_SECTOR_SIZE_BYTES);
+    bigEndian.copy(image, 44 * DVD_SECTOR_SIZE_BYTES);
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow(
+      "DVD ISO path table hierarchy exceeds its safety bound",
+    );
   });
 
   it("accepts an agreeing Joliet supplementary filesystem view", async () => {
@@ -1946,6 +2013,25 @@ describe("retained DVD image layout completeness", () => {
     })).rejects.toThrow("DVD UDF logical volume integrity is malformed");
   });
 
+  it("fails closed on a multi-volume UDF partition map", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    for (const logicalVolumeLba of [259, 275]) {
+      image.writeUInt16LE(
+        2,
+        logicalVolumeLba * DVD_SECTOR_SIZE_BYTES + 442,
+      );
+    }
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD UDF partition map type is unsupported");
+  });
+
   it("follows the first next UDF integrity extent", async () => {
     const image = syntheticCompleteDvdImage({
       includeIso: false,
@@ -2039,6 +2125,26 @@ describe("retained DVD image layout completeness", () => {
       candidateBoundaryLba: 600,
       imagePath: fixture.imagePath,
     })).rejects.toThrow("DVD UDF parent directory reference is invalid");
+  });
+
+  it.each([
+    ["strategy", 20],
+    ["parent ICB", 28],
+  ])("fails closed on an unsupported UDF ICB %s", async (
+    _field,
+    fieldOffset,
+  ) => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    image[301 * DVD_SECTOR_SIZE_BYTES + fieldOffset] = 1;
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD UDF ICB hierarchy is unsupported");
   });
 
   it("accepts UDF directory padding between logical blocks", async () => {
@@ -2221,6 +2327,8 @@ describe("retained DVD image layout completeness", () => {
       350 * DVD_SECTOR_SIZE_BYTES + fileEntryByteCount,
     );
     fileEntry.fill(0);
+    fileEntry.writeUInt16LE(4, 20);
+    fileEntry.writeUInt16LE(1, 24);
     fileEntry[27] = 4;
     fileEntry.writeUInt32LE(allocationDescriptorLength, 172);
     writeUdfTag(fileEntry, 261, 50);
@@ -2447,6 +2555,29 @@ describe("retained DVD image layout completeness", () => {
       candidateBoundaryLba: 600,
       imagePath: fixture.imagePath,
     })).rejects.toThrow(`DVD ${description} table is outside the video manager`);
+  });
+
+  it("fails closed when top-level video-manager tables overlap", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    image.writeUInt32BE(
+      DVD_SECTOR_SIZE_BYTES,
+      332 * DVD_SECTOR_SIZE_BYTES + 4,
+    );
+    image.copy(
+      image,
+      347 * DVD_SECTOR_SIZE_BYTES,
+      330 * DVD_SECTOR_SIZE_BYTES,
+      336 * DVD_SECTOR_SIZE_BYTES,
+    );
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD manager tables overlap ambiguously");
   });
 
   it("accepts a padded 0x308-byte title-set attribute entry", async () => {
