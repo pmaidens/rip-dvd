@@ -68,6 +68,54 @@ function exampleTvLookup(): CatalogMetadataLookup {
 }
 
 describe("Catalog automatic suggestion API", () => {
+  it("builds a proposal from the selected TMDB search result", async () => {
+    const access = dataAccessFixture.create();
+    const archive = createArchive(access, "THE_THING");
+    const lookup: CatalogMetadataLookup = {
+      search: vi.fn(async (): Promise<CatalogMetadataCandidate[]> => [
+        { id: 1, kind: "movie", title: "The Thing", year: 1982 },
+        { id: 2, kind: "movie", title: "The Thing", year: 2011 },
+      ]),
+      getTvDetails: vi.fn(async () => ({ seasons: [] })),
+      getTvSeason: vi.fn(async () => {
+        throw new Error("Unexpected TV season lookup");
+      }),
+    };
+
+    const result = await createCatalogSuggestionRoute(
+      new Request(
+        `http://localhost:3000/api/catalog-reviews/${archive.id}/suggestion?tmdbId=2&mediaType=movie`,
+      ),
+      archive.id,
+      () => access,
+      () => lookup,
+    );
+
+    expect(result.status).toBe(200);
+    await expect(result.json()).resolves.toMatchObject({
+      status: "ready",
+      proposal: { kind: "movie", tmdbId: 2, year: 2011 },
+    });
+  });
+
+  it("rejects incomplete TMDB selection parameters", async () => {
+    const access = dataAccessFixture.create();
+    const archive = createArchive(access, "THE_THING");
+    const getLookup = vi.fn(exampleTvLookup);
+
+    const result = await createCatalogSuggestionRoute(
+      new Request(
+        `http://localhost:3000/api/catalog-reviews/${archive.id}/suggestion?tmdbId=2`,
+      ),
+      archive.id,
+      () => access,
+      getLookup,
+    );
+
+    expect(result.status).toBe(400);
+    expect(getLookup).not.toHaveBeenCalled();
+  });
+
   it("reuses a TMDB-identified local movie even when its title was edited", async () => {
     const access = dataAccessFixture.create();
     const archive = createArchive(access, "THE_IRON_GIANT_1999_DISC_1");

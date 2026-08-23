@@ -23,6 +23,11 @@ export interface CatalogMetadataCandidate {
   year: number | null;
 }
 
+export type CatalogMetadataSelection = Pick<
+  CatalogMetadataCandidate,
+  "id" | "kind"
+>;
+
 export interface CatalogMetadataTvDetails {
   seasons: Array<{
     seasonNumber: number;
@@ -526,6 +531,7 @@ export async function suggestCatalog(
   discLabel: string,
   titles: readonly DvdTitle[],
   lookup: CatalogMetadataLookup | null,
+  metadataSelection?: CatalogMetadataSelection,
 ): Promise<AutomaticCatalogSuggestion> {
   const hints = catalogDiscHints(discLabel, titles);
   if (hints.formattedLabel === "") {
@@ -552,7 +558,22 @@ export async function suggestCatalog(
       "TMDB could not be reached. The archived disc is safe, and you can retry later.",
     );
   }
-  const selected = chooseCandidate(candidates, hints);
+  const operatorSelectedCandidate = metadataSelection === undefined
+    ? undefined
+    : candidates.find((candidate) =>
+      candidate.id === metadataSelection.id &&
+      candidate.kind === metadataSelection.kind
+    );
+  if (metadataSelection !== undefined && operatorSelectedCandidate === undefined) {
+    return needsReview(
+      hints,
+      "no_metadata_match",
+      "The selected TMDB match is no longer in the search results. Choose another match or retry the search.",
+    );
+  }
+  const selected = operatorSelectedCandidate === undefined
+    ? chooseCandidate(candidates, hints)
+    : { candidate: operatorSelectedCandidate, confidence: "high" as const };
   if (selected === null) {
     return needsReview(
       hints,

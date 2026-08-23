@@ -677,22 +677,39 @@ h1 {
 }
 
 .catalog-automation-alternatives li {
+  margin: 0;
+}
+
+.catalog-automation-alternatives li button {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 0.75rem;
+  width: 100%;
+  min-height: 2.75rem;
   padding: 0.55rem 0.7rem;
-  border: 1px solid #29483f;
+  border-color: #29483f;
   border-radius: 0.5rem;
   background: #10231e;
   color: #dbe6e2;
   font-size: 0.72rem;
+  text-align: left;
+}
+
+.catalog-automation-alternatives li button[aria-pressed="true"] {
+  border-color: #d2a14b;
+  background: rgba(210, 161, 75, 0.14);
+  color: #f5d99f;
 }
 
 .catalog-automation-alternatives span {
   flex: 0 0 auto;
   color: #829790;
   font-size: 0.65rem;
+}
+
+.catalog-automation-alternatives + #catalog-proposal-title {
+  margin-top: 1rem;
 }
 
 .catalog-automation button {

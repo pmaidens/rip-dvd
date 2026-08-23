@@ -1,10 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type {
   AutomaticCatalogProposal,
   AutomaticCatalogSuggestion,
+  CatalogMetadataCandidate,
+  CatalogMetadataSelection,
 } from "../lib/catalog-automation";
 import type { CatalogReviewReplacementEncodeInput } from "../lib/catalog-review-command";
 import type {
@@ -14,7 +16,14 @@ import type {
 type SuggestionState =
   | { status: "idle" }
   | { status: "loading" }
-  | { status: "loaded"; suggestion: AutomaticCatalogSuggestion }
+  | {
+      status: "loaded";
+      suggestion: AutomaticCatalogSuggestion;
+      matches: CatalogMetadataCandidate[];
+      selectedMatch: CatalogMetadataCandidate | null;
+      isSelecting: boolean;
+      selectionError: boolean;
+    }
   | { status: "error" };
 
 type CatalogSuggestionFetch = (
@@ -25,9 +34,16 @@ type CatalogSuggestionFetch = (
 export async function requestAutomaticCatalogSuggestion(
   archiveId: string,
   fetcher: CatalogSuggestionFetch = fetch,
+  metadataSelection?: CatalogMetadataSelection,
 ): Promise<AutomaticCatalogSuggestion> {
+  const parameters = metadataSelection === undefined
+    ? ""
+    : `?${new URLSearchParams({
+      tmdbId: String(metadataSelection.id),
+      mediaType: metadataSelection.kind,
+    }).toString()}`;
   const response = await fetcher(
-    `/api/catalog-reviews/${encodeURIComponent(archiveId)}/suggestion`,
+    `/api/catalog-reviews/${encodeURIComponent(archiveId)}/suggestion${parameters}`,
     { cache: "no-store", headers: { Accept: "application/json" } },
   );
   if (!response.ok) {
@@ -55,6 +71,51 @@ function TmdbAttribution() {
 
 function formatYear(year: number | null): string {
   return year === null ? "" : ` (${year})`;
+}
+
+function matchKey(match: CatalogMetadataSelection): string {
+  return `${match.kind}:${match.id}`;
+}
+
+function MatchChoices({
+  matches,
+  selectedMatch,
+  isSelecting,
+  isSaving,
+  onSelect,
+}: {
+  matches: readonly CatalogMetadataCandidate[];
+  selectedMatch: CatalogMetadataCandidate | null;
+  isSelecting: boolean;
+  isSaving: boolean;
+  onSelect(match: CatalogMetadataCandidate): void;
+}) {
+  return (
+    <div
+      className="catalog-automation-alternatives"
+      aria-busy={isSelecting}
+    >
+      <h4>Choose a TMDB match</h4>
+      <ul>
+        {matches.map((match) => (
+          <li key={matchKey(match)}>
+            <button
+              type="button"
+              aria-pressed={
+                selectedMatch !== null &&
+                matchKey(selectedMatch) === matchKey(match)
+              }
+              disabled={isSaving}
+              onClick={() => onSelect(match)}
+            >
+              <strong>{match.title}{formatYear(match.year)}</strong>
+              <span>{match.kind === "movie" ? "Movie" : "TV series"}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
 }
 
 function ProposalDetails({ proposal }: { proposal: AutomaticCatalogProposal }) {
@@ -140,28 +201,79 @@ export function CatalogReviewAutomation({
   ): void;
 }) {
   const [state, setState] = useState<SuggestionState>({ status: "idle" });
+  const suggestionRequest = useRef(0);
   const pristine = review.reviewOutcome === "needs_review" &&
     review.coverage.discSelectionCount === 0;
   const configured = review.automaticCataloging?.configured ?? false;
 
   useEffect(() => {
+    const request = ++suggestionRequest.current;
     if (!pristine || !configured) {
       setState({ status: "idle" });
       return;
     }
-    let isRequestActive = true;
     setState({ status: "loading" });
     void requestAutomaticCatalogSuggestion(review.archive.id)
       .then((suggestion) => {
-        if (isRequestActive) setState({ status: "loaded", suggestion });
+        if (request !== suggestionRequest.current) return;
+        setState({
+          status: "loaded",
+          suggestion,
+          matches: suggestion.status === "needs_review"
+            ? suggestion.matches ?? []
+            : [],
+          selectedMatch: null,
+          isSelecting: false,
+          selectionError: false,
+        });
       })
       .catch(() => {
-        if (isRequestActive) setState({ status: "error" });
+        if (request === suggestionRequest.current) {
+          setState({ status: "error" });
+        }
       });
     return () => {
-      isRequestActive = false;
+      if (request === suggestionRequest.current) {
+        suggestionRequest.current += 1;
+      }
     };
   }, [configured, pristine, review.archive.id, review]);
+
+  function selectMatch(match: CatalogMetadataCandidate) {
+    const request = ++suggestionRequest.current;
+    setState((current) => current.status !== "loaded"
+      ? current
+      : {
+        ...current,
+        selectedMatch: match,
+        isSelecting: true,
+        selectionError: false,
+      });
+    void requestAutomaticCatalogSuggestion(review.archive.id, fetch, match)
+      .then((suggestion) => {
+        if (request !== suggestionRequest.current) return;
+        setState((current) => current.status !== "loaded"
+          ? current
+          : {
+            ...current,
+            suggestion,
+            selectedMatch: match,
+            isSelecting: false,
+            selectionError: false,
+          });
+      })
+      .catch(() => {
+        if (request !== suggestionRequest.current) return;
+        setState((current) => current.status !== "loaded"
+          ? current
+          : {
+            ...current,
+            selectedMatch: match,
+            isSelecting: false,
+            selectionError: true,
+          });
+      });
+  }
 
   if (review.reviewOutcome !== "needs_review") return null;
   if (review.coverage.discSelectionCount > 0) {
@@ -242,7 +354,63 @@ export function CatalogReviewAutomation({
     );
   }
   const suggestion = state.suggestion;
+  const matchChoices = state.matches.length === 0
+    ? null
+    : (
+      <MatchChoices
+        key="tmdb-match-choices"
+        matches={state.matches}
+        selectedMatch={state.selectedMatch}
+        isSelecting={state.isSelecting}
+        isSaving={isSaving}
+        onSelect={selectMatch}
+      />
+    );
+  if (state.isSelecting && state.selectedMatch !== null) {
+    return (
+      <section className="catalog-automation" aria-live="polite">
+        <p className="section-eyebrow">Automatic cataloging</p>
+        <h3>
+          Checking {state.selectedMatch.title}{formatYear(state.selectedMatch.year)}
+        </h3>
+        <p>Building a catalog proposal from this TMDB match.</p>
+        {matchChoices}
+        <TmdbAttribution />
+      </section>
+    );
+  }
+  if (state.selectionError) {
+    return (
+      <section className="catalog-automation">
+        <p className="section-eyebrow">Automatic cataloging</p>
+        <h3>That TMDB match could not be checked</h3>
+        <p role="alert">Choose it again to retry, or try another match.</p>
+        {matchChoices}
+        <TmdbAttribution />
+      </section>
+    );
+  }
   if (suggestion.status === "needs_review") {
+    if (matchChoices !== null) {
+      return (
+        <section className="catalog-automation">
+          <p className="section-eyebrow">Automatic cataloging</p>
+          <h3>
+            {state.selectedMatch === null
+              ? "Choose the right TMDB match"
+              : "This match still needs manual review"}
+          </h3>
+          <p>{suggestion.message}</p>
+          <p>
+            {state.selectedMatch === null
+              ? "Pick a match to build its catalog proposal. You can switch choices until you save."
+              : "Choose another match, or use the manual tools below for this disc."}
+          </p>
+          {matchChoices}
+          <TmdbAttribution />
+        </section>
+      );
+    }
     return (
       <section className="catalog-automation">
         <p className="section-eyebrow">Automatic cataloging</p>
@@ -252,19 +420,6 @@ export function CatalogReviewAutomation({
           I searched for "{suggestion.hints.query}". The manual tools below are
           still available for this disc.
         </p>
-        {suggestion.matches && suggestion.matches.length > 0 ? (
-          <div className="catalog-automation-alternatives">
-            <h4>Possible matches</h4>
-            <ul>
-              {suggestion.matches.map((match) => (
-                <li key={`${match.kind}:${match.id}`}>
-                  <strong>{match.title}{formatYear(match.year)}</strong>
-                  <span>{match.kind === "movie" ? "Movie" : "TV series"}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        ) : null}
         <TmdbAttribution />
       </section>
     );
@@ -273,6 +428,7 @@ export function CatalogReviewAutomation({
   return (
     <section className="catalog-automation is-proposed" aria-labelledby="catalog-proposal-title">
       <p className="section-eyebrow">Automatic catalog proposal</p>
+      {matchChoices}
       <div id="catalog-proposal-title">
         <ProposalDetails proposal={proposal} />
       </div>

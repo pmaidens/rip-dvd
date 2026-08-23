@@ -259,6 +259,49 @@ describe("automatic Catalog proposals", () => {
     });
   });
 
+  it("builds a proposal from an operator-selected ambiguous match", async () => {
+    const metadataLookup = lookup({
+      search: vi.fn(async (): Promise<CatalogMetadataCandidate[]> => [
+        { id: 1, kind: "movie", title: "The Thing", year: 1982 },
+        { id: 2, kind: "movie", title: "The Thing", year: 2011 },
+      ]),
+    });
+
+    await expect(suggestCatalog(
+      "THE_THING",
+      [title(1, 6_540)],
+      metadataLookup,
+      { id: 2, kind: "movie" },
+    )).resolves.toMatchObject({
+      status: "ready",
+      proposal: {
+        kind: "movie",
+        tmdbId: 2,
+        title: "The Thing",
+        year: 2011,
+      },
+    });
+  });
+
+  it("does not accept a selected match that TMDB did not return", async () => {
+    await expect(suggestCatalog(
+      "THE_THING",
+      [title(1, 6_540)],
+      lookup({
+        search: vi.fn(async (): Promise<CatalogMetadataCandidate[]> => [{
+          id: 1,
+          kind: "movie",
+          title: "The Thing",
+          year: 1982,
+        }]),
+      }),
+      { id: 2, kind: "movie" },
+    )).resolves.toMatchObject({
+      status: "needs_review",
+      reason: "no_metadata_match",
+    });
+  });
+
   it("keeps same-name remakes ambiguous regardless of search rank", async () => {
     const suggestion = await suggestCatalog(
       "THE_THING",
