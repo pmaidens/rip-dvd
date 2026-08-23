@@ -11,6 +11,7 @@ import {
   suggestCatalog,
   type AutomaticCatalogSuggestion,
   type CatalogMetadataLookup,
+  type CatalogMetadataSelection,
 } from "../../../../../lib/catalog-automation";
 import { getDataAccess } from "../../../../../lib/data-access";
 import {
@@ -32,6 +33,29 @@ function response(body: unknown, status = 200): Response {
 function defaultLookup(): CatalogMetadataLookup | null {
   const credential = tmdbCredentialFromEnvironment();
   return credential === null ? null : createTmdbCatalogLookup(credential);
+}
+
+function metadataSelectionFromParameters(
+  parameters: URLSearchParams,
+): CatalogMetadataSelection | undefined | null {
+  if ([...parameters.keys()].length === 0) return undefined;
+  if (
+    [...parameters.keys()].some((key) =>
+      key !== "tmdbId" && key !== "mediaType"
+    ) ||
+    parameters.getAll("tmdbId").length !== 1 ||
+    parameters.getAll("mediaType").length !== 1
+  ) {
+    return null;
+  }
+  const tmdbIdText = parameters.get("tmdbId") ?? "";
+  const mediaType = parameters.get("mediaType");
+  const tmdbId = Number(tmdbIdText);
+  return /^(?:[1-9]\d*)$/.test(tmdbIdText) &&
+      Number.isSafeInteger(tmdbId) &&
+      (mediaType === "movie" || mediaType === "tv_show")
+    ? { id: tmdbId, kind: mediaType }
+    : null;
 }
 
 function isCompatibleCatalogMatch(
@@ -256,8 +280,9 @@ export async function createCatalogSuggestionRoute(
     return response({ error: "Method not allowed" }, 405);
   }
   const parameters = new URL(request.url).searchParams;
+  const metadataSelection = metadataSelectionFromParameters(parameters);
   if (
-    [...parameters.keys()].length > 0 ||
+    metadataSelection === null ||
     id.trim().length === 0 || id.length > 256
   ) {
     return response({ error: "Invalid Catalog suggestion request" }, 400);
@@ -286,6 +311,7 @@ export async function createCatalogSuggestionRoute(
       evidence.discLabel,
       evidence.titles,
       getLookup(),
+      metadataSelection,
     );
     return response(reuseExistingCatalogItems(access, suggestion));
   } catch {

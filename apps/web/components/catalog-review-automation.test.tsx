@@ -132,6 +132,45 @@ function readyMovieSuggestion(): Extract<
   };
 }
 
+function readyThingSuggestion(
+  id: number,
+  year: number,
+): Extract<AutomaticCatalogSuggestion, { status: "ready" }> {
+  return {
+    status: "ready",
+    hints: {
+      query: "The Thing",
+      formattedLabel: "The Thing",
+      year: null,
+      seasonNumber: null,
+      discNumber: null,
+      discCount: null,
+      likelyKind: "movie",
+    },
+    proposal: {
+      kind: "movie",
+      title: "The Thing",
+      year,
+      tmdbId: id,
+      confidence: "high",
+      explanation: "The operator selected this TMDB match.",
+      scannedTitleCount: 1,
+      input: {
+        target: {
+          choice: "create_new",
+          mediaItem: {
+            kind: "movie",
+            title: "The Thing",
+            year,
+            tmdbIdentity: { mediaType: "movie", tmdbId: id },
+          },
+        },
+        discSelection: { sourceIdentity: { kind: "main_feature" } },
+      },
+    },
+  };
+}
+
 describe("CatalogReviewAutomation", () => {
   it("accepts and completes a movie proposal through one action", async () => {
     const suggestion = readyMovieSuggestion();
@@ -305,8 +344,8 @@ describe("CatalogReviewAutomation", () => {
     expect(onAccept).toHaveBeenCalledWith(reuseSuggestion.proposal);
   });
 
-  it("shows plausible TMDB matches when identification is ambiguous", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => Response.json({
+  it("builds proposals from clickable TMDB matches and allows switching", async () => {
+    const ambiguousSuggestion: AutomaticCatalogSuggestion = {
       status: "needs_review",
       reason: "ambiguous_metadata_match",
       message: "TMDB returned more than one plausible match.",
@@ -323,22 +362,69 @@ describe("CatalogReviewAutomation", () => {
         { id: 1, kind: "movie", title: "The Thing", year: 1982 },
         { id: 2, kind: "movie", title: "The Thing", year: 2011 },
       ],
-    })));
+    };
+    const suggestions = new Map([
+      ["1", readyThingSuggestion(1, 1982)],
+      ["2", readyThingSuggestion(2, 2011)],
+    ]);
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input), "http://localhost");
+      const tmdbId = url.searchParams.get("tmdbId");
+      return Response.json(
+        tmdbId === null ? ambiguousSuggestion : suggestions.get(tmdbId),
+      );
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const onAccept = vi.fn();
 
     await act(async () => {
       root.render(
         <CatalogReviewAutomation
           review={review()}
           isSaving={false}
-          onAcceptProposal={() => undefined}
+          onAcceptProposal={onAccept}
           onCompleteReview={() => undefined}
         />,
       );
     });
     await act(async () => await Promise.resolve());
 
-    expect(container.textContent).toContain("Possible matches");
-    expect(container.textContent).toContain("The Thing (1982)");
-    expect(container.textContent).toContain("The Thing (2011)");
+    expect(container.textContent).toContain("Choose the right TMDB match");
+    const matchChoices = () => [...container.querySelectorAll<HTMLButtonElement>(
+      ".catalog-automation-alternatives button",
+    )];
+    expect(matchChoices().map((button) => button.textContent)).toEqual([
+      "The Thing (1982)Movie",
+      "The Thing (2011)Movie",
+    ]);
+    expect(matchChoices()[0]?.getAttribute("aria-pressed")).toBe("false");
+
+    const firstChoice = matchChoices()[0];
+    if (!firstChoice) throw new Error("Expected the first TMDB match");
+    firstChoice.focus();
+    await act(async () => firstChoice.click());
+
+    expect(fetcher).toHaveBeenLastCalledWith(
+      "/api/catalog-reviews/archive-1/suggestion?tmdbId=1&mediaType=movie",
+      { cache: "no-store", headers: { Accept: "application/json" } },
+    );
+    expect(container.querySelector("#catalog-proposal-title h3")?.textContent)
+      .toBe("The Thing (1982)");
+    expect(matchChoices()[0]?.getAttribute("aria-pressed")).toBe("true");
+    expect(document.activeElement).toBe(matchChoices()[0]);
+    expect(onAccept).not.toHaveBeenCalled();
+
+    await act(async () => matchChoices()[1]?.click());
+
+    expect(container.querySelector("#catalog-proposal-title h3")?.textContent)
+      .toBe("The Thing (2011)");
+    expect(matchChoices()[0]?.getAttribute("aria-pressed")).toBe("false");
+    expect(matchChoices()[1]?.getAttribute("aria-pressed")).toBe("true");
+    const useSuggestion = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Use this and continue",
+    );
+    if (!useSuggestion) throw new Error("Expected selected movie proposal action");
+    await act(async () => useSuggestion.click());
+    expect(onAccept).toHaveBeenCalledWith(suggestions.get("2")?.proposal);
   });
 });
