@@ -911,6 +911,18 @@ async function analyzeDvdImageLayout({
     programStartCells: readonly number[];
   }
 
+  interface DvdCellAddress {
+    cellNumber: number;
+    firstSector: number;
+    lastSector: number;
+    vobId: number;
+  }
+
+  interface DvdNavigationIdentity {
+    cellNumber: number;
+    vobId: number;
+  }
+
   const parseGlobalTitles = async (
     dvdFiles: ReadonlyMap<string, DvdFileLayout>,
   ): Promise<readonly GlobalDvdTitle[]> => {
@@ -1295,6 +1307,158 @@ async function analyzeDvdImageLayout({
     return units;
   };
 
+  const parseCellAddressTable = (
+    content: Buffer,
+    tablePointerOffset: number,
+    vobSectorCount: number,
+    required: boolean,
+    description: "menu" | "title",
+  ): ReadonlyMap<string, DvdCellAddress> => {
+    const tableSector = content.readUInt32BE(tablePointerOffset);
+    if (tableSector === 0) {
+      if (required) {
+        throw new Error(`DVD ${description} cell address table is missing`);
+      }
+      return new Map();
+    }
+    const tableOffset = tableSector * DVD_SECTOR_SIZE_BYTES;
+    if (
+      !Number.isSafeInteger(tableOffset) ||
+      tableOffset < DVD_SECTOR_SIZE_BYTES ||
+      tableOffset + 8 > content.byteLength
+    ) {
+      throw new Error(`DVD ${description} cell address table is missing`);
+    }
+    const declaredVobCount = content.readUInt16BE(tableOffset);
+    const tableByteCount = content.readUInt32BE(tableOffset + 4) + 1;
+    if (
+      declaredVobCount <= 0 ||
+      declaredVobCount > 99 ||
+      content.readUInt16BE(tableOffset + 2) !== 0 ||
+      tableByteCount < 20 ||
+      (tableByteCount - 8) % 12 !== 0 ||
+      (tableByteCount - 8) / 12 > MAX_DIRECTORY_ENTRIES ||
+      tableOffset + tableByteCount > content.byteLength
+    ) {
+      throw new Error(`DVD ${description} cell address table is malformed`);
+    }
+    const addresses = new Map<string, DvdCellAddress>();
+    const vobIds = new Set<number>();
+    const physicalExtents: Array<{ endLba: number; startLba: number }> = [];
+    for (let offset = 8; offset < tableByteCount; offset += 12) {
+      const entryOffset = tableOffset + offset;
+      const vobId = content.readUInt16BE(entryOffset);
+      const cellNumber = content[entryOffset + 2]!;
+      const firstSector = content.readUInt32BE(entryOffset + 4);
+      const lastSector = content.readUInt32BE(entryOffset + 8);
+      const key = `${vobId}:${cellNumber}`;
+      if (
+        vobId <= 0 ||
+        cellNumber <= 0 ||
+        content[entryOffset + 3] !== 0 ||
+        firstSector > lastSector ||
+        lastSector >= vobSectorCount ||
+        addresses.has(key)
+      ) {
+        throw new Error(`DVD ${description} cell address table is malformed`);
+      }
+      vobIds.add(vobId);
+      physicalExtents.push({ endLba: lastSector + 1, startLba: firstSector });
+      addresses.set(key, { cellNumber, firstSector, lastSector, vobId });
+    }
+    if (
+      vobIds.size !== declaredVobCount ||
+      [...vobIds].some((vobId) => vobId > declaredVobCount)
+    ) {
+      throw new Error(`DVD ${description} cell address table is malformed`);
+    }
+    const ordered = physicalExtents.sort((left, right) =>
+      left.startLba - right.startLba || left.endLba - right.endLba
+    );
+    for (let index = 1; index < ordered.length; index += 1) {
+      if (ordered[index]!.startLba < ordered[index - 1]!.endLba) {
+        throw new Error(`DVD ${description} cell address table overlaps`);
+      }
+    }
+    return addresses;
+  };
+
+  const validateTimeMapTable = (
+    content: Buffer,
+    programChainCount: number,
+    titleVobSectorCount: number,
+  ): void => {
+    const tableSector = content.readUInt32BE(0xd4);
+    if (tableSector === 0) {
+      return;
+    }
+    const tableOffset = tableSector * DVD_SECTOR_SIZE_BYTES;
+    if (
+      !Number.isSafeInteger(tableOffset) ||
+      tableOffset < DVD_SECTOR_SIZE_BYTES ||
+      tableOffset + 8 > content.byteLength
+    ) {
+      throw new Error("DVD title time map table is missing");
+    }
+    const mapCount = content.readUInt16BE(tableOffset);
+    const tableByteCount = content.readUInt32BE(tableOffset + 4) + 1;
+    if (
+      mapCount !== programChainCount ||
+      mapCount <= 0 ||
+      content.readUInt16BE(tableOffset + 2) !== 0 ||
+      tableByteCount < 8 + mapCount * 4 ||
+      tableOffset + tableByteCount > content.byteLength
+    ) {
+      throw new Error("DVD title time map table is malformed");
+    }
+    const starts = new Set<number>();
+    const mapExtents: Array<{ endOffset: number; startOffset: number }> = [];
+    for (let index = 0; index < mapCount; index += 1) {
+      const mapStart = content.readUInt32BE(tableOffset + 8 + index * 4);
+      const mapOffset = tableOffset + mapStart;
+      if (
+        mapStart < 8 + mapCount * 4 ||
+        starts.has(mapStart) ||
+        mapOffset + 4 > tableOffset + tableByteCount
+      ) {
+        throw new Error("DVD title time map table is malformed");
+      }
+      starts.add(mapStart);
+      const entryCount = content.readUInt16BE(mapOffset + 2);
+      if (
+        content[mapOffset] === 0 ||
+        content[mapOffset + 1] !== 0 ||
+        entryCount > MAX_VOBU_ENTRIES ||
+        mapStart + 4 + entryCount * 4 > tableByteCount
+      ) {
+        throw new Error("DVD title time map table is malformed");
+      }
+      mapExtents.push({
+        endOffset: mapStart + 4 + entryCount * 4,
+        startOffset: mapStart,
+      });
+      let previousSector = -1;
+      for (let entry = 0; entry < entryCount; entry += 1) {
+        const sector = content.readUInt32BE(mapOffset + 4 + entry * 4) &
+          0x7fff_ffff;
+        if (sector <= previousSector || sector >= titleVobSectorCount) {
+          throw new Error("DVD title time map entry is invalid");
+        }
+        previousSector = sector;
+      }
+    }
+    const orderedMaps = mapExtents.sort((left, right) =>
+      left.startOffset - right.startOffset || left.endOffset - right.endOffset
+    );
+    for (let index = 1; index < orderedMaps.length; index += 1) {
+      if (
+        orderedMaps[index]!.startOffset < orderedMaps[index - 1]!.endOffset
+      ) {
+        throw new Error("DVD title time map table overlaps");
+      }
+    }
+  };
+
   const commonMenuEntryIds = (
     units: ReturnType<typeof parseMenuProgramChainUnits>,
   ): ReadonlySet<number> => {
@@ -1334,6 +1498,26 @@ async function analyzeDvdImageLayout({
     return file.byteCount / DVD_SECTOR_SIZE_BYTES;
   };
 
+  const normalizeDvdFileExtents = (
+    file: DvdFileLayout,
+  ): Array<{ sectorCount: number; startLba: number }> =>
+    file.extents.reduce<Array<{
+      sectorCount: number;
+      startLba: number;
+    }>>((normalized, extent) => {
+      const sectorCount = sectorCountForBytes(extent.byteCount);
+      const previous = normalized.at(-1);
+      if (
+        previous !== undefined &&
+        previous.startLba + previous.sectorCount === extent.startLba
+      ) {
+        previous.sectorCount += sectorCount;
+      } else {
+        normalized.push({ sectorCount, startLba: extent.startLba });
+      }
+      return normalized;
+    }, []);
+
   const menuVobSectorCount = (
     dvdFiles: ReadonlyMap<string, DvdFileLayout>,
     path: string,
@@ -1353,8 +1537,12 @@ async function analyzeDvdImageLayout({
     source: "iso" | "udf",
     suppliedIfoContent?: Buffer,
   ): Promise<{
+    audioStreamCount: number;
+    cellAddresses: ReadonlyMap<string, DvdCellAddress>;
+    firstPlayProgramChain?: DvdProgramChain;
     menuVobSectorCount: number;
     programChainUnits: ReturnType<typeof parseMenuProgramChainUnits>;
+    subpictureStreamCount: number;
   }> => {
     const dvdFiles = source === "iso" ? isoDvdFiles : udfDvdFiles;
     const managerIfo = dvdFiles.get("VIDEO_TS/VIDEO_TS.IFO");
@@ -1375,13 +1563,37 @@ async function analyzeDvdImageLayout({
       dvdFiles,
       "VIDEO_TS/VIDEO_TS.VOB",
     );
+    const firstPlayOffset = managerIfoContent.readUInt32BE(0x84);
+    const audioStreamCount = managerIfoContent[0x103]!;
+    const subpictureStreamCount = managerIfoContent[0x155]!;
+    if (audioStreamCount > 8 || subpictureStreamCount > 32) {
+      throw new Error("DVD video manager stream attributes are malformed");
+    }
     return {
+      audioStreamCount,
+      cellAddresses: parseCellAddressTable(
+        managerIfoContent,
+        0xd8,
+        sectorCount,
+        sectorCount > 0,
+        "menu",
+      ),
+      firstPlayProgramChain: firstPlayOffset === 0
+        ? undefined
+        : parseMenuProgramChain(
+            managerIfoContent,
+            0,
+            managerIfoContent.byteLength,
+            firstPlayOffset,
+            sectorCount,
+          ),
       menuVobSectorCount: sectorCount,
       programChainUnits: parseMenuProgramChainUnits(
         managerIfoContent,
         0xc8,
         sectorCount,
       ),
+      subpictureStreamCount,
     };
   };
 
@@ -1390,8 +1602,11 @@ async function analyzeDvdImageLayout({
     titleSetNumber: number,
     suppliedIfoContent?: Buffer,
   ): Promise<{
+    audioStreamCount: number;
+    cellAddresses: ReadonlyMap<string, DvdCellAddress>;
     menuVobSectorCount: number;
     programChainUnits: ReturnType<typeof parseMenuProgramChainUnits>;
+    subpictureStreamCount: number;
   }> => {
     const dvdFiles = source === "iso" ? isoDvdFiles : udfDvdFiles;
     const prefix = `VIDEO_TS/VTS_${String(titleSetNumber).padStart(2, "0")}_0`;
@@ -1410,13 +1625,27 @@ async function analyzeDvdImageLayout({
       throw new Error("DVD title-set navigation file is malformed");
     }
     const sectorCount = menuVobSectorCount(dvdFiles, `${prefix}.VOB`);
+    const audioStreamCount = titleSetIfoContent[0x103]!;
+    const subpictureStreamCount = titleSetIfoContent[0x155]!;
+    if (audioStreamCount > 8 || subpictureStreamCount > 32) {
+      throw new Error("DVD title-set menu stream attributes are malformed");
+    }
     return {
+      audioStreamCount,
+      cellAddresses: parseCellAddressTable(
+        titleSetIfoContent,
+        0xd8,
+        sectorCount,
+        sectorCount > 0,
+        "menu",
+      ),
       menuVobSectorCount: sectorCount,
       programChainUnits: parseMenuProgramChainUnits(
         titleSetIfoContent,
         0xd0,
         sectorCount,
       ),
+      subpictureStreamCount,
     };
   };
 
@@ -1494,10 +1723,11 @@ async function analyzeDvdImageLayout({
     files: readonly DvdFileLayout[],
     navigationSectors: ReadonlySet<number>,
     vobSectorCount: number,
-  ): Promise<void> => {
+  ): Promise<ReadonlyMap<number, DvdNavigationIdentity>> => {
     const orderedNavigationSectors = [...navigationSectors].sort(
       (left, right) => left - right,
     );
+    const identities = new Map<number, DvdNavigationIdentity>();
     for (const [index, sector] of orderedNavigationSectors.entries()) {
       const navPack = await readVobSector(files, sector);
       if (
@@ -1530,12 +1760,17 @@ async function analyzeDvdImageLayout({
       const nextVobu = navPack.readUInt32BE(
         DVD_NAV_DSI_PAYLOAD_OFFSET + 314,
       );
+      const vobId = navPack.readUInt16BE(DVD_NAV_DSI_PAYLOAD_OFFSET + 24);
+      const cellNumber = navPack[DVD_NAV_DSI_PAYLOAD_OFFSET + 27]!;
       const nextSector = orderedNavigationSectors[index + 1];
       if (
         pciLbn !== sector ||
         dsiLbn !== sector ||
         pciStartTime === 0 ||
         pciEndTime < pciStartTime ||
+        vobId <= 0 ||
+        navPack[DVD_NAV_DSI_PAYLOAD_OFFSET + 26] !== 0 ||
+        cellNumber <= 0 ||
         sector + vobuEndAddress >= vobSectorCount ||
         referenceEndAddresses.some((address) =>
           address !== 0 && address > vobuEndAddress
@@ -1545,6 +1780,7 @@ async function analyzeDvdImageLayout({
       ) {
         throw new Error("DVD VOB navigation data is malformed");
       }
+      identities.set(sector, { cellNumber, vobId });
       if (nextVobu === 0x3fff_ffff) {
         continue;
       }
@@ -1555,6 +1791,34 @@ async function analyzeDvdImageLayout({
         !navigationSectors.has(sector + nextVobuOffset)
       ) {
         throw new Error("DVD VOB navigation reference is invalid");
+      }
+    }
+    return identities;
+  };
+
+  const validateNavigationCellAddresses = (
+    identities: ReadonlyMap<number, DvdNavigationIdentity>,
+    cellAddresses: ReadonlyMap<string, DvdCellAddress>,
+  ): void => {
+    for (const [sector, identity] of identities) {
+      const address = cellAddresses.get(
+        `${identity.vobId}:${identity.cellNumber}`,
+      );
+      if (
+        address === undefined ||
+        sector < address.firstSector ||
+        sector > address.lastSector
+      ) {
+        throw new Error("DVD VOB navigation cell identity is invalid");
+      }
+    }
+    for (const address of cellAddresses.values()) {
+      const firstVobu = identities.get(address.firstSector);
+      if (
+        firstVobu?.vobId !== address.vobId ||
+        firstVobu.cellNumber !== address.cellNumber
+      ) {
+        throw new Error("DVD cell address has no matching navigation data");
       }
     }
   };
@@ -1633,6 +1897,8 @@ async function analyzeDvdImageLayout({
     command: string,
     commandCount: number,
     context: {
+      angleCount: number;
+      audioStreamCount: number;
       cellCount: number;
       currentTitleSetNumber: number;
       globalTitles: readonly GlobalDvdTitle[];
@@ -1640,6 +1906,7 @@ async function analyzeDvdImageLayout({
       managerProgramChainCount?: number;
       programCount: number;
       programChainCount: number;
+      subpictureStreamCount: number;
       titleSetMenuEntryIds?: ReadonlyMap<number, ReadonlySet<number>>;
     },
   ): void => {
@@ -1796,6 +2063,45 @@ async function analyzeDvdImageLayout({
       if (![1, 2, 3, 6].includes(systemSetOperation)) {
         throw new Error("DVD VM system-set command is unsupported");
       }
+      if (systemSetOperation === 1) {
+        if (dvdVmBits(command, 60, 1) !== 1) {
+          throw new Error("DVD VM indirect stream selection is unsupported");
+        }
+        if (
+          dvdVmBits(command, 39, 1) !== 0 &&
+          dvdVmBits(command, 38, 7) >= context.audioStreamCount
+        ) {
+          throw new Error("DVD VM audio stream target is invalid");
+        }
+        const subpicture = dvdVmBits(command, 30, 7);
+        if (
+          dvdVmBits(command, 31, 1) !== 0 &&
+          ((subpicture & 0x20) !== 0 ||
+            (subpicture & 0x1f) >= context.subpictureStreamCount)
+        ) {
+          throw new Error("DVD VM subpicture stream target is invalid");
+        }
+        const angle = dvdVmBits(command, 22, 7);
+        if (
+          dvdVmBits(command, 23, 1) !== 0 &&
+          (angle <= 0 || angle > context.angleCount)
+        ) {
+          throw new Error("DVD VM angle target is invalid");
+        }
+      } else if (systemSetOperation === 2) {
+        if (dvdVmBits(command, 60, 1) !== 1) {
+          throw new Error("DVD VM indirect navigation timer is unsupported");
+        }
+        const timer = dvdVmBits(command, 47, 16);
+        const programChain = dvdVmBits(command, 23, 8);
+        if (
+          (timer === 0 && programChain !== 0) ||
+          (timer !== 0 &&
+            (programChain <= 0 || programChain > context.programChainCount))
+        ) {
+          throw new Error("DVD VM navigation timer target is invalid");
+        }
+      }
       if (dvdVmBits(command, 51, 4) !== 0) {
         validateLink();
       }
@@ -1823,24 +2129,42 @@ async function analyzeDvdImageLayout({
   const validateProgramChainNavigation = (
     chain: DvdProgramChain,
     context: {
+      angleCount: number;
+      audioStreamCount: number;
+      cellAddresses: ReadonlyMap<string, DvdCellAddress>;
       currentTitleSetNumber: number;
       globalTitles: readonly GlobalDvdTitle[];
       managerMenuEntryIds?: ReadonlySet<number>;
       managerProgramChainCount?: number;
-      navigationSectors: ReadonlySet<number>;
+      navigationIdentities: ReadonlyMap<number, DvdNavigationIdentity>;
       programChainCount: number;
+      subpictureStreamCount: number;
       titleSetMenuEntryIds?: ReadonlyMap<number, ReadonlySet<number>>;
     },
   ): void => {
     for (const cell of chain.cells) {
-      const cellVobuStarts = [...context.navigationSectors]
-        .filter((sector) =>
-          sector >= cell.firstSector && sector <= cell.lastSector
+      const cellAddress = context.cellAddresses.get(
+        `${cell.vobId}:${cell.cellNumber}`,
+      );
+      const cellVobuStarts = [...context.navigationIdentities]
+        .filter(([sector, identity]) =>
+          sector >= cell.firstSector && sector <= cell.lastSector &&
+          identity.vobId === cell.vobId &&
+          identity.cellNumber === cell.cellNumber
         )
+        .map(([sector]) => sector)
         .sort((left, right) => left - right);
       if (
+        cellAddress === undefined ||
+        cellAddress.firstSector !== cell.firstSector ||
+        cellAddress.lastSector !== cell.lastSector ||
         cellVobuStarts[0] !== cell.firstSector ||
-        cellVobuStarts.at(-1) !== cell.lastVobuStartSector
+        cellVobuStarts.at(-1) !== cell.lastVobuStartSector ||
+        [...context.navigationIdentities].some(([sector, identity]) =>
+          sector >= cell.firstSector && sector <= cell.lastSector &&
+          (identity.vobId !== cell.vobId ||
+            identity.cellNumber !== cell.cellNumber)
+        )
       ) {
         throw new Error("DVD program chain VOBU relationships are malformed");
       }
@@ -1848,6 +2172,8 @@ async function analyzeDvdImageLayout({
     for (const block of chain.commandBlocks) {
       for (const command of block.commands) {
         validateDvdVmCommand(command, block.commands.length, {
+          angleCount: context.angleCount,
+          audioStreamCount: context.audioStreamCount,
           cellCount: chain.cells.length,
           currentTitleSetNumber: context.currentTitleSetNumber,
           globalTitles: context.globalTitles,
@@ -1855,6 +2181,7 @@ async function analyzeDvdImageLayout({
           managerProgramChainCount: context.managerProgramChainCount,
           programCount: chain.programStartCells.length,
           programChainCount: context.programChainCount,
+          subpictureStreamCount: context.subpictureStreamCount,
           titleSetMenuEntryIds: context.titleSetMenuEntryIds,
         });
       }
@@ -2014,6 +2341,42 @@ async function analyzeDvdImageLayout({
         titleSetNumber,
         titleVobSectorCount,
       );
+      const titleVob = titleVobLayout(dvdFiles, titleSetNumber);
+      if (titleVob === undefined) {
+        throw new Error("DVD title VOB layout is incomplete");
+      }
+      const cellAddresses = parseCellAddressTable(
+        content,
+        0xe0,
+        titleVobSectorCount,
+        true,
+        "title",
+      );
+      const navigationIdentities = purpose.kind === "completeness-proof"
+        ? await validateVobNavigationPacks(
+            titleVob.parts.map((part) => part.file),
+            navigationSectors,
+            titleVobSectorCount,
+          )
+        : new Map([...navigationSectors].map((sector) => {
+            const address = [...cellAddresses.values()].find((candidate) =>
+              sector >= candidate.firstSector && sector <= candidate.lastSector
+            );
+            if (address === undefined) {
+              throw new Error("DVD title VOBU has no cell address");
+            }
+            return [sector, {
+              cellNumber: address.cellNumber,
+              vobId: address.vobId,
+            }] as const;
+          }));
+      validateNavigationCellAddresses(navigationIdentities, cellAddresses);
+      validateTimeMapTable(content, pgcCount, titleVobSectorCount);
+      const audioStreamCount = content[0x203]!;
+      const subpictureStreamCount = content[0x255]!;
+      if (audioStreamCount > 8 || subpictureStreamCount > 32) {
+        throw new Error("DVD title stream attributes are malformed");
+      }
       const commands = [...programChains.values()].flatMap((chain) =>
         chain.commandBlocks.flatMap((block) => block.commands)
       );
@@ -2059,12 +2422,16 @@ async function analyzeDvdImageLayout({
           : undefined);
       for (const chain of programChains.values()) {
         validateProgramChainNavigation(chain, {
+          angleCount: Math.max(...globalTitles.map((title) => title.angleCount)),
+          audioStreamCount,
+          cellAddresses,
           currentTitleSetNumber: titleSetNumber,
           globalTitles: allGlobalTitles,
           managerMenuEntryIds,
           managerProgramChainCount: validatedManagerProgramChainCount,
-          navigationSectors,
+          navigationIdentities,
           programChainCount: pgcCount,
+          subpictureStreamCount,
           titleSetMenuEntryIds,
         });
       }
@@ -2204,22 +2571,7 @@ async function analyzeDvdImageLayout({
     }
     const evidenceLayout = layout.parts.map(({ file }) => ({
       byteCount: file.byteCount,
-      extents: file.extents.reduce<Array<{
-        sectorCount: number;
-        startLba: number;
-      }>>((normalized, fileExtent) => {
-        const sectorCount = fileExtent.byteCount / DVD_SECTOR_SIZE_BYTES;
-        const previous = normalized.at(-1);
-        if (
-          previous !== undefined &&
-          previous.startLba + previous.sectorCount === fileExtent.startLba
-        ) {
-          previous.sectorCount += sectorCount;
-        } else {
-          normalized.push({ sectorCount, startLba: fileExtent.startLba });
-        }
-        return normalized;
-      }, []),
+      extents: normalizeDvdFileExtents(file),
       path: file.path,
     }));
     const evidenceKey = JSON.stringify({
@@ -2636,6 +2988,7 @@ async function analyzeDvdImageLayout({
       const sequencePartitions = new Map<number, UdfPartition>();
       const descriptorBodies: string[] = [];
       let sequenceLogicalVolume: UdfLogicalVolume | undefined;
+      let sawPrimaryVolumeDescriptor = false;
       let sawTerminator = false;
       for (let index = 0; index < sequenceSectorCount; index += 1) {
         const descriptor = await readRawSector(sequenceStartLba + index);
@@ -2656,7 +3009,12 @@ async function analyzeDvdImageLayout({
         descriptorBodies.push(
           `${identifier}:${descriptor.subarray(16).toString("base64")}`,
         );
-        if (identifier === 5) {
+        if (identifier === 1) {
+          if (sawPrimaryVolumeDescriptor) {
+            throw new Error("DVD UDF primary volume descriptor is duplicated");
+          }
+          sawPrimaryVolumeDescriptor = true;
+        } else if (identifier === 5) {
           const partition: UdfPartition = {
             number: descriptor.readUInt16LE(22),
             startLba: descriptor.readUInt32LE(188),
@@ -2739,6 +3097,7 @@ async function analyzeDvdImageLayout({
       }
       if (
         !sawTerminator ||
+        !sawPrimaryVolumeDescriptor ||
         sequenceLogicalVolume === undefined ||
         sequencePartitions.size === 0
       ) {
@@ -2859,9 +3218,19 @@ async function analyzeDvdImageLayout({
     const rootIcb = readUdfLongAllocationDescriptor(fileSetDescriptor, 400);
 
     const visitedIcbs = new Set<string>();
+    const sameUdfLongAllocationDescriptor = (
+      left: UdfLongAllocationDescriptor,
+      right: UdfLongAllocationDescriptor,
+    ): boolean =>
+      left.extentLength === right.extentLength &&
+      left.extentType === right.extentType &&
+      left.logicalBlockNumber === right.logicalBlockNumber &&
+      left.partitionReferenceNumber === right.partitionReferenceNumber;
     const parseUdfNode = async (
       icb: UdfLongAllocationDescriptor,
       path: string,
+      parentIcb: UdfLongAllocationDescriptor,
+      expectedDirectory: boolean,
       depth = 0,
     ): Promise<void> => {
       if (depth > MAX_DIRECTORY_DEPTH) {
@@ -2927,6 +3296,9 @@ async function analyzeDvdImageLayout({
       const isDirectory = fileType === 4;
       if (!isDirectory && fileType !== 5) {
         throw new Error("DVD UDF file type is unsupported");
+      }
+      if (isDirectory !== expectedDirectory) {
+        throw new Error("DVD UDF directory entry type disagrees with its ICB");
       }
       const normalizedPath = path.toUpperCase();
       const dataExtents: Array<{
@@ -3057,6 +3429,7 @@ async function analyzeDvdImageLayout({
         }
       }
       let offset = 0;
+      let parentEntryCount = 0;
       while (offset < directory.byteLength) {
         if (offset + 38 > directory.byteLength) {
           throw new Error("DVD UDF directory entry is truncated");
@@ -3090,10 +3463,36 @@ async function analyzeDvdImageLayout({
         const recordLength = Math.ceil(
           (38 + implementationUseLength + fileIdentifierLength) / 4,
         ) * 4;
-        if (recordLength <= 0 || offset + recordLength > directory.byteLength) {
+        const entryEnd = offset + recordLength;
+        const identifierEnd = 38 + implementationUseLength +
+          fileIdentifierLength;
+        if (
+          descriptor.readUInt16LE(16) !== 1 ||
+          (fileCharacteristics & ~0x0e) !== 0 ||
+          (fileCharacteristics & 0x04) !== 0 ||
+          descriptor.subarray(30, 36).some((byte) => byte !== 0) ||
+          implementationUseLength !== 0 ||
+          recordLength <= 0 ||
+          entryEnd > directory.byteLength ||
+          directory.subarray(offset + identifierEnd, entryEnd).some((byte) =>
+            byte !== 0
+          )
+        ) {
           throw new Error("DVD UDF directory entry length is invalid");
         }
-        if ((fileCharacteristics & 0x0c) === 0) {
+        const referencedIcb = readUdfLongAllocationDescriptor(descriptor, 20);
+        if ((fileCharacteristics & 0x08) !== 0) {
+          if (
+            fileCharacteristics !== 0x08 ||
+            fileIdentifierLength !== 0 ||
+            parentEntryCount !== 0 ||
+            !sameUdfLongAllocationDescriptor(referencedIcb, parentIcb)
+          ) {
+            throw new Error("DVD UDF parent directory reference is invalid");
+          }
+          partitionAbsoluteLba(referencedIcb, partitionsByReference);
+          parentEntryCount += 1;
+        } else {
           const name = decodeOstaCompressedUnicode(
             descriptor.subarray(
               38 + implementationUseLength,
@@ -3104,15 +3503,20 @@ async function analyzeDvdImageLayout({
             throw new Error("DVD UDF file identifier is invalid");
           }
           await parseUdfNode(
-            readUdfLongAllocationDescriptor(descriptor, 20),
+            referencedIcb,
             `${path}/${name}`.replace(/^\/+/, ""),
+            icb,
+            (fileCharacteristics & 0x02) !== 0,
             depth + 1,
           );
         }
         offset += recordLength;
       }
+      if (parentEntryCount !== 1) {
+        throw new Error("DVD UDF directory parent reference is missing");
+      }
     };
-    await parseUdfNode(rootIcb, "");
+    await parseUdfNode(rootIcb, "", rootIcb, true);
     return {
       damagedRecognition: false,
       hasUdf: true,
@@ -3212,25 +3616,11 @@ async function analyzeDvdImageLayout({
     [...dvdFiles.values()]
       .filter((file) => file.path.startsWith("VIDEO_TS/"))
       .sort((left, right) => left.path.localeCompare(right.path))
-      .map((file) => {
-        const extents = file.extents.reduce<Array<{
-          sectorCount: number;
-          startLba: number;
-        }>>((normalized, extent) => {
-          const sectorCount = sectorCountForBytes(extent.byteCount);
-          const previous = normalized.at(-1);
-          if (
-            previous !== undefined &&
-            previous.startLba + previous.sectorCount === extent.startLba
-          ) {
-            previous.sectorCount += sectorCount;
-          } else {
-            normalized.push({ sectorCount, startLba: extent.startLba });
-          }
-          return normalized;
-        }, []);
-        return { byteCount: file.byteCount, extents, path: file.path };
-      }),
+      .map((file) => ({
+        byteCount: file.byteCount,
+        extents: normalizeDvdFileExtents(file),
+        path: file.path,
+      })),
   );
 
   const validateCompleteDvdVideoView = async (
@@ -3266,8 +3656,12 @@ async function analyzeDvdImageLayout({
     );
     const globalTitles = await parseGlobalTitles(dvdFiles);
     const {
+      audioStreamCount: managerAudioStreamCount,
+      cellAddresses: managerCellAddresses,
+      firstPlayProgramChain,
       menuVobSectorCount: managerMenuSectorCount,
       programChainUnits: managerProgramChainUnits,
+      subpictureStreamCount: managerSubpictureStreamCount,
     } = await readManagerNavigation(
       source,
       managerIfoContent,
@@ -3282,15 +3676,23 @@ async function analyzeDvdImageLayout({
       managerProgramChainUnits,
     );
     const managerMenuEntryIds = commonMenuEntryIds(managerProgramChainUnits);
+    let managerNavigationIdentities: ReadonlyMap<
+      number,
+      DvdNavigationIdentity
+    > = new Map();
     if (managerMenuSectorCount > 0) {
       const managerMenuVob = dvdFiles.get("VIDEO_TS/VIDEO_TS.VOB");
       if (managerMenuVob === undefined) {
         throw new Error("DVD menu VOB layout is malformed");
       }
-      await validateVobNavigationPacks(
+      managerNavigationIdentities = await validateVobNavigationPacks(
         [managerMenuVob],
         managerAddressMap,
         managerMenuSectorCount,
+      );
+      validateNavigationCellAddresses(
+        managerNavigationIdentities,
+        managerCellAddresses,
       );
     }
     const menuNavigation = [{
@@ -3301,10 +3703,38 @@ async function analyzeDvdImageLayout({
     const titleSetNumbers = [...new Set(
       globalTitles.map((title) => title.titleSetNumber),
     )].sort((left, right) => left - right);
+    const filesystemTitleSetNumbers = new Set<number>();
+    for (const path of dvdPaths) {
+      if (!path.startsWith("VIDEO_TS/VTS_")) {
+        continue;
+      }
+      const match = /^VIDEO_TS\/VTS_(\d{2})_([0-9])\.(IFO|BUP|VOB)$/.exec(
+        path,
+      );
+      if (
+        match === null ||
+        (match[2] === "0"
+          ? !["IFO", "BUP", "VOB"].includes(match[3]!)
+          : match[3] !== "VOB")
+      ) {
+        throw new Error("DVD title-set file inventory is unsupported");
+      }
+      filesystemTitleSetNumbers.add(Number(match[1]));
+    }
+    if (
+      filesystemTitleSetNumbers.size !== titleSetNumbers.length ||
+      titleSetNumbers.some((number) => !filesystemTitleSetNumbers.has(number))
+    ) {
+      throw new Error("DVD title-set file inventory disagrees with its titles");
+    }
     const titleSetLayouts = new Map<number, {
+      audioStreamCount: number;
+      cellAddresses: ReadonlyMap<string, DvdCellAddress>;
       layout: NonNullable<ReturnType<typeof titleVobLayout>>;
       menuAddressMap: ReadonlySet<number>;
+      menuNavigationIdentities: ReadonlyMap<number, DvdNavigationIdentity>;
       menuProgramChainUnits: ReturnType<typeof parseMenuProgramChainUnits>;
+      subpictureStreamCount: number;
     }>();
     for (const titleSetNumber of titleSetNumbers) {
       const layout = titleVobLayout(dvdFiles, titleSetNumber);
@@ -3328,8 +3758,11 @@ async function analyzeDvdImageLayout({
         `${titleSetPrefix}.BUP`,
       );
       const {
+        audioStreamCount,
+        cellAddresses,
         menuVobSectorCount: titleSetMenuSectorCount,
         programChainUnits: titleSetProgramChainUnits,
+        subpictureStreamCount,
       } = await readTitleSetMenuNavigation(
         source,
         titleSetNumber,
@@ -3341,21 +3774,33 @@ async function analyzeDvdImageLayout({
         titleSetMenuSectorCount,
         "menu",
       );
+      let menuNavigationIdentities: ReadonlyMap<
+        number,
+        DvdNavigationIdentity
+      > = new Map();
       if (titleSetMenuSectorCount > 0) {
         const titleSetMenuVob = dvdFiles.get(`${titleSetPrefix}.VOB`);
         if (titleSetMenuVob === undefined) {
           throw new Error("DVD menu VOB layout is malformed");
         }
-        await validateVobNavigationPacks(
+        menuNavigationIdentities = await validateVobNavigationPacks(
           [titleSetMenuVob],
           titleSetAddressMap,
           titleSetMenuSectorCount,
         );
+        validateNavigationCellAddresses(
+          menuNavigationIdentities,
+          cellAddresses,
+        );
       }
       titleSetLayouts.set(titleSetNumber, {
+        audioStreamCount,
+        cellAddresses,
         layout,
         menuAddressMap: titleSetAddressMap,
+        menuNavigationIdentities,
         menuProgramChainUnits: titleSetProgramChainUnits,
+        subpictureStreamCount,
       });
       menuNavigation.push({
         addressMap: [...titleSetAddressMap],
@@ -3369,15 +3814,37 @@ async function analyzeDvdImageLayout({
         commonMenuEntryIds(layout.menuProgramChainUnits),
       ] as const),
     );
+    const maximumAngleCount = Math.max(
+      ...globalTitles.map((title) => title.angleCount),
+    );
+    if (firstPlayProgramChain !== undefined) {
+      validateProgramChainNavigation(firstPlayProgramChain, {
+        angleCount: maximumAngleCount,
+        audioStreamCount: managerAudioStreamCount,
+        cellAddresses: managerCellAddresses,
+        currentTitleSetNumber: 0,
+        globalTitles,
+        managerMenuEntryIds,
+        managerProgramChainCount,
+        navigationIdentities: managerNavigationIdentities,
+        programChainCount: 1,
+        subpictureStreamCount: managerSubpictureStreamCount,
+        titleSetMenuEntryIds,
+      });
+    }
     for (const unit of managerProgramChainUnits) {
       for (const chain of unit.programChains) {
         validateProgramChainNavigation(chain, {
+          angleCount: maximumAngleCount,
+          audioStreamCount: managerAudioStreamCount,
+          cellAddresses: managerCellAddresses,
           currentTitleSetNumber: 0,
           globalTitles,
           managerMenuEntryIds,
           managerProgramChainCount: unit.programChains.length,
-          navigationSectors: managerAddressMap,
+          navigationIdentities: managerNavigationIdentities,
           programChainCount: unit.programChains.length,
+          subpictureStreamCount: managerSubpictureStreamCount,
           titleSetMenuEntryIds,
         });
       }
@@ -3396,12 +3863,19 @@ async function analyzeDvdImageLayout({
       for (const unit of titleSetLayout.menuProgramChainUnits) {
         for (const chain of unit.programChains) {
           validateProgramChainNavigation(chain, {
+            angleCount: Math.max(...globalTitles.filter((title) =>
+              title.titleSetNumber === titleSetNumber
+            ).map((title) => title.angleCount)),
+            audioStreamCount: titleSetLayout.audioStreamCount,
+            cellAddresses: titleSetLayout.cellAddresses,
             currentTitleSetNumber: titleSetNumber,
             globalTitles,
             managerMenuEntryIds,
             managerProgramChainCount,
-            navigationSectors: titleSetLayout.menuAddressMap,
+            navigationIdentities:
+              titleSetLayout.menuNavigationIdentities,
             programChainCount: unit.programChains.length,
+            subpictureStreamCount: titleSetLayout.subpictureStreamCount,
             titleSetMenuEntryIds,
           });
         }
