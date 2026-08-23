@@ -1034,6 +1034,67 @@ describe("retained DVD image layout completeness", () => {
     })).rejects.toThrow("DVD UDF partition address is invalid");
   });
 
+  it("fails closed on a shortened UDF file-set descriptor extent", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    for (const logicalVolumeLba of [259, 275]) {
+      image.writeUInt32LE(
+        1,
+        logicalVolumeLba * DVD_SECTOR_SIZE_BYTES + 248,
+      );
+    }
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD UDF file set descriptor extent is truncated");
+  });
+
+  it("bounds UDF volume descriptor sequence reads", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    for (const anchorLba of [256, 343, 599]) {
+      image.writeUInt32LE(
+        257 * DVD_SECTOR_SIZE_BYTES,
+        anchorLba * DVD_SECTOR_SIZE_BYTES + 16,
+      );
+    }
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow(
+      "DVD UDF volume descriptor sequence exceeds its safety bound",
+    );
+  });
+
+  it("bounds UDF integrity sequence reads", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    for (const logicalVolumeLba of [259, 275]) {
+      image.writeUInt32LE(
+        257 * DVD_SECTOR_SIZE_BYTES,
+        logicalVolumeLba * DVD_SECTOR_SIZE_BYTES + 432,
+      );
+    }
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow(
+      "DVD UDF integrity sequence exceeds its safety bound",
+    );
+  });
+
   it("fails closed on an unrecorded UDF partition metadata extent", async () => {
     const image = syntheticCompleteDvdImage({
       includeIso: false,
@@ -1315,6 +1376,20 @@ describe("retained DVD image layout completeness", () => {
       candidateBoundaryLba: 600,
       imagePath: fixture.imagePath,
     })).rejects.toThrow("DVD ISO volume descriptor sequence is malformed");
+  });
+
+  it("fails closed on a reserved ISO volume descriptor type", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    image[17 * DVD_SECTOR_SIZE_BYTES] = 4;
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD ISO volume layout is unsupported");
   });
 
   it("fails closed on partially overlapping file extents", async () => {

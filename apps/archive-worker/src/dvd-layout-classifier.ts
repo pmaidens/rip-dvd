@@ -1193,6 +1193,15 @@ async function analyzeDvdImageLayout({
     );
   };
 
+  const dvdVmCommandTargetsManagerProgramChain = (
+    command: string,
+  ): boolean =>
+    dvdVmBits(command, 63, 3) === 1 &&
+    dvdVmBits(command, 60, 1) === 1 &&
+    (dvdVmBits(command, 51, 4) === 6 ||
+      dvdVmBits(command, 51, 4) === 8) &&
+    dvdVmBits(command, 23, 2) === 3;
+
   const validateDvdVmCommand = (
     command: string,
     commandCount: number,
@@ -1306,6 +1315,9 @@ async function analyzeDvdImageLayout({
             throw new Error("DVD VM menu command target is invalid");
           }
           return;
+        }
+        if (!dvdVmCommandTargetsManagerProgramChain(command)) {
+          throw new Error("DVD VM jump command is unsupported");
         }
         const pgcNumber = dvdVmBits(command, 46, 15);
         if (
@@ -1535,13 +1547,7 @@ async function analyzeDvdImageLayout({
       );
       const targetsManagerProgramChain = [...programChains.values()].some(
         (chain) => chain.commandBlocks.some((block) =>
-          block.commands.some((command) =>
-            dvdVmBits(command, 63, 3) === 1 &&
-            dvdVmBits(command, 60, 1) === 1 &&
-            (dvdVmBits(command, 51, 4) === 6 ||
-              dvdVmBits(command, 51, 4) === 8) &&
-            dvdVmBits(command, 23, 2) === 3
-          )
+          block.commands.some(dvdVmCommandTargetsManagerProgramChain)
         )
       );
       const validatedManagerProgramChainCount =
@@ -1840,7 +1846,7 @@ async function analyzeDvdImageLayout({
       classifyBeforeMetadataRead(lba, 1);
       volumeDescriptorCount += 1;
       const type = descriptor[0]!;
-      if (type === 0 || type === 3) {
+      if (type !== 1 && type !== 2 && type !== 255) {
         throw new Error("DVD ISO volume layout is unsupported");
       }
       if (type === 1) {
@@ -2110,6 +2116,14 @@ async function analyzeDvdImageLayout({
     const reserveSequenceStart = anchor.readUInt32LE(28);
     const mainSequenceSectors = sectorCountForBytes(mainSequenceLength);
     const reserveSequenceSectors = sectorCountForBytes(reserveSequenceLength);
+    if (
+      mainSequenceSectors > MAX_DESCRIPTOR_SECTORS ||
+      reserveSequenceSectors > MAX_DESCRIPTOR_SECTORS
+    ) {
+      throw new Error(
+        "DVD UDF volume descriptor sequence exceeds its safety bound",
+      );
+    }
     policy.validateUdfDescriptorSequenceLengths(
       mainSequenceSectors,
       reserveSequenceSectors,
@@ -2288,6 +2302,11 @@ async function analyzeDvdImageLayout({
     let integritySequenceLength = logicalVolume.integritySequenceLength;
     for (let extentIndex = 0; extentIndex < 16; extentIndex += 1) {
       const integritySectorCount = sectorCountForBytes(integritySequenceLength);
+      if (integritySectorCount > MAX_DESCRIPTOR_SECTORS) {
+        throw new Error(
+          "DVD UDF integrity sequence exceeds its safety bound",
+        );
+      }
       classifyBeforeMetadataRead(integritySequenceStart, integritySectorCount);
       let nextStart = 0;
       let nextLength = 0;
@@ -2318,9 +2337,12 @@ async function analyzeDvdImageLayout({
       logicalVolume.fileSetDescriptor,
       partitionsByReference,
     );
+    if (logicalVolume.fileSetDescriptor.extentLength < 512) {
+      throw new Error("DVD UDF file set descriptor extent is truncated");
+    }
     const fileSetDescriptor = await readExtent(
       fileSetLba,
-      Math.max(logicalVolume.fileSetDescriptor.extentLength, 512),
+      logicalVolume.fileSetDescriptor.extentLength,
       "filesystem_metadata",
       MAX_FILE_ENTRY_BYTES,
     );
