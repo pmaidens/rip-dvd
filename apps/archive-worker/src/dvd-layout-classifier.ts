@@ -82,6 +82,7 @@ interface DvdFilesystemView {
   dvdFiles: Map<string, DvdFileLayout>;
   dvdPaths: Set<string>;
   key: string;
+  normalizedNodePaths: Set<string>;
   source: "iso" | "udf";
 }
 
@@ -632,12 +633,14 @@ async function analyzeDvdImageLayout({
     dvdFiles: isoDvdFiles,
     dvdPaths: isoDvdPaths,
     key: "iso",
+    normalizedNodePaths: new Set(),
     source: "iso",
   };
   const udfFilesystemView: DvdFilesystemView = {
     dvdFiles: udfDvdFiles,
     dvdPaths: udfDvdPaths,
     key: "udf",
+    normalizedNodePaths: new Set(),
     source: "udf",
   };
   const isoFilesystemViews: DvdFilesystemView[] = [];
@@ -811,6 +814,11 @@ async function analyzeDvdImageLayout({
       throw new Error("DVD ISO directory graph is cyclic or ambiguous");
     }
     visited.add(key);
+    const normalizedParentPath = parentPath.toUpperCase();
+    if (filesystemView.normalizedNodePaths.has(normalizedParentPath)) {
+      throw new Error("DVD ISO file layout is ambiguous");
+    }
+    filesystemView.normalizedNodePaths.add(normalizedParentPath);
     consumeFilesystemPath(parentPath);
     directoryLayouts.set(parentPath, {
       depth,
@@ -979,6 +987,10 @@ async function analyzeDvdImageLayout({
           );
         } else {
           const normalizedPath = path.toUpperCase();
+          if (filesystemView.normalizedNodePaths.has(normalizedPath)) {
+            throw new Error("DVD ISO file layout is ambiguous");
+          }
+          filesystemView.normalizedNodePaths.add(normalizedPath);
           consumeFilesystemPath(normalizedPath);
           filesystemView.dvdPaths.add(normalizedPath);
           isoDvdPaths.add(normalizedPath);
@@ -1759,6 +1771,7 @@ async function analyzeDvdImageLayout({
   interface DvdNavigationIdentity {
     buttonCommands: readonly DvdVmCommand[];
     cellNumber: number;
+    interleavedUnitSectorCount?: number;
     vobId: number;
   }
 
@@ -2970,6 +2983,11 @@ async function analyzeDvdImageLayout({
     const orderedNavigationSectors = [...navigationSectors].sort(
       (left, right) => left - right,
     );
+    const interleavedUnitReferences: Array<{
+      description: "interleaved-unit" | "seamless angle";
+      sectorCount: number;
+      targetSector: number;
+    }> = [];
     const identities = new Map<number, DvdNavigationIdentity>();
     for (const [index, sector] of orderedNavigationSectors.entries()) {
       consumeDvdNavigationObjects(1);
@@ -3004,6 +3022,7 @@ async function analyzeDvdImageLayout({
       const vobId = navPack.readUInt16BE(DVD_NAV_DSI_PAYLOAD_OFFSET + 24);
       const cellNumber = navPack[DVD_NAV_DSI_PAYLOAD_OFFSET + 27]!;
       const nextSector = orderedNavigationSectors[index + 1];
+      const vobuEndExclusive = sector + vobuEndAddress + 1;
       if (
         pciLbn !== sector ||
         dsiLbn !== sector ||
@@ -3015,9 +3034,7 @@ async function analyzeDvdImageLayout({
         sector + vobuEndAddress >= vobSectorCount ||
         referenceEndAddresses.some((address) =>
           address !== 0 && address > vobuEndAddress
-        ) ||
-        (nextSector !== undefined &&
-          sector + vobuEndAddress >= nextSector)
+        )
       ) {
         throw new Error("DVD VOB navigation data is malformed");
       }
@@ -3035,15 +3052,28 @@ async function analyzeDvdImageLayout({
         const seamlessAngleSize = navPack.readUInt16BE(
           seamlessAngleOffset + 4,
         );
-        referencedNavigationSector(
+        const targetSector = referencedNavigationSector(
           seamlessAngleAddress,
           sector,
           "encoded",
         );
-        const hasSeamlessAngleAddress = seamlessAngleAddress !== 0 &&
-          (seamlessAngleAddress & 0x3fff_ffff) !== 0x3fff_ffff;
-        if (hasSeamlessAngleAddress !== (seamlessAngleSize !== 0)) {
+        const hasSeamlessAngleAddress = targetSector !== undefined;
+        if (
+          (seamlessAngleAddress !== 0 &&
+            seamlessAngleAddress !== 0x7fff_ffff &&
+            !hasSeamlessAngleAddress) ||
+          hasSeamlessAngleAddress !== (seamlessAngleSize !== 0) ||
+          (targetSector !== undefined &&
+            targetSector + seamlessAngleSize > vobSectorCount)
+        ) {
           throw new Error("DVD VOB seamless angle reference is malformed");
+        }
+        if (targetSector !== undefined) {
+          interleavedUnitReferences.push({
+            description: "seamless angle",
+            sectorCount: seamlessAngleSize,
+            targetSector,
+          });
         }
       }
       const interleavedUnitEnd = navPack.readUInt32BE(
@@ -3055,19 +3085,33 @@ async function analyzeDvdImageLayout({
       const nextInterleavedUnitSize = navPack.readUInt16BE(
         DVD_NAV_DSI_PAYLOAD_OFFSET + 42,
       );
-      const hasNextInterleavedUnit = nextInterleavedUnit !== 0 &&
-        (nextInterleavedUnit & 0x3fff_ffff) !== 0x3fff_ffff;
-      if (
-        sector + interleavedUnitEnd >= vobSectorCount ||
-        hasNextInterleavedUnit !== (nextInterleavedUnitSize !== 0)
-      ) {
-        throw new Error("DVD VOB interleaved-unit reference is malformed");
-      }
-      referencedNavigationSector(
+      const nextInterleavedUnitTarget = referencedNavigationSector(
         nextInterleavedUnit,
         sector,
         "encoded",
       );
+      const terminalInterleavedUnit = nextInterleavedUnit === 0xffff_ffff;
+      if (
+        sector + interleavedUnitEnd >= vobSectorCount ||
+        (nextInterleavedUnit === 0 && nextInterleavedUnitSize !== 0) ||
+        (terminalInterleavedUnit && nextInterleavedUnitSize !== 0xffff) ||
+        (nextInterleavedUnit !== 0 &&
+          !terminalInterleavedUnit &&
+          (nextInterleavedUnitTarget === undefined ||
+            nextInterleavedUnitSize === 0 ||
+            nextInterleavedUnitSize === 0xffff ||
+            nextInterleavedUnitTarget + nextInterleavedUnitSize >
+              vobSectorCount))
+      ) {
+        throw new Error("DVD VOB interleaved-unit reference is malformed");
+      }
+      if (nextInterleavedUnitTarget !== undefined) {
+        interleavedUnitReferences.push({
+          description: "interleaved-unit",
+          sectorCount: nextInterleavedUnitSize,
+          targetSector: nextInterleavedUnitTarget,
+        });
+      }
       const searchOffset = DVD_NAV_DSI_PAYLOAD_OFFSET + 234;
       referencedNavigationSector(
         navPack.readUInt32BE(searchOffset),
@@ -3121,11 +3165,25 @@ async function analyzeDvdImageLayout({
           throw new Error("DVD VOB subpicture synchronization is malformed");
         }
       }
+      if (vobuEndExclusive !== (nextSector ?? vobSectorCount)) {
+        throw new Error("DVD VOB navigation data is malformed");
+      }
       identities.set(sector, {
         buttonCommands: readButtonCommands(navPack),
         cellNumber,
+        interleavedUnitSectorCount: interleavedUnitEnd + 1,
         vobId,
       });
+    }
+    for (const reference of interleavedUnitReferences) {
+      if (
+        identities.get(reference.targetSector)?.interleavedUnitSectorCount !==
+          reference.sectorCount
+      ) {
+        throw new Error(
+          `DVD VOB ${reference.description} size is malformed`,
+        );
+      }
     }
     return identities;
   };
@@ -3725,6 +3783,7 @@ async function analyzeDvdImageLayout({
         }
         const parts = [];
         for (let offset = partOffset; offset < nextPartOffset; offset += 4) {
+          consumeDvdNavigationObjects(1);
           const pgcNumber = content.readUInt16BE(pttOffset + offset);
           const programNumber = content.readUInt16BE(pttOffset + offset + 2);
           if (pgcNumber <= 0 || programNumber <= 0) {
@@ -3754,6 +3813,11 @@ async function analyzeDvdImageLayout({
         pgcitOffset + pgcitByteCount > content.byteLength
       ) {
         throw new Error("DVD program chain table is malformed");
+      }
+      if (titleParts.some((parts) =>
+        parts.some((part) => part.pgcNumber > pgcCount)
+      )) {
+        throw new Error("DVD part-of-title table is malformed");
       }
       const programChains = new Map<number, DvdProgramChain>();
       const programChainRanges = readProgramChainRanges(
@@ -3893,6 +3957,9 @@ async function analyzeDvdImageLayout({
         pgcNumber: number,
         title: GlobalDvdTitle,
       ): void => {
+        if (pgcNumber <= 0 || pgcNumber > pgcCount) {
+          return;
+        }
         const titles = executableTitlesByProgramChain.get(pgcNumber) ??
           new Map<number, GlobalDvdTitle>();
         if (titles.has(title.titleNumber)) {
@@ -4370,6 +4437,7 @@ async function analyzeDvdImageLayout({
         dvdFiles: new Map(),
         dvdPaths: new Set(),
         key: `iso:${viewIndex}`,
+        normalizedNodePaths: new Set(),
         source: "iso",
       };
       if (
@@ -4626,6 +4694,10 @@ async function analyzeDvdImageLayout({
       recognitionDescriptors[terminatorIndex]!.lba -
         recognitionDescriptors[beginningIndex]!.lba + 1,
     );
+    const nsrIdentifier = recognitionDescriptors[nsrIndex]!.identifier;
+    const supportedDomainRevisions = nsrIdentifier === "NSR02"
+      ? new Set([0x0102, 0x0150])
+      : new Set([0x0200, 0x0201, 0x0250, 0x0260]);
     if (totalSectorCount <= 256) {
       throw new Error("DVD UDF image is too small");
     }
@@ -4827,6 +4899,12 @@ async function analyzeDvdImageLayout({
           validateUdfDstring(descriptor, 316, 36);
           udfEntityIdentifier(descriptor, 352);
         } else if (identifier === 5) {
+          if (
+            udfEntityIdentifier(descriptor, 24) !== `+${nsrIdentifier}` ||
+            descriptor.subarray(48, 56).some((byte) => byte !== 0)
+          ) {
+            throw new Error("DVD UDF partition contents are unsupported");
+          }
           const partition: UdfPartition = {
             number: descriptor.readUInt16LE(22),
             startLba: descriptor.readUInt32LE(188),
@@ -4860,9 +4938,15 @@ async function analyzeDvdImageLayout({
             );
           }
         } else if (identifier === 6) {
+          const domainRevision = descriptor.readUInt16LE(240);
           if (
             sequenceLogicalVolume !== undefined ||
-            descriptor.readUInt32LE(212) !== DVD_SECTOR_SIZE_BYTES
+            descriptor.readUInt32LE(212) !== DVD_SECTOR_SIZE_BYTES ||
+            udfEntityIdentifier(descriptor, 216) !==
+              "*OSTA UDF Compliant" ||
+            !supportedDomainRevisions.has(domainRevision) ||
+            (descriptor[242]! & ~0x03) !== 0 ||
+            descriptor.subarray(243, 248).some((byte) => byte !== 0)
           ) {
             throw new Error("DVD UDF logical volume is unsupported");
           }
@@ -5084,7 +5168,6 @@ async function analyzeDvdImageLayout({
     }
     const rootIcb = readUdfLongAllocationDescriptor(fileSetDescriptor, 400);
 
-    const udfNodePaths = new Set<string>();
     const visitedIcbs = new Set<string>();
     const sameUdfLongAllocationDescriptor = (
       left: UdfLongAllocationDescriptor,
@@ -5114,10 +5197,10 @@ async function analyzeDvdImageLayout({
       }
       visitedIcbs.add(key);
       const normalizedPath = path.toUpperCase();
-      if (udfNodePaths.has(normalizedPath)) {
+      if (udfFilesystemView.normalizedNodePaths.has(normalizedPath)) {
         throw new Error("DVD UDF file layout is ambiguous");
       }
-      udfNodePaths.add(normalizedPath);
+      udfFilesystemView.normalizedNodePaths.add(normalizedPath);
       consumeFilesystemPath(normalizedPath);
       const fileEntry = await readExtent(
         icbLba,

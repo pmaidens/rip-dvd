@@ -918,6 +918,7 @@ function writeSyntheticUdfLayout(
     259 * DVD_SECTOR_SIZE_BYTES,
   );
   partition.writeUInt16LE(0, 22);
+  partition.write("+NSR02", 25, "ascii");
   partition.writeUInt32LE(300, 188);
   partition.writeUInt32LE(300, 192);
   writeUdfTag(partition, 5, 258);
@@ -926,6 +927,8 @@ function writeSyntheticUdfLayout(
     260 * DVD_SECTOR_SIZE_BYTES,
   );
   logicalVolume.writeUInt32LE(DVD_SECTOR_SIZE_BYTES, 212);
+  logicalVolume.write("*OSTA UDF Compliant", 217, "ascii");
+  logicalVolume.writeUInt16LE(0x0102, 240);
   writeUdfLongAd(logicalVolume, 248, DVD_SECTOR_SIZE_BYTES, 0);
   logicalVolume.writeUInt32LE(6, 264);
   logicalVolume.writeUInt32LE(1, 268);
@@ -1452,6 +1455,27 @@ describe("retained DVD image layout completeness", () => {
       imagePath: fixture.imagePath,
     })).rejects.toThrow("DVD ISO directory record is unsupported");
   });
+
+  it(
+    "fails closed when ISO file and directory names collide by case",
+    async () => {
+      const image = syntheticCompleteDvdImage({
+        includeIso: true,
+        includeUdf: false,
+      });
+      isoDirectoryRecord({
+        extentLba: 500,
+        identifier: Buffer.from("video_ts;1"),
+        isDirectory: false,
+      }).copy(image, 42 * DVD_SECTOR_SIZE_BYTES + 110);
+      const fixture = writeFixture(image);
+
+      await expect(proveDvdImageLayoutCompleteness({
+        candidateBoundaryLba: 600,
+        imagePath: fixture.imagePath,
+      })).rejects.toThrow("DVD ISO file layout is ambiguous");
+    },
+  );
 
   it("rejects an ISO path-table directory outside the volume", async () => {
     const image = syntheticCompleteDvdImage({
@@ -2030,6 +2054,46 @@ describe("retained DVD image layout completeness", () => {
       candidateBoundaryLba: 600,
       imagePath: fixture.imagePath,
     })).rejects.toThrow("DVD UDF partition map type is unsupported");
+  });
+
+  it("fails closed on unsupported UDF partition contents", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    for (const partitionLba of [258, 274]) {
+      image.write(
+        "+NSR03",
+        partitionLba * DVD_SECTOR_SIZE_BYTES + 25,
+        "ascii",
+      );
+    }
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD UDF partition contents are unsupported");
+  });
+
+  it("fails closed on an unsupported UDF domain identifier", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    for (const logicalVolumeLba of [259, 275]) {
+      image.write(
+        "X",
+        logicalVolumeLba * DVD_SECTOR_SIZE_BYTES + 217,
+        "ascii",
+      );
+    }
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD UDF logical volume is unsupported");
   });
 
   it("follows the first next UDF integrity extent", async () => {
@@ -3079,6 +3143,22 @@ describe("retained DVD image layout completeness", () => {
     })).rejects.toThrow("DVD program chain reference is invalid");
   });
 
+  it("fails closed on an out-of-range part-of-title PGC", async () => {
+    const fixture = createSyntheticCompleteDvdImage({
+      globalTitles: [{
+        parts: [{ pgcNumber: 2, programNumber: 1 }],
+        titleSetTitleNumber: 1,
+      }],
+      includeIso: true,
+      includeUdf: false,
+    });
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD part-of-title table is malformed");
+  });
+
   it("fails closed on a JumpTT command in the title domain", async () => {
     const image = syntheticCompleteDvdImage({
       includeIso: true,
@@ -3350,6 +3430,50 @@ describe("retained DVD image layout completeness", () => {
       candidateBoundaryLba: 600,
       imagePath: fixture.imagePath,
     })).rejects.toThrow("DVD VOB navigation cell identity is invalid");
+  });
+
+  it(
+    "fails closed when VOBU navigation leaves an unmapped sector gap",
+    async () => {
+      const image = syntheticCompleteDvdImage({
+        includeIso: true,
+        includeUdf: false,
+      });
+      image.writeUInt32BE(
+        1,
+        400 * DVD_SECTOR_SIZE_BYTES + DVD_NAV_DSI_PAYLOAD_OFFSET + 8,
+      );
+      const fixture = writeFixture(image);
+
+      await expect(proveDvdImageLayoutCompleteness({
+        candidateBoundaryLba: 600,
+        imagePath: fixture.imagePath,
+      })).rejects.toThrow("DVD VOB navigation data is malformed");
+    },
+  );
+
+  it.each([
+    ["interleaved-unit", 38, 42],
+    ["seamless angle", 180, 184],
+  ])("fails closed when a %s size disagrees with its target", async (
+    description,
+    addressOffset,
+    sizeOffset,
+  ) => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    const dsiOffset = 400 * DVD_SECTOR_SIZE_BYTES +
+      DVD_NAV_DSI_PAYLOAD_OFFSET;
+    image.writeUInt32BE(3, dsiOffset + addressOffset);
+    image.writeUInt16BE(2, dsiOffset + sizeOffset);
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow(`DVD VOB ${description} size is malformed`);
   });
 
   it("fails closed when the filesystem contains an orphan title set", async () => {
