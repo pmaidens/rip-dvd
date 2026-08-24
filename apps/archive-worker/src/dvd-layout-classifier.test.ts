@@ -981,6 +981,8 @@ function writeSyntheticUdfLayout(
     301 * DVD_SECTOR_SIZE_BYTES,
   );
   writeUdfLongAd(fileSet, 400, DVD_SECTOR_SIZE_BYTES, 1);
+  fileSet.write("*OSTA UDF Compliant", 417, "ascii");
+  fileSet.writeUInt16LE(0x0102, 440);
   writeUdfTag(fileSet, 256);
   const rootDirectoryBytes = writeUdfDirectory(image, 302, [
     udfFileIdentifier({ childLba: 1, fileCharacteristics: 8 }),
@@ -2094,6 +2096,25 @@ describe("retained DVD image layout completeness", () => {
       candidateBoundaryLba: 600,
       imagePath: fixture.imagePath,
     })).rejects.toThrow("DVD UDF logical volume is unsupported");
+  });
+
+  it("fails closed on an unsupported UDF file set domain", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    const fileSet = image.subarray(
+      300 * DVD_SECTOR_SIZE_BYTES,
+      301 * DVD_SECTOR_SIZE_BYTES,
+    );
+    fileSet.write("X", 417, "ascii");
+    writeUdfTag(fileSet, 256);
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD UDF file set descriptor is unsupported");
   });
 
   it("follows the first next UDF integrity extent", async () => {
@@ -3452,6 +3473,96 @@ describe("retained DVD image layout completeness", () => {
     },
   );
 
+  it("fails closed when a VOBU crosses its cell boundary", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+      programChains: [{
+        cells: [
+          { firstSector: 0, lastSector: 0 },
+          { firstSector: 3, lastSector: 5 },
+        ],
+        programStartCells: [1],
+      }],
+    });
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD VOB navigation cell identity is invalid");
+  });
+
+  it("fails closed when a non-ILVU VOBU references another ILVU", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    const dsiOffset = 400 * DVD_SECTOR_SIZE_BYTES +
+      DVD_NAV_DSI_PAYLOAD_OFFSET;
+    image.writeUInt32BE(3, dsiOffset + 38);
+    image.writeUInt16BE(1, dsiOffset + 42);
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD VOB interleaved-unit reference is malformed");
+  });
+
+  it("fails closed when a next-ILVU address points backward", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    const dsiOffset = 400 * DVD_SECTOR_SIZE_BYTES +
+      DVD_NAV_DSI_PAYLOAD_OFFSET;
+    image.writeUInt16BE(0x7000, dsiOffset + 32);
+    image.writeUInt32BE(2, dsiOffset + 34);
+    image.writeUInt32BE(0x8000_0003, dsiOffset + 38);
+    image.writeUInt16BE(1, dsiOffset + 42);
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD VOB interleaved-unit reference is malformed");
+  });
+
+  it("reconciles the PGC first-ILVU end with DSI navigation", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+      programChains: [{
+        cells: [
+          { firstSector: 0, lastSector: 2 },
+          { firstSector: 3, lastSector: 5 },
+        ],
+        programStartCells: [1],
+      }],
+    });
+    const playbackOffset = 360 * DVD_SECTOR_SIZE_BYTES +
+      2 * DVD_SECTOR_SIZE_BYTES + 16 + 237;
+    image[playbackOffset] = image[playbackOffset]! | 0x04;
+    image.writeUInt32BE(1, playbackOffset + 12);
+    const dsiOffset = 400 * DVD_SECTOR_SIZE_BYTES +
+      DVD_NAV_DSI_PAYLOAD_OFFSET;
+    image.writeUInt16BE(0x7000, dsiOffset + 32);
+    image.writeUInt32BE(2, dsiOffset + 34);
+    image.copy(
+      image,
+      370 * DVD_SECTOR_SIZE_BYTES,
+      360 * DVD_SECTOR_SIZE_BYTES,
+      366 * DVD_SECTOR_SIZE_BYTES,
+    );
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD program chain VOBU relationships are malformed");
+  });
+
   it.each([
     ["interleaved-unit", 38, 42],
     ["seamless angle", 180, 184],
@@ -3466,6 +3577,9 @@ describe("retained DVD image layout completeness", () => {
     });
     const dsiOffset = 400 * DVD_SECTOR_SIZE_BYTES +
       DVD_NAV_DSI_PAYLOAD_OFFSET;
+    if (description === "interleaved-unit") {
+      image.writeUInt16BE(0x7000, dsiOffset + 32);
+    }
     image.writeUInt32BE(3, dsiOffset + addressOffset);
     image.writeUInt16BE(2, dsiOffset + sizeOffset);
     const fixture = writeFixture(image);
@@ -3963,6 +4077,16 @@ describe("retained DVD image layout completeness", () => {
 });
 
 describe("DVD layout damage classification", () => {
+  it("rejects an oversized damage range before expanding it", async () => {
+    const fixture = createSyntheticDvdImage(50);
+
+    await expect(classifyDvdImageDamage({
+      ...fixture,
+      expectedByteCount: fixture.sizeBytes,
+      unreadableSectorRanges: [{ startLba: 50, sectorCount: 1_000_000 }],
+    })).rejects.toThrow("DVD salvage damage map exceeds the image");
+  });
+
   it("accepts a substituted sector proved outside filesystem allocation", async () => {
     const fixture = createSyntheticDvdImage(50);
 
