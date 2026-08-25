@@ -25,6 +25,7 @@ interface ArchiveFixtureOptions extends Pick<
   Parameters<typeof createLegacySidecarDataAccess>[0],
   "filesystemPathProbe"
 > {
+  archiveSizeBytes?: number;
   libraryDirectory?: string;
   verificationRoots?: {
     mediaLibraryPath: string;
@@ -66,6 +67,7 @@ function createArchiveFixture(options: ArchiveFixtureOptions = {}) {
     archiveFormat: "iso",
     archivePath,
     fingerprint: disc.fingerprint,
+    sizeBytes: options.archiveSizeBytes,
   });
   return { access, archive, directory };
 }
@@ -266,6 +268,30 @@ describe("explicit filesystem verification", () => {
     expect(verified.verifiedAt).toBeInstanceOf(Date);
     expect(verified.updatedAt).toEqual(archive.updatedAt);
     expect(access.catalog.listOriginalDiscArchives()[0]).toEqual(verified);
+    access.close();
+  });
+
+  it("verifies an Original Disc Archive against its stored published size", async () => {
+    const archiveBytes = Buffer.from("preserved disc");
+    const { access, archive } = createArchiveFixture({
+      archiveSizeBytes: archiveBytes.byteLength,
+    });
+
+    await expect(
+      access.filesystemVerification.verifyOriginalDiscArchive(archive.id),
+    ).resolves.toMatchObject({
+      verificationStatus: "accessible",
+      verificationMessage: "File is accessible.",
+    });
+
+    writeFileSync(archive.archivePath, "preserved disc with a suffix");
+    await expect(
+      access.filesystemVerification.verifyOriginalDiscArchive(archive.id),
+    ).resolves.toMatchObject({
+      verificationStatus: "error",
+      verificationMessage:
+        "File size does not match the Original Disc Archive.",
+    });
     access.close();
   });
 

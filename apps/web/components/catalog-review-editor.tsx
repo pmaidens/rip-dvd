@@ -6,6 +6,7 @@ import { archiveIntegrityLabel } from "../lib/archive-integrity";
 import type { AutomaticCatalogProposal } from "../lib/catalog-automation";
 import { formatVolumeLabel } from "../lib/catalog-label";
 import { ArchiveIntegrityDescription } from "./archive-integrity-description";
+import { ArchiveBoundaryDescription } from "./archive-boundary-description";
 import { displayTerm } from "../lib/display-term";
 import { CatalogReviewCompletion } from "./catalog-review-completion";
 import { CatalogReviewAutomation } from "./catalog-review-automation";
@@ -144,6 +145,9 @@ export function CatalogReviewView({
             Archive integrity: {archiveIntegrityLabel(review.archive.integrity)}
           </p>
           <ArchiveIntegrityDescription {...review.archive} />
+          <ArchiveBoundaryDescription
+            boundaryEvidence={review.archive.boundaryEvidence}
+          />
         </div>
         <div className="profile-actions">
           <span className="attention-mark">

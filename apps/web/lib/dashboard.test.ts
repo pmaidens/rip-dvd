@@ -1,5 +1,6 @@
 import {
   createCleanReadArchiveIntegrityEvidence,
+  createCorrectedDvdArchiveBoundaryEvidence,
   createDataAccess,
   createNormalDvdArchiveBoundaryEvidence,
   type DataAccess,
@@ -796,6 +797,72 @@ describe("readDashboardSnapshot", () => {
             publishedSizeBytes: 9,
             excludedSectorCount: 0,
           },
+        }),
+      ],
+    });
+  });
+
+  it("projects a corrected capacity separately from Archive Integrity", () => {
+    const access = dataAccessFixture.create();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/corrected-dashboard-boundary",
+      displayName: "Corrected boundary drive",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "corrected-dashboard-boundary",
+      volumeLabel: "CORRECTED_DASHBOARD_BOUNDARY",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    const reportedSizeBytes = 8 * 2_048;
+    const publishedSizeBytes = 6 * 2_048;
+    const claim = startArchiveJob(
+      access,
+      disc,
+      "corrected-dashboard-worker",
+      reportedSizeBytes,
+    );
+    access.archiveJobs.publish(claim, {
+      archivePath: "/media/originals/corrected-dashboard-boundary.iso",
+      boundaryEvidence: createCorrectedDvdArchiveBoundaryEvidence({
+        reportedSizeBytes,
+        publishedSizeBytes,
+        firstExcludedLba: 6,
+        maximumReferencedLba: 5,
+        outOfRangeEvidence: {
+          classifierVersion: "scsi-read-classifier-v1",
+          scsiStatus: 2,
+          hostStatus: 0,
+          driverStatus: 8,
+          senseResponseCode: 0x70,
+          senseKey: 0x05,
+          asc: 0x21,
+          ascq: 0,
+        },
+      }),
+      integrityEvidence: createCleanReadArchiveIntegrityEvidence(
+        "test-clean-v1",
+      ),
+      sizeBytes: publishedSizeBytes,
+    });
+
+    expect(readDashboardSnapshot(access).catalogReview).toEqual({
+      status: "loaded",
+      items: [
+        expect.objectContaining({
+          boundaryEvidence: expect.objectContaining({
+            reportedSizeBytes,
+            publishedSizeBytes,
+            excludedSectorCount: 2,
+            firstExcludedLba: 6,
+            maximumReferencedLba: 5,
+          }),
+          integrity: "clean_read",
+          badSectorCount: 0,
+          badAreaCount: 0,
         }),
       ],
     });

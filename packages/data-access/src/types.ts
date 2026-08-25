@@ -27,7 +27,7 @@ import type {
   DiscSelectionSourceIdentity,
   DiscSelectionSourceIdentityInput,
 } from "./disc-selection-source-identity.js";
-import type { NormalDvdArchiveBoundaryEvidence } from "./archive-boundary.js";
+import type { ArchiveBoundaryEvidence } from "./archive-boundary.js";
 
 export type ArchiveFormat = (typeof ARCHIVE_FORMATS)[number];
 export type ArchiveIntegrity = (typeof ARCHIVE_INTEGRITIES)[number];
@@ -212,6 +212,16 @@ export interface OriginalDiscArchive {
   boundaryReportedSizeBytes: number | null;
   boundaryPublishedSizeBytes: number | null;
   boundaryExcludedSectorCount: number | null;
+  boundaryFirstExcludedLba: number | null;
+  boundaryMaximumReferencedLba: number | null;
+  boundaryReadFailureClassifierVersion: string | null;
+  boundaryReadFailureScsiStatus: number | null;
+  boundaryReadFailureHostStatus: number | null;
+  boundaryReadFailureDriverStatus: number | null;
+  boundaryReadFailureSenseResponseCode: number | null;
+  boundaryReadFailureSenseKey: number | null;
+  boundaryReadFailureAsc: number | null;
+  boundaryReadFailureAscq: number | null;
   integrity: ArchiveIntegrity;
   integrityPolicyVersion: string | null;
   badSectorCount: number | null;
@@ -1012,7 +1022,7 @@ export interface ArchiveJobAccess {
     claim: RunningArchiveJob,
     input: {
       archivePath: string;
-      boundaryEvidence: NormalDvdArchiveBoundaryEvidence;
+      boundaryEvidence: ArchiveBoundaryEvidence;
       sizeBytes: number;
       integrityEvidence: ArchiveIntegrityEvidence;
     },

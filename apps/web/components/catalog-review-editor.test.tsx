@@ -1770,6 +1770,24 @@ describe("CatalogReviewView", () => {
       archiveId: "archive-a",
       discLabel: "METADATA_NOTICE",
     });
+    review.archive.boundaryEvidence = {
+      policyVersion: "dvd-archive-boundary-v1",
+      reportedSizeBytes: 16_384,
+      publishedSizeBytes: 12_288,
+      excludedSectorCount: 2,
+      firstExcludedLba: 6,
+      maximumReferencedLba: 5,
+      outOfRangeEvidence: {
+        classifierVersion: "scsi-read-classifier-v1",
+        scsiStatus: 2,
+        hostStatus: 0,
+        driverStatus: 8,
+        senseResponseCode: 0x70,
+        senseKey: 0x05,
+        asc: 0x21,
+        ascq: 0,
+      },
+    };
     const html = renderToStaticMarkup(
       <CatalogReviewView
         state={{ status: "loaded", review }}
@@ -1806,6 +1824,12 @@ describe("CatalogReviewView", () => {
     expect(html).toContain('role="status"');
     expect(html).toContain("Metadata saved");
     expect(html).toContain("Archive integrity: Unknown read quality");
+    expect(html).toContain("Capacity correction");
+    expect(html).toContain("Reported size: 16,384 bytes");
+    expect(html).toContain("Archived size: 12,288 bytes");
+    expect(html).toContain("Excluded trailing sectors: 2");
+    expect(html).not.toContain("repaired damage");
+    expect(html).not.toContain("bit-perfect");
     expect(html).not.toContain("Mapping changed; review required");
   });
 

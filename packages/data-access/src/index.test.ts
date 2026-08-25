@@ -25,6 +25,7 @@ import { decodeDvdTitleMap } from "./dvd-scan.js";
 import {
   ARCHIVE_JOB_LEASE_DURATION_MS,
   DISC_INSPECTION_LEASE_DURATION_MS,
+  createCorrectedDvdArchiveBoundaryEvidence,
   createNormalDvdArchiveBoundaryEvidence,
   createDataAccess,
   createCleanReadArchiveIntegrityEvidence,
@@ -8013,6 +8014,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
+        name: "20260825052933_slippery_famine",
+      },
+      {
         name: "20260823160205_flat_fixer",
       },
       {
@@ -8038,9 +8042,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260822062343_media-item-tmdb-identities",
-      },
-      {
-        name: "20260820215821_redundant_jocasta",
       },
     ]);
     expect(
@@ -11900,6 +11901,81 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     access.close();
   });
 
+  it("publishes a corrected DVD at its actual size with separate clean-read evidence", () => {
+    const access = openTestDatabase();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/corrected-boundary",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const reportedSizeBytes = 8 * 2_048;
+    const publishedSizeBytes = 6 * 2_048;
+    const { disc, inspection } = completeDiscInspection(access, {
+      opticalDriveId: drive.id,
+      mediaGeneration: "corrected-boundary",
+      fingerprint: "corrected-boundary",
+      sizeBytes: reportedSizeBytes,
+    });
+    const request = access.archiveRequests.create({ detectedDiscId: disc.id });
+    const claim = access.archiveJobs.startForInspection(
+      inspection.id,
+      "corrected-boundary-publisher",
+    )!;
+    const boundaryEvidence = createCorrectedDvdArchiveBoundaryEvidence({
+      reportedSizeBytes,
+      publishedSizeBytes,
+      firstExcludedLba: 6,
+      maximumReferencedLba: 5,
+      outOfRangeEvidence: {
+        classifierVersion: "scsi-read-classifier-v1",
+        scsiStatus: 2,
+        hostStatus: 0,
+        driverStatus: 8,
+        senseResponseCode: 0x70,
+        senseKey: 0x05,
+        asc: 0x21,
+        ascq: 0,
+      },
+    });
+
+    access.archiveJobs.publish(claim, {
+      archivePath: "/media/originals/corrected-boundary.iso",
+      boundaryEvidence,
+      sizeBytes: publishedSizeBytes,
+      integrityEvidence: createCleanReadArchiveIntegrityEvidence(
+        "dvd-recovery-v1",
+      ),
+    });
+
+    expect(access.catalog.listOriginalDiscArchives()).toEqual([
+      expect.objectContaining({
+        sizeBytes: publishedSizeBytes,
+        boundaryPolicyVersion: "dvd-archive-boundary-v1",
+        boundaryReportedSizeBytes: reportedSizeBytes,
+        boundaryPublishedSizeBytes: publishedSizeBytes,
+        boundaryExcludedSectorCount: 2,
+        boundaryFirstExcludedLba: 6,
+        boundaryMaximumReferencedLba: 5,
+        boundaryReadFailureClassifierVersion: "scsi-read-classifier-v1",
+        boundaryReadFailureScsiStatus: 2,
+        boundaryReadFailureHostStatus: 0,
+        boundaryReadFailureDriverStatus: 8,
+        boundaryReadFailureSenseResponseCode: 0x70,
+        boundaryReadFailureSenseKey: 0x05,
+        boundaryReadFailureAsc: 0x21,
+        boundaryReadFailureAscq: 0,
+        integrity: "clean_read",
+        badSectorCount: 0,
+        badAreaCount: 0,
+        badSectorRanges: [],
+      }),
+    ]);
+    expect(access.archiveRequests.list(["fulfilled"])).toEqual([
+      expect.objectContaining({ id: request.id }),
+    ]);
+    access.close();
+  });
+
   it("publishes recovered archives with explicit unknown integrity evidence", () => {
     const access = openTestDatabase();
     const drive = access.catalog.upsertOpticalDrive({
@@ -12077,6 +12153,96 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     ] as const) {
       expect(() =>
         sqlite.exec(`update original_disc_archives set ${column} = null`),
+      ).toThrow(/constraint/i);
+    }
+    sqlite.close();
+  });
+
+  it("constrains corrected archive-boundary evidence at the SQLite boundary", () => {
+    const databasePath = createTestDatabasePath();
+    const access = openTestDatabase(databasePath);
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/corrected-boundary-constraint",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const reportedSizeBytes = 8 * 2_048;
+    const publishedSizeBytes = 6 * 2_048;
+    const { disc, inspection } = completeDiscInspection(access, {
+      opticalDriveId: drive.id,
+      mediaGeneration: "corrected-boundary-constraint",
+      fingerprint: "corrected-boundary-constraint",
+      sizeBytes: reportedSizeBytes,
+    });
+    access.archiveRequests.create({ detectedDiscId: disc.id });
+    const claim = access.archiveJobs.startForInspection(
+      inspection.id,
+      "corrected-boundary-constraint-publisher",
+    )!;
+    access.archiveJobs.publish(claim, {
+      archivePath: "/media/originals/corrected-boundary-constraint.iso",
+      boundaryEvidence: createCorrectedDvdArchiveBoundaryEvidence({
+        reportedSizeBytes,
+        publishedSizeBytes,
+        firstExcludedLba: 6,
+        maximumReferencedLba: 5,
+        outOfRangeEvidence: {
+          classifierVersion: "scsi-read-classifier-v1",
+          scsiStatus: 2,
+          hostStatus: 0,
+          driverStatus: 8,
+          senseResponseCode: 0x70,
+          senseKey: 0x05,
+          asc: 0x21,
+          ascq: 0,
+        },
+      }),
+      sizeBytes: publishedSizeBytes,
+      integrityEvidence: createCleanReadArchiveIntegrityEvidence(
+        "dvd-recovery-v1",
+      ),
+    });
+    access.close();
+
+    const sqlite = new DatabaseSync(databasePath);
+    for (const column of [
+      "boundary_reported_size_bytes",
+      "boundary_published_size_bytes",
+      "boundary_excluded_sector_count",
+      "boundary_first_excluded_lba",
+      "boundary_maximum_referenced_lba",
+      "boundary_read_failure_classifier_version",
+      "boundary_read_failure_scsi_status",
+      "boundary_read_failure_host_status",
+      "boundary_read_failure_driver_status",
+      "boundary_read_failure_sense_response_code",
+      "boundary_read_failure_sense_key",
+      "boundary_read_failure_asc",
+      "boundary_read_failure_ascq",
+    ] as const) {
+      expect(() =>
+        sqlite.exec(`update original_disc_archives set ${column} = null`),
+      ).toThrow(/constraint/i);
+    }
+    for (const mutation of [
+      "size_bytes = null",
+      "size_bytes = 16384",
+      "boundary_reported_size_bytes = 16383",
+      "boundary_published_size_bytes = 12287",
+      "boundary_excluded_sector_count = 3",
+      "boundary_first_excluded_lba = 5",
+      "boundary_maximum_referenced_lba = 6",
+      "boundary_read_failure_classifier_version = ''",
+      "boundary_read_failure_scsi_status = 0",
+      "boundary_read_failure_host_status = 1",
+      "boundary_read_failure_driver_status = 2",
+      "boundary_read_failure_sense_response_code = 113",
+      "boundary_read_failure_sense_key = 4",
+      "boundary_read_failure_asc = 32",
+      "boundary_read_failure_ascq = 1",
+    ]) {
+      expect(() =>
+        sqlite.exec(`update original_disc_archives set ${mutation}`)
       ).toThrow(/constraint/i);
     }
     sqlite.close();

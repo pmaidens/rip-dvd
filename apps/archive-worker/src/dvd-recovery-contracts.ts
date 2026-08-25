@@ -235,7 +235,15 @@ export function isProvenDvdBoundaryCandidate(
 ): result is ProvenOutOfRangeDvdReadFailureResult {
   return result.category === "out_of_range" &&
     "boundaryProofVersion" in result &&
-    result.boundaryProofVersion === DVD_SECTOR_BOUNDARY_PROOF_VERSION;
+    result.boundaryProofVersion === DVD_SECTOR_BOUNDARY_PROOF_VERSION &&
+    result.candidateConfirmationCount === 2 &&
+    result.firstFailingLba > 0 &&
+    result.precedingSectorLba === result.firstFailingLba - 1 &&
+    result.retainedImageByteCount ===
+      result.firstFailingLba * DVD_SECTOR_SIZE_BYTES &&
+    result.requestedLba === result.firstFailingLba &&
+    result.requestedBlockCount === 1 &&
+    result.retryOrdinal === 1;
 }
 
 export function parseDvdReadFailureResultProtocol(

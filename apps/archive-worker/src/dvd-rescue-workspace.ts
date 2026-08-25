@@ -428,8 +428,15 @@ async function commitPreparedDvdBoundaryRescueWorkspace(
 export async function loadDvdRescueWorkspace(
   root: string,
   identity: DvdRescueIdentity,
-  correlatedArchivePath?: string,
-  authorizeMutation?: AuthorizeMutation,
+  {
+    authorizeMutation,
+    correlatedArchivePath,
+    invalidStatePolicy = "quarantine",
+  }: {
+    authorizeMutation?: AuthorizeMutation;
+    correlatedArchivePath?: string;
+    invalidStatePolicy?: "preserve" | "quarantine";
+  } = {},
 ): Promise<DvdRescueWorkspace | null> {
   const paths = dvdRescueWorkspacePaths(root, identity.archiveRequestId);
   const retentionMapPath = dvdBoundaryRetentionMapPath(
@@ -457,6 +464,11 @@ export async function loadDvdRescueWorkspace(
     });
   }
   if (retentionMapMetadata !== null && mapMetadata !== null) {
+    if (invalidStatePolicy === "preserve") {
+      throw new Error("DVD rescue state is invalid", {
+        cause: new Error("DVD rescue transaction contains conflicting maps"),
+      });
+    }
     try {
       await quarantinePath(retentionMapPath, authorizeMutation);
       await syncPath(root);
@@ -580,18 +592,20 @@ export async function loadDvdRescueWorkspace(
       imageFilesystemIdentity: map.imageFilesystemIdentity,
     };
   } catch (error) {
-    try {
-      await quarantineWorkspaceFiles(
-        root,
-        paths,
-        retentionMapPath,
-        correlatedArchivePath,
-        authorizeMutation,
-      );
-    } catch (quarantineError) {
-      throw new Error("DVD rescue state could not be quarantined", {
-        cause: quarantineError,
-      });
+    if (invalidStatePolicy === "quarantine") {
+      try {
+        await quarantineWorkspaceFiles(
+          root,
+          paths,
+          retentionMapPath,
+          correlatedArchivePath,
+          authorizeMutation,
+        );
+      } catch (quarantineError) {
+        throw new Error("DVD rescue state could not be quarantined", {
+          cause: quarantineError,
+        });
+      }
     }
     if (
       error instanceof Error &&
