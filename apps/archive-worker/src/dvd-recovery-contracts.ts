@@ -15,6 +15,8 @@ export const DVD_RECOVERY_RESULT_PREFIX = "rip-dvd-recovery-result ";
 export const DVD_READ_FAILURE_CLASSIFIER_VERSION =
   "scsi-read-classifier-v1";
 export const DVD_READ_FAILURE_RESULT_PREFIX = "rip-dvd-read-failure ";
+export const DVD_SECTOR_BOUNDARY_PROOF_VERSION =
+  "dvd-sector-boundary-proof-v1";
 
 interface DvdReadFailureResultBase {
   protocolVersion: 1;
@@ -42,7 +44,7 @@ export interface NonBoundaryDvdReadFailureResult
   category: Exclude<ArchiveReadFailureCategory, "out_of_range">;
 }
 
-export interface OutOfRangeDvdReadFailureResult
+interface OutOfRangeDvdReadFailureResultBase
   extends DvdReadFailureResultBase {
   category: "out_of_range";
   declaredByteCount: number;
@@ -57,6 +59,20 @@ export interface OutOfRangeDvdReadFailureResult
   asc: 0x21;
   ascq: 0;
 }
+
+export type UnprovenOutOfRangeDvdReadFailureResult =
+  OutOfRangeDvdReadFailureResultBase;
+
+export interface ProvenOutOfRangeDvdReadFailureResult
+  extends OutOfRangeDvdReadFailureResultBase {
+  boundaryProofVersion: typeof DVD_SECTOR_BOUNDARY_PROOF_VERSION;
+  candidateConfirmationCount: 2;
+  precedingSectorLba: number;
+}
+
+export type OutOfRangeDvdReadFailureResult =
+  | UnprovenOutOfRangeDvdReadFailureResult
+  | ProvenOutOfRangeDvdReadFailureResult;
 
 export type DvdReadFailureResult =
   | NonBoundaryDvdReadFailureResult
@@ -207,6 +223,21 @@ const DVD_OUT_OF_RANGE_FAILURE_PROTOCOL_KEYS = [
   "retainedImageByteCount",
 ].sort();
 
+const DVD_PROVEN_OUT_OF_RANGE_FAILURE_PROTOCOL_KEYS = [
+  ...DVD_OUT_OF_RANGE_FAILURE_PROTOCOL_KEYS,
+  "boundaryProofVersion",
+  "candidateConfirmationCount",
+  "precedingSectorLba",
+].sort();
+
+export function isProvenDvdBoundaryCandidate(
+  result: DvdReadFailureResult,
+): result is ProvenOutOfRangeDvdReadFailureResult {
+  return result.category === "out_of_range" &&
+    "boundaryProofVersion" in result &&
+    result.boundaryProofVersion === DVD_SECTOR_BOUNDARY_PROOF_VERSION;
+}
+
 export function parseDvdReadFailureResultProtocol(
   payload: string,
   expectedByteCount: number,
@@ -223,7 +254,9 @@ export function parseDvdReadFailureResultProtocol(
   const candidate = parsed as Record<string, unknown>;
   const keys = Object.keys(candidate).sort();
   const expectedKeys = candidate.category === "out_of_range"
-    ? DVD_OUT_OF_RANGE_FAILURE_PROTOCOL_KEYS
+    ? candidate.boundaryProofVersion === DVD_SECTOR_BOUNDARY_PROOF_VERSION
+      ? DVD_PROVEN_OUT_OF_RANGE_FAILURE_PROTOCOL_KEYS
+      : DVD_OUT_OF_RANGE_FAILURE_PROTOCOL_KEYS
     : DVD_READ_FAILURE_PROTOCOL_KEYS;
   const totalSectorCount = expectedByteCount / DVD_SECTOR_SIZE_BYTES;
   if (
@@ -301,6 +334,22 @@ export function parseDvdReadFailureResultProtocol(
       (candidate.senseResponseCode !== 0x70 &&
         candidate.senseResponseCode !== 0x72) ||
       candidate.informationLba === null)
+  ) {
+    throw new Error("DVD read failure helper result is malformed");
+  }
+  const provenFirstFailingLba = candidate.firstFailingLba;
+  if (
+    candidate.category === "out_of_range" &&
+    candidate.boundaryProofVersion === DVD_SECTOR_BOUNDARY_PROOF_VERSION &&
+    (!isSafeNonNegativeInteger(provenFirstFailingLba) ||
+      candidate.candidateConfirmationCount !== 2 ||
+      provenFirstFailingLba === 0 ||
+      candidate.precedingSectorLba !== provenFirstFailingLba - 1 ||
+      candidate.retainedImageByteCount !==
+        provenFirstFailingLba * DVD_SECTOR_SIZE_BYTES ||
+      candidate.requestedLba !== provenFirstFailingLba ||
+      candidate.requestedBlockCount !== 1 ||
+      candidate.retryOrdinal !== 1)
   ) {
     throw new Error("DVD read failure helper result is malformed");
   }

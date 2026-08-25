@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import {
   createDamagedDvdRecoveryResult,
   DVD_READ_FAILURE_CLASSIFIER_VERSION,
+  DVD_SECTOR_BOUNDARY_PROOF_VERSION,
   formatUnvalidatedDvdRecovery,
+  isProvenDvdBoundaryCandidate,
   parseDvdReadFailureResultProtocol,
   validateDvdRecoveryResult,
   validateResumedDvdRecoveryResult,
@@ -156,6 +158,85 @@ describe("DVD recovery results", () => {
       firstFailingLba: 35,
       retainedImageByteCount: 31 * 2_048,
     });
+  });
+
+  it("accepts a versioned sector-precise boundary candidate", () => {
+    const result = parseDvdReadFailureResultProtocol(
+      JSON.stringify({
+        protocolVersion: 1,
+        classifierVersion: "scsi-read-classifier-v1",
+        category: "out_of_range",
+        scsiStatus: 2,
+        hostStatus: 0,
+        driverStatus: 8,
+        senseResponseCode: 112,
+        senseKey: 5,
+        asc: 33,
+        ascq: 0,
+        informationLba: 35,
+        requestedLba: 35,
+        requestedBlockCount: 1,
+        retryOrdinal: 1,
+        boundaryProofVersion: DVD_SECTOR_BOUNDARY_PROOF_VERSION,
+        candidateConfirmationCount: 2,
+        precedingSectorLba: 34,
+        declaredByteCount: 40 * 2_048,
+        firstFailingLba: 35,
+        retainedImageByteCount: 35 * 2_048,
+      }),
+      40 * 2_048,
+    );
+
+    expect(isProvenDvdBoundaryCandidate(result)).toBe(true);
+  });
+
+  it.each([
+    [
+      "zero candidate",
+      {
+        firstFailingLba: 0,
+        informationLba: 0,
+        precedingSectorLba: 0,
+        retainedImageByteCount: 0,
+        requestedLba: 0,
+      },
+    ],
+    ["wrong preceding sector", { precedingSectorLba: 33 }],
+    ["one confirmation", { candidateConfirmationCount: 1 }],
+    [
+      "unconfirmed request range",
+      { requestedLba: 31, requestedBlockCount: 9 },
+    ],
+    ["short retained prefix", { retainedImageByteCount: 34 * 2_048 }],
+  ])("rejects a proven boundary candidate with %s", (_label, replacement) => {
+    expect(() =>
+      parseDvdReadFailureResultProtocol(
+        JSON.stringify({
+          protocolVersion: 1,
+          classifierVersion: "scsi-read-classifier-v1",
+          category: "out_of_range",
+          scsiStatus: 2,
+          hostStatus: 0,
+          driverStatus: 8,
+          senseResponseCode: 112,
+          senseKey: 5,
+          asc: 33,
+          ascq: 0,
+          informationLba: 35,
+          requestedLba: 35,
+          requestedBlockCount: 1,
+          retryOrdinal: 1,
+          boundaryProofVersion: DVD_SECTOR_BOUNDARY_PROOF_VERSION,
+          candidateConfirmationCount: 2,
+          precedingSectorLba: 34,
+          declaredByteCount: 40 * 2_048,
+          firstFailingLba: 35,
+          retainedImageByteCount: 35 * 2_048,
+          ...replacement,
+        }),
+        40 * 2_048,
+      ),
+    ).toThrow("DVD read failure helper result is malformed");
   });
 
   it.each([
