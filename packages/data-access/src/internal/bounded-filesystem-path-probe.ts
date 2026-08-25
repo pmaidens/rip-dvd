@@ -1,11 +1,16 @@
 import { spawn } from "node:child_process";
 
-export type FilesystemPathInspection = "file" | "other" | "unsafe";
+export type FilesystemPathInspection =
+  | "file"
+  | "other"
+  | "size_mismatch"
+  | "unsafe";
 
 export interface FilesystemPathProbe {
   inspect(
     path: string,
     configuredRoot?: string,
+    expectedSizeBytes?: number,
   ): Promise<FilesystemPathInspection>;
 }
 
@@ -20,6 +25,7 @@ interface BoundedFilesystemPathProbeOptions {
   startHelper?: (
     path: string,
     configuredRoot?: string,
+    expectedSizeBytes?: number,
   ) => FilesystemProbeHelper;
 }
 
@@ -63,6 +69,13 @@ process.stdin.on("end", () => {
         return;
       }
     }
+    if (
+      request.expectedSizeBytes !== undefined &&
+      metadata.size !== request.expectedSizeBytes
+    ) {
+      writeResult({ inspection: "size_mismatch" });
+      return;
+    }
     accessSync(request.path, constants.R_OK);
     writeResult({ inspection: "file" });
   } catch (error) {
@@ -83,6 +96,7 @@ function codedError(message: string, code: string): NodeJS.ErrnoException {
 function startFilesystemProbeHelper(
   path: string,
   configuredRoot?: string,
+  expectedSizeBytes?: number,
 ): FilesystemProbeHelper {
   const child = spawn(process.execPath, ["-e", FILESYSTEM_PROBE_HELPER_SOURCE], {
     stdio: ["pipe", "pipe", "pipe"],
@@ -103,7 +117,11 @@ function startFilesystemProbeHelper(
     }
   });
   child.stdin.on("error", () => undefined);
-  child.stdin.end(JSON.stringify({ path, configuredRoot }));
+  child.stdin.end(JSON.stringify({
+    path,
+    configuredRoot,
+    expectedSizeBytes,
+  }));
 
   const result = new Promise<FilesystemPathInspection>((resolve, reject) => {
     child.once("error", () => {
@@ -122,6 +140,7 @@ function startFilesystemProbeHelper(
         if (
           parsed.inspection === "file" ||
           parsed.inspection === "other" ||
+          parsed.inspection === "size_mismatch" ||
           parsed.inspection === "unsafe"
         ) {
           resolve(parsed.inspection);
@@ -162,7 +181,7 @@ export function createBoundedFilesystemPathProbe({
   const activeHelpers = new Set<FilesystemProbeHelper>();
 
   return {
-    inspect(path, configuredRoot) {
+    inspect(path, configuredRoot, expectedSizeBytes) {
       if (activeHelpers.size >= maxConcurrent) {
         return Promise.reject(
           codedError("Filesystem verification admission is full", "EBUSY"),
@@ -170,7 +189,7 @@ export function createBoundedFilesystemPathProbe({
       }
       let helper: FilesystemProbeHelper;
       try {
-        helper = startHelper(path, configuredRoot);
+        helper = startHelper(path, configuredRoot, expectedSizeBytes);
       } catch {
         return Promise.reject(
           codedError("Filesystem verification helper failed", "EIO"),

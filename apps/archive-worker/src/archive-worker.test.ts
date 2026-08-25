@@ -38,6 +38,7 @@ import {
   type OpticalDriveHardware,
 } from "./archive-worker.js";
 import type { DvdCopyRunner } from "./dvd-archiver.js";
+import type { DvdCompletenessProver } from "./dvd-completeness-prover.js";
 import {
   createCleanDvdRecoveryResult,
   createDamagedDvdRecoveryResult,
@@ -47,6 +48,7 @@ import {
 } from "./dvd-recovery-contracts.js";
 import {
   createOutOfRangeDvdReadFailure,
+  createOutOfRangeDvdReadFailureResult,
 } from "./dvd-read-failure.test-support.js";
 import { dvdRescueWorkspacePaths } from "./dvd-rescue-workspace.js";
 import {
@@ -996,9 +998,11 @@ describe("archive worker polling", () => {
       waitForInactive: vi.fn(async () => undefined),
     };
     const salvageValidator = { validate: vi.fn() };
+    const completenessProver = { prove: vi.fn() };
 
     await pollArchiveWorker({
       access,
+      completenessProver,
       configuredDevicePath: "/dev/sr0",
       copyRunner,
       hardware,
@@ -1037,6 +1041,7 @@ describe("archive worker polling", () => {
     expect(readFileSync(archive.archivePath, "utf8")).toBe("dvd-image");
     expect(existsSync(`${archive.archivePath}.failed`)).toBe(false);
     expect(salvageValidator.validate).not.toHaveBeenCalled();
+    expect(completenessProver.prove).not.toHaveBeenCalled();
   });
 
   it.each(dvdReadFailureCases)("persists one $category diagnosis for the initial Archive Job attempt", async ({
@@ -1334,6 +1339,254 @@ describe("archive worker polling", () => {
       readFailureLba: 3,
     });
     expect(readFileSync(rescuePaths.imagePath)).toEqual(extendedPrefix);
+  });
+
+  it("publishes a clean retained prefix only after both boundary proofs agree", async () => {
+    const access = openTestDataAccess();
+    const originalsLibraryPath = mkdtempSync(
+      join(tmpdir(), "rip-dvd-originals-corrected-boundary-"),
+    );
+    temporaryDirectories.push(originalsLibraryPath);
+    const fingerprint = `dvdmeta-sha256:${"7".repeat(64)}`;
+    const scanData = {
+      schemaVersion: 2 as const,
+      contentId: fingerprint,
+      titles: [{
+        number: 1,
+        durationSeconds: 3_600,
+        chapters: 10,
+        audioStreams: [],
+        subtitles: [],
+      }],
+    };
+    const discoveredDrive = {
+      devicePath: "/dev/sr0",
+      vendor: "Pioneer",
+      product: "DVD-RW",
+      serialNumber: "CORRECTED-BOUNDARY-001",
+    };
+    const drive = access.catalog.reconcileOpticalDrives([
+      { ...discoveredDrive, isConfiguredDevice: true },
+    ])[0]!;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint,
+      scanData,
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    const request = access.archiveRequests.create({ detectedDiscId: disc.id });
+    const reportedSizeBytes = 8 * 2_048;
+    const firstExcludedLba = 6;
+    const retainedPrefix = Buffer.alloc(firstExcludedLba * 2_048, 47);
+    const boundaryFailure = {
+      ...createOutOfRangeDvdReadFailureResult({
+        declaredByteCount: reportedSizeBytes,
+        firstFailingLba: firstExcludedLba,
+        requestedBlockCount: 1,
+        requestedLba: firstExcludedLba,
+      }),
+      retryOrdinal: 1,
+      boundaryProofVersion: "dvd-sector-boundary-proof-v1" as const,
+      candidateConfirmationCount: 2 as const,
+      precedingSectorLba: firstExcludedLba - 1,
+    };
+    const copyRunner: DvdCopyRunner = {
+      copy: vi.fn(async ({ outputPath }) => {
+        writeFileSync(outputPath, retainedPrefix);
+        throw new DvdReadFailureError(boundaryFailure);
+      }),
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    };
+    const prove = vi.fn<DvdCompletenessProver["prove"]>(async (proof) => {
+      expect(proof.candidateBoundaryLba).toBe(firstExcludedLba);
+      expect(proof.expectedTitleMap).toEqual(scanData);
+      expect(readFileSync(proof.imagePath)).toEqual(retainedPrefix);
+      return { maximumReferencedLba: firstExcludedLba - 1 };
+    });
+    const salvageValidator = { validate: vi.fn() };
+
+    await pollArchiveWorker({
+      access,
+      completenessProver: { prove },
+      configuredDevicePath: discoveredDrive.devicePath,
+      copyRunner,
+      hardware: {
+        ...stableDeviceBinding(),
+        discover: vi.fn().mockResolvedValue([discoveredDrive]),
+        scanDvd: vi.fn().mockResolvedValue({
+          fingerprint,
+          scanData,
+          sizeBytes: reportedSizeBytes,
+        }),
+      },
+      log: vi.fn(),
+      originalsLibraryPath,
+      salvageValidator,
+      signal: new AbortController().signal,
+      workerId: "archive-worker-corrected-boundary",
+    });
+
+    expect(prove).toHaveBeenCalledOnce();
+    expect(access.archiveJobs.list(["completed"])).toEqual([
+      expect.objectContaining({
+        archiveRequestId: request.id,
+        originalDiscArchiveId: expect.any(String),
+        status: "completed",
+      }),
+    ]);
+    expect(access.archiveRequests.list(["fulfilled"])).toEqual([
+      expect.objectContaining({ id: request.id }),
+    ]);
+    const archive = access.catalog.listOriginalDiscArchives()[0]!;
+    expect(archive).toMatchObject({
+      sizeBytes: retainedPrefix.byteLength,
+      boundaryPolicyVersion: "dvd-archive-boundary-v1",
+      boundaryReportedSizeBytes: reportedSizeBytes,
+      boundaryPublishedSizeBytes: retainedPrefix.byteLength,
+      boundaryExcludedSectorCount: 2,
+      boundaryFirstExcludedLba: firstExcludedLba,
+      boundaryMaximumReferencedLba: firstExcludedLba - 1,
+      boundaryReadFailureClassifierVersion: "scsi-read-classifier-v1",
+      boundaryReadFailureScsiStatus: 2,
+      boundaryReadFailureHostStatus: 0,
+      boundaryReadFailureDriverStatus: 8,
+      boundaryReadFailureSenseResponseCode: 0x70,
+      boundaryReadFailureSenseKey: 0x05,
+      boundaryReadFailureAsc: 0x21,
+      boundaryReadFailureAscq: 0,
+      integrity: "clean_read",
+      badSectorCount: 0,
+      badAreaCount: 0,
+      badSectorRanges: [],
+    });
+    expect(readFileSync(archive.archivePath)).toEqual(retainedPrefix);
+    expect(existsSync(`${archive.archivePath}.failed`)).toBe(false);
+    expect(salvageValidator.validate).not.toHaveBeenCalled();
+    const rescuePaths = dvdRescueWorkspacePaths(
+      realpathSync(originalsLibraryPath),
+      request.id,
+    );
+    expect(existsSync(rescuePaths.imagePath)).toBe(false);
+    expect(existsSync(rescuePaths.mapPath)).toBe(false);
+  });
+
+  it("keeps a proven boundary prefix retryable when completeness proof fails", async () => {
+    const access = openTestDataAccess();
+    const originalsLibraryPath = mkdtempSync(
+      join(tmpdir(), "rip-dvd-originals-rejected-boundary-"),
+    );
+    temporaryDirectories.push(originalsLibraryPath);
+    const fingerprint = `dvdmeta-sha256:${"8".repeat(64)}`;
+    const scanData = {
+      schemaVersion: 2 as const,
+      contentId: fingerprint,
+      titles: [{
+        number: 1,
+        durationSeconds: 3_600,
+        chapters: 10,
+        audioStreams: [],
+        subtitles: [],
+      }],
+    };
+    const discoveredDrive = {
+      devicePath: "/dev/sr0",
+      vendor: "Pioneer",
+      product: "DVD-RW",
+      serialNumber: "REJECTED-BOUNDARY-001",
+    };
+    const drive = access.catalog.reconcileOpticalDrives([
+      { ...discoveredDrive, isConfiguredDevice: true },
+    ])[0]!;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint,
+      scanData,
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    const request = access.archiveRequests.create({ detectedDiscId: disc.id });
+    const reportedSizeBytes = 8 * 2_048;
+    const firstExcludedLba = 6;
+    const retainedPrefix = Buffer.alloc(firstExcludedLba * 2_048, 53);
+    const boundaryFailure = {
+      ...createOutOfRangeDvdReadFailureResult({
+        declaredByteCount: reportedSizeBytes,
+        firstFailingLba: firstExcludedLba,
+        requestedBlockCount: 1,
+        requestedLba: firstExcludedLba,
+      }),
+      retryOrdinal: 1,
+      boundaryProofVersion: "dvd-sector-boundary-proof-v1" as const,
+      candidateConfirmationCount: 2 as const,
+      precedingSectorLba: firstExcludedLba - 1,
+    };
+    const copyRunner: DvdCopyRunner = {
+      copy: vi.fn(async ({ outputPath }) => {
+        writeFileSync(outputPath, retainedPrefix);
+        throw new DvdReadFailureError(boundaryFailure);
+      }),
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    };
+    const proofFailure = new Error(
+      "DVD completeness proof found a referenced extent past the boundary",
+    );
+
+    await pollArchiveWorker({
+      access,
+      completenessProver: {
+        prove: vi.fn().mockRejectedValue(proofFailure),
+      },
+      configuredDevicePath: discoveredDrive.devicePath,
+      copyRunner,
+      hardware: {
+        ...stableDeviceBinding(),
+        discover: vi.fn().mockResolvedValue([discoveredDrive]),
+        scanDvd: vi.fn().mockResolvedValue({
+          fingerprint,
+          scanData,
+          sizeBytes: reportedSizeBytes,
+        }),
+      },
+      log: vi.fn(),
+      originalsLibraryPath,
+      salvageValidator: { validate: vi.fn() },
+      signal: new AbortController().signal,
+      workerId: "archive-worker-rejected-boundary",
+    });
+
+    expect(access.catalog.listOriginalDiscArchives()).toEqual([]);
+    expect(access.archiveJobs.list(["failed"])).toEqual([
+      expect.objectContaining({
+        archiveRequestId: request.id,
+        errorMessage: proofFailure.message,
+        originalDiscArchiveId: null,
+        readFailureCategory: null,
+      }),
+    ]);
+    expect(access.archiveRequests.list(["needs_attention"])).toEqual([
+      expect.objectContaining({ id: request.id }),
+    ]);
+    const rescuePaths = dvdRescueWorkspacePaths(
+      realpathSync(originalsLibraryPath),
+      request.id,
+    );
+    expect(readFileSync(rescuePaths.imagePath)).toEqual(retainedPrefix);
+    expect(JSON.parse(readFileSync(rescuePaths.mapPath, "utf8")))
+      .toMatchObject({
+        boundaryFailureProtocol: expect.objectContaining({
+          boundaryProofVersion: "dvd-sector-boundary-proof-v1",
+          firstFailingLba: firstExcludedLba,
+        }),
+      });
+    expect(access.archiveRequests.retry(request.id)).toMatchObject({
+      id: request.id,
+      status: "pending",
+    });
   });
 
   it("persists boundary evidence when prefix retention itself fails", async () => {

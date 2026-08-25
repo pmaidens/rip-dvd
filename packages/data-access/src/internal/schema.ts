@@ -360,6 +360,28 @@ export const originalDiscArchives = sqliteTable(
     boundaryReportedSizeBytes: integer("boundary_reported_size_bytes"),
     boundaryPublishedSizeBytes: integer("boundary_published_size_bytes"),
     boundaryExcludedSectorCount: integer("boundary_excluded_sector_count"),
+    boundaryFirstExcludedLba: integer("boundary_first_excluded_lba"),
+    boundaryMaximumReferencedLba: integer("boundary_maximum_referenced_lba"),
+    boundaryReadFailureClassifierVersion: text(
+      "boundary_read_failure_classifier_version",
+    ),
+    boundaryReadFailureScsiStatus: integer(
+      "boundary_read_failure_scsi_status",
+    ),
+    boundaryReadFailureHostStatus: integer(
+      "boundary_read_failure_host_status",
+    ),
+    boundaryReadFailureDriverStatus: integer(
+      "boundary_read_failure_driver_status",
+    ),
+    boundaryReadFailureSenseResponseCode: integer(
+      "boundary_read_failure_sense_response_code",
+    ),
+    boundaryReadFailureSenseKey: integer(
+      "boundary_read_failure_sense_key",
+    ),
+    boundaryReadFailureAsc: integer("boundary_read_failure_asc"),
+    boundaryReadFailureAscq: integer("boundary_read_failure_ascq"),
     integrity: text("integrity", { enum: ARCHIVE_INTEGRITIES })
       .notNull()
       .default("unknown"),
@@ -413,7 +435,7 @@ export const originalDiscArchives = sqliteTable(
     ),
     check(
       "original_disc_archives_boundary_evidence_check",
-      sql`(${table.boundaryPolicyVersion} is null and ${table.boundaryReportedSizeBytes} is null and ${table.boundaryPublishedSizeBytes} is null and ${table.boundaryExcludedSectorCount} is null) or (${table.discKind} = 'dvd' and typeof(${table.boundaryPolicyVersion}) = 'text' and length(${table.boundaryPolicyVersion}) between 1 and 128 and typeof(${table.boundaryReportedSizeBytes}) = 'integer' and ${table.boundaryReportedSizeBytes} between 1 and 9000000000 and typeof(${table.boundaryPublishedSizeBytes}) = 'integer' and ${table.boundaryPublishedSizeBytes} = ${table.boundaryReportedSizeBytes} and ${table.boundaryPublishedSizeBytes} = ${table.sizeBytes} and typeof(${table.boundaryExcludedSectorCount}) = 'integer' and ${table.boundaryExcludedSectorCount} = 0)`,
+      sql`(${table.boundaryPolicyVersion} is null and ${table.boundaryReportedSizeBytes} is null and ${table.boundaryPublishedSizeBytes} is null and ${table.boundaryExcludedSectorCount} is null and ${table.boundaryFirstExcludedLba} is null and ${table.boundaryMaximumReferencedLba} is null and ${table.boundaryReadFailureClassifierVersion} is null and ${table.boundaryReadFailureScsiStatus} is null and ${table.boundaryReadFailureHostStatus} is null and ${table.boundaryReadFailureDriverStatus} is null and ${table.boundaryReadFailureSenseResponseCode} is null and ${table.boundaryReadFailureSenseKey} is null and ${table.boundaryReadFailureAsc} is null and ${table.boundaryReadFailureAscq} is null) or (${table.discKind} = 'dvd' and typeof(${table.boundaryPolicyVersion}) = 'text' and length(${table.boundaryPolicyVersion}) between 1 and 128 and typeof(${table.boundaryReportedSizeBytes}) = 'integer' and ${table.boundaryReportedSizeBytes} between 1 and 9000000000 and typeof(${table.boundaryPublishedSizeBytes}) = 'integer' and ${table.boundaryPublishedSizeBytes} = ${table.sizeBytes} and typeof(${table.boundaryExcludedSectorCount}) = 'integer' and ((${table.boundaryPublishedSizeBytes} = ${table.boundaryReportedSizeBytes} and ${table.boundaryExcludedSectorCount} = 0 and ${table.boundaryFirstExcludedLba} is null and ${table.boundaryMaximumReferencedLba} is null and ${table.boundaryReadFailureClassifierVersion} is null and ${table.boundaryReadFailureScsiStatus} is null and ${table.boundaryReadFailureHostStatus} is null and ${table.boundaryReadFailureDriverStatus} is null and ${table.boundaryReadFailureSenseResponseCode} is null and ${table.boundaryReadFailureSenseKey} is null and ${table.boundaryReadFailureAsc} is null and ${table.boundaryReadFailureAscq} is null) or (${table.boundaryReportedSizeBytes} % 2048 = 0 and ${table.boundaryPublishedSizeBytes} % 2048 = 0 and ${table.boundaryPublishedSizeBytes} between 2048 and ${table.boundaryReportedSizeBytes} - 2048 and ${table.boundaryExcludedSectorCount} = (${table.boundaryReportedSizeBytes} - ${table.boundaryPublishedSizeBytes}) / 2048 and typeof(${table.boundaryFirstExcludedLba}) = 'integer' and ${table.boundaryFirstExcludedLba} = ${table.boundaryPublishedSizeBytes} / 2048 and typeof(${table.boundaryMaximumReferencedLba}) = 'integer' and ${table.boundaryMaximumReferencedLba} between 0 and ${table.boundaryFirstExcludedLba} - 1 and typeof(${table.boundaryReadFailureClassifierVersion}) = 'text' and length(${table.boundaryReadFailureClassifierVersion}) between 1 and 128 and ${table.boundaryReadFailureScsiStatus} = 2 and ${table.boundaryReadFailureHostStatus} = 0 and ${table.boundaryReadFailureDriverStatus} in (0, 8) and ${table.boundaryReadFailureSenseResponseCode} in (112, 114) and ${table.boundaryReadFailureSenseKey} = 5 and ${table.boundaryReadFailureAsc} = 33 and ${table.boundaryReadFailureAscq} = 0)))`,
     ),
     check(
       "original_disc_archives_integrity_check",

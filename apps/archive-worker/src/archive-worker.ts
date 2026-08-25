@@ -16,6 +16,7 @@ import {
   withCancelledDvdArchiveInactive,
 } from "./dvd-archiver.js";
 import type { DvdSalvageValidator } from "./dvd-salvage-validator.js";
+import type { DvdCompletenessProver } from "./dvd-completeness-prover.js";
 import {
   defaultDvdRescueWorkspaceLock,
   type DvdRescueWorkspaceLock,
@@ -31,6 +32,7 @@ export type {
 export interface PollArchiveWorkerOptions {
   access: DataAccess;
   concurrency?: number;
+  completenessProver?: DvdCompletenessProver;
   configuredDevicePath: string;
   copyRunner?: DvdCopyRunner;
   hardware: OpticalDriveHardware;
@@ -123,6 +125,7 @@ async function pollArchiveWorkerWithDriveAdmission(
   {
     access,
     concurrency: requestedConcurrency = 1,
+    completenessProver,
     configuredDevicePath,
     copyRunner,
     hardware,
@@ -254,6 +257,7 @@ async function pollArchiveWorkerWithDriveAdmission(
       await runArchiveJob({
         access,
         completed,
+        completenessProver,
         configuredCanonicalPath,
         copyRunner,
         hardware,

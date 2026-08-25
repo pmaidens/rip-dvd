@@ -101,7 +101,7 @@ import {
 } from "../disc-selection-source-identity.js";
 import { createDvdMetadataFingerprint } from "../dvd-metadata-fingerprint.js";
 import { createWatchableSalvageArchiveIntegrityEvidence } from "../archive-integrity.js";
-import { validateNormalDvdArchiveBoundaryEvidence } from "../archive-boundary.js";
+import { validateDvdArchiveBoundaryEvidence } from "../archive-boundary.js";
 import { isArchiveReadFailureEvidenceConsistent } from "../archive-read-failure.js";
 import {
   decodeArchivedDvdTitles,
@@ -1818,21 +1818,36 @@ export function createDataAccessInternal(
   async function inspectFilesystemPath(
     path: string,
     configuredRoot?: { resolvedPath: string },
+    expectedSizeBytes?: number,
   ): Promise<{
     verificationStatus: "accessible" | "missing" | "inaccessible" | "error";
     verificationMessage: string;
     verifiedAt: Date;
   }> {
     try {
-      const inspection = await filesystemPathProbe.inspect(
-        path,
-        configuredRoot?.resolvedPath,
-      );
+      const inspection = expectedSizeBytes === undefined
+        ? await filesystemPathProbe.inspect(
+            path,
+            configuredRoot?.resolvedPath,
+          )
+        : await filesystemPathProbe.inspect(
+            path,
+            configuredRoot?.resolvedPath,
+            expectedSizeBytes,
+          );
       if (inspection === "unsafe") {
         return {
           verificationStatus: "error",
           verificationMessage:
             "Recorded path is outside the configured library.",
+          verifiedAt: now(),
+        };
+      }
+      if (inspection === "size_mismatch") {
+        return {
+          verificationStatus: "error",
+          verificationMessage:
+            "File size does not match the Original Disc Archive.",
           verifiedAt: now(),
         };
       }
@@ -7968,7 +7983,7 @@ export function createDataAccessInternal(
       publish(claim, input) {
         const archivePath = requireNonEmpty(input.archivePath, "archivePath");
         const sizeBytes = requirePositiveSafeInteger(input.sizeBytes, "sizeBytes");
-        const boundaryEvidence = validateNormalDvdArchiveBoundaryEvidence(
+        const boundaryEvidence = validateDvdArchiveBoundaryEvidence(
           input.boundaryEvidence,
           sizeBytes,
         );
@@ -8140,6 +8155,46 @@ export function createDataAccessInternal(
                   boundaryEvidence.publishedSizeBytes,
                 boundaryExcludedSectorCount:
                   boundaryEvidence.excludedSectorCount,
+                boundaryFirstExcludedLba:
+                  "firstExcludedLba" in boundaryEvidence
+                    ? boundaryEvidence.firstExcludedLba
+                    : null,
+                boundaryMaximumReferencedLba:
+                  "maximumReferencedLba" in boundaryEvidence
+                    ? boundaryEvidence.maximumReferencedLba
+                    : null,
+                boundaryReadFailureClassifierVersion:
+                  "outOfRangeEvidence" in boundaryEvidence
+                    ? boundaryEvidence.outOfRangeEvidence.classifierVersion
+                    : null,
+                boundaryReadFailureScsiStatus:
+                  "outOfRangeEvidence" in boundaryEvidence
+                    ? boundaryEvidence.outOfRangeEvidence.scsiStatus
+                    : null,
+                boundaryReadFailureHostStatus:
+                  "outOfRangeEvidence" in boundaryEvidence
+                    ? boundaryEvidence.outOfRangeEvidence.hostStatus
+                    : null,
+                boundaryReadFailureDriverStatus:
+                  "outOfRangeEvidence" in boundaryEvidence
+                    ? boundaryEvidence.outOfRangeEvidence.driverStatus
+                    : null,
+                boundaryReadFailureSenseResponseCode:
+                  "outOfRangeEvidence" in boundaryEvidence
+                    ? boundaryEvidence.outOfRangeEvidence.senseResponseCode
+                    : null,
+                boundaryReadFailureSenseKey:
+                  "outOfRangeEvidence" in boundaryEvidence
+                    ? boundaryEvidence.outOfRangeEvidence.senseKey
+                    : null,
+                boundaryReadFailureAsc:
+                  "outOfRangeEvidence" in boundaryEvidence
+                    ? boundaryEvidence.outOfRangeEvidence.asc
+                    : null,
+                boundaryReadFailureAscq:
+                  "outOfRangeEvidence" in boundaryEvidence
+                    ? boundaryEvidence.outOfRangeEvidence.ascq
+                    : null,
                 integrity: integrityEvidence.integrity,
                 integrityPolicyVersion,
                 badSectorCount: integrityEvidence.badSectorCount,
@@ -9954,6 +10009,7 @@ export function createDataAccessInternal(
         const verification = await inspectFilesystemPath(
           archive.archivePath,
           originalsVerificationRoot,
+          archive.sizeBytes ?? undefined,
         );
         return requireRow(
           database

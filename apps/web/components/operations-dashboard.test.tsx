@@ -716,6 +716,24 @@ describe("DashboardView", () => {
             discLabel: "BONUS_DISC",
             discKind: "dvd",
             archiveFormat: "iso",
+            boundaryEvidence: {
+              policyVersion: "dvd-archive-boundary-v1",
+              reportedSizeBytes: 16_384,
+              publishedSizeBytes: 12_288,
+              excludedSectorCount: 2,
+              firstExcludedLba: 6,
+              maximumReferencedLba: 5,
+              outOfRangeEvidence: {
+                classifierVersion: "scsi-read-classifier-v1",
+                scsiStatus: 2,
+                hostStatus: 0,
+                driverStatus: 8,
+                senseResponseCode: 0x70,
+                senseKey: 0x05,
+                asc: 0x21,
+                ascq: 0,
+              },
+            },
             integrity: "unknown",
             badSectorCount: null,
             badAreaCount: null,
@@ -749,6 +767,12 @@ describe("DashboardView", () => {
     expect(html).toContain("My Movie");
     expect(html).toContain("BONUS_DISC");
     expect(html).toContain("Archive integrity: Unknown read quality");
+    expect(html).toContain("Capacity correction");
+    expect(html).toContain("Reported size: 16,384 bytes");
+    expect(html).toContain("Archived size: 12,288 bytes");
+    expect(html).toContain("Excluded trailing sectors: 2");
+    expect(html).not.toContain("repaired damage");
+    expect(html).not.toContain("bit-perfect");
     expect(html).toContain("Review catalog");
     expect(html).toContain("Previous pending reviews");
     expect(html).toContain("Next pending reviews");
