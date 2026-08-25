@@ -35,6 +35,7 @@ export interface EncodeOutputValidationExpectations {
 }
 
 export interface EncodeOutputVobSubExpectation {
+  contentLabel?: string;
   languageCode?: string;
 }
 
@@ -160,6 +161,34 @@ function expectedLanguageName(languageCode: string): string {
   return normalizedLanguageName(languageCode) ?? "und";
 }
 
+function expectedVobSubTitle(contentLabel: string): string | null {
+  switch (contentLabel.trim().toLowerCase()) {
+    case "undefined":
+    case "normal":
+    case "reserved":
+    case "forced":
+      return null;
+    case "large":
+      return "large type";
+    case "children":
+      return "children";
+    case "normal_cc":
+      return "closed caption";
+    case "large_cc":
+      return "closed caption, large type";
+    case "children_cc":
+      return "closed caption, children";
+    case "director":
+      return "commentary";
+    case "large_director":
+      return "commentary, large type";
+    case "children_director":
+      return "commentary, children";
+    default:
+      throw new Error("Encode output subtitle expectation is invalid");
+  }
+}
+
 function isProbeFlag(value: unknown): boolean {
   return value === 0 || value === 1;
 }
@@ -265,6 +294,8 @@ function validateExpectedVobSubStreams(
       typeof expectation !== "object" ||
       expectation === null ||
       Array.isArray(expectation) ||
+      (expectation.contentLabel !== undefined &&
+        !identifiedMetadata(expectation.contentLabel)) ||
       (expectation.languageCode !== undefined &&
         !identifiedMetadata(expectation.languageCode))
     ) {
@@ -277,16 +308,27 @@ function validateExpectedVobSubStreams(
     );
   }
   for (const [position, expectation] of expectations.entries()) {
-    if (expectation.languageCode === undefined) {
+    if (expectation.languageCode !== undefined) {
+      const expectedLanguage = expectedLanguageName(expectation.languageCode);
+      const actualLanguage = normalizedLanguageName(
+        sourceStreams[position]!.tags.language,
+      );
+      if (actualLanguage !== expectedLanguage) {
+        throw validationError(
+          `source VobSub stream ${position + 1} has language ${String(sourceStreams[position]!.tags.language)}, expected ${expectation.languageCode}`,
+        );
+      }
+    }
+    if (expectation.contentLabel === undefined) {
       continue;
     }
-    const expectedLanguage = expectedLanguageName(expectation.languageCode);
-    const actualLanguage = normalizedLanguageName(
-      sourceStreams[position]!.tags.language,
-    );
-    if (actualLanguage !== expectedLanguage) {
+    const expectedTitle = expectedVobSubTitle(expectation.contentLabel);
+    const actualTitle = sourceStreams[position]!.tags.title;
+    const normalizedActualTitle =
+      typeof actualTitle === "string" ? actualTitle.trim().toLowerCase() : null;
+    if (normalizedActualTitle !== expectedTitle) {
       throw validationError(
-        `source VobSub stream ${position + 1} has language ${String(sourceStreams[position]!.tags.language)}, expected ${expectation.languageCode}`,
+        `source VobSub stream ${position + 1} has title ${String(actualTitle)}, expected content ${expectation.contentLabel}`,
       );
     }
   }

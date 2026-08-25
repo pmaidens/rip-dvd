@@ -796,6 +796,7 @@ function createQueuedJob(
           chapters: 12,
           audioStreams: [],
           subtitles: Array.from({ length: subtitleCount }, (_, id) => ({
+            content: id % 2 === 0 ? "Normal" : "Director",
             id,
             languageCode: id % 2 === 0 ? "en" : "fr",
           })),
@@ -1253,8 +1254,8 @@ describe("encode worker polling", () => {
       expect.anything(),
       {
         expectedVobSubStreams: [
-          { languageCode: "en" },
-          { languageCode: "fr" },
+          { contentLabel: "Normal", languageCode: "en" },
+          { contentLabel: "Director", languageCode: "fr" },
         ],
       },
     );

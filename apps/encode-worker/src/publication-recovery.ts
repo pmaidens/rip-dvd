@@ -1372,12 +1372,15 @@ function resolveClaimInput(access: DataAccess, claim: RunningEncodeJob) {
       const selectedCurrentTitle = decodeDvdTitleMap(
         detectedDisc?.scanData,
       )?.titles.find((title) => title.number === sourceIdentity.titleNumber);
-      expectedVobSubStreams = selectedTitle.subtitles.map((subtitle) => {
-        if (selectedCurrentTitle === undefined) {
-          return {};
-        }
-        return { languageCode: subtitle.languageCode ?? "und" };
-      });
+      expectedVobSubStreams =
+        selectedCurrentTitle === undefined
+          ? selectedTitle.subtitles.map(() => ({}))
+          : selectedCurrentTitle.subtitles.map((subtitle) => ({
+              ...(subtitle.content === undefined
+                ? {}
+                : { contentLabel: subtitle.content }),
+              languageCode: subtitle.languageCode ?? "und",
+            }));
     }
     return {
       archive,

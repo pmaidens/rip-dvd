@@ -188,6 +188,107 @@ describe("encode output validation", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("matches same-language normal, commentary, and closed-caption tracks by title", async () => {
+    const validator = createNodeEncodeOutputValidator({
+      runMediaTool: createMediaToolRunner({
+        subtitleStreams: [
+          {
+            codec_name: "dvd_subtitle",
+            disposition: { default: 0, forced: 0 },
+            index: 2,
+            tags: { language: "eng" },
+          },
+          {
+            codec_name: "dvd_subtitle",
+            disposition: { default: 0, forced: 0 },
+            index: 3,
+            tags: { language: "eng", title: "Commentary" },
+          },
+          {
+            codec_name: "dvd_subtitle",
+            disposition: { default: 0, forced: 0 },
+            index: 4,
+            tags: { language: "eng", title: "Closed Caption" },
+          },
+        ],
+      }),
+    });
+
+    await expect(
+      validator.validate("/media/subtitled.mkv", new AbortController().signal, {
+        expectedVobSubStreams: [
+          { contentLabel: "Normal", languageCode: "en" },
+          { contentLabel: "Director", languageCode: "en" },
+          { contentLabel: "Normal_CC", languageCode: "en" },
+        ],
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("rejects a duplicated normal track that replaced same-language commentary", async () => {
+    const validator = createNodeEncodeOutputValidator({
+      runMediaTool: createMediaToolRunner({
+        subtitleStreams: [
+          {
+            codec_name: "dvd_subtitle",
+            disposition: { default: 0, forced: 0 },
+            index: 2,
+            tags: { language: "eng" },
+          },
+          {
+            codec_name: "dvd_subtitle",
+            disposition: { default: 0, forced: 0 },
+            index: 3,
+            tags: { language: "eng" },
+          },
+        ],
+      }),
+    });
+
+    await expect(
+      validator.validate("/media/broken.mkv", new AbortController().signal, {
+        expectedVobSubStreams: [
+          { contentLabel: "Normal", languageCode: "en" },
+          { contentLabel: "Director", languageCode: "en" },
+        ],
+      }),
+    ).rejects.toThrow(
+      "Encode output validation failed: source VobSub stream 2 has title undefined, expected content Director",
+    );
+  });
+
+  it("rejects swapped same-language commentary and closed-caption titles", async () => {
+    const validator = createNodeEncodeOutputValidator({
+      runMediaTool: createMediaToolRunner({
+        subtitleStreams: [
+          {
+            codec_name: "dvd_subtitle",
+            disposition: { default: 0, forced: 0 },
+            index: 2,
+            tags: { language: "eng", title: "Closed Caption" },
+          },
+          {
+            codec_name: "dvd_subtitle",
+            disposition: { default: 0, forced: 0 },
+            index: 3,
+            tags: { language: "eng", title: "Commentary" },
+          },
+        ],
+      }),
+    });
+
+    await expect(
+      validator.validate("/media/broken.mkv", new AbortController().signal, {
+        expectedVobSubStreams: [
+          { contentLabel: "Director", languageCode: "en" },
+          { contentLabel: "Normal_CC", languageCode: "en" },
+        ],
+      }),
+    ).rejects.toThrow(
+      "Encode output validation failed: source VobSub stream 1 has title Closed Caption, expected content Director",
+    );
+  });
+
   it("rejects an output that dropped a selected title's VobSub streams", async () => {
     const validator = createNodeEncodeOutputValidator({
       runMediaTool: createMediaToolRunner({ subtitleStreams: [] }),

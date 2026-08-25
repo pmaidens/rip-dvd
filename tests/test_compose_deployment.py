@@ -941,9 +941,7 @@ class ComposeDeploymentTests(unittest.TestCase):
         )[1].split("FROM runtime-base AS web", 1)[0]
         archive_runtime = dockerfile.split(
             "FROM worker-runtime-base AS archive-worker", 1
-        )[1].split(
-            "FROM node:22.23.1-trixie-slim AS encode-worker-runtime-base", 1
-        )[0]
+        )[1].split("\nFROM ", 1)[0]
         encode_runtime = dockerfile.split(
             "FROM encode-worker-runtime-base AS encode-worker", 1
         )[1]
