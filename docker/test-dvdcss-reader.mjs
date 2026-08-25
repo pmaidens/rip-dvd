@@ -233,6 +233,14 @@ const invalidBoundaryProbeFaults = [
       rawCompletionFault(35, "always", descriptorOutOfRangeSense(35)),
     ].join(","),
   ],
+  [
+    "conflicting-initiating-evidence",
+    rawTailCompletionFault(
+      35,
+      "always",
+      descriptorOutOfRangeSense(35),
+    ),
+  ],
 ];
 
 function prepareOutput(path) {

@@ -1164,7 +1164,6 @@ static int prove_boundary_candidate(
     }
 
     struct backend_read_result confirmation = { 0 };
-    struct read_failure first_confirmation = { 0 };
     for (uint32_t ordinal = 0;
          ordinal < BOUNDARY_CONFIRMATION_READS; ordinal++) {
         confirmation = boundary_probe_read(
@@ -1179,10 +1178,8 @@ static int prove_boundary_candidate(
                 initial_failure, recovery, declared_byte_count,
                 *bytes_processed);
         }
-        if (ordinal == 0) {
-            first_confirmation = confirmation.failure;
-        } else if (!normalized_failure_evidence_matches(
-                       &first_confirmation, &confirmation.failure)) {
+        if (!normalized_failure_evidence_matches(
+                initial_failure, &confirmation.failure)) {
             return emit_unproven_boundary_failure(
                 initial_failure, recovery, declared_byte_count,
                 *bytes_processed);
