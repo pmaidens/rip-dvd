@@ -12206,6 +12206,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
 
     const sqlite = new DatabaseSync(databasePath);
     for (const mutation of [
+      "size_bytes = null",
       "size_bytes = 16384",
       "boundary_reported_size_bytes = 16383",
       "boundary_published_size_bytes = 12287",
