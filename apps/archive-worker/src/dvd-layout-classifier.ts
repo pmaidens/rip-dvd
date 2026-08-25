@@ -4766,14 +4766,18 @@ async function analyzeDvdImageLayout({
   ): number => {
     const partition = partitionsByReference[descriptor.partitionReferenceNumber];
     const extentSectorCount = sectorCountForBytes(descriptor.extentLength);
+    const partitionExtentIsInvalid = partition === undefined ||
+      (policy.requireDvdReadOnlyUdfProfile
+        ? descriptor.extentType !== 0 ||
+          !Number.isSafeInteger(
+            descriptor.logicalBlockNumber + extentSectorCount,
+          ) ||
+          descriptor.logicalBlockNumber + extentSectorCount >
+            partition.sectorCount
+        : descriptor.logicalBlockNumber >= partition.sectorCount);
     if (
-      partition === undefined ||
-      descriptor.extentType !== 0 ||
       descriptor.extentLength <= 0 ||
-      !Number.isSafeInteger(
-        descriptor.logicalBlockNumber + extentSectorCount,
-      ) ||
-      descriptor.logicalBlockNumber + extentSectorCount > partition.sectorCount
+      partitionExtentIsInvalid
     ) {
       throw new Error("DVD UDF partition address is invalid");
     }
@@ -5128,8 +5132,8 @@ async function analyzeDvdImageLayout({
               (udfEntityIdentifier(descriptor, 24, [2]) !==
                   `+${nsrIdentifier}` ||
                 descriptor.readUInt16LE(20) !== 1 ||
-                descriptor.readUInt32LE(184) !== 1) ||
-            descriptor.subarray(48, 56).some((byte) => byte !== 0)
+                descriptor.readUInt32LE(184) !== 1 ||
+                descriptor.subarray(48, 56).some((byte) => byte !== 0))
           ) {
             throw new Error("DVD UDF partition contents are unsupported");
           }
@@ -5143,10 +5147,37 @@ async function analyzeDvdImageLayout({
             throw new Error("DVD UDF partition number is duplicated");
           }
           sequencePartitions.set(partition.number, partition);
-          if (descriptor.subarray(56, 184).some((byte) => byte !== 0)) {
+          if (
+            policy.requireDvdReadOnlyUdfProfile &&
+            descriptor.subarray(56, 184).some((byte) => byte !== 0)
+          ) {
             throw new Error(
               "DVD UDF partition metadata extent is unsupported",
             );
+          }
+          if (!policy.requireDvdReadOnlyUdfProfile) {
+            for (const headerOffset of [56, 64, 72, 80, 88]) {
+              const rawLength = descriptor.readUInt32LE(headerOffset);
+              const extentLength = rawLength & UDF_EXTENT_LENGTH_MASK;
+              if (extentLength === 0) {
+                continue;
+              }
+              const relativeLba = descriptor.readUInt32LE(headerOffset + 4);
+              const sectorCount = sectorCountForBytes(extentLength);
+              if (
+                !Number.isSafeInteger(relativeLba + sectorCount) ||
+                relativeLba + sectorCount > partition.sectorCount
+              ) {
+                throw new Error(
+                  "DVD UDF partition metadata extent is invalid",
+                );
+              }
+              addExtent(
+                partition.startLba + relativeLba,
+                sectorCount,
+                "filesystem_metadata",
+              );
+            }
           }
         } else if (identifier === 6) {
           if (policy.requireDvdReadOnlyUdfProfile) {
@@ -5513,7 +5544,10 @@ async function analyzeDvdImageLayout({
       }> = [];
       let fileByteOffset = 0;
       let recordedLogicalBlockCount = 0;
-      if (allocationType === 2 || allocationType > 3) {
+      if (
+        allocationType > 3 ||
+        policy.requireDvdReadOnlyUdfProfile && allocationType === 2
+      ) {
         throw new Error("DVD UDF allocation descriptors are unsupported");
       }
       if (allocationType === 3) {
@@ -5523,7 +5557,9 @@ async function analyzeDvdImageLayout({
       } else {
         const descriptorSize = allocationType === 0
           ? 8
-          : 16;
+          : allocationType === 1
+          ? 16
+          : 20;
         if (allocationDescriptorLength % descriptorSize !== 0) {
           throw new Error("DVD UDF allocation descriptors are unsupported");
         }
@@ -5539,13 +5575,22 @@ async function analyzeDvdImageLayout({
           if (extentLength === 0) {
             continue;
           }
-          if (extentType !== 0) {
+          if (
+            policy.requireDvdReadOnlyUdfProfile
+              ? extentType !== 0
+              : (extentType === 0x8000_0000 ||
+                extentType === 0xc000_0000)
+          ) {
             throw new Error("DVD UDF continuation or sparse extent is unsupported");
           }
-          const logicalBlockNumber = fileEntry.readUInt32LE(offset + 4);
+          const logicalBlockNumber = allocationType === 2
+            ? fileEntry.readUInt32LE(offset + 12)
+            : fileEntry.readUInt32LE(offset + 4);
           const partitionReferenceNumber = allocationType === 0
             ? icb.partitionReferenceNumber
-            : fileEntry.readUInt16LE(offset + 8);
+            : allocationType === 1
+            ? fileEntry.readUInt16LE(offset + 8)
+            : fileEntry.readUInt16LE(offset + 16);
           const startLba = partitionAbsoluteLba(
             {
               extentLength,

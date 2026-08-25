@@ -1448,10 +1448,7 @@ function createSyntheticPayloadDvdImage(
   return writeFixture(image, badLba);
 }
 
-function createSyntheticUdfDvdImage(badLba: number): {
-  imagePath: string;
-  sizeBytes: number;
-} {
+function syntheticLegacyUdfSalvageImage(): Buffer {
   const image = Buffer.alloc(700 * DVD_SECTOR_SIZE_BYTES);
   writeSyntheticIsoLayout(image, {
     fileStartLba: 310,
@@ -1462,7 +1459,14 @@ function createSyntheticUdfDvdImage(badLba: number): {
     volumeSpaceSize: 600,
   });
   writeSyntheticUdfLayout(image, { legacySalvage: true });
-  return writeFixture(image, badLba);
+  return image;
+}
+
+function createSyntheticUdfDvdImage(badLba: number): {
+  imagePath: string;
+  sizeBytes: number;
+} {
+  return writeFixture(syntheticLegacyUdfSalvageImage(), badLba);
 }
 
 function createSyntheticContradictoryUdfPayloadDvdImage(badLba: number): {
@@ -4954,6 +4958,59 @@ describe("DVD layout damage classification", () => {
       outcome: "accepted",
     });
   });
+
+  it(
+    "preserves salvage classification for a UDF partition-header extent",
+    async () => {
+      const image = syntheticLegacyUdfSalvageImage();
+      for (const descriptorLba of [258, 274]) {
+        const descriptor = image.subarray(
+          descriptorLba * DVD_SECTOR_SIZE_BYTES,
+          (descriptorLba + 1) * DVD_SECTOR_SIZE_BYTES,
+        );
+        descriptor.writeUInt32LE(DVD_SECTOR_SIZE_BYTES, 56);
+        descriptor.writeUInt32LE(200, 60);
+        writeLegacyUdfTag(descriptor, 5);
+      }
+      const fixture = writeFixture(image, 500);
+
+      await expect(classifyDvdImageDamage({
+        expectedByteCount: fixture.sizeBytes,
+        imagePath: fixture.imagePath,
+        unreadableSectorRanges: [{ startLba: 500, sectorCount: 1 }],
+      })).resolves.toEqual({
+        outcome: "rejected",
+        reason: "filesystem_metadata",
+      });
+    },
+  );
+
+  it(
+    "preserves salvage classification for an extended UDF allocation descriptor",
+    async () => {
+      const image = syntheticLegacyUdfSalvageImage();
+      const fileEntry = image.subarray(
+        305 * DVD_SECTOR_SIZE_BYTES,
+        306 * DVD_SECTOR_SIZE_BYTES,
+      );
+      fileEntry.writeUInt16LE(2, 34);
+      fileEntry.writeUInt32LE(20, 172);
+      fileEntry.fill(0, 176, 196);
+      fileEntry.writeUInt32LE(DVD_SECTOR_SIZE_BYTES, 176);
+      fileEntry.writeUInt32LE(DVD_SECTOR_SIZE_BYTES, 180);
+      fileEntry.writeUInt32LE(DVD_SECTOR_SIZE_BYTES, 184);
+      fileEntry.writeUInt32LE(10, 188);
+      fileEntry.writeUInt16LE(0, 192);
+      writeLegacyUdfTag(fileEntry, 261);
+      const fixture = writeFixture(image, 310);
+
+      await expect(classifyDvdImageDamage({
+        expectedByteCount: fixture.sizeBytes,
+        imagePath: fixture.imagePath,
+        unreadableSectorRanges: [{ startLba: 310, sectorCount: 1 }],
+      })).resolves.toEqual({ outcome: "rejected", reason: "ifo" });
+    },
+  );
 
   it("rejects damage to a UDF file entry as filesystem metadata", async () => {
     const fixture = createSyntheticUdfDvdImage(301);
