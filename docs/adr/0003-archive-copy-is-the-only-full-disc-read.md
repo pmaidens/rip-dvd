@@ -10,10 +10,12 @@ Disc Inspection. A smaller file is complete only when versioned, structured
 logical-block-address-out-of-range evidence proves a sector-precise trailing
 boundary and a bounded ISO or UDF and DVD-Video extent proof establishes that
 the excluded suffix is unaddressable and unreferenced. Every retained sector
-must also have a successful recovery outcome. The published file ends at the
-proven boundary, its actual size becomes the Original Disc Archive size, and
-the Disc Inspection reported size remains in separate Archive Boundary
-Evidence.
+must also have normalized recovery evidence. A corrected retained range may
+publish as `clean_read`, or as `watchable_salvage` only when its genuine
+unreadable sectors pass the existing versioned salvage policy; excluded suffix
+sectors never count as damage. The published file ends at the proven boundary,
+its actual size becomes the Original Disc Archive size, and the Disc Inspection
+reported size remains in separate Archive Boundary Evidence.
 
 Both publication paths require stable Optical Drive identity and
 media-generation evidence, a current Archive Job claim, filesystem
