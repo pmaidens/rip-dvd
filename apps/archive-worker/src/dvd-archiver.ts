@@ -1185,11 +1185,15 @@ async function quarantineCancelledCorrectedPublication({
   ) {
     throw new Error("Archive path escaped the originals library");
   }
-  const workspace = await loadDvdRescueWorkspace(root, {
-    archiveRequestId,
-    fingerprint,
-    sizeBytes: safeSizeBytes,
-  });
+  const workspace = await loadDvdRescueWorkspace(
+    root,
+    {
+      archiveRequestId,
+      fingerprint,
+      sizeBytes: safeSizeBytes,
+    },
+    { invalidStatePolicy: "preserve" },
+  );
   if (
     workspace === null ||
     workspace.recoveryResult !== null ||
@@ -1902,8 +1906,7 @@ export async function preserveDvdArchive({
       : await loadDvdRescueWorkspace(
           root,
           rescueIdentity,
-          archivePath,
-          authorizeMutation,
+          { authorizeMutation, correlatedArchivePath: archivePath },
         );
   const recoveryPaths = [
     legacyPartialPath,

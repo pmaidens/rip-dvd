@@ -41,6 +41,7 @@ import {
 } from "./dvd-read-failure.test-support.js";
 import { dvdRescueWorkspacePaths } from "./dvd-rescue-workspace.js";
 import {
+  createInProcessDvdRescueWorkspaceLock,
   DVD_RESCUE_WORKSPACE_LOCK_DIRECTORY_NAME,
 } from "./dvd-rescue-workspace-lock.js";
 
@@ -373,6 +374,49 @@ describe("DVD archive publication", () => {
     expect(child.kill).toHaveBeenCalledWith("SIGKILL");
     expect(stderr.destroy).toHaveBeenCalledOnce();
     expect(child.unref).toHaveBeenCalledOnce();
+  });
+
+  it("keeps cancellation pending when corrected rescue state is invalid", async () => {
+    const originalsLibraryPath = createOriginalsLibrary();
+    const root = realpathSync(originalsLibraryPath);
+    const digest = "d".repeat(64);
+    const archiveRequestId = "cancelled-invalid-corrected-rescue";
+    const archivePath = join(root, `dvdmeta-${digest}.iso`);
+    const rescuePaths = dvdRescueWorkspacePaths(root, archiveRequestId);
+    writeFileSync(archivePath, Buffer.alloc(6 * 2_048, 17));
+    writeFileSync(rescuePaths.mapPath, "invalid rescue map\n");
+    const mutation = vi.fn();
+    const options = {
+      archiveRequestId,
+      devicePath: "/dev/sr0",
+      fingerprint: `dvdmeta-sha256:${digest}`,
+      mutation,
+      originalsLibraryPath,
+      runner: {
+        copy: vi.fn(),
+        isActive: () => false,
+        withDeviceInactive: vi.fn(async (_path, guardedMutation) =>
+          guardedMutation()
+        ),
+        waitForInactive: vi.fn(async () => undefined),
+      },
+      sizeBytes: 8 * 2_048,
+      workspaceLock: createInProcessDvdRescueWorkspaceLock(),
+    };
+
+    await expect(
+      withCancelledDvdArchiveInactive(options),
+    ).rejects.toThrow("DVD rescue state is invalid");
+    await expect(
+      withCancelledDvdArchiveInactive(options),
+    ).rejects.toThrow("DVD rescue state is invalid");
+
+    expect(mutation).not.toHaveBeenCalled();
+    expect(existsSync(archivePath)).toBe(true);
+    expect(existsSync(rescuePaths.mapPath)).toBe(true);
+    expect(
+      readdirSync(root).some((name) => name.includes(".invalid-")),
+    ).toBe(false);
   });
 
   it.runIf(supportsLinuxWriterOwnership)(

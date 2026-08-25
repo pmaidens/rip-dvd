@@ -4919,7 +4919,7 @@ describe("archive worker polling", () => {
   });
 
   it.runIf(supportsLinuxWriterOwnership)(
-    "quarantines a crashed corrected publication before finalizing cancellation",
+    "keeps invalid corrected recovery pending before finalizing cancellation",
     async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-12T08:00:00.000Z"));
@@ -5022,6 +5022,12 @@ describe("archive worker polling", () => {
       verifySource: async () => undefined,
       onProgress: () => undefined,
     });
+    const rescuePaths = dvdRescueWorkspacePaths(
+      realpathSync(originalsLibraryPath),
+      cancelledRequest.id,
+    );
+    const validRescueMap = readFileSync(rescuePaths.mapPath, "utf8");
+    writeFileSync(rescuePaths.mapPath, "invalid rescue map\n");
     access.archiveRequests.cancel(cancelledRequest.id);
     vi.advanceTimersByTime(ARCHIVE_JOB_LEASE_DURATION_MS + 1);
     const replacementImage = Buffer.alloc(reportedSizeBytes, 79);
@@ -5052,6 +5058,24 @@ describe("archive worker polling", () => {
       signal: new AbortController().signal,
     };
 
+    await pollArchiveWorker(pollOptions);
+    await pollArchiveWorker(pollOptions);
+
+    expect(access.archiveJobs.list(["running"])).toEqual([
+      expect.objectContaining({ id: expiredClaim.id }),
+    ]);
+    expect(access.archiveRequests.list(["cancellation_requested"])).toEqual([
+      expect.objectContaining({ id: cancelledRequest.id }),
+    ]);
+    expect(existsSync(crashedPublication.archivePath)).toBe(true);
+    expect(existsSync(rescuePaths.mapPath)).toBe(true);
+    expect(
+      readdirSync(realpathSync(originalsLibraryPath)).some((name) =>
+        name.includes(".invalid-")
+      ),
+    ).toBe(false);
+
+    writeFileSync(rescuePaths.mapPath, validRescueMap);
     await pollArchiveWorker(pollOptions);
 
     expect(access.archiveJobs.list(["aborted"])).toEqual([
