@@ -226,6 +226,13 @@ const invalidBoundaryProbeFaults = [
       rawCompletionFault(35, "always", fixedMediumSense(35)),
     ].join(","),
   ],
+  [
+    "conflicting-out-of-range-confirmations",
+    [
+      rawCompletionFault(35, 1, fixedOutOfRangeSense(35)),
+      rawCompletionFault(35, "always", descriptorOutOfRangeSense(35)),
+    ].join(","),
+  ],
 ];
 
 function prepareOutput(path) {
@@ -998,7 +1005,7 @@ for (const [name, candidateFaults] of invalidBoundaryProbeFaults) {
     statSync(invalidProbe.outputPath).size !== 35 * 2_048 ||
     invalidProbe.stderr.includes(recoveryResultPrefix) ||
     testReads(invalidProbe.stderr).length !==
-      (name === "inconsistent-confirmations" ? 6 : 5)
+      (name.endsWith("confirmations") ? 6 : 5)
   ) {
     throw new Error(
       `libdvdcss ${name} invalid boundary probe check failed: ${invalidProbe.stderr}`,

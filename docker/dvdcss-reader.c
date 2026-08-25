@@ -1082,6 +1082,21 @@ static int emit_unproven_boundary_failure(
         boundary_retained_image_byte_count(recovery, bytes_processed));
 }
 
+static int normalized_failure_evidence_matches(
+    const struct read_failure *left, const struct read_failure *right)
+{
+    return left->category == right->category &&
+        left->status == right->status &&
+        left->completion.scsi_status == right->completion.scsi_status &&
+        left->completion.host_status == right->completion.host_status &&
+        left->completion.driver_status == right->completion.driver_status &&
+        left->sense.response_code == right->sense.response_code &&
+        left->sense.sense_key == right->sense.sense_key &&
+        left->sense.asc == right->sense.asc &&
+        left->sense.ascq == right->sense.ascq &&
+        left->sense.information_lba == right->sense.information_lba;
+}
+
 static int prove_boundary_candidate(
     struct read_backend *backend, struct operation_state *state,
     struct recovery_state *recovery, unsigned char *buffer,
@@ -1117,12 +1132,14 @@ static int prove_boundary_candidate(
             return 1;
         }
         if (prefix.status != BACKEND_READ_SUCCESS ||
-            prefix.blocks_read <= 0 || prefix.blocks_read > requested ||
-            consume_blocks(state, buffer, prefix.blocks_read,
-                           bytes_processed) != 0) {
+            prefix.blocks_read <= 0 || prefix.blocks_read > requested) {
             return emit_unproven_boundary_failure(
                 initial_failure, recovery, declared_byte_count,
                 *bytes_processed);
+        }
+        if (consume_blocks(state, buffer, prefix.blocks_read,
+                           bytes_processed) != 0) {
+            return 1;
         }
         retained_lba += (uint64_t)prefix.blocks_read;
     }
@@ -1147,6 +1164,7 @@ static int prove_boundary_candidate(
     }
 
     struct backend_read_result confirmation = { 0 };
+    struct read_failure first_confirmation = { 0 };
     for (uint32_t ordinal = 0;
          ordinal < BOUNDARY_CONFIRMATION_READS; ordinal++) {
         confirmation = boundary_probe_read(
@@ -1157,6 +1175,14 @@ static int prove_boundary_candidate(
         if (confirmation.status != BACKEND_READ_OUT_OF_RANGE_ERROR ||
             !confirmation.failure.sense.has_information_lba ||
             confirmation.failure.sense.information_lba != candidate_lba) {
+            return emit_unproven_boundary_failure(
+                initial_failure, recovery, declared_byte_count,
+                *bytes_processed);
+        }
+        if (ordinal == 0) {
+            first_confirmation = confirmation.failure;
+        } else if (!normalized_failure_evidence_matches(
+                       &first_confirmation, &confirmation.failure)) {
             return emit_unproven_boundary_failure(
                 initial_failure, recovery, declared_byte_count,
                 *bytes_processed);
