@@ -15,12 +15,25 @@ function createMediaToolRunner({
   decodedFrames = 120,
   pixFmt = "yuv420p",
   profile = "High",
+  subtitlePacketStderr = "",
+  subtitlePacketStreams,
+  subtitleStreams = [
+    {
+      codec_name: "dvd_subtitle",
+      disposition: { default: 0, forced: 0 },
+      index: 2,
+      tags: { language: "eng" },
+    },
+  ],
   videoFirstPts = "0.021000",
 }: {
   audioFirstPts?: string | null;
   decodedFrames?: number;
   pixFmt?: string;
   profile?: string;
+  subtitlePacketStderr?: string;
+  subtitlePacketStreams?: unknown;
+  subtitleStreams?: unknown;
   videoFirstPts?: string | null;
 } = {}) {
   return vi.fn(
@@ -42,6 +55,37 @@ function createMediaToolRunner({
           }),
         );
       }
+      if (streamSelector === "s") {
+        if (request.arguments_.includes("-count_packets")) {
+          const derivedPacketStreams = Array.isArray(subtitleStreams)
+            ? subtitleStreams.flatMap((stream) => {
+                if (
+                  typeof stream !== "object" ||
+                  stream === null ||
+                  Array.isArray(stream) ||
+                  !("index" in stream) ||
+                  !("codec_name" in stream)
+                ) {
+                  return [];
+                }
+                return [
+                  {
+                    codec_name: stream.codec_name,
+                    index: stream.index,
+                    nb_read_packets: "1",
+                  },
+                ];
+              })
+            : [];
+          return {
+            stderr: subtitlePacketStderr,
+            stdout: JSON.stringify({
+              streams: subtitlePacketStreams ?? derivedPacketStreams,
+            }),
+          };
+        }
+        return mediaToolResult(JSON.stringify({ streams: subtitleStreams }));
+      }
       return mediaToolResult(
         JSON.stringify({
           packets:
@@ -62,7 +106,14 @@ describe("encode output validation", () => {
       new AbortController().signal,
     );
 
-    expect(runMediaTool).toHaveBeenCalledTimes(3);
+    expect(runMediaTool).toHaveBeenCalledTimes(5);
+    expect(runMediaTool).toHaveBeenCalledWith(
+      expect.objectContaining({
+        arguments_: expect.arrayContaining(["-count_packets"]),
+        executable: "ffprobe",
+        timeoutMs: 300_000,
+      }),
+    );
     expect(runMediaTool).toHaveBeenLastCalledWith(
       expect.objectContaining({
         arguments_: expect.arrayContaining([
@@ -74,6 +125,359 @@ describe("encode output validation", () => {
         ]),
         executable: "ffmpeg",
       }),
+    );
+  });
+
+  it("accepts an output without subtitles when the selected source has none", async () => {
+    const validator = createNodeEncodeOutputValidator({
+      runMediaTool: createMediaToolRunner({ subtitleStreams: [] }),
+    });
+
+    await expect(
+      validator.validate(
+        "/media/subtitle-free.mkv",
+        new AbortController().signal,
+        { expectedVobSubStreams: [] },
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("accepts identified VobSub streams with language and disposition metadata", async () => {
+    const validator = createNodeEncodeOutputValidator({
+      runMediaTool: createMediaToolRunner({
+        subtitleStreams: [
+          {
+            codec_name: "dvd_subtitle",
+            disposition: { default: 1, forced: 1 },
+            index: 2,
+            tags: { language: "eng", title: "English" },
+          },
+          {
+            codec_name: "dvd_subtitle",
+            disposition: { default: 0, forced: 0 },
+            index: 3,
+            tags: { language: "eng" },
+          },
+          {
+            codec_name: "dvd_subtitle",
+            disposition: { default: 0, forced: 0 },
+            index: 4,
+            tags: { language: "fra" },
+          },
+          {
+            codec_name: "subrip",
+            disposition: { default: 0, forced: 0 },
+            index: 5,
+            tags: { language: "eng" },
+          },
+        ],
+      }),
+    });
+
+    await expect(
+      validator.validate(
+        "/media/subtitled.mkv",
+        new AbortController().signal,
+        {
+          expectedVobSubStreams: [
+            { languageCode: "en" },
+            { languageCode: "fr" },
+          ],
+        },
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("matches same-language normal, commentary, and closed-caption tracks by title", async () => {
+    const validator = createNodeEncodeOutputValidator({
+      runMediaTool: createMediaToolRunner({
+        subtitleStreams: [
+          {
+            codec_name: "dvd_subtitle",
+            disposition: { default: 0, forced: 0 },
+            index: 2,
+            tags: { language: "eng" },
+          },
+          {
+            codec_name: "dvd_subtitle",
+            disposition: { default: 0, forced: 0 },
+            index: 3,
+            tags: { language: "eng", title: "Commentary" },
+          },
+          {
+            codec_name: "dvd_subtitle",
+            disposition: { default: 0, forced: 0 },
+            index: 4,
+            tags: { language: "eng", title: "Closed Caption" },
+          },
+        ],
+      }),
+    });
+
+    await expect(
+      validator.validate("/media/subtitled.mkv", new AbortController().signal, {
+        expectedVobSubStreams: [
+          { contentLabel: "Normal", languageCode: "en" },
+          { contentLabel: "Director", languageCode: "en" },
+          { contentLabel: "Normal_CC", languageCode: "en" },
+        ],
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("rejects a duplicated normal track that replaced same-language commentary", async () => {
+    const validator = createNodeEncodeOutputValidator({
+      runMediaTool: createMediaToolRunner({
+        subtitleStreams: [
+          {
+            codec_name: "dvd_subtitle",
+            disposition: { default: 0, forced: 0 },
+            index: 2,
+            tags: { language: "eng" },
+          },
+          {
+            codec_name: "dvd_subtitle",
+            disposition: { default: 0, forced: 0 },
+            index: 3,
+            tags: { language: "eng" },
+          },
+        ],
+      }),
+    });
+
+    await expect(
+      validator.validate("/media/broken.mkv", new AbortController().signal, {
+        expectedVobSubStreams: [
+          { contentLabel: "Normal", languageCode: "en" },
+          { contentLabel: "Director", languageCode: "en" },
+        ],
+      }),
+    ).rejects.toThrow(
+      "Encode output validation failed: source VobSub stream 2 has title undefined, expected content Director",
+    );
+  });
+
+  it("rejects swapped same-language commentary and closed-caption titles", async () => {
+    const validator = createNodeEncodeOutputValidator({
+      runMediaTool: createMediaToolRunner({
+        subtitleStreams: [
+          {
+            codec_name: "dvd_subtitle",
+            disposition: { default: 0, forced: 0 },
+            index: 2,
+            tags: { language: "eng", title: "Closed Caption" },
+          },
+          {
+            codec_name: "dvd_subtitle",
+            disposition: { default: 0, forced: 0 },
+            index: 3,
+            tags: { language: "eng", title: "Commentary" },
+          },
+        ],
+      }),
+    });
+
+    await expect(
+      validator.validate("/media/broken.mkv", new AbortController().signal, {
+        expectedVobSubStreams: [
+          { contentLabel: "Director", languageCode: "en" },
+          { contentLabel: "Normal_CC", languageCode: "en" },
+        ],
+      }),
+    ).rejects.toThrow(
+      "Encode output validation failed: source VobSub stream 1 has title Closed Caption, expected content Director",
+    );
+  });
+
+  it("rejects an output that dropped a selected title's VobSub streams", async () => {
+    const validator = createNodeEncodeOutputValidator({
+      runMediaTool: createMediaToolRunner({ subtitleStreams: [] }),
+    });
+
+    await expect(
+      validator.validate(
+        "/media/broken.mkv",
+        new AbortController().signal,
+        { expectedVobSubStreams: [{}, {}] },
+      ),
+    ).rejects.toThrow(
+      "Encode output validation failed: expected 2 source VobSub streams, found 0",
+    );
+  });
+
+  it("rejects same-count VobSub streams with the wrong source language", async () => {
+    const validator = createNodeEncodeOutputValidator({
+      runMediaTool: createMediaToolRunner({
+        subtitleStreams: [
+          {
+            codec_name: "dvd_subtitle",
+            disposition: { default: 0, forced: 0 },
+            index: 2,
+            tags: { language: "fra" },
+          },
+        ],
+      }),
+    });
+
+    await expect(
+      validator.validate("/media/broken.mkv", new AbortController().signal, {
+        expectedVobSubStreams: [{ languageCode: "en" }],
+      }),
+    ).rejects.toThrow(
+      "Encode output validation failed: source VobSub stream 1 has language fra, expected en",
+    );
+  });
+
+  it("does not let a foreign-audio-search track mask a dropped source track", async () => {
+    const validator = createNodeEncodeOutputValidator({
+      runMediaTool: createMediaToolRunner({
+        subtitleStreams: [
+          {
+            codec_name: "dvd_subtitle",
+            disposition: { default: 1, forced: 1 },
+            index: 2,
+            tags: { language: "eng" },
+          },
+        ],
+      }),
+    });
+
+    await expect(
+      validator.validate("/media/broken.mkv", new AbortController().signal, {
+        expectedVobSubStreams: [{ languageCode: "en" }],
+      }),
+    ).rejects.toThrow(
+      "Encode output validation failed: expected 1 source VobSub stream, found 0",
+    );
+  });
+
+  it("matches an unknown DVD language to Matroska's und fallback", async () => {
+    const validator = createNodeEncodeOutputValidator({
+      runMediaTool: createMediaToolRunner({
+        subtitleStreams: [
+          {
+            codec_name: "dvd_subtitle",
+            disposition: { default: 0, forced: 0 },
+            index: 2,
+            tags: { language: "und" },
+          },
+        ],
+      }),
+    });
+
+    await expect(
+      validator.validate("/media/subtitled.mkv", new AbortController().signal, {
+        expectedVobSubStreams: [{ languageCode: "xx" }],
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("rejects a subtitle stream without a language tag", async () => {
+    const validator = createNodeEncodeOutputValidator({
+      runMediaTool: createMediaToolRunner({
+        subtitleStreams: [
+          {
+            codec_name: "dvd_subtitle",
+            disposition: { default: 0, forced: 0 },
+            index: 2,
+            tags: {},
+          },
+        ],
+      }),
+    });
+
+    await expect(
+      validator.validate("/media/broken.mkv", new AbortController().signal),
+    ).rejects.toThrow(
+      "Encode output validation failed: subtitle stream metadata is incomplete",
+    );
+  });
+
+  it("rejects an unexpected source VobSub disposition", async () => {
+    const validator = createNodeEncodeOutputValidator({
+      runMediaTool: createMediaToolRunner({
+        subtitleStreams: [
+          {
+            codec_name: "dvd_subtitle",
+            disposition: { default: 1, forced: 0 },
+            index: 2,
+            tags: { language: "eng" },
+          },
+        ],
+      }),
+    });
+
+    await expect(
+      validator.validate("/media/broken.mkv", new AbortController().signal),
+    ).rejects.toThrow(
+      "Encode output validation failed: a source VobSub stream has an unexpected default or forced disposition",
+    );
+  });
+
+  it("rejects a VobSub stream without readable packets", async () => {
+    const validator = createNodeEncodeOutputValidator({
+      runMediaTool: createMediaToolRunner({
+        subtitlePacketStreams: [
+          {
+            codec_name: "dvd_subtitle",
+            index: 2,
+            nb_read_packets: "0",
+          },
+        ],
+      }),
+    });
+
+    await expect(
+      validator.validate("/media/broken.mkv", new AbortController().signal),
+    ).rejects.toThrow(
+      "Encode output validation failed: VobSub stream 2 has no readable packets",
+    );
+  });
+
+  it("rejects VobSub packet read errors reported by ffprobe", async () => {
+    const validator = createNodeEncodeOutputValidator({
+      runMediaTool: createMediaToolRunner({
+        subtitlePacketStderr: "invalid subtitle packet",
+      }),
+    });
+
+    await expect(
+      validator.validate("/media/broken.mkv", new AbortController().signal),
+    ).rejects.toThrow(
+      "Encode output validation failed: subtitle packet probe reported unreadable data",
+    );
+  });
+
+  it("rejects incomplete subtitle metadata", async () => {
+    const validator = createNodeEncodeOutputValidator({
+      runMediaTool: createMediaToolRunner({
+        subtitleStreams: [
+          {
+            codec_name: "unknown",
+            disposition: { default: 0, forced: 0 },
+            index: 2,
+            tags: {},
+          },
+        ],
+      }),
+    });
+
+    await expect(
+      validator.validate("/media/broken.mkv", new AbortController().signal),
+    ).rejects.toThrow(
+      "Encode output validation failed: subtitle stream metadata is incomplete",
+    );
+  });
+
+  it("rejects a malformed subtitle probe result", async () => {
+    const validator = createNodeEncodeOutputValidator({
+      runMediaTool: createMediaToolRunner({ subtitleStreams: {} }),
+    });
+
+    await expect(
+      validator.validate("/media/broken.mkv", new AbortController().signal),
+    ).rejects.toThrow(
+      "Encode output validation failed: subtitle probe returned an invalid result",
     );
   });
 

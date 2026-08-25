@@ -941,9 +941,9 @@ class ComposeDeploymentTests(unittest.TestCase):
         )[1].split("FROM runtime-base AS web", 1)[0]
         archive_runtime = dockerfile.split(
             "FROM worker-runtime-base AS archive-worker", 1
-        )[1].split("FROM worker-runtime-base AS encode-worker", 1)[0]
+        )[1].split("\nFROM ", 1)[0]
         encode_runtime = dockerfile.split(
-            "FROM worker-runtime-base AS encode-worker", 1
+            "FROM encode-worker-runtime-base AS encode-worker", 1
         )[1]
 
         self.assertNotIn("sqlite3", web_runtime)
@@ -954,7 +954,7 @@ class ComposeDeploymentTests(unittest.TestCase):
         self.assertIn("scripts/backup-sqlite.sh", deployment_runtime)
         self.assertIn("USER node", deployment_runtime)
         self.assertIn("lsdvd util-linux", archive_runtime)
-        self.assertNotIn("handbrake-cli", archive_runtime)
+        self.assertIn("handbrake-cli", archive_runtime)
         self.assertIn("handbrake-cli ffmpeg util-linux", encode_runtime)
         self.assertNotIn("lsdvd", encode_runtime)
 
