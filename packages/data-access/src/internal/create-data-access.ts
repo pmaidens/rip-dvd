@@ -7987,6 +7987,41 @@ export function createDataAccessInternal(
           input.boundaryEvidence,
           sizeBytes,
         );
+        const boundaryCorrectionColumns =
+          "outOfRangeEvidence" in boundaryEvidence
+            ? {
+                boundaryFirstExcludedLba: boundaryEvidence.firstExcludedLba,
+                boundaryMaximumReferencedLba:
+                  boundaryEvidence.maximumReferencedLba,
+                boundaryReadFailureClassifierVersion:
+                  boundaryEvidence.outOfRangeEvidence.classifierVersion,
+                boundaryReadFailureScsiStatus:
+                  boundaryEvidence.outOfRangeEvidence.scsiStatus,
+                boundaryReadFailureHostStatus:
+                  boundaryEvidence.outOfRangeEvidence.hostStatus,
+                boundaryReadFailureDriverStatus:
+                  boundaryEvidence.outOfRangeEvidence.driverStatus,
+                boundaryReadFailureSenseResponseCode:
+                  boundaryEvidence.outOfRangeEvidence.senseResponseCode,
+                boundaryReadFailureSenseKey:
+                  boundaryEvidence.outOfRangeEvidence.senseKey,
+                boundaryReadFailureAsc:
+                  boundaryEvidence.outOfRangeEvidence.asc,
+                boundaryReadFailureAscq:
+                  boundaryEvidence.outOfRangeEvidence.ascq,
+              }
+            : {
+                boundaryFirstExcludedLba: null,
+                boundaryMaximumReferencedLba: null,
+                boundaryReadFailureClassifierVersion: null,
+                boundaryReadFailureScsiStatus: null,
+                boundaryReadFailureHostStatus: null,
+                boundaryReadFailureDriverStatus: null,
+                boundaryReadFailureSenseResponseCode: null,
+                boundaryReadFailureSenseKey: null,
+                boundaryReadFailureAsc: null,
+                boundaryReadFailureAscq: null,
+              };
         const integrityEvidence = input.integrityEvidence;
         let integrityPolicyVersion: string | null;
         let badSectorCountsByTitle = null;
@@ -8155,46 +8190,7 @@ export function createDataAccessInternal(
                   boundaryEvidence.publishedSizeBytes,
                 boundaryExcludedSectorCount:
                   boundaryEvidence.excludedSectorCount,
-                boundaryFirstExcludedLba:
-                  "firstExcludedLba" in boundaryEvidence
-                    ? boundaryEvidence.firstExcludedLba
-                    : null,
-                boundaryMaximumReferencedLba:
-                  "maximumReferencedLba" in boundaryEvidence
-                    ? boundaryEvidence.maximumReferencedLba
-                    : null,
-                boundaryReadFailureClassifierVersion:
-                  "outOfRangeEvidence" in boundaryEvidence
-                    ? boundaryEvidence.outOfRangeEvidence.classifierVersion
-                    : null,
-                boundaryReadFailureScsiStatus:
-                  "outOfRangeEvidence" in boundaryEvidence
-                    ? boundaryEvidence.outOfRangeEvidence.scsiStatus
-                    : null,
-                boundaryReadFailureHostStatus:
-                  "outOfRangeEvidence" in boundaryEvidence
-                    ? boundaryEvidence.outOfRangeEvidence.hostStatus
-                    : null,
-                boundaryReadFailureDriverStatus:
-                  "outOfRangeEvidence" in boundaryEvidence
-                    ? boundaryEvidence.outOfRangeEvidence.driverStatus
-                    : null,
-                boundaryReadFailureSenseResponseCode:
-                  "outOfRangeEvidence" in boundaryEvidence
-                    ? boundaryEvidence.outOfRangeEvidence.senseResponseCode
-                    : null,
-                boundaryReadFailureSenseKey:
-                  "outOfRangeEvidence" in boundaryEvidence
-                    ? boundaryEvidence.outOfRangeEvidence.senseKey
-                    : null,
-                boundaryReadFailureAsc:
-                  "outOfRangeEvidence" in boundaryEvidence
-                    ? boundaryEvidence.outOfRangeEvidence.asc
-                    : null,
-                boundaryReadFailureAscq:
-                  "outOfRangeEvidence" in boundaryEvidence
-                    ? boundaryEvidence.outOfRangeEvidence.ascq
-                    : null,
+                ...boundaryCorrectionColumns,
                 integrity: integrityEvidence.integrity,
                 integrityPolicyVersion,
                 badSectorCount: integrityEvidence.badSectorCount,

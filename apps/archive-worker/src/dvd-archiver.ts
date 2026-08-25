@@ -1425,6 +1425,57 @@ async function evaluateDvdSalvage({
   };
 }
 
+async function publishDvdArchiveLink({
+  archivePath,
+  expectedFilesystemIdentity,
+  expectedSizeBytes,
+  mismatchMessage,
+  removeSourceAfterLink,
+  root,
+  sourcePath,
+  sync,
+}: {
+  archivePath: string;
+  expectedFilesystemIdentity: string;
+  expectedSizeBytes: number;
+  mismatchMessage: string;
+  removeSourceAfterLink: boolean;
+  root: string;
+  sourcePath: string;
+  sync(path: string): Promise<void>;
+}): Promise<string> {
+  let published = false;
+  let publishedFilesystemIdentity = expectedFilesystemIdentity;
+  try {
+    await link(sourcePath, archivePath);
+    published = true;
+    const publishedArchive = await lstat(archivePath);
+    publishedFilesystemIdentity = filesystemIdentity(publishedArchive);
+    if (
+      !matchesRescueImageIdentity(
+        publishedArchive,
+        expectedFilesystemIdentity,
+        expectedSizeBytes,
+      )
+    ) {
+      throw new Error(mismatchMessage);
+    }
+    if (removeSourceAfterLink) {
+      await unlink(sourcePath);
+    }
+    await sync(root);
+    return publishedFilesystemIdentity;
+  } catch (error) {
+    if (published) {
+      await quarantinePublishedArchive(
+        archivePath,
+        publishedFilesystemIdentity,
+      );
+    }
+    throw error;
+  }
+}
+
 async function publishCorrectedDvdBoundary({
   archivePath,
   authorizeMutation,
@@ -1519,32 +1570,17 @@ async function publishCorrectedDvdBoundary({
   signal.throwIfAborted();
   await authorizeMutation?.();
   signal.throwIfAborted();
-  let published = false;
-  let publishedFilesystemIdentity = rescueWorkspace.imageFilesystemIdentity;
-  try {
-    await link(rescueWorkspace.imagePath, archivePath);
-    published = true;
-    const publishedArchive = await lstat(archivePath);
-    publishedFilesystemIdentity = filesystemIdentity(publishedArchive);
-    if (
-      !matchesRescueImageIdentity(
-        publishedArchive,
-        rescueWorkspace.imageFilesystemIdentity,
-        publishedSizeBytes,
-      )
-    ) {
-      throw new Error("Published corrected DVD archive changed before verification");
-    }
-    await sync(root);
-  } catch (error) {
-    if (published) {
-      await quarantinePublishedArchive(
-        archivePath,
-        publishedFilesystemIdentity,
-      );
-    }
-    throw error;
-  }
+  const publishedFilesystemIdentity = await publishDvdArchiveLink({
+    archivePath,
+    expectedFilesystemIdentity: rescueWorkspace.imageFilesystemIdentity,
+    expectedSizeBytes: publishedSizeBytes,
+    mismatchMessage:
+      "Published corrected DVD archive changed before verification",
+    removeSourceAfterLink: false,
+    root,
+    sourcePath: rescueWorkspace.imagePath,
+    sync,
+  });
   return {
     archivePath,
     archiveFilesystemIdentity: publishedFilesystemIdentity,
@@ -1851,7 +1887,6 @@ export async function preserveDvdArchive({
   if (rescueWorkspace === null) {
     await movePartialAside(partialPath, authorizeMutation);
   }
-  let finalPublished = false;
   let publishedArchiveFilesystemIdentity: string | undefined;
   let retainedForValidation = false;
   let validation: DvdValidationResult | undefined;
@@ -1972,34 +2007,21 @@ export async function preserveDvdArchive({
     }
     await authorizeMutation?.();
     signal.throwIfAborted();
-    publishedArchiveFilesystemIdentity =
+    const sourceFilesystemIdentity =
       rescueWorkspace?.imageFilesystemIdentity ??
       filesystemIdentity(partialMetadata);
     // A hard link publishes the fully-synced inode without the overwrite
     // behavior of POSIX rename. Both paths are in the same bounded directory.
-    await link(partialPath, archivePath);
-    finalPublished = true;
-    const publishedArchive = await lstat(archivePath);
-    publishedArchiveFilesystemIdentity = filesystemIdentity(publishedArchive);
-    if (
-      rescueWorkspace === null
-        ? !publishedArchive.isFile() ||
-          publishedArchive.isSymbolicLink() ||
-          publishedArchive.size !== safeSizeBytes ||
-          publishedArchive.dev !== partialMetadata.dev ||
-          publishedArchive.ino !== partialMetadata.ino
-        : !matchesRescueImageIdentity(
-            publishedArchive,
-            rescueWorkspace.imageFilesystemIdentity,
-            safeSizeBytes,
-          )
-    ) {
-      throw new Error("Published DVD archive changed before verification");
-    }
-    if (rescueWorkspace === null) {
-      await unlink(partialPath);
-    }
-    await sync(root);
+    publishedArchiveFilesystemIdentity = await publishDvdArchiveLink({
+      archivePath,
+      expectedFilesystemIdentity: sourceFilesystemIdentity,
+      expectedSizeBytes: safeSizeBytes,
+      mismatchMessage: "Published DVD archive changed before verification",
+      removeSourceAfterLink: rescueWorkspace === null,
+      root,
+      sourcePath: partialPath,
+      sync,
+    });
   } catch (error) {
     // A rejected operation is not proof that the helper exited. Do not return
     // control until OS-level closure releases the copy tombstone.
@@ -2095,15 +2117,7 @@ export async function preserveDvdArchive({
         rescueWorkspace !== null ||
         (rescuePaths !== undefined &&
           (await optionalMetadata(rescuePaths.mapPath)) !== null);
-      if (finalPublished) {
-        await quarantinePublishedArchive(
-          archivePath,
-          publishedArchiveFilesystemIdentity!,
-        );
-        if (!hasRequestOwnedRescueState) {
-          await movePartialAside(partialPath);
-        }
-      } else if (
+      if (
         !hasRequestOwnedRescueState &&
         !retainedForValidation &&
         !runner.isActive(safeDevicePath, partialPath)
