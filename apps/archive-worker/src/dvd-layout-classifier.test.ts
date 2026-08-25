@@ -103,6 +103,7 @@ function writeSyntheticIsoLayout(
   {
     fileStartLba,
     lastFileExtendedAttributeSectorCount = 0,
+    legacySalvage = false,
     pathTableLba,
     rootLba,
     videoFiles,
@@ -111,6 +112,7 @@ function writeSyntheticIsoLayout(
   }: {
     fileStartLba: number;
     lastFileExtendedAttributeSectorCount?: number;
+    legacySalvage?: boolean;
     pathTableLba: number;
     rootLba: number;
     videoFiles?: readonly {
@@ -130,8 +132,10 @@ function writeSyntheticIsoLayout(
   primaryVolumeDescriptor.write("CD001", 1, "ascii");
   primaryVolumeDescriptor[6] = 1;
   writeBothEndian32(primaryVolumeDescriptor, 80, volumeSpaceSize);
-  writeBothEndian16(primaryVolumeDescriptor, 120, 1);
-  writeBothEndian16(primaryVolumeDescriptor, 124, 1);
+  if (!legacySalvage) {
+    writeBothEndian16(primaryVolumeDescriptor, 120, 1);
+    writeBothEndian16(primaryVolumeDescriptor, 124, 1);
+  }
   writeBothEndian16(
     primaryVolumeDescriptor,
     128,
@@ -153,7 +157,7 @@ function writeSyntheticIsoLayout(
   writeBothEndian32(
     primaryVolumeDescriptor,
     132,
-    littleEndianPathTable.byteLength,
+    legacySalvage ? 10 : littleEndianPathTable.byteLength,
   );
   primaryVolumeDescriptor.writeUInt32LE(pathTableLba, 140);
   primaryVolumeDescriptor.writeUInt32BE(pathTableLba + 1, 148);
@@ -171,8 +175,10 @@ function writeSyntheticIsoLayout(
   terminator.write("CD001", 1, "ascii");
   terminator[6] = 1;
 
-  littleEndianPathTable.copy(image, pathTableLba * DVD_SECTOR_SIZE_BYTES);
-  bigEndianPathTable.copy(image, (pathTableLba + 1) * DVD_SECTOR_SIZE_BYTES);
+  if (!legacySalvage) {
+    littleEndianPathTable.copy(image, pathTableLba * DVD_SECTOR_SIZE_BYTES);
+    bigEndianPathTable.copy(image, (pathTableLba + 1) * DVD_SECTOR_SIZE_BYTES);
+  }
 
   const current = isoDirectoryRecord({
     extentLba: rootLba,
@@ -786,6 +792,18 @@ function writeUdfTag(
   buffer[4] = checksum;
 }
 
+function writeLegacyUdfTag(buffer: Buffer, identifier: number) {
+  buffer.fill(0, 0, 16);
+  buffer.writeUInt16LE(identifier, 0);
+  buffer.writeUInt16LE(2, 2);
+  buffer.writeUInt16LE(1, 6);
+  buffer[4] = buffer.subarray(0, 16).reduce(
+    (checksum, byte, index) =>
+      index === 4 ? checksum : (checksum + byte) & 0xff,
+    0,
+  );
+}
+
 function writeUdfSectorTag(
   image: Buffer,
   lba: number,
@@ -836,10 +854,12 @@ function writeUdfLongAd(
 function udfFileIdentifier({
   childLba,
   fileCharacteristics,
+  legacySalvage = false,
   name,
 }: {
   childLba: number;
   fileCharacteristics: number;
+  legacySalvage?: boolean;
   name?: string;
 }): Buffer {
   const identifier = name === undefined
@@ -847,12 +867,18 @@ function udfFileIdentifier({
     : Buffer.concat([Buffer.from([8]), Buffer.from(name, "ascii")]);
   const recordLength = Math.ceil((38 + identifier.byteLength) / 4) * 4;
   const record = Buffer.alloc(recordLength);
-  record.writeUInt16LE(1, 16);
+  if (!legacySalvage) {
+    record.writeUInt16LE(1, 16);
+  }
   record[18] = fileCharacteristics;
   record[19] = identifier.byteLength;
   writeUdfLongAd(record, 20, DVD_SECTOR_SIZE_BYTES, childLba);
   identifier.copy(record, 38);
-  writeUdfTag(record, 257);
+  if (legacySalvage) {
+    writeLegacyUdfTag(record, 257);
+  } else {
+    writeUdfTag(record, 257);
+  }
   return record;
 }
 
@@ -864,31 +890,41 @@ function writeUdfFileEntry(
     fileType,
     informationLength,
     allocationByteCount = DVD_SECTOR_SIZE_BYTES,
+    legacySalvage = false,
   }: {
     allocationByteCount?: number;
     dataLba: number;
     fileEntryLba: number;
     fileType: 4 | 5;
     informationLength: number;
+    legacySalvage?: boolean;
   },
 ) {
   const entry = image.subarray(
     fileEntryLba * DVD_SECTOR_SIZE_BYTES,
     (fileEntryLba + 1) * DVD_SECTOR_SIZE_BYTES,
   );
-  entry.writeUInt16LE(4, 20);
-  entry.writeUInt16LE(1, 24);
+  if (!legacySalvage) {
+    entry.writeUInt16LE(4, 20);
+    entry.writeUInt16LE(1, 24);
+  }
   entry[27] = fileType;
   entry.writeBigUInt64LE(BigInt(informationLength), 56);
-  entry.writeBigUInt64LE(
-    BigInt(Math.ceil(allocationByteCount / DVD_SECTOR_SIZE_BYTES)),
-    64,
-  );
+  if (!legacySalvage) {
+    entry.writeBigUInt64LE(
+      BigInt(Math.ceil(allocationByteCount / DVD_SECTOR_SIZE_BYTES)),
+      64,
+    );
+  }
   entry.writeUInt32LE(0, 168);
   entry.writeUInt32LE(8, 172);
   entry.writeUInt32LE(allocationByteCount, 176);
   entry.writeUInt32LE(dataLba, 180);
-  writeUdfTag(entry, 261, fileEntryLba - 300);
+  if (legacySalvage) {
+    writeLegacyUdfTag(entry, 261);
+  } else {
+    writeUdfTag(entry, 261, fileEntryLba - 300);
+  }
 }
 
 function addDvdCopyrightExtendedAttribute(
@@ -929,15 +965,20 @@ function writeUdfDirectory(
   image: Buffer,
   lba: number,
   records: readonly Buffer[],
+  legacySalvage = false,
 ): number {
   let offset = lba * DVD_SECTOR_SIZE_BYTES;
   const start = offset;
   for (const record of records) {
-    writeUdfTag(
-      record,
-      257,
-      lba - 300 + Math.floor((offset - start) / DVD_SECTOR_SIZE_BYTES),
-    );
+    if (legacySalvage) {
+      writeLegacyUdfTag(record, 257);
+    } else {
+      writeUdfTag(
+        record,
+        257,
+        lba - 300 + Math.floor((offset - start) / DVD_SECTOR_SIZE_BYTES),
+      );
+    }
     record.copy(image, offset);
     offset += record.byteLength;
   }
@@ -949,11 +990,13 @@ function writeSyntheticUdfLayout(
   {
     completeNavigation = false,
     extraEmptyDirectoryName,
+    legacySalvage = false,
     payloadTitleVobStartLba,
     volumeLastLba,
   }: {
     completeNavigation?: boolean;
     extraEmptyDirectoryName?: string;
+    legacySalvage?: boolean;
     payloadTitleVobStartLba?: number;
     volumeLastLba?: number;
   } = {},
@@ -964,42 +1007,68 @@ function writeSyntheticUdfLayout(
     [20, "TEA01"],
   ] as const) {
     image.write(identifier, lba * DVD_SECTOR_SIZE_BYTES + 1, "ascii");
-    image[lba * DVD_SECTOR_SIZE_BYTES + 6] = 1;
+    if (!legacySalvage) {
+      image[lba * DVD_SECTOR_SIZE_BYTES + 6] = 1;
+    }
   }
   const anchor = image.subarray(
     256 * DVD_SECTOR_SIZE_BYTES,
     257 * DVD_SECTOR_SIZE_BYTES,
   );
-  anchor.writeUInt32LE(16 * DVD_SECTOR_SIZE_BYTES, 16);
+  anchor.writeUInt32LE(
+    (legacySalvage ? 4 : 16) * DVD_SECTOR_SIZE_BYTES,
+    16,
+  );
   anchor.writeUInt32LE(257, 20);
-  anchor.writeUInt32LE(16 * DVD_SECTOR_SIZE_BYTES, 24);
+  anchor.writeUInt32LE(
+    (legacySalvage ? 4 : 16) * DVD_SECTOR_SIZE_BYTES,
+    24,
+  );
   anchor.writeUInt32LE(273, 28);
-  writeUdfTag(anchor, 2, 256);
+  if (legacySalvage) {
+    writeLegacyUdfTag(anchor, 2);
+  } else {
+    writeUdfTag(anchor, 2, 256);
+  }
 
   const primary = image.subarray(
     257 * DVD_SECTOR_SIZE_BYTES,
     258 * DVD_SECTOR_SIZE_BYTES,
   );
-  writeUdfTag(primary, 1, 257);
+  if (legacySalvage) {
+    writeLegacyUdfTag(primary, 1);
+  } else {
+    writeUdfTag(primary, 1, 257);
+  }
   const partition = image.subarray(
     258 * DVD_SECTOR_SIZE_BYTES,
     259 * DVD_SECTOR_SIZE_BYTES,
   );
-  partition.writeUInt16LE(1, 20);
+  if (!legacySalvage) {
+    partition.writeUInt16LE(1, 20);
+  }
   partition.writeUInt16LE(0, 22);
-  partition[24] = 2;
-  partition.write("+NSR02", 25, "ascii");
-  partition.writeUInt32LE(1, 184);
+  if (!legacySalvage) {
+    partition[24] = 2;
+    partition.write("+NSR02", 25, "ascii");
+    partition.writeUInt32LE(1, 184);
+  }
   partition.writeUInt32LE(300, 188);
   partition.writeUInt32LE(300, 192);
-  writeUdfTag(partition, 5, 258);
+  if (legacySalvage) {
+    writeLegacyUdfTag(partition, 5);
+  } else {
+    writeUdfTag(partition, 5, 258);
+  }
   const logicalVolume = image.subarray(
     259 * DVD_SECTOR_SIZE_BYTES,
     260 * DVD_SECTOR_SIZE_BYTES,
   );
   logicalVolume.writeUInt32LE(DVD_SECTOR_SIZE_BYTES, 212);
-  logicalVolume.write("*OSTA UDF Compliant", 217, "ascii");
-  logicalVolume.writeUInt16LE(0x0102, 240);
+  if (!legacySalvage) {
+    logicalVolume.write("*OSTA UDF Compliant", 217, "ascii");
+    logicalVolume.writeUInt16LE(0x0102, 240);
+  }
   writeUdfLongAd(logicalVolume, 248, DVD_SECTOR_SIZE_BYTES, 0);
   logicalVolume.writeUInt32LE(6, 264);
   logicalVolume.writeUInt32LE(1, 268);
@@ -1009,59 +1078,82 @@ function writeSyntheticUdfLayout(
   logicalVolume[441] = 6;
   logicalVolume.writeUInt16LE(1, 442);
   logicalVolume.writeUInt16LE(0, 444);
-  writeUdfTag(logicalVolume, 6, 259);
+  if (legacySalvage) {
+    writeLegacyUdfTag(logicalVolume, 6);
+  } else {
+    writeUdfTag(logicalVolume, 6, 259);
+  }
   const integrity = image.subarray(
     290 * DVD_SECTOR_SIZE_BYTES,
     291 * DVD_SECTOR_SIZE_BYTES,
   );
-  integrity.writeUInt32LE(1, 28);
-  integrity.writeUInt32LE(1, 72);
-  integrity.writeUInt32LE(46, 76);
-  integrity.writeUInt32LE(0, 80);
-  integrity.writeUInt32LE(300, 84);
-  integrity.write("*UDF LV Info", 89, "ascii");
-  integrity.writeUInt16LE(0x0102, 128);
-  integrity.writeUInt16LE(0x0102, 130);
-  integrity.writeUInt16LE(0x0260, 132);
-  writeUdfTag(integrity, 9, 290);
-  writeUdfTag(
-    image.subarray(
-      260 * DVD_SECTOR_SIZE_BYTES,
+  if (legacySalvage) {
+    writeLegacyUdfTag(integrity, 9);
+    writeLegacyUdfTag(
+      image.subarray(
+        260 * DVD_SECTOR_SIZE_BYTES,
+        261 * DVD_SECTOR_SIZE_BYTES,
+      ),
+      8,
+    );
+    for (let offset = 0; offset < 4; offset += 1) {
+      image.copy(
+        image,
+        (273 + offset) * DVD_SECTOR_SIZE_BYTES,
+        (257 + offset) * DVD_SECTOR_SIZE_BYTES,
+        (258 + offset) * DVD_SECTOR_SIZE_BYTES,
+      );
+    }
+  } else {
+    integrity.writeUInt32LE(1, 28);
+    integrity.writeUInt32LE(1, 72);
+    integrity.writeUInt32LE(46, 76);
+    integrity.writeUInt32LE(0, 80);
+    integrity.writeUInt32LE(300, 84);
+    integrity.write("*UDF LV Info", 89, "ascii");
+    integrity.writeUInt16LE(0x0102, 128);
+    integrity.writeUInt16LE(0x0102, 130);
+    integrity.writeUInt16LE(0x0260, 132);
+    writeUdfTag(integrity, 9, 290);
+    writeUdfTag(
+      image.subarray(
+        260 * DVD_SECTOR_SIZE_BYTES,
+        261 * DVD_SECTOR_SIZE_BYTES,
+      ),
+      7,
+      260,
+    );
+    const implementationUseVolume = image.subarray(
       261 * DVD_SECTOR_SIZE_BYTES,
-    ),
-    7,
-    260,
-  );
-  const implementationUseVolume = image.subarray(
-    261 * DVD_SECTOR_SIZE_BYTES,
-    262 * DVD_SECTOR_SIZE_BYTES,
-  );
-  implementationUseVolume.write("*UDF LV Info", 21, "ascii");
-  implementationUseVolume.write("OSTA Compressed Unicode", 53, "ascii");
-  implementationUseVolume.write("*synthetic", 353, "ascii");
-  writeUdfTag(implementationUseVolume, 4, 261);
-  writeUdfTag(
-    image.subarray(
       262 * DVD_SECTOR_SIZE_BYTES,
-      263 * DVD_SECTOR_SIZE_BYTES,
-    ),
-    8,
-    262,
-  );
-  for (let offset = 0; offset < 16; offset += 1) {
-    image.copy(
-      image,
-      (273 + offset) * DVD_SECTOR_SIZE_BYTES,
-      (257 + offset) * DVD_SECTOR_SIZE_BYTES,
-      (258 + offset) * DVD_SECTOR_SIZE_BYTES,
     );
-  }
-  for (let offset = 0; offset < 6; offset += 1) {
-    const descriptor = image.subarray(
-      (273 + offset) * DVD_SECTOR_SIZE_BYTES,
-      (274 + offset) * DVD_SECTOR_SIZE_BYTES,
+    implementationUseVolume.write("*UDF LV Info", 21, "ascii");
+    implementationUseVolume.write("OSTA Compressed Unicode", 53, "ascii");
+    implementationUseVolume.write("*synthetic", 353, "ascii");
+    writeUdfTag(implementationUseVolume, 4, 261);
+    writeUdfTag(
+      image.subarray(
+        262 * DVD_SECTOR_SIZE_BYTES,
+        263 * DVD_SECTOR_SIZE_BYTES,
+      ),
+      8,
+      262,
     );
-    writeUdfTag(descriptor, descriptor.readUInt16LE(0), 273 + offset);
+    for (let offset = 0; offset < 16; offset += 1) {
+      image.copy(
+        image,
+        (273 + offset) * DVD_SECTOR_SIZE_BYTES,
+        (257 + offset) * DVD_SECTOR_SIZE_BYTES,
+        (258 + offset) * DVD_SECTOR_SIZE_BYTES,
+      );
+    }
+    for (let offset = 0; offset < 6; offset += 1) {
+      const descriptor = image.subarray(
+        (273 + offset) * DVD_SECTOR_SIZE_BYTES,
+        (274 + offset) * DVD_SECTOR_SIZE_BYTES,
+      );
+      writeUdfTag(descriptor, descriptor.readUInt16LE(0), 273 + offset);
+    }
   }
 
   const fileSet = image.subarray(
@@ -1069,14 +1161,23 @@ function writeSyntheticUdfLayout(
     301 * DVD_SECTOR_SIZE_BYTES,
   );
   writeUdfLongAd(fileSet, 400, DVD_SECTOR_SIZE_BYTES, 1);
-  fileSet.write("*OSTA UDF Compliant", 417, "ascii");
-  fileSet.writeUInt16LE(0x0102, 440);
-  writeUdfTag(fileSet, 256);
+  if (legacySalvage) {
+    writeLegacyUdfTag(fileSet, 256);
+  } else {
+    fileSet.write("*OSTA UDF Compliant", 417, "ascii");
+    fileSet.writeUInt16LE(0x0102, 440);
+    writeUdfTag(fileSet, 256);
+  }
   const rootDirectoryBytes = writeUdfDirectory(image, 302, [
-    udfFileIdentifier({ childLba: 1, fileCharacteristics: 8 }),
+    udfFileIdentifier({
+      childLba: 1,
+      fileCharacteristics: 8,
+      legacySalvage,
+    }),
     udfFileIdentifier({
       childLba: 3,
       fileCharacteristics: 2,
+      legacySalvage,
       name: "VIDEO_TS",
     }),
     ...(extraEmptyDirectoryName === undefined
@@ -1084,24 +1185,31 @@ function writeSyntheticUdfLayout(
       : [udfFileIdentifier({
           childLba: 15,
           fileCharacteristics: 2,
+          legacySalvage,
           name: extraEmptyDirectoryName,
         })]),
-  ]);
+  ], legacySalvage);
   writeUdfFileEntry(image, {
     dataLba: 2,
     fileEntryLba: 301,
     fileType: 4,
     informationLength: rootDirectoryBytes,
+    legacySalvage,
   });
   if (extraEmptyDirectoryName !== undefined) {
     const extraDirectoryBytes = writeUdfDirectory(image, 316, [
-      udfFileIdentifier({ childLba: 1, fileCharacteristics: 8 }),
-    ]);
+      udfFileIdentifier({
+        childLba: 1,
+        fileCharacteristics: 8,
+        legacySalvage,
+      }),
+    ], legacySalvage);
     writeUdfFileEntry(image, {
       dataLba: 16,
       fileEntryLba: 315,
       fileType: 4,
       informationLength: extraDirectoryBytes,
+      legacySalvage,
     });
   }
   const videoDirectoryEntries = payloadTitleVobStartLba === undefined
@@ -1120,16 +1228,26 @@ function writeSyntheticUdfLayout(
         { childLba: 10, name: "VTS_01_1.VOB" },
       ];
   const videoDirectoryBytes = writeUdfDirectory(image, 304, [
-    udfFileIdentifier({ childLba: 1, fileCharacteristics: 8 }),
+    udfFileIdentifier({
+      childLba: 1,
+      fileCharacteristics: 8,
+      legacySalvage,
+    }),
     ...videoDirectoryEntries.map(({ childLba, name }) =>
-      udfFileIdentifier({ childLba, fileCharacteristics: 0, name })
+      udfFileIdentifier({
+        childLba,
+        fileCharacteristics: 0,
+        legacySalvage,
+        name,
+      })
     ),
-  ]);
+  ], legacySalvage);
   writeUdfFileEntry(image, {
     dataLba: 4,
     fileEntryLba: 303,
     fileType: 4,
     informationLength: videoDirectoryBytes,
+    legacySalvage,
   });
   if (payloadTitleVobStartLba === undefined) {
     for (let offset = 0; offset < 4; offset += 1) {
@@ -1138,6 +1256,7 @@ function writeSyntheticUdfLayout(
         fileEntryLba: 305 + offset,
         fileType: 5,
         informationLength: DVD_SECTOR_SIZE_BYTES,
+        legacySalvage,
       });
     }
   } else {
@@ -1171,6 +1290,7 @@ function writeSyntheticUdfLayout(
         fileEntryLba: file.fileEntryLba,
         fileType: 5,
         informationLength: byteCount,
+        legacySalvage,
       });
     }
   }
@@ -1244,6 +1364,7 @@ function createSyntheticDvdImage(badLba: number): {
   const image = Buffer.alloc(64 * DVD_SECTOR_SIZE_BYTES);
   writeSyntheticIsoLayout(image, {
     fileStartLba: 22,
+    legacySalvage: true,
     pathTableLba: 18,
     rootLba: 20,
     videoDirectoryLba: 21,
@@ -1334,12 +1455,13 @@ function createSyntheticUdfDvdImage(badLba: number): {
   const image = Buffer.alloc(700 * DVD_SECTOR_SIZE_BYTES);
   writeSyntheticIsoLayout(image, {
     fileStartLba: 310,
+    legacySalvage: true,
     pathTableLba: 40,
     rootLba: 42,
     videoDirectoryLba: 43,
     volumeSpaceSize: 600,
   });
-  writeSyntheticUdfLayout(image);
+  writeSyntheticUdfLayout(image, { legacySalvage: true });
   return writeFixture(image, badLba);
 }
 
@@ -1729,12 +1851,32 @@ describe("retained DVD image layout completeness", () => {
       includeUdf: false,
     });
     writeSyntheticJolietView(image, [
-      { byteCount: 6 * DVD_SECTOR_SIZE_BYTES, extentLba: 330, name: "VIDEO_TS.IFO" },
-      { byteCount: 6 * DVD_SECTOR_SIZE_BYTES, extentLba: 347, name: "VIDEO_TS.BUP" },
+      {
+        byteCount: 6 * DVD_SECTOR_SIZE_BYTES,
+        extentLba: 330,
+        name: "VIDEO_TS.IFO",
+      },
+      {
+        byteCount: 6 * DVD_SECTOR_SIZE_BYTES,
+        extentLba: 347,
+        name: "VIDEO_TS.BUP",
+      },
       { extentLba: 338, name: "VIDEO_TS.VOB" },
-      { byteCount: 6 * DVD_SECTOR_SIZE_BYTES, extentLba: 360, name: "VTS_01_0.IFO" },
-      { byteCount: 6 * DVD_SECTOR_SIZE_BYTES, extentLba: 370, name: "VTS_01_0.BUP" },
-      { byteCount: 6 * DVD_SECTOR_SIZE_BYTES, extentLba: 400, name: "VTS_01_1.VOB" },
+      {
+        byteCount: 6 * DVD_SECTOR_SIZE_BYTES,
+        extentLba: 360,
+        name: "VTS_01_0.IFO",
+      },
+      {
+        byteCount: 6 * DVD_SECTOR_SIZE_BYTES,
+        extentLba: 370,
+        name: "VTS_01_0.BUP",
+      },
+      {
+        byteCount: 6 * DVD_SECTOR_SIZE_BYTES,
+        extentLba: 400,
+        name: "VTS_01_1.VOB",
+      },
     ]);
     const fixture = writeFixture(image);
 
@@ -1742,6 +1884,31 @@ describe("retained DVD image layout completeness", () => {
       candidateBoundaryLba: 600,
       imagePath: fixture.imagePath,
     })).resolves.toEqual({ maximumReferencedLba: 599 });
+  });
+
+  it("rejects high-bit corruption in a Joliet escape sequence", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    writeSyntheticJolietView(image, [
+      { byteCount: 6 * DVD_SECTOR_SIZE_BYTES, extentLba: 330, name: "VIDEO_TS.IFO" },
+      { byteCount: 6 * DVD_SECTOR_SIZE_BYTES, extentLba: 347, name: "VIDEO_TS.BUP" },
+      { extentLba: 338, name: "VIDEO_TS.VOB" },
+      { byteCount: 6 * DVD_SECTOR_SIZE_BYTES, extentLba: 360, name: "VTS_01_0.IFO" },
+      { byteCount: 6 * DVD_SECTOR_SIZE_BYTES, extentLba: 370, name: "VTS_01_0.BUP" },
+      { byteCount: 6 * DVD_SECTOR_SIZE_BYTES, extentLba: 400, name: "VTS_01_1.VOB" },
+    ]);
+    for (let offset = 88; offset < 91; offset += 1) {
+      image[17 * DVD_SECTOR_SIZE_BYTES + offset] =
+        image[17 * DVD_SECTOR_SIZE_BYTES + offset]! | 0x80;
+    }
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD ISO supplementary volume is unsupported");
   });
 
   it("rejects a Joliet inventory that differs outside VIDEO_TS", async () => {
@@ -2017,6 +2184,7 @@ describe("retained DVD image layout completeness", () => {
       image[16 * DVD_SECTOR_SIZE_BYTES + offset] =
         image[16 * DVD_SECTOR_SIZE_BYTES + offset]! | 0x80;
     }
+    image[16 * DVD_SECTOR_SIZE_BYTES] = 4;
     const fixture = writeFixture(image);
 
     await expect(proveDvdImageLayoutCompleteness({
