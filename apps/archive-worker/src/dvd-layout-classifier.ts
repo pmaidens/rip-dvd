@@ -135,6 +135,7 @@ type DvdLayoutAnalysisPurpose = {
 interface DvdLayoutAnalysisPolicy {
   continueAfterUnrecognizedIsoDescriptor(isUnreadable: boolean): boolean;
   exactImageByteCount?: number;
+  requireDvdReadOnlyUdfProfile: boolean;
   unreadableSectorRanges: readonly UnreadableSectorRange[];
   validateDamageMap(badSectors: ReadonlySet<number>): void;
   validateIsoDirectoryRecordTail(
@@ -142,6 +143,7 @@ interface DvdLayoutAnalysisPolicy {
     identifierEnd: number,
     identifierLength: number,
   ): void;
+  validateUnrecognizedIsoDescriptor(descriptor: Buffer): void;
   validateDvdVideoViews(context: {
     hasIso: boolean;
     hasUdf: boolean;
@@ -167,6 +169,7 @@ function createDvdLayoutAnalysisPolicy(
     return {
       continueAfterUnrecognizedIsoDescriptor: (isUnreadable) => isUnreadable,
       exactImageByteCount: purpose.exactImageByteCount,
+      requireDvdReadOnlyUdfProfile: false,
       unreadableSectorRanges: purpose.unreadableSectorRanges,
       validateDamageMap(badSectors) {
         if (badSectors.size === 0) {
@@ -174,6 +177,7 @@ function createDvdLayoutAnalysisPolicy(
         }
       },
       validateIsoDirectoryRecordTail() {},
+      validateUnrecognizedIsoDescriptor() {},
       async validateDvdVideoViews() {},
       async validateUdfAlternateAnchors({
         alternateAnchorLbas,
@@ -188,6 +192,7 @@ function createDvdLayoutAnalysisPolicy(
   }
   return {
     continueAfterUnrecognizedIsoDescriptor: () => false,
+    requireDvdReadOnlyUdfProfile: true,
     unreadableSectorRanges: [],
     validateDamageMap() {},
     validateIsoDirectoryRecordTail(
@@ -202,6 +207,16 @@ function createDvdLayoutAnalysisPolicy(
         identifierLength % 2 === 0 && record[identifierEnd] !== 0
       ) {
         throw new Error("DVD ISO directory record is unsupported");
+      }
+    },
+    validateUnrecognizedIsoDescriptor(descriptor) {
+      const identifier = descriptor.toString("latin1", 1, 6);
+      if (
+        descriptor[6] === 1 &&
+        [0, 1, 2, 3, 255].includes(descriptor[0]!) &&
+        !["BEA01", "NSR02", "NSR03", "TEA01"].includes(identifier)
+      ) {
+        throw new Error("DVD ISO volume descriptor signature is malformed");
       }
     },
     async validateDvdVideoViews({
@@ -474,8 +489,16 @@ function readUdfLongAllocationDescriptor(
   };
 }
 
-function udfEntityIdentifier(buffer: Buffer, offset: number): string {
-  if (offset < 0 || offset + 32 > buffer.byteLength || buffer[offset] !== 0) {
+function udfEntityIdentifier(
+  buffer: Buffer,
+  offset: number,
+  expectedFlags: readonly number[] = [0],
+): string {
+  if (
+    offset < 0 ||
+    offset + 32 > buffer.byteLength ||
+    !expectedFlags.includes(buffer[offset]!)
+  ) {
     throw new Error("DVD UDF entity identifier is malformed");
   }
   const rawIdentifier = buffer.subarray(offset + 1, offset + 24);
@@ -4478,6 +4501,7 @@ async function analyzeDvdImageLayout({
       const hasIsoSignature =
         descriptor.toString("latin1", 1, 6) === "CD001";
       if (!hasIsoSignature) {
+        policy.validateUnrecognizedIsoDescriptor(descriptor);
         if (volumeDescriptorCount === 0) {
           if (policy.continueAfterUnrecognizedIsoDescriptor(
             badSectors.has(lba),
@@ -4915,6 +4939,7 @@ async function analyzeDvdImageLayout({
       const declaredBodyLength = descriptor.readUInt16LE(10);
       if (
         integrityType > 1 ||
+        policy.requireDvdReadOnlyUdfProfile && integrityType !== 1 ||
         (nextLength === 0) !== (nextStart === 0) ||
         nextLength % DVD_SECTOR_SIZE_BYTES !== 0 ||
         partitionCount !== partitionsByReference.length ||
@@ -4981,6 +5006,7 @@ async function analyzeDvdImageLayout({
         startLba: number;
       }> = [];
       let sequenceLogicalVolume: UdfLogicalVolume | undefined;
+      let sawImplementationUseVolumeDescriptor = false;
       let sawPrimaryVolumeDescriptor = false;
       let sawTerminator = false;
       let sawUnallocatedSpaceDescriptor = false;
@@ -5031,6 +5057,15 @@ async function analyzeDvdImageLayout({
             true,
           );
         } else if (identifier === 4) {
+          if (
+            policy.requireDvdReadOnlyUdfProfile &&
+            sawImplementationUseVolumeDescriptor
+          ) {
+            throw new Error(
+              "DVD UDF implementation-use volume descriptor is duplicated",
+            );
+          }
+          sawImplementationUseVolumeDescriptor = true;
           if (udfEntityIdentifier(descriptor, 20) !== "*UDF LV Info") {
             throw new Error(
               "DVD UDF implementation-use volume descriptor is unsupported",
@@ -5044,7 +5079,14 @@ async function analyzeDvdImageLayout({
           udfEntityIdentifier(descriptor, 352);
         } else if (identifier === 5) {
           if (
-            udfEntityIdentifier(descriptor, 24) !== `+${nsrIdentifier}` ||
+            udfEntityIdentifier(
+              descriptor,
+              24,
+              policy.requireDvdReadOnlyUdfProfile ? [2] : [0, 2],
+            ) !== `+${nsrIdentifier}` ||
+            policy.requireDvdReadOnlyUdfProfile &&
+              (descriptor.readUInt16LE(20) !== 1 ||
+                descriptor.readUInt32LE(184) !== 1) ||
             descriptor.subarray(48, 56).some((byte) => byte !== 0)
           ) {
             throw new Error("DVD UDF partition contents are unsupported");
@@ -5154,6 +5196,8 @@ async function analyzeDvdImageLayout({
       if (
         !sawTerminator ||
         !sawPrimaryVolumeDescriptor ||
+        policy.requireDvdReadOnlyUdfProfile &&
+          !sawImplementationUseVolumeDescriptor ||
         !sawUnallocatedSpaceDescriptor ||
         sequenceLogicalVolume === undefined ||
         sequencePartitions.size === 0

@@ -985,8 +985,11 @@ function writeSyntheticUdfLayout(
     258 * DVD_SECTOR_SIZE_BYTES,
     259 * DVD_SECTOR_SIZE_BYTES,
   );
+  partition.writeUInt16LE(1, 20);
   partition.writeUInt16LE(0, 22);
+  partition[24] = 2;
   partition.write("+NSR02", 25, "ascii");
+  partition.writeUInt32LE(1, 184);
   partition.writeUInt32LE(300, 188);
   partition.writeUInt32LE(300, 192);
   writeUdfTag(partition, 5, 258);
@@ -1011,6 +1014,7 @@ function writeSyntheticUdfLayout(
     290 * DVD_SECTOR_SIZE_BYTES,
     291 * DVD_SECTOR_SIZE_BYTES,
   );
+  integrity.writeUInt32LE(1, 28);
   integrity.writeUInt32LE(1, 72);
   integrity.writeUInt32LE(46, 76);
   integrity.writeUInt32LE(0, 80);
@@ -1028,13 +1032,21 @@ function writeSyntheticUdfLayout(
     7,
     260,
   );
+  const implementationUseVolume = image.subarray(
+    261 * DVD_SECTOR_SIZE_BYTES,
+    262 * DVD_SECTOR_SIZE_BYTES,
+  );
+  implementationUseVolume.write("*UDF LV Info", 21, "ascii");
+  implementationUseVolume.write("OSTA Compressed Unicode", 53, "ascii");
+  implementationUseVolume.write("*synthetic", 353, "ascii");
+  writeUdfTag(implementationUseVolume, 4, 261);
   writeUdfTag(
     image.subarray(
-      261 * DVD_SECTOR_SIZE_BYTES,
       262 * DVD_SECTOR_SIZE_BYTES,
+      263 * DVD_SECTOR_SIZE_BYTES,
     ),
     8,
-    261,
+    262,
   );
   for (let offset = 0; offset < 16; offset += 1) {
     image.copy(
@@ -1044,7 +1056,7 @@ function writeSyntheticUdfLayout(
       (258 + offset) * DVD_SECTOR_SIZE_BYTES,
     );
   }
-  for (let offset = 0; offset < 5; offset += 1) {
+  for (let offset = 0; offset < 6; offset += 1) {
     const descriptor = image.subarray(
       (273 + offset) * DVD_SECTOR_SIZE_BYTES,
       (274 + offset) * DVD_SECTOR_SIZE_BYTES,
@@ -1999,7 +2011,7 @@ describe("retained DVD image layout completeness", () => {
   it("rejects high-bit corruption in the ISO standard identifier", async () => {
     const image = syntheticCompleteDvdImage({
       includeIso: true,
-      includeUdf: false,
+      includeUdf: true,
     });
     for (let offset = 1; offset < 6; offset += 1) {
       image[16 * DVD_SECTOR_SIZE_BYTES + offset] =
@@ -2010,7 +2022,7 @@ describe("retained DVD image layout completeness", () => {
     await expect(proveDvdImageLayoutCompleteness({
       candidateBoundaryLba: 600,
       imagePath: fixture.imagePath,
-    })).rejects.toThrow("DVD image has no supported filesystem view");
+    })).rejects.toThrow("DVD ISO volume descriptor signature is malformed");
   });
 
   it("rejects high-bit corruption in the UDF recognition sequence", async () => {
@@ -2144,6 +2156,29 @@ describe("retained DVD image layout completeness", () => {
     );
   });
 
+  it("fails closed when a UDF descriptor sequence omits its implementation-use descriptor", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    for (const descriptorLba of [261, 277]) {
+      const descriptor = image.subarray(
+        descriptorLba * DVD_SECTOR_SIZE_BYTES,
+        (descriptorLba + 1) * DVD_SECTOR_SIZE_BYTES,
+      );
+      descriptor.fill(0);
+      writeUdfTag(descriptor, 8, descriptorLba);
+    }
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow(
+      "DVD UDF main volume descriptor sequence is incomplete",
+    );
+  });
+
   it("fails closed when a UDF descriptor sequence duplicates its unallocated-space descriptor", async () => {
     const image = syntheticCompleteDvdImage({
       includeIso: false,
@@ -2252,6 +2287,25 @@ describe("retained DVD image layout completeness", () => {
     })).rejects.toThrow("DVD UDF logical volume integrity is malformed");
   });
 
+  it("fails closed on an open DVD read-only logical volume", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    const integrity = image.subarray(
+      290 * DVD_SECTOR_SIZE_BYTES,
+      291 * DVD_SECTOR_SIZE_BYTES,
+    );
+    integrity.writeUInt32LE(0, 28);
+    writeUdfTag(integrity, 9, 290);
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD UDF logical volume integrity is malformed");
+  });
+
   it("fails closed on a multi-volume UDF partition map", async () => {
     const image = syntheticCompleteDvdImage({
       includeIso: false,
@@ -2291,6 +2345,46 @@ describe("retained DVD image layout completeness", () => {
       candidateBoundaryLba: 600,
       imagePath: fixture.imagePath,
     })).rejects.toThrow("DVD UDF partition contents are unsupported");
+  });
+
+  it.each([
+    ["partition flags", 20, 2, "DVD UDF partition contents are unsupported"],
+    [
+      "partition contents flags",
+      24,
+      1,
+      "DVD UDF entity identifier is malformed",
+    ],
+    [
+      "partition access type",
+      184,
+      4,
+      "DVD UDF partition contents are unsupported",
+    ],
+  ])("fails closed on unsupported UDF %s", async (
+    _field,
+    fieldOffset,
+    fieldLength,
+    expectedError,
+  ) => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    for (const partitionLba of [258, 274]) {
+      image.fill(
+        0,
+        partitionLba * DVD_SECTOR_SIZE_BYTES + fieldOffset,
+        partitionLba * DVD_SECTOR_SIZE_BYTES + fieldOffset + fieldLength,
+      );
+      writeUdfSectorTag(image, partitionLba, 5);
+    }
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow(expectedError);
   });
 
   it("fails closed on an unsupported UDF domain identifier", async () => {
@@ -2800,11 +2894,11 @@ describe("retained DVD image layout completeness", () => {
       descriptor.writeUInt32LE(400, 28);
       writeUdfTag(descriptor, 7, descriptorLba);
       const terminator = image.subarray(
-        (descriptorLba + 1) * DVD_SECTOR_SIZE_BYTES,
         (descriptorLba + 2) * DVD_SECTOR_SIZE_BYTES,
+        (descriptorLba + 3) * DVD_SECTOR_SIZE_BYTES,
       );
       terminator.fill(0);
-      writeUdfTag(terminator, 8, descriptorLba + 1);
+      writeUdfTag(terminator, 8, descriptorLba + 2);
     }
     const fixture = writeFixture(image);
 
