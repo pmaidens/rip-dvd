@@ -5027,7 +5027,9 @@ describe("archive worker polling", () => {
       cancelledRequest.id,
     );
     const validRescueMap = readFileSync(rescuePaths.mapPath, "utf8");
+    const retentionMapPath = `${rescuePaths.mapPath}.retaining`;
     writeFileSync(rescuePaths.mapPath, "invalid rescue map\n");
+    writeFileSync(retentionMapPath, validRescueMap);
     access.archiveRequests.cancel(cancelledRequest.id);
     vi.advanceTimersByTime(ARCHIVE_JOB_LEASE_DURATION_MS + 1);
     const replacementImage = Buffer.alloc(reportedSizeBytes, 79);
@@ -5069,12 +5071,14 @@ describe("archive worker polling", () => {
     ]);
     expect(existsSync(crashedPublication.archivePath)).toBe(true);
     expect(existsSync(rescuePaths.mapPath)).toBe(true);
+    expect(existsSync(retentionMapPath)).toBe(true);
     expect(
       readdirSync(realpathSync(originalsLibraryPath)).some((name) =>
         name.includes(".invalid-")
       ),
     ).toBe(false);
 
+    unlinkSync(retentionMapPath);
     writeFileSync(rescuePaths.mapPath, validRescueMap);
     await pollArchiveWorker(pollOptions);
 

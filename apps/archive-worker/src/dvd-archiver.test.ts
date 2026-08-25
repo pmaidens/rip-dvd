@@ -383,8 +383,10 @@ describe("DVD archive publication", () => {
     const archiveRequestId = "cancelled-invalid-corrected-rescue";
     const archivePath = join(root, `dvdmeta-${digest}.iso`);
     const rescuePaths = dvdRescueWorkspacePaths(root, archiveRequestId);
+    const retentionMapPath = `${rescuePaths.mapPath}.retaining`;
     writeFileSync(archivePath, Buffer.alloc(6 * 2_048, 17));
     writeFileSync(rescuePaths.mapPath, "invalid rescue map\n");
+    writeFileSync(retentionMapPath, "interrupted rescue map\n");
     const mutation = vi.fn();
     const options = {
       archiveRequestId,
@@ -414,6 +416,7 @@ describe("DVD archive publication", () => {
     expect(mutation).not.toHaveBeenCalled();
     expect(existsSync(archivePath)).toBe(true);
     expect(existsSync(rescuePaths.mapPath)).toBe(true);
+    expect(existsSync(retentionMapPath)).toBe(true);
     expect(
       readdirSync(root).some((name) => name.includes(".invalid-")),
     ).toBe(false);

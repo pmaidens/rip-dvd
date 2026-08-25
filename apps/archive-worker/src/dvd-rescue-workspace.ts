@@ -464,6 +464,11 @@ export async function loadDvdRescueWorkspace(
     });
   }
   if (retentionMapMetadata !== null && mapMetadata !== null) {
+    if (invalidStatePolicy === "preserve") {
+      throw new Error("DVD rescue state is invalid", {
+        cause: new Error("DVD rescue transaction contains conflicting maps"),
+      });
+    }
     try {
       await quarantinePath(retentionMapPath, authorizeMutation);
       await syncPath(root);
