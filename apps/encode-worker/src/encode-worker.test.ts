@@ -3582,6 +3582,83 @@ describe("encode worker polling", () => {
     fixture.access.close();
   });
 
+  it("reports the syscall and errno when atomic exchange fails", () => {
+    const directory = mkdtempSync(join(tmpdir(), "rip-dvd-exchange-error-"));
+    try {
+      let observed: unknown;
+      try {
+        nodeAtomicPathExchange.exchange(
+          join(directory, "missing-first"),
+          join(directory, "missing-second"),
+        );
+      } catch (error) {
+        observed = error;
+      }
+
+      expect(observed).toMatchObject({ code: "ENOENT" });
+      expect((observed as Error).message).toMatch(
+        /renameat(?:2|x_np).*ENOENT/,
+      );
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
+
+  it("publishes a replacement when atomic exchange is unsupported", async () => {
+    const fixture = createQueuedJob();
+    const options = {
+      access: fixture.access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      signal: new AbortController().signal,
+    };
+    await pollEncodeWorker({
+      ...options,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "known good encode", { flag: "wx" });
+        }),
+      },
+    });
+    fixture.access.encodeJobs.requeue(fixture.job.id);
+
+    await pollEncodeWorker({
+      ...options,
+      atomicPathExchange: {
+        exchange() {
+          throw Object.assign(
+            new Error(
+              "renameat2(RENAME_EXCHANGE) failed: Invalid argument (EINVAL)",
+            ),
+            { code: "EINVAL" },
+          );
+        },
+      },
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "NFS replacement", { flag: "wx" });
+        }),
+      },
+    });
+
+    expect(readFileSync(fixture.outputPath, "utf8")).toBe("NFS replacement");
+    expect(quarantinedContents(fixture.outputPath)).toContain(
+      "known good encode",
+    );
+    expect(fixture.access.encodeJobs.listPendingPartialCleanups()).toEqual([]);
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({ id: fixture.job.id, status: "completed" }),
+    ]);
+    expect(options.log).toHaveBeenCalledWith(
+      expect.stringMatching(
+        /renameat2\(RENAME_EXCHANGE\).*EINVAL.*compatible rename/,
+      ),
+    );
+    fixture.access.close();
+  });
+
   it("reconciles a replacement exchange that reports failure after the syscall", async () => {
     const fixture = createQueuedJob();
     const options = {
