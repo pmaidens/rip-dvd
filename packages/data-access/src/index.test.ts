@@ -12205,6 +12205,25 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     access.close();
 
     const sqlite = new DatabaseSync(databasePath);
+    for (const column of [
+      "boundary_reported_size_bytes",
+      "boundary_published_size_bytes",
+      "boundary_excluded_sector_count",
+      "boundary_first_excluded_lba",
+      "boundary_maximum_referenced_lba",
+      "boundary_read_failure_classifier_version",
+      "boundary_read_failure_scsi_status",
+      "boundary_read_failure_host_status",
+      "boundary_read_failure_driver_status",
+      "boundary_read_failure_sense_response_code",
+      "boundary_read_failure_sense_key",
+      "boundary_read_failure_asc",
+      "boundary_read_failure_ascq",
+    ] as const) {
+      expect(() =>
+        sqlite.exec(`update original_disc_archives set ${column} = null`),
+      ).toThrow(/constraint/i);
+    }
     for (const mutation of [
       "size_bytes = null",
       "size_bytes = 16384",
@@ -12221,7 +12240,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       "boundary_read_failure_sense_key = 4",
       "boundary_read_failure_asc = 32",
       "boundary_read_failure_ascq = 1",
-      "boundary_first_excluded_lba = null",
     ]) {
       expect(() =>
         sqlite.exec(`update original_disc_archives set ${mutation}`)
