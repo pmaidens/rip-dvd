@@ -1,12 +1,9 @@
-import { fileURLToPath } from "node:url";
-
 import {
   DVD_SALVAGE_REJECTION_DESCRIPTIONS,
   type DvdSalvageRejectionReason,
 } from "@rip-dvd/data-access";
 import type { DvdTitleMap } from "@rip-dvd/data-access/dvd-scan";
 
-import { decodeLsdvdNavigationMetadata } from "./dvd-metadata.js";
 import {
   formatDvdDamageRanges,
   type DamagedDvdRecoveryResult,
@@ -19,6 +16,12 @@ import {
   createNodeDvdTitlePlaybackValidator,
   type DvdTitlePlaybackValidator,
 } from "./dvd-title-playback-validator.js";
+import { dvdTitleMapsAgree } from "./dvd-title-map-verification.js";
+import {
+  DVD_LAYOUT_CLASSIFIER_SCRIPT_PATH,
+  readDvdNavigation,
+  runDvdLayoutClassifier,
+} from "./dvd-validation-process.js";
 
 export const DVD_WATCHABLE_SALVAGE_POLICY_VERSION =
   "dvd-watchable-salvage-v2";
@@ -47,14 +50,6 @@ export interface DvdSalvageValidator {
     request: DvdSalvageValidationRequest,
   ): Promise<DvdSalvageValidationResult>;
 }
-
-const CLASSIFIER_OUTPUT_LIMIT_BYTES = 4_096;
-const CLASSIFIER_TIMEOUT_MS = 5 * 60_000;
-const NAVIGATION_OUTPUT_LIMIT_BYTES = 1_048_576;
-const NAVIGATION_TIMEOUT_MS = 5 * 60_000;
-const CLASSIFIER_SCRIPT_PATH = fileURLToPath(
-  new URL("./dvd-layout-classifier-cli.js", import.meta.url),
-);
 
 type ClassifierResult =
   | {
@@ -145,14 +140,8 @@ function parseClassifierResult(payload: string): ClassifierResult {
   throw new Error("DVD salvage classifier returned malformed output");
 }
 
-function canonicalizeDvdTitles(titles: DvdTitleMap["titles"]): string {
-  return JSON.stringify(
-    [...titles].sort((left, right) => left.number - right.number),
-  );
-}
-
 export function createNodeDvdSalvageValidator({
-  classifierScriptPath = CLASSIFIER_SCRIPT_PATH,
+  classifierScriptPath = DVD_LAYOUT_CLASSIFIER_SCRIPT_PATH,
   playbackValidator,
   runner = nodeCommandRunner,
 }: {
@@ -177,31 +166,17 @@ export function createNodeDvdSalvageValidator({
       )) {
         return { outcome: "rejected", reason: "consecutive_damage" };
       }
-      let classification;
-      try {
-        classification = await runner.run(
-          process.execPath,
-          [
-            classifierScriptPath,
-            imagePath,
-            String(recoveryResult.declaredByteCount),
-            JSON.stringify(recoveryResult.unrecoveredSectorRanges),
-          ],
-          {
-            maxBufferBytes: CLASSIFIER_OUTPUT_LIMIT_BYTES,
-            signal,
-            timeoutMs: CLASSIFIER_TIMEOUT_MS,
-          },
-        );
-      } catch (error) {
-        throw new Error("DVD salvage filesystem classification failed", {
-          cause: error,
-        });
-      }
-      if (classification.exitCode !== 0 || classification.stderr.trim() !== "") {
-        throw new Error("DVD salvage filesystem classification failed");
-      }
-      const result = parseClassifierResult(classification.stdout.trim());
+      const result = parseClassifierResult(await runDvdLayoutClassifier({
+        arguments: [
+          imagePath,
+          String(recoveryResult.declaredByteCount),
+          JSON.stringify(recoveryResult.unrecoveredSectorRanges),
+        ],
+        classifierScriptPath,
+        failureMessage: "DVD salvage filesystem classification failed",
+        runner,
+        signal,
+      }));
       if (result.outcome === "rejected") {
         return result;
       }
@@ -211,38 +186,14 @@ export function createNodeDvdSalvageValidator({
         throw new Error("DVD salvage classifier returned malformed output");
       }
 
-      let navigation;
-      try {
-        navigation = await runner.run(
-          "rip-dvd-lsdvd",
-          ["-Oh", "-a", "-c", "-s", imagePath],
-          {
-            maxBufferBytes: NAVIGATION_OUTPUT_LIMIT_BYTES,
-            signal,
-            timeoutMs: NAVIGATION_TIMEOUT_MS,
-          },
-        );
-      } catch (error) {
-        throw new Error("DVD salvage navigation validation failed", {
-          cause: error,
-        });
-      }
-      if (navigation.exitCode !== 0) {
-        throw new Error("DVD salvage navigation validation failed");
-      }
-      let observedNavigation;
-      try {
-        observedNavigation = decodeLsdvdNavigationMetadata(
-          `${navigation.stdout}\n${navigation.stderr}`,
-        );
-      } catch (error) {
-        throw new Error("DVD salvage navigation validation failed", {
-          cause: error,
-        });
-      }
+      const observedNavigation = await readDvdNavigation({
+        failureMessage: "DVD salvage navigation validation failed",
+        imagePath,
+        runner,
+        signal,
+      });
       if (
-        canonicalizeDvdTitles(observedNavigation.titles) !==
-          canonicalizeDvdTitles(expectedTitleMap.titles)
+        !dvdTitleMapsAgree(expectedTitleMap, observedNavigation.titles)
       ) {
         throw new Error("DVD salvage navigation validation changed the title map");
       }
