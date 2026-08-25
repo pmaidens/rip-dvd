@@ -1596,6 +1596,39 @@ if (
   );
 }
 
+const recoveredLegacyBoundaryResumePath = prepareOutput(
+  "/tmp/rip-dvd-reader-recovered-legacy-boundary-resume.img",
+);
+writeFileSync(recoveredLegacyBoundaryResumePath, legacyBoundaryResumeContent);
+const recoveredLegacyBoundaryResume = runTestResume(
+  recoveredLegacyBoundaryResumePath,
+  rawTailCompletionFault(35, "always", fixedOutOfRangeSense(35)),
+  legacyBoundaryBitmap.toString("hex"),
+);
+const recoveredLegacyBoundaryResult = readFailureResult(
+  recoveredLegacyBoundaryResume.stderr,
+);
+if (
+  recoveredLegacyBoundaryResume.status !== 3 ||
+  recoveredLegacyBoundaryResult.protocolVersion !== 2 ||
+  recoveredLegacyBoundaryResult.category !== "out_of_range" ||
+  recoveredLegacyBoundaryResult.firstFailingLba !== 35 ||
+  recoveredLegacyBoundaryResult.recoveryProtocol?.badSectorCount !== 0 ||
+  recoveredLegacyBoundaryResult.recoveryProtocol?.badAreaCount !== 0 ||
+  recoveredLegacyBoundaryResult.recoveryProtocol?.recoveredByteCount !==
+    content.byteLength ||
+  recoveredLegacyBoundaryResult.recoveryProtocol?.badSectorBitmapHex !==
+    "" ||
+  !readFileSync(recoveredLegacyBoundaryResumePath)
+    .subarray(5 * 2_048, 6 * 2_048)
+    .equals(content.subarray(5 * 2_048, 6 * 2_048)) ||
+  recoveredLegacyBoundaryResume.stderr.includes(recoveryResultPrefix)
+) {
+  throw new Error(
+    `libdvdcss recovered legacy boundary resume check failed: ${recoveredLegacyBoundaryResume.stderr}`,
+  );
+}
+
 const fullyMappedResumePath = prepareOutput(
   "/tmp/rip-dvd-reader-fully-mapped-resume.img",
 );

@@ -4235,6 +4235,73 @@ describe("DVD archive publication", () => {
     expect(existsSync(rescuePaths.mapPath)).toBe(true);
   });
 
+  it("rejects a same-inode mutation during boundary acceptance", async () => {
+    const originalsLibraryPath = createOriginalsLibrary();
+    const root = realpathSync(originalsLibraryPath);
+    const digest = "7".repeat(64);
+    const archiveRequestId = "mutated-during-boundary-acceptance";
+    const reportedSizeBytes = 8 * 2_048;
+    const firstExcludedLba = 6;
+    const retainedPrefix = Buffer.alloc(firstExcludedLba * 2_048, 73);
+    const boundaryFailure = createProvenBoundaryFailure(
+      reportedSizeBytes,
+      firstExcludedLba,
+    );
+    const rescuePaths = dvdRescueWorkspacePaths(root, archiveRequestId);
+    let proofFinished = false;
+    let postProofAuthorizationCount = 0;
+
+    await expect(preserveDvdArchive({
+      archiveRequestId,
+      authorizeMutation: () => {
+        if (!proofFinished) {
+          return;
+        }
+        postProofAuthorizationCount += 1;
+        if (postProofAuthorizationCount === 2) {
+          writeFileSync(
+            rescuePaths.imagePath,
+            Buffer.alloc(retainedPrefix.byteLength, 79),
+          );
+        }
+      },
+      completenessProver: {
+        async prove() {
+          proofFinished = true;
+          return { maximumReferencedLba: firstExcludedLba - 1 };
+        },
+      },
+      devicePath: "/dev/sr0",
+      expectedTitleMap: {
+        schemaVersion: 2,
+        contentId: `dvdmeta-sha256:${digest}`,
+        titles: [],
+      },
+      fingerprint: `dvdmeta-sha256:${digest}`,
+      originalsLibraryPath,
+      revalidateReadFailure: async () => undefined,
+      runner: {
+        copy: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, retainedPrefix);
+          throw new DvdReadFailureError(boundaryFailure);
+        }),
+        isActive: () => false,
+        withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+        waitForInactive: vi.fn(async () => undefined),
+      },
+      signal: new AbortController().signal,
+      sizeBytes: reportedSizeBytes,
+      verifySource: async () => undefined,
+      onProgress: () => undefined,
+    })).rejects.toThrow(
+      "DVD rescue image changed during boundary acceptance",
+    );
+
+    expect(existsSync(join(root, `dvdmeta-${digest}.iso`))).toBe(false);
+    expect(existsSync(rescuePaths.imagePath)).toBe(true);
+    expect(existsSync(rescuePaths.mapPath)).toBe(true);
+  });
+
   it("does not quarantine a concurrent destination substitution", async () => {
     const originalsLibraryPath = createOriginalsLibrary();
     const root = realpathSync(originalsLibraryPath);

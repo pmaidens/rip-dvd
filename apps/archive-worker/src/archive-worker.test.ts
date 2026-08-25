@@ -1655,6 +1655,84 @@ describe("archive worker polling", () => {
     );
   });
 
+  it("publishes clean when legacy prefix damage recovers before the boundary", async () => {
+    const scenario = await exerciseWatchabilityWorkerScenario({
+      ranges: [
+        { startLba: 1, sectorCount: 1 },
+        { startLba: 7, sectorCount: 1 },
+      ],
+      validation: { outcome: "rejected", reason: "policy_limit" },
+    });
+    scenario.access.archiveRequests.retry(scenario.request.id);
+    const firstExcludedLba = 6;
+    const publishedSizeBytes = firstExcludedLba * 2_048;
+    const boundaryFailure = {
+      ...createOutOfRangeDvdReadFailureResult({
+        declaredByteCount: scenario.sizeBytes,
+        firstFailingLba: firstExcludedLba,
+        requestedBlockCount: 1,
+        requestedLba: firstExcludedLba,
+      }),
+      retryOrdinal: 1,
+      boundaryProofVersion: "dvd-sector-boundary-proof-v1" as const,
+      candidateConfirmationCount: 2 as const,
+      precedingSectorLba: firstExcludedLba - 1,
+    };
+    const copyRunner: DvdCopyRunner = {
+      copy: vi.fn(async ({ continuation }) => {
+        expect(continuation).toMatchObject({ kind: "damaged" });
+        throw new DvdReadFailureError(
+          boundaryFailure,
+          createCleanDvdRecoveryResult(scenario.sizeBytes),
+        );
+      }),
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    };
+    const salvageValidator = { validate: vi.fn() };
+
+    await pollArchiveWorker({
+      access: scenario.access,
+      completenessProver: {
+        async prove() {
+          return { maximumReferencedLba: firstExcludedLba - 1 };
+        },
+      },
+      configuredDevicePath: scenario.discoveredDrive.devicePath,
+      copyRunner,
+      hardware: {
+        ...stableDeviceBinding(),
+        discover: vi.fn().mockResolvedValue([scenario.discoveredDrive]),
+        scanDvd: vi.fn().mockResolvedValue({
+          fingerprint: scenario.fingerprint,
+          scanData: scenario.scanData,
+          sizeBytes: scenario.sizeBytes,
+        }),
+      },
+      log: vi.fn(),
+      originalsLibraryPath: scenario.originalsLibraryPath,
+      salvageValidator,
+      signal: new AbortController().signal,
+      workerId: "archive-worker-corrected-clean-recovery",
+    });
+
+    expect(salvageValidator.validate).not.toHaveBeenCalled();
+    const archive = scenario.access.catalog.listOriginalDiscArchives()[0]!;
+    expect(archive).toMatchObject({
+      sizeBytes: publishedSizeBytes,
+      boundaryReportedSizeBytes: scenario.sizeBytes,
+      boundaryPublishedSizeBytes: publishedSizeBytes,
+      integrity: "clean_read",
+      badSectorCount: 0,
+      badAreaCount: 0,
+      badSectorRanges: [],
+    });
+    expect(readFileSync(archive.archivePath)).toEqual(
+      scenario.rescuedImage.subarray(0, publishedSizeBytes),
+    );
+  });
+
   it("keeps a proven boundary prefix retryable when completeness proof fails", async () => {
     const access = openTestDataAccess();
     const originalsLibraryPath = mkdtempSync(

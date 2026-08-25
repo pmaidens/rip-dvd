@@ -151,6 +151,7 @@ struct recovery_state {
     uint64_t bad_sector_count;
     uint64_t bad_area_count;
     int allow_boundary_proof;
+    int include_boundary_recovery_snapshot;
     int boundary_failure;
     int boundary_proven;
     uint64_t boundary_retained_image_byte_count;
@@ -605,7 +606,8 @@ static int emit_read_failure_result(
     int includes_recovery_snapshot =
         failure->status == BACKEND_READ_OUT_OF_RANGE_ERROR &&
         recovery != NULL && recovery->boundary_proven &&
-        recovery->bad_sector_count > 0;
+        (recovery->bad_sector_count > 0 ||
+         recovery->include_boundary_recovery_snapshot);
     char boundary_fields[512];
     int boundary_length;
     const char *category;
@@ -710,10 +712,13 @@ static int emit_read_failure_result(
     if (includes_recovery_snapshot) {
         static const char hex_digits[] = "0123456789abcdef";
         size_t offset = output_length;
-        for (size_t index = 0; index < recovery->bitmap_byte_count; index++) {
-            unsigned char byte = recovery->bad_sector_bitmap[index];
-            output[offset++] = hex_digits[byte >> 4];
-            output[offset++] = hex_digits[byte & 0x0f];
+        if (recovery->bad_sector_count > 0) {
+            for (size_t index = 0;
+                 index < recovery->bitmap_byte_count; index++) {
+                unsigned char byte = recovery->bad_sector_bitmap[index];
+                output[offset++] = hex_digits[byte >> 4];
+                output[offset++] = hex_digits[byte & 0x0f];
+            }
         }
         memcpy(output + offset, "\"}}\n", 4);
         offset += 4;
@@ -1684,6 +1689,7 @@ static int run_resume(struct read_backend *backend, const char *output_path,
         .bad_sector_count = 0,
         .bad_area_count = 0,
         .allow_boundary_proof = 1,
+        .include_boundary_recovery_snapshot = 1,
         .emit_malformed_result =
             test_result_mode == TEST_RESULT_MALFORMED_RECOVERY,
         .interrupt_read_failure_result =

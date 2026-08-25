@@ -1861,6 +1861,7 @@ async function publishCorrectedDvdBoundary({
     rescueIdentity,
     rescueWorkspace,
     retainedRecoveryResult,
+    imageAfter,
     authorizeMutation,
   );
   const acceptedProofFileIdentity = await readDvdProofFileIdentity(
@@ -2420,6 +2421,12 @@ export async function preserveDvdArchive({
         rescueIdentity!,
         rescueWorkspace!,
         recoveryResult,
+        await readDvdProofFileIdentity(
+          rescueWorkspace!.imagePath,
+          rescueWorkspace!.imageFilesystemIdentity,
+          copyOperationSizeBytes,
+          "DVD corrected-boundary image changed during recovery",
+        ),
         authorizeMutation,
       );
       if (completenessProver === undefined || expectedTitleMap === undefined) {

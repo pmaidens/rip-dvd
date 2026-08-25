@@ -950,6 +950,10 @@ export async function acceptDvdBoundaryRescueWorkspace(
   identity: DvdRescueIdentity,
   workspace: DvdRescueWorkspace,
   recoveryResult: DvdRecoveryResult,
+  expectedImageProofIdentity: {
+    ctimeNs: bigint;
+    mtimeNs: bigint;
+  },
   authorizeMutation?: AuthorizeMutation,
 ): Promise<DvdRescueWorkspace> {
   const expectedPaths = dvdRescueWorkspacePaths(root, identity.archiveRequestId);
@@ -967,13 +971,15 @@ export async function acceptDvdBoundaryRescueWorkspace(
   if (recoveryResult.declaredByteCount !== acceptedByteCount) {
     throw new Error("DVD rescue boundary acceptance is invalid");
   }
-  const metadata = await lstat(workspace.imagePath);
+  const metadata = await lstat(workspace.imagePath, { bigint: true });
   if (
     !metadata.isFile() ||
     metadata.isSymbolicLink() ||
-    metadata.size < acceptedByteCount ||
-    metadata.size > identity.sizeBytes ||
-    filesystemIdentity(metadata) !== workspace.imageFilesystemIdentity
+    metadata.size < BigInt(acceptedByteCount) ||
+    metadata.size > BigInt(identity.sizeBytes) ||
+    `${metadata.dev}:${metadata.ino}` !== workspace.imageFilesystemIdentity ||
+    metadata.ctimeNs !== expectedImageProofIdentity.ctimeNs ||
+    metadata.mtimeNs !== expectedImageProofIdentity.mtimeNs
   ) {
     throw new Error("DVD rescue image changed during boundary acceptance");
   }
@@ -1001,16 +1007,18 @@ export async function acceptDvdBoundaryRescueWorkspace(
     fsConstants.O_RDWR | fsConstants.O_NOFOLLOW,
   );
   try {
-    const opened = await handle.stat();
+    const opened = await handle.stat({ bigint: true });
     if (
       opened.dev !== metadata.dev ||
       opened.ino !== metadata.ino ||
-      opened.size !== metadata.size
+      opened.size !== metadata.size ||
+      opened.ctimeNs !== expectedImageProofIdentity.ctimeNs ||
+      opened.mtimeNs !== expectedImageProofIdentity.mtimeNs
     ) {
       throw new Error("DVD rescue image changed during boundary acceptance");
     }
     await authorizeMutation?.();
-    if (opened.size !== acceptedByteCount) {
+    if (opened.size !== BigInt(acceptedByteCount)) {
       await handle.truncate(acceptedByteCount);
     }
     await handle.sync();

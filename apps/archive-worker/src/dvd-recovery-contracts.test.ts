@@ -282,6 +282,39 @@ describe("DVD recovery results", () => {
     );
   });
 
+  it("accepts a clean recovery snapshot beside a proven boundary", () => {
+    const result = parseDvdReadFailureTerminalResultProtocol(
+      readFailureProtocolPayload({
+        protocolVersion: 2,
+        category: "out_of_range",
+        informationLba: 35,
+        requestedLba: 35,
+        requestedBlockCount: 1,
+        retryOrdinal: 1,
+        boundaryProofVersion: DVD_SECTOR_BOUNDARY_PROOF_VERSION,
+        candidateConfirmationCount: 2,
+        precedingSectorLba: 34,
+        declaredByteCount: 40 * 2_048,
+        firstFailingLba: 35,
+        retainedImageByteCount: 35 * 2_048,
+        recoveryProtocol: {
+          protocolVersion: 1,
+          declaredByteCount: 40 * 2_048,
+          recoveredByteCount: 40 * 2_048,
+          recoveryPolicyVersion: "dvd-recovery-v1",
+          badSectorCount: 0,
+          badAreaCount: 0,
+          badSectorBitmapHex: "",
+        },
+      }),
+      40 * 2_048,
+    );
+
+    expect(result.recoveryResult).toEqual(
+      createCleanDvdRecoveryResult(40 * 2_048),
+    );
+  });
+
   it("rejects suffix damage from a proven boundary terminal result", () => {
     const payload = JSON.parse(readFailureProtocolPayload({
       protocolVersion: 2,

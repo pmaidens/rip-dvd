@@ -80,7 +80,7 @@ export type DvdReadFailureResult =
 
 export interface DvdReadFailureTerminalResult {
   readFailure: DvdReadFailureResult;
-  recoveryResult: DamagedDvdRecoveryResult | null;
+  recoveryResult: DvdRecoveryResult | null;
 }
 
 export class DvdReadFailureError extends Error {
@@ -463,7 +463,6 @@ export function parseDvdReadFailureTerminalResultProtocol(
   );
   if (
     !isProvenDvdBoundaryCandidate(readFailure) ||
-    recoveryResult.outcome !== "damaged" ||
     recoveryResult.unrecoveredSectorRanges.some(
       (range) =>
         range.startLba + range.sectorCount > readFailure.firstFailingLba,
