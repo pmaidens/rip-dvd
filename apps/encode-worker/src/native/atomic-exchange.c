@@ -12,6 +12,51 @@
 
 enum { MAX_PATH_BYTES = 4096 };
 
+static const char *exchange_error_code(int error_number) {
+  if (error_number == ENOENT) {
+    return "ENOENT";
+  }
+  if (error_number == EINVAL) {
+    return "EINVAL";
+  }
+#if defined(ENOSYS)
+  if (error_number == ENOSYS) {
+    return "ENOSYS";
+  }
+#endif
+#if defined(ENOTSUP)
+  if (error_number == ENOTSUP) {
+    return "ENOTSUP";
+  }
+#endif
+#if defined(EOPNOTSUPP)
+  if (error_number == EOPNOTSUPP) {
+    return "EOPNOTSUPP";
+  }
+#endif
+  return NULL;
+}
+
+static void throw_exchange_error(napi_env environment, int error_number) {
+#if defined(__linux__)
+  const char *operation = "renameat2(RENAME_EXCHANGE)";
+#elif defined(__APPLE__)
+  const char *operation = "renameatx_np(RENAME_SWAP)";
+#else
+#error "Atomic path exchange is unsupported on this platform"
+#endif
+  const char *code = exchange_error_code(error_number);
+  char message[512];
+  if (code == NULL) {
+    snprintf(message, sizeof(message), "%s failed: %s", operation,
+             strerror(error_number));
+  } else {
+    snprintf(message, sizeof(message), "%s failed: %s (%s)", operation,
+             strerror(error_number), code);
+  }
+  napi_throw_error(environment, code, message);
+}
+
 static bool read_path(napi_env environment, napi_value value,
                       char path[MAX_PATH_BYTES + 1]) {
   napi_valuetype type;
@@ -57,7 +102,8 @@ static napi_value exchange_paths(napi_env environment,
 #endif
 
   if (result != 0) {
-    napi_throw_error(environment, NULL, strerror(errno));
+    const int exchange_error = errno;
+    throw_exchange_error(environment, exchange_error);
     return NULL;
   }
 

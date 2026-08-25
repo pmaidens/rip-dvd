@@ -509,6 +509,16 @@ function exchangePathsAtMutationBoundary(
   atomicPathExchange.exchange(firstPath, secondPath);
 }
 
+function atomicExchangeIsUnsupported(error: Error): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  return (
+    code === "EINVAL" ||
+    code === "ENOSYS" ||
+    code === "ENOTSUP" ||
+    code === "EOPNOTSUPP"
+  );
+}
+
 function syncPathAtMutationBoundary(path: string): void {
   const descriptor = openSync(path, fsConstants.O_RDONLY);
   try {
@@ -516,6 +526,59 @@ function syncPathAtMutationBoundary(path: string): void {
   } finally {
     closeSync(descriptor);
   }
+}
+
+function publishReplacementWithRenameAtMutationBoundary(
+  finalPath: string,
+  priorFinalPath: string,
+  replacementPath: string,
+  partialPath: string,
+  retainedFinalMetadata: Stats,
+  partialMetadata: Stats,
+  onPublished: () => void,
+): void {
+  const finalBefore = lstatSync(finalPath);
+  const priorFinalBefore = lstatSync(priorFinalPath);
+  const replacementBefore = lstatSync(replacementPath);
+  const partialBefore = lstatSync(partialPath);
+  if (
+    !sameEncodeOutputMutationSnapshot(retainedFinalMetadata, finalBefore) ||
+    !sameEncodeOutputInode(retainedFinalMetadata, priorFinalBefore) ||
+    !sameEncodeOutputInode(partialMetadata, replacementBefore) ||
+    !sameEncodeOutputInode(partialMetadata, partialBefore)
+  ) {
+    throw new PendingPublicationRecoveryError(
+      "Encode replacement changed before the compatible rename",
+    );
+  }
+
+  renameSync(replacementPath, finalPath);
+  onPublished();
+
+  let finalAfter: Stats;
+  let priorFinalAfter: Stats;
+  let partialAfter: Stats;
+  try {
+    finalAfter = lstatSync(finalPath);
+    priorFinalAfter = lstatSync(priorFinalPath);
+    partialAfter = lstatSync(partialPath);
+  } catch (error) {
+    throw new PendingPublicationRecoveryError(
+      `Compatible Encode replacement requires reconciliation: ${
+        normalizeErrorMessage(error)
+      }`,
+    );
+  }
+  if (
+    !sameEncodeOutputInode(partialMetadata, finalAfter) ||
+    !sameEncodeOutputInode(partialMetadata, partialAfter) ||
+    !sameEncodeOutputInode(retainedFinalMetadata, priorFinalAfter)
+  ) {
+    throw new PendingPublicationRecoveryError(
+      "Compatible Encode replacement requires reconciliation",
+    );
+  }
+  syncPathAtMutationBoundary(dirname(finalPath));
 }
 
 function restoreHiddenFinalAtMutationBoundary(
@@ -568,6 +631,7 @@ function publishReplacementAtMutationBoundary(
   partialPath: string,
   expectedFinal: Stats,
   onPublished: () => void,
+  log: (message: string) => void,
 ): void {
   const finalMetadata = lstatSync(finalPath);
   if (!sameEncodeOutputMutationSnapshot(expectedFinal, finalMetadata)) {
@@ -643,6 +707,23 @@ function publishReplacementAtMutationBoundary(
       ) &&
       sameEncodeOutputInode(partialMetadata, displacedFinalMetadata);
     if (exchangeDidNotOccur) {
+      if (atomicExchangeIsUnsupported(exchangeError)) {
+        log(
+          `Encode replacement atomic exchange is unsupported: ${
+            normalizeErrorMessage(exchangeError)
+          }; using compatible rename`,
+        );
+        publishReplacementWithRenameAtMutationBoundary(
+          finalPath,
+          priorFinalPath,
+          replacementPath,
+          partialPath,
+          retainedFinalMetadata,
+          partialMetadata,
+          onPublished,
+        );
+        return;
+      }
       throw exchangeError;
     }
     throw new PendingPublicationRecoveryError(
@@ -1451,6 +1532,7 @@ export async function executeEncodeClaim(
         () => {
           published = true;
         },
+        options.log,
       );
     } else {
       linkSync(paths.partialPath, paths.finalPath);
