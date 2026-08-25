@@ -9,6 +9,7 @@ import {
   DVD_RECOVERY_POLICY_VERSION,
   DVD_SECTOR_SIZE_BYTES,
   createDvdRecoveryProtocolPayload,
+  isProvenDvdBoundaryCandidate,
   type OutOfRangeDvdReadFailureResult,
   type DvdRecoveryResult,
   type DvdRecoveryProtocolPayload,
@@ -41,7 +42,7 @@ type DvdRescueState = Pick<
 >;
 
 interface DvdRescueMap {
-  schemaVersion: 1 | 2;
+  schemaVersion: 1 | 2 | 3;
   archiveRequestId: string;
   fingerprint: string;
   declaredByteCount: number;
@@ -121,6 +122,38 @@ async function optionalMetadata(path: string) {
   }
 }
 
+async function readRescueMap(
+  path: string,
+  metadata: Awaited<ReturnType<typeof lstat>>,
+): Promise<unknown> {
+  if (
+    !metadata.isFile() ||
+    metadata.isSymbolicLink() ||
+    metadata.size <= 0 ||
+    metadata.size > MAX_RESCUE_MAP_BYTES
+  ) {
+    throw new Error("DVD rescue state is invalid");
+  }
+  const handle = await open(
+    path,
+    fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+  );
+  try {
+    const opened = await handle.stat();
+    if (
+      !opened.isFile() ||
+      opened.size !== metadata.size ||
+      opened.dev !== metadata.dev ||
+      opened.ino !== metadata.ino
+    ) {
+      throw new Error("DVD rescue map changed during validation");
+    }
+    return JSON.parse(await handle.readFile("utf8")) as unknown;
+  } finally {
+    await handle.close();
+  }
+}
+
 async function quarantinePath(
   path: string,
   authorizeMutation?: AuthorizeMutation,
@@ -166,7 +199,9 @@ function rescueStateFromMap(
     typeof value !== "object" ||
     value === null ||
     !("schemaVersion" in value) ||
-    (value.schemaVersion !== 1 && value.schemaVersion !== 2) ||
+    (value.schemaVersion !== 1 &&
+      value.schemaVersion !== 2 &&
+      value.schemaVersion !== 3) ||
     !("archiveRequestId" in value) ||
     value.archiveRequestId !== identity.archiveRequestId ||
     !("fingerprint" in value) ||
@@ -212,13 +247,35 @@ function rescueStateFromMap(
     JSON.stringify(map.boundaryFailureProtocol),
     identity.sizeBytes,
   );
+  if (boundaryFailure.category !== "out_of_range") {
+    throw new Error("DVD rescue state does not match the Archive Request");
+  }
+  if (map.schemaVersion === 3) {
+    const acceptedByteCount = boundaryFailure.firstFailingLba *
+      DVD_SECTOR_SIZE_BYTES;
+    if (
+      !isProvenDvdBoundaryCandidate(boundaryFailure) ||
+      map.imageByteCount !== acceptedByteCount ||
+      map.recoveryProtocol === null
+    ) {
+      throw new Error("DVD rescue state does not match the Archive Request");
+    }
+    return {
+      boundaryFailure,
+      imageByteCount: acceptedByteCount,
+      recoveryResult: parseDvdRecoveryResultProtocol(
+        JSON.stringify(map.recoveryProtocol),
+        acceptedByteCount,
+      ),
+    };
+  }
   if (
-    boundaryFailure.category !== "out_of_range" ||
-    map.imageByteCount !== boundaryFailure.retainedImageByteCount ||
-    (map.recoveryProtocol === null &&
-      map.imageByteCount! >
-        boundaryFailure.firstFailingLba * DVD_SECTOR_SIZE_BYTES) ||
-    (map.recoveryProtocol !== null && map.imageByteCount !== identity.sizeBytes)
+    map.recoveryProtocol === null
+      ? map.imageByteCount !== boundaryFailure.retainedImageByteCount ||
+        map.imageByteCount! >
+          boundaryFailure.firstFailingLba * DVD_SECTOR_SIZE_BYTES
+      : map.imageByteCount !== identity.sizeBytes &&
+        map.imageByteCount !== boundaryFailure.retainedImageByteCount
   ) {
     throw new Error("DVD rescue state does not match the Archive Request");
   }
@@ -246,7 +303,7 @@ function createRescueMap(
   if (recoveryProtocol !== null) {
     parseDvdRecoveryResultProtocol(
       JSON.stringify(recoveryProtocol),
-      identity.sizeBytes,
+      state.recoveryResult!.declaredByteCount,
     );
   }
   if (state.boundaryFailure !== null) {
@@ -258,8 +315,17 @@ function createRescueMap(
       throw new Error("DVD rescue boundary evidence is invalid");
     }
   }
+  const schemaVersion = state.boundaryFailure === null
+    ? 1
+    : state.recoveryResult !== null &&
+        isProvenDvdBoundaryCandidate(state.boundaryFailure) &&
+        state.imageByteCount ===
+          state.boundaryFailure.firstFailingLba * DVD_SECTOR_SIZE_BYTES &&
+        state.recoveryResult.declaredByteCount === state.imageByteCount
+      ? 3
+      : 2;
   return {
-    schemaVersion: state.boundaryFailure === null ? 1 : 2,
+    schemaVersion,
     archiveRequestId: identity.archiveRequestId,
     fingerprint: identity.fingerprint,
     declaredByteCount: identity.sizeBytes,
@@ -464,19 +530,58 @@ export async function loadDvdRescueWorkspace(
     });
   }
   if (retentionMapMetadata !== null && mapMetadata !== null) {
-    if (invalidStatePolicy === "preserve") {
+    let acceptedTransaction = false;
+    let unappliedTransaction = false;
+    try {
+      const retainedMapValue = await readRescueMap(
+        retentionMapPath,
+        retentionMapMetadata,
+      );
+      const retainedMap = retainedMapValue as DvdRescueMap;
+      const retainedState = rescueStateFromMap(retainedMapValue, identity);
+      if (
+        retainedMap.schemaVersion === 3 &&
+        imageMetadata !== null &&
+        imageMetadata.isFile() &&
+        !imageMetadata.isSymbolicLink() &&
+        filesystemIdentity(imageMetadata) ===
+          retainedMap.imageFilesystemIdentity
+      ) {
+        acceptedTransaction =
+          imageMetadata.size === retainedState.imageByteCount;
+        if (!acceptedTransaction) {
+          const mapValue = await readRescueMap(paths.mapPath, mapMetadata);
+          const map = mapValue as DvdRescueMap;
+          const state = rescueStateFromMap(mapValue, identity);
+          unappliedTransaction =
+            imageMetadata.size === state.imageByteCount &&
+            filesystemIdentity(imageMetadata) ===
+              map.imageFilesystemIdentity;
+        }
+      }
+    } catch {
+      acceptedTransaction = false;
+      unappliedTransaction = false;
+    }
+    if (acceptedTransaction) {
+      await authorizeMutation?.();
+      await rename(retentionMapPath, paths.mapPath);
+      await syncPath(root);
+      mapMetadata = await lstat(paths.mapPath);
+      retentionMapMetadata = null;
+    } else if (unappliedTransaction) {
+      await authorizeMutation?.();
+      await unlink(retentionMapPath);
+      await syncPath(root);
+      retentionMapMetadata = null;
+    } else if (invalidStatePolicy === "preserve") {
       throw new Error("DVD rescue state is invalid", {
         cause: new Error("DVD rescue transaction contains conflicting maps"),
       });
-    }
-    try {
+    } else {
       await quarantinePath(retentionMapPath, authorizeMutation);
       await syncPath(root);
       retentionMapMetadata = null;
-    } catch (error) {
-      throw new Error("DVD rescue state could not be quarantined", {
-        cause: error,
-      });
     }
   }
   if (
@@ -492,34 +597,11 @@ export async function loadDvdRescueWorkspace(
       !Number.isSafeInteger(identity.sizeBytes) ||
       identity.sizeBytes <= 0 ||
       identity.sizeBytes % DVD_SECTOR_SIZE_BYTES !== 0 ||
-      mapMetadata === null ||
-      !mapMetadata.isFile() ||
-      mapMetadata.isSymbolicLink() ||
-      mapMetadata.size <= 0 ||
-      mapMetadata.size > MAX_RESCUE_MAP_BYTES
+      mapMetadata === null
     ) {
       throw new Error("DVD rescue state is invalid");
     }
-    const handle = await open(
-      paths.mapPath,
-      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
-    );
-    let text: string;
-    try {
-      const opened = await handle.stat();
-      if (
-        !opened.isFile() ||
-        opened.size !== mapMetadata.size ||
-        opened.dev !== mapMetadata.dev ||
-        opened.ino !== mapMetadata.ino
-      ) {
-        throw new Error("DVD rescue map changed during validation");
-      }
-      text = await handle.readFile("utf8");
-    } finally {
-      await handle.close();
-    }
-    const parsed = JSON.parse(text) as unknown;
+    const parsed = await readRescueMap(paths.mapPath, mapMetadata);
     const state = rescueStateFromMap(parsed, identity);
     const map = parsed as DvdRescueMap;
     const preparedImagePath =
@@ -670,7 +752,10 @@ export async function updateDvdRescueWorkspace(
   recoveryResult: DvdRecoveryResult,
   authorizeMutation?: AuthorizeMutation,
 ): Promise<DvdRescueWorkspace> {
-  const expectedPaths = dvdRescueWorkspacePaths(root, identity.archiveRequestId);
+  const expectedPaths = dvdRescueWorkspacePaths(
+    root,
+    identity.archiveRequestId,
+  );
   if (
     workspace.imagePath !== expectedPaths.imagePath ||
     workspace.mapPath !== expectedPaths.mapPath
@@ -726,6 +811,7 @@ export async function commitDvdBoundaryRescueWorkspace(
   boundaryFailure: OutOfRangeDvdReadFailureResult,
   authorizeMutation?: AuthorizeMutation,
   finalizeRetention?: AuthorizeMutation,
+  recoveryResult: DvdRecoveryResult | null = null,
 ): Promise<DvdRescueWorkspace> {
   const paths = dvdRescueWorkspacePaths(root, identity.archiveRequestId);
   const retentionMapPath = dvdBoundaryRetentionMapPath(
@@ -757,7 +843,7 @@ export async function commitDvdBoundaryRescueWorkspace(
     const state = {
       boundaryFailure,
       imageByteCount: imageMetadata.size,
-      recoveryResult: null,
+      recoveryResult,
     };
     return await commitPreparedDvdBoundaryRescueWorkspace(
       root,
@@ -783,17 +869,23 @@ export async function recordDvdBoundaryFailure(
   boundaryFailure: OutOfRangeDvdReadFailureResult,
   authorizeMutation?: AuthorizeMutation,
   finalizeRetention?: AuthorizeMutation,
+  recoveryResult: DvdRecoveryResult | null = null,
 ): Promise<DvdRescueWorkspace> {
-  const expectedPaths = dvdRescueWorkspacePaths(root, identity.archiveRequestId);
+  const expectedPaths = dvdRescueWorkspacePaths(
+    root,
+    identity.archiveRequestId,
+  );
   const imageMetadata = await lstat(workspace.imagePath);
   const continuesBoundaryPrefix =
     workspace.boundaryFailure !== null && workspace.recoveryResult === null;
+  const retainedRecoveryResult = recoveryResult ?? workspace.recoveryResult;
   if (
     workspace.imagePath !== expectedPaths.imagePath ||
     workspace.mapPath !== expectedPaths.mapPath ||
     !imageMetadata.isFile() ||
     imageMetadata.isSymbolicLink() ||
-    imageMetadata.size !== boundaryFailure.retainedImageByteCount ||
+    (retainedRecoveryResult === null &&
+      imageMetadata.size !== boundaryFailure.retainedImageByteCount) ||
     (continuesBoundaryPrefix
       ? imageMetadata.size < workspace.imageByteCount ||
         imageMetadata.size % DVD_SECTOR_SIZE_BYTES !== 0
@@ -804,10 +896,8 @@ export async function recordDvdBoundaryFailure(
   }
   const state = {
     boundaryFailure,
-    imageByteCount: continuesBoundaryPrefix
-      ? imageMetadata.size
-      : workspace.imageByteCount,
-    recoveryResult: workspace.recoveryResult,
+    imageByteCount: imageMetadata.size,
+    recoveryResult: retainedRecoveryResult,
   };
   const retentionMapPath = dvdBoundaryRetentionMapPath(
     root,
@@ -853,6 +943,84 @@ export async function recordDvdBoundaryFailure(
     });
   }
   return { ...workspace, ...state };
+}
+
+export async function acceptDvdBoundaryRescueWorkspace(
+  root: string,
+  identity: DvdRescueIdentity,
+  workspace: DvdRescueWorkspace,
+  recoveryResult: DvdRecoveryResult,
+  authorizeMutation?: AuthorizeMutation,
+): Promise<DvdRescueWorkspace> {
+  const expectedPaths = dvdRescueWorkspacePaths(root, identity.archiveRequestId);
+  const boundaryFailure = workspace.boundaryFailure;
+  if (
+    workspace.imagePath !== expectedPaths.imagePath ||
+    workspace.mapPath !== expectedPaths.mapPath ||
+    boundaryFailure === null ||
+    !isProvenDvdBoundaryCandidate(boundaryFailure)
+  ) {
+    throw new Error("DVD rescue boundary acceptance is invalid");
+  }
+  const acceptedByteCount = boundaryFailure.firstFailingLba *
+    DVD_SECTOR_SIZE_BYTES;
+  if (recoveryResult.declaredByteCount !== acceptedByteCount) {
+    throw new Error("DVD rescue boundary acceptance is invalid");
+  }
+  const metadata = await lstat(workspace.imagePath);
+  if (
+    !metadata.isFile() ||
+    metadata.isSymbolicLink() ||
+    metadata.size < acceptedByteCount ||
+    metadata.size > identity.sizeBytes ||
+    filesystemIdentity(metadata) !== workspace.imageFilesystemIdentity
+  ) {
+    throw new Error("DVD rescue image changed during boundary acceptance");
+  }
+  const acceptedState = {
+    boundaryFailure,
+    imageByteCount: acceptedByteCount,
+    recoveryResult,
+  };
+  const retentionMapPath = dvdBoundaryRetentionMapPath(
+    root,
+    identity.archiveRequestId,
+  );
+  await writeMapAtomically(
+    root,
+    retentionMapPath,
+    createRescueMap(
+      identity,
+      workspace.imageFilesystemIdentity,
+      acceptedState,
+    ),
+    authorizeMutation,
+  );
+  const handle = await open(
+    workspace.imagePath,
+    fsConstants.O_RDWR | fsConstants.O_NOFOLLOW,
+  );
+  try {
+    const opened = await handle.stat();
+    if (
+      opened.dev !== metadata.dev ||
+      opened.ino !== metadata.ino ||
+      opened.size !== metadata.size
+    ) {
+      throw new Error("DVD rescue image changed during boundary acceptance");
+    }
+    await authorizeMutation?.();
+    if (opened.size !== acceptedByteCount) {
+      await handle.truncate(acceptedByteCount);
+    }
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  await authorizeMutation?.();
+  await rename(retentionMapPath, workspace.mapPath);
+  await syncPath(root);
+  return { ...workspace, ...acceptedState };
 }
 
 export async function removeDvdRescueWorkspace(

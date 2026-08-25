@@ -1540,6 +1540,121 @@ describe("archive worker polling", () => {
     expect(existsSync(rescuePaths.mapPath)).toBe(false);
   });
 
+  it("publishes only genuine retained damage after accepting a legacy rescue boundary", async () => {
+    const scenario = await exerciseWatchabilityWorkerScenario({
+      ranges: [
+        { startLba: 1, sectorCount: 1 },
+        { startLba: 7, sectorCount: 1 },
+      ],
+      validation: { outcome: "rejected", reason: "policy_limit" },
+    });
+    scenario.access.archiveRequests.retry(scenario.request.id);
+    const firstExcludedLba = 6;
+    const publishedSizeBytes = firstExcludedLba * 2_048;
+    const boundaryFailure = {
+      ...createOutOfRangeDvdReadFailureResult({
+        declaredByteCount: scenario.sizeBytes,
+        firstFailingLba: firstExcludedLba,
+        requestedBlockCount: 1,
+        requestedLba: firstExcludedLba,
+      }),
+      retryOrdinal: 1,
+      boundaryProofVersion: "dvd-sector-boundary-proof-v1" as const,
+      candidateConfirmationCount: 2 as const,
+      precedingSectorLba: firstExcludedLba - 1,
+    };
+    const retainedRecovery = createDamagedDvdRecoveryResult(
+      scenario.sizeBytes,
+      [{ startLba: 1, sectorCount: 1 }],
+    );
+    const copyRunner: DvdCopyRunner = {
+      copy: vi.fn(async ({ continuation }) => {
+        expect(continuation).toMatchObject({
+          kind: "damaged",
+          recoveryResult: createDamagedDvdRecoveryResult(
+            scenario.sizeBytes,
+            [
+              { startLba: 1, sectorCount: 1 },
+              { startLba: 7, sectorCount: 1 },
+            ],
+          ),
+        });
+        throw new DvdReadFailureError(boundaryFailure, retainedRecovery);
+      }),
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    };
+    const prove = vi.fn<DvdCompletenessProver["prove"]>(async ({
+      candidateBoundaryLba,
+      imagePath,
+    }) => {
+      expect(candidateBoundaryLba).toBe(firstExcludedLba);
+      expect(readFileSync(imagePath)).toEqual(scenario.rescuedImage);
+      return { maximumReferencedLba: firstExcludedLba - 1 };
+    });
+    const salvageValidator = {
+      validate: vi.fn(async ({ imagePath, recoveryResult }) => {
+        expect(readFileSync(imagePath)).toEqual(
+          scenario.rescuedImage.subarray(0, publishedSizeBytes),
+        );
+        expect(recoveryResult).toEqual(
+          createDamagedDvdRecoveryResult(publishedSizeBytes, [
+            { startLba: 1, sectorCount: 1 },
+          ]),
+        );
+        return {
+          badSectorCountsByTitle: [{ badSectorCount: 1, titleNumber: 1 }],
+          outcome: "accepted" as const,
+        };
+      }),
+    };
+
+    await pollArchiveWorker({
+      access: scenario.access,
+      completenessProver: { prove },
+      configuredDevicePath: scenario.discoveredDrive.devicePath,
+      copyRunner,
+      hardware: {
+        ...stableDeviceBinding(),
+        discover: vi.fn().mockResolvedValue([scenario.discoveredDrive]),
+        scanDvd: vi.fn().mockResolvedValue({
+          fingerprint: scenario.fingerprint,
+          scanData: scenario.scanData,
+          sizeBytes: scenario.sizeBytes,
+        }),
+      },
+      log: vi.fn(),
+      originalsLibraryPath: scenario.originalsLibraryPath,
+      salvageValidator,
+      signal: new AbortController().signal,
+      workerId: "archive-worker-corrected-salvage",
+    });
+
+    expect(prove).toHaveBeenCalledOnce();
+    expect(salvageValidator.validate).toHaveBeenCalledOnce();
+    expect(scenario.access.archiveRequests.list(["fulfilled"])).toEqual([
+      expect.objectContaining({ id: scenario.request.id }),
+    ]);
+    const archive = scenario.access.catalog.listOriginalDiscArchives()[0]!;
+    expect(archive).toMatchObject({
+      sizeBytes: publishedSizeBytes,
+      boundaryReportedSizeBytes: scenario.sizeBytes,
+      boundaryPublishedSizeBytes: publishedSizeBytes,
+      boundaryExcludedSectorCount:
+        scenario.sizeBytes / 2_048 - firstExcludedLba,
+      boundaryFirstExcludedLba: firstExcludedLba,
+      integrity: "watchable_salvage",
+      badSectorCount: 1,
+      badAreaCount: 1,
+      badSectorRanges: [{ startLba: 1, sectorCount: 1 }],
+      badSectorCountsByTitle: [{ badSectorCount: 1, titleNumber: 1 }],
+    });
+    expect(readFileSync(archive.archivePath)).toEqual(
+      scenario.rescuedImage.subarray(0, publishedSizeBytes),
+    );
+  });
+
   it("keeps a proven boundary prefix retryable when completeness proof fails", async () => {
     const access = openTestDataAccess();
     const originalsLibraryPath = mkdtempSync(
@@ -5029,7 +5144,12 @@ describe("archive worker polling", () => {
     const validRescueMap = readFileSync(rescuePaths.mapPath, "utf8");
     const retentionMapPath = `${rescuePaths.mapPath}.retaining`;
     writeFileSync(rescuePaths.mapPath, "invalid rescue map\n");
-    writeFileSync(retentionMapPath, validRescueMap);
+    const invalidRetentionMap = JSON.parse(validRescueMap);
+    invalidRetentionMap.imageFilesystemIdentity = "1:2";
+    writeFileSync(
+      retentionMapPath,
+      `${JSON.stringify(invalidRetentionMap)}\n`,
+    );
     access.archiveRequests.cancel(cancelledRequest.id);
     vi.advanceTimersByTime(ARCHIVE_JOB_LEASE_DURATION_MS + 1);
     const replacementImage = Buffer.alloc(reportedSizeBytes, 79);
