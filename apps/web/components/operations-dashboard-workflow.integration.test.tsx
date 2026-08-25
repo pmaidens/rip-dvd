@@ -15,6 +15,19 @@ import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidec
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+vi.mock(
+  "../../encode-worker/src/encode-output-validator.js",
+  async (importOriginal) => {
+    const actual = await importOriginal<
+      typeof import("../../encode-worker/src/encode-output-validator.js")
+    >();
+    return {
+      ...actual,
+      nodeEncodeOutputValidator: { validate: vi.fn(async () => {}) },
+    };
+  },
+);
+
 import type { OpticalDriveHardware } from "../../archive-worker/src/archive-worker.js";
 import type { DvdCopyRunner } from "../../archive-worker/src/dvd-archiver.js";
 import {

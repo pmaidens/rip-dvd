@@ -40,9 +40,20 @@ import {
   pollEncodeWorker,
   type HandBrakeRunner,
 } from "./encode-worker.js";
+import type { EncodeOutputValidator } from "./encode-output-validator.js";
 import {
   encodeOutputFilesystemIdentity,
 } from "./encode-output-filesystem-identity.js";
+
+vi.mock("./encode-output-validator.js", async (importOriginal) => {
+  const actual = await importOriginal<
+    typeof import("./encode-output-validator.js")
+  >();
+  return {
+    ...actual,
+    nodeEncodeOutputValidator: { validate: vi.fn(async () => {}) },
+  };
+});
 
 const quarantineRace = vi.hoisted(() => ({
   armed: false,
@@ -1129,6 +1140,50 @@ describe("encode worker polling", () => {
     ]);
     expect(readFileSync(fixture.outputPath, "utf8")).toBe("complete encode");
     expect(existsSync(request.outputPath)).toBe(false);
+    fixture.access.close();
+  });
+
+  it("quarantines an encoded partial instead of publishing it when media validation fails", async () => {
+    const fixture = createQueuedJob();
+    let partialPath = "";
+    const runner: HandBrakeRunner = {
+      run: vi.fn(async ({ outputPath }) => {
+        partialPath = outputPath;
+        writeFileSync(outputPath, "corrupt encode", { flag: "wx" });
+      }),
+    };
+    const outputValidator: EncodeOutputValidator = {
+      validate: vi.fn(async (outputPath) => {
+        expect(outputPath).toBe(partialPath);
+        expect(existsSync(fixture.outputPath)).toBe(false);
+        throw new Error(
+          "Encode output validation failed: the first 5 seconds decoded zero video frames",
+        );
+      }),
+    };
+
+    await pollEncodeWorker({
+      access: fixture.access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      outputValidator,
+      runner,
+      signal: new AbortController().signal,
+    });
+
+    expect(outputValidator.validate).toHaveBeenCalledOnce();
+    expect(existsSync(fixture.outputPath)).toBe(false);
+    expect(quarantinedContents(partialPath)).toContain("corrupt encode");
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        errorMessage:
+          "Encode output validation failed: the first 5 seconds decoded zero video frames",
+        id: fixture.job.id,
+        status: "failed",
+      }),
+    ]);
     fixture.access.close();
   });
 
@@ -6361,7 +6416,7 @@ describe("node HandBrake runner", () => {
         "ionice",
         "-c",
         "3",
-        "HandBrakeCLI",
+        "rip-dvd-handbrake",
         "--main-feature",
         "-i",
         "/source.iso",

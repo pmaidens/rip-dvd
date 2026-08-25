@@ -41,6 +41,7 @@ import {
   sameEncodeOutputInode,
   sameEncodeOutputMutationSnapshot,
 } from "./encode-output-filesystem-identity.js";
+import type { EncodeOutputValidator } from "./encode-output-validator.js";
 import type { HandBrakeRunner } from "./handbrake-runner.js";
 import { normalizeErrorMessage } from "./normalize-error-message.js";
 import { createProgressParser } from "./progress-parser.js";
@@ -151,6 +152,7 @@ export interface EncodePublicationOptions {
   mediaLibraryPath: string;
   mutationLock: PublicationMutationLock;
   originalsLibraryPath: string;
+  outputValidator: EncodeOutputValidator;
   runner: HandBrakeRunner;
   signal: AbortSignal;
 }
@@ -1407,6 +1409,8 @@ export async function executeEncodeClaim(
     ) {
       throw new Error("HandBrake did not produce a complete regular output file");
     }
+    await options.outputValidator.validate(partialPath, signal);
+    signal.throwIfAborted();
     await syncPath(partialPath);
     publishedOutputMetadata = partialMetadata;
     pendingPartialCleanup =

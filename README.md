@@ -446,10 +446,12 @@ The web image contains only the Next.js runtime and its traced dependencies. It
 does not contain `lsdvd`, HandBrake, ffmpeg, `sqlite3`, or worker hardware
 permissions. The archive-worker image adds `lsdvd`, `lsblk`, a statically linked
 `libdvdcss` disc reader, a CSS-enabled `lsdvd` command, `nice`, and `ionice`;
-the encode-worker image adds HandBrake, ffmpeg, `nice`, and `ionice`. Both DVD
-commands use the same pinned `libdvdcss` source and SCSI-generic compatibility
-bridge. The archive-worker image carries that source archive, its license, and
-the project bridge source alongside the binaries.
+the encode-worker image adds a CSS-enabled HandBrake command, ffmpeg, `nice`,
+and `ionice`. The DVD-reading commands use the same pinned `libdvdcss` source
+and SCSI-generic compatibility bridge. Both worker images fail startup if their
+required CSS runtime is unavailable. The archive-worker image carries that
+source archive, its license, and the project bridge source alongside the
+binaries.
 The short-lived deployment-tools image owns schema migration and SQLite backup
 commands instead of expanding the web image's attack surface.
 
@@ -796,7 +798,8 @@ deliberately retains the worker containers, uniquely named volumes, and
 temporary bind directories for non-destructive inspection.
 
 The archive worker image includes `lsblk`, `lsdvd`, and HandBrake for bounded
-DVD salvage validation; the encode worker image includes HandBrake and ffmpeg.
+DVD salvage validation; the encode worker image includes CSS-enabled HandBrake,
+ffmpeg, and ffprobe.
 The archive worker discovers Linux block devices
 reported as optical drives, records attached/missing and last-seen state in
 SQLite, and scans DVDs only in enabled drives. The configured
@@ -1180,19 +1183,27 @@ require the same trusted Origin and Host checks as archive approval.
 The encode worker atomically claims up to
 `RIP_DVD_ENCODE_WORKER_CONCURRENCY` queued jobs, resolves each job's immutable
 Original Disc Archive, Disc Selection, and Encoding Profile version, and runs
-`HandBrakeCLI` at the lowest configured process and I/O priority. Main-feature,
-DVD-title, and chapter-bounded selections map to HandBrake's documented source
-options. Each slot claims its next job as soon as its prior encode settles.
+`HandBrakeCLI` through the CSS-enabled launcher at the lowest configured process
+and I/O priority. This is required because the byte-identical archived ISO may
+still contain CSS-encrypted sectors. Main-feature, DVD-title, and
+chapter-bounded selections map to HandBrake's documented source options. Each
+slot claims its next job as soon as its prior encode settles.
 Encode claims have a renewable one-minute lease; every poll recovers a bounded
 batch of expired claims into visible failed jobs for explicit retry. HandBrake
 scanning, preview, and encoding progress—including percent and ETA—is written
 to SQLite and appears through the existing dashboard SSE stream.
 
-Each attempt writes to a hidden claim-scoped partial file. A synced regular
-output first records its exact path and claim token with an explicit durable
+Each attempt writes to a hidden claim-scoped partial file. After HandBrake
+closes it, ffprobe must identify the video codec, profile, pixel format, and
+first packet. The first video packet may begin at most five seconds after the
+first audio packet (or timestamp zero when no audio packet exists), and ffmpeg
+must decode at least one video frame from the first five seconds. A failed
+check moves the partial to a collision-resistant `.failed` path, fails the job,
+and never exposes the file in the library. Only a validated, synced regular
+output records its exact path and claim token with an explicit durable
 publication-pending marker. An initial output is hard-linked into its absent
-final path without overwrite behavior. A re-encode retains the known-good inode
-at its claim-scoped recovery path, hard-links the replacement at a hidden
+final path without overwrite behavior. A re-encode retains the known-good
+inode at its claim-scoped recovery path, hard-links the replacement at a hidden
 claim-scoped publication path, then atomically renames that link over the
 still-visible final.
 Before creating those files, every newly created output-directory entry is

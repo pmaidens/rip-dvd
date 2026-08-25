@@ -253,7 +253,7 @@ export function createNodeHandBrakeRunner({
               "ionice",
               "-c",
               "3",
-              "HandBrakeCLI",
+              "rip-dvd-handbrake",
               ...arguments_,
             ],
             { shell: false, stdio: ["ignore", "pipe", "pipe"] },
