@@ -1472,60 +1472,88 @@ export async function quarantinePublishedArchive(
     metadata.size,
     "Published DVD archive changed before cleanup",
   );
-  await authorizeMutation?.();
-  let revalidated;
+  const cleanupHandle = await open(
+    archivePath,
+    fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+  );
   try {
-    revalidated = lstatSync(archivePath);
-  } catch (error) {
-    throw new Error("Published DVD archive changed before cleanup", {
-      cause: error,
-    });
-  }
-  if (
-    !revalidated.isFile() ||
-    revalidated.isSymbolicLink() ||
-    filesystemIdentity(revalidated) !== expectedFilesystemIdentity ||
-    revalidated.size !== metadata.size ||
-    !sameDvdProofFileIdentity(
-      await readDvdProofFileIdentity(
-        archivePath,
-        expectedFilesystemIdentity,
-        metadata.size,
-        "Published DVD archive changed before cleanup",
-      ),
-      proofFileIdentity,
-    )
-  ) {
-    throw new Error("Published DVD archive changed before cleanup");
-  }
-  let revalidatedFailed;
-  try {
-    revalidatedFailed = lstatSync(failedPath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      throw error;
+    const opened = await cleanupHandle.stat({ bigint: true });
+    if (
+      !opened.isFile() ||
+      opened.nlink === 0n ||
+      `${opened.dev}:${opened.ino}` !== expectedFilesystemIdentity ||
+      opened.size !== BigInt(metadata.size) ||
+      opened.ctimeNs !== proofFileIdentity.ctimeNs ||
+      opened.mtimeNs !== proofFileIdentity.mtimeNs
+    ) {
+      throw new Error("Published DVD archive changed before cleanup");
     }
-    revalidatedFailed = null;
-  }
-  if (
-    (failedMetadata === null) !== (revalidatedFailed === null) ||
-    (failedMetadata !== null &&
+    await authorizeMutation?.();
+    const openedAfterAuthorization = await cleanupHandle.stat({ bigint: true });
+    let revalidated;
+    try {
+      revalidated = lstatSync(archivePath);
+    } catch (error) {
+      throw new Error("Published DVD archive changed before cleanup", {
+        cause: error,
+      });
+    }
+    if (
+      openedAfterAuthorization.nlink === 0n ||
+      openedAfterAuthorization.dev !== opened.dev ||
+      openedAfterAuthorization.ino !== opened.ino ||
+      openedAfterAuthorization.size !== opened.size ||
+      openedAfterAuthorization.ctimeNs !== opened.ctimeNs ||
+      openedAfterAuthorization.mtimeNs !== opened.mtimeNs ||
+      !revalidated.isFile() ||
+      revalidated.isSymbolicLink() ||
+      filesystemIdentity(revalidated) !== expectedFilesystemIdentity ||
+      revalidated.size !== metadata.size ||
+      !sameDvdProofFileIdentity(
+        await readDvdProofFileIdentity(
+          archivePath,
+          expectedFilesystemIdentity,
+          metadata.size,
+          "Published DVD archive changed before cleanup",
+        ),
+        proofFileIdentity,
+      )
+    ) {
+      throw new Error("Published DVD archive changed before cleanup");
+    }
+    let revalidatedFailed;
+    try {
+      revalidatedFailed = lstatSync(failedPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw error;
+      }
+      revalidatedFailed = null;
+    }
+    if (
+      (failedMetadata === null) !== (revalidatedFailed === null) ||
+      (failedMetadata !== null &&
+        revalidatedFailed !== null &&
+        (failedMetadata.dev !== revalidatedFailed.dev ||
+          failedMetadata.ino !== revalidatedFailed.ino))
+    ) {
+      throw new Error(
+        "Published DVD archive failed path changed before cleanup",
+      );
+    }
+    if (
       revalidatedFailed !== null &&
-      (failedMetadata.dev !== revalidatedFailed.dev ||
-        failedMetadata.ino !== revalidatedFailed.ino))
-  ) {
-    throw new Error("Published DVD archive failed path changed before cleanup");
+      revalidatedFailed.dev === revalidated.dev &&
+      revalidatedFailed.ino === revalidated.ino
+    ) {
+      unlinkSync(archivePath);
+    } else {
+      renameSync(archivePath, failedPath);
+    }
+    await syncPath(dirname(archivePath));
+  } finally {
+    await cleanupHandle.close();
   }
-  if (
-    revalidatedFailed !== null &&
-    revalidatedFailed.dev === revalidated.dev &&
-    revalidatedFailed.ino === revalidated.ino
-  ) {
-    unlinkSync(archivePath);
-  } else {
-    renameSync(archivePath, failedPath);
-  }
-  await syncPath(dirname(archivePath));
 }
 
 async function optionalMetadata(path: string) {
@@ -2541,6 +2569,23 @@ export async function preserveDvdArchive({
     const isReadFailure = error instanceof DvdReadFailureError;
     const isOutOfRangeFailure =
       isReadFailure && error.readFailure.category === "out_of_range";
+    if (isReadFailure && error.recoveryResult !== null) {
+      if (
+        copyContinuation?.kind === "damaged" ||
+        copyContinuation?.kind === "corrected"
+      ) {
+        validateResumedDvdRecoveryResult(
+          error.recoveryResult,
+          copyContinuation.recoveryResult,
+          copyOperationSizeBytes,
+        );
+      } else {
+        validateDvdRecoveryResult(
+          error.recoveryResult,
+          copyOperationSizeBytes,
+        );
+      }
+    }
     let retentionError: unknown = null;
     const recordRetentionError = (caughtRetentionError: unknown): void => {
       retentionError = retentionError === null

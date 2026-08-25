@@ -4035,6 +4035,81 @@ describe("DVD archive publication", () => {
     expect(existsSync(retentionMapPath)).toBe(false);
   });
 
+  it("rejects boundary snapshots that introduce new rescue damage", async () => {
+    const originalsLibraryPath = createOriginalsLibrary();
+    const root = realpathSync(originalsLibraryPath);
+    const digest = "8".repeat(64);
+    const archiveRequestId = "invalid-boundary-recovery-snapshot";
+    const reportedSizeBytes = 8 * 2_048;
+    const firstExcludedLba = 6;
+    const fullImage = Buffer.alloc(reportedSizeBytes, 53);
+    fullImage.fill(0, 1 * 2_048, 2 * 2_048);
+    const priorDamage = createDamagedDvdRecoveryResult(
+      reportedSizeBytes,
+      [{ startLba: 1, sectorCount: 1 }],
+    );
+    const inventedDamage = createDamagedDvdRecoveryResult(
+      reportedSizeBytes,
+      [{ startLba: 2, sectorCount: 1 }],
+    );
+    const boundaryFailure = createProvenBoundaryFailure(
+      reportedSizeBytes,
+      firstExcludedLba,
+    );
+    const baseOptions = {
+      archiveRequestId,
+      devicePath: "/dev/sr0",
+      expectedTitleMap: {
+        schemaVersion: 2 as const,
+        contentId: `dvdmeta-sha256:${digest}`,
+        titles: [],
+      },
+      fingerprint: `dvdmeta-sha256:${digest}`,
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+      sizeBytes: reportedSizeBytes,
+      verifySource: async () => undefined,
+      onProgress: () => undefined,
+    };
+    const runner = (copy: DvdCopyRunner["copy"]): DvdCopyRunner => ({
+      copy,
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    });
+
+    await expect(preserveDvdArchive({
+      ...baseOptions,
+      runner: runner(vi.fn(async ({ outputPath }) => {
+        writeFileSync(outputPath, fullImage);
+        return priorDamage;
+      })),
+      salvageValidator: {
+        validate: vi.fn().mockResolvedValue({
+          outcome: "rejected",
+          reason: "referenced_content",
+        }),
+      },
+    })).rejects.toThrow("DVD salvage rejected");
+
+    const prove = vi.fn();
+    await expect(preserveDvdArchive({
+      ...baseOptions,
+      completenessProver: { prove },
+      revalidateReadFailure: async () => undefined,
+      runner: runner(vi.fn(async () => {
+        throw new DvdReadFailureError(boundaryFailure, inventedDamage);
+      })),
+    })).rejects.toThrow("Resumed DVD recovery result is invalid");
+
+    expect(prove).not.toHaveBeenCalled();
+    expect(existsSync(join(root, `dvdmeta-${digest}.iso`))).toBe(false);
+    const rescuePaths = dvdRescueWorkspacePaths(root, archiveRequestId);
+    expect(readFileSync(rescuePaths.imagePath)).toEqual(fullImage);
+    expect(JSON.parse(readFileSync(rescuePaths.mapPath, "utf8")))
+      .toMatchObject({ schemaVersion: 1 });
+  });
+
   it("retries only retained damaged sectors after accepting a boundary", async () => {
     const originalsLibraryPath = createOriginalsLibrary();
     const root = realpathSync(originalsLibraryPath);
