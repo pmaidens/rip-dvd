@@ -41,6 +41,8 @@ struct test_fault {
     enum {
         TEST_FAULT_RAW_COMPLETION,
         TEST_FAULT_RAW_TAIL_COMPLETION,
+        TEST_FAULT_RAW_REQUEST_COMPLETION,
+        TEST_FAULT_CORRUPT_REQUEST,
         TEST_FAULT_GENERIC_FAILURE,
     } kind;
     uint64_t lba;
@@ -723,9 +725,15 @@ static struct test_fault *test_fault_for_read(struct read_backend *backend,
     uint64_t end_lba = lba + (uint64_t)block_count;
     for (size_t index = 0; index < backend->test_fault_count; index++) {
         struct test_fault *fault = &backend->test_faults[index];
-        int applies = fault->kind == TEST_FAULT_RAW_TAIL_COMPLETION
-            ? end_lba > fault->lba
-            : fault->lba >= lba && fault->lba < end_lba;
+        int applies;
+        if (fault->kind == TEST_FAULT_RAW_TAIL_COMPLETION) {
+            applies = end_lba > fault->lba;
+        } else if (fault->kind == TEST_FAULT_RAW_REQUEST_COMPLETION ||
+                   fault->kind == TEST_FAULT_CORRUPT_REQUEST) {
+            applies = fault->lba == lba;
+        } else {
+            applies = fault->lba >= lba && fault->lba < end_lba;
+        }
         if (!applies || fault->remaining_failures == 0) {
             continue;
         }
@@ -776,7 +784,9 @@ static struct transport_read_result test_transport_read(
     int block_count, uint32_t retry_ordinal)
 {
     struct test_fault *fault = test_fault_for_read(backend, lba, block_count);
-    if (fault != NULL) {
+    int corrupt_read = fault != NULL &&
+        fault->kind == TEST_FAULT_CORRUPT_REQUEST;
+    if (fault != NULL && !corrupt_read) {
         struct rip_dvd_scsi_completion completion = {
             .descriptor = -1,
             .requested_lba = lba,
@@ -784,7 +794,8 @@ static struct transport_read_result test_transport_read(
             .retry_ordinal = retry_ordinal,
         };
         if (fault->kind == TEST_FAULT_RAW_COMPLETION ||
-            fault->kind == TEST_FAULT_RAW_TAIL_COMPLETION) {
+            fault->kind == TEST_FAULT_RAW_TAIL_COMPLETION ||
+            fault->kind == TEST_FAULT_RAW_REQUEST_COMPLETION) {
             completion.captured = 1;
             completion.command_completed = 1;
             completion.scsi_status = fault->scsi_status;
@@ -845,6 +856,9 @@ static struct transport_read_result test_transport_read(
         return (struct transport_read_result){
             .status = TRANSPORT_READ_FATAL,
         };
+    }
+    if (corrupt_read) {
+        buffer[0] ^= 0xff;
     }
     return (struct transport_read_result){
         .status = TRANSPORT_READ_SUCCESS,
@@ -1967,11 +1981,15 @@ static int parse_exact_test_fault(char *entry, uint64_t total_sector_count,
         }
         parts[part_count++] = part;
     }
-    size_t expected_parts =
-        part_count > 0 && strcmp(parts[0], "generic") == 0 ? 3 : 8;
+    int simple_fault = part_count > 0 &&
+        (strcmp(parts[0], "generic") == 0 ||
+         strcmp(parts[0], "corrupt-request") == 0);
+    size_t expected_parts = simple_fault ? 3 : 8;
     if (part_count != expected_parts ||
         (strcmp(parts[0], "raw") != 0 &&
          strcmp(parts[0], "raw-tail") != 0 &&
+         strcmp(parts[0], "raw-request") != 0 &&
+         strcmp(parts[0], "corrupt-request") != 0 &&
          strcmp(parts[0], "generic") != 0)) {
         return 1;
     }
@@ -1986,6 +2004,10 @@ static int parse_exact_test_fault(char *entry, uint64_t total_sector_count,
         fault->kind = TEST_FAULT_GENERIC_FAILURE;
         return 0;
     }
+    if (strcmp(parts[0], "corrupt-request") == 0) {
+        fault->kind = TEST_FAULT_CORRUPT_REQUEST;
+        return 0;
+    }
     uint64_t scsi_status = 0;
     uint64_t host_status = 0;
     uint64_t driver_status = 0;
@@ -1997,9 +2019,13 @@ static int parse_exact_test_fault(char *entry, uint64_t total_sector_count,
         parse_test_sense(parts[7], fault) != 0) {
         return 1;
     }
-    fault->kind = strcmp(parts[0], "raw-tail") == 0
-        ? TEST_FAULT_RAW_TAIL_COMPLETION
-        : TEST_FAULT_RAW_COMPLETION;
+    if (strcmp(parts[0], "raw-tail") == 0) {
+        fault->kind = TEST_FAULT_RAW_TAIL_COMPLETION;
+    } else if (strcmp(parts[0], "raw-request") == 0) {
+        fault->kind = TEST_FAULT_RAW_REQUEST_COMPLETION;
+    } else {
+        fault->kind = TEST_FAULT_RAW_COMPLETION;
+    }
     fault->scsi_status = (uint8_t)scsi_status;
     fault->host_status = (uint16_t)host_status;
     fault->driver_status = (uint16_t)driver_status;

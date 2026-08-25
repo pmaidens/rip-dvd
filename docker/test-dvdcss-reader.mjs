@@ -105,6 +105,14 @@ function rawTailCompletionFault(
   return `raw-tail@${lba}@${remainingFailures}@${scsiStatus}@${hostStatus}@${driverStatus}@${sense.length / 2}@${sense}`;
 }
 
+function rawRequestCompletionFault(lba, remainingFailures, sense) {
+  return `raw-request@${lba}@${remainingFailures}@2@0@8@${sense.length / 2}@${sense}`;
+}
+
+function corruptRequestFault(lba, remainingFailures) {
+  return `corrupt-request@${lba}@${remainingFailures}`;
+}
+
 const fixedMediumAtFive = fixedMediumSense(5);
 const descriptorMediumAtFive = descriptorMediumSense(5);
 const fixedRetriesExhaustedAtFive = fixedMediumSense(5, 1);
@@ -933,6 +941,46 @@ for (const [name, sense] of [
   ) {
     throw new Error(
       `libdvdcss ${name} boundary check failed: ${outOfRange.stderr}`,
+    );
+  }
+}
+
+for (const [name, precedingFault] of [
+  [
+    "unreadable-preceding-sector",
+    rawRequestCompletionFault(34, "always", fixedMediumSense(34)),
+  ],
+  ["mismatched-preceding-sector", corruptRequestFault(34, "always")],
+]) {
+  const invalidPrecedingSector = runTestCopy(
+    name,
+    [
+      rawCompletionFault(35, 1, fixedOutOfRangeSense(35)),
+      precedingFault,
+    ].join(","),
+  );
+  const result = readFailureResult(invalidPrecedingSector.stderr);
+  if (
+    invalidPrecedingSector.status !== 3 ||
+    result.category !== "out_of_range" ||
+    result.boundaryProofVersion !== undefined ||
+    result.firstFailingLba !== 35 ||
+    result.retainedImageByteCount !== 35 * 2_048 ||
+    statSync(invalidPrecedingSector.outputPath).size !== 35 * 2_048 ||
+    !readFileSync(invalidPrecedingSector.outputPath).equals(
+      content.subarray(0, 35 * 2_048),
+    ) ||
+    invalidPrecedingSector.stderr.includes(recoveryResultPrefix) ||
+    JSON.stringify(testReads(invalidPrecedingSector.stderr)) !==
+      JSON.stringify([
+        { lba: 0, blocks: 31 },
+        { lba: 31, blocks: 9 },
+        { lba: 31, blocks: 4 },
+        { lba: 34, blocks: 1 },
+      ])
+  ) {
+    throw new Error(
+      `libdvdcss ${name} boundary check failed: ${invalidPrecedingSector.stderr}`,
     );
   }
 }
