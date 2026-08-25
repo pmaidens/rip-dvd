@@ -2198,6 +2198,20 @@ describe("retained DVD image layout completeness", () => {
     })).rejects.toThrow("DVD ISO volume descriptor signature is malformed");
   });
 
+  it("rejects a later ISO terminator behind a missing primary descriptor", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: true,
+    });
+    image.fill(0, 16 * DVD_SECTOR_SIZE_BYTES, 17 * DVD_SECTOR_SIZE_BYTES);
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD ISO volume descriptor sequence is malformed");
+  });
+
   it("rejects high-bit corruption in the UDF recognition sequence", async () => {
     const image = syntheticCompleteDvdImage({
       includeIso: false,
@@ -2226,6 +2240,23 @@ describe("retained DVD image layout completeness", () => {
           image[lba * DVD_SECTOR_SIZE_BYTES + offset]! | 0x80;
       }
     }
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD UDF recognition sequence is incomplete");
+  });
+
+  it("uses alternate anchors to detect a malformed UDF bridge", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: true,
+    });
+    for (const lba of [18, 19, 20]) {
+      image.write("XXXXX", lba * DVD_SECTOR_SIZE_BYTES + 1, "ascii");
+    }
+    image.fill(0, 256 * DVD_SECTOR_SIZE_BYTES, 257 * DVD_SECTOR_SIZE_BYTES);
     const fixture = writeFixture(image);
 
     await expect(proveDvdImageLayoutCompleteness({
@@ -4994,6 +5025,26 @@ describe("DVD layout damage classification", () => {
       });
     },
   );
+
+  it("preserves salvage behavior for unrecognized UDF aliases", async () => {
+    const image = syntheticLegacyUdfSalvageImage();
+    for (const lba of [18, 19, 20]) {
+      for (let offset = 1; offset < 6; offset += 1) {
+        image[lba * DVD_SECTOR_SIZE_BYTES + offset] =
+          image[lba * DVD_SECTOR_SIZE_BYTES + offset]! | 0x80;
+      }
+    }
+    const fixture = writeFixture(image, 500);
+
+    await expect(classifyDvdImageDamage({
+      expectedByteCount: fixture.sizeBytes,
+      imagePath: fixture.imagePath,
+      unreadableSectorRanges: [{ startLba: 500, sectorCount: 1 }],
+    })).resolves.toEqual({
+      affectedTitleBadSectorCounts: [],
+      outcome: "accepted",
+    });
+  });
 
   it(
     "preserves salvage classification for a UDF partition-header extent",
