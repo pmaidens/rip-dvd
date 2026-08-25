@@ -205,7 +205,17 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 RUN mkdir --parents /media/movies /media/originals \
   && chown node:node /media/movies /media/originals
+COPY --from=dvdcss-reader-builder /usr/local/lib/libdvdcss.so.2.4.0 /usr/local/lib/libdvdcss.so.2
+COPY --from=dvdcss-reader-builder /usr/local/lib/libdvdcss-sg-io.so.0 /usr/local/lib/libdvdcss-sg-io.so.0
+COPY docker/handbrake-with-css.sh /usr/local/bin/rip-dvd-handbrake
+COPY docker/encode-worker-entrypoint.sh ./scripts/encode-worker-entrypoint.sh
 COPY --from=encode-worker-builder --chown=node:node /encode-worker ./apps/encode-worker
+RUN chmod 0555 /usr/local/bin/rip-dvd-handbrake \
+  && ldconfig \
+  && ldconfig -p | grep --quiet 'libdvdcss.so.2' \
+  && LD_LIBRARY_PATH=/usr/local/lib ldd /usr/local/lib/libdvdcss.so.2 \
+    | grep --quiet '/usr/local/lib/libdvdcss-sg-io.so.0'
+ENV DVDCSS_CACHE="off"
 USER node
-ENTRYPOINT ["sh", "/app/scripts/worker-priority-entrypoint.sh"]
+ENTRYPOINT ["sh", "/app/scripts/encode-worker-entrypoint.sh"]
 CMD ["node", "apps/encode-worker/dist/index.js"]

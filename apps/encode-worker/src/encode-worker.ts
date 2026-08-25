@@ -6,6 +6,10 @@ import {
   nodeHandBrakeRunner,
   type HandBrakeRunner,
 } from "./handbrake-runner.js";
+import {
+  nodeEncodeOutputValidator,
+  type EncodeOutputValidator,
+} from "./encode-output-validator.js";
 import { normalizeErrorMessage } from "./normalize-error-message.js";
 import {
   executeEncodeClaim,
@@ -22,6 +26,14 @@ export {
   type HandBrakeRunner,
   type HandBrakeRunRequest,
 } from "./handbrake-runner.js";
+export {
+  createNodeEncodeOutputValidator,
+  nodeEncodeOutputValidator,
+  type EncodeOutputValidator,
+  type MediaToolRunner,
+  type MediaToolRunRequest,
+  type MediaToolRunResult,
+} from "./encode-output-validator.js";
 export {
   createEncodePublicationMutationRecoveryLock,
   createNodeAtomicPathExchange,
@@ -40,6 +52,7 @@ export interface PollEncodeWorkerOptions {
   mediaLibraryPath: string;
   mutationLock?: PublicationMutationLock;
   originalsLibraryPath: string;
+  outputValidator?: EncodeOutputValidator;
   runner?: HandBrakeRunner;
   signal: AbortSignal;
   workerId?: string;
@@ -65,6 +78,7 @@ export async function pollEncodeWorker(
     atomicPathExchange:
       options.atomicPathExchange ?? nodeAtomicPathExchange,
     mutationLock: options.mutationLock ?? nodePublicationMutationLock,
+    outputValidator: options.outputValidator ?? nodeEncodeOutputValidator,
     runner: options.runner ?? nodeHandBrakeRunner,
   };
   await reconcileEncodePublications(publicationOptions);

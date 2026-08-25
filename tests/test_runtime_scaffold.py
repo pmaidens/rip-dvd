@@ -160,6 +160,32 @@ class RuntimeScaffoldTests(unittest.TestCase):
         self.assertIn("LD_LIBRARY_PATH=/usr/local/lib", command)
         self.assertIn("exec /usr/bin/lsdvd", command)
 
+    def test_encode_worker_packages_and_checks_css_enabled_handbrake(self) -> None:
+        dockerfile = (ROOT / "docker" / "runtime.Dockerfile").read_text()
+        entrypoint = (ROOT / "docker" / "encode-worker-entrypoint.sh").read_text()
+        encode_runtime = dockerfile.split(
+            "FROM worker-runtime-base AS encode-worker", maxsplit=1
+        )[1]
+
+        self.assertIn(
+            "/usr/local/lib/libdvdcss.so.2.4.0 /usr/local/lib/libdvdcss.so.2",
+            encode_runtime,
+        )
+        self.assertIn("/usr/local/lib/libdvdcss-sg-io.so.0", encode_runtime)
+        self.assertIn(
+            "COPY docker/handbrake-with-css.sh /usr/local/bin/rip-dvd-handbrake",
+            encode_runtime,
+        )
+        self.assertIn("ldconfig -p | grep --quiet 'libdvdcss.so.2'", encode_runtime)
+        self.assertIn('ENV DVDCSS_CACHE="off"', encode_runtime)
+        self.assertIn(
+            'ENTRYPOINT ["sh", "/app/scripts/encode-worker-entrypoint.sh"]',
+            encode_runtime,
+        )
+        self.assertIn("/usr/local/bin/rip-dvd-handbrake", entrypoint)
+        self.assertIn("/usr/local/lib/libdvdcss.so.2", entrypoint)
+        self.assertIn("worker-priority-entrypoint.sh", entrypoint)
+
     def test_worker_smoke_uses_configured_command_and_bounded_shutdown(self) -> None:
         smoke = (ROOT / "scripts" / "smoke-compose-workers.sh").read_text()
 
