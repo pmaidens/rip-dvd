@@ -795,7 +795,10 @@ function createQueuedJob(
           durationSeconds: 3_600,
           chapters: 12,
           audioStreams: [],
-          subtitles: Array.from({ length: subtitleCount }, (_, id) => ({ id })),
+          subtitles: Array.from({ length: subtitleCount }, (_, id) => ({
+            id,
+            languageCode: id % 2 === 0 ? "en" : "fr",
+          })),
         },
       ],
     },
@@ -1248,7 +1251,12 @@ describe("encode worker polling", () => {
     expect(outputValidator.validate).toHaveBeenCalledWith(
       request.outputPath,
       expect.anything(),
-      { minimumVobSubStreams: 2 },
+      {
+        expectedVobSubStreams: [
+          { languageCode: "en" },
+          { languageCode: "fr" },
+        ],
+      },
     );
     expect(progressSnapshots).toEqual([
       expect.objectContaining({

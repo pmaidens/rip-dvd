@@ -27,6 +27,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   decodeArchivedDvdTitles,
+  decodeDvdTitleMap,
   ENCODE_JOB_LEASE_DURATION_MS,
   type DataAccess,
   type DiscSelection,
@@ -42,7 +43,10 @@ import {
   sameEncodeOutputInode,
   sameEncodeOutputMutationSnapshot,
 } from "./encode-output-filesystem-identity.js";
-import type { EncodeOutputValidator } from "./encode-output-validator.js";
+import type {
+  EncodeOutputValidator,
+  EncodeOutputVobSubExpectation,
+} from "./encode-output-validator.js";
 import type { HandBrakeRunner } from "./handbrake-runner.js";
 import { normalizeErrorMessage } from "./normalize-error-message.js";
 import { createProgressParser } from "./progress-parser.js";
@@ -1352,7 +1356,9 @@ function resolveClaimInput(access: DataAccess, claim: RunningEncodeJob) {
       throw new Error("Encode Job has invalid DVD video profile settings");
     }
     const sourceIdentity = selection.sourceIdentity;
-    let minimumVobSubStreams = 0;
+    let expectedVobSubStreams:
+      | readonly EncodeOutputVobSubExpectation[]
+      | undefined;
     if (sourceIdentity.kind !== "main_feature") {
       const detectedDisc = snapshot.catalog.listDetectedDiscs(undefined, {
         ids: [archive.detectedDiscId],
@@ -1363,11 +1369,19 @@ function resolveClaimInput(access: DataAccess, claim: RunningEncodeJob) {
       if (selectedTitle === undefined) {
         throw new Error("Encode Job DVD title metadata is unavailable");
       }
-      minimumVobSubStreams = selectedTitle.subtitles.length;
+      const selectedCurrentTitle = decodeDvdTitleMap(
+        detectedDisc?.scanData,
+      )?.titles.find((title) => title.number === sourceIdentity.titleNumber);
+      expectedVobSubStreams = selectedTitle.subtitles.map((subtitle) => {
+        if (selectedCurrentTitle === undefined) {
+          return {};
+        }
+        return { languageCode: subtitle.languageCode ?? "und" };
+      });
     }
     return {
       archive,
-      minimumVobSubStreams,
+      expectedVobSubStreams,
       preset: preset.trim(),
       selection,
     };
@@ -1513,7 +1527,9 @@ export async function executeEncodeClaim(
       throw new Error("HandBrake did not produce a complete regular output file");
     }
     await options.outputValidator.validate(partialPath, signal, {
-      minimumVobSubStreams: input.minimumVobSubStreams,
+      ...(input.expectedVobSubStreams === undefined
+        ? {}
+        : { expectedVobSubStreams: input.expectedVobSubStreams }),
     });
     signal.throwIfAborted();
     await syncPath(partialPath);

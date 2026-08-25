@@ -1,6 +1,6 @@
 # DVD subtitles for Jellyfin
 
-- **Status:** research complete
+- **Status:** core implementation complete; deferred work linked below
 - **Date:** 2026-08-24
 - **Scope:** DVD ISO Original Disc Archives encoded by the current HandBrakeCLI worker into MKV
 - **Decision:** pin HandBrake 1.8.0 or newer, keep every DVD subtitle as a soft VobSub track in the MKV, and keep HandBrake's foreign-audio search as a separate soft forced/default track when it finds one
@@ -14,9 +14,9 @@ Add these arguments to every DVD Encode Job after the selected preset:
 --subtitle-burned=none
 ```
 
-Upgrade and pin the encode-worker's HandBrakeCLI to at least 1.8.0 before treating this as reliable. HandBrake 1.8.0 fixed VobSub passthrough when a track contains empty or fully transparent samples, fixed subtitle setting overrides, and fixed `scan` when it is not first in an explicit subtitle list ([official 1.8.0 notes](https://github.com/HandBrake/HandBrake/releases/tag/1.8.0)). The Bookworm image currently installs 1.6.1, so adding the flags without upgrading would retain known bugs in the exact path this feature needs.
+Upgrade and pin the encode-worker's HandBrakeCLI to at least 1.8.0 before treating this as reliable. HandBrake 1.8.0 fixed VobSub passthrough when a track contains empty or fully transparent samples, fixed subtitle setting overrides, and fixed `scan` when it is not first in an explicit subtitle list ([official 1.8.0 notes](https://github.com/HandBrake/HandBrake/releases/tag/1.8.0)). At research time, the Bookworm image installed 1.6.1, so adding the flags without upgrading would have retained known bugs in the exact path this feature needs. The implementation pins and checks 1.9.2 in an encode-worker-specific runtime.
 
-A live `--preset-export` check against the current 1.6.1 encode worker confirms the intended setting transformation. `Fast 480p30` starts with subtitle selection `none`, foreign-audio search enabled, burn behavior `foreign`, and DVDSub burn enabled. Adding `--all-subtitles --subtitle-burned=none` changes selection to `all`, burn behavior to `none`, and DVDSub burn to false while retaining foreign-audio search. This proves the command override, but it does not cover the VobSub payload defect fixed in 1.8.0.
+A live `--preset-export` check against the then-current 1.6.1 encode worker confirmed the intended setting transformation. `Fast 480p30` starts with subtitle selection `none`, foreign-audio search enabled, burn behavior `foreign`, and DVDSub burn enabled. Adding `--all-subtitles --subtitle-burned=none` changes selection to `all`, burn behavior to `none`, and DVDSub burn to false while retaining foreign-audio search. This proves the command override, but it does not cover the VobSub payload defect fixed in 1.8.0.
 
 Keep `--format av_mkv`. Do not restrict `--subtitle-lang-list` for the preservation-derived output. That would discard tracks before Jellyfin ever sees them.
 
@@ -26,9 +26,9 @@ Do not use `--subtitle-forced` on all the tracks. That option filters a selected
 
 Do not use `--subtitle-default=none` as a substitute for `--subtitle-burned=none`. The former controls which soft track starts automatically; it does not stop burning. It is reasonable as a later policy choice if the product should never auto-select full subtitles, but the forced-dialogue case must remain covered by an actual forced track.
 
-## Why the current command loses selectable subtitles
+## Why the pre-implementation command lost selectable subtitles
 
-The Encode Job currently builds this shape of command and supplies no subtitle overrides:
+Before this implementation, the Encode Job built this shape of command and supplied no subtitle overrides:
 
 ```text
 <title selection> -i <archive.iso> -o <partial.mkv>
@@ -37,11 +37,11 @@ The Encode Job currently builds this shape of command and supplies no subtitle o
 
 See [`publication-recovery.ts`](../../apps/encode-worker/src/publication-recovery.ts) and its exact command assertion in [`encode-worker.test.ts`](../../apps/encode-worker/src/encode-worker.test.ts).
 
-The default repo profile is `Fast 480p30`. HandBrake 1.6.1 defines that preset with `SubtitleTrackSelectionBehavior: "none"`, `SubtitleAddForeignAudioSearch: true`, and DVD bitmap burning enabled. The repo overrides the preset's MP4 container with MKV, but it does not override those subtitle rules. The result is no selectable full subtitle tracks and, when the foreign-audio scan finds a match, a subtitle burned into the video. See the [official 1.6.1 preset definition](https://github.com/HandBrake/HandBrake/blob/1.6.1/preset/preset_builtin.json#L1283-L1295).
+The default repo profile is `Fast 480p30`. HandBrake 1.6.1 defines that preset with `SubtitleTrackSelectionBehavior: "none"`, `SubtitleAddForeignAudioSearch: true`, and DVD bitmap burning enabled. The former pipeline overrode the preset's MP4 container with MKV, but it did not override those subtitle rules. The result was no selectable full subtitle tracks and, when the foreign-audio scan found a match, a subtitle burned into the video. See the [official 1.6.1 preset definition](https://github.com/HandBrake/HandBrake/blob/1.6.1/preset/preset_builtin.json#L1283-L1295).
 
 With burning disabled, HandBrake 1.6.1 changes the foreign-audio search result into a soft track and marks it default and forced. Its preset builder says this directly: if the search track is not burned, it sets `Default` and always sets `Forced` ([source](https://github.com/HandBrake/HandBrake/blob/1.6.1/libhb/preset.c#L1148-L1158)). The muxer writes the selected default subtitle's default disposition and also writes a forced disposition when the same internal `default_track` flag is set ([source](https://github.com/HandBrake/HandBrake/blob/1.6.1/libhb/muxavformat.c#L1102-L1109)). The normal source tracks remain selectable alongside it. This coupling is another behavior the output probe must pin before and after a HandBrake upgrade.
 
-This behavior needs a fixture test even after the upgrade. The image installs Debian's unpinned `handbrake-cli` package today. An image rebuild against a changed package repository could change command behavior unless the runtime version is pinned and checked during the build.
+This behavior needs a fixture test even after the upgrade. The implementation therefore checks the Debian `handbrake-cli` package version both while building the image and when the encode worker starts.
 
 ## What the output format should be
 
@@ -154,9 +154,13 @@ Build or retain small, legally usable DVD ISO fixtures for these cases:
 
 The automated assertions should include the full HandBrake argument vector. That prevents a later preset or command refactor from quietly restoring bitmap burn-in or dropping `--all-subtitles`.
 
-## Open implementation decisions
+## Implementation decision and deferred work
 
-- Whether every Encoding Profile gets subtitle preservation or whether DVD profiles gain an explicit subtitle policy. Preservation by default is the safer behavior.
-- Whether to record HandBrake's resolved main-feature title number so validation can compare against the correct archived title map.
-- Whether to add OCR text as an optional second derivative. It should never replace the VobSub track.
-- Which Jellyfin clients and minimum versions form the supported playback matrix for this deployment.
+Subtitle preservation applies to every accepted DVD Encoding Profile. This keeps the ISO-derived MKV faithful by default instead of letting a profile silently discard source tracks.
+
+The remaining work is tracked separately:
+
+- [Record HandBrake's resolved main-feature title number](https://github.com/pmaidens/rip-dvd/issues/246) so validation can compare against the correct archived title map.
+- [Add optional OCR-derived SRT tracks](https://github.com/pmaidens/rip-dvd/issues/247) without replacing VobSub.
+- [Validate the supported Jellyfin client matrix](https://github.com/pmaidens/rip-dvd/issues/248).
+- [Backfill subtitle-aware encodes](https://github.com/pmaidens/rip-dvd/issues/249) from the Original Disc Archives.
