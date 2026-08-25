@@ -258,7 +258,11 @@ interface DvdCopyWritablePipe {
 
 interface DvdProbeAuthorizationWritablePipe {
   destroy(): void;
-  write(chunk: string): boolean;
+  on(event: "error", listener: (error: Error) => void): void;
+  write(
+    chunk: string,
+    callback: (error?: Error | null) => void,
+  ): boolean;
 }
 
 type SpawnDvdCopyProcess = (
@@ -580,15 +584,27 @@ export function createNodeDvdCopyRunner({
           );
           return;
         }
+        const completeProbeAuthorization = (error?: Error | null) => {
+          if (error != null) {
+            rejectProbeAuthorization(error);
+            return;
+          }
+          if (
+            !probeAuthorizationPending ||
+            cancellationRequested ||
+            processClosed
+          ) {
+            return;
+          }
+          probeAuthorizationPending = false;
+          clearTimeout(probeAuthorizationTimeout);
+          armStallTimeout();
+        };
         try {
-          probeAuthorization.write("1");
+          probeAuthorization.write("1", completeProbeAuthorization);
         } catch (error) {
           rejectProbeAuthorization(error);
-          return;
         }
-        probeAuthorizationPending = false;
-        clearTimeout(probeAuthorizationTimeout);
-        armStallTimeout();
       };
       const requestProbeAuthorization = () => {
         if (probeAuthorizationPending) {
@@ -623,6 +639,17 @@ export function createNodeDvdCopyRunner({
           rejectProbeAuthorization(error);
         }
       };
+      child.stdio[7]?.on("error", (error) => {
+        if (operationSettled || cancellationRequested || processClosed) {
+          return;
+        }
+        if (probeAuthorizationPending) {
+          rejectProbeAuthorization(error);
+          return;
+        }
+        rejectOperation(error);
+        cancel();
+      });
       child.stdio[6]?.on("data", (chunk) => {
         if (operationSettled || cancellationRequested) {
           return;

@@ -78,10 +78,18 @@ function createMockDvdCopyChild() {
   const probeAuthorizationReady = Object.assign(new EventEmitter(), {
     destroy: vi.fn(),
   });
-  const probeAuthorizationGrant = {
+  const probeAuthorizationGrant = Object.assign(new EventEmitter(), {
     destroy: vi.fn(),
-    write: vi.fn(() => true),
-  };
+    write: vi.fn(
+      (
+        _chunk: string,
+        callback: (error?: Error | null) => void,
+      ) => {
+        callback();
+        return true;
+      },
+    ),
+  });
   return Object.assign(new EventEmitter(), {
     stderr,
     stdio: [
@@ -1108,7 +1116,10 @@ describe("DVD archive publication", () => {
     await expect(completion).rejects.toMatchObject({ readFailure });
     expect(authorizeProbe).toHaveBeenCalledTimes(8);
     expect(child.stdio[7]!.write).toHaveBeenCalledTimes(8);
-    expect(child.stdio[7]!.write).toHaveBeenCalledWith("1");
+    expect(child.stdio[7]!.write).toHaveBeenCalledWith(
+      "1",
+      expect.any(Function),
+    );
   });
 
   it("stops boundary probing when source reauthorization fails", async () => {
@@ -1143,6 +1154,45 @@ describe("DVD archive publication", () => {
 
     await expect(completion).rejects.toBe(sourceChanged);
     expect(child.stdio[7]!.write).not.toHaveBeenCalled();
+    expect(child.kill).toHaveBeenCalledWith("SIGKILL");
+  });
+
+  it("fails safely when the boundary probe grant pipe reports an error", async () => {
+    const child = createMockDvdCopyChild();
+    const runner = createNodeDvdCopyRunner({
+      requireInactive: () => undefined,
+      spawnProcess: vi.fn(() => child),
+    });
+    const pipeFailure = new Error("DVD boundary probe grant failed");
+    child.stdio[7]!.write.mockImplementation((_chunk, callback) => {
+      queueMicrotask(() => {
+        child.stdio[7]!.emit("error", pipeFailure);
+        callback(pipeFailure);
+      });
+      return false;
+    });
+    const completion = runner.copy({
+      authorizeProbe: () => undefined,
+      devicePath: "/dev/zero",
+      outputPath: join(
+        createOriginalsLibrary(),
+        ".failed-boundary-grant.iso.rip-dvd-partial",
+      ),
+      sizeBytes: 40 * 2_048,
+      signal: new AbortController().signal,
+      onBytesCopied: () => undefined,
+    });
+
+    child.stdio[4].emit(
+      "data",
+      Buffer.from("rip-dvd-copy-authorization-ready\n"),
+    );
+    child.stdio[6]!.emit(
+      "data",
+      Buffer.from("rip-dvd-boundary-probe-authorization-ready\n"),
+    );
+
+    await expect(completion).rejects.toBe(pipeFailure);
     expect(child.kill).toHaveBeenCalledWith("SIGKILL");
   });
 
