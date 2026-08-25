@@ -2,6 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -25,6 +26,7 @@ import {
   DvdArchiveReadFailureError,
   preserveDvdArchive,
   createNodeDvdCopyRunner,
+  quarantinePublishedArchive,
   withCancelledDvdArchiveInactive,
   type DvdCopyRunner,
 } from "./dvd-archiver.js";
@@ -420,6 +422,54 @@ describe("DVD archive publication", () => {
     expect(
       readdirSync(root).some((name) => name.includes(".invalid-")),
     ).toBe(false);
+  });
+
+  it("does not quarantine a destination substituted at cleanup authorization", async () => {
+    const originalsLibraryPath = createOriginalsLibrary();
+    const root = realpathSync(originalsLibraryPath);
+    const archivePath = join(root, "authorized-cleanup-race.iso");
+    const publishedArchive = Buffer.alloc(2_048, 23);
+    const concurrentArchive = Buffer.alloc(2_048, 29);
+    writeFileSync(archivePath, publishedArchive);
+    const publishedMetadata = lstatSync(archivePath);
+
+    await expect(
+      quarantinePublishedArchive(
+        archivePath,
+        `${publishedMetadata.dev}:${publishedMetadata.ino}`,
+        async () => {
+          unlinkSync(archivePath);
+          writeFileSync(archivePath, concurrentArchive);
+        },
+      ),
+    ).rejects.toThrow("Published DVD archive changed before cleanup");
+
+    expect(readFileSync(archivePath)).toEqual(concurrentArchive);
+    expect(existsSync(`${archivePath}.failed`)).toBe(false);
+  });
+
+  it("does not overwrite a failed path created at cleanup authorization", async () => {
+    const originalsLibraryPath = createOriginalsLibrary();
+    const root = realpathSync(originalsLibraryPath);
+    const archivePath = join(root, "authorized-failed-path-race.iso");
+    const failedPath = `${archivePath}.failed`;
+    const publishedArchive = Buffer.alloc(2_048, 31);
+    const concurrentFailedArchive = Buffer.alloc(2_048, 37);
+    writeFileSync(archivePath, publishedArchive);
+    const publishedMetadata = lstatSync(archivePath);
+
+    await expect(
+      quarantinePublishedArchive(
+        archivePath,
+        `${publishedMetadata.dev}:${publishedMetadata.ino}`,
+        () => writeFileSync(failedPath, concurrentFailedArchive),
+      ),
+    ).rejects.toThrow(
+      "Published DVD archive failed path changed before cleanup",
+    );
+
+    expect(readFileSync(archivePath)).toEqual(publishedArchive);
+    expect(readFileSync(failedPath)).toEqual(concurrentFailedArchive);
   });
 
   it.runIf(supportsLinuxWriterOwnership)(

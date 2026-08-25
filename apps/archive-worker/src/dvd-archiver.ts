@@ -7,7 +7,9 @@ import {
   lstatSync,
   openSync,
   opendirSync,
+  renameSync,
   statSync,
+  unlinkSync,
 } from "node:fs";
 import { spawn } from "node:child_process";
 import {
@@ -1397,19 +1399,54 @@ export async function quarantinePublishedArchive(
   ) {
     throw new Error("Published DVD archive failed path is not a regular file");
   }
-  const revalidated = await lstat(archivePath);
-  if (filesystemIdentity(revalidated) !== expectedFilesystemIdentity) {
-    throw new Error("Published DVD archive changed before cleanup");
-  }
-  await authorizeMutation?.();
   if (
     failedMetadata !== null &&
-    failedMetadata.dev === revalidated.dev &&
-    failedMetadata.ino === revalidated.ino
+    (failedMetadata.dev !== metadata.dev || failedMetadata.ino !== metadata.ino)
   ) {
-    await unlink(archivePath);
+    throw new Error("Published DVD archive failed path conflicts with cleanup");
+  }
+  await authorizeMutation?.();
+  let revalidated;
+  try {
+    revalidated = lstatSync(archivePath);
+  } catch (error) {
+    throw new Error("Published DVD archive changed before cleanup", {
+      cause: error,
+    });
+  }
+  if (
+    !revalidated.isFile() ||
+    revalidated.isSymbolicLink() ||
+    filesystemIdentity(revalidated) !== expectedFilesystemIdentity
+  ) {
+    throw new Error("Published DVD archive changed before cleanup");
+  }
+  let revalidatedFailed;
+  try {
+    revalidatedFailed = lstatSync(failedPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw error;
+    }
+    revalidatedFailed = null;
+  }
+  if (
+    (failedMetadata === null) !== (revalidatedFailed === null) ||
+    (failedMetadata !== null &&
+      revalidatedFailed !== null &&
+      (failedMetadata.dev !== revalidatedFailed.dev ||
+        failedMetadata.ino !== revalidatedFailed.ino))
+  ) {
+    throw new Error("Published DVD archive failed path changed before cleanup");
+  }
+  if (
+    revalidatedFailed !== null &&
+    revalidatedFailed.dev === revalidated.dev &&
+    revalidatedFailed.ino === revalidated.ino
+  ) {
+    unlinkSync(archivePath);
   } else {
-    await rename(archivePath, failedPath);
+    renameSync(archivePath, failedPath);
   }
   await syncPath(dirname(archivePath));
 }
