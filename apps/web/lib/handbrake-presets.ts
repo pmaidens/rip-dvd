@@ -3,8 +3,8 @@ export interface HandBrakePresetGroup {
   presets: readonly string[];
 }
 
-// Built-in presets reported by HandBrake 1.6.1, the version installed by the
-// Bookworm-based encode-worker image.
+// User-facing built-in presets reported by HandBrake 1.9.2, the version pinned
+// in the encode-worker image. The CLI-only default is intentionally excluded.
 export const HANDBRAKE_PRESET_GROUPS = [
   {
     label: "General",
@@ -42,13 +42,10 @@ export const HANDBRAKE_PRESET_GROUPS = [
       "Creator 1440p60 2.5K",
       "Creator 1080p60",
       "Creator 720p60",
-      "Email 25 MB 3 Minutes 720p30",
-      "Email 25 MB 5 Minutes 480p30",
-      "Email 25 MB 10 Minutes 288p30",
-      "Social 100 MB 5 Minutes 1080p30",
-      "Social 50 MB 5 Minutes 720p30",
-      "Social 50 MB 10 Minutes 480p30",
-      "Social 8 MB 3 Minutes 360p30",
+      "Social 25 MB 30 Seconds 1080p60",
+      "Social 25 MB 1 Minute 720p60",
+      "Social 25 MB 2 Minutes 540p60",
+      "Social 25 MB 5 Minutes 360p60",
     ],
   },
   {
@@ -114,15 +111,18 @@ export const HANDBRAKE_PRESET_GROUPS = [
       "H.265 VCN 1080p",
       "H.265 MF 2160p 4K",
       "H.265 MF 1080p",
+      "H.265 Apple VideoToolbox 2160p 4K",
+      "H.265 Apple VideoToolbox 1080p",
     ],
   },
   {
-    label: "Production",
+    label: "Professional",
     presets: [
       "Production Max",
       "Production Standard",
       "Production Proxy 1080p",
       "Production Proxy 540p",
+      "Preservation FFV1",
     ],
   },
 ] as const satisfies readonly HandBrakePresetGroup[];

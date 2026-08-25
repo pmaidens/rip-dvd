@@ -15,12 +15,21 @@ function createMediaToolRunner({
   decodedFrames = 120,
   pixFmt = "yuv420p",
   profile = "High",
+  subtitleStreams = [
+    {
+      codec_name: "dvd_subtitle",
+      disposition: { default: 0, forced: 0 },
+      index: 2,
+      tags: { language: "eng" },
+    },
+  ],
   videoFirstPts = "0.021000",
 }: {
   audioFirstPts?: string | null;
   decodedFrames?: number;
   pixFmt?: string;
   profile?: string;
+  subtitleStreams?: unknown;
   videoFirstPts?: string | null;
 } = {}) {
   return vi.fn(
@@ -42,6 +51,9 @@ function createMediaToolRunner({
           }),
         );
       }
+      if (streamSelector === "s") {
+        return mediaToolResult(JSON.stringify({ streams: subtitleStreams }));
+      }
       return mediaToolResult(
         JSON.stringify({
           packets:
@@ -62,7 +74,7 @@ describe("encode output validation", () => {
       new AbortController().signal,
     );
 
-    expect(runMediaTool).toHaveBeenCalledTimes(3);
+    expect(runMediaTool).toHaveBeenCalledTimes(4);
     expect(runMediaTool).toHaveBeenLastCalledWith(
       expect.objectContaining({
         arguments_: expect.arrayContaining([
@@ -74,6 +86,103 @@ describe("encode output validation", () => {
         ]),
         executable: "ffmpeg",
       }),
+    );
+  });
+
+  it("accepts an output without subtitles when the selected source has none", async () => {
+    const validator = createNodeEncodeOutputValidator({
+      runMediaTool: createMediaToolRunner({ subtitleStreams: [] }),
+    });
+
+    await expect(
+      validator.validate(
+        "/media/subtitle-free.mkv",
+        new AbortController().signal,
+        { minimumVobSubStreams: 0 },
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("accepts identified VobSub streams with language and disposition metadata", async () => {
+    const validator = createNodeEncodeOutputValidator({
+      runMediaTool: createMediaToolRunner({
+        subtitleStreams: [
+          {
+            codec_name: "dvd_subtitle",
+            disposition: { default: 1, forced: 0 },
+            index: 2,
+            tags: { language: "eng", title: "English" },
+          },
+          {
+            codec_name: "dvd_subtitle",
+            disposition: { default: 0, forced: 1 },
+            index: 3,
+            tags: { language: "fra" },
+          },
+          {
+            codec_name: "subrip",
+            disposition: { default: 0, forced: 0 },
+            index: 4,
+          },
+        ],
+      }),
+    });
+
+    await expect(
+      validator.validate(
+        "/media/subtitled.mkv",
+        new AbortController().signal,
+        { minimumVobSubStreams: 2 },
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("rejects an output that dropped a selected title's VobSub streams", async () => {
+    const validator = createNodeEncodeOutputValidator({
+      runMediaTool: createMediaToolRunner({ subtitleStreams: [] }),
+    });
+
+    await expect(
+      validator.validate(
+        "/media/broken.mkv",
+        new AbortController().signal,
+        { minimumVobSubStreams: 2 },
+      ),
+    ).rejects.toThrow(
+      "Encode output validation failed: expected at least 2 VobSub streams, found 0",
+    );
+  });
+
+  it("rejects incomplete subtitle metadata", async () => {
+    const validator = createNodeEncodeOutputValidator({
+      runMediaTool: createMediaToolRunner({
+        subtitleStreams: [
+          {
+            codec_name: "unknown",
+            disposition: { default: 0, forced: 0 },
+            index: 2,
+            tags: {},
+          },
+        ],
+      }),
+    });
+
+    await expect(
+      validator.validate("/media/broken.mkv", new AbortController().signal),
+    ).rejects.toThrow(
+      "Encode output validation failed: subtitle stream metadata is incomplete",
+    );
+  });
+
+  it("rejects a malformed subtitle probe result", async () => {
+    const validator = createNodeEncodeOutputValidator({
+      runMediaTool: createMediaToolRunner({ subtitleStreams: {} }),
+    });
+
+    await expect(
+      validator.validate("/media/broken.mkv", new AbortController().signal),
+    ).rejects.toThrow(
+      "Encode output validation failed: subtitle probe returned an invalid result",
     );
   });
 

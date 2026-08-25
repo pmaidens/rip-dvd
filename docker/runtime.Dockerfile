@@ -172,6 +172,23 @@ RUN mkdir --parents packages/worker-runtime/node_modules/@rip-dvd \
   && ln --symbolic ../../../config packages/worker-runtime/node_modules/@rip-dvd/config
 COPY --chown=node:node docker/worker-priority-entrypoint.sh ./scripts/worker-priority-entrypoint.sh
 
+# HandBrake 1.8 fixed corrupt or transparent VobSub passthrough samples. Keep
+# the newer Debian runtime isolated to the encode worker so the other images do
+# not inherit an unrelated distribution upgrade.
+FROM node:22.23.1-trixie-slim AS encode-worker-runtime-base
+ARG RIP_DVD_HANDBRAKE_VERSION="1.9.2"
+ENV NODE_ENV="production"
+ENV RIP_DVD_HANDBRAKE_VERSION="${RIP_DVD_HANDBRAKE_VERSION}"
+WORKDIR /app
+RUN mkdir --parents /data && chown node:node /data
+COPY --from=shared-builder --chown=node:node /app/packages/config/package.json ./packages/config/package.json
+COPY --from=shared-builder --chown=node:node /app/packages/config/dist ./packages/config/dist
+COPY --from=shared-builder --chown=node:node /app/packages/worker-runtime/package.json ./packages/worker-runtime/package.json
+COPY --from=shared-builder --chown=node:node /app/packages/worker-runtime/dist ./packages/worker-runtime/dist
+RUN mkdir --parents packages/worker-runtime/node_modules/@rip-dvd \
+  && ln --symbolic ../../../config packages/worker-runtime/node_modules/@rip-dvd/config
+COPY --chown=node:node docker/worker-priority-entrypoint.sh ./scripts/worker-priority-entrypoint.sh
+
 FROM worker-runtime-base AS archive-worker
 RUN apt-get update \
   && apt-get install --yes --no-install-recommends handbrake-cli libssl3 lsdvd util-linux \
@@ -199,9 +216,14 @@ USER node
 ENTRYPOINT ["sh", "/app/scripts/worker-priority-entrypoint.sh"]
 CMD ["node", "apps/archive-worker/dist/index.js"]
 
-FROM worker-runtime-base AS encode-worker
+FROM encode-worker-runtime-base AS encode-worker
 RUN apt-get update \
   && apt-get install --yes --no-install-recommends handbrake-cli ffmpeg util-linux \
+  && handbrake_package_version="$(dpkg-query --show --showformat='${Version}' handbrake-cli)" \
+  && case "$handbrake_package_version" in \
+    "${RIP_DVD_HANDBRAKE_VERSION}"+*) ;; \
+    *) printf 'Unexpected HandBrake package version: %s\n' "$handbrake_package_version" >&2; exit 1 ;; \
+  esac \
   && rm -rf /var/lib/apt/lists/*
 RUN mkdir --parents /media/movies /media/originals \
   && chown node:node /media/movies /media/originals

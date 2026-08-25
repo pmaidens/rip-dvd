@@ -26,6 +26,7 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  decodeArchivedDvdTitles,
   ENCODE_JOB_LEASE_DURATION_MS,
   type DataAccess,
   type DiscSelection,
@@ -1350,7 +1351,26 @@ function resolveClaimInput(access: DataAccess, claim: RunningEncodeJob) {
     ) {
       throw new Error("Encode Job has invalid DVD video profile settings");
     }
-    return { archive, preset: preset.trim(), selection };
+    const sourceIdentity = selection.sourceIdentity;
+    let minimumVobSubStreams = 0;
+    if (sourceIdentity.kind !== "main_feature") {
+      const detectedDisc = snapshot.catalog.listDetectedDiscs(undefined, {
+        ids: [archive.detectedDiscId],
+      })[0];
+      const selectedTitle = decodeArchivedDvdTitles(
+        detectedDisc?.scanData,
+      )?.find((title) => title.number === sourceIdentity.titleNumber);
+      if (selectedTitle === undefined) {
+        throw new Error("Encode Job DVD title metadata is unavailable");
+      }
+      minimumVobSubStreams = selectedTitle.subtitles.length;
+    }
+    return {
+      archive,
+      minimumVobSubStreams,
+      preset: preset.trim(),
+      selection,
+    };
   });
 }
 
@@ -1472,6 +1492,8 @@ export async function executeEncodeClaim(
       "av_mkv",
       "--preset",
       input.preset,
+      "--all-subtitles",
+      "--subtitle-burned=none",
     ];
     renewClaim();
     await options.runner.run({
@@ -1490,7 +1512,9 @@ export async function executeEncodeClaim(
     ) {
       throw new Error("HandBrake did not produce a complete regular output file");
     }
-    await options.outputValidator.validate(partialPath, signal);
+    await options.outputValidator.validate(partialPath, signal, {
+      minimumVobSubStreams: input.minimumVobSubStreams,
+    });
     signal.throwIfAborted();
     await syncPath(partialPath);
     publishedOutputMetadata = partialMetadata;

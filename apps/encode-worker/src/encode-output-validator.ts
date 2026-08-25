@@ -22,7 +22,15 @@ export type MediaToolRunner = (
 ) => Promise<MediaToolRunResult>;
 
 export interface EncodeOutputValidator {
-  validate(outputPath: string, signal: AbortSignal): Promise<void>;
+  validate(
+    outputPath: string,
+    signal: AbortSignal,
+    expectations?: EncodeOutputValidationExpectations,
+  ): Promise<void>;
+}
+
+export interface EncodeOutputValidationExpectations {
+  minimumVobSubStreams?: number;
 }
 
 interface ProbePacket {
@@ -31,8 +39,11 @@ interface ProbePacket {
 
 interface ProbeStream {
   codec_name?: unknown;
+  disposition?: unknown;
+  index?: unknown;
   pix_fmt?: unknown;
   profile?: unknown;
+  tags?: unknown;
 }
 
 interface ProbeResult {
@@ -108,6 +119,45 @@ function identifiedMetadata(value: unknown): boolean {
   );
 }
 
+function optionalIdentifiedMetadata(value: unknown): boolean {
+  return value === undefined || identifiedMetadata(value);
+}
+
+function isProbeFlag(value: unknown): boolean {
+  return value === 0 || value === 1;
+}
+
+function hasCompleteSubtitleMetadata(
+  value: unknown,
+): value is ProbeStream & { codec_name: string; index: number } {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const stream = value as ProbeStream;
+  if (
+    !Number.isSafeInteger(stream.index) ||
+    (stream.index as number) < 0 ||
+    !identifiedMetadata(stream.codec_name) ||
+    typeof stream.disposition !== "object" ||
+    stream.disposition === null ||
+    Array.isArray(stream.disposition) ||
+    (stream.tags !== undefined &&
+      (typeof stream.tags !== "object" ||
+        stream.tags === null ||
+        Array.isArray(stream.tags)))
+  ) {
+    return false;
+  }
+  const disposition = stream.disposition as Record<string, unknown>;
+  const tags = (stream.tags ?? {}) as Record<string, unknown>;
+  return (
+    isProbeFlag(disposition.default) &&
+    isProbeFlag(disposition.forced) &&
+    optionalIdentifiedMetadata(tags.language) &&
+    optionalIdentifiedMetadata(tags.title)
+  );
+}
+
 async function runTool(
   runMediaTool: MediaToolRunner,
   request: MediaToolRunRequest,
@@ -134,8 +184,15 @@ export function createNodeEncodeOutputValidator({
     throw new Error("Encode output validation timeout is invalid");
   }
   return {
-    async validate(outputPath, signal) {
+    async validate(outputPath, signal, expectations = {}) {
       signal.throwIfAborted();
+      const minimumVobSubStreams = expectations.minimumVobSubStreams ?? 0;
+      if (
+        !Number.isSafeInteger(minimumVobSubStreams) ||
+        minimumVobSubStreams < 0
+      ) {
+        throw new Error("Encode output subtitle expectation is invalid");
+      }
       const videoProbe = parseProbeResult(
         (
           await runTool(
@@ -210,6 +267,55 @@ export function createNodeEncodeOutputValidator({
       if (videoStartDelay > MAX_VIDEO_START_DELAY_SECONDS) {
         throw validationError(
           `first video frame starts ${videoStartDelay.toFixed(3)} seconds after the audio baseline`,
+        );
+      }
+
+      const subtitleProbe = parseProbeResult(
+        (
+          await runTool(
+            runMediaTool,
+            {
+              arguments_: [
+                "-v",
+                "error",
+                "-select_streams",
+                "s",
+                "-show_entries",
+                "stream=index,codec_name:stream_tags=language,title:stream_disposition=default,forced",
+                "-of",
+                "json",
+                outputPath,
+              ],
+              executable: "ffprobe",
+              signal,
+              timeoutMs,
+            },
+            "subtitle probe",
+          )
+        ).stdout,
+        "subtitle",
+      );
+      if (!Array.isArray(subtitleProbe.streams)) {
+        throw validationError("subtitle probe returned an invalid result");
+      }
+      const subtitleStreams = subtitleProbe.streams;
+      const subtitleStreamIndexes = new Set<number>();
+      let vobSubStreamCount = 0;
+      for (const stream of subtitleStreams) {
+        if (
+          !hasCompleteSubtitleMetadata(stream) ||
+          subtitleStreamIndexes.has(stream.index)
+        ) {
+          throw validationError("subtitle stream metadata is incomplete");
+        }
+        subtitleStreamIndexes.add(stream.index);
+        if (stream.codec_name === "dvd_subtitle") {
+          vobSubStreamCount += 1;
+        }
+      }
+      if (vobSubStreamCount < minimumVobSubStreams) {
+        throw validationError(
+          `expected at least ${minimumVobSubStreams} VobSub stream${minimumVobSubStreams === 1 ? "" : "s"}, found ${vobSubStreamCount}`,
         );
       }
 
