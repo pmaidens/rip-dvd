@@ -719,12 +719,42 @@ function writeSyntheticTitleSetAttributeCounts(
   }
 }
 
+function udfDescriptorCrcLength(buffer: Buffer, identifier: number): number {
+  if ([1, 2, 3, 4, 5, 8, 256].includes(identifier)) {
+    return 496;
+  }
+  if (identifier === 6) {
+    return 424 + buffer.readUInt32LE(264);
+  }
+  if (identifier === 7) {
+    return 8 + buffer.readUInt32LE(20) * 8;
+  }
+  if (identifier === 9) {
+    return 64 + buffer.readUInt32LE(72) * 8 + buffer.readUInt32LE(76);
+  }
+  if (identifier === 257) {
+    return buffer.byteLength - 16;
+  }
+  if (identifier === 261 || identifier === 266) {
+    const extendedAttributeLengthOffset = identifier === 261 ? 168 : 208;
+    const allocationDescriptorLengthOffset = identifier === 261 ? 172 : 212;
+    const descriptorBaseOffset = identifier === 261 ? 176 : 216;
+    return descriptorBaseOffset - 16 +
+      buffer.readUInt32LE(extendedAttributeLengthOffset) +
+      buffer.readUInt32LE(allocationDescriptorLengthOffset);
+  }
+  if (identifier === 262) {
+    return 8;
+  }
+  throw new Error(`unsupported synthetic UDF descriptor ${identifier}`);
+}
+
 function writeUdfTag(
   buffer: Buffer,
   identifier: number,
   location = 0,
   {
-    crcLength = 0,
+    crcLength = udfDescriptorCrcLength(buffer, identifier),
     reserved = 0,
     version = 2,
   }: { crcLength?: number; reserved?: number; version?: number } = {},
@@ -754,6 +784,41 @@ function writeUdfTag(
     }
   }
   buffer[4] = checksum;
+}
+
+function writeUdfSectorTag(
+  image: Buffer,
+  lba: number,
+  identifier: number,
+  location = lba,
+): void {
+  writeUdfTag(
+    image.subarray(
+      lba * DVD_SECTOR_SIZE_BYTES,
+      (lba + 1) * DVD_SECTOR_SIZE_BYTES,
+    ),
+    identifier,
+    location,
+  );
+}
+
+function refreshUdfDirectoryTags(image: Buffer, lba: number): void {
+  const directory = image.subarray(
+    lba * DVD_SECTOR_SIZE_BYTES,
+    (lba + 1) * DVD_SECTOR_SIZE_BYTES,
+  );
+  let offset = 0;
+  while (directory.readUInt16LE(offset) === 257) {
+    const recordLength = Math.ceil(
+      (38 + directory.readUInt16LE(offset + 36) + directory[offset + 19]!) / 4,
+    ) * 4;
+    writeUdfTag(
+      directory.subarray(offset, offset + recordLength),
+      257,
+      lba - 300,
+    );
+    offset += recordLength;
+  }
 }
 
 function writeUdfLongAd(
@@ -857,6 +922,7 @@ function addDvdCopyrightExtendedAttribute(
   fileEntry.writeUInt32LE(extendedAttributeLength, 168);
   fileEntry.writeUInt32LE(originalAllocationLength, 172);
   originalAllocation.copy(fileEntry, 176 + extendedAttributeLength);
+  writeUdfTag(fileEntry, 261, logicalBlockNumber);
 }
 
 function writeUdfDirectory(
@@ -959,8 +1025,16 @@ function writeSyntheticUdfLayout(
       260 * DVD_SECTOR_SIZE_BYTES,
       261 * DVD_SECTOR_SIZE_BYTES,
     ),
-    8,
+    7,
     260,
+  );
+  writeUdfTag(
+    image.subarray(
+      261 * DVD_SECTOR_SIZE_BYTES,
+      262 * DVD_SECTOR_SIZE_BYTES,
+    ),
+    8,
+    261,
   );
   for (let offset = 0; offset < 16; offset += 1) {
     image.copy(
@@ -970,7 +1044,7 @@ function writeSyntheticUdfLayout(
       (258 + offset) * DVD_SECTOR_SIZE_BYTES,
     );
   }
-  for (let offset = 0; offset < 4; offset += 1) {
+  for (let offset = 0; offset < 5; offset += 1) {
     const descriptor = image.subarray(
       (273 + offset) * DVD_SECTOR_SIZE_BYTES,
       (274 + offset) * DVD_SECTOR_SIZE_BYTES,
@@ -1133,6 +1207,7 @@ function relocateSyntheticUdfRootDirectory(
   image.writeBigUInt64LE(2n, rootFileEntryOffset + 64);
   image.writeUInt32LE(2 * DVD_SECTOR_SIZE_BYTES, rootFileEntryOffset + 176);
   image.writeUInt32LE(200, rootFileEntryOffset + 180);
+  writeUdfSectorTag(image, 301, 261, 1);
 }
 
 function writeFixture(image: Buffer, badLba?: number) {
@@ -1892,6 +1967,69 @@ describe("retained DVD image layout completeness", () => {
     })).rejects.toThrow("DVD UDF descriptor tag is malformed");
   });
 
+  it.each([
+    ["zero", 0],
+    ["shortened", 495],
+    ["oversized", 497],
+  ])("fails closed on a %s UDF descriptor CRC length", async (
+    _lengthKind,
+    crcLength,
+  ) => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    writeUdfTag(
+      image.subarray(
+        256 * DVD_SECTOR_SIZE_BYTES,
+        257 * DVD_SECTOR_SIZE_BYTES,
+      ),
+      2,
+      256,
+      { crcLength },
+    );
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD UDF descriptor CRC length is invalid");
+  });
+
+  it("rejects high-bit corruption in the ISO standard identifier", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    for (let offset = 1; offset < 6; offset += 1) {
+      image[16 * DVD_SECTOR_SIZE_BYTES + offset] =
+        image[16 * DVD_SECTOR_SIZE_BYTES + offset]! | 0x80;
+    }
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD image has no supported filesystem view");
+  });
+
+  it("rejects high-bit corruption in the UDF recognition sequence", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    for (let offset = 1; offset < 6; offset += 1) {
+      image[18 * DVD_SECTOR_SIZE_BYTES + offset] =
+        image[18 * DVD_SECTOR_SIZE_BYTES + offset]! | 0x80;
+    }
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD UDF recognition sequence is incomplete");
+  });
+
   it("rejects a reserve UDF partition that crosses the candidate boundary", async () => {
     const image = syntheticCompleteDvdImage({
       includeIso: false,
@@ -1899,6 +2037,7 @@ describe("retained DVD image layout completeness", () => {
     });
     image.writeUInt32LE(590, 274 * DVD_SECTOR_SIZE_BYTES + 188);
     image.writeUInt32LE(20, 274 * DVD_SECTOR_SIZE_BYTES + 192);
+    writeUdfSectorTag(image, 274, 5);
     const fixture = writeFixture(image);
 
     await expect(proveDvdImageLayoutCompleteness({
@@ -1965,14 +2104,12 @@ describe("retained DVD image layout completeness", () => {
       includeUdf: true,
     });
     for (const lba of [257, 273]) {
-      writeUdfTag(
-        image.subarray(
-          lba * DVD_SECTOR_SIZE_BYTES,
-          (lba + 1) * DVD_SECTOR_SIZE_BYTES,
-        ),
-        7,
-        lba,
+      const descriptor = image.subarray(
+        lba * DVD_SECTOR_SIZE_BYTES,
+        (lba + 1) * DVD_SECTOR_SIZE_BYTES,
       );
+      descriptor.fill(0);
+      writeUdfTag(descriptor, 8, lba);
     }
     const fixture = writeFixture(image);
 
@@ -1981,6 +2118,58 @@ describe("retained DVD image layout completeness", () => {
       imagePath: fixture.imagePath,
     })).rejects.toThrow(
       "DVD UDF main volume descriptor sequence is incomplete",
+    );
+  });
+
+  it("fails closed when a UDF descriptor sequence omits its unallocated-space descriptor", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    for (const descriptorLba of [260, 276]) {
+      const descriptor = image.subarray(
+        descriptorLba * DVD_SECTOR_SIZE_BYTES,
+        (descriptorLba + 1) * DVD_SECTOR_SIZE_BYTES,
+      );
+      descriptor.fill(0);
+      writeUdfTag(descriptor, 8, descriptorLba);
+    }
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow(
+      "DVD UDF main volume descriptor sequence is incomplete",
+    );
+  });
+
+  it("fails closed when a UDF descriptor sequence duplicates its unallocated-space descriptor", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    for (const [descriptorLba, terminatorLba] of [[261, 262], [277, 278]]) {
+      const descriptor = image.subarray(
+        descriptorLba * DVD_SECTOR_SIZE_BYTES,
+        (descriptorLba + 1) * DVD_SECTOR_SIZE_BYTES,
+      );
+      descriptor.fill(0);
+      writeUdfTag(descriptor, 7, descriptorLba);
+      const terminator = image.subarray(
+        terminatorLba * DVD_SECTOR_SIZE_BYTES,
+        (terminatorLba + 1) * DVD_SECTOR_SIZE_BYTES,
+      );
+      terminator.fill(0);
+      writeUdfTag(terminator, 8, terminatorLba);
+    }
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow(
+      "DVD UDF unallocated-space descriptor is duplicated",
     );
   });
 
@@ -2073,6 +2262,7 @@ describe("retained DVD image layout completeness", () => {
         2,
         logicalVolumeLba * DVD_SECTOR_SIZE_BYTES + 442,
       );
+      writeUdfSectorTag(image, logicalVolumeLba, 6);
     }
     const fixture = writeFixture(image);
 
@@ -2093,6 +2283,7 @@ describe("retained DVD image layout completeness", () => {
         partitionLba * DVD_SECTOR_SIZE_BYTES + 25,
         "ascii",
       );
+      writeUdfSectorTag(image, partitionLba, 5);
     }
     const fixture = writeFixture(image);
 
@@ -2113,6 +2304,7 @@ describe("retained DVD image layout completeness", () => {
         logicalVolumeLba * DVD_SECTOR_SIZE_BYTES + 217,
         "ascii",
       );
+      writeUdfSectorTag(image, logicalVolumeLba, 6);
     }
     const fixture = writeFixture(image);
 
@@ -2228,6 +2420,7 @@ describe("retained DVD image layout completeness", () => {
       includeUdf: true,
     });
     image.writeUInt32LE(2, 302 * DVD_SECTOR_SIZE_BYTES + 24);
+    refreshUdfDirectoryTags(image, 302);
     const fixture = writeFixture(image);
 
     await expect(proveDvdImageLayoutCompleteness({
@@ -2248,6 +2441,7 @@ describe("retained DVD image layout completeness", () => {
       includeUdf: true,
     });
     image[301 * DVD_SECTOR_SIZE_BYTES + fieldOffset] = 1;
+    writeUdfSectorTag(image, 301, 261, 1);
     const fixture = writeFixture(image);
 
     await expect(proveDvdImageLayoutCompleteness({
@@ -2266,6 +2460,7 @@ describe("retained DVD image layout completeness", () => {
       304 * DVD_SECTOR_SIZE_BYTES + 131,
       "ascii",
     );
+    refreshUdfDirectoryTags(image, 304);
     const fixture = writeFixture(image);
 
     await expect(proveDvdImageLayoutCompleteness({
@@ -2330,6 +2525,7 @@ describe("retained DVD image layout completeness", () => {
         0x4000_0000 | DVD_SECTOR_SIZE_BYTES,
         logicalVolumeLba * DVD_SECTOR_SIZE_BYTES + 248,
       );
+      writeUdfSectorTag(image, logicalVolumeLba, 6);
     }
     const fixture = writeFixture(image);
 
@@ -2349,6 +2545,7 @@ describe("retained DVD image layout completeness", () => {
         1,
         logicalVolumeLba * DVD_SECTOR_SIZE_BYTES + 248,
       );
+      writeUdfSectorTag(image, logicalVolumeLba, 6);
     }
     const fixture = writeFixture(image);
 
@@ -2370,6 +2567,7 @@ describe("retained DVD image layout completeness", () => {
       includeUdf: true,
     });
     image[300 * DVD_SECTOR_SIZE_BYTES + descriptorOffset] = 1;
+    writeUdfSectorTag(image, 300, 256, 0);
     const fixture = writeFixture(image);
 
     await expect(proveDvdImageLayoutCompleteness({
@@ -2417,6 +2615,7 @@ describe("retained DVD image layout completeness", () => {
       image.readUInt16LE(rootFileEntryOffset + 34) | 2,
       rootFileEntryOffset + 34,
     );
+    writeUdfSectorTag(image, 301, 261, 1);
     const fixture = writeFixture(image);
 
     await expect(proveDvdImageLayoutCompleteness({
@@ -2431,6 +2630,7 @@ describe("retained DVD image layout completeness", () => {
       includeUdf: true,
     });
     image.writeBigUInt64LE(2n, 301 * DVD_SECTOR_SIZE_BYTES + 64);
+    writeUdfSectorTag(image, 301, 261, 1);
     const fixture = writeFixture(image);
 
     await expect(proveDvdImageLayoutCompleteness({
@@ -2439,7 +2639,7 @@ describe("retained DVD image layout completeness", () => {
     })).rejects.toThrow("DVD UDF file allocation accounting is malformed");
   });
 
-  it("bounds UDF allocation descriptors in aggregate", async () => {
+  it("fails closed before an oversized UDF file entry can exhaust allocation work", async () => {
     const image = syntheticCompleteDvdImage({
       includeIso: false,
       includeUdf: true,
@@ -2458,21 +2658,20 @@ describe("retained DVD image layout completeness", () => {
     fileEntry.writeUInt16LE(1, 24);
     fileEntry[27] = 4;
     fileEntry.writeUInt32LE(allocationDescriptorLength, 172);
-    writeUdfTag(fileEntry, 261, 50);
+    writeUdfTag(fileEntry, 261, 50, { crcLength: 0 });
     writeUdfLongAd(
       image,
       300 * DVD_SECTOR_SIZE_BYTES + 400,
       fileEntryByteCount,
       50,
     );
+    writeUdfSectorTag(image, 300, 256, 0);
     const fixture = writeFixture(image);
 
     await expect(proveDvdImageLayoutCompleteness({
       candidateBoundaryLba: 600,
       imagePath: fixture.imagePath,
-    })).rejects.toThrow(
-      "DVD UDF allocation descriptors exceed their aggregate safety bound",
-    );
+    })).rejects.toThrow("DVD UDF descriptor CRC length is invalid");
   });
 
   it("accepts a well-formed DVD copyright extended attribute", async () => {
@@ -2506,6 +2705,7 @@ describe("retained DVD image layout completeness", () => {
     );
     addDvdCopyrightExtendedAttribute(rootFileEntry, 1);
     rootFileEntry.writeUInt32LE(55, 200 + 8);
+    writeUdfTag(rootFileEntry, 261, 1);
     const fixture = writeFixture(image);
 
     await expect(proveDvdImageLayoutCompleteness({
@@ -2524,6 +2724,7 @@ describe("retained DVD image layout completeness", () => {
         257 * DVD_SECTOR_SIZE_BYTES,
         anchorLba * DVD_SECTOR_SIZE_BYTES + 16,
       );
+      writeUdfSectorTag(image, anchorLba, 2);
     }
     const fixture = writeFixture(image);
 
@@ -2545,6 +2746,7 @@ describe("retained DVD image layout completeness", () => {
         257 * DVD_SECTOR_SIZE_BYTES,
         logicalVolumeLba * DVD_SECTOR_SIZE_BYTES + 432,
       );
+      writeUdfSectorTag(image, logicalVolumeLba, 6);
     }
     const fixture = writeFixture(image);
 
@@ -2570,6 +2772,7 @@ describe("retained DVD image layout completeness", () => {
         150,
         partitionLba * DVD_SECTOR_SIZE_BYTES + 60,
       );
+      writeUdfSectorTag(image, partitionLba, 5);
     }
     const fixture = writeFixture(image);
 
@@ -4135,6 +4338,7 @@ describe("retained DVD image layout completeness", () => {
       includeUdf: true,
     });
     image.writeUInt16LE(2, 301 * DVD_SECTOR_SIZE_BYTES + 34);
+    writeUdfSectorTag(image, 301, 261, 1);
     const fixture = writeFixture(image);
 
     await expect(proveDvdImageLayoutCompleteness({
@@ -4152,6 +4356,7 @@ describe("retained DVD image layout completeness", () => {
       BigInt(7 * DVD_SECTOR_SIZE_BYTES),
       305 * DVD_SECTOR_SIZE_BYTES + 56,
     );
+    writeUdfSectorTag(image, 305, 261, 5);
     const fixture = writeFixture(image);
 
     await expect(proveDvdImageLayoutCompleteness({

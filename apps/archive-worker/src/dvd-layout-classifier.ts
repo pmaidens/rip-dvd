@@ -399,7 +399,48 @@ function validateUdfTag(
     throw new Error("DVD UDF descriptor tag checksum is invalid");
   }
   const crcLength = buffer.readUInt16LE(10);
-  if (crcLength > buffer.byteLength - 16) {
+  let expectedCrcLength: number;
+  if ([1, 2, 3, 4, 5, 8, 256].includes(identifier)) {
+    expectedCrcLength = 496;
+  } else if (identifier === 6) {
+    if (buffer.byteLength < 268) {
+      throw new Error("DVD UDF descriptor CRC length is invalid");
+    }
+    expectedCrcLength = 424 + buffer.readUInt32LE(264);
+  } else if (identifier === 7) {
+    if (buffer.byteLength < 24) {
+      throw new Error("DVD UDF descriptor CRC length is invalid");
+    }
+    expectedCrcLength = 8 + buffer.readUInt32LE(20) * 8;
+  } else if (identifier === 9) {
+    if (buffer.byteLength < 80) {
+      throw new Error("DVD UDF descriptor CRC length is invalid");
+    }
+    expectedCrcLength = 64 + buffer.readUInt32LE(72) * 8 +
+      buffer.readUInt32LE(76);
+  } else if (identifier === 257) {
+    expectedCrcLength = buffer.byteLength - 16;
+  } else if (identifier === 261 || identifier === 266) {
+    const extendedAttributeLengthOffset = identifier === 261 ? 168 : 208;
+    const allocationDescriptorLengthOffset = identifier === 261 ? 172 : 212;
+    const descriptorBaseOffset = identifier === 261 ? 176 : 216;
+    if (buffer.byteLength < descriptorBaseOffset) {
+      throw new Error("DVD UDF descriptor CRC length is invalid");
+    }
+    expectedCrcLength = descriptorBaseOffset - 16 +
+      buffer.readUInt32LE(extendedAttributeLengthOffset) +
+      buffer.readUInt32LE(allocationDescriptorLengthOffset);
+  } else if (identifier === 262) {
+    expectedCrcLength = 8;
+  } else {
+    throw new Error("DVD UDF descriptor CRC length is invalid");
+  }
+  if (
+    !Number.isSafeInteger(expectedCrcLength) ||
+    expectedCrcLength < 0 ||
+    expectedCrcLength > buffer.byteLength - 16 ||
+    crcLength !== expectedCrcLength
+  ) {
     throw new Error("DVD UDF descriptor CRC length is invalid");
   }
   let crc = 0;
@@ -450,7 +491,7 @@ function udfEntityIdentifier(buffer: Buffer, offset: number): string {
   ) {
     throw new Error("DVD UDF entity identifier is malformed");
   }
-  return identifier.toString("ascii");
+  return identifier.toString("latin1");
 }
 
 function validateUdfCharacterSet(buffer: Buffer, offset: number): void {
@@ -458,7 +499,7 @@ function validateUdfCharacterSet(buffer: Buffer, offset: number): void {
     offset < 0 ||
     offset + 64 > buffer.byteLength ||
     buffer[offset] !== 0 ||
-    buffer.toString("ascii", offset + 1, offset + 24) !==
+    buffer.toString("latin1", offset + 1, offset + 24) !==
       "OSTA Compressed Unicode" ||
     buffer.subarray(offset + 24, offset + 64).some((byte) => byte !== 0)
   ) {
@@ -967,7 +1008,7 @@ async function analyzeDvdImageLayout({
           if (identifier.some((byte) => byte === 0 || byte === 0x2f)) {
             throw new Error("DVD ISO file identifier is malformed");
           }
-          decodedIdentifier = identifier.toString("ascii");
+          decodedIdentifier = identifier.toString("latin1");
         } else {
           if (identifier.byteLength % 2 !== 0) {
             throw new Error("DVD Joliet file identifier is malformed");
@@ -1659,7 +1700,7 @@ async function analyzeDvdImageLayout({
       const content = await readDvdControlFile(file);
       if (
         content.byteLength < DVD_SECTOR_SIZE_BYTES ||
-        content.toString("ascii", 0, 12) !== "DVDVIDEO-VTS"
+        content.toString("latin1", 0, 12) !== "DVDVIDEO-VTS"
       ) {
         throw new Error("DVD title-set navigation file is malformed");
       }
@@ -1847,7 +1888,7 @@ async function analyzeDvdImageLayout({
     const content = await readDvdControlFile(file);
     if (
       content.byteLength < DVD_SECTOR_SIZE_BYTES ||
-      content.toString("ascii", 0, 12) !== "DVDVIDEO-VMG"
+      content.toString("latin1", 0, 12) !== "DVDVIDEO-VMG"
     ) {
       throw new Error("DVD video manager navigation file is malformed");
     }
@@ -3806,7 +3847,7 @@ async function analyzeDvdImageLayout({
       const content = await readDvdControlFile(file);
       if (
         content.byteLength < DVD_SECTOR_SIZE_BYTES ||
-        content.toString("ascii", 0, 12) !== "DVDVIDEO-VTS"
+        content.toString("latin1", 0, 12) !== "DVDVIDEO-VTS"
       ) {
         throw new Error("DVD title-set navigation file is malformed");
       }
@@ -4373,7 +4414,7 @@ async function analyzeDvdImageLayout({
         const parent = layouts[parentDirectoryNumber - 1];
         let name: string;
         if (identifierEncoding === "ascii") {
-          name = identifier.toString("ascii");
+          name = identifier.toString("latin1");
         } else {
           if (identifier.byteLength % 2 !== 0) {
             throw new Error("DVD ISO path table hierarchy is malformed");
@@ -4435,7 +4476,7 @@ async function analyzeDvdImageLayout({
     for (let lba = 16; lba < 16 + MAX_DESCRIPTOR_SECTORS; lba += 1) {
       const descriptor = await readRawSector(lba);
       const hasIsoSignature =
-        descriptor.toString("ascii", 1, 6) === "CD001";
+        descriptor.toString("latin1", 1, 6) === "CD001";
       if (!hasIsoSignature) {
         if (volumeDescriptorCount === 0) {
           if (policy.continueAfterUnrecognizedIsoDescriptor(
@@ -4708,7 +4749,7 @@ async function analyzeDvdImageLayout({
       recognitionDescriptors.push({
         content: descriptor,
         lba,
-        identifier: descriptor.toString("ascii", 1, 6),
+        identifier: descriptor.toString("latin1", 1, 6),
       });
     }
     const nsrIndexes = recognitionDescriptors.flatMap(
@@ -4942,6 +4983,7 @@ async function analyzeDvdImageLayout({
       let sequenceLogicalVolume: UdfLogicalVolume | undefined;
       let sawPrimaryVolumeDescriptor = false;
       let sawTerminator = false;
+      let sawUnallocatedSpaceDescriptor = false;
       for (let index = 0; index < sequenceSectorCount; index += 1) {
         const descriptor = await readRawSector(sequenceStartLba + index);
         const identifier = validateUdfTag(
@@ -5071,6 +5113,12 @@ async function analyzeDvdImageLayout({
             partitionNumbersByReference,
           };
         } else if (identifier === 7) {
+          if (sawUnallocatedSpaceDescriptor) {
+            throw new Error(
+              "DVD UDF unallocated-space descriptor is duplicated",
+            );
+          }
+          sawUnallocatedSpaceDescriptor = true;
           const allocationCount = descriptor.readUInt32LE(20);
           const allocationsEnd = 24 + allocationCount * 8;
           const declaredBodyLength = descriptor.readUInt16LE(10);
@@ -5106,6 +5154,7 @@ async function analyzeDvdImageLayout({
       if (
         !sawTerminator ||
         !sawPrimaryVolumeDescriptor ||
+        !sawUnallocatedSpaceDescriptor ||
         sequenceLogicalVolume === undefined ||
         sequencePartitions.size === 0
       ) {
