@@ -181,13 +181,7 @@ ENV NODE_ENV="production"
 ENV RIP_DVD_HANDBRAKE_VERSION="${RIP_DVD_HANDBRAKE_VERSION}"
 WORKDIR /app
 RUN mkdir --parents /data && chown node:node /data
-COPY --from=shared-builder --chown=node:node /app/packages/config/package.json ./packages/config/package.json
-COPY --from=shared-builder --chown=node:node /app/packages/config/dist ./packages/config/dist
-COPY --from=shared-builder --chown=node:node /app/packages/worker-runtime/package.json ./packages/worker-runtime/package.json
-COPY --from=shared-builder --chown=node:node /app/packages/worker-runtime/dist ./packages/worker-runtime/dist
-RUN mkdir --parents packages/worker-runtime/node_modules/@rip-dvd \
-  && ln --symbolic ../../../config packages/worker-runtime/node_modules/@rip-dvd/config
-COPY --chown=node:node docker/worker-priority-entrypoint.sh ./scripts/worker-priority-entrypoint.sh
+COPY --from=worker-runtime-base --chown=node:node /app /app
 
 FROM worker-runtime-base AS archive-worker
 RUN apt-get update \

@@ -188,6 +188,10 @@ class RuntimeScaffoldTests(unittest.TestCase):
         )
         self.assertIn("/usr/local/bin/rip-dvd-handbrake", entrypoint)
         self.assertIn('RIP_DVD_HANDBRAKE_VERSION="1.9.2"', dockerfile)
+        self.assertIn(
+            "COPY --from=worker-runtime-base --chown=node:node /app /app",
+            dockerfile,
+        )
         self.assertIn("handbrake_package_version", entrypoint)
         self.assertIn("/usr/local/lib/libdvdcss.so.2", entrypoint)
         self.assertIn("worker-priority-entrypoint.sh", entrypoint)
