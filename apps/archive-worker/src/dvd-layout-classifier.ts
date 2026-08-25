@@ -5017,26 +5017,9 @@ async function analyzeDvdImageLayout({
             throw new Error("DVD UDF partition number is duplicated");
           }
           sequencePartitions.set(partition.number, partition);
-          for (const headerOffset of [56, 64, 72, 80, 88]) {
-            const rawLength = descriptor.readUInt32LE(headerOffset);
-            const extentLength = rawLength & UDF_EXTENT_LENGTH_MASK;
-            if ((rawLength & UDF_EXTENT_TYPE_MASK) !== 0) {
-              throw new Error(
-                "DVD UDF partition metadata extent is unsupported",
-              );
-            }
-            if (extentLength === 0) {
-              continue;
-            }
-            const relativeLba = descriptor.readUInt32LE(headerOffset + 4);
-            const sectorCount = sectorCountForBytes(extentLength);
-            if (relativeLba + sectorCount > partition.sectorCount) {
-              throw new Error("DVD UDF partition metadata extent is invalid");
-            }
-            addExtent(
-              partition.startLba + relativeLba,
-              sectorCount,
-              "filesystem_metadata",
+          if (descriptor.subarray(56, 184).some((byte) => byte !== 0)) {
+            throw new Error(
+              "DVD UDF partition metadata extent is unsupported",
             );
           }
         } else if (identifier === 6) {

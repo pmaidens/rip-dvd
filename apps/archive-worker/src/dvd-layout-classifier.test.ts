@@ -2556,15 +2556,19 @@ describe("retained DVD image layout completeness", () => {
     );
   });
 
-  it("fails closed on an unrecorded UDF partition metadata extent", async () => {
+  it("fails closed on a DVD read-only UDF partition space table", async () => {
     const image = syntheticCompleteDvdImage({
       includeIso: false,
       includeUdf: true,
     });
     for (const partitionLba of [258, 274]) {
       image.writeUInt32LE(
-        0x4000_0000 | DVD_SECTOR_SIZE_BYTES,
+        DVD_SECTOR_SIZE_BYTES,
         partitionLba * DVD_SECTOR_SIZE_BYTES + 56,
+      );
+      image.writeUInt32LE(
+        150,
+        partitionLba * DVD_SECTOR_SIZE_BYTES + 60,
       );
     }
     const fixture = writeFixture(image);
