@@ -96,6 +96,23 @@ function rawCompletionFault(
   return `raw@${lba}@${remainingFailures}@${scsiStatus}@${hostStatus}@${driverStatus}@${sense.length / 2}@${sense}`;
 }
 
+function rawTailCompletionFault(
+  lba,
+  remainingFailures,
+  sense,
+  { scsiStatus = 2, hostStatus = 0, driverStatus = 8 } = {},
+) {
+  return `raw-tail@${lba}@${remainingFailures}@${scsiStatus}@${hostStatus}@${driverStatus}@${sense.length / 2}@${sense}`;
+}
+
+function rawRequestCompletionFault(lba, remainingFailures, sense) {
+  return `raw-request@${lba}@${remainingFailures}@2@0@8@${sense.length / 2}@${sense}`;
+}
+
+function corruptRequestFault(lba, remainingFailures) {
+  return `corrupt-request@${lba}@${remainingFailures}`;
+}
+
 const fixedMediumAtFive = fixedMediumSense(5);
 const descriptorMediumAtFive = descriptorMediumSense(5);
 const fixedRetriesExhaustedAtFive = fixedMediumSense(5, 1);
@@ -170,6 +187,68 @@ const categorizedReadFailures = [
       ["descriptor-protection", descriptorSense(5, 0x05, 0x6f, 0x04)],
     ],
   },
+];
+
+const invalidBoundaryProbeFaults = [
+  ["medium", rawCompletionFault(35, "always", fixedMediumSense(35))],
+  [
+    "not-ready",
+    rawCompletionFault(
+      35,
+      "always",
+      fixedTerminalSense(0x02, 0x04, 0x01),
+    ),
+  ],
+  [
+    "unit-attention",
+    rawCompletionFault(
+      35,
+      "always",
+      fixedTerminalSense(0x06, 0x28, 0x00),
+    ),
+  ],
+  [
+    "hardware",
+    rawCompletionFault(35, "always", fixedSense(35, 0x04, 0x44)),
+  ],
+  [
+    "transport",
+    rawCompletionFault(35, "always", fixedMediumSense(35), {
+      hostStatus: 7,
+    }),
+  ],
+  [
+    "protection",
+    rawCompletionFault(35, "always", fixedSense(35, 0x05, 0x6f, 0x04)),
+  ],
+  [
+    "unknown",
+    rawCompletionFault(35, "always", fixedSense(35, 0x05, 0x20)),
+  ],
+  ["generic", "generic@35@always"],
+  ["malformed", "raw@35@always@2@0@8@7@70000500000000"],
+  [
+    "inconsistent-confirmations",
+    [
+      rawCompletionFault(35, 1, fixedOutOfRangeSense(35)),
+      rawCompletionFault(35, "always", fixedMediumSense(35)),
+    ].join(","),
+  ],
+  [
+    "conflicting-out-of-range-confirmations",
+    [
+      rawCompletionFault(35, 1, fixedOutOfRangeSense(35)),
+      rawCompletionFault(35, "always", descriptorOutOfRangeSense(35)),
+    ].join(","),
+  ],
+  [
+    "conflicting-initiating-evidence",
+    rawTailCompletionFault(
+      35,
+      "always",
+      descriptorOutOfRangeSense(35),
+    ),
+  ],
 ];
 
 function prepareOutput(path) {
@@ -663,20 +742,20 @@ for (const [name, sense] of [
 
 const boundaryDriveA = runTestCopy(
   "cross-drive-boundary-drive-a",
-  rawCompletionFault(35, "always", fixedOutOfRangeSense(35)),
+  rawTailCompletionFault(35, "always", fixedOutOfRangeSense(35)),
 );
 const boundaryRescueIdentity = statSync(boundaryDriveA.outputPath);
 const boundaryMatchingDrive = runTestBoundaryResume(
   boundaryDriveA.outputPath,
   "none",
-  31 * 2_048,
+  35 * 2_048,
 );
 if (
   boundaryMatchingDrive.status !== 0 ||
   !readFileSync(boundaryDriveA.outputPath).equals(content) ||
   recoveryResult(boundaryMatchingDrive.stderr).badSectorCount !== 0 ||
   JSON.stringify(testReads(boundaryMatchingDrive.stderr)) !==
-    JSON.stringify([{ lba: 31, blocks: 9 }]) ||
+    JSON.stringify([{ lba: 35, blocks: 5 }]) ||
   statSync(boundaryDriveA.outputPath).dev !== boundaryRescueIdentity.dev ||
   statSync(boundaryDriveA.outputPath).ino !== boundaryRescueIdentity.ino
 ) {
@@ -687,9 +766,9 @@ if (
 
 const rolledBackBoundary = runTestCopy(
   "rolled-back-boundary-initial",
-  rawCompletionFault(35, "always", fixedOutOfRangeSense(35)),
+  rawTailCompletionFault(35, "always", fixedOutOfRangeSense(35)),
 );
-const committedBoundaryByteCount = 31 * 2_048;
+const committedBoundaryByteCount = 35 * 2_048;
 writeFileSync(
   rolledBackBoundary.outputPath,
   Buffer.concat([
@@ -706,7 +785,7 @@ if (
   rolledBackBoundaryResult.status !== 0 ||
   !readFileSync(rolledBackBoundary.outputPath).equals(content) ||
   JSON.stringify(testReads(rolledBackBoundaryResult.stderr)) !==
-    JSON.stringify([{ lba: 31, blocks: 9 }])
+    JSON.stringify([{ lba: 35, blocks: 5 }])
 ) {
   throw new Error(
     `libdvdcss boundary rollback check failed: ${rolledBackBoundaryResult.stderr}`,
@@ -827,30 +906,165 @@ for (const [name, sense] of [
 ]) {
   const outOfRange = runTestCopy(
     name,
-    rawCompletionFault(35, "always", sense),
+    rawTailCompletionFault(35, "always", sense),
   );
   const result = readFailureResult(outOfRange.stderr);
   if (
     outOfRange.status !== 3 ||
-    statSync(outOfRange.outputPath).size !== 31 * 2_048 ||
-    !readFileSync(outOfRange.outputPath).equals(content.subarray(0, 31 * 2_048)) ||
+    statSync(outOfRange.outputPath).size !== 35 * 2_048 ||
+    !readFileSync(outOfRange.outputPath).equals(
+      content.subarray(0, 35 * 2_048),
+    ) ||
     outOfRange.stderr.includes(recoveryResultPrefix) ||
     JSON.stringify(testReads(outOfRange.stderr)) !==
       JSON.stringify([
         { lba: 0, blocks: 31 },
         { lba: 31, blocks: 9 },
+        { lba: 31, blocks: 4 },
+        { lba: 34, blocks: 1 },
+        { lba: 35, blocks: 1 },
+        { lba: 35, blocks: 1 },
+        { lba: 36, blocks: 1 },
+        { lba: 39, blocks: 1 },
       ]) ||
     result.category !== "out_of_range" ||
+    result.boundaryProofVersion !== "dvd-sector-boundary-proof-v1" ||
+    result.candidateConfirmationCount !== 2 ||
+    result.precedingSectorLba !== 34 ||
     result.declaredByteCount !== content.byteLength ||
     result.firstFailingLba !== 35 ||
-    result.retainedImageByteCount !== 31 * 2_048 ||
+    result.retainedImageByteCount !== 35 * 2_048 ||
     result.informationLba !== 35 ||
-    result.requestedLba !== 31 ||
-    result.requestedBlockCount !== 9 ||
-    result.retryOrdinal !== 0
+    result.requestedLba !== 35 ||
+    result.requestedBlockCount !== 1 ||
+    result.retryOrdinal !== 1
   ) {
     throw new Error(
       `libdvdcss ${name} boundary check failed: ${outOfRange.stderr}`,
+    );
+  }
+}
+
+for (const [name, precedingFault] of [
+  [
+    "unreadable-preceding-sector",
+    rawRequestCompletionFault(34, "always", fixedMediumSense(34)),
+  ],
+  ["mismatched-preceding-sector", corruptRequestFault(34, "always")],
+]) {
+  const invalidPrecedingSector = runTestCopy(
+    name,
+    [
+      rawCompletionFault(35, 1, fixedOutOfRangeSense(35)),
+      precedingFault,
+    ].join(","),
+  );
+  const result = readFailureResult(invalidPrecedingSector.stderr);
+  if (
+    invalidPrecedingSector.status !== 3 ||
+    result.category !== "out_of_range" ||
+    result.boundaryProofVersion !== undefined ||
+    result.firstFailingLba !== 35 ||
+    result.retainedImageByteCount !== 35 * 2_048 ||
+    statSync(invalidPrecedingSector.outputPath).size !== 35 * 2_048 ||
+    !readFileSync(invalidPrecedingSector.outputPath).equals(
+      content.subarray(0, 35 * 2_048),
+    ) ||
+    invalidPrecedingSector.stderr.includes(recoveryResultPrefix) ||
+    JSON.stringify(testReads(invalidPrecedingSector.stderr)) !==
+      JSON.stringify([
+        { lba: 0, blocks: 31 },
+        { lba: 31, blocks: 9 },
+        { lba: 31, blocks: 4 },
+        { lba: 34, blocks: 1 },
+      ])
+  ) {
+    throw new Error(
+      `libdvdcss ${name} boundary check failed: ${invalidPrecedingSector.stderr}`,
+    );
+  }
+}
+
+const readableAboveCandidate = runTestCopy(
+  "readable-above-boundary-candidate",
+  rawCompletionFault(35, "always", fixedOutOfRangeSense(35)),
+);
+const readableAboveCandidateResult = readFailureResult(
+  readableAboveCandidate.stderr,
+);
+if (
+  readableAboveCandidate.status !== 3 ||
+  readableAboveCandidateResult.category !== "out_of_range" ||
+  readableAboveCandidateResult.boundaryProofVersion !== undefined ||
+  readableAboveCandidateResult.retainedImageByteCount !== 35 * 2_048 ||
+  JSON.stringify(testReads(readableAboveCandidate.stderr)) !==
+    JSON.stringify([
+      { lba: 0, blocks: 31 },
+      { lba: 31, blocks: 9 },
+      { lba: 31, blocks: 4 },
+      { lba: 34, blocks: 1 },
+      { lba: 35, blocks: 1 },
+      { lba: 35, blocks: 1 },
+      { lba: 36, blocks: 1 },
+    ]) ||
+  readableAboveCandidate.stderr.includes(recoveryResultPrefix)
+) {
+  throw new Error(
+    `libdvdcss readable-above boundary check failed: ${readableAboveCandidate.stderr}`,
+  );
+}
+
+const transientOutOfRange = runTestCopy(
+  "transient-out-of-range-candidate",
+  rawCompletionFault(35, 1, fixedOutOfRangeSense(35)),
+);
+const transientOutOfRangeResult = readFailureResult(
+  transientOutOfRange.stderr,
+);
+if (
+  transientOutOfRange.status !== 3 ||
+  transientOutOfRangeResult.category !== "out_of_range" ||
+  transientOutOfRangeResult.boundaryProofVersion !== undefined ||
+  transientOutOfRangeResult.firstFailingLba !== 35 ||
+  transientOutOfRangeResult.retainedImageByteCount !== 35 * 2_048 ||
+  statSync(transientOutOfRange.outputPath).size !== 35 * 2_048 ||
+  transientOutOfRange.stderr.includes(recoveryResultPrefix) ||
+  JSON.stringify(testReads(transientOutOfRange.stderr)) !==
+    JSON.stringify([
+      { lba: 0, blocks: 31 },
+      { lba: 31, blocks: 9 },
+      { lba: 31, blocks: 4 },
+      { lba: 34, blocks: 1 },
+      { lba: 35, blocks: 1 },
+    ])
+) {
+  throw new Error(
+    `libdvdcss transient boundary proof check failed: ${transientOutOfRange.stderr}`,
+  );
+}
+
+for (const [name, candidateFaults] of invalidBoundaryProbeFaults) {
+  const invalidProbe = runTestCopy(
+    `invalid-boundary-probe-${name}`,
+    [
+      rawCompletionFault(35, 1, fixedOutOfRangeSense(35)),
+      candidateFaults,
+    ].join(","),
+  );
+  const result = readFailureResult(invalidProbe.stderr);
+  if (
+    invalidProbe.status !== 3 ||
+    result.category !== "out_of_range" ||
+    result.boundaryProofVersion !== undefined ||
+    result.firstFailingLba !== 35 ||
+    result.retainedImageByteCount !== 35 * 2_048 ||
+    statSync(invalidProbe.outputPath).size !== 35 * 2_048 ||
+    invalidProbe.stderr.includes(recoveryResultPrefix) ||
+    testReads(invalidProbe.stderr).length !==
+      (name.endsWith("confirmations") ? 6 : 5)
+  ) {
+    throw new Error(
+      `libdvdcss ${name} invalid boundary probe check failed: ${invalidProbe.stderr}`,
     );
   }
 }
@@ -900,7 +1114,7 @@ for (const excludedSectorCount of [114_301, 73_400]) {
   const declaredSectorCount = boundaryLba + excludedSectorCount;
   const outOfRange = runTestCopyWithDeclaredSectors(
     `out-of-range-suffix-${excludedSectorCount}`,
-    rawCompletionFault(
+    rawTailCompletionFault(
       boundaryLba,
       "always",
       fixedOutOfRangeSense(boundaryLba),
@@ -912,9 +1126,12 @@ for (const excludedSectorCount of [114_301, 73_400]) {
     outOfRange.status !== 3 ||
     result.category !== "out_of_range" ||
     result.firstFailingLba !== boundaryLba ||
+    result.boundaryProofVersion !== "dvd-sector-boundary-proof-v1" ||
+    result.candidateConfirmationCount !== 2 ||
+    result.precedingSectorLba !== boundaryLba - 1 ||
     result.declaredByteCount !== declaredSectorCount * 2_048 ||
     result.retainedImageByteCount !== statSync(outOfRange.outputPath).size ||
-    testReads(outOfRange.stderr).length !== 2 ||
+    testReads(outOfRange.stderr).length !== 8 ||
     outOfRange.stderr.includes(recoveryResultPrefix)
   ) {
     throw new Error(

@@ -113,6 +113,7 @@ export type DvdCopyContinuation =
     };
 
 export interface DvdCopyRequest {
+  authorizeProbe?(): void | Promise<void>;
   authorizeStart?(): void | Promise<void>;
   continuation?: DvdCopyContinuation;
   devicePath: string;
@@ -229,6 +230,8 @@ interface DvdCopyChildProcess {
     null,
     DvdCopyReadablePipe,
     DvdCopyWritablePipe,
+    DvdCopyReadablePipe?,
+    DvdProbeAuthorizationWritablePipe?,
   ];
   stderr: {
     destroy(): void;
@@ -253,12 +256,30 @@ interface DvdCopyWritablePipe {
   end(chunk?: string): void;
 }
 
+interface DvdProbeAuthorizationWritablePipe {
+  destroy(): void;
+  on(event: "error", listener: (error: Error) => void): void;
+  write(
+    chunk: string,
+    callback: (error?: Error | null) => void,
+  ): boolean;
+}
+
 type SpawnDvdCopyProcess = (
   executable: string,
   arguments_: readonly string[],
   options: {
     shell: false;
-    stdio: ["ignore", "ignore", "pipe", number, "pipe", "pipe"];
+    stdio: [
+      "ignore",
+      "ignore",
+      "pipe",
+      number,
+      "pipe",
+      "pipe",
+      "pipe",
+      "pipe",
+    ];
   },
 ) => DvdCopyChildProcess;
 
@@ -396,6 +417,8 @@ export function createNodeDvdCopyRunner({
               lockDescriptor,
               "pipe",
               "pipe",
+              "pipe",
+              "pipe",
             ],
           },
         );
@@ -408,6 +431,8 @@ export function createNodeDvdCopyRunner({
       let authorizationStarted = false;
       let authorizationSettled = false;
       let authorizationBuffer = "";
+      let probeAuthorizationBuffer = "";
+      let probeAuthorizationPending = false;
       let progressBuffer = "";
       let highestCopiedBytes = 0;
       let diagnostics = "";
@@ -417,6 +442,7 @@ export function createNodeDvdCopyRunner({
       let rejectResult!: (reason: unknown) => void;
       let resolveClosed!: () => void;
       let stallTimeout: ReturnType<typeof setTimeout> | undefined;
+      let probeAuthorizationTimeout: ReturnType<typeof setTimeout> | undefined;
       const result = new Promise<DvdRecoveryResult>((resolve, reject) => {
         resolveResult = resolve;
         rejectResult = reject;
@@ -448,9 +474,12 @@ export function createNodeDvdCopyRunner({
         }
         cancellationRequested = true;
         clearTimeout(stallTimeout);
+        clearTimeout(probeAuthorizationTimeout);
         child.stderr.destroy();
         child.stdio[4].destroy();
         child.stdio[5].destroy();
+        child.stdio[6]?.destroy();
+        child.stdio[7]?.destroy();
         try {
           child.kill("SIGKILL");
         } finally {
@@ -529,6 +558,121 @@ export function createNodeDvdCopyRunner({
           }
         } catch (error) {
           rejectAuthorization(error);
+        }
+      });
+      const rejectProbeAuthorization = (error: unknown) => {
+        if (!probeAuthorizationPending) {
+          return;
+        }
+        probeAuthorizationPending = false;
+        clearTimeout(probeAuthorizationTimeout);
+        rejectOperation(error);
+        cancel();
+      };
+      const grantProbeAuthorization = () => {
+        if (
+          !probeAuthorizationPending ||
+          cancellationRequested ||
+          processClosed
+        ) {
+          return;
+        }
+        const probeAuthorization = child.stdio[7];
+        if (probeAuthorization === undefined) {
+          rejectProbeAuthorization(
+            new Error("DVD boundary probe authorization is unavailable"),
+          );
+          return;
+        }
+        const completeProbeAuthorization = (error?: Error | null) => {
+          if (error != null) {
+            rejectProbeAuthorization(error);
+            return;
+          }
+          if (
+            !probeAuthorizationPending ||
+            cancellationRequested ||
+            processClosed
+          ) {
+            return;
+          }
+          probeAuthorizationPending = false;
+          clearTimeout(probeAuthorizationTimeout);
+          armStallTimeout();
+        };
+        try {
+          probeAuthorization.write("1", completeProbeAuthorization);
+        } catch (error) {
+          rejectProbeAuthorization(error);
+        }
+      };
+      const requestProbeAuthorization = () => {
+        if (probeAuthorizationPending) {
+          rejectOperation(
+            new Error("DVD boundary probe authorization overlapped"),
+          );
+          cancel();
+          return;
+        }
+        probeAuthorizationPending = true;
+        clearTimeout(stallTimeout);
+        probeAuthorizationTimeout = setTimeout(() => {
+          rejectProbeAuthorization(
+            new Error("DVD boundary probe authorization timed out"),
+          );
+        }, COPY_START_AUTHORIZATION_TIMEOUT_MS);
+        probeAuthorizationTimeout.unref();
+        try {
+          if (request.authorizeProbe === undefined) {
+            throw new Error("DVD boundary probe authorization is unavailable");
+          }
+          const authorization = request.authorizeProbe();
+          if (authorization instanceof Promise) {
+            void authorization.then(
+              grantProbeAuthorization,
+              rejectProbeAuthorization,
+            );
+          } else {
+            grantProbeAuthorization();
+          }
+        } catch (error) {
+          rejectProbeAuthorization(error);
+        }
+      };
+      child.stdio[7]?.on("error", (error) => {
+        if (operationSettled || cancellationRequested || processClosed) {
+          return;
+        }
+        if (probeAuthorizationPending) {
+          rejectProbeAuthorization(error);
+          return;
+        }
+        rejectOperation(error);
+        cancel();
+      });
+      child.stdio[6]?.on("data", (chunk) => {
+        if (operationSettled || cancellationRequested) {
+          return;
+        }
+        probeAuthorizationBuffer += chunk.toString("utf8");
+        if (probeAuthorizationBuffer.length > 256) {
+          rejectOperation(
+            new Error("DVD boundary probe authorization is malformed"),
+          );
+          cancel();
+          return;
+        }
+        const lines = probeAuthorizationBuffer.split("\n");
+        probeAuthorizationBuffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (line !== "rip-dvd-boundary-probe-authorization-ready") {
+            rejectOperation(
+              new Error("DVD boundary probe authorization is malformed"),
+            );
+            cancel();
+            return;
+          }
+          requestProbeAuthorization();
         }
       });
       const appendDiagnostic = (text: string) => {
@@ -610,6 +754,7 @@ export function createNodeDvdCopyRunner({
         clearTimeout(authorizationReadyTimeout);
         clearTimeout(startAuthorizationTimeout);
         clearTimeout(stallTimeout);
+        clearTimeout(probeAuthorizationTimeout);
         confirmClosed();
         if (cancellationRequested) {
           rejectOperation(new Error("DVD archive copy was cancelled"));
@@ -1573,6 +1718,7 @@ export async function preserveDvdArchive({
   try {
     onProgress({ phase: "copying", progressPercent: 0 });
     const recoveryResult = await runner.copy({
+      authorizeProbe: revalidateReadFailure,
       authorizeStart: authorizeCopy,
       ...(copyContinuation === undefined
         ? {}
