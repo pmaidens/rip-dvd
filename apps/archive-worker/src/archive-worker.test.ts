@@ -1209,8 +1209,10 @@ describe("archive worker polling", () => {
     const sizeBytes = 4 * 2_048;
     const retainedPrefix = Buffer.alloc(2 * 2_048, 47);
     const copyRunner: DvdCopyRunner = {
-      copy: vi.fn(async ({ authorizeStart, outputPath }) => {
+      copy: vi.fn(async ({ authorizeProbe, authorizeStart, outputPath }) => {
         await authorizeStart?.();
+        await authorizeProbe?.();
+        await authorizeProbe?.();
         writeFileSync(outputPath, retainedPrefix);
         throw createOutOfRangeDvdReadFailure({
           declaredByteCount: sizeBytes,

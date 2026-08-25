@@ -75,6 +75,13 @@ function createMockDvdCopyChild() {
     destroy: vi.fn(),
   });
   const authorizationStart = { destroy: vi.fn(), end: vi.fn() };
+  const probeAuthorizationReady = Object.assign(new EventEmitter(), {
+    destroy: vi.fn(),
+  });
+  const probeAuthorizationGrant = {
+    destroy: vi.fn(),
+    write: vi.fn(() => true),
+  };
   return Object.assign(new EventEmitter(), {
     stderr,
     stdio: [
@@ -84,6 +91,8 @@ function createMockDvdCopyChild() {
       null,
       authorizationReady,
       authorizationStart,
+      probeAuthorizationReady,
+      probeAuthorizationGrant,
     ] as [
       null,
       null,
@@ -91,6 +100,8 @@ function createMockDvdCopyChild() {
       null,
       typeof authorizationReady,
       typeof authorizationStart,
+      typeof probeAuthorizationReady,
+      typeof probeAuthorizationGrant,
     ],
     kill: vi.fn(() => true),
     unref: vi.fn(),
@@ -763,6 +774,8 @@ describe("DVD archive publication", () => {
           expect.any(Number),
           "pipe",
           "pipe",
+          "pipe",
+          "pipe",
         ],
       },
     );
@@ -1039,6 +1052,98 @@ describe("DVD archive publication", () => {
       message: "DVD read stopped at the readable boundary",
       readFailure,
     });
+  });
+
+  it("reauthorizes source and claim state around every boundary probe", async () => {
+    const child = createMockDvdCopyChild();
+    const runner = createNodeDvdCopyRunner({
+      requireInactive: () => undefined,
+      spawnProcess: vi.fn(() => child),
+    });
+    const authorizeProbe = vi.fn(() => undefined);
+    const sizeBytes = 40 * 2_048;
+    const readFailure = {
+      ...createOutOfRangeDvdReadFailureResult({
+        declaredByteCount: sizeBytes,
+        firstFailingLba: 35,
+        requestedBlockCount: 1,
+        requestedLba: 35,
+        retainedImageByteCount: 35 * 2_048,
+      }),
+      retryOrdinal: 1,
+      boundaryProofVersion: "dvd-sector-boundary-proof-v1" as const,
+      candidateConfirmationCount: 2 as const,
+      precedingSectorLba: 34,
+    };
+    const completion = runner.copy({
+      authorizeProbe,
+      devicePath: "/dev/zero",
+      outputPath: join(
+        createOriginalsLibrary(),
+        ".proven-boundary.iso.rip-dvd-partial",
+      ),
+      sizeBytes,
+      signal: new AbortController().signal,
+      onBytesCopied: () => undefined,
+    });
+
+    child.stdio[4].emit(
+      "data",
+      Buffer.from("rip-dvd-copy-authorization-ready\n"),
+    );
+    for (let index = 0; index < 8; index += 1) {
+      child.stdio[6]!.emit(
+        "data",
+        Buffer.from("rip-dvd-boundary-probe-authorization-ready\n"),
+      );
+    }
+    child.stderr.emit(
+      "data",
+      Buffer.from(
+        `${DVD_READ_FAILURE_RESULT_PREFIX}${JSON.stringify(readFailure)}\n`,
+      ),
+    );
+    child.emit("close", 3, null);
+
+    await expect(completion).rejects.toMatchObject({ readFailure });
+    expect(authorizeProbe).toHaveBeenCalledTimes(8);
+    expect(child.stdio[7]!.write).toHaveBeenCalledTimes(8);
+    expect(child.stdio[7]!.write).toHaveBeenCalledWith("1");
+  });
+
+  it("stops boundary probing when source reauthorization fails", async () => {
+    const child = createMockDvdCopyChild();
+    const runner = createNodeDvdCopyRunner({
+      requireInactive: () => undefined,
+      spawnProcess: vi.fn(() => child),
+    });
+    const sourceChanged = new Error("DVD medium changed during probing");
+    const completion = runner.copy({
+      authorizeProbe: () => {
+        throw sourceChanged;
+      },
+      devicePath: "/dev/zero",
+      outputPath: join(
+        createOriginalsLibrary(),
+        ".rejected-boundary.iso.rip-dvd-partial",
+      ),
+      sizeBytes: 40 * 2_048,
+      signal: new AbortController().signal,
+      onBytesCopied: () => undefined,
+    });
+
+    child.stdio[4].emit(
+      "data",
+      Buffer.from("rip-dvd-copy-authorization-ready\n"),
+    );
+    child.stdio[6]!.emit(
+      "data",
+      Buffer.from("rip-dvd-boundary-probe-authorization-ready\n"),
+    );
+
+    await expect(completion).rejects.toBe(sourceChanged);
+    expect(child.stdio[7]!.write).not.toHaveBeenCalled();
+    expect(child.kill).toHaveBeenCalledWith("SIGKILL");
   });
 
   it("retains an unsupported bounded sense response as unknown evidence", async () => {

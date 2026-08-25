@@ -949,7 +949,13 @@ Job attempt. Cooperative cancellation stops the external copy, records the
 attempt `aborted`, and records the request `cancelled`. Failed or interrupted
 ordinary initial copies are moved to a `.failed` recovery path. A
 reader-confirmed out-of-range boundary instead retains only its synchronized,
-sector-aligned valid prefix as request-owned rescue evidence. Its map remains
+sector-aligned valid prefix as request-owned rescue evidence. The reader marks
+a boundary candidate proven only after it fills the readable part of the
+crossing chunk, rereads and matches the preceding sector, and receives two
+normalized out-of-range completions at the candidate LBA. The worker rechecks
+the claim, cancellation state, Optical Drive, media generation, and source
+identity before and after each probe. A conflicting or interrupted probe keeps
+the evidence unproven and the Archive Request retryable. The rescue map remains
 noncanonical until source identity and media generation pass the final
 retention fence; an interrupted or rejected staging transaction cannot be
 resumed as valid. A complete DVD image with unreadable sectors similarly
