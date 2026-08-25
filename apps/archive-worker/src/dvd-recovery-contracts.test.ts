@@ -7,6 +7,7 @@ import {
   formatUnvalidatedDvdRecovery,
   isProvenDvdBoundaryCandidate,
   parseDvdReadFailureResultProtocol,
+  type DvdReadFailureResult,
   validateDvdRecoveryResult,
   validateResumedDvdRecoveryResult,
 } from "./dvd-recovery-contracts.js";
@@ -188,6 +189,22 @@ describe("DVD recovery results", () => {
     );
 
     expect(isProvenDvdBoundaryCandidate(result)).toBe(true);
+  });
+
+  it("rejects an object that claims the proof version without the proof shape", () => {
+    const result = {
+      category: "out_of_range",
+      boundaryProofVersion: DVD_SECTOR_BOUNDARY_PROOF_VERSION,
+      candidateConfirmationCount: 1,
+      firstFailingLba: 35,
+      precedingSectorLba: 34,
+      retainedImageByteCount: 35 * 2_048,
+      requestedLba: 35,
+      requestedBlockCount: 1,
+      retryOrdinal: 1,
+    } as unknown as DvdReadFailureResult;
+
+    expect(isProvenDvdBoundaryCandidate(result)).toBe(false);
   });
 
   it.each([

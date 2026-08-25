@@ -5,6 +5,7 @@ import { runConfiguredAsyncWorker } from "@rip-dvd/worker-runtime";
 
 import { runArchiveWorker } from "./archive-worker.js";
 import { createNodeDvdCopyRunner } from "./dvd-archiver.js";
+import { createNodeDvdCompletenessProver } from "./dvd-completeness-prover.js";
 import { createLinuxOpticalDriveHardware } from "./optical-drive-hardware.js";
 import { createNodeDvdSalvageValidator } from "./dvd-salvage-validator.js";
 
@@ -24,6 +25,7 @@ await runConfiguredAsyncWorker(
         access,
         concurrency: config.archiveWorkerConcurrency,
         configuredDevicePath: config.archiveDevicePath,
+        completenessProver: createNodeDvdCompletenessProver(),
         copyRunner: createNodeDvdCopyRunner({
           maxActiveCopies: config.archiveWorkerConcurrency,
           stallTimeoutMs: config.archiveCopyStallTimeoutMs,

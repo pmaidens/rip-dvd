@@ -2338,6 +2338,7 @@ describe("end-to-end operations dashboard workflow", () => {
       1,
       archive.archivePath,
       originalsLibraryPath,
+      archive.sizeBytes,
     );
     expect(inspectPath).toHaveBeenNthCalledWith(
       2,

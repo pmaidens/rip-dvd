@@ -55,9 +55,15 @@ export function startArchiveJob(
   access: LegacySidecarDataAccess,
   disc: ReturnType<LegacySidecarDataAccess["catalog"]["registerDetectedDisc"]>,
   workerId: string,
+  totalBytes = 9,
 ) {
   access.archiveRequests.create({ detectedDiscId: disc.id });
-  const completed = completeDiscInspection(access, disc, `${workerId}-generation`);
+  const completed = completeDiscInspection(
+    access,
+    disc,
+    `${workerId}-generation`,
+    totalBytes,
+  );
   return access.archiveJobs.startForInspection(completed.id, workerId)!;
 }
 
@@ -65,6 +71,7 @@ export function completeDiscInspection(
   access: LegacySidecarDataAccess,
   disc: ReturnType<LegacySidecarDataAccess["catalog"]["registerDetectedDisc"]>,
   mediaGeneration: string,
+  totalBytes = 9,
 ) {
   const started = beginSettledDiscInspectionForTest(access, {
     opticalDriveId: disc.opticalDriveId,
@@ -78,7 +85,7 @@ export function completeDiscInspection(
     chapterCount: 0,
     audioStreamCount: 0,
     subtitleStreamCount: 0,
-    totalBytes: 9,
+    totalBytes,
   });
   const completed = access.discInspections.record(started.claim!, {
     type: "complete",

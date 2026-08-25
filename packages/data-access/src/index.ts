@@ -20,11 +20,14 @@ export {
 } from "./archive-integrity.js";
 export {
   archiveBoundaryEvidenceFromRecord,
+  createCorrectedDvdArchiveBoundaryEvidence,
   createNormalDvdArchiveBoundaryEvidence,
   DVD_ARCHIVE_BOUNDARY_POLICY_VERSION,
 } from "./archive-boundary.js";
 export type {
   ArchiveBoundaryEvidence,
+  CorrectedDvdArchiveBoundaryEvidence,
+  DvdArchiveBoundaryOutOfRangeEvidence,
   NormalDvdArchiveBoundaryEvidence,
 } from "./archive-boundary.js";
 export { normalizeMediaItemSearchTitle } from "./media-item-title-search.js";

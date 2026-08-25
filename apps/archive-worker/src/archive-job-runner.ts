@@ -9,6 +9,7 @@ import type { OpticalDriveHardware } from "./archive-worker-contracts.js";
 import { confirmAuthorizedDrive } from "./authorized-optical-drive.js";
 import type { CompletedDiscInspection } from "./disc-inspection-runner.js";
 import type { DvdSalvageValidator } from "./dvd-salvage-validator.js";
+import type { DvdCompletenessProver } from "./dvd-completeness-prover.js";
 import type { DvdRescueWorkspaceLock } from "./dvd-rescue-workspace-lock.js";
 import {
   DvdArchiveReadFailureError,
@@ -21,6 +22,7 @@ export interface RunArchiveJobOptions {
   access: DataAccess;
   completed: CompletedDiscInspection;
   configuredCanonicalPath: string;
+  completenessProver?: DvdCompletenessProver;
   copyRunner: DvdCopyRunner;
   hardware: OpticalDriveHardware;
   log(message: string): void;
@@ -35,6 +37,7 @@ export async function runArchiveJob({
   access,
   completed,
   configuredCanonicalPath,
+  completenessProver,
   copyRunner,
   hardware,
   log,
@@ -135,6 +138,7 @@ export async function runArchiveJob({
             archiveSignal.throwIfAborted();
           },
           authorizeMutation: authorizeClaim,
+          completenessProver,
           devicePath: binding.drive.devicePath,
           expectedTitleMap: scanData,
           fingerprint: disc.fingerprint,
@@ -154,7 +158,8 @@ export async function runArchiveJob({
           access.archiveJobs.publish(claim, {
             archivePath: preserved.archivePath,
             boundaryEvidence:
-              createNormalDvdArchiveBoundaryEvidence(archiveSizeBytes),
+              preserved.correctedBoundaryEvidence ??
+                createNormalDvdArchiveBoundaryEvidence(archiveSizeBytes),
             integrityEvidence: preserved.integrityEvidence,
             sizeBytes: preserved.sizeBytes,
           });

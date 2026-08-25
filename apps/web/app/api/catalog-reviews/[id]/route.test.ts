@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { describe, expect, expectTypeOf, it, vi } from "vitest";
 import {
   createCleanReadArchiveIntegrityEvidence,
+  createCorrectedDvdArchiveBoundaryEvidence,
   createNormalDvdArchiveBoundaryEvidence,
   MAX_MEDIA_ITEM_HIERARCHY_DEPTH,
   type EncodeJobStatus,
@@ -83,6 +84,83 @@ describe("Catalog Review API", () => {
     expect(JSON.stringify(review).toLowerCase()).not.toContain(
       "capacity correction",
     );
+  });
+
+  it("carries corrected archive-boundary provenance into Catalog Review", async () => {
+    const access = dataAccessFixture.create();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/corrected-boundary",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "corrected-boundary",
+      volumeLabel: "CORRECTED_BOUNDARY",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    const reportedSizeBytes = 8 * 2_048;
+    const publishedSizeBytes = 6 * 2_048;
+    const claim = startArchiveJob(
+      access,
+      disc,
+      "corrected-boundary-worker",
+      reportedSizeBytes,
+    );
+    access.archiveJobs.publish(claim, {
+      archivePath: "/media/originals/corrected-boundary.iso",
+      boundaryEvidence: createCorrectedDvdArchiveBoundaryEvidence({
+        reportedSizeBytes,
+        publishedSizeBytes,
+        firstExcludedLba: 6,
+        maximumReferencedLba: 5,
+        outOfRangeEvidence: {
+          classifierVersion: "scsi-read-classifier-v1",
+          scsiStatus: 2,
+          hostStatus: 0,
+          driverStatus: 8,
+          senseResponseCode: 0x70,
+          senseKey: 0x05,
+          asc: 0x21,
+          ascq: 0,
+        },
+      }),
+      integrityEvidence: createCleanReadArchiveIntegrityEvidence(
+        "test-clean-v1",
+      ),
+      sizeBytes: publishedSizeBytes,
+    });
+    const archive = access.catalog.listOriginalDiscArchives()[0]!;
+
+    const response = await createCatalogReviewRoute(
+      new Request(
+        `http://localhost:3000/api/catalog-reviews/${archive.id}`,
+      ),
+      archive.id,
+      () => access,
+      () => "http://localhost:3000",
+    );
+    const review = await response.json();
+
+    expect(review.archive.boundaryEvidence).toEqual({
+      policyVersion: "dvd-archive-boundary-v1",
+      reportedSizeBytes,
+      publishedSizeBytes,
+      excludedSectorCount: 2,
+      firstExcludedLba: 6,
+      maximumReferencedLba: 5,
+      outOfRangeEvidence: {
+        classifierVersion: "scsi-read-classifier-v1",
+        scsiStatus: 2,
+        hostStatus: 0,
+        driverStatus: 8,
+        senseResponseCode: 0x70,
+        senseKey: 0x05,
+        asc: 0x21,
+        ascq: 0,
+      },
+    });
   });
 
   it("returns an archived DVD's raw title map separately from reviewed catalog data", async () => {

@@ -297,6 +297,16 @@ it("migrates historical Original Disc Archives with null boundary evidence", () 
       boundaryReportedSizeBytes: null,
       boundaryPublishedSizeBytes: null,
       boundaryExcludedSectorCount: null,
+      boundaryFirstExcludedLba: null,
+      boundaryMaximumReferencedLba: null,
+      boundaryReadFailureClassifierVersion: null,
+      boundaryReadFailureScsiStatus: null,
+      boundaryReadFailureHostStatus: null,
+      boundaryReadFailureDriverStatus: null,
+      boundaryReadFailureSenseResponseCode: null,
+      boundaryReadFailureSenseKey: null,
+      boundaryReadFailureAsc: null,
+      boundaryReadFailureAscq: null,
     }),
   ]);
   migratedAccess.close();
