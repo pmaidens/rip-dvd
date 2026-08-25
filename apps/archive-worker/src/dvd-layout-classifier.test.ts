@@ -882,10 +882,12 @@ function writeSyntheticUdfLayout(
   image: Buffer,
   {
     completeNavigation = false,
+    extraEmptyDirectoryName,
     payloadTitleVobStartLba,
     volumeLastLba,
   }: {
     completeNavigation?: boolean;
+    extraEmptyDirectoryName?: string;
     payloadTitleVobStartLba?: number;
     volumeLastLba?: number;
   } = {},
@@ -991,6 +993,13 @@ function writeSyntheticUdfLayout(
       fileCharacteristics: 2,
       name: "VIDEO_TS",
     }),
+    ...(extraEmptyDirectoryName === undefined
+      ? []
+      : [udfFileIdentifier({
+          childLba: 15,
+          fileCharacteristics: 2,
+          name: extraEmptyDirectoryName,
+        })]),
   ]);
   writeUdfFileEntry(image, {
     dataLba: 2,
@@ -998,6 +1007,17 @@ function writeSyntheticUdfLayout(
     fileType: 4,
     informationLength: rootDirectoryBytes,
   });
+  if (extraEmptyDirectoryName !== undefined) {
+    const extraDirectoryBytes = writeUdfDirectory(image, 316, [
+      udfFileIdentifier({ childLba: 1, fileCharacteristics: 8 }),
+    ]);
+    writeUdfFileEntry(image, {
+      dataLba: 16,
+      fileEntryLba: 315,
+      fileType: 4,
+      informationLength: extraDirectoryBytes,
+    });
+  }
   const videoDirectoryEntries = payloadTitleVobStartLba === undefined
     ? [
         { childLba: 5, name: "VIDEO_TS.IFO" },
@@ -1300,12 +1320,14 @@ function syntheticCompleteDvdImage({
     cells: [{ firstSector: 0, lastSector: 5 }],
     programStartCells: [1],
   }],
+  udfExtraEmptyDirectoryName,
   udfTitleVobStartLba = 400,
 }: {
   globalTitles?: readonly SyntheticGlobalTitle[];
   includeIso: boolean;
   includeUdf: boolean;
   programChains?: readonly SyntheticProgramChain[];
+  udfExtraEmptyDirectoryName?: string;
   udfTitleVobStartLba?: number;
 }): Buffer {
   const image = Buffer.alloc(700 * DVD_SECTOR_SIZE_BYTES);
@@ -1349,6 +1371,7 @@ function syntheticCompleteDvdImage({
   if (includeUdf) {
     writeSyntheticUdfLayout(image, {
       completeNavigation: true,
+      extraEmptyDirectoryName: udfExtraEmptyDirectoryName,
       payloadTitleVobStartLba: udfTitleVobStartLba,
       volumeLastLba: 599,
     });
@@ -1397,6 +1420,7 @@ function createSyntheticCompleteDvdImage(options: {
   includeIso: boolean;
   includeUdf: boolean;
   programChains?: readonly SyntheticProgramChain[];
+  udfExtraEmptyDirectoryName?: string;
   udfTitleVobStartLba?: number;
 }): {
   imagePath: string;
@@ -2553,6 +2577,38 @@ describe("retained DVD image layout completeness", () => {
     );
   });
 
+  it("rejects UDF unallocated space that overlaps a partition", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    for (const descriptorLba of [260, 276]) {
+      const descriptor = image.subarray(
+        descriptorLba * DVD_SECTOR_SIZE_BYTES,
+        (descriptorLba + 1) * DVD_SECTOR_SIZE_BYTES,
+      );
+      descriptor.fill(0);
+      descriptor.writeUInt32LE(1, 20);
+      descriptor.writeUInt32LE(DVD_SECTOR_SIZE_BYTES, 24);
+      descriptor.writeUInt32LE(400, 28);
+      writeUdfTag(descriptor, 7, descriptorLba);
+      const terminator = image.subarray(
+        (descriptorLba + 1) * DVD_SECTOR_SIZE_BYTES,
+        (descriptorLba + 2) * DVD_SECTOR_SIZE_BYTES,
+      );
+      terminator.fill(0);
+      writeUdfTag(terminator, 8, descriptorLba + 1);
+    }
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow(
+      "DVD UDF unallocated space overlaps allocated layout",
+    );
+  });
+
   it("accepts agreeing ISO and UDF views", async () => {
     const fixture = createSyntheticCompleteDvdImage({
       includeIso: true,
@@ -2563,6 +2619,19 @@ describe("retained DVD image layout completeness", () => {
       candidateBoundaryLba: 600,
       imagePath: fixture.imagePath,
     })).resolves.toEqual({ maximumReferencedLba: 599 });
+  });
+
+  it("rejects ISO and UDF views with different empty directories", async () => {
+    const fixture = createSyntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: true,
+      udfExtraEmptyDirectoryName: "EXTRA",
+    });
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD filesystem views disagree");
   });
 
   it("rejects conflicting ISO and UDF DVD-Video layouts", async () => {
@@ -3510,6 +3579,45 @@ describe("retained DVD image layout completeness", () => {
     })).rejects.toThrow("DVD VOB interleaved-unit reference is malformed");
   });
 
+  it("fails closed when a PREU pack declares an ILVU extent", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    const dsiOffset = 400 * DVD_SECTOR_SIZE_BYTES +
+      DVD_NAV_DSI_PAYLOAD_OFFSET;
+    image.writeUInt16BE(0xb000, dsiOffset + 32);
+    image.writeUInt32BE(2, dsiOffset + 34);
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD VOB interleaved-unit reference is malformed");
+  });
+
+  it("fails closed when an ILVU reference targets a PREU pack", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    const firstDsiOffset = 400 * DVD_SECTOR_SIZE_BYTES +
+      DVD_NAV_DSI_PAYLOAD_OFFSET;
+    image.writeUInt16BE(0x7000, firstDsiOffset + 32);
+    image.writeUInt32BE(2, firstDsiOffset + 34);
+    image.writeUInt32BE(3, firstDsiOffset + 38);
+    image.writeUInt16BE(1, firstDsiOffset + 42);
+    const secondDsiOffset = 403 * DVD_SECTOR_SIZE_BYTES +
+      DVD_NAV_DSI_PAYLOAD_OFFSET;
+    image.writeUInt16BE(0xb000, secondDsiOffset + 32);
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD VOB interleaved-unit size is malformed");
+  });
+
   it("fails closed when a next-ILVU address points backward", async () => {
     const image = syntheticCompleteDvdImage({
       includeIso: true,
@@ -4096,6 +4204,37 @@ describe("DVD layout damage classification", () => {
       unreadableSectorRanges: [{ startLba: 50, sectorCount: 1 }],
     })).resolves.toEqual({
       affectedTitleBadSectorCounts: [],
+      outcome: "accepted",
+    });
+  });
+
+  it("preserves salvage classification for an interleaved title cell", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: false,
+    });
+    const playbackOffset = 360 * DVD_SECTOR_SIZE_BYTES +
+      2 * DVD_SECTOR_SIZE_BYTES + 16 + 237;
+    image[playbackOffset] = image[playbackOffset]! | 0x04;
+    image.writeUInt32BE(2, playbackOffset + 12);
+    image.copy(
+      image,
+      370 * DVD_SECTOR_SIZE_BYTES,
+      360 * DVD_SECTOR_SIZE_BYTES,
+      366 * DVD_SECTOR_SIZE_BYTES,
+    );
+    const fixture = writeFixture(image, 402);
+
+    await expect(classifyDvdImageDamage({
+      ...fixture,
+      expectedByteCount: fixture.sizeBytes,
+      unreadableSectorRanges: [{ startLba: 402, sectorCount: 1 }],
+    })).resolves.toEqual({
+      affectedTitleBadSectorCounts: [{
+        badSectorCount: 1,
+        titleNumber: 1,
+        titleSetNumber: 1,
+      }],
       outcome: "accepted",
     });
   });

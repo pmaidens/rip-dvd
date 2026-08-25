@@ -3120,7 +3120,7 @@ async function analyzeDvdImageLayout({
         DVD_NAV_DSI_PAYLOAD_OFFSET + 42,
       );
       const terminalInterleavedUnit = nextInterleavedUnit === 0xffff_ffff;
-      const hasInterleavedUnit = interleavedUnitKind !== 0;
+      const hasInterleavedUnit = interleavedUnitKind === 0x4000;
       const unsupportedNextInterleavedUnitDirection =
         nextInterleavedUnit !== 0 &&
         !terminalInterleavedUnit &&
@@ -3712,22 +3712,25 @@ async function analyzeDvdImageLayout({
       const firstVobuIdentity = context.navigationIdentities.get(
         cellVobuStarts[0] ?? -1,
       );
+      const hasCompleteNavigationIdentity =
+        firstVobuIdentity?.endSector !== undefined;
       if (
         cellAddress === undefined ||
         cellAddress.firstSector !== cell.firstSector ||
         cellAddress.lastSector !== cell.lastSector ||
         cellVobuStarts[0] !== cell.firstSector ||
         cellVobuStarts.at(-1) !== cell.lastVobuStartSector ||
-        cellVobuStarts.some((sector) =>
-          context.navigationIdentities.get(sector)?.interleaved !==
-            cell.interleaved
-        ) ||
-        (cell.interleaved
-          ? firstVobuIdentity?.interleavedUnitSectorCount === undefined ||
-            cell.firstSector +
-                firstVobuIdentity.interleavedUnitSectorCount - 1 !==
-              cell.firstIlvuEndSector
-          : cell.firstIlvuEndSector !== cell.firstSector)
+        (hasCompleteNavigationIdentity &&
+          (cellVobuStarts.some((sector) =>
+            context.navigationIdentities.get(sector)?.interleaved !==
+              cell.interleaved
+          ) ||
+            (cell.interleaved
+              ? firstVobuIdentity.interleavedUnitSectorCount === undefined ||
+                cell.firstSector +
+                    firstVobuIdentity.interleavedUnitSectorCount - 1 !==
+                  cell.firstIlvuEndSector
+              : cell.firstIlvuEndSector !== cell.firstSector)))
       ) {
         throw new Error("DVD program chain VOBU relationships are malformed");
       }
@@ -4928,9 +4931,14 @@ async function analyzeDvdImageLayout({
       descriptorBodies: readonly string[];
       logicalVolume: UdfLogicalVolume;
       partitions: ReadonlyMap<number, UdfPartition>;
+      unallocatedExtents: readonly { endLba: number; startLba: number }[];
     }> => {
       const sequencePartitions = new Map<number, UdfPartition>();
       const descriptorBodies: string[] = [];
+      const unallocatedExtents: Array<{
+        endLba: number;
+        startLba: number;
+      }> = [];
       let sequenceLogicalVolume: UdfLogicalVolume | undefined;
       let sawPrimaryVolumeDescriptor = false;
       let sawTerminator = false;
@@ -5092,7 +5100,6 @@ async function analyzeDvdImageLayout({
           ) {
             throw new Error("DVD UDF unallocated-space descriptor is malformed");
           }
-          const allocations = [];
           for (
             let allocation = 0;
             allocation < allocationCount;
@@ -5109,22 +5116,7 @@ async function analyzeDvdImageLayout({
                 "DVD UDF unallocated-space descriptor is malformed",
               );
             }
-            allocations.push(extent);
-          }
-          allocations.sort((left, right) =>
-            left.startLba - right.startLba || left.endLba - right.endLba
-          );
-          for (
-            let allocation = 1;
-            allocation < allocations.length;
-            allocation += 1
-          ) {
-            if (
-              allocations[allocation]!.startLba <
-                allocations[allocation - 1]!.endLba
-            ) {
-              throw new Error("DVD UDF unallocated-space extents overlap");
-            }
+            unallocatedExtents.push(extent);
           }
         }
       }
@@ -5138,10 +5130,22 @@ async function analyzeDvdImageLayout({
           `DVD UDF ${sequenceName} volume descriptor sequence is incomplete`,
         );
       }
+      unallocatedExtents.sort((left, right) =>
+        left.startLba - right.startLba || left.endLba - right.endLba
+      );
+      for (let index = 1; index < unallocatedExtents.length; index += 1) {
+        if (
+          unallocatedExtents[index]!.startLba <
+            unallocatedExtents[index - 1]!.endLba
+        ) {
+          throw new Error("DVD UDF unallocated-space extents overlap");
+        }
+      }
       return {
         descriptorBodies,
         logicalVolume: sequenceLogicalVolume,
         partitions: sequencePartitions,
+        unallocatedExtents,
       };
     };
     const mainSequence = await parseVolumeDescriptorSequence(
@@ -5161,6 +5165,7 @@ async function analyzeDvdImageLayout({
       throw new Error("DVD UDF main and reserve descriptor sequences disagree");
     }
     const partitions = mainSequence.partitions;
+    const unallocatedExtents = mainSequence.unallocatedExtents;
     const logicalVolume = mainSequence.logicalVolume;
     const orderedPartitions = [...partitions.values()].sort((left, right) =>
       left.startLba - right.startLba
@@ -5617,6 +5622,35 @@ async function analyzeDvdImageLayout({
       }
     };
     await parseUdfNode(rootIcb, "", rootIcb, true);
+    const allocatedUdfSpace = [
+      ...[...partitions.values()].map((partition) => ({
+        endLba: partition.startLba + partition.sectorCount,
+        startLba: partition.startLba,
+      })),
+      ...allocatedExtents.map((extent) => ({
+        endLba: extent.startLba + extent.sectorCount,
+        startLba: extent.startLba,
+      })),
+    ].sort((left, right) =>
+      left.startLba - right.startLba || left.endLba - right.endLba
+    );
+    let allocatedIndex = 0;
+    for (const unallocatedExtent of unallocatedExtents) {
+      while (
+        allocatedUdfSpace[allocatedIndex] !== undefined &&
+        allocatedUdfSpace[allocatedIndex]!.endLba <=
+          unallocatedExtent.startLba
+      ) {
+        allocatedIndex += 1;
+      }
+      if (
+        allocatedUdfSpace[allocatedIndex] !== undefined &&
+        allocatedUdfSpace[allocatedIndex]!.startLba <
+          unallocatedExtent.endLba
+      ) {
+        throw new Error("DVD UDF unallocated space overlaps allocated layout");
+      }
+    }
     return {
       damagedRecognition: false,
       hasUdf: true,
@@ -5998,6 +6032,7 @@ async function analyzeDvdImageLayout({
     }
     return JSON.stringify({
       filesystemLayout: canonicalFilesystemLayout(dvdFiles),
+      filesystemNodes: [...view.normalizedNodePaths].sort(),
       globalTitles,
       menuNavigation,
     });
