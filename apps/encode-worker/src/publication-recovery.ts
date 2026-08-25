@@ -26,6 +26,8 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  decodeArchivedDvdTitles,
+  decodeDvdTitleMap,
   ENCODE_JOB_LEASE_DURATION_MS,
   type DataAccess,
   type DiscSelection,
@@ -41,7 +43,10 @@ import {
   sameEncodeOutputInode,
   sameEncodeOutputMutationSnapshot,
 } from "./encode-output-filesystem-identity.js";
-import type { EncodeOutputValidator } from "./encode-output-validator.js";
+import type {
+  EncodeOutputValidator,
+  EncodeOutputVobSubExpectation,
+} from "./encode-output-validator.js";
 import type { HandBrakeRunner } from "./handbrake-runner.js";
 import { normalizeErrorMessage } from "./normalize-error-message.js";
 import { createProgressParser } from "./progress-parser.js";
@@ -1350,7 +1355,39 @@ function resolveClaimInput(access: DataAccess, claim: RunningEncodeJob) {
     ) {
       throw new Error("Encode Job has invalid DVD video profile settings");
     }
-    return { archive, preset: preset.trim(), selection };
+    const sourceIdentity = selection.sourceIdentity;
+    let expectedVobSubStreams:
+      | readonly EncodeOutputVobSubExpectation[]
+      | undefined;
+    if (sourceIdentity.kind !== "main_feature") {
+      const detectedDisc = snapshot.catalog.listDetectedDiscs(undefined, {
+        ids: [archive.detectedDiscId],
+      })[0];
+      const selectedTitle = decodeArchivedDvdTitles(
+        detectedDisc?.scanData,
+      )?.find((title) => title.number === sourceIdentity.titleNumber);
+      if (selectedTitle === undefined) {
+        throw new Error("Encode Job DVD title metadata is unavailable");
+      }
+      const selectedCurrentTitle = decodeDvdTitleMap(
+        detectedDisc?.scanData,
+      )?.titles.find((title) => title.number === sourceIdentity.titleNumber);
+      expectedVobSubStreams =
+        selectedCurrentTitle === undefined
+          ? selectedTitle.subtitles.map(() => ({}))
+          : selectedCurrentTitle.subtitles.map((subtitle) => ({
+              ...(subtitle.content === undefined
+                ? {}
+                : { contentLabel: subtitle.content }),
+              languageCode: subtitle.languageCode ?? "und",
+            }));
+    }
+    return {
+      archive,
+      expectedVobSubStreams,
+      preset: preset.trim(),
+      selection,
+    };
   });
 }
 
@@ -1472,6 +1509,8 @@ export async function executeEncodeClaim(
       "av_mkv",
       "--preset",
       input.preset,
+      "--all-subtitles",
+      "--subtitle-burned=none",
     ];
     renewClaim();
     await options.runner.run({
@@ -1490,7 +1529,11 @@ export async function executeEncodeClaim(
     ) {
       throw new Error("HandBrake did not produce a complete regular output file");
     }
-    await options.outputValidator.validate(partialPath, signal);
+    await options.outputValidator.validate(partialPath, signal, {
+      ...(input.expectedVobSubStreams === undefined
+        ? {}
+        : { expectedVobSubStreams: input.expectedVobSubStreams }),
+    });
     signal.throwIfAborted();
     await syncPath(partialPath);
     publishedOutputMetadata = partialMetadata;

@@ -7,14 +7,14 @@ import {
 } from "./handbrake-presets";
 
 describe("HandBrake presets", () => {
-  it("contains every unique HandBrake 1.6.1 built-in preset", () => {
+  it("contains every unique user-facing HandBrake 1.9.2 built-in preset", () => {
     expect(HANDBRAKE_PRESET_GROUPS.map((group) => group.label)).toEqual([
       "General",
       "Web",
       "Devices",
       "Matroska",
       "Hardware",
-      "Production",
+      "Professional",
     ]);
     expect(HANDBRAKE_PRESETS).toHaveLength(89);
     expect(new Set(HANDBRAKE_PRESETS).size).toBe(HANDBRAKE_PRESETS.length);

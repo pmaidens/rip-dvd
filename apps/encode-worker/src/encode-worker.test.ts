@@ -765,6 +765,7 @@ type TestSelection =
 function createQueuedJob(
   selectionInput: TestSelection = { kind: "main_feature" },
   outputRelativePath = "Example.mkv",
+  subtitleCount = 0,
 ) {
   const root = mkdtempSync(join(tmpdir(), "rip-dvd-encode-worker-"));
   temporaryDirectories.push(root);
@@ -794,7 +795,11 @@ function createQueuedJob(
           durationSeconds: 3_600,
           chapters: 12,
           audioStreams: [],
-          subtitles: [],
+          subtitles: Array.from({ length: subtitleCount }, (_, id) => ({
+            content: id % 2 === 0 ? "Normal" : "Director",
+            id,
+            languageCode: id % 2 === 0 ? "en" : "fr",
+          })),
         },
       ],
     },
@@ -1121,6 +1126,8 @@ describe("encode worker polling", () => {
       "av_mkv",
       "--preset",
       "Fast 480p30",
+      "--all-subtitles",
+      "--subtitle-burned=none",
     ]);
     expect(observedProgress).toEqual([
       expect.objectContaining({
@@ -1207,8 +1214,11 @@ describe("encode worker polling", () => {
     selection,
     selectionArguments,
   }) => {
-    const fixture = createQueuedJob(selection);
+    const fixture = createQueuedJob(selection, "Example.mkv", 2);
     const progressSnapshots: unknown[] = [];
+    const outputValidator: EncodeOutputValidator = {
+      validate: vi.fn(async () => {}),
+    };
     const runner: HandBrakeRunner = {
       run: vi.fn(async ({ arguments_, onOutput }) => {
         const outputPath = arguments_[arguments_.indexOf("-o") + 1]!;
@@ -1226,6 +1236,7 @@ describe("encode worker polling", () => {
       log: vi.fn(),
       mediaLibraryPath: fixture.mediaLibraryPath,
       originalsLibraryPath: fixture.originalsLibraryPath,
+      outputValidator,
       runner,
       signal: new AbortController().signal,
     });
@@ -1233,6 +1244,20 @@ describe("encode worker polling", () => {
     const request = vi.mocked(runner.run).mock.calls[0]![0];
     expect(request.arguments_.slice(0, selectionArguments.length)).toEqual(
       selectionArguments,
+    );
+    expect(request.arguments_.slice(-2)).toEqual([
+      "--all-subtitles",
+      "--subtitle-burned=none",
+    ]);
+    expect(outputValidator.validate).toHaveBeenCalledWith(
+      request.outputPath,
+      expect.anything(),
+      {
+        expectedVobSubStreams: [
+          { contentLabel: "Normal", languageCode: "en" },
+          { contentLabel: "Director", languageCode: "fr" },
+        ],
+      },
     );
     expect(progressSnapshots).toEqual([
       expect.objectContaining({

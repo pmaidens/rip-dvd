@@ -6,6 +6,20 @@ if [ ! -x /usr/local/bin/rip-dvd-handbrake ]; then
   printf 'Encode worker CSS-enabled HandBrake command is unavailable\n' >&2
   exit 1
 fi
+handbrake_package_version="$(
+  dpkg-query --show --showformat='${Version}' handbrake-cli 2>/dev/null
+)" || {
+  printf 'Encode worker HandBrake package version is unavailable\n' >&2
+  exit 1
+}
+case "$handbrake_package_version" in
+  "${RIP_DVD_HANDBRAKE_VERSION}"+*) ;;
+  *)
+    printf 'Encode worker HandBrake package version is unsupported: %s\n' \
+      "$handbrake_package_version" >&2
+    exit 1
+    ;;
+esac
 for library in \
   /usr/local/lib/libdvdcss.so.2 \
   /usr/local/lib/libdvdcss-sg-io.so.0

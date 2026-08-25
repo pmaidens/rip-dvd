@@ -156,7 +156,11 @@ class RuntimeScaffoldTests(unittest.TestCase):
             "COPY docker/lsdvd-with-css.sh /usr/local/bin/rip-dvd-lsdvd",
             dockerfile,
         )
-        self.assertIn("chmod 0555 /usr/local/bin/rip-dvd-lsdvd", dockerfile)
+        self.assertIn(
+            "chmod 0555 /usr/local/bin/rip-dvd-handbrake "
+            "/usr/local/bin/rip-dvd-lsdvd",
+            dockerfile,
+        )
         self.assertIn("LD_LIBRARY_PATH=/usr/local/lib", command)
         self.assertIn("exec /usr/bin/lsdvd", command)
 
@@ -164,7 +168,7 @@ class RuntimeScaffoldTests(unittest.TestCase):
         dockerfile = (ROOT / "docker" / "runtime.Dockerfile").read_text()
         entrypoint = (ROOT / "docker" / "encode-worker-entrypoint.sh").read_text()
         encode_runtime = dockerfile.split(
-            "FROM worker-runtime-base AS encode-worker", maxsplit=1
+            "FROM encode-worker-runtime-base AS encode-worker", maxsplit=1
         )[1]
 
         self.assertIn(
@@ -183,6 +187,12 @@ class RuntimeScaffoldTests(unittest.TestCase):
             encode_runtime,
         )
         self.assertIn("/usr/local/bin/rip-dvd-handbrake", entrypoint)
+        self.assertIn('RIP_DVD_HANDBRAKE_VERSION="1.9.2"', dockerfile)
+        self.assertIn(
+            "COPY --from=worker-runtime-base --chown=node:node /app /app",
+            dockerfile,
+        )
+        self.assertIn("handbrake_package_version", entrypoint)
         self.assertIn("/usr/local/lib/libdvdcss.so.2", entrypoint)
         self.assertIn("worker-priority-entrypoint.sh", entrypoint)
 

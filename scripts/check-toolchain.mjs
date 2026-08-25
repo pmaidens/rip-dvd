@@ -36,9 +36,9 @@ if (packageJson.engines.node !== expectedEngine) {
 const dockerPins = dockerfile.match(
   new RegExp(`FROM node:${nodeVersion.replaceAll(".", "\\.")}-`, "g"),
 );
-if (dockerPins?.length !== 2) {
+if (dockerPins?.length !== 3) {
   mismatches.push(
-    `docker/runtime.Dockerfile must pin both build and runtime images to Node ${nodeVersion}`,
+    `docker/runtime.Dockerfile must pin all three build and runtime images to Node ${nodeVersion}`,
   );
 }
 
