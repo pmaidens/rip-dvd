@@ -4816,9 +4816,31 @@ async function analyzeDvdImageLayout({
     );
     const nsrIndex = nsrIndexes[0] ?? -1;
     if (nsrIndex === -1) {
-      if (recognitionDescriptors.some(({ identifier }) =>
-        identifier === "BEA01" || identifier === "TEA01"
-      )) {
+      const hasRecognitionFragment = recognitionDescriptors.some(
+        ({ content, identifier }) => {
+          const sevenBitIdentifier = Buffer.from(
+            content.subarray(1, 6).map((byte) => byte & 0x7f),
+          ).toString("latin1");
+          return identifier === "BEA01" || identifier === "TEA01" ||
+            ["BEA01", "NSR02", "NSR03", "TEA01"].includes(
+              sevenBitIdentifier,
+            );
+        },
+      );
+      let hasAnchorEvidence = false;
+      if (
+        policy.requireDvdReadOnlyUdfProfile &&
+        totalSectorCount > 256
+      ) {
+        const possibleAnchor = await readRawSector(256);
+        try {
+          validateUdfTag(possibleAnchor, [2], 256);
+          hasAnchorEvidence = true;
+        } catch {
+          hasAnchorEvidence = false;
+        }
+      }
+      if (hasRecognitionFragment || hasAnchorEvidence) {
         throw new Error("DVD UDF recognition sequence is incomplete");
       }
       return {

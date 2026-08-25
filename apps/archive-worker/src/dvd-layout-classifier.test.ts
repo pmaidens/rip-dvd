@@ -2215,6 +2215,25 @@ describe("retained DVD image layout completeness", () => {
     })).rejects.toThrow("DVD UDF recognition sequence is incomplete");
   });
 
+  it("rejects a malformed UDF recognition sequence behind an ISO view", async () => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: true,
+      includeUdf: true,
+    });
+    for (const lba of [18, 19, 20]) {
+      for (let offset = 1; offset < 6; offset += 1) {
+        image[lba * DVD_SECTOR_SIZE_BYTES + offset] =
+          image[lba * DVD_SECTOR_SIZE_BYTES + offset]! | 0x80;
+      }
+    }
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow("DVD UDF recognition sequence is incomplete");
+  });
+
   it("rejects a reserve UDF partition that crosses the candidate boundary", async () => {
     const image = syntheticCompleteDvdImage({
       includeIso: false,
