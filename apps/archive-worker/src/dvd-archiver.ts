@@ -134,7 +134,7 @@ export interface DvdCopyRunner {
   isActive(devicePath: string, outputPath: string): boolean;
   withDeviceInactive(
     devicePath: string,
-    mutation: () => undefined,
+    mutation: () => void | Promise<void>,
   ): Promise<void>;
   waitForInactive(devicePath: string, outputPath: string): Promise<void>;
 }
@@ -1004,7 +1004,7 @@ function requireDeviceInactive(devicePath: string): void {
 
 async function withExclusiveDeviceInactivity(
   devicePath: string,
-  mutation: () => undefined,
+  mutation: () => void | Promise<void>,
   requireInactive: (devicePath: string) => void,
   spawnLockProcess: SpawnDvdDeviceLockProcess,
   timeoutMs: number,
@@ -1092,11 +1092,11 @@ async function withExclusiveDeviceInactivity(
     );
   }
   try {
-    mutation();
+    await mutation();
   } finally {
     // Descriptor-mode `flock(1)` locks the inherited open-file description.
     // Retaining the parent's descriptor after that short process exits keeps
-    // exclusion authoritative for the whole synchronous mutation.
+    // exclusion authoritative until the guarded mutation settles.
     closeSync(lockDescriptor);
   }
 }
@@ -1165,6 +1165,66 @@ function discoverAttemptPartialPaths(root: string, digest: string): string[] {
   return partialPaths.sort();
 }
 
+async function quarantineCancelledCorrectedPublication({
+  archiveRequestId,
+  fingerprint,
+  root,
+  sizeBytes,
+}: {
+  archiveRequestId: string;
+  fingerprint: string;
+  root: string;
+  sizeBytes: number;
+}): Promise<void> {
+  const safeSizeBytes = requireDvdContentSize(sizeBytes);
+  const archivePath = join(root, `${dvdArchiveStem(fingerprint)}.iso`);
+  if (
+    dirname(archivePath) !== root ||
+    Buffer.byteLength(archivePath) > MAX_ARCHIVE_PATH_BYTES ||
+    Buffer.byteLength(`${archivePath}.failed`) > MAX_ARCHIVE_PATH_BYTES
+  ) {
+    throw new Error("Archive path escaped the originals library");
+  }
+  const workspace = await loadDvdRescueWorkspace(root, {
+    archiveRequestId,
+    fingerprint,
+    sizeBytes: safeSizeBytes,
+  });
+  if (
+    workspace === null ||
+    workspace.recoveryResult !== null ||
+    workspace.boundaryFailure === null ||
+    !isProvenDvdBoundaryCandidate(workspace.boundaryFailure)
+  ) {
+    return;
+  }
+  const publishedSizeBytes =
+    workspace.boundaryFailure.firstFailingLba * DVD_SECTOR_SIZE_BYTES;
+  const archive = await optionalMetadata(archivePath);
+  if (archive === null) {
+    return;
+  }
+  if (
+    !matchesRescueImageIdentity(
+      archive,
+      workspace.imageFilesystemIdentity,
+      publishedSizeBytes,
+    )
+  ) {
+    throw new Error(
+      "Existing corrected DVD archive conflicts with cancelled rescue state",
+    );
+  }
+  await quarantinePublishedArchive(
+    archivePath,
+    workspace.imageFilesystemIdentity,
+  );
+}
+
+type CancelledDvdArchiveIdentity =
+  | { archiveRequestId?: undefined; sizeBytes?: undefined }
+  | { archiveRequestId: string; sizeBytes?: number };
+
 export async function withCancelledDvdArchiveInactive({
   archiveRequestId,
   devicePath,
@@ -1173,17 +1233,17 @@ export async function withCancelledDvdArchiveInactive({
   originalsLibraryPath,
   runner,
   signal = new AbortController().signal,
+  sizeBytes,
   workspaceLock = defaultDvdRescueWorkspaceLock,
 }: {
-  archiveRequestId?: string;
   devicePath: string;
   fingerprint: string;
-  mutation: () => undefined;
+  mutation: () => void | Promise<void>;
   originalsLibraryPath: string;
   runner: DvdCopyRunner;
   signal?: AbortSignal;
   workspaceLock?: DvdRescueWorkspaceLock;
-}): Promise<void> {
+} & CancelledDvdArchiveIdentity): Promise<void> {
   const safeDevicePath = requireSafeOpticalDevicePath(devicePath);
   if (!isDvdFingerprint(fingerprint)) {
     throw new Error("Detected Disc fingerprint is invalid");
@@ -1191,7 +1251,7 @@ export async function withCancelledDvdArchiveInactive({
   const root = await requireSafeArchiveRoot(originalsLibraryPath);
   const digest = dvdArchiveStem(fingerprint);
   const task = () =>
-    runner.withDeviceInactive(safeDevicePath, () => {
+    runner.withDeviceInactive(safeDevicePath, async () => {
       const partialPaths = [
         join(root, `.${digest}.iso.rip-dvd-partial`),
         ...discoverAttemptPartialPaths(root, digest),
@@ -1205,8 +1265,31 @@ export async function withCancelledDvdArchiveInactive({
         }
         requirePartialInactive(partialPath);
       }
-      mutation();
-      return undefined;
+      if (archiveRequestId !== undefined) {
+        if (sizeBytes === undefined) {
+          const rescuePaths = dvdRescueWorkspacePaths(root, archiveRequestId);
+          const rescueState = await Promise.all([
+            optionalMetadata(rescuePaths.imagePath),
+            optionalMetadata(rescuePaths.mapPath),
+            optionalMetadata(
+              dvdBoundaryRetentionMapPath(root, archiveRequestId),
+            ),
+          ]);
+          if (rescueState.some((metadata) => metadata !== null)) {
+            throw new Error(
+              "Cancelled Archive Job has no completed source size",
+            );
+          }
+        } else {
+          await quarantineCancelledCorrectedPublication({
+            archiveRequestId,
+            fingerprint,
+            root,
+            sizeBytes,
+          });
+        }
+      }
+      await mutation();
     });
   return archiveRequestId === undefined
     ? task()
@@ -1499,12 +1582,10 @@ async function publishDvdArchiveLink({
   sync(path: string): Promise<void>;
 }): Promise<string> {
   let published = false;
-  let publishedFilesystemIdentity = expectedFilesystemIdentity;
   try {
     await link(sourcePath, archivePath);
     published = true;
     const publishedArchive = await lstat(archivePath);
-    publishedFilesystemIdentity = filesystemIdentity(publishedArchive);
     if (
       !matchesRescueImageIdentity(
         publishedArchive,
@@ -1528,6 +1609,16 @@ async function publishDvdArchiveLink({
       await unlink(sourcePath);
     }
     await sync(root);
+    const syncedArchive = await lstat(archivePath);
+    if (
+      !matchesRescueImageIdentity(
+        syncedArchive,
+        expectedFilesystemIdentity,
+        expectedSizeBytes,
+      )
+    ) {
+      throw new Error(mismatchMessage);
+    }
     if (
       linkedProofFileIdentity !== undefined &&
       !sameDvdProofFileIdentity(
@@ -1542,12 +1633,12 @@ async function publishDvdArchiveLink({
     ) {
       throw new Error(mismatchMessage);
     }
-    return publishedFilesystemIdentity;
+    return expectedFilesystemIdentity;
   } catch (error) {
     if (published) {
       await quarantinePublishedArchive(
         archivePath,
-        publishedFilesystemIdentity,
+        expectedFilesystemIdentity,
       );
     }
     throw error;

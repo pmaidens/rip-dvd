@@ -17,6 +17,7 @@ import {
   ARCHIVE_JOB_LEASE_DURATION_MS,
   DISC_INSPECTION_LEASE_DURATION_MS,
   DISC_INSPECTION_SETTLING_TIMEOUT_MS,
+  archiveBoundaryEvidenceFromRecord,
   type DiscInspectionId,
   DVD_SALVAGE_REJECTION_DESCRIPTIONS,
   type ArchiveReadFailureCategory,
@@ -37,7 +38,10 @@ import {
   type RunArchiveWorkerOptions,
   type OpticalDriveHardware,
 } from "./archive-worker.js";
-import type { DvdCopyRunner } from "./dvd-archiver.js";
+import {
+  preserveDvdArchive,
+  type DvdCopyRunner,
+} from "./dvd-archiver.js";
 import type { DvdCompletenessProver } from "./dvd-completeness-prover.js";
 import {
   createCleanDvdRecoveryResult,
@@ -67,6 +71,7 @@ import {
 
 const temporaryDirectories: string[] = [];
 const testRescueWorkspaceLock = createInProcessDvdRescueWorkspaceLock();
+const supportsLinuxWriterOwnership = existsSync("/proc/self/fd");
 
 type DvdReadFailureCategory = NonBoundaryDvdReadFailureResult["category"];
 
@@ -280,11 +285,14 @@ const salvageFailureCases: readonly ({
   },
 ];
 
-function openTestDataAccess() {
+function openTestDataAccess(originalsLibraryPath?: string) {
   const directory = mkdtempSync(join(tmpdir(), "rip-dvd-archive-worker-"));
   temporaryDirectories.push(directory);
   return createLegacySidecarDataAccess({
     databasePath: join(directory, "rip-dvd.sqlite"),
+    ...(originalsLibraryPath === undefined
+      ? {}
+      : { originalsLibraryPath }),
   });
 }
 
@@ -1342,11 +1350,11 @@ describe("archive worker polling", () => {
   });
 
   it("publishes a clean retained prefix only after both boundary proofs agree", async () => {
-    const access = openTestDataAccess();
     const originalsLibraryPath = mkdtempSync(
       join(tmpdir(), "rip-dvd-originals-corrected-boundary-"),
     );
     temporaryDirectories.push(originalsLibraryPath);
+    const access = openTestDataAccess(originalsLibraryPath);
     const fingerprint = `dvdmeta-sha256:${"7".repeat(64)}`;
     const scanData = {
       schemaVersion: 2 as const,
@@ -1464,6 +1472,65 @@ describe("archive worker polling", () => {
     });
     expect(readFileSync(archive.archivePath)).toEqual(retainedPrefix);
     expect(existsSync(`${archive.archivePath}.failed`)).toBe(false);
+    const catalogProjection = access.catalog.listCatalogReviewArchives({
+      view: "needs_review",
+      limit: 10,
+    })[0]!;
+    expect(archiveBoundaryEvidenceFromRecord(catalogProjection)).toMatchObject({
+      policyVersion: "dvd-archive-boundary-v1",
+      reportedSizeBytes,
+      publishedSizeBytes: retainedPrefix.byteLength,
+      excludedSectorCount: 2,
+      firstExcludedLba,
+      maximumReferencedLba: firstExcludedLba - 1,
+    });
+    const verifiedArchive =
+      await access.filesystemVerification.verifyOriginalDiscArchive(archive.id);
+    expect(verifiedArchive).toMatchObject({
+      sizeBytes: retainedPrefix.byteLength,
+      verificationStatus: "accessible",
+    });
+    const mediaItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Corrected boundary integration",
+    });
+    const selection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: mediaItem.id,
+      sourceIdentity: { kind: "main_feature" },
+    });
+    access.catalog.completeCatalogReview(
+      archive.id,
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+        .updatedAt,
+      "reviewed_with_selections",
+    );
+    const profile = access.encodingProfiles.create({
+      key: "corrected-boundary-integration",
+      displayName: "Corrected boundary integration",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30" },
+    });
+    const encodeJob = access.encodeJobs.enqueue({
+      discSelectionId: selection.id,
+      encodingProfileId: profile.id,
+      outputPath: join(originalsLibraryPath, "corrected-boundary.mkv"),
+    });
+    const encodeSource = access.readConsistentSnapshot((snapshot) => {
+      const admittedSelection = snapshot.catalog.listDiscSelections({
+        ids: [encodeJob.discSelectionId],
+        encodeEligibleOnly: true,
+      })[0]!;
+      return snapshot.catalog.listOriginalDiscArchives({
+        ids: [admittedSelection.originalDiscArchiveId],
+      })[0]!;
+    });
+    expect(encodeSource).toMatchObject({
+      archivePath: archive.archivePath,
+      sizeBytes: retainedPrefix.byteLength,
+    });
+    expect(readFileSync(encodeSource.archivePath).byteLength)
+      .toBe(encodeSource.sizeBytes);
     expect(salvageValidator.validate).not.toHaveBeenCalled();
     const rescuePaths = dvdRescueWorkspacePaths(
       realpathSync(originalsLibraryPath),
@@ -4850,6 +4917,170 @@ describe("archive worker polling", () => {
       expect.objectContaining({ id: request.id }),
     ]);
   });
+
+  it.runIf(supportsLinuxWriterOwnership)(
+    "quarantines a crashed corrected publication before finalizing cancellation",
+    async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-12T08:00:00.000Z"));
+    const access = openTestDataAccess();
+    const originalsLibraryPath = mkdtempSync(
+      join(tmpdir(), "rip-dvd-corrected-cancel-recovery-"),
+    );
+    temporaryDirectories.push(originalsLibraryPath);
+    const discoveredDrive = {
+      devicePath: "/dev/sr0",
+      serialNumber: "CORRECTED-CANCEL-RECOVERY-001",
+    };
+    const drive = access.catalog.reconcileOpticalDrives([{
+      ...discoveredDrive,
+      isConfiguredDevice: true,
+    }])[0]!;
+    const reportedSizeBytes = 8 * 2_048;
+    const firstExcludedLba = 6;
+    const fingerprint = `dvdmeta-sha256:${"b".repeat(64)}`;
+    const scanData = {
+      schemaVersion: 2 as const,
+      contentId: fingerprint,
+      titles: [{
+        number: 1,
+        durationSeconds: 3_600,
+        chapters: 10,
+        audioStreams: [],
+        subtitles: [],
+      }],
+    };
+    const started = beginSettledDiscInspection(access, {
+      opticalDriveId: drive.id,
+      mediaGeneration: "test-media-generation",
+      mediaCapacityBytes: reportedSizeBytes,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint,
+      scanData,
+      sizeBytes: reportedSizeBytes,
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.discInspections.record(started.claim!, {
+      type: "metadata",
+      audioStreamCount: 0,
+      chapterCount: 10,
+      subtitleStreamCount: 0,
+      titleCount: 1,
+      totalBytes: reportedSizeBytes,
+      volumeLabel: null,
+    });
+    const inspection = access.discInspections.record(started.claim!, {
+      type: "complete",
+      detectedDiscId: disc.id,
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const cancelledRequest = access.archiveRequests.list(["pending"])[0]!;
+    const expiredClaim = access.archiveJobs.startForInspection(
+      inspection.id,
+      "worker-that-crashed-after-corrected-link",
+    )!;
+    const retainedPrefix = Buffer.alloc(firstExcludedLba * 2_048, 71);
+    const boundaryFailure = {
+      ...createOutOfRangeDvdReadFailureResult({
+        declaredByteCount: reportedSizeBytes,
+        firstFailingLba: firstExcludedLba,
+        requestedBlockCount: 1,
+        requestedLba: firstExcludedLba,
+      }),
+      retryOrdinal: 1,
+      boundaryProofVersion: "dvd-sector-boundary-proof-v1" as const,
+      candidateConfirmationCount: 2 as const,
+      precedingSectorLba: firstExcludedLba - 1,
+    };
+    const crashedPublication = await preserveDvdArchive({
+      archiveRequestId: cancelledRequest.id,
+      authorizeMutation: () => undefined,
+      completenessProver: {
+        async prove() {
+          return { maximumReferencedLba: firstExcludedLba - 1 };
+        },
+      },
+      devicePath: discoveredDrive.devicePath,
+      expectedTitleMap: scanData,
+      fingerprint,
+      originalsLibraryPath,
+      revalidateReadFailure: async () => undefined,
+      runner: {
+        copy: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, retainedPrefix);
+          throw new DvdReadFailureError(boundaryFailure);
+        }),
+        isActive: () => false,
+        withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+        waitForInactive: vi.fn(async () => undefined),
+      },
+      signal: new AbortController().signal,
+      sizeBytes: reportedSizeBytes,
+      verifySource: async () => undefined,
+      onProgress: () => undefined,
+    });
+    access.archiveRequests.cancel(cancelledRequest.id);
+    vi.advanceTimersByTime(ARCHIVE_JOB_LEASE_DURATION_MS + 1);
+    const replacementImage = Buffer.alloc(reportedSizeBytes, 79);
+    const copyRunner: DvdCopyRunner = {
+      copy: vi.fn(async ({ outputPath }) => {
+        writeFileSync(outputPath, replacementImage);
+        return createCleanDvdRecoveryResult(reportedSizeBytes);
+      }),
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    };
+    const pollOptions = {
+      access,
+      configuredDevicePath: discoveredDrive.devicePath,
+      copyRunner,
+      hardware: {
+        ...stableDeviceBinding(),
+        discover: vi.fn().mockResolvedValue([discoveredDrive]),
+        scanDvd: vi.fn().mockResolvedValue({
+          fingerprint,
+          scanData,
+          sizeBytes: reportedSizeBytes,
+        }),
+      },
+      log: vi.fn(),
+      originalsLibraryPath,
+      signal: new AbortController().signal,
+    };
+
+    await pollArchiveWorker(pollOptions);
+
+    expect(access.archiveJobs.list(["aborted"])).toEqual([
+      expect.objectContaining({ id: expiredClaim.id }),
+    ]);
+    expect(access.archiveRequests.list(["cancelled"])).toEqual([
+      expect.objectContaining({ id: cancelledRequest.id }),
+    ]);
+    expect(existsSync(crashedPublication.archivePath)).toBe(false);
+    expect(readFileSync(`${crashedPublication.archivePath}.failed`))
+      .toEqual(retainedPrefix);
+
+    const replacementRequest = access.archiveRequests.create({
+      detectedDiscId: disc.id,
+    });
+    await pollArchiveWorker({
+      ...pollOptions,
+      workerId: "replacement-after-corrected-cancellation",
+    });
+
+    expect(copyRunner.copy).toHaveBeenCalledOnce();
+    expect(access.archiveRequests.list(["fulfilled"])).toEqual([
+      expect.objectContaining({ id: replacementRequest.id }),
+    ]);
+    expect(readFileSync(
+      access.catalog.listOriginalDiscArchives()[0]!.archivePath,
+    )).toEqual(replacementImage);
+    },
+  );
 
   it("discovers an enabled Optical Drive and stores its scanned Detected Disc", async () => {
     vi.useFakeTimers();

@@ -10,6 +10,7 @@ import {
   renameSync,
   rmSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -3726,6 +3727,70 @@ describe("DVD archive publication", () => {
     expect(existsSync(join(root, `dvdmeta-${digest}.iso`))).toBe(false);
     const rescuePaths = dvdRescueWorkspacePaths(root, archiveRequestId);
     expect(existsSync(rescuePaths.imagePath)).toBe(true);
+    expect(existsSync(rescuePaths.mapPath)).toBe(true);
+  });
+
+  it("does not quarantine a concurrent destination substitution", async () => {
+    const originalsLibraryPath = createOriginalsLibrary();
+    const root = realpathSync(originalsLibraryPath);
+    const digest = "4".repeat(64);
+    const archiveRequestId = "concurrent-corrected-destination";
+    const reportedSizeBytes = 8 * 2_048;
+    const firstExcludedLba = 6;
+    const retainedPrefix = Buffer.alloc(firstExcludedLba * 2_048, 61);
+    const concurrentArchive = Buffer.alloc(reportedSizeBytes, 67);
+    const archivePath = join(root, `dvdmeta-${digest}.iso`);
+    let substituted = false;
+
+    await expect(preserveDvdArchive({
+      archiveRequestId,
+      authorizeMutation: () => undefined,
+      completenessProver: {
+        async prove() {
+          return { maximumReferencedLba: firstExcludedLba - 1 };
+        },
+      },
+      devicePath: "/dev/sr0",
+      expectedTitleMap: {
+        schemaVersion: 2,
+        contentId: `dvdmeta-sha256:${digest}`,
+        titles: [],
+      },
+      fingerprint: `dvdmeta-sha256:${digest}`,
+      originalsLibraryPath,
+      revalidateReadFailure: async () => undefined,
+      runner: {
+        copy: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, retainedPrefix);
+          throw new DvdReadFailureError(
+            createProvenBoundaryFailure(
+              reportedSizeBytes,
+              firstExcludedLba,
+            ),
+          );
+        }),
+        isActive: () => false,
+        withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+        waitForInactive: vi.fn(async () => undefined),
+      },
+      signal: new AbortController().signal,
+      sizeBytes: reportedSizeBytes,
+      sync: vi.fn(async (path) => {
+        if (path === root && !substituted) {
+          unlinkSync(archivePath);
+          writeFileSync(archivePath, concurrentArchive);
+          substituted = true;
+        }
+      }),
+      verifySource: async () => undefined,
+      onProgress: () => undefined,
+    })).rejects.toThrow("Published DVD archive changed before cleanup");
+
+    expect(substituted).toBe(true);
+    expect(readFileSync(archivePath)).toEqual(concurrentArchive);
+    expect(existsSync(`${archivePath}.failed`)).toBe(false);
+    const rescuePaths = dvdRescueWorkspacePaths(root, archiveRequestId);
+    expect(readFileSync(rescuePaths.imagePath)).toEqual(retainedPrefix);
     expect(existsSync(rescuePaths.mapPath)).toBe(true);
   });
 
