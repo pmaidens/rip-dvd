@@ -144,6 +144,7 @@ interface DvdLayoutAnalysisPolicy {
     identifierLength: number,
   ): void;
   validateUnrecognizedIsoDescriptor(descriptor: Buffer): void;
+  udfAlternateAnchorLbas(totalSectorCount: number): readonly number[];
   validateDvdVideoViews(context: {
     hasIso: boolean;
     hasUdf: boolean;
@@ -178,6 +179,10 @@ function createDvdLayoutAnalysisPolicy(
       },
       validateIsoDirectoryRecordTail() {},
       validateUnrecognizedIsoDescriptor() {},
+      udfAlternateAnchorLbas: (totalSectorCount) => [
+        totalSectorCount - 256,
+        totalSectorCount - 1,
+      ],
       async validateDvdVideoViews() {},
       async validateUdfAlternateAnchors({
         alternateAnchorLbas,
@@ -212,13 +217,16 @@ function createDvdLayoutAnalysisPolicy(
     validateUnrecognizedIsoDescriptor(descriptor) {
       const identifier = descriptor.toString("latin1", 1, 6);
       if (
-        descriptor[6] === 1 &&
         descriptor.some((byte) => byte !== 0) &&
         !["BEA01", "NSR02", "NSR03", "TEA01"].includes(identifier)
       ) {
         throw new Error("DVD ISO volume descriptor signature is malformed");
       }
     },
+    udfAlternateAnchorLbas: (totalSectorCount) => [
+      totalSectorCount - 257,
+      totalSectorCount - 1,
+    ],
     async validateDvdVideoViews({
       hasIso,
       hasUdf,
@@ -4898,10 +4906,9 @@ async function analyzeDvdImageLayout({
       256,
       policy.requireDvdReadOnlyUdfProfile,
     );
-    const alternateAnchorLbas = [...new Set([
-      totalSectorCount - 257,
-      totalSectorCount - 1,
-    ])].filter((lba) => lba >= 0 && lba !== 256);
+    const alternateAnchorLbas = [
+      ...new Set(policy.udfAlternateAnchorLbas(totalSectorCount)),
+    ].filter((lba) => lba >= 0 && lba !== 256);
     await policy.validateUdfAlternateAnchors({
       anchor,
       alternateAnchorLbas,

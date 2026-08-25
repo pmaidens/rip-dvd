@@ -2179,7 +2179,7 @@ describe("retained DVD image layout completeness", () => {
     })).rejects.toThrow("DVD UDF descriptor CRC length is invalid");
   });
 
-  it("rejects high-bit corruption in the ISO standard identifier", async () => {
+  it("rejects multi-field corruption in an ISO descriptor", async () => {
     const image = syntheticCompleteDvdImage({
       includeIso: true,
       includeUdf: true,
@@ -2189,6 +2189,7 @@ describe("retained DVD image layout completeness", () => {
         image[16 * DVD_SECTOR_SIZE_BYTES + offset]! | 0x80;
     }
     image[16 * DVD_SECTOR_SIZE_BYTES] = 4;
+    image[16 * DVD_SECTOR_SIZE_BYTES + 6] = 2;
     const fixture = writeFixture(image);
 
     await expect(proveDvdImageLayoutCompleteness({
@@ -4958,6 +4959,22 @@ describe("DVD layout damage classification", () => {
       outcome: "accepted",
     });
   });
+
+  it(
+    "preserves salvage classification at the historical UDF alternate anchor",
+    async () => {
+      const fixture = createSyntheticUdfDvdImage(444);
+
+      await expect(classifyDvdImageDamage({
+        expectedByteCount: fixture.sizeBytes,
+        imagePath: fixture.imagePath,
+        unreadableSectorRanges: [{ startLba: 444, sectorCount: 1 }],
+      })).resolves.toEqual({
+        outcome: "rejected",
+        reason: "filesystem_metadata",
+      });
+    },
+  );
 
   it(
     "preserves salvage classification for a UDF partition-header extent",
