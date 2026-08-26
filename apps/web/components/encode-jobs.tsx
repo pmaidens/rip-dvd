@@ -257,7 +257,8 @@ export function EncodeJobsView({
     : "";
   const logicalJobIsTerminal = logicalJob !== null &&
     isTerminalEncodeJobStatus(logicalJob.status);
-  const selectionDetailsAreCurrent = pageSelection !== undefined;
+  const selectionDetailsAreCurrent = pageSelection !== undefined &&
+    selectedSelectionProfileId === visibleSelectedProfileId;
   const canSubmit = visibleSelection !== null &&
     visibleSelectedProfileId !== "" &&
     selectionDetailsAreCurrent &&
@@ -363,7 +364,11 @@ export function EncodeJobsView({
 
   function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (visibleSelection === null || visibleSelectedProfileId === "") {
+    if (
+      !canSubmit ||
+      visibleSelection === null ||
+      visibleSelectedProfileId === ""
+    ) {
       return;
     }
     if (logicalJob === null) {
