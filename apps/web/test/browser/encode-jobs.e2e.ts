@@ -54,6 +54,31 @@ test("queues one new encode and deliberately requeues completed work", async ({
   const profile = manager.getByRole("combobox", {
     name: "Active Encoding Profile",
   });
+  const nextSelections = manager.getByRole("button", {
+    name: "Next reviewed selections",
+  });
+  await tabTo(page, nextSelections);
+  await expectVisibleKeyboardFocus(nextSelections);
+  const search = manager.getByRole("searchbox", {
+    name: "Search reviewed Disc Selections",
+  });
+  await tabTo(page, search);
+  await expectVisibleKeyboardFocus(search);
+  const targetQuery = `Queue new ${variant}`;
+  await expect(manager.getByRole("option", {
+    name: new RegExp(`^${targetQuery} \\(2026\\)`),
+  })).toHaveCount(0);
+  const searchResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return url.pathname === "/api/encode-jobs" &&
+      url.searchParams.get("query") === targetQuery &&
+      url.searchParams.get("selectionOffset") === "0";
+  });
+  await search.fill(targetQuery);
+  await search.press("Enter");
+  expect((await searchResponse).status()).toBe(200);
+  await expect(manager).toContainText("Showing 1 of 1 matches");
+
   await tabTo(page, profile);
   await expectVisibleKeyboardFocus(profile);
   await profile.selectOption({ label: `Queue browser profile ${variant} · Version 1` });
@@ -82,6 +107,7 @@ test("queues one new encode and deliberately requeues completed work", async ({
   await expectVisibleKeyboardFocus(reEncode);
   await page.keyboard.press("Enter");
   await expect(reEncode).toHaveAttribute("aria-pressed", "true");
+  await expect(search).toHaveValue("");
   await expect(manager).toContainText(
     `Queue completed ${variant} (2026) · DVD main feature`,
   );
@@ -108,6 +134,17 @@ test("queues one new encode and deliberately requeues completed work", async ({
   expect((await requeueResponse).status()).toBe(200);
 
   await notEncoded.click();
+  await expect(search).toHaveValue(targetQuery);
+  const activeQuery = `Queue active ${variant}`;
+  const activeSearchResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return url.pathname === "/api/encode-jobs" &&
+      url.searchParams.get("query") === activeQuery &&
+      url.searchParams.get("selectionOffset") === "0";
+  });
+  await search.fill(activeQuery);
+  await search.press("Enter");
+  expect((await activeSearchResponse).status()).toBe(200);
   await profile.selectOption({ label: `Queue browser profile ${variant} · Version 1` });
   await selection.selectOption({
     label: `Queue active ${variant} (2026) · DVD main feature · Not encoded`,

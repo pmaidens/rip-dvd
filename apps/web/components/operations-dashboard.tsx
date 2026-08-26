@@ -1842,7 +1842,7 @@ export function OperationsDashboard({
             onChanged={() => setRequestNumber((value) => value + 1)}
           />
           <EncodeJobsManager
-            key={requestNumber}
+            revision={requestNumber}
             onChanged={() => setRequestNumber((value) => value + 1)}
           />
         </>

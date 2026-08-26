@@ -68,6 +68,7 @@ describe("EncodeJobsView", () => {
         state={{
           status: "loaded",
           historyGroup: "not_encoded",
+          query: "",
           counts: { notEncoded: 1, reEncode: 0 },
           selections: [{
             id: selectionId,
@@ -105,6 +106,7 @@ describe("EncodeJobsView", () => {
         onQueue={() => undefined}
         onRetry={() => undefined}
         onHistoryGroup={() => undefined}
+        onSearch={() => undefined}
         onProfileChange={() => undefined}
         onSelectionPage={() => undefined}
         onProfilePage={() => undefined}
@@ -132,6 +134,7 @@ describe("EncodeJobsView", () => {
           state={{
             status: "loaded",
             historyGroup: "not_encoded",
+            query: "",
             counts: { notEncoded: 2, reEncode: 0 },
             selections: [{
               id: "selection-1" as DiscSelectionId,
@@ -180,6 +183,7 @@ describe("EncodeJobsView", () => {
           onQueue={() => undefined}
           onRetry={() => undefined}
           onHistoryGroup={() => undefined}
+          onSearch={() => undefined}
           onProfileChange={() => undefined}
           onSelectionPage={() => undefined}
           onProfilePage={() => undefined}
@@ -222,6 +226,214 @@ describe("EncodeJobsView", () => {
     await act(async () => root.unmount());
   });
 
+  it("preserves a custom queue choice only while its group and revision stay current", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const onQueue = vi.fn();
+    const selection = {
+      id: "selection-pinned" as DiscSelectionId,
+      mediaItemId: "movie-pinned",
+      mediaTitle: "Pinned choice",
+      mediaYear: 2005,
+      sourceDescription: "DVD title 2",
+      hasCompletedEncode: false,
+      priorCompletedJob: null,
+      logicalJob: null,
+      suggestedOutputPath: "/media/movies/Pinned choice (2005).mkv",
+    };
+    const render = (
+      query: string | null,
+      selections: EncodeSelectionOption[],
+      historyGroup: "not_encoded" | "re_encode" = "not_encoded",
+      successfulQueueRevision = 0,
+      selectedProfileId: EncodingProfileId =
+        "profile-pinned" as EncodingProfileId,
+    ) => (
+      <EncodeJobsView
+        selectedProfileId={selectedProfileId}
+        successfulQueueRevision={successfulQueueRevision}
+        state={query === null
+          ? { status: "loading" }
+          : {
+            status: "loaded",
+            historyGroup,
+            query,
+            counts: { notEncoded: 2, reEncode: 0 },
+            selections,
+            profiles: [{
+              id: "profile-pinned" as EncodingProfileId,
+              displayName: "Pinned profile",
+              version: 1,
+            }, {
+              id: "profile-next" as EncodingProfileId,
+              displayName: "Next profile",
+              version: 1,
+            }],
+            page: {
+              offset: 0,
+              limit: 100,
+              total: selections.length,
+              hasPrevious: false,
+              hasNext: false,
+            },
+            profilePage: {
+              offset: 0,
+              limit: 100,
+              hasPrevious: false,
+              hasNext: false,
+            },
+          }}
+        isSaving={false}
+        requestError={null}
+        onQueue={onQueue}
+        onRetry={() => undefined}
+        onHistoryGroup={() => undefined}
+        onSearch={() => undefined}
+        onProfileChange={() => undefined}
+        onSelectionPage={() => undefined}
+        onProfilePage={() => undefined}
+      />
+    );
+
+    try {
+      await act(async () => root.render(render("", [selection])));
+      const picker = container.querySelector<HTMLSelectElement>(
+        'select[name="discSelectionId"]',
+      );
+      if (!picker) {
+        throw new Error("Expected Disc Selection picker");
+      }
+      await act(async () => {
+        picker.value = selection.id;
+        picker.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      const outputPath = container.querySelector<HTMLInputElement>(
+        'input[name="outputPath"]',
+      );
+      if (!outputPath) {
+        throw new Error("Expected output path");
+      }
+      await act(async () => {
+        const valueSetter = Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          "value",
+        )?.set;
+        if (!valueSetter) {
+          throw new Error("Expected native input value setter");
+        }
+        valueSetter.call(outputPath, "/media/movies/Operator choice.mkv");
+        outputPath.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      expect(outputPath.value).toBe("/media/movies/Operator choice.mkv");
+
+      await act(async () =>
+        root.render(render(
+          "",
+          [selection],
+          "not_encoded",
+          0,
+          "profile-next" as EncodingProfileId,
+        ))
+      );
+      const queueForm = outputPath.closest("form");
+      const submit = queueForm?.querySelector<HTMLButtonElement>(
+        'button[type="submit"]',
+      );
+      if (!queueForm || !submit) {
+        throw new Error("Expected queue form");
+      }
+      expect(outputPath.readOnly).toBe(true);
+      expect(submit.disabled).toBe(true);
+      await act(async () => {
+        queueForm.dispatchEvent(
+          new Event("submit", { bubbles: true, cancelable: true }),
+        );
+      });
+      expect(onQueue).not.toHaveBeenCalled();
+      await act(async () => root.render(render("", [selection])));
+
+      await act(async () => root.render(render(null, [])));
+      await act(async () => root.render(render("another title", [])));
+      const visiblePicker = container.querySelector<HTMLSelectElement>(
+        'select[name="discSelectionId"]',
+      );
+      const visibleOutputPath = container.querySelector<HTMLInputElement>(
+        'input[name="outputPath"]',
+      );
+      if (!visiblePicker || !visibleOutputPath) {
+        throw new Error("Expected restored Encode Job form");
+      }
+
+      expect(container.textContent).toContain(
+        "Pinned choice (2005) · DVD title 2",
+      );
+      expect(container.textContent).toContain(
+        'No Disc Selections match "another title" in Not encoded.',
+      );
+      expect(visiblePicker.value).toBe(selection.id);
+      expect(visibleOutputPath.value).toBe(
+        "/media/movies/Operator choice.mkv",
+      );
+      expect(visibleOutputPath.readOnly).toBe(true);
+      expect(container.textContent).toContain(
+        "Return to its result page to refresh the queue action and output path.",
+      );
+      expect(
+        visibleOutputPath.closest("form")?.querySelector<HTMLButtonElement>(
+          'button[type="submit"]',
+        )?.disabled,
+      ).toBe(true);
+
+      await act(async () =>
+        root.render(render("", [{
+          ...selection,
+          logicalJob: {
+            id: "job-pinned" as EncodeJobId,
+            encodingProfileId: "profile-pinned" as EncodingProfileId,
+            outputPath: "/media/movies/Reserved by queue.mkv",
+            status: "queued",
+            queueAvailable: false,
+          },
+        }]))
+      );
+      expect(visibleOutputPath.value).toBe(
+        "/media/movies/Reserved by queue.mkv",
+      );
+      expect(visibleOutputPath.readOnly).toBe(true);
+
+      await act(async () => root.render(render("", [], "re_encode")));
+      expect(container.textContent).not.toContain("Pinned choice (2005)");
+      expect(visiblePicker.value).toBe("");
+      expect(
+        container.querySelector<HTMLInputElement>('input[name="outputPath"]')
+          ?.value,
+      ).toBe("");
+
+      await act(async () =>
+        root.render(render("", [selection], "not_encoded"))
+      );
+      const returnedPicker = container.querySelector<HTMLSelectElement>(
+        'select[name="discSelectionId"]',
+      );
+      if (!returnedPicker) {
+        throw new Error("Expected returned Disc Selection picker");
+      }
+      await act(async () => {
+        returnedPicker.value = selection.id;
+        returnedPicker.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      await act(async () =>
+        root.render(render("another title", [], "not_encoded", 1))
+      );
+      expect(container.textContent).not.toContain("Pinned choice (2005)");
+      expect(returnedPicker.value).toBe("");
+    } finally {
+      await act(async () => root.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("cannot submit a profile that is absent from the visible page", async () => {
     const container = document.createElement("div");
     const root = createRoot(container);
@@ -234,6 +446,7 @@ describe("EncodeJobsView", () => {
           state={{
             status: "loaded",
             historyGroup: "not_encoded",
+            query: "",
             counts: { notEncoded: 1, reEncode: 0 },
             selections: [{
               id: "selection-page-2" as DiscSelectionId,
@@ -271,6 +484,7 @@ describe("EncodeJobsView", () => {
           onQueue={onQueue}
           onRetry={() => undefined}
           onHistoryGroup={() => undefined}
+          onSearch={() => undefined}
           onProfileChange={() => undefined}
           onSelectionPage={() => undefined}
           onProfilePage={() => undefined}
@@ -284,8 +498,8 @@ describe("EncodeJobsView", () => {
     const selection = container.querySelector<HTMLSelectElement>(
       'select[name="discSelectionId"]',
     );
-    const form = container.querySelector("form");
-    const submit = container.querySelector<HTMLButtonElement>(
+    const form = selection?.closest("form");
+    const submit = form?.querySelector<HTMLButtonElement>(
       'button[type="submit"]',
     );
     if (!profile || !selection || !form || !submit) {
@@ -318,6 +532,7 @@ describe("EncodeJobsView", () => {
       selectionOffset: 100,
       profileOffset: 200,
       historyGroup: "re_encode",
+      query: "queue me",
       encodingProfileId: profileId,
     }, fetcher);
     await queueEncodeJob({
@@ -330,7 +545,7 @@ describe("EncodeJobsView", () => {
 
     expect(fetcher).toHaveBeenNthCalledWith(
       1,
-      "/api/encode-jobs?historyGroup=re_encode&selectionOffset=100&profileOffset=200&encodingProfileId=profile-v2",
+      "/api/encode-jobs?historyGroup=re_encode&selectionOffset=100&profileOffset=200&query=queue+me&encodingProfileId=profile-v2",
       { cache: "no-store", headers: { Accept: "application/json" } },
     );
     expect(fetcher).toHaveBeenNthCalledWith(2, "/api/encode-jobs", {
@@ -375,6 +590,7 @@ describe("EncodeJobsView", () => {
       unprofiledRequests += 1;
       return Response.json({
         historyGroup: "not_encoded",
+        query: "",
         counts: { notEncoded: 0, reEncode: 0 },
         selections: [],
         profiles: unprofiledRequests === 1
@@ -452,6 +668,7 @@ describe("EncodeJobsView", () => {
       }
       return Response.json({
         historyGroup: "not_encoded",
+        query: "",
         counts: { notEncoded: 0, reEncode: 0 },
         selections: [],
         profiles: [{
@@ -500,6 +717,275 @@ describe("EncodeJobsView", () => {
       expect(fetcher).toHaveBeenCalledTimes(2);
       expect(container.textContent).toContain(
         "Encoding options are unavailable. Try again",
+      );
+    } finally {
+      await act(async () => root.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps search controls available when a query has no searchable terms", async () => {
+    const fetcher = vi.fn(async (_input: RequestInfo | URL) => Response.json({
+      historyGroup: "not_encoded",
+      query: "",
+      counts: { notEncoded: 0, reEncode: 0 },
+      selections: [],
+      profiles: [],
+      page: {
+        offset: 0,
+        limit: 100,
+        total: 0,
+        hasPrevious: false,
+        hasNext: false,
+      },
+      profilePage: {
+        offset: 0,
+        limit: 100,
+        hasPrevious: false,
+        hasNext: false,
+      },
+    }));
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.stubGlobal("fetch", fetcher);
+    const container = document.createElement("div");
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(<EncodeJobsManager onChanged={() => undefined} />);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      const input = container.querySelector<HTMLInputElement>(
+        'input[name="selectionQuery"]',
+      );
+      const form = input?.closest("form");
+      if (!input || !form) {
+        throw new Error("Expected Disc Selection search form");
+      }
+
+      await act(async () => {
+        input.value = "---";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+        form.dispatchEvent(
+          new Event("submit", { bubbles: true, cancelable: true }),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      expect(container.querySelector('input[name="selectionQuery"]')).not
+        .toBeNull();
+      expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+        "Enter letters or numbers to search.",
+      );
+
+      await act(async () => {
+        input.value = "Queue Me";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      await act(async () => {
+        form.dispatchEvent(
+          new Event("submit", { bubbles: true, cancelable: true }),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      expect(fetcher.mock.calls.map(([input]) => String(input))).toEqual([
+        "/api/encode-jobs?historyGroup=not_encoded&selectionOffset=0&profileOffset=0",
+        "/api/encode-jobs?historyGroup=not_encoded&selectionOffset=0&profileOffset=0&query=Queue+Me",
+      ]);
+    } finally {
+      await act(async () => root.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("preserves each history group's query and page in memory", async () => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input), "http://localhost:3000");
+      const historyGroup = url.searchParams.get("historyGroup") === "re_encode"
+        ? "re_encode"
+        : "not_encoded";
+      const query = url.searchParams.get("query") ?? "";
+      const offset = Number(url.searchParams.get("selectionOffset") ?? 0);
+      return Response.json({
+        historyGroup,
+        query,
+        counts: { notEncoded: 250, reEncode: 250 },
+        selections: [],
+        profiles: [],
+        page: {
+          offset,
+          limit: 100,
+          total: 250,
+          hasPrevious: offset > 0,
+          hasNext: offset < 100,
+        },
+        profilePage: {
+          offset: 0,
+          limit: 100,
+          hasPrevious: false,
+          hasNext: false,
+        },
+      });
+    });
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.stubGlobal("fetch", fetcher);
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+    const clickButton = async (label: string) => {
+      const button = [...container.querySelectorAll("button")].find(
+        (candidate) => candidate.textContent?.includes(label),
+      );
+      if (!button) {
+        throw new Error(`Expected ${label} button`);
+      }
+      await act(async () => {
+        button.click();
+        await settle();
+      });
+    };
+    const search = async (query: string) => {
+      const input = container.querySelector<HTMLInputElement>(
+        'input[name="selectionQuery"]',
+      );
+      const form = input?.closest("form");
+      if (!input || !form) {
+        throw new Error("Expected Disc Selection search form");
+      }
+      await act(async () => {
+        input.value = query;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+        await settle();
+      });
+      await act(async () => {
+        form.dispatchEvent(
+          new Event("submit", { bubbles: true, cancelable: true }),
+        );
+        await settle();
+      });
+    };
+
+    try {
+      await act(async () => {
+        root.render(<EncodeJobsManager onChanged={() => undefined} />);
+        await settle();
+      });
+      await clickButton("Next reviewed selections");
+      await search("alpha");
+      await clickButton("Next reviewed selections");
+      await clickButton("Re-encode");
+      await search("beta");
+      await clickButton("Next reviewed selections");
+      await clickButton("Not encoded");
+
+      expect(fetcher.mock.calls.map(([input]) => String(input))).toEqual([
+        "/api/encode-jobs?historyGroup=not_encoded&selectionOffset=0&profileOffset=0",
+        "/api/encode-jobs?historyGroup=not_encoded&selectionOffset=100&profileOffset=0",
+        "/api/encode-jobs?historyGroup=not_encoded&selectionOffset=0&profileOffset=0&query=alpha",
+        "/api/encode-jobs?historyGroup=not_encoded&selectionOffset=100&profileOffset=0&query=alpha",
+        "/api/encode-jobs?historyGroup=re_encode&selectionOffset=0&profileOffset=0",
+        "/api/encode-jobs?historyGroup=re_encode&selectionOffset=0&profileOffset=0&query=beta",
+        "/api/encode-jobs?historyGroup=re_encode&selectionOffset=100&profileOffset=0&query=beta",
+        "/api/encode-jobs?historyGroup=not_encoded&selectionOffset=100&profileOffset=0&query=alpha",
+      ]);
+      expect(container.querySelector<HTMLInputElement>(
+        'input[name="selectionQuery"]',
+      )?.value).toBe("alpha");
+    } finally {
+      await act(async () => root.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("returns to the first page when refresh makes the current page invalid", async () => {
+    let total = 250;
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input), "http://localhost:3000");
+      const offset = Number(url.searchParams.get("selectionOffset") ?? 0);
+      const selections = offset < total
+        ? [{
+          id: "selection-survivor" as DiscSelectionId,
+          mediaItemId: "movie-survivor",
+          mediaTitle: "Still available",
+          mediaYear: 2006,
+          sourceDescription: "DVD main feature",
+          hasCompletedEncode: false,
+          priorCompletedJob: null,
+          logicalJob: null,
+          suggestedOutputPath: "/media/movies/Still available (2006).mkv",
+        }]
+        : [];
+      return Response.json({
+        historyGroup: "not_encoded",
+        query: "",
+        counts: { notEncoded: total, reEncode: 0 },
+        selections,
+        profiles: [],
+        page: {
+          offset,
+          limit: 100,
+          total,
+          hasPrevious: offset > 0,
+          hasNext: offset + 100 < total,
+        },
+        profilePage: {
+          offset: 0,
+          limit: 100,
+          hasPrevious: false,
+          hasNext: false,
+        },
+      });
+    });
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.stubGlobal("fetch", fetcher);
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+    try {
+      await act(async () => {
+        root.render(
+          <EncodeJobsManager revision={0} onChanged={() => undefined} />,
+        );
+        await settle();
+      });
+      const next = [...container.querySelectorAll("button")].find(
+        (button) => button.textContent === "Next reviewed selections",
+      );
+      if (!next) {
+        throw new Error("Expected next Disc Selection page button");
+      }
+      await act(async () => {
+        next.click();
+        await settle();
+      });
+
+      total = 50;
+      await act(async () => {
+        root.render(
+          <EncodeJobsManager revision={1} onChanged={() => undefined} />,
+        );
+        await settle();
+      });
+      await act(async () => {
+        await settle();
+      });
+
+      expect(fetcher.mock.calls.map(([input]) => String(input))).toEqual([
+        "/api/encode-jobs?historyGroup=not_encoded&selectionOffset=0&profileOffset=0",
+        "/api/encode-jobs?historyGroup=not_encoded&selectionOffset=100&profileOffset=0",
+        "/api/encode-jobs?historyGroup=not_encoded&selectionOffset=100&profileOffset=0",
+        "/api/encode-jobs?historyGroup=not_encoded&selectionOffset=0&profileOffset=0",
+      ]);
+      expect(container.textContent).toContain("Still available (2006)");
+      expect(container.textContent).not.toContain(
+        "No not-encoded Disc Selections are available.",
       );
     } finally {
       await act(async () => root.unmount());
