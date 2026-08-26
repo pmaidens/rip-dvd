@@ -204,6 +204,120 @@ async function createInterruptedDamagedPublication(
   };
 }
 
+async function createCorrectedDamagedRetryWorkspace(
+  archiveRequestId: string,
+  digest: string,
+) {
+  const originalsLibraryPath = createOriginalsLibrary();
+  const root = realpathSync(originalsLibraryPath);
+  const reportedSizeBytes = 8 * 2_048;
+  const firstExcludedLba = 6;
+  const publishedSizeBytes = firstExcludedLba * 2_048;
+  const fullImage = Buffer.alloc(reportedSizeBytes, 59);
+  fullImage.fill(0, 1 * 2_048, 2 * 2_048);
+  fullImage.fill(0, 7 * 2_048, 8 * 2_048);
+  const legacyDamage = createDamagedDvdRecoveryResult(
+    reportedSizeBytes,
+    [
+      { startLba: 1, sectorCount: 1 },
+      { startLba: 7, sectorCount: 1 },
+    ],
+  );
+  const retainedDamage = createDamagedDvdRecoveryResult(
+    reportedSizeBytes,
+    [{ startLba: 1, sectorCount: 1 }],
+  );
+  const correctedDamage = createDamagedDvdRecoveryResult(
+    publishedSizeBytes,
+    [{ startLba: 1, sectorCount: 1 }],
+  );
+  const boundaryFailure = createProvenBoundaryFailure(
+    reportedSizeBytes,
+    firstExcludedLba,
+  );
+  const baseOptions = {
+    archiveRequestId,
+    completenessProver: {
+      async prove() {
+        return { maximumReferencedLba: firstExcludedLba - 1 };
+      },
+    },
+    devicePath: "/dev/sr0",
+    expectedTitleMap: {
+      schemaVersion: 2 as const,
+      contentId: `dvdmeta-sha256:${digest}`,
+      titles: [],
+    },
+    fingerprint: `dvdmeta-sha256:${digest}`,
+    originalsLibraryPath,
+    signal: new AbortController().signal,
+    sizeBytes: reportedSizeBytes,
+    verifySource: async () => undefined,
+    onProgress: () => undefined,
+  };
+  const runner = (copy: DvdCopyRunner["copy"]): DvdCopyRunner => ({
+    copy,
+    isActive: () => false,
+    withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+    waitForInactive: vi.fn(async () => undefined),
+  });
+  const rejectedSalvage = {
+    validate: vi.fn().mockResolvedValue({
+      outcome: "rejected" as const,
+      reason: "referenced_content" as const,
+    }),
+  };
+
+  await expect(preserveDvdArchive({
+    ...baseOptions,
+    runner: runner(vi.fn(async ({ outputPath }) => {
+      writeFileSync(outputPath, fullImage);
+      return legacyDamage;
+    })),
+    salvageValidator: rejectedSalvage,
+  })).rejects.toThrow("DVD salvage rejected");
+
+  await expect(preserveDvdArchive({
+    ...baseOptions,
+    revalidateReadFailure: async () => undefined,
+    runner: runner(vi.fn(async ({ continuation }) => {
+      expect(continuation).toMatchObject({
+        kind: "damaged",
+        recoveryResult: legacyDamage,
+      });
+      throw new DvdReadFailureError(boundaryFailure, retainedDamage);
+    })),
+    salvageValidator: rejectedSalvage,
+  })).rejects.toThrow("DVD salvage rejected");
+
+  const rescuePaths = dvdRescueWorkspacePaths(root, archiveRequestId);
+  expect(readFileSync(rescuePaths.imagePath)).toEqual(
+    fullImage.subarray(0, publishedSizeBytes),
+  );
+  expect(JSON.parse(readFileSync(rescuePaths.mapPath, "utf8")))
+    .toMatchObject({
+      schemaVersion: 3,
+      imageByteCount: publishedSizeBytes,
+      recoveryProtocol: expect.objectContaining({
+        declaredByteCount: publishedSizeBytes,
+        badSectorCount: 1,
+        badSectorBitmapHex: "02",
+      }),
+    });
+
+  return {
+    baseOptions,
+    correctedDamage,
+    firstExcludedLba,
+    fullImage,
+    publishedSizeBytes,
+    reportedSizeBytes,
+    rescuePaths,
+    root,
+    runner,
+  };
+}
+
 afterEach(() => {
   vi.useRealTimers();
   for (const pid of orphanedWriterPids.splice(0)) {
@@ -4236,105 +4350,21 @@ describe("DVD archive publication", () => {
   });
 
   it("retries only retained damaged sectors after accepting a boundary", async () => {
-    const originalsLibraryPath = createOriginalsLibrary();
-    const root = realpathSync(originalsLibraryPath);
     const digest = "2".repeat(64);
     const archiveRequestId = "corrected-boundary-damage-retry";
-    const reportedSizeBytes = 8 * 2_048;
-    const firstExcludedLba = 6;
-    const publishedSizeBytes = firstExcludedLba * 2_048;
-    const fullImage = Buffer.alloc(reportedSizeBytes, 59);
-    fullImage.fill(0, 1 * 2_048, 2 * 2_048);
-    fullImage.fill(0, 7 * 2_048, 8 * 2_048);
-    const legacyDamage = createDamagedDvdRecoveryResult(
-      reportedSizeBytes,
-      [
-        { startLba: 1, sectorCount: 1 },
-        { startLba: 7, sectorCount: 1 },
-      ],
-    );
-    const retainedDamage = createDamagedDvdRecoveryResult(
-      reportedSizeBytes,
-      [{ startLba: 1, sectorCount: 1 }],
-    );
-    const correctedDamage = createDamagedDvdRecoveryResult(
-      publishedSizeBytes,
-      [{ startLba: 1, sectorCount: 1 }],
-    );
-    const boundaryFailure = createProvenBoundaryFailure(
-      reportedSizeBytes,
+    const {
+      baseOptions,
+      correctedDamage,
       firstExcludedLba,
-    );
-    const expectedTitleMap = {
-      schemaVersion: 2 as const,
-      contentId: `dvdmeta-sha256:${digest}`,
-      titles: [],
-    };
-    const baseOptions = {
+      fullImage,
+      publishedSizeBytes,
+      reportedSizeBytes,
+      rescuePaths,
+      runner,
+    } = await createCorrectedDamagedRetryWorkspace(
       archiveRequestId,
-      completenessProver: {
-        async prove() {
-          return { maximumReferencedLba: firstExcludedLba - 1 };
-        },
-      },
-      devicePath: "/dev/sr0",
-      expectedTitleMap,
-      fingerprint: `dvdmeta-sha256:${digest}`,
-      originalsLibraryPath,
-      signal: new AbortController().signal,
-      sizeBytes: reportedSizeBytes,
-      verifySource: async () => undefined,
-      onProgress: () => undefined,
-    };
-    const runner = (copy: DvdCopyRunner["copy"]): DvdCopyRunner => ({
-      copy,
-      isActive: () => false,
-      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
-      waitForInactive: vi.fn(async () => undefined),
-    });
-    const rejectedSalvage = {
-      validate: vi.fn().mockResolvedValue({
-        outcome: "rejected" as const,
-        reason: "referenced_content" as const,
-      }),
-    };
-
-    await expect(preserveDvdArchive({
-      ...baseOptions,
-      runner: runner(vi.fn(async ({ outputPath }) => {
-        writeFileSync(outputPath, fullImage);
-        return legacyDamage;
-      })),
-      salvageValidator: rejectedSalvage,
-    })).rejects.toThrow("DVD salvage rejected");
-
-    await expect(preserveDvdArchive({
-      ...baseOptions,
-      revalidateReadFailure: async () => undefined,
-      runner: runner(vi.fn(async ({ continuation }) => {
-        expect(continuation).toMatchObject({
-          kind: "damaged",
-          recoveryResult: legacyDamage,
-        });
-        throw new DvdReadFailureError(boundaryFailure, retainedDamage);
-      })),
-      salvageValidator: rejectedSalvage,
-    })).rejects.toThrow("DVD salvage rejected");
-
-    const rescuePaths = dvdRescueWorkspacePaths(root, archiveRequestId);
-    expect(readFileSync(rescuePaths.imagePath)).toEqual(
-      fullImage.subarray(0, publishedSizeBytes),
+      digest,
     );
-    expect(JSON.parse(readFileSync(rescuePaths.mapPath, "utf8")))
-      .toMatchObject({
-        schemaVersion: 3,
-        imageByteCount: publishedSizeBytes,
-        recoveryProtocol: expect.objectContaining({
-          declaredByteCount: publishedSizeBytes,
-          badSectorCount: 1,
-          badSectorBitmapHex: "02",
-        }),
-      });
 
     const recoveredImage = Buffer.from(
       fullImage.subarray(0, publishedSizeBytes),
@@ -4371,6 +4401,49 @@ describe("DVD archive publication", () => {
     await completed.finalizePublication?.();
     expect(existsSync(rescuePaths.imagePath)).toBe(false);
     expect(existsSync(rescuePaths.mapPath)).toBe(false);
+  });
+
+  it("rejects a same-inode mutation of retained good sectors during corrected retry", async () => {
+    const digest = "e".repeat(64);
+    const archiveRequestId = "mutated-corrected-boundary-retry";
+    const {
+      baseOptions,
+      correctedDamage,
+      fullImage,
+      publishedSizeBytes,
+      rescuePaths,
+      root,
+      runner,
+    } = await createCorrectedDamagedRetryWorkspace(
+      archiveRequestId,
+      digest,
+    );
+    const corruptedImage = Buffer.from(
+      fullImage.subarray(0, publishedSizeBytes),
+    );
+    corruptedImage.fill(83, 1 * 2_048, 2 * 2_048);
+    corruptedImage.fill(91, 2 * 2_048, 3 * 2_048);
+
+    await expect(preserveDvdArchive({
+      ...baseOptions,
+      runner: runner(vi.fn(async ({ continuation, outputPath }) => {
+        expect(continuation).toEqual(expect.objectContaining({
+          kind: "corrected",
+          recoveryResult: correctedDamage,
+        }));
+        writeFileSync(outputPath, corruptedImage);
+        return createCleanDvdRecoveryResult(publishedSizeBytes);
+      })),
+    })).rejects.toThrow(
+      "DVD corrected-boundary retained sectors changed during recovery",
+    );
+
+    expect(existsSync(join(root, `dvdmeta-${digest}.iso`))).toBe(false);
+    expect(existsSync(rescuePaths.imagePath)).toBe(false);
+    expect(existsSync(rescuePaths.mapPath)).toBe(false);
+    expect(readdirSync(root).some((entry) =>
+      entry.startsWith(`${basename(rescuePaths.imagePath)}.invalid-`)
+    )).toBe(true);
   });
 
   it("revalidates the source after corrected-boundary salvage", async () => {

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   type Stats,
   closeSync,
@@ -109,6 +109,9 @@ const COPY_START_AUTHORIZATION_TIMEOUT_MS = 5 * 60_000;
 const DEVICE_RECOVERY_LOCK_TIMEOUT_MS = 5_000;
 const FLOCK_CONFLICT_EXIT_CODE = 75;
 const DVD_READ_FAILURE_EXIT_STATUS = 3;
+const RETAINED_SECTOR_PROOF_CHUNK_BYTES = 1_048_576;
+const CORRECTED_RETRY_MUTATION_MESSAGE =
+  "DVD corrected-boundary retained sectors changed during recovery";
 
 function dvdArchiveStem(fingerprint: string): string {
   const digest = fingerprint.slice(fingerprint.lastIndexOf(":") + 1);
@@ -1632,6 +1635,110 @@ function sameDvdProofFileIdentity(
   return left.ctimeNs === right.ctimeNs && left.mtimeNs === right.mtimeNs;
 }
 
+interface DvdRetainedSectorProof {
+  digest: string;
+  imageProofIdentity: DvdProofFileIdentity;
+}
+
+async function readDvdRetainedSectorProof({
+  expectedDigest,
+  expectedImageProofIdentity,
+  recoveryResult,
+  signal,
+  workspace,
+}: {
+  expectedDigest?: string;
+  expectedImageProofIdentity?: DvdProofFileIdentity;
+  recoveryResult: DamagedDvdRecoveryResult;
+  signal: AbortSignal;
+  workspace: DvdRescueWorkspace;
+}): Promise<DvdRetainedSectorProof> {
+  const handle = await open(
+    workspace.imagePath,
+    fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+  );
+  try {
+    const before = await handle.stat({ bigint: true });
+    const beforeProof = {
+      ctimeNs: before.ctimeNs,
+      mtimeNs: before.mtimeNs,
+    };
+    if (
+      !before.isFile() ||
+      before.nlink <= 0n ||
+      before.size !== BigInt(workspace.imageByteCount) ||
+      `${before.dev}:${before.ino}` !== workspace.imageFilesystemIdentity ||
+      (expectedImageProofIdentity !== undefined &&
+        !sameDvdProofFileIdentity(
+          beforeProof,
+          expectedImageProofIdentity,
+        ))
+    ) {
+      throw new Error(CORRECTED_RETRY_MUTATION_MESSAGE);
+    }
+
+    const hash = createHash("sha256");
+    hash.update("rip-dvd-corrected-retry-retained-v1\0");
+    hash.update(`${recoveryResult.declaredByteCount}\0`);
+    const buffer = Buffer.allocUnsafe(RETAINED_SECTOR_PROOF_CHUNK_BYTES);
+    const totalSectorCount =
+      recoveryResult.declaredByteCount / DVD_SECTOR_SIZE_BYTES;
+    let nextReadableLba = 0;
+    const digestReadableRange = async (
+      startLba: number,
+      endLba: number,
+    ): Promise<void> => {
+      if (startLba === endLba) {
+        return;
+      }
+      hash.update(`${startLba}:${endLba}\0`);
+      let position = startLba * DVD_SECTOR_SIZE_BYTES;
+      let remaining = (endLba - startLba) * DVD_SECTOR_SIZE_BYTES;
+      while (remaining > 0) {
+        signal.throwIfAborted();
+        const requested = Math.min(buffer.byteLength, remaining);
+        const { bytesRead } = await handle.read(
+          buffer,
+          0,
+          requested,
+          position,
+        );
+        if (bytesRead !== requested) {
+          throw new Error(CORRECTED_RETRY_MUTATION_MESSAGE);
+        }
+        hash.update(buffer.subarray(0, bytesRead));
+        position += bytesRead;
+        remaining -= bytesRead;
+      }
+    };
+    for (const range of recoveryResult.unrecoveredSectorRanges) {
+      await digestReadableRange(nextReadableLba, range.startLba);
+      nextReadableLba = range.startLba + range.sectorCount;
+    }
+    await digestReadableRange(nextReadableLba, totalSectorCount);
+
+    const after = await handle.stat({ bigint: true });
+    const afterProof = {
+      ctimeNs: after.ctimeNs,
+      mtimeNs: after.mtimeNs,
+    };
+    const digest = hash.digest("hex");
+    if (
+      !after.isFile() ||
+      after.nlink <= 0n ||
+      after.size !== BigInt(workspace.imageByteCount) ||
+      `${after.dev}:${after.ino}` !== workspace.imageFilesystemIdentity ||
+      !sameDvdProofFileIdentity(afterProof, beforeProof) ||
+      (expectedDigest !== undefined && digest !== expectedDigest)
+    ) {
+      throw new Error(CORRECTED_RETRY_MUTATION_MESSAGE);
+    }
+    return { digest, imageProofIdentity: afterProof };
+  } finally {
+    await handle.close();
+  }
+}
+
 async function requireDvdProofFileMtime(
   path: string,
   expectedFilesystemIdentity: string,
@@ -2536,7 +2643,41 @@ export async function preserveDvdArchive({
     : safeSizeBytes;
   const readFailureStage: ArchiveReadFailureStage =
     copyContinuation === undefined ? "initial_copy" : "rescue_resume";
+  let retainedSectorProof: DvdRetainedSectorProof | undefined;
+  const rejectChangedCorrectedRetry = async (error: unknown): Promise<never> => {
+    if (rescueIdentity !== undefined && rescueWorkspace !== null) {
+      await quarantineDvdRescueWorkspace(
+        root,
+        rescueIdentity,
+        rescueWorkspace,
+        authorizeMutation,
+      );
+    }
+    throw error;
+  };
   try {
+    if (copyContinuation?.kind === "corrected") {
+      await authorizeMutation?.();
+      signal.throwIfAborted();
+      try {
+        if (
+          rescueWorkspace === null ||
+          rescueWorkspace.imageProofIdentity === null
+        ) {
+          throw new Error(CORRECTED_RETRY_MUTATION_MESSAGE);
+        }
+        retainedSectorProof = await readDvdRetainedSectorProof({
+          expectedImageProofIdentity: rescueWorkspace.imageProofIdentity,
+          recoveryResult: copyContinuation.recoveryResult,
+          signal,
+          workspace: rescueWorkspace,
+        });
+      } catch (error) {
+        await rejectChangedCorrectedRetry(error);
+      }
+      await authorizeMutation?.();
+      signal.throwIfAborted();
+    }
     onProgress({ phase: "copying", progressPercent: 0 });
     const recoveryResult = await runner.copy({
       authorizeProbe: revalidateReadFailure,
@@ -2586,17 +2727,29 @@ export async function preserveDvdArchive({
       signal.throwIfAborted();
       await authorizeMutation?.();
       signal.throwIfAborted();
+      const recoveredRetainedSectorProof = await (async () => {
+        try {
+          if (retainedSectorProof === undefined) {
+            throw new Error(CORRECTED_RETRY_MUTATION_MESSAGE);
+          }
+          return await readDvdRetainedSectorProof({
+            expectedDigest: retainedSectorProof.digest,
+            recoveryResult: copyContinuation.recoveryResult,
+            signal,
+            workspace: rescueWorkspace!,
+          });
+        } catch (error) {
+          return await rejectChangedCorrectedRetry(error);
+        }
+      })();
+      await authorizeMutation?.();
+      signal.throwIfAborted();
       const acceptance = await acceptDvdBoundaryRescueWorkspace(
         root,
         rescueIdentity!,
         rescueWorkspace!,
         recoveryResult,
-        await readDvdProofFileIdentity(
-          rescueWorkspace!.imagePath,
-          rescueWorkspace!.imageFilesystemIdentity,
-          copyOperationSizeBytes,
-          "DVD corrected-boundary image changed during recovery",
-        ),
+        recoveredRetainedSectorProof.imageProofIdentity,
         authorizeMutation,
       );
       rescueWorkspace = acceptance.workspace;
