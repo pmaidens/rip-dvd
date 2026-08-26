@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { constants as fsConstants } from "node:fs";
+import { constants as fsConstants, type BigIntStats } from "node:fs";
 import { lstat, open, realpath, rename, unlink } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
@@ -54,9 +54,92 @@ interface DvdRescueMap {
   preparedImageBasename?: string;
   recoveryProtocol: DvdRecoveryProtocolPayload | null;
   boundaryFailureProtocol?: OutOfRangeDvdReadFailureResult;
+  boundaryAcceptanceImageProof?: {
+    source: SerializedImageProofIdentity;
+    accepted?: SerializedImageProofIdentity;
+  };
 }
 
 type AuthorizeMutation = () => void | Promise<void>;
+
+interface ImageProofIdentity {
+  ctimeNs: bigint;
+  mtimeNs: bigint;
+}
+
+interface SerializedImageProofIdentity {
+  ctimeNs: string;
+  mtimeNs: string;
+}
+
+const INTEGER_PATTERN = /^-?[0-9]+$/;
+
+function serializeImageProofIdentity(
+  identity: ImageProofIdentity,
+): SerializedImageProofIdentity {
+  return {
+    ctimeNs: identity.ctimeNs.toString(),
+    mtimeNs: identity.mtimeNs.toString(),
+  };
+}
+
+function parseImageProofIdentity(
+  value: unknown,
+): ImageProofIdentity {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !("ctimeNs" in value) ||
+    typeof value.ctimeNs !== "string" ||
+    !INTEGER_PATTERN.test(value.ctimeNs) ||
+    !("mtimeNs" in value) ||
+    typeof value.mtimeNs !== "string" ||
+    !INTEGER_PATTERN.test(value.mtimeNs)
+  ) {
+    throw new Error("DVD rescue boundary image proof is invalid");
+  }
+  return {
+    ctimeNs: BigInt(value.ctimeNs),
+    mtimeNs: BigInt(value.mtimeNs),
+  };
+}
+
+function parseBoundaryAcceptanceImageProof(
+  map: DvdRescueMap,
+): { source: ImageProofIdentity; accepted?: ImageProofIdentity } | null {
+  if (map.boundaryAcceptanceImageProof === undefined) {
+    return null;
+  }
+  if (map.schemaVersion !== 3) {
+    throw new Error("DVD rescue boundary image proof is invalid");
+  }
+  return {
+    source: parseImageProofIdentity(
+      map.boundaryAcceptanceImageProof.source,
+    ),
+    ...(map.boundaryAcceptanceImageProof.accepted === undefined
+      ? {}
+      : {
+          accepted: parseImageProofIdentity(
+            map.boundaryAcceptanceImageProof.accepted,
+          ),
+        }),
+  };
+}
+
+function imageMetadataMatchesProof(
+  metadata: BigIntStats,
+  imageFilesystemIdentity: string,
+  imageByteCount: number,
+  proofIdentity: ImageProofIdentity,
+): boolean {
+  return metadata.isFile() &&
+    metadata.nlink > 0n &&
+    `${metadata.dev}:${metadata.ino}` === imageFilesystemIdentity &&
+    metadata.size === BigInt(imageByteCount) &&
+    metadata.ctimeNs === proofIdentity.ctimeNs &&
+    metadata.mtimeNs === proofIdentity.mtimeNs;
+}
 
 function filesystemIdentity(metadata: Awaited<ReturnType<typeof lstat>>): string {
   if (
@@ -191,6 +274,102 @@ async function quarantineWorkspaceFiles(
   }
 }
 
+async function reconcileBoundaryAcceptanceTransaction(
+  root: string,
+  paths: Pick<DvdRescueWorkspace, "imagePath" | "mapPath">,
+  retentionMapPath: string,
+  transaction: {
+    action: "discard" | "promote";
+    imageByteCount: number;
+    imageFilesystemIdentity: string;
+    proofIdentity: ImageProofIdentity;
+  },
+  {
+    authorizeMutation,
+    correlatedArchivePath,
+    invalidStatePolicy,
+  }: {
+    authorizeMutation?: AuthorizeMutation;
+    correlatedArchivePath?: string;
+    invalidStatePolicy: "preserve" | "quarantine";
+  },
+): Promise<void> {
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  let imageChanged = false;
+  let mapChanged = false;
+  const imageStillMatches = async (): Promise<boolean> => {
+    const metadata = handle === undefined
+      ? await lstat(paths.imagePath, { bigint: true })
+      : await handle.stat({ bigint: true });
+    return imageMetadataMatchesProof(
+      metadata,
+      transaction.imageFilesystemIdentity,
+      transaction.imageByteCount,
+      transaction.proofIdentity,
+    );
+  };
+  const rejectChangedImage = (): never => {
+    imageChanged = true;
+    throw new Error("DVD rescue image changed during transaction recovery");
+  };
+  try {
+    handle = await open(
+      paths.imagePath,
+      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+    );
+    if (!(await imageStillMatches())) {
+      rejectChangedImage();
+    }
+    await authorizeMutation?.();
+    if (!(await imageStillMatches())) {
+      rejectChangedImage();
+    }
+    if (transaction.action === "promote") {
+      await rename(retentionMapPath, paths.mapPath);
+    } else {
+      await unlink(retentionMapPath);
+    }
+    mapChanged = true;
+    await authorizeMutation?.();
+    await syncPath(root);
+    if (!(await imageStillMatches())) {
+      rejectChangedImage();
+    }
+    await handle.close();
+    handle = undefined;
+  } catch (error) {
+    if (!imageChanged) {
+      try {
+        imageChanged = !(await imageStillMatches());
+      } catch {
+        imageChanged = true;
+      }
+    }
+    await handle?.close().catch(() => undefined);
+    handle = undefined;
+    if (
+      invalidStatePolicy === "quarantine" &&
+      (imageChanged ||
+        (mapChanged && transaction.action === "promote"))
+    ) {
+      try {
+        await quarantineWorkspaceFiles(
+          root,
+          paths,
+          retentionMapPath,
+          correlatedArchivePath,
+          authorizeMutation,
+        );
+      } catch (quarantineError) {
+        throw new Error("DVD rescue state could not be quarantined", {
+          cause: new AggregateError([error, quarantineError]),
+        });
+      }
+    }
+    throw error;
+  }
+}
+
 function rescueStateFromMap(
   value: unknown,
   identity: DvdRescueIdentity,
@@ -221,6 +400,7 @@ function rescueStateFromMap(
     throw new Error("DVD rescue state does not match the Archive Request");
   }
   const map = value as DvdRescueMap;
+  parseBoundaryAcceptanceImageProof(map);
   if (map.schemaVersion === 1) {
     if (map.recoveryProtocol === null || map.boundaryFailureProtocol !== undefined) {
       throw new Error("DVD rescue state does not match the Archive Request");
@@ -295,7 +475,16 @@ function createRescueMap(
   identity: DvdRescueIdentity,
   imageFilesystemIdentity: string,
   state: DvdRescueState,
-  preparedImageBasename?: string,
+  {
+    preparedImageBasename,
+    boundaryAcceptanceImageProof,
+  }: {
+    preparedImageBasename?: string;
+    boundaryAcceptanceImageProof?: {
+      source: ImageProofIdentity;
+      accepted?: ImageProofIdentity;
+    };
+  } = {},
 ): DvdRescueMap {
   const recoveryProtocol = state.recoveryResult === null
     ? null
@@ -324,6 +513,12 @@ function createRescueMap(
         state.recoveryResult.declaredByteCount === state.imageByteCount
       ? 3
       : 2;
+  if (
+    boundaryAcceptanceImageProof !== undefined &&
+    schemaVersion !== 3
+  ) {
+    throw new Error("DVD rescue boundary image proof is invalid");
+  }
   return {
     schemaVersion,
     archiveRequestId: identity.archiveRequestId,
@@ -340,6 +535,22 @@ function createRescueMap(
         }),
     imageFilesystemIdentity,
     ...(preparedImageBasename === undefined ? {} : { preparedImageBasename }),
+    ...(boundaryAcceptanceImageProof === undefined
+      ? {}
+      : {
+          boundaryAcceptanceImageProof: {
+            source: serializeImageProofIdentity(
+              boundaryAcceptanceImageProof.source,
+            ),
+            ...(boundaryAcceptanceImageProof.accepted === undefined
+              ? {}
+              : {
+                  accepted: serializeImageProofIdentity(
+                    boundaryAcceptanceImageProof.accepted,
+                  ),
+                }),
+          },
+        }),
     recoveryProtocol,
   };
 }
@@ -428,7 +639,7 @@ async function commitPreparedDvdRescueWorkspace(
       identity,
       imageFilesystemIdentity,
       state,
-      basename(sourceImagePath),
+      { preparedImageBasename: basename(sourceImagePath) },
     ),
     authorizeMutation,
   );
@@ -530,8 +741,16 @@ export async function loadDvdRescueWorkspace(
     });
   }
   if (retentionMapMetadata !== null && mapMetadata !== null) {
-    let acceptedTransaction = false;
-    let unappliedTransaction = false;
+    let acceptedTransaction: {
+      imageByteCount: number;
+      imageFilesystemIdentity: string;
+      proofIdentity: ImageProofIdentity;
+    } | null = null;
+    let unappliedTransaction: {
+      imageByteCount: number;
+      imageFilesystemIdentity: string;
+      proofIdentity: ImageProofIdentity;
+    } | null = null;
     try {
       const retainedMapValue = await readRescueMap(
         retentionMapPath,
@@ -539,40 +758,64 @@ export async function loadDvdRescueWorkspace(
       );
       const retainedMap = retainedMapValue as DvdRescueMap;
       const retainedState = rescueStateFromMap(retainedMapValue, identity);
+      const retentionProof = parseBoundaryAcceptanceImageProof(retainedMap);
       if (
         retainedMap.schemaVersion === 3 &&
+        retentionProof !== null &&
         imageMetadata !== null &&
         imageMetadata.isFile() &&
         !imageMetadata.isSymbolicLink() &&
         filesystemIdentity(imageMetadata) ===
           retainedMap.imageFilesystemIdentity
       ) {
-        acceptedTransaction =
-          imageMetadata.size === retainedState.imageByteCount;
-        if (!acceptedTransaction) {
+        if (
+          retentionProof.accepted !== undefined &&
+          imageMetadata.size === retainedState.imageByteCount
+        ) {
+          acceptedTransaction = {
+            imageByteCount: retainedState.imageByteCount,
+            imageFilesystemIdentity: retainedMap.imageFilesystemIdentity,
+            proofIdentity: retentionProof.accepted,
+          };
+        } else if (retentionProof.accepted === undefined) {
           const mapValue = await readRescueMap(paths.mapPath, mapMetadata);
           const map = mapValue as DvdRescueMap;
           const state = rescueStateFromMap(mapValue, identity);
-          unappliedTransaction =
+          if (
             imageMetadata.size === state.imageByteCount &&
             filesystemIdentity(imageMetadata) ===
-              map.imageFilesystemIdentity;
+              map.imageFilesystemIdentity
+          ) {
+            unappliedTransaction = {
+              imageByteCount: state.imageByteCount,
+              imageFilesystemIdentity: map.imageFilesystemIdentity,
+              proofIdentity: retentionProof.source,
+            };
+          }
         }
       }
     } catch {
-      acceptedTransaction = false;
-      unappliedTransaction = false;
+      acceptedTransaction = null;
+      unappliedTransaction = null;
     }
-    if (acceptedTransaction) {
-      await authorizeMutation?.();
-      await rename(retentionMapPath, paths.mapPath);
-      await syncPath(root);
+    if (acceptedTransaction !== null) {
+      await reconcileBoundaryAcceptanceTransaction(
+        root,
+        paths,
+        retentionMapPath,
+        { action: "promote", ...acceptedTransaction },
+        { authorizeMutation, correlatedArchivePath, invalidStatePolicy },
+      );
       mapMetadata = await lstat(paths.mapPath);
       retentionMapMetadata = null;
-    } else if (unappliedTransaction) {
-      await authorizeMutation?.();
-      await unlink(retentionMapPath);
-      await syncPath(root);
+    } else if (unappliedTransaction !== null) {
+      await reconcileBoundaryAcceptanceTransaction(
+        root,
+        paths,
+        retentionMapPath,
+        { action: "discard", ...unappliedTransaction },
+        { authorizeMutation, correlatedArchivePath, invalidStatePolicy },
+      );
       retentionMapMetadata = null;
     } else if (invalidStatePolicy === "preserve") {
       throw new Error("DVD rescue state is invalid", {
@@ -604,6 +847,7 @@ export async function loadDvdRescueWorkspace(
     const parsed = await readRescueMap(paths.mapPath, mapMetadata);
     const state = rescueStateFromMap(parsed, identity);
     const map = parsed as DvdRescueMap;
+    const boundaryAcceptanceProof = parseBoundaryAcceptanceImageProof(map);
     const preparedImagePath =
       "preparedImageBasename" in map
         ? requirePreparedImagePath(
@@ -648,6 +892,27 @@ export async function loadDvdRescueWorkspace(
     }
     if (map.imageFilesystemIdentity !== filesystemIdentity(imageMetadata)) {
       throw new Error("DVD rescue image does not match its recovery map");
+    }
+    if (boundaryAcceptanceProof !== null) {
+      if (boundaryAcceptanceProof.accepted === undefined) {
+        throw new Error("DVD rescue boundary image proof is incomplete");
+      }
+      const handle = await open(
+        paths.imagePath,
+        fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+      );
+      try {
+        if (!imageMetadataMatchesProof(
+          await handle.stat({ bigint: true }),
+          map.imageFilesystemIdentity,
+          state.imageByteCount,
+          boundaryAcceptanceProof.accepted,
+        )) {
+          throw new Error("DVD rescue boundary image proof does not match");
+        }
+      } finally {
+        await handle.close();
+      }
     }
     const canonicalImagePath = await realpath(paths.imagePath);
     if (
@@ -992,100 +1257,258 @@ export async function acceptDvdBoundaryRescueWorkspace(
     root,
     identity.archiveRequestId,
   );
-  await writeMapAtomically(
-    root,
-    retentionMapPath,
-    createRescueMap(
-      identity,
-      workspace.imageFilesystemIdentity,
-      acceptedState,
-    ),
-    authorizeMutation,
-  );
   let imageChangedDuringAcceptance = false;
+  let mapPromoted = false;
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  let lastValidatedImageByteCount = Number(metadata.size);
+  let lastValidatedImageProof: ImageProofIdentity = expectedImageProofIdentity;
   const rejectChangedImage = (): never => {
     imageChangedDuringAcceptance = true;
     throw new Error("DVD rescue image changed during boundary acceptance");
   };
   try {
-    const handle = await open(
+    await writeMapAtomically(
+      root,
+      retentionMapPath,
+      createRescueMap(
+        identity,
+        workspace.imageFilesystemIdentity,
+        acceptedState,
+        {
+          boundaryAcceptanceImageProof: {
+            source: expectedImageProofIdentity,
+          },
+        },
+      ),
+      authorizeMutation,
+    );
+    handle = await open(
       workspace.imagePath,
       fsConstants.O_RDWR | fsConstants.O_NOFOLLOW,
     );
-    try {
-      const opened = await handle.stat({ bigint: true });
-      if (
-        opened.dev !== metadata.dev ||
-        opened.ino !== metadata.ino ||
-        opened.nlink <= 0n ||
-        opened.size !== metadata.size ||
-        opened.ctimeNs !== expectedImageProofIdentity.ctimeNs ||
-        opened.mtimeNs !== expectedImageProofIdentity.mtimeNs
-      ) {
-        rejectChangedImage();
-      }
-      await authorizeMutation?.();
-      const beforeTruncate = await handle.stat({ bigint: true });
-      if (
-        beforeTruncate.dev !== opened.dev ||
-        beforeTruncate.ino !== opened.ino ||
-        beforeTruncate.nlink <= 0n ||
-        beforeTruncate.size !== opened.size ||
-        beforeTruncate.ctimeNs !== opened.ctimeNs ||
-        beforeTruncate.mtimeNs !== opened.mtimeNs
-      ) {
-        rejectChangedImage();
-      }
-      if (beforeTruncate.size !== BigInt(acceptedByteCount)) {
-        await handle.truncate(acceptedByteCount);
-      }
-      await handle.sync();
-      const accepted = await handle.stat({ bigint: true });
-      if (
-        accepted.dev !== opened.dev ||
-        accepted.ino !== opened.ino ||
-        accepted.nlink <= 0n ||
-        accepted.size !== BigInt(acceptedByteCount)
-      ) {
-        rejectChangedImage();
-      }
-      await authorizeMutation?.();
-      const beforePromotion = await handle.stat({ bigint: true });
-      if (
-        beforePromotion.dev !== accepted.dev ||
-        beforePromotion.ino !== accepted.ino ||
-        beforePromotion.nlink <= 0n ||
-        beforePromotion.size !== accepted.size ||
-        beforePromotion.ctimeNs !== accepted.ctimeNs ||
-        beforePromotion.mtimeNs !== accepted.mtimeNs
-      ) {
-        rejectChangedImage();
-      }
-      await rename(retentionMapPath, workspace.mapPath);
-      await syncPath(root);
-    } finally {
-      await handle.close();
+    const opened = await handle.stat({ bigint: true });
+    if (!imageMetadataMatchesProof(
+      opened,
+      workspace.imageFilesystemIdentity,
+      lastValidatedImageByteCount,
+      lastValidatedImageProof,
+    )) {
+      rejectChangedImage();
     }
+    await authorizeMutation?.();
+    const beforeTruncate = await handle.stat({ bigint: true });
+    if (!imageMetadataMatchesProof(
+      beforeTruncate,
+      workspace.imageFilesystemIdentity,
+      lastValidatedImageByteCount,
+      lastValidatedImageProof,
+    )) {
+      rejectChangedImage();
+    }
+    if (beforeTruncate.size !== BigInt(acceptedByteCount)) {
+      await handle.truncate(acceptedByteCount);
+    }
+    await handle.sync();
+    const accepted = await handle.stat({ bigint: true });
+    if (
+      !accepted.isFile() ||
+      accepted.nlink <= 0n ||
+      `${accepted.dev}:${accepted.ino}` !==
+        workspace.imageFilesystemIdentity ||
+      accepted.size !== BigInt(acceptedByteCount)
+    ) {
+      rejectChangedImage();
+    }
+    lastValidatedImageByteCount = acceptedByteCount;
+    lastValidatedImageProof = {
+      ctimeNs: accepted.ctimeNs,
+      mtimeNs: accepted.mtimeNs,
+    };
+    await writeMapAtomically(
+      root,
+      retentionMapPath,
+      createRescueMap(
+        identity,
+        workspace.imageFilesystemIdentity,
+        acceptedState,
+        {
+          boundaryAcceptanceImageProof: {
+            source: expectedImageProofIdentity,
+            accepted: lastValidatedImageProof,
+          },
+        },
+      ),
+      authorizeMutation,
+    );
+    const beforePromotion = await handle.stat({ bigint: true });
+    if (!imageMetadataMatchesProof(
+      beforePromotion,
+      workspace.imageFilesystemIdentity,
+      lastValidatedImageByteCount,
+      lastValidatedImageProof,
+    )) {
+      rejectChangedImage();
+    }
+    await authorizeMutation?.();
+    const authorizedForPromotion = await handle.stat({ bigint: true });
+    if (!imageMetadataMatchesProof(
+      authorizedForPromotion,
+      workspace.imageFilesystemIdentity,
+      lastValidatedImageByteCount,
+      lastValidatedImageProof,
+    )) {
+      rejectChangedImage();
+    }
+    await rename(retentionMapPath, workspace.mapPath);
+    mapPromoted = true;
+    await authorizeMutation?.();
+    await syncPath(root);
+    const promoted = await handle.stat({ bigint: true });
+    if (!imageMetadataMatchesProof(
+      promoted,
+      workspace.imageFilesystemIdentity,
+      lastValidatedImageByteCount,
+      lastValidatedImageProof,
+    )) {
+      rejectChangedImage();
+    }
+    await handle.close();
+    handle = undefined;
   } catch (error) {
     if (!imageChangedDuringAcceptance) {
-      throw error;
+      try {
+        const observed = handle === undefined
+          ? await lstat(workspace.imagePath, { bigint: true })
+          : await handle.stat({ bigint: true });
+        imageChangedDuringAcceptance = !imageMetadataMatchesProof(
+          observed,
+          workspace.imageFilesystemIdentity,
+          lastValidatedImageByteCount,
+          lastValidatedImageProof,
+        );
+      } catch {
+        imageChangedDuringAcceptance = true;
+      }
     }
-    try {
-      await quarantineWorkspaceFiles(
-        root,
-        expectedPaths,
-        retentionMapPath,
-        undefined,
-        authorizeMutation,
-      );
-    } catch (quarantineError) {
-      throw new Error("DVD rescue boundary state could not be quarantined", {
-        cause: new AggregateError([error, quarantineError]),
-      });
+    await handle?.close().catch(() => undefined);
+    handle = undefined;
+    if (imageChangedDuringAcceptance || mapPromoted) {
+      try {
+        await quarantineWorkspaceFiles(
+          root,
+          expectedPaths,
+          retentionMapPath,
+          undefined,
+          authorizeMutation,
+        );
+      } catch (quarantineError) {
+        throw new Error("DVD rescue boundary state could not be quarantined", {
+          cause: new AggregateError([error, quarantineError]),
+        });
+      }
     }
     throw error;
   }
   return { ...workspace, ...acceptedState };
+}
+
+export async function updateDvdBoundaryRescueWorkspaceImageProof(
+  root: string,
+  identity: DvdRescueIdentity,
+  workspace: DvdRescueWorkspace,
+  expectedImageProofIdentity: ImageProofIdentity,
+  correlatedArchivePath: string,
+  authorizeMutation?: AuthorizeMutation,
+): Promise<void> {
+  const expectedPaths = dvdRescueWorkspacePaths(root, identity.archiveRequestId);
+  const retentionMapPath = dvdBoundaryRetentionMapPath(
+    root,
+    identity.archiveRequestId,
+  );
+  if (
+    workspace.imagePath !== expectedPaths.imagePath ||
+    workspace.mapPath !== expectedPaths.mapPath ||
+    dirname(correlatedArchivePath) !== root
+  ) {
+    throw new Error("DVD rescue boundary image proof update is invalid");
+  }
+  const mapMetadata = await lstat(workspace.mapPath);
+  const mapValue = await readRescueMap(workspace.mapPath, mapMetadata);
+  const map = mapValue as DvdRescueMap;
+  const state = rescueStateFromMap(mapValue, identity);
+  const priorProof = parseBoundaryAcceptanceImageProof(map);
+  if (
+    map.schemaVersion !== 3 ||
+    priorProof?.accepted === undefined ||
+    state.boundaryFailure === null ||
+    state.recoveryResult === null ||
+    state.imageByteCount !== workspace.imageByteCount ||
+    map.imageFilesystemIdentity !== workspace.imageFilesystemIdentity
+  ) {
+    throw new Error("DVD rescue boundary image proof update is invalid");
+  }
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  let updateStarted = false;
+  try {
+    handle = await open(
+      workspace.imagePath,
+      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+    );
+    if (!imageMetadataMatchesProof(
+      await handle.stat({ bigint: true }),
+      workspace.imageFilesystemIdentity,
+      workspace.imageByteCount,
+      expectedImageProofIdentity,
+    )) {
+      throw new Error("DVD rescue boundary image changed after publication");
+    }
+    updateStarted = true;
+    await writeMapAtomically(
+      root,
+      workspace.mapPath,
+      createRescueMap(
+        identity,
+        workspace.imageFilesystemIdentity,
+        state,
+        {
+          boundaryAcceptanceImageProof: {
+            source: priorProof.source,
+            accepted: expectedImageProofIdentity,
+          },
+        },
+      ),
+      authorizeMutation,
+    );
+    if (!imageMetadataMatchesProof(
+      await handle.stat({ bigint: true }),
+      workspace.imageFilesystemIdentity,
+      workspace.imageByteCount,
+      expectedImageProofIdentity,
+    )) {
+      throw new Error("DVD rescue boundary image changed after publication");
+    }
+    await handle.close();
+    handle = undefined;
+  } catch (error) {
+    await handle?.close().catch(() => undefined);
+    handle = undefined;
+    if (updateStarted) {
+      try {
+        await quarantineWorkspaceFiles(
+          root,
+          expectedPaths,
+          retentionMapPath,
+          correlatedArchivePath,
+          authorizeMutation,
+        );
+      } catch (quarantineError) {
+        throw new Error("DVD rescue state could not be quarantined", {
+          cause: new AggregateError([error, quarantineError]),
+        });
+      }
+    }
+    throw error;
+  }
 }
 
 export async function removeDvdRescueWorkspace(

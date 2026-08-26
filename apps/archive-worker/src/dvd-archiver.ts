@@ -85,6 +85,7 @@ import {
   removeDvdRescueWorkspace,
   type DvdRescueIdentity,
   type DvdRescueWorkspace,
+  updateDvdBoundaryRescueWorkspaceImageProof,
   updateDvdRescueWorkspace,
 } from "./dvd-rescue-workspace.js";
 import {
@@ -1955,6 +1956,33 @@ async function publishCorrectedDvdBoundary({
       sourcePath: acceptedWorkspace.imagePath,
       sync,
     });
+    const linkedImageProofIdentity = await readDvdProofFileIdentity(
+      acceptedWorkspace.imagePath,
+      acceptedWorkspace.imageFilesystemIdentity,
+      publishedSizeBytes,
+      "Published corrected DVD archive changed before verification",
+    );
+    await updateDvdBoundaryRescueWorkspaceImageProof(
+      root,
+      rescueIdentity,
+      acceptedWorkspace,
+      linkedImageProofIdentity,
+      archivePath,
+      authorizeMutation,
+    );
+    if (!sameDvdProofFileIdentity(
+      await readDvdProofFileIdentity(
+        archivePath,
+        acceptedWorkspace.imageFilesystemIdentity,
+        publishedSizeBytes,
+        "Published corrected DVD archive changed before verification",
+      ),
+      linkedImageProofIdentity,
+    )) {
+      throw new Error(
+        "Published corrected DVD archive changed before verification",
+      );
+    }
   } else {
     const publishedArchive = await lstat(archivePath);
     publishedFilesystemIdentity = filesystemIdentity(publishedArchive);
