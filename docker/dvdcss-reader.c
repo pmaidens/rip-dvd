@@ -1322,6 +1322,13 @@ static int recover_range(struct read_backend *backend,
             continue;
         }
         if (backend_read_has_terminal_failure_result(result.status)) {
+            if (result.status == BACKEND_READ_OUT_OF_RANGE_ERROR) {
+                uint64_t unproven_bytes_processed = *bytes_processed;
+                return prove_boundary_candidate(
+                    backend, state, recovery, buffer, &result.failure,
+                    bytes_processed, &unproven_bytes_processed,
+                    declared_byte_count);
+            }
             return emit_read_failure_result(
                 &result.failure, recovery, declared_byte_count,
                 boundary_retained_image_byte_count(

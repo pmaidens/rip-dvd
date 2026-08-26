@@ -1104,6 +1104,43 @@ if (
   );
 }
 
+const sameRequestDamagedThenBoundary = runTestCopy(
+  "same-request-medium-then-out-of-range",
+  [
+    rawCompletionFault(5, "always", fixedMediumAtFive),
+    rawTailCompletionFault(20, "always", fixedOutOfRangeSense(20)),
+  ].join(","),
+);
+const sameRequestDamagedThenBoundaryResult = readFailureResult(
+  sameRequestDamagedThenBoundary.stderr,
+);
+const sameRequestDamagedBoundaryImage = Buffer.from(
+  content.subarray(0, 20 * 2_048),
+);
+sameRequestDamagedBoundaryImage.fill(0, 5 * 2_048, 6 * 2_048);
+if (
+  sameRequestDamagedThenBoundary.status !== 3 ||
+  sameRequestDamagedThenBoundaryResult.protocolVersion !== 2 ||
+  sameRequestDamagedThenBoundaryResult.category !== "out_of_range" ||
+  sameRequestDamagedThenBoundaryResult.boundaryProofVersion !==
+    "dvd-sector-boundary-proof-v1" ||
+  sameRequestDamagedThenBoundaryResult.firstFailingLba !== 20 ||
+  sameRequestDamagedThenBoundaryResult.retainedImageByteCount !== 20 * 2_048 ||
+  sameRequestDamagedThenBoundaryResult.recoveryProtocol?.badSectorCount !== 1 ||
+  sameRequestDamagedThenBoundaryResult.recoveryProtocol?.badAreaCount !== 1 ||
+  sameRequestDamagedThenBoundaryResult.recoveryProtocol?.badSectorBitmapHex !==
+    "2000000000" ||
+  statSync(sameRequestDamagedThenBoundary.outputPath).size !== 20 * 2_048 ||
+  !readFileSync(sameRequestDamagedThenBoundary.outputPath).equals(
+    sameRequestDamagedBoundaryImage,
+  ) ||
+  sameRequestDamagedThenBoundary.stderr.includes(recoveryResultPrefix)
+) {
+  throw new Error(
+    `libdvdcss same-request damaged boundary composition check failed: ${sameRequestDamagedThenBoundary.stderr}`,
+  );
+}
+
 for (const excludedSectorCount of [114_301, 73_400]) {
   const boundaryLba = content.byteLength / 2_048;
   const declaredSectorCount = boundaryLba + excludedSectorCount;
