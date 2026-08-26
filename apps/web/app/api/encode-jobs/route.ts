@@ -266,7 +266,7 @@ function readQueueOptions(
   });
 }
 
-function readQueueLogicalJobs(
+function readQueueLogicalJobConflicts(
   access: DataAccess,
   discSelectionIds: readonly DiscSelectionId[],
   encodingProfileId: EncodingProfileId,
@@ -284,7 +284,7 @@ function readQueueLogicalJobs(
         encodingProfileId,
       );
     }
-    return snapshot.encodeJobs.listQueueLogicalJobs({
+    return snapshot.encodeJobs.listQueueLogicalJobConflicts({
       discSelectionIds,
       encodingProfileId,
     });
@@ -354,7 +354,7 @@ export async function createEncodeJobsRoute(
       }
       if (resolveSelectionIds.length > 0) {
         return response({
-          logicalJobs: readQueueLogicalJobs(
+          conflictingDiscSelectionIds: readQueueLogicalJobConflicts(
             getAccess(),
             resolveSelectionIds as DiscSelectionId[],
             encodingProfileId as EncodingProfileId,

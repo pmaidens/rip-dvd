@@ -139,7 +139,7 @@ describe("Encode Jobs API", () => {
       mediaDomain: "dvd_video",
       settings: { preset: "Fast 480p30", container: "mkv" },
     });
-    const job = access.encodeJobs.enqueue({
+    access.encodeJobs.enqueue({
       discSelectionId: candidate.selection.id,
       encodingProfileId: profile.id,
       outputPath: "/media/movies/Replacement resolution.mkv",
@@ -158,14 +158,7 @@ describe("Encode Jobs API", () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
-      logicalJobs: [{
-        discSelectionId: candidate.selection.id,
-        id: job.id,
-        encodingProfileId: profile.id,
-        outputPath: "/media/movies/Replacement resolution.mkv",
-        status: "queued",
-        queueAvailable: false,
-      }],
+      conflictingDiscSelectionIds: [candidate.selection.id],
     });
     expect(access.encodeJobs.list()).toHaveLength(1);
 
@@ -186,6 +179,13 @@ describe("Encode Jobs API", () => {
       }),
     );
     expect(oversizedResponse.status).toBe(400);
+    expect(() => access.encodeJobs.listQueueLogicalJobConflicts({
+      discSelectionIds: Array.from(
+        { length: 101 },
+        () => candidate.selection.id,
+      ),
+      encodingProfileId: profile.id,
+    })).toThrow("limited to 100 Disc Selections");
   });
 
   it("classifies queue candidates and returns profile-relative Encode Job details", async () => {

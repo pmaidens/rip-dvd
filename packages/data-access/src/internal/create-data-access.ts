@@ -3571,8 +3571,8 @@ export function createDataAccessInternal(
         },
         encodeJobs: {
           list: (statuses, options) => access.encodeJobs.list(statuses, options),
-          listQueueLogicalJobs: (options) =>
-            access.encodeJobs.listQueueLogicalJobs(options),
+          listQueueLogicalJobConflicts: (options) =>
+            access.encodeJobs.listQueueLogicalJobConflicts(options),
           listQueueDiscSelections: (options) =>
             access.encodeJobs.listQueueDiscSelections(options),
           listDiscSelectionCorrectionEncodeJobLinks: (options) =>
@@ -8595,34 +8595,29 @@ export function createDataAccessInternal(
     },
 
     encodeJobs: {
-      listQueueLogicalJobs(options) {
-        const discSelectionIds = [...new Set(options.discSelectionIds)];
-        if (discSelectionIds.length > ENCODE_QUEUE_DISC_SELECTION_LIMIT) {
+      listQueueLogicalJobConflicts(options) {
+        if (
+          options.discSelectionIds.length >
+            ENCODE_QUEUE_DISC_SELECTION_LIMIT
+        ) {
           throw new DomainInvariantError(
             `Encode queue logical-job resolution is limited to ${ENCODE_QUEUE_DISC_SELECTION_LIMIT} Disc Selections`,
           );
         }
+        const discSelectionIds = [...new Set(options.discSelectionIds)];
         if (discSelectionIds.length === 0) {
           return [];
         }
         return database
-          .select()
+          .select({ discSelectionId: encodeJobs.discSelectionId })
           .from(encodeJobs)
           .where(and(
             inArray(encodeJobs.discSelectionId, discSelectionIds),
             eq(encodeJobs.encodingProfileId, options.encodingProfileId),
             isNull(encodeJobs.predecessorEncodeJobId),
           ))
-          .orderBy(desc(encodeJobs.updatedAt), desc(encodeJobs.id))
           .all()
-          .map((job) => ({
-            discSelectionId: job.discSelectionId,
-            id: job.id,
-            encodingProfileId: job.encodingProfileId,
-            outputPath: job.outputPath,
-            status: job.status,
-            queueAvailable: isEncodeJobSafelyTerminal(job),
-          }));
+          .map((job) => job.discSelectionId);
       },
 
       listQueueDiscSelections(options) {

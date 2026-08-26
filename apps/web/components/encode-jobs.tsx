@@ -7,7 +7,6 @@ import {
   type EncodeJobId,
   type EncodeJobStatus,
   type EncodeQueueHistoryGroup,
-  type EncodeQueueLogicalJobResolution,
   type EncodingProfileId,
 } from "@rip-dvd/data-access";
 import {
@@ -1117,7 +1116,7 @@ export function EncodeJobsView({
           ) : null}
           <OptionPager
             ariaLabel="Encode profile pages"
-            isSaving={isSaving}
+            isSaving={isSaving || profileSelectionLocked}
             nextLabel="Next active profiles"
             onPage={onProfilePage}
             page={state.profilePage}
@@ -1199,11 +1198,11 @@ export async function requestEncodeJobOptions(
   };
 }
 
-export async function requestQueueLogicalJobs(
+export async function requestQueueLogicalJobConflicts(
   discSelectionIds: readonly DiscSelectionId[],
   encodingProfileId: EncodingProfileId,
   fetcher: EncodeJobsFetch = fetch,
-): Promise<EncodeQueueLogicalJobResolution[]> {
+): Promise<DiscSelectionId[]> {
   const parameters = new URLSearchParams({ encodingProfileId });
   for (const discSelectionId of discSelectionIds) {
     parameters.append("resolveDiscSelectionId", discSelectionId);
@@ -1218,9 +1217,9 @@ export async function requestQueueLogicalJobs(
     );
   }
   const body = await response.json() as {
-    logicalJobs: EncodeQueueLogicalJobResolution[];
+    conflictingDiscSelectionIds: DiscSelectionId[];
   };
-  return body.logicalJobs;
+  return body.conflictingDiscSelectionIds;
 }
 
 export async function queueEncodeJob(
@@ -1537,7 +1536,9 @@ export function EncodeJobsManager({
   async function changeProfile(profileId: EncodingProfileId | "") {
     const preservedSelections = [
       ...worklist.checkedSelections,
-      ...worklist.rows.map((row) => row.selection),
+      ...worklist.rows
+        .filter((row) => row.status === "ready" || row.status === "failed")
+        .map((row) => row.selection),
     ];
     if (
       !profileUnavailable ||
@@ -1556,24 +1557,22 @@ export function EncodeJobsManager({
       const selectionIds = [
         ...new Set(preservedSelections.map((selection) => selection.id)),
       ];
-      const logicalJobs = [] as EncodeQueueLogicalJobResolution[];
+      const conflictingIds = [] as DiscSelectionId[];
       for (let offset = 0; offset < selectionIds.length; offset += 100) {
-        logicalJobs.push(...await requestQueueLogicalJobs(
+        conflictingIds.push(...await requestQueueLogicalJobConflicts(
           selectionIds.slice(offset, offset + 100),
           profileId,
         ));
       }
-      if (logicalJobs.length > 0) {
-        const affectedIds = new Set(
-          logicalJobs.map((job) => job.discSelectionId),
-        );
+      if (conflictingIds.length > 0) {
+        const affectedIds = new Set(conflictingIds);
         const affectedTitles = preservedSelections
           .filter((selection) => affectedIds.has(selection.id))
           .map((selection) => selection.mediaTitle)
           .slice(0, 3);
-        const remaining = logicalJobs.length - affectedTitles.length;
+        const remaining = conflictingIds.length - affectedTitles.length;
         setRequestError(
-          `The replacement profile already has ${countLabel(logicalJobs.length, "Encode Job", "Encode Jobs")} for this worklist (${affectedTitles.join(", ")}${remaining > 0 ? ` and ${remaining} more` : ""}). Choose another profile, or remove those rows and use their single-item actions.`
+          `The replacement profile already has ${countLabel(conflictingIds.length, "Encode Job", "Encode Jobs")} for this worklist (${affectedTitles.join(", ")}${remaining > 0 ? ` and ${remaining} more` : ""}). Choose another profile, or remove those rows and use their single-item actions.`
             .slice(0, 512),
         );
         return;
