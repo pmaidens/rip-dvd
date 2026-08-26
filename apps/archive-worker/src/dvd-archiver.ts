@@ -1917,6 +1917,10 @@ async function publishCorrectedDvdBoundary({
       throw decision.error;
     }
     integrityEvidence = decision.integrityEvidence;
+    await verifySource();
+    signal.throwIfAborted();
+    await authorizeMutation?.();
+    signal.throwIfAborted();
   }
   onProgress({ phase: "finalizing", progressPercent: 99 });
   await sync(acceptedWorkspace.imagePath);
