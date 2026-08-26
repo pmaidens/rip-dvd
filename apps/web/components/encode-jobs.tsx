@@ -2,13 +2,17 @@
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 
-import type {
-  DiscSelectionId,
-  EncodeJobId,
-  EncodeJobStatus,
-  EncodeQueueHistoryGroup,
-  EncodingProfileId,
+import {
+  type DiscSelectionId,
+  type EncodeJobId,
+  type EncodeJobStatus,
+  type EncodeQueueHistoryGroup,
+  type EncodingProfileId,
 } from "@rip-dvd/data-access";
+import {
+  ENCODE_QUEUE_SEARCH_QUERY_MAX_LENGTH,
+  validateEncodeQueueSearchQuery,
+} from "@rip-dvd/data-access/encode-queue-search";
 
 import { displayTerm } from "../lib/display-term";
 import { isTerminalEncodeJobStatus } from "../lib/encode-job-status";
@@ -64,6 +68,7 @@ export type EncodeJobsLoadState =
   | {
       status: "loaded";
       historyGroup: EncodeQueueHistoryGroup;
+      query: string;
       counts: EncodeHistoryCounts;
       selections: EncodeSelectionOption[];
       profiles: EncodeProfileOption[];
@@ -83,12 +88,14 @@ export type QueueEncodeJobAction =
 
 interface EncodeJobsViewProps {
   state: EncodeJobsLoadState;
+  successfulQueueRevision?: number;
   selectedProfileId: EncodingProfileId | "";
   isSaving: boolean;
   requestError: string | null;
   onQueue(action: QueueEncodeJobAction): void;
   onRetry(): void;
   onHistoryGroup(group: EncodeQueueHistoryGroup): void;
+  onSearch(query: string): void;
   onProfileChange(profileId: EncodingProfileId | ""): void;
   onSelectionPage(offset: number): void;
   onProfilePage(offset: number): void;
@@ -194,54 +201,145 @@ function submitLabel(job: LogicalEncodeJob | null): string {
 
 export function EncodeJobsView({
   state,
+  successfulQueueRevision = 0,
   selectedProfileId,
   isSaving,
   requestError,
   onQueue,
   onRetry,
   onHistoryGroup,
+  onSearch,
   onProfileChange,
   onSelectionPage,
   onProfilePage,
 }: EncodeJobsViewProps) {
-  const [selectedSelectionId, setSelectedSelectionId] = useState<
-    DiscSelectionId | ""
+  const [selectedSelection, setSelectedSelection] = useState<
+    EncodeSelectionOption | null
+  >(null);
+  const [selectedSelectionGroup, setSelectedSelectionGroup] = useState<
+    EncodeQueueHistoryGroup | null
+  >(null);
+  const [selectedSelectionProfileId, setSelectedSelectionProfileId] = useState<
+    EncodingProfileId | ""
   >("");
+  const [searchQuery, setSearchQuery] = useState(
+    state.status === "loaded" ? state.query : "",
+  );
+  const [searchError, setSearchError] = useState<string | null>(null);
   const [outputPath, setOutputPath] = useState("");
+  const [isOutputPathEdited, setIsOutputPathEdited] = useState(false);
+  const clearSelectedSelection = useCallback(() => {
+    setSelectedSelection(null);
+    setSelectedSelectionGroup(null);
+    setSelectedSelectionProfileId("");
+    setOutputPath("");
+    setIsOutputPathEdited(false);
+  }, []);
 
-  const selectedSelection = state.status === "loaded"
-    ? state.selections.find((selection) =>
-      selection.id === selectedSelectionId
-    ) ?? null
+  const loadedHistoryGroup = state.status === "loaded"
+    ? state.historyGroup
     : null;
-  const logicalJob = selectedSelection?.logicalJob ?? null;
+  const groupedSelectedSelection = loadedHistoryGroup !== null &&
+      selectedSelectionGroup === loadedHistoryGroup
+    ? selectedSelection
+    : null;
+  const pageSelection = state.status === "loaded" &&
+      groupedSelectedSelection !== null
+    ? state.selections.find((selection) =>
+      selection.id === groupedSelectedSelection.id
+    )
+    : undefined;
+  const visibleSelection = pageSelection ?? groupedSelectedSelection;
+  const logicalJob = visibleSelection?.logicalJob ?? null;
   const visibleSelectedProfileId = state.status === "loaded" &&
       state.profiles.some((profile) => profile.id === selectedProfileId)
     ? selectedProfileId
     : "";
   const logicalJobIsTerminal = logicalJob !== null &&
     isTerminalEncodeJobStatus(logicalJob.status);
-  const canSubmit = selectedSelection !== null &&
+  const selectionDetailsAreCurrent = pageSelection !== undefined &&
+    selectedSelectionProfileId === visibleSelectedProfileId;
+  const canSubmit = visibleSelection !== null &&
     visibleSelectedProfileId !== "" &&
+    selectionDetailsAreCurrent &&
     (logicalJob === null ||
       (logicalJobIsTerminal && logicalJob.queueAvailable));
+  const loadedQuery = state.status === "loaded" ? state.query : null;
+  const groupTotal = state.status !== "loaded"
+    ? 0
+    : state.historyGroup === "not_encoded"
+    ? state.counts.notEncoded
+    : state.counts.reEncode;
+  const groupLabel = state.status === "loaded" &&
+      state.historyGroup === "re_encode"
+    ? "re-encode"
+    : "not encoded";
 
   useEffect(() => {
-    if (state.status !== "loaded") {
+    if (
+      state.status !== "loaded" ||
+      selectedSelection === null ||
+      selectedSelectionGroup !== state.historyGroup
+    ) {
       return;
     }
-    const selection = state.selections.find(
-      (candidate) => candidate.id === selectedSelectionId,
+    const refreshedSelection = state.selections.find(
+      (candidate) => candidate.id === selectedSelection.id,
     );
-    if (selection === undefined) {
-      setSelectedSelectionId("");
-      setOutputPath("");
-      return;
+    if (
+      refreshedSelection !== undefined &&
+      refreshedSelection !== selectedSelection
+    ) {
+      const selectedProfileChanged =
+        selectedSelectionProfileId !== visibleSelectedProfileId;
+      setSelectedSelection(refreshedSelection);
+      setSelectedSelectionProfileId(visibleSelectedProfileId);
+      if (
+        selectedProfileChanged ||
+        refreshedSelection.logicalJob !== null ||
+        !isOutputPathEdited
+      ) {
+        setOutputPath(
+          refreshedSelection.logicalJob?.outputPath ??
+            refreshedSelection.suggestedOutputPath ??
+            "",
+        );
+        setIsOutputPathEdited(false);
+      }
     }
-    setOutputPath(
-      selection.logicalJob?.outputPath ?? selection.suggestedOutputPath ?? "",
-    );
-  }, [selectedSelectionId, state]);
+  }, [
+    isOutputPathEdited,
+    selectedSelection,
+    selectedSelectionGroup,
+    selectedSelectionProfileId,
+    state,
+    visibleSelectedProfileId,
+  ]);
+
+  useEffect(() => {
+    if (
+      loadedHistoryGroup !== null &&
+      selectedSelectionGroup !== null &&
+      selectedSelectionGroup !== loadedHistoryGroup
+    ) {
+      clearSelectedSelection();
+    }
+  }, [
+    clearSelectedSelection,
+    loadedHistoryGroup,
+    selectedSelectionGroup,
+  ]);
+
+  useEffect(() => {
+    clearSelectedSelection();
+  }, [clearSelectedSelection, successfulQueueRevision]);
+
+  useEffect(() => {
+    if (loadedQuery !== null) {
+      setSearchQuery(loadedQuery);
+      setSearchError(null);
+    }
+  }, [loadedQuery]);
 
   function selectDiscSelection(event: React.ChangeEvent<HTMLSelectElement>) {
     if (state.status !== "loaded") {
@@ -251,7 +349,14 @@ export function EncodeJobsView({
     const selection = state.selections.find(
       (candidate) => candidate.id === selectionId,
     );
-    setSelectedSelectionId(selectionId);
+    if (selection === undefined) {
+      clearSelectedSelection();
+      return;
+    }
+    setSelectedSelection(selection);
+    setSelectedSelectionGroup(state.historyGroup);
+    setSelectedSelectionProfileId(visibleSelectedProfileId);
+    setIsOutputPathEdited(false);
     setOutputPath(
       selection?.logicalJob?.outputPath ?? selection?.suggestedOutputPath ?? "",
     );
@@ -259,14 +364,18 @@ export function EncodeJobsView({
 
   function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (selectedSelection === null || visibleSelectedProfileId === "") {
+    if (
+      !canSubmit ||
+      visibleSelection === null ||
+      visibleSelectedProfileId === ""
+    ) {
       return;
     }
     if (logicalJob === null) {
       onQueue({
         kind: "enqueue",
         input: {
-          discSelectionId: selectedSelection.id,
+          discSelectionId: visibleSelection.id,
           encodingProfileId: visibleSelectedProfileId,
           outputPath: outputPath.trim(),
         },
@@ -337,13 +446,88 @@ export function EncodeJobsView({
               </button>
             </div>
             <p aria-live="polite">
-              Showing {state.selections.length} of {state.page.total}{" "}
-              {state.historyGroup === "not_encoded"
-                ? "not encoded"
-                : "re-encode"}{" "}
-              Disc Selections.
+              {state.query === ""
+                ? `Showing ${state.selections.length} of ${state.page.total} ${groupLabel} Disc Selections.`
+                : `Showing ${state.selections.length} of ${state.page.total} matches in ${groupTotal} ${groupLabel} Disc Selections.`}
             </p>
           </div>
+
+          <form
+            className="encode-selection-search"
+            role="search"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const value = new FormData(event.currentTarget).get(
+                "selectionQuery",
+              );
+              const query = typeof value === "string" ? value.trim() : "";
+              if (query === "") {
+                setSearchError(null);
+                if (state.query !== "") {
+                  onSearch("");
+                }
+                return;
+              }
+              const validation = validateEncodeQueueSearchQuery(query);
+              if (!validation.valid) {
+                setSearchError(
+                  validation.reason === "too_long"
+                    ? `Search must be ${ENCODE_QUEUE_SEARCH_QUERY_MAX_LENGTH} characters or fewer.`
+                    : "Enter letters or numbers to search.",
+                );
+                return;
+              }
+              setSearchError(null);
+              if (validation.query !== state.query) {
+                onSearch(validation.query);
+              }
+            }}
+          >
+            <label>
+              Search reviewed Disc Selections
+              <input
+                type="search"
+                name="selectionQuery"
+                maxLength={ENCODE_QUEUE_SEARCH_QUERY_MAX_LENGTH}
+                value={searchQuery}
+                aria-describedby={
+                  searchError === null
+                    ? undefined
+                    : "encode-selection-search-error"
+                }
+                aria-invalid={searchError !== null}
+                disabled={isSaving}
+                onChange={(event) => {
+                  setSearchQuery(event.currentTarget.value);
+                  setSearchError(null);
+                }}
+              />
+              {searchError === null ? null : (
+                <span id="encode-selection-search-error" role="alert">
+                  {searchError}
+                </span>
+              )}
+            </label>
+            <button
+              type="submit"
+              disabled={isSaving || searchQuery.trim() === state.query}
+            >
+              Search
+            </button>
+            {state.query === "" ? null : (
+              <button
+                type="button"
+                disabled={isSaving}
+                onClick={() => {
+                  setSearchQuery("");
+                  setSearchError(null);
+                  onSearch("");
+                }}
+              >
+                Clear search
+              </button>
+            )}
+          </form>
 
           <form className="profile-form" onSubmit={submit}>
             <div className="profile-fields encode-job-fields">
@@ -372,11 +556,19 @@ export function EncodeJobsView({
                 <select
                   name="discSelectionId"
                   required
-                  value={selectedSelectionId}
-                  disabled={state.selections.length === 0 || isSaving}
+                  value={visibleSelection?.id ?? ""}
+                  disabled={
+                    (state.selections.length === 0 && visibleSelection === null) ||
+                    isSaving
+                  }
                   onChange={selectDiscSelection}
                 >
                   <option value="" disabled>Select reviewed media</option>
+                  {visibleSelection !== null && pageSelection === undefined ? (
+                    <option value={visibleSelection.id}>
+                      {`Currently selected · ${selectionOptionLabel(visibleSelection)}`}
+                    </option>
+                  ) : null}
                   {state.selections.map((selection) => (
                     <option key={selection.id} value={selection.id}>
                       {selectionOptionLabel(selection)}
@@ -389,29 +581,36 @@ export function EncodeJobsView({
                 <input
                   name="outputPath"
                   required
-                  readOnly={logicalJob !== null}
+                  readOnly={logicalJob !== null || !selectionDetailsAreCurrent}
                   maxLength={4096}
                   placeholder="/media/movies/Movie (2001)/Movie (2001).mkv"
                   value={outputPath}
-                  onChange={(event) => setOutputPath(event.currentTarget.value)}
+                  onChange={(event) => {
+                    setOutputPath(event.currentTarget.value);
+                    setIsOutputPathEdited(true);
+                  }}
                 />
               </label>
             </div>
 
-            {selectedSelection ? (
+            {visibleSelection ? (
               <div className="encode-selection-summary" aria-live="polite">
-                <strong>{mediaDescription(selectedSelection)}</strong>
+                <strong>{mediaDescription(visibleSelection)}</strong>
                 <span>
-                  {selectedSelection.hasCompletedEncode
+                  {visibleSelection.hasCompletedEncode
                     ? "Encoded before"
                     : "No completed Encode Job history"}
                 </span>
-                {selectedSelection.priorCompletedJob ? (
+                {visibleSelection.priorCompletedJob ? (
                   <span>
-                    Previously encoded with {selectedSelection.priorCompletedJob.profile.displayName}, version {selectedSelection.priorCompletedJob.profile.version} · {displayTerm(selectedSelection.priorCompletedJob.status)}
+                    Previously encoded with {visibleSelection.priorCompletedJob.profile.displayName}, version {visibleSelection.priorCompletedJob.profile.version} · {displayTerm(visibleSelection.priorCompletedJob.status)}
                   </span>
                 ) : null}
-                {logicalJob === null ? (
+                {!selectionDetailsAreCurrent ? (
+                  <span>
+                    This choice is outside the current results. Return to its result page to refresh the queue action and output path. The last known path is read-only until then.
+                  </span>
+                ) : logicalJob === null ? (
                   <span>
                     {visibleSelectedProfileId === ""
                       ? "Choose an Encoding Profile to determine the queue action."
@@ -438,7 +637,14 @@ export function EncodeJobsView({
 
           {state.selections.length === 0 ? (
             <div className="section-message" role="status">
-              {state.historyGroup === "not_encoded"
+              {state.query !== "" &&
+                  groupTotal > 0
+                ? `No Disc Selections match "${state.query}" in ${
+                  state.historyGroup === "not_encoded"
+                    ? "Not encoded"
+                    : "Re-encode"
+                }.`
+                : state.historyGroup === "not_encoded"
                 ? "No not-encoded Disc Selections are available."
                 : "No Disc Selections are available for re-encoding."}
             </div>
@@ -497,6 +703,7 @@ interface EncodeJobOptionsRequest {
   selectionOffset: number;
   profileOffset: number;
   historyGroup: EncodeQueueHistoryGroup;
+  query?: string;
   encodingProfileId?: EncodingProfileId;
 }
 
@@ -515,6 +722,9 @@ export async function requestEncodeJobOptions(
     selectionOffset: String(request.selectionOffset),
     profileOffset: String(request.profileOffset),
   });
+  if (request.query?.trim()) {
+    parameters.set("query", request.query.trim());
+  }
   if (request.encodingProfileId !== undefined) {
     parameters.set("encodingProfileId", request.encodingProfileId);
   }
@@ -529,7 +739,11 @@ export async function requestEncodeJobOptions(
     Extract<EncodeJobsLoadState, { status: "loaded" }>,
     "status"
   >;
-  return { status: "loaded", ...body };
+  return {
+    status: "loaded",
+    ...body,
+    query: typeof body.query === "string" ? body.query : "",
+  };
 }
 
 export async function queueEncodeJob(
@@ -585,7 +799,13 @@ export async function cancelEncodeJob(
   }
 }
 
-export function EncodeJobsManager({ onChanged }: { onChanged(): void }) {
+export function EncodeJobsManager({
+  onChanged,
+  revision = 0,
+}: {
+  onChanged(): void;
+  revision?: number;
+}) {
   const [state, setState] = useState<EncodeJobsLoadState>({ status: "loading" });
   const [historyGroup, setHistoryGroup] = useState<EncodeQueueHistoryGroup>(
     "not_encoded",
@@ -593,23 +813,46 @@ export function EncodeJobsManager({ onChanged }: { onChanged(): void }) {
   const [selectedProfileId, setSelectedProfileId] = useState<
     EncodingProfileId | ""
   >("");
-  const [selectionOffset, setSelectionOffset] = useState(0);
+  const [selectionViews, setSelectionViews] = useState<Record<
+    EncodeQueueHistoryGroup,
+    { query: string; selectionOffset: number }
+  >>({
+    not_encoded: { query: "", selectionOffset: 0 },
+    re_encode: { query: "", selectionOffset: 0 },
+  });
   const [profileOffset, setProfileOffset] = useState(0);
   const [isSaving, setIsSaving] = useState(false);
   const [requestError, setRequestError] = useState<string | null>(null);
+  const [successfulQueueRevision, setSuccessfulQueueRevision] = useState(0);
   const loadVersion = useRef(0);
+  const selectionView = selectionViews[historyGroup];
 
   const load = useCallback(async () => {
     const version = loadVersion.current + 1;
     loadVersion.current = version;
     try {
       const loaded = await requestEncodeJobOptions({
-        selectionOffset,
+        selectionOffset: selectionView.selectionOffset,
         profileOffset,
         historyGroup,
+        query: selectionView.query,
         encodingProfileId: selectedProfileId || undefined,
       });
       if (loadVersion.current === version) {
+        if (
+          loaded.page.offset > 0 &&
+          loaded.page.offset >= loaded.page.total
+        ) {
+          setSelectionViews((current) => ({
+            ...current,
+            [historyGroup]: {
+              ...current[historyGroup],
+              selectionOffset: 0,
+            },
+          }));
+          setRequestError(null);
+          return;
+        }
         setState(loaded);
         setRequestError(null);
       }
@@ -628,7 +871,14 @@ export function EncodeJobsManager({ onChanged }: { onChanged(): void }) {
         }
       }
     }
-  }, [historyGroup, profileOffset, selectedProfileId, selectionOffset]);
+  }, [
+    historyGroup,
+    profileOffset,
+    revision,
+    selectedProfileId,
+    selectionView.query,
+    selectionView.selectionOffset,
+  ]);
 
   useEffect(() => {
     setState({ status: "loading" });
@@ -650,6 +900,7 @@ export function EncodeJobsManager({ onChanged }: { onChanged(): void }) {
       } else {
         await retryEncodeJob(action.encodeJobId);
       }
+      setSuccessfulQueueRevision((current) => current + 1);
       await load();
       onChanged();
     } catch (error) {
@@ -664,17 +915,31 @@ export function EncodeJobsManager({ onChanged }: { onChanged(): void }) {
   return (
     <EncodeJobsView
       state={state}
+      successfulQueueRevision={successfulQueueRevision}
       selectedProfileId={selectedProfileId}
       isSaving={isSaving}
       requestError={requestError}
       onQueue={(action) => void queue(action)}
       onRetry={() => void load()}
       onHistoryGroup={(group) => {
-        setSelectionOffset(0);
         setHistoryGroup(group);
       }}
+      onSearch={(query) => {
+        setSelectionViews((current) => ({
+          ...current,
+          [historyGroup]: { query: query.trim(), selectionOffset: 0 },
+        }));
+      }}
       onProfileChange={setSelectedProfileId}
-      onSelectionPage={setSelectionOffset}
+      onSelectionPage={(selectionOffset) => {
+        setSelectionViews((current) => ({
+          ...current,
+          [historyGroup]: {
+            ...current[historyGroup],
+            selectionOffset,
+          },
+        }));
+      }}
       onProfilePage={(offset) => {
         setSelectedProfileId("");
         setProfileOffset(offset);

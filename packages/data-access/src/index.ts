@@ -4,7 +4,10 @@ import {
 } from "./internal/create-data-access.js";
 import type { DataAccess } from "./types.js";
 
-export { createDiscSelectionSourceIdentity } from "./disc-selection-source-identity.js";
+export {
+  createDiscSelectionSourceIdentity,
+  discSelectionSourceDescription,
+} from "./disc-selection-source-identity.js";
 export {
   classifyArchiveReadFailureEvidence,
   isArchiveReadFailureEvidenceConsistent,
@@ -31,6 +34,11 @@ export type {
   NormalDvdArchiveBoundaryEvidence,
 } from "./archive-boundary.js";
 export { normalizeMediaItemSearchTitle } from "./media-item-title-search.js";
+export {
+  ENCODE_QUEUE_SEARCH_QUERY_MAX_LENGTH,
+  validateEncodeQueueSearchQuery,
+} from "./encode-queue-search.js";
+export type { EncodeQueueSearchQueryValidation } from "./encode-queue-search.js";
 export {
   isCorrectedEncodePredecessorReady,
   isEncodeJobSafelyTerminal,

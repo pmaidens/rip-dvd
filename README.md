@@ -1180,6 +1180,15 @@ cancellation-requested, completed, failed, and cancelled state.
 `historyGroup=re_encode` for selections with finalized Encode history. It
 returns exact page-independent counts for both groups and pages at most 100
 eligible Disc Selections within the chosen group with `selectionOffset`.
+An optional single `query` searches the complete chosen group before paging by
+the normalized displayed Media Item title, year, and DVD source description.
+The trimmed query is limited to 256 characters and must contain a letter or
+number; empty, repeated, overlong, and punctuation-only query parameters return
+HTTP 400. Group counts remain unfiltered, while `page.total` reports matches for
+the active query. Not-encoded results are ordered by newest catalog review,
+then Disc Selection ID; re-encode results are ordered by normalized Media Item
+title, year, then Disc Selection ID. These stable orders apply before the
+offset and 100-row page limit.
 `encodingProfileId` adds the matching ordinary logical job for each selection,
 while prior completion metadata identifies a finalized job and its Encoding
 Profile version. Active DVD video Encoding Profile versions page

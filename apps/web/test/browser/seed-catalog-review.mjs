@@ -1,5 +1,6 @@
 import { mkdirSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
 
@@ -232,7 +233,7 @@ function seedEncodeQueue(variant, fingerprintFills) {
     mediaDomain: "dvd_video",
     settings: { preset: "HQ 480p30 Surround", container: "mkv" },
   });
-  createEncodeQueueSelection({
+  const newSelection = createEncodeQueueSelection({
     key: `queue-new-${variant}`,
     label: `ENCODE_QUEUE_NEW_${variant.toUpperCase()}`,
     fingerprintFill: fingerprintFills.newSelection,
@@ -270,6 +271,36 @@ function seedEncodeQueue(variant, fingerprintFills) {
     encodingProfileId: profile.id,
     outputPath: join(mediaLibraryPath, `Queue active ${variant}.mkv`),
   });
+
+  const overflowArchive = createArchive({
+    key: `queue-overflow-${variant}`,
+    label: `ENCODE_QUEUE_OVERFLOW_${variant.toUpperCase()}`,
+    fingerprintFill: fingerprintFills.overflowSelection,
+    titles: Array.from({ length: 101 }, (_, index) =>
+      detailedTitle(index + 1, 5_400, 14)
+    ),
+  });
+  for (let index = 0; index < 101; index += 1) {
+    const item = access.catalog.createMediaItem({
+      kind: "movie",
+      title: `Queue filler ${variant} ${String(index).padStart(3, "0")}`,
+      year: 2026,
+    });
+    access.catalog.createDiscSelection({
+      originalDiscArchiveId: overflowArchive.id,
+      mediaItemId: item.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: index + 1 },
+    });
+  }
+  completeReview(overflowArchive.id);
+
+  const sqlite = new DatabaseSync(databasePath);
+  sqlite.prepare(`
+    update original_disc_archives
+    set catalog_reviewed_at = 1
+    where id = ?
+  `).run(newSelection.originalDiscArchiveId);
+  sqlite.close();
 }
 
 try {
@@ -281,11 +312,13 @@ try {
     newSelection: "5",
     completedSelection: "6",
     activeSelection: "7",
+    overflowSelection: "b",
   });
   seedEncodeQueue("mobile", {
     newSelection: "8",
     completedSelection: "9",
     activeSelection: "a",
+    overflowSelection: "c",
   });
 } finally {
   access.close();

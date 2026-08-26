@@ -1680,7 +1680,8 @@ p.verification-result {
   margin: 1rem 0;
 }
 
-.profile-fields label {
+.profile-fields label,
+.encode-selection-search label {
   display: grid;
   gap: 0.4rem;
   color: #b8c8c3;
@@ -1689,7 +1690,8 @@ p.verification-result {
 }
 
 .profile-fields input,
-.profile-fields select {
+.profile-fields select,
+.encode-selection-search input {
   width: 100%;
   min-width: 0;
   min-height: 2.75rem;
@@ -1701,7 +1703,8 @@ p.verification-result {
 }
 
 .profile-fields input:focus-visible,
-.profile-fields select:focus-visible {
+.profile-fields select:focus-visible,
+.encode-selection-search input:focus-visible {
   outline: 3px solid #d2a14b;
   outline-offset: 2px;
 }
@@ -1754,6 +1757,18 @@ p.verification-result {
   border-color: #d2a14b;
   background: #d2a14b;
   color: #10211c;
+}
+
+.encode-selection-search {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: end;
+  gap: 0.75rem;
+  padding: 1rem 1.4rem 0;
+}
+
+.encode-selection-search label {
+  min-width: 0;
 }
 
 .profile-fields input[readonly] {
@@ -2591,6 +2606,15 @@ h3 {
   .encode-history-picker {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .encode-selection-search {
+    display: block;
+  }
+
+  .encode-selection-search button {
+    width: 100%;
+    margin-top: 0.8rem;
   }
 
   .profile-list,
