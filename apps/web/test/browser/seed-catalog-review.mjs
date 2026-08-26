@@ -272,6 +272,24 @@ function seedEncodeQueue(variant, fingerprintFills) {
     outputPath: join(mediaLibraryPath, `Queue active ${variant}.mkv`),
   });
 
+  const failedSelection = createEncodeQueueSelection({
+    key: `queue-failed-${variant}`,
+    label: `ENCODE_QUEUE_FAILED_${variant.toUpperCase()}`,
+    fingerprintFill: fingerprintFills.failedSelection,
+    title: `Queue failed ${variant}`,
+  });
+  const failedJob = access.encodeJobs.enqueue({
+    discSelectionId: failedSelection.id,
+    encodingProfileId: profile.id,
+    outputPath: join(mediaLibraryPath, `Queue failed ${variant}.mkv`),
+    priority: 20,
+  });
+  const failedClaim = access.encodeJobs.claimNext(`queue-failed-${variant}`);
+  if (failedClaim?.id !== failedJob.id) {
+    throw new Error(`Missing failed queue fixture for ${variant}`);
+  }
+  access.encodeJobs.fail(failedClaim, "Browser fixture failure");
+
   const batchArchive = createArchive({
     key: `queue-batch-${variant}`,
     label: `ENCODE_QUEUE_BATCH_${variant.toUpperCase()}`,
@@ -338,6 +356,7 @@ try {
     newSelection: "5",
     completedSelection: "6",
     activeSelection: "7",
+    failedSelection: "f",
     overflowSelection: "b",
     batchSelections: "d",
   });
@@ -345,6 +364,7 @@ try {
     newSelection: "8",
     completedSelection: "9",
     activeSelection: "a",
+    failedSelection: "0",
     overflowSelection: "c",
     batchSelections: "e",
   });
