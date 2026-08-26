@@ -233,12 +233,34 @@ function seedEncodeQueue(variant, fingerprintFills) {
     mediaDomain: "dvd_video",
     settings: { preset: "HQ 480p30 Surround", container: "mkv" },
   });
+  const alternateProfile = access.encodingProfiles.create({
+    key: `queue-alternate-${variant}`,
+    displayName: `Queue alternate profile ${variant}`,
+    mediaDomain: "dvd_video",
+    settings: { preset: "Fast 480p30", container: "mkv" },
+  });
   const newSelection = createEncodeQueueSelection({
     key: `queue-new-${variant}`,
     label: `ENCODE_QUEUE_NEW_${variant.toUpperCase()}`,
     fingerprintFill: fingerprintFills.newSelection,
     title: `Queue new ${variant}`,
   });
+  const alternateRetryJob = access.encodeJobs.enqueue({
+    discSelectionId: newSelection.id,
+    encodingProfileId: alternateProfile.id,
+    outputPath: join(
+      mediaLibraryPath,
+      `Queue new ${variant} alternate authoritative.mkv`,
+    ),
+    priority: 30,
+  });
+  const alternateRetryClaim = access.encodeJobs.claimNext(
+    `queue-alternate-retry-${variant}`,
+  );
+  if (alternateRetryClaim?.id !== alternateRetryJob.id) {
+    throw new Error(`Missing alternate retry queue fixture for ${variant}`);
+  }
+  access.encodeJobs.fail(alternateRetryClaim, "Alternate browser fixture failure");
   const completedSelection = createEncodeQueueSelection({
     key: `queue-completed-${variant}`,
     label: `ENCODE_QUEUE_COMPLETED_${variant.toUpperCase()}`,
@@ -299,6 +321,7 @@ function seedEncodeQueue(variant, fingerprintFills) {
       detailedTitle(2, 5_400, 14),
     ],
   });
+  let secondSelection;
   for (const [titleNumber, title] of [
     [1, `Queue second ${variant}`],
     [2, `Queue conflict ${variant}`],
@@ -308,13 +331,22 @@ function seedEncodeQueue(variant, fingerprintFills) {
       title,
       year: 2026,
     });
-    access.catalog.createDiscSelection({
+    const selection = access.catalog.createDiscSelection({
       originalDiscArchiveId: batchArchive.id,
       mediaItemId: item.id,
       sourceIdentity: { kind: "dvd_title", titleNumber },
     });
+    if (titleNumber === 1) secondSelection = selection;
   }
   completeReview(batchArchive.id);
+  if (!secondSelection) {
+    throw new Error(`Missing second queue fixture for ${variant}`);
+  }
+  access.encodeJobs.enqueue({
+    discSelectionId: secondSelection.id,
+    encodingProfileId: alternateProfile.id,
+    outputPath: join(mediaLibraryPath, `Queue second ${variant} active.mkv`),
+  });
 
   const overflowArchive = createArchive({
     key: `queue-overflow-${variant}`,

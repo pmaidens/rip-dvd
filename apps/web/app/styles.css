@@ -1777,29 +1777,6 @@ p.verification-result {
   color: #b8c8c3;
 }
 
-.encode-selection-summary {
-  display: grid;
-  gap: 0.3rem;
-  min-width: 0;
-  margin: 0 0 1rem;
-  padding: 0.8rem;
-  border: 1px solid #29483f;
-  border-radius: 0.55rem;
-  background: #10231e;
-  overflow-wrap: anywhere;
-}
-
-.encode-selection-summary strong {
-  color: #eef4f1;
-  font-size: 0.8rem;
-}
-
-.encode-selection-summary span {
-  color: #9fb0ab;
-  font-size: 0.72rem;
-  line-height: 1.45;
-}
-
 .encode-worklist-toolbar {
   display: grid;
   grid-template-columns: minmax(16rem, 1fr) minmax(18rem, 1.4fr);
@@ -1937,21 +1914,6 @@ p.verification-result {
   background: rgba(210, 161, 75, 0.1);
 }
 
-.encode-picker-existing-job {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 0.7rem;
-  padding: 0.7rem;
-  border: 1px solid #29483f;
-  border-radius: 0.55rem;
-  background: #10231e;
-}
-
-.encode-picker-existing-job > span {
-  min-width: 0;
-}
-
 .encode-picker-results input {
   width: 1.15rem;
   height: 1.15rem;
@@ -1988,14 +1950,6 @@ p.verification-result {
 .encode-add-selected span:last-child {
   color: #d9bd80;
   font-size: 0.7rem;
-}
-
-.encode-requeue-form {
-  border-bottom: 0;
-}
-
-.encode-requeue-form .profile-fields {
-  grid-template-columns: minmax(0, 1fr);
 }
 
 .encode-worklist-empty {
