@@ -4005,10 +4005,18 @@ describe("DVD archive publication", () => {
     const firstExcludedLba = 6;
     const publishedSizeBytes = firstExcludedLba * 2_048;
     const fullImage = Buffer.alloc(reportedSizeBytes, 47);
+    fullImage.fill(0, 1 * 2_048, 2 * 2_048);
     fullImage.fill(0, 7 * 2_048, 8 * 2_048);
-    const suffixDamage = createDamagedDvdRecoveryResult(
+    const priorDamage = createDamagedDvdRecoveryResult(
       reportedSizeBytes,
-      [{ startLba: 7, sectorCount: 1 }],
+      [
+        { startLba: 1, sectorCount: 1 },
+        { startLba: 7, sectorCount: 1 },
+      ],
+    );
+    const retainedDamage = createDamagedDvdRecoveryResult(
+      reportedSizeBytes,
+      [{ startLba: 1, sectorCount: 1 }],
     );
     const boundaryFailure = createProvenBoundaryFailure(
       reportedSizeBytes,
@@ -4025,6 +4033,12 @@ describe("DVD archive publication", () => {
       expectedTitleMap,
       fingerprint: `dvdmeta-sha256:${digest}`,
       originalsLibraryPath,
+      salvageValidator: {
+        validate: vi.fn().mockResolvedValue({
+          badSectorCountsByTitle: [],
+          outcome: "accepted",
+        }),
+      },
       signal: new AbortController().signal,
       sizeBytes: reportedSizeBytes,
       verifySource: async () => undefined,
@@ -4041,7 +4055,7 @@ describe("DVD archive publication", () => {
       ...baseOptions,
       runner: runner(vi.fn(async ({ outputPath }) => {
         writeFileSync(outputPath, fullImage);
-        return suffixDamage;
+        return priorDamage;
       })),
       salvageValidator: {
         validate: vi.fn().mockResolvedValue({
@@ -4079,16 +4093,16 @@ describe("DVD archive publication", () => {
       runner: runner(vi.fn(async ({ continuation }) => {
         expect(continuation).toMatchObject({
           kind: "damaged",
-          recoveryResult: suffixDamage,
+          recoveryResult: priorDamage,
         });
-        throw new DvdReadFailureError(boundaryFailure);
+        throw new DvdReadFailureError(boundaryFailure, retainedDamage);
       })),
     })).rejects.toBe(interruptedBeforeTrim);
 
     expect(stoppedBeforeTrim).toBe(true);
     expect(readFileSync(rescuePaths.imagePath)).toEqual(fullImage);
     expect(JSON.parse(readFileSync(rescuePaths.mapPath, "utf8")))
-      .toMatchObject({ schemaVersion: 2 });
+      .toMatchObject({ schemaVersion: 1 });
     expect(JSON.parse(readFileSync(retentionMapPath, "utf8")))
       .toMatchObject({ schemaVersion: 3 });
 
@@ -4140,10 +4154,22 @@ describe("DVD archive publication", () => {
             mtimeNs: expect.any(String),
           },
         },
-        recoveryProtocol: expect.objectContaining({ badSectorCount: 0 }),
+        recoveryProtocol: expect.objectContaining({ badSectorCount: 1 }),
       });
 
-    const restartedCopy = vi.fn();
+    const restartedCopy = vi.fn(async ({ continuation }) => {
+      expect(continuation).toMatchObject({
+        kind: "corrected",
+        recoveryResult: createDamagedDvdRecoveryResult(
+          publishedSizeBytes,
+          [{ startLba: 1, sectorCount: 1 }],
+        ),
+      });
+      return createDamagedDvdRecoveryResult(
+        publishedSizeBytes,
+        [{ startLba: 1, sectorCount: 1 }],
+      );
+    });
     const restarted = await preserveDvdArchive({
       ...baseOptions,
       completenessProver: {
@@ -4154,8 +4180,8 @@ describe("DVD archive publication", () => {
       runner: runner(restartedCopy),
     });
 
-    expect(restartedCopy).not.toHaveBeenCalled();
-    expect(restarted.integrityEvidence.integrity).toBe("clean_read");
+    expect(restartedCopy).toHaveBeenCalledOnce();
+    expect(restarted.integrityEvidence.integrity).toBe("watchable_salvage");
     expect(readFileSync(restarted.archivePath)).toEqual(
       fullImage.subarray(0, publishedSizeBytes),
     );

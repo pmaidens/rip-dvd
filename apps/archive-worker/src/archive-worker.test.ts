@@ -1655,6 +1655,93 @@ describe("archive worker polling", () => {
     );
   });
 
+  it("preserves legacy suffix damage when boundary proof fails", async () => {
+    const scenario = await exerciseWatchabilityWorkerScenario({
+      ranges: [
+        { startLba: 1, sectorCount: 1 },
+        { startLba: 7, sectorCount: 1 },
+      ],
+      validation: { outcome: "rejected", reason: "policy_limit" },
+    });
+    scenario.access.archiveRequests.retry(scenario.request.id);
+    const firstExcludedLba = 6;
+    const boundaryFailure = {
+      ...createOutOfRangeDvdReadFailureResult({
+        declaredByteCount: scenario.sizeBytes,
+        firstFailingLba: firstExcludedLba,
+        requestedBlockCount: 1,
+        requestedLba: firstExcludedLba,
+      }),
+      retryOrdinal: 1,
+      boundaryProofVersion: "dvd-sector-boundary-proof-v1" as const,
+      candidateConfirmationCount: 2 as const,
+      precedingSectorLba: firstExcludedLba - 1,
+    };
+    const retainedRecovery = createDamagedDvdRecoveryResult(
+      scenario.sizeBytes,
+      [{ startLba: 1, sectorCount: 1 }],
+    );
+    const rescuePaths = dvdRescueWorkspacePaths(
+      realpathSync(scenario.originalsLibraryPath),
+      scenario.request.id,
+    );
+    const rescueMapBeforeProof = readFileSync(rescuePaths.mapPath, "utf8");
+    const proofFailure = new Error(
+      "DVD completeness proof rejected the legacy rescue boundary",
+    );
+
+    await pollArchiveWorker({
+      access: scenario.access,
+      completenessProver: {
+        prove: vi.fn().mockRejectedValue(proofFailure),
+      },
+      configuredDevicePath: scenario.discoveredDrive.devicePath,
+      copyRunner: {
+        copy: vi.fn(async ({ continuation }) => {
+          expect(continuation).toMatchObject({
+            kind: "damaged",
+            recoveryResult: createDamagedDvdRecoveryResult(
+              scenario.sizeBytes,
+              [
+                { startLba: 1, sectorCount: 1 },
+                { startLba: 7, sectorCount: 1 },
+              ],
+            ),
+          });
+          throw new DvdReadFailureError(boundaryFailure, retainedRecovery);
+        }),
+        isActive: () => false,
+        withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+        waitForInactive: vi.fn(async () => undefined),
+      },
+      hardware: {
+        ...stableDeviceBinding(),
+        discover: vi.fn().mockResolvedValue([scenario.discoveredDrive]),
+        scanDvd: vi.fn().mockResolvedValue({
+          fingerprint: scenario.fingerprint,
+          scanData: scenario.scanData,
+          sizeBytes: scenario.sizeBytes,
+        }),
+      },
+      log: vi.fn(),
+      originalsLibraryPath: scenario.originalsLibraryPath,
+      salvageValidator: { validate: vi.fn() },
+      signal: new AbortController().signal,
+      workerId: "archive-worker-rejected-legacy-boundary",
+    });
+
+    expect(scenario.access.catalog.listOriginalDiscArchives()).toEqual([]);
+    expect(scenario.access.archiveJobs.list(["failed"]))
+      .toContainEqual(expect.objectContaining({
+        archiveRequestId: scenario.request.id,
+        errorMessage: proofFailure.message,
+        originalDiscArchiveId: null,
+      }));
+    expect(readFileSync(rescuePaths.imagePath)).toEqual(scenario.rescuedImage);
+    expect(readFileSync(rescuePaths.mapPath, "utf8"))
+      .toBe(rescueMapBeforeProof);
+  });
+
   it("publishes clean when legacy prefix damage recovers before the boundary", async () => {
     const scenario = await exerciseWatchabilityWorkerScenario({
       ranges: [

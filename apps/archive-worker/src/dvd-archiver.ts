@@ -84,6 +84,7 @@ import {
   dvdBoundaryRetentionMapPath,
   dvdRescueWorkspacePaths,
   loadDvdRescueWorkspace,
+  prepareDvdBoundaryRescueWorkspace,
   quarantineDvdRescueWorkspace,
   readDvdRetainedSectorProof,
   recordDvdBoundaryFailure,
@@ -1821,6 +1822,7 @@ async function publishCorrectedDvdBoundary({
   existingPublishedFilesystemIdentity,
   expectedTitleMap,
   onProgress,
+  candidateRecoveryResult,
   rescueWorkspace,
   rescueIdentity,
   root,
@@ -1836,6 +1838,7 @@ async function publishCorrectedDvdBoundary({
   existingPublishedFilesystemIdentity?: string;
   expectedTitleMap: DvdTitleMap;
   onProgress(progress: ArchiveJobProgress): void;
+  candidateRecoveryResult?: DvdRecoveryResult;
   rescueWorkspace: DvdRescueWorkspace;
   rescueIdentity: DvdRescueIdentity;
   root: string;
@@ -1959,7 +1962,8 @@ async function publishCorrectedDvdBoundary({
       },
     });
   const retainedRecoveryResult = trimDvdRecoveryResult(
-    rescueWorkspace.recoveryResult ??
+    candidateRecoveryResult ??
+      rescueWorkspace.recoveryResult ??
       createCleanDvdRecoveryResult(boundaryFailure.declaredByteCount),
     publishedSizeBytes,
   );
@@ -2825,25 +2829,35 @@ export async function preserveDvdArchive({
           }
         };
         try {
-          rescueWorkspace = rescueWorkspace === null
-            ? await commitDvdBoundaryRescueWorkspace(
-                root,
-                rescueIdentity,
-                partialPath,
-                error.readFailure,
-                authorizeMutation,
-                finalizeRetention,
-                error.recoveryResult,
-              )
-            : await recordDvdBoundaryFailure(
-                root,
-                rescueIdentity,
-                rescueWorkspace,
-                error.readFailure,
-                authorizeMutation,
-                finalizeRetention,
-                error.recoveryResult,
-              );
+          if (rescueWorkspace === null) {
+            rescueWorkspace = await commitDvdBoundaryRescueWorkspace(
+              root,
+              rescueIdentity,
+              partialPath,
+              error.readFailure,
+              authorizeMutation,
+              finalizeRetention,
+              error.recoveryResult,
+            );
+          } else if (isProvenDvdBoundaryCandidate(error.readFailure)) {
+            await finalizeRetention();
+            rescueWorkspace = await prepareDvdBoundaryRescueWorkspace(
+              root,
+              rescueIdentity,
+              rescueWorkspace,
+              error.readFailure,
+            );
+          } else {
+            rescueWorkspace = await recordDvdBoundaryFailure(
+              root,
+              rescueIdentity,
+              rescueWorkspace,
+              error.readFailure,
+              authorizeMutation,
+              finalizeRetention,
+              error.recoveryResult,
+            );
+          }
           partialPath = rescueWorkspace.imagePath;
         } catch (caughtRetentionError) {
           if (retentionFenceFailed) {
@@ -2868,6 +2882,9 @@ export async function preserveDvdArchive({
         archivePath,
         authorizeMutation,
         boundaryFailure: error.readFailure,
+        ...(error.recoveryResult === null
+          ? {}
+          : { candidateRecoveryResult: error.recoveryResult }),
         completenessProver,
         expectedTitleMap,
         onProgress,
