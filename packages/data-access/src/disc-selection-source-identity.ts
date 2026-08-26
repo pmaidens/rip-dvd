@@ -28,7 +28,7 @@ export type DiscSelectionSourceIdentity =
   };
 
 export function discSelectionSourceDescription(
-  identity: DiscSelectionSourceIdentityInput,
+  identity: DiscSelectionSourceIdentity,
 ): string {
   switch (identity.kind) {
     case "main_feature":
