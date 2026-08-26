@@ -7,6 +7,8 @@ import {
   type EncodeJobId,
   type EncodeJobStatus,
   type EncodeQueueHistoryGroup,
+  type EncodeQueueLogicalJob as LogicalEncodeJob,
+  type EncodeQueueLogicalJobResolution,
   type EncodingProfileId,
 } from "@rip-dvd/data-access";
 import {
@@ -21,14 +23,6 @@ interface PriorCompletedEncodeJob {
   id: EncodeJobId;
   status: EncodeJobStatus;
   profile: EncodeProfileOption;
-}
-
-interface LogicalEncodeJob {
-  id: EncodeJobId;
-  encodingProfileId: EncodingProfileId;
-  outputPath: string;
-  status: EncodeJobStatus;
-  queueAvailable: boolean;
 }
 
 export interface EncodeSelectionOption {
@@ -82,10 +76,6 @@ export interface QueueEncodeJobInput {
   outputPath: string;
 }
 
-export type QueueEncodeJobAction =
-  | { kind: "enqueue"; input: QueueEncodeJobInput }
-  | { kind: "requeue"; encodeJobId: EncodeJobId };
-
 export type EncodeWorklistRowStatus =
   | "ready"
   | "queueing"
@@ -101,13 +91,14 @@ export interface EncodeWorklistRow {
 }
 
 interface EncodeQueueSummary {
-  queued: number;
+  newQueued: number;
+  requeued: number;
+  unavailable: number;
   failed: number;
 }
 
 interface EncodeJobsViewProps {
   state: EncodeJobsLoadState;
-  successfulQueueRevision?: number;
   checkedSelections: readonly EncodeSelectionOption[];
   worklistRows: readonly EncodeWorklistRow[];
   queueSummary: EncodeQueueSummary | null;
@@ -115,7 +106,6 @@ interface EncodeJobsViewProps {
   selectedProfileId: EncodingProfileId | "";
   isSaving: boolean;
   requestError: string | null;
-  onQueue(action: QueueEncodeJobAction): void;
   onToggleSelection(selection: EncodeSelectionOption, checked: boolean): void;
   onAddSelected(): void;
   onWorklistPath(selectionId: DiscSelectionId, outputPath: string): void;
@@ -179,53 +169,62 @@ function mediaDescription(selection: EncodeSelectionOption): string {
   } · ${selection.sourceDescription}`;
 }
 
-function selectionOptionLabel(selection: EncodeSelectionOption): string {
-  const history = selection.hasCompletedEncode
-    ? "Encoded before"
-    : "Not encoded";
-  const prior = selection.priorCompletedJob;
-  if (prior === null) {
-    return `${mediaDescription(selection)} · ${history}`;
-  }
-  return `${mediaDescription(selection)} · ${history} · ${prior.profile.displayName} version ${prior.profile.version} · ${displayTerm(prior.status)}`;
-}
-
-const ENCODE_JOB_PRESENTATION: Record<
-  EncodeJobStatus,
-  { activeDescription: string | null; submitLabel: string }
-> = {
-  queued: {
-    activeDescription: "This Encode Job is already queued.",
-    submitLabel: "Already queued",
-  },
-  running: {
-    activeDescription:
-      "This Encode Job is running and cannot be queued again.",
-    submitLabel: "Encoding in progress",
-  },
-  cancellation_requested: {
-    activeDescription:
-      "Cancellation has been requested; this Encode Job cannot be queued again.",
-    submitLabel: "Cancellation requested",
-  },
-  completed: { activeDescription: null, submitLabel: "Re-encode" },
-  failed: { activeDescription: null, submitLabel: "Retry Encode Job" },
-  cancelled: { activeDescription: null, submitLabel: "Retry Encode Job" },
+const ACTIVE_ENCODE_JOB_DESCRIPTION: Record<EncodeJobStatus, string | null> = {
+  queued: "This Encode Job is already queued.",
+  running: "This Encode Job is running and cannot be queued again.",
+  cancellation_requested:
+    "Cancellation has been requested; this Encode Job cannot be queued again.",
+  completed: null,
+  failed: null,
+  cancelled: null,
 };
 
 function activeJobDescription(status: EncodeJobStatus): string {
-  return ENCODE_JOB_PRESENTATION[status].activeDescription ??
+  return ACTIVE_ENCODE_JOB_DESCRIPTION[status] ??
     "This Encode Job cannot be queued again.";
 }
 
-function submitLabel(job: LogicalEncodeJob | null): string {
+type EncodeWorklistAction =
+  | { kind: "enqueue"; label: "New Encode Job" }
+  | { kind: "requeue"; label: "Retry" | "Re-encode" }
+  | {
+      kind: "unavailable";
+      label:
+        | "Already queued"
+        | "Running"
+        | "Cancellation requested"
+        | "Cleanup in progress";
+    };
+
+function worklistAction(job: LogicalEncodeJob | null): EncodeWorklistAction {
   if (job === null) {
-    return "Queue new Encode Job";
+    return { kind: "enqueue", label: "New Encode Job" };
   }
   if (isTerminalEncodeJobStatus(job.status) && !job.queueAvailable) {
-    return "Cleanup in progress";
+    return { kind: "unavailable", label: "Cleanup in progress" };
   }
-  return ENCODE_JOB_PRESENTATION[job.status].submitLabel;
+  switch (job.status) {
+    case "failed":
+    case "cancelled":
+      return { kind: "requeue", label: "Retry" };
+    case "completed":
+      return { kind: "requeue", label: "Re-encode" };
+    case "queued":
+      return { kind: "unavailable", label: "Already queued" };
+    case "running":
+      return { kind: "unavailable", label: "Running" };
+    case "cancellation_requested":
+      return { kind: "unavailable", label: "Cancellation requested" };
+  }
+}
+
+function rowIsUnresolved(row: EncodeWorklistRow): boolean {
+  return row.status === "ready" || row.status === "failed";
+}
+
+function rowIsActionable(row: EncodeWorklistRow): boolean {
+  return rowIsUnresolved(row) &&
+    worklistAction(row.selection.logicalJob).kind !== "unavailable";
 }
 
 function worklistStatusLabel(status: EncodeWorklistRowStatus): string {
@@ -338,12 +337,11 @@ function EncodeSelectionSearch({
   );
 }
 
-function NotEncodedPicker({
+function EncodeSelectionPicker({
   checkedSelectionIds,
   checkedSelectionCount,
   isSaving,
   onAddSelected,
-  onQueue,
   onToggleSelection,
   selections,
   visibleSelectedProfileId,
@@ -353,7 +351,6 @@ function NotEncodedPicker({
   checkedSelectionCount: number;
   isSaving: boolean;
   onAddSelected(): void;
-  onQueue(action: QueueEncodeJobAction): void;
   onToggleSelection(selection: EncodeSelectionOption, checked: boolean): void;
   selections: readonly EncodeSelectionOption[];
   visibleSelectedProfileId: EncodingProfileId | "";
@@ -365,38 +362,7 @@ function NotEncodedPicker({
         {selections.map((selection) => {
           const isInWorklist = worklistSelectionIds.has(selection.id);
           const existingJob = selection.logicalJob;
-          if (existingJob !== null) {
-            const canRequeue = isTerminalEncodeJobStatus(existingJob.status) &&
-              existingJob.queueAvailable;
-            return (
-              <li key={selection.id}>
-                <div className="encode-picker-existing-job">
-                  <span>
-                    <strong>{mediaDescription(selection)}</strong>
-                    <small>
-                      {canRequeue
-                        ? `Selected profile job: ${displayTerm(existingJob.status)}. Use the single-item action.`
-                        : activeJobDescription(existingJob.status)}
-                    </small>
-                    <small>
-                      Reserved final output: {existingJob.outputPath}
-                    </small>
-                  </span>
-                  <button
-                    type="button"
-                    disabled={isSaving || !canRequeue}
-                    onClick={() =>
-                      onQueue({
-                        kind: "requeue",
-                        encodeJobId: existingJob.id,
-                      })}
-                  >
-                    {submitLabel(existingJob)}
-                  </button>
-                </div>
-              </li>
-            );
-          }
+          const action = worklistAction(existingJob);
           return (
             <li key={selection.id}>
               <label>
@@ -415,9 +381,24 @@ function NotEncodedPicker({
                 <span>
                   <strong>{mediaDescription(selection)}</strong>
                   <small>
-                    First-encode candidate
+                    {action.label}
                     {isInWorklist ? " · In worklist" : ""}
                   </small>
+                  {selection.priorCompletedJob === null ? null : (
+                    <small>
+                      Previously: {selection.priorCompletedJob.profile.displayName}, version {selection.priorCompletedJob.profile.version} · {displayTerm(
+                        selection.priorCompletedJob.status,
+                      )}
+                    </small>
+                  )}
+                  {existingJob === null ? null : (
+                    <small>
+                      Reserved final output: {existingJob.outputPath}
+                    </small>
+                  )}
+                  {action.kind !== "unavailable" || existingJob === null
+                    ? null
+                    : <small>{activeJobDescription(existingJob.status)}</small>}
                 </span>
               </label>
             </li>
@@ -434,7 +415,7 @@ function NotEncodedPicker({
         }
         onClick={onAddSelected}
       >
-        <span>Add selected to batch</span>
+        <span>Add selected to worklist</span>
         <span>{checkedSelectionCount} selected</span>
       </button>
     </>
@@ -462,7 +443,7 @@ function EncodeWorklistPanel({
       <header>
         <div>
           <p className="section-eyebrow">In-memory worklist</p>
-          <h3 id="encode-worklist-title">First-encode worklist</h3>
+          <h3 id="encode-worklist-title">Encode worklist</h3>
         </div>
         <button
           type="button"
@@ -475,7 +456,7 @@ function EncodeWorklistPanel({
 
       {rows.length === 0 ? (
         <div className="encode-worklist-empty">
-          Check Not encoded Disc Selections, then add them to the batch.
+          Check Disc Selections, then add them to the worklist.
         </div>
       ) : (
         <table className="encode-worklist-table">
@@ -492,6 +473,8 @@ function EncodeWorklistPanel({
           <tbody>
             {rows.map((row) => {
               const title = row.selection.mediaTitle;
+              const logicalJob = row.selection.logicalJob;
+              const action = worklistAction(logicalJob);
               return (
                 <tr key={row.selection.id}>
                   <td data-label="Media Item">
@@ -502,8 +485,17 @@ function EncodeWorklistPanel({
                   </td>
                   <td data-label="Disc Selection">
                     {row.selection.sourceDescription}
+                    {row.selection.priorCompletedJob === null ? null : (
+                      <span>
+                        {row.selection.priorCompletedJob.profile.displayName}, version {row.selection.priorCompletedJob.profile.version} · {displayTerm(
+                          row.selection.priorCompletedJob.status,
+                        )}
+                      </span>
+                    )}
                   </td>
-                  <td data-label="Intent">First encode</td>
+                  <td data-label="Intent">
+                    <strong>{action.label}</strong>
+                  </td>
                   <td data-label="Final output path">
                     <label>
                       <span className="visually-hidden">
@@ -515,11 +507,31 @@ function EncodeWorklistPanel({
                         maxLength={4096}
                         aria-label={`Final output path for ${title}`}
                         value={row.outputPath}
-                        readOnly={isSaving || row.status === "queued"}
+                        readOnly={
+                          isSaving ||
+                          row.status === "queued" ||
+                          logicalJob !== null
+                        }
                         onChange={(event) =>
                           onPath(row.selection.id, event.currentTarget.value)}
                       />
                     </label>
+                    {logicalJob === null
+                      ? row.selection.hasCompletedEncode
+                        ? (
+                          <span>
+                            This profile will create a new logical Encode Job.
+                            Choose an unreserved output. It cannot replace
+                            another logical job's final output.
+                          </span>
+                        )
+                        : null
+                      : (
+                        <span>
+                          The existing logical Encode Job retains this output
+                          reservation.
+                        </span>
+                      )}
                   </td>
                   <td data-label="Outcome" aria-live="polite">
                     <strong>{worklistStatusLabel(row.status)}</strong>
@@ -554,127 +566,8 @@ function EncodeWorklistPanel({
   );
 }
 
-function ReencodeForm({
-  canSubmit,
-  isSaving,
-  logicalJob,
-  logicalJobIsTerminal,
-  onOutputPath,
-  onSelect,
-  onSubmit,
-  outputPath,
-  pageSelection,
-  selectionDetailsAreCurrent,
-  selections,
-  visibleSelectedProfileId,
-  visibleSelection,
-}: {
-  canSubmit: boolean;
-  isSaving: boolean;
-  logicalJob: LogicalEncodeJob | null;
-  logicalJobIsTerminal: boolean;
-  onOutputPath(outputPath: string): void;
-  onSelect(event: React.ChangeEvent<HTMLSelectElement>): void;
-  onSubmit(event: React.FormEvent<HTMLFormElement>): void;
-  outputPath: string;
-  pageSelection: EncodeSelectionOption | undefined;
-  selectionDetailsAreCurrent: boolean;
-  selections: readonly EncodeSelectionOption[];
-  visibleSelectedProfileId: EncodingProfileId | "";
-  visibleSelection: EncodeSelectionOption | null;
-}) {
-  return (
-    <form className="profile-form encode-requeue-form" onSubmit={onSubmit}>
-      <div className="profile-fields">
-        <label>
-          Reviewed Disc Selection
-          <select
-            name="discSelectionId"
-            required
-            value={visibleSelection?.id ?? ""}
-            disabled={
-              (selections.length === 0 && visibleSelection === null) || isSaving
-            }
-            onChange={onSelect}
-          >
-            <option value="" disabled>Select reviewed media</option>
-            {visibleSelection !== null && pageSelection === undefined ? (
-              <option value={visibleSelection.id}>
-                {`Currently selected · ${selectionOptionLabel(visibleSelection)}`}
-              </option>
-            ) : null}
-            {selections.map((selection) => (
-              <option key={selection.id} value={selection.id}>
-                {selectionOptionLabel(selection)}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Re-encode final output path
-          <input
-            name="outputPath"
-            required
-            readOnly={logicalJob !== null || !selectionDetailsAreCurrent}
-            maxLength={4096}
-            placeholder="/media/movies/Movie (2001)/Movie (2001).mkv"
-            value={outputPath}
-            onChange={(event) => onOutputPath(event.currentTarget.value)}
-          />
-        </label>
-      </div>
-
-      {visibleSelection ? (
-        <div className="encode-selection-summary" aria-live="polite">
-          <strong>{mediaDescription(visibleSelection)}</strong>
-          <span>
-            {visibleSelection.hasCompletedEncode
-              ? "Encoded before"
-              : "No completed Encode Job history"}
-          </span>
-          {visibleSelection.priorCompletedJob ? (
-            <span>
-              Previously encoded with {visibleSelection.priorCompletedJob.profile.displayName}, version {visibleSelection.priorCompletedJob.profile.version} · {displayTerm(visibleSelection.priorCompletedJob.status)}
-            </span>
-          ) : null}
-          {!selectionDetailsAreCurrent ? (
-            <span>
-              This choice is outside the current results. Return to its result
-              page to refresh the queue action and output path. The last known
-              path is read-only until then.
-            </span>
-          ) : logicalJob === null ? (
-            <span>
-              {visibleSelectedProfileId === ""
-                ? "Choose an Encoding Profile to determine the queue action."
-                : "This pair will create a new logical Encode Job. The suggested output path is editable."}
-            </span>
-          ) : logicalJobIsTerminal && logicalJob.queueAvailable ? (
-            <span>
-              This {displayTerm(logicalJob.status).toLowerCase()} Encode Job will
-              be queued again. Its reserved output path cannot be changed.
-            </span>
-          ) : logicalJobIsTerminal ? (
-            <span>
-              Pending output cleanup must finish before this Encode Job can be
-              queued again.
-            </span>
-          ) : (
-            <span>{activeJobDescription(logicalJob.status)}</span>
-          )}
-        </div>
-      ) : null}
-
-      <button type="submit" disabled={isSaving || !canSubmit}>
-        {isSaving ? "Queueing…" : submitLabel(logicalJob)}
-      </button>
-    </form>
-  );
-}
-
 export function EncodeJobsView({
   state,
-  successfulQueueRevision = 0,
   checkedSelections,
   worklistRows,
   queueSummary,
@@ -682,7 +575,6 @@ export function EncodeJobsView({
   selectedProfileId,
   isSaving,
   requestError,
-  onQueue,
   onToggleSelection,
   onAddSelected,
   onWorklistPath,
@@ -696,59 +588,14 @@ export function EncodeJobsView({
   onSelectionPage,
   onProfilePage,
 }: EncodeJobsViewProps) {
-  const [selectedSelection, setSelectedSelection] = useState<
-    EncodeSelectionOption | null
-  >(null);
-  const [selectedSelectionGroup, setSelectedSelectionGroup] = useState<
-    EncodeQueueHistoryGroup | null
-  >(null);
-  const [selectedSelectionProfileId, setSelectedSelectionProfileId] = useState<
-    EncodingProfileId | ""
-  >("");
   const [searchQuery, setSearchQuery] = useState(
     state.status === "loaded" ? state.query : "",
   );
   const [searchError, setSearchError] = useState<string | null>(null);
-  const [reencodeOutputPath, setReencodeOutputPath] = useState("");
-  const [isReencodeOutputPathEdited, setIsReencodeOutputPathEdited] = useState(
-    false,
-  );
-  const clearSelectedSelection = useCallback(() => {
-    setSelectedSelection(null);
-    setSelectedSelectionGroup(null);
-    setSelectedSelectionProfileId("");
-    setReencodeOutputPath("");
-    setIsReencodeOutputPathEdited(false);
-  }, []);
-
-  const loadedHistoryGroup = state.status === "loaded"
-    ? state.historyGroup
-    : null;
-  const groupedSelectedSelection = loadedHistoryGroup !== null &&
-      selectedSelectionGroup === loadedHistoryGroup
-    ? selectedSelection
-    : null;
-  const pageSelection = state.status === "loaded" &&
-      groupedSelectedSelection !== null
-    ? state.selections.find((selection) =>
-      selection.id === groupedSelectedSelection.id
-    )
-    : undefined;
-  const visibleSelection = pageSelection ?? groupedSelectedSelection;
-  const logicalJob = visibleSelection?.logicalJob ?? null;
   const visibleSelectedProfileId = state.status === "loaded" &&
       state.profiles.some((profile) => profile.id === selectedProfileId)
     ? selectedProfileId
     : "";
-  const logicalJobIsTerminal = logicalJob !== null &&
-    isTerminalEncodeJobStatus(logicalJob.status);
-  const selectionDetailsAreCurrent = pageSelection !== undefined &&
-    selectedSelectionProfileId === visibleSelectedProfileId;
-  const canSubmit = visibleSelection !== null &&
-    visibleSelectedProfileId !== "" &&
-    selectionDetailsAreCurrent &&
-    (logicalJob === null ||
-      (logicalJobIsTerminal && logicalJob.queueAvailable));
   const loadedQuery = state.status === "loaded" ? state.query : null;
   const groupTotal = state.status !== "loaded"
     ? 0
@@ -761,116 +608,11 @@ export function EncodeJobsView({
     : "not encoded";
 
   useEffect(() => {
-    if (
-      state.status !== "loaded" ||
-      selectedSelection === null ||
-      selectedSelectionGroup !== state.historyGroup
-    ) {
-      return;
-    }
-    const refreshedSelection = state.selections.find(
-      (candidate) => candidate.id === selectedSelection.id,
-    );
-    if (
-      refreshedSelection !== undefined &&
-      refreshedSelection !== selectedSelection
-    ) {
-      const selectedProfileChanged =
-        selectedSelectionProfileId !== visibleSelectedProfileId;
-      setSelectedSelection(refreshedSelection);
-      setSelectedSelectionProfileId(visibleSelectedProfileId);
-      if (
-        selectedProfileChanged ||
-        refreshedSelection.logicalJob !== null ||
-        !isReencodeOutputPathEdited
-      ) {
-        setReencodeOutputPath(
-          refreshedSelection.logicalJob?.outputPath ??
-            refreshedSelection.suggestedOutputPath ??
-            "",
-        );
-        setIsReencodeOutputPathEdited(false);
-      }
-    }
-  }, [
-    isReencodeOutputPathEdited,
-    selectedSelection,
-    selectedSelectionGroup,
-    selectedSelectionProfileId,
-    state,
-    visibleSelectedProfileId,
-  ]);
-
-  useEffect(() => {
-    if (
-      loadedHistoryGroup !== null &&
-      selectedSelectionGroup !== null &&
-      selectedSelectionGroup !== loadedHistoryGroup
-    ) {
-      clearSelectedSelection();
-    }
-  }, [
-    clearSelectedSelection,
-    loadedHistoryGroup,
-    selectedSelectionGroup,
-  ]);
-
-  useEffect(() => {
-    clearSelectedSelection();
-  }, [clearSelectedSelection, successfulQueueRevision]);
-
-  useEffect(() => {
     if (loadedQuery !== null) {
       setSearchQuery(loadedQuery);
       setSearchError(null);
     }
   }, [loadedQuery]);
-
-  function selectDiscSelection(event: React.ChangeEvent<HTMLSelectElement>) {
-    if (state.status !== "loaded") {
-      return;
-    }
-    const selectionId = event.currentTarget.value as DiscSelectionId;
-    const selection = state.selections.find(
-      (candidate) => candidate.id === selectionId,
-    );
-    if (selection === undefined) {
-      clearSelectedSelection();
-      return;
-    }
-    setSelectedSelection(selection);
-    setSelectedSelectionGroup(state.historyGroup);
-    setSelectedSelectionProfileId(visibleSelectedProfileId);
-    setIsReencodeOutputPathEdited(false);
-    setReencodeOutputPath(
-      selection?.logicalJob?.outputPath ?? selection?.suggestedOutputPath ?? "",
-    );
-  }
-
-  function submit(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (
-      !canSubmit ||
-      visibleSelection === null ||
-      visibleSelectedProfileId === ""
-    ) {
-      return;
-    }
-    if (logicalJob === null) {
-      onQueue({
-        kind: "enqueue",
-        input: {
-          discSelectionId: visibleSelection.id,
-          encodingProfileId: visibleSelectedProfileId,
-          outputPath: reencodeOutputPath.trim(),
-        },
-      });
-      return;
-    }
-    if (isTerminalEncodeJobStatus(logicalJob.status)) {
-      onQueue({ kind: "requeue", encodeJobId: logicalJob.id });
-    }
-  }
 
   const checkedSelectionIds = new Set(
     checkedSelections.map((selection) => selection.id),
@@ -878,16 +620,18 @@ export function EncodeJobsView({
   const worklistSelectionIds = new Set(
     worklistRows.map((row) => row.selection.id),
   );
-  const failedRows = worklistRows.filter((row) => row.status === "failed");
-  const readyRows = worklistRows.filter((row) => row.status === "ready");
+  const failedRows = worklistRows.filter((row) =>
+    row.status === "failed" && rowIsActionable(row)
+  );
+  const readyRows = worklistRows.filter((row) =>
+    row.status === "ready" && rowIsActionable(row)
+  );
   const actionableCount = failedRows.length > 0
     ? failedRows.length
     : readyRows.length;
   const queueButtonLabel = failedRows.length > 0
     ? `Retry ${countLabel(failedRows.length, "failed Encode Job", "failed Encode Jobs")}`
     : `Queue ${countLabel(actionableCount, "Encode Job", "Encode Jobs")}`;
-  const profileSelectionLocked = !profileUnavailable &&
-    (checkedSelections.length > 0 || worklistRows.length > 0);
 
   return (
     <section
@@ -899,9 +643,8 @@ export function EncodeJobsView({
           <p className="section-eyebrow">Reviewed catalog</p>
           <h2 id="queue-encode-jobs-title">Queue Encode Jobs</h2>
           <p>
-            Build a first-encode worklist from Not encoded Disc Selections. The
-            Re-encode view keeps its one-item queue action for deliberate repeat
-            work.
+            Build one worklist from new and previously encoded Disc Selections.
+            The selected Encoding Profile resolves each row's queue action.
           </p>
         </div>
       </header>
@@ -930,11 +673,7 @@ export function EncodeJobsView({
                 name="encodingProfileId"
                 required
                 value={visibleSelectedProfileId}
-                disabled={
-                  state.profiles.length === 0 ||
-                  isSaving ||
-                  profileSelectionLocked
-                }
+                disabled={state.profiles.length === 0 || isSaving}
                 onChange={(event) =>
                   onProfileChange(
                     event.currentTarget.value as EncodingProfileId | "",
@@ -951,9 +690,7 @@ export function EncodeJobsView({
             <div className="encode-worklist-queue-action">
               <span>
                 {visibleSelectedProfileId === ""
-                  ? "Choose one active profile before selecting first encodes."
-                  : profileSelectionLocked
-                  ? "Clear the current selection and worklist before changing profiles."
+                  ? "Choose one active profile before selecting Disc Selections."
                   : "The selected profile applies to every actionable row."}
               </span>
               <button
@@ -982,9 +719,17 @@ export function EncodeJobsView({
           {queueSummary === null ? null : (
             <div className="section-message" role="status" aria-live="polite">
               {countLabel(
-                queueSummary.queued,
-                "Encode Job queued",
-                "Encode Jobs queued",
+                queueSummary.newQueued,
+                "new job queued",
+                "new jobs queued",
+              )}. {countLabel(
+                queueSummary.requeued,
+                "retry or re-encode queued",
+                "retries or re-encodes queued",
+              )}. {countLabel(
+                queueSummary.unavailable,
+                "row unavailable",
+                "rows unavailable",
               )}. {queueSummary.failed} failed.
             </div>
           )}
@@ -1044,38 +789,16 @@ export function EncodeJobsView({
                 state={state}
               />
 
-              {state.historyGroup === "not_encoded" ? (
-                <NotEncodedPicker
-                  checkedSelectionCount={checkedSelections.length}
-                  checkedSelectionIds={checkedSelectionIds}
-                  isSaving={isSaving}
-                  onAddSelected={onAddSelected}
-                  onQueue={onQueue}
-                  onToggleSelection={onToggleSelection}
-                  selections={state.selections}
-                  visibleSelectedProfileId={visibleSelectedProfileId}
-                  worklistSelectionIds={worklistSelectionIds}
-                />
-              ) : (
-                <ReencodeForm
-                  canSubmit={canSubmit}
-                  isSaving={isSaving}
-                  logicalJob={logicalJob}
-                  logicalJobIsTerminal={logicalJobIsTerminal}
-                  onOutputPath={(outputPath) => {
-                    setReencodeOutputPath(outputPath);
-                    setIsReencodeOutputPathEdited(true);
-                  }}
-                  onSelect={selectDiscSelection}
-                  onSubmit={submit}
-                  outputPath={reencodeOutputPath}
-                  pageSelection={pageSelection}
-                  selectionDetailsAreCurrent={selectionDetailsAreCurrent}
-                  selections={state.selections}
-                  visibleSelectedProfileId={visibleSelectedProfileId}
-                  visibleSelection={visibleSelection}
-                />
-              )}
+              <EncodeSelectionPicker
+                checkedSelectionCount={checkedSelections.length}
+                checkedSelectionIds={checkedSelectionIds}
+                isSaving={isSaving}
+                onAddSelected={onAddSelected}
+                onToggleSelection={onToggleSelection}
+                selections={state.selections}
+                visibleSelectedProfileId={visibleSelectedProfileId}
+                worklistSelectionIds={worklistSelectionIds}
+              />
 
               {state.selections.length === 0 ? (
                 <div className="section-message" role="status">
@@ -1116,7 +839,7 @@ export function EncodeJobsView({
           ) : null}
           <OptionPager
             ariaLabel="Encode profile pages"
-            isSaving={isSaving || profileSelectionLocked}
+            isSaving={isSaving}
             nextLabel="Next active profiles"
             onPage={onProfilePage}
             page={state.profilePage}
@@ -1198,11 +921,11 @@ export async function requestEncodeJobOptions(
   };
 }
 
-export async function requestQueueLogicalJobConflicts(
+export async function requestQueueLogicalJobResolutions(
   discSelectionIds: readonly DiscSelectionId[],
   encodingProfileId: EncodingProfileId,
   fetcher: EncodeJobsFetch = fetch,
-): Promise<DiscSelectionId[]> {
+): Promise<EncodeQueueLogicalJobResolution[]> {
   const parameters = new URLSearchParams({ encodingProfileId });
   for (const discSelectionId of discSelectionIds) {
     parameters.append("resolveDiscSelectionId", discSelectionId);
@@ -1217,15 +940,15 @@ export async function requestQueueLogicalJobConflicts(
     );
   }
   const body = await response.json() as {
-    conflictingDiscSelectionIds: DiscSelectionId[];
+    resolvedDiscSelections: EncodeQueueLogicalJobResolution[];
   };
-  return body.conflictingDiscSelectionIds;
+  return body.resolvedDiscSelections;
 }
 
 export async function queueEncodeJob(
   input: QueueEncodeJobInput,
   fetcher: EncodeJobsFetch = fetch,
-): Promise<Pick<LogicalEncodeJob, "outputPath" | "status">> {
+): Promise<LogicalEncodeJob> {
   const response = await fetcher("/api/encode-jobs", {
     method: "POST",
     headers: {
@@ -1238,18 +961,18 @@ export async function queueEncodeJob(
     throw new Error(await errorMessage(response, "Encode Job queueing failed"));
   }
   const body = await response.json() as {
-    job: Pick<LogicalEncodeJob, "outputPath" | "status">;
+    job: Omit<LogicalEncodeJob, "queueAvailable">;
   };
   return {
-    outputPath: body.job.outputPath,
-    status: body.job.status,
+    ...body.job,
+    queueAvailable: false,
   };
 }
 
-export async function retryEncodeJob(
+async function requestEncodeJobRequeue(
   encodeJobId: EncodeJobId,
   fetcher: EncodeJobsFetch = fetch,
-): Promise<void> {
+): Promise<Response> {
   const response = await fetcher("/api/encode-jobs", {
     method: "PATCH",
     headers: {
@@ -1261,6 +984,25 @@ export async function retryEncodeJob(
   if (!response.ok) {
     throw new Error(await errorMessage(response, "Encode Job retry failed"));
   }
+  return response;
+}
+
+async function requeueEncodeJob(
+  encodeJobId: EncodeJobId,
+  fetcher: EncodeJobsFetch = fetch,
+): Promise<LogicalEncodeJob> {
+  const response = await requestEncodeJobRequeue(encodeJobId, fetcher);
+  const body = await response.json() as {
+    job: Omit<LogicalEncodeJob, "queueAvailable">;
+  };
+  return { ...body.job, queueAvailable: false };
+}
+
+export async function retryEncodeJob(
+  encodeJobId: EncodeJobId,
+  fetcher: EncodeJobsFetch = fetch,
+): Promise<void> {
+  await requestEncodeJobRequeue(encodeJobId, fetcher);
 }
 
 export async function cancelEncodeJob(
@@ -1314,6 +1056,56 @@ function useEncodeWorklist({
     ));
   }
 
+  function markRowQueued(
+    selectionId: DiscSelectionId,
+    logicalJob: LogicalEncodeJob,
+    profile: EncodeProfileOption,
+  ) {
+    setRows((current) => current.map((row) =>
+      row.selection.id === selectionId
+        ? {
+            ...row,
+            selection: { ...row.selection, logicalJob },
+            outputPath: logicalJob.outputPath,
+            status: "queued",
+            error: null,
+            attemptedProfile: profile,
+          }
+        : row
+    ));
+  }
+
+  function applyResolutions(
+    resolutions: readonly EncodeQueueLogicalJobResolution[],
+  ) {
+    const jobsBySelectionId = new Map(
+      resolutions.map((resolution) => [
+        resolution.discSelectionId,
+        resolution.logicalJob,
+      ]),
+    );
+    setCheckedSelections((current) => current.map((selection) => ({
+      ...selection,
+      logicalJob: jobsBySelectionId.get(selection.id) ?? null,
+    })));
+    setRows((current) => current.map((row) => {
+      if (!rowIsUnresolved(row) || !jobsBySelectionId.has(row.selection.id)) {
+        return row;
+      }
+      const previousJob = row.selection.logicalJob;
+      const logicalJob = jobsBySelectionId.get(row.selection.id) ?? null;
+      return {
+        ...row,
+        selection: { ...row.selection, logicalJob },
+        outputPath: logicalJob?.outputPath ??
+          (previousJob === null
+            ? row.outputPath
+            : row.selection.suggestedOutputPath ?? ""),
+      };
+    }));
+    setSummary(null);
+  }
+
   async function queueRows() {
     if (isSaving || state.status !== "loaded") {
       return;
@@ -1324,10 +1116,12 @@ function useEncodeWorklist({
     if (profile === undefined) {
       return;
     }
-    const failedRows = rows.filter((row) => row.status === "failed");
+    const failedRows = rows.filter((row) =>
+      row.status === "failed" && rowIsActionable(row)
+    );
     const actionableRows = failedRows.length > 0
       ? failedRows
-      : rows.filter((row) => row.status === "ready");
+      : rows.filter((row) => row.status === "ready" && rowIsActionable(row));
     if (actionableRows.length === 0) {
       return;
     }
@@ -1335,8 +1129,13 @@ function useEncodeWorklist({
     setIsSaving(true);
     setRequestError(null);
     setSummary(null);
-    let queued = 0;
+    let newQueued = 0;
+    let requeued = 0;
     let failed = 0;
+    const unavailable = rows.filter((row) =>
+      rowIsUnresolved(row) &&
+      worklistAction(row.selection.logicalJob).kind === "unavailable"
+    ).length;
     try {
       for (const row of actionableRows) {
         updateRow(row.selection.id, {
@@ -1345,23 +1144,36 @@ function useEncodeWorklist({
           attemptedProfile: profile,
         });
         try {
-          const queuedJob = await queueEncodeJob({
-            discSelectionId: row.selection.id,
-            encodingProfileId: profile.id,
-            outputPath: row.outputPath.trim(),
-          });
-          if (queuedJob.status !== "queued") {
-            throw new Error(
-              `The selected profile already has an Encode Job with ${displayTerm(queuedJob.status).toLowerCase()} status. Use its single-item action instead.`,
-            );
+          const action = worklistAction(row.selection.logicalJob);
+          let queuedJob: LogicalEncodeJob;
+          if (action.kind === "enqueue") {
+            queuedJob = await queueEncodeJob({
+              discSelectionId: row.selection.id,
+              encodingProfileId: profile.id,
+              outputPath: row.outputPath.trim(),
+            });
+            if (queuedJob.status !== "queued") {
+              throw new Error(
+                `The selected profile already has an Encode Job with ${displayTerm(queuedJob.status).toLowerCase()} status. Refresh the worklist before trying again.`,
+              );
+            }
+            newQueued += 1;
+          } else if (action.kind === "requeue") {
+            const logicalJob = row.selection.logicalJob;
+            if (logicalJob === null) {
+              throw new Error("Encode Job resolution changed before queueing");
+            }
+            queuedJob = await requeueEncodeJob(logicalJob.id);
+            if (queuedJob.status !== "queued") {
+              throw new Error(
+                `The Encode Job has ${displayTerm(queuedJob.status).toLowerCase()} status after requeueing. Refresh the worklist before trying again.`,
+              );
+            }
+            requeued += 1;
+          } else {
+            throw new Error("Encode Job is no longer actionable");
           }
-          queued += 1;
-          updateRow(row.selection.id, {
-            outputPath: queuedJob.outputPath,
-            status: "queued",
-            error: null,
-            attemptedProfile: profile,
-          });
+          markRowQueued(row.selection.id, queuedJob, profile);
         } catch (error) {
           failed += 1;
           updateRow(row.selection.id, {
@@ -1373,7 +1185,7 @@ function useEncodeWorklist({
           });
         }
       }
-      setSummary({ queued, failed });
+      setSummary({ newQueued, requeued, unavailable, failed });
       await load();
       onChanged();
     } finally {
@@ -1385,6 +1197,7 @@ function useEncodeWorklist({
     checkedSelections,
     rows,
     summary,
+    applyResolutions,
     addChecked() {
       setRows((current) => {
         const existingIds = new Set(current.map((row) => row.selection.id));
@@ -1395,7 +1208,8 @@ function useEncodeWorklist({
               ? []
               : [{
                   selection,
-                  outputPath: selection.suggestedOutputPath ?? "",
+                  outputPath: selection.logicalJob?.outputPath ??
+                    selection.suggestedOutputPath ?? "",
                   status: "ready" as const,
                   error: null,
                   attemptedProfile: null,
@@ -1417,7 +1231,13 @@ function useEncodeWorklist({
       );
     },
     setPath(selectionId: DiscSelectionId, outputPath: string) {
-      updateRow(selectionId, { outputPath });
+      setRows((current) => current.map((row) =>
+        row.selection.id === selectionId &&
+          row.selection.logicalJob === null &&
+          rowIsUnresolved(row)
+          ? { ...row, outputPath }
+          : row
+      ));
     },
     toggle(selection: EncodeSelectionOption, checked: boolean) {
       setCheckedSelections((current) => checked
@@ -1453,7 +1273,6 @@ export function EncodeJobsManager({
   const [profileOffset, setProfileOffset] = useState(0);
   const [isSaving, setIsSaving] = useState(false);
   const [requestError, setRequestError] = useState<string | null>(null);
-  const [successfulQueueRevision, setSuccessfulQueueRevision] = useState(0);
   const [profileUnavailable, setProfileUnavailable] = useState(false);
   const loadVersion = useRef(0);
   const selectionView = selectionViews[historyGroup];
@@ -1537,14 +1356,10 @@ export function EncodeJobsManager({
     const preservedSelections = [
       ...worklist.checkedSelections,
       ...worklist.rows
-        .filter((row) => row.status === "ready" || row.status === "failed")
+        .filter(rowIsUnresolved)
         .map((row) => row.selection),
     ];
-    if (
-      !profileUnavailable ||
-      profileId === "" ||
-      preservedSelections.length === 0
-    ) {
+    if (profileId === "" || preservedSelections.length === 0) {
       setProfileUnavailable(false);
       setRequestError(null);
       setSelectedProfileId(profileId);
@@ -1557,57 +1372,21 @@ export function EncodeJobsManager({
       const selectionIds = [
         ...new Set(preservedSelections.map((selection) => selection.id)),
       ];
-      const conflictingIds = [] as DiscSelectionId[];
+      const resolutions: EncodeQueueLogicalJobResolution[] = [];
       for (let offset = 0; offset < selectionIds.length; offset += 100) {
-        conflictingIds.push(...await requestQueueLogicalJobConflicts(
+        resolutions.push(...await requestQueueLogicalJobResolutions(
           selectionIds.slice(offset, offset + 100),
           profileId,
         ));
       }
-      if (conflictingIds.length > 0) {
-        const affectedIds = new Set(conflictingIds);
-        const affectedTitles = preservedSelections
-          .filter((selection) => affectedIds.has(selection.id))
-          .map((selection) => selection.mediaTitle)
-          .slice(0, 3);
-        const remaining = conflictingIds.length - affectedTitles.length;
-        setRequestError(
-          `The replacement profile already has ${countLabel(conflictingIds.length, "Encode Job", "Encode Jobs")} for this worklist (${affectedTitles.join(", ")}${remaining > 0 ? ` and ${remaining} more` : ""}). Choose another profile, or remove those rows and use their single-item actions.`
-            .slice(0, 512),
-        );
-        return;
-      }
+      worklist.applyResolutions(resolutions);
       setProfileUnavailable(false);
       setSelectedProfileId(profileId);
     } catch (error) {
       setRequestError(
         error instanceof Error
           ? error.message
-          : "Replacement profile validation failed",
-      );
-    } finally {
-      setIsSaving(false);
-    }
-  }
-
-  async function queue(action: QueueEncodeJobAction) {
-    if (isSaving) {
-      return;
-    }
-    setIsSaving(true);
-    setRequestError(null);
-    try {
-      if (action.kind === "enqueue") {
-        await queueEncodeJob(action.input);
-      } else {
-        await retryEncodeJob(action.encodeJobId);
-      }
-      setSuccessfulQueueRevision((current) => current + 1);
-      await load();
-      onChanged();
-    } catch (error) {
-      setRequestError(
-        error instanceof Error ? error.message : "Encode Job queueing failed",
+          : "Encoding Profile resolution failed",
       );
     } finally {
       setIsSaving(false);
@@ -1617,7 +1396,6 @@ export function EncodeJobsManager({
   return (
     <EncodeJobsView
       state={state}
-      successfulQueueRevision={successfulQueueRevision}
       checkedSelections={worklist.checkedSelections}
       worklistRows={worklist.rows}
       queueSummary={worklist.summary}
@@ -1625,7 +1403,6 @@ export function EncodeJobsManager({
       selectedProfileId={selectedProfileId}
       isSaving={isSaving}
       requestError={requestError}
-      onQueue={(action) => void queue(action)}
       onToggleSelection={worklist.toggle}
       onAddSelected={worklist.addChecked}
       onWorklistPath={worklist.setPath}

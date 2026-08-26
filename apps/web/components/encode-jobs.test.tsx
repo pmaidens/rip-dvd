@@ -17,7 +17,7 @@ import {
   EncodeJobsView,
   queueEncodeJob,
   requestEncodeJobOptions,
-  requestQueueLogicalJobConflicts,
+  requestQueueLogicalJobResolutions,
   retryEncodeJob,
 } from "./encode-jobs";
 import type {
@@ -108,7 +108,6 @@ describe("EncodeJobsView", () => {
         }}
         isSaving={false}
         requestError={null}
-        onQueue={() => undefined}
         onToggleSelection={() => undefined}
         onAddSelected={() => undefined}
         onWorklistPath={() => undefined}
@@ -127,16 +126,16 @@ describe("EncodeJobsView", () => {
     expect(html).toContain("Queue Encode Jobs");
     expect(html).toContain("Queue Me (2001) · DVD main feature");
     expect(html).toContain('type="checkbox"');
-    expect(html).toContain("Add selected to batch");
-    expect(html).toContain("First-encode worklist");
+    expect(html).toContain("Add selected to worklist");
+    expect(html).toContain("Encode worklist");
     expect(html).toContain("Queue 0 Encode Jobs");
     expect(html).toContain("Next active profiles");
     expect(html).toContain(
-      '<button type="button" disabled="">Next active profiles</button>',
+      '<button type="button">Next active profiles</button>',
     );
   });
 
-  it("keeps existing profile jobs out of the first-encode worklist", () => {
+  it("allows active profile jobs to join the worklist as unavailable rows", () => {
     const profileId = "profile-v2" as EncodingProfileId;
     const selection: EncodeSelectionOption = {
       id: "selection-active" as DiscSelectionId,
@@ -189,7 +188,6 @@ describe("EncodeJobsView", () => {
         }}
         isSaving={false}
         requestError={null}
-        onQueue={() => undefined}
         onToggleSelection={() => undefined}
         onAddSelected={() => undefined}
         onWorklistPath={() => undefined}
@@ -205,12 +203,12 @@ describe("EncodeJobsView", () => {
       />,
     );
 
-    expect(html).not.toContain("Select Already queued");
+    expect(html).toContain("Select Already queued");
     expect(html).toContain("This Encode Job is already queued.");
     expect(html).toContain(
       "Reserved final output: /media/movies/Already queued (2002).mkv",
     );
-    expect(html).toContain("Already queued</button>");
+    expect(html).toContain("Already queued</small>");
   });
 
   it("offers a failed-only retry while untouched rows remain ready", () => {
@@ -281,7 +279,6 @@ describe("EncodeJobsView", () => {
         }}
         isSaving={false}
         requestError={null}
-        onQueue={() => undefined}
         onToggleSelection={() => undefined}
         onAddSelected={() => undefined}
         onWorklistPath={() => undefined}
@@ -299,6 +296,130 @@ describe("EncodeJobsView", () => {
 
     expect(html).toContain("Retry 1 failed Encode Job");
     expect(html).not.toContain("Queue 2 Encode Jobs");
+  });
+
+  it("renders mixed row actions and excludes active jobs from the queue count", () => {
+    const profileId = "profile-v2" as EncodingProfileId;
+    const profile = {
+      id: profileId,
+      displayName: "DVD library",
+      version: 2,
+    };
+    const selection = (
+      id: string,
+      title: string,
+      logicalJob: EncodeSelectionOption["logicalJob"],
+      hasCompletedEncode = false,
+    ): EncodeSelectionOption => ({
+      id: id as DiscSelectionId,
+      mediaItemId: `movie-${id}`,
+      mediaTitle: title,
+      mediaYear: 2003,
+      sourceDescription: "DVD main feature",
+      hasCompletedEncode,
+      priorCompletedJob: hasCompletedEncode
+        ? {
+            id: "prior-completed" as EncodeJobId,
+            status: "completed",
+            profile,
+          }
+        : null,
+      logicalJob,
+      suggestedOutputPath: `/media/movies/${title} (2003).mkv`,
+    });
+    const newSelection = selection("new", "New row", null);
+    const failedSelection = selection("failed", "Retry row", {
+      id: "failed-job" as EncodeJobId,
+      encodingProfileId: profileId,
+      outputPath: "/media/movies/Retry row authoritative.mkv",
+      status: "failed",
+      queueAvailable: true,
+    });
+    const completedSelection = selection("completed", "Re-encode row", {
+      id: "completed-job" as EncodeJobId,
+      encodingProfileId: profileId,
+      outputPath: "/media/movies/Re-encode row authoritative.mkv",
+      status: "completed",
+      queueAvailable: true,
+    }, true);
+    const runningSelection = selection("running", "Running row", {
+      id: "running-job" as EncodeJobId,
+      encodingProfileId: profileId,
+      outputPath: "/media/movies/Running row authoritative.mkv",
+      status: "running",
+      queueAvailable: false,
+    });
+    const rows = [
+      newSelection,
+      failedSelection,
+      completedSelection,
+      runningSelection,
+    ].map((candidate) => ({
+      selection: candidate,
+      outputPath: candidate.logicalJob?.outputPath ??
+        candidate.suggestedOutputPath!,
+      status: "ready" as const,
+      error: null,
+      attemptedProfile: null,
+    }));
+
+    const html = renderToStaticMarkup(
+      <EncodeJobsView
+        selectedProfileId={profileId}
+        checkedSelections={[]}
+        worklistRows={rows}
+        queueSummary={null}
+        profileUnavailable={false}
+        state={{
+          status: "loaded",
+          historyGroup: "re_encode",
+          query: "",
+          counts: { notEncoded: 3, reEncode: 1 },
+          selections: [completedSelection],
+          profiles: [profile],
+          page: {
+            offset: 0,
+            limit: 100,
+            total: 1,
+            hasPrevious: false,
+            hasNext: false,
+          },
+          profilePage: {
+            offset: 0,
+            limit: 100,
+            hasPrevious: false,
+            hasNext: false,
+          },
+        }}
+        isSaving={false}
+        requestError={null}
+        onToggleSelection={() => undefined}
+        onAddSelected={() => undefined}
+        onWorklistPath={() => undefined}
+        onRemoveWorklistRow={() => undefined}
+        onClearWorklist={() => undefined}
+        onQueueWorklist={() => undefined}
+        onRetry={() => undefined}
+        onHistoryGroup={() => undefined}
+        onSearch={() => undefined}
+        onProfileChange={() => undefined}
+        onSelectionPage={() => undefined}
+        onProfilePage={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("Queue 3 Encode Jobs");
+    expect(html).toContain("New Encode Job");
+    expect(html).toContain("Retry");
+    expect(html).toContain("Re-encode");
+    expect(html).toContain("Running");
+    expect(html).toContain("DVD library, version 2 · Completed");
+    expect(html).toContain(
+      "The existing logical Encode Job retains this output reservation.",
+    );
+    expect(html).toContain(
+      'aria-label="Final output path for Retry row" readOnly="" value="/media/movies/Retry row authoritative.mkv"',
+    );
   });
 
   it("exposes editable worklist paths only with a visible shared profile", async () => {
@@ -360,7 +481,6 @@ describe("EncodeJobsView", () => {
         }}
         isSaving={false}
         requestError={null}
-        onQueue={() => undefined}
         onToggleSelection={() => undefined}
         onAddSelected={() => undefined}
         onWorklistPath={onWorklistPath}
@@ -426,6 +546,7 @@ describe("EncodeJobsView", () => {
         : Response.json({
             job: {
               id: "job-1",
+              encodingProfileId: profileId,
               status: "queued",
               outputPath: canonicalOutputPath,
             },
@@ -447,8 +568,11 @@ describe("EncodeJobsView", () => {
     await retryEncodeJob(jobId, fetcher);
 
     expect(queuedJob).toEqual({
+      id: "job-1",
+      encodingProfileId: profileId,
       status: "queued",
       outputPath: canonicalOutputPath,
+      queueAvailable: false,
     });
 
     expect(fetcher).toHaveBeenNthCalledWith(
@@ -490,17 +614,30 @@ describe("EncodeJobsView", () => {
     const profileId = "profile-v2" as EncodingProfileId;
     const firstId = "selection-1" as DiscSelectionId;
     const secondId = "selection-2" as DiscSelectionId;
+    const logicalJob = {
+      id: "job-2" as EncodeJobId,
+      encodingProfileId: profileId,
+      outputPath: "/media/movies/Selection 2.mkv",
+      status: "failed" as const,
+      queueAvailable: true,
+    };
     const fetcher = vi.fn(async () => Response.json({
-      conflictingDiscSelectionIds: [secondId],
+      resolvedDiscSelections: [
+        { discSelectionId: firstId, logicalJob: null },
+        { discSelectionId: secondId, logicalJob },
+      ],
     }));
 
     await expect(
-      requestQueueLogicalJobConflicts(
+      requestQueueLogicalJobResolutions(
         [firstId, secondId],
         profileId,
         fetcher,
       ),
-    ).resolves.toEqual([secondId]);
+    ).resolves.toEqual([
+      { discSelectionId: firstId, logicalJob: null },
+      { discSelectionId: secondId, logicalJob },
+    ]);
     expect(fetcher).toHaveBeenCalledWith(
       "/api/encode-jobs?encodingProfileId=profile-v2&resolveDiscSelectionId=selection-1&resolveDiscSelectionId=selection-2",
       { cache: "no-store", headers: { Accept: "application/json" } },
@@ -587,7 +724,7 @@ describe("EncodeJobsView", () => {
     }
   });
 
-  it("rejects a replacement profile with existing jobs without discarding rows", async () => {
+  it("re-resolves preserved rows when the shared profile changes", async () => {
     const retiredProfileId = "profile-retired" as EncodingProfileId;
     const replacementProfileId = "profile-replacement" as EncodingProfileId;
     const selection: EncodeSelectionOption = {
@@ -632,7 +769,16 @@ describe("EncodeJobsView", () => {
       const url = new URL(String(input), "http://localhost:3000");
       if (url.searchParams.has("resolveDiscSelectionId")) {
         return Response.json({
-          conflictingDiscSelectionIds: [selection.id],
+          resolvedDiscSelections: [{
+            discSelectionId: selection.id,
+            logicalJob: {
+              id: "replacement-job" as EncodeJobId,
+              encodingProfileId: replacementProfileId,
+              outputPath: "/media/movies/Replacement authoritative.mkv",
+              status: "failed",
+              queueAvailable: true,
+            },
+          }],
         });
       }
       if (
@@ -679,7 +825,7 @@ describe("EncodeJobsView", () => {
         checkbox.click();
       });
       const add = [...container.querySelectorAll("button")].find(
-        (button) => button.textContent?.includes("Add selected to batch"),
+        (button) => button.textContent?.includes("Add selected to worklist"),
       );
       if (!add) {
         throw new Error("Expected add-to-worklist action");
@@ -708,11 +854,16 @@ describe("EncodeJobsView", () => {
         await settle();
       });
 
-      expect(replacement.value).toBe("");
+      expect(replacement.value).toBe(replacementProfileId);
       expect(container.textContent).toContain("Preserved worklist row");
-      expect(container.textContent).toContain(
-        "The replacement profile already has 1 Encode Job for this worklist",
+      expect(container.textContent).toContain("Retry");
+      const outputPath = container.querySelector<HTMLInputElement>(
+        'input[aria-label="Final output path for Preserved worklist row"]',
       );
+      expect(outputPath?.value).toBe(
+        "/media/movies/Replacement authoritative.mkv",
+      );
+      expect(outputPath?.readOnly).toBe(true);
       expect(fetcher.mock.calls.some(([input]) =>
         String(input).includes(
           `encodingProfileId=${replacementProfileId}&resolveDiscSelectionId=${selection.id}`,

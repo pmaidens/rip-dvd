@@ -266,7 +266,7 @@ function readQueueOptions(
   });
 }
 
-function readQueueLogicalJobConflicts(
+function resolveQueueLogicalJobs(
   access: DataAccess,
   discSelectionIds: readonly DiscSelectionId[],
   encodingProfileId: EncodingProfileId,
@@ -284,7 +284,7 @@ function readQueueLogicalJobConflicts(
         encodingProfileId,
       );
     }
-    return snapshot.encodeJobs.listQueueLogicalJobConflicts({
+    return snapshot.encodeJobs.resolveQueueLogicalJobs({
       discSelectionIds,
       encodingProfileId,
     });
@@ -353,11 +353,18 @@ export async function createEncodeJobsRoute(
         return response({ error: "Encoding options are unavailable" }, 503);
       }
       if (resolveSelectionIds.length > 0) {
+        const resolvedDiscSelections = resolveQueueLogicalJobs(
+          getAccess(),
+          resolveSelectionIds as DiscSelectionId[],
+          encodingProfileId as EncodingProfileId,
+        );
         return response({
-          conflictingDiscSelectionIds: readQueueLogicalJobConflicts(
-            getAccess(),
-            resolveSelectionIds as DiscSelectionId[],
-            encodingProfileId as EncodingProfileId,
+          resolvedDiscSelections,
+          conflictingDiscSelectionIds: resolvedDiscSelections.flatMap(
+            (resolution) =>
+              resolution.logicalJob === null
+                ? []
+                : [resolution.discSelectionId],
           ),
         });
       }

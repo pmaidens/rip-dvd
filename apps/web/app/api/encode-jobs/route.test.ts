@@ -129,26 +129,99 @@ describe("Encode Jobs API", () => {
     });
   });
 
-  it("resolves bounded selected-profile logical jobs without a mutation", async () => {
+  it("resolves bounded profile-relative target jobs without a mutation", async () => {
     const access = dataAccessFixture.create();
-    const candidate = createSelection(access, "replacement-resolution");
-    completeCatalogReview(access, candidate.archive.id);
+    const noJob = createSelection(access, "resolution-no-job");
+    const failed = createSelection(access, "resolution-failed");
+    const cancelled = createSelection(access, "resolution-cancelled");
+    const completed = createSelection(access, "resolution-completed");
+    const queued = createSelection(access, "resolution-queued");
+    const running = createSelection(access, "resolution-running");
+    const cancellationRequested = createSelection(
+      access,
+      "resolution-cancellation-requested",
+    );
+    const candidates = [
+      noJob,
+      failed,
+      cancelled,
+      completed,
+      queued,
+      running,
+      cancellationRequested,
+    ];
+    for (const candidate of candidates) {
+      completeCatalogReview(access, candidate.archive.id);
+    }
     const profile = access.encodingProfiles.create({
       key: "replacement-resolution",
       displayName: "Replacement resolution",
       mediaDomain: "dvd_video",
       settings: { preset: "Fast 480p30", container: "mkv" },
     });
-    access.encodeJobs.enqueue({
-      discSelectionId: candidate.selection.id,
+
+    const failedJob = access.encodeJobs.enqueue({
+      discSelectionId: failed.selection.id,
       encodingProfileId: profile.id,
-      outputPath: "/media/movies/Replacement resolution.mkv",
+      outputPath: "/media/movies/Resolution failed.mkv",
+    });
+    const failedClaim = access.encodeJobs.claimNext("resolution-failed");
+    if (!failedClaim) throw new Error("Expected failed target claim");
+    access.encodeJobs.fail(failedClaim, "expected failure");
+
+    const cancelledJob = access.encodeJobs.enqueue({
+      discSelectionId: cancelled.selection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Resolution cancelled.mkv",
+    });
+    access.encodeJobs.requestCancellation(cancelledJob.id);
+
+    const completedJob = access.encodeJobs.enqueue({
+      discSelectionId: completed.selection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Resolution completed.mkv",
+    });
+    const completedClaim = access.encodeJobs.claimNext("resolution-completed");
+    if (!completedClaim) throw new Error("Expected completed target claim");
+    access.encodeJobs.complete(completedClaim);
+
+    const runningJob = access.encodeJobs.enqueue({
+      discSelectionId: running.selection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Resolution running.mkv",
+    });
+    const runningClaim = access.encodeJobs.claimNext("resolution-running");
+    if (!runningClaim || runningClaim.id !== runningJob.id) {
+      throw new Error("Expected running target claim");
+    }
+    const cancellationRequestedJob = access.encodeJobs.enqueue({
+      discSelectionId: cancellationRequested.selection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Resolution cancellation requested.mkv",
+    });
+    const cancellationClaim = access.encodeJobs.claimNext(
+      "resolution-cancellation-requested",
+    );
+    if (
+      !cancellationClaim ||
+      cancellationClaim.id !== cancellationRequestedJob.id
+    ) {
+      throw new Error("Expected cancellation-requested target claim");
+    }
+    access.encodeJobs.requestCancellation(cancellationClaim.id);
+    const queuedJob = access.encodeJobs.enqueue({
+      discSelectionId: queued.selection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Resolution queued.mkv",
     });
 
+    const url = new URL("http://localhost:3000/api/encode-jobs");
+    url.searchParams.set("encodingProfileId", profile.id);
+    for (const candidate of candidates) {
+      url.searchParams.append("resolveDiscSelectionId", candidate.selection.id);
+    }
     const response = await createEncodeJobsRoute(
-      new Request(
-        `http://localhost:3000/api/encode-jobs?encodingProfileId=${profile.id}&resolveDiscSelectionId=${candidate.selection.id}`,
-      ),
+      new Request(url),
       () => access,
       () => ({
         mediaLibraryPath: "/media/movies",
@@ -158,16 +231,70 @@ describe("Encode Jobs API", () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
-      conflictingDiscSelectionIds: [candidate.selection.id],
+      conflictingDiscSelectionIds: candidates.slice(1).map(
+        (candidate) => candidate.selection.id,
+      ),
+      resolvedDiscSelections: [
+        { discSelectionId: noJob.selection.id, logicalJob: null },
+        {
+          discSelectionId: failed.selection.id,
+          logicalJob: expect.objectContaining({
+            id: failedJob.id,
+            status: "failed",
+            outputPath: "/media/movies/Resolution failed.mkv",
+            queueAvailable: true,
+          }),
+        },
+        {
+          discSelectionId: cancelled.selection.id,
+          logicalJob: expect.objectContaining({
+            id: cancelledJob.id,
+            status: "cancelled",
+            queueAvailable: true,
+          }),
+        },
+        {
+          discSelectionId: completed.selection.id,
+          logicalJob: expect.objectContaining({
+            id: completedJob.id,
+            status: "completed",
+            queueAvailable: true,
+          }),
+        },
+        {
+          discSelectionId: queued.selection.id,
+          logicalJob: expect.objectContaining({
+            id: queuedJob.id,
+            status: "queued",
+            queueAvailable: false,
+          }),
+        },
+        {
+          discSelectionId: running.selection.id,
+          logicalJob: expect.objectContaining({
+            id: runningClaim.id,
+            status: "running",
+            queueAvailable: false,
+          }),
+        },
+        {
+          discSelectionId: cancellationRequested.selection.id,
+          logicalJob: expect.objectContaining({
+            id: cancellationClaim.id,
+            status: "cancellation_requested",
+            queueAvailable: false,
+          }),
+        },
+      ],
     });
-    expect(access.encodeJobs.list()).toHaveLength(1);
+    expect(access.encodeJobs.list()).toHaveLength(6);
 
     const oversizedUrl = new URL("http://localhost:3000/api/encode-jobs");
     oversizedUrl.searchParams.set("encodingProfileId", profile.id);
     for (let index = 0; index < 101; index += 1) {
       oversizedUrl.searchParams.append(
         "resolveDiscSelectionId",
-        candidate.selection.id,
+        noJob.selection.id,
       );
     }
     const oversizedResponse = await createEncodeJobsRoute(
@@ -179,11 +306,8 @@ describe("Encode Jobs API", () => {
       }),
     );
     expect(oversizedResponse.status).toBe(400);
-    expect(() => access.encodeJobs.listQueueLogicalJobConflicts({
-      discSelectionIds: Array.from(
-        { length: 101 },
-        () => candidate.selection.id,
-      ),
+    expect(() => access.encodeJobs.resolveQueueLogicalJobs({
+      discSelectionIds: Array.from({ length: 101 }, () => noJob.selection.id),
       encodingProfileId: profile.id,
     })).toThrow("limited to 100 Disc Selections");
   });

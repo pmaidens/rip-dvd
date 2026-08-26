@@ -644,6 +644,11 @@ export interface EncodeQueueLogicalJob {
   queueAvailable: boolean;
 }
 
+export interface EncodeQueueLogicalJobResolution {
+  discSelectionId: DiscSelectionId;
+  logicalJob: EncodeQueueLogicalJob | null;
+}
+
 export interface EncodeQueueDiscSelection {
   selection: DiscSelection;
   hasCompletedEncode: boolean;
@@ -1118,10 +1123,10 @@ export interface ArchiveRequestAccess {
 }
 
 export interface EncodeJobAccess {
-  listQueueLogicalJobConflicts(options: {
+  resolveQueueLogicalJobs(options: {
     discSelectionIds: readonly DiscSelectionId[];
     encodingProfileId: EncodingProfileId;
-  }): DiscSelectionId[];
+  }): EncodeQueueLogicalJobResolution[];
   listQueueDiscSelections(options: {
     historyGroup: EncodeQueueHistoryGroup;
     encodingProfileId?: EncodingProfileId;
@@ -1274,7 +1279,7 @@ export interface ConsistentReadAccess {
   readonly encodeJobs: Pick<
     EncodeJobAccess,
     | "list"
-    | "listQueueLogicalJobConflicts"
+    | "resolveQueueLogicalJobs"
     | "listQueueDiscSelections"
     | "listDiscSelectionCorrectionEncodeJobLinks"
     | "listDiscSelectionCorrectionRetainedOutputSummaries"
