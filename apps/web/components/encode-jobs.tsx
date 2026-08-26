@@ -11,6 +11,7 @@ import {
 } from "@rip-dvd/data-access";
 import {
   ENCODE_QUEUE_SEARCH_QUERY_MAX_LENGTH,
+  validateEncodeQueueSearchQuery,
 } from "@rip-dvd/data-access/encode-queue-search";
 
 import { displayTerm } from "../lib/display-term";
@@ -224,6 +225,7 @@ export function EncodeJobsView({
   const [searchQuery, setSearchQuery] = useState(
     state.status === "loaded" ? state.query : "",
   );
+  const [searchError, setSearchError] = useState<string | null>(null);
   const [outputPath, setOutputPath] = useState("");
   const [isOutputPathEdited, setIsOutputPathEdited] = useState(false);
   const clearSelectedSelection = useCallback(() => {
@@ -331,6 +333,7 @@ export function EncodeJobsView({
   useEffect(() => {
     if (loadedQuery !== null) {
       setSearchQuery(loadedQuery);
+      setSearchError(null);
     }
   }, [loadedQuery]);
 
@@ -450,8 +453,25 @@ export function EncodeJobsView({
                 "selectionQuery",
               );
               const query = typeof value === "string" ? value.trim() : "";
-              if (query !== state.query) {
-                onSearch(query);
+              if (query === "") {
+                setSearchError(null);
+                if (state.query !== "") {
+                  onSearch("");
+                }
+                return;
+              }
+              const validation = validateEncodeQueueSearchQuery(query);
+              if (!validation.valid) {
+                setSearchError(
+                  validation.reason === "too_long"
+                    ? `Search must be ${ENCODE_QUEUE_SEARCH_QUERY_MAX_LENGTH} characters or fewer.`
+                    : "Enter letters or numbers to search.",
+                );
+                return;
+              }
+              setSearchError(null);
+              if (validation.query !== state.query) {
+                onSearch(validation.query);
               }
             }}
           >
@@ -462,9 +482,23 @@ export function EncodeJobsView({
                 name="selectionQuery"
                 maxLength={ENCODE_QUEUE_SEARCH_QUERY_MAX_LENGTH}
                 value={searchQuery}
+                aria-describedby={
+                  searchError === null
+                    ? undefined
+                    : "encode-selection-search-error"
+                }
+                aria-invalid={searchError !== null}
                 disabled={isSaving}
-                onChange={(event) => setSearchQuery(event.currentTarget.value)}
+                onChange={(event) => {
+                  setSearchQuery(event.currentTarget.value);
+                  setSearchError(null);
+                }}
               />
+              {searchError === null ? null : (
+                <span id="encode-selection-search-error" role="alert">
+                  {searchError}
+                </span>
+              )}
             </label>
             <button
               type="submit"
@@ -478,6 +512,7 @@ export function EncodeJobsView({
                 disabled={isSaving}
                 onClick={() => {
                   setSearchQuery("");
+                  setSearchError(null);
                   onSearch("");
                 }}
               >
