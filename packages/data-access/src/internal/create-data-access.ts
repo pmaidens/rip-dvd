@@ -119,6 +119,10 @@ import {
   ENCODE_PROGRESS_PHASES,
 } from "../domain-values.js";
 import {
+  ENCODE_QUEUE_SEARCH_QUERY_MAX_LENGTH,
+  validateEncodeQueueSearchQuery,
+} from "../encode-queue-search.js";
+import {
   DomainInvariantError,
   InvalidStatusTransitionError,
   RecordNotFoundError,
@@ -8574,22 +8578,18 @@ export function createDataAccessInternal(
           ENCODE_QUEUE_DISC_SELECTION_LIMIT,
         );
         const offset = optionalSafeInteger(options.offset, "offset", 0) ?? 0;
-        const searchQuery = options.query === undefined
+        const searchValidation = options.query === undefined
           ? undefined
-          : requireNonEmpty(options.query, "Encode queue search query");
-        if (searchQuery !== undefined && searchQuery.length > 256) {
-          throw new DomainInvariantError(
-            "Encode queue search query must be at most 256 characters",
-          );
+          : validateEncodeQueueSearchQuery(options.query);
+        if (searchValidation !== undefined && !searchValidation.valid) {
+          const message = searchValidation.reason === "too_long"
+            ? `Encode queue search query must be at most ${ENCODE_QUEUE_SEARCH_QUERY_MAX_LENGTH} characters`
+            : searchValidation.reason === "no_terms"
+            ? "Encode queue search query must contain a letter or number"
+            : "Encode queue search query must not be empty";
+          throw new DomainInvariantError(message);
         }
-        const normalizedQuery = searchQuery === undefined
-          ? undefined
-          : normalizeMediaItemSearchTitle(searchQuery);
-        if (normalizedQuery !== undefined && normalizedQuery.length === 0) {
-          throw new DomainInvariantError(
-            "Encode queue search query must contain a letter or number",
-          );
-        }
+        const normalizedQuery = searchValidation?.normalizedQuery;
         const searchPattern = normalizedQuery === undefined
           ? null
           : `%${normalizedQuery.replaceAll(" ", "%")}%`;

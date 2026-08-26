@@ -2,8 +2,8 @@ import { loadConfig } from "@rip-dvd/config";
 import {
   DomainInvariantError,
   InvalidStatusTransitionError,
-  normalizeMediaItemSearchTitle,
   RecordNotFoundError,
+  validateEncodeQueueSearchQuery,
   type DataAccess,
   type DiscSelection,
   type DiscSelectionId,
@@ -88,15 +88,8 @@ function encodeQueueSearchQuery(
   if (values.length !== 1) {
     return null;
   }
-  const query = values[0]!.trim();
-  if (
-    query.length === 0 ||
-    query.length > 256 ||
-    normalizeMediaItemSearchTitle(query).length === 0
-  ) {
-    return null;
-  }
-  return query;
+  const validation = validateEncodeQueueSearchQuery(values[0]!);
+  return validation.valid ? validation.query : null;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

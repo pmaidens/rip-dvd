@@ -30,6 +30,10 @@
       "types": "./src/disc-selection-source-identity-api.ts",
       "default": "./dist/disc-selection-source-identity-api.js"
     },
+    "./encode-queue-search": {
+      "types": "./src/encode-queue-search.ts",
+      "default": "./dist/encode-queue-search.js"
+    },
     "./legacy-sidecars": {
       "types": "./src/legacy-sidecars.ts",
       "default": "./dist/legacy-sidecars.js"
