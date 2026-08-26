@@ -129,6 +129,65 @@ describe("Encode Jobs API", () => {
     });
   });
 
+  it("resolves bounded selected-profile logical jobs without a mutation", async () => {
+    const access = dataAccessFixture.create();
+    const candidate = createSelection(access, "replacement-resolution");
+    completeCatalogReview(access, candidate.archive.id);
+    const profile = access.encodingProfiles.create({
+      key: "replacement-resolution",
+      displayName: "Replacement resolution",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30", container: "mkv" },
+    });
+    const job = access.encodeJobs.enqueue({
+      discSelectionId: candidate.selection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Replacement resolution.mkv",
+    });
+
+    const response = await createEncodeJobsRoute(
+      new Request(
+        `http://localhost:3000/api/encode-jobs?encodingProfileId=${profile.id}&resolveDiscSelectionId=${candidate.selection.id}`,
+      ),
+      () => access,
+      () => ({
+        mediaLibraryPath: "/media/movies",
+        webTrustedOrigin: "http://localhost:3000",
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      logicalJobs: [{
+        discSelectionId: candidate.selection.id,
+        id: job.id,
+        encodingProfileId: profile.id,
+        outputPath: "/media/movies/Replacement resolution.mkv",
+        status: "queued",
+        queueAvailable: false,
+      }],
+    });
+    expect(access.encodeJobs.list()).toHaveLength(1);
+
+    const oversizedUrl = new URL("http://localhost:3000/api/encode-jobs");
+    oversizedUrl.searchParams.set("encodingProfileId", profile.id);
+    for (let index = 0; index < 101; index += 1) {
+      oversizedUrl.searchParams.append(
+        "resolveDiscSelectionId",
+        candidate.selection.id,
+      );
+    }
+    const oversizedResponse = await createEncodeJobsRoute(
+      new Request(oversizedUrl),
+      () => access,
+      () => ({
+        mediaLibraryPath: "/media/movies",
+        webTrustedOrigin: "http://localhost:3000",
+      }),
+    );
+    expect(oversizedResponse.status).toBe(400);
+  });
+
   it("classifies queue candidates and returns profile-relative Encode Job details", async () => {
     const { access, databasePath } = dataAccessFixture.createWithDatabasePath();
     const neverEncoded = createSelection(access, "never-encoded");

@@ -7,6 +7,7 @@ import {
   type EncodeJobId,
   type EncodeJobStatus,
   type EncodeQueueHistoryGroup,
+  type EncodeQueueLogicalJobResolution,
   type EncodingProfileId,
 } from "@rip-dvd/data-access";
 import {
@@ -1198,6 +1199,30 @@ export async function requestEncodeJobOptions(
   };
 }
 
+export async function requestQueueLogicalJobs(
+  discSelectionIds: readonly DiscSelectionId[],
+  encodingProfileId: EncodingProfileId,
+  fetcher: EncodeJobsFetch = fetch,
+): Promise<EncodeQueueLogicalJobResolution[]> {
+  const parameters = new URLSearchParams({ encodingProfileId });
+  for (const discSelectionId of discSelectionIds) {
+    parameters.append("resolveDiscSelectionId", discSelectionId);
+  }
+  const response = await fetcher(`/api/encode-jobs?${parameters}`, {
+    cache: "no-store",
+    headers: { Accept: "application/json" },
+  });
+  if (!response.ok) {
+    throw new Error(
+      await errorMessage(response, "Encode Job resolution failed"),
+    );
+  }
+  const body = await response.json() as {
+    logicalJobs: EncodeQueueLogicalJobResolution[];
+  };
+  return body.logicalJobs;
+}
+
 export async function queueEncodeJob(
   input: QueueEncodeJobInput,
   fetcher: EncodeJobsFetch = fetch,
@@ -1509,6 +1534,63 @@ export function EncodeJobsManager({
     state,
   });
 
+  async function changeProfile(profileId: EncodingProfileId | "") {
+    const preservedSelections = [
+      ...worklist.checkedSelections,
+      ...worklist.rows.map((row) => row.selection),
+    ];
+    if (
+      !profileUnavailable ||
+      profileId === "" ||
+      preservedSelections.length === 0
+    ) {
+      setProfileUnavailable(false);
+      setRequestError(null);
+      setSelectedProfileId(profileId);
+      return;
+    }
+
+    setIsSaving(true);
+    setRequestError(null);
+    try {
+      const selectionIds = [
+        ...new Set(preservedSelections.map((selection) => selection.id)),
+      ];
+      const logicalJobs = [] as EncodeQueueLogicalJobResolution[];
+      for (let offset = 0; offset < selectionIds.length; offset += 100) {
+        logicalJobs.push(...await requestQueueLogicalJobs(
+          selectionIds.slice(offset, offset + 100),
+          profileId,
+        ));
+      }
+      if (logicalJobs.length > 0) {
+        const affectedIds = new Set(
+          logicalJobs.map((job) => job.discSelectionId),
+        );
+        const affectedTitles = preservedSelections
+          .filter((selection) => affectedIds.has(selection.id))
+          .map((selection) => selection.mediaTitle)
+          .slice(0, 3);
+        const remaining = logicalJobs.length - affectedTitles.length;
+        setRequestError(
+          `The replacement profile already has ${countLabel(logicalJobs.length, "Encode Job", "Encode Jobs")} for this worklist (${affectedTitles.join(", ")}${remaining > 0 ? ` and ${remaining} more` : ""}). Choose another profile, or remove those rows and use their single-item actions.`
+            .slice(0, 512),
+        );
+        return;
+      }
+      setProfileUnavailable(false);
+      setSelectedProfileId(profileId);
+    } catch (error) {
+      setRequestError(
+        error instanceof Error
+          ? error.message
+          : "Replacement profile validation failed",
+      );
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
   async function queue(action: QueueEncodeJobAction) {
     if (isSaving) {
       return;
@@ -1561,10 +1643,7 @@ export function EncodeJobsManager({
           [historyGroup]: { query: query.trim(), selectionOffset: 0 },
         }));
       }}
-      onProfileChange={(profileId) => {
-        setProfileUnavailable(false);
-        setSelectedProfileId(profileId);
-      }}
+      onProfileChange={(profileId) => void changeProfile(profileId)}
       onSelectionPage={(selectionOffset) => {
         setSelectionViews((current) => ({
           ...current,
