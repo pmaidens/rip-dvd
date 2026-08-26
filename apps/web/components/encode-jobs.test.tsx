@@ -230,6 +230,7 @@ describe("EncodeJobsView", () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     const container = document.createElement("div");
     const root = createRoot(container);
+    const onQueue = vi.fn();
     const selection = {
       id: "selection-pinned" as DiscSelectionId,
       mediaItemId: "movie-pinned",
@@ -246,9 +247,11 @@ describe("EncodeJobsView", () => {
       selections: EncodeSelectionOption[],
       historyGroup: "not_encoded" | "re_encode" = "not_encoded",
       successfulQueueRevision = 0,
+      selectedProfileId: EncodingProfileId =
+        "profile-pinned" as EncodingProfileId,
     ) => (
       <EncodeJobsView
-        selectedProfileId={"profile-pinned" as EncodingProfileId}
+        selectedProfileId={selectedProfileId}
         successfulQueueRevision={successfulQueueRevision}
         state={query === null
           ? { status: "loading" }
@@ -261,6 +264,10 @@ describe("EncodeJobsView", () => {
             profiles: [{
               id: "profile-pinned" as EncodingProfileId,
               displayName: "Pinned profile",
+              version: 1,
+            }, {
+              id: "profile-next" as EncodingProfileId,
+              displayName: "Next profile",
               version: 1,
             }],
             page: {
@@ -279,7 +286,7 @@ describe("EncodeJobsView", () => {
           }}
         isSaving={false}
         requestError={null}
-        onQueue={() => undefined}
+        onQueue={onQueue}
         onRetry={() => undefined}
         onHistoryGroup={() => undefined}
         onSearch={() => undefined}
@@ -319,6 +326,33 @@ describe("EncodeJobsView", () => {
         outputPath.dispatchEvent(new Event("input", { bubbles: true }));
       });
       expect(outputPath.value).toBe("/media/movies/Operator choice.mkv");
+
+      await act(async () =>
+        root.render(render(
+          "",
+          [selection],
+          "not_encoded",
+          0,
+          "profile-next" as EncodingProfileId,
+        ))
+      );
+      const queueForm = outputPath.closest("form");
+      const submit = queueForm?.querySelector<HTMLButtonElement>(
+        'button[type="submit"]',
+      );
+      if (!queueForm || !submit) {
+        throw new Error("Expected queue form");
+      }
+      expect(outputPath.readOnly).toBe(true);
+      expect(submit.disabled).toBe(true);
+      await act(async () => {
+        queueForm.dispatchEvent(
+          new Event("submit", { bubbles: true, cancelable: true }),
+        );
+      });
+      expect(onQueue).not.toHaveBeenCalled();
+      await act(async () => root.render(render("", [selection])));
+
       await act(async () => root.render(render(null, [])));
       await act(async () => root.render(render("another title", [])));
       const visiblePicker = container.querySelector<HTMLSelectElement>(
