@@ -664,6 +664,85 @@ describe("EncodeJobsView", () => {
     }
   });
 
+  it("keeps search controls available when a query has no searchable terms", async () => {
+    const fetcher = vi.fn(async (_input: RequestInfo | URL) => Response.json({
+      historyGroup: "not_encoded",
+      query: "",
+      counts: { notEncoded: 0, reEncode: 0 },
+      selections: [],
+      profiles: [],
+      page: {
+        offset: 0,
+        limit: 100,
+        total: 0,
+        hasPrevious: false,
+        hasNext: false,
+      },
+      profilePage: {
+        offset: 0,
+        limit: 100,
+        hasPrevious: false,
+        hasNext: false,
+      },
+    }));
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.stubGlobal("fetch", fetcher);
+    const container = document.createElement("div");
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(<EncodeJobsManager onChanged={() => undefined} />);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      const input = container.querySelector<HTMLInputElement>(
+        'input[name="selectionQuery"]',
+      );
+      const form = input?.closest("form");
+      if (!input || !form) {
+        throw new Error("Expected Disc Selection search form");
+      }
+
+      await act(async () => {
+        input.value = "---";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+        form.dispatchEvent(
+          new Event("submit", { bubbles: true, cancelable: true }),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      expect(fetcher).toHaveBeenCalledTimes(1);
+      expect(container.querySelector('input[name="selectionQuery"]')).not
+        .toBeNull();
+      expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+        "Enter letters or numbers to search.",
+      );
+
+      await act(async () => {
+        input.value = "Queue Me";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      await act(async () => {
+        form.dispatchEvent(
+          new Event("submit", { bubbles: true, cancelable: true }),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      expect(fetcher.mock.calls.map(([input]) => String(input))).toEqual([
+        "/api/encode-jobs?historyGroup=not_encoded&selectionOffset=0&profileOffset=0",
+        "/api/encode-jobs?historyGroup=not_encoded&selectionOffset=0&profileOffset=0&query=Queue+Me",
+      ]);
+    } finally {
+      await act(async () => root.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("preserves each history group's query and page in memory", async () => {
     const fetcher = vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(String(input), "http://localhost:3000");
