@@ -132,6 +132,168 @@ describe("EncodeJobsView", () => {
     expect(html).toContain("Next active profiles");
   });
 
+  it("keeps existing profile jobs out of the first-encode worklist", () => {
+    const profileId = "profile-v2" as EncodingProfileId;
+    const selection: EncodeSelectionOption = {
+      id: "selection-active" as DiscSelectionId,
+      mediaItemId: "movie-active",
+      mediaTitle: "Already queued",
+      mediaYear: 2002,
+      sourceDescription: "DVD main feature",
+      hasCompletedEncode: false,
+      priorCompletedJob: null,
+      logicalJob: {
+        id: "job-active" as EncodeJobId,
+        encodingProfileId: profileId,
+        outputPath: "/media/movies/Already queued (2002).mkv",
+        status: "queued",
+        queueAvailable: false,
+      },
+      suggestedOutputPath: "/media/movies/Already queued (2002).mkv",
+    };
+    const html = renderToStaticMarkup(
+      <EncodeJobsView
+        selectedProfileId={profileId}
+        checkedSelections={[]}
+        worklistRows={[]}
+        queueSummary={null}
+        profileUnavailable={false}
+        state={{
+          status: "loaded",
+          historyGroup: "not_encoded",
+          query: "",
+          counts: { notEncoded: 1, reEncode: 0 },
+          selections: [selection],
+          profiles: [{
+            id: profileId,
+            displayName: "DVD library",
+            version: 2,
+          }],
+          page: {
+            offset: 0,
+            limit: 100,
+            total: 1,
+            hasPrevious: false,
+            hasNext: false,
+          },
+          profilePage: {
+            offset: 0,
+            limit: 100,
+            hasPrevious: false,
+            hasNext: false,
+          },
+        }}
+        isSaving={false}
+        requestError={null}
+        onQueue={() => undefined}
+        onToggleSelection={() => undefined}
+        onAddSelected={() => undefined}
+        onWorklistPath={() => undefined}
+        onRemoveWorklistRow={() => undefined}
+        onClearWorklist={() => undefined}
+        onQueueWorklist={() => undefined}
+        onRetry={() => undefined}
+        onHistoryGroup={() => undefined}
+        onSearch={() => undefined}
+        onProfileChange={() => undefined}
+        onSelectionPage={() => undefined}
+        onProfilePage={() => undefined}
+      />,
+    );
+
+    expect(html).not.toContain("Select Already queued");
+    expect(html).toContain("This Encode Job is already queued.");
+    expect(html).toContain("Already queued</button>");
+  });
+
+  it("offers a failed-only retry while untouched rows remain ready", () => {
+    const profileId = "profile-v2" as EncodingProfileId;
+    const selection = (id: string, title: string): EncodeSelectionOption => ({
+      id: id as DiscSelectionId,
+      mediaItemId: `movie-${id}`,
+      mediaTitle: title,
+      mediaYear: 2003,
+      sourceDescription: "DVD main feature",
+      hasCompletedEncode: false,
+      priorCompletedJob: null,
+      logicalJob: null,
+      suggestedOutputPath: `/media/movies/${title} (2003).mkv`,
+    });
+    const failed = selection("failed", "Needs correction");
+    const ready = selection("ready", "Not attempted");
+    const html = renderToStaticMarkup(
+      <EncodeJobsView
+        selectedProfileId={profileId}
+        checkedSelections={[]}
+        worklistRows={[
+          {
+            selection: failed,
+            outputPath: failed.suggestedOutputPath!,
+            status: "failed",
+            error: "Reserved output",
+            attemptedProfile: {
+              id: profileId,
+              displayName: "DVD library",
+              version: 2,
+            },
+          },
+          {
+            selection: ready,
+            outputPath: ready.suggestedOutputPath!,
+            status: "ready",
+            error: null,
+            attemptedProfile: null,
+          },
+        ]}
+        queueSummary={null}
+        profileUnavailable={false}
+        state={{
+          status: "loaded",
+          historyGroup: "not_encoded",
+          query: "",
+          counts: { notEncoded: 2, reEncode: 0 },
+          selections: [failed, ready],
+          profiles: [{
+            id: profileId,
+            displayName: "DVD library",
+            version: 2,
+          }],
+          page: {
+            offset: 0,
+            limit: 100,
+            total: 2,
+            hasPrevious: false,
+            hasNext: false,
+          },
+          profilePage: {
+            offset: 0,
+            limit: 100,
+            hasPrevious: false,
+            hasNext: false,
+          },
+        }}
+        isSaving={false}
+        requestError={null}
+        onQueue={() => undefined}
+        onToggleSelection={() => undefined}
+        onAddSelected={() => undefined}
+        onWorklistPath={() => undefined}
+        onRemoveWorklistRow={() => undefined}
+        onClearWorklist={() => undefined}
+        onQueueWorklist={() => undefined}
+        onRetry={() => undefined}
+        onHistoryGroup={() => undefined}
+        onSearch={() => undefined}
+        onProfileChange={() => undefined}
+        onSelectionPage={() => undefined}
+        onProfilePage={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("Retry 1 failed Encode Job");
+    expect(html).not.toContain("Queue 2 Encode Jobs");
+  });
+
   it("exposes editable worklist paths only with a visible shared profile", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     const container = document.createElement("div");

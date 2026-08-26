@@ -1937,6 +1937,21 @@ p.verification-result {
   background: rgba(210, 161, 75, 0.1);
 }
 
+.encode-picker-existing-job {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.7rem;
+  border: 1px solid #29483f;
+  border-radius: 0.55rem;
+  background: #10231e;
+}
+
+.encode-picker-existing-job > span {
+  min-width: 0;
+}
+
 .encode-picker-results input {
   width: 1.15rem;
   height: 1.15rem;
