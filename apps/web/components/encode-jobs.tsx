@@ -796,6 +796,20 @@ export function EncodeJobsManager({
         encodingProfileId: selectedProfileId || undefined,
       });
       if (loadVersion.current === version) {
+        if (
+          loaded.page.offset > 0 &&
+          loaded.page.offset >= loaded.page.total
+        ) {
+          setSelectionViews((current) => ({
+            ...current,
+            [historyGroup]: {
+              ...current[historyGroup],
+              selectionOffset: 0,
+            },
+          }));
+          setRequestError(null);
+          return;
+        }
         setState(loaded);
         setRequestError(null);
       }

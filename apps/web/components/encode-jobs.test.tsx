@@ -763,4 +763,94 @@ describe("EncodeJobsView", () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it("returns to the first page when refresh makes the current page invalid", async () => {
+    let total = 250;
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input), "http://localhost:3000");
+      const offset = Number(url.searchParams.get("selectionOffset") ?? 0);
+      const selections = offset < total
+        ? [{
+          id: "selection-survivor" as DiscSelectionId,
+          mediaItemId: "movie-survivor",
+          mediaTitle: "Still available",
+          mediaYear: 2006,
+          sourceDescription: "DVD main feature",
+          hasCompletedEncode: false,
+          priorCompletedJob: null,
+          logicalJob: null,
+          suggestedOutputPath: "/media/movies/Still available (2006).mkv",
+        }]
+        : [];
+      return Response.json({
+        historyGroup: "not_encoded",
+        query: "",
+        counts: { notEncoded: total, reEncode: 0 },
+        selections,
+        profiles: [],
+        page: {
+          offset,
+          limit: 100,
+          total,
+          hasPrevious: offset > 0,
+          hasNext: offset + 100 < total,
+        },
+        profilePage: {
+          offset: 0,
+          limit: 100,
+          hasPrevious: false,
+          hasNext: false,
+        },
+      });
+    });
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.stubGlobal("fetch", fetcher);
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+    try {
+      await act(async () => {
+        root.render(
+          <EncodeJobsManager revision={0} onChanged={() => undefined} />,
+        );
+        await settle();
+      });
+      const next = [...container.querySelectorAll("button")].find(
+        (button) => button.textContent === "Next reviewed selections",
+      );
+      if (!next) {
+        throw new Error("Expected next Disc Selection page button");
+      }
+      await act(async () => {
+        next.click();
+        await settle();
+      });
+
+      total = 50;
+      await act(async () => {
+        root.render(
+          <EncodeJobsManager revision={1} onChanged={() => undefined} />,
+        );
+        await settle();
+      });
+      await act(async () => {
+        await settle();
+      });
+
+      expect(fetcher.mock.calls.map(([input]) => String(input))).toEqual([
+        "/api/encode-jobs?historyGroup=not_encoded&selectionOffset=0&profileOffset=0",
+        "/api/encode-jobs?historyGroup=not_encoded&selectionOffset=100&profileOffset=0",
+        "/api/encode-jobs?historyGroup=not_encoded&selectionOffset=100&profileOffset=0",
+        "/api/encode-jobs?historyGroup=not_encoded&selectionOffset=0&profileOffset=0",
+      ]);
+      expect(container.textContent).toContain("Still available (2006)");
+      expect(container.textContent).not.toContain(
+        "No not-encoded Disc Selections are available.",
+      );
+    } finally {
+      await act(async () => root.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
 });
