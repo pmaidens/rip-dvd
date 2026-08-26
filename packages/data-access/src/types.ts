@@ -1118,6 +1118,10 @@ export interface ArchiveRequestAccess {
 }
 
 export interface EncodeJobAccess {
+  listQueueLogicalJobConflicts(options: {
+    discSelectionIds: readonly DiscSelectionId[];
+    encodingProfileId: EncodingProfileId;
+  }): DiscSelectionId[];
   listQueueDiscSelections(options: {
     historyGroup: EncodeQueueHistoryGroup;
     encodingProfileId?: EncodingProfileId;
@@ -1270,6 +1274,7 @@ export interface ConsistentReadAccess {
   readonly encodeJobs: Pick<
     EncodeJobAccess,
     | "list"
+    | "listQueueLogicalJobConflicts"
     | "listQueueDiscSelections"
     | "listDiscSelectionCorrectionEncodeJobLinks"
     | "listDiscSelectionCorrectionRetainedOutputSummaries"
