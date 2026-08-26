@@ -17,7 +17,7 @@ import {
   EncodeJobsView,
   queueEncodeJob,
   requestEncodeJobOptions,
-  requestQueueLogicalJobs,
+  requestQueueLogicalJobConflicts,
   retryEncodeJob,
 } from "./encode-jobs";
 import type {
@@ -131,6 +131,9 @@ describe("EncodeJobsView", () => {
     expect(html).toContain("First-encode worklist");
     expect(html).toContain("Queue 0 Encode Jobs");
     expect(html).toContain("Next active profiles");
+    expect(html).toContain(
+      '<button type="button" disabled="">Next active profiles</button>',
+    );
   });
 
   it("keeps existing profile jobs out of the first-encode worklist", () => {
@@ -487,21 +490,17 @@ describe("EncodeJobsView", () => {
     const profileId = "profile-v2" as EncodingProfileId;
     const firstId = "selection-1" as DiscSelectionId;
     const secondId = "selection-2" as DiscSelectionId;
-    const logicalJob = {
-      discSelectionId: secondId,
-      id: "job-2" as EncodeJobId,
-      encodingProfileId: profileId,
-      outputPath: "/media/movies/Existing.mkv",
-      status: "failed" as const,
-      queueAvailable: true,
-    };
     const fetcher = vi.fn(async () => Response.json({
-      logicalJobs: [logicalJob],
+      conflictingDiscSelectionIds: [secondId],
     }));
 
     await expect(
-      requestQueueLogicalJobs([firstId, secondId], profileId, fetcher),
-    ).resolves.toEqual([logicalJob]);
+      requestQueueLogicalJobConflicts(
+        [firstId, secondId],
+        profileId,
+        fetcher,
+      ),
+    ).resolves.toEqual([secondId]);
     expect(fetcher).toHaveBeenCalledWith(
       "/api/encode-jobs?encodingProfileId=profile-v2&resolveDiscSelectionId=selection-1&resolveDiscSelectionId=selection-2",
       { cache: "no-store", headers: { Accept: "application/json" } },
@@ -633,14 +632,7 @@ describe("EncodeJobsView", () => {
       const url = new URL(String(input), "http://localhost:3000");
       if (url.searchParams.has("resolveDiscSelectionId")) {
         return Response.json({
-          logicalJobs: [{
-            discSelectionId: selection.id,
-            id: "job-existing" as EncodeJobId,
-            encodingProfileId: replacementProfileId,
-            outputPath: "/media/movies/Existing replacement.mkv",
-            status: "queued",
-            queueAvailable: false,
-          }],
+          conflictingDiscSelectionIds: [selection.id],
         });
       }
       if (
