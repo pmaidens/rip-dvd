@@ -1176,11 +1176,16 @@ for ordinary initial jobs. Corrected lineage may retain multiple same-profile
 jobs for one active selection, with one distinct successor per predecessor.
 The dashboard shows the referenced profile version with queued, running,
 cancellation-requested, completed, failed, and cancelled state.
-`GET /api/encode-jobs` independently
-pages up to 100 eligible Disc Selections with `selectionOffset` and 100 active
-DVD video Encoding Profile versions with `profileOffset`; its `page` and
-`profilePage` metadata keep every option reachable without an unbounded
-response.
+`GET /api/encode-jobs` defaults to the `not_encoded` history group; callers use
+`historyGroup=re_encode` for selections with finalized Encode history. It
+returns exact page-independent counts for both groups and pages at most 100
+eligible Disc Selections within the chosen group with `selectionOffset`.
+`encodingProfileId` adds the matching ordinary logical job for each selection,
+while prior completion metadata identifies a finalized job and its Encoding
+Profile version. Active DVD video Encoding Profile versions page
+independently in batches of 100 with `profileOffset`. The `page` and
+`profilePage` metadata keep every option in both history groups reachable
+without an unbounded response.
 `POST /api/encode-jobs` queues or returns the logical job. A trusted
 `PATCH /api/encode-jobs` command explicitly cancels queued work, requests safe
 cancellation of running work, or requeues an eligible terminal job. Mutations

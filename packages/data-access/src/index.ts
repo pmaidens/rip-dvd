@@ -31,7 +31,10 @@ export type {
   NormalDvdArchiveBoundaryEvidence,
 } from "./archive-boundary.js";
 export { normalizeMediaItemSearchTitle } from "./media-item-title-search.js";
-export { isCorrectedEncodePredecessorReady } from "./corrected-encode-readiness.js";
+export {
+  isCorrectedEncodePredecessorReady,
+  isEncodeJobSafelyTerminal,
+} from "./corrected-encode-readiness.js";
 
 export * from "./errors.js";
 export * from "./dvd-scan.js";

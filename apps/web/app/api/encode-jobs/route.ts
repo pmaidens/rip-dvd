@@ -6,6 +6,7 @@ import {
   type DataAccess,
   type DiscSelection,
   type DiscSelectionId,
+  type EncodeQueueHistoryGroup,
   type EncodeJob,
   type EncodeJobId,
   type EncodingProfileId,
@@ -49,6 +50,14 @@ function optionOffset(request: Request, parameter: string): number | null {
   }
   const offset = Number(value);
   return Number.isSafeInteger(offset) ? offset : null;
+}
+
+function encodeQueueHistoryGroup(request: Request): EncodeQueueHistoryGroup | null {
+  const value = new URL(request.url).searchParams.get("historyGroup");
+  if (value === null || value === "not_encoded") {
+    return "not_encoded";
+  }
+  return value === "re_encode" ? value : null;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -112,16 +121,30 @@ function readQueueOptions(
   selectionOffset: number,
   profileOffset: number,
   mediaLibraryPath: string,
+  historyGroup: EncodeQueueHistoryGroup,
+  encodingProfileId?: EncodingProfileId,
 ) {
   return access.readConsistentSnapshot((snapshot) => {
-    const selectionRecords = snapshot.catalog.listDiscSelections({
-      encodeEligibleOnly: true,
-      limit: ENCODE_SELECTION_PAGE_SIZE + 1,
+    if (
+      encodingProfileId !== undefined &&
+      snapshot.encodingProfiles.list({
+        ids: [encodingProfileId],
+        mediaDomain: "dvd_video",
+        activeOnly: true,
+      }).length !== 1
+    ) {
+      throw new RecordNotFoundError(
+        "active DVD video Encoding Profile",
+        encodingProfileId,
+      );
+    }
+    const selectionPage = snapshot.encodeJobs.listQueueDiscSelections({
+      historyGroup,
+      encodingProfileId,
+      limit: ENCODE_SELECTION_PAGE_SIZE,
       offset: selectionOffset,
     });
-    const hasNextSelection =
-      selectionRecords.length > ENCODE_SELECTION_PAGE_SIZE;
-    const selections = selectionRecords.slice(0, ENCODE_SELECTION_PAGE_SIZE);
+    const selections = selectionPage.selections.map(({ selection }) => selection);
     const profileRecords = snapshot.encodingProfiles.list({
       mediaDomain: "dvd_video",
       activeOnly: true,
@@ -144,14 +167,42 @@ function readQueueOptions(
         .map((item) => item.mediaItemId),
     );
     return {
-      selections: selections.map((selection) => {
+      historyGroup,
+      counts: selectionPage.counts,
+      selections: selectionPage.selections.map((queueSelection) => {
+        const selection = queueSelection.selection;
         const mediaItem = mediaItemsById.get(selection.mediaItemId);
+        const priorCompletedJob = queueSelection.priorCompletedJob;
+        const priorCompletedProfile = queueSelection.priorCompletedProfile;
+        const logicalJob = queueSelection.logicalJob;
         return {
           id: selection.id,
           mediaItemId: selection.mediaItemId,
           mediaTitle: mediaItem?.title ?? "Unknown Media Item",
           mediaYear: mediaItem?.year ?? null,
           sourceDescription: sourceDescription(selection),
+          hasCompletedEncode: queueSelection.hasCompletedEncode,
+          priorCompletedJob:
+            priorCompletedJob === null || priorCompletedProfile === null
+              ? null
+              : {
+                id: priorCompletedJob.id,
+                status: priorCompletedJob.status,
+                profile: {
+                  id: priorCompletedProfile.id,
+                  displayName: priorCompletedProfile.displayName,
+                  version: priorCompletedProfile.version,
+                },
+              },
+          logicalJob: logicalJob === null
+            ? null
+            : {
+              id: logicalJob.id,
+              encodingProfileId: logicalJob.encodingProfileId,
+              outputPath: logicalJob.outputPath,
+              status: logicalJob.status,
+              queueAvailable: logicalJob.queueAvailable,
+            },
           suggestedOutputPath: mediaItem === undefined
             ? null
             : suggestedMediaOutputPath({
@@ -173,8 +224,9 @@ function readQueueOptions(
       page: {
         offset: selectionOffset,
         limit: ENCODE_SELECTION_PAGE_SIZE,
+        total: selectionPage.total,
         hasPrevious: selectionOffset > 0,
-        hasNext: hasNextSelection,
+        hasNext: selectionOffset + selections.length < selectionPage.total,
       },
       profilePage: {
         offset: profileOffset,
@@ -200,6 +252,10 @@ export async function createEncodeJobsRoute(
   }
   try {
     if (request.method === "GET") {
+      const historyGroup = encodeQueueHistoryGroup(request);
+      if (historyGroup === null) {
+        return response({ error: "Invalid Encode Job history group" }, 400);
+      }
       const selectionOffset = optionOffset(request, "selectionOffset");
       if (selectionOffset === null) {
         return response({ error: "Invalid Disc Selection offset" }, 400);
@@ -207,6 +263,15 @@ export async function createEncodeJobsRoute(
       const profileOffset = optionOffset(request, "profileOffset");
       if (profileOffset === null) {
         return response({ error: "Invalid Encoding Profile offset" }, 400);
+      }
+      const encodingProfileValue = new URL(request.url).searchParams.get(
+        "encodingProfileId",
+      );
+      const encodingProfileId = encodingProfileValue === null
+        ? undefined
+        : boundedString(encodingProfileValue);
+      if (encodingProfileValue !== null && encodingProfileId === null) {
+        return response({ error: "Invalid Encoding Profile" }, 400);
       }
       let config: EncodeJobsRuntimeConfig;
       try {
@@ -220,6 +285,8 @@ export async function createEncodeJobsRoute(
           selectionOffset,
           profileOffset,
           config.mediaLibraryPath,
+          historyGroup,
+          encodingProfileId as EncodingProfileId | undefined,
         ),
       );
     }

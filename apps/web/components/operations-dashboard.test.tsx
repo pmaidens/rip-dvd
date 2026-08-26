@@ -1651,11 +1651,14 @@ async function renderMutationDashboard(
       }
       if (path.startsWith("/api/encode-jobs?")) {
         return Response.json({
+          historyGroup: "not_encoded",
+          counts: { notEncoded: 0, reEncode: 0 },
           selections: [],
           profiles: [],
           page: {
             offset: 0,
             limit: 20,
+            total: 0,
             hasPrevious: false,
             hasNext: false,
           },

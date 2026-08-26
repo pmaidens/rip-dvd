@@ -9,7 +9,7 @@ const SAFELY_TERMINAL_ENCODE_JOB_STATUSES = [
   "cancelled",
 ] as const satisfies readonly EncodeJobStatus[];
 
-export type CorrectedEncodePredecessorReadiness = Pick<
+export type EncodeJobSafelyTerminalState = Pick<
   EncodeJob,
   | "status"
   | "partialCleanupOutputPath"
@@ -19,18 +19,21 @@ export type CorrectedEncodePredecessorReadiness = Pick<
   | "publicationCompletionPending"
 >;
 
-export function isCorrectedEncodePredecessorReady(
-  predecessor: CorrectedEncodePredecessorReadiness,
+export function isEncodeJobSafelyTerminal(
+  job: EncodeJobSafelyTerminalState,
 ): boolean {
   return SAFELY_TERMINAL_ENCODE_JOB_STATUSES.includes(
-    predecessor.status as (typeof SAFELY_TERMINAL_ENCODE_JOB_STATUSES)[number],
+    job.status as (typeof SAFELY_TERMINAL_ENCODE_JOB_STATUSES)[number],
   ) &&
-    predecessor.partialCleanupOutputPath === null &&
-    predecessor.partialCleanupClaimToken === null &&
-    predecessor.partialCleanupLeaseToken === null &&
-    !predecessor.publicationPending &&
-    !predecessor.publicationCompletionPending;
+    job.partialCleanupOutputPath === null &&
+    job.partialCleanupClaimToken === null &&
+    job.partialCleanupLeaseToken === null &&
+    !job.publicationPending &&
+    !job.publicationCompletionPending;
 }
+
+export const isCorrectedEncodePredecessorReady =
+  isEncodeJobSafelyTerminal;
 
 type CorrectedEncodeReadinessColumns = Record<
   | "status"

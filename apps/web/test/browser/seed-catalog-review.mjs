@@ -204,11 +204,89 @@ function seedComplexLayout(variant, fingerprintFill) {
   }
 }
 
+function createEncodeQueueSelection({ key, label, fingerprintFill, title }) {
+  const archive = createArchive({
+    key,
+    label,
+    fingerprintFill,
+    titles: [detailedTitle(1, 5_400, 14)],
+  });
+  const item = access.catalog.createMediaItem({
+    kind: "movie",
+    title,
+    year: 2026,
+  });
+  const selection = access.catalog.createDiscSelection({
+    originalDiscArchiveId: archive.id,
+    mediaItemId: item.id,
+    sourceIdentity: { kind: "main_feature" },
+  });
+  completeReview(archive.id);
+  return selection;
+}
+
+function seedEncodeQueue(variant, fingerprintFills) {
+  const profile = access.encodingProfiles.create({
+    key: `queue-${variant}`,
+    displayName: `Queue browser profile ${variant}`,
+    mediaDomain: "dvd_video",
+    settings: { preset: "HQ 480p30 Surround", container: "mkv" },
+  });
+  createEncodeQueueSelection({
+    key: `queue-new-${variant}`,
+    label: `ENCODE_QUEUE_NEW_${variant.toUpperCase()}`,
+    fingerprintFill: fingerprintFills.newSelection,
+    title: `Queue new ${variant}`,
+  });
+  const completedSelection = createEncodeQueueSelection({
+    key: `queue-completed-${variant}`,
+    label: `ENCODE_QUEUE_COMPLETED_${variant.toUpperCase()}`,
+    fingerprintFill: fingerprintFills.completedSelection,
+    title: `Queue completed ${variant}`,
+  });
+  const completedJob = access.encodeJobs.enqueue({
+    discSelectionId: completedSelection.id,
+    encodingProfileId: profile.id,
+    outputPath: join(
+      mediaLibraryPath,
+      `Queue completed ${variant} authoritative.mkv`,
+    ),
+    priority: 10,
+  });
+  const claim = access.encodeJobs.claimNext(`queue-completed-${variant}`);
+  if (claim?.id !== completedJob.id) {
+    throw new Error(`Missing completed queue fixture for ${variant}`);
+  }
+  access.encodeJobs.complete(claim);
+
+  const activeSelection = createEncodeQueueSelection({
+    key: `queue-active-${variant}`,
+    label: `ENCODE_QUEUE_ACTIVE_${variant.toUpperCase()}`,
+    fingerprintFill: fingerprintFills.activeSelection,
+    title: `Queue active ${variant}`,
+  });
+  access.encodeJobs.enqueue({
+    discSelectionId: activeSelection.id,
+    encodingProfileId: profile.id,
+    outputPath: join(mediaLibraryPath, `Queue active ${variant}.mkv`),
+  });
+}
+
 try {
   seedKeyboardJourney("desktop", "1");
   seedComplexLayout("desktop", "2");
   seedKeyboardJourney("mobile", "3");
   seedComplexLayout("mobile", "4");
+  seedEncodeQueue("desktop", {
+    newSelection: "5",
+    completedSelection: "6",
+    activeSelection: "7",
+  });
+  seedEncodeQueue("mobile", {
+    newSelection: "8",
+    completedSelection: "9",
+    activeSelection: "a",
+  });
 } finally {
   access.close();
 }
