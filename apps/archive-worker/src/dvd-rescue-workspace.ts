@@ -1011,6 +1011,7 @@ export async function acceptDvdBoundaryRescueWorkspace(
     if (
       opened.dev !== metadata.dev ||
       opened.ino !== metadata.ino ||
+      opened.nlink <= 0n ||
       opened.size !== metadata.size ||
       opened.ctimeNs !== expectedImageProofIdentity.ctimeNs ||
       opened.mtimeNs !== expectedImageProofIdentity.mtimeNs
@@ -1018,16 +1019,47 @@ export async function acceptDvdBoundaryRescueWorkspace(
       throw new Error("DVD rescue image changed during boundary acceptance");
     }
     await authorizeMutation?.();
-    if (opened.size !== BigInt(acceptedByteCount)) {
+    const beforeTruncate = await handle.stat({ bigint: true });
+    if (
+      beforeTruncate.dev !== opened.dev ||
+      beforeTruncate.ino !== opened.ino ||
+      beforeTruncate.nlink <= 0n ||
+      beforeTruncate.size !== opened.size ||
+      beforeTruncate.ctimeNs !== opened.ctimeNs ||
+      beforeTruncate.mtimeNs !== opened.mtimeNs
+    ) {
+      throw new Error("DVD rescue image changed during boundary acceptance");
+    }
+    if (beforeTruncate.size !== BigInt(acceptedByteCount)) {
       await handle.truncate(acceptedByteCount);
     }
     await handle.sync();
+    const accepted = await handle.stat({ bigint: true });
+    if (
+      accepted.dev !== opened.dev ||
+      accepted.ino !== opened.ino ||
+      accepted.nlink <= 0n ||
+      accepted.size !== BigInt(acceptedByteCount)
+    ) {
+      throw new Error("DVD rescue image changed during boundary acceptance");
+    }
+    await authorizeMutation?.();
+    const beforePromotion = await handle.stat({ bigint: true });
+    if (
+      beforePromotion.dev !== accepted.dev ||
+      beforePromotion.ino !== accepted.ino ||
+      beforePromotion.nlink <= 0n ||
+      beforePromotion.size !== accepted.size ||
+      beforePromotion.ctimeNs !== accepted.ctimeNs ||
+      beforePromotion.mtimeNs !== accepted.mtimeNs
+    ) {
+      throw new Error("DVD rescue image changed during boundary acceptance");
+    }
+    await rename(retentionMapPath, workspace.mapPath);
+    await syncPath(root);
   } finally {
     await handle.close();
   }
-  await authorizeMutation?.();
-  await rename(retentionMapPath, workspace.mapPath);
-  await syncPath(root);
   return { ...workspace, ...acceptedState };
 }
 
