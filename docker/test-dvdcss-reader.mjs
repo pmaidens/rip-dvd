@@ -1141,6 +1141,32 @@ if (
   );
 }
 
+const conflictingSameRequestBoundary = runTestCopy(
+  "conflicting-same-request-medium-boundary",
+  [
+    rawCompletionFault(5, "always", fixedMediumAtFive),
+    rawCompletionFault(20, 1, fixedMediumSense(20)),
+    rawTailCompletionFault(20, "always", fixedOutOfRangeSense(20)),
+  ].join(","),
+);
+const conflictingSameRequestBoundaryResult = readFailureResult(
+  conflictingSameRequestBoundary.stderr,
+);
+if (
+  conflictingSameRequestBoundary.status !== 3 ||
+  conflictingSameRequestBoundaryResult.protocolVersion !== 1 ||
+  conflictingSameRequestBoundaryResult.category !== "out_of_range" ||
+  conflictingSameRequestBoundaryResult.boundaryProofVersion !== undefined ||
+  conflictingSameRequestBoundaryResult.firstFailingLba !== 20 ||
+  conflictingSameRequestBoundaryResult.retainedImageByteCount !== 5 * 2_048 ||
+  statSync(conflictingSameRequestBoundary.outputPath).size !== 5 * 2_048 ||
+  conflictingSameRequestBoundary.stderr.includes(recoveryResultPrefix)
+) {
+  throw new Error(
+    `libdvdcss conflicting same-request boundary check failed: ${conflictingSameRequestBoundary.stderr}`,
+  );
+}
+
 for (const excludedSectorCount of [114_301, 73_400]) {
   const boundaryLba = content.byteLength / 2_048;
   const declaredSectorCount = boundaryLba + excludedSectorCount;
@@ -1580,6 +1606,42 @@ if (
 ) {
   throw new Error(
     `libdvdcss out-of-range resume check failed: ${outOfRangeResume.stderr}`,
+  );
+}
+
+const conflictingOutOfRangeResumePath = prepareOutput(
+  "/tmp/rip-dvd-reader-conflicting-out-of-range-resume.img",
+);
+writeFileSync(conflictingOutOfRangeResumePath, unknownResumeContent);
+const conflictingOutOfRangeResume = runTestResume(
+  conflictingOutOfRangeResumePath,
+  [
+    rawCompletionFault(5, 1, fixedMediumAtFive),
+    rawCompletionFault(5, "always", fixedOutOfRangeSense(5)),
+  ].join(","),
+  isolatedResult.badSectorBitmapHex,
+);
+const conflictingOutOfRangeResumeResult = readFailureResult(
+  conflictingOutOfRangeResume.stderr,
+);
+if (
+  conflictingOutOfRangeResume.status !== 3 ||
+  !readFileSync(conflictingOutOfRangeResumePath).equals(unknownResumeContent) ||
+  conflictingOutOfRangeResume.stderr.includes(recoveryResultPrefix) ||
+  JSON.stringify(testReads(conflictingOutOfRangeResume.stderr)) !==
+    JSON.stringify([
+      { lba: 5, blocks: 1 },
+      { lba: 5, blocks: 1 },
+    ]) ||
+  conflictingOutOfRangeResumeResult.protocolVersion !== 1 ||
+  conflictingOutOfRangeResumeResult.category !== "out_of_range" ||
+  conflictingOutOfRangeResumeResult.boundaryProofVersion !== undefined ||
+  conflictingOutOfRangeResumeResult.firstFailingLba !== 5 ||
+  conflictingOutOfRangeResumeResult.retainedImageByteCount !==
+    content.byteLength
+) {
+  throw new Error(
+    `libdvdcss conflicting out-of-range resume check failed: ${conflictingOutOfRangeResume.stderr}`,
   );
 }
 

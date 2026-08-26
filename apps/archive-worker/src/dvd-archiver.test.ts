@@ -4422,7 +4422,7 @@ describe("DVD archive publication", () => {
           if (postProofAuthorizationCount === mutationAuthorizationCount) {
             writeFileSync(
               rescuePaths.imagePath,
-              Buffer.alloc(retainedPrefix.byteLength - 1, 79),
+              Buffer.alloc(retainedPrefix.byteLength, 79),
             );
           }
         },
@@ -4459,8 +4459,46 @@ describe("DVD archive publication", () => {
       );
 
       expect(existsSync(join(root, `dvdmeta-${digest}.iso`))).toBe(false);
-      expect(existsSync(rescuePaths.imagePath)).toBe(true);
-      expect(existsSync(rescuePaths.mapPath)).toBe(true);
+      expect(existsSync(rescuePaths.imagePath)).toBe(false);
+      expect(existsSync(rescuePaths.mapPath)).toBe(false);
+      expect(existsSync(`${rescuePaths.mapPath}.retaining`)).toBe(false);
+
+      const freshImage = Buffer.alloc(reportedSizeBytes, 97);
+      const freshCopy = vi.fn(async ({ outputPath }) => {
+        writeFileSync(outputPath, freshImage);
+        return createCleanDvdRecoveryResult(reportedSizeBytes);
+      });
+      const restarted = await preserveDvdArchive({
+        archiveRequestId,
+        authorizeMutation: () => undefined,
+        completenessProver: {
+          async prove() {
+            return { maximumReferencedLba: firstExcludedLba - 1 };
+          },
+        },
+        devicePath: "/dev/sr0",
+        expectedTitleMap: {
+          schemaVersion: 2,
+          contentId: `dvdmeta-sha256:${digest}`,
+          titles: [],
+        },
+        fingerprint: `dvdmeta-sha256:${digest}`,
+        originalsLibraryPath,
+        runner: {
+          copy: freshCopy,
+          isActive: () => false,
+          withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+          waitForInactive: vi.fn(async () => undefined),
+        },
+        signal: new AbortController().signal,
+        sizeBytes: reportedSizeBytes,
+        verifySource: async () => undefined,
+        onProgress: () => undefined,
+      });
+
+      expect(freshCopy).toHaveBeenCalledOnce();
+      expect(restarted.correctedBoundaryEvidence).toBeUndefined();
+      expect(readFileSync(restarted.archivePath)).toEqual(freshImage);
     },
   );
 

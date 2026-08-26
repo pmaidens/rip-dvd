@@ -1002,63 +1002,88 @@ export async function acceptDvdBoundaryRescueWorkspace(
     ),
     authorizeMutation,
   );
-  const handle = await open(
-    workspace.imagePath,
-    fsConstants.O_RDWR | fsConstants.O_NOFOLLOW,
-  );
+  let imageChangedDuringAcceptance = false;
+  const rejectChangedImage = (): never => {
+    imageChangedDuringAcceptance = true;
+    throw new Error("DVD rescue image changed during boundary acceptance");
+  };
   try {
-    const opened = await handle.stat({ bigint: true });
-    if (
-      opened.dev !== metadata.dev ||
-      opened.ino !== metadata.ino ||
-      opened.nlink <= 0n ||
-      opened.size !== metadata.size ||
-      opened.ctimeNs !== expectedImageProofIdentity.ctimeNs ||
-      opened.mtimeNs !== expectedImageProofIdentity.mtimeNs
-    ) {
-      throw new Error("DVD rescue image changed during boundary acceptance");
+    const handle = await open(
+      workspace.imagePath,
+      fsConstants.O_RDWR | fsConstants.O_NOFOLLOW,
+    );
+    try {
+      const opened = await handle.stat({ bigint: true });
+      if (
+        opened.dev !== metadata.dev ||
+        opened.ino !== metadata.ino ||
+        opened.nlink <= 0n ||
+        opened.size !== metadata.size ||
+        opened.ctimeNs !== expectedImageProofIdentity.ctimeNs ||
+        opened.mtimeNs !== expectedImageProofIdentity.mtimeNs
+      ) {
+        rejectChangedImage();
+      }
+      await authorizeMutation?.();
+      const beforeTruncate = await handle.stat({ bigint: true });
+      if (
+        beforeTruncate.dev !== opened.dev ||
+        beforeTruncate.ino !== opened.ino ||
+        beforeTruncate.nlink <= 0n ||
+        beforeTruncate.size !== opened.size ||
+        beforeTruncate.ctimeNs !== opened.ctimeNs ||
+        beforeTruncate.mtimeNs !== opened.mtimeNs
+      ) {
+        rejectChangedImage();
+      }
+      if (beforeTruncate.size !== BigInt(acceptedByteCount)) {
+        await handle.truncate(acceptedByteCount);
+      }
+      await handle.sync();
+      const accepted = await handle.stat({ bigint: true });
+      if (
+        accepted.dev !== opened.dev ||
+        accepted.ino !== opened.ino ||
+        accepted.nlink <= 0n ||
+        accepted.size !== BigInt(acceptedByteCount)
+      ) {
+        rejectChangedImage();
+      }
+      await authorizeMutation?.();
+      const beforePromotion = await handle.stat({ bigint: true });
+      if (
+        beforePromotion.dev !== accepted.dev ||
+        beforePromotion.ino !== accepted.ino ||
+        beforePromotion.nlink <= 0n ||
+        beforePromotion.size !== accepted.size ||
+        beforePromotion.ctimeNs !== accepted.ctimeNs ||
+        beforePromotion.mtimeNs !== accepted.mtimeNs
+      ) {
+        rejectChangedImage();
+      }
+      await rename(retentionMapPath, workspace.mapPath);
+      await syncPath(root);
+    } finally {
+      await handle.close();
     }
-    await authorizeMutation?.();
-    const beforeTruncate = await handle.stat({ bigint: true });
-    if (
-      beforeTruncate.dev !== opened.dev ||
-      beforeTruncate.ino !== opened.ino ||
-      beforeTruncate.nlink <= 0n ||
-      beforeTruncate.size !== opened.size ||
-      beforeTruncate.ctimeNs !== opened.ctimeNs ||
-      beforeTruncate.mtimeNs !== opened.mtimeNs
-    ) {
-      throw new Error("DVD rescue image changed during boundary acceptance");
+  } catch (error) {
+    if (!imageChangedDuringAcceptance) {
+      throw error;
     }
-    if (beforeTruncate.size !== BigInt(acceptedByteCount)) {
-      await handle.truncate(acceptedByteCount);
+    try {
+      await quarantineWorkspaceFiles(
+        root,
+        expectedPaths,
+        retentionMapPath,
+        undefined,
+        authorizeMutation,
+      );
+    } catch (quarantineError) {
+      throw new Error("DVD rescue boundary state could not be quarantined", {
+        cause: new AggregateError([error, quarantineError]),
+      });
     }
-    await handle.sync();
-    const accepted = await handle.stat({ bigint: true });
-    if (
-      accepted.dev !== opened.dev ||
-      accepted.ino !== opened.ino ||
-      accepted.nlink <= 0n ||
-      accepted.size !== BigInt(acceptedByteCount)
-    ) {
-      throw new Error("DVD rescue image changed during boundary acceptance");
-    }
-    await authorizeMutation?.();
-    const beforePromotion = await handle.stat({ bigint: true });
-    if (
-      beforePromotion.dev !== accepted.dev ||
-      beforePromotion.ino !== accepted.ino ||
-      beforePromotion.nlink <= 0n ||
-      beforePromotion.size !== accepted.size ||
-      beforePromotion.ctimeNs !== accepted.ctimeNs ||
-      beforePromotion.mtimeNs !== accepted.mtimeNs
-    ) {
-      throw new Error("DVD rescue image changed during boundary acceptance");
-    }
-    await rename(retentionMapPath, workspace.mapPath);
-    await syncPath(root);
-  } finally {
-    await handle.close();
+    throw error;
   }
   return { ...workspace, ...acceptedState };
 }
