@@ -1121,6 +1121,7 @@ export interface EncodeJobAccess {
   listQueueDiscSelections(options: {
     historyGroup: EncodeQueueHistoryGroup;
     encodingProfileId?: EncodingProfileId;
+    query?: string;
     limit: number;
     offset?: number;
   }): EncodeQueueDiscSelectionPage;

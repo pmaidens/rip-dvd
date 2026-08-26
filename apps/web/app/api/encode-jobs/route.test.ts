@@ -94,6 +94,7 @@ describe("Encode Jobs API", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
       historyGroup: "not_encoded",
+      query: "",
       counts: { notEncoded: 1, reEncode: 0 },
       selections: [{
         id: reviewed.selection.id,
@@ -212,13 +213,14 @@ describe("Encode Jobs API", () => {
       hasPrevious: false,
       hasNext: false,
     });
-    expect(defaultBody.selections.map((selection: { id: string }) => selection.id))
-      .toEqual([
+    expect(new Set(defaultBody.selections.map(
+      (selection: { id: string }) => selection.id,
+    ))).toEqual(new Set([
         neverEncoded.selection.id,
         failed.selection.id,
         cancelled.selection.id,
         queued.selection.id,
-      ]);
+      ]));
     expect(defaultBody.selections).toEqual(expect.arrayContaining([
       expect.objectContaining({
         id: neverEncoded.selection.id,
@@ -743,38 +745,59 @@ describe("Encode Jobs API", () => {
     await expectNotEncoded("failed", true);
   });
 
-  it("keeps history counts accurate while bounding Disc Selection pages", async () => {
-    const access = dataAccessFixture.create();
+  it("searches complete history groups while keeping counts and pages stable", async () => {
+    const { access, databasePath } = dataAccessFixture.createWithDatabasePath();
     const notEncoded = Array.from({ length: 101 }, (_, index) => {
       const candidate = createSelection(
         access,
         `bounded-${String(index).padStart(3, "0")}`,
       );
       completeCatalogReview(access, candidate.archive.id);
-      return candidate.selection;
+      return candidate;
     });
-    const completed = createSelection(access, "bounded-completed");
-    completeCatalogReview(access, completed.archive.id);
+    const completed = [
+      createSelection(access, "bounded-reencode-zulu"),
+      createSelection(access, "bounded-reencode-alpha"),
+    ];
+    for (const candidate of completed) {
+      completeCatalogReview(access, candidate.archive.id);
+    }
+    const sqlite = new DatabaseSync(databasePath);
+    const setReviewedAt = sqlite.prepare(`
+      update original_disc_archives
+      set catalog_reviewed_at = ?, updated_at = ?
+      where id = ?
+    `);
+    notEncoded.forEach((candidate, index) => {
+      const reviewedAt = 1_700_000_000_000 + index;
+      setReviewedAt.run(reviewedAt, reviewedAt, candidate.archive.id);
+    });
+    sqlite.close();
     const profile = access.encodingProfiles.create({
       key: "bounded-selection-profile",
       displayName: "Bounded selection profile",
       mediaDomain: "dvd_video",
       settings: {},
     });
-    access.encodeJobs.enqueue({
-      discSelectionId: completed.selection.id,
-      encodingProfileId: profile.id,
-      outputPath: "/media/movies/Bounded completed.mkv",
-    });
-    const claim = access.encodeJobs.claimNext("bounded-selection-worker");
-    if (!claim) {
-      throw new Error("Expected bounded selection Encode Job claim");
+    for (const [index, candidate] of completed.entries()) {
+      access.encodeJobs.enqueue({
+        discSelectionId: candidate.selection.id,
+        encodingProfileId: profile.id,
+        outputPath: `/media/movies/Bounded completed ${index}.mkv`,
+      });
+      const claim = access.encodeJobs.claimNext(
+        `bounded-selection-worker-${index}`,
+      );
+      if (!claim) {
+        throw new Error("Expected bounded selection Encode Job claim");
+      }
+      access.encodeJobs.complete(claim);
     }
-    access.encodeJobs.complete(claim);
     const config = () => ({
       mediaLibraryPath: "/media/movies",
       webTrustedOrigin: "http://localhost:3000",
     });
+    const orderedNotEncoded = [...notEncoded].reverse();
 
     const firstResponse = await createEncodeJobsRoute(
       new Request("http://localhost:3000/api/encode-jobs"),
@@ -784,8 +807,10 @@ describe("Encode Jobs API", () => {
     const firstPage = await firstResponse.json();
     expect(firstPage.selections).toHaveLength(100);
     expect(firstPage.selections.map((selection: { id: string }) => selection.id))
-      .toEqual(notEncoded.slice(0, 100).map((selection) => selection.id));
-    expect(firstPage.counts).toEqual({ notEncoded: 101, reEncode: 1 });
+      .toEqual(
+        orderedNotEncoded.slice(0, 100).map(({ selection }) => selection.id),
+      );
+    expect(firstPage.counts).toEqual({ notEncoded: 101, reEncode: 2 });
     expect(firstPage.page).toEqual({
       offset: 0,
       limit: 100,
@@ -803,7 +828,7 @@ describe("Encode Jobs API", () => {
     );
     const secondPage = await secondResponse.json();
     expect(secondPage.selections).toEqual([
-      expect.objectContaining({ id: notEncoded[100]?.id }),
+      expect.objectContaining({ id: orderedNotEncoded[100]?.selection.id }),
     ]);
     expect(secondPage.counts).toEqual(firstPage.counts);
     expect(secondPage.page).toEqual({
@@ -814,6 +839,67 @@ describe("Encode Jobs API", () => {
       hasNext: false,
     });
 
+    const repeatedFirstResponse = await createEncodeJobsRoute(
+      new Request("http://localhost:3000/api/encode-jobs"),
+      () => access,
+      config,
+    );
+    const repeatedFirstPage = await repeatedFirstResponse.json();
+    expect(repeatedFirstPage.selections.map(
+      (selection: { id: string }) => selection.id,
+    )).toEqual(firstPage.selections.map(
+      (selection: { id: string }) => selection.id,
+    ));
+    expect(new Set([
+      ...firstPage.selections.map((selection: { id: string }) => selection.id),
+      ...secondPage.selections.map((selection: { id: string }) => selection.id),
+    ])).toHaveLength(101);
+
+    const outsideFirstPage = notEncoded[0]!;
+    const query = "bounded 000 2026 DVD main feature";
+    const searchResponse = await createEncodeJobsRoute(
+      new Request(
+        `http://localhost:3000/api/encode-jobs?query=${encodeURIComponent(query)}`,
+      ),
+      () => access,
+      config,
+    );
+    const searchPage = await searchResponse.json();
+    expect(searchPage.query).toBe(query);
+    expect(searchPage.counts).toEqual(firstPage.counts);
+    expect(searchPage.selections).toEqual([
+      expect.objectContaining({ id: outsideFirstPage.selection.id }),
+    ]);
+    expect(searchPage.page).toEqual({
+      offset: 0,
+      limit: 100,
+      total: 1,
+      hasPrevious: false,
+      hasNext: false,
+    });
+
+    const wrongGroupResponse = await createEncodeJobsRoute(
+      new Request(
+        `http://localhost:3000/api/encode-jobs?historyGroup=re_encode&query=${encodeURIComponent(query)}`,
+      ),
+      () => access,
+      config,
+    );
+    const wrongGroupPage = await wrongGroupResponse.json();
+    expect(wrongGroupPage.counts).toEqual(firstPage.counts);
+    expect(wrongGroupPage.selections).toEqual([]);
+    expect(wrongGroupPage.page.total).toBe(0);
+
+    const noMatchResponse = await createEncodeJobsRoute(
+      new Request("http://localhost:3000/api/encode-jobs?query=no-such-title"),
+      () => access,
+      config,
+    );
+    const noMatchPage = await noMatchResponse.json();
+    expect(noMatchPage.counts).toEqual(firstPage.counts);
+    expect(noMatchPage.selections).toEqual([]);
+    expect(noMatchPage.page.total).toBe(0);
+
     const reEncodeResponse = await createEncodeJobsRoute(
       new Request(
         "http://localhost:3000/api/encode-jobs?historyGroup=re_encode",
@@ -822,11 +908,46 @@ describe("Encode Jobs API", () => {
       config,
     );
     const reEncodePage = await reEncodeResponse.json();
-    expect(reEncodePage.selections).toEqual([
-      expect.objectContaining({ id: completed.selection.id }),
+    expect(reEncodePage.selections.map(
+      (selection: { id: string }) => selection.id,
+    )).toEqual([
+      completed[1]!.selection.id,
+      completed[0]!.selection.id,
     ]);
     expect(reEncodePage.counts).toEqual(firstPage.counts);
-    expect(reEncodePage.page.total).toBe(1);
+    expect(reEncodePage.page.total).toBe(2);
+  });
+
+  it("rejects malformed Disc Selection search and offset parameters", async () => {
+    const access = dataAccessFixture.create();
+    const cases = [
+      ["query=", "Invalid Disc Selection search query"],
+      ["query=---", "Invalid Disc Selection search query"],
+      [`query=${"x".repeat(257)}`, "Invalid Disc Selection search query"],
+      ["query=first&query=second", "Invalid Disc Selection search query"],
+      ["selectionOffset=-1", "Invalid Disc Selection offset"],
+      ["selectionOffset=1.5", "Invalid Disc Selection offset"],
+      [
+        "selectionOffset=1&selectionOffset=2",
+        "Invalid Disc Selection offset",
+      ],
+      ["selectionOffset=12345678901234567", "Invalid Disc Selection offset"],
+      ["profileOffset=1&profileOffset=2", "Invalid Encoding Profile offset"],
+    ] as const;
+
+    for (const [parameters, error] of cases) {
+      const response = await createEncodeJobsRoute(
+        new Request(`http://localhost:3000/api/encode-jobs?${parameters}`),
+        () => access,
+        () => ({
+          mediaLibraryPath: "/media/movies",
+          webTrustedOrigin: "http://localhost:3000",
+        }),
+      );
+      expect(response.status, parameters).toBe(400);
+      expect(await response.json(), parameters).toEqual({ error });
+      expect(error.length).toBeLessThanOrEqual(64);
+    }
   });
 
   it("suggests hierarchical and selection-specific final output paths", async () => {
