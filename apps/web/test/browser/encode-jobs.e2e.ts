@@ -39,7 +39,7 @@ async function expectNoPageOverflow(page: Page): Promise<void> {
   expect(result.scrollWidth).toBeLessThanOrEqual(result.clientWidth);
 }
 
-test("queues a first-encode worklist with partial failure recovery", async ({
+test("queues a mixed worklist after resolving a new shared profile", async ({
   page,
 }, testInfo) => {
   test.setTimeout(60_000);
@@ -50,65 +50,32 @@ test("queues a first-encode worklist with partial failure recovery", async ({
   const notEncoded = manager.getByRole("button", { name: /Not encoded \d+/ });
   const reEncode = manager.getByRole("button", { name: /Re-encode \d+/ });
   await expect(notEncoded).toHaveAttribute("aria-pressed", "true");
-  await expect(reEncode).toHaveAttribute("aria-pressed", "false");
 
   const profile = manager.getByRole("combobox", {
     name: "Worklist Encoding Profile",
   });
   await tabTo(page, profile);
   await expectVisibleKeyboardFocus(profile);
-  await profile.selectOption({ label: `Queue browser profile ${variant} · Version 1` });
-  const nextSelections = manager.getByRole("button", {
-    name: "Next reviewed selections",
+  await profile.selectOption({
+    label: `Queue browser profile ${variant} · Version 1`,
   });
-  await tabTo(page, nextSelections);
-  await expectVisibleKeyboardFocus(nextSelections);
+
   const search = manager.getByRole("searchbox", {
     name: "Search reviewed Disc Selections",
   });
-  await tabTo(page, search);
-  await expectVisibleKeyboardFocus(search);
-  await search.fill(`Queue active ${variant}`);
-  await search.press("Enter");
-  await expect(manager.getByRole("checkbox", {
-    name: `Select Queue active ${variant} (2026) · DVD main feature`,
-  })).toHaveCount(0);
-  await expect(manager.getByText(
-    "This Encode Job is already queued.",
-  )).toBeVisible();
-  await expect(manager.getByRole("button", { name: "Already queued" }))
-    .toBeDisabled();
+  const checkSelection = async (title: string, source: string) => {
+    await search.fill(title);
+    await search.press("Enter");
+    const checkbox = manager.getByRole("checkbox", {
+      name: `Select ${title} (2026) · ${source}`,
+    });
+    await expect(checkbox).toBeVisible();
+    await checkbox.check();
+    return checkbox;
+  };
 
-  await search.fill(`Queue failed ${variant}`);
+  await search.fill(`Queue new ${variant}`);
   await search.press("Enter");
-  await expect(manager.getByRole("checkbox", {
-    name: `Select Queue failed ${variant} (2026) · DVD main feature`,
-  })).toHaveCount(0);
-  await expect(manager).toContainText(
-    new RegExp(`Reserved final output: .*/Queue failed ${variant}\\.mkv`),
-  );
-  const retryExistingResponse = page.waitForResponse((response) =>
-    response.url().endsWith("/api/encode-jobs") &&
-    response.request().method() === "PATCH"
-  );
-  await manager.getByRole("button", { name: "Retry Encode Job" }).click();
-  expect((await retryExistingResponse).status()).toBe(200);
-
-  const targetQuery = `Queue new ${variant}`;
-  await expect(manager.getByRole("option", {
-    name: new RegExp(`^${targetQuery} \\(2026\\)`),
-  })).toHaveCount(0);
-  const searchResponse = page.waitForResponse((response) => {
-    const url = new URL(response.url());
-    return url.pathname === "/api/encode-jobs" &&
-      url.searchParams.get("query") === targetQuery &&
-      url.searchParams.get("selectionOffset") === "0";
-  });
-  await search.fill(targetQuery);
-  await search.press("Enter");
-  expect((await searchResponse).status()).toBe(200);
-  await expect(manager).toContainText("Showing 1 of 1 matches");
-
   const newSelection = manager.getByRole("checkbox", {
     name: `Select Queue new ${variant} (2026) · DVD main feature`,
   });
@@ -116,157 +83,145 @@ test("queues a first-encode worklist with partial failure recovery", async ({
   await expectVisibleKeyboardFocus(newSelection);
   await page.keyboard.press("Space");
   await expect(newSelection).toBeChecked();
-  await expect(profile).toBeDisabled();
-
-  await manager.getByRole("button", { name: "Clear search" }).click();
-  await nextSelections.click();
-  await expect(manager.getByText("1 selected", { exact: true }).first())
-    .toBeVisible();
-
-  const secondSelection = manager.getByRole("checkbox", {
-    name: `Select Queue second ${variant} (2026) · DVD title 1`,
-  });
-  const conflictSelection = manager.getByRole("checkbox", {
-    name: `Select Queue conflict ${variant} (2026) · DVD title 2`,
-  });
-
-  await search.fill(`Queue second ${variant}`);
-  await search.press("Enter");
-  await secondSelection.check();
-
-  await search.fill(`Queue conflict ${variant}`);
-  await search.press("Enter");
-  await conflictSelection.check();
-  await expect(manager.getByText("3 selected", { exact: true }).first())
-    .toBeVisible();
+  await checkSelection(`Queue failed ${variant}`, "DVD main feature");
+  await checkSelection(`Queue second ${variant}`, "DVD title 1");
+  await checkSelection(`Queue conflict ${variant}`, "DVD title 2");
 
   await tabTo(page, reEncode);
   await expectVisibleKeyboardFocus(reEncode);
   await page.keyboard.press("Enter");
   await expect(reEncode).toHaveAttribute("aria-pressed", "true");
-  await expect(manager.getByText("3 selected", { exact: true }).first())
+  await checkSelection(`Queue completed ${variant}`, "DVD main feature");
+  await expect(manager.getByText("5 selected", { exact: true }).first())
     .toBeVisible();
-  await expect(manager).toContainText(
-    `Queue completed ${variant} (2026) · DVD main feature`,
+
+  await manager.getByRole("button", { name: /Add selected to worklist/ })
+    .click();
+  const row = (title: string) => manager.getByRole("textbox", {
+    name: `Final output path for ${title}`,
+  }).locator("xpath=ancestor::tr");
+  const newRow = row(`Queue new ${variant}`);
+  const failedRow = row(`Queue failed ${variant}`);
+  const secondRow = row(`Queue second ${variant}`);
+  const conflictRow = row(`Queue conflict ${variant}`);
+  const completedRow = row(`Queue completed ${variant}`);
+  await expect(newRow).toContainText("New Encode Job");
+  await expect(failedRow).toContainText("Retry");
+  await expect(completedRow).toContainText("Re-encode");
+  await expect(manager.getByRole("button", { name: "Queue 5 Encode Jobs" }))
+    .toBeEnabled();
+
+  const outputPath = (targetRow: Locator, title: string) =>
+    targetRow.getByRole("textbox", {
+      name: `Final output path for ${title}`,
+    });
+  const newOutput = outputPath(newRow, `Queue new ${variant}`);
+  const failedOutput = outputPath(failedRow, `Queue failed ${variant}`);
+  const completedOutput = outputPath(
+    completedRow,
+    `Queue completed ${variant}`,
   );
-
-  await notEncoded.click();
-  await expect(manager.getByText("3 selected", { exact: true }).first())
-    .toBeVisible();
-  await expect(conflictSelection).toBeChecked();
-
-  const addSelected = manager.getByRole("button", {
-    name: /Add selected to batch/,
-  });
-  await addSelected.click();
-  await expect(manager.getByRole("row", { name: new RegExp(`Queue new ${variant}`) }))
-    .toBeVisible();
-  await expect(manager.getByRole("row", { name: new RegExp(`Queue second ${variant}`) }))
-    .toBeVisible();
-  await expect(manager.getByRole("row", { name: new RegExp(`Queue conflict ${variant}`) }))
-    .toBeVisible();
-
-  const newRow = manager.getByRole("row", {
-    name: new RegExp(`Queue new ${variant}`),
-  });
-  const conflictRow = manager.getByRole("row", {
-    name: new RegExp(`Queue conflict ${variant}`),
-  });
-  const newOutputPath = newRow.getByRole("textbox", {
-    name: `Final output path for Queue new ${variant}`,
-  });
-  await expect(newOutputPath).toBeEditable();
-  await newOutputPath.fill(
-    (await newOutputPath.inputValue()).replace(
-      /\.mkv$/,
-      ` operator choice ${variant}.mkv`,
-    ),
+  const conflictOutput = outputPath(conflictRow, `Queue conflict ${variant}`);
+  await expect(newOutput).toBeEditable();
+  await expect(failedOutput).toHaveAttribute("readonly", "");
+  await expect(completedOutput).toHaveAttribute("readonly", "");
+  await expect(failedRow).toContainText(
+    "The existing logical Encode Job retains this output reservation.",
   );
-  const conflictOutputPath = conflictRow.getByRole("textbox", {
-    name: `Final output path for Queue conflict ${variant}`,
-  });
-  const correctedConflictPath = await conflictOutputPath.inputValue();
-  await conflictOutputPath.fill(
-    correctedConflictPath.replace(
-      /Queue conflict.*\.mkv$/,
-      `Queue completed ${variant} authoritative.mkv`,
-    ),
+  const completedAuthoritativePath = await completedOutput.inputValue();
+  const preservedConflictPath = (await conflictOutput.inputValue()).replace(
+    /\.mkv$/,
+    ` operator choice ${variant}.mkv`,
   );
+  await conflictOutput.fill(preservedConflictPath);
 
-  const postStatuses: number[] = [];
+  const resolutionResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return url.pathname === "/api/encode-jobs" &&
+      url.searchParams.get("encodingProfileId") !== null &&
+      url.searchParams.has("resolveDiscSelectionId");
+  });
+  await profile.selectOption({
+    label: `Queue alternate profile ${variant} · Version 1`,
+  });
+  expect((await resolutionResponse).status()).toBe(200);
+
+  await expect(newRow).toContainText("Retry");
+  await expect(newOutput).toHaveAttribute("readonly", "");
+  await expect(newOutput).toHaveValue(
+    new RegExp(`Queue new ${variant} alternate authoritative\\.mkv$`),
+  );
+  await expect(failedRow).toContainText("New Encode Job");
+  await expect(failedOutput).toBeEditable();
+  await expect(completedRow).toContainText("New Encode Job");
+  await expect(completedOutput).toBeEditable();
+  await expect(completedRow).toContainText(
+    "It cannot replace another logical job's final output.",
+  );
+  await expect(secondRow).toContainText("Already queued");
+  await expect(outputPath(secondRow, `Queue second ${variant}`))
+    .toHaveAttribute("readonly", "");
+  await expect(conflictOutput).toHaveValue(preservedConflictPath);
+  await expect(manager.getByRole("button", { name: "Queue 4 Encode Jobs" }))
+    .toBeEnabled();
+
+  await conflictOutput.fill(completedAuthoritativePath);
+  const mutations: Array<{ method: string; status: number }> = [];
   page.on("response", (response) => {
+    const method = response.request().method();
     if (
       response.url().endsWith("/api/encode-jobs") &&
-      response.request().method() === "POST"
+      (method === "POST" || method === "PATCH")
     ) {
-      postStatuses.push(response.status());
+      mutations.push({ method, status: response.status() });
     }
   });
 
-  const queueBatch = manager.getByRole("button", {
-    name: "Queue 3 Encode Jobs",
+  const queueMixed = manager.getByRole("button", {
+    name: "Queue 4 Encode Jobs",
   });
-  await tabTo(page, queueBatch);
-  await expectVisibleKeyboardFocus(queueBatch);
+  await tabTo(page, queueMixed);
+  await expectVisibleKeyboardFocus(queueMixed);
   await page.keyboard.press("Enter");
   await expect(manager.getByRole("status")).toContainText(
-    "2 Encode Jobs queued. 1 failed.",
+    "2 new jobs queued. 1 retry or re-encode queued. 1 row unavailable. 1 failed.",
   );
-  expect(postStatuses).toEqual([200, 200, 409]);
+  expect(mutations).toEqual([
+    { method: "PATCH", status: 200 },
+    { method: "POST", status: 200 },
+    { method: "POST", status: 409 },
+    { method: "POST", status: 200 },
+  ]);
   await expect(newRow).toContainText("Queued");
+  await expect(failedRow).toContainText("Queued");
+  await expect(completedRow).toContainText("Queued");
   await expect(conflictRow).toContainText("Failed");
   await expect(conflictRow).toContainText("Encode Job output is already assigned");
 
-  await search.fill(`Queue filler ${variant} 000`);
-  await search.press("Enter");
-  const laterSelection = manager.getByRole("checkbox", {
-    name: `Select Queue filler ${variant} 000 (2026) · DVD title 1`,
-  });
-  await laterSelection.check();
-  await addSelected.click();
-  const laterRow = manager.getByRole("row", {
-    name: new RegExp(`Queue filler ${variant} 000`),
-  });
+  await notEncoded.click();
+  await checkSelection(`Queue filler ${variant} 000`, "DVD title 1");
+  await manager.getByRole("button", { name: /Add selected to worklist/ })
+    .click();
+  const laterRow = row(`Queue filler ${variant} 000`);
   await expect(laterRow).toContainText("Ready");
 
-  await conflictOutputPath.fill(correctedConflictPath);
-  const retryFailed = manager.getByRole("button", {
-    name: "Retry 1 failed Encode Job",
-  });
-  await retryFailed.click();
+  await conflictOutput.fill(preservedConflictPath);
+  await manager.getByRole("button", { name: "Retry 1 failed Encode Job" })
+    .click();
   await expect(manager.getByRole("status")).toContainText(
-    "1 Encode Job queued. 0 failed.",
+    "1 new job queued. 0 retries or re-encodes queued. 1 row unavailable. 0 failed.",
   );
-  expect(postStatuses).toEqual([200, 200, 409, 200]);
+  expect(mutations.at(-1)).toEqual({ method: "POST", status: 200 });
   await expect(conflictRow).toContainText("Queued");
   await expect(laterRow).toContainText("Ready");
 
   await manager.getByRole("button", { name: "Queue 1 Encode Job" }).click();
   await expect(manager.getByRole("status")).toContainText(
-    "1 Encode Job queued. 0 failed.",
+    "1 new job queued. 0 retries or re-encodes queued. 1 row unavailable. 0 failed.",
   );
-  expect(postStatuses).toEqual([200, 200, 409, 200, 200]);
   await expect(laterRow).toContainText("Queued");
+  expect(mutations).toHaveLength(6);
   await expect(manager.getByRole("button", { name: "Queue 0 Encode Jobs" }))
     .toBeDisabled();
-
-  await reEncode.click();
-  const reEncodeSelection = manager.getByRole("combobox", {
-    name: "Reviewed Disc Selection",
-  });
-  await reEncodeSelection.selectOption({
-    label: `Queue completed ${variant} (2026) · DVD main feature · Encoded before · Queue browser profile ${variant} version 1 · Completed`,
-  });
-  const reEncodePath = manager.getByRole("textbox", {
-    name: "Re-encode final output path",
-  });
-  await expect(reEncodePath).toHaveAttribute("readonly", "");
-  const requeueResponse = page.waitForResponse((response) =>
-    response.url().endsWith("/api/encode-jobs") &&
-    response.request().method() === "PATCH"
-  );
-  await manager.getByRole("button", { name: "Re-encode", exact: true }).click();
-  expect((await requeueResponse).status()).toBe(200);
-  expect(postStatuses).toEqual([200, 200, 409, 200, 200]);
   await expectNoPageOverflow(page);
 });

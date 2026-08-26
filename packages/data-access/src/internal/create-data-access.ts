@@ -3571,8 +3571,8 @@ export function createDataAccessInternal(
         },
         encodeJobs: {
           list: (statuses, options) => access.encodeJobs.list(statuses, options),
-          listQueueLogicalJobConflicts: (options) =>
-            access.encodeJobs.listQueueLogicalJobConflicts(options),
+          resolveQueueLogicalJobs: (options) =>
+            access.encodeJobs.resolveQueueLogicalJobs(options),
           listQueueDiscSelections: (options) =>
             access.encodeJobs.listQueueDiscSelections(options),
           listDiscSelectionCorrectionEncodeJobLinks: (options) =>
@@ -8595,7 +8595,7 @@ export function createDataAccessInternal(
     },
 
     encodeJobs: {
-      listQueueLogicalJobConflicts(options) {
+      resolveQueueLogicalJobs(options) {
         if (
           options.discSelectionIds.length >
             ENCODE_QUEUE_DISC_SELECTION_LIMIT
@@ -8605,19 +8605,35 @@ export function createDataAccessInternal(
           );
         }
         const discSelectionIds = [...new Set(options.discSelectionIds)];
-        if (discSelectionIds.length === 0) {
-          return [];
-        }
-        return database
-          .select({ discSelectionId: encodeJobs.discSelectionId })
-          .from(encodeJobs)
-          .where(and(
-            inArray(encodeJobs.discSelectionId, discSelectionIds),
-            eq(encodeJobs.encodingProfileId, options.encodingProfileId),
-            isNull(encodeJobs.predecessorEncodeJobId),
-          ))
-          .all()
-          .map((job) => job.discSelectionId);
+        const jobs = discSelectionIds.length === 0
+          ? []
+          : database
+            .select()
+            .from(encodeJobs)
+            .where(and(
+              inArray(encodeJobs.discSelectionId, discSelectionIds),
+              eq(encodeJobs.encodingProfileId, options.encodingProfileId),
+              isNull(encodeJobs.predecessorEncodeJobId),
+            ))
+            .all();
+        const jobsBySelectionId = new Map(
+          jobs.map((job) => [job.discSelectionId, job]),
+        );
+        return discSelectionIds.map((discSelectionId) => {
+          const job = jobsBySelectionId.get(discSelectionId);
+          return {
+            discSelectionId,
+            logicalJob: job === undefined
+              ? null
+              : {
+                  id: job.id,
+                  encodingProfileId: job.encodingProfileId,
+                  outputPath: job.outputPath,
+                  status: job.status,
+                  queueAvailable: isEncodeJobSafelyTerminal(job),
+                },
+          };
+        });
       },
 
       listQueueDiscSelections(options) {
