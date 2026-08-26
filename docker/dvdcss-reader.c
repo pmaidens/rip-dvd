@@ -151,11 +151,18 @@ struct recovery_state {
     uint64_t bad_sector_count;
     uint64_t bad_area_count;
     int allow_boundary_proof;
+    int include_boundary_recovery_snapshot;
     int boundary_failure;
     int boundary_proven;
     uint64_t boundary_retained_image_byte_count;
     int emit_malformed_result;
     int interrupt_read_failure_result;
+};
+
+struct boundary_conflict_evidence {
+    uint64_t medium_error_lbas[READ_BLOCKS];
+    size_t medium_error_lba_count;
+    int has_unlocated_medium_error;
 };
 
 static int fail_errno(const char *operation);
@@ -602,12 +609,41 @@ static int emit_read_failure_result(
     format_optional_u64(ascq, sense->has_ascq, sense->ascq);
     format_optional_u64(information_lba, sense->has_information_lba,
                         sense->information_lba);
-    char boundary_fields[320];
+    int includes_recovery_snapshot =
+        failure->status == BACKEND_READ_OUT_OF_RANGE_ERROR &&
+        recovery != NULL && recovery->boundary_proven &&
+        (recovery->bad_sector_count > 0 ||
+         recovery->include_boundary_recovery_snapshot);
+    char boundary_fields[512];
     int boundary_length;
     const char *category;
     if (failure->status == BACKEND_READ_OUT_OF_RANGE_ERROR) {
         category = "out_of_range";
-        if (recovery != NULL && recovery->boundary_proven) {
+        if (includes_recovery_snapshot) {
+            uint64_t recovered_byte_count = declared_byte_count -
+                recovery->bad_sector_count * DVDCSS_BLOCK_SIZE;
+            boundary_length = snprintf(
+                boundary_fields, sizeof(boundary_fields),
+                ",\"boundaryProofVersion\":\"" BOUNDARY_PROOF_VERSION "\""
+                ",\"candidateConfirmationCount\":%d"
+                ",\"precedingSectorLba\":%" PRIu64
+                ",\"declaredByteCount\":%" PRIu64
+                ",\"firstFailingLba\":%" PRIu64
+                ",\"retainedImageByteCount\":%" PRIu64
+                ",\"recoveryProtocol\":{\"protocolVersion\":1"
+                ",\"declaredByteCount\":%" PRIu64
+                ",\"recoveredByteCount\":%" PRIu64
+                ",\"recoveryPolicyVersion\":\"" RECOVERY_POLICY_VERSION "\""
+                ",\"badSectorCount\":%" PRIu64
+                ",\"badAreaCount\":%" PRIu64
+                ",\"badSectorBitmapHex\":\"",
+                BOUNDARY_CONFIRMATION_READS,
+                sense->information_lba - 1,
+                declared_byte_count, sense->information_lba,
+                retained_image_byte_count, declared_byte_count,
+                recovered_byte_count, recovery->bad_sector_count,
+                recovery->bad_area_count);
+        } else if (recovery != NULL && recovery->boundary_proven) {
             boundary_length = snprintf(
                 boundary_fields, sizeof(boundary_fields),
                 ",\"boundaryProofVersion\":\"" BOUNDARY_PROOF_VERSION "\""
@@ -644,10 +680,21 @@ static int emit_read_failure_result(
         fprintf(stderr, "DVD read failure result exceeded its bound\n");
         return 1;
     }
-    char output[1024];
-    int length = snprintf(
-        output, sizeof(output), READ_FAILURE_RESULT_PREFIX
-        "{\"protocolVersion\":1,\"classifierVersion\":\""
+    if (includes_recovery_snapshot &&
+        recovery->bitmap_byte_count > (SIZE_MAX - 2048) / 2) {
+        fprintf(stderr, "DVD read failure result exceeded its bound\n");
+        return 1;
+    }
+    size_t output_capacity = 2048 +
+        (includes_recovery_snapshot ? recovery->bitmap_byte_count * 2 : 0);
+    char *output = malloc(output_capacity);
+    if (output == NULL) {
+        fprintf(stderr, "DVD read failure result allocation failed\n");
+        return 1;
+    }
+    int formatted_length = snprintf(
+        output, output_capacity, READ_FAILURE_RESULT_PREFIX
+        "{\"protocolVersion\":%d,\"classifierVersion\":\""
         READ_FAILURE_CLASSIFIER_VERSION
         "\",\"category\":\"%s\",\"scsiStatus\":%s"
         ",\"hostStatus\":%s,\"driverStatus\":%s"
@@ -656,33 +703,58 @@ static int emit_read_failure_result(
         ",\"requestedLba\":%" PRIu64
         ",\"requestedBlockCount\":%" PRIu32
         ",\"retryOrdinal\":%" PRIu32 "%s",
+        includes_recovery_snapshot ? 2 : 1,
         category, scsi_status, host_status, driver_status, response_code,
         sense_key, asc, ascq, information_lba, completion->requested_lba,
         completion->requested_block_count, completion->retry_ordinal,
         boundary_fields);
-    if (length <= 0 || (size_t)length >= sizeof(output)) {
+    if (formatted_length <= 0 ||
+        (size_t)formatted_length >= output_capacity) {
+        free(output);
         fprintf(stderr, "DVD read failure result exceeded its bound\n");
         return 1;
     }
+    size_t output_length = (size_t)formatted_length;
+    if (includes_recovery_snapshot) {
+        static const char hex_digits[] = "0123456789abcdef";
+        size_t offset = output_length;
+        if (recovery->bad_sector_count > 0) {
+            for (size_t index = 0;
+                 index < recovery->bitmap_byte_count; index++) {
+                unsigned char byte = recovery->bad_sector_bitmap[index];
+                output[offset++] = hex_digits[byte >> 4];
+                output[offset++] = hex_digits[byte & 0x0f];
+            }
+        }
+        memcpy(output + offset, "\"}}\n", 4);
+        offset += 4;
+        output[offset] = '\0';
+        output_length = offset;
+    }
 #ifdef RIP_DVD_READER_TESTING
     if (recovery != NULL && recovery->interrupt_read_failure_result) {
-        size_t partial_length = (size_t)length - 2;
+        size_t partial_length = output_length - 2;
         if (write_terminal_output(output, partial_length) != 0) {
+            free(output);
             return 1;
         }
         sleep(5);
         if (write_terminal_output(output + partial_length,
-                                  (size_t)length - partial_length) != 0) {
+                                  output_length - partial_length) != 0) {
+            free(output);
             return 1;
         }
+        free(output);
         return READ_FAILURE_EXIT_STATUS;
     }
 #else
     (void)recovery;
 #endif
-    if (write_terminal_output(output, (size_t)length) != 0) {
+    if (write_terminal_output(output, output_length) != 0) {
+        free(output);
         return 1;
     }
+    free(output);
     return READ_FAILURE_EXIT_STATUS;
 }
 
@@ -1111,11 +1183,52 @@ static int normalized_failure_evidence_matches(
         left->sense.information_lba == right->sense.information_lba;
 }
 
+static void record_boundary_medium_error(
+    struct boundary_conflict_evidence *evidence,
+    const struct read_failure *failure)
+{
+    if (!failure->sense.has_information_lba) {
+        evidence->has_unlocated_medium_error = 1;
+        return;
+    }
+    uint64_t lba = failure->sense.information_lba;
+    for (size_t index = 0;
+         index < evidence->medium_error_lba_count; index++) {
+        if (evidence->medium_error_lbas[index] == lba) {
+            return;
+        }
+    }
+    if (evidence->medium_error_lba_count >= READ_BLOCKS) {
+        evidence->has_unlocated_medium_error = 1;
+        return;
+    }
+    evidence->medium_error_lbas[evidence->medium_error_lba_count] = lba;
+    evidence->medium_error_lba_count += 1;
+}
+
+static int boundary_conflicts_with_medium_error(
+    const struct boundary_conflict_evidence *evidence,
+    const struct read_failure *boundary_failure)
+{
+    if (evidence->has_unlocated_medium_error ||
+        !boundary_failure->sense.has_information_lba) {
+        return 1;
+    }
+    for (size_t index = 0;
+         index < evidence->medium_error_lba_count; index++) {
+        if (evidence->medium_error_lbas[index] ==
+            boundary_failure->sense.information_lba) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int prove_boundary_candidate(
     struct read_backend *backend, struct operation_state *state,
     struct recovery_state *recovery, unsigned char *buffer,
     const struct read_failure *initial_failure, uint64_t *bytes_processed,
-    uint64_t declared_byte_count)
+    const uint64_t *unproven_bytes_processed, uint64_t declared_byte_count)
 {
     const struct decoded_sense *initial_sense = &initial_failure->sense;
     const struct rip_dvd_scsi_completion *initial_completion =
@@ -1124,7 +1237,7 @@ static int prove_boundary_candidate(
         declared_byte_count / DVDCSS_BLOCK_SIZE;
     uint64_t candidate_lba = initial_sense->information_lba;
     uint64_t retained_lba = *bytes_processed / DVDCSS_BLOCK_SIZE;
-    if (!recovery->allow_boundary_proof || recovery->bad_sector_count != 0 ||
+    if (!recovery->allow_boundary_proof ||
         state->operation != OPERATION_COPY || state->output_fd < 0 ||
         candidate_lba == 0 || candidate_lba >= total_sector_count ||
         initial_completion->requested_lba != retained_lba ||
@@ -1133,7 +1246,7 @@ static int prove_boundary_candidate(
             initial_completion->requested_block_count) {
         return emit_unproven_boundary_failure(
             initial_failure, recovery, declared_byte_count,
-            *bytes_processed);
+            *unproven_bytes_processed);
     }
 
     while (retained_lba < candidate_lba) {
@@ -1149,7 +1262,7 @@ static int prove_boundary_candidate(
             prefix.blocks_read <= 0 || prefix.blocks_read > requested) {
             return emit_unproven_boundary_failure(
                 initial_failure, recovery, declared_byte_count,
-                *bytes_processed);
+                *unproven_bytes_processed);
         }
         if (consume_blocks(state, buffer, prefix.blocks_read,
                            bytes_processed) != 0) {
@@ -1174,7 +1287,7 @@ static int prove_boundary_candidate(
         memcmp(buffer, retained_sector, DVDCSS_BLOCK_SIZE) != 0) {
         return emit_unproven_boundary_failure(
             initial_failure, recovery, declared_byte_count,
-            *bytes_processed);
+            *unproven_bytes_processed);
     }
 
     struct backend_read_result confirmation = { 0 };
@@ -1190,13 +1303,13 @@ static int prove_boundary_candidate(
             confirmation.failure.sense.information_lba != candidate_lba) {
             return emit_unproven_boundary_failure(
                 initial_failure, recovery, declared_byte_count,
-                *bytes_processed);
+                *unproven_bytes_processed);
         }
         if (!normalized_failure_evidence_matches(
                 initial_failure, &confirmation.failure)) {
             return emit_unproven_boundary_failure(
                 initial_failure, recovery, declared_byte_count,
-                *bytes_processed);
+                *unproven_bytes_processed);
         }
     }
 
@@ -1221,7 +1334,7 @@ static int prove_boundary_candidate(
             upper.failure.sense.information_lba != probe_lba) {
             return emit_unproven_boundary_failure(
                 initial_failure, recovery, declared_byte_count,
-                *bytes_processed);
+                *unproven_bytes_processed);
         }
         previous_probe_lba = probe_lba;
     }
@@ -1235,6 +1348,7 @@ static int prove_boundary_candidate(
 static int recover_range(struct read_backend *backend,
                          struct operation_state *state,
                          struct recovery_state *recovery,
+                         struct boundary_conflict_evidence *conflict_evidence,
                          unsigned char *buffer, uint64_t start_lba,
                          int block_count, uint64_t *bytes_processed,
                          uint32_t first_retry_ordinal,
@@ -1253,9 +1367,23 @@ static int recover_range(struct read_backend *backend,
             return 1;
         }
         if (result.status == BACKEND_READ_MEDIUM_ERROR) {
+            record_boundary_medium_error(conflict_evidence, &result.failure);
             continue;
         }
         if (backend_read_has_terminal_failure_result(result.status)) {
+            if (result.status == BACKEND_READ_OUT_OF_RANGE_ERROR) {
+                uint64_t unproven_bytes_processed = *bytes_processed;
+                if (boundary_conflicts_with_medium_error(
+                        conflict_evidence, &result.failure)) {
+                    return emit_unproven_boundary_failure(
+                        &result.failure, recovery, declared_byte_count,
+                        unproven_bytes_processed);
+                }
+                return prove_boundary_candidate(
+                    backend, state, recovery, buffer, &result.failure,
+                    bytes_processed, &unproven_bytes_processed,
+                    declared_byte_count);
+            }
             return emit_read_failure_result(
                 &result.failure, recovery, declared_byte_count,
                 boundary_retained_image_byte_count(
@@ -1268,7 +1396,8 @@ static int recover_range(struct read_backend *backend,
         if (result.blocks_read == block_count) {
             return 0;
         }
-        return recover_range(backend, state, recovery, buffer,
+        return recover_range(backend, state, recovery, conflict_evidence,
+                             buffer,
                              start_lba + (uint64_t)result.blocks_read,
                              block_count - result.blocks_read,
                              bytes_processed, 0, declared_byte_count);
@@ -1284,14 +1413,14 @@ static int recover_range(struct read_backend *backend,
     }
 
     int left_block_count = block_count / 2;
-    int left_status = recover_range(backend, state, recovery, buffer,
-                                    start_lba, left_block_count,
-                                    bytes_processed, 0,
-                                    declared_byte_count);
+    int left_status = recover_range(
+        backend, state, recovery, conflict_evidence, buffer,
+        start_lba, left_block_count, bytes_processed, 0,
+        declared_byte_count);
     if (left_status != 0) {
         return left_status;
     }
-    return recover_range(backend, state, recovery, buffer,
+    return recover_range(backend, state, recovery, conflict_evidence, buffer,
                          start_lba + (uint64_t)left_block_count,
                          block_count - left_block_count, bytes_processed, 0,
                          declared_byte_count);
@@ -1338,8 +1467,12 @@ static int read_disc(struct read_backend *backend, uint64_t size_bytes,
                 status = fail_dvdcss_read(backend->dvdcss, bytes_processed);
                 break;
             }
+            struct boundary_conflict_evidence conflict_evidence = { 0 };
+            record_boundary_medium_error(
+                &conflict_evidence, &result.failure);
             int recovery_status = recover_range(
-                backend, state, recovery, buffer, start_lba, requested,
+                backend, state, recovery, &conflict_evidence, buffer,
+                start_lba, requested,
                 &bytes_processed, 1, size_bytes);
             if (recovery_status != 0) {
                 status = recovery_status;
@@ -1354,7 +1487,7 @@ static int read_disc(struct read_backend *backend, uint64_t size_bytes,
                     recovery != NULL
                 ? prove_boundary_candidate(
                     backend, state, recovery, buffer, &result.failure,
-                    &bytes_processed, size_bytes)
+                    &bytes_processed, &bytes_processed, size_bytes)
                 : emit_read_failure_result(
                     &result.failure, recovery, size_bytes,
                     boundary_retained_image_byte_count(
@@ -1622,11 +1755,17 @@ static int run_resume(struct read_backend *backend, const char *output_path,
         .bitmap_byte_count = bitmap_byte_count,
         .bad_sector_count = 0,
         .bad_area_count = 0,
-        .allow_boundary_proof = 0,
+        .allow_boundary_proof = 1,
+        .include_boundary_recovery_snapshot = 1,
         .emit_malformed_result =
             test_result_mode == TEST_RESULT_MALFORMED_RECOVERY,
         .interrupt_read_failure_result =
             test_result_mode == TEST_RESULT_INTERRUPTED_READ_FAILURE,
+    };
+    struct operation_state state = {
+        .operation = OPERATION_COPY,
+        .hash = NULL,
+        .output_fd = output_fd,
     };
     uint64_t bytes_processed =
         size_bytes - prior_bad_sector_count * DVDCSS_BLOCK_SIZE;
@@ -1647,6 +1786,7 @@ static int run_resume(struct read_backend *backend, const char *output_path,
             continue;
         }
         int recovered = 0;
+        struct boundary_conflict_evidence conflict_evidence = { 0 };
         for (int attempt = 0; attempt < RECOVERY_READ_ATTEMPTS; attempt++) {
             struct backend_read_result result =
                 backend_read(backend, buffer, lba, 1, 1,
@@ -1662,11 +1802,30 @@ static int run_resume(struct read_backend *backend, const char *output_path,
                 break;
             }
             if (result.status == BACKEND_READ_MEDIUM_ERROR) {
+                record_boundary_medium_error(
+                    &conflict_evidence, &result.failure);
                 continue;
             }
             if (backend_read_has_terminal_failure_result(result.status)) {
-                status = emit_read_failure_result(
-                    &result.failure, &recovery, size_bytes, size_bytes);
+                uint64_t boundary_byte_count = lba * DVDCSS_BLOCK_SIZE;
+                uint64_t unproven_byte_count = size_bytes;
+                if (result.status == BACKEND_READ_OUT_OF_RANGE_ERROR &&
+                    boundary_conflicts_with_medium_error(
+                        &conflict_evidence, &result.failure)) {
+                    status = emit_unproven_boundary_failure(
+                        &result.failure, &recovery, size_bytes,
+                        unproven_byte_count);
+                } else if (
+                    result.status == BACKEND_READ_OUT_OF_RANGE_ERROR) {
+                    status = prove_boundary_candidate(
+                        backend, &state, &recovery, buffer,
+                        &result.failure, &boundary_byte_count,
+                        &unproven_byte_count,
+                        size_bytes);
+                } else {
+                    status = emit_read_failure_result(
+                        &result.failure, &recovery, size_bytes, size_bytes);
+                }
                 break;
             }
             if (result.blocks_read != 1 ||

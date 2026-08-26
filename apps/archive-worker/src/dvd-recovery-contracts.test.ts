@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  createCleanDvdRecoveryResult,
   createDamagedDvdRecoveryResult,
   DVD_READ_FAILURE_CLASSIFIER_VERSION,
   DVD_SECTOR_BOUNDARY_PROOF_VERSION,
   formatUnvalidatedDvdRecovery,
   isProvenDvdBoundaryCandidate,
   parseDvdReadFailureResultProtocol,
+  parseDvdReadFailureTerminalResultProtocol,
+  trimDvdRecoveryResult,
   type DvdReadFailureResult,
   validateDvdRecoveryResult,
   validateResumedDvdRecoveryResult,
@@ -35,6 +38,47 @@ function readFailureProtocolPayload(
 }
 
 describe("DVD recovery results", () => {
+  it("trims recovery evidence to the accepted boundary", () => {
+    expect(
+      trimDvdRecoveryResult(
+        createDamagedDvdRecoveryResult(10 * 2_048, [
+          { startLba: 1, sectorCount: 1 },
+          { startLba: 5, sectorCount: 3 },
+          { startLba: 9, sectorCount: 1 },
+        ]),
+        6 * 2_048,
+      ),
+    ).toEqual(
+      createDamagedDvdRecoveryResult(6 * 2_048, [
+        { startLba: 1, sectorCount: 1 },
+        { startLba: 5, sectorCount: 1 },
+      ]),
+    );
+  });
+
+  it("becomes clean when every damaged sector is beyond the boundary", () => {
+    expect(
+      trimDvdRecoveryResult(
+        createDamagedDvdRecoveryResult(10 * 2_048, [
+          { startLba: 7, sectorCount: 1 },
+        ]),
+        6 * 2_048,
+      ),
+    ).toEqual(createCleanDvdRecoveryResult(6 * 2_048));
+  });
+
+  it.each([0, 2_049, 11 * 2_048])(
+    "rejects invalid recovery trim boundary %s",
+    (retainedByteCount) => {
+      expect(() =>
+        trimDvdRecoveryResult(
+          createCleanDvdRecoveryResult(10 * 2_048),
+          retainedByteCount,
+        )
+      ).toThrow("DVD recovery boundary is invalid");
+    },
+  );
+
   it.each([
     {
       category: "not_ready",
@@ -189,6 +233,119 @@ describe("DVD recovery results", () => {
     );
 
     expect(isProvenDvdBoundaryCandidate(result)).toBe(true);
+  });
+
+  it("accepts retained damage beside a proven boundary terminal result", () => {
+    const result = parseDvdReadFailureTerminalResultProtocol(
+      JSON.stringify({
+        protocolVersion: 2,
+        classifierVersion: "scsi-read-classifier-v1",
+        category: "out_of_range",
+        scsiStatus: 2,
+        hostStatus: 0,
+        driverStatus: 8,
+        senseResponseCode: 112,
+        senseKey: 5,
+        asc: 33,
+        ascq: 0,
+        informationLba: 35,
+        requestedLba: 35,
+        requestedBlockCount: 1,
+        retryOrdinal: 1,
+        boundaryProofVersion: DVD_SECTOR_BOUNDARY_PROOF_VERSION,
+        candidateConfirmationCount: 2,
+        precedingSectorLba: 34,
+        declaredByteCount: 40 * 2_048,
+        firstFailingLba: 35,
+        retainedImageByteCount: 35 * 2_048,
+        recoveryProtocol: {
+          protocolVersion: 1,
+          declaredByteCount: 40 * 2_048,
+          recoveredByteCount: 39 * 2_048,
+          recoveryPolicyVersion: "dvd-recovery-v1",
+          badSectorCount: 1,
+          badAreaCount: 1,
+          badSectorBitmapHex: "4000000000",
+        },
+      }),
+      40 * 2_048,
+    );
+
+    expect(result.readFailure).toMatchObject({
+      category: "out_of_range",
+      protocolVersion: 1,
+    });
+    expect(result.recoveryResult).toEqual(
+      createDamagedDvdRecoveryResult(40 * 2_048, [
+        { startLba: 6, sectorCount: 1 },
+      ]),
+    );
+  });
+
+  it("accepts a clean recovery snapshot beside a proven boundary", () => {
+    const result = parseDvdReadFailureTerminalResultProtocol(
+      readFailureProtocolPayload({
+        protocolVersion: 2,
+        category: "out_of_range",
+        informationLba: 35,
+        requestedLba: 35,
+        requestedBlockCount: 1,
+        retryOrdinal: 1,
+        boundaryProofVersion: DVD_SECTOR_BOUNDARY_PROOF_VERSION,
+        candidateConfirmationCount: 2,
+        precedingSectorLba: 34,
+        declaredByteCount: 40 * 2_048,
+        firstFailingLba: 35,
+        retainedImageByteCount: 35 * 2_048,
+        recoveryProtocol: {
+          protocolVersion: 1,
+          declaredByteCount: 40 * 2_048,
+          recoveredByteCount: 40 * 2_048,
+          recoveryPolicyVersion: "dvd-recovery-v1",
+          badSectorCount: 0,
+          badAreaCount: 0,
+          badSectorBitmapHex: "",
+        },
+      }),
+      40 * 2_048,
+    );
+
+    expect(result.recoveryResult).toEqual(
+      createCleanDvdRecoveryResult(40 * 2_048),
+    );
+  });
+
+  it("rejects suffix damage from a proven boundary terminal result", () => {
+    const payload = JSON.parse(readFailureProtocolPayload({
+      protocolVersion: 2,
+      category: "out_of_range",
+      informationLba: 35,
+      requestedLba: 35,
+      requestedBlockCount: 1,
+      retryOrdinal: 1,
+      boundaryProofVersion: DVD_SECTOR_BOUNDARY_PROOF_VERSION,
+      candidateConfirmationCount: 2,
+      precedingSectorLba: 34,
+      declaredByteCount: 40 * 2_048,
+      firstFailingLba: 35,
+      retainedImageByteCount: 35 * 2_048,
+      recoveryProtocol: {
+        protocolVersion: 1,
+        declaredByteCount: 40 * 2_048,
+        recoveredByteCount: 39 * 2_048,
+        recoveryPolicyVersion: "dvd-recovery-v1",
+        badSectorCount: 1,
+        badAreaCount: 1,
+        badSectorBitmapHex: "0000000008",
+      },
+    }));
+
+    expect(() =>
+      parseDvdReadFailureTerminalResultProtocol(
+        JSON.stringify(payload),
+        40 * 2_048,
+      )
+    ).toThrow("DVD read failure helper result is malformed");
   });
 
   it("rejects an object that claims the proof version without the proof shape", () => {
