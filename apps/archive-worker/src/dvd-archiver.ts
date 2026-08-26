@@ -1777,19 +1777,19 @@ async function publishDvdArchiveLink({
       linkedProofFileIdentity === undefined
         ? undefined
         : await readDvdProofFileIdentity(
-          archivePath,
-          expectedFilesystemIdentity,
-          expectedSizeBytes,
-          mismatchMessage,
-        );
-      if (
-        linkedProofFileIdentity !== undefined &&
-        (syncedProofFileIdentity === undefined ||
-          !sameDvdProofFileIdentity(
-            syncedProofFileIdentity,
-            linkedProofFileIdentity,
-          ))
-      ) {
+            archivePath,
+            expectedFilesystemIdentity,
+            expectedSizeBytes,
+            mismatchMessage,
+          );
+    if (
+      linkedProofFileIdentity !== undefined &&
+      (syncedProofFileIdentity === undefined ||
+        !sameDvdProofFileIdentity(
+          syncedProofFileIdentity,
+          linkedProofFileIdentity,
+        ))
+    ) {
       throw new Error(mismatchMessage);
     }
     return {
