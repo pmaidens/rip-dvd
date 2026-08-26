@@ -4446,6 +4446,48 @@ describe("DVD archive publication", () => {
     )).toBe(true);
   });
 
+  it("preserves corrected retry progress when retained-sector proof is cancelled", async () => {
+    const digest = "a".repeat(64);
+    const archiveRequestId = "cancelled-corrected-boundary-retry-proof";
+    const {
+      baseOptions,
+      rescuePaths,
+      root,
+      runner,
+    } = await createCorrectedDamagedRetryWorkspace(
+      archiveRequestId,
+      digest,
+    );
+    const cancellation = new DOMException(
+      "Corrected retry was cancelled",
+      "AbortError",
+    );
+    const signal = new AbortController().signal;
+    let cancelledDuringProof = false;
+    vi.spyOn(signal, "throwIfAborted").mockImplementation(() => {
+      if (new Error().stack?.includes("digestReadableRange")) {
+        cancelledDuringProof = true;
+        throw cancellation;
+      }
+    });
+    const retryCopy = vi.fn();
+
+    await expect(preserveDvdArchive({
+      ...baseOptions,
+      runner: runner(retryCopy),
+      signal,
+    })).rejects.toBe(cancellation);
+
+    expect(cancelledDuringProof).toBe(true);
+    expect(retryCopy).not.toHaveBeenCalled();
+    expect(existsSync(join(root, `dvdmeta-${digest}.iso`))).toBe(false);
+    expect(existsSync(rescuePaths.imagePath)).toBe(true);
+    expect(existsSync(rescuePaths.mapPath)).toBe(true);
+    expect(readdirSync(root).some((entry) =>
+      entry.startsWith(`${basename(rescuePaths.imagePath)}.invalid-`)
+    )).toBe(false);
+  });
+
   it("revalidates the source after corrected-boundary salvage", async () => {
     const originalsLibraryPath = createOriginalsLibrary();
     const root = realpathSync(originalsLibraryPath);

@@ -20,14 +20,21 @@ reported size remains in separate Archive Boundary Evidence.
 Both publication paths require stable Optical Drive identity and
 media-generation evidence, a current Archive Job claim, filesystem
 synchronization, and atomic no-overwrite publication. The worker no longer
-rereads the completed image to compare a raw-content hash. Existing raw-content
-fingerprints remain valid catalog identities, while newly inspected DVDs use
-the `dvdmeta-sha256:` namespace so the two identity strengths cannot be
-mistaken for one another. When an older raw-hash archive is rediscovered, its
-new metadata fingerprint is derived from the title map and size already stored
-in the catalog; compatibility does not require rereading the disc or ISO.
+rereads the completed image to derive or compare a catalog raw-content hash.
+The narrow exception is an in-place retry of a damaged corrected rescue: the
+worker computes an ephemeral local hash of only the previously successful
+retained sectors before and after the helper runs. This proves that valid rescue
+progress survived while the helper changed only bitmap-bad sectors; it neither
+rereads the Optical Drive nor creates a disc identity or a general post-copy
+verification claim. Existing raw-content fingerprints remain valid catalog
+identities, while newly inspected DVDs use the `dvdmeta-sha256:` namespace so
+the two identity strengths cannot be mistaken for one another. When an older
+raw-hash archive is rediscovered, its new metadata fingerprint is derived from
+the title map and size already stored in the catalog; compatibility does not
+require rereading the disc or ISO.
 
-This deliberately trades sector-level duplicate detection and post-copy hash
-verification for materially less optical-drive wear and shorter archive time.
+This deliberately trades sector-level duplicate detection and general
+post-copy raw-image hash verification for materially less optical-drive wear
+and shorter archive time.
 Explicit filesystem verification remains available for checking that an
 archive path still exists and is safely reachable.

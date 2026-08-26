@@ -113,6 +113,13 @@ const RETAINED_SECTOR_PROOF_CHUNK_BYTES = 1_048_576;
 const CORRECTED_RETRY_MUTATION_MESSAGE =
   "DVD corrected-boundary retained sectors changed during recovery";
 
+class DvdRetainedSectorProofMismatchError extends Error {
+  constructor() {
+    super(CORRECTED_RETRY_MUTATION_MESSAGE);
+    this.name = "DvdRetainedSectorProofMismatchError";
+  }
+}
+
 function dvdArchiveStem(fingerprint: string): string {
   const digest = fingerprint.slice(fingerprint.lastIndexOf(":") + 1);
   return isDvdMetadataFingerprint(fingerprint) ? `dvdmeta-${digest}` : digest;
@@ -1674,7 +1681,7 @@ async function readDvdRetainedSectorProof({
           expectedImageProofIdentity,
         ))
     ) {
-      throw new Error(CORRECTED_RETRY_MUTATION_MESSAGE);
+      throw new DvdRetainedSectorProofMismatchError();
     }
 
     const hash = createHash("sha256");
@@ -1704,7 +1711,7 @@ async function readDvdRetainedSectorProof({
           position,
         );
         if (bytesRead !== requested) {
-          throw new Error(CORRECTED_RETRY_MUTATION_MESSAGE);
+          throw new DvdRetainedSectorProofMismatchError();
         }
         hash.update(buffer.subarray(0, bytesRead));
         position += bytesRead;
@@ -1731,7 +1738,7 @@ async function readDvdRetainedSectorProof({
       !sameDvdProofFileIdentity(afterProof, beforeProof) ||
       (expectedDigest !== undefined && digest !== expectedDigest)
     ) {
-      throw new Error(CORRECTED_RETRY_MUTATION_MESSAGE);
+      throw new DvdRetainedSectorProofMismatchError();
     }
     return { digest, imageProofIdentity: afterProof };
   } finally {
@@ -2644,8 +2651,12 @@ export async function preserveDvdArchive({
   const readFailureStage: ArchiveReadFailureStage =
     copyContinuation === undefined ? "initial_copy" : "rescue_resume";
   let retainedSectorProof: DvdRetainedSectorProof | undefined;
-  const rejectChangedCorrectedRetry = async (error: unknown): Promise<never> => {
-    if (rescueIdentity !== undefined && rescueWorkspace !== null) {
+  const rejectCorrectedRetryProof = async (error: unknown): Promise<never> => {
+    if (
+      error instanceof DvdRetainedSectorProofMismatchError &&
+      rescueIdentity !== undefined &&
+      rescueWorkspace !== null
+    ) {
       await quarantineDvdRescueWorkspace(
         root,
         rescueIdentity,
@@ -2664,7 +2675,7 @@ export async function preserveDvdArchive({
           rescueWorkspace === null ||
           rescueWorkspace.imageProofIdentity === null
         ) {
-          throw new Error(CORRECTED_RETRY_MUTATION_MESSAGE);
+          throw new DvdRetainedSectorProofMismatchError();
         }
         retainedSectorProof = await readDvdRetainedSectorProof({
           expectedImageProofIdentity: rescueWorkspace.imageProofIdentity,
@@ -2673,7 +2684,7 @@ export async function preserveDvdArchive({
           workspace: rescueWorkspace,
         });
       } catch (error) {
-        await rejectChangedCorrectedRetry(error);
+        await rejectCorrectedRetryProof(error);
       }
       await authorizeMutation?.();
       signal.throwIfAborted();
@@ -2730,7 +2741,7 @@ export async function preserveDvdArchive({
       const recoveredRetainedSectorProof = await (async () => {
         try {
           if (retainedSectorProof === undefined) {
-            throw new Error(CORRECTED_RETRY_MUTATION_MESSAGE);
+            throw new DvdRetainedSectorProofMismatchError();
           }
           return await readDvdRetainedSectorProof({
             expectedDigest: retainedSectorProof.digest,
@@ -2739,7 +2750,7 @@ export async function preserveDvdArchive({
             workspace: rescueWorkspace!,
           });
         } catch (error) {
-          return await rejectChangedCorrectedRetry(error);
+          return await rejectCorrectedRetryProof(error);
         }
       })();
       await authorizeMutation?.();
