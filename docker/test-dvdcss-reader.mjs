@@ -1073,39 +1073,97 @@ const damagedThenBoundary = runTestCopy(
   "medium-then-out-of-range",
   [
     rawCompletionFault(5, "always", fixedMediumAtFive),
-    rawCompletionFault(35, "always", fixedOutOfRangeSense(35)),
+    rawTailCompletionFault(35, "always", fixedOutOfRangeSense(35)),
   ].join(","),
 );
 const damagedThenBoundaryResult = readFailureResult(
   damagedThenBoundary.stderr,
 );
+const damagedBoundaryImage = Buffer.from(content.subarray(0, 35 * 2_048));
+damagedBoundaryImage.fill(0, 5 * 2_048, 6 * 2_048);
 if (
   damagedThenBoundary.status !== 3 ||
+  damagedThenBoundaryResult.protocolVersion !== 2 ||
   damagedThenBoundaryResult.category !== "out_of_range" ||
+  damagedThenBoundaryResult.boundaryProofVersion !==
+    "dvd-sector-boundary-proof-v1" ||
   damagedThenBoundaryResult.firstFailingLba !== 35 ||
-  damagedThenBoundaryResult.retainedImageByteCount !== 5 * 2_048 ||
-  statSync(damagedThenBoundary.outputPath).size !== 5 * 2_048 ||
+  damagedThenBoundaryResult.retainedImageByteCount !== 35 * 2_048 ||
+  damagedThenBoundaryResult.recoveryProtocol?.badSectorCount !== 1 ||
+  damagedThenBoundaryResult.recoveryProtocol?.badAreaCount !== 1 ||
+  damagedThenBoundaryResult.recoveryProtocol?.badSectorBitmapHex !==
+    "2000000000" ||
+  statSync(damagedThenBoundary.outputPath).size !== 35 * 2_048 ||
   !readFileSync(damagedThenBoundary.outputPath).equals(
-    content.subarray(0, 5 * 2_048),
+    damagedBoundaryImage,
   ) ||
   damagedThenBoundary.stderr.includes(recoveryResultPrefix)
 ) {
   throw new Error(
-    `libdvdcss medium-then-boundary rollback check failed: ${damagedThenBoundary.stderr}`,
+    `libdvdcss damaged boundary composition check failed: ${damagedThenBoundary.stderr}`,
   );
 }
-const resumedAfterDamagedBoundary = runTestBoundaryResume(
-  damagedThenBoundary.outputPath,
-  "none",
-  damagedThenBoundaryResult.retainedImageByteCount,
+
+const sameRequestDamagedThenBoundary = runTestCopy(
+  "same-request-medium-then-out-of-range",
+  [
+    rawCompletionFault(5, "always", fixedMediumAtFive),
+    rawTailCompletionFault(20, "always", fixedOutOfRangeSense(20)),
+  ].join(","),
 );
+const sameRequestDamagedThenBoundaryResult = readFailureResult(
+  sameRequestDamagedThenBoundary.stderr,
+);
+const sameRequestDamagedBoundaryImage = Buffer.from(
+  content.subarray(0, 20 * 2_048),
+);
+sameRequestDamagedBoundaryImage.fill(0, 5 * 2_048, 6 * 2_048);
 if (
-  resumedAfterDamagedBoundary.status !== 0 ||
-  !readFileSync(resumedAfterDamagedBoundary.outputPath).equals(content) ||
-  recoveryResult(resumedAfterDamagedBoundary.stderr).badSectorCount !== 0
+  sameRequestDamagedThenBoundary.status !== 3 ||
+  sameRequestDamagedThenBoundaryResult.protocolVersion !== 2 ||
+  sameRequestDamagedThenBoundaryResult.category !== "out_of_range" ||
+  sameRequestDamagedThenBoundaryResult.boundaryProofVersion !==
+    "dvd-sector-boundary-proof-v1" ||
+  sameRequestDamagedThenBoundaryResult.firstFailingLba !== 20 ||
+  sameRequestDamagedThenBoundaryResult.retainedImageByteCount !== 20 * 2_048 ||
+  sameRequestDamagedThenBoundaryResult.recoveryProtocol?.badSectorCount !== 1 ||
+  sameRequestDamagedThenBoundaryResult.recoveryProtocol?.badAreaCount !== 1 ||
+  sameRequestDamagedThenBoundaryResult.recoveryProtocol?.badSectorBitmapHex !==
+    "2000000000" ||
+  statSync(sameRequestDamagedThenBoundary.outputPath).size !== 20 * 2_048 ||
+  !readFileSync(sameRequestDamagedThenBoundary.outputPath).equals(
+    sameRequestDamagedBoundaryImage,
+  ) ||
+  sameRequestDamagedThenBoundary.stderr.includes(recoveryResultPrefix)
 ) {
   throw new Error(
-    `libdvdcss medium-then-boundary resume check failed: ${resumedAfterDamagedBoundary.stderr}`,
+    `libdvdcss same-request damaged boundary composition check failed: ${sameRequestDamagedThenBoundary.stderr}`,
+  );
+}
+
+const conflictingSameRequestBoundary = runTestCopy(
+  "conflicting-same-request-medium-boundary",
+  [
+    rawCompletionFault(5, "always", fixedMediumAtFive),
+    rawCompletionFault(20, 1, fixedMediumSense(20)),
+    rawTailCompletionFault(20, "always", fixedOutOfRangeSense(20)),
+  ].join(","),
+);
+const conflictingSameRequestBoundaryResult = readFailureResult(
+  conflictingSameRequestBoundary.stderr,
+);
+if (
+  conflictingSameRequestBoundary.status !== 3 ||
+  conflictingSameRequestBoundaryResult.protocolVersion !== 1 ||
+  conflictingSameRequestBoundaryResult.category !== "out_of_range" ||
+  conflictingSameRequestBoundaryResult.boundaryProofVersion !== undefined ||
+  conflictingSameRequestBoundaryResult.firstFailingLba !== 20 ||
+  conflictingSameRequestBoundaryResult.retainedImageByteCount !== 5 * 2_048 ||
+  statSync(conflictingSameRequestBoundary.outputPath).size !== 5 * 2_048 ||
+  conflictingSameRequestBoundary.stderr.includes(recoveryResultPrefix)
+) {
+  throw new Error(
+    `libdvdcss conflicting same-request boundary check failed: ${conflictingSameRequestBoundary.stderr}`,
   );
 }
 
@@ -1534,7 +1592,13 @@ if (
   !readFileSync(outOfRangeResumePath).equals(unknownResumeContent) ||
   outOfRangeResume.stderr.includes(recoveryResultPrefix) ||
   JSON.stringify(testReads(outOfRangeResume.stderr)) !==
-    JSON.stringify([{ lba: 5, blocks: 1 }]) ||
+    JSON.stringify([
+      { lba: 5, blocks: 1 },
+      { lba: 4, blocks: 1 },
+      { lba: 5, blocks: 1 },
+      { lba: 5, blocks: 1 },
+      { lba: 6, blocks: 1 },
+    ]) ||
   outOfRangeResumeResult.category !== "out_of_range" ||
   outOfRangeResumeResult.firstFailingLba !== 5 ||
   outOfRangeResumeResult.declaredByteCount !== content.byteLength ||
@@ -1542,6 +1606,125 @@ if (
 ) {
   throw new Error(
     `libdvdcss out-of-range resume check failed: ${outOfRangeResume.stderr}`,
+  );
+}
+
+const conflictingOutOfRangeResumePath = prepareOutput(
+  "/tmp/rip-dvd-reader-conflicting-out-of-range-resume.img",
+);
+writeFileSync(conflictingOutOfRangeResumePath, unknownResumeContent);
+const conflictingOutOfRangeResume = runTestResume(
+  conflictingOutOfRangeResumePath,
+  [
+    rawCompletionFault(5, 1, fixedMediumAtFive),
+    rawCompletionFault(5, "always", fixedOutOfRangeSense(5)),
+  ].join(","),
+  isolatedResult.badSectorBitmapHex,
+);
+const conflictingOutOfRangeResumeResult = readFailureResult(
+  conflictingOutOfRangeResume.stderr,
+);
+if (
+  conflictingOutOfRangeResume.status !== 3 ||
+  !readFileSync(conflictingOutOfRangeResumePath).equals(unknownResumeContent) ||
+  conflictingOutOfRangeResume.stderr.includes(recoveryResultPrefix) ||
+  JSON.stringify(testReads(conflictingOutOfRangeResume.stderr)) !==
+    JSON.stringify([
+      { lba: 5, blocks: 1 },
+      { lba: 5, blocks: 1 },
+    ]) ||
+  conflictingOutOfRangeResumeResult.protocolVersion !== 1 ||
+  conflictingOutOfRangeResumeResult.category !== "out_of_range" ||
+  conflictingOutOfRangeResumeResult.boundaryProofVersion !== undefined ||
+  conflictingOutOfRangeResumeResult.firstFailingLba !== 5 ||
+  conflictingOutOfRangeResumeResult.retainedImageByteCount !==
+    content.byteLength
+) {
+  throw new Error(
+    `libdvdcss conflicting out-of-range resume check failed: ${conflictingOutOfRangeResume.stderr}`,
+  );
+}
+
+const legacyBoundaryResumePath = prepareOutput(
+  "/tmp/rip-dvd-reader-legacy-boundary-resume.img",
+);
+const legacyBoundaryResumeContent = Buffer.from(content);
+legacyBoundaryResumeContent.fill(0, 5 * 2_048, 6 * 2_048);
+legacyBoundaryResumeContent.fill(0, 35 * 2_048, 36 * 2_048);
+writeFileSync(legacyBoundaryResumePath, legacyBoundaryResumeContent);
+const legacyBoundaryBitmap = Buffer.alloc(content.byteLength / 2_048 / 8);
+legacyBoundaryBitmap[0] = 1 << 5;
+legacyBoundaryBitmap[4] = 1 << 3;
+const legacyBoundaryResume = runTestResume(
+  legacyBoundaryResumePath,
+  [
+    rawCompletionFault(5, "always", fixedMediumAtFive),
+    rawTailCompletionFault(35, "always", fixedOutOfRangeSense(35)),
+  ].join(","),
+  legacyBoundaryBitmap.toString("hex"),
+);
+const legacyBoundaryResult = readFailureResult(legacyBoundaryResume.stderr);
+if (
+  legacyBoundaryResume.status !== 3 ||
+  !readFileSync(legacyBoundaryResumePath).equals(legacyBoundaryResumeContent) ||
+  legacyBoundaryResult.protocolVersion !== 2 ||
+  legacyBoundaryResult.category !== "out_of_range" ||
+  legacyBoundaryResult.boundaryProofVersion !==
+    "dvd-sector-boundary-proof-v1" ||
+  legacyBoundaryResult.firstFailingLba !== 35 ||
+  legacyBoundaryResult.retainedImageByteCount !== 35 * 2_048 ||
+  legacyBoundaryResult.recoveryProtocol?.badSectorCount !== 1 ||
+  legacyBoundaryResult.recoveryProtocol?.badAreaCount !== 1 ||
+  legacyBoundaryResult.recoveryProtocol?.badSectorBitmapHex !==
+    "2000000000" ||
+  legacyBoundaryResume.stderr.includes(recoveryResultPrefix) ||
+  JSON.stringify(testReads(legacyBoundaryResume.stderr)) !==
+    JSON.stringify([
+      { lba: 5, blocks: 1 },
+      { lba: 5, blocks: 1 },
+      { lba: 35, blocks: 1 },
+      { lba: 34, blocks: 1 },
+      { lba: 35, blocks: 1 },
+      { lba: 35, blocks: 1 },
+      { lba: 36, blocks: 1 },
+      { lba: 39, blocks: 1 },
+    ])
+) {
+  throw new Error(
+    `libdvdcss legacy damaged boundary resume check failed: ${legacyBoundaryResume.stderr}`,
+  );
+}
+
+const recoveredLegacyBoundaryResumePath = prepareOutput(
+  "/tmp/rip-dvd-reader-recovered-legacy-boundary-resume.img",
+);
+writeFileSync(recoveredLegacyBoundaryResumePath, legacyBoundaryResumeContent);
+const recoveredLegacyBoundaryResume = runTestResume(
+  recoveredLegacyBoundaryResumePath,
+  rawTailCompletionFault(35, "always", fixedOutOfRangeSense(35)),
+  legacyBoundaryBitmap.toString("hex"),
+);
+const recoveredLegacyBoundaryResult = readFailureResult(
+  recoveredLegacyBoundaryResume.stderr,
+);
+if (
+  recoveredLegacyBoundaryResume.status !== 3 ||
+  recoveredLegacyBoundaryResult.protocolVersion !== 2 ||
+  recoveredLegacyBoundaryResult.category !== "out_of_range" ||
+  recoveredLegacyBoundaryResult.firstFailingLba !== 35 ||
+  recoveredLegacyBoundaryResult.recoveryProtocol?.badSectorCount !== 0 ||
+  recoveredLegacyBoundaryResult.recoveryProtocol?.badAreaCount !== 0 ||
+  recoveredLegacyBoundaryResult.recoveryProtocol?.recoveredByteCount !==
+    content.byteLength ||
+  recoveredLegacyBoundaryResult.recoveryProtocol?.badSectorBitmapHex !==
+    "" ||
+  !readFileSync(recoveredLegacyBoundaryResumePath)
+    .subarray(5 * 2_048, 6 * 2_048)
+    .equals(content.subarray(5 * 2_048, 6 * 2_048)) ||
+  recoveredLegacyBoundaryResume.stderr.includes(recoveryResultPrefix)
+) {
+  throw new Error(
+    `libdvdcss recovered legacy boundary resume check failed: ${recoveredLegacyBoundaryResume.stderr}`,
   );
 }
 

@@ -27,7 +27,7 @@ import {
   DVD_READ_FAILURE_RESULT_PREFIX,
   DVD_RECOVERY_RESULT_PREFIX,
   formatDvdRecoveryResumeBitmap,
-  parseDvdReadFailureResultProtocol,
+  parseDvdReadFailureTerminalResultProtocol,
   parseDvdRecoveryResultProtocol,
   type DvdRecoveryResult,
 } from "./dvd-recovery-contracts.js";
@@ -88,6 +88,15 @@ function rawCompletionFault(
   return `raw@${lba}@${remainingFailures}@${scsiStatus}@${hostStatus}@${driverStatus}@${sense.length / 2}@${sense}`;
 }
 
+function rawTailCompletionFault(
+  lba: number,
+  remainingFailures: number | "always",
+  sense: string,
+  { scsiStatus = 2, hostStatus = 0, driverStatus = 8 } = {},
+): string {
+  return `raw-tail@${lba}@${remainingFailures}@${scsiStatus}@${hostStatus}@${driverStatus}@${sense.length / 2}@${sense}`;
+}
+
 const distinguishedReadFailures = [
   {
     category: "hardware_error",
@@ -127,12 +136,15 @@ function createSyntheticDvdCopyRunner({
       await request.authorizeStart?.();
       request.signal.throwIfAborted();
       const continuation = request.continuation;
+      const operationSizeBytes = continuation?.kind === "corrected"
+        ? continuation.recoveryResult.declaredByteCount
+        : request.sizeBytes;
       const arguments_ = continuation === undefined
         ? [
             "copy-test",
             sourcePath,
             request.outputPath,
-            String(request.sizeBytes),
+            String(operationSizeBytes),
             faults,
             "0",
             "valid",
@@ -142,7 +154,7 @@ function createSyntheticDvdCopyRunner({
               "resume-boundary-test",
               sourcePath,
               request.outputPath,
-              String(request.sizeBytes),
+              String(operationSizeBytes),
               faults,
               "0",
               "valid",
@@ -153,7 +165,7 @@ function createSyntheticDvdCopyRunner({
               "resume-test",
               sourcePath,
               request.outputPath,
-              String(request.sizeBytes),
+              String(operationSizeBytes),
               faults,
               "0",
               "valid",
@@ -178,11 +190,13 @@ function createSyntheticDvdCopyRunner({
         .filter((line) => line.startsWith(DVD_READ_FAILURE_RESULT_PREFIX))
         .map((line) => line.slice(DVD_READ_FAILURE_RESULT_PREFIX.length));
       if (completion.status === 3 && readFailurePayloads.length === 1) {
+        const terminalResult = parseDvdReadFailureTerminalResultProtocol(
+          readFailurePayloads[0]!,
+          operationSizeBytes,
+        );
         throw new DvdReadFailureError(
-          parseDvdReadFailureResultProtocol(
-            readFailurePayloads[0]!,
-            request.sizeBytes,
-          ),
+          terminalResult.readFailure,
+          terminalResult.recoveryResult,
         );
       }
       if (completion.status !== 0) {
@@ -199,7 +213,7 @@ function createSyntheticDvdCopyRunner({
       }
       const result = parseDvdRecoveryResultProtocol(
         payloads[0]!,
-        request.sizeBytes,
+        operationSizeBytes,
       );
       results.push(result);
       return result;
@@ -341,6 +355,70 @@ describe.runIf(nativeTestExecutable !== "")(
       expect(readFileSync(preserved.archivePath)).toEqual(fixture.content);
       expect(preserved.integrityEvidence.integrity).toBe("clean_read");
       expect(salvageValidator.validate).not.toHaveBeenCalled();
+      await preserved.finalizePublication?.();
+    });
+
+    it("publishes genuine prefix damage at a proven corrected boundary", async () => {
+      const archiveRequestId = "21222222-2222-4222-8222-222222222222";
+      const fixture = createFixture(archiveRequestId);
+      const firstExcludedLba = 35;
+      const publishedSizeBytes = firstExcludedLba * 2_048;
+      const runner = createSyntheticDvdCopyRunner({
+        faults: [
+          rawCompletionFault(5, "always", fixedMediumSense(5)),
+          rawTailCompletionFault(
+            firstExcludedLba,
+            "always",
+            fixedSense(firstExcludedLba, 0x05, 0x21),
+          ),
+        ].join(","),
+        sourcePath: fixture.sourcePath,
+      });
+      const completenessProver = {
+        prove: vi.fn().mockResolvedValue({
+          maximumReferencedLba: firstExcludedLba - 1,
+        }),
+      };
+      const salvageValidator = {
+        validate: vi.fn().mockResolvedValue({
+          badSectorCountsByTitle: [{ badSectorCount: 1, titleNumber: 1 }],
+          outcome: "accepted" as const,
+        }),
+      };
+
+      const preserved = await preserveDvdArchive({
+        ...fixture.baseOptions,
+        completenessProver,
+        runner,
+        salvageValidator,
+      });
+
+      const expectedImage = Buffer.from(
+        fixture.content.subarray(0, publishedSizeBytes),
+      );
+      expectedImage.fill(0, 5 * 2_048, 6 * 2_048);
+      expect(runner.results).toEqual([]);
+      expect(completenessProver.prove).toHaveBeenCalledOnce();
+      expect(salvageValidator.validate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          recoveryResult: createDamagedDvdRecoveryResult(
+            publishedSizeBytes,
+            [{ startLba: 5, sectorCount: 1 }],
+          ),
+        }),
+      );
+      expect(preserved.correctedBoundaryEvidence).toMatchObject({
+        reportedSizeBytes: fixture.content.byteLength,
+        publishedSizeBytes,
+        firstExcludedLba,
+      });
+      expect(preserved.integrityEvidence).toMatchObject({
+        integrity: "watchable_salvage",
+        badSectorCount: 1,
+        badAreaCount: 1,
+        badSectorRanges: [{ startLba: 5, sectorCount: 1 }],
+      });
+      expect(readFileSync(preserved.archivePath)).toEqual(expectedImage);
       await preserved.finalizePublication?.();
     });
 

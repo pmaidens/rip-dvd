@@ -78,10 +78,19 @@ export type DvdReadFailureResult =
   | NonBoundaryDvdReadFailureResult
   | OutOfRangeDvdReadFailureResult;
 
+export interface DvdReadFailureTerminalResult {
+  readFailure: DvdReadFailureResult;
+  recoveryResult: DvdRecoveryResult | null;
+}
+
 export class DvdReadFailureError extends Error {
+  readonly recoveryResult: DvdRecoveryResult | null;
   readonly readFailure: DvdReadFailureResult;
 
-  constructor(readFailure: DvdReadFailureResult) {
+  constructor(
+    readFailure: DvdReadFailureResult,
+    recoveryResult: DvdRecoveryResult | null = null,
+  ) {
     super({
       unknown: "DVD read failed with structured unknown evidence",
       not_ready: "DVD read failed because the Optical Drive was not ready",
@@ -93,6 +102,7 @@ export class DvdReadFailureError extends Error {
       out_of_range: "DVD read stopped at the readable boundary",
     }[readFailure.category]);
     this.name = "DvdReadFailureError";
+    this.recoveryResult = recoveryResult;
     this.readFailure = readFailure;
   }
 }
@@ -185,6 +195,36 @@ export function createDamagedDvdRecoveryResult(
   };
   validateDvdRecoveryResult(result, declaredByteCount);
   return result;
+}
+
+export function trimDvdRecoveryResult(
+  result: DvdRecoveryResult,
+  retainedByteCount: number,
+): DvdRecoveryResult {
+  if (
+    !Number.isSafeInteger(retainedByteCount) ||
+    retainedByteCount <= 0 ||
+    retainedByteCount > result.declaredByteCount ||
+    retainedByteCount % DVD_SECTOR_SIZE_BYTES !== 0
+  ) {
+    throw new Error("DVD recovery boundary is invalid");
+  }
+  const retainedSectorCount = retainedByteCount / DVD_SECTOR_SIZE_BYTES;
+  const retainedRanges = result.unrecoveredSectorRanges.flatMap((range) => {
+    if (range.startLba >= retainedSectorCount) {
+      return [];
+    }
+    return [{
+      startLba: range.startLba,
+      sectorCount: Math.min(
+        range.startLba + range.sectorCount,
+        retainedSectorCount,
+      ) - range.startLba,
+    }];
+  });
+  return retainedRanges.length === 0
+    ? createCleanDvdRecoveryResult(retainedByteCount)
+    : createDamagedDvdRecoveryResult(retainedByteCount, retainedRanges);
 }
 
 function isSafeNonNegativeInteger(value: unknown): value is number {
@@ -379,6 +419,58 @@ export function parseDvdReadFailureResultProtocol(
     throw new Error("DVD read failure helper result is malformed");
   }
   return result;
+}
+
+export function parseDvdReadFailureTerminalResultProtocol(
+  payload: string,
+  expectedByteCount: number,
+): DvdReadFailureTerminalResult {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payload);
+  } catch {
+    throw new Error("DVD read failure helper result is malformed");
+  }
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    Array.isArray(parsed) ||
+    !("recoveryProtocol" in parsed)
+  ) {
+    return {
+      readFailure: parseDvdReadFailureResultProtocol(
+        payload,
+        expectedByteCount,
+      ),
+      recoveryResult: null,
+    };
+  }
+  const {
+    recoveryProtocol,
+    protocolVersion,
+    ...readFailureProtocol
+  } = parsed as Record<string, unknown>;
+  if (protocolVersion !== 2) {
+    throw new Error("DVD read failure helper result is malformed");
+  }
+  const readFailure = parseDvdReadFailureResultProtocol(
+    JSON.stringify({ ...readFailureProtocol, protocolVersion: 1 }),
+    expectedByteCount,
+  );
+  const recoveryResult = parseDvdRecoveryResultProtocol(
+    JSON.stringify(recoveryProtocol),
+    expectedByteCount,
+  );
+  if (
+    !isProvenDvdBoundaryCandidate(readFailure) ||
+    recoveryResult.unrecoveredSectorRanges.some(
+      (range) =>
+        range.startLba + range.sectorCount > readFailure.firstFailingLba,
+    )
+  ) {
+    throw new Error("DVD read failure helper result is malformed");
+  }
+  return { readFailure, recoveryResult };
 }
 
 function isNormalizedDamagedResult(
