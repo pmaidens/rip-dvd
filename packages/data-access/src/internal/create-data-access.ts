@@ -802,7 +802,12 @@ export function createDataAccessInternal(
   }
 
   const encodeQueueDiscSelectionPageStatement = sqlite.prepare(`
-    with completed_selection_history as (
+    with requested_selection as (
+      select
+        ? as has_completed_encode,
+        ? as search_pattern
+    ),
+    completed_selection_history as (
       select distinct history_job.disc_selection_id
       from encode_jobs as history_job
       left join retained_encode_outputs as history_retained
@@ -812,12 +817,30 @@ export function createDataAccessInternal(
     eligible_selection as (
       select
         disc_selection.id,
-        disc_selection.created_at,
+        reviewed_archive.catalog_reviewed_at,
+        rip_dvd_normalize_media_item_title(media_item.title)
+          as normalized_media_title,
+        media_item.year as media_year,
+        rip_dvd_normalize_media_item_title(
+          media_item.title || ' ' ||
+          coalesce(cast(media_item.year as text), '') || ' ' ||
+          case disc_selection.kind
+            when 'main_feature' then 'DVD main feature'
+            when 'dvd_title' then
+              'DVD title ' || disc_selection.title_number
+            else
+              'DVD title ' || disc_selection.title_number ||
+              ', chapters ' || disc_selection.chapter_start ||
+              '–' || disc_selection.chapter_end
+          end
+        ) as searchable_details,
         case when completed_selection_history.disc_selection_id is null
           then 0 else 1 end as has_completed_encode
       from disc_selections as disc_selection
       inner join original_disc_archives as reviewed_archive
         on reviewed_archive.id = disc_selection.original_disc_archive_id
+      inner join media_items as media_item
+        on media_item.id = disc_selection.media_item_id
       left join completed_selection_history
         on completed_selection_history.disc_selection_id = disc_selection.id
       where disc_selection.is_catalog_active = 1
@@ -833,20 +856,57 @@ export function createDataAccessInternal(
           as re_encode
       from eligible_selection
     ),
-    queue_page as (
-      select id, created_at
+    matching_selection as (
+      select eligible_selection.*
       from eligible_selection
-      where has_completed_encode = ?
-      order by created_at, id
+      cross join requested_selection
+      where eligible_selection.has_completed_encode =
+          requested_selection.has_completed_encode
+        and (
+          requested_selection.search_pattern is null
+          or eligible_selection.searchable_details like
+            requested_selection.search_pattern
+        )
+    ),
+    matching_count as (
+      select count(*) as total
+      from matching_selection
+    ),
+    queue_page as (
+      select
+        id,
+        catalog_reviewed_at,
+        normalized_media_title,
+        media_year
+      from matching_selection
+      cross join requested_selection
+      order by
+        case when requested_selection.has_completed_encode = 0
+          then catalog_reviewed_at end desc,
+        case when requested_selection.has_completed_encode = 1
+          then normalized_media_title end,
+        case when requested_selection.has_completed_encode = 1
+          then media_year end,
+        id
       limit ? offset ?
     )
     select
       queue_counts.not_encoded,
       queue_counts.re_encode,
+      matching_count.total,
       queue_page.id
     from queue_counts
+    cross join matching_count
+    cross join requested_selection
     left join queue_page on 1 = 1
-    order by queue_page.created_at, queue_page.id
+    order by
+      case when requested_selection.has_completed_encode = 0
+        then queue_page.catalog_reviewed_at end desc,
+      case when requested_selection.has_completed_encode = 1
+        then queue_page.normalized_media_title end,
+      case when requested_selection.has_completed_encode = 1
+        then queue_page.media_year end,
+      queue_page.id
   `);
 
   function getCatalogReviewCoverage(
@@ -8514,13 +8574,34 @@ export function createDataAccessInternal(
           ENCODE_QUEUE_DISC_SELECTION_LIMIT,
         );
         const offset = optionalSafeInteger(options.offset, "offset", 0) ?? 0;
+        const searchQuery = options.query === undefined
+          ? undefined
+          : requireNonEmpty(options.query, "Encode queue search query");
+        if (searchQuery !== undefined && searchQuery.length > 256) {
+          throw new DomainInvariantError(
+            "Encode queue search query must be at most 256 characters",
+          );
+        }
+        const normalizedQuery = searchQuery === undefined
+          ? undefined
+          : normalizeMediaItemSearchTitle(searchQuery);
+        if (normalizedQuery !== undefined && normalizedQuery.length === 0) {
+          throw new DomainInvariantError(
+            "Encode queue search query must contain a letter or number",
+          );
+        }
+        const searchPattern = normalizedQuery === undefined
+          ? null
+          : `%${normalizedQuery.replaceAll(" ", "%")}%`;
         const pageRows = encodeQueueDiscSelectionPageStatement.all(
           options.historyGroup === "re_encode" ? 1 : 0,
+          searchPattern,
           limit,
           offset,
         ) as unknown as Array<{
           not_encoded: number;
           re_encode: number;
+          total: number;
           id: DiscSelectionId | null;
         }>;
         const countRow = pageRows[0];
@@ -8665,9 +8746,7 @@ export function createDataAccessInternal(
             };
           }),
           counts,
-          total: options.historyGroup === "re_encode"
-            ? counts.reEncode
-            : counts.notEncoded,
+          total: countRow?.total ?? 0,
         };
       },
 

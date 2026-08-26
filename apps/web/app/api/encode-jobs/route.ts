@@ -2,6 +2,7 @@ import { loadConfig } from "@rip-dvd/config";
 import {
   DomainInvariantError,
   InvalidStatusTransitionError,
+  normalizeMediaItemSearchTitle,
   RecordNotFoundError,
   type DataAccess,
   type DiscSelection,
@@ -40,24 +41,62 @@ function response(body: unknown, status = 200): Response {
   });
 }
 
-function optionOffset(request: Request, parameter: string): number | null {
-  const value = new URL(request.url).searchParams.get(parameter);
-  if (value === null) {
+function optionOffset(
+  parameters: URLSearchParams,
+  parameter: string,
+): number | null {
+  const values = parameters.getAll(parameter);
+  if (values.length === 0) {
     return 0;
   }
-  if (!/^(0|[1-9]\d*)$/.test(value) || value.length > 16) {
+  const value = values[0]!;
+  if (
+    values.length !== 1 ||
+    !/^(0|[1-9]\d*)$/.test(value) ||
+    value.length > 16
+  ) {
     return null;
   }
   const offset = Number(value);
   return Number.isSafeInteger(offset) ? offset : null;
 }
 
-function encodeQueueHistoryGroup(request: Request): EncodeQueueHistoryGroup | null {
-  const value = new URL(request.url).searchParams.get("historyGroup");
-  if (value === null || value === "not_encoded") {
+function encodeQueueHistoryGroup(
+  parameters: URLSearchParams,
+): EncodeQueueHistoryGroup | null {
+  const values = parameters.getAll("historyGroup");
+  if (values.length === 0) {
     return "not_encoded";
   }
+  if (values.length !== 1) {
+    return null;
+  }
+  const value = values[0];
+  if (value === "not_encoded") {
+    return value;
+  }
   return value === "re_encode" ? value : null;
+}
+
+function encodeQueueSearchQuery(
+  parameters: URLSearchParams,
+): string | undefined | null {
+  const values = parameters.getAll("query");
+  if (values.length === 0) {
+    return undefined;
+  }
+  if (values.length !== 1) {
+    return null;
+  }
+  const query = values[0]!.trim();
+  if (
+    query.length === 0 ||
+    query.length > 256 ||
+    normalizeMediaItemSearchTitle(query).length === 0
+  ) {
+    return null;
+  }
+  return query;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -122,6 +161,7 @@ function readQueueOptions(
   profileOffset: number,
   mediaLibraryPath: string,
   historyGroup: EncodeQueueHistoryGroup,
+  query?: string,
   encodingProfileId?: EncodingProfileId,
 ) {
   return access.readConsistentSnapshot((snapshot) => {
@@ -141,6 +181,7 @@ function readQueueOptions(
     const selectionPage = snapshot.encodeJobs.listQueueDiscSelections({
       historyGroup,
       encodingProfileId,
+      query,
       limit: ENCODE_SELECTION_PAGE_SIZE,
       offset: selectionOffset,
     });
@@ -168,6 +209,7 @@ function readQueueOptions(
     );
     return {
       historyGroup,
+      query: query ?? "",
       counts: selectionPage.counts,
       selections: selectionPage.selections.map((queueSelection) => {
         const selection = queueSelection.selection;
@@ -252,25 +294,32 @@ export async function createEncodeJobsRoute(
   }
   try {
     if (request.method === "GET") {
-      const historyGroup = encodeQueueHistoryGroup(request);
+      const parameters = new URL(request.url).searchParams;
+      const historyGroup = encodeQueueHistoryGroup(parameters);
       if (historyGroup === null) {
         return response({ error: "Invalid Encode Job history group" }, 400);
       }
-      const selectionOffset = optionOffset(request, "selectionOffset");
+      const query = encodeQueueSearchQuery(parameters);
+      if (query === null) {
+        return response({ error: "Invalid Disc Selection search query" }, 400);
+      }
+      const selectionOffset = optionOffset(parameters, "selectionOffset");
       if (selectionOffset === null) {
         return response({ error: "Invalid Disc Selection offset" }, 400);
       }
-      const profileOffset = optionOffset(request, "profileOffset");
+      const profileOffset = optionOffset(parameters, "profileOffset");
       if (profileOffset === null) {
         return response({ error: "Invalid Encoding Profile offset" }, 400);
       }
-      const encodingProfileValue = new URL(request.url).searchParams.get(
-        "encodingProfileId",
-      );
-      const encodingProfileId = encodingProfileValue === null
+      const encodingProfileValues = parameters.getAll("encodingProfileId");
+      const encodingProfileValue = encodingProfileValues[0];
+      const encodingProfileId = encodingProfileValue === undefined
         ? undefined
         : boundedString(encodingProfileValue);
-      if (encodingProfileValue !== null && encodingProfileId === null) {
+      if (
+        encodingProfileValues.length > 1 ||
+        (encodingProfileValue !== undefined && encodingProfileId === null)
+      ) {
         return response({ error: "Invalid Encoding Profile" }, 400);
       }
       let config: EncodeJobsRuntimeConfig;
@@ -286,6 +335,7 @@ export async function createEncodeJobsRoute(
           profileOffset,
           config.mediaLibraryPath,
           historyGroup,
+          query,
           encodingProfileId as EncodingProfileId | undefined,
         ),
       );
