@@ -87,6 +87,7 @@ export type QueueEncodeJobAction =
 
 interface EncodeJobsViewProps {
   state: EncodeJobsLoadState;
+  successfulQueueRevision?: number;
   selectedProfileId: EncodingProfileId | "";
   isSaving: boolean;
   requestError: string | null;
@@ -199,6 +200,7 @@ function submitLabel(job: LogicalEncodeJob | null): string {
 
 export function EncodeJobsView({
   state,
+  successfulQueueRevision = 0,
   selectedProfileId,
   isSaving,
   requestError,
@@ -223,6 +225,14 @@ export function EncodeJobsView({
     state.status === "loaded" ? state.query : "",
   );
   const [outputPath, setOutputPath] = useState("");
+  const [isOutputPathEdited, setIsOutputPathEdited] = useState(false);
+  const clearSelectedSelection = useCallback(() => {
+    setSelectedSelection(null);
+    setSelectedSelectionGroup(null);
+    setSelectedSelectionProfileId("");
+    setOutputPath("");
+    setIsOutputPathEdited(false);
+  }, []);
 
   const loadedHistoryGroup = state.status === "loaded"
     ? state.historyGroup
@@ -278,31 +288,45 @@ export function EncodeJobsView({
       refreshedSelection !== undefined &&
       refreshedSelection !== selectedSelection
     ) {
+      const selectedProfileChanged =
+        selectedSelectionProfileId !== visibleSelectedProfileId;
       setSelectedSelection(refreshedSelection);
       setSelectedSelectionProfileId(visibleSelectedProfileId);
+      if (selectedProfileChanged || !isOutputPathEdited) {
+        setOutputPath(
+          refreshedSelection.logicalJob?.outputPath ??
+            refreshedSelection.suggestedOutputPath ??
+            "",
+        );
+        setIsOutputPathEdited(false);
+      }
     }
   }, [
+    isOutputPathEdited,
     selectedSelection,
     selectedSelectionGroup,
+    selectedSelectionProfileId,
     state,
     visibleSelectedProfileId,
   ]);
 
   useEffect(() => {
     if (
-      selectedSelection === null ||
-      loadedHistoryGroup === null ||
+      loadedHistoryGroup !== null &&
+      selectedSelectionGroup !== null &&
       selectedSelectionGroup !== loadedHistoryGroup
     ) {
-      setOutputPath("");
-      return;
+      clearSelectedSelection();
     }
-    setOutputPath(
-      selectedSelection.logicalJob?.outputPath ??
-        selectedSelection.suggestedOutputPath ??
-        "",
-    );
-  }, [loadedHistoryGroup, selectedSelection, selectedSelectionGroup]);
+  }, [
+    clearSelectedSelection,
+    loadedHistoryGroup,
+    selectedSelectionGroup,
+  ]);
+
+  useEffect(() => {
+    clearSelectedSelection();
+  }, [clearSelectedSelection, successfulQueueRevision]);
 
   useEffect(() => {
     if (loadedQuery !== null) {
@@ -318,11 +342,14 @@ export function EncodeJobsView({
     const selection = state.selections.find(
       (candidate) => candidate.id === selectionId,
     );
-    setSelectedSelection(selection ?? null);
-    setSelectedSelectionGroup(
-      selection === undefined ? null : state.historyGroup,
-    );
+    if (selection === undefined) {
+      clearSelectedSelection();
+      return;
+    }
+    setSelectedSelection(selection);
+    setSelectedSelectionGroup(state.historyGroup);
     setSelectedSelectionProfileId(visibleSelectedProfileId);
+    setIsOutputPathEdited(false);
     setOutputPath(
       selection?.logicalJob?.outputPath ?? selection?.suggestedOutputPath ?? "",
     );
@@ -515,7 +542,10 @@ export function EncodeJobsView({
                   maxLength={4096}
                   placeholder="/media/movies/Movie (2001)/Movie (2001).mkv"
                   value={outputPath}
-                  onChange={(event) => setOutputPath(event.currentTarget.value)}
+                  onChange={(event) => {
+                    setOutputPath(event.currentTarget.value);
+                    setIsOutputPathEdited(true);
+                  }}
                 />
               </label>
             </div>
@@ -750,6 +780,7 @@ export function EncodeJobsManager({
   const [profileOffset, setProfileOffset] = useState(0);
   const [isSaving, setIsSaving] = useState(false);
   const [requestError, setRequestError] = useState<string | null>(null);
+  const [successfulQueueRevision, setSuccessfulQueueRevision] = useState(0);
   const loadVersion = useRef(0);
   const selectionView = selectionViews[historyGroup];
 
@@ -812,6 +843,7 @@ export function EncodeJobsManager({
       } else {
         await retryEncodeJob(action.encodeJobId);
       }
+      setSuccessfulQueueRevision((current) => current + 1);
       await load();
       onChanged();
     } catch (error) {
@@ -826,6 +858,7 @@ export function EncodeJobsManager({
   return (
     <EncodeJobsView
       state={state}
+      successfulQueueRevision={successfulQueueRevision}
       selectedProfileId={selectedProfileId}
       isSaving={isSaving}
       requestError={requestError}

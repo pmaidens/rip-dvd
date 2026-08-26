@@ -4,7 +4,10 @@ import {
 } from "./internal/create-data-access.js";
 import type { DataAccess } from "./types.js";
 
-export { createDiscSelectionSourceIdentity } from "./disc-selection-source-identity.js";
+export {
+  createDiscSelectionSourceIdentity,
+  discSelectionSourceDescription,
+} from "./disc-selection-source-identity.js";
 export {
   classifyArchiveReadFailureEvidence,
   isArchiveReadFailureEvidenceConsistent,
