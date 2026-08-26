@@ -55,6 +55,9 @@ test("queues a first-encode worklist with partial failure recovery", async ({
   const profile = manager.getByRole("combobox", {
     name: "Worklist Encoding Profile",
   });
+  await tabTo(page, profile);
+  await expectVisibleKeyboardFocus(profile);
+  await profile.selectOption({ label: `Queue browser profile ${variant} · Version 1` });
   const nextSelections = manager.getByRole("button", {
     name: "Next reviewed selections",
   });
@@ -65,6 +68,17 @@ test("queues a first-encode worklist with partial failure recovery", async ({
   });
   await tabTo(page, search);
   await expectVisibleKeyboardFocus(search);
+  await search.fill(`Queue active ${variant}`);
+  await search.press("Enter");
+  await expect(manager.getByRole("checkbox", {
+    name: `Select Queue active ${variant} (2026) · DVD main feature`,
+  })).toHaveCount(0);
+  await expect(manager.getByText(
+    "This Encode Job is already queued.",
+  )).toBeVisible();
+  await expect(manager.getByRole("button", { name: "Already queued" }))
+    .toBeDisabled();
+
   const targetQuery = `Queue new ${variant}`;
   await expect(manager.getByRole("option", {
     name: new RegExp(`^${targetQuery} \\(2026\\)`),
@@ -136,10 +150,6 @@ test("queues a first-encode worklist with partial failure recovery", async ({
   await expect(manager.getByRole("row", { name: new RegExp(`Queue conflict ${variant}`) }))
     .toBeVisible();
 
-  await tabTo(page, profile);
-  await expectVisibleKeyboardFocus(profile);
-  await profile.selectOption({ label: `Queue browser profile ${variant} · Version 1` });
-
   const newRow = manager.getByRole("row", {
     name: new RegExp(`Queue new ${variant}`),
   });
@@ -191,6 +201,18 @@ test("queues a first-encode worklist with partial failure recovery", async ({
   await expect(conflictRow).toContainText("Failed");
   await expect(conflictRow).toContainText("Encode Job output is already assigned");
 
+  await search.fill(`Queue filler ${variant} 000`);
+  await search.press("Enter");
+  const laterSelection = manager.getByRole("checkbox", {
+    name: `Select Queue filler ${variant} 000 (2026) · DVD title 1`,
+  });
+  await laterSelection.check();
+  await addSelected.click();
+  const laterRow = manager.getByRole("row", {
+    name: new RegExp(`Queue filler ${variant} 000`),
+  });
+  await expect(laterRow).toContainText("Ready");
+
   await conflictOutputPath.fill(correctedConflictPath);
   const retryFailed = manager.getByRole("button", {
     name: "Retry 1 failed Encode Job",
@@ -201,6 +223,14 @@ test("queues a first-encode worklist with partial failure recovery", async ({
   );
   expect(postStatuses).toEqual([200, 200, 409, 200]);
   await expect(conflictRow).toContainText("Queued");
+  await expect(laterRow).toContainText("Ready");
+
+  await manager.getByRole("button", { name: "Queue 1 Encode Job" }).click();
+  await expect(manager.getByRole("status")).toContainText(
+    "1 Encode Job queued. 0 failed.",
+  );
+  expect(postStatuses).toEqual([200, 200, 409, 200, 200]);
+  await expect(laterRow).toContainText("Queued");
   await expect(manager.getByRole("button", { name: "Queue 0 Encode Jobs" }))
     .toBeDisabled();
 
@@ -221,6 +251,6 @@ test("queues a first-encode worklist with partial failure recovery", async ({
   );
   await manager.getByRole("button", { name: "Re-encode", exact: true }).click();
   expect((await requeueResponse).status()).toBe(200);
-  expect(postStatuses).toEqual([200, 200, 409, 200]);
+  expect(postStatuses).toEqual([200, 200, 409, 200, 200]);
   await expectNoPageOverflow(page);
 });

@@ -453,8 +453,10 @@ export function EncodeJobsView({
   );
   const failedRows = worklistRows.filter((row) => row.status === "failed");
   const readyRows = worklistRows.filter((row) => row.status === "ready");
-  const actionableCount = failedRows.length + readyRows.length;
-  const queueButtonLabel = failedRows.length > 0 && readyRows.length === 0
+  const actionableCount = failedRows.length > 0
+    ? failedRows.length
+    : readyRows.length;
+  const queueButtonLabel = failedRows.length > 0
     ? `Retry ${countLabel(failedRows.length, "failed Encode Job", "failed Encode Jobs")}`
     : `Queue ${countLabel(actionableCount, "Encode Job", "Encode Jobs")}`;
 
@@ -679,6 +681,37 @@ export function EncodeJobsView({
                   <ul className="encode-picker-results">
                     {state.selections.map((selection) => {
                       const isInWorklist = worklistSelectionIds.has(selection.id);
+                      const existingJob = selection.logicalJob;
+                      if (existingJob !== null) {
+                        const canRequeue =
+                          isTerminalEncodeJobStatus(existingJob.status) &&
+                          existingJob.queueAvailable;
+                        return (
+                          <li key={selection.id}>
+                            <div className="encode-picker-existing-job">
+                              <span>
+                                <strong>{mediaDescription(selection)}</strong>
+                                <small>
+                                  {canRequeue
+                                    ? `Selected profile job: ${displayTerm(existingJob.status)}. Use the single-item action.`
+                                    : activeJobDescription(existingJob.status)}
+                                </small>
+                              </span>
+                              <button
+                                type="button"
+                                disabled={isSaving || !canRequeue}
+                                onClick={() =>
+                                  onQueue({
+                                    kind: "requeue",
+                                    encodeJobId: existingJob.id,
+                                  })}
+                              >
+                                {submitLabel(existingJob)}
+                              </button>
+                            </div>
+                          </li>
+                        );
+                      }
                       return (
                         <li key={selection.id}>
                           <label>
@@ -696,9 +729,7 @@ export function EncodeJobsView({
                             <span>
                               <strong>{mediaDescription(selection)}</strong>
                               <small>
-                                {selection.logicalJob === null
-                                  ? "First-encode candidate"
-                                  : `Selected profile job: ${displayTerm(selection.logicalJob.status)}`}
+                                First-encode candidate
                                 {isInWorklist ? " · In worklist" : ""}
                               </small>
                             </span>
@@ -1229,9 +1260,10 @@ export function EncodeJobsManager({
     if (profile === undefined) {
       return;
     }
-    const actionableRows = worklistRows.filter((row) =>
-      row.status === "ready" || row.status === "failed"
-    );
+    const failedRows = worklistRows.filter((row) => row.status === "failed");
+    const actionableRows = failedRows.length > 0
+      ? failedRows
+      : worklistRows.filter((row) => row.status === "ready");
     if (actionableRows.length === 0) {
       return;
     }
