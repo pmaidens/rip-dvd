@@ -3254,11 +3254,14 @@ describe("DVD archive publication", () => {
 
     expect(noCopy).not.toHaveBeenCalled();
     expect(existsSync(fixture.interrupted.archivePath)).toBe(false);
+    expect(readFileSync(`${fixture.interrupted.archivePath}.failed`)).toEqual(
+      fixture.rescuedImage,
+    );
     expect(existsSync(fixture.rescuePaths.imagePath)).toBe(false);
     expect(existsSync(fixture.rescuePaths.mapPath)).toBe(false);
     expect(
       readdirSync(fixture.root).filter((name) => name.includes(".invalid-")),
-    ).toHaveLength(3);
+    ).toHaveLength(2);
 
     const replacementCopy = vi.fn(async ({ outputPath, sizeBytes }) => {
       writeFileSync(outputPath, Buffer.alloc(sizeBytes, 7));
@@ -4453,6 +4456,104 @@ describe("DVD archive publication", () => {
     expect(existsSync(rescuePaths.mapPath)).toBe(true);
   });
 
+  it("quarantines a same-size mutation when completeness proof throws", async () => {
+    const originalsLibraryPath = createOriginalsLibrary();
+    const root = realpathSync(originalsLibraryPath);
+    const digest = "3".repeat(64);
+    const archiveRequestId = "mutated-failed-boundary-proof";
+    const reportedSizeBytes = 8 * 2_048;
+    const firstExcludedLba = 6;
+    const retainedPrefix = Buffer.alloc(firstExcludedLba * 2_048, 73);
+    const boundaryFailure = createProvenBoundaryFailure(
+      reportedSizeBytes,
+      firstExcludedLba,
+    );
+    const baseOptions = {
+      archiveRequestId,
+      devicePath: "/dev/sr0",
+      expectedTitleMap: {
+        schemaVersion: 2 as const,
+        contentId: `dvdmeta-sha256:${digest}`,
+        titles: [],
+      },
+      fingerprint: `dvdmeta-sha256:${digest}`,
+      originalsLibraryPath,
+      revalidateReadFailure: async () => undefined,
+      signal: new AbortController().signal,
+      sizeBytes: reportedSizeBytes,
+      verifySource: async () => undefined,
+      onProgress: () => undefined,
+    };
+    const runner = (copy: DvdCopyRunner["copy"]): DvdCopyRunner => ({
+      copy,
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    });
+
+    await expect(preserveDvdArchive({
+      ...baseOptions,
+      runner: runner(vi.fn(async ({ outputPath }) => {
+        writeFileSync(outputPath, retainedPrefix);
+        throw new DvdReadFailureError(boundaryFailure);
+      })),
+    })).rejects.toThrow("DVD corrected-boundary validation is unavailable");
+
+    const rescuePaths = dvdRescueWorkspacePaths(root, archiveRequestId);
+    const unchangedProofFailure = new Error("unchanged completeness proof failed");
+    await expect(preserveDvdArchive({
+      ...baseOptions,
+      authorizeMutation: () => undefined,
+      completenessProver: {
+        async prove() {
+          throw unchangedProofFailure;
+        },
+      },
+      runner: runner(vi.fn()),
+    })).rejects.toBe(unchangedProofFailure);
+
+    expect(readFileSync(rescuePaths.imagePath)).toEqual(retainedPrefix);
+    expect(existsSync(rescuePaths.mapPath)).toBe(true);
+
+    const proofFailure = new Error("completeness proof failed");
+    const retryCopy = vi.fn();
+    await expect(preserveDvdArchive({
+      ...baseOptions,
+      authorizeMutation: () => undefined,
+      completenessProver: {
+        async prove() {
+          writeFileSync(
+            rescuePaths.imagePath,
+            Buffer.alloc(retainedPrefix.byteLength, 89),
+          );
+          throw proofFailure;
+        },
+      },
+      runner: runner(retryCopy),
+    })).rejects.toBe(proofFailure);
+
+    expect(retryCopy).not.toHaveBeenCalled();
+    expect(existsSync(rescuePaths.imagePath)).toBe(false);
+    expect(existsSync(rescuePaths.mapPath)).toBe(false);
+    expect(existsSync(`${rescuePaths.mapPath}.retaining`)).toBe(false);
+    expect(existsSync(join(root, `dvdmeta-${digest}.iso`))).toBe(false);
+
+    const freshImage = Buffer.alloc(reportedSizeBytes, 97);
+    const freshCopy = vi.fn(async ({ outputPath }) => {
+      writeFileSync(outputPath, freshImage);
+      return createCleanDvdRecoveryResult(reportedSizeBytes);
+    });
+    const restarted = await preserveDvdArchive({
+      ...baseOptions,
+      authorizeMutation: () => undefined,
+      runner: runner(freshCopy),
+    });
+
+    expect(freshCopy).toHaveBeenCalledOnce();
+    expect(restarted.correctedBoundaryEvidence).toBeUndefined();
+    expect(readFileSync(restarted.archivePath)).toEqual(freshImage);
+  });
+
   it("rejects a same-size image mutation after corrected-boundary proof", async () => {
     const originalsLibraryPath = createOriginalsLibrary();
     const root = realpathSync(originalsLibraryPath);
@@ -4641,7 +4742,7 @@ describe("DVD archive publication", () => {
     },
   );
 
-  it("does not quarantine a concurrent destination substitution", async () => {
+  it("does not quarantine a destination substituted during proof-map update", async () => {
     const originalsLibraryPath = createOriginalsLibrary();
     const root = realpathSync(originalsLibraryPath);
     const digest = "4".repeat(64);
@@ -4655,7 +4756,13 @@ describe("DVD archive publication", () => {
 
     await expect(preserveDvdArchive({
       archiveRequestId,
-      authorizeMutation: () => undefined,
+      authorizeMutation: () => {
+        if (existsSync(archivePath) && !substituted) {
+          unlinkSync(archivePath);
+          writeFileSync(archivePath, concurrentArchive);
+          substituted = true;
+        }
+      },
       completenessProver: {
         async prove() {
           return { maximumReferencedLba: firstExcludedLba - 1 };
@@ -4686,13 +4793,6 @@ describe("DVD archive publication", () => {
       },
       signal: new AbortController().signal,
       sizeBytes: reportedSizeBytes,
-      sync: vi.fn(async (path) => {
-        if (path === root && !substituted) {
-          unlinkSync(archivePath);
-          writeFileSync(archivePath, concurrentArchive);
-          substituted = true;
-        }
-      }),
       verifySource: async () => undefined,
       onProgress: () => undefined,
     })).rejects.toThrow("Published DVD archive changed before cleanup");
@@ -4701,8 +4801,8 @@ describe("DVD archive publication", () => {
     expect(readFileSync(archivePath)).toEqual(concurrentArchive);
     expect(existsSync(`${archivePath}.failed`)).toBe(false);
     const rescuePaths = dvdRescueWorkspacePaths(root, archiveRequestId);
-    expect(readFileSync(rescuePaths.imagePath)).toEqual(retainedPrefix);
-    expect(existsSync(rescuePaths.mapPath)).toBe(true);
+    expect(existsSync(rescuePaths.imagePath)).toBe(false);
+    expect(existsSync(rescuePaths.mapPath)).toBe(false);
   });
 
   it("quarantines a crashed correction when restart is cancelled", async () => {
