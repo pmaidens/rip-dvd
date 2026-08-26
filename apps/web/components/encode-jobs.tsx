@@ -294,7 +294,11 @@ export function EncodeJobsView({
         selectedSelectionProfileId !== visibleSelectedProfileId;
       setSelectedSelection(refreshedSelection);
       setSelectedSelectionProfileId(visibleSelectedProfileId);
-      if (selectedProfileChanged || !isOutputPathEdited) {
+      if (
+        selectedProfileChanged ||
+        refreshedSelection.logicalJob !== null ||
+        !isOutputPathEdited
+      ) {
         setOutputPath(
           refreshedSelection.logicalJob?.outputPath ??
             refreshedSelection.suggestedOutputPath ??

@@ -342,6 +342,23 @@ describe("EncodeJobsView", () => {
         "/media/movies/Operator choice.mkv",
       );
 
+      await act(async () =>
+        root.render(render("", [{
+          ...selection,
+          logicalJob: {
+            id: "job-pinned" as EncodeJobId,
+            encodingProfileId: "profile-pinned" as EncodingProfileId,
+            outputPath: "/media/movies/Reserved by queue.mkv",
+            status: "queued",
+            queueAvailable: false,
+          },
+        }]))
+      );
+      expect(visibleOutputPath.value).toBe(
+        "/media/movies/Reserved by queue.mkv",
+      );
+      expect(visibleOutputPath.readOnly).toBe(true);
+
       await act(async () => root.render(render("", [], "re_encode")));
       expect(container.textContent).not.toContain("Pinned choice (2005)");
       expect(visiblePicker.value).toBe("");
