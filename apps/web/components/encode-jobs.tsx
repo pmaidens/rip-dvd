@@ -257,8 +257,7 @@ export function EncodeJobsView({
     : "";
   const logicalJobIsTerminal = logicalJob !== null &&
     isTerminalEncodeJobStatus(logicalJob.status);
-  const selectionDetailsAreCurrent = pageSelection !== undefined ||
-    selectedSelectionProfileId === visibleSelectedProfileId;
+  const selectionDetailsAreCurrent = pageSelection !== undefined;
   const canSubmit = visibleSelection !== null &&
     visibleSelectedProfileId !== "" &&
     selectionDetailsAreCurrent &&
@@ -577,7 +576,7 @@ export function EncodeJobsView({
                 <input
                   name="outputPath"
                   required
-                  readOnly={logicalJob !== null}
+                  readOnly={logicalJob !== null || !selectionDetailsAreCurrent}
                   maxLength={4096}
                   placeholder="/media/movies/Movie (2001)/Movie (2001).mkv"
                   value={outputPath}
@@ -604,7 +603,7 @@ export function EncodeJobsView({
                 ) : null}
                 {!selectionDetailsAreCurrent ? (
                   <span>
-                    This choice is outside the current results. Return to its result page to refresh the queue action for this Encoding Profile.
+                    This choice is outside the current results. Return to its result page to refresh the queue action and output path. The last known path is read-only until then.
                   </span>
                 ) : logicalJob === null ? (
                   <span>

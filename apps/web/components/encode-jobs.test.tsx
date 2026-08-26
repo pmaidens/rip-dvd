@@ -341,6 +341,15 @@ describe("EncodeJobsView", () => {
       expect(visibleOutputPath.value).toBe(
         "/media/movies/Operator choice.mkv",
       );
+      expect(visibleOutputPath.readOnly).toBe(true);
+      expect(container.textContent).toContain(
+        "Return to its result page to refresh the queue action and output path.",
+      );
+      expect(
+        visibleOutputPath.closest("form")?.querySelector<HTMLButtonElement>(
+          'button[type="submit"]',
+        )?.disabled,
+      ).toBe(true);
 
       await act(async () =>
         root.render(render("", [{
