@@ -272,6 +272,32 @@ function seedEncodeQueue(variant, fingerprintFills) {
     outputPath: join(mediaLibraryPath, `Queue active ${variant}.mkv`),
   });
 
+  const batchArchive = createArchive({
+    key: `queue-batch-${variant}`,
+    label: `ENCODE_QUEUE_BATCH_${variant.toUpperCase()}`,
+    fingerprintFill: fingerprintFills.batchSelections,
+    titles: [
+      detailedTitle(1, 5_400, 14),
+      detailedTitle(2, 5_400, 14),
+    ],
+  });
+  for (const [titleNumber, title] of [
+    [1, `Queue second ${variant}`],
+    [2, `Queue conflict ${variant}`],
+  ]) {
+    const item = access.catalog.createMediaItem({
+      kind: "movie",
+      title,
+      year: 2026,
+    });
+    access.catalog.createDiscSelection({
+      originalDiscArchiveId: batchArchive.id,
+      mediaItemId: item.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber },
+    });
+  }
+  completeReview(batchArchive.id);
+
   const overflowArchive = createArchive({
     key: `queue-overflow-${variant}`,
     label: `ENCODE_QUEUE_OVERFLOW_${variant.toUpperCase()}`,
@@ -313,12 +339,14 @@ try {
     completedSelection: "6",
     activeSelection: "7",
     overflowSelection: "b",
+    batchSelections: "d",
   });
   seedEncodeQueue("mobile", {
     newSelection: "8",
     completedSelection: "9",
     activeSelection: "a",
     overflowSelection: "c",
+    batchSelections: "e",
   });
 } finally {
   access.close();

@@ -59,29 +59,33 @@ describe("EncodeJobsView", () => {
     }
   });
 
-  it("lets a user select a reviewed Disc Selection and active profile version", () => {
-    const selectionId = "selection-1" as DiscSelectionId;
+  it("renders a checked first-encode picker beside an empty worklist", () => {
+    const selection: EncodeSelectionOption = {
+      id: "selection-1" as DiscSelectionId,
+      mediaItemId: "movie-1",
+      mediaTitle: "Queue Me",
+      mediaYear: 2001,
+      sourceDescription: "DVD main feature",
+      hasCompletedEncode: false,
+      priorCompletedJob: null,
+      logicalJob: null,
+      suggestedOutputPath:
+        "/media/movies/Queue Me (2001)/Queue Me (2001).mkv",
+    };
     const profileId = "profile-v2" as EncodingProfileId;
     const html = renderToStaticMarkup(
       <EncodeJobsView
         selectedProfileId={profileId}
+        checkedSelections={[selection]}
+        worklistRows={[]}
+        queueSummary={null}
+        profileUnavailable={false}
         state={{
           status: "loaded",
           historyGroup: "not_encoded",
           query: "",
           counts: { notEncoded: 1, reEncode: 0 },
-          selections: [{
-            id: selectionId,
-            mediaItemId: "movie-1",
-            mediaTitle: "Queue Me",
-            mediaYear: 2001,
-            sourceDescription: "DVD main feature",
-            hasCompletedEncode: false,
-            priorCompletedJob: null,
-            logicalJob: null,
-            suggestedOutputPath:
-              "/media/movies/Queue Me (2001)/Queue Me (2001).mkv",
-          }],
+          selections: [selection],
           profiles: [{
             id: profileId,
             displayName: "DVD library",
@@ -104,6 +108,12 @@ describe("EncodeJobsView", () => {
         isSaving={false}
         requestError={null}
         onQueue={() => undefined}
+        onToggleSelection={() => undefined}
+        onAddSelected={() => undefined}
+        onWorklistPath={() => undefined}
+        onRemoveWorklistRow={() => undefined}
+        onClearWorklist={() => undefined}
+        onQueueWorklist={() => undefined}
         onRetry={() => undefined}
         onHistoryGroup={() => undefined}
         onSearch={() => undefined}
@@ -114,179 +124,80 @@ describe("EncodeJobsView", () => {
     );
 
     expect(html).toContain("Queue Encode Jobs");
-    expect(html).toContain("Queue Me (2001) · DVD main feature · Not encoded");
-    expect(html).toContain("DVD library · Version 2");
-    expect(html).toContain('name="discSelectionId"');
-    expect(html).toContain('name="encodingProfileId"');
-    expect(html).toContain('name="outputPath"');
-    expect(html).toContain("Queue new Encode Job");
+    expect(html).toContain("Queue Me (2001) · DVD main feature");
+    expect(html).toContain('type="checkbox"');
+    expect(html).toContain("Add selected to batch");
+    expect(html).toContain("First-encode worklist");
+    expect(html).toContain("Queue 0 Encode Jobs");
     expect(html).toContain("Next active profiles");
   });
 
-  it("fills an editable final output path for each reviewed selection", async () => {
-    const container = document.createElement("div");
-    const root = createRoot(container);
-
-    await act(async () => {
-      root.render(
-        <EncodeJobsView
-          selectedProfileId={"profile-v2" as EncodingProfileId}
-          state={{
-            status: "loaded",
-            historyGroup: "not_encoded",
-            query: "",
-            counts: { notEncoded: 2, reEncode: 0 },
-            selections: [{
-              id: "selection-1" as DiscSelectionId,
-              mediaItemId: "movie-1",
-              mediaTitle: "Queue Me",
-              mediaYear: 2001,
-              sourceDescription: "DVD main feature",
-              hasCompletedEncode: false,
-              priorCompletedJob: null,
-              logicalJob: null,
-              suggestedOutputPath:
-                "/media/movies/Queue Me (2001)/Queue Me (2001).mkv",
-            }, {
-              id: "selection-2" as DiscSelectionId,
-              mediaItemId: "movie-2",
-              mediaTitle: "Queue Next",
-              mediaYear: 2002,
-              sourceDescription: "DVD title 2",
-              hasCompletedEncode: false,
-              priorCompletedJob: null,
-              logicalJob: null,
-              suggestedOutputPath:
-                "/media/movies/Queue Next (2002)/Queue Next (2002).mkv",
-            }],
-            profiles: [{
-              id: "profile-v2" as EncodingProfileId,
-              displayName: "DVD library",
-              version: 2,
-            }],
-            page: {
-              offset: 0,
-              limit: 100,
-              total: 2,
-              hasPrevious: false,
-              hasNext: false,
-            },
-            profilePage: {
-              offset: 0,
-              limit: 100,
-              hasPrevious: false,
-              hasNext: false,
-            },
-          }}
-          isSaving={false}
-          requestError={null}
-          onQueue={() => undefined}
-          onRetry={() => undefined}
-          onHistoryGroup={() => undefined}
-          onSearch={() => undefined}
-          onProfileChange={() => undefined}
-          onSelectionPage={() => undefined}
-          onProfilePage={() => undefined}
-        />,
-      );
-    });
-
-    const selection = container.querySelector<HTMLSelectElement>(
-      'select[name="discSelectionId"]',
-    );
-    const outputPath = container.querySelector<HTMLInputElement>(
-      'input[name="outputPath"]',
-    );
-    if (!selection || !outputPath) {
-      throw new Error("Expected Encode Job form fields");
-    }
-
-    await act(async () => {
-      selection.value = "selection-1";
-      selection.dispatchEvent(new Event("change", { bubbles: true }));
-    });
-
-    expect(outputPath.value).toBe(
-      "/media/movies/Queue Me (2001)/Queue Me (2001).mkv",
-    );
-
-    await act(async () => {
-      outputPath.value = "/media/movies/Operator choice.mkv";
-      outputPath.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    expect(outputPath.value).toBe("/media/movies/Operator choice.mkv");
-
-    await act(async () => {
-      selection.value = "selection-2";
-      selection.dispatchEvent(new Event("change", { bubbles: true }));
-    });
-    expect(outputPath.value).toBe(
-      "/media/movies/Queue Next (2002)/Queue Next (2002).mkv",
-    );
-    await act(async () => root.unmount());
-  });
-
-  it("preserves a custom queue choice only while its group and revision stay current", async () => {
+  it("exposes editable worklist paths only with a visible shared profile", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     const container = document.createElement("div");
     const root = createRoot(container);
-    const onQueue = vi.fn();
-    const selection = {
-      id: "selection-pinned" as DiscSelectionId,
-      mediaItemId: "movie-pinned",
-      mediaTitle: "Pinned choice",
-      mediaYear: 2005,
-      sourceDescription: "DVD title 2",
+    const onWorklistPath = vi.fn();
+    const onQueueWorklist = vi.fn();
+    const profileId = "profile-v2" as EncodingProfileId;
+    const selection: EncodeSelectionOption = {
+      id: "selection-1" as DiscSelectionId,
+      mediaItemId: "movie-1",
+      mediaTitle: "Queue Me",
+      mediaYear: 2001,
+      sourceDescription: "DVD main feature",
       hasCompletedEncode: false,
       priorCompletedJob: null,
       logicalJob: null,
-      suggestedOutputPath: "/media/movies/Pinned choice (2005).mkv",
+      suggestedOutputPath:
+        "/media/movies/Queue Me (2001)/Queue Me (2001).mkv",
     };
-    const render = (
-      query: string | null,
-      selections: EncodeSelectionOption[],
-      historyGroup: "not_encoded" | "re_encode" = "not_encoded",
-      successfulQueueRevision = 0,
-      selectedProfileId: EncodingProfileId =
-        "profile-pinned" as EncodingProfileId,
-    ) => (
+    const render = (profileVisible: boolean) => (
       <EncodeJobsView
-        selectedProfileId={selectedProfileId}
-        successfulQueueRevision={successfulQueueRevision}
-        state={query === null
-          ? { status: "loading" }
-          : {
-            status: "loaded",
-            historyGroup,
-            query,
-            counts: { notEncoded: 2, reEncode: 0 },
-            selections,
-            profiles: [{
-              id: "profile-pinned" as EncodingProfileId,
-              displayName: "Pinned profile",
-              version: 1,
-            }, {
-              id: "profile-next" as EncodingProfileId,
-              displayName: "Next profile",
-              version: 1,
-            }],
-            page: {
-              offset: 0,
-              limit: 100,
-              total: selections.length,
-              hasPrevious: false,
-              hasNext: false,
-            },
-            profilePage: {
-              offset: 0,
-              limit: 100,
-              hasPrevious: false,
-              hasNext: false,
-            },
-          }}
+        selectedProfileId={profileId}
+        checkedSelections={[]}
+        worklistRows={[{
+          selection,
+          outputPath: selection.suggestedOutputPath!,
+          status: "ready",
+          error: null,
+          attemptedProfile: null,
+        }]}
+        queueSummary={null}
+        profileUnavailable={false}
+        state={{
+          status: "loaded",
+          historyGroup: "not_encoded",
+          query: "",
+          counts: { notEncoded: 1, reEncode: 0 },
+          selections: [selection],
+          profiles: [{
+            id: (profileVisible ? profileId : "profile-page-2") as EncodingProfileId,
+            displayName: "DVD library",
+            version: 2,
+          }],
+          page: {
+            offset: 0,
+            limit: 100,
+            total: 1,
+            hasPrevious: false,
+            hasNext: false,
+          },
+          profilePage: {
+            offset: profileVisible ? 0 : 100,
+            limit: 100,
+            hasPrevious: !profileVisible,
+            hasNext: false,
+          },
+        }}
         isSaving={false}
         requestError={null}
-        onQueue={onQueue}
+        onQueue={() => undefined}
+        onToggleSelection={() => undefined}
+        onAddSelected={() => undefined}
+        onWorklistPath={onWorklistPath}
+        onRemoveWorklistRow={() => undefined}
+        onClearWorklist={() => undefined}
+        onQueueWorklist={onQueueWorklist}
         onRetry={() => undefined}
         onHistoryGroup={() => undefined}
         onSearch={() => undefined}
@@ -296,227 +207,43 @@ describe("EncodeJobsView", () => {
       />
     );
 
-    try {
-      await act(async () => root.render(render("", [selection])));
-      const picker = container.querySelector<HTMLSelectElement>(
-        'select[name="discSelectionId"]',
-      );
-      if (!picker) {
-        throw new Error("Expected Disc Selection picker");
-      }
-      await act(async () => {
-        picker.value = selection.id;
-        picker.dispatchEvent(new Event("change", { bubbles: true }));
-      });
-      const outputPath = container.querySelector<HTMLInputElement>(
-        'input[name="outputPath"]',
-      );
-      if (!outputPath) {
-        throw new Error("Expected output path");
-      }
-      await act(async () => {
-        const valueSetter = Object.getOwnPropertyDescriptor(
-          HTMLInputElement.prototype,
-          "value",
-        )?.set;
-        if (!valueSetter) {
-          throw new Error("Expected native input value setter");
-        }
-        valueSetter.call(outputPath, "/media/movies/Operator choice.mkv");
-        outputPath.dispatchEvent(new Event("input", { bubbles: true }));
-      });
-      expect(outputPath.value).toBe("/media/movies/Operator choice.mkv");
-
-      await act(async () =>
-        root.render(render(
-          "",
-          [selection],
-          "not_encoded",
-          0,
-          "profile-next" as EncodingProfileId,
-        ))
-      );
-      const queueForm = outputPath.closest("form");
-      const submit = queueForm?.querySelector<HTMLButtonElement>(
-        'button[type="submit"]',
-      );
-      if (!queueForm || !submit) {
-        throw new Error("Expected queue form");
-      }
-      expect(outputPath.readOnly).toBe(true);
-      expect(submit.disabled).toBe(true);
-      await act(async () => {
-        queueForm.dispatchEvent(
-          new Event("submit", { bubbles: true, cancelable: true }),
-        );
-      });
-      expect(onQueue).not.toHaveBeenCalled();
-      await act(async () => root.render(render("", [selection])));
-
-      await act(async () => root.render(render(null, [])));
-      await act(async () => root.render(render("another title", [])));
-      const visiblePicker = container.querySelector<HTMLSelectElement>(
-        'select[name="discSelectionId"]',
-      );
-      const visibleOutputPath = container.querySelector<HTMLInputElement>(
-        'input[name="outputPath"]',
-      );
-      if (!visiblePicker || !visibleOutputPath) {
-        throw new Error("Expected restored Encode Job form");
-      }
-
-      expect(container.textContent).toContain(
-        "Pinned choice (2005) · DVD title 2",
-      );
-      expect(container.textContent).toContain(
-        'No Disc Selections match "another title" in Not encoded.',
-      );
-      expect(visiblePicker.value).toBe(selection.id);
-      expect(visibleOutputPath.value).toBe(
-        "/media/movies/Operator choice.mkv",
-      );
-      expect(visibleOutputPath.readOnly).toBe(true);
-      expect(container.textContent).toContain(
-        "Return to its result page to refresh the queue action and output path.",
-      );
-      expect(
-        visibleOutputPath.closest("form")?.querySelector<HTMLButtonElement>(
-          'button[type="submit"]',
-        )?.disabled,
-      ).toBe(true);
-
-      await act(async () =>
-        root.render(render("", [{
-          ...selection,
-          logicalJob: {
-            id: "job-pinned" as EncodeJobId,
-            encodingProfileId: "profile-pinned" as EncodingProfileId,
-            outputPath: "/media/movies/Reserved by queue.mkv",
-            status: "queued",
-            queueAvailable: false,
-          },
-        }]))
-      );
-      expect(visibleOutputPath.value).toBe(
-        "/media/movies/Reserved by queue.mkv",
-      );
-      expect(visibleOutputPath.readOnly).toBe(true);
-
-      await act(async () => root.render(render("", [], "re_encode")));
-      expect(container.textContent).not.toContain("Pinned choice (2005)");
-      expect(visiblePicker.value).toBe("");
-      expect(
-        container.querySelector<HTMLInputElement>('input[name="outputPath"]')
-          ?.value,
-      ).toBe("");
-
-      await act(async () =>
-        root.render(render("", [selection], "not_encoded"))
-      );
-      const returnedPicker = container.querySelector<HTMLSelectElement>(
-        'select[name="discSelectionId"]',
-      );
-      if (!returnedPicker) {
-        throw new Error("Expected returned Disc Selection picker");
-      }
-      await act(async () => {
-        returnedPicker.value = selection.id;
-        returnedPicker.dispatchEvent(new Event("change", { bubbles: true }));
-      });
-      await act(async () =>
-        root.render(render("another title", [], "not_encoded", 1))
-      );
-      expect(container.textContent).not.toContain("Pinned choice (2005)");
-      expect(returnedPicker.value).toBe("");
-    } finally {
-      await act(async () => root.unmount());
-      vi.unstubAllGlobals();
+    await act(async () => root.render(render(true)));
+    const outputPath = container.querySelector<HTMLInputElement>(
+      'input[aria-label="Final output path for Queue Me"]',
+    );
+    const queueButton = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Queue 1 Encode Job",
+    );
+    if (!outputPath || !queueButton) {
+      throw new Error("Expected worklist path and queue action");
     }
-  });
-
-  it("cannot submit a profile that is absent from the visible page", async () => {
-    const container = document.createElement("div");
-    const root = createRoot(container);
-    const onQueue = vi.fn();
+    expect(outputPath.readOnly).toBe(false);
+    expect(queueButton.disabled).toBe(false);
 
     await act(async () => {
-      root.render(
-        <EncodeJobsView
-          selectedProfileId={"profile-page-1" as EncodingProfileId}
-          state={{
-            status: "loaded",
-            historyGroup: "not_encoded",
-            query: "",
-            counts: { notEncoded: 1, reEncode: 0 },
-            selections: [{
-              id: "selection-page-2" as DiscSelectionId,
-              mediaItemId: "movie-page-2",
-              mediaTitle: "Paged profile movie",
-              mediaYear: 2004,
-              sourceDescription: "DVD main feature",
-              hasCompletedEncode: false,
-              priorCompletedJob: null,
-              logicalJob: null,
-              suggestedOutputPath:
-                "/media/movies/Paged profile movie (2004).mkv",
-            }],
-            profiles: [{
-              id: "profile-page-2" as EncodingProfileId,
-              displayName: "Profile page two",
-              version: 1,
-            }],
-            page: {
-              offset: 0,
-              limit: 100,
-              total: 1,
-              hasPrevious: false,
-              hasNext: false,
-            },
-            profilePage: {
-              offset: 100,
-              limit: 100,
-              hasPrevious: true,
-              hasNext: false,
-            },
-          }}
-          isSaving={false}
-          requestError={null}
-          onQueue={onQueue}
-          onRetry={() => undefined}
-          onHistoryGroup={() => undefined}
-          onSearch={() => undefined}
-          onProfileChange={() => undefined}
-          onSelectionPage={() => undefined}
-          onProfilePage={() => undefined}
-        />,
-      );
+      const valueSetter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )?.set;
+      if (!valueSetter) {
+        throw new Error("Expected native input value setter");
+      }
+      valueSetter.call(outputPath, "/media/movies/Operator choice.mkv");
+      outputPath.dispatchEvent(new Event("input", { bubbles: true }));
     });
+    expect(onWorklistPath).toHaveBeenCalledWith(
+      selection.id,
+      "/media/movies/Operator choice.mkv",
+    );
 
-    const profile = container.querySelector<HTMLSelectElement>(
-      'select[name="encodingProfileId"]',
-    );
-    const selection = container.querySelector<HTMLSelectElement>(
-      'select[name="discSelectionId"]',
-    );
-    const form = selection?.closest("form");
-    const submit = form?.querySelector<HTMLButtonElement>(
-      'button[type="submit"]',
-    );
-    if (!profile || !selection || !form || !submit) {
-      throw new Error("Expected paged Encode Job form");
-    }
-
-    await act(async () => {
-      selection.value = "selection-page-2";
-      selection.dispatchEvent(new Event("change", { bubbles: true }));
-    });
-    expect(profile.value).toBe("");
-    expect(submit.disabled).toBe(true);
-    await act(async () => {
-      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-    });
-    expect(onQueue).not.toHaveBeenCalled();
+    await act(async () => root.render(render(false)));
+    expect(
+      [...container.querySelectorAll("button")].find(
+        (button) => button.textContent === "Queue 1 Encode Job",
+      )?.disabled,
+    ).toBe(true);
     await act(async () => root.unmount());
+    vi.unstubAllGlobals();
   });
 
   it("loads options and submits a same-origin JSON queue request", async () => {
