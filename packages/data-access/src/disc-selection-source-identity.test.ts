@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   createDiscSelectionSourceIdentity,
+  discSelectionSourceDescription,
   DomainInvariantError,
   type DiscSelectionSourceIdentityInput,
 } from "./index.js";
@@ -21,6 +22,23 @@ describe("Disc Selection source identity", () => {
 
     expect(identity).toEqual(input);
     expect(Object.isFrozen(identity)).toBe(true);
+  });
+
+  it.each([
+    [{ kind: "main_feature" } as const, "DVD main feature"],
+    [{ kind: "dvd_title", titleNumber: 2 } as const, "DVD title 2"],
+    [{
+      kind: "dvd_chapters",
+      titleNumber: 3,
+      chapterStart: 4,
+      chapterEnd: 7,
+    } as const, "DVD title 3, chapters 4–7"],
+  ])("describes the canonical source identity %#", (input, description) => {
+    expect(
+      discSelectionSourceDescription(
+        createDiscSelectionSourceIdentity(input),
+      ),
+    ).toBe(description);
   });
 
   it.each([

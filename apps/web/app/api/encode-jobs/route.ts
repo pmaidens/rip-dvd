@@ -1,6 +1,7 @@
 import { loadConfig } from "@rip-dvd/config";
 import {
   DomainInvariantError,
+  discSelectionSourceDescription,
   InvalidStatusTransitionError,
   RecordNotFoundError,
   validateEncodeQueueSearchQuery,
@@ -126,17 +127,6 @@ function serializeJob(job: EncodeJob) {
   };
 }
 
-function sourceDescription(selection: DiscSelection): string {
-  const sourceIdentity = selection.sourceIdentity;
-  if (sourceIdentity.kind === "main_feature") {
-    return "DVD main feature";
-  }
-  if (sourceIdentity.kind === "dvd_title") {
-    return `DVD title ${sourceIdentity.titleNumber}`;
-  }
-  return `DVD title ${sourceIdentity.titleNumber}, chapters ${sourceIdentity.chapterStart}–${sourceIdentity.chapterEnd}`;
-}
-
 function outputPathSelectionQualifier(
   selection: DiscSelection,
   hasMultipleSelections: boolean,
@@ -144,7 +134,8 @@ function outputPathSelectionQualifier(
   if (!hasMultipleSelections) {
     return null;
   }
-  const description = selection.label?.trim() || sourceDescription(selection);
+  const description = selection.label?.trim() ||
+    discSelectionSourceDescription(selection.sourceIdentity);
   return `${description} ${selection.id.slice(-8)}`;
 }
 
@@ -215,7 +206,9 @@ function readQueueOptions(
           mediaItemId: selection.mediaItemId,
           mediaTitle: mediaItem?.title ?? "Unknown Media Item",
           mediaYear: mediaItem?.year ?? null,
-          sourceDescription: sourceDescription(selection),
+          sourceDescription: discSelectionSourceDescription(
+            selection.sourceIdentity,
+          ),
           hasCompletedEncode: queueSelection.hasCompletedEncode,
           priorCompletedJob:
             priorCompletedJob === null || priorCompletedProfile === null

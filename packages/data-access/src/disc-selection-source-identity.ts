@@ -27,6 +27,19 @@ export type DiscSelectionSourceIdentity =
     readonly [discSelectionSourceIdentityBrand]: true;
   };
 
+export function discSelectionSourceDescription(
+  identity: DiscSelectionSourceIdentityInput,
+): string {
+  switch (identity.kind) {
+    case "main_feature":
+      return "DVD main feature";
+    case "dvd_title":
+      return `DVD title ${identity.titleNumber}`;
+    case "dvd_chapters":
+      return `DVD title ${identity.titleNumber}, chapters ${identity.chapterStart}–${identity.chapterEnd}`;
+  }
+}
+
 export interface DiscSelectionSourceIdentityColumns {
   sourceKey: string;
   kind: DiscSelectionSourceIdentityInput["kind"];

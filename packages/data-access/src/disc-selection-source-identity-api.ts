@@ -1,4 +1,7 @@
-export { createDiscSelectionSourceIdentity } from "./disc-selection-source-identity.js";
+export {
+  createDiscSelectionSourceIdentity,
+  discSelectionSourceDescription,
+} from "./disc-selection-source-identity.js";
 export type {
   DiscSelectionSourceIdentity,
   DiscSelectionSourceIdentityInput,

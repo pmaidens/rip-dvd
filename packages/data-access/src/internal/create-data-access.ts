@@ -96,6 +96,8 @@ import {
   type ValidatedMediaItem,
 } from "./media-item-validation.js";
 import {
+  deserializeDiscSelectionSourceIdentity,
+  discSelectionSourceDescription,
   serializeDiscSelectionSourceIdentity,
   type DiscSelectionSourceIdentityColumns,
 } from "../disc-selection-source-identity.js";
@@ -712,6 +714,30 @@ function openMigratedDatabase(
           ? normalizeMediaItemSearchTitle(value)
           : null,
     );
+    sqlite.function(
+      "rip_dvd_disc_selection_source_description",
+      { deterministic: true },
+      (kind, titleNumber, chapterStart, chapterEnd) => {
+        if (
+          (kind !== "main_feature" &&
+            kind !== "dvd_title" &&
+            kind !== "dvd_chapters") ||
+          (titleNumber !== null && typeof titleNumber !== "number") ||
+          (chapterStart !== null && typeof chapterStart !== "number") ||
+          (chapterEnd !== null && typeof chapterEnd !== "number")
+        ) {
+          return null;
+        }
+        return discSelectionSourceDescription(
+          deserializeDiscSelectionSourceIdentity({
+            kind,
+            titleNumber,
+            chapterStart,
+            chapterEnd,
+          }),
+        );
+      },
+    );
     sqlite.exec(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
     sqlite.exec("PRAGMA foreign_keys = ON");
     if (sqlite.prepare("PRAGMA foreign_key_check").get() !== undefined) {
@@ -828,15 +854,12 @@ export function createDataAccessInternal(
         rip_dvd_normalize_media_item_title(
           media_item.title || ' ' ||
           coalesce(cast(media_item.year as text), '') || ' ' ||
-          case disc_selection.kind
-            when 'main_feature' then 'DVD main feature'
-            when 'dvd_title' then
-              'DVD title ' || disc_selection.title_number
-            else
-              'DVD title ' || disc_selection.title_number ||
-              ', chapters ' || disc_selection.chapter_start ||
-              '–' || disc_selection.chapter_end
-          end
+          rip_dvd_disc_selection_source_description(
+            disc_selection.kind,
+            disc_selection.title_number,
+            disc_selection.chapter_start,
+            disc_selection.chapter_end
+          )
         ) as searchable_details,
         case when completed_selection_history.disc_selection_id is null
           then 0 else 1 end as has_completed_encode
