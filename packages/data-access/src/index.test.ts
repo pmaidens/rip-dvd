@@ -446,6 +446,22 @@ describe("data-access facade", () => {
     access.close();
   });
 
+  it("caps Encode queue Disc Selection pages at 100", () => {
+    const access = openTestDatabase();
+
+    expect(() =>
+      access.readConsistentSnapshot((snapshot) =>
+        snapshot.encodeJobs.listQueueDiscSelections({
+          historyGroup: "not_encoded",
+          limit: 101,
+        })
+      )
+    ).toThrow(
+      "Encode queue Disc Selection limit must be a safe integer between 1 and 100",
+    );
+    access.close();
+  });
+
   it("keeps every configured missing drive plus bounded disabled history", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
@@ -3884,6 +3900,9 @@ describe("data-access facade", () => {
   });
 
   it("atomically completes review and admits an opted-in corrected replacement", () => {
+    vi.useFakeTimers();
+    const firstCompletionAt = new Date("2026-08-26T07:00:00.000Z");
+    vi.setSystemTime(firstCompletionAt);
     const databasePath = createTestDatabasePath();
     const logicalOutputDirectory = join(dirname(databasePath), "logical-media");
     const canonicalOutputDirectory = join(
@@ -3972,6 +3991,7 @@ describe("data-access facade", () => {
         status: "running",
       });
     expect(access.encodeJobs.list()).toContainEqual(expect.objectContaining({
+      completedAt: null,
       id: replacement.id,
       predecessorEncodeJobId: predecessor.id,
       status: "running",
@@ -4049,6 +4069,7 @@ describe("data-access facade", () => {
       )
     ).toThrow("Retained Encode output provenance is incomplete");
     expect(access.encodeJobs.list()).toContainEqual(expect.objectContaining({
+      completedAt: null,
       id: replacement.id,
       status: "completed",
       publicationCompletionPending: true,
@@ -4071,6 +4092,7 @@ describe("data-access facade", () => {
       { retainedOutputPath, retainedOutputIdentity: priorOutputIdentity },
     );
     expect(finalizedReplacement.job).toMatchObject({
+      completedAt: firstCompletionAt,
       id: replacement.id,
       replacementOutputIdentity: null,
       status: "completed",
@@ -4081,13 +4103,15 @@ describe("data-access facade", () => {
         () => true,
       )
     ).toThrow("Retained Encode output provenance is incomplete");
-    expect(() =>
-      access.encodeJobs.completePublishedPartial(
-        fencedPublication,
-        () => true,
-        { retainedOutputPath, retainedOutputIdentity: priorOutputIdentity },
-      )
-    ).not.toThrow();
+    vi.setSystemTime(new Date("2026-08-26T07:01:00.000Z"));
+    const replayedPublication = access.encodeJobs.completePublishedPartial(
+      fencedPublication,
+      () => true,
+      { retainedOutputPath, retainedOutputIdentity: priorOutputIdentity },
+    );
+    expect(replayedPublication).toMatchObject({
+      job: expect.objectContaining({ completedAt: firstCompletionAt }),
+    });
     access.encodeJobs.completePartialCleanup(fencedPublication);
     const sqlite = new DatabaseSync(databasePath);
     expect(sqlite.prepare(
@@ -4180,6 +4204,8 @@ describe("data-access facade", () => {
       })).toThrow(
         "Disc Selection correction Retained Encode output history limit must be a safe integer between 1 and 101",
       );
+    const reencodeCompletionAt = new Date("2026-08-26T07:05:00.000Z");
+    vi.setSystemTime(reencodeCompletionAt);
     const requeuedReplacement = access.encodeJobs.requeue(replacement.id);
     const reencodeClaim = access.encodeJobs.claimNext("corrected-reencoder");
     if (!reencodeClaim || reencodeClaim.id !== requeuedReplacement.id) {
@@ -4205,7 +4231,7 @@ describe("data-access facade", () => {
         reencodePublication,
         correctedOutputPath,
       );
-    access.encodeJobs.completePublishedClaim(
+    const finalizedReencode = access.encodeJobs.completePublishedClaim(
       reencodeClaim,
       fencedReencodePublication,
       () => true,
@@ -4214,6 +4240,11 @@ describe("data-access facade", () => {
         retainedOutputIdentity: correctedOutputIdentity,
       },
     );
+    expect(finalizedReencode).toMatchObject({
+      completedAt: reencodeCompletionAt,
+      id: replacement.id,
+      status: "completed",
+    });
     access.encodeJobs.completePartialCleanup(fencedReencodePublication);
     expect(access.encodeJobs.listRetainedOutputs([replacement.id])).toEqual(
       expect.arrayContaining([
