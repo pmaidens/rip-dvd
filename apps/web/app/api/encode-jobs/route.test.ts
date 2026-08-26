@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 
 import { describe, expect, it, vi } from "vitest";
 
@@ -92,12 +93,17 @@ describe("Encode Jobs API", () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({
+      historyGroup: "not_encoded",
+      counts: { notEncoded: 1, reEncode: 0 },
       selections: [{
         id: reviewed.selection.id,
         mediaItemId: reviewed.item.id,
         mediaTitle: "Encode API reviewed",
         mediaYear: 2026,
         sourceDescription: "DVD main feature",
+        hasCompletedEncode: false,
+        priorCompletedJob: null,
+        logicalJob: null,
         suggestedOutputPath:
           "/media/movies/Encode API reviewed (2026)/Encode API reviewed (2026).mkv",
       }],
@@ -109,6 +115,7 @@ describe("Encode Jobs API", () => {
       page: {
         offset: 0,
         limit: 100,
+        total: 1,
         hasPrevious: false,
         hasNext: false,
       },
@@ -119,6 +126,707 @@ describe("Encode Jobs API", () => {
         hasNext: false,
       },
     });
+  });
+
+  it("classifies queue candidates and returns profile-relative Encode Job details", async () => {
+    const { access, databasePath } = dataAccessFixture.createWithDatabasePath();
+    const neverEncoded = createSelection(access, "never-encoded");
+    const failed = createSelection(access, "failed-history");
+    const cancelled = createSelection(access, "cancelled-history");
+    const queued = createSelection(access, "queued-history");
+    const completed = createSelection(access, "completed-history");
+    const unreviewed = createSelection(access, "unreviewed-history");
+    for (const candidate of [
+      neverEncoded,
+      failed,
+      cancelled,
+      queued,
+      completed,
+    ]) {
+      completeCatalogReview(access, candidate.archive.id);
+    }
+    const profile = access.encodingProfiles.create({
+      key: "history-profile",
+      displayName: "History profile",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30", container: "mkv" },
+    });
+
+    const failedJob = access.encodeJobs.enqueue({
+      discSelectionId: failed.selection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Failed history.mkv",
+    });
+    const failedClaim = access.encodeJobs.claimNext("failed-history-worker");
+    if (!failedClaim) {
+      throw new Error("Expected failed-history Encode Job claim");
+    }
+    access.encodeJobs.fail(failedClaim, "HandBrake stopped");
+
+    const cancelledJob = access.encodeJobs.enqueue({
+      discSelectionId: cancelled.selection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Cancelled history.mkv",
+    });
+    access.encodeJobs.requestCancellation(cancelledJob.id);
+
+    const completedJob = access.encodeJobs.enqueue({
+      discSelectionId: completed.selection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Completed history.mkv",
+    });
+    const completedClaim = access.encodeJobs.claimNext(
+      "completed-history-worker",
+    );
+    if (!completedClaim) {
+      throw new Error("Expected completed-history Encode Job claim");
+    }
+    access.encodeJobs.complete(completedClaim);
+
+    const queuedJob = access.encodeJobs.enqueue({
+      discSelectionId: queued.selection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Queued history.mkv",
+    });
+    const config = () => ({
+      mediaLibraryPath: "/media/movies",
+      webTrustedOrigin: "http://localhost:3000",
+    });
+
+    const defaultResponse = await createEncodeJobsRoute(
+      new Request(
+        `http://localhost:3000/api/encode-jobs?encodingProfileId=${profile.id}`,
+      ),
+      () => access,
+      config,
+    );
+    expect(defaultResponse.status).toBe(200);
+    const defaultBody = await defaultResponse.json();
+
+    expect(defaultBody.historyGroup).toBe("not_encoded");
+    expect(defaultBody.counts).toEqual({ notEncoded: 4, reEncode: 1 });
+    expect(defaultBody.page).toEqual({
+      offset: 0,
+      limit: 100,
+      total: 4,
+      hasPrevious: false,
+      hasNext: false,
+    });
+    expect(defaultBody.selections.map((selection: { id: string }) => selection.id))
+      .toEqual([
+        neverEncoded.selection.id,
+        failed.selection.id,
+        cancelled.selection.id,
+        queued.selection.id,
+      ]);
+    expect(defaultBody.selections).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: neverEncoded.selection.id,
+        hasCompletedEncode: false,
+        priorCompletedJob: null,
+        logicalJob: null,
+      }),
+      expect.objectContaining({
+        id: failed.selection.id,
+        logicalJob: expect.objectContaining({
+          id: failedJob.id,
+          status: "failed",
+          outputPath: "/media/movies/Failed history.mkv",
+        }),
+      }),
+      expect.objectContaining({
+        id: cancelled.selection.id,
+        logicalJob: expect.objectContaining({
+          id: cancelledJob.id,
+          status: "cancelled",
+          outputPath: "/media/movies/Cancelled history.mkv",
+        }),
+      }),
+      expect.objectContaining({
+        id: queued.selection.id,
+        logicalJob: expect.objectContaining({
+          id: queuedJob.id,
+          status: "queued",
+          outputPath: "/media/movies/Queued history.mkv",
+        }),
+      }),
+    ]));
+    expect(defaultBody.selections).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: unreviewed.selection.id }),
+    ]));
+
+    const reEncodeResponse = await createEncodeJobsRoute(
+      new Request(
+        `http://localhost:3000/api/encode-jobs?historyGroup=re_encode&encodingProfileId=${profile.id}`,
+      ),
+      () => access,
+      config,
+    );
+    expect(reEncodeResponse.status).toBe(200);
+    const reEncodeBody = await reEncodeResponse.json();
+    expect(reEncodeBody.historyGroup).toBe("re_encode");
+    expect(reEncodeBody.selections).toEqual([
+      expect.objectContaining({
+        id: completed.selection.id,
+        hasCompletedEncode: true,
+        priorCompletedJob: expect.objectContaining({
+          id: completedJob.id,
+          status: "completed",
+          profile: {
+            id: profile.id,
+            displayName: "History profile",
+            version: 1,
+          },
+        }),
+        logicalJob: expect.objectContaining({
+          id: completedJob.id,
+          status: "completed",
+          outputPath: "/media/movies/Completed history.mkv",
+        }),
+      }),
+    ]);
+
+    access.encodeJobs.requeue(completedJob.id);
+    const activeReEncodeResponse = await createEncodeJobsRoute(
+      new Request(
+        `http://localhost:3000/api/encode-jobs?historyGroup=re_encode&encodingProfileId=${profile.id}`,
+      ),
+      () => access,
+      config,
+    );
+    const activeReEncodeBody = await activeReEncodeResponse.json();
+    expect(activeReEncodeBody.counts).toEqual({ notEncoded: 4, reEncode: 1 });
+    expect(activeReEncodeBody.selections).toEqual([
+      expect.objectContaining({
+        id: completed.selection.id,
+        hasCompletedEncode: true,
+        priorCompletedJob: expect.objectContaining({
+          id: completedJob.id,
+          status: "completed",
+        }),
+        logicalJob: expect.objectContaining({
+          id: completedJob.id,
+          status: "queued",
+        }),
+      }),
+    ]);
+
+    const tentativeRetryClaim = access.encodeJobs.claimNext(
+      "tentative-retry-worker",
+    );
+    if (!tentativeRetryClaim || tentativeRetryClaim.id !== completedJob.id) {
+      throw new Error("Expected tentative retry claim");
+    }
+    const sqlite = new DatabaseSync(databasePath);
+    sqlite.prepare(`
+      update encode_jobs
+      set status = 'completed',
+          completed_at = updated_at,
+          publication_pending = 1,
+          publication_completion_pending = 1,
+          partial_cleanup_output_path = output_path,
+          partial_cleanup_claim_token = ?,
+          partial_cleanup_lease_token = NULL
+      where id = ?
+    `).run(tentativeRetryClaim.claimToken, completedJob.id);
+    sqlite.close();
+
+    const tentativeSummary = access.encodeJobs.listQueueDiscSelections({
+      historyGroup: "re_encode",
+      encodingProfileId: profile.id,
+      limit: 100,
+    }).selections[0];
+    expect(tentativeSummary?.priorCompletedJob).toEqual({
+      id: completedJob.id,
+      encodingProfileId: profile.id,
+      status: "completed",
+    });
+    expect(tentativeSummary?.logicalJob).toEqual({
+      id: completedJob.id,
+      encodingProfileId: profile.id,
+      outputPath: completedJob.outputPath,
+      status: "completed",
+      queueAvailable: false,
+    });
+
+    const tentativeRetryResponse = await createEncodeJobsRoute(
+      new Request(
+        `http://localhost:3000/api/encode-jobs?historyGroup=re_encode&encodingProfileId=${profile.id}`,
+      ),
+      () => access,
+      config,
+    );
+    const tentativeRetryBody = await tentativeRetryResponse.json();
+    expect(tentativeRetryBody).toEqual(expect.objectContaining({
+      counts: { notEncoded: 4, reEncode: 1 },
+      selections: [expect.objectContaining({
+        id: completed.selection.id,
+        hasCompletedEncode: true,
+        priorCompletedJob: expect.objectContaining({ id: completedJob.id }),
+        logicalJob: expect.objectContaining({
+          id: completedJob.id,
+          queueAvailable: false,
+        }),
+      })],
+    }));
+    expect(tentativeRetryBody.selections[0].priorCompletedJob)
+      .not.toHaveProperty("completedAt");
+
+    const tentativeRetryCleanup = access.encodeJobs.renewPublishedPartial({
+      jobId: completedJob.id,
+      outputPath: completedJob.outputPath,
+      claimToken: tentativeRetryClaim.claimToken,
+      leaseToken: null,
+      publicationPending: true,
+    }, () => true);
+    expect(access.encodeJobs.completePartialCleanup(tentativeRetryCleanup))
+      .toMatchObject({
+        status: "failed",
+      });
+    access.encodeJobs.requeue(completedJob.id);
+    const failedReEncodeClaim = access.encodeJobs.claimNext(
+      "failed-re-encode-worker",
+    );
+    if (!failedReEncodeClaim || failedReEncodeClaim.id !== completedJob.id) {
+      throw new Error("Expected re-encoded Encode Job claim");
+    }
+    access.encodeJobs.fail(failedReEncodeClaim, "Replacement failed");
+    const failedReEncodeResponse = await createEncodeJobsRoute(
+      new Request(
+        `http://localhost:3000/api/encode-jobs?historyGroup=re_encode&encodingProfileId=${profile.id}`,
+      ),
+      () => access,
+      config,
+    );
+    const failedReEncodeBody = await failedReEncodeResponse.json();
+    expect(failedReEncodeBody.counts).toEqual({ notEncoded: 4, reEncode: 1 });
+    expect(failedReEncodeBody.selections).toEqual([
+      expect.objectContaining({
+        id: completed.selection.id,
+        hasCompletedEncode: true,
+        priorCompletedJob: expect.objectContaining({
+          id: completedJob.id,
+          status: "completed",
+        }),
+        logicalJob: expect.objectContaining({
+          id: completedJob.id,
+          status: "failed",
+        }),
+      }),
+    ]);
+  });
+
+  it("reports one completion-ranked profile from deep history", async () => {
+    const { access, databasePath } = dataAccessFixture.createWithDatabasePath();
+    const candidate = createSelection(access, "completed-profile-order");
+    completeCatalogReview(access, candidate.archive.id);
+    const olderProfile = access.encodingProfiles.create({
+      key: "completed-profile-order-older",
+      displayName: "Older completed profile",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const newerProfile = access.encodingProfiles.create({
+      key: "completed-profile-order-newer",
+      displayName: "Newer completed profile",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const deepHistoryJobIds: string[] = [];
+    for (let index = 0; index < 101; index += 1) {
+      const profile = access.encodingProfiles.create({
+        key: `completed-profile-order-${index}`,
+        displayName: `Historical completed profile ${index}`,
+        mediaDomain: "dvd_video",
+        settings: {},
+      });
+      const job = access.encodeJobs.enqueue({
+        discSelectionId: candidate.selection.id,
+        encodingProfileId: profile.id,
+        outputPath: `/media/movies/Historical completed profile ${index}.mkv`,
+      });
+      const claim = access.encodeJobs.claimNext(
+        `completed-profile-order-worker-${index}`,
+      );
+      if (!claim || claim.id !== job.id) {
+        throw new Error("Expected deep-history profile claim");
+      }
+      access.encodeJobs.complete(claim);
+      deepHistoryJobIds.push(job.id);
+    }
+    const olderJob = access.encodeJobs.enqueue({
+      discSelectionId: candidate.selection.id,
+      encodingProfileId: olderProfile.id,
+      outputPath: "/media/movies/Older completed profile.mkv",
+    });
+    const olderClaim = access.encodeJobs.claimNext(
+      "completed-profile-order-older-worker",
+    );
+    if (!olderClaim) throw new Error("Expected older profile claim");
+    access.encodeJobs.complete(olderClaim);
+    const newerJob = access.encodeJobs.enqueue({
+      discSelectionId: candidate.selection.id,
+      encodingProfileId: newerProfile.id,
+      outputPath: "/media/movies/Newer completed profile.mkv",
+    });
+    const newerClaim = access.encodeJobs.claimNext(
+      "completed-profile-order-newer-worker",
+    );
+    if (!newerClaim) throw new Error("Expected newer profile claim");
+    access.encodeJobs.complete(newerClaim);
+
+    const sqlite = new DatabaseSync(databasePath);
+    const backdateDeepHistory = sqlite.prepare(`
+      update encode_jobs
+      set completed_at = ?, updated_at = ?
+      where id = ?
+    `);
+    for (const jobId of deepHistoryJobIds) {
+      backdateDeepHistory.run(500, 500, jobId);
+    }
+    sqlite.prepare(`
+      update encode_jobs
+      set completed_at = ?, updated_at = ?
+      where id = ?
+    `).run(1_000, 3_000, olderJob.id);
+    sqlite.prepare(`
+      update encode_jobs
+      set completed_at = ?, updated_at = ?
+      where id = ?
+    `).run(2_000, 2_000, newerJob.id);
+    sqlite.close();
+
+    const response = await createEncodeJobsRoute(
+      new Request(
+        "http://localhost:3000/api/encode-jobs?historyGroup=re_encode",
+      ),
+      () => access,
+      () => ({
+        mediaLibraryPath: "/media/movies",
+        webTrustedOrigin: "http://localhost:3000",
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(expect.objectContaining({
+      selections: [expect.objectContaining({
+        id: candidate.selection.id,
+        priorCompletedJob: expect.objectContaining({
+          id: newerJob.id,
+          status: "completed",
+          profile: expect.objectContaining({
+            id: newerProfile.id,
+            displayName: "Newer completed profile",
+          }),
+        }),
+      })],
+    }));
+  });
+
+  it("does not treat corrected replacements as ordinary profile jobs", async () => {
+    const { access, databasePath } = dataAccessFixture.createWithDatabasePath();
+    const mistaken = createSelection(access, "corrected-history");
+    completeCatalogReview(access, mistaken.archive.id);
+    const profile = access.encodingProfiles.create({
+      key: "corrected-history-profile",
+      displayName: "Corrected history profile",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30", container: "mkv" },
+    });
+    const predecessor = access.encodeJobs.enqueue({
+      discSelectionId: mistaken.selection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Corrected history.mkv",
+    });
+    const predecessorClaim = access.encodeJobs.claimNext(
+      "corrected-history-worker",
+    );
+    if (!predecessorClaim) {
+      throw new Error("Expected corrected-history Encode Job claim");
+    }
+    access.encodeJobs.complete(predecessorClaim);
+
+    const correctedItem = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Corrected Encode API title",
+      year: 2026,
+    });
+    const correction = access.catalog.correctDiscSelection(
+      mistaken.selection.id,
+      {
+        originalDiscArchiveId: mistaken.archive.id,
+        catalogRevision: access.catalog.listOriginalDiscArchives({
+          ids: [mistaken.archive.id],
+        })[0]!.updatedAt,
+        mediaItemId: correctedItem.id,
+        sourceIdentity: { kind: "main_feature" },
+      },
+    );
+    const replacement = access.catalog.completeCatalogReviewWithReplacements(
+      mistaken.archive.id,
+      access.catalog.listOriginalDiscArchives({ ids: [mistaken.archive.id] })[0]!
+        .updatedAt,
+      "reviewed_with_selections",
+      [{
+        predecessorEncodeJobId: predecessor.id,
+        encodingProfileId: profile.id,
+        outputPath: predecessor.outputPath,
+      }],
+    ).replacementEncodeJobs[0]!;
+
+    const config = () => ({
+      mediaLibraryPath: "/media/movies",
+      webTrustedOrigin: "http://localhost:3000",
+    });
+    const response = await createEncodeJobsRoute(
+      new Request(
+        `http://localhost:3000/api/encode-jobs?encodingProfileId=${profile.id}`,
+      ),
+      () => access,
+      config,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(expect.objectContaining({
+      counts: { notEncoded: 1, reEncode: 0 },
+      selections: [expect.objectContaining({
+        id: correction.discSelection.id,
+        hasCompletedEncode: false,
+        logicalJob: null,
+      })],
+    }));
+    expect(replacement).toMatchObject({
+      predecessorEncodeJobId: predecessor.id,
+      discSelectionId: correction.discSelection.id,
+      encodingProfileId: profile.id,
+      status: "queued",
+    });
+
+    const replacementClaim = access.encodeJobs.claimNext(
+      "corrected-tentative-worker",
+    );
+    if (!replacementClaim || replacementClaim.id !== replacement.id) {
+      throw new Error("Expected corrected replacement claim");
+    }
+    const sqlite = new DatabaseSync(databasePath);
+    sqlite.prepare(`
+      update encode_jobs
+      set status = 'completed',
+          completed_at = updated_at,
+          publication_pending = 1,
+          publication_completion_pending = 1,
+          partial_cleanup_output_path = output_path,
+          partial_cleanup_claim_token = ?,
+          partial_cleanup_lease_token = NULL
+      where id = ?
+    `).run(replacementClaim.claimToken, replacement.id);
+    sqlite.close();
+    const expectNotEncoded = async () => {
+      const pendingResponse = await createEncodeJobsRoute(
+        new Request("http://localhost:3000/api/encode-jobs"),
+        () => access,
+        config,
+      );
+      expect(await pendingResponse.json()).toEqual(expect.objectContaining({
+        counts: { notEncoded: 1, reEncode: 0 },
+        selections: [expect.objectContaining({
+          id: correction.discSelection.id,
+          hasCompletedEncode: false,
+        })],
+      }));
+    };
+
+    await expectNotEncoded();
+    const renewed = access.encodeJobs.renewPublishedPartial({
+      jobId: replacement.id,
+      outputPath: replacement.outputPath,
+      claimToken: replacementClaim.claimToken,
+      leaseToken: null,
+      publicationPending: true,
+    }, () => true);
+    await expectNotEncoded();
+    expect(access.encodeJobs.completePartialCleanup(renewed)).toMatchObject({
+      completedAt: null,
+      status: "failed",
+    });
+    await expectNotEncoded();
+  });
+
+  it("keeps tentative first publication out of history through recovery", async () => {
+    const { access, databasePath } = dataAccessFixture.createWithDatabasePath();
+    const candidate = createSelection(access, "tentative-completion");
+    completeCatalogReview(access, candidate.archive.id);
+    const profile = access.encodingProfiles.create({
+      key: "tentative-completion-profile",
+      displayName: "Tentative completion profile",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    const job = access.encodeJobs.enqueue({
+      discSelectionId: candidate.selection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Tentative completion.mkv",
+    });
+    const claim = access.encodeJobs.claimNext("tentative-completion-worker");
+    if (!claim) {
+      throw new Error("Expected tentative-completion Encode Job claim");
+    }
+
+    const sqlite = new DatabaseSync(databasePath);
+    sqlite.prepare(`
+      update encode_jobs
+      set status = 'completed',
+          completed_at = updated_at,
+          publication_pending = 1,
+          publication_completion_pending = 1,
+          partial_cleanup_output_path = output_path,
+          partial_cleanup_claim_token = ?,
+          partial_cleanup_lease_token = NULL
+      where id = ?
+    `).run(claim.claimToken, job.id);
+    sqlite.close();
+    const config = () => ({
+      mediaLibraryPath: "/media/movies",
+      webTrustedOrigin: "http://localhost:3000",
+    });
+
+    const expectNotEncoded = async (
+      status: "completed" | "failed",
+      queueAvailable: boolean,
+    ) => {
+      const notEncodedResponse = await createEncodeJobsRoute(
+        new Request(
+          `http://localhost:3000/api/encode-jobs?encodingProfileId=${profile.id}`,
+        ),
+        () => access,
+        config,
+      );
+      expect(await notEncodedResponse.json()).toEqual(expect.objectContaining({
+        counts: { notEncoded: 1, reEncode: 0 },
+        selections: [expect.objectContaining({
+          id: candidate.selection.id,
+          hasCompletedEncode: false,
+          logicalJob: expect.objectContaining({
+            id: job.id,
+            status,
+            queueAvailable,
+          }),
+        })],
+      }));
+
+      const reEncodeResponse = await createEncodeJobsRoute(
+        new Request(
+          "http://localhost:3000/api/encode-jobs?historyGroup=re_encode",
+        ),
+        () => access,
+        config,
+      );
+      expect(await reEncodeResponse.json()).toEqual(expect.objectContaining({
+        counts: { notEncoded: 1, reEncode: 0 },
+        selections: [],
+      }));
+    };
+
+    await expectNotEncoded("completed", false);
+    const renewed = access.encodeJobs.renewPublishedPartial({
+      jobId: job.id,
+      outputPath: job.outputPath,
+      claimToken: claim.claimToken,
+      leaseToken: null,
+      publicationPending: true,
+    }, () => true);
+    await expectNotEncoded("completed", false);
+    expect(access.encodeJobs.completePartialCleanup(renewed)).toMatchObject({
+      completedAt: null,
+      status: "failed",
+    });
+    await expectNotEncoded("failed", true);
+  });
+
+  it("keeps history counts accurate while bounding Disc Selection pages", async () => {
+    const access = dataAccessFixture.create();
+    const notEncoded = Array.from({ length: 101 }, (_, index) => {
+      const candidate = createSelection(
+        access,
+        `bounded-${String(index).padStart(3, "0")}`,
+      );
+      completeCatalogReview(access, candidate.archive.id);
+      return candidate.selection;
+    });
+    const completed = createSelection(access, "bounded-completed");
+    completeCatalogReview(access, completed.archive.id);
+    const profile = access.encodingProfiles.create({
+      key: "bounded-selection-profile",
+      displayName: "Bounded selection profile",
+      mediaDomain: "dvd_video",
+      settings: {},
+    });
+    access.encodeJobs.enqueue({
+      discSelectionId: completed.selection.id,
+      encodingProfileId: profile.id,
+      outputPath: "/media/movies/Bounded completed.mkv",
+    });
+    const claim = access.encodeJobs.claimNext("bounded-selection-worker");
+    if (!claim) {
+      throw new Error("Expected bounded selection Encode Job claim");
+    }
+    access.encodeJobs.complete(claim);
+    const config = () => ({
+      mediaLibraryPath: "/media/movies",
+      webTrustedOrigin: "http://localhost:3000",
+    });
+
+    const firstResponse = await createEncodeJobsRoute(
+      new Request("http://localhost:3000/api/encode-jobs"),
+      () => access,
+      config,
+    );
+    const firstPage = await firstResponse.json();
+    expect(firstPage.selections).toHaveLength(100);
+    expect(firstPage.selections.map((selection: { id: string }) => selection.id))
+      .toEqual(notEncoded.slice(0, 100).map((selection) => selection.id));
+    expect(firstPage.counts).toEqual({ notEncoded: 101, reEncode: 1 });
+    expect(firstPage.page).toEqual({
+      offset: 0,
+      limit: 100,
+      total: 101,
+      hasPrevious: false,
+      hasNext: true,
+    });
+
+    const secondResponse = await createEncodeJobsRoute(
+      new Request(
+        "http://localhost:3000/api/encode-jobs?selectionOffset=100",
+      ),
+      () => access,
+      config,
+    );
+    const secondPage = await secondResponse.json();
+    expect(secondPage.selections).toEqual([
+      expect.objectContaining({ id: notEncoded[100]?.id }),
+    ]);
+    expect(secondPage.counts).toEqual(firstPage.counts);
+    expect(secondPage.page).toEqual({
+      offset: 100,
+      limit: 100,
+      total: 101,
+      hasPrevious: true,
+      hasNext: false,
+    });
+
+    const reEncodeResponse = await createEncodeJobsRoute(
+      new Request(
+        "http://localhost:3000/api/encode-jobs?historyGroup=re_encode",
+      ),
+      () => access,
+      config,
+    );
+    const reEncodePage = await reEncodeResponse.json();
+    expect(reEncodePage.selections).toEqual([
+      expect.objectContaining({ id: completed.selection.id }),
+    ]);
+    expect(reEncodePage.counts).toEqual(firstPage.counts);
+    expect(reEncodePage.page.total).toBe(1);
   });
 
   it("suggests hierarchical and selection-specific final output paths", async () => {
@@ -444,11 +1152,13 @@ describe("Encode Jobs API", () => {
     }
     access.encodeJobs.complete(secondClaim);
 
-    expect((await (await repeatSubmission()).json()).job).toMatchObject({
+    const completedBody = await (await repeatSubmission()).json();
+    expect(completedBody.job).toMatchObject({
       id: original.id,
       status: "completed",
       progressPercent: 100,
       outputPath: "/media/movies/Encode API retry.mkv",
+      completedAt: expect.any(String),
     });
     expect(access.encodeJobs.claimNext("late-completed-post-retry")).toBeNull();
 
@@ -456,7 +1166,7 @@ describe("Encode Jobs API", () => {
       id: original.id,
       status: "queued",
       progressPercent: 0,
-      completedAt: null,
+      completedAt: completedBody.job.completedAt,
     });
     expect(access.encodeJobs.list()).toHaveLength(1);
   });

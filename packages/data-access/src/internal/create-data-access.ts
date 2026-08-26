@@ -193,7 +193,7 @@ import {
 import { newId, requireRow } from "./persistence.js";
 import {
   correctedEncodePredecessorReadyCondition,
-  isCorrectedEncodePredecessorReady,
+  isEncodeJobSafelyTerminal,
 } from "../corrected-encode-readiness.js";
 
 const BUSY_TIMEOUT_MS = 5_000;
@@ -298,6 +298,7 @@ function discSelectionSourceOverlapsTracker(
 const CATALOG_REVIEW_ARCHIVE_LIMIT = 100;
 const CATALOG_REVIEW_MAPPED_TITLE_SUMMARY_LIMIT = 3;
 const CORRECTED_ENCODE_REPLACEMENT_LIMIT = 100;
+const ENCODE_QUEUE_DISC_SELECTION_LIMIT = 100;
 const RETAINED_ENCODE_OUTPUT_LOOKUP_LIMIT = 400;
 const DEFAULT_MIGRATIONS_FOLDER = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -384,6 +385,22 @@ const requestedDetectedDiscRecords = alias(
   detectedDiscs,
   "requested_detected_discs",
 );
+
+const COMPLETED_ENCODE_HISTORY_SQL = `(
+  (
+    history_job.status = 'completed'
+    and history_job.publication_completion_pending = 0
+  )
+  or (
+    history_job.completed_at is not null
+    and history_job.publication_completion_pending = 0
+  )
+  or (
+    history_job.predecessor_encode_job_id is null
+    and history_job.replace_existing_output = 1
+  )
+  or history_retained.replacement_encode_job_id is not null
+)`;
 
 const unresolvedLegacyDvdArchiveIdentity = and(
   eq(originalDiscArchives.discKind, "dvd"),
@@ -784,6 +801,54 @@ export function createDataAccessInternal(
     return new Date();
   }
 
+  const encodeQueueDiscSelectionPageStatement = sqlite.prepare(`
+    with completed_selection_history as (
+      select distinct history_job.disc_selection_id
+      from encode_jobs as history_job
+      left join retained_encode_outputs as history_retained
+        on history_retained.replacement_encode_job_id = history_job.id
+      where ${COMPLETED_ENCODE_HISTORY_SQL}
+    ),
+    eligible_selection as (
+      select
+        disc_selection.id,
+        disc_selection.created_at,
+        case when completed_selection_history.disc_selection_id is null
+          then 0 else 1 end as has_completed_encode
+      from disc_selections as disc_selection
+      inner join original_disc_archives as reviewed_archive
+        on reviewed_archive.id = disc_selection.original_disc_archive_id
+      left join completed_selection_history
+        on completed_selection_history.disc_selection_id = disc_selection.id
+      where disc_selection.is_catalog_active = 1
+        and reviewed_archive.catalog_review_outcome =
+          'reviewed_with_selections'
+        and reviewed_archive.legacy_cutover_pending = 0
+    ),
+    queue_counts as (
+      select
+        coalesce(sum(case when has_completed_encode = 0 then 1 else 0 end), 0)
+          as not_encoded,
+        coalesce(sum(case when has_completed_encode = 1 then 1 else 0 end), 0)
+          as re_encode
+      from eligible_selection
+    ),
+    queue_page as (
+      select id, created_at
+      from eligible_selection
+      where has_completed_encode = ?
+      order by created_at, id
+      limit ? offset ?
+    )
+    select
+      queue_counts.not_encoded,
+      queue_counts.re_encode,
+      queue_page.id
+    from queue_counts
+    left join queue_page on 1 = 1
+    order by queue_page.created_at, queue_page.id
+  `);
+
   function getCatalogReviewCoverage(
     originalDiscArchiveId: OriginalDiscArchiveId,
   ): CatalogReviewCoverage {
@@ -1125,6 +1190,7 @@ export function createDataAccessInternal(
     provenance: EncodeJobPublicationProvenance | undefined,
     operation: string,
     jobId: EncodeJobId,
+    replayedCompletion?: { completedAt: Date | null },
   ): EncodeJob | undefined {
     const current = transaction
       .select()
@@ -1144,6 +1210,9 @@ export function createDataAccessInternal(
     return transaction
       .update(encodeJobs)
       .set({
+        completedAt: replayedCompletion === undefined
+          ? finalizedAt
+          : replayedCompletion.completedAt,
         replaceExistingOutput: false,
         replacementOutputIdentity: null,
         publicationCompletionPending: false,
@@ -1152,6 +1221,21 @@ export function createDataAccessInternal(
       .where(completionCondition)
       .returning()
       .get();
+  }
+
+  function completedAtAfterInterruptedPublication() {
+    return sql`case when (
+      (
+        ${encodeJobs.predecessorEncodeJobId} is null
+        and ${encodeJobs.replaceExistingOutput} = 1
+      )
+      or exists (
+        select 1
+        from ${retainedEncodeOutputs} as prior_retained_output
+        where prior_retained_output.replacement_encode_job_id =
+          ${encodeJobs.id}
+      )
+    ) then ${encodeJobs.completedAt} else null end`;
   }
 
   function retainedEncodeOutputLookupIds(
@@ -1163,6 +1247,28 @@ export function createDataAccessInternal(
       );
     }
     return [...new Set(ids)];
+  }
+
+  function encodeEligibleDiscSelectionCondition() {
+    return and(
+      eq(discSelections.isCatalogActive, true),
+      exists(
+        database
+          .select({ id: originalDiscArchives.id })
+          .from(originalDiscArchives)
+          .where(and(
+            eq(
+              originalDiscArchives.id,
+              discSelections.originalDiscArchiveId,
+            ),
+            eq(
+              originalDiscArchives.catalogReviewOutcome,
+              "reviewed_with_selections",
+            ),
+            eq(originalDiscArchives.legacyCutoverPending, false),
+          )),
+      ),
+    );
   }
 
   function mediaItemDeletionReason(
@@ -2593,7 +2699,7 @@ export function createDataAccessInternal(
       proposedEncodingProfileId: row.proposed_encoding_profile_id,
       proposedOutputPath: row.proposed_output_path,
       predecessorStatus: row.predecessor_status,
-      predecessorReady: isCorrectedEncodePredecessorReady({
+      predecessorReady: isEncodeJobSafelyTerminal({
         status: row.predecessor_status,
         partialCleanupOutputPath: row.partial_cleanup_output_path,
         partialCleanupClaimToken: row.partial_cleanup_claim_token,
@@ -2857,6 +2963,7 @@ export function createDataAccessInternal(
           .update(encodeJobs)
           .set({
             ...update,
+            completedAt: current.completedAt,
             outputPath: effectiveOutputPath,
             reservesOutputPath: true,
             priority: options?.priority,
@@ -3377,6 +3484,8 @@ export function createDataAccessInternal(
         },
         encodeJobs: {
           list: (statuses, options) => access.encodeJobs.list(statuses, options),
+          listQueueDiscSelections: (options) =>
+            access.encodeJobs.listQueueDiscSelections(options),
           listDiscSelectionCorrectionEncodeJobLinks: (options) =>
             access.encodeJobs.listDiscSelectionCorrectionEncodeJobLinks(
               options,
@@ -5567,29 +5676,11 @@ export function createDataAccessInternal(
                 options.originalDiscArchiveId,
               )
             : undefined,
-          options?.ids === undefined || options.encodeEligibleOnly
-            ? eq(discSelections.isCatalogActive, true)
-            : undefined,
           options?.encodeEligibleOnly
-            ? exists(
-                database
-                  .select({ id: originalDiscArchives.id })
-                  .from(originalDiscArchives)
-                  .where(
-                    and(
-                      eq(
-                        originalDiscArchives.id,
-                        discSelections.originalDiscArchiveId,
-                      ),
-                      eq(
-                        originalDiscArchives.catalogReviewOutcome,
-                        "reviewed_with_selections",
-                      ),
-                      eq(originalDiscArchives.legacyCutoverPending, false),
-                    ),
-                  ),
-              )
-            : undefined,
+            ? encodeEligibleDiscSelectionCondition()
+            : options?.ids === undefined
+              ? eq(discSelections.isCatalogActive, true)
+              : undefined,
         ].filter((condition) => condition !== undefined);
         const query = database
           .select()
@@ -8415,6 +8506,171 @@ export function createDataAccessInternal(
     },
 
     encodeJobs: {
+      listQueueDiscSelections(options) {
+        const limit = requireSafeIntegerInRange(
+          options.limit,
+          "Encode queue Disc Selection limit",
+          1,
+          ENCODE_QUEUE_DISC_SELECTION_LIMIT,
+        );
+        const offset = optionalSafeInteger(options.offset, "offset", 0) ?? 0;
+        const pageRows = encodeQueueDiscSelectionPageStatement.all(
+          options.historyGroup === "re_encode" ? 1 : 0,
+          limit,
+          offset,
+        ) as unknown as Array<{
+          not_encoded: number;
+          re_encode: number;
+          id: DiscSelectionId | null;
+        }>;
+        const countRow = pageRows[0];
+        const counts = {
+          notEncoded: countRow?.not_encoded ?? 0,
+          reEncode: countRow?.re_encode ?? 0,
+        };
+        const selectionIds = pageRows.flatMap((row) =>
+          row.id === null ? [] : [row.id]
+        );
+        const selectionById = new Map(
+          (selectionIds.length === 0
+            ? []
+            : database
+              .select()
+              .from(discSelections)
+              .where(inArray(discSelections.id, selectionIds))
+              .all()
+              .map(toDiscSelection))
+            .map((selection) => [selection.id, selection]),
+        );
+        const selections = selectionIds.map((id) => {
+          const selection = selectionById.get(id);
+          if (!selection) {
+            throw new DomainInvariantError(
+              `Encode queue Disc Selection ${id} disappeared during hydration`,
+            );
+          }
+          return selection;
+        });
+        // The page is bounded to 100 selections. Rank their history in one
+        // scan instead of running a correlated self-scan for every job.
+        const historicalJobIds = selectionIds.length === 0
+          ? []
+          : (sqlite.prepare(`
+              with ranked_history as (
+                select
+                  history_job.id,
+                  row_number() over (
+                    partition by history_job.disc_selection_id
+                    order by
+                      coalesce(
+                        history_job.completed_at,
+                        history_job.updated_at
+                      ) desc,
+                      history_job.rowid desc
+                  ) as history_rank
+                from encode_jobs as history_job
+                left join retained_encode_outputs as history_retained
+                  on history_retained.replacement_encode_job_id = history_job.id
+                where history_job.disc_selection_id in (
+                  ${selectionIds.map(() => "?").join(", ")}
+                )
+                  and ${COMPLETED_ENCODE_HISTORY_SQL}
+              )
+              select id
+              from ranked_history
+              where history_rank = 1
+            `).all(...selectionIds) as unknown as Array<{ id: EncodeJobId }>)
+            .map(({ id }) => id);
+        const historicalJobs = historicalJobIds.length === 0
+          ? []
+          : database
+            .select()
+            .from(encodeJobs)
+            .where(inArray(encodeJobs.id, historicalJobIds))
+            .all();
+        const logicalJobs =
+          selectionIds.length === 0 || options.encodingProfileId === undefined
+            ? []
+            : database
+              .select()
+              .from(encodeJobs)
+              .where(and(
+                inArray(encodeJobs.discSelectionId, selectionIds),
+                eq(encodeJobs.encodingProfileId, options.encodingProfileId),
+                isNull(encodeJobs.predecessorEncodeJobId),
+              ))
+              .orderBy(desc(encodeJobs.updatedAt), desc(encodeJobs.id))
+              .all();
+        const priorCompletedJobsBySelectionId = new Map<
+          DiscSelectionId,
+          EncodeJob
+        >();
+        const logicalJobsBySelectionId = new Map<DiscSelectionId, EncodeJob>();
+        for (const job of historicalJobs) {
+          if (!priorCompletedJobsBySelectionId.has(job.discSelectionId)) {
+            priorCompletedJobsBySelectionId.set(job.discSelectionId, job);
+          }
+        }
+        for (const job of logicalJobs) {
+          if (!logicalJobsBySelectionId.has(job.discSelectionId)) {
+            logicalJobsBySelectionId.set(job.discSelectionId, job);
+          }
+        }
+        const priorProfileIds = [
+          ...new Set(
+            [...priorCompletedJobsBySelectionId.values()]
+              .map((job) => job.encodingProfileId),
+          ),
+        ];
+        const priorProfilesById = new Map(
+          (priorProfileIds.length === 0
+            ? []
+            : database
+              .select()
+              .from(encodingProfiles)
+              .where(inArray(encodingProfiles.id, priorProfileIds))
+              .all())
+            .map((profile) => [profile.id, profile]),
+        );
+
+        return {
+          selections: selections.map((selection) => {
+            const priorCompletedJob =
+              priorCompletedJobsBySelectionId.get(selection.id) ?? null;
+            const logicalJob =
+              logicalJobsBySelectionId.get(selection.id) ?? null;
+            return {
+              selection,
+              hasCompletedEncode: priorCompletedJob !== null,
+              priorCompletedJob: priorCompletedJob === null
+                ? null
+                : {
+                    id: priorCompletedJob.id,
+                    encodingProfileId: priorCompletedJob.encodingProfileId,
+                    status: "completed" as const,
+                  },
+              priorCompletedProfile: priorCompletedJob === null
+                ? null
+                : priorProfilesById.get(priorCompletedJob.encodingProfileId) ??
+                  null,
+              logicalJob: logicalJob === null
+                ? null
+                : {
+                    id: logicalJob.id,
+                    encodingProfileId: logicalJob.encodingProfileId,
+                    outputPath: logicalJob.outputPath,
+                    status: logicalJob.status,
+                    queueAvailable: isEncodeJobSafelyTerminal(logicalJob),
+                  },
+            };
+          }),
+          counts,
+          total: options.historyGroup === "re_encode"
+            ? counts.reEncode
+            : counts.notEncoded,
+        };
+      },
+
       enqueue(input) {
         const timestamp = now();
         const outputPath = requireNonEmpty(input.outputPath, "outputPath");
@@ -8849,7 +9105,7 @@ export function createDataAccessInternal(
               claimedBy: null,
               claimToken: null,
               claimedAt: null,
-              completedAt: null,
+              completedAt: claim.completedAt,
               errorMessage: null,
               updatedAt: timestamp,
             })
@@ -9091,7 +9347,6 @@ export function createDataAccessInternal(
             publicationCompletionPending: true,
             progressPercent: 100,
             progressEtaSeconds: null,
-            completedAt: timestamp,
             errorMessage: null,
             updatedAt: timestamp,
           })
@@ -9126,7 +9381,7 @@ export function createDataAccessInternal(
             .set({
               status: "running",
               publicationCompletionPending: false,
-              completedAt: null,
+              completedAt: completedAtAfterInterruptedPublication(),
               updatedAt: now(),
             })
             .where(completionCondition)
@@ -9241,7 +9496,7 @@ export function createDataAccessInternal(
             claimedBy: null,
             claimToken: null,
             claimedAt: null,
-            completedAt: null,
+            completedAt: claim.completedAt,
             errorMessage: null,
             updatedAt: timestamp,
           })
@@ -9670,7 +9925,6 @@ export function createDataAccessInternal(
               publicationCompletionPending: true,
               progressPercent: 100,
               progressEtaSeconds: null,
-              completedAt: sql`coalesce(${encodeJobs.completedAt}, ${timestamp.getTime()})`,
               errorMessage: null,
               updatedAt: timestamp,
             })
@@ -9694,8 +9948,13 @@ export function createDataAccessInternal(
           eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
           eq(encodeJobs.partialCleanupLeaseToken, leaseToken),
         );
-        if (!publicationMatches()) {
-          const invalidated = database
+        const replayedCompletion =
+          owned.status === "completed" &&
+            !owned.publicationCompletionPending
+            ? { completedAt: owned.completedAt }
+            : undefined;
+        const restoreOwnedPublication = () => {
+          const restored = database
             .update(encodeJobs)
             .set({
               status: owned.status,
@@ -9708,26 +9967,38 @@ export function createDataAccessInternal(
             .where(completionCondition)
             .returning()
             .get();
-          if (!invalidated) {
+          if (!restored) {
             throw new StaleJobAttemptError(
               "encode job publication",
               cleanup.jobId,
             );
           }
+        };
+        if (!publicationMatches()) {
+          restoreOwnedPublication();
           throw new StaleJobAttemptError(
             "encode job publication",
             cleanup.jobId,
           );
         }
-        const finalized = database.transaction((transaction) => {
-          return finalizePublishedEncodeJob(
-            transaction,
-            completionCondition,
-            provenance,
-            "encode job publication",
-            cleanup.jobId,
-          );
-        }, { behavior: "immediate" });
+        let finalized: EncodeJob | undefined;
+        try {
+          finalized = database.transaction((transaction) => {
+            return finalizePublishedEncodeJob(
+              transaction,
+              completionCondition,
+              provenance,
+              "encode job publication",
+              cleanup.jobId,
+              replayedCompletion,
+            );
+          }, { behavior: "immediate" });
+        } catch (error) {
+          if (replayedCompletion !== undefined) {
+            restoreOwnedPublication();
+          }
+          throw error;
+        }
         if (!finalized) {
           throw new StaleJobAttemptError(
             "encode job publication",
@@ -9785,7 +10056,6 @@ export function createDataAccessInternal(
               publicationCompletionPending: true,
               progressPercent: 100,
               progressEtaSeconds: null,
-              completedAt: timestamp,
               errorMessage: null,
               updatedAt: timestamp,
             })
@@ -9821,7 +10091,7 @@ export function createDataAccessInternal(
             .set({
               status: "failed",
               publicationCompletionPending: false,
-              completedAt: null,
+              completedAt: completedAtAfterInterruptedPublication(),
               errorMessage:
                 "Encode publication changed across completion commit",
               updatedAt: now(),
@@ -9863,7 +10133,11 @@ export function createDataAccessInternal(
             .update(encodeJobs)
             .set({
               status: sql`case when ${encodeJobs.publicationCompletionPending} = 1 then 'failed' else ${encodeJobs.status} end`,
-              completedAt: sql`case when ${encodeJobs.publicationCompletionPending} = 1 then null else ${encodeJobs.completedAt} end`,
+              completedAt: sql`case when
+                ${encodeJobs.publicationCompletionPending} = 1
+                then ${completedAtAfterInterruptedPublication()}
+                else ${encodeJobs.completedAt}
+              end`,
               errorMessage: sql`case when ${encodeJobs.publicationCompletionPending} = 1 then 'Encode publication completion was interrupted' else ${encodeJobs.errorMessage} end`,
               partialCleanupOutputPath: null,
               partialCleanupClaimToken: null,

@@ -628,6 +628,39 @@ export interface EncodeJob {
   updatedAt: Date;
 }
 
+export type EncodeQueueHistoryGroup = "not_encoded" | "re_encode";
+
+export interface EncodeQueuePriorCompletedJob {
+  id: EncodeJobId;
+  encodingProfileId: EncodingProfileId;
+  status: "completed";
+}
+
+export interface EncodeQueueLogicalJob {
+  id: EncodeJobId;
+  encodingProfileId: EncodingProfileId;
+  outputPath: string;
+  status: EncodeJobStatus;
+  queueAvailable: boolean;
+}
+
+export interface EncodeQueueDiscSelection {
+  selection: DiscSelection;
+  hasCompletedEncode: boolean;
+  priorCompletedJob: EncodeQueuePriorCompletedJob | null;
+  priorCompletedProfile: EncodingProfile | null;
+  logicalJob: EncodeQueueLogicalJob | null;
+}
+
+export interface EncodeQueueDiscSelectionPage {
+  selections: EncodeQueueDiscSelection[];
+  counts: {
+    notEncoded: number;
+    reEncode: number;
+  };
+  total: number;
+}
+
 export type EncodeJobCorrectionLink = EncodeJob;
 
 export interface RetainedEncodeOutput {
@@ -1085,6 +1118,12 @@ export interface ArchiveRequestAccess {
 }
 
 export interface EncodeJobAccess {
+  listQueueDiscSelections(options: {
+    historyGroup: EncodeQueueHistoryGroup;
+    encodingProfileId?: EncodingProfileId;
+    limit: number;
+    offset?: number;
+  }): EncodeQueueDiscSelectionPage;
   enqueue(input: {
     discSelectionId: DiscSelectionId;
     encodingProfileId: EncodingProfileId;
@@ -1230,6 +1269,7 @@ export interface ConsistentReadAccess {
   readonly encodeJobs: Pick<
     EncodeJobAccess,
     | "list"
+    | "listQueueDiscSelections"
     | "listDiscSelectionCorrectionEncodeJobLinks"
     | "listDiscSelectionCorrectionRetainedOutputSummaries"
     | "listCorrectionLinks"

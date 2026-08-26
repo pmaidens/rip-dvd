@@ -3704,7 +3704,7 @@ describe("legacy sidecar import", () => {
           replaceExistingOutput: true,
           status: "queued",
           progressPercent: 0,
-          completedAt: null,
+          completedAt: completedJob.completedAt,
         }),
       ]),
     );

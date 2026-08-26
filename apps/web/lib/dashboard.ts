@@ -27,7 +27,7 @@ import type {
 } from "@rip-dvd/data-access";
 import {
   archiveBoundaryEvidenceFromRecord,
-  isCorrectedEncodePredecessorReady,
+  isEncodeJobSafelyTerminal,
 } from "@rip-dvd/data-access";
 import {
   decodeDvdTitleMap,
@@ -931,7 +931,7 @@ function readDashboardSnapshotRecords(
                               predecessorId: predecessor.id,
                               predecessorStatus: predecessor.status,
                               predecessorReady:
-                                isCorrectedEncodePredecessorReady(predecessor),
+                                isEncodeJobSafelyTerminal(predecessor),
                             }
                           : {}),
                         ...(successor
