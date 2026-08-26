@@ -1800,6 +1800,295 @@ p.verification-result {
   line-height: 1.45;
 }
 
+.encode-worklist-toolbar {
+  display: grid;
+  grid-template-columns: minmax(16rem, 1fr) minmax(18rem, 1.4fr);
+  align-items: end;
+  gap: 1rem;
+  padding: 1rem 1.4rem;
+  border-bottom: 1px solid #203b34;
+  background: #0d1d19;
+}
+
+.encode-worklist-toolbar label {
+  display: grid;
+  gap: 0.4rem;
+  min-width: 0;
+  color: #b8c8c3;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.encode-worklist-toolbar select,
+.encode-worklist-table input {
+  width: 100%;
+  min-width: 0;
+  min-height: 2.75rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid #365149;
+  border-radius: 0.55rem;
+  background: #091713;
+  color: #eef4f1;
+}
+
+.encode-worklist-toolbar select:focus-visible,
+.encode-worklist-table input:focus-visible,
+.encode-picker-results input:focus-visible {
+  outline: 3px solid #d2a14b;
+  outline-offset: 2px;
+}
+
+.encode-worklist-queue-action {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.encode-worklist-queue-action > span {
+  color: #9fb0ab;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  text-align: right;
+}
+
+.encode-worklist-queue-action button {
+  flex: 0 0 auto;
+}
+
+.encode-workspace {
+  display: grid;
+  grid-template-columns: minmax(20rem, 0.72fr) minmax(0, 1.28fr);
+  min-width: 0;
+}
+
+.encode-workspace > section {
+  min-width: 0;
+}
+
+.encode-picker-panel {
+  border-right: 1px solid #203b34;
+}
+
+.encode-picker-panel > header,
+.encode-worklist-panel > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.4rem;
+  border-bottom: 1px solid #203b34;
+}
+
+.encode-picker-panel > header h3,
+.encode-worklist-panel > header h3 {
+  margin: 0.25rem 0 0;
+}
+
+.encode-picker-panel > header > span {
+  color: #d9bd80;
+  font-size: 0.72rem;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.encode-picker-panel .encode-history-picker {
+  align-items: stretch;
+  flex-direction: column;
+}
+
+.encode-picker-panel .encode-selection-search {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.encode-picker-panel .encode-selection-search label {
+  grid-column: 1 / -1;
+}
+
+.encode-picker-results {
+  display: grid;
+  gap: 0.55rem;
+  max-height: 31rem;
+  margin: 0;
+  padding: 1rem 1.4rem;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.encode-picker-results li {
+  min-width: 0;
+}
+
+.encode-picker-results label {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 0.7rem;
+  padding: 0.7rem;
+  border: 1px solid #29483f;
+  border-radius: 0.55rem;
+  background: #10231e;
+  cursor: pointer;
+}
+
+.encode-picker-results label:has(input:checked) {
+  border-color: #d2a14b;
+  background: rgba(210, 161, 75, 0.1);
+}
+
+.encode-picker-existing-job {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.7rem;
+  border: 1px solid #29483f;
+  border-radius: 0.55rem;
+  background: #10231e;
+}
+
+.encode-picker-existing-job > span {
+  min-width: 0;
+}
+
+.encode-picker-results input {
+  width: 1.15rem;
+  height: 1.15rem;
+  margin: 0.15rem 0 0;
+  accent-color: #d2a14b;
+}
+
+.encode-picker-results strong,
+.encode-picker-results small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.encode-picker-results strong {
+  color: #eef4f1;
+  font-size: 0.76rem;
+  line-height: 1.4;
+}
+
+.encode-picker-results small {
+  margin-top: 0.25rem;
+  color: #9fb0ab;
+  font-size: 0.68rem;
+}
+
+.encode-add-selected {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  width: calc(100% - 2.8rem);
+  margin: 0 1.4rem 1rem;
+}
+
+.encode-add-selected span:last-child {
+  color: #d9bd80;
+  font-size: 0.7rem;
+}
+
+.encode-requeue-form {
+  border-bottom: 0;
+}
+
+.encode-requeue-form .profile-fields {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.encode-worklist-empty {
+  min-height: 15rem;
+  padding: 2rem 1.4rem;
+  color: #9fb0ab;
+  line-height: 1.5;
+}
+
+.encode-worklist-table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+}
+
+.encode-worklist-table th,
+.encode-worklist-table td {
+  min-width: 0;
+  padding: 0.75rem;
+  border-bottom: 1px solid #203b34;
+  overflow-wrap: anywhere;
+  text-align: left;
+  vertical-align: top;
+}
+
+.encode-worklist-table th {
+  color: #829790;
+  font-size: 0.65rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.encode-worklist-table td {
+  color: #b8c8c3;
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
+.encode-worklist-table th:nth-child(1) {
+  width: 14%;
+}
+
+.encode-worklist-table th:nth-child(2) {
+  width: 12%;
+}
+
+.encode-worklist-table th:nth-child(3) {
+  width: 10%;
+}
+
+.encode-worklist-table th:nth-child(4) {
+  width: 32%;
+}
+
+.encode-worklist-table th:nth-child(5) {
+  width: 20%;
+}
+
+.encode-worklist-table th:nth-child(6) {
+  width: 12%;
+}
+
+.encode-worklist-table td > strong,
+.encode-worklist-table td > span {
+  display: block;
+}
+
+.encode-worklist-table td > strong {
+  color: #eef4f1;
+}
+
+.encode-worklist-table td > span {
+  margin-top: 0.2rem;
+  color: #9fb0ab;
+  font-size: 0.68rem;
+}
+
+.encode-worklist-table input[readonly] {
+  border-color: #53686f;
+  background: #13211e;
+  color: #b8c8c3;
+}
+
+.encode-worklist-table button {
+  min-height: 2.25rem;
+  padding: 0.45rem 0.6rem;
+  font-size: 0.68rem;
+}
+
+.encode-worklist-table .encode-row-error {
+  color: #f4b6ad;
+}
+
 .profile-list {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -2498,6 +2787,15 @@ h3 {
 }
 
 @media (max-width: 70rem) {
+  .encode-workspace {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .encode-picker-panel {
+    border-right: 0;
+    border-bottom: 1px solid #203b34;
+  }
+
   .profile-list {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -2603,6 +2901,32 @@ h3 {
     border-radius: 0.85rem;
   }
 
+  .encode-worklist-toolbar,
+  .encode-worklist-queue-action {
+    display: block;
+  }
+
+  .encode-worklist-queue-action {
+    margin-top: 0.8rem;
+  }
+
+  .encode-worklist-queue-action > span {
+    display: block;
+    margin-bottom: 0.8rem;
+    text-align: left;
+  }
+
+  .encode-worklist-queue-action button,
+  .encode-worklist-panel > header button {
+    width: 100%;
+  }
+
+  .encode-picker-panel > header,
+  .encode-worklist-panel > header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
   .encode-history-picker {
     align-items: stretch;
     flex-direction: column;
@@ -2615,6 +2939,52 @@ h3 {
   .encode-selection-search button {
     width: 100%;
     margin-top: 0.8rem;
+  }
+
+  .encode-worklist-table,
+  .encode-worklist-table tbody,
+  .encode-worklist-table tr,
+  .encode-worklist-table td {
+    display: block;
+    width: 100%;
+  }
+
+  .encode-worklist-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .encode-worklist-table tr {
+    padding: 0.6rem 1rem;
+    border-bottom: 1px solid #203b34;
+  }
+
+  .encode-worklist-table td {
+    display: grid;
+    grid-template-columns: minmax(6.5rem, 0.35fr) minmax(0, 1fr);
+    gap: 0.75rem;
+    padding: 0.55rem 0;
+    border-bottom: 0;
+  }
+
+  .encode-worklist-table td::before {
+    content: attr(data-label);
+    color: #829790;
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  .encode-worklist-table td > label,
+  .encode-worklist-table td > button {
+    min-width: 0;
   }
 
   .profile-list,

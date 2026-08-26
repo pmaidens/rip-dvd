@@ -3571,6 +3571,8 @@ export function createDataAccessInternal(
         },
         encodeJobs: {
           list: (statuses, options) => access.encodeJobs.list(statuses, options),
+          listQueueLogicalJobConflicts: (options) =>
+            access.encodeJobs.listQueueLogicalJobConflicts(options),
           listQueueDiscSelections: (options) =>
             access.encodeJobs.listQueueDiscSelections(options),
           listDiscSelectionCorrectionEncodeJobLinks: (options) =>
@@ -8593,6 +8595,31 @@ export function createDataAccessInternal(
     },
 
     encodeJobs: {
+      listQueueLogicalJobConflicts(options) {
+        if (
+          options.discSelectionIds.length >
+            ENCODE_QUEUE_DISC_SELECTION_LIMIT
+        ) {
+          throw new DomainInvariantError(
+            `Encode queue logical-job resolution is limited to ${ENCODE_QUEUE_DISC_SELECTION_LIMIT} Disc Selections`,
+          );
+        }
+        const discSelectionIds = [...new Set(options.discSelectionIds)];
+        if (discSelectionIds.length === 0) {
+          return [];
+        }
+        return database
+          .select({ discSelectionId: encodeJobs.discSelectionId })
+          .from(encodeJobs)
+          .where(and(
+            inArray(encodeJobs.discSelectionId, discSelectionIds),
+            eq(encodeJobs.encodingProfileId, options.encodingProfileId),
+            isNull(encodeJobs.predecessorEncodeJobId),
+          ))
+          .all()
+          .map((job) => job.discSelectionId);
+      },
+
       listQueueDiscSelections(options) {
         const limit = requireSafeIntegerInRange(
           options.limit,
