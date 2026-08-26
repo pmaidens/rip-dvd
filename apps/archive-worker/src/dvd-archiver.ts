@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import {
   type Stats,
   closeSync,
@@ -85,8 +85,12 @@ import {
   dvdRescueWorkspacePaths,
   loadDvdRescueWorkspace,
   quarantineDvdRescueWorkspace,
+  readDvdRetainedSectorProof,
   recordDvdBoundaryFailure,
   removeDvdRescueWorkspace,
+  stageDvdCorrectedRetryRetainedSectorProof,
+  DvdRetainedSectorProofMismatchError,
+  type DvdRetainedSectorProof,
   type DvdRescueIdentity,
   type DvdRescueWorkspace,
   updateDvdBoundaryRescueWorkspaceImageProof,
@@ -109,16 +113,6 @@ const COPY_START_AUTHORIZATION_TIMEOUT_MS = 5 * 60_000;
 const DEVICE_RECOVERY_LOCK_TIMEOUT_MS = 5_000;
 const FLOCK_CONFLICT_EXIT_CODE = 75;
 const DVD_READ_FAILURE_EXIT_STATUS = 3;
-const RETAINED_SECTOR_PROOF_CHUNK_BYTES = 1_048_576;
-const CORRECTED_RETRY_MUTATION_MESSAGE =
-  "DVD corrected-boundary retained sectors changed during recovery";
-
-class DvdRetainedSectorProofMismatchError extends Error {
-  constructor() {
-    super(CORRECTED_RETRY_MUTATION_MESSAGE);
-    this.name = "DvdRetainedSectorProofMismatchError";
-  }
-}
 
 function dvdArchiveStem(fingerprint: string): string {
   const digest = fingerprint.slice(fingerprint.lastIndexOf(":") + 1);
@@ -1642,110 +1636,6 @@ function sameDvdProofFileIdentity(
   return left.ctimeNs === right.ctimeNs && left.mtimeNs === right.mtimeNs;
 }
 
-interface DvdRetainedSectorProof {
-  digest: string;
-  imageProofIdentity: DvdProofFileIdentity;
-}
-
-async function readDvdRetainedSectorProof({
-  expectedDigest,
-  expectedImageProofIdentity,
-  recoveryResult,
-  signal,
-  workspace,
-}: {
-  expectedDigest?: string;
-  expectedImageProofIdentity?: DvdProofFileIdentity;
-  recoveryResult: DamagedDvdRecoveryResult;
-  signal: AbortSignal;
-  workspace: DvdRescueWorkspace;
-}): Promise<DvdRetainedSectorProof> {
-  const handle = await open(
-    workspace.imagePath,
-    fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
-  );
-  try {
-    const before = await handle.stat({ bigint: true });
-    const beforeProof = {
-      ctimeNs: before.ctimeNs,
-      mtimeNs: before.mtimeNs,
-    };
-    if (
-      !before.isFile() ||
-      before.nlink <= 0n ||
-      before.size !== BigInt(workspace.imageByteCount) ||
-      `${before.dev}:${before.ino}` !== workspace.imageFilesystemIdentity ||
-      (expectedImageProofIdentity !== undefined &&
-        !sameDvdProofFileIdentity(
-          beforeProof,
-          expectedImageProofIdentity,
-        ))
-    ) {
-      throw new DvdRetainedSectorProofMismatchError();
-    }
-
-    const hash = createHash("sha256");
-    hash.update("rip-dvd-corrected-retry-retained-v1\0");
-    hash.update(`${recoveryResult.declaredByteCount}\0`);
-    const buffer = Buffer.allocUnsafe(RETAINED_SECTOR_PROOF_CHUNK_BYTES);
-    const totalSectorCount =
-      recoveryResult.declaredByteCount / DVD_SECTOR_SIZE_BYTES;
-    let nextReadableLba = 0;
-    const digestReadableRange = async (
-      startLba: number,
-      endLba: number,
-    ): Promise<void> => {
-      if (startLba === endLba) {
-        return;
-      }
-      hash.update(`${startLba}:${endLba}\0`);
-      let position = startLba * DVD_SECTOR_SIZE_BYTES;
-      let remaining = (endLba - startLba) * DVD_SECTOR_SIZE_BYTES;
-      while (remaining > 0) {
-        signal.throwIfAborted();
-        const requested = Math.min(buffer.byteLength, remaining);
-        const { bytesRead } = await handle.read(
-          buffer,
-          0,
-          requested,
-          position,
-        );
-        if (bytesRead !== requested) {
-          throw new DvdRetainedSectorProofMismatchError();
-        }
-        hash.update(buffer.subarray(0, bytesRead));
-        position += bytesRead;
-        remaining -= bytesRead;
-      }
-    };
-    for (const range of recoveryResult.unrecoveredSectorRanges) {
-      await digestReadableRange(nextReadableLba, range.startLba);
-      nextReadableLba = range.startLba + range.sectorCount;
-    }
-    await digestReadableRange(nextReadableLba, totalSectorCount);
-
-    const after = await handle.stat({ bigint: true });
-    const afterProof = {
-      ctimeNs: after.ctimeNs,
-      mtimeNs: after.mtimeNs,
-    };
-    const digest = hash.digest("hex");
-    if (
-      !after.isFile() ||
-      after.nlink <= 0n ||
-      after.size !== BigInt(workspace.imageByteCount) ||
-      `${after.dev}:${after.ino}` !== workspace.imageFilesystemIdentity ||
-      !sameDvdProofFileIdentity(afterProof, beforeProof) ||
-      (expectedDigest !== undefined && digest !== expectedDigest)
-    ) {
-      throw new DvdRetainedSectorProofMismatchError();
-    }
-    return { digest, imageProofIdentity: afterProof };
-  } finally {
-    await handle.close();
-  }
-}
-
 async function requireDvdProofFileMtime(
   path: string,
   expectedFilesystemIdentity: string,
@@ -2683,6 +2573,13 @@ export async function preserveDvdArchive({
           signal,
           workspace: rescueWorkspace,
         });
+        await stageDvdCorrectedRetryRetainedSectorProof(
+          root,
+          rescueIdentity!,
+          rescueWorkspace,
+          retainedSectorProof,
+          authorizeMutation,
+        );
       } catch (error) {
         await rejectCorrectedRetryProof(error);
       }

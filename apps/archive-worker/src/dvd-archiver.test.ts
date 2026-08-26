@@ -4488,6 +4488,89 @@ describe("DVD archive publication", () => {
     )).toBe(false);
   });
 
+  it("resumes corrected retry after post-helper proof cancellation", async () => {
+    const digest = "b".repeat(64);
+    const archiveRequestId = "post-helper-cancelled-corrected-retry-proof";
+    const {
+      baseOptions,
+      correctedDamage,
+      fullImage,
+      publishedSizeBytes,
+      rescuePaths,
+      root,
+      runner,
+    } = await createCorrectedDamagedRetryWorkspace(
+      archiveRequestId,
+      digest,
+    );
+    const recoveredImage = Buffer.from(
+      fullImage.subarray(0, publishedSizeBytes),
+    );
+    recoveredImage.fill(83, 1 * 2_048, 2 * 2_048);
+    const cancellation = new DOMException(
+      "Corrected retry was cancelled after helper completion",
+      "AbortError",
+    );
+    const signal = new AbortController().signal;
+    let helperCompleted = false;
+    let cancelledDuringPostHelperProof = false;
+    vi.spyOn(signal, "throwIfAborted").mockImplementation(() => {
+      if (
+        helperCompleted &&
+        new Error().stack?.includes("digestReadableRange")
+      ) {
+        cancelledDuringPostHelperProof = true;
+        throw cancellation;
+      }
+    });
+    const cancelledRetry = vi.fn(async ({ outputPath }) => {
+      writeFileSync(outputPath, recoveredImage);
+      helperCompleted = true;
+      return createCleanDvdRecoveryResult(publishedSizeBytes);
+    });
+
+    await expect(preserveDvdArchive({
+      ...baseOptions,
+      runner: runner(cancelledRetry),
+      signal,
+    })).rejects.toBe(cancellation);
+
+    expect(cancelledRetry).toHaveBeenCalledOnce();
+    expect(cancelledDuringPostHelperProof).toBe(true);
+    expect(existsSync(rescuePaths.imagePath)).toBe(true);
+    expect(existsSync(rescuePaths.mapPath)).toBe(true);
+    expect(JSON.parse(readFileSync(rescuePaths.mapPath, "utf8")))
+      .toMatchObject({
+        correctedRetryRetainedSectorProof: {
+          digest: expect.stringMatching(/^[0-9a-f]{64}$/),
+          proofVersion: "dvd-corrected-retry-retained-v1",
+        },
+      });
+
+    const restartedRetry = vi.fn(async ({ continuation, outputPath }) => {
+      expect(continuation).toEqual(expect.objectContaining({
+        kind: "corrected",
+        recoveryResult: correctedDamage,
+      }));
+      expect(readFileSync(outputPath)).toEqual(recoveredImage);
+      return createCleanDvdRecoveryResult(publishedSizeBytes);
+    });
+    const completed = await preserveDvdArchive({
+      ...baseOptions,
+      runner: runner(restartedRetry),
+    });
+
+    expect(restartedRetry).toHaveBeenCalledOnce();
+    expect(completed.integrityEvidence.integrity).toBe("clean_read");
+    expect(readFileSync(completed.archivePath)).toEqual(recoveredImage);
+    await completed.finalizePublication?.();
+    expect(existsSync(rescuePaths.imagePath)).toBe(false);
+    expect(existsSync(rescuePaths.mapPath)).toBe(false);
+    expect(readdirSync(root).some((entry) =>
+      entry.startsWith(`${basename(rescuePaths.imagePath)}.invalid-`)
+    )).toBe(false);
+  });
+
   it("revalidates the source after corrected-boundary salvage", async () => {
     const originalsLibraryPath = createOriginalsLibrary();
     const root = realpathSync(originalsLibraryPath);

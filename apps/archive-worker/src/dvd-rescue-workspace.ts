@@ -10,9 +10,10 @@ import {
   DVD_SECTOR_SIZE_BYTES,
   createDvdRecoveryProtocolPayload,
   isProvenDvdBoundaryCandidate,
-  type OutOfRangeDvdReadFailureResult,
+  type DamagedDvdRecoveryResult,
   type DvdRecoveryResult,
   type DvdRecoveryProtocolPayload,
+  type OutOfRangeDvdReadFailureResult,
   parseDvdReadFailureResultProtocol,
   parseDvdRecoveryResultProtocol,
 } from "./dvd-recovery-contracts.js";
@@ -20,6 +21,12 @@ import {
 const MAX_RESCUE_MAP_BYTES = 1_200_000;
 const UUID_V4_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const SHA256_DIGEST_PATTERN = /^[0-9a-f]{64}$/;
+const RETAINED_SECTOR_PROOF_CHUNK_BYTES = 1_048_576;
+const CORRECTED_RETRY_RETAINED_SECTOR_PROOF_VERSION =
+  "dvd-corrected-retry-retained-v1";
+const CORRECTED_RETRY_MUTATION_MESSAGE =
+  "DVD corrected-boundary retained sectors changed during recovery";
 
 export interface DvdRescueIdentity {
   archiveRequestId: string;
@@ -30,6 +37,18 @@ export interface DvdRescueIdentity {
 export interface ImageProofIdentity {
   ctimeNs: bigint;
   mtimeNs: bigint;
+}
+
+export interface DvdRetainedSectorProof {
+  digest: string;
+  imageProofIdentity: ImageProofIdentity;
+}
+
+export class DvdRetainedSectorProofMismatchError extends Error {
+  constructor() {
+    super(CORRECTED_RETRY_MUTATION_MESSAGE);
+    this.name = "DvdRetainedSectorProofMismatchError";
+  }
 }
 
 export interface DvdRescueWorkspace {
@@ -63,6 +82,10 @@ interface DvdRescueMap {
   boundaryAcceptanceImageProof?: {
     source: SerializedImageProofIdentity;
     accepted?: SerializedImageProofIdentity;
+  };
+  correctedRetryRetainedSectorProof?: {
+    digest: string;
+    proofVersion: typeof CORRECTED_RETRY_RETAINED_SECTOR_PROOF_VERSION;
   };
 }
 
@@ -128,6 +151,26 @@ function parseBoundaryAcceptanceImageProof(
   };
 }
 
+function parseCorrectedRetryRetainedSectorProof(
+  map: DvdRescueMap,
+): { digest: string } | null {
+  if (map.correctedRetryRetainedSectorProof === undefined) {
+    return null;
+  }
+  if (
+    map.schemaVersion !== 3 ||
+    map.correctedRetryRetainedSectorProof.proofVersion !==
+      CORRECTED_RETRY_RETAINED_SECTOR_PROOF_VERSION ||
+    typeof map.correctedRetryRetainedSectorProof.digest !== "string" ||
+    !SHA256_DIGEST_PATTERN.test(
+      map.correctedRetryRetainedSectorProof.digest,
+    )
+  ) {
+    throw new Error("DVD corrected retry retained-sector proof is invalid");
+  }
+  return { digest: map.correctedRetryRetainedSectorProof.digest };
+}
+
 function imageMetadataMatchesProof(
   metadata: BigIntStats,
   imageFilesystemIdentity: string,
@@ -140,6 +183,109 @@ function imageMetadataMatchesProof(
     metadata.size === BigInt(imageByteCount) &&
     metadata.ctimeNs === proofIdentity.ctimeNs &&
     metadata.mtimeNs === proofIdentity.mtimeNs;
+}
+
+function sameImageProofIdentity(
+  left: ImageProofIdentity,
+  right: ImageProofIdentity,
+): boolean {
+  return left.ctimeNs === right.ctimeNs && left.mtimeNs === right.mtimeNs;
+}
+
+export async function readDvdRetainedSectorProof({
+  expectedDigest,
+  expectedImageProofIdentity,
+  recoveryResult,
+  signal,
+  workspace,
+}: {
+  expectedDigest?: string;
+  expectedImageProofIdentity?: ImageProofIdentity;
+  recoveryResult: DamagedDvdRecoveryResult;
+  signal?: AbortSignal;
+  workspace: DvdRescueWorkspace;
+}): Promise<DvdRetainedSectorProof> {
+  const handle = await open(
+    workspace.imagePath,
+    fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+  );
+  try {
+    const before = await handle.stat({ bigint: true });
+    const beforeProof = {
+      ctimeNs: before.ctimeNs,
+      mtimeNs: before.mtimeNs,
+    };
+    if (
+      !before.isFile() ||
+      before.nlink <= 0n ||
+      before.size !== BigInt(workspace.imageByteCount) ||
+      `${before.dev}:${before.ino}` !== workspace.imageFilesystemIdentity ||
+      (expectedImageProofIdentity !== undefined &&
+        !sameImageProofIdentity(beforeProof, expectedImageProofIdentity))
+    ) {
+      throw new DvdRetainedSectorProofMismatchError();
+    }
+
+    const hash = createHash("sha256");
+    hash.update(`${CORRECTED_RETRY_RETAINED_SECTOR_PROOF_VERSION}\0`);
+    hash.update(`${recoveryResult.declaredByteCount}\0`);
+    const buffer = Buffer.allocUnsafe(RETAINED_SECTOR_PROOF_CHUNK_BYTES);
+    const totalSectorCount =
+      recoveryResult.declaredByteCount / DVD_SECTOR_SIZE_BYTES;
+    let nextReadableLba = 0;
+    const digestReadableRange = async (
+      startLba: number,
+      endLba: number,
+    ): Promise<void> => {
+      if (startLba === endLba) {
+        return;
+      }
+      hash.update(`${startLba}:${endLba}\0`);
+      let position = startLba * DVD_SECTOR_SIZE_BYTES;
+      let remaining = (endLba - startLba) * DVD_SECTOR_SIZE_BYTES;
+      while (remaining > 0) {
+        signal?.throwIfAborted();
+        const requested = Math.min(buffer.byteLength, remaining);
+        const { bytesRead } = await handle.read(
+          buffer,
+          0,
+          requested,
+          position,
+        );
+        if (bytesRead !== requested) {
+          throw new DvdRetainedSectorProofMismatchError();
+        }
+        hash.update(buffer.subarray(0, bytesRead));
+        position += bytesRead;
+        remaining -= bytesRead;
+      }
+    };
+    for (const range of recoveryResult.unrecoveredSectorRanges) {
+      await digestReadableRange(nextReadableLba, range.startLba);
+      nextReadableLba = range.startLba + range.sectorCount;
+    }
+    await digestReadableRange(nextReadableLba, totalSectorCount);
+
+    const after = await handle.stat({ bigint: true });
+    const afterProof = {
+      ctimeNs: after.ctimeNs,
+      mtimeNs: after.mtimeNs,
+    };
+    const digest = hash.digest("hex");
+    if (
+      !after.isFile() ||
+      after.nlink <= 0n ||
+      after.size !== BigInt(workspace.imageByteCount) ||
+      `${after.dev}:${after.ino}` !== workspace.imageFilesystemIdentity ||
+      !sameImageProofIdentity(afterProof, beforeProof) ||
+      (expectedDigest !== undefined && digest !== expectedDigest)
+    ) {
+      throw new DvdRetainedSectorProofMismatchError();
+    }
+    return { digest, imageProofIdentity: afterProof };
+  } finally {
+    await handle.close();
+  }
 }
 
 function filesystemIdentity(metadata: Awaited<ReturnType<typeof lstat>>): string {
@@ -391,6 +537,7 @@ function rescueStateFromMap(
   }
   const map = value as DvdRescueMap;
   parseBoundaryAcceptanceImageProof(map);
+  const correctedRetryProof = parseCorrectedRetryRetainedSectorProof(map);
   if (map.schemaVersion === 1) {
     if (map.recoveryProtocol === null || map.boundaryFailureProtocol !== undefined) {
       throw new Error("DVD rescue state does not match the Archive Request");
@@ -430,13 +577,20 @@ function rescueStateFromMap(
     ) {
       throw new Error("DVD rescue state does not match the Archive Request");
     }
+    const recoveryResult = parseDvdRecoveryResultProtocol(
+      JSON.stringify(map.recoveryProtocol),
+      acceptedByteCount,
+    );
+    if (
+      correctedRetryProof !== null &&
+      recoveryResult.outcome !== "damaged"
+    ) {
+      throw new Error("DVD rescue state does not match the Archive Request");
+    }
     return {
       boundaryFailure,
       imageByteCount: acceptedByteCount,
-      recoveryResult: parseDvdRecoveryResultProtocol(
-        JSON.stringify(map.recoveryProtocol),
-        acceptedByteCount,
-      ),
+      recoveryResult,
     };
   }
   if (
@@ -468,11 +622,15 @@ function createRescueMap(
   {
     preparedImageBasename,
     boundaryAcceptanceImageProof,
+    correctedRetryRetainedSectorProof,
   }: {
     preparedImageBasename?: string;
     boundaryAcceptanceImageProof?: {
       source: ImageProofIdentity;
       accepted?: ImageProofIdentity;
+    };
+    correctedRetryRetainedSectorProof?: {
+      digest: string;
     };
   } = {},
 ): DvdRescueMap {
@@ -509,6 +667,16 @@ function createRescueMap(
   ) {
     throw new Error("DVD rescue boundary image proof is invalid");
   }
+  if (
+    correctedRetryRetainedSectorProof !== undefined &&
+    (schemaVersion !== 3 ||
+      state.recoveryResult?.outcome !== "damaged" ||
+      !SHA256_DIGEST_PATTERN.test(
+        correctedRetryRetainedSectorProof.digest,
+      ))
+  ) {
+    throw new Error("DVD corrected retry retained-sector proof is invalid");
+  }
   return {
     schemaVersion,
     archiveRequestId: identity.archiveRequestId,
@@ -539,6 +707,14 @@ function createRescueMap(
                     boundaryAcceptanceImageProof.accepted,
                   ),
                 }),
+          },
+        }),
+    ...(correctedRetryRetainedSectorProof === undefined
+      ? {}
+      : {
+          correctedRetryRetainedSectorProof: {
+            digest: correctedRetryRetainedSectorProof.digest,
+            proofVersion: CORRECTED_RETRY_RETAINED_SECTOR_PROOF_VERSION,
           },
         }),
     recoveryProtocol,
@@ -610,6 +786,61 @@ async function writeMapAtomically(
     await handle?.close().catch(() => undefined);
     await unlink(temporaryPath).catch(() => undefined);
     throw error;
+  }
+}
+
+async function writeCorrectedRetryProofMap(
+  root: string,
+  identity: DvdRescueIdentity,
+  workspace: DvdRescueWorkspace,
+  state: DvdRescueState,
+  boundaryAcceptanceImageProof: {
+    source: ImageProofIdentity;
+    accepted: ImageProofIdentity;
+  },
+  correctedRetryRetainedSectorProof: { digest: string },
+  authorizeMutation?: AuthorizeMutation,
+): Promise<void> {
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    handle = await open(
+      workspace.imagePath,
+      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+    );
+    if (!imageMetadataMatchesProof(
+      await handle.stat({ bigint: true }),
+      workspace.imageFilesystemIdentity,
+      workspace.imageByteCount,
+      boundaryAcceptanceImageProof.accepted,
+    )) {
+      throw new DvdRetainedSectorProofMismatchError();
+    }
+    await writeMapAtomically(
+      root,
+      workspace.mapPath,
+      createRescueMap(
+        identity,
+        workspace.imageFilesystemIdentity,
+        state,
+        {
+          boundaryAcceptanceImageProof,
+          correctedRetryRetainedSectorProof,
+        },
+      ),
+      authorizeMutation,
+    );
+    if (!imageMetadataMatchesProof(
+      await handle.stat({ bigint: true }),
+      workspace.imageFilesystemIdentity,
+      workspace.imageByteCount,
+      boundaryAcceptanceImageProof.accepted,
+    )) {
+      throw new DvdRetainedSectorProofMismatchError();
+    }
+    await handle.close();
+    handle = undefined;
+  } finally {
+    await handle?.close().catch(() => undefined);
   }
 }
 
@@ -891,6 +1122,7 @@ export async function loadDvdRescueWorkspace(
   ) {
     return null;
   }
+  let preserveCorrectedRetryWorkspace = false;
   try {
     if (
       !isDvdFingerprint(identity.fingerprint) ||
@@ -904,7 +1136,8 @@ export async function loadDvdRescueWorkspace(
     const parsed = await readRescueMap(paths.mapPath, mapMetadata);
     const state = rescueStateFromMap(parsed, identity);
     const map = parsed as DvdRescueMap;
-    const boundaryAcceptanceProof = parseBoundaryAcceptanceImageProof(map);
+    let boundaryAcceptanceProof = parseBoundaryAcceptanceImageProof(map);
+    const correctedRetryProof = parseCorrectedRetryRetainedSectorProof(map);
     const preparedImagePath =
       "preparedImageBasename" in map
         ? requirePreparedImagePath(
@@ -954,21 +1187,67 @@ export async function loadDvdRescueWorkspace(
       if (boundaryAcceptanceProof.accepted === undefined) {
         throw new Error("DVD rescue boundary image proof is incomplete");
       }
-      const handle = await open(
-        paths.imagePath,
-        fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
-      );
-      try {
-        if (!imageMetadataMatchesProof(
-          await handle.stat({ bigint: true }),
-          map.imageFilesystemIdentity,
-          state.imageByteCount,
-          boundaryAcceptanceProof.accepted,
-        )) {
+      const acceptedProof = boundaryAcceptanceProof.accepted;
+      if (correctedRetryProof !== null) {
+        if (state.recoveryResult?.outcome !== "damaged") {
           throw new Error("DVD rescue boundary image proof does not match");
         }
-      } finally {
-        await handle.close();
+        try {
+          const workspace = {
+            ...paths,
+            ...state,
+            imageFilesystemIdentity: map.imageFilesystemIdentity,
+            imageProofIdentity: null,
+          };
+          const reconciledProof = await readDvdRetainedSectorProof({
+            expectedDigest: correctedRetryProof.digest,
+            recoveryResult: state.recoveryResult,
+            workspace,
+          });
+          if (!sameImageProofIdentity(
+            acceptedProof,
+            reconciledProof.imageProofIdentity,
+          )) {
+            await writeCorrectedRetryProofMap(
+              root,
+              identity,
+              workspace,
+              state,
+              {
+                source: boundaryAcceptanceProof.source,
+                accepted: reconciledProof.imageProofIdentity,
+              },
+              correctedRetryProof,
+              authorizeMutation,
+            );
+          }
+          boundaryAcceptanceProof = {
+            source: boundaryAcceptanceProof.source,
+            accepted: reconciledProof.imageProofIdentity,
+          };
+        } catch (error) {
+          if (!(error instanceof DvdRetainedSectorProofMismatchError)) {
+            preserveCorrectedRetryWorkspace = true;
+          }
+          throw error;
+        }
+      } else {
+        const handle = await open(
+          paths.imagePath,
+          fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+        );
+        try {
+          if (!imageMetadataMatchesProof(
+            await handle.stat({ bigint: true }),
+            map.imageFilesystemIdentity,
+            state.imageByteCount,
+            acceptedProof,
+          )) {
+            throw new Error("DVD rescue boundary image proof does not match");
+          }
+        } finally {
+          await handle.close();
+        }
       }
     }
     const canonicalImagePath = await realpath(paths.imagePath);
@@ -997,7 +1276,10 @@ export async function loadDvdRescueWorkspace(
       imageProofIdentity: boundaryAcceptanceProof?.accepted ?? null,
     };
   } catch (error) {
-    if (invalidStatePolicy === "quarantine") {
+    if (
+      invalidStatePolicy === "quarantine" &&
+      !preserveCorrectedRetryWorkspace
+    ) {
       try {
         await quarantineWorkspaceFiles(
           root,
@@ -1657,6 +1939,65 @@ export async function updateDvdBoundaryRescueWorkspaceImageProof(
     }
     throw error;
   }
+}
+
+export async function stageDvdCorrectedRetryRetainedSectorProof(
+  root: string,
+  identity: DvdRescueIdentity,
+  workspace: DvdRescueWorkspace,
+  retainedSectorProof: DvdRetainedSectorProof,
+  authorizeMutation?: AuthorizeMutation,
+): Promise<void> {
+  const expectedPaths = dvdRescueWorkspacePaths(root, identity.archiveRequestId);
+  if (
+    workspace.imagePath !== expectedPaths.imagePath ||
+    workspace.mapPath !== expectedPaths.mapPath ||
+    workspace.imageProofIdentity === null ||
+    !sameImageProofIdentity(
+      workspace.imageProofIdentity,
+      retainedSectorProof.imageProofIdentity,
+    ) ||
+    !SHA256_DIGEST_PATTERN.test(retainedSectorProof.digest)
+  ) {
+    throw new DvdRetainedSectorProofMismatchError();
+  }
+  const mapMetadata = await lstat(workspace.mapPath);
+  const mapValue = await readRescueMap(workspace.mapPath, mapMetadata);
+  const map = mapValue as DvdRescueMap;
+  const state = rescueStateFromMap(mapValue, identity);
+  const priorProof = parseBoundaryAcceptanceImageProof(map);
+  if (
+    map.schemaVersion !== 3 ||
+    priorProof?.accepted === undefined ||
+    state.recoveryResult?.outcome !== "damaged" ||
+    workspace.recoveryResult?.outcome !== "damaged" ||
+    state.imageByteCount !== workspace.imageByteCount ||
+    JSON.stringify(createDvdRecoveryProtocolPayload(state.recoveryResult)) !==
+      JSON.stringify(
+        createDvdRecoveryProtocolPayload(workspace.recoveryResult),
+      ) ||
+    JSON.stringify(state.boundaryFailure) !==
+      JSON.stringify(workspace.boundaryFailure) ||
+    map.imageFilesystemIdentity !== workspace.imageFilesystemIdentity ||
+    !sameImageProofIdentity(
+      priorProof.accepted,
+      workspace.imageProofIdentity,
+    )
+  ) {
+    throw new DvdRetainedSectorProofMismatchError();
+  }
+  await writeCorrectedRetryProofMap(
+    root,
+    identity,
+    workspace,
+    state,
+    {
+      source: priorProof.source,
+      accepted: retainedSectorProof.imageProofIdentity,
+    },
+    { digest: retainedSectorProof.digest },
+    authorizeMutation,
+  );
 }
 
 export async function quarantineDvdRescueWorkspace(
