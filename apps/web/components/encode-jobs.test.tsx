@@ -203,6 +203,9 @@ describe("EncodeJobsView", () => {
 
     expect(html).not.toContain("Select Already queued");
     expect(html).toContain("This Encode Job is already queued.");
+    expect(html).toContain(
+      "Reserved final output: /media/movies/Already queued (2002).mkv",
+    );
     expect(html).toContain("Already queued</button>");
   });
 
@@ -412,10 +415,17 @@ describe("EncodeJobsView", () => {
     const selectionId = "selection-1" as DiscSelectionId;
     const profileId = "profile-v2" as EncodingProfileId;
     const jobId = "job-1" as EncodeJobId;
+    const canonicalOutputPath = "/media/movies/Queue Me (2001).mkv";
     const fetcher = vi.fn(async (input: RequestInfo | URL) =>
       String(input).includes("selectionOffset")
         ? Response.json({ selections: [], profiles: [], page: {} })
-        : Response.json({ job: { id: "job-1" } }));
+        : Response.json({
+            job: {
+              id: "job-1",
+              status: "queued",
+              outputPath: canonicalOutputPath,
+            },
+          }));
 
     await requestEncodeJobOptions({
       selectionOffset: 100,
@@ -424,13 +434,18 @@ describe("EncodeJobsView", () => {
       query: "queue me",
       encodingProfileId: profileId,
     }, fetcher);
-    await queueEncodeJob({
+    const queuedJob = await queueEncodeJob({
       discSelectionId: selectionId,
       encodingProfileId: profileId,
       outputPath: "/media/movies/Queue Me (2001).mkv",
     }, fetcher);
     await cancelEncodeJob(jobId, fetcher);
     await retryEncodeJob(jobId, fetcher);
+
+    expect(queuedJob).toEqual({
+      status: "queued",
+      outputPath: canonicalOutputPath,
+    });
 
     expect(fetcher).toHaveBeenNthCalledWith(
       1,

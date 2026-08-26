@@ -79,6 +79,21 @@ test("queues a first-encode worklist with partial failure recovery", async ({
   await expect(manager.getByRole("button", { name: "Already queued" }))
     .toBeDisabled();
 
+  await search.fill(`Queue failed ${variant}`);
+  await search.press("Enter");
+  await expect(manager.getByRole("checkbox", {
+    name: `Select Queue failed ${variant} (2026) · DVD main feature`,
+  })).toHaveCount(0);
+  await expect(manager).toContainText(
+    new RegExp(`Reserved final output: .*/Queue failed ${variant}\\.mkv`),
+  );
+  const retryExistingResponse = page.waitForResponse((response) =>
+    response.url().endsWith("/api/encode-jobs") &&
+    response.request().method() === "PATCH"
+  );
+  await manager.getByRole("button", { name: "Retry Encode Job" }).click();
+  expect((await retryExistingResponse).status()).toBe(200);
+
   const targetQuery = `Queue new ${variant}`;
   await expect(manager.getByRole("option", {
     name: new RegExp(`^${targetQuery} \\(2026\\)`),
@@ -101,6 +116,7 @@ test("queues a first-encode worklist with partial failure recovery", async ({
   await expectVisibleKeyboardFocus(newSelection);
   await page.keyboard.press("Space");
   await expect(newSelection).toBeChecked();
+  await expect(profile).toBeDisabled();
 
   await manager.getByRole("button", { name: "Clear search" }).click();
   await nextSelections.click();
