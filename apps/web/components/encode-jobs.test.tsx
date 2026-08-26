@@ -17,6 +17,7 @@ import {
   EncodeJobsView,
   queueEncodeJob,
   requestEncodeJobOptions,
+  requestQueueLogicalJobs,
   retryEncodeJob,
 } from "./encode-jobs";
 import type {
@@ -482,6 +483,31 @@ describe("EncodeJobsView", () => {
     });
   });
 
+  it("resolves selected-profile jobs for bounded replacement recovery", async () => {
+    const profileId = "profile-v2" as EncodingProfileId;
+    const firstId = "selection-1" as DiscSelectionId;
+    const secondId = "selection-2" as DiscSelectionId;
+    const logicalJob = {
+      discSelectionId: secondId,
+      id: "job-2" as EncodeJobId,
+      encodingProfileId: profileId,
+      outputPath: "/media/movies/Existing.mkv",
+      status: "failed" as const,
+      queueAvailable: true,
+    };
+    const fetcher = vi.fn(async () => Response.json({
+      logicalJobs: [logicalJob],
+    }));
+
+    await expect(
+      requestQueueLogicalJobs([firstId, secondId], profileId, fetcher),
+    ).resolves.toEqual([logicalJob]);
+    expect(fetcher).toHaveBeenCalledWith(
+      "/api/encode-jobs?encodingProfileId=profile-v2&resolveDiscSelectionId=selection-1&resolveDiscSelectionId=selection-2",
+      { cache: "no-store", headers: { Accept: "application/json" } },
+    );
+  });
+
   it("recovers when the selected Encoding Profile becomes inactive", async () => {
     const profileId = "profile-retired" as EncodingProfileId;
     let unprofiledRequests = 0;
@@ -556,6 +582,150 @@ describe("EncodeJobsView", () => {
       expect(container.textContent).toContain(
         "No active DVD video Encoding Profiles are available.",
       );
+    } finally {
+      await act(async () => root.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("rejects a replacement profile with existing jobs without discarding rows", async () => {
+    const retiredProfileId = "profile-retired" as EncodingProfileId;
+    const replacementProfileId = "profile-replacement" as EncodingProfileId;
+    const selection: EncodeSelectionOption = {
+      id: "selection-preserved" as DiscSelectionId,
+      mediaItemId: "movie-preserved",
+      mediaTitle: "Preserved worklist row",
+      mediaYear: 2004,
+      sourceDescription: "DVD main feature",
+      hasCompletedEncode: false,
+      priorCompletedJob: null,
+      logicalJob: null,
+      suggestedOutputPath: "/media/movies/Preserved worklist row (2004).mkv",
+    };
+    let retired = false;
+    const loaded = (profileId: EncodingProfileId) => ({
+      historyGroup: "not_encoded",
+      query: "",
+      counts: { notEncoded: 1, reEncode: 0 },
+      selections: [selection],
+      profiles: [{
+        id: profileId,
+        displayName: profileId === retiredProfileId
+          ? "Retiring profile"
+          : "Replacement profile",
+        version: 1,
+      }],
+      page: {
+        offset: 0,
+        limit: 100,
+        total: 1,
+        hasPrevious: false,
+        hasNext: false,
+      },
+      profilePage: {
+        offset: 0,
+        limit: 100,
+        hasPrevious: false,
+        hasNext: false,
+      },
+    });
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input), "http://localhost:3000");
+      if (url.searchParams.has("resolveDiscSelectionId")) {
+        return Response.json({
+          logicalJobs: [{
+            discSelectionId: selection.id,
+            id: "job-existing" as EncodeJobId,
+            encodingProfileId: replacementProfileId,
+            outputPath: "/media/movies/Existing replacement.mkv",
+            status: "queued",
+            queueAvailable: false,
+          }],
+        });
+      }
+      if (
+        retired &&
+        url.searchParams.get("encodingProfileId") === retiredProfileId
+      ) {
+        return Response.json({ error: "Encoding Profile is inactive" }, {
+          status: 404,
+        });
+      }
+      return Response.json(
+        loaded(retired ? replacementProfileId : retiredProfileId),
+      );
+    });
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.stubGlobal("fetch", fetcher);
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+    try {
+      await act(async () => {
+        root.render(<EncodeJobsManager revision={0} onChanged={() => undefined} />);
+        await settle();
+      });
+      const profile = container.querySelector<HTMLSelectElement>(
+        'select[name="encodingProfileId"]',
+      );
+      if (!profile) {
+        throw new Error("Expected Encoding Profile picker");
+      }
+      await act(async () => {
+        profile.value = retiredProfileId;
+        profile.dispatchEvent(new Event("change", { bubbles: true }));
+        await settle();
+      });
+      const checkbox = container.querySelector<HTMLInputElement>(
+        `input[aria-label^="Select Preserved worklist row"]`,
+      );
+      if (!checkbox) {
+        throw new Error("Expected first-encode checkbox");
+      }
+      await act(async () => {
+        checkbox.click();
+      });
+      const add = [...container.querySelectorAll("button")].find(
+        (button) => button.textContent?.includes("Add selected to batch"),
+      );
+      if (!add) {
+        throw new Error("Expected add-to-worklist action");
+      }
+      await act(async () => {
+        add.click();
+      });
+
+      retired = true;
+      await act(async () => {
+        root.render(<EncodeJobsManager revision={1} onChanged={() => undefined} />);
+        await settle();
+      });
+      await act(async () => {
+        await settle();
+      });
+      const replacement = container.querySelector<HTMLSelectElement>(
+        'select[name="encodingProfileId"]',
+      );
+      if (!replacement) {
+        throw new Error("Expected replacement profile picker");
+      }
+      await act(async () => {
+        replacement.value = replacementProfileId;
+        replacement.dispatchEvent(new Event("change", { bubbles: true }));
+        await settle();
+      });
+
+      expect(replacement.value).toBe("");
+      expect(container.textContent).toContain("Preserved worklist row");
+      expect(container.textContent).toContain(
+        "The replacement profile already has 1 Encode Job for this worklist",
+      );
+      expect(fetcher.mock.calls.some(([input]) =>
+        String(input).includes(
+          `encodingProfileId=${replacementProfileId}&resolveDiscSelectionId=${selection.id}`,
+        )
+      )).toBe(true);
     } finally {
       await act(async () => root.unmount());
       vi.unstubAllGlobals();

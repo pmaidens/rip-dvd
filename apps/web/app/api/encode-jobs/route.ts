@@ -266,6 +266,31 @@ function readQueueOptions(
   });
 }
 
+function readQueueLogicalJobs(
+  access: DataAccess,
+  discSelectionIds: readonly DiscSelectionId[],
+  encodingProfileId: EncodingProfileId,
+) {
+  return access.readConsistentSnapshot((snapshot) => {
+    if (
+      snapshot.encodingProfiles.list({
+        ids: [encodingProfileId],
+        mediaDomain: "dvd_video",
+        activeOnly: true,
+      }).length !== 1
+    ) {
+      throw new RecordNotFoundError(
+        "active DVD video Encoding Profile",
+        encodingProfileId,
+      );
+    }
+    return snapshot.encodeJobs.listQueueLogicalJobs({
+      discSelectionIds,
+      encodingProfileId,
+    });
+  });
+}
+
 export async function createEncodeJobsRoute(
   request: Request,
   getAccess: () => DataAccess = getDataAccess,
@@ -308,11 +333,33 @@ export async function createEncodeJobsRoute(
       ) {
         return response({ error: "Invalid Encoding Profile" }, 400);
       }
+      const resolveSelectionValues = parameters.getAll(
+        "resolveDiscSelectionId",
+      );
+      const resolveSelectionIds = resolveSelectionValues.map((value) =>
+        boundedString(value)
+      );
+      if (
+        resolveSelectionValues.length > ENCODE_SELECTION_PAGE_SIZE ||
+        resolveSelectionIds.some((id) => id === null) ||
+        (resolveSelectionValues.length > 0 && encodingProfileId === undefined)
+      ) {
+        return response({ error: "Invalid Disc Selection resolution" }, 400);
+      }
       let config: EncodeJobsRuntimeConfig;
       try {
         config = getRuntimeConfig();
       } catch {
         return response({ error: "Encoding options are unavailable" }, 503);
+      }
+      if (resolveSelectionIds.length > 0) {
+        return response({
+          logicalJobs: readQueueLogicalJobs(
+            getAccess(),
+            resolveSelectionIds as DiscSelectionId[],
+            encodingProfileId as EncodingProfileId,
+          ),
+        });
       }
       return response(
         readQueueOptions(
