@@ -32,6 +32,11 @@ export type {
 } from "./archive-boundary.js";
 export { normalizeMediaItemSearchTitle } from "./media-item-title-search.js";
 export {
+  ENCODE_QUEUE_SEARCH_QUERY_MAX_LENGTH,
+  validateEncodeQueueSearchQuery,
+} from "./encode-queue-search.js";
+export type { EncodeQueueSearchQueryValidation } from "./encode-queue-search.js";
+export {
   isCorrectedEncodePredecessorReady,
   isEncodeJobSafelyTerminal,
 } from "./corrected-encode-readiness.js";

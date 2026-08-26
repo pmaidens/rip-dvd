@@ -2,13 +2,16 @@
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 
-import type {
-  DiscSelectionId,
-  EncodeJobId,
-  EncodeJobStatus,
-  EncodeQueueHistoryGroup,
-  EncodingProfileId,
+import {
+  type DiscSelectionId,
+  type EncodeJobId,
+  type EncodeJobStatus,
+  type EncodeQueueHistoryGroup,
+  type EncodingProfileId,
 } from "@rip-dvd/data-access";
+import {
+  ENCODE_QUEUE_SEARCH_QUERY_MAX_LENGTH,
+} from "@rip-dvd/data-access/encode-queue-search";
 
 import { displayTerm } from "../lib/display-term";
 import { isTerminalEncodeJobStatus } from "../lib/encode-job-status";
@@ -210,6 +213,9 @@ export function EncodeJobsView({
   const [selectedSelection, setSelectedSelection] = useState<
     EncodeSelectionOption | null
   >(null);
+  const [selectedSelectionGroup, setSelectedSelectionGroup] = useState<
+    EncodeQueueHistoryGroup | null
+  >(null);
   const [selectedSelectionProfileId, setSelectedSelectionProfileId] = useState<
     EncodingProfileId | ""
   >("");
@@ -218,12 +224,20 @@ export function EncodeJobsView({
   );
   const [outputPath, setOutputPath] = useState("");
 
-  const pageSelection = state.status === "loaded" && selectedSelection !== null
+  const loadedHistoryGroup = state.status === "loaded"
+    ? state.historyGroup
+    : null;
+  const groupedSelectedSelection = loadedHistoryGroup !== null &&
+      selectedSelectionGroup === loadedHistoryGroup
+    ? selectedSelection
+    : null;
+  const pageSelection = state.status === "loaded" &&
+      groupedSelectedSelection !== null
     ? state.selections.find((selection) =>
-      selection.id === selectedSelection.id
+      selection.id === groupedSelectedSelection.id
     )
     : undefined;
-  const visibleSelection = pageSelection ?? selectedSelection;
+  const visibleSelection = pageSelection ?? groupedSelectedSelection;
   const logicalJob = visibleSelection?.logicalJob ?? null;
   const visibleSelectedProfileId = state.status === "loaded" &&
       state.profiles.some((profile) => profile.id === selectedProfileId)
@@ -250,7 +264,11 @@ export function EncodeJobsView({
     : "not encoded";
 
   useEffect(() => {
-    if (state.status !== "loaded" || selectedSelection === null) {
+    if (
+      state.status !== "loaded" ||
+      selectedSelection === null ||
+      selectedSelectionGroup !== state.historyGroup
+    ) {
       return;
     }
     const refreshedSelection = state.selections.find(
@@ -263,10 +281,19 @@ export function EncodeJobsView({
       setSelectedSelection(refreshedSelection);
       setSelectedSelectionProfileId(visibleSelectedProfileId);
     }
-  }, [selectedSelection, state, visibleSelectedProfileId]);
+  }, [
+    selectedSelection,
+    selectedSelectionGroup,
+    state,
+    visibleSelectedProfileId,
+  ]);
 
   useEffect(() => {
-    if (selectedSelection === null) {
+    if (
+      selectedSelection === null ||
+      loadedHistoryGroup === null ||
+      selectedSelectionGroup !== loadedHistoryGroup
+    ) {
       setOutputPath("");
       return;
     }
@@ -275,7 +302,7 @@ export function EncodeJobsView({
         selectedSelection.suggestedOutputPath ??
         "",
     );
-  }, [selectedSelection]);
+  }, [loadedHistoryGroup, selectedSelection, selectedSelectionGroup]);
 
   useEffect(() => {
     if (loadedQuery !== null) {
@@ -292,6 +319,9 @@ export function EncodeJobsView({
       (candidate) => candidate.id === selectionId,
     );
     setSelectedSelection(selection ?? null);
+    setSelectedSelectionGroup(
+      selection === undefined ? null : state.historyGroup,
+    );
     setSelectedSelectionProfileId(visibleSelectedProfileId);
     setOutputPath(
       selection?.logicalJob?.outputPath ?? selection?.suggestedOutputPath ?? "",
@@ -403,7 +433,7 @@ export function EncodeJobsView({
               <input
                 type="search"
                 name="selectionQuery"
-                maxLength={256}
+                maxLength={ENCODE_QUEUE_SEARCH_QUERY_MAX_LENGTH}
                 value={searchQuery}
                 disabled={isSaving}
                 onChange={(event) => setSearchQuery(event.currentTarget.value)}

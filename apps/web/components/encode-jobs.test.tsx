@@ -226,7 +226,8 @@ describe("EncodeJobsView", () => {
     await act(async () => root.unmount());
   });
 
-  it("keeps a chosen Disc Selection understandable outside its result page", async () => {
+  it("pins a chosen Disc Selection within its history group only", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     const container = document.createElement("div");
     const root = createRoot(container);
     const selection = {
@@ -240,12 +241,16 @@ describe("EncodeJobsView", () => {
       logicalJob: null,
       suggestedOutputPath: "/media/movies/Pinned choice (2005).mkv",
     };
-    const render = (query: string, selections: EncodeSelectionOption[]) => (
+    const render = (
+      query: string,
+      selections: EncodeSelectionOption[],
+      historyGroup: "not_encoded" | "re_encode" = "not_encoded",
+    ) => (
       <EncodeJobsView
         selectedProfileId={"profile-pinned" as EncodingProfileId}
         state={{
           status: "loaded",
-          historyGroup: "not_encoded",
+          historyGroup,
           query,
           counts: { notEncoded: 2, reEncode: 0 },
           selections,
@@ -280,27 +285,39 @@ describe("EncodeJobsView", () => {
       />
     );
 
-    await act(async () => root.render(render("", [selection])));
-    const picker = container.querySelector<HTMLSelectElement>(
-      'select[name="discSelectionId"]',
-    );
-    if (!picker) {
-      throw new Error("Expected Disc Selection picker");
-    }
-    await act(async () => {
-      picker.value = selection.id;
-      picker.dispatchEvent(new Event("change", { bubbles: true }));
-    });
-    await act(async () => root.render(render("another title", [])));
+    try {
+      await act(async () => root.render(render("", [selection])));
+      const picker = container.querySelector<HTMLSelectElement>(
+        'select[name="discSelectionId"]',
+      );
+      if (!picker) {
+        throw new Error("Expected Disc Selection picker");
+      }
+      await act(async () => {
+        picker.value = selection.id;
+        picker.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      await act(async () => root.render(render("another title", [])));
 
-    expect(container.textContent).toContain(
-      "Pinned choice (2005) · DVD title 2",
-    );
-    expect(container.textContent).toContain(
-      'No Disc Selections match "another title" in Not encoded.',
-    );
-    expect(picker.value).toBe(selection.id);
-    await act(async () => root.unmount());
+      expect(container.textContent).toContain(
+        "Pinned choice (2005) · DVD title 2",
+      );
+      expect(container.textContent).toContain(
+        'No Disc Selections match "another title" in Not encoded.',
+      );
+      expect(picker.value).toBe(selection.id);
+
+      await act(async () => root.render(render("", [], "re_encode")));
+      expect(container.textContent).not.toContain("Pinned choice (2005)");
+      expect(picker.value).toBe("");
+      expect(
+        container.querySelector<HTMLInputElement>('input[name="outputPath"]')
+          ?.value,
+      ).toBe("");
+    } finally {
+      await act(async () => root.unmount());
+      vi.unstubAllGlobals();
+    }
   });
 
   it("cannot submit a profile that is absent from the visible page", async () => {
