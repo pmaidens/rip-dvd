@@ -414,14 +414,14 @@ describe("encode output validation", () => {
     );
   });
 
-  it("rejects a VobSub stream without readable packets", async () => {
+  it("rejects a malformed VobSub packet count", async () => {
     const validator = createNodeEncodeOutputValidator({
       runMediaTool: createMediaToolRunner({
         subtitlePacketStreams: [
           {
             codec_name: "dvd_subtitle",
             index: 2,
-            nb_read_packets: "0",
+            nb_read_packets: "not-a-count",
           },
         ],
       }),
@@ -430,7 +430,122 @@ describe("encode output validation", () => {
     await expect(
       validator.validate("/media/broken.mkv", new AbortController().signal),
     ).rejects.toThrow(
-      "Encode output validation failed: VobSub stream 2 has no readable packets",
+      "Encode output validation failed: subtitle packet probe returned an invalid result",
+    );
+  });
+
+  it("removes packetless forced variants before accepting useful VobSub streams", async () => {
+    const cleanedSubtitleStreams = Array.from({ length: 6 }, (_, position) => ({
+      codec_name: "dvd_subtitle",
+      disposition:
+        position === 0
+          ? { default: 1, forced: 1 }
+          : { default: 0, forced: 0 },
+      index: position + 3,
+      tags: { language: position % 2 === 0 ? "eng" : "spa" },
+    }));
+    const emptySubtitleStreams = Array.from(
+      { length: 6 },
+      (_, position) => ({
+        codec_name: "dvd_subtitle",
+        disposition: { default: 0, forced: 0 },
+        index: position + 9,
+        tags: { language: position % 2 === 0 ? "eng" : "spa" },
+      }),
+    );
+    const originalRunner = createMediaToolRunner({
+      subtitlePacketStreams: [
+        ...cleanedSubtitleStreams.map((stream, position) => ({
+          codec_name: "dvd_subtitle",
+          index: stream.index,
+          nb_read_packets: String(position + 1),
+        })),
+        ...emptySubtitleStreams.map((stream) => ({
+          codec_name: "dvd_subtitle",
+          index: stream.index,
+        })),
+      ],
+      subtitleStreams: [
+        ...cleanedSubtitleStreams,
+        ...emptySubtitleStreams,
+      ],
+    });
+    let remuxed = false;
+    const runMediaTool = vi.fn(async (request: MediaToolRunRequest) => {
+      if (
+        request.executable === "ffmpeg" &&
+        request.arguments_.includes("copy")
+      ) {
+        remuxed = true;
+        return mediaToolResult("");
+      }
+      if (remuxed) {
+        const streamSelector = request.arguments_[
+          request.arguments_.indexOf("-select_streams") + 1
+        ];
+        if (streamSelector === "s") {
+          return mediaToolResult(
+            JSON.stringify({
+              streams: request.arguments_.includes("-count_packets")
+                ? cleanedSubtitleStreams.map((stream, position) => ({
+                    codec_name: "dvd_subtitle",
+                    index: stream.index,
+                    nb_read_packets: String(position + 1),
+                  }))
+                : cleanedSubtitleStreams,
+            }),
+          );
+        }
+      }
+      return originalRunner(request);
+    });
+    const replaceOutput = vi.fn(async () => {});
+    const validator = createNodeEncodeOutputValidator({
+      replaceOutput,
+      runMediaTool,
+    });
+
+    await expect(
+      validator.validate(
+        "/media/subtitled.mkv",
+        new AbortController().signal,
+        {
+          expectedVobSubStreams: cleanedSubtitleStreams
+            .slice(1)
+            .map((stream) => ({ languageCode: stream.tags.language })),
+        },
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(runMediaTool).toHaveBeenCalledWith(
+      expect.objectContaining({
+        arguments_: expect.arrayContaining([
+          "-map",
+          "0",
+          "-map",
+          "-0:9",
+          "-0:10",
+          "-0:11",
+          "-0:12",
+          "-0:13",
+          "-0:14",
+          "-c",
+          "copy",
+          "-disposition:s:0",
+          "+default+forced",
+          "-disposition:s:1",
+          "-default-forced",
+          "-f",
+          "matroska",
+        ]),
+        executable: "ffmpeg",
+      }),
+    );
+    expect(replaceOutput).toHaveBeenCalledWith(
+      expect.stringMatching(
+        /^\/media\/subtitled\.mkv\..+\.rip-dvd-subtitle-remux$/,
+      ),
+      "/media/subtitled.mkv",
     );
   });
 

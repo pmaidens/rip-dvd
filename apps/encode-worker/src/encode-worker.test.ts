@@ -1194,6 +1194,46 @@ describe("encode worker polling", () => {
     fixture.access.close();
   });
 
+  it("does not publish when output validation leaves an empty partial", async () => {
+    const fixture = createQueuedJob();
+    let partialPath = "";
+    const runner: HandBrakeRunner = {
+      run: vi.fn(async ({ outputPath }) => {
+        partialPath = outputPath;
+        writeFileSync(outputPath, "complete encode", { flag: "wx" });
+      }),
+    };
+    const outputValidator: EncodeOutputValidator = {
+      validate: vi.fn(async (outputPath) => {
+        writeFileSync(outputPath, "");
+      }),
+    };
+
+    await pollEncodeWorker({
+      access: fixture.access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      outputValidator,
+      runner,
+      signal: new AbortController().signal,
+    });
+
+    expect(outputValidator.validate).toHaveBeenCalledOnce();
+    expect(existsSync(fixture.outputPath)).toBe(false);
+    expect(existsSync(partialPath)).toBe(false);
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        errorMessage:
+          "Encode output validation did not retain a regular output file",
+        id: fixture.job.id,
+        status: "failed",
+      }),
+    ]);
+    fixture.access.close();
+  });
+
   it.each([
     {
       name: "a DVD title",
