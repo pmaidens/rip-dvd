@@ -1,4 +1,5 @@
 import type { Stats } from "node:fs";
+import { lstat } from "node:fs/promises";
 
 import type { EncodeOutputFilesystemIdentity } from "@rip-dvd/data-access";
 
@@ -8,6 +9,21 @@ export interface EncodeOutputFilesystemAuthoritySnapshot {
   inode: number;
   modifiedAtMs: number;
   sizeBytes: number;
+}
+
+export async function requireCompleteRegularEncodeOutput(
+  path: string,
+  errorMessage: string,
+): Promise<Stats> {
+  const metadata = await lstat(path);
+  if (
+    !metadata.isFile() ||
+    metadata.isSymbolicLink() ||
+    metadata.size <= 0
+  ) {
+    throw new Error(errorMessage);
+  }
+  return metadata;
 }
 
 function snapshotFromMetadata(

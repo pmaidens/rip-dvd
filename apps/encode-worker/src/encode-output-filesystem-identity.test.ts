@@ -15,6 +15,7 @@ import {
   decodeOutputFilesystemIdentity,
   encodeOutputFilesystemIdentity,
   matchesEncodeOutputFilesystemIdentity,
+  requireCompleteRegularEncodeOutput,
   sameEncodeOutputAuthoritySnapshot,
   sameEncodeOutputInode,
   sameEncodeOutputMutationSnapshot,
@@ -37,6 +38,19 @@ function createOutput() {
 }
 
 describe("Encode output filesystem identity codec", () => {
+  it("returns metadata only for a non-empty regular output", async () => {
+    const { metadata, path } = createOutput();
+
+    await expect(
+      requireCompleteRegularEncodeOutput(path, "invalid output"),
+    ).resolves.toMatchObject({ ino: metadata.ino, size: metadata.size });
+
+    writeFileSync(path, "");
+    await expect(
+      requireCompleteRegularEncodeOutput(path, "invalid output"),
+    ).rejects.toThrow("invalid output");
+  });
+
   it("round-trips the filesystem snapshot using the existing tuple encoding", () => {
     const { metadata } = createOutput();
 

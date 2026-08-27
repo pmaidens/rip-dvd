@@ -434,6 +434,23 @@ describe("encode output validation", () => {
     );
   });
 
+  it("rejects a packet probe that omits a declared VobSub stream", async () => {
+    const repairer = {
+      removeEmptyVobSubStreams: vi.fn(async () => {}),
+    };
+    const validator = createNodeEncodeOutputValidator({
+      repairer,
+      runMediaTool: createMediaToolRunner({ subtitlePacketStreams: [] }),
+    });
+
+    await expect(
+      validator.validate("/media/broken.mkv", new AbortController().signal),
+    ).rejects.toThrow(
+      "Encode output validation failed: subtitle packet probe returned an invalid result",
+    );
+    expect(repairer.removeEmptyVobSubStreams).not.toHaveBeenCalled();
+  });
+
   it("removes packetless forced variants before accepting useful VobSub streams", async () => {
     const cleanedSubtitleStreams = Array.from({ length: 6 }, (_, position) => ({
       codec_name: "dvd_subtitle",
@@ -499,9 +516,13 @@ describe("encode output validation", () => {
       }
       return originalRunner(request);
     });
-    const replaceOutput = vi.fn(async () => {});
+    const repairer = {
+      removeEmptyVobSubStreams: vi.fn(async () => {
+        remuxed = true;
+      }),
+    };
     const validator = createNodeEncodeOutputValidator({
-      replaceOutput,
+      repairer,
       runMediaTool,
     });
 
@@ -517,36 +538,19 @@ describe("encode output validation", () => {
       ),
     ).resolves.toBeUndefined();
 
-    expect(runMediaTool).toHaveBeenCalledWith(
-      expect.objectContaining({
-        arguments_: expect.arrayContaining([
-          "-map",
-          "0",
-          "-map",
-          "-0:9",
-          "-0:10",
-          "-0:11",
-          "-0:12",
-          "-0:13",
-          "-0:14",
-          "-c",
-          "copy",
-          "-disposition:s:0",
-          "+default+forced",
-          "-disposition:s:1",
-          "-default-forced",
-          "-f",
-          "matroska",
-        ]),
-        executable: "ffmpeg",
-      }),
-    );
-    expect(replaceOutput).toHaveBeenCalledWith(
-      expect.stringMatching(
-        /^\/media\/subtitled\.mkv\..+\.rip-dvd-subtitle-remux$/,
-      ),
-      "/media/subtitled.mkv",
-    );
+    expect(repairer.removeEmptyVobSubStreams).toHaveBeenCalledWith({
+      emptyStreamIndexes: [9, 10, 11, 12, 13, 14],
+      outputPath: "/media/subtitled.mkv",
+      retainedSubtitleDispositions: [
+        { default: true, forced: true },
+        ...Array.from({ length: 5 }, () => ({
+          default: false,
+          forced: false,
+        })),
+      ],
+      signal: expect.any(AbortSignal),
+      timeoutMs: 300_000,
+    });
   });
 
   it("rejects VobSub packet read errors reported by ffprobe", async () => {

@@ -39,6 +39,7 @@ import {
 import {
   encodeOutputFilesystemIdentity,
   matchesEncodeOutputFilesystemIdentity,
+  requireCompleteRegularEncodeOutput,
   sameEncodeOutputAuthoritySnapshot,
   sameEncodeOutputInode,
   sameEncodeOutputMutationSnapshot,
@@ -1521,28 +1522,20 @@ export async function executeEncodeClaim(
     });
     parseProgress("", true);
     signal.throwIfAborted();
-    const partialMetadata = await lstat(partialPath);
-    if (
-      !partialMetadata.isFile() ||
-      partialMetadata.isSymbolicLink() ||
-      partialMetadata.size <= 0
-    ) {
-      throw new Error("HandBrake did not produce a complete regular output file");
-    }
+    await requireCompleteRegularEncodeOutput(
+      partialPath,
+      "HandBrake did not produce a complete regular output file",
+    );
     await options.outputValidator.validate(partialPath, signal, {
       ...(input.expectedVobSubStreams === undefined
         ? {}
         : { expectedVobSubStreams: input.expectedVobSubStreams }),
     });
     signal.throwIfAborted();
-    const validatedPartialMetadata = await lstat(partialPath);
-    if (
-      !validatedPartialMetadata.isFile() ||
-      validatedPartialMetadata.isSymbolicLink() ||
-      validatedPartialMetadata.size <= 0
-    ) {
-      throw new Error("Encode output validation did not retain a regular output file");
-    }
+    const validatedPartialMetadata = await requireCompleteRegularEncodeOutput(
+      partialPath,
+      "Encode output validation did not retain a regular output file",
+    );
     await syncPath(partialPath);
     publishedOutputMetadata = validatedPartialMetadata;
     pendingPartialCleanup =

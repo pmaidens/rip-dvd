@@ -1,6 +1,9 @@
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { lstat, rename, unlink } from "node:fs/promises";
+
+import {
+  createNodeEncodeOutputRepairer,
+  type EncodeOutputRepairer,
+} from "./encode-output-repairer.js";
 
 const DEFAULT_MEDIA_TOOL_TIMEOUT_MS = 30_000;
 const DEFAULT_SUBTITLE_PACKET_TIMEOUT_MS = 5 * 60_000;
@@ -23,11 +26,6 @@ export interface MediaToolRunResult {
 export type MediaToolRunner = (
   request: MediaToolRunRequest,
 ) => Promise<MediaToolRunResult>;
-
-type ReplaceEncodeOutput = (
-  replacementPath: string,
-  outputPath: string,
-) => Promise<void>;
 
 export interface EncodeOutputValidator {
   validate(
@@ -110,21 +108,6 @@ function runNodeMediaTool(
       },
     );
   });
-}
-
-async function replaceNodeEncodeOutput(
-  replacementPath: string,
-  outputPath: string,
-): Promise<void> {
-  const metadata = await lstat(replacementPath);
-  if (
-    !metadata.isFile() ||
-    metadata.isSymbolicLink() ||
-    metadata.size === 0
-  ) {
-    throw new Error("subtitle cleanup did not produce a regular output file");
-  }
-  await rename(replacementPath, outputPath);
 }
 
 function parseProbeResult(stdout: string, description: string): ProbeResult {
@@ -410,90 +393,16 @@ function validateVobSubPacketCounts(
   }
   for (const index of expectedIndexes) {
     if (!observedIndexes.has(index)) {
-      emptyIndexes.add(index);
+      throw validationError("subtitle packet probe returned an invalid result");
     }
   }
   return emptyIndexes;
 }
 
-function copiedSubtitleDisposition(stream: CompleteSubtitleStream): string {
-  return `${stream.disposition.default === 1 ? "+default" : "-default"}${
-    stream.disposition.forced === 1 ? "+forced" : "-forced"
-  }`;
-}
-
-async function removeEmptyVobSubStreams({
-  emptyIndexes,
-  outputPath,
-  replaceOutput,
-  runMediaTool,
-  signal,
-  subtitleStreams,
-  timeoutMs,
-}: {
-  emptyIndexes: ReadonlySet<number>;
-  outputPath: string;
-  replaceOutput: ReplaceEncodeOutput;
-  runMediaTool: MediaToolRunner;
-  signal: AbortSignal;
-  subtitleStreams: readonly CompleteSubtitleStream[];
-  timeoutMs: number;
-}): Promise<void> {
-  const replacementPath = `${outputPath}.${randomUUID()}.rip-dvd-subtitle-remux`;
-  const retainedSubtitleStreams = subtitleStreams.filter(
-    (stream) => !emptyIndexes.has(stream.index),
-  );
-  try {
-    await runTool(
-      runMediaTool,
-      {
-        arguments_: [
-          "-nostdin",
-          "-hide_banner",
-          "-loglevel",
-          "error",
-          "-i",
-          outputPath,
-          "-map",
-          "0",
-          ...[...emptyIndexes].flatMap((index) => ["-map", `-0:${index}`]),
-          "-c",
-          "copy",
-          "-map_metadata",
-          "0",
-          "-map_chapters",
-          "0",
-          ...retainedSubtitleStreams.flatMap((stream, position) => [
-            `-disposition:s:${position}`,
-            copiedSubtitleDisposition(stream),
-          ]),
-          "-f",
-          "matroska",
-          replacementPath,
-        ],
-        executable: "ffmpeg",
-        signal,
-        timeoutMs,
-      },
-      "subtitle cleanup",
-    );
-    signal.throwIfAborted();
-    try {
-      await replaceOutput(replacementPath, outputPath);
-    } catch (error) {
-      throw validationError(
-        `subtitle cleanup failed: ${normalizeToolError(error)}`,
-      );
-    }
-  } finally {
-    await unlink(replacementPath).catch(() => {});
-  }
-}
-
 async function validateSubtitleStreams({
   expectations,
   outputPath,
-  replaceOutput,
+  repairer,
   runMediaTool,
   signal,
   subtitlePacketTimeoutMs,
@@ -501,7 +410,7 @@ async function validateSubtitleStreams({
 }: {
   expectations: EncodeOutputValidationExpectations;
   outputPath: string;
-  replaceOutput: ReplaceEncodeOutput;
+  repairer: EncodeOutputRepairer;
   runMediaTool: MediaToolRunner;
   signal: AbortSignal;
   subtitlePacketTimeoutMs: number;
@@ -589,26 +498,36 @@ async function validateSubtitleStreams({
     if (removedEmptyStreams) {
       throw validationError("subtitle cleanup left an empty VobSub stream");
     }
-    await removeEmptyVobSubStreams({
-      emptyIndexes,
-      outputPath,
-      replaceOutput,
-      runMediaTool,
-      signal,
-      subtitleStreams,
-      timeoutMs: subtitlePacketTimeoutMs,
-    });
+    try {
+      await repairer.removeEmptyVobSubStreams({
+        emptyStreamIndexes: [...emptyIndexes],
+        outputPath,
+        retainedSubtitleDispositions: subtitleStreams
+          .filter((stream) => !emptyIndexes.has(stream.index))
+          .map((stream) => ({
+            default: stream.disposition.default === 1,
+            forced: stream.disposition.forced === 1,
+          })),
+        signal,
+        timeoutMs: subtitlePacketTimeoutMs,
+      });
+    } catch (error) {
+      signal.throwIfAborted();
+      throw validationError(
+        `subtitle cleanup failed: ${normalizeToolError(error)}`,
+      );
+    }
     removedEmptyStreams = true;
   }
 }
 
 export function createNodeEncodeOutputValidator({
-  replaceOutput = replaceNodeEncodeOutput,
+  repairer,
   runMediaTool = runNodeMediaTool,
   subtitlePacketTimeoutMs = DEFAULT_SUBTITLE_PACKET_TIMEOUT_MS,
   timeoutMs = DEFAULT_MEDIA_TOOL_TIMEOUT_MS,
 }: {
-  replaceOutput?: ReplaceEncodeOutput;
+  repairer?: EncodeOutputRepairer;
   runMediaTool?: MediaToolRunner;
   subtitlePacketTimeoutMs?: number;
   timeoutMs?: number;
@@ -621,13 +540,15 @@ export function createNodeEncodeOutputValidator({
   ) {
     throw new Error("Encode output validation timeout is invalid");
   }
+  const outputRepairer =
+    repairer ?? createNodeEncodeOutputRepairer({ runMediaTool });
   return {
     async validate(outputPath, signal, expectations = {}) {
       signal.throwIfAborted();
       await validateSubtitleStreams({
         expectations,
         outputPath,
-        replaceOutput,
+        repairer: outputRepairer,
         runMediaTool,
         signal,
         subtitlePacketTimeoutMs,
