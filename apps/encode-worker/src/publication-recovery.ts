@@ -1535,8 +1535,16 @@ export async function executeEncodeClaim(
         : { expectedVobSubStreams: input.expectedVobSubStreams }),
     });
     signal.throwIfAborted();
+    const validatedPartialMetadata = await lstat(partialPath);
+    if (
+      !validatedPartialMetadata.isFile() ||
+      validatedPartialMetadata.isSymbolicLink() ||
+      validatedPartialMetadata.size <= 0
+    ) {
+      throw new Error("Encode output validation did not retain a regular output file");
+    }
     await syncPath(partialPath);
-    publishedOutputMetadata = partialMetadata;
+    publishedOutputMetadata = validatedPartialMetadata;
     pendingPartialCleanup =
       options.access.encodeJobs.registerPartialCleanup(claim, {
         publicationPending: true,

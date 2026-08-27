@@ -106,7 +106,7 @@ The last point changes the operational cost. Android TV 0.19.10 can ask for embe
 4. Encode video and audio to MKV with the profile preset plus `--all-subtitles --subtitle-burned=none`.
 5. Probe the partial MKV before publication. In addition to the existing video/audio checks, inspect every subtitle stream's codec, language, title, and default/forced dispositions.
 6. Reject an output that silently drops expected source tracks. A foreign-audio-search result may add zero or one extra output track, so compare by source tracks rather than requiring exact equality with the output count.
-7. Publish only after a packet/read test proves each VobSub track is readable. Then refresh Jellyfin and run the client matrix.
+7. Treat an omitted `nb_read_packets` field as a zero-packet stream. Remove packetless VobSub streams with a stream-copy remux, then repeat the metadata and packet probes against the rewritten MKV. Publish only when every retained VobSub track is readable. Then refresh Jellyfin and run the client matrix.
 
 A useful probe during implementation is:
 
