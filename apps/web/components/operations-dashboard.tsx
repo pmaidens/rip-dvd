@@ -297,13 +297,19 @@ function archiveProgressDetail(job: DashboardArchiveJob): string | null {
     verifying: "Verifying the disc image",
     finalizing: "Saving the archive",
   }[job.progressPhase];
-  if (job.progressPhase !== "copying") {
-    return phase;
+  if (job.progressPhase === "preparing") {
+    return `${phase} · Estimate available once copying starts`;
+  }
+  if (job.progressPhase === "verifying") {
+    return `${phase} · Copy complete; finishing time varies`;
+  }
+  if (job.progressPhase === "finalizing") {
+    return `${phase} · Copy complete; nearly done`;
   }
   if (job.progressEtaSeconds == null) {
     return `${phase} · Calculating time remaining…`;
   }
-  return `${phase} · about ${formatDuration(job.progressEtaSeconds)} remaining`;
+  return `${phase} · about ${formatDuration(job.progressEtaSeconds)} of copying remaining`;
 }
 
 function formatBytes(bytes: number): string {

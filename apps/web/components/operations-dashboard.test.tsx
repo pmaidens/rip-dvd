@@ -1015,7 +1015,10 @@ describe("DashboardView", () => {
     for (const [, , detail] of phases) {
       expect(html).toContain(detail);
     }
-    expect(html).toContain("about 2m 5s remaining");
+    expect(html).toContain("Estimate available once copying starts");
+    expect(html).toContain("about 2m 5s of copying remaining");
+    expect(html).toContain("Copy complete; finishing time varies");
+    expect(html).toContain("Copy complete; nearly done");
   });
 
   it("warns and offers cancellation when an Archive Job has not advanced", async () => {

@@ -3311,6 +3311,13 @@ export function createDataAccessInternal(
       lastProgressAt: progress.lastProgressAt,
     };
   };
+  const archiveTerminalProgressPatchForClaim = (
+    archiveJobId: ArchiveJobId,
+    claimToken: ArchiveJobClaimToken | null,
+  ) => ({
+    ...archiveProgressPatchForClaim(archiveJobId, claimToken),
+    progressEtaSeconds: null,
+  });
   const archiveReadFailurePatch = (
     evidence: ArchiveReadFailureEvidence,
   ) => {
@@ -3455,14 +3462,13 @@ export function createDataAccessInternal(
         .update(archiveJobs)
         .set({
           status: cancellationWins ? "aborted" : "failed",
-          ...archiveProgressPatchForClaim(claim.id, claim.claimToken),
+          ...archiveTerminalProgressPatchForClaim(claim.id, claim.claimToken),
           ...(cancellationWins
             ? {}
             : {
                 failureDetailVersion: ARCHIVE_FAILURE_DETAIL_VERSIONS[0],
                 ...readFailureValues,
               }),
-          progressEtaSeconds: null,
           completedAt: timestamp,
           errorMessage: cancellationWins
             ? "Archive cancelled by operator"
@@ -7840,11 +7846,10 @@ export function createDataAccessInternal(
               .update(archiveJobs)
               .set({
                 status: "failed",
-                ...archiveProgressPatchForClaim(
+                ...archiveTerminalProgressPatchForClaim(
                   candidate.id,
                   candidate.claimToken,
                 ),
-                progressEtaSeconds: null,
                 completedAt: timestamp,
                 errorMessage: "Archive worker lease expired",
                 failureDetailVersion: ARCHIVE_FAILURE_DETAIL_VERSIONS[0],
@@ -7947,8 +7952,10 @@ export function createDataAccessInternal(
             .update(archiveJobs)
             .set({
               status: "aborted",
-              ...archiveProgressPatchForClaim(claim.id, claim.claimToken),
-              progressEtaSeconds: null,
+              ...archiveTerminalProgressPatchForClaim(
+                claim.id,
+                claim.claimToken,
+              ),
               completedAt: timestamp,
               errorMessage: "Archive cancelled after worker recovery",
               updatedAt: timestamp,
@@ -8117,7 +8124,6 @@ export function createDataAccessInternal(
           previous.token !== claim.claimToken ||
           previous.persistedPhase !== progress.phase ||
           previous.persistedBytes !== progressBytes ||
-          previous.persistedEtaSeconds !== progressEtaSeconds ||
           timestamp.getTime() - previous.persistedAt >= 1_000 ||
           Math.abs(
             progress.progressPercent - (previous?.persistedPercent ?? 0),
@@ -8464,10 +8470,13 @@ export function createDataAccessInternal(
               .set({
                 originalDiscArchiveId: archive.id,
                 status: "completed",
+                ...archiveTerminalProgressPatchForClaim(
+                  claim.id,
+                  claim.claimToken,
+                ),
                 progressPhase: "finalizing",
                 progressPercent: 100,
                 progressBytes: sizeBytes,
-                progressEtaSeconds: null,
                 lastProgressAt: timestamp,
                 completedAt: timestamp,
                 errorMessage: null,
@@ -8513,8 +8522,10 @@ export function createDataAccessInternal(
             .update(archiveJobs)
             .set({
               status: "aborted",
-              ...archiveProgressPatchForClaim(claim.id, claim.claimToken),
-              progressEtaSeconds: null,
+              ...archiveTerminalProgressPatchForClaim(
+                claim.id,
+                claim.claimToken,
+              ),
               completedAt: timestamp,
               errorMessage,
               updatedAt: timestamp,
@@ -8588,9 +8599,12 @@ export function createDataAccessInternal(
             .set({
               originalDiscArchiveId,
               status: "completed",
+              ...archiveTerminalProgressPatchForClaim(
+                claim.id,
+                claim.claimToken,
+              ),
               progressPhase: "finalizing",
               progressPercent: 100,
-              progressEtaSeconds: null,
               lastProgressAt: timestamp,
               completedAt: timestamp,
               updatedAt: timestamp,
