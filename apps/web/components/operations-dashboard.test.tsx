@@ -682,6 +682,7 @@ describe("DashboardView", () => {
             progressPhase: "copying",
             progressPercent: 42,
             progressBytes: 42,
+            progressEtaSeconds: null,
             lastProgressAt: "2026-07-22T07:58:00.000Z",
             failureDetail: "DVD archive copy failed: Input/output error",
           },
@@ -904,6 +905,7 @@ describe("DashboardView", () => {
                   progressPhase: "copying",
                   progressPercent: 28,
                   progressBytes: 28,
+                  progressEtaSeconds: null,
                   lastProgressAt: "2026-07-22T07:58:00.000Z",
                   failureDetail:
                     "The Optical Drive returned an unclassified read failure. Retry the Archive Request; if it fails again, inspect the disc and drive.",
@@ -951,6 +953,7 @@ describe("DashboardView", () => {
             progressPhase: "copying",
             progressPercent: 20,
             progressBytes: 20,
+            progressEtaSeconds: null,
             lastProgressAt: "2026-07-22T07:58:00.000Z",
           },
           {
@@ -964,6 +967,7 @@ describe("DashboardView", () => {
             progressPhase: "copying",
             progressPercent: 30,
             progressBytes: 30,
+            progressEtaSeconds: null,
             lastProgressAt: "2026-07-22T07:58:00.000Z",
           },
         ],
@@ -1000,6 +1004,7 @@ describe("DashboardView", () => {
           progressPhase,
           progressPercent: 99,
           progressBytes: index,
+          progressEtaSeconds: progressPhase === "copying" ? 125 : null,
           lastProgressAt: "2026-07-22T07:58:00.000Z",
         })),
       },
@@ -1010,6 +1015,7 @@ describe("DashboardView", () => {
     for (const [, , detail] of phases) {
       expect(html).toContain(detail);
     }
+    expect(html).toContain("about 2m 5s remaining");
   });
 
   it("warns and offers cancellation when an Archive Job has not advanced", async () => {
@@ -1031,6 +1037,7 @@ describe("DashboardView", () => {
           progressPhase: "copying",
           progressPercent: 9,
           progressBytes: 638_000_000,
+          progressEtaSeconds: null,
           lastProgressAt: "2026-08-20T20:04:10.000Z",
         }],
       },

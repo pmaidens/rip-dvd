@@ -113,6 +113,7 @@ export interface DashboardArchiveJob {
   progressPhase: ArchiveProgressPhase;
   progressPercent: number;
   progressBytes: number;
+  progressEtaSeconds?: number | null;
   lastProgressAt: string;
   failureDetail?: string | null;
   failureDiagnostic?: string | null;
@@ -807,6 +808,9 @@ function readDashboardSnapshotRecords(
               progressPhase: job.progressPhase,
               progressPercent: job.progressPercent,
               progressBytes: job.progressBytes,
+              ...(job.status === "running"
+                ? { progressEtaSeconds: job.progressEtaSeconds }
+                : {}),
               lastProgressAt: job.lastProgressAt.toISOString(),
               ...failure,
             };

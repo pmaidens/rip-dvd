@@ -4,11 +4,11 @@ import {
   classifyDiscInspectionError,
   DiscInspectionError,
 } from "./disc-inspection-error.js";
-import { createDiscInspectionRateEstimator } from "./disc-inspection-rate.js";
+import { createByteProgressRateEstimator } from "./byte-progress-rate.js";
 
 describe("Disc Inspection worker policy", () => {
   it("stabilizes throughput and ETA, then resets after a restarted hash", () => {
-    const estimator = createDiscInspectionRateEstimator();
+    const estimator = createByteProgressRateEstimator();
 
     expect(estimator.update(0, 10_000, 1_000)).toEqual({
       bytesPerSecond: null,

@@ -1,10 +1,14 @@
-export interface DiscInspectionRateEstimate {
+export interface ByteProgressRateEstimate {
   bytesPerSecond: number | null;
   etaSeconds: number | null;
 }
 
-export interface DiscInspectionRateEstimator {
-  update(bytesHashed: number, totalBytes: number, observedAtMs: number): DiscInspectionRateEstimate;
+export interface ByteProgressRateEstimator {
+  update(
+    completedBytes: number,
+    totalBytes: number,
+    observedAtMs: number,
+  ): ByteProgressRateEstimate;
 }
 
 interface RateSample {
@@ -12,7 +16,7 @@ interface RateSample {
   at: number;
 }
 
-export function createDiscInspectionRateEstimator({
+export function createByteProgressRateEstimator({
   minimumSamples = 3,
   stabilizationMs = 2_000,
   windowMs = 15_000,
@@ -20,43 +24,43 @@ export function createDiscInspectionRateEstimator({
   minimumSamples?: number;
   stabilizationMs?: number;
   windowMs?: number;
-} = {}): DiscInspectionRateEstimator {
+} = {}): ByteProgressRateEstimator {
   if (
     !Number.isSafeInteger(minimumSamples) || minimumSamples < 2 ||
     !Number.isSafeInteger(stabilizationMs) || stabilizationMs <= 0 ||
     !Number.isSafeInteger(windowMs) || windowMs < stabilizationMs
   ) {
-    throw new Error("Disc Inspection rate estimator configuration is invalid");
+    throw new Error("Byte progress rate estimator configuration is invalid");
   }
   let samples: RateSample[] = [];
   return {
-    update(bytesHashed, totalBytes, observedAtMs) {
+    update(completedBytes, totalBytes, observedAtMs) {
       if (
-        !Number.isSafeInteger(bytesHashed) || bytesHashed < 0 ||
+        !Number.isSafeInteger(completedBytes) || completedBytes < 0 ||
         !Number.isSafeInteger(totalBytes) || totalBytes <= 0 ||
-        bytesHashed > totalBytes ||
+        completedBytes > totalBytes ||
         !Number.isSafeInteger(observedAtMs) || observedAtMs < 0
       ) {
-        throw new Error("Disc Inspection rate sample is invalid");
+        throw new Error("Byte progress rate sample is invalid");
       }
       const latest = samples.at(-1);
       if (
         latest !== undefined &&
-        (bytesHashed < latest.bytes || observedAtMs <= latest.at)
+        (completedBytes < latest.bytes || observedAtMs <= latest.at)
       ) {
         samples = [];
       }
-      samples.push({ at: observedAtMs, bytes: bytesHashed });
+      samples.push({ at: observedAtMs, bytes: completedBytes });
       const cutoff = observedAtMs - windowMs;
       while (samples.length > 1 && samples[1]!.at <= cutoff) {
         samples.shift();
       }
-      if (bytesHashed === totalBytes) {
+      if (completedBytes === totalBytes) {
         return { bytesPerSecond: null, etaSeconds: null };
       }
       const first = samples[0]!;
       const elapsedMs = observedAtMs - first.at;
-      const movedBytes = bytesHashed - first.bytes;
+      const movedBytes = completedBytes - first.bytes;
       if (
         samples.length < minimumSamples ||
         elapsedMs < stabilizationMs ||
@@ -64,10 +68,13 @@ export function createDiscInspectionRateEstimator({
       ) {
         return { bytesPerSecond: null, etaSeconds: null };
       }
-      const bytesPerSecond = Math.max(1, Math.round(movedBytes * 1_000 / elapsedMs));
+      const bytesPerSecond = Math.max(
+        1,
+        Math.round(movedBytes * 1_000 / elapsedMs),
+      );
       return {
         bytesPerSecond,
-        etaSeconds: Math.ceil((totalBytes - bytesHashed) / bytesPerSecond),
+        etaSeconds: Math.ceil((totalBytes - completedBytes) / bytesPerSecond),
       };
     },
   };
