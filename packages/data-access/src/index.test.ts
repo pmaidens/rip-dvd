@@ -1210,8 +1210,8 @@ describe("data-access facade", () => {
           name !== "20260822201215_thick_madame_web" &&
           name !== "20260823160205_flat_fixer" &&
           name !== "20260828154312_luxuriant_human_robot" &&
-          name !== "20260828160349_dusty_nekra" &&
-          name !== "20260828160945_fancy_chimera",
+          name !== "20260828160945_fancy_chimera" &&
+          name !== "20260828164042_married_lady_ursula",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -8086,10 +8086,10 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
-        name: "20260828160945_fancy_chimera",
+        name: "20260828164042_married_lady_ursula",
       },
       {
-        name: "20260828160349_dusty_nekra",
+        name: "20260828160945_fancy_chimera",
       },
       {
         name: "20260828154312_luxuriant_human_robot",
@@ -8114,9 +8114,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260822183552_bounded-disc-settling",
-      },
-      {
-        name: "20260822175220_striped_kabuki",
       },
     ]);
     expect(
