@@ -1607,6 +1607,12 @@ const encodingPageTabs: ReadonlyArray<{
   { id: "settings", label: "Settings" },
 ];
 
+function encodeJobFilterForStatus(
+  status: DashboardEncodeJob["status"],
+): EncodeJobFilter {
+  return status === "completed" ? "completed" : "in_progress";
+}
+
 export function filterEncodeJobs(
   state: DashboardSectionLoadState<DashboardEncodeJob>,
   filter: EncodeJobFilter,
@@ -1616,12 +1622,25 @@ export function filterEncodeJobs(
   }
   return {
     ...state,
-    items: state.items.filter((job) =>
-      filter === "completed"
-        ? job.status === "completed"
-        : job.status !== "completed"
+    items: state.items.filter(
+      (job) => encodeJobFilterForStatus(job.status) === filter,
     ),
   };
+}
+
+function countEncodeJobsByFilter(
+  state: DashboardSectionLoadState<DashboardEncodeJob>,
+): Record<EncodeJobFilter, number> {
+  const counts: Record<EncodeJobFilter, number> = {
+    in_progress: 0,
+    completed: 0,
+  };
+  if (state.status === "loaded") {
+    for (const job of state.items) {
+      counts[encodeJobFilterForStatus(job.status)] += 1;
+    }
+  }
+  return counts;
 }
 
 const pageCopy: Record<
@@ -1841,16 +1860,7 @@ export function OperationsDashboard({
         : actionOverview.status
       : connectionStatus;
   const copy = pageCopy[page];
-  const encodeJobCounts = state.encodeJobs.status === "loaded"
-    ? {
-        inProgress: state.encodeJobs.items.filter(
-          (job) => job.status !== "completed",
-        ).length,
-        completed: state.encodeJobs.items.filter(
-          (job) => job.status === "completed",
-        ).length,
-      }
-    : { inProgress: 0, completed: 0 };
+  const encodeJobCounts = countEncodeJobsByFilter(state.encodeJobs);
 
   const selectEncodingTab = (index: number) => {
     const tab = encodingPageTabs[index];
@@ -1968,7 +1978,7 @@ export function OperationsDashboard({
                 onClick={() => setEncodeJobFilter("in_progress")}
               >
                 <span>In progress</span>
-                <span>{encodeJobCounts.inProgress}</span>
+                <span>{encodeJobCounts.in_progress}</span>
               </button>
               <button
                 type="button"
