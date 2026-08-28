@@ -101,7 +101,7 @@ describe("encode output validation", () => {
     const runMediaTool = createMediaToolRunner();
     const validator = createNodeEncodeOutputValidator({ runMediaTool });
 
-    await validator.validate(
+    await validator.prepareAndValidate(
       "/media/.Example.mkv.claim.rip-dvd-partial",
       new AbortController().signal,
     );
@@ -134,7 +134,7 @@ describe("encode output validation", () => {
     });
 
     await expect(
-      validator.validate(
+      validator.prepareAndValidate(
         "/media/subtitle-free.mkv",
         new AbortController().signal,
         { expectedVobSubStreams: [] },
@@ -175,7 +175,7 @@ describe("encode output validation", () => {
     });
 
     await expect(
-      validator.validate(
+      validator.prepareAndValidate(
         "/media/subtitled.mkv",
         new AbortController().signal,
         {
@@ -215,13 +215,17 @@ describe("encode output validation", () => {
     });
 
     await expect(
-      validator.validate("/media/subtitled.mkv", new AbortController().signal, {
-        expectedVobSubStreams: [
-          { contentLabel: "Normal", languageCode: "en" },
-          { contentLabel: "Director", languageCode: "en" },
-          { contentLabel: "Normal_CC", languageCode: "en" },
-        ],
-      }),
+      validator.prepareAndValidate(
+        "/media/subtitled.mkv",
+        new AbortController().signal,
+        {
+          expectedVobSubStreams: [
+            { contentLabel: "Normal", languageCode: "en" },
+            { contentLabel: "Director", languageCode: "en" },
+            { contentLabel: "Normal_CC", languageCode: "en" },
+          ],
+        },
+      ),
     ).resolves.toBeUndefined();
   });
 
@@ -246,7 +250,7 @@ describe("encode output validation", () => {
     });
 
     await expect(
-      validator.validate("/media/broken.mkv", new AbortController().signal, {
+      validator.prepareAndValidate("/media/broken.mkv", new AbortController().signal, {
         expectedVobSubStreams: [
           { contentLabel: "Normal", languageCode: "en" },
           { contentLabel: "Director", languageCode: "en" },
@@ -278,7 +282,7 @@ describe("encode output validation", () => {
     });
 
     await expect(
-      validator.validate("/media/broken.mkv", new AbortController().signal, {
+      validator.prepareAndValidate("/media/broken.mkv", new AbortController().signal, {
         expectedVobSubStreams: [
           { contentLabel: "Director", languageCode: "en" },
           { contentLabel: "Normal_CC", languageCode: "en" },
@@ -295,7 +299,7 @@ describe("encode output validation", () => {
     });
 
     await expect(
-      validator.validate(
+      validator.prepareAndValidate(
         "/media/broken.mkv",
         new AbortController().signal,
         { expectedVobSubStreams: [{}, {}] },
@@ -320,7 +324,7 @@ describe("encode output validation", () => {
     });
 
     await expect(
-      validator.validate("/media/broken.mkv", new AbortController().signal, {
+      validator.prepareAndValidate("/media/broken.mkv", new AbortController().signal, {
         expectedVobSubStreams: [{ languageCode: "en" }],
       }),
     ).rejects.toThrow(
@@ -343,7 +347,7 @@ describe("encode output validation", () => {
     });
 
     await expect(
-      validator.validate("/media/broken.mkv", new AbortController().signal, {
+      validator.prepareAndValidate("/media/broken.mkv", new AbortController().signal, {
         expectedVobSubStreams: [{ languageCode: "en" }],
       }),
     ).rejects.toThrow(
@@ -366,9 +370,11 @@ describe("encode output validation", () => {
     });
 
     await expect(
-      validator.validate("/media/subtitled.mkv", new AbortController().signal, {
-        expectedVobSubStreams: [{ languageCode: "xx" }],
-      }),
+      validator.prepareAndValidate(
+        "/media/subtitled.mkv",
+        new AbortController().signal,
+        { expectedVobSubStreams: [{ languageCode: "xx" }] },
+      ),
     ).resolves.toBeUndefined();
   });
 
@@ -387,7 +393,7 @@ describe("encode output validation", () => {
     });
 
     await expect(
-      validator.validate("/media/broken.mkv", new AbortController().signal),
+      validator.prepareAndValidate("/media/broken.mkv", new AbortController().signal),
     ).rejects.toThrow(
       "Encode output validation failed: subtitle stream metadata is incomplete",
     );
@@ -408,30 +414,141 @@ describe("encode output validation", () => {
     });
 
     await expect(
-      validator.validate("/media/broken.mkv", new AbortController().signal),
+      validator.prepareAndValidate("/media/broken.mkv", new AbortController().signal),
     ).rejects.toThrow(
       "Encode output validation failed: a source VobSub stream has an unexpected default or forced disposition",
     );
   });
 
-  it("rejects a VobSub stream without readable packets", async () => {
+  it("rejects a malformed VobSub packet count", async () => {
     const validator = createNodeEncodeOutputValidator({
       runMediaTool: createMediaToolRunner({
         subtitlePacketStreams: [
           {
             codec_name: "dvd_subtitle",
             index: 2,
-            nb_read_packets: "0",
+            nb_read_packets: "not-a-count",
           },
         ],
       }),
     });
 
     await expect(
-      validator.validate("/media/broken.mkv", new AbortController().signal),
+      validator.prepareAndValidate("/media/broken.mkv", new AbortController().signal),
     ).rejects.toThrow(
-      "Encode output validation failed: VobSub stream 2 has no readable packets",
+      "Encode output validation failed: subtitle packet probe returned an invalid result",
     );
+  });
+
+  it("rejects a packet probe that omits a declared VobSub stream", async () => {
+    const repairer = {
+      removeEmptyVobSubStreams: vi.fn(async () => {}),
+    };
+    const validator = createNodeEncodeOutputValidator({
+      repairer,
+      runMediaTool: createMediaToolRunner({ subtitlePacketStreams: [] }),
+    });
+
+    await expect(
+      validator.prepareAndValidate("/media/broken.mkv", new AbortController().signal),
+    ).rejects.toThrow(
+      "Encode output validation failed: subtitle packet probe returned an invalid result",
+    );
+    expect(repairer.removeEmptyVobSubStreams).not.toHaveBeenCalled();
+  });
+
+  it("removes packetless forced variants before accepting useful VobSub streams", async () => {
+    const cleanedSubtitleStreams = Array.from({ length: 6 }, (_, position) => ({
+      codec_name: "dvd_subtitle",
+      disposition:
+        position === 0
+          ? { default: 1, forced: 1 }
+          : { default: 0, forced: 0 },
+      index: position + 3,
+      tags: { language: position % 2 === 0 ? "eng" : "spa" },
+    }));
+    const cleanedSubtitlePacketStreams = cleanedSubtitleStreams.map(
+      (stream, position) => ({
+        codec_name: "dvd_subtitle",
+        index: stream.index,
+        nb_read_packets: position + 1,
+      }),
+    );
+    const emptySubtitleStreams = Array.from(
+      { length: 6 },
+      (_, position) => ({
+        codec_name: "dvd_subtitle",
+        disposition: { default: 0, forced: 0 },
+        index: position + 9,
+        tags: { language: position % 2 === 0 ? "eng" : "spa" },
+      }),
+    );
+    const originalRunner = createMediaToolRunner({
+      subtitlePacketStreams: [
+        ...cleanedSubtitlePacketStreams,
+        ...emptySubtitleStreams.map((stream) => ({
+          codec_name: "dvd_subtitle",
+          index: stream.index,
+        })),
+      ],
+      subtitleStreams: [
+        ...cleanedSubtitleStreams,
+        ...emptySubtitleStreams,
+      ],
+    });
+    let remuxed = false;
+    const runMediaTool = vi.fn(async (request: MediaToolRunRequest) => {
+      if (remuxed) {
+        const streamSelector = request.arguments_[
+          request.arguments_.indexOf("-select_streams") + 1
+        ];
+        if (streamSelector === "s") {
+          return mediaToolResult(
+            JSON.stringify({
+              streams: request.arguments_.includes("-count_packets")
+                ? cleanedSubtitlePacketStreams
+                : cleanedSubtitleStreams,
+            }),
+          );
+        }
+      }
+      return originalRunner(request);
+    });
+    const repairer = {
+      removeEmptyVobSubStreams: vi.fn(async () => {
+        remuxed = true;
+      }),
+    };
+    const validator = createNodeEncodeOutputValidator({
+      repairer,
+      runMediaTool,
+    });
+
+    await expect(
+      validator.prepareAndValidate(
+        "/media/subtitled.mkv",
+        new AbortController().signal,
+        {
+          expectedVobSubStreams: cleanedSubtitleStreams
+            .slice(1)
+            .map((stream) => ({ languageCode: stream.tags.language })),
+        },
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(repairer.removeEmptyVobSubStreams).toHaveBeenCalledWith({
+      emptyStreamIndexes: [9, 10, 11, 12, 13, 14],
+      outputPath: "/media/subtitled.mkv",
+      retainedSubtitleDispositions: [
+        { default: true, forced: true },
+        ...Array.from({ length: 5 }, () => ({
+          default: false,
+          forced: false,
+        })),
+      ],
+      signal: expect.any(AbortSignal),
+      timeoutMs: 300_000,
+    });
   });
 
   it("rejects VobSub packet read errors reported by ffprobe", async () => {
@@ -442,7 +559,7 @@ describe("encode output validation", () => {
     });
 
     await expect(
-      validator.validate("/media/broken.mkv", new AbortController().signal),
+      validator.prepareAndValidate("/media/broken.mkv", new AbortController().signal),
     ).rejects.toThrow(
       "Encode output validation failed: subtitle packet probe reported unreadable data",
     );
@@ -463,7 +580,7 @@ describe("encode output validation", () => {
     });
 
     await expect(
-      validator.validate("/media/broken.mkv", new AbortController().signal),
+      validator.prepareAndValidate("/media/broken.mkv", new AbortController().signal),
     ).rejects.toThrow(
       "Encode output validation failed: subtitle stream metadata is incomplete",
     );
@@ -475,7 +592,7 @@ describe("encode output validation", () => {
     });
 
     await expect(
-      validator.validate("/media/broken.mkv", new AbortController().signal),
+      validator.prepareAndValidate("/media/broken.mkv", new AbortController().signal),
     ).rejects.toThrow(
       "Encode output validation failed: subtitle probe returned an invalid result",
     );
@@ -490,7 +607,7 @@ describe("encode output validation", () => {
     });
 
     await expect(
-      validator.validate("/media/broken.mkv", new AbortController().signal),
+      validator.prepareAndValidate("/media/broken.mkv", new AbortController().signal),
     ).rejects.toThrow(
       "Encode output validation failed: video stream metadata is incomplete",
     );
@@ -502,7 +619,7 @@ describe("encode output validation", () => {
     });
 
     await expect(
-      validator.validate("/media/broken.mkv", new AbortController().signal),
+      validator.prepareAndValidate("/media/broken.mkv", new AbortController().signal),
     ).rejects.toThrow(
       "Encode output validation failed: first video frame starts 24.480 seconds after the audio baseline",
     );
@@ -514,7 +631,7 @@ describe("encode output validation", () => {
     });
 
     await expect(
-      validator.validate("/media/broken.mkv", new AbortController().signal),
+      validator.prepareAndValidate("/media/broken.mkv", new AbortController().signal),
     ).rejects.toThrow(
       "Encode output validation failed: the first 5 seconds decoded zero video frames",
     );

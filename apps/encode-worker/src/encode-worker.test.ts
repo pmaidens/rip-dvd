@@ -51,7 +51,7 @@ vi.mock("./encode-output-validator.js", async (importOriginal) => {
   >();
   return {
     ...actual,
-    nodeEncodeOutputValidator: { validate: vi.fn(async () => {}) },
+    nodeEncodeOutputValidator: { prepareAndValidate: vi.fn(async () => {}) },
   };
 });
 
@@ -1160,7 +1160,7 @@ describe("encode worker polling", () => {
       }),
     };
     const outputValidator: EncodeOutputValidator = {
-      validate: vi.fn(async (outputPath) => {
+      prepareAndValidate: vi.fn(async (outputPath) => {
         expect(outputPath).toBe(partialPath);
         expect(existsSync(fixture.outputPath)).toBe(false);
         throw new Error(
@@ -1180,13 +1180,53 @@ describe("encode worker polling", () => {
       signal: new AbortController().signal,
     });
 
-    expect(outputValidator.validate).toHaveBeenCalledOnce();
+    expect(outputValidator.prepareAndValidate).toHaveBeenCalledOnce();
     expect(existsSync(fixture.outputPath)).toBe(false);
     expect(quarantinedContents(partialPath)).toContain("corrupt encode");
     expect(fixture.access.encodeJobs.list()).toEqual([
       expect.objectContaining({
         errorMessage:
           "Encode output validation failed: the first 5 seconds decoded zero video frames",
+        id: fixture.job.id,
+        status: "failed",
+      }),
+    ]);
+    fixture.access.close();
+  });
+
+  it("does not publish when output validation leaves an empty partial", async () => {
+    const fixture = createQueuedJob();
+    let partialPath = "";
+    const runner: HandBrakeRunner = {
+      run: vi.fn(async ({ outputPath }) => {
+        partialPath = outputPath;
+        writeFileSync(outputPath, "complete encode", { flag: "wx" });
+      }),
+    };
+    const outputValidator: EncodeOutputValidator = {
+      prepareAndValidate: vi.fn(async (outputPath) => {
+        writeFileSync(outputPath, "");
+      }),
+    };
+
+    await pollEncodeWorker({
+      access: fixture.access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      outputValidator,
+      runner,
+      signal: new AbortController().signal,
+    });
+
+    expect(outputValidator.prepareAndValidate).toHaveBeenCalledOnce();
+    expect(existsSync(fixture.outputPath)).toBe(false);
+    expect(existsSync(partialPath)).toBe(false);
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        errorMessage:
+          "Encode output validation did not retain a regular output file",
         id: fixture.job.id,
         status: "failed",
       }),
@@ -1217,7 +1257,7 @@ describe("encode worker polling", () => {
     const fixture = createQueuedJob(selection, "Example.mkv", 2);
     const progressSnapshots: unknown[] = [];
     const outputValidator: EncodeOutputValidator = {
-      validate: vi.fn(async () => {}),
+      prepareAndValidate: vi.fn(async () => {}),
     };
     const runner: HandBrakeRunner = {
       run: vi.fn(async ({ arguments_, onOutput }) => {
@@ -1249,7 +1289,7 @@ describe("encode worker polling", () => {
       "--all-subtitles",
       "--subtitle-burned=none",
     ]);
-    expect(outputValidator.validate).toHaveBeenCalledWith(
+    expect(outputValidator.prepareAndValidate).toHaveBeenCalledWith(
       request.outputPath,
       expect.anything(),
       {
