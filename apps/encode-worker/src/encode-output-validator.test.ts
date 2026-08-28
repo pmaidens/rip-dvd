@@ -498,13 +498,6 @@ describe("encode output validation", () => {
     });
     let remuxed = false;
     const runMediaTool = vi.fn(async (request: MediaToolRunRequest) => {
-      if (
-        request.executable === "ffmpeg" &&
-        request.arguments_.includes("copy")
-      ) {
-        remuxed = true;
-        return mediaToolResult("");
-      }
       if (remuxed) {
         const streamSelector = request.arguments_[
           request.arguments_.indexOf("-select_streams") + 1
