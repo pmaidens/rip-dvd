@@ -20,6 +20,12 @@ const recoveryResultPrefix = "rip-dvd-recovery-result ";
 const readFailureResultPrefix = "rip-dvd-read-failure ";
 const scsiSessionResultPrefix = "rip-dvd-scsi-session-result ";
 const scsiExitResultPrefix = "rip-dvd-scsi-exit-result ";
+const classificationVectors = JSON.parse(
+  readFileSync(
+    "/tmp/scsi-read-classification-v2-vectors.json",
+    "utf8",
+  ),
+);
 const content = Buffer.alloc(40 * 2_048);
 for (let index = 0; index < content.length; index += 1) {
   content[index] = index % 251;
@@ -50,6 +56,33 @@ function descriptorSense(lba, senseKey, asc, ascq = 0) {
   sense[10] = 0x80;
   sense.writeBigUInt64BE(BigInt(lba), 12);
   return sense.toString("hex");
+}
+
+function descriptorMediumSenseWithPeripheralDescriptors(
+  lba,
+  informationPosition,
+) {
+  const information = Buffer.from(descriptorMediumSense(lba), "hex").subarray(
+    8,
+  );
+  const commandSpecific = Buffer.from([
+    0x01, 0x0a, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+  ]);
+  const senseKeySpecific = Buffer.from([0x02, 0x06, 0x80, 0, 0, 0, 0, 1]);
+  const fieldReplaceableUnit = Buffer.from([0x03, 0x02, 0, 1]);
+  const peripheralDescriptors = [
+    commandSpecific,
+    senseKeySpecific,
+    fieldReplaceableUnit,
+  ];
+  peripheralDescriptors.splice(informationPosition, 0, information);
+  const descriptors = Buffer.concat(peripheralDescriptors);
+  const sense = Buffer.alloc(8);
+  sense[0] = 0x72;
+  sense[1] = 0x03;
+  sense[2] = 0x11;
+  sense[7] = descriptors.length;
+  return Buffer.concat([sense, descriptors]).toString("hex");
 }
 
 function fixedTerminalSense(senseKey, asc, ascq) {
@@ -207,6 +240,46 @@ const categorizedReadFailures = [
   },
 ];
 
+for (const vector of classificationVectors) {
+  const lba = vector.category === "out_of_range" ? 35 : 5;
+  const sense = fixedSense(lba, vector.senseKey, vector.asc, vector.ascq);
+  const completion = {
+    scsiStatus: vector.scsiStatus,
+    hostStatus: vector.hostStatus,
+    driverStatus: vector.driverStatus,
+  };
+  if (vector.category === "recognized_medium_error") {
+    const recovered = runTestCopy(
+      `classification-vector-${vector.name}`,
+      rawCompletionFault(lba, "always", sense, completion),
+    );
+    const result = recoveryResult(recovered.stderr);
+    if (
+      recovered.status !== 0 ||
+      result.badSectorCount !== 1 ||
+      JSON.stringify(badSectorRanges(result, 40)) !==
+        JSON.stringify([{ startLba: lba, sectorCount: 1 }])
+    ) {
+      throw new Error(
+        `libdvdcss ${vector.name} classification vector failed: ${recovered.stderr}`,
+      );
+    }
+    continue;
+  }
+  const failure = runTestCopy(
+    `classification-vector-${vector.name}`,
+    vector.category === "out_of_range"
+      ? rawTailCompletionFault(lba, "always", sense, completion)
+      : rawCompletionFault(lba, "always", sense, completion),
+  );
+  const result = readFailureResult(failure.stderr);
+  if (failure.status !== 3 || result.category !== vector.category) {
+    throw new Error(
+      `libdvdcss ${vector.name} classification vector failed: ${failure.stderr}`,
+    );
+  }
+}
+
 const invalidBoundaryProbeFaults = [
   ["medium", rawCompletionFault(35, "always", fixedMediumSense(35))],
   [
@@ -245,6 +318,22 @@ const invalidBoundaryProbeFaults = [
   ],
   ["generic", "generic@35@always"],
   ["malformed", "raw@35@always@2@0@8@7@70000500000000"],
+  [
+    "descriptor-information-reserved-bits",
+    rawCompletionFault(
+      35,
+      "always",
+      "720521000000000c000a81000000000000000023",
+    ),
+  ],
+  [
+    "descriptor-information-reserved-byte",
+    rawCompletionFault(
+      35,
+      "always",
+      "720521000000000c000a80010000000000000023",
+    ),
+  ],
   [
     "inconsistent-confirmations",
     [
@@ -829,6 +918,26 @@ if (
 ) {
   throw new Error(
     `libdvdcss transient raw completion check failed: ${transientExactMedium.stderr}`,
+  );
+}
+
+const transientNoSeekComplete = runTestCopy(
+  "transient-no-seek-complete",
+  rawCompletionFault(5, 1, fixedNoSeekCompleteSense(5)),
+);
+if (
+  transientNoSeekComplete.status !== 0 ||
+  !readFileSync(transientNoSeekComplete.outputPath).equals(content) ||
+  recoveryResult(transientNoSeekComplete.stderr).badSectorCount !== 0 ||
+  JSON.stringify(testReads(transientNoSeekComplete.stderr)) !==
+    JSON.stringify([
+      { lba: 0, blocks: 31 },
+      { lba: 0, blocks: 31 },
+      { lba: 31, blocks: 9 },
+    ])
+) {
+  throw new Error(
+    `libdvdcss transient no-seek-complete check failed: ${transientNoSeekComplete.stderr}`,
   );
 }
 
@@ -1426,6 +1535,22 @@ const optionalMediumSenseFixtures = [
       "7203110000000018000a80000000000000000005000a80000000000000000005",
     ),
   ],
+  [
+    "descriptor-information-among-standard-descriptors",
+    rawCompletionFault(
+      5,
+      "always",
+      descriptorMediumSenseWithPeripheralDescriptors(5, 1),
+    ),
+  ],
+  [
+    "descriptor-information-after-standard-descriptors",
+    rawCompletionFault(
+      5,
+      "always",
+      descriptorMediumSenseWithPeripheralDescriptors(5, 3),
+    ),
+  ],
 ];
 for (const [name, fault] of optionalMediumSenseFixtures) {
   const recovered = runTestCopy(`recover-${name}`, fault);
@@ -1445,6 +1570,7 @@ for (const [name, fault] of optionalMediumSenseFixtures) {
 const malformedUnknownFixtures = [
   ["missing", "generic@5@always"],
   ["empty", "raw@5@always@2@0@8@0@-"],
+  ["descriptor-core-too-short", "raw@5@always@2@0@8@2@7203"],
   ["truncated", "raw@5@always@2@0@8@7@70000300000000"],
   ["oversized", "raw@5@always@2@0@8@253@-"],
   ["inconsistent", "raw@5@always@2@0@8@8@700003000000000a"],

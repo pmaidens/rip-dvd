@@ -15,9 +15,9 @@ interface DvdArchiveBoundaryEvidenceBase {
 
 export interface DvdArchiveBoundaryOutOfRangeEvidence {
   classifierVersion: string;
-  scsiStatus: 2;
+  scsiStatus: number;
   hostStatus: 0;
-  driverStatus: 0 | 8;
+  driverStatus: number;
   senseResponseCode: 0x70 | 0x72;
   senseKey: 0x05;
   asc: 0x21;
@@ -118,10 +118,16 @@ export function createCorrectedDvdArchiveBoundaryEvidence({
     typeof outOfRangeEvidence.classifierVersion !== "string" ||
     outOfRangeEvidence.classifierVersion.length === 0 ||
     outOfRangeEvidence.classifierVersion.length > 128 ||
-    outOfRangeEvidence.scsiStatus !== 2 ||
+    !Number.isSafeInteger(outOfRangeEvidence.scsiStatus) ||
+    outOfRangeEvidence.scsiStatus < 0 ||
+    outOfRangeEvidence.scsiStatus > 0xff ||
+    (outOfRangeEvidence.scsiStatus & 0xfe) !== 2 ||
     outOfRangeEvidence.hostStatus !== 0 ||
-    (outOfRangeEvidence.driverStatus !== 0 &&
-      outOfRangeEvidence.driverStatus !== 8) ||
+    !Number.isSafeInteger(outOfRangeEvidence.driverStatus) ||
+    outOfRangeEvidence.driverStatus < 0 ||
+    outOfRangeEvidence.driverStatus > 0xffff ||
+    ((outOfRangeEvidence.driverStatus & 0x0f) !== 0 &&
+      (outOfRangeEvidence.driverStatus & 0x0f) !== 8) ||
     (outOfRangeEvidence.senseResponseCode !== 0x70 &&
       outOfRangeEvidence.senseResponseCode !== 0x72) ||
     outOfRangeEvidence.senseKey !== 0x05 ||

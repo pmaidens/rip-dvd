@@ -372,6 +372,9 @@ static struct decoded_sense decode_sense(
     if (sense[0] != 0x72 && sense[0] != 0x73) {
         return decoded;
     }
+    if (length < 4) {
+        return decoded;
+    }
     decoded.has_sense_key = 1;
     decoded.sense_key = sense[1] & 0x0f;
     decoded.has_asc = 1;
@@ -399,7 +402,9 @@ static struct decoded_sense decode_sense(
         }
         if (sense[offset] == 0x00) {
             if (sense[offset + 1] != 0x0a ||
-                information_descriptor_seen) {
+                information_descriptor_seen ||
+                (sense[offset + 2] & 0x7f) != 0 ||
+                sense[offset + 3] != 0) {
                 information_descriptors_valid = 0;
             } else {
                 information_descriptor_seen = 1;
