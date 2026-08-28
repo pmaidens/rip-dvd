@@ -15,7 +15,7 @@ import {
   decodeOutputFilesystemIdentity,
   encodeOutputFilesystemIdentity,
   matchesEncodeOutputFilesystemIdentity,
-  requireCompleteRegularEncodeOutput,
+  requireNonEmptyRegularEncodeOutput,
   sameEncodeOutputAuthoritySnapshot,
   sameEncodeOutputInode,
   sameEncodeOutputMutationSnapshot,
@@ -42,12 +42,12 @@ describe("Encode output filesystem identity codec", () => {
     const { metadata, path } = createOutput();
 
     await expect(
-      requireCompleteRegularEncodeOutput(path, "invalid output"),
+      requireNonEmptyRegularEncodeOutput(path, "invalid output"),
     ).resolves.toMatchObject({ ino: metadata.ino, size: metadata.size });
 
     writeFileSync(path, "");
     await expect(
-      requireCompleteRegularEncodeOutput(path, "invalid output"),
+      requireNonEmptyRegularEncodeOutput(path, "invalid output"),
     ).rejects.toThrow("invalid output");
   });
 

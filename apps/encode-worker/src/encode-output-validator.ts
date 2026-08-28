@@ -28,7 +28,7 @@ export type MediaToolRunner = (
 ) => Promise<MediaToolRunResult>;
 
 export interface EncodeOutputValidator {
-  validate(
+  prepareAndValidate(
     outputPath: string,
     signal: AbortSignal,
     expectations?: EncodeOutputValidationExpectations,
@@ -230,6 +230,9 @@ function hasCompleteSubtitleMetadata(
 }
 
 function packetCount(value: unknown): number | null {
+  if (typeof value === "number") {
+    return Number.isSafeInteger(value) && value >= 0 ? value : null;
+  }
   if (typeof value !== "string" || !/^\d+$/.test(value)) {
     return null;
   }
@@ -543,7 +546,7 @@ export function createNodeEncodeOutputValidator({
   const outputRepairer =
     repairer ?? createNodeEncodeOutputRepairer({ runMediaTool });
   return {
-    async validate(outputPath, signal, expectations = {}) {
+    async prepareAndValidate(outputPath, signal, expectations = {}) {
       signal.throwIfAborted();
       await validateSubtitleStreams({
         expectations,

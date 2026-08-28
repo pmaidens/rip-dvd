@@ -11,7 +11,7 @@ export interface EncodeOutputFilesystemAuthoritySnapshot {
   sizeBytes: number;
 }
 
-export async function requireCompleteRegularEncodeOutput(
+export async function requireNonEmptyRegularEncodeOutput(
   path: string,
   errorMessage: string,
 ): Promise<Stats> {
