@@ -1,5 +1,10 @@
 import { execFile } from "node:child_process";
 
+import {
+  createNodeEncodeOutputRepairer,
+  type EncodeOutputRepairer,
+} from "./encode-output-repairer.js";
+
 const DEFAULT_MEDIA_TOOL_TIMEOUT_MS = 30_000;
 const DEFAULT_SUBTITLE_PACKET_TIMEOUT_MS = 5 * 60_000;
 const MAX_MEDIA_TOOL_OUTPUT_BYTES = 1024 * 1024;
@@ -23,7 +28,7 @@ export type MediaToolRunner = (
 ) => Promise<MediaToolRunResult>;
 
 export interface EncodeOutputValidator {
-  validate(
+  prepareAndValidate(
     outputPath: string,
     signal: AbortSignal,
     expectations?: EncodeOutputValidationExpectations,
@@ -225,6 +230,9 @@ function hasCompleteSubtitleMetadata(
 }
 
 function packetCount(value: unknown): number | null {
+  if (typeof value === "number") {
+    return Number.isSafeInteger(value) && value >= 0 ? value : null;
+  }
   if (typeof value !== "string" || !/^\d+$/.test(value)) {
     return null;
   }
@@ -353,11 +361,12 @@ function validatedSubtitleStreams(result: ProbeResult): CompleteSubtitleStream[]
 function validateVobSubPacketCounts(
   result: ProbeResult,
   expectedIndexes: ReadonlySet<number>,
-): void {
+): ReadonlySet<number> {
   if (!Array.isArray(result.streams)) {
     throw validationError("subtitle packet probe returned an invalid result");
   }
-  const readableIndexes = new Set<number>();
+  const observedIndexes = new Set<number>();
+  const emptyIndexes = new Set<number>();
   for (const value of result.streams) {
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
       throw validationError("subtitle packet probe returned an invalid result");
@@ -366,31 +375,37 @@ function validateVobSubPacketCounts(
     if (stream.codec_name !== "dvd_subtitle") {
       continue;
     }
-    if (
-      !Number.isSafeInteger(stream.index) ||
-      !expectedIndexes.has(stream.index as number) ||
-      readableIndexes.has(stream.index as number) ||
-      packetCount(stream.nb_read_packets) === null
-    ) {
+    if (!Number.isSafeInteger(stream.index)) {
       throw validationError("subtitle packet probe returned an invalid result");
     }
-    if (packetCount(stream.nb_read_packets) === 0) {
-      throw validationError(
-        `VobSub stream ${String(stream.index)} has no readable packets`,
-      );
+    const index = stream.index as number;
+    if (!expectedIndexes.has(index) || observedIndexes.has(index)) {
+      throw validationError("subtitle packet probe returned an invalid result");
     }
-    readableIndexes.add(stream.index as number);
+    const count =
+      stream.nb_read_packets === undefined
+        ? 0
+        : packetCount(stream.nb_read_packets);
+    if (count === null) {
+      throw validationError("subtitle packet probe returned an invalid result");
+    }
+    observedIndexes.add(index);
+    if (count === 0) {
+      emptyIndexes.add(index);
+    }
   }
   for (const index of expectedIndexes) {
-    if (!readableIndexes.has(index)) {
-      throw validationError(`VobSub stream ${index} has no readable packets`);
+    if (!observedIndexes.has(index)) {
+      throw validationError("subtitle packet probe returned an invalid result");
     }
   }
+  return emptyIndexes;
 }
 
 async function validateSubtitleStreams({
   expectations,
   outputPath,
+  repairer,
   runMediaTool,
   signal,
   subtitlePacketTimeoutMs,
@@ -398,83 +413,124 @@ async function validateSubtitleStreams({
 }: {
   expectations: EncodeOutputValidationExpectations;
   outputPath: string;
+  repairer: EncodeOutputRepairer;
   runMediaTool: MediaToolRunner;
   signal: AbortSignal;
   subtitlePacketTimeoutMs: number;
   timeoutMs: number;
 }): Promise<void> {
-  const subtitleProbe = parseProbeResult(
-    (
-      await runTool(
-        runMediaTool,
-        {
-          arguments_: [
-            "-v",
-            "error",
-            "-select_streams",
-            "s",
-            "-show_entries",
-            "stream=index,codec_name:stream_tags=language,title:stream_disposition=default,forced",
-            "-of",
-            "json",
-            outputPath,
-          ],
-          executable: "ffprobe",
-          signal,
-          timeoutMs,
-        },
-        "subtitle probe",
-      )
-    ).stdout,
-    "subtitle",
-  );
-  const subtitleStreams = validatedSubtitleStreams(subtitleProbe);
-  const vobSubIndexes = new Set(
-    subtitleStreams
-      .filter((stream) => stream.codec_name === "dvd_subtitle")
-      .map((stream) => stream.index),
-  );
-  const sourceStreams = sourceVobSubStreams(subtitleStreams);
-  validateExpectedVobSubStreams(
-    sourceStreams,
-    expectations.expectedVobSubStreams,
-  );
-  if (vobSubIndexes.size === 0) {
-    return;
-  }
-  const packetProbeRun = await runTool(
-    runMediaTool,
-    {
-      arguments_: [
-        "-v",
-        "error",
-        "-select_streams",
-        "s",
-        "-count_packets",
-        "-show_entries",
-        "stream=index,codec_name,nb_read_packets",
-        "-of",
-        "json",
+  let removedEmptyStreams = false;
+  while (true) {
+    const subtitleProbe = parseProbeResult(
+      (
+        await runTool(
+          runMediaTool,
+          {
+            arguments_: [
+              "-v",
+              "error",
+              "-select_streams",
+              "s",
+              "-show_entries",
+              "stream=index,codec_name:stream_tags=language,title:stream_disposition=default,forced",
+              "-of",
+              "json",
+              outputPath,
+            ],
+            executable: "ffprobe",
+            signal,
+            timeoutMs,
+          },
+          "subtitle probe",
+        )
+      ).stdout,
+      "subtitle",
+    );
+    const subtitleStreams = validatedSubtitleStreams(subtitleProbe);
+    const vobSubIndexes = new Set(
+      subtitleStreams
+        .filter((stream) => stream.codec_name === "dvd_subtitle")
+        .map((stream) => stream.index),
+    );
+    if (vobSubIndexes.size === 0) {
+      validateExpectedVobSubStreams(
+        sourceVobSubStreams(subtitleStreams),
+        expectations.expectedVobSubStreams,
+      );
+      return;
+    }
+    const packetProbeRun = await runTool(
+      runMediaTool,
+      {
+        arguments_: [
+          "-v",
+          "error",
+          "-select_streams",
+          "s",
+          "-count_packets",
+          "-show_entries",
+          "stream=index,codec_name,nb_read_packets",
+          "-of",
+          "json",
+          outputPath,
+        ],
+        executable: "ffprobe",
+        signal,
+        timeoutMs: subtitlePacketTimeoutMs,
+      },
+      "subtitle packet probe",
+    );
+    if (packetProbeRun.stderr.trim().length > 0) {
+      throw validationError("subtitle packet probe reported unreadable data");
+    }
+    const packetProbe = parseProbeResult(
+      packetProbeRun.stdout,
+      "subtitle packet",
+    );
+    const emptyIndexes = validateVobSubPacketCounts(
+      packetProbe,
+      vobSubIndexes,
+    );
+    if (emptyIndexes.size === 0) {
+      validateExpectedVobSubStreams(
+        sourceVobSubStreams(subtitleStreams),
+        expectations.expectedVobSubStreams,
+      );
+      return;
+    }
+    if (removedEmptyStreams) {
+      throw validationError("subtitle cleanup left an empty VobSub stream");
+    }
+    try {
+      await repairer.removeEmptyVobSubStreams({
+        emptyStreamIndexes: [...emptyIndexes],
         outputPath,
-      ],
-      executable: "ffprobe",
-      signal,
-      timeoutMs: subtitlePacketTimeoutMs,
-    },
-    "subtitle packet probe",
-  );
-  if (packetProbeRun.stderr.trim().length > 0) {
-    throw validationError("subtitle packet probe reported unreadable data");
+        retainedSubtitleDispositions: subtitleStreams
+          .filter((stream) => !emptyIndexes.has(stream.index))
+          .map((stream) => ({
+            default: stream.disposition.default === 1,
+            forced: stream.disposition.forced === 1,
+          })),
+        signal,
+        timeoutMs: subtitlePacketTimeoutMs,
+      });
+    } catch (error) {
+      signal.throwIfAborted();
+      throw validationError(
+        `subtitle cleanup failed: ${normalizeToolError(error)}`,
+      );
+    }
+    removedEmptyStreams = true;
   }
-  const packetProbe = parseProbeResult(packetProbeRun.stdout, "subtitle packet");
-  validateVobSubPacketCounts(packetProbe, vobSubIndexes);
 }
 
 export function createNodeEncodeOutputValidator({
+  repairer,
   runMediaTool = runNodeMediaTool,
   subtitlePacketTimeoutMs = DEFAULT_SUBTITLE_PACKET_TIMEOUT_MS,
   timeoutMs = DEFAULT_MEDIA_TOOL_TIMEOUT_MS,
 }: {
+  repairer?: EncodeOutputRepairer;
   runMediaTool?: MediaToolRunner;
   subtitlePacketTimeoutMs?: number;
   timeoutMs?: number;
@@ -487,9 +543,21 @@ export function createNodeEncodeOutputValidator({
   ) {
     throw new Error("Encode output validation timeout is invalid");
   }
+  const outputRepairer =
+    repairer ?? createNodeEncodeOutputRepairer({ runMediaTool });
   return {
-    async validate(outputPath, signal, expectations = {}) {
+    async prepareAndValidate(outputPath, signal, expectations = {}) {
       signal.throwIfAborted();
+      await validateSubtitleStreams({
+        expectations,
+        outputPath,
+        repairer: outputRepairer,
+        runMediaTool,
+        signal,
+        subtitlePacketTimeoutMs,
+        timeoutMs,
+      });
+
       const videoProbe = parseProbeResult(
         (
           await runTool(
@@ -566,15 +634,6 @@ export function createNodeEncodeOutputValidator({
           `first video frame starts ${videoStartDelay.toFixed(3)} seconds after the audio baseline`,
         );
       }
-
-      await validateSubtitleStreams({
-        expectations,
-        outputPath,
-        runMediaTool,
-        signal,
-        subtitlePacketTimeoutMs,
-        timeoutMs,
-      });
 
       const decodeResult = await runTool(
         runMediaTool,
