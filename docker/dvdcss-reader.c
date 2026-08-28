@@ -27,12 +27,11 @@
 #define PROGRESS_INTERVAL_NS INT64_C(1000000000)
 #define RECOVERY_POLICY_VERSION "dvd-recovery-v1"
 #define RECOVERY_RESULT_PREFIX "rip-dvd-recovery-result "
-#define READ_FAILURE_CLASSIFIER_VERSION "scsi-read-classifier-v1"
+#define READ_FAILURE_CLASSIFIER_VERSION "scsi-read-classifier-v2"
 #define READ_FAILURE_RESULT_PREFIX "rip-dvd-read-failure "
 #define READ_FAILURE_EXIT_STATUS 3
 #define BOUNDARY_PROOF_VERSION "dvd-sector-boundary-proof-v1"
 #define BOUNDARY_CONFIRMATION_READS 2
-#define SUPPORTED_FIXED_SENSE_LENGTH 18U
 
 #ifdef RIP_DVD_READER_TESTING
 #define MAX_TEST_FAULTS 64
@@ -86,7 +85,7 @@ enum read_failure_category {
 };
 
 struct decoded_sense {
-    int well_formed;
+    int recognized_format;
     int has_response_code;
     uint8_t response_code;
     int has_sense_key;
@@ -317,16 +316,6 @@ static uint32_t read_big_endian_u32(const uint8_t bytes[4])
     return value;
 }
 
-static int bytes_are_zero(const uint8_t *bytes, size_t length)
-{
-    for (size_t index = 0; index < length; index++) {
-        if (bytes[index] != 0) {
-            return 0;
-        }
-    }
-    return 1;
-}
-
 static int information_lba_matches_request(
     const struct rip_dvd_scsi_completion *completion,
     uint64_t information_lba)
@@ -359,35 +348,31 @@ static struct decoded_sense decode_sense(
             return decoded;
         }
         size_t declared_length = 8U + sense[7];
-        if (length != SUPPORTED_FIXED_SENSE_LENGTH ||
-            declared_length != length || sense[1] != 0 ||
-            (sense[2] & 0xf0) != 0 ||
-            !bytes_are_zero(sense + 8, 4) || sense[14] != 0 ||
-            !bytes_are_zero(sense + 15, 3)) {
-            return decoded;
+        size_t usable_length = length < declared_length
+            ? length : declared_length;
+        if (usable_length >= 13) {
+            decoded.has_asc = 1;
+            decoded.asc = sense[12];
         }
-        decoded.has_asc = 1;
-        decoded.asc = sense[12];
-        decoded.has_ascq = 1;
-        decoded.ascq = sense[13];
+        if (usable_length >= 14) {
+            decoded.has_ascq = 1;
+            decoded.ascq = sense[13];
+        }
         if ((sense[0] & 0x80) != 0) {
             uint64_t information_lba = read_big_endian_u32(sense + 3);
-            if (!information_lba_matches_request(
+            if (information_lba_matches_request(
                     completion, information_lba)) {
-                return decoded;
+                decoded.has_information_lba = 1;
+                decoded.information_lba = information_lba;
             }
-            decoded.has_information_lba = 1;
-            decoded.information_lba = information_lba;
-        } else if (!bytes_are_zero(sense + 3, 4)) {
-            return decoded;
         }
-        decoded.well_formed = 1;
+        decoded.recognized_format = 1;
         return decoded;
     }
     if (sense[0] != 0x72 && sense[0] != 0x73) {
         return decoded;
     }
-    if (length < 8) {
+    if (length < 4) {
         return decoded;
     }
     decoded.has_sense_key = 1;
@@ -396,68 +381,69 @@ static struct decoded_sense decode_sense(
     decoded.asc = sense[2];
     decoded.has_ascq = 1;
     decoded.ascq = sense[3];
-    size_t declared_length = 8U + sense[7];
-    if (declared_length != length || (sense[1] & 0xf0) != 0 ||
-        sense[4] != 0 || sense[5] != 0 || sense[6] != 0) {
+    decoded.recognized_format = 1;
+    if (length < 8) {
         return decoded;
     }
+    size_t declared_length = 8U + sense[7];
+    size_t descriptor_end = length < declared_length
+        ? length : declared_length;
     int information_descriptor_seen = 0;
-    for (size_t offset = 8; offset < declared_length;) {
-        if (declared_length - offset < 2) {
-            return decoded;
+    int information_descriptors_valid = length >= declared_length;
+    for (size_t offset = 8; offset < descriptor_end;) {
+        if (descriptor_end - offset < 2) {
+            information_descriptors_valid = 0;
+            break;
         }
         size_t descriptor_length = 2U + sense[offset + 1];
-        if (descriptor_length > declared_length - offset) {
-            return decoded;
+        if (descriptor_length > descriptor_end - offset) {
+            information_descriptors_valid = 0;
+            break;
         }
-        if (sense[offset] != 0x00 || sense[offset + 1] != 0x0a ||
-            information_descriptor_seen) {
-            return decoded;
-        }
-        information_descriptor_seen = 1;
-        if ((sense[offset + 2] & 0x7f) != 0 ||
-            sense[offset + 3] != 0) {
-            return decoded;
-        }
-        if ((sense[offset + 2] & 0x80) != 0) {
-            uint64_t information_lba =
-                read_big_endian_u64(sense + offset + 4);
-            if (!information_lba_matches_request(
-                    completion, information_lba)) {
-                return decoded;
+        if (sense[offset] == 0x00) {
+            if (sense[offset + 1] != 0x0a ||
+                information_descriptor_seen ||
+                (sense[offset + 2] & 0x7f) != 0 ||
+                sense[offset + 3] != 0) {
+                information_descriptors_valid = 0;
+            } else {
+                information_descriptor_seen = 1;
+                if ((sense[offset + 2] & 0x80) != 0) {
+                    uint64_t information_lba =
+                        read_big_endian_u64(sense + offset + 4);
+                    if (information_lba_matches_request(
+                            completion, information_lba)) {
+                        decoded.has_information_lba = 1;
+                        decoded.information_lba = information_lba;
+                    }
+                }
             }
-            decoded.has_information_lba = 1;
-            decoded.information_lba = information_lba;
-        } else if (!bytes_are_zero(sense + offset + 4, 8)) {
-            return decoded;
         }
         offset += descriptor_length;
     }
-    decoded.well_formed = 1;
+    if (!information_descriptors_valid) {
+        decoded.has_information_lba = 0;
+        decoded.information_lba = 0;
+    }
     return decoded;
 }
 
 static int is_recognized_dvd_medium_read_error(
     const struct decoded_sense *sense)
 {
-    if (sense->sense_key != 0x03 || sense->asc != 0x11) {
-        return 0;
-    }
-    return sense->ascq == 0x00 || sense->ascq == 0x01 ||
-           sense->ascq == 0x02 || sense->ascq == 0x05 ||
-           sense->ascq == 0x06;
+    return sense->sense_key == 0x03;
 }
 
 static int is_recognized_host_transport_failure(uint16_t host_status)
 {
-    return (host_status >= 0x01 && host_status <= 0x12) ||
-           host_status == 0x14;
+    return host_status != 0;
 }
 
 static int is_recognized_driver_transport_failure(uint16_t driver_status)
 {
-    return driver_status == 0x01 || driver_status == 0x02 ||
-           driver_status == 0x04 || driver_status == 0x06;
+    uint16_t base_status = driver_status & 0x0f;
+    return base_status == 0x01 || base_status == 0x02 ||
+           base_status == 0x04 || base_status == 0x06;
 }
 
 static int is_recognized_dvd_protection_error(
@@ -466,8 +452,7 @@ static int is_recognized_dvd_protection_error(
     if (sense->sense_key == 0x07) {
         return 1;
     }
-    return sense->sense_key == 0x05 && sense->asc == 0x6f &&
-           sense->ascq <= 0x05;
+    return sense->sense_key == 0x05 && sense->asc == 0x6f;
 }
 
 static int is_recognized_dvd_out_of_range_error(
@@ -495,10 +480,11 @@ static enum backend_read_status classify_read_failure(
         return BACKEND_READ_TERMINAL_FAILURE;
     }
     const struct decoded_sense *sense = &failure->sense;
-    if (!sense->well_formed || completion->scsi_status != 0x02 ||
+    uint16_t driver_base_status = completion->driver_status & 0x0f;
+    if (!sense->recognized_format ||
+        (completion->scsi_status & 0xfe) != 0x02 ||
         completion->host_status != 0 ||
-        (completion->driver_status != 0x00 &&
-         completion->driver_status != 0x08) ||
+        (driver_base_status != 0x00 && driver_base_status != 0x08) ||
         (sense->response_code != 0x70 && sense->response_code != 0x72) ||
         !sense->has_sense_key || !sense->has_asc || !sense->has_ascq) {
         return BACKEND_READ_TERMINAL_FAILURE;
@@ -836,7 +822,7 @@ static void write_big_endian_u32(uint8_t bytes[4], uint32_t value)
 static void set_test_tail_information_lba(
     struct rip_dvd_scsi_completion *completion, uint64_t information_lba)
 {
-    if (completion->sense_length >= SUPPORTED_FIXED_SENSE_LENGTH &&
+    if (completion->sense_length >= 8 &&
         (completion->sense[0] & 0x7f) == 0x70 &&
         (completion->sense[0] & 0x80) != 0 &&
         information_lba <= UINT32_MAX) {

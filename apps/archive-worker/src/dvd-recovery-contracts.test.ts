@@ -104,6 +104,18 @@ describe("DVD recovery results", () => {
       category: "recognized_medium_error",
       status: { hostStatus: 0, senseKey: 0x03, asc: 0x11, ascq: 0x05 },
     },
+    {
+      category: "recognized_medium_error",
+      status: { hostStatus: 0, senseKey: 0x03, asc: 0x02, ascq: 0x00 },
+    },
+    {
+      category: "recognized_medium_error",
+      status: { hostStatus: 0, senseKey: 0x03, asc: 0x7f, ascq: 0x7f },
+    },
+    {
+      category: "transport_error",
+      status: { hostStatus: 0x13, senseKey: 0x03, asc: 0x11, ascq: 0x00 },
+    },
   ] as const)(
     "rejects $category evidence labeled as an unknown terminal failure",
     ({ status }) => {
@@ -121,6 +133,7 @@ describe("DVD recovery results", () => {
     { driverStatus: 0x02, label: "0x02" },
     { driverStatus: 0x04, label: "0x04" },
     { driverStatus: 0x06, label: "0x06" },
+    { driverStatus: 0x16, label: "0x16" },
   ])(
     "rejects driver transport status $label labeled as unknown",
     ({ driverStatus }) => {
@@ -138,6 +151,27 @@ describe("DVD recovery results", () => {
       ).toThrow("DVD read failure helper result is malformed");
     },
   );
+
+  it("accepts masked target status and newer DVD protection evidence", () => {
+    expect(
+      parseDvdReadFailureResultProtocol(
+        readFailureProtocolPayload({
+          category: "protection_error",
+          scsiStatus: 0x03,
+          driverStatus: 0x28,
+          senseKey: 0x05,
+          asc: 0x6f,
+          ascq: 0x0a,
+        }),
+        4 * 2_048,
+      ),
+    ).toMatchObject({
+      category: "protection_error",
+      scsiStatus: 0x03,
+      driverStatus: 0x28,
+      ascq: 0x0a,
+    });
+  });
 
   it.each([
     { driverStatus: 0x03, label: "0x03" },
@@ -165,11 +199,11 @@ describe("DVD recovery results", () => {
       parseDvdReadFailureResultProtocol(
         JSON.stringify({
           protocolVersion: 1,
-          classifierVersion: "scsi-read-classifier-v1",
+          classifierVersion: "scsi-read-classifier-v2",
           category: "out_of_range",
-          scsiStatus: 2,
+          scsiStatus: 3,
           hostStatus: 0,
-          driverStatus: 8,
+          driverStatus: 0x28,
           senseResponseCode: 112,
           senseKey: 5,
           asc: 33,
@@ -186,11 +220,11 @@ describe("DVD recovery results", () => {
       ),
     ).toEqual({
       protocolVersion: 1,
-      classifierVersion: "scsi-read-classifier-v1",
+      classifierVersion: "scsi-read-classifier-v2",
       category: "out_of_range",
-      scsiStatus: 2,
+      scsiStatus: 3,
       hostStatus: 0,
-      driverStatus: 8,
+      driverStatus: 0x28,
       senseResponseCode: 112,
       senseKey: 5,
       asc: 33,
@@ -209,7 +243,7 @@ describe("DVD recovery results", () => {
     const result = parseDvdReadFailureResultProtocol(
       JSON.stringify({
         protocolVersion: 1,
-        classifierVersion: "scsi-read-classifier-v1",
+        classifierVersion: "scsi-read-classifier-v2",
         category: "out_of_range",
         scsiStatus: 2,
         hostStatus: 0,
@@ -239,7 +273,7 @@ describe("DVD recovery results", () => {
     const result = parseDvdReadFailureTerminalResultProtocol(
       JSON.stringify({
         protocolVersion: 2,
-        classifierVersion: "scsi-read-classifier-v1",
+        classifierVersion: "scsi-read-classifier-v2",
         category: "out_of_range",
         scsiStatus: 2,
         hostStatus: 0,
@@ -387,7 +421,7 @@ describe("DVD recovery results", () => {
       parseDvdReadFailureResultProtocol(
         JSON.stringify({
           protocolVersion: 1,
-          classifierVersion: "scsi-read-classifier-v1",
+          classifierVersion: "scsi-read-classifier-v2",
           category: "out_of_range",
           scsiStatus: 2,
           hostStatus: 0,
@@ -424,7 +458,7 @@ describe("DVD recovery results", () => {
       parseDvdReadFailureResultProtocol(
         JSON.stringify({
           protocolVersion: 1,
-          classifierVersion: "scsi-read-classifier-v1",
+          classifierVersion: "scsi-read-classifier-v2",
           category: "out_of_range",
           scsiStatus: 2,
           hostStatus: 0,
@@ -452,7 +486,7 @@ describe("DVD recovery results", () => {
       parseDvdReadFailureResultProtocol(
         JSON.stringify({
           protocolVersion: 1,
-          classifierVersion: "scsi-read-classifier-v1",
+          classifierVersion: "scsi-read-classifier-v2",
           category: "unknown",
           scsiStatus: 2,
           hostStatus: 0,

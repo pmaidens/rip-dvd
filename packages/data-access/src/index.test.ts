@@ -57,6 +57,43 @@ import { createLegacySidecarDataAccess } from "./legacy-sidecars.js";
 
 const temporaryDirectories: string[] = [];
 
+interface ClassificationVector {
+  name: string;
+  category:
+    | "recognized_medium_error"
+    | "not_ready"
+    | "unit_attention"
+    | "hardware_error"
+    | "transport_error"
+    | "protection_error"
+    | "out_of_range";
+  scsiStatus: number;
+  hostStatus: number;
+  driverStatus: number;
+  senseKey: number;
+  asc: number;
+  ascq: number;
+}
+
+type PersistedClassificationVector = ClassificationVector & {
+  category: Exclude<ClassificationVector["category"], "recognized_medium_error">;
+};
+
+const persistedClassificationVectors = (
+  JSON.parse(
+    readFileSync(
+      new URL(
+        "../../../docker/scsi-read-classification-v2-vectors.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  ) as ClassificationVector[]
+).filter(
+  (vector): vector is PersistedClassificationVector =>
+    vector.category !== "recognized_medium_error",
+);
+
 type ConcurrentWorkerResult =
   | "ok"
   | {
@@ -1170,7 +1207,9 @@ describe("data-access facade", () => {
           name !== "20260822185006_burly_northstar" &&
           name !== "20260822193801_safe_proteus" &&
           name !== "20260822201215_thick_madame_web" &&
-          name !== "20260823160205_flat_fixer",
+          name !== "20260823160205_flat_fixer" &&
+          name !== "20260828154312_luxuriant_human_robot" &&
+          name !== "20260828160945_fancy_chimera",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -8045,6 +8084,12 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
+        name: "20260828160945_fancy_chimera",
+      },
+      {
+        name: "20260828154312_luxuriant_human_robot",
+      },
+      {
         name: "20260825052933_slippery_famine",
       },
       {
@@ -8067,12 +8112,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260822175220_striped_kabuki",
-      },
-      {
-        name: "20260822142722_disc-inspection-settling",
-      },
-      {
-        name: "20260822062343_media-item-tmdb-identities",
       },
     ]);
     expect(
@@ -11047,6 +11086,49 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     access.close();
   });
 
+  it.each(persistedClassificationVectors)(
+    "persists the shared $name classification vector",
+    ({ category, scsiStatus, hostStatus, driverStatus, senseKey, asc, ascq }) => {
+      const access = openTestDatabase();
+      const drive = access.catalog.upsertOpticalDrive({
+        devicePath: `/dev/classification-${category}`,
+        isEnabled: true,
+        isPresent: true,
+      });
+      const { disc, inspection } = completeDiscInspection(access, {
+        opticalDriveId: drive.id,
+        mediaGeneration: `classification-${category}`,
+        fingerprint: `classification-${category}`,
+      });
+      access.archiveRequests.create({ detectedDiscId: disc.id });
+      const claim = access.archiveJobs.startForInspection(
+        inspection.id,
+        `classification-${category}-worker`,
+      )!;
+
+      expect(access.archiveJobs.failWithReadFailure(claim, {
+        stage: "initial_copy",
+        category,
+        classifierVersion: "scsi-read-classifier-v2",
+        failingLba: 1_024,
+        requestedBlockCount: 16,
+        retryCount: 0,
+        scsiStatus,
+        hostStatus,
+        driverStatus,
+        senseKey,
+        asc,
+        ascq,
+      })).toMatchObject({
+        readFailureCategory: category,
+        readFailureScsiStatus: scsiStatus,
+        readFailureHostStatus: hostStatus,
+        readFailureDriverStatus: driverStatus,
+      });
+      access.close();
+    },
+  );
+
   it.each([
     {
       category: "unknown",
@@ -11064,9 +11146,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       category: "hardware_error",
       errorMessage: "The Optical Drive reported a hardware fault",
       evidence: {
-        scsiStatus: 2,
+        scsiStatus: 3,
         hostStatus: 0,
-        driverStatus: 8,
+        driverStatus: 0x28,
         senseKey: 4,
         asc: 68,
         ascq: 0,
@@ -11077,7 +11159,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       errorMessage: "Communication with the Optical Drive failed",
       evidence: {
         scsiStatus: 2,
-        hostStatus: 7,
+        hostStatus: 0x13,
         driverStatus: 0,
         senseKey: 3,
         asc: 17,
@@ -11088,12 +11170,12 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       category: "protection_error",
       errorMessage: "DVD copy protection or region access failed",
       evidence: {
-        scsiStatus: 2,
+        scsiStatus: 3,
         hostStatus: 0,
-        driverStatus: 8,
+        driverStatus: 0x28,
         senseKey: 5,
         asc: 111,
-        ascq: 4,
+        ascq: 0x0a,
       },
     },
   ] as const)("keeps $category evidence immutable on the Archive Job attempt that observed it", ({
@@ -11122,7 +11204,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       access.archiveJobs.failWithReadFailure(first, {
         stage: "initial_copy",
         category,
-        classifierVersion: "scsi-read-classifier-v1",
+        classifierVersion: "scsi-read-classifier-v2",
         failingLba: 1_024,
         requestedBlockCount: 16,
         retryCount: 2,
@@ -11134,7 +11216,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       failureDetailVersion: "archive-failure-detail-v1",
       readFailureStage: "initial_copy",
       readFailureCategory: category,
-      readFailureClassifierVersion: "scsi-read-classifier-v1",
+      readFailureClassifierVersion: "scsi-read-classifier-v2",
       readFailureLba: 1_024,
       readFailureRequestedBlockCount: 16,
       readFailureRetryCount: 2,
@@ -11958,10 +12040,10 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       firstExcludedLba: 6,
       maximumReferencedLba: 5,
       outOfRangeEvidence: {
-        classifierVersion: "scsi-read-classifier-v1",
-        scsiStatus: 2,
+        classifierVersion: "scsi-read-classifier-v2",
+        scsiStatus: 3,
         hostStatus: 0,
-        driverStatus: 8,
+        driverStatus: 0x28,
         senseResponseCode: 0x70,
         senseKey: 0x05,
         asc: 0x21,
@@ -11987,10 +12069,10 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         boundaryExcludedSectorCount: 2,
         boundaryFirstExcludedLba: 6,
         boundaryMaximumReferencedLba: 5,
-        boundaryReadFailureClassifierVersion: "scsi-read-classifier-v1",
-        boundaryReadFailureScsiStatus: 2,
+        boundaryReadFailureClassifierVersion: "scsi-read-classifier-v2",
+        boundaryReadFailureScsiStatus: 3,
         boundaryReadFailureHostStatus: 0,
-        boundaryReadFailureDriverStatus: 8,
+        boundaryReadFailureDriverStatus: 0x28,
         boundaryReadFailureSenseResponseCode: 0x70,
         boundaryReadFailureSenseKey: 0x05,
         boundaryReadFailureAsc: 0x21,
@@ -12265,8 +12347,10 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       "boundary_maximum_referenced_lba = 6",
       "boundary_read_failure_classifier_version = ''",
       "boundary_read_failure_scsi_status = 0",
+      "boundary_read_failure_scsi_status = 259",
       "boundary_read_failure_host_status = 1",
       "boundary_read_failure_driver_status = 2",
+      "boundary_read_failure_driver_status = 65576",
       "boundary_read_failure_sense_response_code = 113",
       "boundary_read_failure_sense_key = 4",
       "boundary_read_failure_asc = 32",

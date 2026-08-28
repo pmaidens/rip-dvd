@@ -1,0 +1,132 @@
+[
+  {
+    "name": "no-seek-complete",
+    "category": "recognized_medium_error",
+    "scsiStatus": 2,
+    "hostStatus": 0,
+    "driverStatus": 8,
+    "senseKey": 3,
+    "asc": 2,
+    "ascq": 0
+  },
+  {
+    "name": "unfamiliar-medium-detail-with-masked-status",
+    "category": "recognized_medium_error",
+    "scsiStatus": 3,
+    "hostStatus": 0,
+    "driverStatus": 40,
+    "senseKey": 3,
+    "asc": 127,
+    "ascq": 127
+  },
+  {
+    "name": "not-ready-with-masked-status",
+    "category": "not_ready",
+    "scsiStatus": 3,
+    "hostStatus": 0,
+    "driverStatus": 40,
+    "senseKey": 2,
+    "asc": 4,
+    "ascq": 1
+  },
+  {
+    "name": "unit-attention-with-masked-status",
+    "category": "unit_attention",
+    "scsiStatus": 3,
+    "hostStatus": 0,
+    "driverStatus": 40,
+    "senseKey": 6,
+    "asc": 40,
+    "ascq": 0
+  },
+  {
+    "name": "hardware-error-with-masked-status",
+    "category": "hardware_error",
+    "scsiStatus": 3,
+    "hostStatus": 0,
+    "driverStatus": 40,
+    "senseKey": 4,
+    "asc": 68,
+    "ascq": 0
+  },
+  {
+    "name": "future-host-transport-status",
+    "category": "transport_error",
+    "scsiStatus": 2,
+    "hostStatus": 19,
+    "driverStatus": 8,
+    "senseKey": 3,
+    "asc": 17,
+    "ascq": 0
+  },
+  {
+    "name": "driver-transport-suggestion",
+    "category": "transport_error",
+    "scsiStatus": 2,
+    "hostStatus": 0,
+    "driverStatus": 22,
+    "senseKey": 3,
+    "asc": 17,
+    "ascq": 0
+  },
+  {
+    "name": "dvd-protection-ascq-06",
+    "category": "protection_error",
+    "scsiStatus": 2,
+    "hostStatus": 0,
+    "driverStatus": 8,
+    "senseKey": 5,
+    "asc": 111,
+    "ascq": 6
+  },
+  {
+    "name": "dvd-protection-ascq-07",
+    "category": "protection_error",
+    "scsiStatus": 2,
+    "hostStatus": 0,
+    "driverStatus": 8,
+    "senseKey": 5,
+    "asc": 111,
+    "ascq": 7
+  },
+  {
+    "name": "dvd-protection-ascq-08",
+    "category": "protection_error",
+    "scsiStatus": 2,
+    "hostStatus": 0,
+    "driverStatus": 8,
+    "senseKey": 5,
+    "asc": 111,
+    "ascq": 8
+  },
+  {
+    "name": "dvd-protection-ascq-09",
+    "category": "protection_error",
+    "scsiStatus": 2,
+    "hostStatus": 0,
+    "driverStatus": 8,
+    "senseKey": 5,
+    "asc": 111,
+    "ascq": 9
+  },
+  {
+    "name": "dvd-protection-ascq-0a",
+    "category": "protection_error",
+    "scsiStatus": 2,
+    "hostStatus": 0,
+    "driverStatus": 8,
+    "senseKey": 5,
+    "asc": 111,
+    "ascq": 10
+  },
+  {
+    "name": "out-of-range-with-masked-status",
+    "category": "out_of_range",
+    "scsiStatus": 3,
+    "hostStatus": 0,
+    "driverStatus": 40,
+    "senseKey": 5,
+    "asc": 33,
+    "ascq": 0
+  }
+]

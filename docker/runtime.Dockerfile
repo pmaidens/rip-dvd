@@ -45,6 +45,7 @@ RUN curl --fail --location --silent --show-error \
   && meson install -C /tmp/libdvdcss-build
 COPY docker/dvdcss-reader.c /tmp/dvdcss-reader.c
 COPY docker/test-dvdcss-reader.mjs /tmp/test-dvdcss-reader.mjs
+COPY docker/scsi-read-classification-v2-vectors.json /tmp/scsi-read-classification-v2-vectors.json
 RUN gcc -std=c17 -O2 -D_FORTIFY_SOURCE=2 -fstack-protector-strong \
     -Wall -Wextra -Werror -Wformat=2 -pthread \
     /tmp/dvdcss-reader.c /tmp/libdvdcss-sg-io.c \
