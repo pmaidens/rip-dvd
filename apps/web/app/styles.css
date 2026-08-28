@@ -496,6 +496,75 @@ h1 {
   box-shadow: 0 1.4rem 4rem rgba(0, 0, 0, 0.16);
 }
 
+.encoding-page-tabs {
+  display: flex;
+  gap: 0.35rem;
+  margin-bottom: 1rem;
+  padding: 0.35rem;
+  overflow-x: auto;
+  border: 1px solid #29483f;
+  border-radius: 0.8rem;
+  background: rgba(12, 27, 24, 0.94);
+}
+
+.encoding-page-tabs button {
+  flex: 0 0 auto;
+  min-height: 2.75rem;
+  padding: 0.65rem 1rem;
+  border-color: transparent;
+  background: transparent;
+  color: #9fb0ab;
+}
+
+.encoding-page-tabs button[aria-selected="true"] {
+  border-color: #d2a14b;
+  background: #d2a14b;
+  color: #10211c;
+}
+
+.encoding-page-tabs button:focus-visible,
+.encoding-job-filters button:focus-visible {
+  outline: 3px solid #f5d99f;
+  outline-offset: 2px;
+}
+
+.encoding-job-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-bottom: 1rem;
+  padding: 0.8rem;
+  border: 1px solid #203b34;
+  border-radius: 0.8rem;
+  background: rgba(12, 27, 24, 0.88);
+}
+
+.encoding-job-filters button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-height: 2.35rem;
+  padding: 0.45rem 0.65rem;
+  font-size: 0.75rem;
+}
+
+.encoding-job-filters button span:last-child {
+  display: grid;
+  min-width: 1.5rem;
+  height: 1.5rem;
+  padding: 0 0.35rem;
+  place-items: center;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 0.68rem;
+}
+
+.encoding-job-filters button[aria-pressed="true"] {
+  border-color: #d2a14b;
+  background: #d2a14b;
+  color: #10211c;
+}
+
 .catalog-editor {
   margin-bottom: 1rem;
   overflow: hidden;
