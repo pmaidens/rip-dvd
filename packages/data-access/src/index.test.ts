@@ -50,6 +50,7 @@ import type {
   EncodeOutputFilesystemIdentity,
   MediaItemId,
   OriginalDiscArchiveId,
+  RunningArchiveJob,
   RunningEncodeJob,
 } from "./index.js";
 import type { EncodingProfileId } from "./index.js";
@@ -11873,6 +11874,21 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       progressEtaSeconds: 420,
       lastProgressAt: new Date("2026-08-20T20:05:10.000Z"),
     });
+    const advancedClaim: RunningArchiveJob = {
+      ...advanced,
+      status: "running",
+      claimToken: claim.claimToken,
+    };
+    vi.advanceTimersByTime(100);
+    const etaOnly = access.archiveJobs.updateProgress(advancedClaim, {
+      phase: "copying",
+      progressPercent: 9,
+      progressBytes: 638_000_000,
+      etaSeconds: 419,
+    });
+    expect(etaOnly.updatedAt).toEqual(advanced.updatedAt);
+    expect(etaOnly.progressEtaSeconds).toBe(419);
+    vi.setSystemTime(new Date("2026-08-20T20:05:10.000Z"));
 
     vi.advanceTimersByTime(20_000);
     access.archiveJobs.renewClaim(claim);
