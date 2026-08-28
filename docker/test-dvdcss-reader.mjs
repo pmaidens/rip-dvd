@@ -75,8 +75,23 @@ function fixedMediumSense(lba, ascq = 0) {
   return fixedSense(lba, 0x03, 0x11, ascq);
 }
 
+function fixedMediumSenseWithActualRetryCount(lba, retryCount, ascq = 0) {
+  const sense = Buffer.from(fixedMediumSense(lba, ascq), "hex");
+  sense[15] = 0x80;
+  sense.writeUInt16BE(retryCount, 16);
+  return sense.toString("hex");
+}
+
 function descriptorMediumSense(lba, ascq = 0) {
   return descriptorSense(lba, 0x03, 0x11, ascq);
+}
+
+function fixedNoSeekCompleteSense(lba) {
+  return fixedSense(lba, 0x03, 0x02);
+}
+
+function descriptorNoSeekCompleteSense(lba) {
+  return descriptorSense(lba, 0x03, 0x02);
 }
 
 function fixedOutOfRangeSense(lba) {
@@ -177,7 +192,9 @@ const categorizedReadFailures = [
         descriptorMediumAtFive,
         { hostStatus: 7 },
       ],
+      ["future-host-transport", fixedMediumAtFive, { hostStatus: 0x13 }],
       ["driver-transport", fixedMediumAtFive, { driverStatus: 6 }],
+      ["driver-transport-suggestion", fixedMediumAtFive, { driverStatus: 0x16 }],
     ],
   },
   {
@@ -185,6 +202,7 @@ const categorizedReadFailures = [
     fixtures: [
       ["fixed-protection", fixedSense(5, 0x05, 0x6f, 0x04)],
       ["descriptor-protection", descriptorSense(5, 0x05, 0x6f, 0x04)],
+      ["fixed-protection-newer-ascq", fixedSense(5, 0x05, 0x6f, 0x0a)],
     ],
   },
 ];
@@ -722,6 +740,8 @@ for (const [name, sense] of [
   ["descriptor-medium", descriptorMediumAtFive],
   ["fixed-retries-exhausted", fixedRetriesExhaustedAtFive],
   ["descriptor-retries-exhausted", descriptorRetriesExhaustedAtFive],
+  ["fixed-no-seek-complete", fixedNoSeekCompleteSense(5)],
+  ["descriptor-no-seek-complete", descriptorNoSeekCompleteSense(5)],
 ]) {
   const exactMedium = runTestCopy(
     name,
@@ -812,6 +832,29 @@ if (
   );
 }
 
+const transientFixedMediumWithActualRetryCount = runTestCopy(
+  "transient-fixed-medium-with-actual-retry-count",
+  rawCompletionFault(5, 1, fixedMediumSenseWithActualRetryCount(5, 2)),
+);
+if (
+  transientFixedMediumWithActualRetryCount.status !== 0 ||
+  !readFileSync(transientFixedMediumWithActualRetryCount.outputPath).equals(
+    content,
+  ) ||
+  recoveryResult(transientFixedMediumWithActualRetryCount.stderr)
+      .badSectorCount !== 0 ||
+  JSON.stringify(testReads(transientFixedMediumWithActualRetryCount.stderr)) !==
+    JSON.stringify([
+      { lba: 0, blocks: 31 },
+      { lba: 0, blocks: 31 },
+      { lba: 31, blocks: 9 },
+    ])
+) {
+  throw new Error(
+    `libdvdcss fixed medium actual retry count check failed: ${transientFixedMediumWithActualRetryCount.stderr}`,
+  );
+}
+
 for (const { category, fixtures } of categorizedReadFailures) {
   for (const [name, sense, completion] of fixtures) {
     const failure = runTestCopy(
@@ -852,7 +895,7 @@ if (
   JSON.stringify(persistentUnknownResult) !==
     JSON.stringify({
       protocolVersion: 1,
-      classifierVersion: "scsi-read-classifier-v1",
+      classifierVersion: "scsi-read-classifier-v2",
       category: "unknown",
       scsiStatus: 2,
       hostStatus: 0,
@@ -1198,6 +1241,207 @@ for (const excludedSectorCount of [114_301, 73_400]) {
   }
 }
 
+const optionalMediumSenseFixtures = [
+  [
+    "fixed-captured-truncated-record",
+    rawCompletionFault(5, "always", "f00003000000050a000000001100"),
+  ],
+  [
+    "fixed-fourteen-byte-record",
+    rawCompletionFault(5, "always", "f000030000000506000000001100"),
+  ],
+  [
+    "fixed-undeclared-trailing-byte",
+    rawCompletionFault(5, "always", `${fixedMediumAtFive}ff`),
+  ],
+  [
+    "descriptor-undeclared-trailing-byte",
+    rawCompletionFault(5, "always", `${descriptorMediumAtFive}ff`),
+  ],
+  [
+    "fixed-sdat-overflow",
+    rawCompletionFault(
+      5,
+      "always",
+      "f00013000000050a00000000110000000000",
+    ),
+  ],
+  [
+    "fixed-sense-key-specific-data",
+    rawCompletionFault(
+      5,
+      "always",
+      "f00003000000050a00000000110000400000",
+    ),
+  ],
+  [
+    "fixed-declared-vendor-byte",
+    rawCompletionFault(
+      5,
+      "always",
+      "f00003000000050b00000000110000000000ff",
+    ),
+  ],
+  [
+    "fixed-command-specific-information",
+    rawCompletionFault(
+      5,
+      "always",
+      "f00003000000050a01000000110000000000",
+    ),
+  ],
+  [
+    "fixed-obsolete-flags-and-fru",
+    rawCompletionFault(
+      5,
+      "always",
+      "f0ffe3000000050a0000000011007f000000",
+    ),
+  ],
+  [
+    "fixed-invalid-information",
+    rawCompletionFault(
+      5,
+      "always",
+      "700003000000050a00000000110000000000",
+    ),
+  ],
+  [
+    "fixed-medium-with-out-of-range-asc",
+    rawCompletionFault(
+      5,
+      "always",
+      "f00003000000050a00000000210000000000",
+    ),
+  ],
+  [
+    "fixed-unfamiliar-asc",
+    rawCompletionFault(
+      5,
+      "always",
+      "f00003000000050a000000007f7f00000000",
+    ),
+  ],
+  [
+    "driver-status-reserved-upper-bit",
+    rawCompletionFault(5, "always", fixedMediumAtFive, {
+      driverStatus: 0x108,
+    }),
+  ],
+  [
+    "driver-status-sense-suggestion",
+    rawCompletionFault(5, "always", fixedMediumAtFive, {
+      driverStatus: 0x28,
+    }),
+  ],
+  [
+    "masked-check-condition",
+    rawCompletionFault(5, "always", fixedMediumAtFive, { scsiStatus: 3 }),
+  ],
+  [
+    "descriptor-vendor-descriptor",
+    rawCompletionFault(5, "always", "72031100000000027f00"),
+  ],
+  [
+    "descriptor-vendor-before-information",
+    rawCompletionFault(
+      5,
+      "always",
+      "720311000000000e8000000a80000000000000000005",
+    ),
+  ],
+  [
+    "descriptor-sdat-overflow",
+    rawCompletionFault(
+      5,
+      "always",
+      "720311008000000c000a80000000000000000005",
+    ),
+  ],
+  [
+    "descriptor-header-byte-5",
+    rawCompletionFault(
+      5,
+      "always",
+      "720311000001000c000a80000000000000000005",
+    ),
+  ],
+  [
+    "descriptor-header-byte-6",
+    rawCompletionFault(
+      5,
+      "always",
+      "720311000000010c000a80000000000000000005",
+    ),
+  ],
+  [
+    "descriptor-information-flags",
+    rawCompletionFault(
+      5,
+      "always",
+      "720311000000000c000a81000000000000000005",
+    ),
+  ],
+  [
+    "descriptor-invalid-information",
+    rawCompletionFault(
+      5,
+      "always",
+      "720311000000000c000a00000000000000000005",
+    ),
+  ],
+  [
+    "descriptor-medium-with-out-of-range-asc",
+    rawCompletionFault(
+      5,
+      "always",
+      "720321000000000c000a80000000000000000005",
+    ),
+  ],
+  [
+    "descriptor-unfamiliar-asc",
+    rawCompletionFault(
+      5,
+      "always",
+      "72037f7f0000000c000a80000000000000000005",
+    ),
+  ],
+  [
+    "descriptor-information-byte-3",
+    rawCompletionFault(
+      5,
+      "always",
+      "720311000000000c000a80010000000000000005",
+    ),
+  ],
+  [
+    "descriptor-truncated-descriptor",
+    rawCompletionFault(5, "always", "7203110000000004000a"),
+  ],
+  [
+    "descriptor-duplicate-information",
+    rawCompletionFault(
+      5,
+      "always",
+      "7203110000000018000a80000000000000000005000a80000000000000000005",
+    ),
+  ],
+];
+for (const [name, fault] of optionalMediumSenseFixtures) {
+  const recovered = runTestCopy(`recover-${name}`, fault);
+  const result = recoveryResult(recovered.stderr);
+  if (
+    recovered.status !== 0 ||
+    result.badSectorCount !== 1 ||
+    JSON.stringify(badSectorRanges(result, 40)) !==
+      JSON.stringify([{ startLba: 5, sectorCount: 1 }])
+  ) {
+    throw new Error(
+      `libdvdcss ${name} optional medium sense check failed: ${recovered.stderr}`,
+    );
+  }
+}
+
 const malformedUnknownFixtures = [
   ["missing", "generic@5@always"],
   ["empty", "raw@5@always@2@0@8@0@-"],
@@ -1205,53 +1449,17 @@ const malformedUnknownFixtures = [
   ["oversized", "raw@5@always@2@0@8@253@-"],
   ["inconsistent", "raw@5@always@2@0@8@8@700003000000000a"],
   [
-    "fixed-undeclared-trailing-byte",
-    `raw@5@always@2@0@8@19@${fixedMediumAtFive}ff`,
-  ],
-  [
-    "descriptor-undeclared-trailing-byte",
-    `raw@5@always@2@0@8@21@${descriptorMediumAtFive}ff`,
-  ],
-  [
     "fixed-declared-length-excludes-asc",
     "raw@5@always@2@0@8@14@f000030000000504000000001100",
   ],
-  [
-    "fixed-reserved-sense-key-bit",
-    "raw@5@always@2@0@8@18@f00013000000050a00000000110000000000",
-  ],
-  [
-    "fixed-sense-key-specific-reserved-bit",
-    "raw@5@always@2@0@8@18@f00003000000050a00000000110000400000",
-  ],
-  [
-    "fixed-declared-vendor-byte",
-    "raw@5@always@2@0@8@19@f00003000000050b00000000110000000000ff",
-  ],
-  [
-    "fixed-command-specific-information",
-    "raw@5@always@2@0@8@18@f00003000000050a01000000110000000000",
-  ],
-  [
-    "fixed-invalid-information",
-    "raw@5@always@2@0@8@18@700003000000050a00000000110000000000",
-  ],
-  [
-    "fixed-contradictory-medium-tuple",
-    "raw@5@always@2@0@8@18@f00003000000050a00000000210000000000",
-  ],
-  [
-    "fixed-unrecognized-medium-tuple",
-    "raw@5@always@2@0@8@18@f00003000000050a000000007f7f00000000",
-  ],
   ["unsupported", "raw@5@always@2@0@8@1@7f"],
   [
-    "driver-status-reserved-upper-bit",
-    `raw@5@always@2@0@264@${fixedMediumAtFive.length / 2}@${fixedMediumAtFive}`,
+    "fixed-deferred-medium",
+    "raw@5@always@2@0@8@18@710003000000050a00000000110000000000",
   ],
   [
-    "driver-status-abort-suggestion",
-    `raw@5@always@2@0@40@${fixedMediumAtFive.length / 2}@${fixedMediumAtFive}`,
+    "descriptor-deferred-medium",
+    "raw@5@always@2@0@8@20@730311000000000c000a80000000000000000005",
   ],
   [
     "driver-media-status",
@@ -1270,42 +1478,6 @@ const malformedUnknownFixtures = [
     "raw@5@always@2@0@8@8@f203110000000000",
   ],
   [
-    "descriptor-unknown-descriptor",
-    "raw@5@always@2@0@8@10@72031100000000027f00",
-  ],
-  [
-    "descriptor-header-reserved-byte-4",
-    "raw@5@always@2@0@8@20@720311000100000c000a80000000000000000005",
-  ],
-  [
-    "descriptor-header-reserved-byte-5",
-    "raw@5@always@2@0@8@20@720311000001000c000a80000000000000000005",
-  ],
-  [
-    "descriptor-header-reserved-byte-6",
-    "raw@5@always@2@0@8@20@720311000000010c000a80000000000000000005",
-  ],
-  [
-    "descriptor-information-reserved-bits",
-    "raw@5@always@2@0@8@20@720311000000000c000a81000000000000000005",
-  ],
-  [
-    "descriptor-invalid-information",
-    "raw@5@always@2@0@8@20@720311000000000c000a00000000000000000005",
-  ],
-  [
-    "descriptor-contradictory-medium-tuple",
-    "raw@5@always@2@0@8@20@720321000000000c000a80000000000000000005",
-  ],
-  [
-    "descriptor-unrecognized-medium-tuple",
-    "raw@5@always@2@0@8@20@72037f7f0000000c000a80000000000000000005",
-  ],
-  [
-    "descriptor-reserved-byte",
-    "raw@5@always@2@0@8@20@720311000000000c000a80010000000000000005",
-  ],
-  [
     "contradictory",
     `raw@5@always@0@0@0@${fixedMediumAtFive.length / 2}@${fixedMediumAtFive}`,
   ],
@@ -1316,7 +1488,7 @@ for (const [name, fault] of malformedUnknownFixtures) {
   if (
     malformedUnknown.status !== 3 ||
     result.category !== "unknown" ||
-    result.classifierVersion !== "scsi-read-classifier-v1" ||
+    result.classifierVersion !== "scsi-read-classifier-v2" ||
     result.requestedLba !== 0 ||
     result.requestedBlockCount !== 31 ||
     result.retryOrdinal !== 0 ||
@@ -1339,26 +1511,19 @@ for (const [name, sense] of [
   ["fixed", fixedMediumAtFive],
   ["descriptor", descriptorMediumAtFive],
 ]) {
-  const contradictoryInformation = runTestCopy(
-    `unknown-${name}-information-lba`,
+  const unlocatedMedium = runTestCopy(
+    `recover-${name}-out-of-request-information-lba`,
     `raw@35@always@2@0@8@${sense.length / 2}@${sense}`,
   );
-  const result = readFailureResult(contradictoryInformation.stderr);
+  const result = recoveryResult(unlocatedMedium.stderr);
   if (
-    contradictoryInformation.status !== 3 ||
-    result.category !== "unknown" ||
-    result.informationLba !== null ||
-    result.requestedLba !== 31 ||
-    result.requestedBlockCount !== 9 ||
-    contradictoryInformation.stderr.includes(recoveryResultPrefix) ||
-    JSON.stringify(testReads(contradictoryInformation.stderr)) !==
-      JSON.stringify([
-        { lba: 0, blocks: 31 },
-        { lba: 31, blocks: 9 },
-      ])
+    unlocatedMedium.status !== 0 ||
+    result.badSectorCount !== 1 ||
+    JSON.stringify(badSectorRanges(result, 40)) !==
+      JSON.stringify([{ startLba: 35, sectorCount: 1 }])
   ) {
     throw new Error(
-      `libdvdcss contradictory ${name} information check failed: ${contradictoryInformation.stderr}`,
+      `libdvdcss out-of-request ${name} information check failed: ${unlocatedMedium.stderr}`,
     );
   }
 }

@@ -19,22 +19,26 @@ export type ArchiveReadFailureEvidenceClassification =
   | "recognized_medium_error";
 
 function isHostTransportFailure(hostStatus: number): boolean {
-  return (hostStatus >= 0x01 && hostStatus <= 0x12) || hostStatus === 0x14;
+  return hostStatus !== 0;
 }
 
 function isDriverTransportFailure(driverStatus: number): boolean {
-  return driverStatus === 0x01 ||
-    driverStatus === 0x02 ||
-    driverStatus === 0x04 ||
-    driverStatus === 0x06;
+  const baseStatus = driverStatus & 0x0f;
+  return baseStatus === 0x01 ||
+    baseStatus === 0x02 ||
+    baseStatus === 0x04 ||
+    baseStatus === 0x06;
 }
 
 function isTargetSenseCompletion(
   evidence: ArchiveReadFailureScsiEvidence,
 ): boolean {
-  return evidence.scsiStatus === 0x02 &&
+  return evidence.scsiStatus !== null &&
+    (evidence.scsiStatus & 0xfe) === 0x02 &&
     evidence.hostStatus === 0 &&
-    (evidence.driverStatus === 0 || evidence.driverStatus === 0x08) &&
+    evidence.driverStatus !== null &&
+    ((evidence.driverStatus & 0x0f) === 0 ||
+      (evidence.driverStatus & 0x0f) === 0x08) &&
     evidence.senseKey !== null &&
     evidence.asc !== null &&
     evidence.ascq !== null;
@@ -66,15 +70,7 @@ export function classifyArchiveReadFailureEvidence(
   if (evidence.senseKey === 0x06) {
     return "unit_attention";
   }
-  if (
-    evidence.senseKey === 0x03 &&
-    evidence.asc === 0x11 &&
-    (evidence.ascq === 0x00 ||
-      evidence.ascq === 0x01 ||
-      evidence.ascq === 0x02 ||
-      evidence.ascq === 0x05 ||
-      evidence.ascq === 0x06)
-  ) {
+  if (evidence.senseKey === 0x03) {
     return "recognized_medium_error";
   }
   if (evidence.senseKey === 0x04) {
@@ -84,8 +80,7 @@ export function classifyArchiveReadFailureEvidence(
     evidence.senseKey === 0x07 ||
     (evidence.senseKey === 0x05 &&
       evidence.asc === 0x6f &&
-      evidence.ascq !== null &&
-      evidence.ascq <= 0x05)
+      evidence.ascq !== null)
   ) {
     return "protection_error";
   }

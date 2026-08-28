@@ -1170,7 +1170,8 @@ describe("data-access facade", () => {
           name !== "20260822185006_burly_northstar" &&
           name !== "20260822193801_safe_proteus" &&
           name !== "20260822201215_thick_madame_web" &&
-          name !== "20260823160205_flat_fixer",
+          name !== "20260823160205_flat_fixer" &&
+          name !== "20260828154312_luxuriant_human_robot",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -8045,6 +8046,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
+        name: "20260828154312_luxuriant_human_robot",
+      },
+      {
         name: "20260825052933_slippery_famine",
       },
       {
@@ -8070,9 +8074,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260822142722_disc-inspection-settling",
-      },
-      {
-        name: "20260822062343_media-item-tmdb-identities",
       },
     ]);
     expect(
@@ -11064,9 +11065,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       category: "hardware_error",
       errorMessage: "The Optical Drive reported a hardware fault",
       evidence: {
-        scsiStatus: 2,
+        scsiStatus: 3,
         hostStatus: 0,
-        driverStatus: 8,
+        driverStatus: 0x28,
         senseKey: 4,
         asc: 68,
         ascq: 0,
@@ -11077,7 +11078,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       errorMessage: "Communication with the Optical Drive failed",
       evidence: {
         scsiStatus: 2,
-        hostStatus: 7,
+        hostStatus: 0x13,
         driverStatus: 0,
         senseKey: 3,
         asc: 17,
@@ -11088,12 +11089,12 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       category: "protection_error",
       errorMessage: "DVD copy protection or region access failed",
       evidence: {
-        scsiStatus: 2,
+        scsiStatus: 3,
         hostStatus: 0,
-        driverStatus: 8,
+        driverStatus: 0x28,
         senseKey: 5,
         asc: 111,
-        ascq: 4,
+        ascq: 0x0a,
       },
     },
   ] as const)("keeps $category evidence immutable on the Archive Job attempt that observed it", ({
@@ -11122,7 +11123,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       access.archiveJobs.failWithReadFailure(first, {
         stage: "initial_copy",
         category,
-        classifierVersion: "scsi-read-classifier-v1",
+        classifierVersion: "scsi-read-classifier-v2",
         failingLba: 1_024,
         requestedBlockCount: 16,
         retryCount: 2,
@@ -11134,7 +11135,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       failureDetailVersion: "archive-failure-detail-v1",
       readFailureStage: "initial_copy",
       readFailureCategory: category,
-      readFailureClassifierVersion: "scsi-read-classifier-v1",
+      readFailureClassifierVersion: "scsi-read-classifier-v2",
       readFailureLba: 1_024,
       readFailureRequestedBlockCount: 16,
       readFailureRetryCount: 2,
