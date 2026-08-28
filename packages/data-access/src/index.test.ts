@@ -1209,6 +1209,7 @@ describe("data-access facade", () => {
           name !== "20260822201215_thick_madame_web" &&
           name !== "20260823160205_flat_fixer" &&
           name !== "20260828154312_luxuriant_human_robot" &&
+          name !== "20260828160349_dusty_nekra" &&
           name !== "20260828160945_fancy_chimera",
       )
       .sort();
@@ -8087,6 +8088,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         name: "20260828160945_fancy_chimera",
       },
       {
+        name: "20260828160349_dusty_nekra",
+      },
+      {
         name: "20260828154312_luxuriant_human_robot",
       },
       {
@@ -11848,6 +11852,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
 
     expect(claim).toMatchObject({
       progressBytes: 0,
+      progressEtaSeconds: null,
       lastProgressAt: startedAt,
     });
 
@@ -11861,9 +11866,11 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       phase: "copying",
       progressPercent: 9,
       progressBytes: 638_000_000,
+      etaSeconds: 420,
     });
     expect(advanced).toMatchObject({
       progressBytes: 638_000_000,
+      progressEtaSeconds: 420,
       lastProgressAt: new Date("2026-08-20T20:05:10.000Z"),
     });
 
@@ -11876,6 +11883,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       progressBytes: 638_000_000,
     });
     expect(unchanged.updatedAt).toEqual(new Date("2026-08-20T20:06:10.000Z"));
+    expect(unchanged.progressEtaSeconds).toBeNull();
     expect(unchanged.lastProgressAt).toEqual(
       new Date("2026-08-20T20:05:10.000Z"),
     );
@@ -11891,8 +11899,22 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       }),
     ).toMatchObject({
       progressBytes: 638_002_048,
+      progressEtaSeconds: null,
       lastProgressAt: new Date("2026-08-20T20:07:10.000Z"),
     });
+    expect(() => access.archiveJobs.updateProgress(claim, {
+      phase: "copying",
+      progressPercent: 9,
+      etaSeconds: -1,
+    })).toThrow("etaSeconds must be a non-negative safe integer or null");
+    access.archiveJobs.updateProgress(claim, {
+      phase: "copying",
+      progressPercent: 9,
+      etaSeconds: 300,
+    });
+    expect(
+      access.archiveJobs.abort(claim, "Archive cancelled by test"),
+    ).toMatchObject({ progressEtaSeconds: null, status: "aborted" });
     access.close();
   });
 

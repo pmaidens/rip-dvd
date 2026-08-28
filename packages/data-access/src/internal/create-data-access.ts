@@ -3285,9 +3285,11 @@ export function createDataAccessInternal(
       token: ArchiveJobClaimToken;
       lastProgressAt: Date;
       latestBytes: number;
+      latestEtaSeconds: number | null;
       latestPercent: number;
       latestPhase: ArchiveJob["progressPhase"];
       persistedBytes: number;
+      persistedEtaSeconds: number | null;
       persistedPercent: number;
       persistedPhase: ArchiveJob["progressPhase"];
       persistedAt: number;
@@ -3305,6 +3307,7 @@ export function createDataAccessInternal(
       progressPhase: progress.latestPhase,
       progressPercent: progress.latestPercent,
       progressBytes: progress.latestBytes,
+      progressEtaSeconds: progress.latestEtaSeconds,
       lastProgressAt: progress.lastProgressAt,
     };
   };
@@ -3459,6 +3462,7 @@ export function createDataAccessInternal(
                 failureDetailVersion: ARCHIVE_FAILURE_DETAIL_VERSIONS[0],
                 ...readFailureValues,
               }),
+          progressEtaSeconds: null,
           completedAt: timestamp,
           errorMessage: cancellationWins
             ? "Archive cancelled by operator"
@@ -7755,6 +7759,7 @@ export function createDataAccessInternal(
                 progressPhase: "preparing",
                 progressPercent: 0,
                 progressBytes: 0,
+                progressEtaSeconds: null,
                 lastProgressAt: timestamp,
                 claimedBy: workerId,
                 claimToken,
@@ -7839,6 +7844,7 @@ export function createDataAccessInternal(
                   candidate.id,
                   candidate.claimToken,
                 ),
+                progressEtaSeconds: null,
                 completedAt: timestamp,
                 errorMessage: "Archive worker lease expired",
                 failureDetailVersion: ARCHIVE_FAILURE_DETAIL_VERSIONS[0],
@@ -7942,6 +7948,7 @@ export function createDataAccessInternal(
             .set({
               status: "aborted",
               ...archiveProgressPatchForClaim(claim.id, claim.claimToken),
+              progressEtaSeconds: null,
               completedAt: timestamp,
               errorMessage: "Archive cancelled after worker recovery",
               updatedAt: timestamp,
@@ -8079,6 +8086,17 @@ export function createDataAccessInternal(
             "progressBytes must be a non-negative safe integer",
           );
         }
+        if (
+          progress.etaSeconds !== undefined &&
+          progress.etaSeconds !== null &&
+          (!Number.isSafeInteger(progress.etaSeconds) ||
+            progress.etaSeconds < 0)
+        ) {
+          throw new DomainInvariantError(
+            "etaSeconds must be a non-negative safe integer or null",
+          );
+        }
+        const progressEtaSeconds = progress.etaSeconds ?? null;
         const previous = archiveProgress.get(claim.id);
         const previousBytes = previous?.latestBytes ?? claim.progressBytes;
         const progressBytes = Math.max(
@@ -8099,6 +8117,7 @@ export function createDataAccessInternal(
           previous.token !== claim.claimToken ||
           previous.persistedPhase !== progress.phase ||
           previous.persistedBytes !== progressBytes ||
+          previous.persistedEtaSeconds !== progressEtaSeconds ||
           timestamp.getTime() - previous.persistedAt >= 1_000 ||
           Math.abs(
             progress.progressPercent - (previous?.persistedPercent ?? 0),
@@ -8108,6 +8127,7 @@ export function createDataAccessInternal(
             ...previous,
             lastProgressAt,
             latestBytes: progressBytes,
+            latestEtaSeconds: progressEtaSeconds,
             latestPercent: progress.progressPercent,
             latestPhase: progress.phase,
           });
@@ -8115,6 +8135,7 @@ export function createDataAccessInternal(
             ...claim,
             lastProgressAt,
             progressBytes,
+            progressEtaSeconds,
             progressPhase: progress.phase,
             progressPercent: progress.progressPercent,
           };
@@ -8124,6 +8145,7 @@ export function createDataAccessInternal(
           .set({
             lastProgressAt,
             progressBytes,
+            progressEtaSeconds,
             progressPhase: progress.phase,
             progressPercent: progress.progressPercent,
             updatedAt: timestamp,
@@ -8150,9 +8172,11 @@ export function createDataAccessInternal(
           token: claim.claimToken,
           lastProgressAt,
           latestBytes: progressBytes,
+          latestEtaSeconds: progressEtaSeconds,
           latestPercent: progress.progressPercent,
           latestPhase: progress.phase,
           persistedBytes: progressBytes,
+          persistedEtaSeconds: progressEtaSeconds,
           persistedPercent: progress.progressPercent,
           persistedPhase: progress.phase,
           persistedAt: timestamp.getTime(),
@@ -8443,6 +8467,7 @@ export function createDataAccessInternal(
                 progressPhase: "finalizing",
                 progressPercent: 100,
                 progressBytes: sizeBytes,
+                progressEtaSeconds: null,
                 lastProgressAt: timestamp,
                 completedAt: timestamp,
                 errorMessage: null,
@@ -8489,6 +8514,7 @@ export function createDataAccessInternal(
             .set({
               status: "aborted",
               ...archiveProgressPatchForClaim(claim.id, claim.claimToken),
+              progressEtaSeconds: null,
               completedAt: timestamp,
               errorMessage,
               updatedAt: timestamp,
@@ -8564,6 +8590,7 @@ export function createDataAccessInternal(
               status: "completed",
               progressPhase: "finalizing",
               progressPercent: 100,
+              progressEtaSeconds: null,
               lastProgressAt: timestamp,
               completedAt: timestamp,
               updatedAt: timestamp,

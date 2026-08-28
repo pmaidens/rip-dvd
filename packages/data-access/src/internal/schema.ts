@@ -705,6 +705,7 @@ export const archiveJobs = sqliteTable(
       .default("preparing"),
     progressPercent: integer("progress_percent").notNull().default(0),
     progressBytes: integer("progress_bytes").notNull().default(0),
+    progressEtaSeconds: integer("progress_eta_seconds"),
     lastProgressAt: integer("last_progress_at", { mode: "timestamp_ms" })
       .notNull(),
     claimedBy: text("claimed_by"),
@@ -761,6 +762,10 @@ export const archiveJobs = sqliteTable(
     check(
       "archive_jobs_progress_bytes_check",
       sql`typeof(${table.progressBytes}) = 'integer' and ${table.progressBytes} >= 0`,
+    ),
+    check(
+      "archive_jobs_progress_eta_check",
+      sql`${table.progressEtaSeconds} is null or (typeof(${table.progressEtaSeconds}) = 'integer' and ${table.progressEtaSeconds} >= 0)`,
     ),
     check(
       "archive_jobs_progress_phase_check",

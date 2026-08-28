@@ -291,12 +291,19 @@ function archiveProgressDetail(job: DashboardArchiveJob): string | null {
   if (job.status !== "running") {
     return null;
   }
-  return {
+  const phase = {
     preparing: "Preparing the disc for archiving",
     copying: "Copying the disc image",
     verifying: "Verifying the disc image",
     finalizing: "Saving the archive",
   }[job.progressPhase];
+  if (job.progressPhase !== "copying") {
+    return phase;
+  }
+  if (job.progressEtaSeconds == null) {
+    return `${phase} · Calculating time remaining…`;
+  }
+  return `${phase} · about ${formatDuration(job.progressEtaSeconds)} remaining`;
 }
 
 function formatBytes(bytes: number): string {
