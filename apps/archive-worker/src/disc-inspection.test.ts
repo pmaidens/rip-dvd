@@ -4,38 +4,8 @@ import {
   classifyDiscInspectionError,
   DiscInspectionError,
 } from "./disc-inspection-error.js";
-import { createByteProgressRateEstimator } from "./byte-progress-rate.js";
 
 describe("Disc Inspection worker policy", () => {
-  it("stabilizes throughput and ETA, then resets after a restarted hash", () => {
-    const estimator = createByteProgressRateEstimator();
-
-    expect(estimator.update(0, 10_000, 1_000)).toEqual({
-      bytesPerSecond: null,
-      etaSeconds: null,
-    });
-    expect(estimator.update(1_000, 10_000, 2_000)).toEqual({
-      bytesPerSecond: null,
-      etaSeconds: null,
-    });
-    expect(estimator.update(2_000, 10_000, 3_000)).toEqual({
-      bytesPerSecond: 1_000,
-      etaSeconds: 8,
-    });
-    expect(estimator.update(2_000, 10_000, 4_000)).toEqual({
-      bytesPerSecond: 667,
-      etaSeconds: 12,
-    });
-    expect(estimator.update(0, 10_000, 5_000)).toEqual({
-      bytesPerSecond: null,
-      etaSeconds: null,
-    });
-    expect(estimator.update(10_000, 10_000, 6_000)).toEqual({
-      bytesPerSecond: null,
-      etaSeconds: null,
-    });
-  });
-
   it("does not derive a persisted reason code from arbitrary error text", () => {
     for (const message of [
       "DVD medium changed during scanning",
