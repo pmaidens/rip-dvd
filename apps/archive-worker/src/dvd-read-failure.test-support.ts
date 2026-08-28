@@ -1,5 +1,6 @@
 import {
   DvdReadFailureError,
+  DVD_READ_FAILURE_CLASSIFIER_VERSION,
   DVD_SECTOR_SIZE_BYTES,
   type OutOfRangeDvdReadFailureResult,
 } from "./dvd-recovery-contracts.js";
@@ -21,7 +22,7 @@ export function createOutOfRangeDvdReadFailureResult({
 }: OutOfRangeDvdReadFailureFixtureOptions): OutOfRangeDvdReadFailureResult {
   return {
     protocolVersion: 1,
-    classifierVersion: "scsi-read-classifier-v1",
+    classifierVersion: DVD_READ_FAILURE_CLASSIFIER_VERSION,
     category: "out_of_range",
     scsiStatus: 2,
     hostStatus: 0,
