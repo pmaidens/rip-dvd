@@ -1146,7 +1146,7 @@ describe("DVD archive publication", () => {
       Buffer.from(
         `${DVD_READ_FAILURE_RESULT_PREFIX}${JSON.stringify({
           protocolVersion: 1,
-          classifierVersion: "scsi-read-classifier-v1",
+          classifierVersion: "scsi-read-classifier-v2",
           category,
           ...status,
           informationLba: 1,
@@ -1162,7 +1162,7 @@ describe("DVD archive publication", () => {
       message,
       readFailure: {
         protocolVersion: 1,
-        classifierVersion: "scsi-read-classifier-v1",
+        classifierVersion: "scsi-read-classifier-v2",
         category,
         informationLba: 1,
         requestedLba: 0,
@@ -1218,7 +1218,7 @@ describe("DVD archive publication", () => {
         Buffer.from(
           `${DVD_READ_FAILURE_RESULT_PREFIX}${JSON.stringify({
             protocolVersion: 1,
-            classifierVersion: "scsi-read-classifier-v1",
+            classifierVersion: "scsi-read-classifier-v2",
             category,
             scsiStatus: 2,
             hostStatus: 0,
@@ -1509,7 +1509,7 @@ describe("DVD archive publication", () => {
       Buffer.from(
         `${DVD_READ_FAILURE_RESULT_PREFIX}${JSON.stringify({
           protocolVersion: 1,
-          classifierVersion: "scsi-read-classifier-v1",
+          classifierVersion: "scsi-read-classifier-v2",
           category: "unknown",
           scsiStatus: 2,
           hostStatus: 0,
@@ -1572,7 +1572,7 @@ describe("DVD archive publication", () => {
     },
     {
       name: "unsupported classifier version",
-      mutate: { classifierVersion: "scsi-read-classifier-v2" },
+      mutate: { classifierVersion: "scsi-read-classifier-v3" },
       status: 3,
     },
     {
@@ -1637,7 +1637,7 @@ describe("DVD archive publication", () => {
     });
     const payload = `${DVD_READ_FAILURE_RESULT_PREFIX}${JSON.stringify({
       protocolVersion: 1,
-      classifierVersion: "scsi-read-classifier-v1",
+      classifierVersion: "scsi-read-classifier-v2",
       category: "unknown",
       scsiStatus: 2,
       hostStatus: 0,
@@ -1700,7 +1700,7 @@ describe("DVD archive publication", () => {
         Buffer.from(
           `${DVD_READ_FAILURE_RESULT_PREFIX}${JSON.stringify({
             protocolVersion: 1,
-            classifierVersion: "scsi-read-classifier-v1",
+            classifierVersion: "scsi-read-classifier-v2",
             category: "unknown",
             scsiStatus: 2,
             hostStatus: 0,
@@ -5633,7 +5633,7 @@ describe("DVD archive publication", () => {
         writeFileSync(outputPath, "uncommitted read failure");
         throw new DvdReadFailureError({
           protocolVersion: 1,
-          classifierVersion: "scsi-read-classifier-v1",
+          classifierVersion: "scsi-read-classifier-v2",
           category: "unknown",
           scsiStatus: 2,
           hostStatus: 0,

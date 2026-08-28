@@ -13,7 +13,7 @@ export const DVD_SECTOR_SIZE_BYTES = 2_048;
 export const DVD_RECOVERY_POLICY_VERSION = "dvd-recovery-v1";
 export const DVD_RECOVERY_RESULT_PREFIX = "rip-dvd-recovery-result ";
 export const DVD_READ_FAILURE_CLASSIFIER_VERSION =
-  "scsi-read-classifier-v1";
+  "scsi-read-classifier-v2";
 export const DVD_READ_FAILURE_RESULT_PREFIX = "rip-dvd-read-failure ";
 export const DVD_SECTOR_BOUNDARY_PROOF_VERSION =
   "dvd-sector-boundary-proof-v1";
@@ -51,9 +51,9 @@ interface OutOfRangeDvdReadFailureResultBase
   firstFailingLba: number;
   retainedImageByteCount: number;
   informationLba: number;
-  scsiStatus: 2;
+  scsiStatus: number;
   hostStatus: 0;
-  driverStatus: 0 | 8;
+  driverStatus: number;
   senseResponseCode: 0x70 | 0x72;
   senseKey: 0x05;
   asc: 0x21;
