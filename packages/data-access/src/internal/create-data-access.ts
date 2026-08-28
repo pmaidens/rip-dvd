@@ -7813,7 +7813,7 @@ export function createDataAccessInternal(
         const expiredBefore = new Date(
           timestamp.getTime() - ARCHIVE_JOB_LEASE_DURATION_MS,
         );
-        return database.transaction((transaction) => {
+        const recovered = database.transaction((transaction) => {
           const expired = transaction
             .select({
               id: archiveJobs.id,
@@ -7887,11 +7887,12 @@ export function createDataAccessInternal(
             const job = jobsById.get(id);
             return job === undefined ? [] : [job];
           });
-          for (const job of terminalJobs) {
-            archiveProgress.delete(job.id);
-          }
           return jobs;
         }, { behavior: "immediate" });
+        for (const job of recovered) {
+          archiveProgress.delete(job.id);
+        }
+        return recovered;
       },
 
       listExpiredCancellations() {
