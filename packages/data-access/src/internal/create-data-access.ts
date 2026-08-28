@@ -8574,7 +8574,7 @@ export function createDataAccessInternal(
 
       complete(claim, originalDiscArchiveId) {
         const timestamp = now();
-        return database.transaction((transaction) => {
+        const completed = database.transaction((transaction) => {
           const archive = requireRow(
             transaction
               .select()
@@ -8627,6 +8627,8 @@ export function createDataAccessInternal(
             .run();
           return job;
         }, { behavior: "immediate" });
+        archiveProgress.delete(claim.id);
+        return completed;
       },
     },
 
