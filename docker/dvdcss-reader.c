@@ -389,7 +389,7 @@ static struct decoded_sense decode_sense(
     size_t descriptor_end = length < declared_length
         ? length : declared_length;
     int information_descriptor_seen = 0;
-    int information_descriptors_valid = 1;
+    int information_descriptors_valid = length >= declared_length;
     for (size_t offset = 8; offset < descriptor_end;) {
         if (descriptor_end - offset < 2) {
             information_descriptors_valid = 0;

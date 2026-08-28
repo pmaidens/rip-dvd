@@ -335,6 +335,14 @@ const invalidBoundaryProbeFaults = [
     ),
   ],
   [
+    "descriptor-capture-truncated-after-information",
+    rawCompletionFault(
+      35,
+      "always",
+      "720521000000000e000a80000000000000000023",
+    ),
+  ],
+  [
     "inconsistent-confirmations",
     [
       rawCompletionFault(35, 1, fixedOutOfRangeSense(35)),
