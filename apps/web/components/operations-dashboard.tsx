@@ -1595,6 +1595,35 @@ export type OperationsDashboardPage =
   | "encoding"
   | "verification";
 
+export type EncodingPageTab = "current" | "queue" | "settings";
+export type EncodeJobFilter = "in_progress" | "completed";
+
+const encodingPageTabs: ReadonlyArray<{
+  id: EncodingPageTab;
+  label: string;
+}> = [
+  { id: "current", label: "Current jobs" },
+  { id: "queue", label: "Queue new jobs" },
+  { id: "settings", label: "Settings" },
+];
+
+export function filterEncodeJobs(
+  state: DashboardSectionLoadState<DashboardEncodeJob>,
+  filter: EncodeJobFilter,
+): DashboardSectionLoadState<DashboardEncodeJob> {
+  if (state.status !== "loaded") {
+    return state;
+  }
+  return {
+    ...state,
+    items: state.items.filter((job) =>
+      filter === "completed"
+        ? job.status === "completed"
+        : job.status !== "completed"
+    ),
+  };
+}
+
 const pageCopy: Record<
   OperationsDashboardPage,
   { kicker: string; title: string; summary: string }
@@ -1671,6 +1700,11 @@ export function OperationsDashboard({
   const [catalogReviewQuery, setCatalogReviewQuery] = useState("");
   const [catalogReviewOutcome, setCatalogReviewOutcome] =
     useState<CompletedCatalogReviewOutcome | undefined>(undefined);
+  const [encodingTab, setEncodingTab] =
+    useState<EncodingPageTab>("current");
+  const [encodeJobFilter, setEncodeJobFilter] =
+    useState<EncodeJobFilter>("in_progress");
+  const encodingTabRefs = React.useRef<Array<HTMLButtonElement | null>>([]);
   const [verifyingFilesystemTarget, setVerifyingFilesystemTarget] = useState<
     string | null
   >(null);
@@ -1807,6 +1841,47 @@ export function OperationsDashboard({
         : actionOverview.status
       : connectionStatus;
   const copy = pageCopy[page];
+  const encodeJobCounts = state.encodeJobs.status === "loaded"
+    ? {
+        inProgress: state.encodeJobs.items.filter(
+          (job) => job.status !== "completed",
+        ).length,
+        completed: state.encodeJobs.items.filter(
+          (job) => job.status === "completed",
+        ).length,
+      }
+    : { inProgress: 0, completed: 0 };
+
+  const selectEncodingTab = (index: number) => {
+    const tab = encodingPageTabs[index];
+    if (!tab) {
+      return;
+    }
+    setEncodingTab(tab.id);
+    encodingTabRefs.current[index]?.focus();
+  };
+
+  const handleEncodingTabKeyDown = (
+    event: React.KeyboardEvent<HTMLButtonElement>,
+    index: number,
+  ) => {
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight") {
+      nextIndex = (index + 1) % encodingPageTabs.length;
+    } else if (event.key === "ArrowLeft") {
+      nextIndex = (index - 1 + encodingPageTabs.length) %
+        encodingPageTabs.length;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = encodingPageTabs.length - 1;
+    }
+    if (nextIndex === null) {
+      return;
+    }
+    event.preventDefault();
+    selectEncodingTab(nextIndex);
+  };
 
   const verifyFilesystem = async (
     target: FilesystemVerificationTarget,
@@ -1850,15 +1925,100 @@ export function OperationsDashboard({
       </header>
 
       {page === "encoding" ? (
-        <>
-          <EncodingProfilesManager
-            onChanged={() => setRequestNumber((value) => value + 1)}
-          />
-          <EncodeJobsManager
-            revision={requestNumber}
-            onChanged={() => setRequestNumber((value) => value + 1)}
-          />
-        </>
+        <section className="encoding-workspace" aria-label="Encoding workspace">
+          <div
+            className="encoding-page-tabs"
+            role="tablist"
+            aria-label="Encoding views"
+          >
+            {encodingPageTabs.map((tab, index) => (
+              <button
+                key={tab.id}
+                id={`encoding-tab-${tab.id}`}
+                ref={(element) => {
+                  encodingTabRefs.current[index] = element;
+                }}
+                type="button"
+                role="tab"
+                aria-selected={encodingTab === tab.id}
+                aria-controls={`encoding-panel-${tab.id}`}
+                tabIndex={encodingTab === tab.id ? 0 : -1}
+                onClick={() => setEncodingTab(tab.id)}
+                onKeyDown={(event) => handleEncodingTabKeyDown(event, index)}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+
+          <div
+            id="encoding-panel-current"
+            role="tabpanel"
+            aria-labelledby="encoding-tab-current"
+            hidden={encodingTab !== "current"}
+          >
+            <div
+              className="encoding-job-filters"
+              role="group"
+              aria-label="Current job status filters"
+            >
+              <button
+                type="button"
+                aria-pressed={encodeJobFilter === "in_progress"}
+                onClick={() => setEncodeJobFilter("in_progress")}
+              >
+                <span>In progress</span>
+                <span>{encodeJobCounts.inProgress}</span>
+              </button>
+              <button
+                type="button"
+                aria-pressed={encodeJobFilter === "completed"}
+                onClick={() => setEncodeJobFilter("completed")}
+              >
+                <span>Completed</span>
+                <span>{encodeJobCounts.completed}</span>
+              </button>
+            </div>
+            <DashboardView
+              state={{
+                ...state,
+                encodeJobs: filterEncodeJobs(state.encodeJobs, encodeJobFilter),
+              }}
+              section="encoding"
+              onRequeueEncodeJob={(id) => void requeueEncodeJob(id)}
+              requeueingEncodeJobId={requeueingEncodeJobId}
+              onCancelEncodeJob={(id) => void requestEncodeCancellation(id)}
+              cancellingEncodeJobId={cancellingEncodeJobId}
+              onVerifyFilesystem={(target, id) =>
+                void verifyFilesystem(target, id)
+              }
+              verifyingFilesystemTarget={verifyingFilesystemTarget}
+            />
+          </div>
+
+          <div
+            id="encoding-panel-queue"
+            role="tabpanel"
+            aria-labelledby="encoding-tab-queue"
+            hidden={encodingTab !== "queue"}
+          >
+            <EncodeJobsManager
+              revision={requestNumber}
+              onChanged={() => setRequestNumber((value) => value + 1)}
+            />
+          </div>
+
+          <div
+            id="encoding-panel-settings"
+            role="tabpanel"
+            aria-labelledby="encoding-tab-settings"
+            hidden={encodingTab !== "settings"}
+          >
+            <EncodingProfilesManager
+              onChanged={() => setRequestNumber((value) => value + 1)}
+            />
+          </div>
+        </section>
       ) : null}
 
       {page === "catalog" && catalogReviewArchiveId ? (
@@ -1915,7 +2075,7 @@ export function OperationsDashboard({
         />
       ) : page === "overview" ? (
         <ActionOverview state={actionOverview} />
-      ) : (
+      ) : page === "encoding" ? null : (
         <DashboardView
           state={state}
           section={page}
