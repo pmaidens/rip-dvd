@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { rename, unlink } from "node:fs/promises";
 
-import { requireCompleteRegularEncodeOutput } from "./encode-output-filesystem-identity.js";
+import { requireNonEmptyRegularEncodeOutput } from "./encode-output-filesystem-identity.js";
 import type { MediaToolRunner } from "./encode-output-validator.js";
 
 export interface RetainedSubtitleDisposition {
@@ -32,7 +32,7 @@ async function replaceNodeEncodeOutput(
   replacementPath: string,
   outputPath: string,
 ): Promise<void> {
-  await requireCompleteRegularEncodeOutput(
+  await requireNonEmptyRegularEncodeOutput(
     replacementPath,
     "subtitle cleanup did not produce a regular output file",
   );
