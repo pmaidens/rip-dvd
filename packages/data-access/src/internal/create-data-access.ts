@@ -3289,7 +3289,6 @@ export function createDataAccessInternal(
       latestPercent: number;
       latestPhase: ArchiveJob["progressPhase"];
       persistedBytes: number;
-      persistedEtaSeconds: number | null;
       persistedPercent: number;
       persistedPhase: ArchiveJob["progressPhase"];
       persistedAt: number;
@@ -8182,7 +8181,6 @@ export function createDataAccessInternal(
           latestPercent: progress.progressPercent,
           latestPhase: progress.phase,
           persistedBytes: progressBytes,
-          persistedEtaSeconds: progressEtaSeconds,
           persistedPercent: progress.progressPercent,
           persistedPhase: progress.phase,
           persistedAt: timestamp.getTime(),
