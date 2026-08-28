@@ -11877,15 +11877,18 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       claimToken: claim.claimToken,
     };
     vi.advanceTimersByTime(100);
-    const etaOnly = access.archiveJobs.updateProgress(advancedClaim, {
+    const coalesced = access.archiveJobs.updateProgress(advancedClaim, {
       phase: "copying",
       progressPercent: 9,
-      progressBytes: 638_000_000,
+      progressBytes: 638_001_024,
       etaSeconds: 419,
     });
-    expect(etaOnly.updatedAt).toEqual(advanced.updatedAt);
-    expect(etaOnly.progressEtaSeconds).toBe(419);
-    vi.setSystemTime(new Date("2026-08-20T20:05:10.000Z"));
+    expect(coalesced.updatedAt).toEqual(advanced.updatedAt);
+    expect(coalesced).toMatchObject({
+      progressBytes: 638_001_024,
+      progressEtaSeconds: 419,
+      lastProgressAt: new Date("2026-08-20T20:05:10.100Z"),
+    });
 
     vi.advanceTimersByTime(20_000);
     access.archiveJobs.renewClaim(claim);
@@ -11895,10 +11898,10 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       progressPercent: 9,
       progressBytes: 638_000_000,
     });
-    expect(unchanged.updatedAt).toEqual(new Date("2026-08-20T20:06:10.000Z"));
+    expect(unchanged.updatedAt).toEqual(new Date("2026-08-20T20:06:10.100Z"));
     expect(unchanged.progressEtaSeconds).toBeNull();
     expect(unchanged.lastProgressAt).toEqual(
-      new Date("2026-08-20T20:05:10.000Z"),
+      new Date("2026-08-20T20:05:10.100Z"),
     );
 
     vi.advanceTimersByTime(20_000);
@@ -11913,7 +11916,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     ).toMatchObject({
       progressBytes: 638_002_048,
       progressEtaSeconds: null,
-      lastProgressAt: new Date("2026-08-20T20:07:10.000Z"),
+      lastProgressAt: new Date("2026-08-20T20:07:10.100Z"),
     });
     expect(() => access.archiveJobs.updateProgress(claim, {
       phase: "copying",
