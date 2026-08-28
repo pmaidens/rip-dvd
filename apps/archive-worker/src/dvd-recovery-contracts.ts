@@ -51,9 +51,9 @@ interface OutOfRangeDvdReadFailureResultBase
   firstFailingLba: number;
   retainedImageByteCount: number;
   informationLba: number;
-  scsiStatus: 2;
+  scsiStatus: number;
   hostStatus: 0;
-  driverStatus: 0 | 8;
+  driverStatus: number;
   senseResponseCode: 0x70 | 0x72;
   senseKey: 0x05;
   asc: 0x21;

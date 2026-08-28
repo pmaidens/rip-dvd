@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -14,7 +16,48 @@ const currentReadFailure = {
   ascq: 0x00,
 };
 
+interface ClassificationVector {
+  name: string;
+  category:
+    | "recognized_medium_error"
+    | "not_ready"
+    | "unit_attention"
+    | "hardware_error"
+    | "transport_error"
+    | "protection_error"
+    | "out_of_range";
+  scsiStatus: number;
+  hostStatus: number;
+  driverStatus: number;
+  senseKey: number;
+  asc: number;
+  ascq: number;
+}
+
+const classificationVectors = JSON.parse(
+  readFileSync(
+    new URL(
+      "../../../docker/scsi-read-classification-v2-vectors.json",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
+) as ClassificationVector[];
+
 describe("archive read failure classification", () => {
+  it.each(classificationVectors)(
+    "matches the shared $name classification vector",
+    ({ category, name: _name, ...evidence }) => {
+      if (category === "out_of_range") {
+        expect(
+          isArchiveReadFailureEvidenceConsistent({ category, ...evidence }),
+        ).toBe(true);
+        return;
+      }
+      expect(classifyArchiveReadFailureEvidence(evidence)).toBe(category);
+    },
+  );
+
   it.each([
     { asc: 0x02, ascq: 0x00 },
     { asc: 0x11, ascq: 0x05 },
