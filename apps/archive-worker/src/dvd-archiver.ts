@@ -48,6 +48,7 @@ import {
   createBoundedSingleFlightCoordinator,
   type ActiveBoundedProcess,
 } from "./bounded-child-process.js";
+import { createByteProgressRateEstimator } from "./byte-progress-rate.js";
 import {
   DvdReadFailureError,
   DVD_RECOVERY_POLICY_VERSION,
@@ -2591,6 +2592,7 @@ export async function preserveDvdArchive({
       signal.throwIfAborted();
     }
     onProgress({ phase: "copying", progressPercent: 0 });
+    const copyRateEstimator = createByteProgressRateEstimator();
     const recoveryResult = await runner.copy({
       authorizeProbe: revalidateReadFailure,
       authorizeStart: authorizeCopy,
@@ -2605,13 +2607,20 @@ export async function preserveDvdArchive({
         if (!Number.isSafeInteger(bytes) || bytes < 0) {
           return;
         }
+        const completedBytes = Math.min(bytes, copyOperationSizeBytes);
+        const { etaSeconds } = copyRateEstimator.update(
+          completedBytes,
+          copyOperationSizeBytes,
+          Date.now(),
+        );
         onProgress({
           phase: "copying",
-          progressBytes: bytes,
+          progressBytes: completedBytes,
           progressPercent: Math.min(
             99,
-            Math.floor((bytes * 100) / copyOperationSizeBytes),
+            Math.floor((completedBytes * 100) / copyOperationSizeBytes),
           ),
+          ...(etaSeconds === null ? {} : { etaSeconds }),
         });
       },
     });

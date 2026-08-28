@@ -2486,6 +2486,8 @@ describe("DVD archive publication", () => {
   });
 
   it("copies through a hidden partial path and publishes only after full success", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000);
     const originalsLibraryPath = createOriginalsLibrary();
     const content = Buffer.from("dvd-image");
     const digest = "e5cbeaa2965a33da9559ec142f30f4046ff91d1788a8d2f6ba22490b095f1c61";
@@ -2493,8 +2495,14 @@ describe("DVD archive publication", () => {
     const runner: DvdCopyRunner = {
       copy: vi.fn(async ({ outputPath, onBytesCopied, sizeBytes }) => {
         expect(basename(outputPath)).toMatch(/^\..+\.rip-dvd-partial$/);
+        vi.setSystemTime(2_000);
+        onBytesCopied(2);
+        vi.setSystemTime(3_000);
         onBytesCopied(4);
+        vi.setSystemTime(4_000);
+        onBytesCopied(6);
         writeFileSync(outputPath, content);
+        vi.setSystemTime(5_000);
         onBytesCopied(content.byteLength);
         return createCleanDvdRecoveryResult(sizeBytes);
       }),
@@ -2538,7 +2546,14 @@ describe("DVD archive publication", () => {
     expect(progress).toEqual([
       { phase: "preparing", progressPercent: 0 },
       { phase: "copying", progressPercent: 0 },
+      { phase: "copying", progressPercent: 22, progressBytes: 2 },
       { phase: "copying", progressPercent: 44, progressBytes: 4 },
+      {
+        phase: "copying",
+        progressPercent: 66,
+        progressBytes: 6,
+        etaSeconds: 2,
+      },
       { phase: "copying", progressPercent: 99, progressBytes: 9 },
       { phase: "finalizing", progressPercent: 99 },
     ]);

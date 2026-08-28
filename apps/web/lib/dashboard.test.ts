@@ -637,7 +637,12 @@ describe("readDashboardSnapshot", () => {
       access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
     }
     const activeJob = startArchiveJob(access, activeDisc, "active-worker");
-    access.archiveJobs.fail(activeJob, "active read failed");
+    access.archiveJobs.updateProgress(activeJob, {
+      phase: "copying",
+      progressBytes: 500,
+      progressPercent: 50,
+      etaSeconds: 125,
+    });
     const removedJob = startArchiveJob(access, removedDisc, "removed-worker");
     access.archiveJobs.fail(removedJob, "removed read failed");
 
@@ -654,7 +659,10 @@ describe("readDashboardSnapshot", () => {
     });
     expect(dashboard.archiveJobs).toEqual({
       status: "loaded",
-      items: [expect.objectContaining({ id: activeJob.id })],
+      items: [expect.objectContaining({
+        id: activeJob.id,
+        progressEtaSeconds: 125,
+      })],
     });
   });
 

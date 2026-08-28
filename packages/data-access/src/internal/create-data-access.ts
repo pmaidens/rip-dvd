@@ -3285,9 +3285,9 @@ export function createDataAccessInternal(
       token: ArchiveJobClaimToken;
       lastProgressAt: Date;
       latestBytes: number;
+      latestEtaSeconds: number | null;
       latestPercent: number;
       latestPhase: ArchiveJob["progressPhase"];
-      persistedBytes: number;
       persistedPercent: number;
       persistedPhase: ArchiveJob["progressPhase"];
       persistedAt: number;
@@ -3305,9 +3305,17 @@ export function createDataAccessInternal(
       progressPhase: progress.latestPhase,
       progressPercent: progress.latestPercent,
       progressBytes: progress.latestBytes,
+      progressEtaSeconds: progress.latestEtaSeconds,
       lastProgressAt: progress.lastProgressAt,
     };
   };
+  const archiveTerminalProgressPatchForClaim = (
+    archiveJobId: ArchiveJobId,
+    claimToken: ArchiveJobClaimToken | null,
+  ) => ({
+    ...archiveProgressPatchForClaim(archiveJobId, claimToken),
+    progressEtaSeconds: null,
+  });
   const archiveReadFailurePatch = (
     evidence: ArchiveReadFailureEvidence,
   ) => {
@@ -3452,7 +3460,7 @@ export function createDataAccessInternal(
         .update(archiveJobs)
         .set({
           status: cancellationWins ? "aborted" : "failed",
-          ...archiveProgressPatchForClaim(claim.id, claim.claimToken),
+          ...archiveTerminalProgressPatchForClaim(claim.id, claim.claimToken),
           ...(cancellationWins
             ? {}
             : {
@@ -7755,6 +7763,7 @@ export function createDataAccessInternal(
                 progressPhase: "preparing",
                 progressPercent: 0,
                 progressBytes: 0,
+                progressEtaSeconds: null,
                 lastProgressAt: timestamp,
                 claimedBy: workerId,
                 claimToken,
@@ -7804,7 +7813,7 @@ export function createDataAccessInternal(
         const expiredBefore = new Date(
           timestamp.getTime() - ARCHIVE_JOB_LEASE_DURATION_MS,
         );
-        return database.transaction((transaction) => {
+        const recovered = database.transaction((transaction) => {
           const expired = transaction
             .select({
               id: archiveJobs.id,
@@ -7835,7 +7844,7 @@ export function createDataAccessInternal(
               .update(archiveJobs)
               .set({
                 status: "failed",
-                ...archiveProgressPatchForClaim(
+                ...archiveTerminalProgressPatchForClaim(
                   candidate.id,
                   candidate.claimToken,
                 ),
@@ -7878,11 +7887,12 @@ export function createDataAccessInternal(
             const job = jobsById.get(id);
             return job === undefined ? [] : [job];
           });
-          for (const job of terminalJobs) {
-            archiveProgress.delete(job.id);
-          }
           return jobs;
         }, { behavior: "immediate" });
+        for (const job of recovered) {
+          archiveProgress.delete(job.id);
+        }
+        return recovered;
       },
 
       listExpiredCancellations() {
@@ -7941,7 +7951,10 @@ export function createDataAccessInternal(
             .update(archiveJobs)
             .set({
               status: "aborted",
-              ...archiveProgressPatchForClaim(claim.id, claim.claimToken),
+              ...archiveTerminalProgressPatchForClaim(
+                claim.id,
+                claim.claimToken,
+              ),
               completedAt: timestamp,
               errorMessage: "Archive cancelled after worker recovery",
               updatedAt: timestamp,
@@ -8079,6 +8092,17 @@ export function createDataAccessInternal(
             "progressBytes must be a non-negative safe integer",
           );
         }
+        if (
+          progress.etaSeconds !== undefined &&
+          progress.etaSeconds !== null &&
+          (!Number.isSafeInteger(progress.etaSeconds) ||
+            progress.etaSeconds < 0)
+        ) {
+          throw new DomainInvariantError(
+            "etaSeconds must be a non-negative safe integer or null",
+          );
+        }
+        const progressEtaSeconds = progress.etaSeconds ?? null;
         const previous = archiveProgress.get(claim.id);
         const previousBytes = previous?.latestBytes ?? claim.progressBytes;
         const progressBytes = Math.max(
@@ -8098,7 +8122,6 @@ export function createDataAccessInternal(
           previous === undefined ||
           previous.token !== claim.claimToken ||
           previous.persistedPhase !== progress.phase ||
-          previous.persistedBytes !== progressBytes ||
           timestamp.getTime() - previous.persistedAt >= 1_000 ||
           Math.abs(
             progress.progressPercent - (previous?.persistedPercent ?? 0),
@@ -8108,6 +8131,7 @@ export function createDataAccessInternal(
             ...previous,
             lastProgressAt,
             latestBytes: progressBytes,
+            latestEtaSeconds: progressEtaSeconds,
             latestPercent: progress.progressPercent,
             latestPhase: progress.phase,
           });
@@ -8115,6 +8139,7 @@ export function createDataAccessInternal(
             ...claim,
             lastProgressAt,
             progressBytes,
+            progressEtaSeconds,
             progressPhase: progress.phase,
             progressPercent: progress.progressPercent,
           };
@@ -8124,6 +8149,7 @@ export function createDataAccessInternal(
           .set({
             lastProgressAt,
             progressBytes,
+            progressEtaSeconds,
             progressPhase: progress.phase,
             progressPercent: progress.progressPercent,
             updatedAt: timestamp,
@@ -8150,9 +8176,9 @@ export function createDataAccessInternal(
           token: claim.claimToken,
           lastProgressAt,
           latestBytes: progressBytes,
+          latestEtaSeconds: progressEtaSeconds,
           latestPercent: progress.progressPercent,
           latestPhase: progress.phase,
-          persistedBytes: progressBytes,
           persistedPercent: progress.progressPercent,
           persistedPhase: progress.phase,
           persistedAt: timestamp.getTime(),
@@ -8440,6 +8466,10 @@ export function createDataAccessInternal(
               .set({
                 originalDiscArchiveId: archive.id,
                 status: "completed",
+                ...archiveTerminalProgressPatchForClaim(
+                  claim.id,
+                  claim.claimToken,
+                ),
                 progressPhase: "finalizing",
                 progressPercent: 100,
                 progressBytes: sizeBytes,
@@ -8488,7 +8518,10 @@ export function createDataAccessInternal(
             .update(archiveJobs)
             .set({
               status: "aborted",
-              ...archiveProgressPatchForClaim(claim.id, claim.claimToken),
+              ...archiveTerminalProgressPatchForClaim(
+                claim.id,
+                claim.claimToken,
+              ),
               completedAt: timestamp,
               errorMessage,
               updatedAt: timestamp,
@@ -8542,7 +8575,7 @@ export function createDataAccessInternal(
 
       complete(claim, originalDiscArchiveId) {
         const timestamp = now();
-        return database.transaction((transaction) => {
+        const completed = database.transaction((transaction) => {
           const archive = requireRow(
             transaction
               .select()
@@ -8562,6 +8595,10 @@ export function createDataAccessInternal(
             .set({
               originalDiscArchiveId,
               status: "completed",
+              ...archiveTerminalProgressPatchForClaim(
+                claim.id,
+                claim.claimToken,
+              ),
               progressPhase: "finalizing",
               progressPercent: 100,
               lastProgressAt: timestamp,
@@ -8591,6 +8628,8 @@ export function createDataAccessInternal(
             .run();
           return job;
         }, { behavior: "immediate" });
+        archiveProgress.delete(claim.id);
+        return completed;
       },
     },
 
