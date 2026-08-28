@@ -23,7 +23,9 @@ vi.mock(
     >();
     return {
       ...actual,
-      nodeEncodeOutputValidator: { validate: vi.fn(async () => {}) },
+      nodeEncodeOutputValidator: {
+        prepareAndValidate: vi.fn(async () => {}),
+      },
     };
   },
 );
