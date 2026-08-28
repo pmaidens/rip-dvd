@@ -45,6 +45,7 @@ test("queues a mixed worklist after resolving a new shared profile", async ({
   test.setTimeout(60_000);
   const variant = fixtureVariant(testInfo.project.name);
   await page.goto("/encoding");
+  await page.getByRole("tab", { name: "Queue new jobs" }).click();
 
   const manager = page.getByRole("region", { name: "Queue Encode Jobs" });
   const notEncoded = manager.getByRole("button", { name: /Not encoded \d+/ });
