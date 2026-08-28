@@ -467,6 +467,13 @@ describe("encode output validation", () => {
       index: position + 3,
       tags: { language: position % 2 === 0 ? "eng" : "spa" },
     }));
+    const cleanedSubtitlePacketStreams = cleanedSubtitleStreams.map(
+      (stream, position) => ({
+        codec_name: "dvd_subtitle",
+        index: stream.index,
+        nb_read_packets: position + 1,
+      }),
+    );
     const emptySubtitleStreams = Array.from(
       { length: 6 },
       (_, position) => ({
@@ -478,11 +485,7 @@ describe("encode output validation", () => {
     );
     const originalRunner = createMediaToolRunner({
       subtitlePacketStreams: [
-        ...cleanedSubtitleStreams.map((stream, position) => ({
-          codec_name: "dvd_subtitle",
-          index: stream.index,
-          nb_read_packets: position + 1,
-        })),
+        ...cleanedSubtitlePacketStreams,
         ...emptySubtitleStreams.map((stream) => ({
           codec_name: "dvd_subtitle",
           index: stream.index,
@@ -510,11 +513,7 @@ describe("encode output validation", () => {
           return mediaToolResult(
             JSON.stringify({
               streams: request.arguments_.includes("-count_packets")
-                ? cleanedSubtitleStreams.map((stream, position) => ({
-                    codec_name: "dvd_subtitle",
-                    index: stream.index,
-                    nb_read_packets: position + 1,
-                  }))
+                ? cleanedSubtitlePacketStreams
                 : cleanedSubtitleStreams,
             }),
           );
