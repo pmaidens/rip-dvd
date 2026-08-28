@@ -50,6 +50,7 @@ import type {
   EncodeOutputFilesystemIdentity,
   MediaItemId,
   OriginalDiscArchiveId,
+  RunningArchiveJob,
   RunningEncodeJob,
 } from "./index.js";
 import type { EncodingProfileId } from "./index.js";
@@ -1209,7 +1210,8 @@ describe("data-access facade", () => {
           name !== "20260822201215_thick_madame_web" &&
           name !== "20260823160205_flat_fixer" &&
           name !== "20260828154312_luxuriant_human_robot" &&
-          name !== "20260828160945_fancy_chimera",
+          name !== "20260828160945_fancy_chimera" &&
+          name !== "20260828164042_married_lady_ursula",
       )
       .sort();
     for (const migrationName of predecessorNames) {
@@ -8084,6 +8086,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
+        name: "20260828164042_married_lady_ursula",
+      },
+      {
         name: "20260828160945_fancy_chimera",
       },
       {
@@ -8109,9 +8114,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260822183552_bounded-disc-settling",
-      },
-      {
-        name: "20260822175220_striped_kabuki",
       },
     ]);
     expect(
@@ -11848,6 +11850,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
 
     expect(claim).toMatchObject({
       progressBytes: 0,
+      progressEtaSeconds: null,
       lastProgressAt: startedAt,
     });
 
@@ -11861,10 +11864,30 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       phase: "copying",
       progressPercent: 9,
       progressBytes: 638_000_000,
+      etaSeconds: 420,
     });
     expect(advanced).toMatchObject({
       progressBytes: 638_000_000,
+      progressEtaSeconds: 420,
       lastProgressAt: new Date("2026-08-20T20:05:10.000Z"),
+    });
+    const advancedClaim: RunningArchiveJob = {
+      ...advanced,
+      status: "running",
+      claimToken: claim.claimToken,
+    };
+    vi.advanceTimersByTime(100);
+    const coalesced = access.archiveJobs.updateProgress(advancedClaim, {
+      phase: "copying",
+      progressPercent: 9,
+      progressBytes: 638_001_024,
+      etaSeconds: 419,
+    });
+    expect(coalesced.updatedAt).toEqual(advanced.updatedAt);
+    expect(coalesced).toMatchObject({
+      progressBytes: 638_001_024,
+      progressEtaSeconds: 419,
+      lastProgressAt: new Date("2026-08-20T20:05:10.100Z"),
     });
 
     vi.advanceTimersByTime(20_000);
@@ -11875,9 +11898,10 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       progressPercent: 9,
       progressBytes: 638_000_000,
     });
-    expect(unchanged.updatedAt).toEqual(new Date("2026-08-20T20:06:10.000Z"));
+    expect(unchanged.updatedAt).toEqual(new Date("2026-08-20T20:06:10.100Z"));
+    expect(unchanged.progressEtaSeconds).toBeNull();
     expect(unchanged.lastProgressAt).toEqual(
-      new Date("2026-08-20T20:05:10.000Z"),
+      new Date("2026-08-20T20:05:10.100Z"),
     );
 
     vi.advanceTimersByTime(20_000);
@@ -11891,8 +11915,22 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       }),
     ).toMatchObject({
       progressBytes: 638_002_048,
-      lastProgressAt: new Date("2026-08-20T20:07:10.000Z"),
+      progressEtaSeconds: null,
+      lastProgressAt: new Date("2026-08-20T20:07:10.100Z"),
     });
+    expect(() => access.archiveJobs.updateProgress(claim, {
+      phase: "copying",
+      progressPercent: 9,
+      etaSeconds: -1,
+    })).toThrow("etaSeconds must be a non-negative safe integer or null");
+    access.archiveJobs.updateProgress(claim, {
+      phase: "copying",
+      progressPercent: 9,
+      etaSeconds: 300,
+    });
+    expect(
+      access.archiveJobs.abort(claim, "Archive cancelled by test"),
+    ).toMatchObject({ progressEtaSeconds: null, status: "aborted" });
     access.close();
   });
 

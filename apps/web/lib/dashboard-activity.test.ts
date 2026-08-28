@@ -616,6 +616,7 @@ describe("watchDashboardActivity", () => {
         progressPhase: "copying",
         progressPercent: 10,
         progressBytes: 10,
+        progressEtaSeconds: null,
         lastProgressAt: "2026-07-26T16:00:01.000Z",
       }],
     };
@@ -867,6 +868,7 @@ describe("watchDashboardActivity", () => {
             progressPhase: "copying",
             progressPercent: 42,
             progressBytes: 42,
+            progressEtaSeconds: 125,
             lastProgressAt: "2026-07-26T15:58:00.000Z",
           },
         ],

@@ -356,11 +356,12 @@ immediately. Later reports persist when at least one second has elapsed or the
 reported value differs from the last persisted value by at least five
 percentage points; intermediate reports are coalesced in memory. Completion
 always persists 100%, and failure persists the newest coalesced value before
-recording the terminal status. Encode Job reports also persist the HandBrake
-phase and ETA; phase changes bypass percentage coalescing so scanning, preview,
-and encoding transitions reach the database immediately. Terminal updates
-clear an obsolete ETA, and requeue clears all prior progress fields. Encode
-claims use a renewable one-minute lease with the same attempt-token guard.
+recording the terminal status. Archive Job copy reports and Encode Job reports
+also persist ETA. Encode Job reports additionally persist the HandBrake phase;
+phase changes bypass percentage coalescing so Archive Job and Encode Job phase
+transitions reach the database immediately. Terminal updates clear an obsolete
+ETA, and requeue clears all prior progress fields. Encode claims use a renewable
+one-minute lease with the same attempt-token guard.
 Recovery moves at most 100 expired claims per call into visible failed state,
 and every mutation from the expired attempt is rejected. The same transaction
 records the expired claim's output path and token as durable partial-cleanup

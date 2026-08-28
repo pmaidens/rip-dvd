@@ -558,6 +558,7 @@ export interface ArchiveJob {
   progressPhase: ArchiveProgressPhase;
   progressPercent: number;
   progressBytes: number;
+  progressEtaSeconds: number | null;
   lastProgressAt: Date;
   claimedBy: string | null;
   claimToken: ArchiveJobClaimToken | null;
@@ -774,6 +775,7 @@ export interface ArchiveJobProgress {
   phase: ArchiveRunningProgressPhase;
   progressPercent: number;
   progressBytes?: number;
+  etaSeconds?: number | null;
 }
 
 export type RunningEncodeJob = EncodeJob & {
