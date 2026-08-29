@@ -431,42 +431,38 @@ function readDashboardSnapshotRecords(
           ids: currentDetectedDiscIds,
         }),
       );
-  const currentArchiveJobSource = readSource(() =>
-    access.archiveJobs.list(undefined, {
-      detectedDiscIds: currentDetectedDiscIds ?? [],
-      ...(activityLimit === undefined
-        ? {}
-        : {
-            policy: {
-              mode: "active-and-history",
-              activeLimit: DASHBOARD_ACTIVE_JOB_LIMIT,
-              historyLimit: activityLimit,
-            },
-          }),
-    }),
+  const currentDetectedDiscArchiveJobOptions = {
+    detectedDiscIds: currentDetectedDiscIds ?? [],
+    ...(activityLimit === undefined
+      ? {}
+      : {
+          policy: {
+            mode: "active-and-history" as const,
+            activeLimit: DASHBOARD_ACTIVE_JOB_LIMIT,
+            historyLimit: activityLimit,
+          },
+        }),
+  };
+  const currentDetectedDiscArchiveJobSource = readSource(() =>
+    access.archiveJobs.list(undefined, currentDetectedDiscArchiveJobOptions)
   );
-  const currentArchiveRequestIds = currentArchiveJobSource.status === "loaded"
+  const currentArchiveRequestIds =
+    currentDetectedDiscArchiveJobSource.status === "loaded"
     ? [...new Set(
-        currentArchiveJobSource.value.map((job) => job.archiveRequestId),
+        currentDetectedDiscArchiveJobSource.value.map((job) =>
+          job.archiveRequestId
+        ),
       )]
     : [];
-  const archiveJobSource = currentArchiveJobSource.status === "error"
-    ? currentArchiveJobSource
-    : readSource(() =>
-        access.archiveJobs.list(undefined, {
-          archiveRequestIds: currentArchiveRequestIds,
-          detectedDiscIds: currentDetectedDiscIds ?? [],
-          ...(activityLimit === undefined
-            ? {}
-            : {
-                policy: {
-                  mode: "active-and-history",
-                  activeLimit: DASHBOARD_ACTIVE_JOB_LIMIT,
-                  historyLimit: activityLimit,
-                } as const,
-              }),
-        }),
-      );
+  const archiveJobSource =
+    currentDetectedDiscArchiveJobSource.status === "error"
+      ? currentDetectedDiscArchiveJobSource
+      : readSource(() =>
+          access.archiveJobs.list(undefined, {
+            ...currentDetectedDiscArchiveJobOptions,
+            archiveRequestIds: currentArchiveRequestIds,
+          }),
+        );
   const displayedDetectedDiscIds = detectedDiscSource.status === "loaded"
     ? detectedDiscSource.value.map((disc) => disc.id)
     : [];

@@ -1172,12 +1172,11 @@ export function createDataAccessInternal(
     );
   }
 
-  function declaredByteCountForArchiveRequest(
+  function attemptedDeclaredByteCountsForArchiveRequest(
     transaction: CatalogTransaction,
     archiveRequestId: ArchiveRequestId,
-    requestedDetectedDiscId: DetectedDiscId,
-  ): number | null {
-    const attemptedByteCounts = transaction
+  ): (number | null)[] {
+    return transaction
       .select({ totalBytes: discInspections.totalBytes })
       .from(archiveJobs)
       .innerJoin(
@@ -1192,6 +1191,29 @@ export function createDataAccessInternal(
       )
       .all()
       .map(({ totalBytes }) => totalBytes);
+  }
+
+  function attemptedDeclaredByteCountForArchiveRequest(
+    transaction: CatalogTransaction,
+    archiveRequestId: ArchiveRequestId,
+  ): number | null {
+    return uniqueDeclaredByteCount(
+      attemptedDeclaredByteCountsForArchiveRequest(
+        transaction,
+        archiveRequestId,
+      ),
+    );
+  }
+
+  function declaredByteCountForArchiveRequest(
+    transaction: CatalogTransaction,
+    archiveRequestId: ArchiveRequestId,
+    requestedDetectedDiscId: DetectedDiscId,
+  ): number | null {
+    const attemptedByteCounts = attemptedDeclaredByteCountsForArchiveRequest(
+      transaction,
+      archiveRequestId,
+    );
     if (attemptedByteCounts.length > 0) {
       return uniqueDeclaredByteCount(attemptedByteCounts);
     }
@@ -1219,13 +1241,13 @@ export function createDataAccessInternal(
   };
 
   function archiveRequestMatchesDvdContinuationIdentity(
-    transaction: CatalogTransaction,
     currentDisc: Pick<
       typeof detectedDiscs.$inferSelect,
       "discKind" | "fingerprint" | "scanData"
     >,
     currentDeclaredByteCount: number | null,
     candidate: ArchiveRequestDvdContinuationCandidate,
+    requestDeclaredByteCount: number | null,
   ): boolean {
     if (
       currentDisc.discKind !== "dvd" ||
@@ -1240,11 +1262,37 @@ export function createDataAccessInternal(
     );
     return currentTitleMap?.contentId === currentDisc.fingerprint &&
       requestedTitleMap?.contentId === currentDisc.fingerprint &&
-      declaredByteCountForArchiveRequest(
-        transaction,
-        candidate.request.id,
-        candidate.requestedDiscId,
-      ) === currentDeclaredByteCount;
+      requestDeclaredByteCount === currentDeclaredByteCount;
+  }
+
+  function archiveRequestWithCreationPriority(
+    transaction: CatalogTransaction,
+    request: typeof archiveRequests.$inferSelect,
+    requestedPriority: number | undefined,
+    timestamp: Date,
+  ): typeof archiveRequests.$inferSelect {
+    if (
+      requestedPriority === undefined ||
+      request.status !== "pending" ||
+      requestedPriority === request.priority
+    ) {
+      return request;
+    }
+    return requireRow(
+      transaction
+        .update(archiveRequests)
+        .set({ priority: requestedPriority, updatedAt: timestamp })
+        .where(
+          and(
+            eq(archiveRequests.id, request.id),
+            eq(archiveRequests.status, "pending"),
+          ),
+        )
+        .returning()
+        .get(),
+      "archive request",
+      request.id,
+    );
   }
 
   function clearCorrectedEncodePublicationAuthority(
@@ -3358,28 +3406,12 @@ export function createDataAccessInternal(
         )
         .get();
       if (existing) {
-        if (
-          input.priority !== undefined &&
-          existing.status === "pending" &&
-          input.priority !== existing.priority
-        ) {
-          return requireRow(
-            transaction
-              .update(archiveRequests)
-              .set({ priority: input.priority, updatedAt: timestamp })
-              .where(
-                and(
-                  eq(archiveRequests.id, existing.id),
-                  eq(archiveRequests.status, "pending"),
-                ),
-              )
-              .returning()
-              .get(),
-            "archive request",
-            existing.id,
-          );
-        }
-        return existing;
+        return archiveRequestWithCreationPriority(
+          transaction,
+          existing,
+          input.priority,
+          timestamp,
+        );
       }
       const declaredByteCount = disc.discKind === "dvd"
         ? currentDeclaredByteCountForDetectedDisc(transaction, disc.id)
@@ -3419,10 +3451,13 @@ export function createDataAccessInternal(
           .all()
           .filter((candidate) =>
             archiveRequestMatchesDvdContinuationIdentity(
-              transaction,
               disc,
               declaredByteCount,
               candidate,
+              attemptedDeclaredByteCountForArchiveRequest(
+                transaction,
+                candidate.request.id,
+              ),
             )
           );
         if (reusableRequests.length > 1) {
@@ -3456,28 +3491,12 @@ export function createDataAccessInternal(
           );
         }
         if (reusableRequest !== undefined) {
-          if (
-            input.priority !== undefined &&
-            reusableRequest.status === "pending" &&
-            input.priority !== reusableRequest.priority
-          ) {
-            return requireRow(
-              transaction
-                .update(archiveRequests)
-                .set({ priority: input.priority, updatedAt: timestamp })
-                .where(
-                  and(
-                    eq(archiveRequests.id, reusableRequest.id),
-                    eq(archiveRequests.status, "pending"),
-                  ),
-                )
-                .returning()
-                .get(),
-              "archive request",
-              reusableRequest.id,
-            );
-          }
-          return reusableRequest;
+          return archiveRequestWithCreationPriority(
+            transaction,
+            reusableRequest,
+            input.priority,
+            timestamp,
+          );
         }
       }
       return requireRow(
@@ -7855,10 +7874,14 @@ export function createDataAccessInternal(
               return true;
             }
             return archiveRequestMatchesDvdContinuationIdentity(
-              transaction,
               disc,
               inspection.disc_inspections.totalBytes,
               candidate,
+              declaredByteCountForArchiveRequest(
+                transaction,
+                candidate.request.id,
+                candidate.requestedDiscId,
+              ),
             );
           });
           if (matchingRequests.length > 1) {

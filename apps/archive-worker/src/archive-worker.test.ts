@@ -552,6 +552,74 @@ async function exerciseWatchabilityWorkerScenario({
   };
 }
 
+type WatchabilityWorkerScenario = Awaited<
+  ReturnType<typeof exerciseWatchabilityWorkerScenario>
+>;
+
+async function prepareMatchingOpticalDriveRescueContinuation(
+  scenario: WatchabilityWorkerScenario,
+  {
+    displayName,
+    serialNumber,
+    workerId,
+  }: {
+    displayName: string;
+    serialNumber: string;
+    workerId: string;
+  },
+) {
+  const discoveredDrive = {
+    devicePath: "/dev/sr1",
+    displayName,
+    serialNumber,
+  };
+  const opticalDrive = scenario.access.catalog.upsertOpticalDrive({
+    ...discoveredDrive,
+    isEnabled: true,
+    isPresent: true,
+  });
+  const scanOnlyCopy = vi.fn();
+  const hardware: OpticalDriveHardware = {
+    ...stableDeviceBinding(),
+    discover: vi.fn().mockResolvedValue([discoveredDrive]),
+    scanDvd: vi.fn().mockResolvedValue({
+      fingerprint: scenario.fingerprint,
+      scanData: scenario.scanData,
+      sizeBytes: scenario.sizeBytes,
+    }),
+  };
+
+  await pollArchiveWorker({
+    access: scenario.access,
+    configuredDevicePath: "/dev/sr0",
+    copyRunner: {
+      copy: scanOnlyCopy,
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    },
+    hardware,
+    log: vi.fn(),
+    originalsLibraryPath: scenario.originalsLibraryPath,
+    rescueWorkspaceLock: createInProcessDvdRescueWorkspaceLock(),
+    signal: new AbortController().signal,
+    workerId,
+  });
+
+  const detectedDisc = scenario.access.catalog.listDetectedDiscs()
+    .find(({ opticalDriveId }) => opticalDriveId === opticalDrive.id)!;
+  const archiveRequest = scenario.access.archiveRequests.create({
+    detectedDiscId: detectedDisc.id,
+  });
+  return {
+    archiveRequest,
+    detectedDisc,
+    discoveredDrive,
+    hardware,
+    scanOnlyCopy,
+  };
+}
+
 async function exerciseReadFailureFence({
   beforeFailure,
   beforeReadFailurePersistence,
@@ -3125,52 +3193,20 @@ describe("archive worker polling", () => {
     );
     const firstAttemptImage = readFileSync(rescuePaths.imagePath);
     const firstAttemptMap = readFileSync(rescuePaths.mapPath);
-    const secondDrive = {
-      devicePath: "/dev/sr1",
+    const {
+      archiveRequest: continuedRequest,
+      detectedDisc: secondDisc,
+      discoveredDrive: secondDrive,
+      hardware,
+      scanOnlyCopy,
+    } = await prepareMatchingOpticalDriveRescueContinuation(scenario, {
       displayName: "Second matching rescue drive",
       serialNumber: "MATCHING-RESCUE-002",
-    };
-    const persistedSecondDrive = scenario.access.catalog.upsertOpticalDrive({
-      ...secondDrive,
-      isEnabled: true,
-      isPresent: true,
-    });
-    const scanOnlyCopy = vi.fn();
-    const hardware: OpticalDriveHardware = {
-      ...stableDeviceBinding(),
-      discover: vi.fn().mockResolvedValue([secondDrive]),
-      scanDvd: vi.fn().mockResolvedValue({
-        fingerprint: scenario.fingerprint,
-        scanData: scenario.scanData,
-        sizeBytes: scenario.sizeBytes,
-      }),
-    };
-
-    await pollArchiveWorker({
-      access: scenario.access,
-      configuredDevicePath: "/dev/sr0",
-      copyRunner: {
-        copy: scanOnlyCopy,
-        isActive: () => false,
-        withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
-        waitForInactive: vi.fn(async () => undefined),
-      },
-      hardware,
-      log: vi.fn(),
-      originalsLibraryPath: scenario.originalsLibraryPath,
-      rescueWorkspaceLock: createInProcessDvdRescueWorkspaceLock(),
-      signal: new AbortController().signal,
       workerId: "archive-worker-second-drive-scan",
     });
 
     expect(scanOnlyCopy).not.toHaveBeenCalled();
-    const secondDisc = scenario.access.catalog.listDetectedDiscs()
-      .find(({ opticalDriveId }) => opticalDriveId === persistedSecondDrive.id)!;
-    expect(
-      scenario.access.archiveRequests.create({
-        detectedDiscId: secondDisc.id,
-      }),
-    ).toMatchObject({
+    expect(continuedRequest).toMatchObject({
       id: scenario.request.id,
       detectedDiscId: scenario.request.detectedDiscId,
       status: "pending",
@@ -3259,40 +3295,17 @@ describe("archive worker polling", () => {
       );
       const preservedImage = readFileSync(rescuePaths.imagePath);
       const preservedMap = readFileSync(rescuePaths.mapPath);
-      const secondDrive = {
-        devicePath: "/dev/sr1",
+      const {
+        archiveRequest: continuedRequest,
+        detectedDisc: secondDisc,
+        discoveredDrive: secondDrive,
+        hardware: scanHardware,
+      } = await prepareMatchingOpticalDriveRescueContinuation(scenario, {
         displayName: "Mismatched rescue drive",
         serialNumber: `MISMATCHED-RESCUE-${mismatchCase}`,
-      };
-      const persistedSecondDrive = scenario.access.catalog.upsertOpticalDrive({
-        ...secondDrive,
-        isEnabled: true,
-        isPresent: true,
+        workerId: `archive-worker-second-drive-${mismatchCase}`,
       });
-      const scanHardware: OpticalDriveHardware = {
-        ...stableDeviceBinding(),
-        discover: vi.fn().mockResolvedValue([secondDrive]),
-        scanDvd: vi.fn().mockResolvedValue({
-          fingerprint: scenario.fingerprint,
-          scanData: scenario.scanData,
-          sizeBytes: scenario.sizeBytes,
-        }),
-      };
-
-      await pollArchiveWorker({
-        access: scenario.access,
-        configuredDevicePath: "/dev/sr0",
-        hardware: scanHardware,
-        log: vi.fn(),
-        signal: new AbortController().signal,
-      });
-      const secondDisc = scenario.access.catalog.listDetectedDiscs()
-        .find(({ opticalDriveId }) =>
-          opticalDriveId === persistedSecondDrive.id
-        )!;
-      expect(scenario.access.archiveRequests.create({
-        detectedDiscId: secondDisc.id,
-      }).id).toBe(scenario.request.id);
+      expect(continuedRequest.id).toBe(scenario.request.id);
       const copy = vi.fn(async ({ authorizeStart }) => {
         if (mismatchCase === "Optical Drive authorization") {
           scenario.access.catalog.upsertOpticalDrive({
