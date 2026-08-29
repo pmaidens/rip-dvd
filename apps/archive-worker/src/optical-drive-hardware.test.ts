@@ -875,6 +875,173 @@ describe("Linux Optical Drive hardware boundary", () => {
     });
   });
 
+  it("normalizes unavailable lsdvd stream languages during Disc Inspection", async () => {
+    const legacySummary = [
+      "Disc Title: HP7_DEATHLY_HALLOWS_PART_1",
+      "Title: 01, Length: 00:01:00.000 Chapters: 1, Cells: 1, Audio streams: 0, Subpictures: 0",
+      "Title: 02, Length: 00:01:00.000 Chapters: 1, Cells: 1, Audio streams: 0, Subpictures: 0",
+      "Title: 03, Length: 00:01:00.000 Chapters: 1, Cells: 1, Audio streams: 0, Subpictures: 0",
+      "Title: 04, Length: 00:01:00.000 Chapters: 1, Cells: 1, Audio streams: 0, Subpictures: 0",
+      "Title: 05, Length: 00:01:00.000 Chapters: 1, Cells: 1, Audio streams: 0, Subpictures: 0",
+      "Title: 06, Length: 00:01:00.000 Chapters: 1, Cells: 1, Audio streams: 0, Subpictures: 0",
+      "Title: 07, Length: 00:01:00.000 Chapters: 1, Cells: 1, Audio streams: 0, Subpictures: 0",
+      "Title: 08, Length: 00:01:00.000 Chapters: 1, Cells: 1, Audio streams: 0, Subpictures: 0",
+      "Title: 09, Length: 00:01:00.000 Chapters: 1, Cells: 1, Audio streams: 0, Subpictures: 0",
+      "Title: 10, Length: 00:00:11.266 Chapters: 2, Cells: 2, Audio streams: 1, Subpictures: 1",
+      "  Audio: 1, Language: \uFFFD\uFFFD - , Format: ac3, Frequency: 48000, Quantization: drc, Channels: 6, AP: 0, Content: Undefined, Stream id: 0x80",
+      "  Subtitle: 1, Language: \uFFFD\uFFFD - , Content: Undefined, Stream id: 0x20,",
+      "Title: 11, Length: 00:00:11.266 Chapters: 2, Cells: 2, Audio streams: 1, Subpictures: 1",
+      "  Audio: 1, Language: \uFFFD\uFFFD - , Format: ac3, Frequency: 48000, Quantization: drc, Channels: 2, AP: 0, Content: Undefined, Stream id: 0x81",
+      "  Subtitle: 1, Language: \uFFFD\uFFFD - , Content: Undefined, Stream id: 0x21,",
+      "Title: 12, Length: 02:26:05.000 Chapters: 37, Cells: 37, Audio streams: 1, Subpictures: 1",
+      "  Audio: 1, Language: en - English, Format: ac3, Frequency: 48000, Quantization: drc, Channels: 6, AP: 0, Content: Normal, Stream id: 0x80",
+      "  Subtitle: 1, Language: \uFFFD\uFFFD - , Content: Undefined, Stream id: 0x20,",
+    ].join("\n");
+    const maintainedSummary = legacySummary.replaceAll(
+      "\uFFFD\uFFFD - ,",
+      "xx - Unknown,",
+    );
+    const scan = async (summary: string) => {
+      const runner: CommandRunner = {
+        run: vi.fn()
+          .mockResolvedValueOnce({ exitCode: 0, stdout: summary, stderr: "" })
+          .mockResolvedValueOnce({
+            exitCode: 0,
+            stdout: "4700000000\n",
+            stderr: "",
+          }),
+      };
+      const hardware = createTestOpticalDriveHardware({
+        platform: "linux",
+        runner,
+        mediaGenerationObserver: stableMediaGenerationObserver(),
+      });
+      const result = await hardware.scanDvd(
+        boundOpticalDrive(),
+        new AbortController().signal,
+      );
+      return { result, runner };
+    };
+
+    const legacy = await scan(legacySummary);
+    const maintained = await scan(maintainedSummary);
+
+    expect(legacy.result).toEqual(maintained.result);
+    expect(legacy.result?.scanData.titles.map((title) => title.number)).toEqual([
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+    ]);
+    expect(legacy.result?.scanData.titles.slice(9)).toEqual([
+      {
+        number: 10,
+        durationSeconds: 11,
+        chapters: 2,
+        audioStreams: [
+          {
+            id: 128,
+            languageCode: "xx",
+            language: "Unknown",
+            format: "ac3",
+            channels: 6,
+          },
+        ],
+        subtitles: [
+          {
+            id: 32,
+            languageCode: "xx",
+            language: "Unknown",
+            content: "Undefined",
+          },
+        ],
+      },
+      {
+        number: 11,
+        durationSeconds: 11,
+        chapters: 2,
+        audioStreams: [
+          {
+            id: 129,
+            languageCode: "xx",
+            language: "Unknown",
+            format: "ac3",
+            channels: 2,
+          },
+        ],
+        subtitles: [
+          {
+            id: 33,
+            languageCode: "xx",
+            language: "Unknown",
+            content: "Undefined",
+          },
+        ],
+      },
+      {
+        number: 12,
+        durationSeconds: 8_765,
+        chapters: 37,
+        audioStreams: [
+          {
+            id: 128,
+            languageCode: "en",
+            language: "English",
+            format: "ac3",
+            channels: 6,
+          },
+        ],
+        subtitles: [
+          {
+            id: 32,
+            languageCode: "xx",
+            language: "Unknown",
+            content: "Undefined",
+          },
+        ],
+      },
+    ]);
+    expect(legacy.result?.fingerprint).toBe(maintained.result?.fingerprint);
+    expect(legacy.runner.run).toHaveBeenCalledTimes(2);
+    expect(maintained.runner.run).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    {
+      kind: "audio",
+      title:
+        "Title: 01, Length: 00:10:00.000 Chapters: 2, Cells: 2, Audio streams: 1, Subpictures: 0",
+      row: "  Audio: 1, Language: en - , Format: ac3, Frequency: 48000, Quantization: drc, Channels: 2, AP: 0, Content: Normal, Stream id: 0x80",
+      message: "lsdvd returned invalid audio language",
+    },
+    {
+      kind: "subtitle",
+      title:
+        "Title: 01, Length: 00:10:00.000 Chapters: 2, Cells: 2, Audio streams: 0, Subpictures: 1",
+      row: "  Subtitle: 1, Language: en - , Content: Normal, Stream id: 0x20,",
+      message: "lsdvd returned invalid subtitle language",
+    },
+  ])("rejects an empty $kind label with an available code", async ({
+    title,
+    row,
+    message,
+  }) => {
+    const runner: CommandRunner = {
+      run: vi.fn().mockResolvedValue({
+        exitCode: 0,
+        stdout: ["Disc Title: INVALID_LANGUAGE", title, row].join("\n"),
+        stderr: "",
+      }),
+    };
+    const hardware = createTestOpticalDriveHardware({
+      platform: "linux",
+      runner,
+      mediaGenerationObserver: stableMediaGenerationObserver(),
+    });
+
+    await expect(
+      hardware.scanDvd(boundOpticalDrive(), new AbortController().signal),
+    ).rejects.toThrow(message);
+    expect(runner.run).toHaveBeenCalledOnce();
+  });
+
   it("inspects a CSS-protected DVD through the packaged metadata reader", async () => {
     const runner: CommandRunner = {
       run: vi.fn().mockImplementation(async (executable: string) => {
