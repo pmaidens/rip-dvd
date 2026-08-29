@@ -5825,7 +5825,7 @@ async function analyzeDvdImageLayout({
         const referencedIcb = readUdfLongAllocationDescriptor(descriptor, 20);
         if ((fileCharacteristics & 0x08) !== 0) {
           if (
-            fileCharacteristics !== 0x08 ||
+            fileCharacteristics !== 0x0a ||
             fileIdentifierLength !== 0 ||
             parentEntryCount !== 0 ||
             !sameUdfLongAllocationDescriptor(referencedIcb, parentIcb)
