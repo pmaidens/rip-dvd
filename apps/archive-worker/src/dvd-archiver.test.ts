@@ -3186,7 +3186,7 @@ describe("DVD archive publication", () => {
     expect(existsSync(join(root, `dvdmeta-${digest}.iso`))).toBe(false);
   });
 
-  it("does not quarantine invalid rescue state after claim authority is lost", async () => {
+  it("preserves identity-mismatched rescue state without quarantine authority", async () => {
     const fixture = await createInterruptedDamagedPublication(
       "archive-request:disc:invalid-state-fence",
       "a".repeat(64),
@@ -3213,9 +3213,9 @@ describe("DVD archive publication", () => {
         waitForInactive: vi.fn(async () => undefined),
       },
       signal: new AbortController().signal,
-    })).rejects.toThrow("DVD rescue state could not be quarantined");
+    })).rejects.toThrow("DVD rescue state does not match the Archive Request");
 
-    expect(authorizeMutation).toHaveBeenCalledTimes(2);
+    expect(authorizeMutation).toHaveBeenCalledOnce();
     expect(existsSync(fixture.interrupted.archivePath)).toBe(true);
     expect(existsSync(fixture.rescuePaths.imagePath)).toBe(true);
     expect(existsSync(fixture.rescuePaths.mapPath)).toBe(true);
@@ -3352,7 +3352,7 @@ describe("DVD archive publication", () => {
     );
   });
 
-  it("quarantines a correlated orphan archive with invalid rescue state", async () => {
+  it("preserves a correlated rescue with mismatched map identity", async () => {
     const fixture = await createInterruptedDamagedPublication(
       "33333333-3333-4333-8333-333333333336",
       "e".repeat(64),
@@ -3362,6 +3362,8 @@ describe("DVD archive publication", () => {
     ) as { fingerprint: string };
     map.fingerprint = `dvdmeta-sha256:${"f".repeat(64)}`;
     writeFileSync(fixture.rescuePaths.mapPath, `${JSON.stringify(map)}\n`);
+    const preservedImage = readFileSync(fixture.rescuePaths.imagePath);
+    const preservedMap = readFileSync(fixture.rescuePaths.mapPath);
     const noCopy = vi.fn();
 
     await expect(preserveDvdArchive({
@@ -3382,33 +3384,15 @@ describe("DVD archive publication", () => {
     })).rejects.toThrow("DVD rescue state does not match the Archive Request");
 
     expect(noCopy).not.toHaveBeenCalled();
-    expect(existsSync(fixture.interrupted.archivePath)).toBe(false);
-    expect(readFileSync(`${fixture.interrupted.archivePath}.failed`)).toEqual(
+    expect(readFileSync(fixture.interrupted.archivePath)).toEqual(
       fixture.rescuedImage,
     );
-    expect(existsSync(fixture.rescuePaths.imagePath)).toBe(false);
-    expect(existsSync(fixture.rescuePaths.mapPath)).toBe(false);
+    expect(existsSync(`${fixture.interrupted.archivePath}.failed`)).toBe(false);
+    expect(readFileSync(fixture.rescuePaths.imagePath)).toEqual(preservedImage);
+    expect(readFileSync(fixture.rescuePaths.mapPath)).toEqual(preservedMap);
     expect(
       readdirSync(fixture.root).filter((name) => name.includes(".invalid-")),
-    ).toHaveLength(2);
-
-    const replacementCopy = vi.fn(async ({ outputPath, sizeBytes }) => {
-      writeFileSync(outputPath, Buffer.alloc(sizeBytes, 7));
-      return createCleanDvdRecoveryResult(sizeBytes);
-    });
-    const recovered = await preserveDvdArchive({
-      ...fixture.baseOptions,
-      runner: {
-        copy: replacementCopy,
-        isActive: () => false,
-        withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
-        waitForInactive: vi.fn(async () => undefined),
-      },
-      signal: new AbortController().signal,
-    });
-
-    expect(replacementCopy).toHaveBeenCalledOnce();
-    expect(recovered.integrityEvidence.integrity).toBe("clean_read");
+    ).toHaveLength(0);
   });
 
   it("keeps clean rescue state valid when archive directory sync fails", async () => {
