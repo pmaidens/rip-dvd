@@ -1211,6 +1211,42 @@ export function createDataAccessInternal(
     );
   }
 
+  type ArchiveRequestDvdContinuationCandidate = {
+    request: typeof archiveRequests.$inferSelect;
+    requestedDiscId: DetectedDiscId;
+    requestedDiscScanData: unknown;
+    requestedDiscStatus: DetectedDiscStatus;
+  };
+
+  function archiveRequestMatchesDvdContinuationIdentity(
+    transaction: CatalogTransaction,
+    currentDisc: Pick<
+      typeof detectedDiscs.$inferSelect,
+      "discKind" | "fingerprint" | "scanData"
+    >,
+    currentDeclaredByteCount: number | null,
+    candidate: ArchiveRequestDvdContinuationCandidate,
+  ): boolean {
+    if (
+      currentDisc.discKind !== "dvd" ||
+      currentDeclaredByteCount === null ||
+      candidate.requestedDiscStatus !== "approved"
+    ) {
+      return false;
+    }
+    const currentTitleMap = decodeDvdTitleMap(currentDisc.scanData);
+    const requestedTitleMap = decodeDvdTitleMap(
+      candidate.requestedDiscScanData,
+    );
+    return currentTitleMap?.contentId === currentDisc.fingerprint &&
+      requestedTitleMap?.contentId === currentDisc.fingerprint &&
+      declaredByteCountForArchiveRequest(
+        transaction,
+        candidate.request.id,
+        candidate.requestedDiscId,
+      ) === currentDeclaredByteCount;
+  }
+
   function clearCorrectedEncodePublicationAuthority(
     transaction: CatalogTransaction,
     jobId: EncodeJobId,
@@ -3348,13 +3384,7 @@ export function createDataAccessInternal(
       const declaredByteCount = disc.discKind === "dvd"
         ? currentDeclaredByteCountForDetectedDisc(transaction, disc.id)
         : null;
-      const currentTitleMap = disc.discKind === "dvd"
-        ? decodeDvdTitleMap(disc.scanData)
-        : null;
-      if (
-        declaredByteCount !== null &&
-        currentTitleMap?.contentId === disc.fingerprint
-      ) {
+      if (disc.discKind === "dvd" && declaredByteCount !== null) {
         const reusableRequests = transaction
           .select({
             request: archiveRequests,
@@ -3387,18 +3417,14 @@ export function createDataAccessInternal(
             ),
           )
           .all()
-          .filter((candidate) => {
-            const requestedTitleMap = decodeDvdTitleMap(
-              candidate.requestedDiscScanData,
-            );
-            return candidate.requestedDiscStatus === "approved" &&
-              requestedTitleMap?.contentId === disc.fingerprint &&
-              declaredByteCountForArchiveRequest(
-                transaction,
-                candidate.request.id,
-                candidate.requestedDiscId,
-              ) === declaredByteCount;
-          });
+          .filter((candidate) =>
+            archiveRequestMatchesDvdContinuationIdentity(
+              transaction,
+              disc,
+              declaredByteCount,
+              candidate,
+            )
+          );
         if (reusableRequests.length > 1) {
           throw new DomainInvariantError(
             "Disc identity matches multiple reusable Archive Requests",
@@ -7824,34 +7850,16 @@ export function createDataAccessInternal(
               `pending Archive Request references a ${exactRequest.requestedDiscStatus} Detected Disc`,
             );
           }
-          const currentTitleMap = decodeDvdTitleMap(disc.scanData);
           const matchingRequests = requestCandidates.filter((candidate) => {
             if (candidate.requestedDiscId === disc.id) {
               return true;
             }
-            if (
-              disc.discKind !== "dvd" ||
-              inspection.disc_inspections.totalBytes === null ||
-              currentTitleMap === null ||
-              currentTitleMap.contentId !== disc.fingerprint ||
-              candidate.requestedDiscStatus !== "approved"
-            ) {
-              return false;
-            }
-            const requestedTitleMap = decodeDvdTitleMap(
-              candidate.requestedDiscScanData,
-            );
-            if (
-              requestedTitleMap === null ||
-              requestedTitleMap.contentId !== disc.fingerprint
-            ) {
-              return false;
-            }
-            return declaredByteCountForArchiveRequest(
+            return archiveRequestMatchesDvdContinuationIdentity(
               transaction,
-              candidate.request.id,
-              candidate.requestedDiscId,
-            ) === inspection.disc_inspections.totalBytes;
+              disc,
+              inspection.disc_inspections.totalBytes,
+              candidate,
+            );
           });
           if (matchingRequests.length > 1) {
             throw new DomainInvariantError(

@@ -11699,7 +11699,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     },
   );
 
-  it("does not bypass cancellation through a matching second drive", () => {
+  it("does not bypass cancellation through a matching second Optical Drive", () => {
     const access = openTestDatabase();
     const firstDrive = access.catalog.upsertOpticalDrive({
       devicePath: "/dev/cancel-source",
