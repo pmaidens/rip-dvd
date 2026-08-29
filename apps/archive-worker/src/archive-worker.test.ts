@@ -3246,8 +3246,8 @@ describe("archive worker polling", () => {
     ]);
   });
 
-  it.each(["media generation", "drive authorization"] as const)(
-    "preserves a cross-drive rescue after a %s mismatch",
+  it.each(["media generation", "Optical Drive authorization"] as const)(
+    "preserves a rescue on another Optical Drive after a %s mismatch",
     async (mismatchCase) => {
       const scenario = await exerciseWatchabilityWorkerScenario({
         ranges: [{ startLba: 1, sectorCount: 1 }],
@@ -3294,7 +3294,7 @@ describe("archive worker polling", () => {
         detectedDiscId: secondDisc.id,
       }).id).toBe(scenario.request.id);
       const copy = vi.fn(async ({ authorizeStart }) => {
-        if (mismatchCase === "drive authorization") {
+        if (mismatchCase === "Optical Drive authorization") {
           scenario.access.catalog.upsertOpticalDrive({
             ...secondDrive,
             isEnabled: false,

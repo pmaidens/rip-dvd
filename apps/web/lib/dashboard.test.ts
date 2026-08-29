@@ -710,7 +710,7 @@ describe("readDashboardSnapshot", () => {
       });
   });
 
-  it("shows cross-drive rescue attempts by display name without device paths", () => {
+  it("shows rescue attempts from multiple Optical Drives without device paths", () => {
     const access = dataAccessFixture.create();
     const fingerprint = `dvdmeta-sha256:${"a".repeat(64)}`;
     const scanData = {

@@ -53,6 +53,13 @@ export class DvdRetainedSectorProofMismatchError extends Error {
   }
 }
 
+class DvdRescueIdentityMismatchError extends Error {
+  constructor() {
+    super("DVD rescue state does not match the Archive Request");
+    this.name = "DvdRescueIdentityMismatchError";
+  }
+}
+
 export interface DvdRescueWorkspace {
   boundaryFailure: OutOfRangeDvdReadFailureResult | null;
   imageByteCount: number;
@@ -548,14 +555,14 @@ function rescueStateFromMap(
     typeof value.imageFilesystemIdentity !== "string" ||
     !("recoveryProtocol" in value)
   ) {
-    throw new Error("DVD rescue state does not match the Archive Request");
+    throw new DvdRescueIdentityMismatchError();
   }
   const map = value as DvdRescueMap;
   parseBoundaryAcceptanceImageProof(map);
   const correctedRetryProof = parseCorrectedRetryRetainedSectorProof(map);
   if (map.schemaVersion === 1) {
     if (map.recoveryProtocol === null || map.boundaryFailureProtocol !== undefined) {
-      throw new Error("DVD rescue state does not match the Archive Request");
+      throw new DvdRescueIdentityMismatchError();
     }
     return {
       boundaryFailure: null,
@@ -573,14 +580,14 @@ function rescueStateFromMap(
     map.imageByteCount! % DVD_SECTOR_SIZE_BYTES !== 0 ||
     map.boundaryFailureProtocol === undefined
   ) {
-    throw new Error("DVD rescue state does not match the Archive Request");
+    throw new DvdRescueIdentityMismatchError();
   }
   const boundaryFailure = parseDvdReadFailureResultProtocol(
     JSON.stringify(map.boundaryFailureProtocol),
     identity.sizeBytes,
   );
   if (boundaryFailure.category !== "out_of_range") {
-    throw new Error("DVD rescue state does not match the Archive Request");
+    throw new DvdRescueIdentityMismatchError();
   }
   if (map.schemaVersion === 3) {
     const acceptedByteCount = boundaryFailure.firstFailingLba *
@@ -590,7 +597,7 @@ function rescueStateFromMap(
       map.imageByteCount !== acceptedByteCount ||
       map.recoveryProtocol === null
     ) {
-      throw new Error("DVD rescue state does not match the Archive Request");
+      throw new DvdRescueIdentityMismatchError();
     }
     const recoveryResult = parseDvdRecoveryResultProtocol(
       JSON.stringify(map.recoveryProtocol),
@@ -600,7 +607,7 @@ function rescueStateFromMap(
       correctedRetryProof !== null &&
       recoveryResult.outcome !== "damaged"
     ) {
-      throw new Error("DVD rescue state does not match the Archive Request");
+      throw new DvdRescueIdentityMismatchError();
     }
     return {
       boundaryFailure,
@@ -616,7 +623,7 @@ function rescueStateFromMap(
       : map.imageByteCount !== identity.sizeBytes &&
         map.imageByteCount !== boundaryFailure.retainedImageByteCount
   ) {
-    throw new Error("DVD rescue state does not match the Archive Request");
+    throw new DvdRescueIdentityMismatchError();
   }
   return {
     boundaryFailure,
@@ -1352,8 +1359,7 @@ export async function loadDvdRescueWorkspace(
       imageProofIdentity: boundaryAcceptanceProof?.accepted ?? null,
     };
   } catch (error) {
-    const identityMismatch = error instanceof Error &&
-      error.message === "DVD rescue state does not match the Archive Request";
+    const identityMismatch = error instanceof DvdRescueIdentityMismatchError;
     if (
       invalidStatePolicy === "quarantine" &&
       !preserveCorrectedRetryWorkspace &&
