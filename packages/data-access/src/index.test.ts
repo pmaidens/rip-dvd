@@ -11561,7 +11561,15 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       "worker-1",
     )!;
     access.archiveJobs.fail(firstAttempt, "unreadable sector");
-    access.archiveRequests.retry(request.id);
+    const inconsistentSourceObservation = completeDiscInspection(access, {
+      opticalDriveId: firstDrive.id,
+      mediaGeneration: "later-inconsistent-source-observation",
+      fingerprint,
+      scanData,
+      sizeBytes: 5 * 2_048,
+      volumeLabel: "MATCHING_DISC",
+    });
+    expect(inconsistentSourceObservation.disc.id).toBe(first.disc.id);
 
     const second = completeDiscInspection(access, {
       opticalDriveId: secondDrive.id,
@@ -11571,6 +11579,12 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       sizeBytes: 4 * 2_048,
       volumeLabel: "MATCHING_DISC",
     });
+    expect(access.archiveRequests.create({ detectedDiscId: second.disc.id }))
+      .toMatchObject({
+        id: request.id,
+        detectedDiscId: first.disc.id,
+        status: "pending",
+      });
     expect(
       access.archiveRequests.hasPendingRequestForDetectedDiscFingerprint(
         second.disc.id,
@@ -11604,6 +11618,147 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       { id: second.disc.id, opticalDriveId: secondDrive.id },
     ]);
     expect(JSON.stringify(attempts)).not.toContain("/dev/sr");
+    access.close();
+  });
+
+  it.each([
+    {
+      identityCase: "fingerprint",
+      fingerprintSuffix: "6",
+      sizeBytes: 4 * 2_048,
+    },
+    {
+      identityCase: "declared size",
+      fingerprintSuffix: "5",
+      sizeBytes: 5 * 2_048,
+    },
+  ])(
+    "does not reuse an Archive Request with mismatched $identityCase",
+    ({ fingerprintSuffix, sizeBytes }) => {
+      const access = openTestDatabase();
+      const firstDrive = access.catalog.upsertOpticalDrive({
+        devicePath: "/dev/source",
+        isEnabled: true,
+        isPresent: true,
+      });
+      const secondDrive = access.catalog.upsertOpticalDrive({
+        devicePath: "/dev/candidate",
+        isEnabled: true,
+        isPresent: true,
+      });
+      const fingerprint = `dvdmeta-sha256:${"5".repeat(64)}`;
+      const candidateFingerprint =
+        `dvdmeta-sha256:${fingerprintSuffix.repeat(64)}`;
+      const titleMap = (contentId: string) => ({
+        schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+        contentId,
+        titles: [{
+          number: 1,
+          durationSeconds: 3_600,
+          chapters: 10,
+          audioStreams: [],
+          subtitles: [],
+        }],
+      });
+      const source = completeDiscInspection(access, {
+        opticalDriveId: firstDrive.id,
+        mediaGeneration: "source-generation",
+        fingerprint,
+        scanData: titleMap(fingerprint),
+        sizeBytes: 4 * 2_048,
+      });
+      const request = access.archiveRequests.create({
+        detectedDiscId: source.disc.id,
+      });
+      const firstAttempt = access.archiveJobs.startForInspection(
+        source.inspection.id,
+        "source-worker",
+      )!;
+      access.archiveJobs.fail(firstAttempt, "unreadable sector");
+      const candidate = completeDiscInspection(access, {
+        opticalDriveId: secondDrive.id,
+        mediaGeneration: "candidate-generation",
+        fingerprint: candidateFingerprint,
+        scanData: titleMap(candidateFingerprint),
+        sizeBytes,
+      });
+
+      const separateRequest = access.archiveRequests.create({
+        detectedDiscId: candidate.disc.id,
+      });
+
+      expect(separateRequest).toMatchObject({
+        detectedDiscId: candidate.disc.id,
+        status: "pending",
+      });
+      expect(separateRequest.id).not.toBe(request.id);
+      expect(access.archiveRequests.list(["needs_attention"])).toEqual([
+        expect.objectContaining({ id: request.id }),
+      ]);
+      access.close();
+    },
+  );
+
+  it("does not bypass cancellation through a matching second Optical Drive", () => {
+    const access = openTestDatabase();
+    const firstDrive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/cancel-source",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const secondDrive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/cancel-candidate",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const fingerprint = `dvdmeta-sha256:${"c".repeat(64)}`;
+    const scanData = {
+      schemaVersion: DVD_TITLE_MAP_SCHEMA_VERSION,
+      contentId: fingerprint,
+      titles: [{
+        number: 1,
+        durationSeconds: 3_600,
+        chapters: 10,
+        audioStreams: [],
+        subtitles: [],
+      }],
+    };
+    const source = completeDiscInspection(access, {
+      opticalDriveId: firstDrive.id,
+      mediaGeneration: "cancel-source-generation",
+      fingerprint,
+      scanData,
+      sizeBytes: 4 * 2_048,
+    });
+    const request = access.archiveRequests.create({
+      detectedDiscId: source.disc.id,
+    });
+    const running = access.archiveJobs.startForInspection(
+      source.inspection.id,
+      "cancel-source-worker",
+    )!;
+    expect(access.archiveRequests.cancel(request.id).status)
+      .toBe("cancellation_requested");
+    const candidate = completeDiscInspection(access, {
+      opticalDriveId: secondDrive.id,
+      mediaGeneration: "cancel-candidate-generation",
+      fingerprint,
+      scanData,
+      sizeBytes: 4 * 2_048,
+    });
+
+    expect(access.archiveRequests.create({ detectedDiscId: candidate.disc.id }))
+      .toMatchObject({
+        id: request.id,
+        detectedDiscId: source.disc.id,
+        status: "cancellation_requested",
+      });
+    expect(access.archiveRequests.list()).toHaveLength(1);
+    expect(access.archiveJobs.startForInspection(
+      candidate.inspection.id,
+      "cancel-candidate-worker",
+    )).toBeNull();
+    expect(access.archiveJobs.isCancellationRequested(running)).toBe(true);
     access.close();
   });
 

@@ -3186,7 +3186,7 @@ describe("DVD archive publication", () => {
     expect(existsSync(join(root, `dvdmeta-${digest}.iso`))).toBe(false);
   });
 
-  it("does not quarantine invalid rescue state after claim authority is lost", async () => {
+  it("checks rescue ownership before recovery policy compatibility", async () => {
     const fixture = await createInterruptedDamagedPublication(
       "archive-request:disc:invalid-state-fence",
       "a".repeat(64),
@@ -3195,6 +3195,8 @@ describe("DVD archive publication", () => {
       readFileSync(fixture.rescuePaths.mapPath, "utf8"),
     );
     map.fingerprint = `dvdmeta-sha256:${"b".repeat(64)}`;
+    map.recoveryPolicyVersion = "retired-dvd-recovery-policy";
+    delete map.declaredByteCount;
     writeFileSync(fixture.rescuePaths.mapPath, `${JSON.stringify(map)}\n`);
     const staleClaim = new Error("Stale Archive Job attempt before quarantine");
     const authorizeMutation = vi.fn(() => {
@@ -3213,9 +3215,9 @@ describe("DVD archive publication", () => {
         waitForInactive: vi.fn(async () => undefined),
       },
       signal: new AbortController().signal,
-    })).rejects.toThrow("DVD rescue state could not be quarantined");
+    })).rejects.toThrow("DVD rescue state does not match the Archive Request");
 
-    expect(authorizeMutation).toHaveBeenCalledTimes(2);
+    expect(authorizeMutation).toHaveBeenCalledOnce();
     expect(existsSync(fixture.interrupted.archivePath)).toBe(true);
     expect(existsSync(fixture.rescuePaths.imagePath)).toBe(true);
     expect(existsSync(fixture.rescuePaths.mapPath)).toBe(true);
@@ -3223,6 +3225,112 @@ describe("DVD archive publication", () => {
       readdirSync(fixture.root).some((name) => name.includes(".invalid-")),
     ).toBe(false);
   });
+
+  it.each([
+    "the canonical map belongs to another Archive Request",
+    "the retention map belongs to another Archive Request",
+    "the canonical map is foreign and the retention map is malformed",
+    "only a foreign Archive Request retention map remains",
+  ] as const)(
+    "preserves boundary transaction state when %s",
+    async (mismatchCase) => {
+      const fixture = await createInterruptedDamagedPublication(
+        "archive-request:boundary-transaction-owner",
+        "2".repeat(64),
+      );
+      const retentionMapPath = `${fixture.rescuePaths.mapPath}.retaining`;
+      const canonicalMap = JSON.parse(
+        readFileSync(fixture.rescuePaths.mapPath, "utf8"),
+      );
+      const imageMetadata = lstatSync(
+        fixture.rescuePaths.imagePath,
+        { bigint: true },
+      );
+      const imageProof = {
+        ctimeNs: imageMetadata.ctimeNs.toString(),
+        mtimeNs: imageMetadata.mtimeNs.toString(),
+      };
+      const retentionMap = {
+        ...canonicalMap,
+        schemaVersion: 3,
+        imageByteCount: fixture.rescuedImage.byteLength,
+        boundaryFailureProtocol: createProvenBoundaryFailure(
+          fixture.rescuedImage.byteLength,
+          fixture.rescuedImage.byteLength / 2_048,
+        ),
+        boundaryAcceptanceImageProof: {
+          source: imageProof,
+          accepted: imageProof,
+        },
+      };
+      const foreignArchiveRequestId =
+        "archive-request:foreign-boundary-transaction-owner";
+      if (
+        mismatchCase ===
+          "the canonical map belongs to another Archive Request" ||
+        mismatchCase ===
+          "the canonical map is foreign and the retention map is malformed"
+      ) {
+        canonicalMap.archiveRequestId = foreignArchiveRequestId;
+      } else {
+        retentionMap.archiveRequestId = foreignArchiveRequestId;
+      }
+      writeFileSync(
+        fixture.rescuePaths.mapPath,
+        `${JSON.stringify(canonicalMap)}\n`,
+      );
+      writeFileSync(
+        retentionMapPath,
+        mismatchCase ===
+            "the canonical map is foreign and the retention map is malformed"
+          ? "malformed retention state\n"
+          : `${JSON.stringify(retentionMap)}\n`,
+      );
+      if (
+        mismatchCase ===
+          "only a foreign Archive Request retention map remains"
+      ) {
+        unlinkSync(fixture.rescuePaths.mapPath);
+      }
+      const workspacePaths = [
+        fixture.rescuePaths.imagePath,
+        fixture.rescuePaths.mapPath,
+        retentionMapPath,
+      ];
+      const preservedWorkspace = new Map(
+        workspacePaths.flatMap((path) =>
+          existsSync(path) ? [[path, readFileSync(path)] as const] : []
+        ),
+      );
+      const noCopy = vi.fn();
+
+      await expect(preserveDvdArchive({
+        ...fixture.baseOptions,
+        runner: {
+          copy: noCopy,
+          isActive: () => false,
+          withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+          waitForInactive: vi.fn(async () => undefined),
+        },
+        signal: new AbortController().signal,
+      })).rejects.toThrow(
+        "DVD rescue state does not match the Archive Request",
+      );
+
+      expect(noCopy).not.toHaveBeenCalled();
+      for (const path of workspacePaths) {
+        const preserved = preservedWorkspace.get(path);
+        if (preserved === undefined) {
+          expect(existsSync(path)).toBe(false);
+        } else {
+          expect(readFileSync(path)).toEqual(preserved);
+        }
+      }
+      expect(
+        readdirSync(fixture.root).some((name) => name.includes(".invalid-")),
+      ).toBe(false);
+    },
+  );
 
   it("recovers an accepted damaged publication after a worker restart", async () => {
     const originalsLibraryPath = createOriginalsLibrary();
@@ -3352,7 +3460,7 @@ describe("DVD archive publication", () => {
     );
   });
 
-  it("quarantines a correlated orphan archive with invalid rescue state", async () => {
+  it("preserves a correlated rescue with mismatched map identity", async () => {
     const fixture = await createInterruptedDamagedPublication(
       "33333333-3333-4333-8333-333333333336",
       "e".repeat(64),
@@ -3362,6 +3470,8 @@ describe("DVD archive publication", () => {
     ) as { fingerprint: string };
     map.fingerprint = `dvdmeta-sha256:${"f".repeat(64)}`;
     writeFileSync(fixture.rescuePaths.mapPath, `${JSON.stringify(map)}\n`);
+    const preservedImage = readFileSync(fixture.rescuePaths.imagePath);
+    const preservedMap = readFileSync(fixture.rescuePaths.mapPath);
     const noCopy = vi.fn();
 
     await expect(preserveDvdArchive({
@@ -3382,33 +3492,15 @@ describe("DVD archive publication", () => {
     })).rejects.toThrow("DVD rescue state does not match the Archive Request");
 
     expect(noCopy).not.toHaveBeenCalled();
-    expect(existsSync(fixture.interrupted.archivePath)).toBe(false);
-    expect(readFileSync(`${fixture.interrupted.archivePath}.failed`)).toEqual(
+    expect(readFileSync(fixture.interrupted.archivePath)).toEqual(
       fixture.rescuedImage,
     );
-    expect(existsSync(fixture.rescuePaths.imagePath)).toBe(false);
-    expect(existsSync(fixture.rescuePaths.mapPath)).toBe(false);
+    expect(existsSync(`${fixture.interrupted.archivePath}.failed`)).toBe(false);
+    expect(readFileSync(fixture.rescuePaths.imagePath)).toEqual(preservedImage);
+    expect(readFileSync(fixture.rescuePaths.mapPath)).toEqual(preservedMap);
     expect(
       readdirSync(fixture.root).filter((name) => name.includes(".invalid-")),
-    ).toHaveLength(2);
-
-    const replacementCopy = vi.fn(async ({ outputPath, sizeBytes }) => {
-      writeFileSync(outputPath, Buffer.alloc(sizeBytes, 7));
-      return createCleanDvdRecoveryResult(sizeBytes);
-    });
-    const recovered = await preserveDvdArchive({
-      ...fixture.baseOptions,
-      runner: {
-        copy: replacementCopy,
-        isActive: () => false,
-        withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
-        waitForInactive: vi.fn(async () => undefined),
-      },
-      signal: new AbortController().signal,
-    });
-
-    expect(replacementCopy).toHaveBeenCalledOnce();
-    expect(recovered.integrityEvidence.integrity).toBe("clean_read");
+    ).toHaveLength(0);
   });
 
   it("keeps clean rescue state valid when archive directory sync fails", async () => {

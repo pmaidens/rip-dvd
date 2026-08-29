@@ -1140,6 +1140,161 @@ export function createDataAccessInternal(
     Parameters<typeof database.transaction>[0]
   >[0];
 
+  function uniqueDeclaredByteCount(
+    byteCounts: readonly (number | null)[],
+  ): number | null {
+    const observed = new Set(
+      byteCounts.filter((byteCount): byteCount is number =>
+        byteCount !== null
+      ),
+    );
+    return observed.size === 1 ? [...observed][0]! : null;
+  }
+
+  function currentDeclaredByteCountForDetectedDisc(
+    transaction: CatalogTransaction,
+    detectedDiscId: DetectedDiscId,
+  ): number | null {
+    return uniqueDeclaredByteCount(
+      transaction
+        .select({ totalBytes: discInspections.totalBytes })
+        .from(discInspections)
+        .where(
+          and(
+            eq(discInspections.detectedDiscId, detectedDiscId),
+            eq(discInspections.isCurrent, true),
+            eq(discInspections.status, "completed"),
+            isNotNull(discInspections.totalBytes),
+          ),
+        )
+        .all()
+        .map(({ totalBytes }) => totalBytes),
+    );
+  }
+
+  function attemptedDeclaredByteCountsForArchiveRequest(
+    transaction: CatalogTransaction,
+    archiveRequestId: ArchiveRequestId,
+  ): (number | null)[] {
+    return transaction
+      .select({ totalBytes: discInspections.totalBytes })
+      .from(archiveJobs)
+      .innerJoin(
+        discInspections,
+        eq(discInspections.id, archiveJobs.discInspectionId),
+      )
+      .where(
+        and(
+          eq(archiveJobs.archiveRequestId, archiveRequestId),
+          isNotNull(discInspections.totalBytes),
+        ),
+      )
+      .all()
+      .map(({ totalBytes }) => totalBytes);
+  }
+
+  function attemptedDeclaredByteCountForArchiveRequest(
+    transaction: CatalogTransaction,
+    archiveRequestId: ArchiveRequestId,
+  ): number | null {
+    return uniqueDeclaredByteCount(
+      attemptedDeclaredByteCountsForArchiveRequest(
+        transaction,
+        archiveRequestId,
+      ),
+    );
+  }
+
+  function declaredByteCountForArchiveRequest(
+    transaction: CatalogTransaction,
+    archiveRequestId: ArchiveRequestId,
+    requestedDetectedDiscId: DetectedDiscId,
+  ): number | null {
+    const attemptedByteCounts = attemptedDeclaredByteCountsForArchiveRequest(
+      transaction,
+      archiveRequestId,
+    );
+    if (attemptedByteCounts.length > 0) {
+      return uniqueDeclaredByteCount(attemptedByteCounts);
+    }
+    return uniqueDeclaredByteCount(
+      transaction
+        .select({ totalBytes: discInspections.totalBytes })
+        .from(discInspections)
+        .where(
+          and(
+            eq(discInspections.detectedDiscId, requestedDetectedDiscId),
+            eq(discInspections.status, "completed"),
+            isNotNull(discInspections.totalBytes),
+          ),
+        )
+        .all()
+        .map(({ totalBytes }) => totalBytes),
+    );
+  }
+
+  type ArchiveRequestDvdContinuationCandidate = {
+    request: typeof archiveRequests.$inferSelect;
+    requestedDiscId: DetectedDiscId;
+    requestedDiscScanData: unknown;
+    requestedDiscStatus: DetectedDiscStatus;
+  };
+
+  function archiveRequestMatchesDvdContinuationIdentity(
+    currentDisc: Pick<
+      typeof detectedDiscs.$inferSelect,
+      "discKind" | "fingerprint" | "scanData"
+    >,
+    currentDeclaredByteCount: number | null,
+    candidate: ArchiveRequestDvdContinuationCandidate,
+    requestDeclaredByteCount: number | null,
+  ): boolean {
+    if (
+      currentDisc.discKind !== "dvd" ||
+      currentDeclaredByteCount === null ||
+      candidate.requestedDiscStatus !== "approved"
+    ) {
+      return false;
+    }
+    const currentTitleMap = decodeDvdTitleMap(currentDisc.scanData);
+    const requestedTitleMap = decodeDvdTitleMap(
+      candidate.requestedDiscScanData,
+    );
+    return currentTitleMap?.contentId === currentDisc.fingerprint &&
+      requestedTitleMap?.contentId === currentDisc.fingerprint &&
+      requestDeclaredByteCount === currentDeclaredByteCount;
+  }
+
+  function archiveRequestWithCreationPriority(
+    transaction: CatalogTransaction,
+    request: typeof archiveRequests.$inferSelect,
+    requestedPriority: number | undefined,
+    timestamp: Date,
+  ): typeof archiveRequests.$inferSelect {
+    if (
+      requestedPriority === undefined ||
+      request.status !== "pending" ||
+      requestedPriority === request.priority
+    ) {
+      return request;
+    }
+    return requireRow(
+      transaction
+        .update(archiveRequests)
+        .set({ priority: requestedPriority, updatedAt: timestamp })
+        .where(
+          and(
+            eq(archiveRequests.id, request.id),
+            eq(archiveRequests.status, "pending"),
+          ),
+        )
+        .returning()
+        .get(),
+      "archive request",
+      request.id,
+    );
+  }
+
   function clearCorrectedEncodePublicationAuthority(
     transaction: CatalogTransaction,
     jobId: EncodeJobId,
@@ -2552,14 +2707,27 @@ export function createDataAccessInternal(
     statuses: ArchiveJobStatus[] | undefined,
     options: ArchiveJobListOptions | undefined,
   ) {
-    if (options?.detectedDiscIds?.length === 0) {
+    const requestScope = options?.archiveRequestIds?.length
+      ? inArray(archiveJobs.archiveRequestId, [...options.archiveRequestIds])
+      : undefined;
+    const discScope = options?.detectedDiscIds?.length
+      ? inArray(archiveJobs.detectedDiscId, [...options.detectedDiscIds])
+      : undefined;
+    if (
+      (options?.archiveRequestIds !== undefined ||
+        options?.detectedDiscIds !== undefined) &&
+      requestScope === undefined &&
+      discScope === undefined
+    ) {
       return null;
     }
     return and(
       statuses?.length ? inArray(archiveJobs.status, statuses) : undefined,
-      options?.detectedDiscIds
-        ? inArray(archiveJobs.detectedDiscId, [...options.detectedDiscIds])
-        : undefined,
+      requestScope === undefined
+        ? discScope
+        : discScope === undefined
+          ? requestScope
+          : or(requestScope, discScope),
     );
   }
 
@@ -3238,28 +3406,98 @@ export function createDataAccessInternal(
         )
         .get();
       if (existing) {
-        if (
-          input.priority !== undefined &&
-          existing.status === "pending" &&
-          input.priority !== existing.priority
-        ) {
+        return archiveRequestWithCreationPriority(
+          transaction,
+          existing,
+          input.priority,
+          timestamp,
+        );
+      }
+      const declaredByteCount = disc.discKind === "dvd"
+        ? currentDeclaredByteCountForDetectedDisc(transaction, disc.id)
+        : null;
+      if (disc.discKind === "dvd" && declaredByteCount !== null) {
+        const reusableRequests = transaction
+          .select({
+            request: archiveRequests,
+            requestedDiscId: requestedDetectedDiscRecords.id,
+            requestedDiscScanData: requestedDetectedDiscRecords.scanData,
+            requestedDiscStatus: requestedDetectedDiscRecords.status,
+          })
+          .from(archiveRequests)
+          .innerJoin(
+            requestedDetectedDiscRecords,
+            eq(
+              requestedDetectedDiscRecords.id,
+              archiveRequests.detectedDiscId,
+            ),
+          )
+          .where(
+            and(
+              inArray(archiveRequests.status, [
+                "pending",
+                "running",
+                "needs_attention",
+                "cancellation_requested",
+              ]),
+              eq(requestedDetectedDiscRecords.discKind, "dvd"),
+              eq(
+                requestedDetectedDiscRecords.fingerprint,
+                disc.fingerprint,
+              ),
+              ne(requestedDetectedDiscRecords.id, disc.id),
+            ),
+          )
+          .all()
+          .filter((candidate) =>
+            archiveRequestMatchesDvdContinuationIdentity(
+              disc,
+              declaredByteCount,
+              candidate,
+              attemptedDeclaredByteCountForArchiveRequest(
+                transaction,
+                candidate.request.id,
+              ),
+            )
+          );
+        if (reusableRequests.length > 1) {
+          throw new DomainInvariantError(
+            "Disc identity matches multiple reusable Archive Requests",
+          );
+        }
+        const reusableRequest = reusableRequests[0]?.request;
+        if (reusableRequest?.status === "needs_attention") {
           return requireRow(
             transaction
               .update(archiveRequests)
-              .set({ priority: input.priority, updatedAt: timestamp })
+              .set({
+                status: "pending",
+                priority: input.priority ?? reusableRequest.priority,
+                cancellationRequestedAt: null,
+                fulfilledAt: null,
+                cancelledAt: null,
+                updatedAt: timestamp,
+              })
               .where(
                 and(
-                  eq(archiveRequests.id, existing.id),
-                  eq(archiveRequests.status, "pending"),
+                  eq(archiveRequests.id, reusableRequest.id),
+                  eq(archiveRequests.status, "needs_attention"),
                 ),
               )
               .returning()
               .get(),
             "archive request",
-            existing.id,
+            reusableRequest.id,
           );
         }
-        return existing;
+        if (reusableRequest !== undefined) {
+          return archiveRequestWithCreationPriority(
+            transaction,
+            reusableRequest,
+            input.priority,
+            timestamp,
+          );
+        }
       }
       return requireRow(
         transaction
@@ -7631,49 +7869,19 @@ export function createDataAccessInternal(
               `pending Archive Request references a ${exactRequest.requestedDiscStatus} Detected Disc`,
             );
           }
-          const currentTitleMap = decodeDvdTitleMap(disc.scanData);
           const matchingRequests = requestCandidates.filter((candidate) => {
             if (candidate.requestedDiscId === disc.id) {
               return true;
             }
-            if (
-              disc.discKind !== "dvd" ||
-              inspection.disc_inspections.totalBytes === null ||
-              currentTitleMap === null ||
-              currentTitleMap.contentId !== disc.fingerprint ||
-              candidate.requestedDiscStatus !== "approved"
-            ) {
-              return false;
-            }
-            const requestedTitleMap = decodeDvdTitleMap(
-              candidate.requestedDiscScanData,
-            );
-            if (
-              requestedTitleMap === null ||
-              requestedTitleMap.contentId !== disc.fingerprint
-            ) {
-              return false;
-            }
-            const sourceSizes = new Set(
-              transaction
-                .select({ totalBytes: discInspections.totalBytes })
-                .from(discInspections)
-                .where(
-                  and(
-                    eq(
-                      discInspections.detectedDiscId,
-                      candidate.requestedDiscId,
-                    ),
-                    eq(discInspections.status, "completed"),
-                    isNotNull(discInspections.totalBytes),
-                  ),
-                )
-                .all()
-                .map(({ totalBytes }) => totalBytes),
-            );
-            return (
-              sourceSizes.size === 1 &&
-              sourceSizes.has(inspection.disc_inspections.totalBytes)
+            return archiveRequestMatchesDvdContinuationIdentity(
+              disc,
+              inspection.disc_inspections.totalBytes,
+              candidate,
+              declaredByteCountForArchiveRequest(
+                transaction,
+                candidate.request.id,
+                candidate.requestedDiscId,
+              ),
             );
           });
           if (matchingRequests.length > 1) {

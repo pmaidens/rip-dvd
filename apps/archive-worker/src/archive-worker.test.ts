@@ -552,6 +552,74 @@ async function exerciseWatchabilityWorkerScenario({
   };
 }
 
+type WatchabilityWorkerScenario = Awaited<
+  ReturnType<typeof exerciseWatchabilityWorkerScenario>
+>;
+
+async function prepareMatchingOpticalDriveRescueContinuation(
+  scenario: WatchabilityWorkerScenario,
+  {
+    displayName,
+    serialNumber,
+    workerId,
+  }: {
+    displayName: string;
+    serialNumber: string;
+    workerId: string;
+  },
+) {
+  const discoveredDrive = {
+    devicePath: "/dev/sr1",
+    displayName,
+    serialNumber,
+  };
+  const opticalDrive = scenario.access.catalog.upsertOpticalDrive({
+    ...discoveredDrive,
+    isEnabled: true,
+    isPresent: true,
+  });
+  const scanOnlyCopy = vi.fn();
+  const hardware: OpticalDriveHardware = {
+    ...stableDeviceBinding(),
+    discover: vi.fn().mockResolvedValue([discoveredDrive]),
+    scanDvd: vi.fn().mockResolvedValue({
+      fingerprint: scenario.fingerprint,
+      scanData: scenario.scanData,
+      sizeBytes: scenario.sizeBytes,
+    }),
+  };
+
+  await pollArchiveWorker({
+    access: scenario.access,
+    configuredDevicePath: "/dev/sr0",
+    copyRunner: {
+      copy: scanOnlyCopy,
+      isActive: () => false,
+      withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+      waitForInactive: vi.fn(async () => undefined),
+    },
+    hardware,
+    log: vi.fn(),
+    originalsLibraryPath: scenario.originalsLibraryPath,
+    rescueWorkspaceLock: createInProcessDvdRescueWorkspaceLock(),
+    signal: new AbortController().signal,
+    workerId,
+  });
+
+  const detectedDisc = scenario.access.catalog.listDetectedDiscs()
+    .find(({ opticalDriveId }) => opticalDriveId === opticalDrive.id)!;
+  const archiveRequest = scenario.access.archiveRequests.create({
+    detectedDiscId: detectedDisc.id,
+  });
+  return {
+    archiveRequest,
+    detectedDisc,
+    discoveredDrive,
+    hardware,
+    scanOnlyCopy,
+  };
+}
+
 async function exerciseReadFailureFence({
   beforeFailure,
   beforeReadFailurePersistence,
@@ -3114,7 +3182,186 @@ describe("archive worker polling", () => {
     expect(existsSync(rescueImagePath)).toBe(false);
   });
 
-  it("preserves cross-drive rescue outcomes and per-attempt evidence", async () => {
+  it("finishes one rescue on a second matching Optical Drive", async () => {
+    const scenario = await exerciseWatchabilityWorkerScenario({
+      ranges: [{ startLba: 1, sectorCount: 1 }],
+      validation: { outcome: "rejected", reason: "ambiguous" },
+    });
+    const rescuePaths = dvdRescueWorkspacePaths(
+      realpathSync(scenario.originalsLibraryPath),
+      scenario.request.id,
+    );
+    const firstAttemptImage = readFileSync(rescuePaths.imagePath);
+    const firstAttemptMap = readFileSync(rescuePaths.mapPath);
+    const {
+      archiveRequest: continuedRequest,
+      detectedDisc: secondDisc,
+      discoveredDrive: secondDrive,
+      hardware,
+      scanOnlyCopy,
+    } = await prepareMatchingOpticalDriveRescueContinuation(scenario, {
+      displayName: "Second matching rescue drive",
+      serialNumber: "MATCHING-RESCUE-002",
+      workerId: "archive-worker-second-drive-scan",
+    });
+
+    expect(scanOnlyCopy).not.toHaveBeenCalled();
+    expect(continuedRequest).toMatchObject({
+      id: scenario.request.id,
+      detectedDiscId: scenario.request.detectedDiscId,
+      status: "pending",
+    });
+    expect(readFileSync(rescuePaths.imagePath)).toEqual(firstAttemptImage);
+    expect(readFileSync(rescuePaths.mapPath)).toEqual(firstAttemptMap);
+
+    const recoveredImage = Buffer.alloc(scenario.sizeBytes, 7);
+    const secondCopy = vi.fn(async ({
+      authorizeStart,
+      continuation,
+      devicePath,
+      outputPath,
+    }: Parameters<DvdCopyRunner["copy"]>[0]) => {
+      expect(devicePath).toBe(secondDrive.devicePath);
+      expect(outputPath).toBe(rescuePaths.imagePath);
+      expect(continuation).toMatchObject({
+        kind: "damaged",
+        recoveryResult: createDamagedDvdRecoveryResult(
+          scenario.sizeBytes,
+          [{ startLba: 1, sectorCount: 1 }],
+        ),
+      });
+      expect(readFileSync(outputPath)).toEqual(firstAttemptImage);
+      await authorizeStart?.();
+      writeFileSync(outputPath, recoveredImage);
+      return createCleanDvdRecoveryResult(scenario.sizeBytes);
+    });
+
+    await pollArchiveWorker({
+      access: scenario.access,
+      configuredDevicePath: "/dev/sr0",
+      copyRunner: {
+        copy: secondCopy,
+        isActive: () => false,
+        withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+        waitForInactive: vi.fn(async () => undefined),
+      },
+      hardware,
+      log: vi.fn(),
+      originalsLibraryPath: scenario.originalsLibraryPath,
+      rescueWorkspaceLock: createInProcessDvdRescueWorkspaceLock(),
+      signal: new AbortController().signal,
+      workerId: "archive-worker-second-drive-completion",
+    });
+
+    expect(secondCopy).toHaveBeenCalledOnce();
+    expect(scenario.access.archiveRequests.list(["fulfilled"])).toEqual([
+      expect.objectContaining({ id: scenario.request.id }),
+    ]);
+    expect(readFileSync(
+      scenario.access.catalog.listOriginalDiscArchives()[0]!.archivePath,
+    )).toEqual(recoveredImage);
+    expect(
+      scenario.access.archiveJobs.list()
+        .sort((left, right) => left.attemptOrdinal - right.attemptOrdinal)
+        .map((attempt) => ({
+          attemptOrdinal: attempt.attemptOrdinal,
+          detectedDiscId: attempt.detectedDiscId,
+          status: attempt.status,
+        })),
+    ).toEqual([
+      {
+        attemptOrdinal: 1,
+        detectedDiscId: scenario.request.detectedDiscId,
+        status: "failed",
+      },
+      {
+        attemptOrdinal: 2,
+        detectedDiscId: secondDisc.id,
+        status: "completed",
+      },
+    ]);
+  });
+
+  it.each(["media generation", "Optical Drive authorization"] as const)(
+    "preserves a rescue on another Optical Drive after a %s mismatch",
+    async (mismatchCase) => {
+      const scenario = await exerciseWatchabilityWorkerScenario({
+        ranges: [{ startLba: 1, sectorCount: 1 }],
+        validation: { outcome: "rejected", reason: "ambiguous" },
+      });
+      const rescuePaths = dvdRescueWorkspacePaths(
+        realpathSync(scenario.originalsLibraryPath),
+        scenario.request.id,
+      );
+      const preservedImage = readFileSync(rescuePaths.imagePath);
+      const preservedMap = readFileSync(rescuePaths.mapPath);
+      const {
+        archiveRequest: continuedRequest,
+        detectedDisc: secondDisc,
+        discoveredDrive: secondDrive,
+        hardware: scanHardware,
+      } = await prepareMatchingOpticalDriveRescueContinuation(scenario, {
+        displayName: "Mismatched rescue drive",
+        serialNumber: `MISMATCHED-RESCUE-${mismatchCase}`,
+        workerId: `archive-worker-second-drive-${mismatchCase}`,
+      });
+      expect(continuedRequest.id).toBe(scenario.request.id);
+      const copy = vi.fn(async ({ authorizeStart }) => {
+        if (mismatchCase === "Optical Drive authorization") {
+          scenario.access.catalog.upsertOpticalDrive({
+            ...secondDrive,
+            isEnabled: false,
+            isPresent: true,
+          });
+        }
+        await authorizeStart?.();
+        throw new Error("copy started despite mismatched source identity");
+      });
+      const mismatchHardware: OpticalDriveHardware = {
+        ...scanHardware,
+        ...(mismatchCase === "media generation"
+          ? {
+              observeMediaGeneration: vi.fn(
+                async () => "replacement-media-generation",
+              ),
+            }
+          : {}),
+      };
+
+      await pollArchiveWorker({
+        access: scenario.access,
+        configuredDevicePath: "/dev/sr0",
+        copyRunner: {
+          copy,
+          isActive: () => false,
+          withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+          waitForInactive: vi.fn(async () => undefined),
+        },
+        hardware: mismatchHardware,
+        log: vi.fn(),
+        originalsLibraryPath: scenario.originalsLibraryPath,
+        rescueWorkspaceLock: createInProcessDvdRescueWorkspaceLock(),
+        signal: new AbortController().signal,
+        workerId: `archive-worker-cross-drive-${mismatchCase}`,
+      });
+
+      expect(copy).toHaveBeenCalledOnce();
+      expect(readFileSync(rescuePaths.imagePath)).toEqual(preservedImage);
+      expect(readFileSync(rescuePaths.mapPath)).toEqual(preservedMap);
+      expect(
+        scenario.access.archiveJobs.list(["failed"])
+          .find(({ attemptOrdinal }) => attemptOrdinal === 2),
+      ).toMatchObject({
+        archiveRequestId: scenario.request.id,
+        errorMessage: mismatchCase === "media generation"
+          ? "DVD medium changed during archiving"
+          : "Optical Drive is not enabled before DVD persistence",
+      });
+      expect(scenario.access.catalog.listOriginalDiscArchives()).toEqual([]);
+    },
+  );
+
+  it("preserves rescue outcomes and attempt evidence across Optical Drives", async () => {
     const scenario = await exerciseWatchabilityWorkerScenario({
       ranges: [
         { startLba: 1, sectorCount: 1 },
@@ -3697,10 +3944,15 @@ describe("archive worker polling", () => {
     expect(rescueMapName).toBeDefined();
     const rescueMapPath = join(root, rescueMapName!);
     const rescueMap = JSON.parse(readFileSync(rescueMapPath, "utf8")) as {
-      fingerprint: string;
+      archiveRequestId: string;
     };
-    rescueMap.fingerprint = `dvdmeta-sha256:${"9".repeat(64)}`;
+    rescueMap.archiveRequestId = "different-archive-request";
     writeFileSync(rescueMapPath, `${JSON.stringify(rescueMap)}\n`);
+    const rescueImagePath = readdirSync(root)
+      .map((name) => join(root, name))
+      .find((path) => path.endsWith(".rip-dvd-rescue.iso"))!;
+    const preservedImage = readFileSync(rescueImagePath);
+    const preservedMap = readFileSync(rescueMapPath);
     access.archiveRequests.retry(request.id);
     const copy = vi.fn();
     const laterCopyRunner: DvdCopyRunner = {
@@ -3734,9 +3986,11 @@ describe("archive worker polling", () => {
       expect.objectContaining({ id: request.id }),
     ]);
     expect(access.catalog.listOriginalDiscArchives()).toEqual([]);
+    expect(readFileSync(rescueImagePath)).toEqual(preservedImage);
+    expect(readFileSync(rescueMapPath)).toEqual(preservedMap);
     expect(
       readdirSync(root).filter((name) => name.includes(".invalid-")),
-    ).toHaveLength(2);
+    ).toHaveLength(0);
   });
 
 

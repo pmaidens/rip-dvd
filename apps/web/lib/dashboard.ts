@@ -431,20 +431,38 @@ function readDashboardSnapshotRecords(
           ids: currentDetectedDiscIds,
         }),
       );
-  const archiveJobSource = readSource(() =>
-    access.archiveJobs.list(undefined, {
-      detectedDiscIds: currentDetectedDiscIds ?? [],
-      ...(activityLimit === undefined
-        ? {}
-        : {
-            policy: {
-              mode: "active-and-history",
-              activeLimit: DASHBOARD_ACTIVE_JOB_LIMIT,
-              historyLimit: activityLimit,
-            },
-          }),
-    }),
+  const currentDetectedDiscArchiveJobOptions = {
+    detectedDiscIds: currentDetectedDiscIds ?? [],
+    ...(activityLimit === undefined
+      ? {}
+      : {
+          policy: {
+            mode: "active-and-history" as const,
+            activeLimit: DASHBOARD_ACTIVE_JOB_LIMIT,
+            historyLimit: activityLimit,
+          },
+        }),
+  };
+  const currentDetectedDiscArchiveJobSource = readSource(() =>
+    access.archiveJobs.list(undefined, currentDetectedDiscArchiveJobOptions)
   );
+  const currentArchiveRequestIds =
+    currentDetectedDiscArchiveJobSource.status === "loaded"
+    ? [...new Set(
+        currentDetectedDiscArchiveJobSource.value.map((job) =>
+          job.archiveRequestId
+        ),
+      )]
+    : [];
+  const archiveJobSource =
+    currentDetectedDiscArchiveJobSource.status === "error"
+      ? currentDetectedDiscArchiveJobSource
+      : readSource(() =>
+          access.archiveJobs.list(undefined, {
+            ...currentDetectedDiscArchiveJobOptions,
+            archiveRequestIds: currentArchiveRequestIds,
+          }),
+        );
   const displayedDetectedDiscIds = detectedDiscSource.status === "loaded"
     ? detectedDiscSource.value.map((disc) => disc.id)
     : [];
