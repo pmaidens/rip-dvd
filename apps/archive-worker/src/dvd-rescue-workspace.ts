@@ -528,6 +528,28 @@ async function reconcileBoundaryAcceptanceTransaction(
   }
 }
 
+function assertNoDvdRescueMapIdentityMismatch(
+  value: unknown,
+  identity: DvdRescueIdentity,
+): void {
+  if (typeof value !== "object" || value === null) {
+    return;
+  }
+  if (
+    ("archiveRequestId" in value &&
+      typeof value.archiveRequestId === "string" &&
+      value.archiveRequestId !== identity.archiveRequestId) ||
+    ("fingerprint" in value &&
+      typeof value.fingerprint === "string" &&
+      value.fingerprint !== identity.fingerprint) ||
+    ("declaredByteCount" in value &&
+      typeof value.declaredByteCount === "number" &&
+      value.declaredByteCount !== identity.sizeBytes)
+  ) {
+    throw new DvdRescueIdentityMismatchError();
+  }
+}
+
 function assertDvdRescueMapIdentity(
   value: unknown,
   identity: DvdRescueIdentity,
@@ -536,6 +558,7 @@ function assertDvdRescueMapIdentity(
   declaredByteCount: number;
   fingerprint: string;
 } {
+  assertNoDvdRescueMapIdentityMismatch(value, identity);
   if (
     typeof value !== "object" ||
     value === null ||
@@ -547,13 +570,6 @@ function assertDvdRescueMapIdentity(
     typeof value.declaredByteCount !== "number"
   ) {
     throw new Error("DVD rescue state is invalid");
-  }
-  if (
-    value.archiveRequestId !== identity.archiveRequestId ||
-    value.fingerprint !== identity.fingerprint ||
-    value.declaredByteCount !== identity.sizeBytes
-  ) {
-    throw new DvdRescueIdentityMismatchError();
   }
 }
 
@@ -1112,6 +1128,19 @@ export async function loadDvdRescueWorkspace(
     throw new Error("DVD rescue state could not be inspected", {
       cause: error,
     });
+  }
+  const mapIdentityPreflightResults = await Promise.allSettled([
+    ...(mapMetadata === null
+      ? []
+      : [readRescueMap(paths.mapPath, mapMetadata)]),
+    ...(retentionMapMetadata === null
+      ? []
+      : [readRescueMap(retentionMapPath, retentionMapMetadata)]),
+  ]);
+  for (const result of mapIdentityPreflightResults) {
+    if (result.status === "fulfilled") {
+      assertNoDvdRescueMapIdentityMismatch(result.value, identity);
+    }
   }
   if (retentionMapMetadata !== null && mapMetadata !== null) {
     let acceptedTransaction: {
