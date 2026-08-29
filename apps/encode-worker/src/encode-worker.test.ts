@@ -766,6 +766,7 @@ function createQueuedJob(
   selectionInput: TestSelection = { kind: "main_feature" },
   outputRelativePath = "Example.mkv",
   subtitleCount = 0,
+  additionalTitleDurations: readonly number[] = [],
 ) {
   const root = mkdtempSync(join(tmpdir(), "rip-dvd-encode-worker-"));
   temporaryDirectories.push(root);
@@ -801,6 +802,13 @@ function createQueuedJob(
             languageCode: id % 2 === 0 ? "en" : "fr",
           })),
         },
+        ...additionalTitleDurations.map((durationSeconds, index) => ({
+          number: 5 + index,
+          durationSeconds,
+          chapters: 1,
+          audioStreams: [],
+          subtitles: [],
+        })),
       ],
     },
   });
@@ -1086,8 +1094,16 @@ async function createCorrectedReplacementFixture() {
 
 describe("encode worker polling", () => {
   it("claims a main-feature job, persists HandBrake progress, and publishes only after success", async () => {
-    const fixture = createQueuedJob();
+    const fixture = createQueuedJob(
+      { kind: "main_feature" },
+      "Example.mkv",
+      0,
+      [5_400],
+    );
     const observedProgress: unknown[] = [];
+    const outputValidator: EncodeOutputValidator = {
+      prepareAndValidate: vi.fn(async () => {}),
+    };
     const runner: HandBrakeRunner = {
       run: vi.fn(async ({ arguments_, onOutput }) => {
         const outputPath = arguments_[arguments_.indexOf("-o") + 1];
@@ -1106,6 +1122,7 @@ describe("encode worker polling", () => {
       log: vi.fn(),
       mediaLibraryPath: fixture.mediaLibraryPath,
       originalsLibraryPath: fixture.originalsLibraryPath,
+      outputValidator,
       runner,
       signal: new AbortController().signal,
       workerId: "encode-worker-test",
@@ -1117,6 +1134,7 @@ describe("encode worker polling", () => {
     ).toHaveBeenCalledOnce();
     const request = vi.mocked(runner.run).mock.calls[0]![0];
     expect(request.arguments_).toEqual([
+      "--no-dvdnav",
       "--main-feature",
       "-i",
       realpathSync(fixture.sourcePath),
@@ -1129,6 +1147,11 @@ describe("encode worker polling", () => {
       "--all-subtitles",
       "--subtitle-burned=none",
     ]);
+    expect(outputValidator.prepareAndValidate).toHaveBeenCalledWith(
+      request.outputPath,
+      expect.anything(),
+      { expectedDurationSeconds: 5_400 },
+    );
     expect(observedProgress).toEqual([
       expect.objectContaining({
         id: fixture.job.id,
@@ -1150,8 +1173,13 @@ describe("encode worker polling", () => {
     fixture.access.close();
   });
 
-  it("quarantines an encoded partial instead of publishing it when media validation fails", async () => {
-    const fixture = createQueuedJob();
+  it("quarantines a materially truncated full-title output instead of publishing it", async () => {
+    const fixture = createQueuedJob(
+      { kind: "main_feature" },
+      "Example.mkv",
+      0,
+      [8_078],
+    );
     let partialPath = "";
     const runner: HandBrakeRunner = {
       run: vi.fn(async ({ outputPath }) => {
@@ -1160,11 +1188,12 @@ describe("encode worker polling", () => {
       }),
     };
     const outputValidator: EncodeOutputValidator = {
-      prepareAndValidate: vi.fn(async (outputPath) => {
+      prepareAndValidate: vi.fn(async (outputPath, _signal, expectations) => {
         expect(outputPath).toBe(partialPath);
+        expect(expectations).toEqual({ expectedDurationSeconds: 8_078 });
         expect(existsSync(fixture.outputPath)).toBe(false);
         throw new Error(
-          "Encode output validation failed: the first 5 seconds decoded zero video frames",
+          "Encode output validation failed: output duration 97.205 seconds is materially shorter than the expected 8078 seconds",
         );
       }),
     };
@@ -1186,7 +1215,7 @@ describe("encode worker polling", () => {
     expect(fixture.access.encodeJobs.list()).toEqual([
       expect.objectContaining({
         errorMessage:
-          "Encode output validation failed: the first 5 seconds decoded zero video frames",
+          "Encode output validation failed: output duration 97.205 seconds is materially shorter than the expected 8078 seconds",
         id: fixture.job.id,
         status: "failed",
       }),
@@ -1238,7 +1267,14 @@ describe("encode worker polling", () => {
     {
       name: "a DVD title",
       selection: { kind: "dvd_title", titleNumber: 4 } as const,
-      selectionArguments: ["--title", "4"],
+      selectionArguments: ["--no-dvdnav", "--title", "4"],
+      validationExpectations: {
+        expectedDurationSeconds: 3_600,
+        expectedVobSubStreams: [
+          { contentLabel: "Normal", languageCode: "en" },
+          { contentLabel: "Director", languageCode: "fr" },
+        ],
+      },
     },
     {
       name: "a chapter-bounded DVD title",
@@ -1248,11 +1284,24 @@ describe("encode worker polling", () => {
         chapterStart: 3,
         chapterEnd: 5,
       } as const,
-      selectionArguments: ["--title", "4", "--chapters", "3-5"],
+      selectionArguments: [
+        "--no-dvdnav",
+        "--title",
+        "4",
+        "--chapters",
+        "3-5",
+      ],
+      validationExpectations: {
+        expectedVobSubStreams: [
+          { contentLabel: "Normal", languageCode: "en" },
+          { contentLabel: "Director", languageCode: "fr" },
+        ],
+      },
     },
   ])("builds the HandBrake command for $name", async ({
     selection,
     selectionArguments,
+    validationExpectations,
   }) => {
     const fixture = createQueuedJob(selection, "Example.mkv", 2);
     const progressSnapshots: unknown[] = [];
@@ -1292,12 +1341,7 @@ describe("encode worker polling", () => {
     expect(outputValidator.prepareAndValidate).toHaveBeenCalledWith(
       request.outputPath,
       expect.anything(),
-      {
-        expectedVobSubStreams: [
-          { contentLabel: "Normal", languageCode: "en" },
-          { contentLabel: "Director", languageCode: "fr" },
-        ],
-      },
+      validationExpectations,
     );
     expect(progressSnapshots).toEqual([
       expect.objectContaining({

@@ -13,6 +13,7 @@ function mediaToolResult(stdout: string): MediaToolRunResult {
 function createMediaToolRunner({
   audioFirstPts = "0.000000",
   decodedFrames = 120,
+  outputDurationSeconds = 8_078,
   pixFmt = "yuv420p",
   profile = "High",
   subtitlePacketStderr = "",
@@ -29,6 +30,7 @@ function createMediaToolRunner({
 }: {
   audioFirstPts?: string | null;
   decodedFrames?: number;
+  outputDurationSeconds?: number | null;
   pixFmt?: string;
   profile?: string;
   subtitlePacketStderr?: string;
@@ -49,6 +51,7 @@ function createMediaToolRunner({
       if (streamSelector === "v:0") {
         return mediaToolResult(
           JSON.stringify({
+            format: { duration: String(outputDurationSeconds) },
             packets:
               videoFirstPts === null ? [] : [{ pts_time: videoFirstPts }],
             streams: [{ codec_name: "h264", pix_fmt: pixFmt, profile }],
@@ -97,6 +100,52 @@ function createMediaToolRunner({
 }
 
 describe("encode output validation", () => {
+  it("rejects a materially truncated full-title output", async () => {
+    const validator = createNodeEncodeOutputValidator({
+      runMediaTool: createMediaToolRunner({ outputDurationSeconds: 97.205 }),
+    });
+
+    await expect(
+      validator.prepareAndValidate(
+        "/media/truncated.mkv",
+        new AbortController().signal,
+        { expectedDurationSeconds: 8_078 },
+      ),
+    ).rejects.toThrow(
+      "Encode output validation failed: output duration 97.205 seconds is materially shorter than the expected 8078 seconds",
+    );
+  });
+
+  it("accepts a full-title output within the duration tolerance", async () => {
+    const validator = createNodeEncodeOutputValidator({
+      runMediaTool: createMediaToolRunner({ outputDurationSeconds: 8_000 }),
+    });
+
+    await expect(
+      validator.prepareAndValidate(
+        "/media/complete.mkv",
+        new AbortController().signal,
+        { expectedDurationSeconds: 8_078 },
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("rejects missing duration metadata for a full-title output", async () => {
+    const validator = createNodeEncodeOutputValidator({
+      runMediaTool: createMediaToolRunner({ outputDurationSeconds: null }),
+    });
+
+    await expect(
+      validator.prepareAndValidate(
+        "/media/unmeasured.mkv",
+        new AbortController().signal,
+        { expectedDurationSeconds: 8_078 },
+      ),
+    ).rejects.toThrow(
+      "Encode output validation failed: output duration metadata is unavailable",
+    );
+  });
+
   it("accepts an identified video stream that starts promptly and decodes frames", async () => {
     const runMediaTool = createMediaToolRunner();
     const validator = createNodeEncodeOutputValidator({ runMediaTool });

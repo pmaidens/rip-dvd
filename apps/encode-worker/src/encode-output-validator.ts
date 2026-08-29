@@ -9,6 +9,7 @@ const DEFAULT_MEDIA_TOOL_TIMEOUT_MS = 30_000;
 const DEFAULT_SUBTITLE_PACKET_TIMEOUT_MS = 5 * 60_000;
 const MAX_MEDIA_TOOL_OUTPUT_BYTES = 1024 * 1024;
 const MAX_VIDEO_START_DELAY_SECONDS = 5;
+const MINIMUM_FULL_TITLE_DURATION_RATIO = 0.98;
 const VALIDATION_DECODE_SECONDS = 5;
 
 export interface MediaToolRunRequest {
@@ -36,6 +37,7 @@ export interface EncodeOutputValidator {
 }
 
 export interface EncodeOutputValidationExpectations {
+  expectedDurationSeconds?: number;
   expectedVobSubStreams?: readonly EncodeOutputVobSubExpectation[];
 }
 
@@ -59,8 +61,13 @@ interface ProbeStream {
 }
 
 interface ProbeResult {
+  format?: unknown;
   packets?: unknown;
   streams?: unknown;
+}
+
+interface ProbeFormat {
+  duration?: unknown;
 }
 
 interface CompleteSubtitleStream extends ProbeStream {
@@ -133,6 +140,22 @@ function firstPacketPts(result: ProbeResult): number | null {
       ? Number.parseFloat(packet.pts_time)
       : Number.NaN;
   return Number.isFinite(pts) ? pts : null;
+}
+
+function outputDurationSeconds(result: ProbeResult): number | null {
+  if (
+    typeof result.format !== "object" ||
+    result.format === null ||
+    Array.isArray(result.format)
+  ) {
+    return null;
+  }
+  const value = (result.format as ProbeFormat).duration;
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return null;
+  }
+  const duration = Number(value);
+  return Number.isFinite(duration) && duration >= 0 ? duration : null;
 }
 
 function identifiedMetadata(value: unknown): boolean {
@@ -548,6 +571,13 @@ export function createNodeEncodeOutputValidator({
   return {
     async prepareAndValidate(outputPath, signal, expectations = {}) {
       signal.throwIfAborted();
+      if (
+        expectations.expectedDurationSeconds !== undefined &&
+        (!Number.isFinite(expectations.expectedDurationSeconds) ||
+          expectations.expectedDurationSeconds <= 0)
+      ) {
+        throw new Error("Encode output duration expectation is invalid");
+      }
       await validateSubtitleStreams({
         expectations,
         outputPath,
@@ -571,7 +601,7 @@ export function createNodeEncodeOutputValidator({
                 "-read_intervals",
                 "%+#1",
                 "-show_entries",
-                "stream=codec_name,profile,pix_fmt:packet=pts_time",
+                "format=duration:stream=codec_name,profile,pix_fmt:packet=pts_time",
                 "-of",
                 "json",
                 outputPath,
@@ -595,6 +625,21 @@ export function createNodeEncodeOutputValidator({
         !identifiedMetadata(videoStream.pix_fmt)
       ) {
         throw validationError("video stream metadata is incomplete");
+      }
+      if (expectations.expectedDurationSeconds !== undefined) {
+        const outputDuration = outputDurationSeconds(videoProbe);
+        if (outputDuration === null) {
+          throw validationError("output duration metadata is unavailable");
+        }
+        if (
+          outputDuration <
+          expectations.expectedDurationSeconds *
+            MINIMUM_FULL_TITLE_DURATION_RATIO
+        ) {
+          throw validationError(
+            `output duration ${outputDuration} seconds is materially shorter than the expected ${expectations.expectedDurationSeconds} seconds`,
+          );
+        }
       }
       const videoFirstPts = firstPacketPts(videoProbe);
       if (videoFirstPts === null) {
