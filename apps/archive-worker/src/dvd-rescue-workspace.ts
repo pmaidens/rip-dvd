@@ -528,10 +528,14 @@ async function reconcileBoundaryAcceptanceTransaction(
   }
 }
 
-function rescueStateFromMap(
+function assertDvdRescueMapIdentity(
   value: unknown,
   identity: DvdRescueIdentity,
-): DvdRescueState {
+): asserts value is {
+  archiveRequestId: string;
+  declaredByteCount: number;
+  fingerprint: string;
+} {
   if (
     typeof value !== "object" ||
     value === null ||
@@ -551,6 +555,13 @@ function rescueStateFromMap(
   ) {
     throw new DvdRescueIdentityMismatchError();
   }
+}
+
+function rescueStateFromMap(
+  value: unknown,
+  identity: DvdRescueIdentity,
+): DvdRescueState {
+  assertDvdRescueMapIdentity(value, identity);
   if (
     !("schemaVersion" in value) ||
     (value.schemaVersion !== 1 &&
@@ -1119,6 +1130,9 @@ export async function loadDvdRescueWorkspace(
         retentionMapPath,
         retentionMapMetadata,
       );
+      assertDvdRescueMapIdentity(retainedMapValue, identity);
+      const mapValue = await readRescueMap(paths.mapPath, mapMetadata);
+      assertDvdRescueMapIdentity(mapValue, identity);
       const retainedMap = retainedMapValue as DvdRescueMap;
       const retainedState = rescueStateFromMap(retainedMapValue, identity);
       const retentionProof = parseBoundaryAcceptanceImageProof(retainedMap);
@@ -1141,7 +1155,6 @@ export async function loadDvdRescueWorkspace(
             proofIdentity: retentionProof.accepted,
           };
         } else if (retentionProof.accepted === undefined) {
-          const mapValue = await readRescueMap(paths.mapPath, mapMetadata);
           const map = mapValue as DvdRescueMap;
           const state = rescueStateFromMap(mapValue, identity);
           if (retainedState.recoveryResult === null) {
@@ -1178,7 +1191,10 @@ export async function loadDvdRescueWorkspace(
           }
         }
       }
-    } catch {
+    } catch (error) {
+      if (error instanceof DvdRescueIdentityMismatchError) {
+        throw error;
+      }
       acceptedTransaction = null;
       unappliedTransaction = null;
     }
