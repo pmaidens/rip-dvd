@@ -3196,6 +3196,7 @@ describe("DVD archive publication", () => {
     );
     map.fingerprint = `dvdmeta-sha256:${"b".repeat(64)}`;
     map.recoveryPolicyVersion = "retired-dvd-recovery-policy";
+    delete map.declaredByteCount;
     writeFileSync(fixture.rescuePaths.mapPath, `${JSON.stringify(map)}\n`);
     const staleClaim = new Error("Stale Archive Job attempt before quarantine");
     const authorizeMutation = vi.fn(() => {
@@ -3225,9 +3226,14 @@ describe("DVD archive publication", () => {
     ).toBe(false);
   });
 
-  it.each(["canonical", "retention"] as const)(
-    "preserves an accepted boundary transaction when the %s map belongs to another Archive Request",
-    async (mismatchedMap) => {
+  it.each([
+    "the canonical map belongs to another Archive Request",
+    "the retention map belongs to another Archive Request",
+    "the canonical map is foreign and the retention map is malformed",
+    "only a foreign Archive Request retention map remains",
+  ] as const)(
+    "preserves boundary transaction state when %s",
+    async (mismatchCase) => {
       const fixture = await createInterruptedDamagedPublication(
         "archive-request:boundary-transaction-owner",
         "2".repeat(64),
@@ -3259,7 +3265,12 @@ describe("DVD archive publication", () => {
       };
       const foreignArchiveRequestId =
         "archive-request:foreign-boundary-transaction-owner";
-      if (mismatchedMap === "canonical") {
+      if (
+        mismatchCase ===
+          "the canonical map belongs to another Archive Request" ||
+        mismatchCase ===
+          "the canonical map is foreign and the retention map is malformed"
+      ) {
         canonicalMap.archiveRequestId = foreignArchiveRequestId;
       } else {
         retentionMap.archiveRequestId = foreignArchiveRequestId;
@@ -3270,11 +3281,27 @@ describe("DVD archive publication", () => {
       );
       writeFileSync(
         retentionMapPath,
-        `${JSON.stringify(retentionMap)}\n`,
+        mismatchCase ===
+            "the canonical map is foreign and the retention map is malformed"
+          ? "malformed retention state\n"
+          : `${JSON.stringify(retentionMap)}\n`,
       );
-      const preservedImage = readFileSync(fixture.rescuePaths.imagePath);
-      const preservedCanonicalMap = readFileSync(fixture.rescuePaths.mapPath);
-      const preservedRetentionMap = readFileSync(retentionMapPath);
+      if (
+        mismatchCase ===
+          "only a foreign Archive Request retention map remains"
+      ) {
+        unlinkSync(fixture.rescuePaths.mapPath);
+      }
+      const workspacePaths = [
+        fixture.rescuePaths.imagePath,
+        fixture.rescuePaths.mapPath,
+        retentionMapPath,
+      ];
+      const preservedWorkspace = new Map(
+        workspacePaths.flatMap((path) =>
+          existsSync(path) ? [[path, readFileSync(path)] as const] : []
+        ),
+      );
       const noCopy = vi.fn();
 
       await expect(preserveDvdArchive({
@@ -3291,13 +3318,14 @@ describe("DVD archive publication", () => {
       );
 
       expect(noCopy).not.toHaveBeenCalled();
-      expect(readFileSync(fixture.rescuePaths.imagePath)).toEqual(
-        preservedImage,
-      );
-      expect(readFileSync(fixture.rescuePaths.mapPath)).toEqual(
-        preservedCanonicalMap,
-      );
-      expect(readFileSync(retentionMapPath)).toEqual(preservedRetentionMap);
+      for (const path of workspacePaths) {
+        const preserved = preservedWorkspace.get(path);
+        if (preserved === undefined) {
+          expect(existsSync(path)).toBe(false);
+        } else {
+          expect(readFileSync(path)).toEqual(preserved);
+        }
+      }
       expect(
         readdirSync(fixture.root).some((name) => name.includes(".invalid-")),
       ).toBe(false);
