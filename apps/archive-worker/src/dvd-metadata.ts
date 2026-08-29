@@ -62,6 +62,27 @@ function boundedStreamText(value: string, field: string): string {
   return text;
 }
 
+function decodeStreamLanguage(
+  codeValue: string,
+  labelValue: string,
+  field: string,
+): { languageCode?: string; language: string } {
+  const languageCode = optionalBoundedText(
+    codeValue,
+    MAX_DVD_STREAM_TEXT_LENGTH,
+  );
+  if (
+    languageCode?.includes("\uFFFD") === true &&
+    labelValue.trim().length === 0
+  ) {
+    return { languageCode: "xx", language: "Unknown" };
+  }
+  return {
+    ...(languageCode ? { languageCode } : {}),
+    language: boundedStreamText(labelValue, field),
+  };
+}
+
 function recordStreamOrdinal(
   value: string,
   expectedCount: number,
@@ -166,9 +187,10 @@ export function decodeLsdvdNavigationMetadata(
         currentTitle.expectedAudioStreams,
         currentTitle.audioOrdinals,
       );
-      const languageCode = optionalBoundedText(
+      const language = decodeStreamLanguage(
         match[2],
-        MAX_DVD_STREAM_TEXT_LENGTH,
+        match[3],
+        "audio language",
       );
       const sourceId = parseStreamId(match[6]);
       if (currentTitle.audioSourceIds.has(sourceId)) {
@@ -177,8 +199,7 @@ export function decodeLsdvdNavigationMetadata(
       currentTitle.audioSourceIds.add(sourceId);
       currentTitle.audioStreams.push({
         id: sourceId,
-        ...(languageCode ? { languageCode } : {}),
-        language: boundedStreamText(match[3], "audio language"),
+        ...language,
         format: boundedStreamText(match[4], "audio format"),
         channels: boundedNonNegativeInteger(match[5], "channel count"),
       });
@@ -199,9 +220,10 @@ export function decodeLsdvdNavigationMetadata(
         currentTitle.expectedSubtitles,
         currentTitle.subtitleOrdinals,
       );
-      const languageCode = optionalBoundedText(
+      const language = decodeStreamLanguage(
         match[2],
-        MAX_DVD_STREAM_TEXT_LENGTH,
+        match[3],
+        "subtitle language",
       );
       const sourceId = parseStreamId(match[5]);
       if (currentTitle.subtitleSourceIds.has(sourceId)) {
@@ -210,8 +232,7 @@ export function decodeLsdvdNavigationMetadata(
       currentTitle.subtitleSourceIds.add(sourceId);
       currentTitle.subtitles.push({
         id: sourceId,
-        ...(languageCode ? { languageCode } : {}),
-        language: boundedStreamText(match[3], "subtitle language"),
+        ...language,
         content: boundedStreamText(match[4], "subtitle content"),
       });
       if (currentTitle.subtitles.length > MAX_DVD_SUBTITLES_PER_TITLE) {
