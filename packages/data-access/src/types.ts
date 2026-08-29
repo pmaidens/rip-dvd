@@ -843,6 +843,7 @@ export interface DetectedDiscListOptions extends ChronologicalListOptions {
 }
 
 export interface ArchiveJobListOptions extends ChronologicalListOptions {
+  archiveRequestIds?: readonly ArchiveRequestId[];
   detectedDiscIds?: readonly DetectedDiscId[];
 }
 

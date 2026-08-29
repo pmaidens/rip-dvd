@@ -961,8 +961,13 @@ retention fence; an interrupted or rejected staging transaction cannot be
 resumed as valid. A complete DVD image with unreadable sectors similarly
 becomes a durable, request-owned rescue image and bounded recovery map. A retry
 reads only the unresolved sectors, restores zeros for sectors that remain
-unreadable, and atomically replaces the map after the image is synced. The
-worker holds a fingerprint-scoped filesystem lock and
+unreadable, and atomically replaces the map after the image is synced. The same
+Archive Request may resume that map through another authorized Optical Drive
+only when the DVD metadata fingerprint and declared byte count match. The
+original Archive Request retains ownership while each Optical Drive adds its
+own Archive Job attempt; an ownership or disc-identity mismatch leaves the
+existing rescue workspace untouched. The worker holds a fingerprint-scoped
+filesystem lock and
 renews the current Archive Job claim before rescue recovery, mutation, and
 publication, so an expired attempt cannot overlap a successor that targets the
 same archive path. Rescue progress is
@@ -990,9 +995,12 @@ provenance and no duplicate execution attempt starts.
 The dashboard's HTTP snapshot carries review details. One-second SSE activity
 events retain up to 100 Detected Discs identified by current Disc Inspections.
 Archive Jobs are filtered to those inserted discs before the active and
-20-record terminal-history bounds are applied. Events include every present or
-enabled Optical Drive plus at most 20 disabled missing-history drives and carry
-no title maps. Bounded relationship rows preserve labels. The browser
+20-record terminal-history bounds are applied, then expanded to include related
+attempts for the same Archive Requests across other Optical Drives. Attempt
+history exposes Optical Drive display names but not device paths. Events
+include every present or enabled Optical Drive plus at most 20 disabled
+missing-history drives and carry no title maps. Bounded relationship rows
+preserve labels. The browser
 merges unchanged summaries into its cache and reloads HTTP details when a disc
 is first observed or rescanned.
 
