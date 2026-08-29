@@ -1171,7 +1171,7 @@ function writeSyntheticUdfLayout(
   const rootDirectoryBytes = writeUdfDirectory(image, 302, [
     udfFileIdentifier({
       childLba: 1,
-      fileCharacteristics: 8,
+      fileCharacteristics: 0x0a,
       legacySalvage,
     }),
     udfFileIdentifier({
@@ -1200,7 +1200,7 @@ function writeSyntheticUdfLayout(
     const extraDirectoryBytes = writeUdfDirectory(image, 316, [
       udfFileIdentifier({
         childLba: 1,
-        fileCharacteristics: 8,
+        fileCharacteristics: 0x0a,
         legacySalvage,
       }),
     ], legacySalvage);
@@ -1230,7 +1230,7 @@ function writeSyntheticUdfLayout(
   const videoDirectoryBytes = writeUdfDirectory(image, 304, [
     udfFileIdentifier({
       childLba: 1,
-      fileCharacteristics: 8,
+      fileCharacteristics: 0x0a,
       legacySalvage,
     }),
     ...videoDirectoryEntries.map(({ childLba, name }) =>
@@ -1318,7 +1318,10 @@ function relocateSyntheticUdfRootDirectory(
   image: Buffer,
   childOffset: number,
 ) {
-  const parent = udfFileIdentifier({ childLba: 1, fileCharacteristics: 8 });
+  const parent = udfFileIdentifier({
+    childLba: 1,
+    fileCharacteristics: 0x0a,
+  });
   const child = udfFileIdentifier({
     childLba: 3,
     fileCharacteristics: 2,
@@ -2089,7 +2092,7 @@ describe("retained DVD image layout completeness", () => {
     })).rejects.toThrow("DVD ISO root directory record is invalid");
   });
 
-  it("accepts a complete UDF-only layout", async () => {
+  it("accepts a complete UDF layout with standard parent-directory flags", async () => {
     const fixture = createSyntheticCompleteDvdImage({
       includeIso: false,
       includeUdf: true,
@@ -2744,6 +2747,43 @@ describe("retained DVD image layout completeness", () => {
       candidateBoundaryLba: 600,
       imagePath: fixture.imagePath,
     })).rejects.toThrow("DVD UDF parent directory reference is invalid");
+  });
+
+  it.each([
+    [
+      "a Parent entry without Directory",
+      0x08,
+      "DVD UDF parent directory reference is invalid",
+    ],
+    [
+      "a Deleted parent entry",
+      0x0e,
+      "DVD UDF directory entry length is invalid",
+    ],
+    [
+      "a Metadata parent entry",
+      0x1a,
+      "DVD UDF directory entry length is invalid",
+    ],
+  ])("rejects UDF directory flags for %s", async (
+    _case,
+    fileCharacteristics,
+    expectedError,
+  ) => {
+    const image = syntheticCompleteDvdImage({
+      includeIso: false,
+      includeUdf: true,
+    });
+    for (const directoryLba of [302, 304]) {
+      image[directoryLba * DVD_SECTOR_SIZE_BYTES + 18] = fileCharacteristics;
+      refreshUdfDirectoryTags(image, directoryLba);
+    }
+    const fixture = writeFixture(image);
+
+    await expect(proveDvdImageLayoutCompleteness({
+      candidateBoundaryLba: 600,
+      imagePath: fixture.imagePath,
+    })).rejects.toThrow(expectedError);
   });
 
   it.each([
