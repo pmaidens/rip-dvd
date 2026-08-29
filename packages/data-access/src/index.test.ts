@@ -11860,7 +11860,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     access.close();
   });
 
-  it("coalesces matching request creation before starting an Archive Job", () => {
+  it("rejects ambiguous matching requests before starting an Archive Job", () => {
     const access = openTestDatabase();
     const fingerprint = `dvdmeta-sha256:${"7".repeat(64)}`;
     const scanData = {
@@ -11892,24 +11892,16 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
     const first = completeEvidence("/dev/request-source-1", "generation-1");
     const second = completeEvidence("/dev/request-source-2", "generation-2");
     const candidate = completeEvidence("/dev/candidate", "generation-3");
-    const request = access.archiveRequests.create({
-      detectedDiscId: first.disc.id,
-    });
-    expect(access.archiveRequests.create({ detectedDiscId: second.disc.id }))
-      .toMatchObject({
-        id: request.id,
-        detectedDiscId: first.disc.id,
-      });
+    access.archiveRequests.create({ detectedDiscId: first.disc.id });
+    access.archiveRequests.create({ detectedDiscId: second.disc.id });
 
-    expect(access.archiveJobs.startForInspection(
-      candidate.inspection.id,
-      "coalesced-worker",
-    )).toMatchObject({
-      archiveRequestId: request.id,
-      detectedDiscId: candidate.disc.id,
-      attemptOrdinal: 1,
-    });
-    expect(access.archiveRequests.list()).toHaveLength(1);
+    expect(() =>
+      access.archiveJobs.startForInspection(
+        candidate.inspection.id,
+        "ambiguous-worker",
+      )
+    ).toThrow("Disc identity matches multiple pending Archive Requests");
+    expect(access.archiveJobs.list()).toEqual([]);
     access.close();
   });
 

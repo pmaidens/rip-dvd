@@ -540,11 +540,11 @@ function rescueStateFromMap(
       value.schemaVersion !== 2 &&
       value.schemaVersion !== 3) ||
     !("archiveRequestId" in value) ||
-    value.archiveRequestId !== identity.archiveRequestId ||
+    typeof value.archiveRequestId !== "string" ||
     !("fingerprint" in value) ||
-    value.fingerprint !== identity.fingerprint ||
+    typeof value.fingerprint !== "string" ||
     !("declaredByteCount" in value) ||
-    value.declaredByteCount !== identity.sizeBytes ||
+    typeof value.declaredByteCount !== "number" ||
     !("sectorSizeBytes" in value) ||
     value.sectorSizeBytes !== DVD_SECTOR_SIZE_BYTES ||
     !("totalSectorCount" in value) ||
@@ -555,14 +555,24 @@ function rescueStateFromMap(
     typeof value.imageFilesystemIdentity !== "string" ||
     !("recoveryProtocol" in value)
   ) {
+    throw new Error("DVD rescue state is invalid");
+  }
+  if (
+    value.archiveRequestId !== identity.archiveRequestId ||
+    value.fingerprint !== identity.fingerprint ||
+    value.declaredByteCount !== identity.sizeBytes
+  ) {
     throw new DvdRescueIdentityMismatchError();
   }
   const map = value as DvdRescueMap;
   parseBoundaryAcceptanceImageProof(map);
   const correctedRetryProof = parseCorrectedRetryRetainedSectorProof(map);
   if (map.schemaVersion === 1) {
-    if (map.recoveryProtocol === null || map.boundaryFailureProtocol !== undefined) {
-      throw new DvdRescueIdentityMismatchError();
+    if (
+      map.recoveryProtocol === null ||
+      map.boundaryFailureProtocol !== undefined
+    ) {
+      throw new Error("DVD rescue state is invalid");
     }
     return {
       boundaryFailure: null,
@@ -580,14 +590,14 @@ function rescueStateFromMap(
     map.imageByteCount! % DVD_SECTOR_SIZE_BYTES !== 0 ||
     map.boundaryFailureProtocol === undefined
   ) {
-    throw new DvdRescueIdentityMismatchError();
+    throw new Error("DVD rescue state is invalid");
   }
   const boundaryFailure = parseDvdReadFailureResultProtocol(
     JSON.stringify(map.boundaryFailureProtocol),
     identity.sizeBytes,
   );
   if (boundaryFailure.category !== "out_of_range") {
-    throw new DvdRescueIdentityMismatchError();
+    throw new Error("DVD rescue state is invalid");
   }
   if (map.schemaVersion === 3) {
     const acceptedByteCount = boundaryFailure.firstFailingLba *
@@ -597,7 +607,7 @@ function rescueStateFromMap(
       map.imageByteCount !== acceptedByteCount ||
       map.recoveryProtocol === null
     ) {
-      throw new DvdRescueIdentityMismatchError();
+      throw new Error("DVD rescue state is invalid");
     }
     const recoveryResult = parseDvdRecoveryResultProtocol(
       JSON.stringify(map.recoveryProtocol),
@@ -607,7 +617,7 @@ function rescueStateFromMap(
       correctedRetryProof !== null &&
       recoveryResult.outcome !== "damaged"
     ) {
-      throw new DvdRescueIdentityMismatchError();
+      throw new Error("DVD rescue state is invalid");
     }
     return {
       boundaryFailure,
@@ -623,7 +633,7 @@ function rescueStateFromMap(
       : map.imageByteCount !== identity.sizeBytes &&
         map.imageByteCount !== boundaryFailure.retainedImageByteCount
   ) {
-    throw new DvdRescueIdentityMismatchError();
+    throw new Error("DVD rescue state is invalid");
   }
   return {
     boundaryFailure,
