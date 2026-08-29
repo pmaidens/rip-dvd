@@ -535,16 +535,27 @@ function rescueStateFromMap(
   if (
     typeof value !== "object" ||
     value === null ||
-    !("schemaVersion" in value) ||
-    (value.schemaVersion !== 1 &&
-      value.schemaVersion !== 2 &&
-      value.schemaVersion !== 3) ||
     !("archiveRequestId" in value) ||
     typeof value.archiveRequestId !== "string" ||
     !("fingerprint" in value) ||
     typeof value.fingerprint !== "string" ||
     !("declaredByteCount" in value) ||
-    typeof value.declaredByteCount !== "number" ||
+    typeof value.declaredByteCount !== "number"
+  ) {
+    throw new Error("DVD rescue state is invalid");
+  }
+  if (
+    value.archiveRequestId !== identity.archiveRequestId ||
+    value.fingerprint !== identity.fingerprint ||
+    value.declaredByteCount !== identity.sizeBytes
+  ) {
+    throw new DvdRescueIdentityMismatchError();
+  }
+  if (
+    !("schemaVersion" in value) ||
+    (value.schemaVersion !== 1 &&
+      value.schemaVersion !== 2 &&
+      value.schemaVersion !== 3) ||
     !("sectorSizeBytes" in value) ||
     value.sectorSizeBytes !== DVD_SECTOR_SIZE_BYTES ||
     !("totalSectorCount" in value) ||
@@ -556,13 +567,6 @@ function rescueStateFromMap(
     !("recoveryProtocol" in value)
   ) {
     throw new Error("DVD rescue state is invalid");
-  }
-  if (
-    value.archiveRequestId !== identity.archiveRequestId ||
-    value.fingerprint !== identity.fingerprint ||
-    value.declaredByteCount !== identity.sizeBytes
-  ) {
-    throw new DvdRescueIdentityMismatchError();
   }
   const map = value as DvdRescueMap;
   parseBoundaryAcceptanceImageProof(map);

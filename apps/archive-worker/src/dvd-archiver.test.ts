@@ -3186,7 +3186,7 @@ describe("DVD archive publication", () => {
     expect(existsSync(join(root, `dvdmeta-${digest}.iso`))).toBe(false);
   });
 
-  it("preserves identity-mismatched rescue state without quarantine authority", async () => {
+  it("checks rescue ownership before recovery policy compatibility", async () => {
     const fixture = await createInterruptedDamagedPublication(
       "archive-request:disc:invalid-state-fence",
       "a".repeat(64),
@@ -3195,6 +3195,7 @@ describe("DVD archive publication", () => {
       readFileSync(fixture.rescuePaths.mapPath, "utf8"),
     );
     map.fingerprint = `dvdmeta-sha256:${"b".repeat(64)}`;
+    map.recoveryPolicyVersion = "retired-dvd-recovery-policy";
     writeFileSync(fixture.rescuePaths.mapPath, `${JSON.stringify(map)}\n`);
     const staleClaim = new Error("Stale Archive Job attempt before quarantine");
     const authorizeMutation = vi.fn(() => {
