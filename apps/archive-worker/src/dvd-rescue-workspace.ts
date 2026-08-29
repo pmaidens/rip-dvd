@@ -1352,9 +1352,12 @@ export async function loadDvdRescueWorkspace(
       imageProofIdentity: boundaryAcceptanceProof?.accepted ?? null,
     };
   } catch (error) {
+    const identityMismatch = error instanceof Error &&
+      error.message === "DVD rescue state does not match the Archive Request";
     if (
       invalidStatePolicy === "quarantine" &&
-      !preserveCorrectedRetryWorkspace
+      !preserveCorrectedRetryWorkspace &&
+      !identityMismatch
     ) {
       try {
         await quarantineWorkspaceFiles(
@@ -1369,10 +1372,7 @@ export async function loadDvdRescueWorkspace(
         });
       }
     }
-    if (
-      error instanceof Error &&
-      error.message === "DVD rescue state does not match the Archive Request"
-    ) {
+    if (identityMismatch) {
       throw error;
     }
     throw new Error("DVD rescue state is invalid", { cause: error });

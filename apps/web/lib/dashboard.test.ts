@@ -710,6 +710,100 @@ describe("readDashboardSnapshot", () => {
       });
   });
 
+  it("shows cross-drive rescue attempts by display name without device paths", () => {
+    const access = dataAccessFixture.create();
+    const fingerprint = `dvdmeta-sha256:${"a".repeat(64)}`;
+    const scanData = {
+      schemaVersion: 2 as const,
+      contentId: fingerprint,
+      titles: [{
+        number: 1,
+        durationSeconds: 3_600,
+        chapters: 10,
+        audioStreams: [],
+        subtitles: [],
+      }],
+    };
+    const firstDrive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/private-first-drive",
+      displayName: "First rescue drive",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const secondDrive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/private-second-drive",
+      displayName: "Second rescue drive",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const registerDisc = (
+      opticalDriveId: typeof firstDrive.id,
+      volumeLabel: string,
+    ) => {
+      const disc = access.catalog.registerDetectedDisc({
+        opticalDriveId,
+        discKind: "dvd",
+        fingerprint,
+        scanData,
+        volumeLabel,
+      });
+      access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+      return disc;
+    };
+    const firstDisc = registerDisc(firstDrive.id, "RESCUE_ATTEMPT_ONE");
+    const firstInspection = completeDiscInspection(
+      access,
+      firstDisc,
+      "first-generation",
+      4 * 2_048,
+    );
+    const request = access.archiveRequests.create({
+      detectedDiscId: firstDisc.id,
+    });
+    const firstAttempt = access.archiveJobs.startForInspection(
+      firstInspection.id,
+      "first-worker",
+    )!;
+    access.archiveJobs.fail(firstAttempt, "first drive could not read sector");
+    access.archiveRequests.retry(request.id);
+    access.discInspections.clearCurrent({
+      opticalDriveId: firstDrive.id,
+      reasonCode: "drive_unavailable",
+    });
+    const secondDisc = registerDisc(secondDrive.id, "RESCUE_ATTEMPT_TWO");
+    const secondInspection = completeDiscInspection(
+      access,
+      secondDisc,
+      "second-generation",
+      4 * 2_048,
+    );
+    const secondAttempt = access.archiveJobs.startForInspection(
+      secondInspection.id,
+      "second-worker",
+    )!;
+
+    const snapshot = readDashboardSnapshot(access, { activityLimit: 20 });
+
+    expect(snapshot.archiveJobs).toEqual({
+      status: "loaded",
+      items: expect.arrayContaining([
+        expect.objectContaining({
+          id: firstAttempt.id,
+          archiveRequestId: request.id,
+          attemptOrdinal: 1,
+          opticalDriveName: "First rescue drive",
+        }),
+        expect.objectContaining({
+          id: secondAttempt.id,
+          archiveRequestId: request.id,
+          attemptOrdinal: 2,
+          opticalDriveName: "Second rescue drive",
+        }),
+      ]),
+    });
+    expect(JSON.stringify(snapshot)).not.toContain("/dev/private");
+  });
+
   it("caps current Detected Discs in activity snapshots", () => {
     const access = dataAccessFixture.create();
     for (let index = 0; index <= DASHBOARD_ACTIVE_DISC_LIMIT; index += 1) {
