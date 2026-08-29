@@ -3361,7 +3361,7 @@ describe("archive worker polling", () => {
     },
   );
 
-  it("preserves cross-drive rescue outcomes and per-attempt evidence", async () => {
+  it("preserves rescue outcomes and attempt evidence across Optical Drives", async () => {
     const scenario = await exerciseWatchabilityWorkerScenario({
       ranges: [
         { startLba: 1, sectorCount: 1 },

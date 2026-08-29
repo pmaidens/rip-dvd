@@ -3225,6 +3225,85 @@ describe("DVD archive publication", () => {
     ).toBe(false);
   });
 
+  it.each(["canonical", "retention"] as const)(
+    "preserves an accepted boundary transaction when the %s map belongs to another Archive Request",
+    async (mismatchedMap) => {
+      const fixture = await createInterruptedDamagedPublication(
+        "archive-request:boundary-transaction-owner",
+        "2".repeat(64),
+      );
+      const retentionMapPath = `${fixture.rescuePaths.mapPath}.retaining`;
+      const canonicalMap = JSON.parse(
+        readFileSync(fixture.rescuePaths.mapPath, "utf8"),
+      );
+      const imageMetadata = lstatSync(
+        fixture.rescuePaths.imagePath,
+        { bigint: true },
+      );
+      const imageProof = {
+        ctimeNs: imageMetadata.ctimeNs.toString(),
+        mtimeNs: imageMetadata.mtimeNs.toString(),
+      };
+      const retentionMap = {
+        ...canonicalMap,
+        schemaVersion: 3,
+        imageByteCount: fixture.rescuedImage.byteLength,
+        boundaryFailureProtocol: createProvenBoundaryFailure(
+          fixture.rescuedImage.byteLength,
+          fixture.rescuedImage.byteLength / 2_048,
+        ),
+        boundaryAcceptanceImageProof: {
+          source: imageProof,
+          accepted: imageProof,
+        },
+      };
+      const foreignArchiveRequestId =
+        "archive-request:foreign-boundary-transaction-owner";
+      if (mismatchedMap === "canonical") {
+        canonicalMap.archiveRequestId = foreignArchiveRequestId;
+      } else {
+        retentionMap.archiveRequestId = foreignArchiveRequestId;
+      }
+      writeFileSync(
+        fixture.rescuePaths.mapPath,
+        `${JSON.stringify(canonicalMap)}\n`,
+      );
+      writeFileSync(
+        retentionMapPath,
+        `${JSON.stringify(retentionMap)}\n`,
+      );
+      const preservedImage = readFileSync(fixture.rescuePaths.imagePath);
+      const preservedCanonicalMap = readFileSync(fixture.rescuePaths.mapPath);
+      const preservedRetentionMap = readFileSync(retentionMapPath);
+      const noCopy = vi.fn();
+
+      await expect(preserveDvdArchive({
+        ...fixture.baseOptions,
+        runner: {
+          copy: noCopy,
+          isActive: () => false,
+          withDeviceInactive: vi.fn(async (_path, mutation) => mutation()),
+          waitForInactive: vi.fn(async () => undefined),
+        },
+        signal: new AbortController().signal,
+      })).rejects.toThrow(
+        "DVD rescue state does not match the Archive Request",
+      );
+
+      expect(noCopy).not.toHaveBeenCalled();
+      expect(readFileSync(fixture.rescuePaths.imagePath)).toEqual(
+        preservedImage,
+      );
+      expect(readFileSync(fixture.rescuePaths.mapPath)).toEqual(
+        preservedCanonicalMap,
+      );
+      expect(readFileSync(retentionMapPath)).toEqual(preservedRetentionMap);
+      expect(
+        readdirSync(fixture.root).some((name) => name.includes(".invalid-")),
+      ).toBe(false);
+    },
+  );
+
   it("recovers an accepted damaged publication after a worker restart", async () => {
     const originalsLibraryPath = createOriginalsLibrary();
     const root = realpathSync(originalsLibraryPath);
