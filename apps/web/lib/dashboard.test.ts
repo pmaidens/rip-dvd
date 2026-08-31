@@ -1138,7 +1138,7 @@ describe("readDashboardSnapshot", () => {
             subjectId: structured.job.id,
             attempt: 1,
             reasonCode: "archive_read.unknown",
-            failedPhase: "Preparation",
+            failedPhase: "Copying",
             retryability: "appropriate",
             explanation:
               "The Optical Drive returned an unclassified read failure.",
@@ -1164,6 +1164,7 @@ describe("readDashboardSnapshot", () => {
           id: boundary.job.id,
           investigation: expect.objectContaining({
             reasonCode: "archive_read.out_of_range",
+            failedPhase: "Copying",
             retryability: "after_action",
             explanation:
               "The Optical Drive reported a capacity or readable-boundary mismatch.",

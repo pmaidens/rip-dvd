@@ -521,7 +521,9 @@ function archiveJobInvestigation({
         ? "archive_failure.legacy"
         : "archive_failure.unclassified"
       : `archive_read.${job.readFailureCategory}`,
-    failedPhase: ARCHIVE_PHASE_LABELS[job.progressPhase],
+    failedPhase: job.readFailureStage === null
+      ? ARCHIVE_PHASE_LABELS[job.progressPhase]
+      : "Copying",
     occurredAt: (job.completedAt ?? job.updatedAt).toISOString(),
     retryability,
     retryabilityDetail: retryGuidance.detail,
