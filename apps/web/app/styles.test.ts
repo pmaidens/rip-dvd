@@ -173,6 +173,20 @@ describe("dashboard 320px fallback", () => {
     expect(selectorDeclarations(".status, .attention-mark")).toMatch(
       /flex:\s*0\s+0\s+auto/,
     );
+    expect(selectorDeclarations(".investigation-panel")).toMatch(
+      /width:\s*min\(48rem,\s*calc\(100vw\s*-\s*2rem\)\)/,
+    );
+    expect(
+      selectorDeclarations(
+        ".investigation-summary dd, .investigation-evidence dd",
+      ),
+    ).toMatch(/overflow-wrap:\s*anywhere/);
+    expect(selectorDeclarations(".investigation-report textarea")).toMatch(
+      /max-width:\s*100%/,
+    );
+    expect(styles.replace(/\s+/g, " ")).toMatch(
+      /@media \(max-width: 47rem\).*\.investigation-panel \{ width: calc\(100vw - 1rem\);.*\.investigation-summary, \.investigation-evidence dl \{ grid-template-columns: minmax\(0, 1fr\);/,
+    );
   });
 });
 
