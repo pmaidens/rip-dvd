@@ -4,19 +4,136 @@ import { describe, expect, it, vi } from "vitest";
 import type { OpticalDriveHardware } from "../../archive-worker/src/archive-worker.js";
 
 import type { DashboardSnapshot } from "../lib/dashboard";
+import { investigationReport } from "../lib/investigation";
 import {
   useDataAccessFixture,
   withSnapshotOverrides,
 } from "../test/data-access-fixture";
 import {
   pollArchiveWorkerForTest as pollArchiveWorker,
+  startArchiveJob,
 } from "../test/archive-job-fixture";
 import { createDashboardResponse } from "../app/api/dashboard/route";
+import { InvestigationPanel } from "./investigation-panel";
 import { DashboardView } from "./operations-dashboard";
 
 const dataAccessFixture = useDataAccessFixture();
 
 describe("database-backed dashboard over HTTP", () => {
+  it("carries safe Archive Job evidence through HTTP into the shared investigation panel and report", async () => {
+    const { access, databasePath } =
+      dataAccessFixture.createWithDatabasePath();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/private-optical-drive",
+      displayName: "Archive drive",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: "http-investigation-disc",
+      volumeLabel: "HTTP_INVESTIGATION_DISC",
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    const job = startArchiveJob(
+      access,
+      disc,
+      "raw-output /srv/private.iso --arg ENV=x claim=x",
+      8_192,
+    );
+    access.archiveJobs.updateProgress(job, {
+      phase: "copying",
+      progressPercent: 50,
+      progressBytes: 4_096,
+    });
+    access.archiveJobs.failWithReadFailure(job, {
+      stage: "initial_copy",
+      category: "hardware_error",
+      classifierVersion: "scsi-read-classifier-v1",
+      failingLba: 2,
+      requestedBlockCount: 8,
+      retryCount: 1,
+      scsiStatus: 2,
+      hostStatus: 0,
+      driverStatus: 8,
+      senseKey: 4,
+      asc: 68,
+      ascq: 0,
+    });
+
+    const response = createDashboardResponse(access);
+    const dashboard = (await response.json()) as DashboardSnapshot;
+    const serialized = JSON.stringify(dashboard);
+    const projectedJob = dashboard.archiveJobs.status === "loaded"
+      ? dashboard.archiveJobs.items.find(({ id }) => id === job.id)
+      : undefined;
+    expect(projectedJob?.investigation).toMatchObject({
+      incidentId: `archive-job-failure:${job.id}`,
+      attempt: 1,
+      reasonCode: "archive_read.hardware_error",
+      failedPhase: "Copying",
+      retryability: "appropriate",
+      explanation: "The Optical Drive reported a hardware fault.",
+      technicalEvidence: expect.arrayContaining([
+        { label: "Read stage", value: "Initial copy" },
+        { label: "Failing LBA", value: "2" },
+        { label: "Requested block count", value: "8" },
+        { label: "SCSI status", value: "2" },
+        { label: "Sense key", value: "4" },
+        { label: "ASC", value: "68" },
+      ]),
+    });
+    for (const secret of [
+      "/dev/private-optical-drive",
+      "/srv/private.iso",
+      databasePath,
+      "raw-output",
+      "--arg",
+      "ENV=x",
+      "claim=x",
+    ]) {
+      expect(serialized).not.toContain(secret);
+    }
+
+    const dashboardHtml = renderToStaticMarkup(
+      <DashboardView state={dashboard} />,
+    );
+    const investigation = projectedJob!.investigation!;
+    const panelHtml = renderToStaticMarkup(
+      <InvestigationPanel
+        investigation={investigation}
+        returnFocusTo={null}
+        onClose={() => undefined}
+      />,
+    );
+    const copiedReport = investigationReport(investigation);
+    expect(dashboardHtml).toContain("HTTP_INVESTIGATION_DISC");
+    expect(dashboardHtml).toContain("Investigate");
+    expect(panelHtml).toContain(`archive-job-failure:${job.id}`);
+    expect(panelHtml).toContain("hardware fault");
+    expect(panelHtml).toContain("Failing LBA");
+    expect(panelHtml).toContain(">2<");
+    expect(copiedReport).toContain(`Incident identifier: archive-job-failure:${job.id}`);
+    expect(copiedReport).toContain("- Failing LBA: 2");
+    expect(copiedReport).toContain(
+      "Suggested action: Retry the Archive Request once.",
+    );
+    for (const secret of [
+      "/dev/private-optical-drive",
+      "/srv/private.iso",
+      databasePath,
+      "raw-output",
+      "--arg",
+      "ENV=x",
+      "claim=x",
+    ]) {
+      expect(dashboardHtml).not.toContain(secret);
+      expect(panelHtml).not.toContain(secret);
+      expect(copiedReport).not.toContain(secret);
+    }
+  });
+
   it("renders persisted discovery and scan results including an already archived match", async () => {
     const access = dataAccessFixture.create();
     const hardware: OpticalDriveHardware = {

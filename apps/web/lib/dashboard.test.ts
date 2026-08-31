@@ -1028,7 +1028,11 @@ describe("readDashboardSnapshot", () => {
         expect.objectContaining({
           id: fixture.failedJob.id,
           status: "failed",
-          failureDetail: "The worker could not read its input.",
+          investigation: expect.objectContaining({
+            explanation: "The worker could not read its input.",
+            reasonCode: "archive_failure.unclassified",
+            retryability: "after_action",
+          }),
         }),
       ]),
     });
@@ -1048,7 +1052,10 @@ describe("readDashboardSnapshot", () => {
           id: fixture.failedJob.id,
           discLabel: "FAILED_DUPLICATE",
           status: "failed",
-          failureDetail: "The worker could not read its input.",
+          investigation: expect.objectContaining({
+            explanation: "The worker could not read its input.",
+            retryability: "not_appropriate",
+          }),
         }),
         expect.objectContaining({
           id: publishedJob.id,
@@ -1126,23 +1133,56 @@ describe("readDashboardSnapshot", () => {
       items: expect.arrayContaining([
         expect.objectContaining({
           id: structured.job.id,
-          failureDetail:
-            "The Optical Drive returned an unclassified read failure. Retry the Archive Request; if it fails again, inspect the disc and drive.",
-          failureDiagnostic:
-            "Initial copy · LBA 1024 · requested 16 blocks · retry 2 · SCSI/host/driver 2/0/8 · sense key/ASC/ASCQ 5/32/0 · classifier scsi-read-classifier-v1",
+          investigation: expect.objectContaining({
+            incidentId: `archive-job-failure:${structured.job.id}`,
+            subjectId: structured.job.id,
+            attempt: 1,
+            reasonCode: "archive_read.unknown",
+            failedPhase: "Preparation",
+            retryability: "appropriate",
+            explanation:
+              "The Optical Drive returned an unclassified read failure.",
+            technicalEvidence: expect.arrayContaining([
+              { label: "Read stage", value: "Initial copy" },
+              { label: "Failing LBA", value: "1024" },
+              { label: "Requested block count", value: "16" },
+              { label: "Retry ordinal", value: "2" },
+              { label: "SCSI status", value: "2" },
+              { label: "Host status", value: "0" },
+              { label: "Driver status", value: "8" },
+              { label: "Sense key", value: "5" },
+              { label: "ASC", value: "32" },
+              { label: "ASCQ", value: "0" },
+              {
+                label: "Classifier version",
+                value: "scsi-read-classifier-v1",
+              },
+            ]),
+          }),
         }),
         expect.objectContaining({
           id: boundary.job.id,
-          failureDetail:
-            "The Optical Drive reported a capacity or readable-boundary mismatch. Retry the Archive Request or manually choose another Optical Drive.",
-          failureDiagnostic:
-            "Rescue resume · LBA 2048 · requested 31 blocks · retry 0 · SCSI/host/driver 2/0/8 · sense key/ASC/ASCQ 5/33/0 · classifier scsi-read-classifier-v1",
+          investigation: expect.objectContaining({
+            reasonCode: "archive_read.out_of_range",
+            retryability: "after_action",
+            explanation:
+              "The Optical Drive reported a capacity or readable-boundary mismatch.",
+            technicalEvidence: expect.arrayContaining([
+              { label: "Read stage", value: "Rescue resume" },
+              { label: "Failing LBA", value: "2048" },
+              { label: "Requested block count", value: "31" },
+              { label: "ASC", value: "33" },
+            ]),
+          }),
         }),
         expect.objectContaining({
           id: historical.job.id,
-          failureDetail:
-            "The Archive Job failed with an unknown diagnostic because structured read evidence is unavailable.",
-          failureDiagnostic: "Structured read evidence unavailable.",
+          investigation: expect.objectContaining({
+            reasonCode: "archive_failure.legacy",
+            explanation:
+              "The Archive Job failed with an unknown diagnostic because structured read evidence is unavailable.",
+            technicalEvidence: [],
+          }),
         }),
       ]),
     });
@@ -1165,8 +1205,10 @@ describe("readDashboardSnapshot", () => {
   it.each([
     {
       category: "not_ready",
-      failureDetail:
-        "The Optical Drive was not ready to read the disc. Check that the disc is inserted and the drive is available, then retry the Archive Request.",
+      explanation: "The Optical Drive was not ready to read the disc.",
+      suggestedAction:
+        "Check that the expected disc is inserted and the Optical Drive is available, then retry the Archive Request.",
+      retryability: "after_action",
       status: {
         scsiStatus: 2,
         hostStatus: 0,
@@ -1178,8 +1220,10 @@ describe("readDashboardSnapshot", () => {
     },
     {
       category: "unit_attention",
-      failureDetail:
-        "The Optical Drive reported a media-state change. Confirm that the expected disc is still inserted, then retry the Archive Request.",
+      explanation: "The Optical Drive reported a media-state change.",
+      suggestedAction:
+        "Confirm that the expected disc is still inserted, then retry the Archive Request.",
+      retryability: "after_action",
       status: {
         scsiStatus: 2,
         hostStatus: 0,
@@ -1191,8 +1235,10 @@ describe("readDashboardSnapshot", () => {
     },
     {
       category: "hardware_error",
-      failureDetail:
-        "The Optical Drive reported a hardware fault. Retry the Archive Request; if it fails again with another disc, inspect or replace the Optical Drive.",
+      explanation: "The Optical Drive reported a hardware fault.",
+      suggestedAction:
+        "Retry the Archive Request once. If another disc fails the same way, inspect or replace the Optical Drive.",
+      retryability: "appropriate",
       status: {
         scsiStatus: 2,
         hostStatus: 0,
@@ -1204,8 +1250,10 @@ describe("readDashboardSnapshot", () => {
     },
     {
       category: "transport_error",
-      failureDetail:
-        "Communication with the Optical Drive failed. Check the drive connection and host passthrough, then retry the Archive Request.",
+      explanation: "Communication with the Optical Drive failed.",
+      suggestedAction:
+        "Check the Optical Drive connection and host passthrough, then retry the Archive Request.",
+      retryability: "after_action",
       status: {
         scsiStatus: 2,
         hostStatus: 7,
@@ -1217,8 +1265,10 @@ describe("readDashboardSnapshot", () => {
     },
     {
       category: "protection_error",
-      failureDetail:
-        "DVD copy protection or region access failed. Check DVD CSS support and the Optical Drive region, then retry the Archive Request.",
+      explanation: "DVD copy protection or region access failed.",
+      suggestedAction:
+        "Correct DVD CSS support or the Optical Drive region, then retry the Archive Request.",
+      retryability: "after_action",
       status: {
         scsiStatus: 2,
         hostStatus: 0,
@@ -1230,7 +1280,9 @@ describe("readDashboardSnapshot", () => {
     },
   ] as const)("projects path-free $category guidance with bounded evidence", ({
     category,
-    failureDetail,
+    explanation,
+    suggestedAction,
+    retryability,
     status,
   }) => {
     const access = dataAccessFixture.create();
@@ -1264,9 +1316,28 @@ describe("readDashboardSnapshot", () => {
       items: expect.arrayContaining([
         expect.objectContaining({
           id: job.id,
-          failureDetail,
-          failureDiagnostic:
-            `Rescue resume · LBA 2048 · requested 1 blocks · retry 3 · SCSI/host/driver ${status.scsiStatus}/${status.hostStatus}/${status.driverStatus} · sense key/ASC/ASCQ ${status.senseKey}/${status.asc}/${status.ascq} · classifier scsi-read-classifier-v1`,
+          investigation: expect.objectContaining({
+            reasonCode: `archive_read.${category}`,
+            explanation,
+            suggestedAction,
+            retryability,
+            technicalEvidence: expect.arrayContaining([
+              { label: "Read stage", value: "Rescue resume" },
+              { label: "Failing LBA", value: "2048" },
+              { label: "Requested block count", value: "1" },
+              { label: "Retry ordinal", value: "3" },
+              { label: "SCSI status", value: String(status.scsiStatus) },
+              { label: "Host status", value: String(status.hostStatus) },
+              { label: "Driver status", value: String(status.driverStatus) },
+              { label: "Sense key", value: String(status.senseKey) },
+              { label: "ASC", value: String(status.asc) },
+              { label: "ASCQ", value: String(status.ascq) },
+              {
+                label: "Classifier version",
+                value: "scsi-read-classifier-v1",
+              },
+            ]),
+          }),
         }),
       ]),
     });
@@ -1437,10 +1508,13 @@ describe("readDashboardSnapshot", () => {
         status: "loaded",
         items: expect.arrayContaining([
           expect.objectContaining({
-            failureDetail:
-              "The worker reported an unclassified failure. Check the worker logs for the full diagnostic.",
-            failureDiagnostic: "Structured read evidence unavailable.",
             id: expect.any(String),
+            investigation: expect.objectContaining({
+              reasonCode: "archive_failure.unclassified",
+              explanation:
+                "The worker reported an unclassified failure. Check the worker logs for the full diagnostic.",
+              technicalEvidence: [],
+            }),
           }),
         ]),
       });

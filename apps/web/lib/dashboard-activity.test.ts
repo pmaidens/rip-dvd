@@ -141,6 +141,102 @@ describe("watchDashboardActivity", () => {
     stop();
   });
 
+  it("hydrates a newly failed Archive Job before publishing its compact activity update", async () => {
+    const initial = emptySnapshot("2026-08-31T06:00:00.000Z");
+    initial.archiveJobs = {
+      status: "loaded",
+      items: [{
+        id: "archive-1",
+        activityRevision: "2026-08-31T06:00:00.000Z",
+        detectedDiscId: "disc-1",
+        archiveRequestId: "request-1",
+        attemptOrdinal: 1,
+        discLabel: "LIVE_FAILURE",
+        opticalDriveName: "Upper drive",
+        status: "running",
+        progressPhase: "copying",
+        progressPercent: 50,
+        progressBytes: 4_096,
+        lastProgressAt: "2026-08-31T06:00:00.000Z",
+      }],
+    };
+    const compactFailure = structuredClone(initial);
+    compactFailure.generatedAt = "2026-08-31T06:00:01.000Z";
+    if (compactFailure.archiveJobs.status === "loaded") {
+      Object.assign(compactFailure.archiveJobs.items[0]!, {
+        activityRevision: "2026-08-31T06:00:01.000Z",
+        status: "failed",
+      });
+    }
+    const detailedFailure = structuredClone(compactFailure);
+    if (detailedFailure.archiveJobs.status === "loaded") {
+      detailedFailure.archiveJobs.items[0]!.investigation = {
+        incidentId: "archive-job-failure:archive-1",
+        worker: "Archive Worker",
+        subjectType: "Archive Job",
+        subjectId: "archive-1",
+        attempt: 1,
+        reasonCode: "archive_read.hardware_error",
+        failedPhase: "Copying",
+        occurredAt: "2026-08-31T06:00:01.000Z",
+        retryability: "appropriate",
+        retryabilityDetail:
+          "The current Archive Request is waiting for a retry.",
+        explanation: "The Optical Drive reported a hardware fault.",
+        suggestedAction: "Retry the Archive Request once.",
+        technicalEvidence: [{ label: "Sense key", value: "4" }],
+      };
+    }
+    const loadSnapshot = vi.fn()
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(detailedFailure);
+    let dashboardListener: ((event: MessageEvent<string>) => void) | undefined;
+    const onSnapshot = vi.fn();
+    const stop = watchDashboardActivity({
+      loadSnapshot,
+      openEventSource: () => ({
+        onerror: null,
+        onopen: null,
+        addEventListener(_type, listener) {
+          dashboardListener = listener;
+        },
+        close: vi.fn(),
+      }),
+      onSnapshot,
+      onInitialLoadError: vi.fn(),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    dashboardListener?.({
+      data: JSON.stringify(compactFailure),
+    } as MessageEvent<string>);
+    await flushUntil(() => loadSnapshot.mock.calls.length === 2);
+    await flushUntil(() => {
+      const latest = onSnapshot.mock.calls.at(-1)?.[0] as
+        | DashboardSnapshot
+        | undefined;
+      return latest?.archiveJobs.status === "loaded" &&
+        latest.archiveJobs.items[0]?.investigation !== undefined;
+    });
+
+    expect(
+      onSnapshot.mock.calls.some((call) => {
+        const snapshot = call[0] as DashboardSnapshot;
+        return snapshot.archiveJobs.status === "loaded" &&
+          snapshot.archiveJobs.items.some(
+            (job) => job.status === "failed" && job.investigation === undefined,
+          );
+      }),
+    ).toBe(false);
+    dashboardListener?.({
+      data: JSON.stringify(compactFailure),
+    } as MessageEvent<string>);
+    await Promise.resolve();
+    expect(loadSnapshot).toHaveBeenCalledTimes(2);
+    stop();
+  });
+
   it("retains every detail version from a full bounded activity snapshot", async () => {
     const detailed = emptySnapshot("2026-07-26T16:00:00.000Z");
     detailed.detectedDiscs = {
