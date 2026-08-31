@@ -189,7 +189,6 @@ interface DashboardJobItemProps {
   progressPercent: number;
   progressDetail?: string | null;
   failureDetail?: string | null;
-  failureDiagnostic?: string | null;
   failureAction?: React.ReactNode;
   annotation?: React.ReactNode;
   action?: React.ReactNode;
@@ -203,7 +202,6 @@ function DashboardJobItem({
   progressPercent,
   progressDetail,
   failureDetail,
-  failureDiagnostic,
   failureAction,
   annotation,
   action,
@@ -234,12 +232,6 @@ function DashboardJobItem({
             <div className="job-failure-detail">
               <strong>Failure details</strong>
               <p>{failureDetail ?? "No additional details were recorded."}</p>
-              {failureDiagnostic ? (
-                <>
-                  <strong>Structured diagnostic</strong>
-                  <p>{failureDiagnostic}</p>
-                </>
-              ) : null}
             </div>
           </details>
         )
