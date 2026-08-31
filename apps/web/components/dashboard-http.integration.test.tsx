@@ -50,7 +50,8 @@ describe("database-backed dashboard over HTTP", () => {
     access.archiveJobs.failWithReadFailure(job, {
       stage: "initial_copy",
       category: "hardware_error",
-      classifierVersion: "scsi-read-classifier-v1",
+      classifierVersion:
+        "/dev/classifier-drive --classifier-arg ENV=classifier claim=classifier",
       failingLba: 2,
       requestedBlockCount: 8,
       retryCount: 1,
@@ -82,6 +83,10 @@ describe("database-backed dashboard over HTTP", () => {
         { label: "SCSI status", value: "2" },
         { label: "Sense key", value: "4" },
         { label: "ASC", value: "68" },
+        {
+          label: "Classifier version",
+          value: "Unrecognized classifier version",
+        },
       ]),
     });
     for (const secret of [
@@ -92,6 +97,10 @@ describe("database-backed dashboard over HTTP", () => {
       "--arg",
       "ENV=x",
       "claim=x",
+      "/dev/classifier-drive",
+      "--classifier-arg",
+      "ENV=classifier",
+      "claim=classifier",
     ]) {
       expect(serialized).not.toContain(secret);
     }
@@ -127,6 +136,10 @@ describe("database-backed dashboard over HTTP", () => {
       "--arg",
       "ENV=x",
       "claim=x",
+      "/dev/classifier-drive",
+      "--classifier-arg",
+      "ENV=classifier",
+      "claim=classifier",
     ]) {
       expect(dashboardHtml).not.toContain(secret);
       expect(panelHtml).not.toContain(secret);

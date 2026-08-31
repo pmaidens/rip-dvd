@@ -441,7 +441,10 @@ function archiveReadFailureEvidence(
     { label: "ASCQ", value: recorded(job.readFailureAscq) },
     {
       label: "Classifier version",
-      value: recorded(job.readFailureClassifierVersion),
+      value: job.readFailureClassifierVersion === "scsi-read-classifier-v1" ||
+          job.readFailureClassifierVersion === "scsi-read-classifier-v2"
+        ? job.readFailureClassifierVersion
+        : "Unrecognized classifier version",
     },
   ];
 }
@@ -476,26 +479,37 @@ function archiveJobInvestigation({
   const retryability: InvestigationRetryability = retryIsAvailable
     ? presentation.retryability
     : "not_appropriate";
-  const retryabilityDetail = retryIsAvailable
-    ? presentation.retryability === "appropriate"
-      ? "The current Archive Request is waiting for a retry."
-      : "The current Archive Request can be retried after completing the suggested action."
+  const retryGuidance = retryIsAvailable
+    ? {
+        detail: presentation.retryability === "appropriate"
+          ? "The current Archive Request is waiting for a retry."
+          : "The current Archive Request can be retried after completing the suggested action.",
+        suggestedAction: presentation.suggestedAction,
+      }
     : !isLatestAttempt
-      ? "A newer Archive Job attempt exists for this Archive Request."
+      ? {
+          detail: "A newer Archive Job attempt exists for this Archive Request.",
+          suggestedAction:
+            "Investigate the latest Archive Job attempt. Retry belongs to the Archive Request, not this historical attempt.",
+        }
       : requestStatus === "fulfilled"
-        ? "The Archive Request was fulfilled by another attempt."
+        ? {
+            detail: "The Archive Request was fulfilled by another attempt.",
+            suggestedAction:
+              "No retry is needed. Keep this report only if the historical failure still needs investigation.",
+          }
         : requestStatus === "cancelled"
-          ? "The Archive Request was cancelled."
-          : "The Archive Request is not currently waiting for a retry.";
-  const suggestedAction = retryIsAvailable
-    ? presentation.suggestedAction
-    : !isLatestAttempt
-      ? "Investigate the latest Archive Job attempt. Retry belongs to the Archive Request, not this historical attempt."
-      : requestStatus === "fulfilled"
-        ? "No retry is needed. Keep this report only if the historical failure still needs investigation."
-        : requestStatus === "cancelled"
-          ? "No retry is available for the cancelled Archive Request."
-          : "Review the current Archive Request state before deciding whether to retry.";
+          ? {
+              detail: "The Archive Request was cancelled.",
+              suggestedAction:
+                "No retry is available for the cancelled Archive Request.",
+            }
+          : {
+              detail:
+                "The Archive Request is not currently waiting for a retry.",
+              suggestedAction:
+                "Review the current Archive Request state before deciding whether to retry.",
+            };
   return {
     incidentId: `archive-job-failure:${job.id}`,
     worker: "Archive Worker",
@@ -510,9 +524,9 @@ function archiveJobInvestigation({
     failedPhase: ARCHIVE_PHASE_LABELS[job.progressPhase],
     occurredAt: (job.completedAt ?? job.updatedAt).toISOString(),
     retryability,
-    retryabilityDetail,
+    retryabilityDetail: retryGuidance.detail,
     explanation: presentation.explanation,
-    suggestedAction,
+    suggestedAction: retryGuidance.suggestedAction,
     technicalEvidence: archiveReadFailureEvidence(job),
   };
 }

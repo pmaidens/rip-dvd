@@ -1002,6 +1002,86 @@ describe("DashboardView", () => {
     await act(async () => root.unmount());
   });
 
+  it("updates an open investigation when live Archive Request context changes", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const dashboardState = (
+      investigation: DashboardInvestigation,
+    ): DashboardLoadState => ({
+      opticalDrives: { status: "loaded", items: [] },
+      detectedDiscs: { status: "loaded", items: [] },
+      archiveJobs: {
+        status: "loaded",
+        items: [{
+          id: "live-context-archive",
+          detectedDiscId: "live-context-disc",
+          archiveRequestId: "live-context-request",
+          attemptOrdinal: 1,
+          discLabel: "LIVE_CONTEXT_DISC",
+          opticalDriveName: "Upper drive",
+          status: "failed",
+          progressPhase: "copying",
+          progressPercent: 28,
+          progressBytes: 28,
+          lastProgressAt: "2026-07-22T07:58:00.000Z",
+          investigation,
+        }],
+      },
+      encodeJobs: { status: "loaded", items: [] },
+      catalogReview: { status: "loaded", items: [] },
+    });
+    await act(async () => {
+      root.render(
+        <DashboardView
+          section="discs"
+          state={dashboardState(archiveInvestigation({
+            incidentId: "archive-job-failure:live-context-archive",
+            subjectId: "live-context-archive",
+          }))}
+        />,
+      );
+    });
+    const trigger = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Investigate",
+    )!;
+    await act(async () => trigger.click());
+    expect(container.querySelector('[role="dialog"]')?.textContent).toContain(
+      "The current Archive Request is waiting for a retry.",
+    );
+
+    await act(async () => {
+      root.render(
+        <DashboardView
+          section="discs"
+          state={dashboardState(archiveInvestigation({
+            incidentId: "archive-job-failure:live-context-archive",
+            subjectId: "live-context-archive",
+            retryability: "not_appropriate",
+            retryabilityDetail:
+              "A newer Archive Job attempt exists for this Archive Request.",
+            suggestedAction:
+              "Investigate the latest Archive Job attempt. Retry belongs to the Archive Request, not this historical attempt.",
+          }))}
+        />,
+      );
+    });
+
+    const updatedDialog = container.querySelector('[role="dialog"]');
+    expect(updatedDialog?.textContent).toContain("Not appropriate");
+    expect(updatedDialog?.textContent).toContain(
+      "A newer Archive Job attempt exists for this Archive Request.",
+    );
+    expect(updatedDialog?.textContent).toContain(
+      "Investigate the latest Archive Job attempt.",
+    );
+    expect(updatedDialog?.textContent).not.toContain(
+      "The current Archive Request is waiting for a retry.",
+    );
+    await act(async () => root.unmount());
+  });
+
   it("offers the shared investigation action for current and older failed Archive Job attempts", () => {
     const html = render({
       opticalDrives: { status: "loaded", items: [] },

@@ -237,6 +237,147 @@ describe("watchDashboardActivity", () => {
     stop();
   });
 
+  it("rehydrates a failed Archive Job when a retry changes its investigation context", async () => {
+    const initial = emptySnapshot("2026-08-31T06:00:00.000Z");
+    const retryableInvestigation = {
+      incidentId: "archive-job-failure:archive-1",
+      worker: "Archive Worker",
+      subjectType: "Archive Job",
+      subjectId: "archive-1",
+      attempt: 1,
+      reasonCode: "archive_read.hardware_error",
+      failedPhase: "Copying",
+      occurredAt: "2026-08-31T06:00:00.000Z",
+      retryability: "appropriate" as const,
+      retryabilityDetail: "The current Archive Request is waiting for a retry.",
+      explanation: "The Optical Drive reported a hardware fault.",
+      suggestedAction: "Retry the Archive Request once.",
+      technicalEvidence: [],
+    };
+    initial.detectedDiscs = {
+      status: "loaded",
+      items: [{
+        ...detectedDiscSummary(1),
+        id: "disc-1",
+        status: "approved",
+        archiveRequest: {
+          id: "request-1",
+          status: "needs_attention",
+          attemptCount: 1,
+          latestFailureDetail: "The Optical Drive reported a hardware fault.",
+          createdAt: "2026-08-31T05:58:00.000Z",
+          updatedAt: "2026-08-31T06:00:00.000Z",
+        },
+      }],
+    };
+    initial.archiveJobs = {
+      status: "loaded",
+      items: [{
+        id: "archive-1",
+        activityRevision: "2026-08-31T06:00:00.000Z",
+        detectedDiscId: "disc-1",
+        archiveRequestId: "request-1",
+        attemptOrdinal: 1,
+        discLabel: "LIVE_RETRY",
+        opticalDriveName: "Upper drive",
+        status: "failed",
+        progressPhase: "copying",
+        progressPercent: 50,
+        progressBytes: 4_096,
+        lastProgressAt: "2026-08-31T06:00:00.000Z",
+        investigation: retryableInvestigation,
+      }],
+    };
+    const compactRetry = structuredClone(initial);
+    compactRetry.generatedAt = "2026-08-31T06:00:01.000Z";
+    if (compactRetry.detectedDiscs.status === "loaded") {
+      Object.assign(compactRetry.detectedDiscs.items[0]!.archiveRequest!, {
+        status: "running",
+        attemptCount: 2,
+        updatedAt: "2026-08-31T06:00:01.000Z",
+      });
+    }
+    if (compactRetry.archiveJobs.status === "loaded") {
+      delete compactRetry.archiveJobs.items[0]!.investigation;
+      compactRetry.archiveJobs.items.push({
+        id: "archive-2",
+        activityRevision: "2026-08-31T06:00:01.000Z",
+        detectedDiscId: "disc-1",
+        archiveRequestId: "request-1",
+        attemptOrdinal: 2,
+        discLabel: "LIVE_RETRY",
+        opticalDriveName: "Upper drive",
+        status: "running",
+        progressPhase: "preparing",
+        progressPercent: 0,
+        progressBytes: 0,
+        lastProgressAt: "2026-08-31T06:00:01.000Z",
+      });
+    }
+    const detailedRetry = structuredClone(compactRetry);
+    detailedRetry.generatedAt = "2026-08-31T06:00:02.000Z";
+    if (detailedRetry.archiveJobs.status === "loaded") {
+      detailedRetry.archiveJobs.items[0]!.investigation = {
+        ...retryableInvestigation,
+        retryability: "not_appropriate",
+        retryabilityDetail:
+          "A newer Archive Job attempt exists for this Archive Request.",
+        suggestedAction:
+          "Investigate the latest Archive Job attempt. Retry belongs to the Archive Request, not this historical attempt.",
+      };
+    }
+    const loadSnapshot = vi.fn()
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(detailedRetry);
+    let dashboardListener: ((event: MessageEvent<string>) => void) | undefined;
+    const onSnapshot = vi.fn();
+    const stop = watchDashboardActivity({
+      loadSnapshot,
+      openEventSource: () => ({
+        onerror: null,
+        onopen: null,
+        addEventListener(_type, listener) {
+          dashboardListener = listener;
+        },
+        close: vi.fn(),
+      }),
+      onSnapshot,
+      onInitialLoadError: vi.fn(),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    dashboardListener?.({
+      data: JSON.stringify(compactRetry),
+    } as MessageEvent<string>);
+    await flushUntil(() => loadSnapshot.mock.calls.length === 2);
+    await flushUntil(() => {
+      const latest = onSnapshot.mock.calls.at(-1)?.[0] as
+        | DashboardSnapshot
+        | undefined;
+      return latest?.archiveJobs.status === "loaded" &&
+        latest.archiveJobs.items[0]?.investigation?.retryability ===
+          "not_appropriate";
+    });
+
+    expect(onSnapshot).toHaveBeenCalledTimes(2);
+    expect(
+      (onSnapshot.mock.calls[1]![0] as DashboardSnapshot).archiveJobs,
+    ).toEqual(expect.objectContaining({
+      status: "loaded",
+      items: expect.arrayContaining([
+        expect.objectContaining({
+          id: "archive-1",
+          investigation: expect.objectContaining({
+            retryability: "not_appropriate",
+            suggestedAction: expect.stringContaining("latest Archive Job"),
+          }),
+        }),
+      ]),
+    }));
+    stop();
+  });
+
   it("retains every detail version from a full bounded activity snapshot", async () => {
     const detailed = emptySnapshot("2026-07-26T16:00:00.000Z");
     detailed.detectedDiscs = {

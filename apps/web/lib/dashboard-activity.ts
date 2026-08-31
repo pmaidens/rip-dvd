@@ -1,6 +1,8 @@
 import type {
+  ArchiveRequestStatus,
   CatalogReviewArchiveView,
   CompletedCatalogReviewOutcome,
+  DetectedDiscStatus,
 } from "@rip-dvd/data-access";
 
 import type {
@@ -69,6 +71,57 @@ function rememberBoundedEntry<Key>(
   }
 }
 
+interface ArchiveJobInvestigationContext {
+  requestStatus: ArchiveRequestStatus | null;
+  discStatus: DetectedDiscStatus | null;
+  latestJobId: string | null;
+}
+
+function archiveJobInvestigationContexts(
+  snapshot: DashboardSnapshot,
+): Map<string, ArchiveJobInvestigationContext> | undefined {
+  if (
+    snapshot.archiveJobs.status !== "loaded" ||
+    snapshot.detectedDiscs.status !== "loaded"
+  ) {
+    return undefined;
+  }
+  const discsById = new Map(
+    snapshot.detectedDiscs.items.map((disc) => [disc.id, disc]),
+  );
+  const latestJobByRequestId = new Map<string, { id: string; attempt: number }>();
+  for (const job of snapshot.archiveJobs.items) {
+    const latest = latestJobByRequestId.get(job.archiveRequestId);
+    if (latest === undefined || job.attemptOrdinal > latest.attempt) {
+      latestJobByRequestId.set(job.archiveRequestId, {
+        id: job.id,
+        attempt: job.attemptOrdinal,
+      });
+    }
+  }
+  return new Map(snapshot.archiveJobs.items.map((job) => {
+    const disc = discsById.get(job.detectedDiscId);
+    const request = disc?.archiveRequest?.id === job.archiveRequestId
+      ? disc.archiveRequest
+      : undefined;
+    return [job.id, {
+      requestStatus: request?.status ?? null,
+      discStatus: disc?.status ?? null,
+      latestJobId: latestJobByRequestId.get(job.archiveRequestId)?.id ?? null,
+    }];
+  }));
+}
+
+function investigationContextMatches(
+  left: ArchiveJobInvestigationContext | undefined,
+  right: ArchiveJobInvestigationContext | undefined,
+): boolean {
+  return left !== undefined && right !== undefined &&
+    left.requestStatus === right.requestStatus &&
+    left.discStatus === right.discStatus &&
+    left.latestJobId === right.latestJobId;
+}
+
 function mergeActivitySnapshot(
   detailed: DashboardSnapshot,
   activity: DashboardSnapshot,
@@ -96,6 +149,8 @@ function mergeActivitySnapshot(
     detailed.archiveJobs.status === "loaded" &&
       activity.archiveJobs.status === "loaded"
       ? (() => {
+          const detailedContexts = archiveJobInvestigationContexts(detailed);
+          const activityContexts = archiveJobInvestigationContexts(activity);
           const detailedById = new Map(
             detailed.archiveJobs.items.map((job) => [job.id, job]),
           );
@@ -105,7 +160,11 @@ function mergeActivitySnapshot(
               const previous = detailedById.get(job.id);
               const investigation = job.investigation ??
                 (previous?.status === job.status &&
-                    previous.activityRevision === job.activityRevision
+                    previous.activityRevision === job.activityRevision &&
+                    investigationContextMatches(
+                      detailedContexts?.get(job.id),
+                      activityContexts?.get(job.id),
+                    )
                   ? previous.investigation
                   : undefined);
               return {
@@ -304,6 +363,7 @@ export function watchDashboardActivity({
     if (!active || investigationRefresh !== undefined) {
       return;
     }
+    let successfulRefreshStillMissingInvestigation = false;
     investigationRefresh = snapshotLoader(catalogReviewCursor)
       .then((detailed) => {
         if (!active) {
@@ -312,6 +372,8 @@ export function watchDashboardActivity({
         latestSnapshot = latestSnapshot === undefined
           ? detailed
           : mergeActivitySnapshot(detailed, latestSnapshot);
+        successfulRefreshStillMissingInvestigation =
+          hasMissingArchiveJobInvestigation(latestSnapshot);
         publishLatestSnapshot();
       })
       .catch(() => {
@@ -319,6 +381,9 @@ export function watchDashboardActivity({
       })
       .finally(() => {
         investigationRefresh = undefined;
+        if (successfulRefreshStillMissingInvestigation) {
+          startInvestigationRefresh();
+        }
       });
   }
 

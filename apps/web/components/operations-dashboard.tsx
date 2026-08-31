@@ -379,7 +379,7 @@ function ArchiveJobItem({
   busy: boolean;
   onCancel: (archiveRequestId: string) => void;
   onInvestigate: (
-    investigation: NonNullable<DashboardArchiveJob["investigation"]>,
+    archiveJobId: DashboardArchiveJob["id"],
     trigger: HTMLButtonElement,
   ) => void;
 }) {
@@ -401,7 +401,7 @@ function ArchiveJobItem({
           className="investigate-action"
           type="button"
           onClick={(event) =>
-            onInvestigate(investigation, event.currentTarget)}
+            onInvestigate(job.id, event.currentTarget)}
         >
           Investigate
         </button>
@@ -1071,7 +1071,7 @@ export function DashboardView({
   verifyingFilesystemTarget?: string | null;
 }) {
   const [activeInvestigation, setActiveInvestigation] = useState<{
-    investigation: NonNullable<DashboardArchiveJob["investigation"]>;
+    archiveJobId: DashboardArchiveJob["id"];
     trigger: HTMLButtonElement;
   } | null>(null);
   const catalogReviewPage =
@@ -1100,6 +1100,21 @@ export function DashboardView({
           },
         ),
       };
+  const activeInvestigationDetails =
+    activeInvestigation !== null && state.archiveJobs.status === "loaded"
+      ? state.archiveJobs.items.find(
+          (job) => job.id === activeInvestigation.archiveJobId,
+        )?.investigation
+      : undefined;
+  useEffect(() => {
+    if (
+      activeInvestigation !== null &&
+      state.archiveJobs.status === "loaded" &&
+      activeInvestigationDetails === undefined
+    ) {
+      setActiveInvestigation(null);
+    }
+  }, [activeInvestigation, activeInvestigationDetails, state.archiveJobs.status]);
   return (
     <>
       <div className={`dashboard-grid dashboard-grid-${section}`}>
@@ -1164,8 +1179,8 @@ export function DashboardView({
               job={group.latest}
               busy={busyWorkflowId === group.archiveRequestId}
               onCancel={onCancelArchiveRequest}
-              onInvestigate={(investigation, trigger) =>
-                setActiveInvestigation({ investigation, trigger })}
+              onInvestigate={(archiveJobId, trigger) =>
+                setActiveInvestigation({ archiveJobId, trigger })}
             />
             {group.older.length > 0 ? (
               <details className="archive-attempt-history">
@@ -1187,7 +1202,7 @@ export function DashboardView({
                             type="button"
                             onClick={(event) =>
                               setActiveInvestigation({
-                                investigation,
+                                archiveJobId: attempt.id,
                                 trigger: event.currentTarget,
                               })}
                           >
@@ -1501,9 +1516,9 @@ export function DashboardView({
         </>
       ) : null}
       </div>
-      {activeInvestigation ? (
+      {activeInvestigation && activeInvestigationDetails ? (
         <InvestigationPanel
-          investigation={activeInvestigation.investigation}
+          investigation={activeInvestigationDetails}
           returnFocusTo={activeInvestigation.trigger}
           onClose={() => setActiveInvestigation(null)}
         />
