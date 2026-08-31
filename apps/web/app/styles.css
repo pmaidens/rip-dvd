@@ -2619,7 +2619,28 @@ h3 {
   font-size: 0.75rem;
 }
 
-.archive-attempt-history ol { margin-bottom: 0; }
+.archive-attempt-history ol {
+  display: grid;
+  gap: 0.55rem;
+  margin-bottom: 0;
+}
+
+.archive-attempt-history li {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.archive-attempt-history button,
+.investigate-action {
+  min-height: 2.25rem;
+  margin-top: 0.65rem;
+  padding: 0.45rem 0.65rem;
+  font-size: 0.72rem;
+}
+
+.archive-attempt-history li button {
+  display: block;
+}
 
 .job-progress-detail {
   margin: 0.7rem 0 0;
@@ -2720,6 +2741,168 @@ h3 {
   font-size: 0.78rem;
   line-height: 1.5;
   white-space: pre-wrap;
+}
+
+.investigation-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  padding: 1rem;
+  overflow-y: auto;
+  place-items: center;
+  background: rgba(3, 10, 8, 0.82);
+}
+
+.investigation-panel {
+  width: min(48rem, calc(100vw - 2rem));
+  max-height: calc(100dvh - 2rem);
+  min-width: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border: 1px solid #796331;
+  border-radius: 1rem;
+  background: #0c1b18;
+  box-shadow: 0 1.5rem 5rem rgba(0, 0, 0, 0.48);
+}
+
+.investigation-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1.25rem 1.4rem;
+  border-bottom: 1px solid #29483f;
+}
+
+.investigation-header > div {
+  min-width: 0;
+}
+
+.investigation-header h2 {
+  margin: 0.3rem 0 0;
+  overflow-wrap: anywhere;
+  color: #f5f1e7;
+  font-size: 1.35rem;
+}
+
+.investigation-header button {
+  flex: 0 0 auto;
+}
+
+.investigation-content {
+  display: grid;
+  gap: 1rem;
+  min-width: 0;
+  padding: 1.25rem 1.4rem 1.4rem;
+}
+
+.investigation-summary,
+.investigation-evidence dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+  margin: 0;
+}
+
+.investigation-summary > div,
+.investigation-evidence dl > div {
+  min-width: 0;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid #29483f;
+  border-radius: 0.55rem;
+  background: #10231e;
+}
+
+.investigation-summary-wide {
+  grid-column: 1 / -1;
+}
+
+.investigation-summary dt,
+.investigation-evidence dt {
+  color: #9fb0ab;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.investigation-summary dd,
+.investigation-evidence dd {
+  margin: 0.3rem 0 0;
+  overflow-wrap: anywhere;
+  color: #dbe6e2;
+  font-size: 0.76rem;
+  line-height: 1.5;
+}
+
+.investigation-guidance,
+.investigation-evidence,
+.investigation-report {
+  min-width: 0;
+  padding: 0.9rem;
+  border: 1px solid #29483f;
+  border-radius: 0.65rem;
+  background: #0f211c;
+}
+
+.investigation-guidance h3,
+.investigation-evidence h3,
+.investigation-report h3 {
+  margin: 0;
+  color: #eef4f1;
+  font-size: 0.86rem;
+}
+
+.investigation-guidance h3 + p,
+.investigation-evidence h3 + p,
+.investigation-report h3 + p {
+  margin: 0.4rem 0 0;
+  overflow-wrap: anywhere;
+  color: #b8c8c3;
+  font-size: 0.76rem;
+  line-height: 1.55;
+}
+
+.investigation-guidance p + h3 {
+  margin-top: 0.9rem;
+}
+
+.investigation-evidence dl {
+  margin-top: 0.75rem;
+}
+
+.investigation-report textarea {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  overflow-x: hidden;
+  border: 1px solid #365149;
+  border-radius: 0.55rem;
+  background: #081510;
+  color: #dbe6e2;
+  font: 0.72rem/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    monospace;
+  overflow-wrap: anywhere;
+  resize: vertical;
+}
+
+.investigation-report-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+}
+
+.investigation-report-actions p {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: #b8d6cb;
+  font-size: 0.72rem;
+  line-height: 1.45;
 }
 
 .verification-inventory {
@@ -3143,6 +3326,34 @@ h3 {
 
   .operation-item {
     padding: 1.15rem 1.1rem;
+  }
+
+  .investigation-backdrop {
+    padding: 0.5rem;
+  }
+
+  .investigation-panel {
+    width: calc(100vw - 1rem);
+    max-height: calc(100dvh - 1rem);
+  }
+
+  .investigation-header,
+  .investigation-content {
+    padding: 1rem;
+  }
+
+  .investigation-summary,
+  .investigation-evidence dl {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .investigation-summary-wide {
+    grid-column: auto;
+  }
+
+  .investigation-report-actions {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .section-message {

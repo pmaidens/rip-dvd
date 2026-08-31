@@ -1,6 +1,8 @@
 import type {
+  ArchiveRequestStatus,
   CatalogReviewArchiveView,
   CompletedCatalogReviewOutcome,
+  DetectedDiscStatus,
 } from "@rip-dvd/data-access";
 
 import type {
@@ -69,32 +71,124 @@ function rememberBoundedEntry<Key>(
   }
 }
 
+interface ArchiveJobInvestigationContext {
+  requestStatus: ArchiveRequestStatus | null;
+  discStatus: DetectedDiscStatus | null;
+  latestJobId: string | null;
+}
+
+function archiveJobInvestigationContexts(
+  snapshot: DashboardSnapshot,
+): Map<string, ArchiveJobInvestigationContext> | undefined {
+  if (
+    snapshot.archiveJobs.status !== "loaded" ||
+    snapshot.detectedDiscs.status !== "loaded"
+  ) {
+    return undefined;
+  }
+  const discsById = new Map(
+    snapshot.detectedDiscs.items.map((disc) => [disc.id, disc]),
+  );
+  const latestJobByRequestId = new Map<string, { id: string; attempt: number }>();
+  for (const job of snapshot.archiveJobs.items) {
+    const latest = latestJobByRequestId.get(job.archiveRequestId);
+    if (latest === undefined || job.attemptOrdinal > latest.attempt) {
+      latestJobByRequestId.set(job.archiveRequestId, {
+        id: job.id,
+        attempt: job.attemptOrdinal,
+      });
+    }
+  }
+  return new Map(snapshot.archiveJobs.items.map((job) => {
+    const disc = discsById.get(job.detectedDiscId);
+    const request = disc?.archiveRequest?.id === job.archiveRequestId
+      ? disc.archiveRequest
+      : undefined;
+    return [job.id, {
+      requestStatus: request?.status ?? null,
+      discStatus: disc?.status ?? null,
+      latestJobId: latestJobByRequestId.get(job.archiveRequestId)?.id ?? null,
+    }];
+  }));
+}
+
+function investigationContextMatches(
+  left: ArchiveJobInvestigationContext | undefined,
+  right: ArchiveJobInvestigationContext | undefined,
+): boolean {
+  return left !== undefined && right !== undefined &&
+    left.requestStatus === right.requestStatus &&
+    left.discStatus === right.discStatus &&
+    left.latestJobId === right.latestJobId;
+}
+
 function mergeActivitySnapshot(
   detailed: DashboardSnapshot,
   activity: DashboardSnapshot,
 ): DashboardSnapshot {
-  if (
-    detailed.detectedDiscs.status !== "loaded" ||
-    activity.detectedDiscs.status !== "loaded"
-  ) {
-    return activity;
-  }
-  const detailedById = new Map(
-    detailed.detectedDiscs.items.map((disc) => [disc.id, disc]),
-  );
+  const mergedDetectedDiscs =
+    detailed.detectedDiscs.status === "loaded" &&
+      activity.detectedDiscs.status === "loaded"
+      ? (() => {
+          const detailedById = new Map(
+            detailed.detectedDiscs.items.map((disc) => [disc.id, disc]),
+          );
+          return {
+            status: "loaded" as const,
+            items: activity.detectedDiscs.items.map((disc) => ({
+              ...disc,
+              titles:
+                detailedById.get(disc.id)?.detectedAt === disc.detectedAt
+                  ? (detailedById.get(disc.id)?.titles ?? disc.titles)
+                  : disc.titles,
+            })),
+          };
+        })()
+      : activity.detectedDiscs;
+  const mergedArchiveJobs =
+    detailed.archiveJobs.status === "loaded" &&
+      activity.archiveJobs.status === "loaded"
+      ? (() => {
+          const detailedContexts = archiveJobInvestigationContexts(detailed);
+          const activityContexts = archiveJobInvestigationContexts(activity);
+          const detailedById = new Map(
+            detailed.archiveJobs.items.map((job) => [job.id, job]),
+          );
+          return {
+            status: "loaded" as const,
+            items: activity.archiveJobs.items.map((job) => {
+              const previous = detailedById.get(job.id);
+              const investigation = job.investigation ??
+                (previous?.status === job.status &&
+                    previous.activityRevision === job.activityRevision &&
+                    investigationContextMatches(
+                      detailedContexts?.get(job.id),
+                      activityContexts?.get(job.id),
+                    )
+                  ? previous.investigation
+                  : undefined);
+              return {
+                ...job,
+                ...(investigation === undefined ? {} : { investigation }),
+              };
+            }),
+          };
+        })()
+      : activity.archiveJobs;
   return {
     ...activity,
-    detectedDiscs: {
-      status: "loaded",
-      items: activity.detectedDiscs.items.map((disc) => ({
-        ...disc,
-        titles:
-          detailedById.get(disc.id)?.detectedAt === disc.detectedAt
-            ? (detailedById.get(disc.id)?.titles ?? disc.titles)
-            : disc.titles,
-      })),
-    },
+    detectedDiscs: mergedDetectedDiscs,
+    archiveJobs: mergedArchiveJobs,
   };
+}
+
+function hasMissingArchiveJobInvestigation(
+  snapshot: DashboardSnapshot,
+): boolean {
+  return snapshot.archiveJobs.status === "loaded" &&
+    snapshot.archiveJobs.items.some(
+      (job) => job.status === "failed" && job.investigation === undefined,
+    );
 }
 
 function mergeDiscDetails(
@@ -245,6 +339,7 @@ export function watchDashboardActivity({
   let eventSource: DashboardEventSource | undefined;
   let latestSnapshot: DashboardSnapshot | undefined;
   let activeDetailAbortController: AbortController | undefined;
+  let investigationRefresh: Promise<void> | undefined;
   const detailQueue: Array<{ id: string; detectedAt: string; key: string }> = [];
   const attemptedDetailVersions = new Set<string>();
   const failedDetailVersions = new Map<string, number>();
@@ -252,6 +347,45 @@ export function watchDashboardActivity({
   const maximumQueuedDetails = 20;
   const maximumRememberedVersions = DASHBOARD_ACTIVITY_DETECTED_DISC_LIMIT;
   const detailRetryDelayMs = 1_000;
+
+  const publishLatestSnapshot = () => {
+    if (latestSnapshot === undefined) {
+      return;
+    }
+    if (hasMissingArchiveJobInvestigation(latestSnapshot)) {
+      startInvestigationRefresh();
+      return;
+    }
+    onSnapshot(latestSnapshot);
+  };
+
+  function startInvestigationRefresh() {
+    if (!active || investigationRefresh !== undefined) {
+      return;
+    }
+    let successfulRefreshStillMissingInvestigation = false;
+    investigationRefresh = snapshotLoader(catalogReviewCursor)
+      .then((detailed) => {
+        if (!active) {
+          return;
+        }
+        latestSnapshot = latestSnapshot === undefined
+          ? detailed
+          : mergeActivitySnapshot(detailed, latestSnapshot);
+        successfulRefreshStillMissingInvestigation =
+          hasMissingArchiveJobInvestigation(latestSnapshot);
+        publishLatestSnapshot();
+      })
+      .catch(() => {
+        // Retain the last complete dashboard snapshot and retry on new activity.
+      })
+      .finally(() => {
+        investigationRefresh = undefined;
+        if (successfulRefreshStillMissingInvestigation) {
+          startInvestigationRefresh();
+        }
+      });
+  }
 
   const rememberAttempt = (key: string) => {
     rememberBoundedEntry(
@@ -313,7 +447,7 @@ export function watchDashboardActivity({
           return;
         }
         latestSnapshot = mergeDiscDetails(latestSnapshot, details);
-        onSnapshot(latestSnapshot);
+        publishLatestSnapshot();
       })
       .catch(() => {
         attemptedDetailVersions.delete(next.key);
@@ -410,7 +544,7 @@ export function watchDashboardActivity({
             latestSnapshot = latestSnapshot
               ? mergeActivitySnapshot(latestSnapshot, activity)
               : activity;
-            onSnapshot(latestSnapshot);
+            publishLatestSnapshot();
             queueMissingDetails(activity);
           } catch {
             // Ignore malformed events and retain the last database snapshot.

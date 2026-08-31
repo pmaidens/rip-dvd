@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { watchDashboardActivity } from "../lib/dashboard-activity";
 import type { DashboardSnapshot } from "../lib/dashboard";
+import type { DashboardInvestigation } from "../lib/investigation";
 
 import type { EncodeJobId } from "@rip-dvd/data-access";
 
@@ -43,6 +44,40 @@ const sectionNames = [
 
 function render(state: DashboardLoadState): string {
   return renderToStaticMarkup(<DashboardView state={state} />);
+}
+
+function archiveInvestigation(
+  overrides: Partial<DashboardInvestigation> = {},
+): DashboardInvestigation {
+  return {
+    incidentId: "archive-job-failure:failed-archive",
+    worker: "Archive Worker",
+    subjectType: "Archive Job",
+    subjectId: "failed-archive",
+    attempt: 1,
+    reasonCode: "archive_read.unknown",
+    failedPhase: "Copying",
+    occurredAt: "2026-07-22T07:58:00.000Z",
+    retryability: "appropriate",
+    retryabilityDetail: "The current Archive Request is waiting for a retry.",
+    explanation: "The Optical Drive returned an unclassified read failure.",
+    suggestedAction:
+      "Retry the Archive Request once. If it fails again, inspect the disc and Optical Drive and include this report when asking for support.",
+    technicalEvidence: [
+      { label: "Read stage", value: "Initial copy" },
+      { label: "Failing LBA", value: "1024" },
+      { label: "Requested block count", value: "16" },
+      { label: "Retry ordinal", value: "2" },
+      { label: "SCSI status", value: "2" },
+      { label: "Host status", value: "0" },
+      { label: "Driver status", value: "8" },
+      { label: "Sense key", value: "5" },
+      { label: "ASC", value: "33" },
+      { label: "ASCQ", value: "0" },
+      { label: "Classifier version", value: "scsi-read-classifier-v1" },
+    ],
+    ...overrides,
+  };
 }
 
 it("keeps an open review revision stable across unchanged SSE heartbeats", () => {
@@ -684,7 +719,10 @@ describe("DashboardView", () => {
             progressBytes: 42,
             progressEtaSeconds: null,
             lastProgressAt: "2026-07-22T07:58:00.000Z",
-            failureDetail: "DVD archive copy failed: Input/output error",
+            investigation: archiveInvestigation({
+              incidentId: "archive-job-failure:archive-job-1",
+              subjectId: "archive-job-1",
+            }),
           },
         ],
       },
@@ -778,8 +816,9 @@ describe("DashboardView", () => {
     expect(html).toContain("Previous pending reviews");
     expect(html).toContain("Next pending reviews");
     expect(html).toContain("Worker reported a failure");
-    expect(html.match(/<details class="job-failure">/g)).toHaveLength(2);
-    expect(html).toContain("DVD archive copy failed: Input/output error");
+    expect(html.match(/<details class="job-failure">/g)).toHaveLength(1);
+    expect(html.match(/>Investigate</g)).toHaveLength(1);
+    expect(html).not.toContain("DVD archive copy failed: Input/output error");
     expect(html).toContain("HandBrake stopped after a source read error");
     expect(html).toContain("Request archive");
     expect(html).not.toContain("/dev/");
@@ -879,8 +918,13 @@ describe("DashboardView", () => {
     await act(async () => root.unmount());
   });
 
-  it("expands a worker failure when its summary is clicked", async () => {
+  it("opens an Archive Job investigation, copies its report, and restores focus on Escape", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
@@ -907,10 +951,7 @@ describe("DashboardView", () => {
                   progressBytes: 28,
                   progressEtaSeconds: null,
                   lastProgressAt: "2026-07-22T07:58:00.000Z",
-                  failureDetail:
-                    "The Optical Drive returned an unclassified read failure. Retry the Archive Request; if it fails again, inspect the disc and drive.",
-                  failureDiagnostic:
-                    "Initial copy · LBA 1024 · requested 16 blocks · retry 2 · SCSI/host/driver 2/0/8 · sense key/ASC/ASCQ 5/33/0 · classifier scsi-read-classifier-v1",
+                  investigation: archiveInvestigation(),
                 },
               ],
             },
@@ -921,21 +962,127 @@ describe("DashboardView", () => {
       );
     });
 
-    const disclosure = container.querySelector("details");
-    const summary = container.querySelector("summary");
-    expect(disclosure?.open).toBe(false);
-    await act(async () => summary?.click());
-    expect(disclosure?.open).toBe(true);
-    expect(disclosure?.textContent).toContain(
+    const trigger = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Investigate",
+    )!;
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    await act(async () => trigger.click());
+
+    const dialog = container.querySelector<HTMLElement>('[role="dialog"]')!;
+    expect(dialog.textContent).toContain("Archive Job attempt 1");
+    expect(dialog.textContent).toContain("archive-job-failure:failed-archive");
+    expect(dialog.textContent).toContain("archive_read.unknown");
+    expect(dialog.textContent).toContain("Appropriate");
+    expect(dialog.textContent).toContain(
       "The Optical Drive returned an unclassified read failure",
     );
-    expect(disclosure?.textContent).toContain(
-      "Initial copy · LBA 1024 · requested 16 blocks · retry 2",
+    expect(dialog.textContent).toContain("Failing LBA1024");
+    expect(document.activeElement?.getAttribute("aria-label")).toBe(
+      "Close investigation",
+    );
+
+    const copy = [...dialog.querySelectorAll("button")].find(
+      (button) => button.textContent === "Copy report",
+    )!;
+    await act(async () => copy.click());
+    expect(writeText).toHaveBeenCalledOnce();
+    const report = writeText.mock.calls[0]![0] as string;
+    expect(report).toContain("Incident identifier: archive-job-failure:failed-archive");
+    expect(report).toContain("- Failing LBA: 1024");
+    expect(dialog.textContent).toContain("Investigation report copied.");
+
+    await act(async () => {
+      dialog.dispatchEvent(new KeyboardEvent("keydown", {
+        bubbles: true,
+        key: "Escape",
+      }));
+    });
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+    await act(async () => root.unmount());
+  });
+
+  it("updates an open investigation when live Archive Request context changes", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const dashboardState = (
+      investigation: DashboardInvestigation,
+    ): DashboardLoadState => ({
+      opticalDrives: { status: "loaded", items: [] },
+      detectedDiscs: { status: "loaded", items: [] },
+      archiveJobs: {
+        status: "loaded",
+        items: [{
+          id: "live-context-archive",
+          detectedDiscId: "live-context-disc",
+          archiveRequestId: "live-context-request",
+          attemptOrdinal: 1,
+          discLabel: "LIVE_CONTEXT_DISC",
+          opticalDriveName: "Upper drive",
+          status: "failed",
+          progressPhase: "copying",
+          progressPercent: 28,
+          progressBytes: 28,
+          lastProgressAt: "2026-07-22T07:58:00.000Z",
+          investigation,
+        }],
+      },
+      encodeJobs: { status: "loaded", items: [] },
+      catalogReview: { status: "loaded", items: [] },
+    });
+    await act(async () => {
+      root.render(
+        <DashboardView
+          section="discs"
+          state={dashboardState(archiveInvestigation({
+            incidentId: "archive-job-failure:live-context-archive",
+            subjectId: "live-context-archive",
+          }))}
+        />,
+      );
+    });
+    const trigger = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Investigate",
+    )!;
+    await act(async () => trigger.click());
+    expect(container.querySelector('[role="dialog"]')?.textContent).toContain(
+      "The current Archive Request is waiting for a retry.",
+    );
+
+    await act(async () => {
+      root.render(
+        <DashboardView
+          section="discs"
+          state={dashboardState(archiveInvestigation({
+            incidentId: "archive-job-failure:live-context-archive",
+            subjectId: "live-context-archive",
+            retryability: "not_appropriate",
+            retryabilityDetail:
+              "A newer Archive Job attempt exists for this Archive Request.",
+            suggestedAction:
+              "Investigate the latest Archive Job attempt. Retry belongs to the Archive Request, not this historical attempt.",
+          }))}
+        />,
+      );
+    });
+
+    const updatedDialog = container.querySelector('[role="dialog"]');
+    expect(updatedDialog?.textContent).toContain("Not appropriate");
+    expect(updatedDialog?.textContent).toContain(
+      "A newer Archive Job attempt exists for this Archive Request.",
+    );
+    expect(updatedDialog?.textContent).toContain(
+      "Investigate the latest Archive Job attempt.",
+    );
+    expect(updatedDialog?.textContent).not.toContain(
+      "The current Archive Request is waiting for a retry.",
     );
     await act(async () => root.unmount());
   });
 
-  it("shows failed Archive Job history without job-level retry controls", () => {
+  it("offers the shared investigation action for current and older failed Archive Job attempts", () => {
     const html = render({
       opticalDrives: { status: "loaded", items: [] },
       detectedDiscs: { status: "loaded", items: [] },
@@ -943,10 +1090,10 @@ describe("DashboardView", () => {
         status: "loaded",
         items: [
           {
-            id: "retryable-archive-job",
+            id: "latest-archive-job",
             detectedDiscId: "retryable-disc",
             archiveRequestId: "retryable-request",
-            attemptOrdinal: 1,
+            attemptOrdinal: 2,
             discLabel: "RETRYABLE_DISC",
             opticalDriveName: "Upper drive",
             status: "failed",
@@ -955,20 +1102,32 @@ describe("DashboardView", () => {
             progressBytes: 20,
             progressEtaSeconds: null,
             lastProgressAt: "2026-07-22T07:58:00.000Z",
+            investigation: archiveInvestigation({
+              incidentId: "archive-job-failure:latest-archive-job",
+              subjectId: "latest-archive-job",
+              attempt: 2,
+            }),
           },
           {
-            id: "superseded-archive-job",
-            detectedDiscId: "superseded-disc",
-            archiveRequestId: "superseded-request",
+            id: "older-archive-job",
+            detectedDiscId: "retryable-disc",
+            archiveRequestId: "retryable-request",
             attemptOrdinal: 1,
-            discLabel: "SUPERSEDED_DISC",
-            opticalDriveName: "Lower drive",
+            discLabel: "RETRYABLE_DISC",
+            opticalDriveName: "Upper drive",
             status: "failed",
             progressPhase: "copying",
             progressPercent: 30,
             progressBytes: 30,
             progressEtaSeconds: null,
             lastProgressAt: "2026-07-22T07:58:00.000Z",
+            investigation: archiveInvestigation({
+              incidentId: "archive-job-failure:older-archive-job",
+              subjectId: "older-archive-job",
+              retryability: "not_appropriate",
+              retryabilityDetail:
+                "A newer Archive Job attempt exists for this Archive Request.",
+            }),
           },
         ],
       },
@@ -977,8 +1136,134 @@ describe("DashboardView", () => {
     });
 
     expect(html).toContain("RETRYABLE_DISC");
-    expect(html).toContain("SUPERSEDED_DISC");
+    expect(html).toContain("1 older attempt");
+    expect(html.match(/>Investigate</g)).toHaveLength(2);
     expect(html.match(/Retry archive/g)).toBeNull();
+  });
+
+  it("opens an older attempt in the same investigation panel", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const attempt = (
+      id: string,
+      attemptOrdinal: number,
+    ) => ({
+      id,
+      detectedDiscId: "history-disc",
+      archiveRequestId: "history-request",
+      attemptOrdinal,
+      discLabel: "HISTORY_DISC",
+      opticalDriveName: "Upper drive",
+      status: "failed" as const,
+      progressPhase: "copying" as const,
+      progressPercent: 20,
+      progressBytes: 20,
+      lastProgressAt: "2026-07-22T07:58:00.000Z",
+      investigation: archiveInvestigation({
+        incidentId: `archive-job-failure:${id}`,
+        subjectId: id,
+        attempt: attemptOrdinal,
+        retryability:
+          attemptOrdinal === 1 ? "not_appropriate" : "appropriate",
+      }),
+    });
+    await act(async () => {
+      root.render(
+        <DashboardView
+          section="discs"
+          state={{
+            opticalDrives: { status: "loaded", items: [] },
+            detectedDiscs: { status: "loaded", items: [] },
+            archiveJobs: {
+              status: "loaded",
+              items: [attempt("latest-attempt", 2), attempt("older-attempt", 1)],
+            },
+            encodeJobs: { status: "loaded", items: [] },
+            catalogReview: { status: "loaded", items: [] },
+          }}
+        />,
+      );
+    });
+
+    await act(async () => {
+      container.querySelector<HTMLDetailsElement>(
+        ".archive-attempt-history",
+      )!.open = true;
+    });
+    const triggers = [...container.querySelectorAll("button")].filter(
+      (button) => button.textContent === "Investigate",
+    );
+    await act(async () => triggers[1]!.click());
+
+    const dialog = container.querySelector<HTMLElement>('[role="dialog"]')!;
+    expect(dialog.textContent).toContain("Archive Job attempt 1");
+    expect(dialog.textContent).toContain("archive-job-failure:older-attempt");
+    expect(dialog.textContent).toContain("Not appropriate");
+    await act(async () => root.unmount());
+  });
+
+  it("selects the visible report when clipboard access is denied", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: vi.fn().mockRejectedValue(new Error("denied")) },
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <DashboardView
+          section="discs"
+          state={{
+            opticalDrives: { status: "loaded", items: [] },
+            detectedDiscs: { status: "loaded", items: [] },
+            archiveJobs: {
+              status: "loaded",
+              items: [{
+                id: "denied-archive",
+                detectedDiscId: "denied-disc",
+                archiveRequestId: "denied-request",
+                attemptOrdinal: 1,
+                discLabel: "DENIED_DISC",
+                opticalDriveName: "Upper drive",
+                status: "failed",
+                progressPhase: "copying",
+                progressPercent: 28,
+                progressBytes: 28,
+                lastProgressAt: "2026-07-22T07:58:00.000Z",
+                investigation: archiveInvestigation({
+                  incidentId: "archive-job-failure:denied-archive",
+                  subjectId: "denied-archive",
+                }),
+              }],
+            },
+            encodeJobs: { status: "loaded", items: [] },
+            catalogReview: { status: "loaded", items: [] },
+          }}
+        />,
+      );
+    });
+    const investigate = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Investigate",
+    )!;
+    await act(async () => investigate.click());
+    const dialog = container.querySelector<HTMLElement>('[role="dialog"]')!;
+    const copy = [...dialog.querySelectorAll("button")].find(
+      (button) => button.textContent === "Copy report",
+    )!;
+    await act(async () => copy.click());
+
+    const report = dialog.querySelector<HTMLTextAreaElement>("textarea")!;
+    expect(document.activeElement).toBe(report);
+    expect(report.selectionStart).toBe(0);
+    expect(report.selectionEnd).toBe(report.value.length);
+    expect(dialog.textContent).toContain(
+      "Clipboard access was denied. The report is selected",
+    );
+    await act(async () => root.unmount());
   });
 
   it("explains Archive Job work before and between percentage updates", () => {

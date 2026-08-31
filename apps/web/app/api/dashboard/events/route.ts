@@ -92,6 +92,7 @@ export function createDashboardEventResponse(
           catalogReviewQuery: catalogReviewFilters.query,
           catalogReviewOutcome: catalogReviewFilters.outcome,
           includeDetectedDiscDetails: false,
+          includeInvestigations: false,
         });
         controller.enqueue(
           encoder.encode(`${prefix}${formatDashboardEvent(snapshot)}`),

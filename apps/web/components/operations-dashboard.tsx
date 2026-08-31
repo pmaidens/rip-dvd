@@ -32,6 +32,7 @@ import { isTerminalEncodeJobStatus } from "../lib/encode-job-status";
 import { ArchiveIntegrityDescription } from "./archive-integrity-description";
 import { ArchiveBoundaryDescription } from "./archive-boundary-description";
 import { CatalogReviewEditor } from "./catalog-review-editor";
+import { InvestigationPanel } from "./investigation-panel";
 import {
   cancelEncodeJob,
   EncodeJobsManager,
@@ -188,7 +189,7 @@ interface DashboardJobItemProps {
   progressPercent: number;
   progressDetail?: string | null;
   failureDetail?: string | null;
-  failureDiagnostic?: string | null;
+  failureAction?: React.ReactNode;
   annotation?: React.ReactNode;
   action?: React.ReactNode;
   verification?: FilesystemVerificationDisplay;
@@ -201,7 +202,7 @@ function DashboardJobItem({
   progressPercent,
   progressDetail,
   failureDetail,
-  failureDiagnostic,
+  failureAction,
   annotation,
   action,
   verification,
@@ -225,19 +226,15 @@ function DashboardJobItem({
         </p>
       ) : null}
       {status === "failed" ? (
-        <details className="job-failure">
-          <summary>Worker reported a failure.</summary>
-          <div className="job-failure-detail">
-            <strong>Failure details</strong>
-            <p>{failureDetail ?? "No additional details were recorded."}</p>
-            {failureDiagnostic ? (
-              <>
-                <strong>Structured diagnostic</strong>
-                <p>{failureDiagnostic}</p>
-              </>
-            ) : null}
-          </div>
-        </details>
+        failureAction ?? (
+          <details className="job-failure">
+            <summary>Worker reported a failure.</summary>
+            <div className="job-failure-detail">
+              <strong>Failure details</strong>
+              <p>{failureDetail ?? "No additional details were recorded."}</p>
+            </div>
+          </details>
+        )
       ) : null}
       {annotation}
       {verification ? <FilesystemVerificationResult {...verification} /> : null}
@@ -368,15 +365,21 @@ function ArchiveJobItem({
   job,
   busy,
   onCancel,
+  onInvestigate,
 }: {
   job: DashboardArchiveJob;
   busy: boolean;
   onCancel: (archiveRequestId: string) => void;
+  onInvestigate: (
+    archiveJobId: DashboardArchiveJob["id"],
+    trigger: HTMLButtonElement,
+  ) => void;
 }) {
   const currentTime = useCurrentTime(job.status === "running" ? 5_000 : 0);
   const progressHealth = job.status === "running"
     ? assessArchiveProgress(job, currentTime)
     : null;
+  const investigation = job.investigation;
 
   return (
     <DashboardJobItem
@@ -385,8 +388,16 @@ function ArchiveJobItem({
       status={job.status}
       progressPercent={job.progressPercent}
       progressDetail={archiveProgressDetail(job)}
-      failureDetail={job.failureDetail}
-      failureDiagnostic={job.failureDiagnostic}
+      failureAction={investigation ? (
+        <button
+          className="investigate-action"
+          type="button"
+          onClick={(event) =>
+            onInvestigate(job.id, event.currentTarget)}
+        >
+          Investigate
+        </button>
+      ) : null}
       annotation={
         progressHealth?.status === "not_advancing" ? (
           <div className="archive-progress-warning" role="alert">
@@ -1051,6 +1062,10 @@ export function DashboardView({
   onVerifyFilesystem?: (target: FilesystemVerificationTarget, id: string) => void;
   verifyingFilesystemTarget?: string | null;
 }) {
+  const [activeInvestigation, setActiveInvestigation] = useState<{
+    archiveJobId: DashboardArchiveJob["id"];
+    trigger: HTMLButtonElement;
+  } | null>(null);
   const catalogReviewPage =
     state.catalogReview.status === "loaded"
       ? state.catalogReview.page
@@ -1077,8 +1092,24 @@ export function DashboardView({
           },
         ),
       };
+  const activeInvestigationDetails =
+    activeInvestigation !== null && state.archiveJobs.status === "loaded"
+      ? state.archiveJobs.items.find(
+          (job) => job.id === activeInvestigation.archiveJobId,
+        )?.investigation
+      : undefined;
+  useEffect(() => {
+    if (
+      activeInvestigation !== null &&
+      state.archiveJobs.status === "loaded" &&
+      activeInvestigationDetails === undefined
+    ) {
+      setActiveInvestigation(null);
+    }
+  }, [activeInvestigation, activeInvestigationDetails, state.archiveJobs.status]);
   return (
-    <div className={`dashboard-grid dashboard-grid-${section}`}>
+    <>
+      <div className={`dashboard-grid dashboard-grid-${section}`}>
       {section === "all" || section === "discs" ? (
         <>
           <DashboardSection
@@ -1140,6 +1171,8 @@ export function DashboardView({
               job={group.latest}
               busy={busyWorkflowId === group.archiveRequestId}
               onCancel={onCancelArchiveRequest}
+              onInvestigate={(archiveJobId, trigger) =>
+                setActiveInvestigation({ archiveJobId, trigger })}
             />
             {group.older.length > 0 ? (
               <details className="archive-attempt-history">
@@ -1148,18 +1181,29 @@ export function DashboardView({
                   {group.older.length === 1 ? "attempt" : "attempts"}
                 </summary>
                 <ol>
-                  {group.older.map((attempt) => (
-                    <li key={attempt.id}>
-                      Attempt {attempt.attemptOrdinal} ·{" "}
-                      {displayTerm(attempt.status)}
-                      {attempt.failureDetail
-                        ? ` · ${attempt.failureDetail}`
-                        : ""}
-                      {attempt.failureDiagnostic
-                        ? ` · ${attempt.failureDiagnostic}`
-                        : ""}
-                    </li>
-                  ))}
+                  {group.older.map((attempt) => {
+                    const investigation = attempt.investigation;
+                    return (
+                      <li key={attempt.id}>
+                        <span>
+                          Attempt {attempt.attemptOrdinal} ·{" "}
+                          {displayTerm(attempt.status)}
+                        </span>
+                        {investigation ? (
+                          <button
+                            type="button"
+                            onClick={(event) =>
+                              setActiveInvestigation({
+                                archiveJobId: attempt.id,
+                                trigger: event.currentTarget,
+                              })}
+                          >
+                            Investigate
+                          </button>
+                        ) : null}
+                      </li>
+                    );
+                  })}
                 </ol>
               </details>
             ) : null}
@@ -1463,7 +1507,15 @@ export function DashboardView({
           ) : null}
         </>
       ) : null}
-    </div>
+      </div>
+      {activeInvestigation && activeInvestigationDetails ? (
+        <InvestigationPanel
+          investigation={activeInvestigationDetails}
+          returnFocusTo={activeInvestigation.trigger}
+          onClose={() => setActiveInvestigation(null)}
+        />
+      ) : null}
+    </>
   );
 }
 
