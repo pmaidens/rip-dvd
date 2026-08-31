@@ -9,11 +9,16 @@ export const MAX_OPTICAL_DRIVE_COMMAND_OUTPUT_BYTES = 1_048_576;
 
 const DEFAULT_MAX_ACTIVE_COMMANDS = 32;
 
-export interface CommandResult {
-  exitCode: number;
+interface CommandOutput {
   stdout: string;
   stderr: string;
 }
+
+export type CommandResult = CommandOutput &
+  (
+    | { exitCode: number; signal?: null }
+    | { exitCode: null; signal: NodeJS.Signals }
+  );
 
 export interface CommandRunnerOptions {
   maxBufferBytes: number;
@@ -92,8 +97,20 @@ export function createNodeCommandRunner(
           timeoutMs: commandOptions.timeoutMs,
         },
       );
+      if (completion.exitCode === null) {
+        if (completion.signal === null) {
+          throw new Error("device command ended without an exit status or signal");
+        }
+        return {
+          exitCode: null,
+          signal: completion.signal,
+          stderr: completion.stderr,
+          stdout: completion.stdout,
+        };
+      }
       return {
-        exitCode: completion.exitCode ?? 1,
+        exitCode: completion.exitCode,
+        signal: null,
         stderr: completion.stderr,
         stdout: completion.stdout,
       };
@@ -130,7 +147,10 @@ export function commandFailure(tool: string, result: CommandResult): Error {
     .replaceAll(/[\r\n]+/g, " ")
     .trim()
     .slice(0, 500);
+  const outcome = result.exitCode === null
+    ? `terminated by signal ${result.signal}`
+    : `exited with status ${result.exitCode}`;
   return new Error(
-    `${tool} exited with status ${result.exitCode}${detail ? `: ${detail}` : ""}`,
+    `${tool} ${outcome}${detail ? `: ${detail}` : ""}`,
   );
 }
