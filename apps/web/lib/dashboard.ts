@@ -38,8 +38,13 @@ import {
   DASHBOARD_ACTIVE_DISC_LIMIT,
   DASHBOARD_ACTIVE_JOB_LIMIT,
 } from "./dashboard-bounds";
+import { isArchiveJobRetryable } from "./archive-job-retryability";
 import { isTerminalEncodeJobStatus } from "./encode-job-status";
 import { formatFailureDetail } from "./failure-detail";
+import type {
+  DashboardInvestigation,
+  InvestigationRetryability,
+} from "./investigation";
 
 export interface DashboardOpticalDrive {
   id: string;
@@ -115,8 +120,7 @@ export interface DashboardArchiveJob {
   progressBytes: number;
   progressEtaSeconds?: number | null;
   lastProgressAt: string;
-  failureDetail?: string | null;
-  failureDiagnostic?: string | null;
+  investigation?: DashboardInvestigation;
 }
 
 export interface DashboardEncodeJob {
@@ -207,6 +211,7 @@ export interface DashboardSnapshotOptions {
   catalogReviewQuery?: string;
   catalogReviewOutcome?: CompletedCatalogReviewOutcome;
   includeDetectedDiscDetails?: boolean;
+  includeInvestigations?: boolean;
 }
 
 export interface DashboardCatalogReviewFilters {
@@ -318,73 +323,197 @@ function driveDisplayName(drive: OpticalDriveRecord): string {
   return drive.displayName ?? "Unnamed Optical Drive";
 }
 
-const READ_FAILURE_DETAILS: Record<
+interface ArchiveReadFailurePresentation {
+  summary: string;
+  explanation: string;
+  suggestedAction: string;
+  retryability: Exclude<InvestigationRetryability, "not_appropriate">;
+}
+
+const READ_FAILURE_PRESENTATIONS: Record<
   NonNullable<ArchiveJob["readFailureCategory"]>,
-  string
+  ArchiveReadFailurePresentation
 > = {
-  unknown:
-    "The Optical Drive returned an unclassified read failure. Retry the Archive Request; if it fails again, inspect the disc and drive.",
-  not_ready:
-    "The Optical Drive was not ready to read the disc. Check that the disc is inserted and the drive is available, then retry the Archive Request.",
-  unit_attention:
-    "The Optical Drive reported a media-state change. Confirm that the expected disc is still inserted, then retry the Archive Request.",
-  hardware_error:
-    "The Optical Drive reported a hardware fault. Retry the Archive Request; if it fails again with another disc, inspect or replace the Optical Drive.",
-  transport_error:
-    "Communication with the Optical Drive failed. Check the drive connection and host passthrough, then retry the Archive Request.",
-  protection_error:
-    "DVD copy protection or region access failed. Check DVD CSS support and the Optical Drive region, then retry the Archive Request.",
-  out_of_range:
-    "The Optical Drive reported a capacity or readable-boundary mismatch. Retry the Archive Request or manually choose another Optical Drive.",
+  unknown: {
+    summary:
+      "The Optical Drive returned an unclassified read failure. Retry the Archive Request; if it fails again, inspect the disc and drive.",
+    explanation: "The Optical Drive returned an unclassified read failure.",
+    suggestedAction:
+      "Retry the Archive Request once. If it fails again, inspect the disc and Optical Drive and include this report when asking for support.",
+    retryability: "appropriate",
+  },
+  not_ready: {
+    summary:
+      "The Optical Drive was not ready to read the disc. Check that the disc is inserted and the drive is available, then retry the Archive Request.",
+    explanation: "The Optical Drive was not ready to read the disc.",
+    suggestedAction:
+      "Check that the expected disc is inserted and the Optical Drive is available, then retry the Archive Request.",
+    retryability: "after_action",
+  },
+  unit_attention: {
+    summary:
+      "The Optical Drive reported a media-state change. Confirm that the expected disc is still inserted, then retry the Archive Request.",
+    explanation: "The Optical Drive reported a media-state change.",
+    suggestedAction:
+      "Confirm that the expected disc is still inserted, then retry the Archive Request.",
+    retryability: "after_action",
+  },
+  hardware_error: {
+    summary:
+      "The Optical Drive reported a hardware fault. Retry the Archive Request; if it fails again with another disc, inspect or replace the Optical Drive.",
+    explanation: "The Optical Drive reported a hardware fault.",
+    suggestedAction:
+      "Retry the Archive Request once. If another disc fails the same way, inspect or replace the Optical Drive.",
+    retryability: "appropriate",
+  },
+  transport_error: {
+    summary:
+      "Communication with the Optical Drive failed. Check the drive connection and host passthrough, then retry the Archive Request.",
+    explanation: "Communication with the Optical Drive failed.",
+    suggestedAction:
+      "Check the Optical Drive connection and host passthrough, then retry the Archive Request.",
+    retryability: "after_action",
+  },
+  protection_error: {
+    summary:
+      "DVD copy protection or region access failed. Check DVD CSS support and the Optical Drive region, then retry the Archive Request.",
+    explanation: "DVD copy protection or region access failed.",
+    suggestedAction:
+      "Correct DVD CSS support or the Optical Drive region, then retry the Archive Request.",
+    retryability: "after_action",
+  },
+  out_of_range: {
+    summary:
+      "The Optical Drive reported a capacity or readable-boundary mismatch. Retry the Archive Request or manually choose another Optical Drive.",
+    explanation:
+      "The Optical Drive reported a capacity or readable-boundary mismatch.",
+    suggestedAction:
+      "Retry the Archive Request with another Optical Drive, or confirm the current drive reports the disc boundary consistently before retrying.",
+    retryability: "after_action",
+  },
 };
 const MISSING_READ_FAILURE_DETAIL =
   "The Archive Job failed with an unknown diagnostic because structured read evidence is unavailable.";
-const MISSING_READ_FAILURE_DIAGNOSTIC =
-  "Structured read evidence unavailable.";
 
-function diagnosticTuple(values: readonly (number | null)[]): string {
-  return values.map((value) => value ?? "–").join("/");
-}
-
-function archiveJobFailure(job: ArchiveJob | undefined): {
-  failureDetail: string | null;
-  failureDiagnostic?: string;
-} {
+function archiveJobFailure(job: ArchiveJob | undefined): string | null {
   if (job?.readFailureCategory) {
-    return {
-      failureDetail: READ_FAILURE_DETAILS[job.readFailureCategory],
-      failureDiagnostic: [
-        job.readFailureStage === "rescue_resume"
-          ? "Rescue resume"
-          : "Initial copy",
-        `LBA ${job.readFailureLba}`,
-        `requested ${job.readFailureRequestedBlockCount} blocks`,
-        `retry ${job.readFailureRetryCount}`,
-        `SCSI/host/driver ${diagnosticTuple([
-          job.readFailureScsiStatus,
-          job.readFailureHostStatus,
-          job.readFailureDriverStatus,
-        ])}`,
-        `sense key/ASC/ASCQ ${diagnosticTuple([
-          job.readFailureSenseKey,
-          job.readFailureAsc,
-          job.readFailureAscq,
-        ])}`,
-        `classifier ${job.readFailureClassifierVersion}`,
-      ].join(" · "),
-    };
+    return READ_FAILURE_PRESENTATIONS[job.readFailureCategory].summary;
   }
   if (job?.status === "failed" && job.failureDetailVersion === null) {
-    return {
-      failureDetail: MISSING_READ_FAILURE_DETAIL,
-      failureDiagnostic: MISSING_READ_FAILURE_DIAGNOSTIC,
-    };
+    return MISSING_READ_FAILURE_DETAIL;
   }
+  return formatFailureDetail(job?.errorMessage ?? null);
+}
+
+const ARCHIVE_PHASE_LABELS: Record<ArchiveProgressPhase, string> = {
+  preparing: "Preparation",
+  copying: "Copying",
+  verifying: "Verification",
+  finalizing: "Finalization",
+};
+
+function archiveReadFailureEvidence(
+  job: ArchiveJob,
+): DashboardInvestigation["technicalEvidence"] {
+  if (job.readFailureCategory === null) {
+    return [];
+  }
+  const recorded = (value: number | string | null): string =>
+    value === null ? "Not recorded" : String(value);
+  return [
+    {
+      label: "Read stage",
+      value: job.readFailureStage === "rescue_resume"
+        ? "Rescue resume"
+        : "Initial copy",
+    },
+    { label: "Failing LBA", value: recorded(job.readFailureLba) },
+    {
+      label: "Requested block count",
+      value: recorded(job.readFailureRequestedBlockCount),
+    },
+    { label: "Retry ordinal", value: recorded(job.readFailureRetryCount) },
+    { label: "SCSI status", value: recorded(job.readFailureScsiStatus) },
+    { label: "Host status", value: recorded(job.readFailureHostStatus) },
+    { label: "Driver status", value: recorded(job.readFailureDriverStatus) },
+    { label: "Sense key", value: recorded(job.readFailureSenseKey) },
+    { label: "ASC", value: recorded(job.readFailureAsc) },
+    { label: "ASCQ", value: recorded(job.readFailureAscq) },
+    {
+      label: "Classifier version",
+      value: recorded(job.readFailureClassifierVersion),
+    },
+  ];
+}
+
+function archiveJobInvestigation({
+  job,
+  requestStatus,
+  discStatus,
+  isLatestAttempt,
+}: {
+  job: ArchiveJob;
+  requestStatus: ArchiveRequestStatus | null;
+  discStatus: DetectedDiscStatus | null;
+  isLatestAttempt: boolean;
+}): DashboardInvestigation {
+  const presentation = job.readFailureCategory === null
+    ? {
+        explanation: archiveJobFailure(job) ??
+          "The Archive Job failed without a recorded explanation.",
+        suggestedAction:
+          "Review the Archive Worker configuration and host state, then retry the Archive Request. If the failure repeats, include this report when asking for support.",
+        retryability: "after_action" as const,
+      }
+    : READ_FAILURE_PRESENTATIONS[job.readFailureCategory];
+  const retryIsAvailable =
+    isLatestAttempt &&
+    requestStatus === "needs_attention" &&
+    isArchiveJobRetryable(
+      job,
+      discStatus === null ? undefined : { status: discStatus },
+    );
+  const retryability: InvestigationRetryability = retryIsAvailable
+    ? presentation.retryability
+    : "not_appropriate";
+  const retryabilityDetail = retryIsAvailable
+    ? presentation.retryability === "appropriate"
+      ? "The current Archive Request is waiting for a retry."
+      : "The current Archive Request can be retried after completing the suggested action."
+    : !isLatestAttempt
+      ? "A newer Archive Job attempt exists for this Archive Request."
+      : requestStatus === "fulfilled"
+        ? "The Archive Request was fulfilled by another attempt."
+        : requestStatus === "cancelled"
+          ? "The Archive Request was cancelled."
+          : "The Archive Request is not currently waiting for a retry.";
+  const suggestedAction = retryIsAvailable
+    ? presentation.suggestedAction
+    : !isLatestAttempt
+      ? "Investigate the latest Archive Job attempt. Retry belongs to the Archive Request, not this historical attempt."
+      : requestStatus === "fulfilled"
+        ? "No retry is needed. Keep this report only if the historical failure still needs investigation."
+        : requestStatus === "cancelled"
+          ? "No retry is available for the cancelled Archive Request."
+          : "Review the current Archive Request state before deciding whether to retry.";
   return {
-    failureDetail: formatFailureDetail(job?.errorMessage ?? null),
-    ...(job?.status === "failed"
-      ? { failureDiagnostic: MISSING_READ_FAILURE_DIAGNOSTIC }
-      : {}),
+    incidentId: `archive-job-failure:${job.id}`,
+    worker: "Archive Worker",
+    subjectType: "Archive Job",
+    subjectId: job.id,
+    attempt: job.attemptOrdinal,
+    reasonCode: job.readFailureCategory === null
+      ? job.failureDetailVersion === null
+        ? "archive_failure.legacy"
+        : "archive_failure.unclassified"
+      : `archive_read.${job.readFailureCategory}`,
+    failedPhase: ARCHIVE_PHASE_LABELS[job.progressPhase],
+    occurredAt: (job.completedAt ?? job.updatedAt).toISOString(),
+    retryability,
+    retryabilityDetail,
+    explanation: presentation.explanation,
+    suggestedAction,
+    technicalEvidence: archiveReadFailureEvidence(job),
   };
 }
 
@@ -397,6 +526,7 @@ function readDashboardSnapshotRecords(
     catalogReviewQuery,
     catalogReviewOutcome,
     includeDetectedDiscDetails = true,
+    includeInvestigations = true,
   }: DashboardSnapshotOptions = {},
 ): DashboardSnapshot {
   const opticalDriveSource = readSource(() =>
@@ -705,6 +835,11 @@ function readDashboardSnapshotRecords(
         (typeof archiveRequestSource.value)[number]
       >())
     : null;
+  const requestsById = archiveRequestSource.status === "loaded"
+    ? new Map(
+        archiveRequestSource.value.map((request) => [request.id, request]),
+      )
+    : null;
 
   const opticalDrives =
     opticalDriveSource.status === "error" ||
@@ -789,8 +924,7 @@ function readDashboardSnapshotRecords(
                   id: request.id,
                   status: request.status,
                   attemptCount: latestJob?.attemptOrdinal ?? 0,
-                  latestFailureDetail: archiveJobFailure(latestJob)
-                    .failureDetail,
+                  latestFailureDetail: archiveJobFailure(latestJob),
                   createdAt: request.createdAt.toISOString(),
                   updatedAt: request.updatedAt.toISOString(),
                 },
@@ -798,6 +932,20 @@ function readDashboardSnapshotRecords(
             }),
           );
         })();
+
+  const latestDisplayedArchiveJobIdByRequest =
+    archiveJobSource.status === "loaded"
+      ? archiveJobSource.value.reduce((latestByRequest, job) => {
+          const latest = latestByRequest.get(job.archiveRequestId);
+          if (
+            latest === undefined ||
+            job.attemptOrdinal > latest.attemptOrdinal
+          ) {
+            latestByRequest.set(job.archiveRequestId, job);
+          }
+          return latestByRequest;
+        }, new Map<ArchiveJob["archiveRequestId"], ArchiveJob>())
+      : null;
 
   const archiveJobs =
     archiveJobSource.status === "error" ||
@@ -811,7 +959,6 @@ function readDashboardSnapshotRecords(
             const drive = disc
               ? drivesById.get(disc.opticalDriveId)
               : undefined;
-            const failure = archiveJobFailure(job);
             return {
               id: job.id,
               activityRevision: job.updatedAt.toISOString(),
@@ -830,7 +977,19 @@ function readDashboardSnapshotRecords(
                 ? { progressEtaSeconds: job.progressEtaSeconds }
                 : {}),
               lastProgressAt: job.lastProgressAt.toISOString(),
-              ...failure,
+              ...(job.status === "failed" && includeInvestigations
+                ? {
+                    investigation: archiveJobInvestigation({
+                      job,
+                      requestStatus:
+                        requestsById?.get(job.archiveRequestId)?.status ?? null,
+                      discStatus: disc?.status ?? null,
+                      isLatestAttempt:
+                        latestDisplayedArchiveJobIdByRequest
+                          ?.get(job.archiveRequestId)?.id === job.id,
+                    }),
+                  }
+                : {}),
             };
           }),
         );
