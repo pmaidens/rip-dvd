@@ -271,6 +271,39 @@ describe("readDashboardSnapshot", () => {
     expect(JSON.stringify(failedJob)).not.toContain("/private/output.mkv");
   });
 
+  it("describes a same-attempt cleanup report on a completed job", () => {
+    const access = dataAccessFixture.create();
+    const { job } = seedEncodeJob(access);
+    const claim = access.encodeJobs.claimNext("completed-cleanup-worker");
+    if (!claim) {
+      throw new Error("Expected completed cleanup Encode Job claim");
+    }
+    const cleanup = access.encodeJobs.registerPartialCleanup(claim);
+    access.encodeJobs.complete(claim);
+    access.encodeJobs.recordCleanupFailureReport(cleanup, {
+      schemaVersion: 1,
+      reasonCode: "cleanup_failed",
+      phase: "cleanup",
+      retryability: "after_action",
+      diagnostic: "partial cleanup failed after completion",
+      evidence: { kind: "cleanup", operation: "partial_output" },
+    });
+
+    const snapshot = readDashboardSnapshot(access);
+    const completedJob = snapshot.encodeJobs.status === "loaded"
+      ? snapshot.encodeJobs.items.find(({ id }) => id === job.id)
+      : undefined;
+
+    expect(completedJob?.investigations).toEqual([
+      expect.objectContaining({
+        reasonCode: "encode.cleanup_failed",
+        retryability: "not_appropriate",
+        retryabilityDetail:
+          "This Encode Job is completed, so this report does not offer a retry.",
+      }),
+    ]);
+  });
+
   it("keeps a terminal Encode Job outcome beside its Disc Selection correction", () => {
     const access = dataAccessFixture.create();
     const { archive, job, selection } = seedEncodeJob(access);

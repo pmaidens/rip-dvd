@@ -4270,6 +4270,80 @@ describe("encode worker polling", () => {
     fixture.access.close();
   });
 
+  it("records a publication error after completion state is durable", async () => {
+    const fixture = createQueuedJob();
+    const completePublishedClaim =
+      fixture.access.encodeJobs.completePublishedClaim.bind(
+        fixture.access.encodeJobs,
+      );
+    const completionErrorAccess: DataAccess = {
+      ...fixture.access,
+      encodeJobs: {
+        ...fixture.access.encodeJobs,
+        completePublishedClaim(claim, cleanup, publicationMatches) {
+          completePublishedClaim(claim, cleanup, publicationMatches);
+          throw new Error("publication completion acknowledgement failed");
+        },
+      },
+    };
+    const options = {
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      signal: new AbortController().signal,
+    };
+
+    await pollEncodeWorker({
+      ...options,
+      access: completionErrorAccess,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "durably completed publication", {
+            flag: "wx",
+          });
+        }),
+      },
+    });
+
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        partialCleanupClaimToken: expect.any(String),
+        publicationPending: true,
+        status: "completed",
+      }),
+    ]);
+    expect(fixture.access.encodeJobs.listFailureReports([fixture.job.id])[0])
+      .toMatchObject({
+        reasonCode: "publication_failed",
+        phase: "publication",
+        evidence: {
+          kind: "publication",
+          operation: "publication_completion",
+        },
+      });
+
+    await pollEncodeWorker({
+      ...options,
+      access: fixture.access,
+      runner: { run: vi.fn() },
+      workerId: "completed-publication-recovery",
+    });
+
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        partialCleanupClaimToken: null,
+        publicationPending: false,
+        status: "completed",
+      }),
+    ]);
+    expect(fixture.access.encodeJobs.listFailureReports([fixture.job.id]))
+      .toHaveLength(1);
+    fixture.access.close();
+  });
+
   it("retains recovery provenance when the final changes during completion commit", async () => {
     const fixture = createQueuedJob();
     const options = {

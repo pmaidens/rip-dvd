@@ -990,7 +990,8 @@ function encodeFailureRetryGuidance(
     case "completed":
       return {
         retryability: "not_appropriate" as const,
-        detail: "A later attempt completed this Encode Job.",
+        detail:
+          "This Encode Job is completed, so this report does not offer a retry.",
       };
     case "cancelled":
       return {
