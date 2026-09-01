@@ -14,6 +14,7 @@ import type {
   DetectedDiscId,
   DetectedDiscStatus,
   DiscKind,
+  DiscInspection,
   DiscInspectionPhase,
   DiscInspectionReasonCode,
   DiscInspectionStatus,
@@ -57,6 +58,7 @@ export interface DashboardOpticalDrive {
 
 export interface DashboardDiscInspection {
   id: string;
+  activityRevision?: string;
   status: DiscInspectionStatus;
   phase: DiscInspectionPhase;
   attemptCount: number;
@@ -77,6 +79,7 @@ export interface DashboardDiscInspection {
   phaseStartedAt: string;
   startedAt: string;
   completedAt: string | null;
+  investigation?: DashboardInvestigation;
 }
 
 export interface DashboardArchiveRequest {
@@ -321,6 +324,149 @@ type OpticalDriveRecord = ReturnType<
 
 function driveDisplayName(drive: OpticalDriveRecord): string {
   return drive.displayName ?? "Unnamed Optical Drive";
+}
+
+interface DiscInspectionFailurePresentation {
+  explanation: string;
+  suggestedAction: string;
+  retryability: InvestigationRetryability;
+}
+
+const DISC_INSPECTION_FAILURE_PRESENTATIONS: Record<
+  DiscInspectionReasonCode,
+  DiscInspectionFailurePresentation
+> = {
+  no_medium: {
+    explanation: "No disc was present when the Disc Inspection failed.",
+    suggestedAction:
+      "Insert the expected disc, wait for the Optical Drive to become ready, then retry the Disc Inspection.",
+    retryability: "after_action",
+  },
+  media_changed: {
+    explanation:
+      "The inserted disc was removed or replaced during the Disc Inspection.",
+    suggestedAction:
+      "Keep one disc inserted for the full inspection, then retry the Disc Inspection.",
+    retryability: "after_action",
+  },
+  drive_identity_changed: {
+    explanation:
+      "The Optical Drive identity changed during the Disc Inspection.",
+    suggestedAction:
+      "Restore the configured Optical Drive and its host connection, then retry the Disc Inspection.",
+    retryability: "after_action",
+  },
+  drive_unavailable: {
+    explanation:
+      "The configured Optical Drive became unavailable during the Disc Inspection.",
+    suggestedAction:
+      "Check that the Optical Drive is connected, enabled, and available to the Archive Worker, then retry the Disc Inspection.",
+    retryability: "after_action",
+  },
+  drive_not_ready: {
+    explanation:
+      "The Optical Drive did not become ready for the Disc Inspection.",
+    suggestedAction:
+      "Check that the disc is fully inserted and the Optical Drive has settled, then retry the Disc Inspection.",
+    retryability: "after_action",
+  },
+  metadata_read_failed: {
+    explanation:
+      "The Archive Worker could not read the DVD metadata needed to identify the disc.",
+    suggestedAction:
+      "Retry the Disc Inspection once. If it fails again, inspect the disc and verify the DVD metadata tools on the Archive Worker host.",
+    retryability: "appropriate",
+  },
+  invalid_metadata: {
+    explanation:
+      "The DVD metadata did not satisfy the Disc Inspection requirements.",
+    suggestedAction:
+      "Inspect the disc and verify the DVD metadata tools on the Archive Worker host before retrying the Disc Inspection.",
+    retryability: "after_action",
+  },
+  content_size_failed: {
+    explanation:
+      "The Archive Worker could not determine the DVD content size during the Disc Inspection.",
+    suggestedAction:
+      "Check that the disc and Optical Drive are readable, then retry the Disc Inspection.",
+    retryability: "after_action",
+  },
+  content_read_failed: {
+    explanation:
+      "The Archive Worker could not read the DVD content needed to identify the disc.",
+    suggestedAction:
+      "Retry the Disc Inspection once. If it fails again, inspect the disc and Optical Drive.",
+    retryability: "appropriate",
+  },
+  invalid_content: {
+    explanation:
+      "The DVD content did not satisfy the Disc Inspection requirements.",
+    suggestedAction:
+      "Inspect the disc and verify the DVD tools on the Archive Worker host before retrying the Disc Inspection.",
+    retryability: "after_action",
+  },
+  worker_interrupted: {
+    explanation:
+      "The Archive Worker stopped before the Disc Inspection attempt completed.",
+    suggestedAction:
+      "Confirm that the Archive Worker is running, then retry the Disc Inspection.",
+    retryability: "appropriate",
+  },
+  operator_cancelled: {
+    explanation: "An operator cancelled the Disc Inspection.",
+    suggestedAction:
+      "No retry is needed unless the inserted disc still needs to be identified.",
+    retryability: "not_appropriate",
+  },
+  unknown: {
+    explanation:
+      "The Disc Inspection failed for an unclassified reason.",
+    suggestedAction:
+      "Retry the Disc Inspection once. If it fails again, include this report when asking for support.",
+    retryability: "appropriate",
+  },
+};
+
+const DISC_INSPECTION_PHASE_LABELS: Record<DiscInspectionPhase, string> = {
+  settling: "Settling",
+  reading_metadata: "Reading metadata",
+  hashing_content: "Hashing content",
+  confirming_media: "Confirming media",
+  retry_wait: "Retry wait",
+};
+
+function discInspectionInvestigation(
+  inspection: DiscInspection,
+): DashboardInvestigation {
+  const reasonCode = inspection.reasonCode ?? "unknown";
+  const presentation = DISC_INSPECTION_FAILURE_PRESENTATIONS[reasonCode];
+  const retryability = inspection.manualRetryRequestedAt === null
+    ? presentation.retryability
+    : "not_appropriate";
+  const retryabilityDetail = inspection.manualRetryRequestedAt !== null
+    ? "A manual retry is already queued for this Disc Inspection."
+    : retryability === "appropriate"
+      ? "A manual retry is available for the current inserted disc."
+      : retryability === "after_action"
+        ? "A manual retry is available after completing the suggested action."
+        : "Retrying is not useful unless the inserted disc still needs inspection.";
+  return {
+    incidentId: `disc-inspection-failure:${inspection.id}`,
+    worker: "Archive Worker",
+    subjectType: "Disc Inspection",
+    subjectId: inspection.id,
+    attempt: inspection.attemptCount,
+    reasonCode: `disc_inspection.${reasonCode}`,
+    failedPhase: DISC_INSPECTION_PHASE_LABELS[inspection.phase],
+    occurredAt: (inspection.completedAt ?? inspection.updatedAt).toISOString(),
+    retryability,
+    retryabilityDetail,
+    explanation: presentation.explanation,
+    suggestedAction: inspection.manualRetryRequestedAt === null
+      ? presentation.suggestedAction
+      : "Wait for the Archive Worker to start the queued retry.",
+    technicalEvidence: [],
+  };
 }
 
 interface ArchiveReadFailurePresentation {
@@ -877,6 +1023,7 @@ function readDashboardSnapshotRecords(
               lastSeenAt: drive.lastSeenAt.toISOString(),
               currentInspection: inspection === undefined ? null : {
                 id: inspection.id,
+                activityRevision: inspection.updatedAt.toISOString(),
                 status: inspection.status,
                 phase: inspection.phase,
                 attemptCount: inspection.attemptCount,
@@ -901,6 +1048,11 @@ function readDashboardSnapshotRecords(
                 phaseStartedAt: inspection.phaseStartedAt.toISOString(),
                 startedAt: inspection.startedAt.toISOString(),
                 completedAt: inspection.completedAt?.toISOString() ?? null,
+                ...(inspection.status === "failed" && includeInvestigations
+                  ? {
+                      investigation: discInspectionInvestigation(inspection),
+                    }
+                  : {}),
               },
             };
           }),

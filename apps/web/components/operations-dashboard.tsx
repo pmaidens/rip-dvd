@@ -428,10 +428,15 @@ function ArchiveJobItem({
 function DiscInspectionItem({
   inspection,
   onRetry,
+  onInvestigate,
   busy,
 }: {
   inspection: NonNullable<DashboardOpticalDrive["currentInspection"]>;
   onRetry(id: string): void;
+  onInvestigate(
+    inspectionId: string,
+    trigger: HTMLButtonElement,
+  ): void;
   busy: boolean;
 }) {
   const now = useCurrentTime(
@@ -542,14 +547,28 @@ function DiscInspectionItem({
           <p>{inspectionReason(inspection.reasonCode)}</p>
         )}
       </div>
-      {inspection.status === "failed" && !inspection.manualRetryRequested ? (
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => onRetry(inspection.id)}
-        >
-          {busy ? "Retrying…" : "Retry inspection"}
-        </button>
+      {inspection.status === "failed" ? (
+        <div className="operation-actions">
+          {inspection.investigation ? (
+            <button
+              className="investigate-action"
+              type="button"
+              onClick={(event) =>
+                onInvestigate(inspection.id, event.currentTarget)}
+            >
+              Investigate
+            </button>
+          ) : null}
+          {!inspection.manualRetryRequested ? (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => onRetry(inspection.id)}
+            >
+              {busy ? "Retrying…" : "Retry inspection"}
+            </button>
+          ) : null}
+        </div>
       ) : null}
     </section>
   );
@@ -1063,7 +1082,8 @@ export function DashboardView({
   verifyingFilesystemTarget?: string | null;
 }) {
   const [activeInvestigation, setActiveInvestigation] = useState<{
-    archiveJobId: DashboardArchiveJob["id"];
+    kind: "archive-job" | "disc-inspection";
+    subjectId: string;
     trigger: HTMLButtonElement;
   } | null>(null);
   const catalogReviewPage =
@@ -1092,21 +1112,39 @@ export function DashboardView({
           },
         ),
       };
-  const activeInvestigationDetails =
-    activeInvestigation !== null && state.archiveJobs.status === "loaded"
-      ? state.archiveJobs.items.find(
-          (job) => job.id === activeInvestigation.archiveJobId,
-        )?.investigation
-      : undefined;
+  const activeInvestigationDetails = activeInvestigation === null
+    ? undefined
+    : activeInvestigation.kind === "archive-job"
+      ? state.archiveJobs.status === "loaded"
+        ? state.archiveJobs.items.find(
+            (job) => job.id === activeInvestigation.subjectId,
+          )?.investigation
+        : undefined
+      : state.opticalDrives.status === "loaded"
+        ? state.opticalDrives.items
+            .find(
+              (drive) =>
+                drive.currentInspection?.id === activeInvestigation.subjectId,
+            )
+            ?.currentInspection?.investigation
+        : undefined;
+  const activeInvestigationSourceLoaded = activeInvestigation === null ||
+    (activeInvestigation.kind === "archive-job"
+      ? state.archiveJobs.status === "loaded"
+      : state.opticalDrives.status === "loaded");
   useEffect(() => {
     if (
       activeInvestigation !== null &&
-      state.archiveJobs.status === "loaded" &&
+      activeInvestigationSourceLoaded &&
       activeInvestigationDetails === undefined
     ) {
       setActiveInvestigation(null);
     }
-  }, [activeInvestigation, activeInvestigationDetails, state.archiveJobs.status]);
+  }, [
+    activeInvestigation,
+    activeInvestigationDetails,
+    activeInvestigationSourceLoaded,
+  ]);
   return (
     <>
       <div className={`dashboard-grid dashboard-grid-${section}`}>
@@ -1133,6 +1171,12 @@ export function DashboardView({
               <DiscInspectionItem
                 inspection={drive.currentInspection}
                 onRetry={onRetryDiscInspection}
+                onInvestigate={(subjectId, trigger) =>
+                  setActiveInvestigation({
+                    kind: "disc-inspection",
+                    subjectId,
+                    trigger,
+                  })}
                 busy={busyWorkflowId === drive.currentInspection.id}
               />
             ) : drive.state === "ready" ? (
@@ -1172,7 +1216,11 @@ export function DashboardView({
               busy={busyWorkflowId === group.archiveRequestId}
               onCancel={onCancelArchiveRequest}
               onInvestigate={(archiveJobId, trigger) =>
-                setActiveInvestigation({ archiveJobId, trigger })}
+                setActiveInvestigation({
+                  kind: "archive-job",
+                  subjectId: archiveJobId,
+                  trigger,
+                })}
             />
             {group.older.length > 0 ? (
               <details className="archive-attempt-history">
@@ -1194,7 +1242,8 @@ export function DashboardView({
                             type="button"
                             onClick={(event) =>
                               setActiveInvestigation({
-                                archiveJobId: attempt.id,
+                                kind: "archive-job",
+                                subjectId: attempt.id,
                                 trigger: event.currentTarget,
                               })}
                           >

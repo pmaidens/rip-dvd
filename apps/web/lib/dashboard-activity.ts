@@ -126,6 +126,38 @@ function mergeActivitySnapshot(
   detailed: DashboardSnapshot,
   activity: DashboardSnapshot,
 ): DashboardSnapshot {
+  const mergedOpticalDrives =
+    detailed.opticalDrives.status === "loaded" &&
+      activity.opticalDrives.status === "loaded"
+      ? (() => {
+          const detailedById = new Map(
+            detailed.opticalDrives.items.map((drive) => [drive.id, drive]),
+          );
+          return {
+            status: "loaded" as const,
+            items: activity.opticalDrives.items.map((drive) => {
+              const inspection = drive.currentInspection;
+              const previous = detailedById.get(drive.id)?.currentInspection;
+              if (inspection === null || inspection === undefined) {
+                return drive;
+              }
+              const investigation = inspection.investigation ??
+                (previous?.id === inspection.id &&
+                    previous.status === inspection.status &&
+                    previous.activityRevision === inspection.activityRevision
+                  ? previous.investigation
+                  : undefined);
+              return {
+                ...drive,
+                currentInspection: {
+                  ...inspection,
+                  ...(investigation === undefined ? {} : { investigation }),
+                },
+              };
+            }),
+          };
+        })()
+      : activity.opticalDrives;
   const mergedDetectedDiscs =
     detailed.detectedDiscs.status === "loaded" &&
       activity.detectedDiscs.status === "loaded"
@@ -177,18 +209,26 @@ function mergeActivitySnapshot(
       : activity.archiveJobs;
   return {
     ...activity,
+    opticalDrives: mergedOpticalDrives,
     detectedDiscs: mergedDetectedDiscs,
     archiveJobs: mergedArchiveJobs,
   };
 }
 
-function hasMissingArchiveJobInvestigation(
+function hasMissingInvestigation(
   snapshot: DashboardSnapshot,
 ): boolean {
-  return snapshot.archiveJobs.status === "loaded" &&
+  const missingDiscInspection = snapshot.opticalDrives.status === "loaded" &&
+    snapshot.opticalDrives.items.some(
+      (drive) =>
+        drive.currentInspection?.status === "failed" &&
+        drive.currentInspection.investigation === undefined,
+    );
+  const missingArchiveJob = snapshot.archiveJobs.status === "loaded" &&
     snapshot.archiveJobs.items.some(
       (job) => job.status === "failed" && job.investigation === undefined,
     );
+  return missingDiscInspection || missingArchiveJob;
 }
 
 function mergeDiscDetails(
@@ -352,7 +392,7 @@ export function watchDashboardActivity({
     if (latestSnapshot === undefined) {
       return;
     }
-    if (hasMissingArchiveJobInvestigation(latestSnapshot)) {
+    if (hasMissingInvestigation(latestSnapshot)) {
       startInvestigationRefresh();
       return;
     }
@@ -373,7 +413,7 @@ export function watchDashboardActivity({
           ? detailed
           : mergeActivitySnapshot(detailed, latestSnapshot);
         successfulRefreshStillMissingInvestigation =
-          hasMissingArchiveJobInvestigation(latestSnapshot);
+          hasMissingInvestigation(latestSnapshot);
         publishLatestSnapshot();
       })
       .catch(() => {
