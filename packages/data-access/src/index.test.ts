@@ -8088,6 +8088,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
+        name: "20260901191117_encode_publication_recovery_failures",
+      },
+      {
         name: "20260901183135_encode_preparation_validation_failures",
       },
       {
@@ -8113,9 +8116,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260823160205_flat_fixer",
-      },
-      {
-        name: "20260823142401_conscious_alice",
       },
     ]);
     expect(

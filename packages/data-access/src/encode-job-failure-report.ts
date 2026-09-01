@@ -200,6 +200,9 @@ export function encodeJobFailureEvidenceContext(
     case "exit_status":
     case "signal":
     case "timeout":
+    case "duration":
+    case "validation_check":
+    case "none":
       return null;
   }
 }

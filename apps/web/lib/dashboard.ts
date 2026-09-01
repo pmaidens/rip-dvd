@@ -722,14 +722,7 @@ const ENCODE_PHASE_LABELS: Record<
 const ENCODE_FAILURE_PHASE_LABELS: Record<
   EncodeJobFailureReport["phase"],
   string
-> = {
-  preparation: "Preparation",
-  ...ENCODE_PHASE_LABELS,
-  validation: "Validation",
-  cleanup: "Cleanup",
-  publication: "Publication",
-  recovery: "Recovery",
-};
+> = ENCODE_PHASE_LABELS;
 
 const ENCODE_VALIDATION_CHECK_PRESENTATIONS = {
   subtitle_streams: {
