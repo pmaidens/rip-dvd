@@ -35,3 +35,7 @@ _Avoid_: Hash Job, rip, metadata scan, drive inspection
 **Retained Encode Output**:
 A prior final preserved when a corrected Encode Job publishes a replacement. Its durable provenance links the predecessor and replacement Encode Jobs and marks it eligible for future operator-directed cleanup.
 _Avoid_: Backup, failed output
+
+**Worker Incident**:
+A durable, operator-facing record of a worker polling or recovery failure that does not belong to a Disc Inspection, Archive Job, or Encode Job. Repeated matching failures coalesce while active, and a later successful pass records recovery without erasing recent history.
+_Avoid_: Alert, error event, worker log

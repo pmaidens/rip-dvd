@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
 import type { OpticalDriveHardware } from "../../archive-worker/src/archive-worker.js";
+import { pollEncodeWorker } from "../../encode-worker/src/encode-worker.js";
 
 import type { DashboardSnapshot } from "../lib/dashboard";
 import { investigationReport } from "../lib/investigation";
@@ -20,6 +21,103 @@ import { DashboardView } from "./operations-dashboard";
 const dataAccessFixture = useDataAccessFixture();
 
 describe("database-backed dashboard over HTTP", () => {
+  it("carries a coalesced Encode Worker Incident through HTTP, investigation, copy, and recovery", async () => {
+    const { access, databasePath } = dataAccessFixture.createWithDatabasePath();
+    const diagnostic =
+      "/private/media/output.mkv --token private-claim ENV=private-value";
+    const log = vi.fn();
+    const listPublicationMutations = vi.spyOn(
+      access.encodeJobs,
+      "listPublicationMutations",
+    ).mockImplementation(() => {
+      throw new Error(diagnostic);
+    });
+    const workerOptions = {
+      access,
+      concurrency: 1,
+      log,
+      mediaLibraryPath: "/private/media",
+      originalsLibraryPath: "/private/originals",
+      signal: new AbortController().signal,
+    };
+
+    await expect(pollEncodeWorker(workerOptions)).rejects.toThrow(diagnostic);
+    await expect(pollEncodeWorker(workerOptions)).rejects.toThrow(diagnostic);
+
+    const response = createDashboardResponse(access);
+    const dashboard = (await response.json()) as DashboardSnapshot;
+    const serialized = JSON.stringify(dashboard);
+    const incident = dashboard.workerIncidents.status === "loaded"
+      ? dashboard.workerIncidents.items[0]
+      : undefined;
+    expect(incident).toMatchObject({
+      worker: "Encode Worker",
+      status: "active",
+      reasonCode: "worker.publication_recovery_failure",
+      phase: "publication_recovery",
+      occurrenceCount: 2,
+      resolvedAt: null,
+      investigation: {
+        subjectType: "Worker Incident",
+        worker: "Encode Worker",
+        failedPhase: "Publication recovery",
+        retryability: "not_appropriate",
+        technicalEvidence: expect.arrayContaining([
+          { label: "Occurrence count", value: "2" },
+          { label: "Recovery area", value: "Active publication" },
+        ]),
+      },
+    });
+    expect(log).toHaveBeenCalledWith(expect.stringContaining(diagnostic));
+
+    const dashboardHtml = renderToStaticMarkup(
+      <DashboardView state={dashboard} section="encoding" />,
+    );
+    const investigation = incident!.investigation!;
+    const panelHtml = renderToStaticMarkup(
+      <InvestigationPanel
+        investigation={investigation}
+        returnFocusTo={null}
+        onClose={() => undefined}
+      />,
+    );
+    const copiedReport = investigationReport(investigation);
+    expect(dashboardHtml).toContain("Worker Incidents");
+    expect(dashboardHtml).toContain("2 occurrences");
+    expect(dashboardHtml).toContain("Investigate");
+    expect(panelHtml).toContain("Active publication");
+    expect(copiedReport).toContain("Subject: Worker Incident");
+    expect(copiedReport).toContain("- Occurrence count: 2");
+    for (const secret of [
+      diagnostic,
+      "/private/media",
+      "/private/originals",
+      databasePath,
+      "private-claim",
+      "private-value",
+    ]) {
+      expect(serialized).not.toContain(secret);
+      expect(dashboardHtml).not.toContain(secret);
+      expect(panelHtml).not.toContain(secret);
+      expect(copiedReport).not.toContain(secret);
+    }
+
+    listPublicationMutations.mockReturnValue([]);
+    await pollEncodeWorker(workerOptions);
+    const recoveredResponse = createDashboardResponse(access);
+    const recovered = (await recoveredResponse.json()) as DashboardSnapshot;
+    expect(
+      recovered.workerIncidents.status === "loaded"
+        ? recovered.workerIncidents.items[0]
+        : undefined,
+    ).toMatchObject({
+      id: incident!.id,
+      status: "recovered",
+      occurrenceCount: 2,
+      resolvedAt: expect.any(String),
+    });
+  });
+
   it("carries safe Archive Job evidence through HTTP into the shared investigation panel and report", async () => {
     const { access, databasePath } =
       dataAccessFixture.createWithDatabasePath();
@@ -355,7 +453,7 @@ describe("database-backed dashboard over HTTP", () => {
 
     expect(response.status).toBe(200);
     expect(html.match(/data-state="populated"/g)).toHaveLength(1);
-    expect(html.match(/data-state="empty"/g)).toHaveLength(4);
+    expect(html.match(/data-state="empty"/g)).toHaveLength(5);
     expect(html).toContain("Archive drive");
     expect(html).toContain("Pioneer BDR-XD08");
     expect(html).toContain("No discs are currently in an Optical Drive.");

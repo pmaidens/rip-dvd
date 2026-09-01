@@ -602,6 +602,7 @@ describe("readDashboardSnapshot", () => {
       opticalDrives: { status: "loaded", items: [] },
       detectedDiscs: { status: "loaded", items: [] },
       archiveJobs: { status: "loaded", items: [] },
+      workerIncidents: { status: "loaded", items: [] },
       encodeJobs: { status: "loaded", items: [] },
       catalogReview: { status: "loaded", items: [] },
     });

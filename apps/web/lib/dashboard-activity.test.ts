@@ -15,6 +15,7 @@ function emptySnapshot(generatedAt: string): DashboardSnapshot {
     opticalDrives: { status: "loaded", items: [] },
     detectedDiscs: { status: "loaded", items: [] },
     archiveJobs: { status: "loaded", items: [] },
+    workerIncidents: { status: "loaded", items: [] },
     encodeJobs: { status: "loaded", items: [] },
     catalogReview: { status: "loaded", items: [] },
   };
@@ -410,6 +411,93 @@ describe("watchDashboardActivity", () => {
         ? latest.opticalDrives.items[0]?.currentInspection?.investigation
         : undefined,
     ).toBeUndefined();
+    expect(loadSnapshot).toHaveBeenCalledTimes(2);
+    stop();
+  });
+
+  it("hydrates a changed Worker Incident before publishing its compact live update", async () => {
+    const initial = emptySnapshot("2026-09-01T12:00:00.000Z");
+    const compact = emptySnapshot("2026-09-01T12:00:01.000Z");
+    compact.workerIncidents = {
+      status: "loaded",
+      items: [{
+        id: "incident-1",
+        activityRevision: "2026-09-01T12:00:01.000Z:1:active",
+        worker: "Encode Worker",
+        status: "active",
+        reasonCode: "worker.poll_failure",
+        phase: "polling",
+        phaseLabel: "Polling",
+        occurrenceCount: 1,
+        firstObservedAt: "2026-09-01T12:00:01.000Z",
+        lastObservedAt: "2026-09-01T12:00:01.000Z",
+        resolvedAt: null,
+      }],
+    };
+    const detailed = structuredClone(compact);
+    if (detailed.workerIncidents.status === "loaded") {
+      detailed.workerIncidents.items[0]!.investigation = {
+        incidentId: "incident-1",
+        worker: "Encode Worker",
+        subjectType: "Worker Incident",
+        subjectId: "incident-1",
+        attempt: null,
+        reasonCode: "worker.poll_failure",
+        failedPhase: "Polling",
+        occurredAt: "2026-09-01T12:00:01.000Z",
+        retryability: "not_appropriate",
+        retryabilityDetail: "The Encode Worker retries automatically.",
+        explanation: "The Encode Worker could not finish a polling pass.",
+        suggestedAction: "Check worker stdout and database health.",
+        technicalEvidence: [{ label: "Occurrence count", value: "1" }],
+      };
+    }
+    const loadSnapshot = vi.fn()
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(detailed);
+    let dashboardListener: ((event: MessageEvent<string>) => void) | undefined;
+    const onSnapshot = vi.fn();
+    const stop = watchDashboardActivity({
+      loadSnapshot,
+      openEventSource: () => ({
+        onerror: null,
+        onopen: null,
+        addEventListener(_type, listener) {
+          dashboardListener = listener;
+        },
+        close: vi.fn(),
+      }),
+      onSnapshot,
+      onInitialLoadError: vi.fn(),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    dashboardListener?.({
+      data: JSON.stringify(compact),
+    } as MessageEvent<string>);
+    await flushUntil(() => loadSnapshot.mock.calls.length === 2);
+    await flushUntil(() => {
+      const latest = onSnapshot.mock.calls.at(-1)?.[0] as
+        | DashboardSnapshot
+        | undefined;
+      return latest?.workerIncidents.status === "loaded" &&
+        latest.workerIncidents.items[0]?.investigation !== undefined;
+    });
+
+    expect(
+      onSnapshot.mock.calls.some((call) => {
+        const snapshot = call[0] as DashboardSnapshot;
+        return snapshot.workerIncidents.status === "loaded" &&
+          snapshot.workerIncidents.items.some(
+            (incident) => incident.investigation === undefined,
+          );
+      }),
+    ).toBe(false);
+    dashboardListener?.({
+      data: JSON.stringify(compact),
+    } as MessageEvent<string>);
+    await Promise.resolve();
     expect(loadSnapshot).toHaveBeenCalledTimes(2);
     stop();
   });
@@ -1287,6 +1375,7 @@ describe("watchDashboardActivity", () => {
           },
         ],
       },
+      workerIncidents: { status: "loaded", items: [] },
       encodeJobs: {
         status: "loaded",
         items: [

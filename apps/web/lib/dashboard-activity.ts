@@ -207,11 +207,39 @@ function mergeActivitySnapshot(
           };
         })()
       : activity.archiveJobs;
+  const mergedWorkerIncidents =
+    detailed.workerIncidents.status === "loaded" &&
+      activity.workerIncidents.status === "loaded"
+      ? (() => {
+          const detailedById = new Map(
+            detailed.workerIncidents.items.map((incident) => [
+              incident.id,
+              incident,
+            ]),
+          );
+          return {
+            status: "loaded" as const,
+            items: activity.workerIncidents.items.map((incident) => {
+              const previous = detailedById.get(incident.id);
+              const investigation = incident.investigation ??
+                (previous?.status === incident.status &&
+                    previous.activityRevision === incident.activityRevision
+                  ? previous.investigation
+                  : undefined);
+              return {
+                ...incident,
+                ...(investigation === undefined ? {} : { investigation }),
+              };
+            }),
+          };
+        })()
+      : activity.workerIncidents;
   return {
     ...activity,
     opticalDrives: mergedOpticalDrives,
     detectedDiscs: mergedDetectedDiscs,
     archiveJobs: mergedArchiveJobs,
+    workerIncidents: mergedWorkerIncidents,
   };
 }
 
@@ -228,7 +256,11 @@ function hasMissingInvestigation(
     snapshot.archiveJobs.items.some(
       (job) => job.status === "failed" && job.investigation === undefined,
     );
-  return missingDiscInspection || missingArchiveJob;
+  const missingWorkerIncident = snapshot.workerIncidents.status === "loaded" &&
+    snapshot.workerIncidents.items.some(
+      (incident) => incident.investigation === undefined,
+    );
+  return missingDiscInspection || missingArchiveJob || missingWorkerIncident;
 }
 
 function mergeDiscDetails(
