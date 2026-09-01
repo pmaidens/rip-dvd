@@ -151,6 +151,7 @@ export const ENCODE_PROGRESS_PHASES = [
   "scanning",
   "previewing",
   "encoding",
+  "validation",
 ] as const;
 
 export const RETAINED_ENCODE_OUTPUT_STATES = ["retained"] as const;
