@@ -715,9 +715,7 @@ const ENCODE_FAILURE_PHASE_LABELS: Record<
   string
 > = {
   preparation: "Preparation",
-  scanning: "Scanning",
-  previewing: "Previewing",
-  encoding: "Encoding",
+  ...ENCODE_PHASE_LABELS,
   validation: "Validation",
   cleanup: "Cleanup",
   publication: "Publication",

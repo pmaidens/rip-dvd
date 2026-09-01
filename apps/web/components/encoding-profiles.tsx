@@ -1,13 +1,13 @@
 "use client";
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-
-import { displayTerm } from "../lib/display-term";
-import type { EncodingProfileDto } from "../lib/encoding-profiles";
 import {
   HANDBRAKE_PRESET_GROUPS,
   isHandBrakePreset,
-} from "../lib/handbrake-presets";
+} from "@rip-dvd/config";
+
+import { displayTerm } from "../lib/display-term";
+import type { EncodingProfileDto } from "../lib/encoding-profiles";
 
 export type EncodingProfilesLoadState =
   | { status: "loading" }
