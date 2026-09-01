@@ -167,7 +167,10 @@ async function inspectDvd(
         "Optical Drive is temporarily not ready",
       );
     }
-    if (/Invalid IFO for title \d+/i.test(output)) {
+    if (
+      result.signal === "SIGSEGV" ||
+      /Invalid IFO for title \d+/i.test(output)
+    ) {
       const recovered = await recoverReadableTitles(devicePath, signal, runner);
       if (recovered !== null) {
         return recovered;

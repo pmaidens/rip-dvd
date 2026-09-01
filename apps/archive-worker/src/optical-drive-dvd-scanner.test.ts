@@ -123,14 +123,13 @@ describe("Optical Drive DVD scan coordinator", () => {
   });
 
   it("reports an lsdvd command failure as a structured metadata retry", async () => {
+    const run = vi.fn().mockResolvedValue({
+      exitCode: 2,
+      stdout: "",
+      stderr: "permission denied",
+    });
     const { binding, scanner, signal } = await createScannerFixture({
-      runner: {
-        run: vi.fn().mockResolvedValue({
-          exitCode: 2,
-          stdout: "",
-          stderr: "permission denied",
-        }),
-      },
+      runner: { run },
     });
 
     await expect(scanner.scan(binding, signal)).rejects.toEqual(
@@ -139,6 +138,7 @@ describe("Optical Drive DVD scan coordinator", () => {
         reasonCode: "metadata_read_failed",
       }),
     );
+    expect(run).toHaveBeenCalledOnce();
   });
 
   it("recovers valid titles when unreadable IFO decoys crash the full scan", async () => {
@@ -146,10 +146,10 @@ describe("Optical Drive DVD scan coordinator", () => {
       run: vi
         .fn()
         .mockResolvedValueOnce({
-          exitCode: 139,
+          exitCode: null,
+          signal: "SIGSEGV",
           stdout: "",
-          stderr:
-            "libdvdread: Invalid IFO for title 20 (VTS_20_0.IFO).\nSegmentation fault",
+          stderr: "",
         })
         .mockResolvedValueOnce({
           exitCode: 0,
