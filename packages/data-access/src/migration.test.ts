@@ -55,6 +55,51 @@ function createMigrationsThrough(lastMigration: string): string {
   return migrationsFolder;
 }
 
+function seedEncodeJob(
+  access: ReturnType<typeof createLegacySidecarDataAccess>,
+  key: string,
+) {
+  const drive = access.catalog.upsertOpticalDrive({
+    devicePath: `/dev/${key}`,
+    isPresent: true,
+  });
+  const disc = access.catalog.registerDetectedDisc({
+    opticalDriveId: drive.id,
+    discKind: "dvd",
+    fingerprint: `${key}-disc`,
+  });
+  access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+  access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+  const archive = access.catalog.createOriginalDiscArchive({
+    detectedDiscId: disc.id,
+    discKind: "dvd",
+    archiveFormat: "iso",
+    archivePath: `/originals/${key}.iso`,
+    fingerprint: disc.fingerprint,
+  });
+  const item = access.catalog.createMediaItem({
+    kind: "movie",
+    title: key,
+  });
+  const selection = access.catalog.createDiscSelection({
+    originalDiscArchiveId: archive.id,
+    mediaItemId: item.id,
+    sourceIdentity: { kind: "main_feature" },
+  });
+  completeCatalogReview(access, archive.id);
+  const profile = access.encodingProfiles.create({
+    key,
+    displayName: key,
+    mediaDomain: "dvd_video",
+    settings: { preset: "Fast 480p30" },
+  });
+  return access.encodeJobs.enqueue({
+    discSelectionId: selection.id,
+    encodingProfileId: profile.id,
+    outputPath: `/media/${key}.mkv`,
+  });
+}
+
 function readApplicationSchema(sqlite: DatabaseSync): unknown[] {
   return sqlite
     .prepare(`
@@ -330,45 +375,7 @@ it("preserves historical Encode Jobs without inventing Failure Reports", () => {
     databasePath,
     migrationsFolder: previousMigrations,
   });
-  const drive = previousAccess.catalog.upsertOpticalDrive({
-    devicePath: "/dev/historical-encode",
-    isPresent: true,
-  });
-  const disc = previousAccess.catalog.registerDetectedDisc({
-    opticalDriveId: drive.id,
-    discKind: "dvd",
-    fingerprint: "historical-encode-disc",
-  });
-  previousAccess.catalog.updateDetectedDiscStatus(disc.id, "scanned");
-  previousAccess.catalog.updateDetectedDiscStatus(disc.id, "approved");
-  const archive = previousAccess.catalog.createOriginalDiscArchive({
-    detectedDiscId: disc.id,
-    discKind: "dvd",
-    archiveFormat: "iso",
-    archivePath: "/originals/historical-encode.iso",
-    fingerprint: disc.fingerprint,
-  });
-  const item = previousAccess.catalog.createMediaItem({
-    kind: "movie",
-    title: "Historical Encode",
-  });
-  const selection = previousAccess.catalog.createDiscSelection({
-    originalDiscArchiveId: archive.id,
-    mediaItemId: item.id,
-    sourceIdentity: { kind: "main_feature" },
-  });
-  completeCatalogReview(previousAccess, archive.id);
-  const profile = previousAccess.encodingProfiles.create({
-    key: "historical-encode",
-    displayName: "Historical encode",
-    mediaDomain: "dvd_video",
-    settings: { preset: "Fast 480p30" },
-  });
-  const job = previousAccess.encodeJobs.enqueue({
-    discSelectionId: selection.id,
-    encodingProfileId: profile.id,
-    outputPath: "/media/historical-encode.mkv",
-  });
+  const job = seedEncodeJob(previousAccess, "historical-encode");
   const claim = previousAccess.encodeJobs.claimNext("historical-worker");
   if (claim === null) {
     throw new Error("Expected historical Encode Job claim");
@@ -538,4 +545,72 @@ it("migrates command reports and accepts every new Encode failure category", () 
     quick_check: "ok",
   });
   sqlite.close();
+});
+
+it("preserves existing command Failure Reports when adding post-command evidence", () => {
+  const databasePath = createDatabasePath(
+    "rip-dvd-post-command-report-migration-",
+  );
+  const previousMigrations = createMigrationsThrough(
+    "20260901172324_glorious_cargill",
+  );
+  const previousAccess = createLegacySidecarDataAccess({
+    databasePath,
+    migrationsFolder: previousMigrations,
+  });
+  const job = seedEncodeJob(previousAccess, "previous-command-report");
+  const claim = previousAccess.encodeJobs.claimNext("previous-report-worker");
+  if (claim === null) {
+    throw new Error("Expected previous Encode Job claim");
+  }
+  previousAccess.encodeJobs.fail(claim, "HandBrake command failed");
+  previousAccess.close();
+
+  const previousSqlite = new DatabaseSync(databasePath);
+  const occurredAt = Date.parse("2026-09-01T17:30:00.000Z");
+  previousSqlite.prepare(`
+    INSERT INTO encode_job_failure_reports(
+      id,
+      encode_job_id,
+      schema_version,
+      worker_kind,
+      reason_code,
+      phase,
+      retryability,
+      diagnostic,
+      exit_status,
+      signal,
+      timeout_seconds,
+      occurred_at,
+      created_at
+    ) VALUES (?, ?, 1, 'encode_worker', 'command_failed', 'encoding',
+      'appropriate', ?, 19, NULL, NULL, ?, ?)
+  `).run(
+    "previous-command-failure-report",
+    job.id,
+    "previous private diagnostic",
+    occurredAt,
+    occurredAt,
+  );
+  previousSqlite.close();
+
+  const migratedAccess = createDataAccess({ databasePath });
+  expect(migratedAccess.encodeJobs.listFailureReports([job.id])).toEqual([
+    expect.objectContaining({
+      id: "previous-command-failure-report",
+      reasonCode: "command_failed",
+      phase: "encoding",
+      retryability: "appropriate",
+      diagnostic: "previous private diagnostic",
+      evidence: { kind: "exit_status", exitStatus: 19 },
+    }),
+  ]);
+  migratedAccess.close();
+
+  const migratedSqlite = new DatabaseSync(databasePath);
+  expect(migratedSqlite.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+  expect(migratedSqlite.prepare("PRAGMA quick_check").get()).toEqual({
+    quick_check: "ok",
+  });
+  migratedSqlite.close();
 });
