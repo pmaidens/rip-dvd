@@ -1206,6 +1206,20 @@ export function createDataAccessInternal(
     Parameters<typeof database.transaction>[0]
   >[0];
 
+  function appendEncodeJobFailureReport(
+    transaction: CatalogTransaction,
+    encodeJobId: EncodeJobId | undefined,
+    report: ValidatedEncodeJobFailureReportInput | undefined,
+    occurredAt: Date,
+  ): void {
+    if (encodeJobId === undefined || report === undefined) {
+      return;
+    }
+    transaction.insert(encodeJobFailureReports).values(
+      encodeJobFailureReportRecord(encodeJobId, report, occurredAt),
+    ).run();
+  }
+
   function uniqueDeclaredByteCount(
     byteCounts: readonly (number | null)[],
   ): number | null {
@@ -3218,19 +3232,12 @@ export function createDataAccessInternal(
         ) {
           clearCorrectedEncodePublicationAuthority(transaction, updated.id);
         }
-        if (
-          updated &&
-          update.status === "failed" &&
-          failureOptions?.failureReport
-        ) {
-          transaction.insert(encodeJobFailureReports).values(
-            encodeJobFailureReportRecord(
-              updated.id,
-              failureOptions.failureReport,
-              update.updatedAt,
-            ),
-          ).run();
-        }
+        appendEncodeJobFailureReport(
+          transaction,
+          update.status === "failed" ? updated?.id : undefined,
+          failureOptions?.failureReport,
+          update.updatedAt,
+        );
         return updated;
       }, { behavior: "immediate" }),
     updateProgressAttempt: (claim, update, details, failureOptions) =>
@@ -3260,19 +3267,12 @@ export function createDataAccessInternal(
         ) {
           clearCorrectedEncodePublicationAuthority(transaction, updated.id);
         }
-        if (
-          updated &&
-          update.status === "failed" &&
-          failureOptions?.failureReport
-        ) {
-          transaction.insert(encodeJobFailureReports).values(
-            encodeJobFailureReportRecord(
-              updated.id,
-              failureOptions.failureReport,
-              update.updatedAt,
-            ),
-          ).run();
-        }
+        appendEncodeJobFailureReport(
+          transaction,
+          update.status === "failed" ? updated?.id : undefined,
+          failureOptions?.failureReport,
+          update.updatedAt,
+        );
         return updated;
       }, { behavior: "immediate" }),
     progressDetailsChanged: (current, previous) =>
