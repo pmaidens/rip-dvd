@@ -201,6 +201,22 @@ async function runEncodePreparationStep<T>(
   }
 }
 
+async function requireRegularOutputForValidation(
+  outputPath: string,
+  errorMessage: string,
+): Promise<Stats> {
+  try {
+    return await requireNonEmptyRegularEncodeOutput(outputPath, errorMessage);
+  } catch (error) {
+    throw new ClassifiedEncodeFailureError(
+      normalizeErrorMessage(error),
+      "output_validation_failed",
+      "validation",
+      { kind: "validation_check", check: "output_file" },
+    );
+  }
+}
+
 export interface AtomicPathExchange {
   exchange(firstPath: string, secondPath: string): void;
 }
@@ -1766,19 +1782,10 @@ export async function executeEncodeClaim(
     parseProgress("", true);
     signal.throwIfAborted();
     failurePhase = "validation";
-    try {
-      await requireNonEmptyRegularEncodeOutput(
-        partialPath,
-        "HandBrake did not produce a complete regular output file",
-      );
-    } catch (error) {
-      throw new ClassifiedEncodeFailureError(
-        normalizeErrorMessage(error),
-        "output_validation_failed",
-        "validation",
-        { kind: "validation_check", check: "output_file" },
-      );
-    }
+    await requireRegularOutputForValidation(
+      partialPath,
+      "HandBrake did not produce a complete regular output file",
+    );
     await options.outputValidator.prepareAndValidate(partialPath, signal, {
       ...(input.expectedDurationSeconds === undefined
         ? {}
@@ -1788,20 +1795,10 @@ export async function executeEncodeClaim(
         : { expectedVobSubStreams: input.expectedVobSubStreams }),
     });
     signal.throwIfAborted();
-    let validatedPartialMetadata: Stats;
-    try {
-      validatedPartialMetadata = await requireNonEmptyRegularEncodeOutput(
-        partialPath,
-        "Encode output validation did not retain a regular output file",
-      );
-    } catch (error) {
-      throw new ClassifiedEncodeFailureError(
-        normalizeErrorMessage(error),
-        "output_validation_failed",
-        "validation",
-        { kind: "validation_check", check: "output_file" },
-      );
-    }
+    const validatedPartialMetadata = await requireRegularOutputForValidation(
+      partialPath,
+      "Encode output validation did not retain a regular output file",
+    );
     await syncPath(partialPath);
     failurePhase = "publication";
     publishedOutputMetadata = validatedPartialMetadata;
