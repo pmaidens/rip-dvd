@@ -34,6 +34,15 @@ const pollFailure = {
   evidence: {},
 } satisfies RecordWorkerIncidentInput;
 
+const archiveRecoveryFailure = {
+  schemaVersion: 1,
+  workerKind: "archive",
+  reasonCode: "claim_recovery_failure",
+  phase: "claim_recovery",
+  retryability: "automatic",
+  evidence: { recoveryArea: "expired_archive_job_claim" },
+} satisfies RecordWorkerIncidentInput;
+
 describe("Worker Incident data access", () => {
   it("coalesces repeated active incidents and retains resolved history", () => {
     vi.useFakeTimers();
@@ -116,6 +125,33 @@ describe("Worker Incident data access", () => {
     access.close();
   });
 
+  it("coalesces and bounds Archive Worker recovery history independently", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime("2026-09-01T00:00:00.000Z");
+    const access = createAccess();
+    const active = access.workerIncidents.record({
+      ...pollFailure,
+      workerKind: "archive",
+    });
+
+    for (let index = 0; index < 105; index += 1) {
+      vi.setSystemTime(Date.now() + 1_000);
+      access.workerIncidents.record(archiveRecoveryFailure);
+      vi.setSystemTime(Date.now() + 1_000);
+      access.workerIncidents.resolve(archiveRecoveryFailure);
+    }
+
+    const retained = access.workerIncidents.list({
+      workerKind: "archive",
+      resolvedLimit: 100,
+    });
+    expect(retained).toHaveLength(100);
+    expect(retained[0]).toMatchObject({ id: active.id, resolvedAt: null });
+    expect(retained.filter(({ resolvedAt }) => resolvedAt !== null))
+      .toHaveLength(99);
+    access.close();
+  });
+
   it("rejects unversioned, inconsistent, and non-allowlisted records", () => {
     const access = createAccess();
 
@@ -127,6 +163,14 @@ describe("Worker Incident data access", () => {
       {
         ...pollFailure,
         evidence: { recoveryArea: "pending_partial_cleanup" },
+      },
+      {
+        ...archiveRecoveryFailure,
+        evidence: { recoveryArea: "active_publication" },
+      },
+      {
+        ...archiveRecoveryFailure,
+        workerKind: "encode",
       },
     ]) {
       expect(() =>

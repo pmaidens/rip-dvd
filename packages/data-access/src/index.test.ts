@@ -8091,6 +8091,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         name: "20260901183135_encode_preparation_validation_failures",
       },
       {
+        name: "20260901182617_parallel_cerebro",
+      },
+      {
         name: "20260901175437_reflective_tattoo",
       },
       {
@@ -8113,9 +8116,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260823142401_conscious_alice",
-      },
-      {
-        name: "20260822201215_thick_madame_web",
       },
     ]);
     expect(
