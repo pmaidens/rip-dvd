@@ -77,6 +77,19 @@ function commandFailure(
   };
 }
 
+function cleanupFailure(
+  diagnostic = "partial cleanup failed",
+): EncodeJobFailureReportInput {
+  return {
+    schemaVersion: 1,
+    reasonCode: "cleanup_failed",
+    phase: "cleanup",
+    retryability: "after_action",
+    diagnostic,
+    evidence: { kind: "cleanup", operation: "partial_output" },
+  };
+}
+
 function claim(access: DataAccess): RunningEncodeJob {
   const claimed = access.encodeJobs.claimNext("failure-report-worker");
   if (claimed === null) {
@@ -136,6 +149,16 @@ describe("Encode Job Failure Reports", () => {
         },
       } as EncodeJobFailureReportInput),
     ).toThrow(DomainInvariantError);
+    expect(() =>
+      access.encodeJobs.failWithReport(claimed, {
+        ...cleanupFailure(),
+        evidence: {
+          kind: "cleanup",
+          operation: "partial_output",
+          outputPath: "/media/private/output.mkv",
+        },
+      } as EncodeJobFailureReportInput),
+    ).toThrow(DomainInvariantError);
     expect(access.encodeJobs.list()).toEqual([
       expect.objectContaining({ id: job.id, status: "running" }),
     ]);
@@ -152,10 +175,123 @@ describe("Encode Job Failure Reports", () => {
     expect(() =>
       access.encodeJobs.failWithReport(staleClaim, commandFailure(3)),
     ).toThrow(StaleJobAttemptError);
+    expect(() =>
+      access.encodeJobs.recordFailureReport(staleClaim, cleanupFailure()),
+    ).toThrow(StaleJobAttemptError);
     expect(access.encodeJobs.list()).toEqual([
       expect.objectContaining({ id: job.id, status: "running" }),
     ]);
     expect(access.encodeJobs.listFailureReports([job.id])).toEqual([]);
+  });
+
+  it("keeps primary and cleanup failures as separate structured reports", () => {
+    const { access, job } = createEncodeJobFixture();
+
+    const failed = access.encodeJobs.failWithReports(
+      claim(access),
+      "HandBrake command failed",
+      [commandFailure(29), cleanupFailure("cleanup /private/output.mkv")],
+    );
+
+    expect(failed).toMatchObject({
+      id: job.id,
+      status: "failed",
+      errorMessage: "HandBrake command failed",
+    });
+    expect(access.encodeJobs.listFailureReports([job.id])).toEqual([
+      expect.objectContaining({
+        reasonCode: "cleanup_failed",
+        phase: "cleanup",
+        retryability: "after_action",
+        diagnostic: "cleanup /private/output.mkv",
+        evidence: { kind: "cleanup", operation: "partial_output" },
+      }),
+      expect.objectContaining({
+        reasonCode: "command_failed",
+        phase: "encoding",
+        evidence: { kind: "exit_status", exitStatus: 29 },
+      }),
+    ]);
+  });
+
+  it("fences cleanup reports by the current cleanup lease", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T12:00:00.000Z"));
+    const { access, job } = createEncodeJobFixture();
+    const claimed = claim(access);
+    const cleanup = access.encodeJobs.registerPartialCleanup(claimed);
+    access.encodeJobs.failWithReport(claimed, commandFailure(31));
+    const firstOwner = access.encodeJobs.claimPartialCleanup(cleanup);
+
+    vi.advanceTimersByTime(1_000);
+    access.encodeJobs.recordCleanupFailureReport(
+      firstOwner,
+      cleanupFailure("first owner"),
+    );
+    vi.advanceTimersByTime(60_001);
+    const laterOwner = access.encodeJobs.claimPartialCleanup(cleanup);
+
+    expect(() =>
+      access.encodeJobs.recordCleanupFailureReport(
+        firstOwner,
+        cleanupFailure("stale owner"),
+      )
+    ).toThrow(StaleJobAttemptError);
+    access.encodeJobs.recordCleanupFailureReport(
+      laterOwner,
+      cleanupFailure("later owner"),
+    );
+    expect(
+      access.encodeJobs.listFailureReports([job.id]).map(
+        ({ diagnostic }) => diagnostic,
+      ),
+    ).toEqual(["later owner", "first owner", "HandBrake diagnostic 31"]);
+  });
+
+  it("atomically classifies expired job and publication leases", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T12:00:00.000Z"));
+    const { access, job } = createEncodeJobFixture();
+    const abandonedClaim = claim(access);
+    access.encodeJobs.updateProgress(abandonedClaim, {
+      phase: "previewing",
+      progressPercent: 10,
+      etaSeconds: null,
+    });
+    vi.advanceTimersByTime(60_001);
+
+    expect(access.encodeJobs.recoverExpiredClaims()).toHaveLength(1);
+    expect(access.encodeJobs.listFailureReports([job.id])).toEqual([
+      expect.objectContaining({
+        reasonCode: "lease_expired",
+        phase: "previewing",
+        evidence: { kind: "lease", scope: "job_claim" },
+      }),
+    ]);
+
+    access.encodeJobs.completePartialCleanup(
+      access.encodeJobs.listPendingPartialCleanups()[0]!,
+    );
+    access.encodeJobs.requeue(job.id);
+    const publicationClaim = claim(access);
+    const publication = access.encodeJobs.registerPartialCleanup(
+      publicationClaim,
+      { publicationPending: true },
+    );
+    const mutation = access.encodeJobs.beginPublicationMutation(
+      publicationClaim,
+      publication,
+    );
+    vi.advanceTimersByTime(60_001);
+
+    expect(
+      access.encodeJobs.recoverExpiredPublicationMutation(mutation),
+    ).toMatchObject({ id: job.id, status: "failed" });
+    expect(access.encodeJobs.listFailureReports([job.id])[0]).toMatchObject({
+      reasonCode: "lease_expired",
+      phase: "publication",
+      evidence: { kind: "lease", scope: "publication_cleanup" },
+    });
   });
 
   it("keeps newest-first history across requeue and completion", () => {

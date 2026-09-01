@@ -2186,6 +2186,8 @@ describe("encode worker polling", () => {
     );
     expect(fixture.access.encodeJobs.listRetainedOutputs([replacement.id]))
       .toEqual([]);
+    expect(fixture.access.encodeJobs.listFailureReports([replacement.id]))
+      .toEqual([]);
     fixture.access.close();
   });
 
@@ -2218,6 +2220,8 @@ describe("encode worker polling", () => {
       expect.objectContaining({ id: replacement.id, status: "cancelled" }),
     );
     expect(fixture.access.encodeJobs.listRetainedOutputs([replacement.id]))
+      .toEqual([]);
+    expect(fixture.access.encodeJobs.listFailureReports([replacement.id]))
       .toEqual([]);
     vi.useRealTimers();
     fixture.access.close();
@@ -2258,6 +2262,14 @@ describe("encode worker polling", () => {
     );
     expect(fixture.access.encodeJobs.listRetainedOutputs([replacement.id]))
       .toEqual([]);
+    expect(fixture.access.encodeJobs.listFailureReports([replacement.id]))
+      .toEqual([
+        expect.objectContaining({
+          reasonCode: "worker_interrupted",
+          phase: "encoding",
+          evidence: { kind: "interruption", source: "worker_shutdown" },
+        }),
+      ]);
     fixture.access.close();
   });
 
@@ -2289,6 +2301,8 @@ describe("encode worker polling", () => {
       expect.objectContaining({ id: replacement.id, status: "failed" }),
     );
     expect(fixture.access.encodeJobs.listRetainedOutputs([replacement.id]))
+      .toEqual([]);
+    expect(fixture.access.encodeJobs.listFailureReports([replacement.id]))
       .toEqual([]);
     fixture.access.close();
   });
@@ -2423,6 +2437,17 @@ describe("encode worker polling", () => {
     expect(existsSync(retainedBeforeRecovery[0]!.retainedOutputPath)).toBe(
       true,
     );
+    expect(fixture.access.encodeJobs.listFailureReports([replacement.id]))
+      .toEqual([
+        expect.objectContaining({
+          reasonCode: "cleanup_failed",
+          phase: "cleanup",
+          evidence: {
+            kind: "cleanup",
+            operation: "publication_completion",
+          },
+        }),
+      ]);
 
     postFinalizationCleanupFailure.armed = false;
     await pollEncodeWorker({
@@ -2446,6 +2471,8 @@ describe("encode worker polling", () => {
       .toEqual(retainedBeforeRecovery);
     expect(readFileSync(retainedBeforeRecovery[0]!.retainedOutputPath, "utf8"))
       .toBe("incorrect final");
+    expect(fixture.access.encodeJobs.listFailureReports([replacement.id]))
+      .toHaveLength(1);
     fixture.access.close();
   });
 
@@ -2566,6 +2593,15 @@ describe("encode worker polling", () => {
         status: "failed",
       }),
     ]);
+    expect(fixture.access.encodeJobs.listFailureReports([fixture.job.id])[0])
+      .toMatchObject({
+        reasonCode: "publication_failed",
+        phase: "publication",
+        evidence: {
+          kind: "publication",
+          operation: "publication_mutation",
+        },
+      });
     replacementLinkFailure.armed = false;
     expect(
       fixture.access.encodeJobs.requeue(fixture.job.id, {
@@ -5592,6 +5628,15 @@ describe("encode worker polling", () => {
         status: "failed",
       }),
     ]);
+    expect(fixture.access.encodeJobs.listFailureReports([fixture.job.id])[0])
+      .toMatchObject({
+        reasonCode: "publication_recovery_failed",
+        phase: "recovery",
+        evidence: {
+          kind: "recovery",
+          operation: "publication_recovery",
+        },
+      });
 
     recoveryDirectorySyncFailure.armed = false;
     await pollEncodeWorker(options);

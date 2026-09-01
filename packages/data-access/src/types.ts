@@ -888,7 +888,28 @@ export type EncodeJobFailureEvidence =
       observedSeconds: number;
     }
   | { kind: "validation_check"; check: EncodeJobFailureValidationCheck }
-  | { kind: "none" };
+  | { kind: "none" }
+  | {
+      kind: "cleanup";
+      operation:
+        | "partial_output"
+        | "replacement_artifact"
+        | "published_output"
+        | "publication_completion";
+    }
+  | {
+      kind: "publication";
+      operation: "publication_mutation" | "publication_completion";
+    }
+  | { kind: "lease"; scope: "job_claim" | "publication_cleanup" }
+  | {
+      kind: "interruption";
+      source: "worker_shutdown" | "publication_completion";
+    }
+  | {
+      kind: "recovery";
+      operation: "publication_recovery" | "cleanup_recovery";
+    };
 
 export interface EncodeJobFailureReportInput {
   schemaVersion: (typeof ENCODE_JOB_FAILURE_REPORT_SCHEMA_VERSIONS)[number];
@@ -1334,6 +1355,20 @@ export interface EncodeJobAccess {
     report: EncodeJobFailureReportInput,
     options?: EncodeJobFailureOptions,
   ): EncodeJob;
+  failWithReports(
+    claim: RunningEncodeJob,
+    errorMessage: string,
+    reports: readonly EncodeJobFailureReportInput[],
+    options?: EncodeJobFailureOptions,
+  ): EncodeJob;
+  recordFailureReport(
+    claim: RunningEncodeJob,
+    report: EncodeJobFailureReportInput,
+  ): void;
+  recordCleanupFailureReport(
+    cleanup: EncodeJobPartialCleanup,
+    report: EncodeJobFailureReportInput,
+  ): void;
   listFailureReports(ids: readonly EncodeJobId[]): EncodeJobFailureReport[];
   requeue(id: EncodeJobId, options?: EncodeJobRequeueOptions): EncodeJob;
 }

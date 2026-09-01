@@ -11,6 +11,11 @@ export const ENCODE_JOB_FAILURE_REASON_CODES = [
   "command_timeout",
   "output_validation_failed",
   "unknown_failure",
+  "cleanup_failed",
+  "publication_failed",
+  "lease_expired",
+  "worker_interrupted",
+  "publication_recovery_failed",
 ] as const;
 export const ENCODE_JOB_FAILURE_PHASES = [
   "preparation",
@@ -37,6 +42,18 @@ export const ENCODE_JOB_FAILURE_VALIDATION_CHECKS = [
   "audio_timing",
   "video_decode",
   "output_file",
+] as const;
+export const ENCODE_JOB_FAILURE_CONTEXTS = [
+  "partial_output",
+  "replacement_artifact",
+  "published_output",
+  "publication_completion",
+  "publication_mutation",
+  "job_claim",
+  "publication_cleanup",
+  "worker_shutdown",
+  "publication_recovery",
+  "cleanup_recovery",
 ] as const;
 export const ENCODE_JOB_FAILURE_SIGNALS = [
   "SIGABRT",
@@ -86,6 +103,26 @@ export interface ValidatedEncodeJobFailureReportInput
   extends EncodeJobFailureReportInput {
   diagnostic: string | null;
 }
+
+const CLEANUP_OPERATIONS = [
+  "partial_output",
+  "replacement_artifact",
+  "published_output",
+  "publication_completion",
+] as const;
+const PUBLICATION_OPERATIONS = [
+  "publication_mutation",
+  "publication_completion",
+] as const;
+const LEASE_SCOPES = ["job_claim", "publication_cleanup"] as const;
+const INTERRUPTION_SOURCES = [
+  "worker_shutdown",
+  "publication_completion",
+] as const;
+const RECOVERY_OPERATIONS = [
+  "publication_recovery",
+  "cleanup_recovery",
+] as const;
 
 function requireAllowlistedKeys(
   value: unknown,
@@ -172,11 +209,31 @@ export function validateEncodeJobFailureReport(
               ? ["kind", "check"]
               : input.evidence?.kind === "none"
                 ? ["kind"]
-          : [],
+                : input.evidence?.kind === "cleanup"
+                  ? ["kind", "operation"]
+                  : input.evidence?.kind === "publication"
+                    ? ["kind", "operation"]
+                    : input.evidence?.kind === "lease"
+                      ? ["kind", "scope"]
+                      : input.evidence?.kind === "interruption"
+                        ? ["kind", "source"]
+                        : input.evidence?.kind === "recovery"
+                          ? ["kind", "operation"]
+                          : [],
     "evidence",
   );
 
   if (input.reasonCode === "command_failed") {
+    if (
+      (input.phase !== "scanning" &&
+        input.phase !== "previewing" &&
+        input.phase !== "encoding") ||
+      input.retryability !== "appropriate"
+    ) {
+      throw new DomainInvariantError(
+        "Encode Job Failure Report command failure classification is invalid",
+      );
+    }
     if (input.evidence.kind === "exit_status") {
       if (
         !Number.isSafeInteger(input.evidence.exitStatus) ||
@@ -197,6 +254,10 @@ export function validateEncodeJobFailureReport(
     }
   } else if (input.reasonCode === "command_timeout") {
     if (
+      (input.phase !== "scanning" &&
+        input.phase !== "previewing" &&
+        input.phase !== "encoding") ||
+      input.retryability !== "appropriate" ||
       input.evidence.kind !== "timeout" ||
       !Number.isSafeInteger(input.evidence.timeoutSeconds) ||
       input.evidence.timeoutSeconds < 1 ||
@@ -227,6 +288,67 @@ export function validateEncodeJobFailureReport(
     ) {
       throw new DomainInvariantError(
         "Encode Job Failure Report validation evidence is invalid",
+      );
+    }
+  } else if (input.reasonCode === "cleanup_failed") {
+    if (
+      input.phase !== "cleanup" ||
+      input.retryability !== "after_action" ||
+      input.evidence.kind !== "cleanup" ||
+      !CLEANUP_OPERATIONS.includes(input.evidence.operation)
+    ) {
+      throw new DomainInvariantError(
+        "Encode Job Failure Report cleanup evidence is invalid",
+      );
+    }
+  } else if (input.reasonCode === "publication_failed") {
+    if (
+      input.phase !== "publication" ||
+      input.retryability !== "after_action" ||
+      input.evidence.kind !== "publication" ||
+      !PUBLICATION_OPERATIONS.includes(input.evidence.operation)
+    ) {
+      throw new DomainInvariantError(
+        "Encode Job Failure Report publication evidence is invalid",
+      );
+    }
+  } else if (input.reasonCode === "lease_expired") {
+    if (
+      input.retryability !== "after_action" ||
+      input.evidence.kind !== "lease" ||
+      !LEASE_SCOPES.includes(input.evidence.scope) ||
+      (input.evidence.scope === "publication_cleanup" &&
+        input.phase !== "publication") ||
+      (input.evidence.scope === "job_claim" &&
+        (input.phase === "cleanup" || input.phase === "recovery"))
+    ) {
+      throw new DomainInvariantError(
+        "Encode Job Failure Report lease evidence is invalid",
+      );
+    }
+  } else if (input.reasonCode === "worker_interrupted") {
+    if (
+      input.retryability !== "after_action" ||
+      input.evidence.kind !== "interruption" ||
+      !INTERRUPTION_SOURCES.includes(input.evidence.source) ||
+      (input.evidence.source === "publication_completion" &&
+        input.phase !== "publication") ||
+      input.phase === "cleanup" ||
+      input.phase === "recovery"
+    ) {
+      throw new DomainInvariantError(
+        "Encode Job Failure Report interruption evidence is invalid",
+      );
+    }
+  } else if (input.reasonCode === "publication_recovery_failed") {
+    if (
+      input.phase !== "recovery" ||
+      input.retryability !== "after_action" ||
+      input.evidence.kind !== "recovery" ||
+      !RECOVERY_OPERATIONS.includes(input.evidence.operation)
+    ) {
+      throw new DomainInvariantError(
+        "Encode Job Failure Report recovery evidence is invalid",
       );
     }
   } else if (input.evidence.kind !== "none") {

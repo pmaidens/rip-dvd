@@ -705,10 +705,18 @@ function archiveJobInvestigation({
   };
 }
 
-const ENCODE_PHASE_LABELS: Record<EncodeProgressPhase, string> = {
+const ENCODE_PHASE_LABELS: Record<
+  EncodeJobFailureReport["phase"] | EncodeProgressPhase,
+  string
+> = {
+  preparation: "Preparation",
   scanning: "Scanning",
   previewing: "Previewing",
   encoding: "Encoding",
+  validation: "Validation",
+  cleanup: "Cleanup",
+  publication: "Publication",
+  recovery: "Recovery",
 };
 
 const ENCODE_FAILURE_PHASE_LABELS: Record<
@@ -825,16 +833,48 @@ const ENCODE_FAILURE_PRESENTATIONS = {
     suggestedAction:
       "Retry the Encode Job. If it reaches the time limit again, copy this report when asking for support.",
   },
+  output_validation_failed: {
+    explanation: "The encoded file failed validation.",
+    suggestedAction:
+      "Review the Encode Job inputs, then retry the Encode Job.",
+  },
   unknown_failure: {
     explanation: "The Encode Worker could not classify this failure.",
     suggestedAction:
       "Review the output location for an obvious conflict, then retry once. Copy this report if the failure repeats.",
   },
+  cleanup_failed: {
+    explanation:
+      "The Encode Worker could not finish a required output cleanup operation.",
+    suggestedAction:
+      "Keep the Encode Worker running so it can retry cleanup. If the Encode Job remains blocked, restart the worker and copy this report when asking for support.",
+  },
+  publication_failed: {
+    explanation:
+      "The Encode Worker could not safely finish publishing the validated output.",
+    suggestedAction:
+      "Leave the output files in place and let publication reconciliation run. If recovery keeps failing, copy this report when asking for support.",
+  },
+  lease_expired: {
+    explanation:
+      "Encode Job ownership expired before the active work reached a durable terminal state.",
+    suggestedAction:
+      "Confirm that the Encode Worker is running, wait for its cleanup pass to finish, then retry the Encode Job.",
+  },
+  worker_interrupted: {
+    explanation:
+      "The Encode Worker stopped before the active phase reached a durable terminal state.",
+    suggestedAction:
+      "Restart or resume the Encode Worker, wait for cleanup or publication recovery to finish, then retry the Encode Job if it failed.",
+  },
+  publication_recovery_failed: {
+    explanation:
+      "The Encode Worker could not reconcile output state left by an interrupted publication.",
+    suggestedAction:
+      "Leave the output files in place and restart the Encode Worker. If reconciliation fails again, copy this report when asking for support.",
+  },
 } satisfies Record<
-  Exclude<
-    EncodeJobFailureReport["reasonCode"],
-    "output_validation_failed"
-  >,
+  EncodeJobFailureReport["reasonCode"],
   { explanation: string; suggestedAction: string }
 >;
 
@@ -902,16 +942,20 @@ function encodeFailureEvidencePresentation(
         suggestedAction: presentation.suggestedAction,
       };
     }
-    case "none": {
-      const presentation = report.reasonCode === "output_validation_failed"
-        ? {
-            explanation: "The encoded file failed validation.",
-            suggestedAction:
-              "Review the Encode Job inputs, then retry the Encode Job.",
-          }
-        : ENCODE_FAILURE_PRESENTATIONS[report.reasonCode];
-      return { ...presentation, technicalEvidence: [] };
-    }
+    case "none":
+      return {
+        ...ENCODE_FAILURE_PRESENTATIONS[report.reasonCode],
+        technicalEvidence: [],
+      };
+    case "cleanup":
+    case "publication":
+    case "lease":
+    case "interruption":
+    case "recovery":
+      return {
+        ...ENCODE_FAILURE_PRESENTATIONS[report.reasonCode],
+        technicalEvidence: encodeFailureEvidence(report.evidence),
+      };
   }
 }
 
@@ -956,6 +1000,78 @@ function encodeFailureRetryGuidance(
   }
 }
 
+function encodeFailureEvidence(
+  evidence: EncodeJobFailureReport["evidence"],
+): DashboardInvestigation["technicalEvidence"] {
+  switch (evidence.kind) {
+    case "exit_status":
+      return [{ label: "Exit status", value: String(evidence.exitStatus) }];
+    case "signal":
+      return [{ label: "Termination signal", value: evidence.signal }];
+    case "timeout":
+      return [{
+        label: "Timeout limit",
+        value: `${evidence.timeoutSeconds} seconds`,
+      }];
+    case "duration":
+      return [
+        {
+          label: "Expected duration",
+          value: `${evidence.expectedSeconds} seconds`,
+        },
+        {
+          label: "Observed duration",
+          value: `${evidence.observedSeconds} seconds`,
+        },
+      ];
+    case "validation_check":
+      return [{
+        label: "Validation check",
+        value: ENCODE_VALIDATION_CHECK_PRESENTATIONS[evidence.check].evidence,
+      }];
+    case "none":
+      return [];
+    case "cleanup":
+      return [{
+        label: "Cleanup operation",
+        value: {
+          partial_output: "Partial output",
+          replacement_artifact: "Replacement staging artifact",
+          published_output: "Published output rollback",
+          publication_completion: "Publication completion state",
+        }[evidence.operation],
+      }];
+    case "publication":
+      return [{
+        label: "Publication stage",
+        value: evidence.operation === "publication_mutation"
+          ? "Filesystem mutation"
+          : "Completion commit",
+      }];
+    case "lease":
+      return [{
+        label: "Expired lease",
+        value: evidence.scope === "job_claim"
+          ? "Encode Job claim"
+          : "Publication cleanup",
+      }];
+    case "interruption":
+      return [{
+        label: "Interruption point",
+        value: evidence.source === "worker_shutdown"
+          ? "Worker shutdown"
+          : "Publication completion",
+      }];
+    case "recovery":
+      return [{
+        label: "Recovery operation",
+        value: evidence.operation === "publication_recovery"
+          ? "Publication reconciliation"
+          : "Output cleanup",
+      }];
+  }
+}
+
 function encodeJobFailureReportInvestigation(
   job: EncodeJob,
   report: EncodeJobFailureReport,
@@ -967,8 +1083,6 @@ function encodeJobFailureReportInvestigation(
     report.retryability,
   );
   const presentation = encodeFailureEvidencePresentation(report);
-  const actionApplies = job.status === "failed" && canRetry &&
-    retry.retryability !== "not_appropriate";
   return {
     incidentId: report.id,
     worker: "Encode Worker",
@@ -981,9 +1095,10 @@ function encodeJobFailureReportInvestigation(
     retryability: retry.retryability,
     retryabilityDetail: retry.detail,
     explanation: presentation.explanation,
-    suggestedAction: actionApplies
-      ? presentation.suggestedAction
-      : "Review the current Encode Job state. No retry is needed for this historical report.",
+    suggestedAction: retry.retryability === "not_appropriate" &&
+        report.retryability === "appropriate"
+      ? "Review the current Encode Job state. No retry is needed for this historical report."
+      : presentation.suggestedAction,
     technicalEvidence: presentation.technicalEvidence,
   };
 }
