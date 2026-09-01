@@ -168,20 +168,27 @@ export const WORKER_INCIDENT_SCHEMA_VERSIONS = [1] as const;
 
 export const WORKER_INCIDENT_REASON_CODES = [
   "poll_failure",
+  "claim_recovery_failure",
   "publication_recovery_failure",
 ] as const;
 
 export const WORKER_INCIDENT_PHASES = [
   "polling",
+  "claim_recovery",
   "publication_recovery",
 ] as const;
 
 export const WORKER_INCIDENT_RETRYABILITIES = ["automatic"] as const;
 
-export const WORKER_INCIDENT_RECOVERY_AREAS = [
+export const ENCODE_WORKER_INCIDENT_RECOVERY_AREAS = [
   "active_publication",
   "expired_publication_mutation",
   "expired_encode_job_claim",
   "expired_cancellation",
   "pending_partial_cleanup",
+] as const;
+
+export const WORKER_INCIDENT_RECOVERY_AREAS = [
+  "expired_archive_job_claim",
+  ...ENCODE_WORKER_INCIDENT_RECOVERY_AREAS,
 ] as const;

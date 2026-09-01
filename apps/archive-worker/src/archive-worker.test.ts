@@ -4763,6 +4763,10 @@ describe("archive worker polling", () => {
     expect(log).toHaveBeenCalledWith(
       expect.stringContaining("DVD scan failed"),
     );
+    expect(access.workerIncidents.list({
+      workerKind: "archive",
+      resolvedLimit: 20,
+    })).toEqual([]);
   });
 
   it("persists recoverable failure state and leaves no completed archive", async () => {
@@ -4851,6 +4855,10 @@ describe("archive worker polling", () => {
     expect(access.catalog.listDetectedDiscs(["approved"])).toEqual([
       expect.objectContaining({ id: disc.id }),
     ]);
+    expect(access.workerIncidents.list({
+      workerKind: "archive",
+      resolvedLimit: 20,
+    })).toEqual([]);
     const root = realpathSync(originalsLibraryPath);
     expect(existsSync(join(root, `${digest}.iso`))).toBe(false);
     expect(readFileSync(`${failedPartialPath}.failed`, "utf8")).toBe(
@@ -5361,6 +5369,10 @@ describe("archive worker polling", () => {
       expect.objectContaining({ id: request.id }),
     ]);
     expect(log).toHaveBeenCalledWith("DVD archive cancelled for /dev/sr0");
+    expect(access.workerIncidents.list({
+      workerKind: "archive",
+      resolvedLimit: 20,
+    })).toEqual([]);
   });
 
   it("recovers an expired cancellation only after archive work is proven inactive", async () => {
@@ -5438,6 +5450,10 @@ describe("archive worker polling", () => {
     expect(log).toHaveBeenCalledWith(
       expect.stringContaining("DVD archive copy is still active"),
     );
+    expect(access.workerIncidents.list({
+      workerKind: "archive",
+      resolvedLimit: 20,
+    })).toEqual([]);
 
     active = false;
     await pollArchiveWorker(pollOptions);
@@ -5805,6 +5821,10 @@ describe("archive worker polling", () => {
       expect.anything(),
     );
     expect(log).not.toHaveBeenCalled();
+    expect(access.workerIncidents.list({
+      workerKind: "archive",
+      resolvedLimit: 20,
+    })).toEqual([]);
     access.close();
   });
 
@@ -5871,6 +5891,10 @@ describe("archive worker polling", () => {
       expect.anything(),
     );
     expect(options.log).not.toHaveBeenCalled();
+    expect(access.workerIncidents.list({
+      workerKind: "archive",
+      resolvedLimit: 20,
+    })).toEqual([]);
     access.close();
   });
 
@@ -5938,6 +5962,10 @@ describe("archive worker polling", () => {
       expect.anything(),
       expect.anything(),
     );
+    expect(access.workerIncidents.list({
+      workerKind: "archive",
+      resolvedLimit: 20,
+    })).toEqual([]);
     access.close();
   });
 
@@ -8011,6 +8039,10 @@ describe("archive worker polling", () => {
     expect(log).toHaveBeenCalledWith(
       "DVD scan failed for /dev/sr0: malformed lsdvd output",
     );
+    expect(access.workerIncidents.list({
+      workerKind: "archive",
+      resolvedLimit: 20,
+    })).toEqual([]);
     access.close();
   });
 

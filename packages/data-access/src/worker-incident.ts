@@ -1,4 +1,5 @@
 import {
+  ENCODE_WORKER_INCIDENT_RECOVERY_AREAS,
   WORKER_INCIDENT_PHASES,
   WORKER_INCIDENT_REASON_CODES,
   WORKER_INCIDENT_RECOVERY_AREAS,
@@ -58,13 +59,24 @@ export function normalizeWorkerIncidentIdentity(
   const evidence = normalizeEvidence(input.evidence);
   const isPolling =
     input.reasonCode === "poll_failure" && input.phase === "polling";
+  const isArchiveClaimRecovery =
+    input.workerKind === "archive" &&
+    input.reasonCode === "claim_recovery_failure" &&
+    input.phase === "claim_recovery" &&
+    "recoveryArea" in evidence &&
+    (evidence.recoveryArea === "expired_archive_job_claim" ||
+      evidence.recoveryArea === "expired_cancellation");
   const isPublicationRecovery =
     input.workerKind === "encode" &&
     input.reasonCode === "publication_recovery_failure" &&
     input.phase === "publication_recovery" &&
-    "recoveryArea" in evidence;
+    "recoveryArea" in evidence &&
+    included(
+      ENCODE_WORKER_INCIDENT_RECOVERY_AREAS,
+      evidence.recoveryArea,
+    );
   if (
-    (!isPolling && !isPublicationRecovery) ||
+    (!isPolling && !isArchiveClaimRecovery && !isPublicationRecovery) ||
     (isPolling && Object.keys(evidence).length !== 0)
   ) {
     throw new DomainInvariantError("Worker Incident identity is inconsistent");

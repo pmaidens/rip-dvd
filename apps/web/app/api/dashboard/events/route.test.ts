@@ -376,7 +376,9 @@ describe("GET /api/dashboard/events", () => {
     expect(event).not.toContain("/media/");
   });
 
-  it("streams Encode Worker Incident activation and recovery through the existing connection", async () => {
+  it.each(["archive", "encode"] as const)(
+    "streams %s Worker Incident activation and recovery through the existing connection",
+    async (workerKind) => {
     vi.useFakeTimers();
     const access = dataAccessFixture.create();
     const abortController = new AbortController();
@@ -387,7 +389,7 @@ describe("GET /api/dashboard/events", () => {
     const reader = response.body!.getReader();
     await reader.read();
     const identity = {
-      workerKind: "encode",
+      workerKind,
       reasonCode: "poll_failure",
       phase: "polling",
       evidence: {},
@@ -416,7 +418,8 @@ describe("GET /api/dashboard/events", () => {
     expect(recoveredEvent).toContain(`"id":"${incident.id}"`);
     expect(recoveredEvent).toContain('"status":"recovered"');
     expect(recoveredEvent).toContain('"resolvedAt":"');
-  });
+    },
+  );
 
   it("streams Archive Job progress, failure, completion, and catalog review from SQLite", async () => {
     vi.useFakeTimers();
