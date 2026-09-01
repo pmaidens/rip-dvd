@@ -18,6 +18,8 @@ import type {
   DiscInspectionPhase,
   DiscInspectionReasonCode,
   DiscInspectionStatus,
+  EncodeJob,
+  EncodeJobFailureReport,
   EncodeJobId,
   EncodeJobStatus,
   EncodeProgressPhase,
@@ -154,6 +156,7 @@ export interface DashboardEncodeJob {
   };
   requeueable?: boolean;
   failureDetail?: string | null;
+  investigations?: readonly DashboardInvestigation[];
   verificationStatus?: FilesystemVerificationStatus | null;
   verificationMessage?: string | null;
   verifiedAt?: string | null;
@@ -679,6 +682,117 @@ function archiveJobInvestigation({
   };
 }
 
+const ENCODE_PHASE_LABELS: Record<EncodeProgressPhase, string> = {
+  scanning: "Scanning",
+  previewing: "Previewing",
+  encoding: "Encoding",
+};
+
+function encodeFailureRetryGuidance(job: EncodeJob, canRetry: boolean) {
+  switch (job.status) {
+    case "failed":
+      return canRetry
+        ? {
+            retryability: "appropriate" as const,
+            detail:
+              "Retrying starts another attempt for this logical Encode Job and keeps this report.",
+          }
+        : {
+            retryability: "not_appropriate" as const,
+            detail:
+              "Retry requires an active Disc Selection with completed Catalog Review.",
+          };
+    case "queued":
+    case "running":
+    case "cancellation_requested":
+      return {
+        retryability: "not_appropriate" as const,
+        detail: "Another attempt or terminal transition is already in progress.",
+      };
+    case "completed":
+      return {
+        retryability: "not_appropriate" as const,
+        detail: "A later attempt completed this Encode Job.",
+      };
+    case "cancelled":
+      return {
+        retryability: "not_appropriate" as const,
+        detail: "This Encode Job was cancelled after the recorded failure.",
+      };
+  }
+}
+
+function encodeJobFailureReportInvestigation(
+  job: EncodeJob,
+  report: EncodeJobFailureReport,
+  canRetry: boolean,
+): DashboardInvestigation {
+  const retry = encodeFailureRetryGuidance(job, canRetry);
+  const commandFailed = report.reasonCode === "command_failed";
+  const technicalEvidence = report.evidence.kind === "exit_status"
+    ? [{ label: "Exit status", value: String(report.evidence.exitStatus) }]
+    : report.evidence.kind === "signal"
+      ? [{ label: "Termination signal", value: report.evidence.signal }]
+      : [{
+          label: "Timeout limit",
+          value: `${report.evidence.timeoutSeconds} seconds`,
+        }];
+  return {
+    incidentId: report.id,
+    worker: "Encode Worker",
+    subjectType: "Encode Job",
+    subjectId: job.id,
+    attempt: null,
+    reasonCode: `encode.${report.reasonCode}`,
+    failedPhase: ENCODE_PHASE_LABELS[report.phase],
+    occurredAt: report.occurredAt.toISOString(),
+    retryability: retry.retryability,
+    retryabilityDetail: retry.detail,
+    explanation: commandFailed
+      ? report.evidence.kind === "signal"
+        ? "HandBrake stopped after receiving a process signal."
+        : "HandBrake exited without completing the Encode Job."
+      : "HandBrake did not finish within the command time limit.",
+    suggestedAction: retry.retryability === "appropriate"
+      ? commandFailed
+        ? "Retry the Encode Job. If the same command failure repeats, copy this report when asking for support."
+        : "Retry the Encode Job. If it reaches the time limit again, copy this report when asking for support."
+      : "Review the current Encode Job state. No retry is needed for this historical report.",
+    technicalEvidence,
+  };
+}
+
+function legacyEncodeJobInvestigation(
+  job: EncodeJob,
+  canRetry: boolean,
+): DashboardInvestigation {
+  const retry = encodeFailureRetryGuidance(job, canRetry);
+  return {
+    incidentId: `encode-job-failure:legacy:${job.id}`,
+    worker: "Encode Worker",
+    subjectType: "Encode Job",
+    subjectId: job.id,
+    attempt: null,
+    reasonCode:
+      job.errorMessage === null
+        ? "encode_failure.unclassified"
+        : "encode_failure.legacy",
+    failedPhase: job.progressPhase === null
+      ? "Unclassified"
+      : ENCODE_PHASE_LABELS[job.progressPhase],
+    occurredAt: (job.completedAt ?? job.updatedAt).toISOString(),
+    retryability: retry.retryability,
+    retryabilityDetail: retry.detail,
+    explanation:
+      formatFailureDetail(job.errorMessage) ??
+      "The Encode Worker did not record a structured failure explanation.",
+    suggestedAction: retry.retryability === "appropriate"
+      ? "Retry the Encode Job. If it fails again, use the new report when asking for support."
+      : "Review the current Encode Job state. No retry is needed for this historical failure.",
+    technicalEvidence: [],
+  };
+}
+
 function readDashboardSnapshotRecords(
   access: ConsistentReadAccess,
   {
@@ -785,6 +899,13 @@ function readDashboardSnapshotRecords(
             },
           },
     ),
+  );
+  const encodeJobFailureReportSource = readSource(() =>
+    !includeInvestigations || encodeJobSource.status === "error"
+      ? []
+      : access.encodeJobs.listFailureReports(
+          encodeJobSource.value.map((job) => job.id),
+        )
   );
   const encodeJobLinkSource = readSource(() =>
     encodeJobSource.status === "error"
@@ -1164,6 +1285,7 @@ function readDashboardSnapshotRecords(
 
   const encodeJobs =
     encodeJobSource.status === "error" ||
+    encodeJobFailureReportSource.status === "error" ||
     encodeJobLinkSource.status === "error" ||
     retainedEncodeOutputSource.status === "error" ||
     selectionSource.status === "error" ||
@@ -1220,6 +1342,13 @@ function readDashboardSnapshotRecords(
               output,
             ]),
           );
+          const failureReportsByJobId = encodeJobFailureReportSource.value
+            .reduce((reportsByJobId, report) => {
+              const reports = reportsByJobId.get(report.encodeJobId) ?? [];
+              reports.push(report);
+              reportsByJobId.set(report.encodeJobId, reports);
+              return reportsByJobId;
+            }, new Map<EncodeJobId, EncodeJobFailureReport[]>());
           return loaded(
             encodeJobSource.value.map((job) => {
               const relationshipJob = encodeJobsById.get(job.id);
@@ -1260,6 +1389,17 @@ function readDashboardSnapshotRecords(
                       cleanupEligible: false,
                     }
                   : undefined;
+              const failureReports = failureReportsByJobId.get(job.id) ?? [];
+              const canRequeue = terminalRequeueSelectionIds.has(
+                job.discSelectionId,
+              );
+              const investigations = failureReports.length > 0
+                ? failureReports.map((report) =>
+                    encodeJobFailureReportInvestigation(job, report, canRequeue)
+                  )
+                : job.status === "failed" && includeInvestigations
+                  ? [legacyEncodeJobInvestigation(job, canRequeue)]
+                  : [];
               return {
                 id: job.id,
                 mediaTitle: mediaItem?.title ?? "Unknown Media Item",
@@ -1308,12 +1448,11 @@ function readDashboardSnapshotRecords(
                     }),
                 ...(isTerminalEncodeJobStatus(job.status)
                   ? {
-                      requeueable: terminalRequeueSelectionIds.has(
-                        job.discSelectionId,
-                      ),
+                      requeueable: canRequeue,
                     }
                   : {}),
                 failureDetail: formatFailureDetail(job.errorMessage),
+                ...(investigations.length === 0 ? {} : { investigations }),
                 verificationStatus: job.verificationStatus,
                 verificationMessage: job.verificationMessage,
                 verifiedAt: job.verifiedAt?.toISOString() ?? null,

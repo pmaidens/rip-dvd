@@ -11,6 +11,7 @@ import {
 
 interface InvestigationPanelProps {
   investigation: DashboardInvestigation;
+  investigations?: readonly DashboardInvestigation[];
   returnFocusTo: HTMLButtonElement | null;
   returnFocusFallback?: HTMLElement | null;
   onClose(): void;
@@ -25,6 +26,7 @@ const FOCUSABLE_SELECTOR = [
 
 export function InvestigationPanel({
   investigation,
+  investigations,
   returnFocusTo,
   returnFocusFallback = null,
   onClose,
@@ -35,7 +37,31 @@ export function InvestigationPanel({
   const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "denied">(
     "idle",
   );
-  const report = investigationReport(investigation);
+  const availableInvestigations = investigations?.length
+    ? investigations
+    : [investigation];
+  const [selectedIncidentId, setSelectedIncidentId] = useState(
+    investigation.incidentId,
+  );
+  const selectedInvestigation =
+    availableInvestigations.find(
+      ({ incidentId }) => incidentId === selectedIncidentId,
+    ) ?? investigation;
+  const report = investigationReport(selectedInvestigation);
+
+  useEffect(() => {
+    if (
+      !availableInvestigations.some(
+        ({ incidentId }) => incidentId === selectedIncidentId,
+      )
+    ) {
+      setSelectedIncidentId(investigation.incidentId);
+    }
+  }, [
+    availableInvestigations,
+    investigation.incidentId,
+    selectedIncidentId,
+  ]);
 
   useEffect(() => {
     closeButtonRef.current?.focus();
@@ -112,10 +138,10 @@ export function InvestigationPanel({
           <div>
             <p className="section-eyebrow">Failure investigation</p>
             <h2 id="investigation-title">
-              {investigation.subjectType}
-              {investigation.attempt === null
+              {selectedInvestigation.subjectType}
+              {selectedInvestigation.attempt === null
                 ? ""
-                : ` attempt ${investigation.attempt}`}
+                : ` attempt ${selectedInvestigation.attempt}`}
             </h2>
           </div>
           <button
@@ -129,34 +155,57 @@ export function InvestigationPanel({
         </header>
 
         <div className="investigation-content">
+          {availableInvestigations.length > 1 ? (
+            <label className="investigation-report-selector">
+              Failure report
+              <select
+                value={selectedInvestigation.incidentId}
+                onChange={(event) => {
+                  setSelectedIncidentId(event.currentTarget.value);
+                  setCopyStatus("idle");
+                }}
+              >
+                {availableInvestigations.map((candidate, index) => (
+                  <option key={candidate.incidentId} value={candidate.incidentId}>
+                    {index === 0 ? "Latest" : `Older ${index}`} ·{" "}
+                    {formatInvestigationTimestamp(candidate.occurredAt)} ·{" "}
+                    {candidate.reasonCode}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
           <dl className="investigation-summary">
             <div>
               <dt>Incident identifier</dt>
-              <dd>{investigation.incidentId}</dd>
+              <dd>{selectedInvestigation.incidentId}</dd>
             </div>
             <div>
               <dt>Worker</dt>
-              <dd>{investigation.worker}</dd>
+              <dd>{selectedInvestigation.worker}</dd>
             </div>
             <div>
               <dt>Subject</dt>
               <dd>
-                {investigation.subjectType} {investigation.subjectId}
+                {selectedInvestigation.subjectType}{" "}
+                {selectedInvestigation.subjectId}
               </dd>
             </div>
             <div>
               <dt>Reason code</dt>
-              <dd>{investigation.reasonCode}</dd>
+              <dd>{selectedInvestigation.reasonCode}</dd>
             </div>
             <div>
               <dt>Failed phase</dt>
-              <dd>{investigation.failedPhase}</dd>
+              <dd>{selectedInvestigation.failedPhase}</dd>
             </div>
             <div>
               <dt>Occurred</dt>
               <dd>
-                <time dateTime={investigation.occurredAt}>
-                  {formatInvestigationTimestamp(investigation.occurredAt)}
+                <time dateTime={selectedInvestigation.occurredAt}>
+                  {formatInvestigationTimestamp(
+                    selectedInvestigation.occurredAt,
+                  )}
                 </time>
               </dd>
             </div>
@@ -165,34 +214,38 @@ export function InvestigationPanel({
               <dd>
                 <strong>
                   {investigationRetryabilityLabel(
-                    investigation.retryability,
+                    selectedInvestigation.retryability,
                   )}
                 </strong>
                 {". "}
-                {investigation.retryabilityDetail}
+                {selectedInvestigation.retryabilityDetail}
               </dd>
             </div>
           </dl>
 
           <section className="investigation-guidance">
             <h3>What happened</h3>
-            <p id="investigation-explanation">{investigation.explanation}</p>
+            <p id="investigation-explanation">
+              {selectedInvestigation.explanation}
+            </p>
             <h3>Suggested action</h3>
-            <p>{investigation.suggestedAction}</p>
+            <p>{selectedInvestigation.suggestedAction}</p>
           </section>
 
           <section className="investigation-evidence">
             <h3>Technical evidence</h3>
-            {investigation.technicalEvidence.length === 0 ? (
+            {selectedInvestigation.technicalEvidence.length === 0 ? (
               <p>No structured technical evidence was recorded.</p>
             ) : (
               <dl>
-                {investigation.technicalEvidence.map(({ label, value }) => (
-                  <div key={label}>
-                    <dt>{label}</dt>
-                    <dd>{value}</dd>
-                  </div>
-                ))}
+                {selectedInvestigation.technicalEvidence.map(
+                  ({ label, value }) => (
+                    <div key={label}>
+                      <dt>{label}</dt>
+                      <dd>{value}</dd>
+                    </div>
+                  ),
+                )}
               </dl>
             )}
           </section>

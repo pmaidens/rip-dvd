@@ -8,6 +8,8 @@ import {
 } from "node:fs";
 import type { Readable } from "node:stream";
 
+import { ENCODE_JOB_FAILURE_DIAGNOSTIC_MAX_LENGTH } from "@rip-dvd/data-access";
+
 const HANDBRAKE_TIMEOUT_MS = 24 * 60 * 60_000;
 const HANDBRAKE_TERMINATION_GRACE_MS = 10_000;
 const MAX_DIAGNOSTIC_BYTES = 65_536;
@@ -27,6 +29,41 @@ export interface HandBrakeRunner {
   isActive?(outputPath: string): boolean;
   requireInactive?(outputPath: string): void;
   whenInactive?(outputPath: string): Promise<void>;
+}
+
+export type HandBrakeCommandFailureEvidence =
+  | { kind: "exit_status"; exitStatus: number }
+  | { kind: "signal"; signal: NodeJS.Signals };
+
+export class HandBrakeCommandError extends Error {
+  override readonly name = "HandBrakeCommandError";
+  readonly evidence: HandBrakeCommandFailureEvidence;
+  readonly diagnostic: string | null;
+
+  constructor(
+    evidence: HandBrakeCommandFailureEvidence,
+    diagnostic: string | null,
+  ) {
+    super(
+      evidence.kind === "exit_status"
+        ? `HandBrake failed with status ${evidence.exitStatus}`
+        : `HandBrake failed with signal ${evidence.signal}`,
+    );
+    this.evidence = evidence;
+    this.diagnostic = diagnostic;
+  }
+}
+
+export class HandBrakeTimeoutError extends Error {
+  override readonly name = "HandBrakeTimeoutError";
+  readonly timeoutSeconds: number;
+  readonly diagnostic: string | null;
+
+  constructor(timeoutMs: number, diagnostic: string | null) {
+    super("HandBrake timed out");
+    this.timeoutSeconds = Math.ceil(timeoutMs / 1_000);
+    this.diagnostic = diagnostic;
+  }
 }
 
 interface HandBrakeChildProcess {
@@ -51,6 +88,15 @@ function boundedDiagnostic(value: string): string {
     .subarray(-MAX_DIAGNOSTIC_BYTES)
     .toString("utf8")
     .trim();
+}
+
+function failureDiagnostic(value: string): string | null {
+  return (
+    boundedDiagnostic(value).slice(
+      0,
+      ENCODE_JOB_FAILURE_DIAGNOSTIC_MAX_LENGTH,
+    ) || null
+  );
 }
 
 function isVanishedProcEntry(error: unknown): boolean {
@@ -317,7 +363,12 @@ export function createNodeHandBrakeRunner({
           }, terminationGraceMs);
         };
         const timeout = setTimeout(() => {
-          cancel(new Error("HandBrake timed out"));
+          cancel(
+            new HandBrakeTimeoutError(
+              timeoutMs,
+              failureDiagnostic(diagnostics),
+            ),
+          );
         }, timeoutMs);
         timeout.unref();
         child.stdout.on("data", capture);
@@ -335,12 +386,26 @@ export function createNodeHandBrakeRunner({
             finish();
             return;
           }
-          const detail = boundedDiagnostic(diagnostics).slice(0, 500);
-          finish(
-            new Error(
-              `HandBrake failed${detail ? `: ${detail}` : ` with ${closeSignal ?? `status ${code}`}`}`,
-            ),
-          );
+          const diagnostic = failureDiagnostic(diagnostics);
+          if (code !== null && code >= 1 && code <= 255) {
+            finish(
+              new HandBrakeCommandError(
+                { kind: "exit_status", exitStatus: code },
+                diagnostic,
+              ),
+            );
+            return;
+          }
+          if (closeSignal !== null) {
+            finish(
+              new HandBrakeCommandError(
+                { kind: "signal", signal: closeSignal },
+                diagnostic,
+              ),
+            );
+            return;
+          }
+          finish(new Error("HandBrake failed without an exit status or signal"));
         });
         signal.addEventListener("abort", abort, { once: true });
         if (signal.aborted) {

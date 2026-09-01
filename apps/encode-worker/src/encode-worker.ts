@@ -22,7 +22,10 @@ import {
 
 export {
   createNodeHandBrakeRunner,
+  HandBrakeCommandError,
+  HandBrakeTimeoutError,
   nodeHandBrakeRunner,
+  type HandBrakeCommandFailureEvidence,
   type HandBrakeRunner,
   type HandBrakeRunRequest,
 } from "./handbrake-runner.js";
