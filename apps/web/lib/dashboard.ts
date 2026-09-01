@@ -710,14 +710,225 @@ const ENCODE_PHASE_LABELS: Record<EncodeProgressPhase, string> = {
   encoding: "Encoding",
 };
 
-function encodeFailureRetryGuidance(job: EncodeJob, canRetry: boolean) {
+const ENCODE_FAILURE_PHASE_LABELS: Record<
+  EncodeJobFailureReport["phase"],
+  string
+> = {
+  preparation: "Preparation",
+  ...ENCODE_PHASE_LABELS,
+  validation: "Validation",
+  cleanup: "Cleanup",
+  publication: "Publication",
+  recovery: "Recovery",
+};
+
+const ENCODE_VALIDATION_CHECK_PRESENTATIONS = {
+  subtitle_streams: {
+    evidence: "Subtitle streams",
+    explanation:
+      "The encoded file's subtitle streams did not match the selected DVD title.",
+    suggestedAction:
+      "Verify the selected DVD title and subtitle metadata, then retry the Encode Job.",
+  },
+  subtitle_packets: {
+    evidence: "Subtitle packet scan",
+    explanation:
+      "The encoded file's subtitle packets were missing or unreadable.",
+    suggestedAction:
+      "Retry the Encode Job. If the subtitle packet scan fails again, copy this report when asking for support.",
+  },
+  subtitle_cleanup: {
+    evidence: "Subtitle cleanup",
+    explanation: "The worker could not remove an empty subtitle stream safely.",
+    suggestedAction:
+      "Retry the Encode Job. If subtitle cleanup fails again, copy this report when asking for support.",
+  },
+  video_metadata: {
+    evidence: "Video metadata",
+    explanation: "The encoded file has incomplete video stream metadata.",
+    suggestedAction:
+      "Retry the Encode Job. If video metadata is still incomplete, copy this report when asking for support.",
+  },
+  duration_metadata: {
+    evidence: "Duration metadata",
+    explanation: "The encoded file has no usable duration measurement.",
+    suggestedAction:
+      "Verify the selected DVD title metadata, then retry the Encode Job.",
+  },
+  video_packets: {
+    evidence: "First video packet",
+    explanation: "The encoded file has no readable first video packet.",
+    suggestedAction:
+      "Retry the Encode Job. If the first video packet is still unreadable, copy this report when asking for support.",
+  },
+  audio_timing: {
+    evidence: "Audio and video timing",
+    explanation:
+      "The encoded file's first video frame starts too far after its audio.",
+    suggestedAction:
+      "Retry the Encode Job. If the timing check fails again, copy this report when asking for support.",
+  },
+  video_decode: {
+    evidence: "Bounded video decode",
+    explanation: "The encoded file failed the bounded video decode check.",
+    suggestedAction:
+      "Retry the Encode Job. If the bounded video decode fails again, copy this report when asking for support.",
+  },
+  output_file: {
+    evidence: "Output file",
+    explanation:
+      "HandBrake did not leave a non-empty regular file for validation.",
+    suggestedAction:
+      "Check free space and output permissions, then retry the Encode Job.",
+  },
+} satisfies Record<
+  Extract<
+    EncodeJobFailureReport["evidence"],
+    { kind: "validation_check" }
+  >["check"],
+  { evidence: string; explanation: string; suggestedAction: string }
+>;
+
+const ENCODE_FAILURE_PRESENTATIONS = {
+  input_unavailable: {
+    explanation:
+      "The Encode Worker could not read the selected Original Disc Archive or its catalog input.",
+    suggestedAction:
+      "Verify the Original Disc Archive and Catalog Review, then retry the Encode Job.",
+  },
+  invalid_configuration: {
+    explanation:
+      "The Encoding Profile is missing or has settings the Encode Worker cannot use.",
+    suggestedAction:
+      "Correct or reactivate the Encoding Profile, then retry the Encode Job.",
+  },
+  output_conflict: {
+    explanation:
+      "The requested output is already owned or changed while the Encode Job was running.",
+    suggestedAction:
+      "Resolve the competing output or choose a different output path, then retry the Encode Job.",
+  },
+  unsafe_output_state: {
+    explanation:
+      "The output path or file state did not pass the worker's safety checks.",
+    suggestedAction:
+      "Check output permissions and free space, and remove symlinks or ambiguous files from the output location before retrying the Encode Job.",
+  },
+  command_failed: {
+    explanation: "HandBrake exited without completing the Encode Job.",
+    suggestedAction:
+      "Retry the Encode Job. If the same command failure repeats, copy this report when asking for support.",
+  },
+  command_timeout: {
+    explanation: "HandBrake did not finish within the command time limit.",
+    suggestedAction:
+      "Retry the Encode Job. If it reaches the time limit again, copy this report when asking for support.",
+  },
+  unknown_failure: {
+    explanation: "The Encode Worker could not classify this failure.",
+    suggestedAction:
+      "Review the output location for an obvious conflict, then retry once. Copy this report if the failure repeats.",
+  },
+} satisfies Record<
+  Exclude<
+    EncodeJobFailureReport["reasonCode"],
+    "output_validation_failed"
+  >,
+  { explanation: string; suggestedAction: string }
+>;
+
+interface EncodeFailureEvidencePresentation {
+  technicalEvidence: DashboardInvestigation["technicalEvidence"];
+  explanation: string;
+  suggestedAction: string;
+}
+
+function encodeFailureEvidencePresentation(
+  report: EncodeJobFailureReport,
+): EncodeFailureEvidencePresentation {
+  switch (report.evidence.kind) {
+    case "exit_status":
+      return {
+        ...ENCODE_FAILURE_PRESENTATIONS.command_failed,
+        technicalEvidence: [{
+          label: "Exit status",
+          value: String(report.evidence.exitStatus),
+        }],
+      };
+    case "signal":
+      return {
+        ...ENCODE_FAILURE_PRESENTATIONS.command_failed,
+        explanation: "HandBrake stopped after receiving a process signal.",
+        technicalEvidence: [{
+          label: "Termination signal",
+          value: report.evidence.signal,
+        }],
+      };
+    case "timeout":
+      return {
+        ...ENCODE_FAILURE_PRESENTATIONS.command_timeout,
+        technicalEvidence: [{
+          label: "Timeout limit",
+          value: `${report.evidence.timeoutSeconds} seconds`,
+        }],
+      };
+    case "duration":
+      return {
+        technicalEvidence: [
+          {
+            label: "Expected duration",
+            value: `${report.evidence.expectedSeconds} seconds`,
+          },
+          {
+            label: "Observed duration",
+            value: `${report.evidence.observedSeconds} seconds`,
+          },
+        ],
+        explanation:
+          "The encoded file is materially shorter than the selected DVD title.",
+        suggestedAction:
+          "Verify the selected DVD title and source metadata, then retry the Encode Job.",
+      };
+    case "validation_check": {
+      const presentation =
+        ENCODE_VALIDATION_CHECK_PRESENTATIONS[report.evidence.check];
+      return {
+        technicalEvidence: [{
+          label: "Validation check",
+          value: presentation.evidence,
+        }],
+        explanation: presentation.explanation,
+        suggestedAction: presentation.suggestedAction,
+      };
+    }
+    case "none": {
+      const presentation = report.reasonCode === "output_validation_failed"
+        ? {
+            explanation: "The encoded file failed validation.",
+            suggestedAction:
+              "Review the Encode Job inputs, then retry the Encode Job.",
+          }
+        : ENCODE_FAILURE_PRESENTATIONS[report.reasonCode];
+      return { ...presentation, technicalEvidence: [] };
+    }
+  }
+}
+
+function encodeFailureRetryGuidance(
+  job: EncodeJob,
+  canRetry: boolean,
+  reportRetryability: EncodeJobFailureReport["retryability"] = "appropriate",
+) {
   switch (job.status) {
     case "failed":
       return canRetry
         ? {
-            retryability: "appropriate" as const,
-            detail:
-              "Retrying starts another attempt for this logical Encode Job and keeps this report.",
+            retryability: reportRetryability,
+            detail: reportRetryability === "appropriate"
+              ? "Retrying starts another attempt for this logical Encode Job and keeps this report."
+              : reportRetryability === "after_action"
+                ? "Retry after completing the suggested action. This logical Encode Job keeps the report."
+                : "Retrying unchanged is not appropriate for this failure.",
           }
         : {
             retryability: "not_appropriate" as const,
@@ -749,16 +960,14 @@ function encodeJobFailureReportInvestigation(
   report: EncodeJobFailureReport,
   canRetry: boolean,
 ): DashboardInvestigation {
-  const retry = encodeFailureRetryGuidance(job, canRetry);
-  const commandFailed = report.reasonCode === "command_failed";
-  const technicalEvidence = report.evidence.kind === "exit_status"
-    ? [{ label: "Exit status", value: String(report.evidence.exitStatus) }]
-    : report.evidence.kind === "signal"
-      ? [{ label: "Termination signal", value: report.evidence.signal }]
-      : [{
-          label: "Timeout limit",
-          value: `${report.evidence.timeoutSeconds} seconds`,
-        }];
+  const retry = encodeFailureRetryGuidance(
+    job,
+    canRetry,
+    report.retryability,
+  );
+  const presentation = encodeFailureEvidencePresentation(report);
+  const actionApplies = job.status === "failed" && canRetry &&
+    retry.retryability !== "not_appropriate";
   return {
     incidentId: report.id,
     worker: "Encode Worker",
@@ -766,21 +975,15 @@ function encodeJobFailureReportInvestigation(
     subjectId: job.id,
     attempt: null,
     reasonCode: `encode.${report.reasonCode}`,
-    failedPhase: ENCODE_PHASE_LABELS[report.phase],
+    failedPhase: ENCODE_FAILURE_PHASE_LABELS[report.phase],
     occurredAt: report.occurredAt.toISOString(),
     retryability: retry.retryability,
     retryabilityDetail: retry.detail,
-    explanation: commandFailed
-      ? report.evidence.kind === "signal"
-        ? "HandBrake stopped after receiving a process signal."
-        : "HandBrake exited without completing the Encode Job."
-      : "HandBrake did not finish within the command time limit.",
-    suggestedAction: retry.retryability === "appropriate"
-      ? commandFailed
-        ? "Retry the Encode Job. If the same command failure repeats, copy this report when asking for support."
-        : "Retry the Encode Job. If it reaches the time limit again, copy this report when asking for support."
+    explanation: presentation.explanation,
+    suggestedAction: actionApplies
+      ? presentation.suggestedAction
       : "Review the current Encode Job state. No retry is needed for this historical report.",
-    technicalEvidence,
+    technicalEvidence: presentation.technicalEvidence,
   };
 }
 

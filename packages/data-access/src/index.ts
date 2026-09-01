@@ -46,6 +46,7 @@ export {
   ENCODE_JOB_FAILURE_REPORT_SCHEMA_VERSIONS,
   ENCODE_JOB_FAILURE_RETRYABILITIES,
   ENCODE_JOB_FAILURE_SIGNALS,
+  ENCODE_JOB_FAILURE_VALIDATION_CHECKS,
 } from "./encode-job-failure-report.js";
 export type { EncodeQueueSearchQueryValidation } from "./encode-queue-search.js";
 export {

@@ -1,5 +1,10 @@
 import { execFile } from "node:child_process";
 
+import type {
+  EncodeJobFailureEvidence,
+  EncodeJobFailureValidationCheck,
+} from "@rip-dvd/data-access";
+
 import {
   createNodeEncodeOutputRepairer,
   type EncodeOutputRepairer,
@@ -82,8 +87,30 @@ const ENGLISH_LANGUAGE_NAMES = new Intl.DisplayNames(["en"], {
   type: "language",
 });
 
-function validationError(message: string): Error {
-  return new Error(`Encode output validation failed: ${message}`);
+type EncodeOutputValidationEvidence = Extract<
+  EncodeJobFailureEvidence,
+  { kind: "duration" | "validation_check" }
+>;
+
+export class EncodeOutputValidationError extends Error {
+  constructor(
+    message: string,
+    readonly evidence: EncodeOutputValidationEvidence,
+  ) {
+    super(`Encode output validation failed: ${message}`);
+    this.name = "EncodeOutputValidationError";
+  }
+}
+
+function validationError(
+  check: EncodeJobFailureValidationCheck,
+  message: string,
+  evidence: EncodeOutputValidationEvidence = {
+    kind: "validation_check",
+    check,
+  },
+): EncodeOutputValidationError {
+  return new EncodeOutputValidationError(message, evidence);
 }
 
 function normalizeToolError(error: unknown): string {
@@ -117,15 +144,22 @@ function runNodeMediaTool(
   });
 }
 
-function parseProbeResult(stdout: string, description: string): ProbeResult {
+function parseProbeResult(
+  stdout: string,
+  description: string,
+  check: EncodeJobFailureValidationCheck,
+): ProbeResult {
   let parsed: unknown;
   try {
     parsed = JSON.parse(stdout);
   } catch {
-    throw validationError(`${description} probe returned invalid JSON`);
+    throw validationError(check, `${description} probe returned invalid JSON`);
   }
   if (typeof parsed !== "object" || parsed === null) {
-    throw validationError(`${description} probe returned an invalid result`);
+    throw validationError(
+      check,
+      `${description} probe returned an invalid result`,
+    );
   }
   return parsed as ProbeResult;
 }
@@ -267,12 +301,14 @@ async function runTool(
   runMediaTool: MediaToolRunner,
   request: MediaToolRunRequest,
   description: string,
+  check: EncodeJobFailureValidationCheck,
 ): Promise<MediaToolRunResult> {
   try {
     return await runMediaTool(request);
   } catch (error) {
     request.signal.throwIfAborted();
     throw validationError(
+      check,
       `${description} failed: ${normalizeToolError(error)}`,
     );
   }
@@ -291,6 +327,7 @@ function sourceVobSubStreams(
   });
   if (foreignAudioSearchStreams.length > 1) {
     throw validationError(
+      "subtitle_streams",
       "more than one foreign-audio-search VobSub stream was produced",
     );
   }
@@ -304,6 +341,7 @@ function sourceVobSubStreams(
     )
   ) {
     throw validationError(
+      "subtitle_streams",
       "a source VobSub stream has an unexpected default or forced disposition",
     );
   }
@@ -335,6 +373,7 @@ function validateExpectedVobSubStreams(
   }
   if (sourceStreams.length !== expectations.length) {
     throw validationError(
+      "subtitle_streams",
       `expected ${expectations.length} source VobSub stream${expectations.length === 1 ? "" : "s"}, found ${sourceStreams.length}`,
     );
   }
@@ -346,6 +385,7 @@ function validateExpectedVobSubStreams(
       );
       if (actualLanguage !== expectedLanguage) {
         throw validationError(
+          "subtitle_streams",
           `source VobSub stream ${position + 1} has language ${String(sourceStreams[position]!.tags.language)}, expected ${expectation.languageCode}`,
         );
       }
@@ -359,6 +399,7 @@ function validateExpectedVobSubStreams(
       typeof actualTitle === "string" ? actualTitle.trim().toLowerCase() : null;
     if (normalizedActualTitle !== expectedTitle) {
       throw validationError(
+        "subtitle_streams",
         `source VobSub stream ${position + 1} has title ${String(actualTitle)}, expected content ${expectation.contentLabel}`,
       );
     }
@@ -367,13 +408,19 @@ function validateExpectedVobSubStreams(
 
 function validatedSubtitleStreams(result: ProbeResult): CompleteSubtitleStream[] {
   if (!Array.isArray(result.streams)) {
-    throw validationError("subtitle probe returned an invalid result");
+    throw validationError(
+      "subtitle_streams",
+      "subtitle probe returned an invalid result",
+    );
   }
   const streams: CompleteSubtitleStream[] = [];
   const indexes = new Set<number>();
   for (const stream of result.streams) {
     if (!hasCompleteSubtitleMetadata(stream) || indexes.has(stream.index)) {
-      throw validationError("subtitle stream metadata is incomplete");
+      throw validationError(
+        "subtitle_streams",
+        "subtitle stream metadata is incomplete",
+      );
     }
     indexes.add(stream.index);
     streams.push(stream);
@@ -386,31 +433,46 @@ function validateVobSubPacketCounts(
   expectedIndexes: ReadonlySet<number>,
 ): ReadonlySet<number> {
   if (!Array.isArray(result.streams)) {
-    throw validationError("subtitle packet probe returned an invalid result");
+    throw validationError(
+      "subtitle_packets",
+      "subtitle packet probe returned an invalid result",
+    );
   }
   const observedIndexes = new Set<number>();
   const emptyIndexes = new Set<number>();
   for (const value of result.streams) {
     if (typeof value !== "object" || value === null || Array.isArray(value)) {
-      throw validationError("subtitle packet probe returned an invalid result");
+      throw validationError(
+        "subtitle_packets",
+        "subtitle packet probe returned an invalid result",
+      );
     }
     const stream = value as ProbeStream;
     if (stream.codec_name !== "dvd_subtitle") {
       continue;
     }
     if (!Number.isSafeInteger(stream.index)) {
-      throw validationError("subtitle packet probe returned an invalid result");
+      throw validationError(
+        "subtitle_packets",
+        "subtitle packet probe returned an invalid result",
+      );
     }
     const index = stream.index as number;
     if (!expectedIndexes.has(index) || observedIndexes.has(index)) {
-      throw validationError("subtitle packet probe returned an invalid result");
+      throw validationError(
+        "subtitle_packets",
+        "subtitle packet probe returned an invalid result",
+      );
     }
     const count =
       stream.nb_read_packets === undefined
         ? 0
         : packetCount(stream.nb_read_packets);
     if (count === null) {
-      throw validationError("subtitle packet probe returned an invalid result");
+      throw validationError(
+        "subtitle_packets",
+        "subtitle packet probe returned an invalid result",
+      );
     }
     observedIndexes.add(index);
     if (count === 0) {
@@ -419,7 +481,10 @@ function validateVobSubPacketCounts(
   }
   for (const index of expectedIndexes) {
     if (!observedIndexes.has(index)) {
-      throw validationError("subtitle packet probe returned an invalid result");
+      throw validationError(
+        "subtitle_packets",
+        "subtitle packet probe returned an invalid result",
+      );
     }
   }
   return emptyIndexes;
@@ -465,9 +530,11 @@ async function validateSubtitleStreams({
             timeoutMs,
           },
           "subtitle probe",
+          "subtitle_streams",
         )
       ).stdout,
       "subtitle",
+      "subtitle_streams",
     );
     const subtitleStreams = validatedSubtitleStreams(subtitleProbe);
     const vobSubIndexes = new Set(
@@ -502,13 +569,18 @@ async function validateSubtitleStreams({
         timeoutMs: subtitlePacketTimeoutMs,
       },
       "subtitle packet probe",
+      "subtitle_packets",
     );
     if (packetProbeRun.stderr.trim().length > 0) {
-      throw validationError("subtitle packet probe reported unreadable data");
+      throw validationError(
+        "subtitle_packets",
+        "subtitle packet probe reported unreadable data",
+      );
     }
     const packetProbe = parseProbeResult(
       packetProbeRun.stdout,
       "subtitle packet",
+      "subtitle_packets",
     );
     const emptyIndexes = validateVobSubPacketCounts(
       packetProbe,
@@ -522,7 +594,10 @@ async function validateSubtitleStreams({
       return;
     }
     if (removedEmptyStreams) {
-      throw validationError("subtitle cleanup left an empty VobSub stream");
+      throw validationError(
+        "subtitle_cleanup",
+        "subtitle cleanup left an empty VobSub stream",
+      );
     }
     try {
       await repairer.removeEmptyVobSubStreams({
@@ -540,6 +615,7 @@ async function validateSubtitleStreams({
     } catch (error) {
       signal.throwIfAborted();
       throw validationError(
+        "subtitle_cleanup",
         `subtitle cleanup failed: ${normalizeToolError(error)}`,
       );
     }
@@ -611,9 +687,11 @@ export function createNodeEncodeOutputValidator({
               timeoutMs,
             },
             "video probe",
+            "video_metadata",
           )
         ).stdout,
         "video",
+        "video_metadata",
       );
       const videoStream = Array.isArray(videoProbe.streams)
         ? (videoProbe.streams[0] as ProbeStream | undefined)
@@ -624,12 +702,18 @@ export function createNodeEncodeOutputValidator({
         !identifiedMetadata(videoStream.profile) ||
         !identifiedMetadata(videoStream.pix_fmt)
       ) {
-        throw validationError("video stream metadata is incomplete");
+        throw validationError(
+          "video_metadata",
+          "video stream metadata is incomplete",
+        );
       }
       if (expectations.expectedDurationSeconds !== undefined) {
         const outputDuration = outputDurationSeconds(videoProbe);
         if (outputDuration === null) {
-          throw validationError("output duration metadata is unavailable");
+          throw validationError(
+            "duration_metadata",
+            "output duration metadata is unavailable",
+          );
         }
         if (
           outputDuration <
@@ -637,13 +721,22 @@ export function createNodeEncodeOutputValidator({
             MINIMUM_FULL_TITLE_DURATION_RATIO
         ) {
           throw validationError(
+            "duration_metadata",
             `output duration ${outputDuration} seconds is materially shorter than the expected ${expectations.expectedDurationSeconds} seconds`,
+            {
+              kind: "duration",
+              expectedSeconds: expectations.expectedDurationSeconds,
+              observedSeconds: outputDuration,
+            },
           );
         }
       }
       const videoFirstPts = firstPacketPts(videoProbe);
       if (videoFirstPts === null) {
-        throw validationError("video stream has no readable first packet");
+        throw validationError(
+          "video_packets",
+          "video stream has no readable first packet",
+        );
       }
 
       const audioProbe = parseProbeResult(
@@ -669,13 +762,16 @@ export function createNodeEncodeOutputValidator({
               timeoutMs,
             },
             "audio probe",
+            "audio_timing",
           )
         ).stdout,
         "audio",
+        "audio_timing",
       );
       const videoStartDelay = videoFirstPts - (firstPacketPts(audioProbe) ?? 0);
       if (videoStartDelay > MAX_VIDEO_START_DELAY_SECONDS) {
         throw validationError(
+          "audio_timing",
           `first video frame starts ${videoStartDelay.toFixed(3)} seconds after the audio baseline`,
         );
       }
@@ -709,17 +805,22 @@ export function createNodeEncodeOutputValidator({
           timeoutMs,
         },
         "video decode",
+        "video_decode",
       );
       const decodedFrames = [...decodeResult.stdout.matchAll(/^frame=(\d+)$/gm)]
         .map((match) => Number.parseInt(match[1]!, 10))
         .reduce((maximum, frames) => Math.max(maximum, frames), 0);
       if (decodedFrames === 0) {
         throw validationError(
+          "video_decode",
           `the first ${VALIDATION_DECODE_SECONDS} seconds decoded zero video frames`,
         );
       }
       if (!/^progress=end$/m.test(decodeResult.stdout)) {
-        throw validationError("the bounded video decode did not complete");
+        throw validationError(
+          "video_decode",
+          "the bounded video decode did not complete",
+        );
       }
     },
   };

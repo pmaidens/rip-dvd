@@ -1,10 +1,10 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-
 import {
   HANDBRAKE_PRESET_GROUPS,
   HANDBRAKE_PRESETS,
-} from "../lib/handbrake-presets";
+} from "@rip-dvd/config";
+
 import { EncodingProfilesView } from "./encoding-profiles";
 
 describe("EncodingProfilesView", () => {

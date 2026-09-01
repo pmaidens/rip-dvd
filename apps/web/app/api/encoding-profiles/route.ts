@@ -2,7 +2,7 @@ import type {
   DataAccess,
   EncodingProfileId,
 } from "@rip-dvd/data-access";
-import { loadConfig } from "@rip-dvd/config";
+import { isHandBrakePreset, loadConfig } from "@rip-dvd/config";
 import {
   DomainInvariantError,
   RecordNotFoundError,
@@ -16,8 +16,6 @@ import {
   toEncodingProfileDto,
   type DvdVideoEncodingSettings,
 } from "../../../lib/encoding-profiles";
-import { isHandBrakePreset } from "../../../lib/handbrake-presets";
-
 export const dynamic = "force-dynamic";
 
 function response(body: unknown, status = 200): Response {

@@ -4,7 +4,7 @@ import {
   HANDBRAKE_PRESET_GROUPS,
   HANDBRAKE_PRESETS,
   isHandBrakePreset,
-} from "./handbrake-presets";
+} from "./handbrake-presets.js";
 
 describe("HandBrake presets", () => {
   it("contains every unique user-facing HandBrake 1.9.2 built-in preset", () => {

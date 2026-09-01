@@ -36,6 +36,7 @@ export {
 } from "./handbrake-runner.js";
 export {
   createNodeEncodeOutputValidator,
+  EncodeOutputValidationError,
   nodeEncodeOutputValidator,
   type EncodeOutputValidator,
   type MediaToolRunner,

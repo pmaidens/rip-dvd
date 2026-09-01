@@ -8088,6 +8088,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
+        name: "20260901183135_encode_preparation_validation_failures",
+      },
+      {
         name: "20260901175437_reflective_tattoo",
       },
       {
@@ -8113,9 +8116,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260822201215_thick_madame_web",
-      },
-      {
-        name: "20260822193801_safe_proteus",
       },
     ]);
     expect(

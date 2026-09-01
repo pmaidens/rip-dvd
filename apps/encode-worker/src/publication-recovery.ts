@@ -25,9 +25,11 @@ import { createRequire } from "node:module";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { isHandBrakePreset } from "@rip-dvd/config";
 import {
   decodeArchivedDvdTitles,
   decodeDvdTitleMap,
+  ENCODE_JOB_FAILURE_DIAGNOSTIC_MAX_LENGTH,
   ENCODE_JOB_LEASE_DURATION_MS,
   type DataAccess,
   type DiscSelection,
@@ -50,6 +52,7 @@ import type {
   EncodeOutputValidator,
   EncodeOutputVobSubExpectation,
 } from "./encode-output-validator.js";
+import { EncodeOutputValidationError } from "./encode-output-validator.js";
 import {
   HandBrakeCommandError,
   type HandBrakeRunner,
@@ -69,15 +72,29 @@ const ATOMIC_EXCHANGE_PATH = fileURLToPath(
 
 class PendingPublicationRecoveryError extends Error {}
 class EncodeCancellationRequestedError extends Error {}
+class ClassifiedEncodeFailureError extends Error {
+  constructor(
+    message: string,
+    readonly reasonCode: EncodeJobFailureReportInput["reasonCode"],
+    readonly phase: EncodeJobFailureReportInput["phase"],
+    readonly evidence: EncodeJobFailureReportInput["evidence"] = {
+      kind: "none",
+    },
+  ) {
+    super(message);
+    this.name = "ClassifiedEncodeFailureError";
+  }
+}
 
-function handBrakeFailureReport(
+function encodeFailureReport(
   error: unknown,
-): EncodeJobFailureReportInput | null {
+  phase: EncodeJobFailureReportInput["phase"],
+): EncodeJobFailureReportInput {
   if (error instanceof HandBrakeCommandError) {
     return {
       schemaVersion: 1,
       reasonCode: "command_failed",
-      phase: "encoding",
+      phase,
       retryability: "appropriate",
       diagnostic: error.diagnostic,
       evidence: error.evidence,
@@ -87,7 +104,7 @@ function handBrakeFailureReport(
     return {
       schemaVersion: 1,
       reasonCode: "command_timeout",
-      phase: "encoding",
+      phase,
       retryability: "appropriate",
       diagnostic: error.diagnostic,
       evidence: {
@@ -96,7 +113,43 @@ function handBrakeFailureReport(
       },
     };
   }
-  return null;
+  if (error instanceof EncodeOutputValidationError) {
+    return {
+      schemaVersion: 1,
+      reasonCode: "output_validation_failed",
+      phase: "validation",
+      retryability: "after_action",
+      diagnostic: error.message.slice(
+        0,
+        ENCODE_JOB_FAILURE_DIAGNOSTIC_MAX_LENGTH,
+      ),
+      evidence: error.evidence,
+    };
+  }
+  if (error instanceof ClassifiedEncodeFailureError) {
+    return {
+      schemaVersion: 1,
+      reasonCode: error.reasonCode,
+      phase: error.phase,
+      retryability: "after_action",
+      diagnostic: error.message.slice(
+        0,
+        ENCODE_JOB_FAILURE_DIAGNOSTIC_MAX_LENGTH,
+      ),
+      evidence: error.evidence,
+    };
+  }
+  return {
+    schemaVersion: 1,
+    reasonCode: "unknown_failure",
+    phase,
+    retryability: "after_action",
+    diagnostic: normalizeErrorMessage(error).slice(
+      0,
+      ENCODE_JOB_FAILURE_DIAGNOSTIC_MAX_LENGTH,
+    ),
+    evidence: { kind: "none" },
+  };
 }
 
 export class EncodePublicationRecoveryError extends Error {
@@ -131,6 +184,37 @@ function createPublicationRecoveryStepTracker(
       return result;
     },
   };
+}
+
+async function runEncodePreparationStep<T>(
+  operation: () => Promise<T>,
+  reasonCode: "input_unavailable" | "unsafe_output_state",
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    throw new ClassifiedEncodeFailureError(
+      normalizeErrorMessage(error),
+      reasonCode,
+      "preparation",
+    );
+  }
+}
+
+async function requireRegularOutputForValidation(
+  outputPath: string,
+  errorMessage: string,
+): Promise<Stats> {
+  try {
+    return await requireNonEmptyRegularEncodeOutput(outputPath, errorMessage);
+  } catch (error) {
+    throw new ClassifiedEncodeFailureError(
+      normalizeErrorMessage(error),
+      "output_validation_failed",
+      "validation",
+      { kind: "validation_check", check: "output_file" },
+    );
+  }
 }
 
 export interface AtomicPathExchange {
@@ -1426,13 +1510,21 @@ function resolveClaimInput(access: DataAccess, claim: RunningEncodeJob) {
       encodeEligibleOnly: true,
     })[0];
     if (!selection) {
-      throw new Error("Encode Job Disc Selection is unavailable");
+      throw new ClassifiedEncodeFailureError(
+        "Encode Job Disc Selection is unavailable",
+        "input_unavailable",
+        "preparation",
+      );
     }
     const archive = snapshot.catalog.listOriginalDiscArchives({
       ids: [selection.originalDiscArchiveId],
     })[0];
     if (!archive || archive.discKind !== "dvd" || archive.archiveFormat !== "iso") {
-      throw new Error("Encode Job requires a DVD ISO Original Disc Archive");
+      throw new ClassifiedEncodeFailureError(
+        "Encode Job requires a DVD ISO Original Disc Archive",
+        "input_unavailable",
+        "preparation",
+      );
     }
     const profile = snapshot.encodingProfiles.list({
       ids: [claim.encodingProfileId],
@@ -1442,11 +1534,15 @@ function resolveClaimInput(access: DataAccess, claim: RunningEncodeJob) {
       !profile ||
       profile.mediaDomain !== "dvd_video" ||
       typeof preset !== "string" ||
-      preset.trim() === "" ||
+      !isHandBrakePreset(preset) ||
       (profile.settings.container !== undefined &&
         profile.settings.container !== "mkv")
     ) {
-      throw new Error("Encode Job has invalid DVD video profile settings");
+      throw new ClassifiedEncodeFailureError(
+        "Encode Job has invalid DVD video profile settings",
+        "invalid_configuration",
+        "preparation",
+      );
     }
     const sourceIdentity = selection.sourceIdentity;
     const detectedDisc = snapshot.catalog.listDetectedDiscs(undefined, {
@@ -1463,19 +1559,31 @@ function resolveClaimInput(access: DataAccess, claim: RunningEncodeJob) {
         0,
       );
       if (!expectedDurationSeconds) {
-        throw new Error("Encode Job DVD title metadata is unavailable");
+        throw new ClassifiedEncodeFailureError(
+          "Encode Job DVD title metadata is unavailable",
+          "input_unavailable",
+          "preparation",
+        );
       }
     } else {
       const selectedTitle = archivedTitles?.find(
         (title) => title.number === sourceIdentity.titleNumber,
       );
       if (selectedTitle === undefined) {
-        throw new Error("Encode Job DVD title metadata is unavailable");
+        throw new ClassifiedEncodeFailureError(
+          "Encode Job DVD title metadata is unavailable",
+          "input_unavailable",
+          "preparation",
+        );
       }
       if (sourceIdentity.kind === "dvd_title") {
         expectedDurationSeconds = selectedTitle.durationSeconds;
         if (!expectedDurationSeconds) {
-          throw new Error("Encode Job DVD title duration is unavailable");
+          throw new ClassifiedEncodeFailureError(
+            "Encode Job DVD title duration is unavailable",
+            "input_unavailable",
+            "preparation",
+          );
         }
       }
       const selectedCurrentTitle = decodeDvdTitleMap(
@@ -1537,24 +1645,39 @@ export async function executeEncodeClaim(
   let pendingPartialCleanup: EncodeJobPartialCleanup | undefined;
   let published = false;
   let mutationLockHandle: number | null = null;
+  let failurePhase: EncodeJobFailureReportInput["phase"] = "preparation";
   try {
     const input = resolveClaimInput(options.access, claim);
-    const originalsRoot = await requireLibraryRoot(
-      options.originalsLibraryPath,
-      { create: false },
+    const originalsRoot = await runEncodePreparationStep(
+      () =>
+        requireLibraryRoot(options.originalsLibraryPath, {
+          create: false,
+        }),
+      "input_unavailable",
     );
-    const mediaRoot = await requireLibraryRoot(
-      options.mediaLibraryPath,
-      { create: true },
+    const mediaRoot = await runEncodePreparationStep(
+      () =>
+        requireLibraryRoot(options.mediaLibraryPath, {
+          create: true,
+        }),
+      "unsafe_output_state",
     );
-    const sourcePath = await requireSourcePath(
-      originalsRoot,
-      input.archive.archivePath,
+    const sourcePath = await runEncodePreparationStep(
+      () =>
+        requireSourcePath(
+          originalsRoot,
+          input.archive.archivePath,
+        ),
+      "input_unavailable",
     );
-    const paths = await requireOutputPaths(
-      mediaRoot,
-      claim.outputPath,
-      claim.claimToken,
+    const paths = await runEncodePreparationStep(
+      () =>
+        requireOutputPaths(
+          mediaRoot,
+          claim.outputPath,
+          claim.claimToken,
+        ),
+      "unsafe_output_state",
     );
     finalPath = paths.finalPath;
     partialPath = paths.partialPath;
@@ -1564,17 +1687,29 @@ export async function executeEncodeClaim(
       paths.mutationLockPath,
     );
     if (mutationLockHandle === null) {
-      throw new Error("Encode output ownership is already active");
+      throw new ClassifiedEncodeFailureError(
+        "Encode output ownership is already active",
+        "output_conflict",
+        "preparation",
+      );
     }
     const existingFinal = await optionalMetadata(finalPath);
     if (
       existingFinal !== null &&
       (!existingFinal.isFile() || existingFinal.isSymbolicLink())
     ) {
-      throw new Error("Encode Job final output is not a regular file");
+      throw new ClassifiedEncodeFailureError(
+        "Encode Job final output is not a regular file",
+        "unsafe_output_state",
+        "preparation",
+      );
     }
     if (existingFinal !== null && !claim.replaceExistingOutput) {
-      throw new Error("Encode Job final output already exists");
+      throw new ClassifiedEncodeFailureError(
+        "Encode Job final output already exists",
+        "output_conflict",
+        "preparation",
+      );
     }
     if (existingFinal !== null && claim.replaceExistingOutput) {
       const identity = encodeOutputFilesystemIdentity(existingFinal);
@@ -1585,7 +1720,11 @@ export async function executeEncodeClaim(
           existingFinal,
         )
       ) {
-        throw new Error("Encode Job prior final output changed before retry");
+        throw new ClassifiedEncodeFailureError(
+          "Encode Job prior final output changed before retry",
+          "output_conflict",
+          "preparation",
+        );
       }
       options.access.encodeJobs.recordReplacementOutputIdentity(
         claim,
@@ -1593,9 +1732,18 @@ export async function executeEncodeClaim(
       );
     }
     replaceableFinal = existingFinal ?? undefined;
-    await moveAside(paths.legacyPartialPath);
-    await moveStalePartials(finalPath, options.runner);
+    try {
+      await moveAside(paths.legacyPartialPath);
+      await moveStalePartials(finalPath, options.runner);
+    } catch (error) {
+      throw new ClassifiedEncodeFailureError(
+        normalizeErrorMessage(error),
+        "unsafe_output_state",
+        "preparation",
+      );
+    }
     const parseProgress = createProgressParser((progress) => {
+      failurePhase = progress.phase;
       try {
         options.access.encodeJobs.updateProgress(claim, progress);
       } catch (error) {
@@ -1624,6 +1772,7 @@ export async function executeEncodeClaim(
       "--subtitle-burned=none",
     ];
     renewClaim();
+    failurePhase = "encoding";
     await options.runner.run({
       arguments_,
       onOutput: parseProgress,
@@ -1632,7 +1781,8 @@ export async function executeEncodeClaim(
     });
     parseProgress("", true);
     signal.throwIfAborted();
-    await requireNonEmptyRegularEncodeOutput(
+    failurePhase = "validation";
+    await requireRegularOutputForValidation(
       partialPath,
       "HandBrake did not produce a complete regular output file",
     );
@@ -1645,11 +1795,12 @@ export async function executeEncodeClaim(
         : { expectedVobSubStreams: input.expectedVobSubStreams }),
     });
     signal.throwIfAborted();
-    const validatedPartialMetadata = await requireNonEmptyRegularEncodeOutput(
+    const validatedPartialMetadata = await requireRegularOutputForValidation(
       partialPath,
       "Encode output validation did not retain a regular output file",
     );
     await syncPath(partialPath);
+    failurePhase = "publication";
     publishedOutputMetadata = validatedPartialMetadata;
     pendingPartialCleanup =
       options.access.encodeJobs.registerPartialCleanup(claim, {
@@ -1664,7 +1815,11 @@ export async function executeEncodeClaim(
       currentFinal !== null &&
       !sameEncodeOutputMutationSnapshot(replaceableFinal, currentFinal)
     ) {
-      throw new Error("Encode Job final output changed during encoding");
+      throw new ClassifiedEncodeFailureError(
+        "Encode Job final output changed during encoding",
+        "output_conflict",
+        "publication",
+      );
     }
     renewClaim();
     signal.throwIfAborted();
@@ -1692,7 +1847,18 @@ export async function executeEncodeClaim(
         options.log,
       );
     } else {
-      linkSync(paths.partialPath, paths.finalPath);
+      try {
+        linkSync(paths.partialPath, paths.finalPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+          throw new ClassifiedEncodeFailureError(
+            "Encode Job final output appeared before publication",
+            "output_conflict",
+            "publication",
+          );
+        }
+        throw error;
+      }
       published = true;
     }
     await syncPath(dirname(finalPath));
@@ -1931,16 +2097,10 @@ export async function executeEncodeClaim(
         : ""
     }`.slice(0, 500);
     try {
-      const report = signal.aborted ? null : handBrakeFailureReport(error);
-      if (report === null) {
-        options.access.encodeJobs.fail(claim, message, {
-          preserveReplacementAuthority,
-        });
-      } else {
-        options.access.encodeJobs.failWithReport(claim, report, {
-          preserveReplacementAuthority,
-        });
-      }
+      const report = encodeFailureReport(error, failurePhase);
+      options.access.encodeJobs.failWithReport(claim, report, {
+        preserveReplacementAuthority,
+      });
     } catch (failureError) {
       const failureMessage = normalizeErrorMessage(failureError);
       options.log(

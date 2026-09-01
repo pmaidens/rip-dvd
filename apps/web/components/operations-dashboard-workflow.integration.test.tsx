@@ -5,12 +5,14 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
+import { DatabaseSync } from "node:sqlite";
 
 import type { DataAccess, MediaItemId } from "@rip-dvd/data-access";
 import { createLegacySidecarDataAccess } from "@rip-dvd/data-access/legacy-sidecars";
@@ -47,6 +49,7 @@ import {
   pollEncodeWorker,
   type HandBrakeRunner,
 } from "../../encode-worker/src/encode-worker.js";
+import { EncodeOutputValidationError } from "../../encode-worker/src/encode-output-validator.js";
 import {
   pollArchiveWorkerForTest as pollArchiveWorker,
 } from "../test/archive-job-fixture";
@@ -457,6 +460,201 @@ describe("end-to-end operations dashboard workflow", () => {
     expect(JSON.stringify(completedDashboard.snapshot)).not.toContain(
       sensitiveDiagnostic,
     );
+  });
+
+  it("carries every preparation and validation failure through the safe dashboard workflow", async () => {
+    const root = mkdtempSync(join(tmpdir(), "rip-dvd-encode-categories-"));
+    temporaryDirectories.push(root);
+    const originalsLibraryPath = join(root, "originals");
+    const mediaLibraryPath = join(root, "media");
+    const databasePath = join(root, "rip-dvd.sqlite");
+    mkdirSync(originalsLibraryPath);
+    mkdirSync(mediaLibraryPath);
+    const sourcePath = join(originalsLibraryPath, "Categories.iso");
+    const outputPath = join(mediaLibraryPath, "Categories.mkv");
+    writeFileSync(sourcePath, "category source");
+    const access = createLegacySidecarDataAccess({
+      databasePath,
+      mediaLibraryPath,
+      originalsLibraryPath,
+    });
+    openAccess.push(access);
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/encode-categories",
+      isPresent: true,
+    });
+    const contentId = `sha256:${"7".repeat(64)}`;
+    const disc = access.catalog.registerDetectedDisc({
+      opticalDriveId: drive.id,
+      discKind: "dvd",
+      fingerprint: contentId,
+      scanData: {
+        schemaVersion: 2,
+        contentId,
+        titles: [{
+          number: 1,
+          durationSeconds: 8_078,
+          chapters: 12,
+          audioStreams: [],
+          subtitles: [],
+        }],
+      },
+    });
+    access.catalog.updateDetectedDiscStatus(disc.id, "scanned");
+    access.catalog.updateDetectedDiscStatus(disc.id, "approved");
+    const archive = access.catalog.createOriginalDiscArchive({
+      detectedDiscId: disc.id,
+      discKind: "dvd",
+      archiveFormat: "iso",
+      archivePath: sourcePath,
+      fingerprint: contentId,
+    });
+    const item = access.catalog.createMediaItem({
+      kind: "movie",
+      title: "Encode Categories",
+    });
+    const selection = access.catalog.createDiscSelection({
+      originalDiscArchiveId: archive.id,
+      mediaItemId: item.id,
+      sourceIdentity: { kind: "dvd_title", titleNumber: 1 },
+    });
+    access.catalog.completeCatalogReview(
+      archive.id,
+      access.catalog.listOriginalDiscArchives({ ids: [archive.id] })[0]!
+        .updatedAt,
+      "reviewed_with_selections",
+    );
+    const profile = access.encodingProfiles.create({
+      key: "encode-categories",
+      displayName: "Encode categories",
+      mediaDomain: "dvd_video",
+      settings: { preset: "Fast 480p30", container: "mkv" },
+    });
+    const job = access.encodeJobs.enqueue({
+      discSelectionId: selection.id,
+      encodingProfileId: profile.id,
+      outputPath,
+    });
+    const sensitiveValues = [
+      sourcePath,
+      outputPath,
+      "/private/validation.mkv",
+      "--preset SECRET",
+      "ENV=private",
+      "claim-token-secret",
+    ];
+    const runAttempt = async ({
+      outputValidator,
+      runner,
+    }: {
+      outputValidator?: {
+        prepareAndValidate(
+          outputPath: string,
+          signal: AbortSignal,
+        ): Promise<void>;
+      };
+      runner: HandBrakeRunner;
+    }) => {
+      await pollEncodeWorker({
+        access,
+        concurrency: 1,
+        log: vi.fn(),
+        mediaLibraryPath,
+        originalsLibraryPath,
+        ...(outputValidator === undefined ? {} : { outputValidator }),
+        runner,
+        signal: new AbortController().signal,
+      });
+    };
+
+    rmSync(sourcePath);
+    await runAttempt({ runner: { run: vi.fn() } });
+    writeFileSync(sourcePath, "category source");
+    access.encodeJobs.requeue(job.id);
+
+    const sqlite = new DatabaseSync(databasePath);
+    sqlite.prepare("UPDATE encoding_profiles SET settings = '{}' WHERE id = ?")
+      .run(profile.id);
+    sqlite.close();
+    await runAttempt({ runner: { run: vi.fn() } });
+    const restoredSqlite = new DatabaseSync(databasePath);
+    restoredSqlite.prepare(
+      "UPDATE encoding_profiles SET settings = ? WHERE id = ?",
+    ).run(JSON.stringify({ preset: "Fast 480p30", container: "mkv" }), profile.id);
+    restoredSqlite.close();
+    access.encodeJobs.requeue(job.id);
+
+    writeFileSync(outputPath, "competing output");
+    await runAttempt({ runner: { run: vi.fn() } });
+    rmSync(outputPath);
+    access.encodeJobs.requeue(job.id);
+
+    symlinkSync(sourcePath, outputPath);
+    await runAttempt({ runner: { run: vi.fn() } });
+    rmSync(outputPath);
+    access.encodeJobs.requeue(job.id);
+
+    await runAttempt({
+      runner: {
+        run: vi.fn(async ({ outputPath: partialPath }) => {
+          writeFileSync(partialPath, "invalid output", { flag: "wx" });
+        }),
+      },
+      outputValidator: {
+        prepareAndValidate: vi.fn(async () => {
+          throw new EncodeOutputValidationError(
+            `${sensitiveValues.slice(2).join(" ")} failed bounded decode`,
+            { kind: "validation_check", check: "video_decode" },
+          );
+        }),
+      },
+    });
+    access.encodeJobs.requeue(job.id);
+
+    await runAttempt({
+      runner: {
+        run: vi.fn(async () => {
+          throw new Error(sensitiveValues.slice(2).join(" "));
+        }),
+      },
+    });
+
+    const dashboard = await readDashboard(access);
+    const investigations = encodeJobById(
+      dashboard.snapshot,
+      job.id,
+    )!.investigations!;
+    expect(new Set(investigations.map(({ reasonCode }) => reasonCode))).toEqual(
+      new Set([
+        "encode.input_unavailable",
+        "encode.invalid_configuration",
+        "encode.output_conflict",
+        "encode.unsafe_output_state",
+        "encode.output_validation_failed",
+        "encode.unknown_failure",
+      ]),
+    );
+    const renderedInvestigations = investigations.map((investigation) =>
+      renderToStaticMarkup(
+        <InvestigationPanel
+          investigation={investigation}
+          investigations={investigations}
+          returnFocusTo={null}
+          onClose={() => undefined}
+        />,
+      )
+    ).join("\n");
+    const copiedReports = investigations.map(investigationReport).join("\n");
+    const exposedText = [
+      JSON.stringify(dashboard.snapshot),
+      renderedInvestigations,
+      copiedReports,
+    ].join("\n");
+    for (const sensitiveValue of sensitiveValues) {
+      expect(exposedText).not.toContain(sensitiveValue);
+    }
+    expect(renderedInvestigations).toContain("Bounded video decode");
+    expect(copiedReports).toContain("Validation check: Bounded video decode");
   });
 
   it("presents bounded watchable-salvage evidence after unused-space validation", async () => {

@@ -3,11 +3,41 @@ import type { EncodeJobFailureReportInput } from "./types.js";
 
 export const ENCODE_JOB_FAILURE_REPORT_SCHEMA_VERSIONS = [1] as const;
 export const ENCODE_JOB_FAILURE_REASON_CODES = [
+  "input_unavailable",
+  "invalid_configuration",
+  "output_conflict",
+  "unsafe_output_state",
   "command_failed",
   "command_timeout",
+  "output_validation_failed",
+  "unknown_failure",
 ] as const;
-export const ENCODE_JOB_FAILURE_PHASES = ["encoding"] as const;
-export const ENCODE_JOB_FAILURE_RETRYABILITIES = ["appropriate"] as const;
+export const ENCODE_JOB_FAILURE_PHASES = [
+  "preparation",
+  "scanning",
+  "previewing",
+  "encoding",
+  "validation",
+  "cleanup",
+  "publication",
+  "recovery",
+] as const;
+export const ENCODE_JOB_FAILURE_RETRYABILITIES = [
+  "appropriate",
+  "after_action",
+  "not_appropriate",
+] as const;
+export const ENCODE_JOB_FAILURE_VALIDATION_CHECKS = [
+  "subtitle_streams",
+  "subtitle_packets",
+  "subtitle_cleanup",
+  "video_metadata",
+  "duration_metadata",
+  "video_packets",
+  "audio_timing",
+  "video_decode",
+  "output_file",
+] as const;
 export const ENCODE_JOB_FAILURE_SIGNALS = [
   "SIGABRT",
   "SIGALRM",
@@ -50,6 +80,7 @@ export const ENCODE_JOB_FAILURE_SIGNALS = [
 
 export const ENCODE_JOB_FAILURE_DIAGNOSTIC_MAX_LENGTH = 500;
 export const ENCODE_JOB_FAILURE_REPORT_HISTORY_LIMIT = 20;
+const ENCODE_JOB_FAILURE_DURATION_MAX_SECONDS = 604_800;
 
 export interface ValidatedEncodeJobFailureReportInput
   extends EncodeJobFailureReportInput {
@@ -135,6 +166,12 @@ export function validateEncodeJobFailureReport(
         ? ["kind", "signal"]
         : input.evidence?.kind === "timeout"
           ? ["kind", "timeoutSeconds"]
+          : input.evidence?.kind === "duration"
+            ? ["kind", "expectedSeconds", "observedSeconds"]
+            : input.evidence?.kind === "validation_check"
+              ? ["kind", "check"]
+              : input.evidence?.kind === "none"
+                ? ["kind"]
           : [],
     "evidence",
   );
@@ -158,14 +195,43 @@ export function validateEncodeJobFailureReport(
         "Encode Job Failure Report command failure evidence is invalid",
       );
     }
-  } else if (
-    input.evidence.kind !== "timeout" ||
-    !Number.isSafeInteger(input.evidence.timeoutSeconds) ||
-    input.evidence.timeoutSeconds < 1 ||
-    input.evidence.timeoutSeconds > 604_800
-  ) {
+  } else if (input.reasonCode === "command_timeout") {
+    if (
+      input.evidence.kind !== "timeout" ||
+      !Number.isSafeInteger(input.evidence.timeoutSeconds) ||
+      input.evidence.timeoutSeconds < 1 ||
+      input.evidence.timeoutSeconds > 604_800
+    ) {
+      throw new DomainInvariantError(
+        "Encode Job Failure Report timeout evidence is invalid",
+      );
+    }
+  } else if (input.reasonCode === "output_validation_failed") {
+    if (input.evidence.kind === "duration") {
+      if (
+        !Number.isFinite(input.evidence.expectedSeconds) ||
+        input.evidence.expectedSeconds <= 0 ||
+        input.evidence.expectedSeconds >
+          ENCODE_JOB_FAILURE_DURATION_MAX_SECONDS ||
+        !Number.isFinite(input.evidence.observedSeconds) ||
+        input.evidence.observedSeconds < 0 ||
+        input.evidence.observedSeconds > ENCODE_JOB_FAILURE_DURATION_MAX_SECONDS
+      ) {
+        throw new DomainInvariantError(
+          "Encode Job Failure Report duration evidence is invalid",
+        );
+      }
+    } else if (
+      input.evidence.kind !== "validation_check" ||
+      !ENCODE_JOB_FAILURE_VALIDATION_CHECKS.includes(input.evidence.check)
+    ) {
+      throw new DomainInvariantError(
+        "Encode Job Failure Report validation evidence is invalid",
+      );
+    }
+  } else if (input.evidence.kind !== "none") {
     throw new DomainInvariantError(
-      "Encode Job Failure Report timeout evidence is invalid",
+      "Encode Job Failure Report evidence is invalid for its reason code",
     );
   }
 
