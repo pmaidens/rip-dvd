@@ -460,6 +460,172 @@ describe("end-to-end operations dashboard workflow", () => {
     expect(JSON.stringify(completedDashboard.snapshot)).not.toContain(
       sensitiveDiagnostic,
     );
+
+    access.encodeJobs.requeue(job.id);
+    const publicationClaim = access.encodeJobs.claimNext(
+      "publication-investigation-worker",
+    );
+    if (!publicationClaim) {
+      throw new Error("Expected publication investigation claim");
+    }
+    const privateRecoveryDiagnostic =
+      "/media/private/output.mkv claim-token=private lock=/tmp/private.lock";
+    access.encodeJobs.failWithReports(
+      publicationClaim,
+      "Encode publication recovery failed",
+      [
+        {
+          schemaVersion: 1,
+          reasonCode: "cleanup_failed",
+          phase: "cleanup",
+          retryability: "after_action",
+          diagnostic: privateRecoveryDiagnostic,
+          evidence: { kind: "cleanup", operation: "partial_output" },
+        },
+        {
+          schemaVersion: 1,
+          reasonCode: "publication_failed",
+          phase: "publication",
+          retryability: "after_action",
+          diagnostic: privateRecoveryDiagnostic,
+          evidence: {
+            kind: "publication",
+            operation: "publication_completion",
+          },
+        },
+        {
+          schemaVersion: 1,
+          reasonCode: "lease_expired",
+          phase: "previewing",
+          retryability: "after_action",
+          diagnostic: privateRecoveryDiagnostic,
+          evidence: { kind: "lease", scope: "job_claim" },
+        },
+        {
+          schemaVersion: 1,
+          reasonCode: "worker_interrupted",
+          phase: "validation",
+          retryability: "after_action",
+          diagnostic: privateRecoveryDiagnostic,
+          evidence: { kind: "interruption", source: "worker_shutdown" },
+        },
+        {
+          schemaVersion: 1,
+          reasonCode: "publication_recovery_failed",
+          phase: "recovery",
+          retryability: "after_action",
+          diagnostic: privateRecoveryDiagnostic,
+          evidence: {
+            kind: "recovery",
+            operation: "publication_recovery",
+          },
+        },
+      ],
+    );
+
+    const classifiedDashboard = await readDashboard(access);
+    const classifiedInvestigations = encodeJobById(
+      classifiedDashboard.snapshot,
+      job.id,
+    )!.investigations!;
+    expect(
+      classifiedInvestigations.slice(0, 5).map(({ reasonCode }) => reasonCode),
+    ).toEqual([
+      "encode.publication_recovery_failed",
+      "encode.worker_interrupted",
+      "encode.lease_expired",
+      "encode.publication_failed",
+      "encode.cleanup_failed",
+    ]);
+    expect(classifiedInvestigations.slice(0, 5)).toEqual([
+      expect.objectContaining({
+        failedPhase: "Recovery",
+        retryability: "after_action",
+        explanation:
+          "The Encode Worker could not reconcile output state left by an interrupted publication.",
+        technicalEvidence: [{
+          label: "Recovery operation",
+          value: "Publication reconciliation",
+        }],
+      }),
+      expect.objectContaining({
+        failedPhase: "Validation",
+        retryability: "after_action",
+        explanation:
+          "The Encode Worker stopped before the active phase reached a durable terminal state.",
+      }),
+      expect.objectContaining({
+        failedPhase: "Previewing",
+        retryability: "after_action",
+        technicalEvidence: [{
+          label: "Expired lease",
+          value: "Encode Job claim",
+        }],
+      }),
+      expect.objectContaining({
+        failedPhase: "Publication",
+        retryability: "after_action",
+        technicalEvidence: [{
+          label: "Publication stage",
+          value: "Completion commit",
+        }],
+      }),
+      expect.objectContaining({
+        failedPhase: "Cleanup",
+        retryability: "after_action",
+        technicalEvidence: [{
+          label: "Cleanup operation",
+          value: "Partial output",
+        }],
+      }),
+    ]);
+    const classifiedPanelHtml = renderToStaticMarkup(
+      <InvestigationPanel
+        investigation={classifiedInvestigations[0]!}
+        investigations={classifiedInvestigations}
+        returnFocusTo={null}
+        onClose={() => undefined}
+      />,
+    );
+    expect(classifiedPanelHtml).toContain(
+      "encode.publication_recovery_failed",
+    );
+    expect(JSON.stringify(classifiedDashboard.snapshot)).not.toContain(
+      privateRecoveryDiagnostic,
+    );
+    for (const investigation of classifiedInvestigations.slice(0, 5)) {
+      const copied = investigationReport(investigation);
+      expect(copied).toContain("Suggested action:");
+      expect(copied).not.toContain(privateRecoveryDiagnostic);
+      expect(copied).not.toContain("claim-token");
+      expect(copied).not.toContain("/tmp/private.lock");
+    }
+
+    access.encodeJobs.requeue(job.id);
+    const recoveredClaim = access.encodeJobs.claimNext(
+      "completed-publication-investigation-worker",
+    );
+    if (!recoveredClaim) {
+      throw new Error("Expected completed publication investigation claim");
+    }
+    access.encodeJobs.complete(recoveredClaim);
+    const recoveredDashboard = await readDashboard(access);
+    const recoveredInvestigations = encodeJobById(
+      recoveredDashboard.snapshot,
+      job.id,
+    )!.investigations!.slice(0, 5);
+    for (const investigation of recoveredInvestigations) {
+      expect(investigation).toMatchObject({
+        retryability: "not_appropriate",
+        suggestedAction:
+          "No operator action is needed for this completed Encode Job. Keep this report as historical context.",
+      });
+      const copied = investigationReport(investigation);
+      expect(copied).toContain(
+        "Suggested action: No operator action is needed for this completed Encode Job. Keep this report as historical context.",
+      );
+      expect(copied).not.toContain("then retry the Encode Job");
+    }
   });
 
   it("carries every preparation and validation failure through the safe dashboard workflow", async () => {

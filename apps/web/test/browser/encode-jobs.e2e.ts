@@ -200,6 +200,7 @@ test("queues a mixed worklist after resolving a new shared profile", async ({
   await expect(conflictRow).toContainText("Encode Job output is already assigned");
 
   await notEncoded.click();
+  await expect(notEncoded).toHaveAttribute("aria-pressed", "true");
   await checkSelection(`Queue filler ${variant} 000`, "DVD title 1");
   await manager.getByRole("button", { name: /Add selected to worklist/ })
     .click();

@@ -163,6 +163,10 @@ type PublicationRecoveryStepResult =
   | "completed"
   | "completed_with_failures"
   | "deferred";
+type PublicationMutationFailureReports = Map<
+  NonNullable<EncodeJobPartialCleanup["leaseToken"]>,
+  EncodeJobFailureReportInput
+>;
 
 function createPublicationRecoveryStepTracker(
   options: EncodePublicationOptions,
@@ -175,10 +179,16 @@ function createPublicationRecoveryStepTracker(
         result = "deferred";
       }
     },
-    recordFailure(message: string, error: unknown): void {
+    recordFailure(
+      message: string,
+      error: unknown,
+      recordIncident = true,
+    ): void {
       result = "completed_with_failures";
       options.log(`${message}: ${normalizeErrorMessage(error)}`);
-      recordEncodePublicationRecoveryIncident(options, recoveryArea);
+      if (recordIncident) {
+        recordEncodePublicationRecoveryIncident(options, recoveryArea);
+      }
     },
     result(): PublicationRecoveryStepResult {
       return result;
@@ -213,6 +223,167 @@ async function requireRegularOutputForValidation(
       "output_validation_failed",
       "validation",
       { kind: "validation_check", check: "output_file" },
+    );
+  }
+}
+
+function boundedDiagnostic(error: unknown): string {
+  return normalizeErrorMessage(error).slice(0, 500);
+}
+
+type OperationalFailureClassification = Pick<
+  EncodeJobFailureReportInput,
+  "reasonCode" | "phase" | "evidence"
+> & {
+  reasonCode:
+    | "cleanup_failed"
+    | "publication_failed"
+    | "worker_interrupted"
+    | "publication_recovery_failed";
+};
+
+function operationalFailureReport(
+  error: unknown,
+  classification: OperationalFailureClassification,
+): EncodeJobFailureReportInput {
+  return {
+    schemaVersion: 1,
+    retryability: "after_action",
+    diagnostic: boundedDiagnostic(error),
+    ...classification,
+  };
+}
+
+function cleanupFailureReport(
+  error: unknown,
+  operation: Extract<
+    EncodeJobFailureReportInput["evidence"],
+    { kind: "cleanup" }
+  >["operation"],
+): EncodeJobFailureReportInput {
+  return operationalFailureReport(error, {
+    reasonCode: "cleanup_failed",
+    phase: "cleanup",
+    evidence: { kind: "cleanup", operation },
+  });
+}
+
+function publicationFailureReport(
+  error: unknown,
+  operation: Extract<
+    EncodeJobFailureReportInput["evidence"],
+    { kind: "publication" }
+  >["operation"],
+): EncodeJobFailureReportInput {
+  return operationalFailureReport(error, {
+    reasonCode: "publication_failed",
+    phase: "publication",
+    evidence: { kind: "publication", operation },
+  });
+}
+
+function interruptionFailureReport(
+  error: unknown,
+  phase: EncodeJobFailureReportInput["phase"],
+): EncodeJobFailureReportInput {
+  return operationalFailureReport(error, {
+    reasonCode: "worker_interrupted",
+    phase,
+    evidence: { kind: "interruption", source: "worker_shutdown" },
+  });
+}
+
+function publicationRecoveryFailureReport(
+  error: unknown,
+  publicationPending: boolean,
+): EncodeJobFailureReportInput {
+  return operationalFailureReport(error, {
+    reasonCode: "publication_recovery_failed",
+    phase: "recovery",
+    evidence: {
+      kind: "recovery",
+      operation: publicationPending
+        ? "publication_recovery"
+        : "cleanup_recovery",
+    },
+  });
+}
+
+function recordCleanupFailure(
+  cleanup: EncodeJobPartialCleanup,
+  report: EncodeJobFailureReportInput,
+  options: EncodePublicationOptions,
+): boolean {
+  try {
+    options.access.encodeJobs.recordCleanupFailureReport(cleanup, report);
+    return true;
+  } catch (error) {
+    options.log(
+      `Encode cleanup Failure Report could not be persisted: ${
+        normalizeErrorMessage(error)
+      }`,
+    );
+    return false;
+  }
+}
+
+function recordDetachedPublicationRecoveryFailure(
+  cleanup: EncodeJobPartialCleanup,
+  error: unknown,
+  options: EncodePublicationOptions,
+): void {
+  const attributed = recordCleanupFailure(
+    cleanup,
+    publicationRecoveryFailureReport(error, cleanup.publicationPending),
+    options,
+  );
+  options.log(
+    `Deferred Encode publication cleanup failed: ${
+      normalizeErrorMessage(error)
+    }`,
+  );
+  if (!attributed) {
+    recordEncodePublicationRecoveryIncident(
+      options,
+      "pending_partial_cleanup",
+    );
+  }
+}
+
+function recordExpiredPublicationRecoveryFailure(
+  cleanup: EncodeJobPartialCleanup,
+  error: unknown,
+  options: EncodePublicationOptions,
+): boolean {
+  try {
+    options.access.encodeJobs.recordExpiredPublicationRecoveryFailure(
+      cleanup,
+      publicationRecoveryFailureReport(error, cleanup.publicationPending),
+    );
+    return true;
+  } catch (reportError) {
+    options.log(
+      `Expired Encode publication recovery Failure Report could not be persisted: ${
+        normalizeErrorMessage(reportError)
+      }`,
+    );
+    return false;
+  }
+}
+
+function recordClaimFailure(
+  claim: RunningEncodeJob,
+  report: EncodeJobFailureReportInput,
+  label: string,
+  options: EncodePublicationOptions,
+): void {
+  try {
+    options.access.encodeJobs.recordFailureReport(claim, report);
+  } catch (error) {
+    options.log(
+      `${label} Failure Report could not be persisted: ${
+        normalizeErrorMessage(error)
+      }`,
     );
   }
 }
@@ -1009,11 +1180,12 @@ async function quarantinePartial(
   runner: HandBrakeRunner,
   log: (message: string) => void,
   onQuarantined?: () => unknown | Promise<unknown>,
-): Promise<string | null> {
+  onFailure?: (error: unknown) => unknown | Promise<unknown>,
+): Promise<"completed" | "deferred"> {
   if (!(runner.isActive?.(partialPath) ?? false)) {
-    const failedPath = await moveAside(partialPath);
+    await moveAside(partialPath);
     await onQuarantined?.();
-    return failedPath;
+    return "completed";
   }
   const inactive = runner.whenInactive?.(partialPath);
   if (inactive) {
@@ -1022,7 +1194,16 @@ async function quarantinePartial(
         await moveAside(partialPath);
         await onQuarantined?.();
       })
-      .catch((error: unknown) => {
+      .catch(async (error: unknown) => {
+        try {
+          await onFailure?.(error);
+        } catch (reportError) {
+          log(
+            `Encode partial cleanup Failure Report could not be persisted: ${
+              normalizeErrorMessage(reportError)
+            }`,
+          );
+        }
         log(
           `Encode partial cleanup after HandBrake close failed: ${
             normalizeErrorMessage(error)
@@ -1030,7 +1211,7 @@ async function quarantinePartial(
         );
       });
   }
-  return null;
+  return "deferred";
 }
 
 async function reconcilePendingPublications(
@@ -1049,6 +1230,7 @@ async function reconcilePendingPublications(
   });
   for (const cleanup of cleanups) {
     let mutationLockHandle: number | null = null;
+    let reportingCleanup = cleanup;
     try {
       let authorizedCleanup = cleanup;
       const {
@@ -1188,6 +1370,7 @@ async function reconcilePendingPublications(
                 );
               },
             );
+          reportingCleanup = authorizedCleanup;
           const currentFinalMetadata = lstatSync(finalPath);
           const currentReplacementMetadata = lstatSync(replacementPath);
           if (
@@ -1240,7 +1423,7 @@ async function reconcilePendingPublications(
           }
         }
         await cleanupReplacementLink(replacementPath, partialMetadata);
-        await quarantinePartial(
+        const quarantineResult = await quarantinePartial(
           partialPath,
           options.runner,
           options.log,
@@ -1248,7 +1431,16 @@ async function reconcilePendingPublications(
             options.access.encodeJobs.completePartialCleanup(
               authorizedCleanup,
             ),
+          (error) =>
+            recordDetachedPublicationRecoveryFailure(
+              authorizedCleanup,
+              error,
+              options,
+            ),
         );
+        if (quarantineResult === "deferred") {
+          recovery.markDeferred();
+        }
         continue;
       }
       if (replacementMetadata !== null) {
@@ -1274,6 +1466,7 @@ async function reconcilePendingPublications(
               ),
             );
           authorizedCleanup = completion.cleanup;
+          reportingCleanup = authorizedCleanup;
         } else {
           authorizedCleanup =
             options.access.encodeJobs.withPartialCleanupMutationFence(
@@ -1286,6 +1479,7 @@ async function reconcilePendingPublications(
                 );
               },
             );
+          reportingCleanup = authorizedCleanup;
           await syncPath(dirname(finalPath));
           if (priorFinalMetadata !== null) {
             await restoreMovedAsideOutput(priorFinalPath, finalPath);
@@ -1299,16 +1493,34 @@ async function reconcilePendingPublications(
       if (reconciledFinalMetadata === null && priorFinalMetadata !== null) {
         await restoreMovedAsideOutput(priorFinalPath, finalPath);
       }
-      await quarantinePartial(
+      const quarantineResult = await quarantinePartial(
         partialPath,
         options.runner,
         options.log,
         () => options.access.encodeJobs.completePartialCleanup(cleanup),
+        (error) =>
+          recordDetachedPublicationRecoveryFailure(
+            cleanup,
+            error,
+            options,
+          ),
       );
+      if (quarantineResult === "deferred") {
+        recovery.markDeferred();
+      }
     } catch (error) {
+      const attributed = recordCleanupFailure(
+        reportingCleanup,
+        publicationRecoveryFailureReport(
+          error,
+          reportingCleanup.publicationPending,
+        ),
+        options,
+      );
       recovery.recordFailure(
         "Pending Encode publication could not be reconciled",
         error,
+        !attributed,
       );
     } finally {
       if (mutationLockHandle !== null) {
@@ -1321,6 +1533,7 @@ async function reconcilePendingPublications(
 
 async function recoverAbandonedPublicationMutations(
   options: EncodePublicationOptions,
+  failureReports: PublicationMutationFailureReports,
 ): Promise<PublicationRecoveryStepResult> {
   const mutations =
     options.access.encodeJobs.listExpiredPublicationMutations();
@@ -1349,14 +1562,26 @@ async function recoverAbandonedPublicationMutations(
       try {
         options.access.encodeJobs.recoverExpiredPublicationMutation(
           mutation,
+          mutation.leaseToken === null
+            ? undefined
+            : failureReports.get(mutation.leaseToken),
         );
+        if (mutation.leaseToken !== null) {
+          failureReports.delete(mutation.leaseToken);
+        }
       } finally {
         options.mutationLock.release(handle);
       }
     } catch (error) {
+      const attributed = recordExpiredPublicationRecoveryFailure(
+        mutation,
+        error,
+        options,
+      );
       recovery.recordFailure(
         "Encode publication mutation could not be recovered",
         error,
+        !attributed,
       );
     }
   }
@@ -1413,6 +1638,7 @@ async function recoverAbandonedCancellations(
 
 async function reconcileActivePublicationMutations(
   options: EncodePublicationOptions,
+  failureReports: PublicationMutationFailureReports,
 ): Promise<PublicationRecoveryStepResult> {
   const mutations = options.access.encodeJobs.listPublicationMutations();
   if (mutations.length === 0) {
@@ -1469,9 +1695,22 @@ async function reconcileActivePublicationMutations(
       await syncPath(dirname(finalPath));
       options.access.encodeJobs.completePartialCleanup(mutation);
     } catch (error) {
+      const failureReport = publicationRecoveryFailureReport(
+        error,
+        mutation.publicationPending,
+      );
+      const attributed = recordCleanupFailure(
+        mutation,
+        failureReport,
+        options,
+      );
+      if (!attributed && mutation.leaseToken !== null) {
+        failureReports.set(mutation.leaseToken, failureReport);
+      }
       recovery.recordFailure(
         "Active Encode publication mutation could not be reconciled",
         error,
+        false,
       );
     }
   }
@@ -1646,6 +1885,10 @@ export async function executeEncodeClaim(
   let published = false;
   let mutationLockHandle: number | null = null;
   let failurePhase: EncodeJobFailureReportInput["phase"] = "preparation";
+  let publicationOperation: Extract<
+    EncodeJobFailureReportInput["evidence"],
+    { kind: "publication" }
+  >["operation"] = "publication_mutation";
   try {
     const input = resolveClaimInput(options.access, claim);
     const originalsRoot = await runEncodePreparationStep(
@@ -1771,8 +2014,13 @@ export async function executeEncodeClaim(
       "--all-subtitles",
       "--subtitle-burned=none",
     ];
-    renewClaim();
     failurePhase = "encoding";
+    options.access.encodeJobs.updateProgress(claim, {
+      progressPercent: 0,
+      phase: "encoding",
+      etaSeconds: null,
+    });
+    renewClaim();
     await options.runner.run({
       arguments_,
       onOutput: parseProgress,
@@ -1782,10 +2030,16 @@ export async function executeEncodeClaim(
     parseProgress("", true);
     signal.throwIfAborted();
     failurePhase = "validation";
+    options.access.encodeJobs.updateProgress(claim, {
+      progressPercent: 100,
+      phase: "validation",
+      etaSeconds: null,
+    });
     await requireRegularOutputForValidation(
       partialPath,
       "HandBrake did not produce a complete regular output file",
     );
+    failurePhase = "validation";
     await options.outputValidator.prepareAndValidate(partialPath, signal, {
       ...(input.expectedDurationSeconds === undefined
         ? {}
@@ -1863,6 +2117,7 @@ export async function executeEncodeClaim(
     }
     await syncPath(dirname(finalPath));
     let publicationChangedBeforeCompletion = false;
+    publicationOperation = "publication_completion";
     try {
       options.access.encodeJobs.completePublishedClaim(
         claim,
@@ -1886,6 +2141,11 @@ export async function executeEncodeClaim(
       );
     } catch (error) {
       if (publicationChangedBeforeCompletion) {
+        recordCleanupFailure(
+          pendingPartialCleanup,
+          publicationFailureReport(error, "publication_completion"),
+          options,
+        );
         options.log(
           "Encode publication changed before completion; retained for reconciliation",
         );
@@ -1898,6 +2158,11 @@ export async function executeEncodeClaim(
       await syncPath(dirname(finalPath));
       options.access.encodeJobs.completePartialCleanup(pendingPartialCleanup);
     } catch (cleanupError) {
+      recordCleanupFailure(
+        pendingPartialCleanup,
+        cleanupFailureReport(cleanupError, "publication_completion"),
+        options,
+      );
       options.log(
         `Completed Encode publication cleanup failed: ${
           normalizeErrorMessage(cleanupError)
@@ -1906,6 +2171,12 @@ export async function executeEncodeClaim(
     }
   } catch (error) {
     if (error instanceof PendingPublicationRecoveryError) {
+      recordClaimFailure(
+        claim,
+        publicationFailureReport(error, publicationOperation),
+        "Encode publication",
+        options,
+      );
       options.log(
         `Encode publication mutation requires reconciliation: ${error.message}`,
       );
@@ -1932,6 +2203,19 @@ export async function executeEncodeClaim(
       }
     }
     const cleanupFailures: string[] = [];
+    const cleanupFailureReports: EncodeJobFailureReportInput[] = [];
+    const rememberCleanupFailure = (
+      cleanupError: unknown,
+      operation: Extract<
+        EncodeJobFailureReportInput["evidence"],
+        { kind: "cleanup" }
+      >["operation"],
+    ) => {
+      cleanupFailures.push(normalizeErrorMessage(cleanupError));
+      cleanupFailureReports.push(
+        cleanupFailureReport(cleanupError, operation),
+      );
+    };
     let replacementCleanupFailed = false;
     let preserveReplacementAuthority = priorFinalRestored;
     if (published) {
@@ -1951,7 +2235,20 @@ export async function executeEncodeClaim(
           }`,
         );
         if (options.signal.aborted) {
+          recordClaimFailure(
+            claim,
+            interruptionFailureReport(error, failurePhase),
+            "Encode interruption",
+            options,
+          );
           throw error;
+        }
+        if (pendingPartialCleanup !== undefined) {
+          recordCleanupFailure(
+            pendingPartialCleanup,
+            publicationFailureReport(authorityError, publicationOperation),
+            options,
+          );
         }
         return;
       }
@@ -1973,7 +2270,7 @@ export async function executeEncodeClaim(
           preserveReplacementAuthority = true;
         }
       } catch (cleanupError) {
-        cleanupFailures.push(normalizeErrorMessage(cleanupError));
+        rememberCleanupFailure(cleanupError, "published_output");
       }
     }
     if (!published && replacementPath !== undefined) {
@@ -1984,7 +2281,7 @@ export async function executeEncodeClaim(
         );
       } catch (cleanupError) {
         replacementCleanupFailed = true;
-        cleanupFailures.push(normalizeErrorMessage(cleanupError));
+        rememberCleanupFailure(cleanupError, "replacement_artifact");
       }
     }
     if (published && finalPath !== undefined) {
@@ -2020,14 +2317,14 @@ export async function executeEncodeClaim(
           await syncPath(dirname(finalPath));
         }
       } catch (cleanupError) {
-        cleanupFailures.push(normalizeErrorMessage(cleanupError));
+        rememberCleanupFailure(cleanupError, "published_output");
       }
       if (priorFinalFailedPath !== null) {
         try {
           await restoreMovedAsideOutput(priorFinalFailedPath, finalPath);
           preserveReplacementAuthority = true;
         } catch (cleanupError) {
-          cleanupFailures.push(normalizeErrorMessage(cleanupError));
+          rememberCleanupFailure(cleanupError, "published_output");
         }
       }
     }
@@ -2040,13 +2337,13 @@ export async function executeEncodeClaim(
           pendingPartialCleanup =
             options.access.encodeJobs.registerPartialCleanup(claim);
         } catch (cleanupError) {
-          cleanupFailures.push(normalizeErrorMessage(cleanupError));
+          rememberCleanupFailure(cleanupError, "partial_output");
         }
       } else if (pendingPartialCleanup === undefined) {
         try {
           await quarantinePartial(partialPath, options.runner, options.log);
         } catch (cleanupError) {
-          cleanupFailures.push(normalizeErrorMessage(cleanupError));
+          rememberCleanupFailure(cleanupError, "partial_output");
         }
       }
     }
@@ -2054,7 +2351,8 @@ export async function executeEncodeClaim(
       if (
         partialPath !== undefined &&
         pendingPartialCleanup !== undefined &&
-        !replacementCleanupFailed
+        !replacementCleanupFailed &&
+        cleanupFailures.length === 0
       ) {
         const cleanup = pendingPartialCleanup;
         try {
@@ -2065,15 +2363,28 @@ export async function executeEncodeClaim(
             () => options.access.encodeJobs.completePartialCleanup(cleanup),
           );
         } catch (cleanupError) {
-          cleanupFailures.push(normalizeErrorMessage(cleanupError));
+          rememberCleanupFailure(cleanupError, "partial_output");
         }
       }
       if (cleanupFailures.length > 0) {
-        options.log(
-          `Encode Job ${claim.id} cancellation cleanup failed: ${
-            cleanupFailures.join("; ")
-          }`,
-        );
+        try {
+          options.access.encodeJobs.completeCancellationWithReports(
+            claim,
+            pendingPartialCleanup ?? null,
+            cleanupFailureReports,
+          );
+          options.log(
+            `Encode Job ${claim.id} cancelled with cleanup pending: ${
+              cleanupFailures.join("; ")
+            }`,
+          );
+        } catch (cancellationError) {
+          options.log(
+            `Encode Job cancellation state and cleanup reports could not be persisted: ${
+              normalizeErrorMessage(cancellationError)
+            }`,
+          );
+        }
         return;
       }
       try {
@@ -2091,16 +2402,36 @@ export async function executeEncodeClaim(
     const failureMessage = signal.aborted
       ? "Encode interrupted"
       : normalizeErrorMessage(error);
-    const message = `${failureMessage}${
-      cleanupFailures.length > 0
-        ? `; cleanup failed: ${cleanupFailures.join("; ")}`
-        : ""
-    }`.slice(0, 500);
+    let message = failureMessage.slice(0, 500);
     try {
-      const report = encodeFailureReport(error, failurePhase);
-      options.access.encodeJobs.failWithReport(claim, report, {
-        preserveReplacementAuthority,
-      });
+      const classifiedReport = encodeFailureReport(error, failurePhase);
+      const primaryReport = options.signal.aborted
+        ? interruptionFailureReport(error, failurePhase)
+        : classifiedReport.reasonCode === "unknown_failure" &&
+            failurePhase === "publication"
+          ? publicationFailureReport(error, publicationOperation)
+          : classifiedReport;
+      if (primaryReport.reasonCode === "command_timeout") {
+        message = "HandBrake command timed out";
+      } else if (primaryReport.reasonCode === "command_failed") {
+        message = "HandBrake command failed";
+      }
+      const reports = [
+        primaryReport,
+        ...cleanupFailureReports,
+      ];
+      if (cleanupFailureReports.length === 0) {
+        options.access.encodeJobs.failWithReport(claim, primaryReport, {
+          preserveReplacementAuthority,
+        });
+      } else {
+        options.access.encodeJobs.failWithReports(
+          claim,
+          message,
+          reports,
+          { preserveReplacementAuthority },
+        );
+      }
     } catch (failureError) {
       const failureMessage = normalizeErrorMessage(failureError);
       options.log(
@@ -2120,8 +2451,19 @@ export async function executeEncodeClaim(
           options.log,
           () =>
             options.access.encodeJobs.completePartialCleanup(cleanup),
+          (cleanupError) =>
+            recordCleanupFailure(
+              cleanup,
+              cleanupFailureReport(cleanupError, "partial_output"),
+              options,
+            ),
         );
       } catch (cleanupError) {
+        recordCleanupFailure(
+          cleanup,
+          cleanupFailureReport(cleanupError, "partial_output"),
+          options,
+        );
         options.log(
           `Deferred Encode partial cleanup could not start: ${
             normalizeErrorMessage(cleanupError)
@@ -2144,6 +2486,8 @@ export async function executeEncodeClaim(
 export async function reconcileEncodePublications(
   options: EncodePublicationOptions,
 ): Promise<void> {
+  const publicationMutationFailureReports: PublicationMutationFailureReports =
+    new Map();
   const runPublicationRecoveryStep = async (
     recoveryArea: EncodeWorkerIncidentRecoveryArea,
     failureMessage: string,
@@ -2156,6 +2500,7 @@ export async function reconcileEncodePublications(
       if (result === "completed") {
         resolveEncodePublicationRecoveryIncident(options, recoveryArea);
       }
+      return result;
     } catch (error) {
       options.log(`${failureMessage}: ${normalizeErrorMessage(error)}`);
       recordEncodePublicationRecoveryIncident(options, recoveryArea);
@@ -2163,16 +2508,31 @@ export async function reconcileEncodePublications(
     }
   };
 
-  await runPublicationRecoveryStep(
+  const activePublicationResult = await runPublicationRecoveryStep(
     "active_publication",
     "Active Encode publications could not be listed for reconciliation",
-    () => reconcileActivePublicationMutations(options),
+    () =>
+      reconcileActivePublicationMutations(
+        options,
+        publicationMutationFailureReports,
+      ),
   );
-  await runPublicationRecoveryStep(
+  const expiredPublicationResult = await runPublicationRecoveryStep(
     "expired_publication_mutation",
     "Expired Encode publication mutations could not be listed for recovery",
-    () => recoverAbandonedPublicationMutations(options),
+    () =>
+      recoverAbandonedPublicationMutations(
+        options,
+        publicationMutationFailureReports,
+      ),
   );
+  if (activePublicationResult === "completed_with_failures") {
+    if (publicationMutationFailureReports.size === 0) {
+      resolveEncodePublicationRecoveryIncident(options, "active_publication");
+    } else if (expiredPublicationResult === "completed") {
+      recordEncodePublicationRecoveryIncident(options, "active_publication");
+    }
+  }
   await runPublicationRecoveryStep(
     "expired_encode_job_claim",
     "Expired Encode Job claims could not be recovered",

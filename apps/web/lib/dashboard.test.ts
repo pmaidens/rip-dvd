@@ -29,6 +29,7 @@ import { DVD_READ_FAILURE_RESULT_PREFIX } from "../../archive-worker/src/dvd-rec
 
 import { readDashboardSnapshot } from "./dashboard";
 import { DASHBOARD_ACTIVE_DISC_LIMIT } from "./dashboard-bounds";
+import { investigationReport } from "./investigation";
 import {
   completeDiscInspection,
   pollArchiveWorkerForTest,
@@ -230,6 +231,124 @@ describe("readDashboardSnapshot", () => {
     expect(JSON.stringify(snapshot)).not.toMatch(
       /private|output\.mkv|--preset|ENV=value|claim-token/,
     );
+  });
+
+  it("keeps an unclassified primary failure beside its cleanup report", () => {
+    const access = dataAccessFixture.create();
+    const { job } = seedEncodeJob(access);
+    const claim = access.encodeJobs.claimNext("dashboard-cleanup-worker");
+    if (!claim) {
+      throw new Error("Expected dashboard cleanup Encode Job claim");
+    }
+    access.encodeJobs.failWithReports(
+      claim,
+      "Output validation could not read the encoded file",
+      [{
+        schemaVersion: 1,
+        reasonCode: "cleanup_failed",
+        phase: "cleanup",
+        retryability: "after_action",
+        diagnostic: "/private/output.mkv could not be quarantined",
+        evidence: { kind: "cleanup", operation: "partial_output" },
+      }],
+    );
+
+    const snapshot = readDashboardSnapshot(access);
+    const failedJob = snapshot.encodeJobs.status === "loaded"
+      ? snapshot.encodeJobs.items.find(({ id }) => id === job.id)
+      : undefined;
+
+    expect(failedJob?.investigations).toEqual([
+      expect.objectContaining({
+        reasonCode: "encode.cleanup_failed",
+        failedPhase: "Cleanup",
+      }),
+      expect.objectContaining({
+        reasonCode: "encode_failure.legacy",
+        explanation:
+          "The worker reported an unclassified failure. Check the worker logs for the full diagnostic.",
+      }),
+    ]);
+    expect(JSON.stringify(failedJob)).not.toContain("/private/output.mkv");
+  });
+
+  it("keeps an older unclassified failure behind a later cleanup recovery report", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T18:00:00.000Z"));
+    const access = dataAccessFixture.create();
+    const { job } = seedEncodeJob(access);
+    const claim = access.encodeJobs.claimNext("dashboard-recovery-worker");
+    if (!claim) {
+      throw new Error("Expected dashboard recovery Encode Job claim");
+    }
+    const cleanup = access.encodeJobs.registerPartialCleanup(claim);
+    access.encodeJobs.fail(
+      claim,
+      "The worker reported an unclassified primary failure",
+    );
+
+    vi.advanceTimersByTime(1_000);
+    access.encodeJobs.recordCleanupFailureReport(cleanup, {
+      schemaVersion: 1,
+      reasonCode: "publication_recovery_failed",
+      phase: "recovery",
+      retryability: "after_action",
+      diagnostic: "/private/output.mkv could not be reconciled",
+      evidence: { kind: "recovery", operation: "cleanup_recovery" },
+    });
+
+    const snapshot = readDashboardSnapshot(access);
+    const failedJob = snapshot.encodeJobs.status === "loaded"
+      ? snapshot.encodeJobs.items.find(({ id }) => id === job.id)
+      : undefined;
+
+    expect(failedJob?.investigations).toEqual([
+      expect.objectContaining({
+        reasonCode: "encode.publication_recovery_failed",
+        failedPhase: "Recovery",
+        occurredAt: "2026-09-01T18:00:01.000Z",
+      }),
+      expect.objectContaining({
+        reasonCode: "encode_failure.legacy",
+        occurredAt: "2026-09-01T18:00:00.000Z",
+      }),
+    ]);
+    expect(JSON.stringify(failedJob)).not.toContain("/private/output.mkv");
+  });
+
+  it("describes a same-attempt cleanup report on a completed job", () => {
+    const access = dataAccessFixture.create();
+    const { job } = seedEncodeJob(access);
+    const claim = access.encodeJobs.claimNext("completed-cleanup-worker");
+    if (!claim) {
+      throw new Error("Expected completed cleanup Encode Job claim");
+    }
+    const cleanup = access.encodeJobs.registerPartialCleanup(claim);
+    access.encodeJobs.complete(claim);
+    access.encodeJobs.recordCleanupFailureReport(cleanup, {
+      schemaVersion: 1,
+      reasonCode: "cleanup_failed",
+      phase: "cleanup",
+      retryability: "after_action",
+      diagnostic: "partial cleanup failed after completion",
+      evidence: { kind: "cleanup", operation: "partial_output" },
+    });
+
+    const snapshot = readDashboardSnapshot(access);
+    const completedJob = snapshot.encodeJobs.status === "loaded"
+      ? snapshot.encodeJobs.items.find(({ id }) => id === job.id)
+      : undefined;
+
+    expect(completedJob?.investigations).toEqual([
+      expect.objectContaining({
+        reasonCode: "encode.cleanup_failed",
+        retryability: "not_appropriate",
+        retryabilityDetail:
+          "This Encode Job is completed, so this report does not offer a retry.",
+        suggestedAction:
+          "Keep the Encode Worker running and leave output files in place while cleanup or publication recovery finishes. No operator retry is needed while recovery is pending.",
+      }),
+    ]);
   });
 
   it("keeps a terminal Encode Job outcome beside its Disc Selection correction", () => {
