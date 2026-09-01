@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -140,6 +140,62 @@ describe("Encode Worker Incidents", () => {
       resolvedLimit: 20,
     })[0]).toMatchObject({
       evidence: { recoveryArea: "active_publication" },
+      resolvedAt: expect.any(Date),
+    });
+    fixture.access.close();
+  });
+
+  it("does not resolve a recovery incident while output ownership is deferred", async () => {
+    const fixture = createFixture();
+    mkdirSync(fixture.mediaLibraryPath, { recursive: true });
+    const identity = {
+      workerKind: "encode",
+      reasonCode: "publication_recovery_failure",
+      phase: "publication_recovery",
+      evidence: { recoveryArea: "pending_partial_cleanup" },
+    } as const;
+    const incident = fixture.access.workerIncidents.record({
+      ...identity,
+      schemaVersion: 1,
+      retryability: "automatic",
+    });
+    const pending = vi.spyOn(
+      fixture.access.encodeJobs,
+      "listPendingPartialCleanups",
+    ).mockReturnValue([{
+      jobId: "deferred-job",
+      outputPath: join(fixture.mediaLibraryPath, "deferred.mkv"),
+      claimToken: "deferred-claim",
+      leaseToken: null,
+      publicationPending: true,
+    } as never]);
+    const mutationLock = {
+      tryAcquire: vi.fn(() => null),
+      release: vi.fn(),
+    };
+    const options = {
+      ...fixture,
+      concurrency: 1,
+      log: vi.fn(),
+      mutationLock,
+      signal: new AbortController().signal,
+    };
+
+    await pollEncodeWorker(options);
+
+    expect(mutationLock.tryAcquire).toHaveBeenCalledOnce();
+    expect(fixture.access.workerIncidents.list({
+      workerKind: "encode",
+      resolvedLimit: 20,
+    })[0]).toMatchObject({ id: incident.id, resolvedAt: null });
+
+    pending.mockReturnValue([]);
+    await pollEncodeWorker(options);
+    expect(fixture.access.workerIncidents.list({
+      workerKind: "encode",
+      resolvedLimit: 20,
+    })[0]).toMatchObject({
+      id: incident.id,
       resolvedAt: expect.any(Date),
     });
     fixture.access.close();

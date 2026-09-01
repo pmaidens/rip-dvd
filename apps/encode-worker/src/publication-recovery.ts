@@ -106,6 +106,11 @@ export class EncodePublicationRecoveryError extends Error {
   }
 }
 
+type PublicationRecoveryStepResult =
+  | "completed"
+  | "completed_with_failures"
+  | "deferred";
+
 export interface AtomicPathExchange {
   exchange(firstPath: string, secondPath: string): void;
 }
@@ -925,11 +930,11 @@ async function quarantinePartial(
 async function reconcilePendingPublications(
   cleanups: readonly EncodeJobPartialCleanup[],
   options: EncodePublicationOptions,
-): Promise<boolean> {
+): Promise<PublicationRecoveryStepResult> {
   if (cleanups.length === 0) {
-    return false;
+    return "completed";
   }
-  let failed = false;
+  let result: PublicationRecoveryStepResult = "completed";
   const mediaRoot = await requireLibraryRoot(options.mediaLibraryPath, {
     create: true,
   });
@@ -979,6 +984,9 @@ async function reconcilePendingPublications(
       }
       mutationLockHandle = options.mutationLock.tryAcquire(mutationLockPath);
       if (mutationLockHandle === null) {
+        if (result === "completed") {
+          result = "deferred";
+        }
         continue;
       }
       quarantineMetadata = await optionalMetadata(cleanupQuarantinePath);
@@ -1191,7 +1199,7 @@ async function reconcilePendingPublications(
         () => options.access.encodeJobs.completePartialCleanup(cleanup),
       );
     } catch (error) {
-      failed = true;
+      result = "completed_with_failures";
       options.log(
         `Pending Encode publication could not be reconciled: ${
           normalizeErrorMessage(error)
@@ -1207,18 +1215,18 @@ async function reconcilePendingPublications(
       }
     }
   }
-  return failed;
+  return result;
 }
 
 async function recoverAbandonedPublicationMutations(
   options: EncodePublicationOptions,
-): Promise<boolean> {
+): Promise<PublicationRecoveryStepResult> {
   const mutations =
     options.access.encodeJobs.listExpiredPublicationMutations();
   if (mutations.length === 0) {
-    return false;
+    return "completed";
   }
-  let failed = false;
+  let result: PublicationRecoveryStepResult = "completed";
   const mediaRoot = await requireLibraryRoot(options.mediaLibraryPath, {
     create: true,
   });
@@ -1231,6 +1239,9 @@ async function recoverAbandonedPublicationMutations(
       );
       const handle = options.mutationLock.tryAcquire(mutationLockPath);
       if (handle === null) {
+        if (result === "completed") {
+          result = "deferred";
+        }
         continue;
       }
       try {
@@ -1241,7 +1252,7 @@ async function recoverAbandonedPublicationMutations(
         options.mutationLock.release(handle);
       }
     } catch (error) {
-      failed = true;
+      result = "completed_with_failures";
       options.log(
         `Encode publication mutation could not be recovered: ${
           normalizeErrorMessage(error)
@@ -1253,17 +1264,17 @@ async function recoverAbandonedPublicationMutations(
       );
     }
   }
-  return failed;
+  return result;
 }
 
 async function recoverAbandonedCancellations(
   options: EncodePublicationOptions,
-): Promise<boolean> {
+): Promise<PublicationRecoveryStepResult> {
   const claims = options.access.encodeJobs.listExpiredCancellationClaims();
   if (claims.length === 0) {
-    return false;
+    return "completed";
   }
-  let failed = false;
+  let result: PublicationRecoveryStepResult = "completed";
   const mediaRoot = await requireLibraryRoot(options.mediaLibraryPath, {
     create: true,
   });
@@ -1277,6 +1288,9 @@ async function recoverAbandonedCancellations(
       );
       mutationLockHandle = options.mutationLock.tryAcquire(mutationLockPath);
       if (mutationLockHandle === null) {
+        if (result === "completed") {
+          result = "deferred";
+        }
         continue;
       }
       if (options.runner.requireInactive === undefined) {
@@ -1287,7 +1301,7 @@ async function recoverAbandonedCancellations(
         () => options.runner.requireInactive?.(partialPath),
       );
     } catch (error) {
-      failed = true;
+      result = "completed_with_failures";
       options.log(
         `Encode Job ${claim.id} cancellation recovery is waiting for process closure: ${
           normalizeErrorMessage(error)
@@ -1303,17 +1317,17 @@ async function recoverAbandonedCancellations(
       }
     }
   }
-  return failed;
+  return result;
 }
 
 async function reconcileActivePublicationMutations(
   options: EncodePublicationOptions,
-): Promise<boolean> {
+): Promise<PublicationRecoveryStepResult> {
   const mutations = options.access.encodeJobs.listPublicationMutations();
   if (mutations.length === 0) {
-    return false;
+    return "completed";
   }
-  let failed = false;
+  let result: PublicationRecoveryStepResult = "completed";
   const mediaRoot = await requireLibraryRoot(options.mediaLibraryPath, {
     create: true,
   });
@@ -1361,7 +1375,7 @@ async function reconcileActivePublicationMutations(
       await syncPath(dirname(finalPath));
       options.access.encodeJobs.completePartialCleanup(mutation);
     } catch (error) {
-      failed = true;
+      result = "completed_with_failures";
       options.log(
         `Active Encode publication mutation could not be reconciled: ${
           normalizeErrorMessage(error)
@@ -1373,7 +1387,7 @@ async function reconcileActivePublicationMutations(
       );
     }
   }
-  return failed;
+  return result;
 }
 
 async function syncPath(path: string): Promise<void> {
@@ -1966,14 +1980,16 @@ export async function executeEncodeClaim(
 export async function reconcileEncodePublications(
   options: EncodePublicationOptions,
 ): Promise<void> {
-  const observe = async (
+  const runPublicationRecoveryStep = async (
     recoveryArea: WorkerIncidentRecoveryArea,
     failureMessage: string,
-    recover: () => boolean | Promise<boolean>,
+    recover: () =>
+      | PublicationRecoveryStepResult
+      | Promise<PublicationRecoveryStepResult>,
   ) => {
     try {
-      const failed = await recover();
-      if (!failed) {
+      const result = await recover();
+      if (result === "completed") {
         resolveEncodePublicationRecoveryIncident(options, recoveryArea);
       }
     } catch (error) {
@@ -1983,30 +1999,30 @@ export async function reconcileEncodePublications(
     }
   };
 
-  await observe(
+  await runPublicationRecoveryStep(
     "active_publication",
     "Active Encode publications could not be listed for reconciliation",
     () => reconcileActivePublicationMutations(options),
   );
-  await observe(
+  await runPublicationRecoveryStep(
     "expired_publication_mutation",
     "Expired Encode publication mutations could not be listed for recovery",
     () => recoverAbandonedPublicationMutations(options),
   );
-  await observe(
+  await runPublicationRecoveryStep(
     "expired_encode_job_claim",
     "Expired Encode Job claims could not be recovered",
     () => {
       options.access.encodeJobs.recoverExpiredClaims();
-      return false;
+      return "completed";
     },
   );
-  await observe(
+  await runPublicationRecoveryStep(
     "expired_cancellation",
     "Expired Encode Job cancellations could not be listed for recovery",
     () => recoverAbandonedCancellations(options),
   );
-  await observe(
+  await runPublicationRecoveryStep(
     "pending_partial_cleanup",
     "Pending Encode publications could not be listed for reconciliation",
     () => reconcilePendingPublications(
