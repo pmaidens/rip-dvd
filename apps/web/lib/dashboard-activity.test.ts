@@ -237,6 +237,183 @@ describe("watchDashboardActivity", () => {
     stop();
   });
 
+  it("keeps Disc Inspection investigation state current across retry, terminal failure, and recovery", async () => {
+    const initial = emptySnapshot("2026-08-31T09:00:00.000Z");
+    initial.opticalDrives = {
+      status: "loaded",
+      items: [{
+        id: "drive-1",
+        displayName: "Inspection drive",
+        hardwareName: "DVD-RW",
+        state: "ready",
+        lastSeenAt: "2026-08-31T09:00:00.000Z",
+        currentInspection: {
+          id: "inspection-1",
+          activityRevision: "2026-08-31T09:00:00.000Z",
+          status: "failed",
+          phase: "reading_metadata",
+          attemptCount: 5,
+          consecutiveFailureCount: 5,
+          volumeLabel: null,
+          titleCount: null,
+          chapterCount: null,
+          audioStreamCount: null,
+          subtitleStreamCount: null,
+          totalBytes: null,
+          bytesHashed: null,
+          bytesPerSecond: null,
+          etaSeconds: null,
+          retryAt: null,
+          manualRetryRequested: false,
+          reasonCode: "metadata_read_failed",
+          archiveWorkFulfilled: false,
+          phaseStartedAt: "2026-08-31T08:59:30.000Z",
+          startedAt: "2026-08-31T08:55:00.000Z",
+          completedAt: "2026-08-31T09:00:00.000Z",
+          investigation: {
+            incidentId: "disc-inspection-failure:inspection-1",
+            worker: "Archive Worker",
+            subjectType: "Disc Inspection",
+            subjectId: "inspection-1",
+            attempt: 5,
+            reasonCode: "disc_inspection.metadata_read_failed",
+            failedPhase: "Reading metadata",
+            occurredAt: "2026-08-31T09:00:00.000Z",
+            retryability: "appropriate",
+            retryabilityDetail:
+              "A manual retry is available for the current inserted disc.",
+            explanation:
+              "The Archive Worker could not read the DVD metadata needed to identify the disc.",
+            suggestedAction: "Retry the Disc Inspection once.",
+            technicalEvidence: [],
+          },
+        },
+      }],
+    };
+    const compactRetry = structuredClone(initial);
+    compactRetry.generatedAt = "2026-08-31T09:00:01.000Z";
+    if (compactRetry.opticalDrives.status === "loaded") {
+      const inspection = compactRetry.opticalDrives.items[0]!.currentInspection!;
+      inspection.activityRevision = "2026-08-31T09:00:01.000Z";
+      inspection.status = "running";
+      inspection.attemptCount = 6;
+      inspection.consecutiveFailureCount = 0;
+      inspection.completedAt = null;
+      delete inspection.investigation;
+    }
+    const compactTerminal = structuredClone(compactRetry);
+    compactTerminal.generatedAt = "2026-08-31T09:01:00.000Z";
+    if (compactTerminal.opticalDrives.status === "loaded") {
+      const inspection =
+        compactTerminal.opticalDrives.items[0]!.currentInspection!;
+      inspection.activityRevision = "2026-08-31T09:01:00.000Z";
+      inspection.status = "failed";
+      inspection.consecutiveFailureCount = 1;
+      inspection.completedAt = "2026-08-31T09:01:00.000Z";
+    }
+    const detailedTerminal = structuredClone(compactTerminal);
+    const initialInvestigation = initial.opticalDrives.status === "loaded"
+      ? initial.opticalDrives.items[0]?.currentInspection?.investigation
+      : undefined;
+    if (initialInvestigation === undefined) {
+      throw new Error("Expected initial Disc Inspection investigation");
+    }
+    if (detailedTerminal.opticalDrives.status === "loaded") {
+      detailedTerminal.opticalDrives.items[0]!.currentInspection!.investigation = {
+        ...initialInvestigation,
+        attempt: 6,
+        occurredAt: "2026-08-31T09:01:00.000Z",
+      };
+    }
+    const recovered = structuredClone(compactTerminal);
+    recovered.generatedAt = "2026-08-31T09:02:00.000Z";
+    if (recovered.opticalDrives.status === "loaded") {
+      const inspection = recovered.opticalDrives.items[0]!.currentInspection!;
+      inspection.activityRevision = "2026-08-31T09:02:00.000Z";
+      inspection.status = "completed";
+      inspection.consecutiveFailureCount = 0;
+      inspection.reasonCode = null;
+      inspection.completedAt = "2026-08-31T09:02:00.000Z";
+      delete inspection.investigation;
+    }
+    const loadSnapshot = vi.fn()
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(detailedTerminal);
+    let dashboardListener: ((event: MessageEvent<string>) => void) | undefined;
+    const onSnapshot = vi.fn();
+    const stop = watchDashboardActivity({
+      loadSnapshot,
+      openEventSource: () => ({
+        onerror: null,
+        onopen: null,
+        addEventListener(_type, listener) {
+          dashboardListener = listener;
+        },
+        close: vi.fn(),
+      }),
+      onSnapshot,
+      onInitialLoadError: vi.fn(),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    dashboardListener?.({
+      data: JSON.stringify(compactRetry),
+    } as MessageEvent<string>);
+    await flushUntil(() => {
+      const latest = onSnapshot.mock.calls.at(-1)?.[0] as
+        | DashboardSnapshot
+        | undefined;
+      return latest?.opticalDrives.status === "loaded" &&
+        latest.opticalDrives.items[0]?.currentInspection?.status === "running";
+    });
+    expect(loadSnapshot).toHaveBeenCalledTimes(1);
+
+    dashboardListener?.({
+      data: JSON.stringify(compactTerminal),
+    } as MessageEvent<string>);
+    await flushUntil(() => loadSnapshot.mock.calls.length === 2);
+    await flushUntil(() => {
+      const latest = onSnapshot.mock.calls.at(-1)?.[0] as
+        | DashboardSnapshot
+        | undefined;
+      return latest?.opticalDrives.status === "loaded" &&
+        latest.opticalDrives.items[0]?.currentInspection?.investigation
+          ?.attempt === 6;
+    });
+    expect(
+      onSnapshot.mock.calls.some((call) => {
+        const snapshot = call[0] as DashboardSnapshot;
+        if (snapshot.opticalDrives.status !== "loaded") {
+          return false;
+        }
+        const inspection = snapshot.opticalDrives.items[0]?.currentInspection;
+        return inspection?.status === "failed" &&
+          inspection.investigation === undefined;
+      }),
+    ).toBe(false);
+
+    dashboardListener?.({
+      data: JSON.stringify(recovered),
+    } as MessageEvent<string>);
+    await flushUntil(() => {
+      const latest = onSnapshot.mock.calls.at(-1)?.[0] as
+        | DashboardSnapshot
+        | undefined;
+      return latest?.opticalDrives.status === "loaded" &&
+        latest.opticalDrives.items[0]?.currentInspection?.status ===
+          "completed";
+    });
+    const latest = onSnapshot.mock.calls.at(-1)?.[0] as DashboardSnapshot;
+    expect(
+      latest.opticalDrives.status === "loaded"
+        ? latest.opticalDrives.items[0]?.currentInspection?.investigation
+        : undefined,
+    ).toBeUndefined();
+    expect(loadSnapshot).toHaveBeenCalledTimes(2);
+    stop();
+  });
+
   it("rehydrates a failed Archive Job when a retry changes its investigation context", async () => {
     const initial = emptySnapshot("2026-08-31T06:00:00.000Z");
     const retryableInvestigation = {

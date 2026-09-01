@@ -428,10 +428,16 @@ function ArchiveJobItem({
 function DiscInspectionItem({
   inspection,
   onRetry,
+  onInvestigate,
   busy,
 }: {
   inspection: NonNullable<DashboardOpticalDrive["currentInspection"]>;
   onRetry(id: string): void;
+  onInvestigate(
+    inspectionId: string,
+    trigger: HTMLButtonElement,
+    fallback: HTMLElement | null,
+  ): void;
   busy: boolean;
 }) {
   const now = useCurrentTime(
@@ -542,14 +548,34 @@ function DiscInspectionItem({
           <p>{inspectionReason(inspection.reasonCode)}</p>
         )}
       </div>
-      {inspection.status === "failed" && !inspection.manualRetryRequested ? (
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => onRetry(inspection.id)}
-        >
-          {busy ? "Retrying…" : "Retry inspection"}
-        </button>
+      {inspection.status === "failed" ? (
+        <div className="operation-actions">
+          {inspection.investigation ? (
+            <button
+              className="investigate-action"
+              type="button"
+              onClick={(event) =>
+                onInvestigate(
+                  inspection.id,
+                  event.currentTarget,
+                  event.currentTarget.closest<HTMLElement>(
+                    "article.operation-item",
+                  ),
+                )}
+            >
+              Investigate
+            </button>
+          ) : null}
+          {!inspection.manualRetryRequested ? (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => onRetry(inspection.id)}
+            >
+              {busy ? "Retrying…" : "Retry inspection"}
+            </button>
+          ) : null}
+        </div>
       ) : null}
     </section>
   );
@@ -1063,8 +1089,10 @@ export function DashboardView({
   verifyingFilesystemTarget?: string | null;
 }) {
   const [activeInvestigation, setActiveInvestigation] = useState<{
-    archiveJobId: DashboardArchiveJob["id"];
+    kind: "archive-job" | "disc-inspection";
+    subjectId: string;
     trigger: HTMLButtonElement;
+    fallback: HTMLElement | null;
   } | null>(null);
   const catalogReviewPage =
     state.catalogReview.status === "loaded"
@@ -1092,21 +1120,43 @@ export function DashboardView({
           },
         ),
       };
-  const activeInvestigationDetails =
-    activeInvestigation !== null && state.archiveJobs.status === "loaded"
-      ? state.archiveJobs.items.find(
-          (job) => job.id === activeInvestigation.archiveJobId,
-        )?.investigation
-      : undefined;
+  const activeInvestigationResolution = activeInvestigation === null
+    ? { details: undefined, sourceLoaded: true }
+    : activeInvestigation.kind === "archive-job"
+      ? {
+          details: state.archiveJobs.status === "loaded"
+            ? state.archiveJobs.items.find(
+                (job) => job.id === activeInvestigation.subjectId,
+              )?.investigation
+            : undefined,
+          sourceLoaded: state.archiveJobs.status === "loaded",
+        }
+      : {
+          details: state.opticalDrives.status === "loaded"
+            ? state.opticalDrives.items
+                .find(
+                  (drive) =>
+                    drive.currentInspection?.id ===
+                      activeInvestigation.subjectId,
+                )
+                ?.currentInspection?.investigation
+            : undefined,
+          sourceLoaded: state.opticalDrives.status === "loaded",
+        };
+  const activeInvestigationDetails = activeInvestigationResolution.details;
   useEffect(() => {
     if (
       activeInvestigation !== null &&
-      state.archiveJobs.status === "loaded" &&
+      activeInvestigationResolution.sourceLoaded &&
       activeInvestigationDetails === undefined
     ) {
       setActiveInvestigation(null);
     }
-  }, [activeInvestigation, activeInvestigationDetails, state.archiveJobs.status]);
+  }, [
+    activeInvestigation,
+    activeInvestigationDetails,
+    activeInvestigationResolution.sourceLoaded,
+  ]);
   return (
     <>
       <div className={`dashboard-grid dashboard-grid-${section}`}>
@@ -1118,7 +1168,7 @@ export function DashboardView({
         state={state.opticalDrives}
         emptyMessage="No Optical Drives have been discovered."
         renderItem={(drive) => (
-          <article className="operation-item" key={drive.id}>
+          <article className="operation-item" key={drive.id} tabIndex={-1}>
             <div className="item-heading">
               <div>
                 <h3>{drive.displayName}</h3>
@@ -1133,6 +1183,13 @@ export function DashboardView({
               <DiscInspectionItem
                 inspection={drive.currentInspection}
                 onRetry={onRetryDiscInspection}
+                onInvestigate={(subjectId, trigger, fallback) =>
+                  setActiveInvestigation({
+                    kind: "disc-inspection",
+                    subjectId,
+                    trigger,
+                    fallback,
+                  })}
                 busy={busyWorkflowId === drive.currentInspection.id}
               />
             ) : drive.state === "ready" ? (
@@ -1172,7 +1229,12 @@ export function DashboardView({
               busy={busyWorkflowId === group.archiveRequestId}
               onCancel={onCancelArchiveRequest}
               onInvestigate={(archiveJobId, trigger) =>
-                setActiveInvestigation({ archiveJobId, trigger })}
+                setActiveInvestigation({
+                  kind: "archive-job",
+                  subjectId: archiveJobId,
+                  trigger,
+                  fallback: null,
+                })}
             />
             {group.older.length > 0 ? (
               <details className="archive-attempt-history">
@@ -1194,8 +1256,10 @@ export function DashboardView({
                             type="button"
                             onClick={(event) =>
                               setActiveInvestigation({
-                                archiveJobId: attempt.id,
+                                kind: "archive-job",
+                                subjectId: attempt.id,
                                 trigger: event.currentTarget,
+                                fallback: null,
                               })}
                           >
                             Investigate
@@ -1512,6 +1576,7 @@ export function DashboardView({
         <InvestigationPanel
           investigation={activeInvestigationDetails}
           returnFocusTo={activeInvestigation.trigger}
+          returnFocusFallback={activeInvestigation.fallback}
           onClose={() => setActiveInvestigation(null)}
         />
       ) : null}

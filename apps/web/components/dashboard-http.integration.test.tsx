@@ -147,6 +147,96 @@ describe("database-backed dashboard over HTTP", () => {
     }
   });
 
+  it("carries a persisted Disc Inspection failure through HTTP without exposing its diagnostic or inventing ownership", async () => {
+    const { access, databasePath } =
+      dataAccessFixture.createWithDatabasePath();
+    const drive = access.catalog.upsertOpticalDrive({
+      devicePath: "/dev/private-inspection-drive",
+      displayName: "Inspection drive",
+      isEnabled: true,
+      isPresent: true,
+    });
+    const started = access.discInspections.beginOrResume({
+      opticalDriveId: drive.id,
+      mediaGeneration: "private-generation-token",
+      mediaCapacityBytes: 8_192,
+    });
+    if (started.claim === null) {
+      throw new Error("Expected a claimed Disc Inspection");
+    }
+    const failed = access.discInspections.record(started.claim, {
+      type: "fail",
+      reasonCode: "invalid_metadata",
+      diagnostic:
+        "raw-output /srv/private.iso --scan-arg ENV=secret claim=inspection-secret",
+    });
+
+    const response = createDashboardResponse(access);
+    const dashboard = (await response.json()) as DashboardSnapshot;
+    const serialized = JSON.stringify(dashboard);
+    const projectedInspection = dashboard.opticalDrives.status === "loaded"
+      ? dashboard.opticalDrives.items.find(({ id }) => id === drive.id)
+          ?.currentInspection
+      : undefined;
+    expect(projectedInspection?.investigation).toMatchObject({
+      incidentId: `disc-inspection-failure:${failed.id}`,
+      worker: "Archive Worker",
+      subjectType: "Disc Inspection",
+      subjectId: failed.id,
+      attempt: 1,
+      reasonCode: "disc_inspection.invalid_metadata",
+      failedPhase: "Settling",
+      occurredAt: failed.completedAt?.toISOString(),
+      retryability: "after_action",
+      explanation:
+        "The DVD metadata did not satisfy the Disc Inspection requirements.",
+      technicalEvidence: [],
+    });
+    expect(projectedInspection).not.toHaveProperty("diagnostic");
+
+    const investigation = projectedInspection!.investigation!;
+    const dashboardHtml = renderToStaticMarkup(
+      <DashboardView state={dashboard} />,
+    );
+    const panelHtml = renderToStaticMarkup(
+      <InvestigationPanel
+        investigation={investigation}
+        returnFocusTo={null}
+        onClose={() => undefined}
+      />,
+    );
+    const copiedReport = investigationReport(investigation);
+
+    expect(dashboardHtml).toContain("Inspection drive");
+    expect(dashboardHtml).toContain("Investigate");
+    expect(panelHtml).toContain("Disc Inspection attempt 1");
+    expect(panelHtml).toContain(`disc-inspection-failure:${failed.id}`);
+    expect(panelHtml).toContain("disc_inspection.invalid_metadata");
+    expect(panelHtml).toContain("Appropriate after the suggested action");
+    expect(copiedReport).toContain(`Subject: Disc Inspection ${failed.id}`);
+    expect(copiedReport).toContain("Disc Inspection attempt: 1");
+    expect(copiedReport).toContain("Failed phase: Settling");
+    expect(copiedReport).not.toContain("Detected Disc");
+    expect(copiedReport).not.toContain("Archive Request");
+    expect(copiedReport).not.toContain("Archive Job");
+
+    for (const secret of [
+      "/dev/private-inspection-drive",
+      "/srv/private.iso",
+      databasePath,
+      "private-generation-token",
+      "raw-output",
+      "--scan-arg",
+      "ENV=secret",
+      "claim=inspection-secret",
+    ]) {
+      expect(serialized).not.toContain(secret);
+      expect(dashboardHtml).not.toContain(secret);
+      expect(panelHtml).not.toContain(secret);
+      expect(copiedReport).not.toContain(secret);
+    }
+  });
+
   it("renders persisted discovery and scan results including an already archived match", async () => {
     const access = dataAccessFixture.create();
     const hardware: OpticalDriveHardware = {

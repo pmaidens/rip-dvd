@@ -6,7 +6,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { watchDashboardActivity } from "../lib/dashboard-activity";
-import type { DashboardSnapshot } from "../lib/dashboard";
+import type {
+  DashboardOpticalDrive,
+  DashboardSnapshot,
+} from "../lib/dashboard";
 import type { DashboardInvestigation } from "../lib/investigation";
 
 import type { EncodeJobId } from "@rip-dvd/data-access";
@@ -77,6 +80,87 @@ function archiveInvestigation(
       { label: "Classifier version", value: "scsi-read-classifier-v1" },
     ],
     ...overrides,
+  };
+}
+
+function discInspectionInvestigation(
+  id = "failed-inspection",
+  overrides: Partial<DashboardInvestigation> = {},
+): DashboardInvestigation {
+  return {
+    incidentId: `disc-inspection-failure:${id}`,
+    worker: "Archive Worker",
+    subjectType: "Disc Inspection",
+    subjectId: id,
+    attempt: 5,
+    reasonCode: "disc_inspection.metadata_read_failed",
+    failedPhase: "Reading metadata",
+    occurredAt: "2026-08-31T09:00:00.000Z",
+    retryability: "appropriate",
+    retryabilityDetail:
+      "A manual retry is available for the current inserted disc.",
+    explanation:
+      "The Archive Worker could not read the DVD metadata needed to identify the disc.",
+    suggestedAction:
+      "Retry the Disc Inspection once. If it fails again, inspect the disc and verify the DVD metadata tools on the Archive Worker host.",
+    technicalEvidence: [],
+    ...overrides,
+  };
+}
+
+function failedDiscInspection(
+  id = "failed-inspection",
+  overrides: Partial<
+    NonNullable<DashboardOpticalDrive["currentInspection"]>
+  > = {},
+): NonNullable<DashboardOpticalDrive["currentInspection"]> {
+  return {
+    id,
+    activityRevision: "2026-08-31T09:00:00.000Z",
+    status: "failed",
+    phase: "reading_metadata",
+    attemptCount: 5,
+    consecutiveFailureCount: 5,
+    volumeLabel: null,
+    titleCount: null,
+    chapterCount: null,
+    audioStreamCount: null,
+    subtitleStreamCount: null,
+    totalBytes: null,
+    bytesHashed: null,
+    bytesPerSecond: null,
+    etaSeconds: null,
+    retryAt: null,
+    manualRetryRequested: false,
+    reasonCode: "metadata_read_failed",
+    archiveWorkFulfilled: false,
+    phaseStartedAt: "2026-08-31T08:59:30.000Z",
+    startedAt: "2026-08-31T08:55:00.000Z",
+    completedAt: "2026-08-31T09:00:00.000Z",
+    investigation: discInspectionInvestigation(id),
+    ...overrides,
+  };
+}
+
+function stateWithDiscInspection(
+  inspection: NonNullable<DashboardOpticalDrive["currentInspection"]>,
+): DashboardLoadState {
+  return {
+    opticalDrives: {
+      status: "loaded",
+      items: [{
+        id: "inspection-drive",
+        displayName: "Inspection drive",
+        hardwareName: "DVD-RW",
+        state: "ready",
+        lastSeenAt: "2026-08-31T09:00:00.000Z",
+        currentInspection: inspection,
+      }],
+    },
+    detectedDiscs: { status: "loaded", items: [] },
+    archiveJobs: { status: "loaded", items: [] },
+    encodeJobs: { status: "loaded", items: [] },
+    catalogReview: { status: "loaded", items: [] },
   };
 }
 
@@ -999,6 +1083,171 @@ describe("DashboardView", () => {
     });
     expect(container.querySelector('[role="dialog"]')).toBeNull();
     expect(document.activeElement).toBe(trigger);
+    await act(async () => root.unmount());
+  });
+
+  it("offers Investigate for every current failed Disc Inspection", () => {
+    const first = failedDiscInspection("failed-inspection-1");
+    const second = failedDiscInspection("failed-inspection-2", {
+      phase: "confirming_media",
+      attemptCount: 1,
+      consecutiveFailureCount: 1,
+      investigation: discInspectionInvestigation("failed-inspection-2", {
+        attempt: 1,
+        failedPhase: "Confirming media",
+      }),
+    });
+    const state = stateWithDiscInspection(first);
+    state.opticalDrives = {
+      status: "loaded",
+      items: [
+        ...(state.opticalDrives.status === "loaded"
+          ? state.opticalDrives.items
+          : []),
+        {
+          id: "second-inspection-drive",
+          displayName: "Second inspection drive",
+          hardwareName: "DVD-RW",
+          state: "ready",
+          lastSeenAt: "2026-08-31T09:00:00.000Z",
+          currentInspection: second,
+        },
+      ],
+    };
+
+    const html = render(state);
+
+    expect(html.match(/>Investigate</g)).toHaveLength(2);
+    expect(html.match(/Retry inspection/g)).toHaveLength(2);
+  });
+
+  it("keeps the Disc Inspection panel safe and current through retry, terminal failure, and recovery", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: vi.fn().mockRejectedValue(new Error("denied")) },
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const failed = failedDiscInspection();
+    await act(async () => {
+      root.render(
+        <DashboardView section="discs" state={stateWithDiscInspection(failed)} />,
+      );
+    });
+
+    const trigger = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Investigate",
+    )!;
+    const driveCard = trigger.closest<HTMLElement>("article.operation-item")!;
+    await act(async () => trigger.click());
+
+    let dialog = container.querySelector<HTMLElement>('[role="dialog"]')!;
+    expect(dialog.textContent).toContain("Disc Inspection attempt 5");
+    expect(dialog.textContent).toContain(
+      "disc-inspection-failure:failed-inspection",
+    );
+    expect(dialog.textContent).toContain(
+      "disc_inspection.metadata_read_failed",
+    );
+    expect(dialog.textContent).toContain("Reading metadata");
+    expect(dialog.textContent).toContain("Appropriate");
+    expect(dialog.textContent).not.toContain("Detected Disc");
+    expect(dialog.textContent).not.toContain("Archive Request");
+    expect(dialog.textContent).not.toContain("Archive Job");
+    expect(document.activeElement?.getAttribute("aria-label")).toBe(
+      "Close investigation",
+    );
+
+    const copy = [...dialog.querySelectorAll("button")].find(
+      (button) => button.textContent === "Copy report",
+    )!;
+    await act(async () => copy.click());
+    const report = dialog.querySelector<HTMLTextAreaElement>("textarea")!;
+    expect(document.activeElement).toBe(report);
+    expect(report.selectionStart).toBe(0);
+    expect(report.selectionEnd).toBe(report.value.length);
+    expect(report.value).toContain("Subject: Disc Inspection failed-inspection");
+    expect(report.value).not.toContain("diagnostic");
+
+    const retryQueued = failedDiscInspection("failed-inspection", {
+      activityRevision: "2026-08-31T09:00:01.000Z",
+      manualRetryRequested: true,
+      investigation: discInspectionInvestigation("failed-inspection", {
+        retryability: "not_appropriate",
+        retryabilityDetail:
+          "A manual retry is already queued for this Disc Inspection.",
+        suggestedAction:
+          "Wait for the Archive Worker to start the queued retry.",
+      }),
+    });
+    await act(async () => {
+      root.render(
+        <DashboardView
+          section="discs"
+          state={stateWithDiscInspection(retryQueued)}
+        />,
+      );
+    });
+    dialog = container.querySelector<HTMLElement>('[role="dialog"]')!;
+    expect(dialog.textContent).toContain("A manual retry is already queued");
+    expect(dialog.textContent).toContain("Not appropriate");
+
+    await act(async () => {
+      root.render(
+        <DashboardView
+          section="discs"
+          state={stateWithDiscInspection(failedDiscInspection(
+            "failed-inspection",
+            {
+              activityRevision: "2026-08-31T09:00:02.000Z",
+              status: "running",
+              attemptCount: 6,
+              consecutiveFailureCount: 0,
+              manualRetryRequested: false,
+              completedAt: null,
+              investigation: undefined,
+            },
+          ))}
+        />,
+      );
+    });
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.activeElement).toBe(driveCard);
+
+    const terminal = failedDiscInspection("failed-inspection", {
+      activityRevision: "2026-08-31T09:01:00.000Z",
+      attemptCount: 6,
+      consecutiveFailureCount: 1,
+      investigation: discInspectionInvestigation("failed-inspection", {
+        attempt: 6,
+        occurredAt: "2026-08-31T09:01:00.000Z",
+      }),
+    });
+    await act(async () => {
+      root.render(
+        <DashboardView
+          section="discs"
+          state={stateWithDiscInspection(terminal)}
+        />,
+      );
+    });
+    const terminalTrigger = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Investigate",
+    )!;
+    await act(async () => terminalTrigger.click());
+    dialog = container.querySelector<HTMLElement>('[role="dialog"]')!;
+    expect(dialog.textContent).toContain("Disc Inspection attempt 6");
+
+    await act(async () => {
+      dialog.dispatchEvent(new KeyboardEvent("keydown", {
+        bubbles: true,
+        key: "Escape",
+      }));
+    });
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.activeElement).toBe(terminalTrigger);
     await act(async () => root.unmount());
   });
 
