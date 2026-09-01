@@ -20,6 +20,7 @@ import type {
   DashboardOpticalDrive,
   DashboardSectionResult,
   DashboardStatus,
+  DashboardWorkerIncident,
 } from "../lib/dashboard";
 import { assessArchiveProgress } from "../lib/archive-progress-health";
 import {
@@ -54,6 +55,7 @@ export interface DashboardLoadState {
   opticalDrives: DashboardSectionLoadState<DashboardOpticalDrive>;
   detectedDiscs: DashboardSectionLoadState<DashboardDetectedDisc>;
   archiveJobs: DashboardSectionLoadState<DashboardArchiveJob>;
+  workerIncidents?: DashboardSectionLoadState<DashboardWorkerIncident>;
   encodeJobs: DashboardSectionLoadState<DashboardEncodeJob>;
   catalogReview: DashboardSectionLoadState<DashboardCatalogReviewItem>;
 }
@@ -69,6 +71,7 @@ function dashboardState(
     opticalDrives: { status },
     detectedDiscs: { status },
     archiveJobs: { status },
+    workerIncidents: { status },
     encodeJobs: { status },
     catalogReview: { status },
   };
@@ -1090,7 +1093,7 @@ export function DashboardView({
 }) {
   const [activeInvestigation, setActiveInvestigation] = useState<
     | {
-        kind: "archive-job" | "disc-inspection";
+        kind: "archive-job" | "disc-inspection" | "worker-incident";
         subjectId: string;
         trigger: HTMLButtonElement;
         fallback: HTMLElement | null;
@@ -1103,6 +1106,10 @@ export function DashboardView({
       }
     | null
   >(null);
+  const workerIncidentState = state.workerIncidents ?? {
+    status: "loaded" as const,
+    items: [],
+  };
   const catalogReviewPage =
     state.catalogReview.status === "loaded"
       ? state.catalogReview.page
@@ -1157,7 +1164,19 @@ export function DashboardView({
               : undefined,
             sourceLoaded: state.opticalDrives.status === "loaded",
           }
-        : {
+        : activeInvestigation.kind === "worker-incident"
+          ? {
+              investigations: workerIncidentState.status === "loaded"
+                ? [workerIncidentState.items.find(
+                    (incident) =>
+                      incident.id === activeInvestigation.subjectId,
+                  )?.investigation].filter(
+                    (investigation) => investigation !== undefined,
+                  )
+                : undefined,
+              sourceLoaded: workerIncidentState.status === "loaded",
+            }
+          : {
             investigations: state.encodeJobs.status === "loaded"
               ? state.encodeJobs.items.find(
                   (job) => job.id === activeInvestigation.subjectId,
@@ -1302,6 +1321,56 @@ export function DashboardView({
       ) : null}
 
       {section === "all" || section === "encoding" ? (
+        <>
+          <DashboardSection
+            title="Worker Incidents"
+            eyebrow="Encode Worker health"
+            className="wide-section"
+            state={workerIncidentState}
+            emptyMessage="No Encode Worker Incidents are recorded."
+            renderItem={(incident) => (
+              <article className="operation-item" key={incident.id}>
+                <div className="item-heading">
+                  <div>
+                    <h3>{incident.worker}</h3>
+                    <p>{incident.phaseLabel}</p>
+                  </div>
+                  <StatusBadge value={incident.status} />
+                </div>
+                <p>
+                  {countLabel(incident.occurrenceCount, "occurrence")}
+                  {" · First observed "}
+                  {formatTimestamp(incident.firstObservedAt)}
+                  {" · Last observed "}
+                  {formatTimestamp(incident.lastObservedAt)}
+                </p>
+                {incident.resolvedAt ? (
+                  <p className="item-time">
+                    Recovered {formatTimestamp(incident.resolvedAt)}
+                  </p>
+                ) : (
+                  <p className="job-progress-detail" role="status">
+                    The Encode Worker is retrying automatically.
+                  </p>
+                )}
+                {incident.investigation ? (
+                  <button
+                    className="investigate-action"
+                    type="button"
+                    onClick={(event) =>
+                      setActiveInvestigation({
+                        kind: "worker-incident",
+                        subjectId: incident.id,
+                        trigger: event.currentTarget,
+                        fallback: null,
+                      })}
+                  >
+                    Investigate
+                  </button>
+                ) : null}
+              </article>
+            )}
+          />
         <DashboardSection
           title="Encode Jobs"
         eyebrow="Media queue"
@@ -1445,6 +1514,7 @@ export function DashboardView({
           />
         )}
         />
+        </>
       ) : null}
 
       {section === "all" || section === "catalog" ? (
@@ -2015,6 +2085,7 @@ export function OperationsDashboard({
     state.opticalDrives.status,
     state.detectedDiscs.status,
     state.archiveJobs.status,
+    state.workerIncidents?.status ?? "loaded",
     state.encodeJobs.status,
     state.catalogReview.status,
   ];

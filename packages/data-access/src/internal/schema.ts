@@ -34,6 +34,10 @@ import {
   MEDIA_ITEM_KINDS,
   RETAINED_ENCODE_OUTPUT_STATES,
   TMDB_MEDIA_TYPES,
+  WORKER_INCIDENT_PHASES,
+  WORKER_INCIDENT_REASON_CODES,
+  WORKER_INCIDENT_RETRYABILITIES,
+  WORKER_KINDS,
 } from "../domain-values.js";
 import {
   ENCODE_JOB_FAILURE_DIAGNOSTIC_MAX_LENGTH,
@@ -66,6 +70,9 @@ import type {
   OriginalDiscArchiveId,
   RetainedEncodeOutputId,
   UnreadableSectorRange,
+  WorkerIncidentEvidence,
+  WorkerIncidentId,
+  WorkerIncidentSchemaVersion,
 } from "../types.js";
 
 const createdAt = () => integer("created_at", { mode: "timestamp_ms" }).notNull();
@@ -1063,5 +1070,77 @@ export const correctedEncodePublicationAuthorities = sqliteTable(
     ),
     uniqueIndex("corrected_encode_publication_authorities_path_unique")
       .on(table.retainedOutputPath),
+  ],
+);
+
+export const workerIncidents = sqliteTable(
+  "worker_incidents",
+  {
+    id: text("id").$type<WorkerIncidentId>().notNull().primaryKey(),
+    schemaVersion: integer("schema_version")
+      .$type<WorkerIncidentSchemaVersion>()
+      .notNull(),
+    workerKind: text("worker_kind", { enum: WORKER_KINDS }).notNull(),
+    reasonCode: text("reason_code", {
+      enum: WORKER_INCIDENT_REASON_CODES,
+    }).notNull(),
+    phase: text("phase", { enum: WORKER_INCIDENT_PHASES }).notNull(),
+    retryability: text("retryability", {
+      enum: WORKER_INCIDENT_RETRYABILITIES,
+    }).notNull(),
+    evidence: text("evidence", { mode: "json" })
+      .$type<WorkerIncidentEvidence>()
+      .notNull(),
+    firstObservedAt: integer("first_observed_at", {
+      mode: "timestamp_ms",
+    }).notNull(),
+    lastObservedAt: integer("last_observed_at", {
+      mode: "timestamp_ms",
+    }).notNull(),
+    occurrenceCount: integer("occurrence_count").notNull().default(1),
+    resolvedAt: integer("resolved_at", { mode: "timestamp_ms" }),
+  },
+  (table) => [
+    check("worker_incidents_id_not_null", sql`${table.id} is not null`),
+    check(
+      "worker_incidents_schema_version_check",
+      sql`${table.schemaVersion} = 1`,
+    ),
+    check(
+      "worker_incidents_worker_kind_check",
+      sql`${table.workerKind} in (${sqliteStringLiterals(WORKER_KINDS)})`,
+    ),
+    check(
+      "worker_incidents_reason_code_check",
+      sql`${table.reasonCode} in (${sqliteStringLiterals(WORKER_INCIDENT_REASON_CODES)})`,
+    ),
+    check(
+      "worker_incidents_phase_check",
+      sql`${table.phase} in (${sqliteStringLiterals(WORKER_INCIDENT_PHASES)})`,
+    ),
+    check(
+      "worker_incidents_retryability_check",
+      sql`${table.retryability} in (${sqliteStringLiterals(WORKER_INCIDENT_RETRYABILITIES)})`,
+    ),
+    check(
+      "worker_incidents_occurrence_count_check",
+      sql`typeof(${table.occurrenceCount}) = 'integer' and ${table.occurrenceCount} > 0`,
+    ),
+    check(
+      "worker_incidents_observation_order_check",
+      sql`${table.lastObservedAt} >= ${table.firstObservedAt}`,
+    ),
+    check(
+      "worker_incidents_resolution_order_check",
+      sql`${table.resolvedAt} is null or ${table.resolvedAt} >= ${table.lastObservedAt}`,
+    ),
+    uniqueIndex("worker_incidents_active_identity_unique")
+      .on(table.workerKind, table.reasonCode, table.phase, table.evidence)
+      .where(sql`${table.resolvedAt} is null`),
+    index("worker_incidents_worker_activity_idx").on(
+      table.workerKind,
+      table.resolvedAt,
+      table.lastObservedAt,
+    ),
   ],
 );

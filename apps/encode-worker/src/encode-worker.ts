@@ -12,6 +12,7 @@ import {
 } from "./encode-output-validator.js";
 import { normalizeErrorMessage } from "./normalize-error-message.js";
 import {
+  EncodePublicationRecoveryError,
   executeEncodeClaim,
   nodeAtomicPathExchange,
   nodePublicationMutationLock,
@@ -19,6 +20,10 @@ import {
   type AtomicPathExchange,
   type PublicationMutationLock,
 } from "./publication-recovery.js";
+import {
+  recordEncodePollIncident,
+  resolveEncodePollIncident,
+} from "./worker-incidents.js";
 
 export {
   createNodeHandBrakeRunner,
@@ -123,12 +128,16 @@ export async function runEncodeWorker({
   while (!pollOptions.signal.aborted) {
     try {
       await pollEncodeWorker(pollOptions);
+      resolveEncodePollIncident(pollOptions);
     } catch (error) {
       if (pollOptions.signal.aborted) {
         break;
       }
-      const message = normalizeErrorMessage(error);
-      pollOptions.log(`Encode worker poll failed: ${message}`);
+      if (!(error instanceof EncodePublicationRecoveryError)) {
+        const message = normalizeErrorMessage(error);
+        pollOptions.log(`Encode worker poll failed: ${message}`);
+        recordEncodePollIncident(pollOptions);
+      }
     }
     if (pollOptions.signal.aborted) {
       break;

@@ -9,6 +9,7 @@ import { watchDashboardActivity } from "../lib/dashboard-activity";
 import type {
   DashboardOpticalDrive,
   DashboardSnapshot,
+  DashboardWorkerIncident,
 } from "../lib/dashboard";
 import type { DashboardInvestigation } from "../lib/investigation";
 
@@ -41,6 +42,7 @@ const sectionNames = [
   "Optical Drives",
   "Detected Discs",
   "Archive Jobs",
+  "Worker Incidents",
   "Encode Jobs",
   "Catalog Review",
 ];
@@ -126,6 +128,45 @@ function encodeInvestigation(
     explanation: "HandBrake did not finish within the command time limit.",
     suggestedAction: "Retry the Encode Job.",
     technicalEvidence: [{ label: "Timeout limit", value: "86400 seconds" }],
+    ...overrides,
+  };
+}
+
+function workerIncident(
+  overrides: Partial<DashboardWorkerIncident> = {},
+): DashboardWorkerIncident {
+  return {
+    id: "worker-incident-1",
+    activityRevision: "2026-09-01T12:01:00.000Z:2:active",
+    worker: "Encode Worker",
+    status: "active",
+    reasonCode: "worker.poll_failure",
+    phase: "polling",
+    phaseLabel: "Polling",
+    occurrenceCount: 2,
+    firstObservedAt: "2026-09-01T12:00:00.000Z",
+    lastObservedAt: "2026-09-01T12:01:00.000Z",
+    resolvedAt: null,
+    investigation: {
+      incidentId: "worker-incident-1",
+      worker: "Encode Worker",
+      subjectType: "Worker Incident",
+      subjectId: "worker-incident-1",
+      attempt: null,
+      reasonCode: "worker.poll_failure",
+      failedPhase: "Polling",
+      occurredAt: "2026-09-01T12:01:00.000Z",
+      retryability: "not_appropriate",
+      retryabilityDetail:
+        "The Encode Worker retries this phase automatically; there is no operator retry action.",
+      explanation:
+        "The Encode Worker could not finish a polling pass for available work.",
+      suggestedAction:
+        "Check the Encode Worker stdout and database health. The worker will retry the polling pass automatically.",
+      technicalEvidence: [
+        { label: "Occurrence count", value: "2" },
+      ],
+    },
     ...overrides,
   };
 }
@@ -547,7 +588,7 @@ describe("DashboardView", () => {
     });
 
     expectEverySection(html);
-    expect(html.match(/data-state="empty"/g)).toHaveLength(5);
+    expect(html.match(/data-state="empty"/g)).toHaveLength(6);
     expect(html).toContain("No Optical Drives have been discovered.");
     expect(html).toContain("No discs are currently in an Optical Drive.");
     expect(html).toContain(
@@ -677,7 +718,7 @@ describe("DashboardView", () => {
 
   it.each([
     ["discs", ["Optical Drives", "Detected Discs", "Archive Jobs"]],
-    ["encoding", ["Encode Jobs"]],
+    ["encoding", ["Worker Incidents", "Encode Jobs"]],
     ["catalog", ["Catalog Review"]],
   ] as const)("renders only the %s detail-page sections", (section, expected) => {
     const html = renderToStaticMarkup(
@@ -1105,6 +1146,84 @@ describe("DashboardView", () => {
     });
     expect(container.querySelector('[role="dialog"]')).toBeNull();
     expect(document.activeElement).toBe(trigger);
+    await act(async () => root.unmount());
+  });
+
+  it("opens a Worker Incident investigation with accessible copy and focus behavior", async () => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const writeText = vi.fn()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("denied"));
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <DashboardView
+          section="encoding"
+          state={{
+            opticalDrives: { status: "loaded", items: [] },
+            detectedDiscs: { status: "loaded", items: [] },
+            archiveJobs: { status: "loaded", items: [] },
+            workerIncidents: {
+              status: "loaded",
+              items: [workerIncident()],
+            },
+            encodeJobs: { status: "loaded", items: [] },
+            catalogReview: { status: "loaded", items: [] },
+          }}
+        />,
+      );
+    });
+
+    const trigger = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Investigate",
+    )!;
+    await act(async () => trigger.click());
+    let dialog = container.querySelector<HTMLElement>('[role="dialog"]')!;
+    expect(dialog.textContent).toContain("Worker Incident");
+    expect(dialog.textContent).toContain("worker.poll_failure");
+    expect(dialog.textContent).toContain("Occurrence count2");
+    expect(document.activeElement?.getAttribute("aria-label")).toBe(
+      "Close investigation",
+    );
+
+    let copy = [...dialog.querySelectorAll("button")].find(
+      (button) => button.textContent === "Copy report",
+    )!;
+    await act(async () => copy.click());
+    expect(writeText).toHaveBeenCalledOnce();
+    expect(writeText.mock.calls[0]![0]).toContain(
+      "Subject: Worker Incident worker-incident-1",
+    );
+    expect(dialog.textContent).toContain("Investigation report copied.");
+
+    await act(async () => {
+      dialog.dispatchEvent(new KeyboardEvent("keydown", {
+        bubbles: true,
+        key: "Escape",
+      }));
+    });
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+
+    await act(async () => trigger.click());
+    dialog = container.querySelector<HTMLElement>('[role="dialog"]')!;
+    copy = [...dialog.querySelectorAll("button")].find(
+      (button) => button.textContent === "Copy report",
+    )!;
+    await act(async () => copy.click());
+    const report = dialog.querySelector<HTMLTextAreaElement>("textarea")!;
+    expect(document.activeElement).toBe(report);
+    expect(report.selectionStart).toBe(0);
+    expect(report.selectionEnd).toBe(report.value.length);
+    expect(dialog.textContent).toContain(
+      "Clipboard access was denied. The report is selected",
+    );
     await act(async () => root.unmount());
   });
 
@@ -1911,7 +2030,7 @@ describe("DashboardView", () => {
     });
 
     expect(html.match(/data-state="populated"/g)).toHaveLength(2);
-    expect(html.match(/data-state="empty"/g)).toHaveLength(1);
+    expect(html.match(/data-state="empty"/g)).toHaveLength(2);
     expect(html.match(/data-state="loading"/g)).toHaveLength(1);
     expect(html.match(/data-state="error"/g)).toHaveLength(1);
     expect(html).toContain("Upper drive");
@@ -2181,6 +2300,7 @@ function mutationDashboardState(
       ],
     },
     archiveJobs: { status: "loaded", items: [] },
+    workerIncidents: { status: "loaded", items: [] },
     encodeJobs: {
       status: "loaded",
       items: [
@@ -2350,6 +2470,7 @@ it("keeps the selected Reviewed filters across live dashboard snapshots", async 
     opticalDrives: { status: "loaded", items: [] },
     detectedDiscs: { status: "loaded", items: [] },
     archiveJobs: { status: "loaded", items: [] },
+    workerIncidents: { status: "loaded", items: [] },
     encodeJobs: { status: "loaded", items: [] },
     catalogReview: { status: "loaded", items: [] },
   };

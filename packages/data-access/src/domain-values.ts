@@ -161,3 +161,27 @@ export const FILESYSTEM_VERIFICATION_STATUSES = [
   "inaccessible",
   "error",
 ] as const;
+
+export const WORKER_KINDS = ["archive", "encode"] as const;
+
+export const WORKER_INCIDENT_SCHEMA_VERSIONS = [1] as const;
+
+export const WORKER_INCIDENT_REASON_CODES = [
+  "poll_failure",
+  "publication_recovery_failure",
+] as const;
+
+export const WORKER_INCIDENT_PHASES = [
+  "polling",
+  "publication_recovery",
+] as const;
+
+export const WORKER_INCIDENT_RETRYABILITIES = ["automatic"] as const;
+
+export const WORKER_INCIDENT_RECOVERY_AREAS = [
+  "active_publication",
+  "expired_publication_mutation",
+  "expired_encode_job_claim",
+  "expired_cancellation",
+  "pending_partial_cleanup",
+] as const;

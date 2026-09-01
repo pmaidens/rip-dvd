@@ -2516,7 +2516,8 @@ h3 {
 .status-ready,
 .status-completed,
 .status-archived,
-.status-fulfilled {
+.status-fulfilled,
+.status-recovered {
   border-color: #356953;
   background: rgba(64, 139, 108, 0.13);
   color: #80d4b1;
@@ -2537,7 +2538,8 @@ h3 {
 .status-missing,
 .status-aborted,
 .status-cancelled,
-.status-needs_attention {
+.status-needs_attention,
+.status-active {
   border-color: #713d37;
   background: rgba(164, 71, 60, 0.12);
   color: #e89a90;

@@ -22,6 +22,12 @@ import type {
   MEDIA_ITEM_KINDS,
   RETAINED_ENCODE_OUTPUT_STATES,
   TMDB_MEDIA_TYPES,
+  WORKER_INCIDENT_PHASES,
+  WORKER_INCIDENT_REASON_CODES,
+  WORKER_INCIDENT_RECOVERY_AREAS,
+  WORKER_INCIDENT_RETRYABILITIES,
+  WORKER_INCIDENT_SCHEMA_VERSIONS,
+  WORKER_KINDS,
 } from "./domain-values.js";
 import type {
   ENCODE_JOB_FAILURE_PHASES,
@@ -74,6 +80,16 @@ export type FilesystemVerificationStatus =
   (typeof FILESYSTEM_VERIFICATION_STATUSES)[number];
 export type RetainedEncodeOutputState =
   (typeof RETAINED_ENCODE_OUTPUT_STATES)[number];
+export type WorkerKind = (typeof WORKER_KINDS)[number];
+export type WorkerIncidentSchemaVersion =
+  (typeof WORKER_INCIDENT_SCHEMA_VERSIONS)[number];
+export type WorkerIncidentReasonCode =
+  (typeof WORKER_INCIDENT_REASON_CODES)[number];
+export type WorkerIncidentPhase = (typeof WORKER_INCIDENT_PHASES)[number];
+export type WorkerIncidentRetryability =
+  (typeof WORKER_INCIDENT_RETRYABILITIES)[number];
+export type WorkerIncidentRecoveryArea =
+  (typeof WORKER_INCIDENT_RECOVERY_AREAS)[number];
 
 declare const domainIdBrand: unique symbol;
 type DomainId<Name extends string> = string & {
@@ -97,6 +113,7 @@ export type ArchiveJobClaimToken = DomainId<"ArchiveJobClaim">;
 export type DiscInspectionClaimToken = DomainId<"DiscInspectionClaim">;
 export type EncodeJobClaimToken = DomainId<"EncodeJobClaim">;
 export type EncodeJobCleanupClaimToken = DomainId<"EncodeJobCleanupClaim">;
+export type WorkerIncidentId = DomainId<"WorkerIncident">;
 
 declare const encodeOutputFilesystemIdentityBrand: unique symbol;
 export type EncodeOutputFilesystemIdentity = string & {
@@ -116,6 +133,36 @@ export interface ServiceHealth {
   sqliteVersion: string;
   journalMode: string;
   busyTimeoutMs: number;
+}
+
+export type WorkerIncidentEvidence =
+  | Record<string, never>
+  | { recoveryArea: WorkerIncidentRecoveryArea };
+
+export interface WorkerIncident {
+  id: WorkerIncidentId;
+  schemaVersion: WorkerIncidentSchemaVersion;
+  workerKind: WorkerKind;
+  reasonCode: WorkerIncidentReasonCode;
+  phase: WorkerIncidentPhase;
+  retryability: WorkerIncidentRetryability;
+  evidence: WorkerIncidentEvidence;
+  firstObservedAt: Date;
+  lastObservedAt: Date;
+  occurrenceCount: number;
+  resolvedAt: Date | null;
+}
+
+export interface WorkerIncidentIdentity {
+  workerKind: WorkerKind;
+  reasonCode: WorkerIncidentReasonCode;
+  phase: WorkerIncidentPhase;
+  evidence?: WorkerIncidentEvidence;
+}
+
+export interface RecordWorkerIncidentInput extends WorkerIncidentIdentity {
+  schemaVersion: WorkerIncidentSchemaVersion;
+  retryability: WorkerIncidentRetryability;
 }
 
 export interface OpticalDrive {
@@ -1290,6 +1337,15 @@ export interface FilesystemVerificationAccess {
   verifyEncodeJobOutput(id: EncodeJobId): Promise<EncodeJob>;
 }
 
+export interface WorkerIncidentAccess {
+  record(input: RecordWorkerIncidentInput): WorkerIncident;
+  resolve(input: WorkerIncidentIdentity): WorkerIncident[];
+  list(options: {
+    workerKind: WorkerKind;
+    resolvedLimit: number;
+  }): WorkerIncident[];
+}
+
 export type SnapshotCatalogAccess = Pick<
   CatalogAccess,
   | "listOpticalDrives"
@@ -1329,6 +1385,7 @@ export interface ConsistentReadAccess {
     | "listFailureReports"
     | "listRetainedOutputSummaries"
   >;
+  readonly workerIncidents: Pick<WorkerIncidentAccess, "list">;
 }
 
 export interface DataAccess {
@@ -1338,6 +1395,7 @@ export interface DataAccess {
   readonly archiveRequests: ArchiveRequestAccess;
   readonly archiveJobs: ArchiveJobAccess;
   readonly encodeJobs: EncodeJobAccess;
+  readonly workerIncidents: WorkerIncidentAccess;
   readonly filesystemVerification: FilesystemVerificationAccess;
   readConsistentSnapshot<T>(read: (access: ConsistentReadAccess) => T): T;
   checkHealth(): ServiceHealth;

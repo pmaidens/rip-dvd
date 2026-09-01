@@ -71,6 +71,7 @@ import {
   originalDiscArchiveContentIds,
   originalDiscArchives,
   retainedEncodeOutputs,
+  workerIncidents,
 } from "./schema.js";
 import {
   reconcileLegacyRepairCutover,
@@ -194,6 +195,7 @@ import type {
   RunningEncodeJob,
   TmdbIdentity,
   ArchiveReadFailureEvidence,
+  WorkerIncidentId,
 } from "../types.js";
 import {
   ARCHIVE_JOB_LEASE_DURATION_MS,
@@ -209,6 +211,10 @@ import {
   correctedEncodePredecessorReadyCondition,
   isEncodeJobSafelyTerminal,
 } from "../corrected-encode-readiness.js";
+import {
+  normalizeRecordWorkerIncidentInput,
+  normalizeWorkerIncidentIdentity,
+} from "../worker-incident.js";
 
 const BUSY_TIMEOUT_MS = 5_000;
 const MAX_CORRECTED_ENCODE_REPLACEMENT_PLAN_PAGE_SIZE = 101;
@@ -232,6 +238,7 @@ interface EncodeJobAttemptFailureOptions extends EncodeJobFailureOptions {
   failureReport?: ValidatedEncodeJobFailureReportInput;
 }
 const MEDIA_ITEM_SEARCH_LIMIT = 100;
+const WORKER_INCIDENT_RETENTION_LIMIT = 100;
 const ARCHIVE_READ_FAILURE_MESSAGES = {
   unknown: "The Optical Drive returned an unclassified read failure",
   not_ready: "The Optical Drive was not ready to read the disc",
@@ -3926,6 +3933,9 @@ export function createDataAccessInternal(
             access.encodeJobs.listFailureReports(ids),
           listRetainedOutputSummaries: (ids) =>
             access.encodeJobs.listRetainedOutputSummaries(ids),
+        },
+        workerIncidents: {
+          list: (options) => access.workerIncidents.list(options),
         },
       };
       sqlite.exec("BEGIN");
@@ -10764,6 +10774,160 @@ export function createDataAccessInternal(
           outputPath,
           priority: options?.priority,
         });
+      },
+    },
+
+    workerIncidents: {
+      record(input) {
+        const normalized = normalizeRecordWorkerIncidentInput(input);
+        const timestamp = now();
+        return database.transaction((transaction) => {
+          const identityCondition = and(
+            eq(workerIncidents.workerKind, normalized.workerKind),
+            eq(workerIncidents.reasonCode, normalized.reasonCode),
+            eq(workerIncidents.phase, normalized.phase),
+            eq(workerIncidents.evidence, normalized.evidence),
+            isNull(workerIncidents.resolvedAt),
+          );
+          const existing = transaction
+            .select()
+            .from(workerIncidents)
+            .where(identityCondition)
+            .get();
+          if (existing) {
+            return requireRow(
+              transaction
+                .update(workerIncidents)
+                .set({
+                  schemaVersion: normalized.schemaVersion,
+                  retryability: normalized.retryability,
+                  lastObservedAt: timestamp,
+                  occurrenceCount: sql`${workerIncidents.occurrenceCount} + 1`,
+                })
+                .where(and(
+                  eq(workerIncidents.id, existing.id),
+                  isNull(workerIncidents.resolvedAt),
+                ))
+                .returning()
+                .get(),
+              "worker incident",
+              existing.id,
+            );
+          }
+
+          const retainedCount = transaction
+            .select({ count: count() })
+            .from(workerIncidents)
+            .where(eq(workerIncidents.workerKind, normalized.workerKind))
+            .get()?.count ?? 0;
+          if (retainedCount >= WORKER_INCIDENT_RETENTION_LIMIT) {
+            const removalCount =
+              retainedCount - WORKER_INCIDENT_RETENTION_LIMIT + 1;
+            const removableIds = transaction
+              .select({ id: workerIncidents.id })
+              .from(workerIncidents)
+              .where(and(
+                eq(workerIncidents.workerKind, normalized.workerKind),
+                isNotNull(workerIncidents.resolvedAt),
+              ))
+              .orderBy(
+                asc(workerIncidents.resolvedAt),
+                asc(workerIncidents.lastObservedAt),
+                asc(workerIncidents.id),
+              )
+              .limit(removalCount)
+              .all()
+              .map(({ id }) => id);
+            if (removableIds.length !== removalCount) {
+              throw new DomainInvariantError(
+                "Worker Incident capacity contains only active incidents",
+              );
+            }
+            transaction
+              .delete(workerIncidents)
+              .where(inArray(workerIncidents.id, removableIds))
+              .run();
+          }
+
+          const id = newId<WorkerIncidentId>();
+          return requireRow(
+            transaction
+              .insert(workerIncidents)
+              .values({
+                id,
+                schemaVersion: normalized.schemaVersion,
+                workerKind: normalized.workerKind,
+                reasonCode: normalized.reasonCode,
+                phase: normalized.phase,
+                retryability: normalized.retryability,
+                evidence: normalized.evidence,
+                firstObservedAt: timestamp,
+                lastObservedAt: timestamp,
+                occurrenceCount: 1,
+              })
+              .returning()
+              .get(),
+            "worker incident",
+            id,
+          );
+        }, { behavior: "immediate" });
+      },
+
+      resolve(input) {
+        const normalized = normalizeWorkerIncidentIdentity(input);
+        const timestamp = now();
+        return database
+          .update(workerIncidents)
+          .set({
+            resolvedAt: sql`max(${workerIncidents.lastObservedAt}, ${timestamp.getTime()})`,
+          })
+          .where(and(
+            eq(workerIncidents.workerKind, normalized.workerKind),
+            eq(workerIncidents.reasonCode, normalized.reasonCode),
+            eq(workerIncidents.phase, normalized.phase),
+            eq(workerIncidents.evidence, normalized.evidence),
+            isNull(workerIncidents.resolvedAt),
+          ))
+          .returning()
+          .all();
+      },
+
+      list(options) {
+        const resolvedLimit = requireSafeIntegerInRange(
+          options.resolvedLimit,
+          "Worker Incident resolved limit",
+          0,
+          WORKER_INCIDENT_RETENTION_LIMIT,
+        );
+        const active = database
+          .select()
+          .from(workerIncidents)
+          .where(and(
+            eq(workerIncidents.workerKind, options.workerKind),
+            isNull(workerIncidents.resolvedAt),
+          ))
+          .orderBy(
+            desc(workerIncidents.lastObservedAt),
+            desc(workerIncidents.id),
+          )
+          .all();
+        const resolved = resolvedLimit === 0
+          ? []
+          : database
+            .select()
+            .from(workerIncidents)
+            .where(and(
+              eq(workerIncidents.workerKind, options.workerKind),
+              isNotNull(workerIncidents.resolvedAt),
+            ))
+            .orderBy(
+              desc(workerIncidents.resolvedAt),
+              desc(workerIncidents.lastObservedAt),
+              desc(workerIncidents.id),
+            )
+            .limit(resolvedLimit)
+            .all();
+        return [...active, ...resolved];
       },
     },
 
