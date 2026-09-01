@@ -270,6 +270,7 @@ function encodeProgressDetail(job: DashboardEncodeJob): string | null {
     scanning: "Scanning titles",
     previewing: "Scanning previews",
     encoding: "Encoding",
+    validation: "Validating output",
   }[job.progressPhase];
   if (job.progressEtaSeconds === null) {
     return phase;

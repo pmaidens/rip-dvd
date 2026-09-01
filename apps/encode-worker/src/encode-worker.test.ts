@@ -1246,6 +1246,55 @@ describe("encode worker polling", () => {
     fixture.access.close();
   });
 
+  it("persists validation progress for accurate expired-claim reporting", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T12:00:00.000Z"));
+    const fixture = createQueuedJob();
+    const recoveryAccess = createLegacySidecarDataAccess({
+      databasePath: fixture.databasePath,
+    });
+    const outputValidator: EncodeOutputValidator = {
+      prepareAndValidate: vi.fn(async () => {
+        expect(fixture.access.encodeJobs.list()).toEqual([
+          expect.objectContaining({
+            id: fixture.job.id,
+            progressPhase: "validation",
+          }),
+        ]);
+        vi.setSystemTime(new Date("2026-09-01T12:01:00.001Z"));
+        expect(recoveryAccess.encodeJobs.recoverExpiredClaims()).toEqual([
+          expect.objectContaining({ id: fixture.job.id, status: "failed" }),
+        ]);
+      }),
+    };
+
+    await pollEncodeWorker({
+      access: fixture.access,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      outputValidator,
+      runner: {
+        run: vi.fn(async ({ outputPath }) => {
+          writeFileSync(outputPath, "validation lease output", { flag: "wx" });
+        }),
+      },
+      signal: new AbortController().signal,
+    });
+
+    expect(recoveryAccess.encodeJobs.listFailureReports([fixture.job.id]))
+      .toEqual([
+        expect.objectContaining({
+          reasonCode: "lease_expired",
+          phase: "validation",
+          evidence: { kind: "lease", scope: "job_claim" },
+        }),
+      ]);
+    recoveryAccess.close();
+    fixture.access.close();
+  });
+
   it("does not publish when output validation leaves an empty partial", async () => {
     const fixture = createQueuedJob();
     let partialPath = "";
@@ -2614,6 +2663,10 @@ describe("encode worker polling", () => {
           operation: "publication_mutation",
         },
       });
+    expect(fixture.access.workerIncidents.list({
+      workerKind: "encode",
+      resolvedLimit: 20,
+    })).toEqual([]);
     replacementLinkFailure.armed = false;
     expect(
       fixture.access.encodeJobs.requeue(fixture.job.id, {
@@ -5723,6 +5776,10 @@ describe("encode worker polling", () => {
           operation: "publication_recovery",
         },
       });
+    expect(fixture.access.workerIncidents.list({
+      workerKind: "encode",
+      resolvedLimit: 20,
+    })).toEqual([]);
 
     recoveryDirectorySyncFailure.armed = false;
     await pollEncodeWorker(options);
@@ -5812,6 +5869,10 @@ describe("encode worker polling", () => {
           evidence: { kind: "lease", scope: "publication_cleanup" },
         }),
       ]);
+    expect(fixture.access.workerIncidents.list({
+      workerKind: "encode",
+      resolvedLimit: 20,
+    })).toEqual([]);
     fixture.access.close();
   });
 
@@ -6658,6 +6719,100 @@ describe("encode worker polling", () => {
     expect(quarantinedContents(request.outputPath)).toContain(
       "cancelled partial",
     );
+    vi.useRealTimers();
+    fixture.access.close();
+  });
+
+  it("keeps cancellation terminal and reports failed quarantine cleanup", async () => {
+    vi.useFakeTimers();
+    const fixture = createQueuedJob();
+    let releaseClosure!: () => void;
+    const closure = new Promise<void>((resolve) => {
+      releaseClosure = resolve;
+    });
+    let activeOutputPath: string | null = null;
+    const log = vi.fn();
+    const runner: HandBrakeRunner = {
+      isActive: (outputPath) => activeOutputPath === outputPath,
+      whenInactive: async (outputPath) => {
+        if (activeOutputPath === outputPath) {
+          await closure;
+        }
+      },
+      run: vi.fn(({ outputPath, signal }) => {
+        activeOutputPath = outputPath;
+        writeFileSync(outputPath, "cancelled cleanup failure", { flag: "wx" });
+        return new Promise<void>((_resolve, reject) => {
+          signal.addEventListener(
+            "abort",
+            () => reject(signal.reason as Error),
+            { once: true },
+          );
+        });
+      }),
+    };
+    const options = {
+      access: fixture.access,
+      concurrency: 1,
+      log,
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      runner,
+      signal: new AbortController().signal,
+      workerId: "cancellation-cleanup-failure-worker",
+    };
+    const polling = pollEncodeWorker(options);
+    await vi.waitFor(() => expect(runner.run).toHaveBeenCalledOnce());
+    const request = vi.mocked(runner.run).mock.calls[0]![0];
+    fixture.access.encodeJobs.requestCancellation(fixture.job.id);
+    await vi.advanceTimersByTimeAsync(
+      Math.floor(ENCODE_JOB_LEASE_DURATION_MS / 3),
+    );
+    await vi.waitFor(() => expect(request.signal.aborted).toBe(true));
+
+    staleCleanupRenameCrash.armed = true;
+    staleCleanupRenameCrash.finalPath = request.outputPath;
+    activeOutputPath = null;
+    releaseClosure();
+    await polling;
+
+    expect(staleCleanupRenameCrash.triggered).toBe(true);
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        status: "cancelled",
+        partialCleanupClaimToken: expect.any(String),
+        partialCleanupOutputPath: fixture.outputPath,
+      }),
+    ]);
+    expect(fixture.access.encodeJobs.listFailureReports([fixture.job.id]))
+      .toEqual([
+        expect.objectContaining({
+          reasonCode: "cleanup_failed",
+          phase: "cleanup",
+          evidence: { kind: "cleanup", operation: "partial_output" },
+        }),
+      ]);
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining(
+        `Encode Job ${fixture.job.id} cancelled with cleanup pending`,
+      ),
+    );
+
+    staleCleanupRenameCrash.armed = false;
+    await pollEncodeWorker({
+      ...options,
+      runner: { run: vi.fn() },
+      workerId: "cancellation-cleanup-recovery-worker",
+    });
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        status: "cancelled",
+        partialCleanupClaimToken: null,
+        partialCleanupOutputPath: null,
+      }),
+    ]);
     vi.useRealTimers();
     fixture.access.close();
   });

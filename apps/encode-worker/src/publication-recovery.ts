@@ -179,10 +179,16 @@ function createPublicationRecoveryStepTracker(
         result = "deferred";
       }
     },
-    recordFailure(message: string, error: unknown): void {
+    recordFailure(
+      message: string,
+      error: unknown,
+      recordIncident = true,
+    ): void {
       result = "completed_with_failures";
       options.log(`${message}: ${normalizeErrorMessage(error)}`);
-      recordEncodePublicationRecoveryIncident(options, recoveryArea);
+      if (recordIncident) {
+        recordEncodePublicationRecoveryIncident(options, recoveryArea);
+      }
     },
     result(): PublicationRecoveryStepResult {
       return result;
@@ -307,15 +313,17 @@ function recordCleanupFailure(
   cleanup: EncodeJobPartialCleanup,
   report: EncodeJobFailureReportInput,
   options: EncodePublicationOptions,
-): void {
+): boolean {
   try {
     options.access.encodeJobs.recordCleanupFailureReport(cleanup, report);
+    return true;
   } catch (error) {
     options.log(
       `Encode cleanup Failure Report could not be persisted: ${
         normalizeErrorMessage(error)
       }`,
     );
+    return false;
   }
 }
 
@@ -1439,7 +1447,7 @@ async function reconcilePendingPublications(
         () => options.access.encodeJobs.completePartialCleanup(cleanup),
       );
     } catch (error) {
-      recordCleanupFailure(
+      const attributed = recordCleanupFailure(
         reportingCleanup,
         publicationRecoveryFailureReport(
           error,
@@ -1450,6 +1458,7 @@ async function reconcilePendingPublications(
       recovery.recordFailure(
         "Pending Encode publication could not be reconciled",
         error,
+        !attributed,
       );
     } finally {
       if (mutationLockHandle !== null) {
@@ -1495,6 +1504,9 @@ async function recoverAbandonedPublicationMutations(
             ? undefined
             : failureReports.get(mutation.leaseToken),
         );
+        if (mutation.leaseToken !== null) {
+          failureReports.delete(mutation.leaseToken);
+        }
       } finally {
         options.mutationLock.release(handle);
       }
@@ -1619,17 +1631,18 @@ async function reconcileActivePublicationMutations(
         error,
         mutation.publicationPending,
       );
-      recordCleanupFailure(
+      const attributed = recordCleanupFailure(
         mutation,
         failureReport,
         options,
       );
-      if (mutation.leaseToken !== null) {
+      if (!attributed && mutation.leaseToken !== null) {
         failureReports.set(mutation.leaseToken, failureReport);
       }
       recovery.recordFailure(
         "Active Encode publication mutation could not be reconciled",
         error,
+        false,
       );
     }
   }
@@ -1945,6 +1958,11 @@ export async function executeEncodeClaim(
     parseProgress("", true);
     signal.throwIfAborted();
     failurePhase = "validation";
+    options.access.encodeJobs.updateProgress(claim, {
+      progressPercent: 100,
+      phase: "validation",
+      etaSeconds: null,
+    });
     await requireRegularOutputForValidation(
       partialPath,
       "HandBrake did not produce a complete regular output file",
@@ -2122,11 +2140,9 @@ export async function executeEncodeClaim(
       >["operation"],
     ) => {
       cleanupFailures.push(normalizeErrorMessage(cleanupError));
-      if (!cancellationRequested) {
-        cleanupFailureReports.push(
-          cleanupFailureReport(cleanupError, operation),
-        );
-      }
+      cleanupFailureReports.push(
+        cleanupFailureReport(cleanupError, operation),
+      );
     };
     let replacementCleanupFailed = false;
     let preserveReplacementAuthority = priorFinalRestored;
@@ -2278,11 +2294,23 @@ export async function executeEncodeClaim(
         }
       }
       if (cleanupFailures.length > 0) {
-        options.log(
-          `Encode Job ${claim.id} cancellation cleanup failed: ${
-            cleanupFailures.join("; ")
-          }`,
-        );
+        try {
+          options.access.encodeJobs.completeCancellationWithReports(
+            claim,
+            cleanupFailureReports,
+          );
+          options.log(
+            `Encode Job ${claim.id} cancelled with cleanup pending: ${
+              cleanupFailures.join("; ")
+            }`,
+          );
+        } catch (cancellationError) {
+          options.log(
+            `Encode Job cancellation state and cleanup reports could not be persisted: ${
+              normalizeErrorMessage(cancellationError)
+            }`,
+          );
+        }
         return;
       }
       try {
@@ -2398,6 +2426,7 @@ export async function reconcileEncodePublications(
       if (result === "completed") {
         resolveEncodePublicationRecoveryIncident(options, recoveryArea);
       }
+      return result;
     } catch (error) {
       options.log(`${failureMessage}: ${normalizeErrorMessage(error)}`);
       recordEncodePublicationRecoveryIncident(options, recoveryArea);
@@ -2405,7 +2434,7 @@ export async function reconcileEncodePublications(
     }
   };
 
-  await runPublicationRecoveryStep(
+  const activePublicationResult = await runPublicationRecoveryStep(
     "active_publication",
     "Active Encode publications could not be listed for reconciliation",
     () =>
@@ -2414,7 +2443,7 @@ export async function reconcileEncodePublications(
         publicationMutationFailureReports,
       ),
   );
-  await runPublicationRecoveryStep(
+  const expiredPublicationResult = await runPublicationRecoveryStep(
     "expired_publication_mutation",
     "Expired Encode publication mutations could not be listed for recovery",
     () =>
@@ -2423,6 +2452,13 @@ export async function reconcileEncodePublications(
         publicationMutationFailureReports,
       ),
   );
+  if (activePublicationResult === "completed_with_failures") {
+    if (publicationMutationFailureReports.size === 0) {
+      resolveEncodePublicationRecoveryIncident(options, "active_publication");
+    } else if (expiredPublicationResult === "completed") {
+      recordEncodePublicationRecoveryIncident(options, "active_publication");
+    }
+  }
   await runPublicationRecoveryStep(
     "expired_encode_job_claim",
     "Expired Encode Job claims could not be recovered",
