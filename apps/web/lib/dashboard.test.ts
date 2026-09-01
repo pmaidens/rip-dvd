@@ -29,6 +29,7 @@ import { DVD_READ_FAILURE_RESULT_PREFIX } from "../../archive-worker/src/dvd-rec
 
 import { readDashboardSnapshot } from "./dashboard";
 import { DASHBOARD_ACTIVE_DISC_LIMIT } from "./dashboard-bounds";
+import { investigationReport } from "./investigation";
 import {
   completeDiscInspection,
   pollArchiveWorkerForTest,
@@ -300,6 +301,8 @@ describe("readDashboardSnapshot", () => {
         retryability: "not_appropriate",
         retryabilityDetail:
           "This Encode Job is completed, so this report does not offer a retry.",
+        suggestedAction:
+          "Keep the Encode Worker running and leave output files in place while cleanup or publication recovery finishes. No operator retry is needed while recovery is pending.",
       }),
     ]);
   });

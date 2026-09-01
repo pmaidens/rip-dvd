@@ -332,6 +332,51 @@ describe("Encode Job Failure Reports", () => {
     ).toEqual(["later owner", "first owner", "HandBrake diagnostic 31"]);
   });
 
+  it("rejects an unfenced cleanup report after its running claim expires", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-01T12:00:00.000Z"));
+    const { access, job } = createEncodeJobFixture();
+    const claimed = claim(access);
+    const cleanup = access.encodeJobs.registerPartialCleanup(claimed);
+    vi.advanceTimersByTime(60_001);
+
+    expect(() =>
+      access.encodeJobs.recordCleanupFailureReport(
+        cleanup,
+        cleanupFailure("expired claim cleanup"),
+      )
+    ).toThrow(StaleJobAttemptError);
+    expect(access.encodeJobs.listFailureReports([job.id])).toEqual([]);
+  });
+
+  it("coalesces an identical repeated publication recovery report", () => {
+    const { access, job } = createEncodeJobFixture();
+    const claimed = claim(access);
+    const cleanup = access.encodeJobs.registerPartialCleanup(claimed);
+    access.encodeJobs.failWithReport(claimed, commandFailure(32));
+    const recoveryFailure = {
+      schemaVersion: 1,
+      reasonCode: "publication_recovery_failed",
+      phase: "recovery",
+      retryability: "after_action",
+      diagnostic: "recovery directory sync failed",
+      evidence: { kind: "recovery", operation: "cleanup_recovery" },
+    } as const;
+
+    access.encodeJobs.recordCleanupFailureReport(cleanup, recoveryFailure);
+    access.encodeJobs.recordCleanupFailureReport(cleanup, recoveryFailure);
+
+    expect(access.encodeJobs.listFailureReports([job.id])).toEqual([
+      expect.objectContaining({
+        reasonCode: "publication_recovery_failed",
+        diagnostic: recoveryFailure.diagnostic,
+      }),
+      expect.objectContaining({
+        reasonCode: "command_failed",
+      }),
+    ]);
+  });
+
   it("atomically classifies expired job and publication leases", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-01T12:00:00.000Z"));
