@@ -24,6 +24,13 @@ import type {
   TMDB_MEDIA_TYPES,
 } from "./domain-values.js";
 import type {
+  ENCODE_JOB_FAILURE_PHASES,
+  ENCODE_JOB_FAILURE_REASON_CODES,
+  ENCODE_JOB_FAILURE_REPORT_SCHEMA_VERSIONS,
+  ENCODE_JOB_FAILURE_RETRYABILITIES,
+  ENCODE_JOB_FAILURE_SIGNALS,
+} from "./encode-job-failure-report.js";
+import type {
   DiscSelectionSourceIdentity,
   DiscSelectionSourceIdentityInput,
 } from "./disc-selection-source-identity.js";
@@ -84,6 +91,7 @@ export type DiscSelectionId = DomainId<"DiscSelection">;
 export type EncodingProfileId = DomainId<"EncodingProfile">;
 export type ArchiveJobId = DomainId<"ArchiveJob">;
 export type EncodeJobId = DomainId<"EncodeJob">;
+export type EncodeJobFailureReportId = DomainId<"EncodeJobFailureReport">;
 export type RetainedEncodeOutputId = DomainId<"RetainedEncodeOutput">;
 export type ArchiveJobClaimToken = DomainId<"ArchiveJobClaim">;
 export type DiscInspectionClaimToken = DomainId<"DiscInspectionClaim">;
@@ -815,6 +823,31 @@ export interface EncodeJobFailureOptions {
   preserveReplacementAuthority?: boolean;
 }
 
+export type EncodeJobFailureSignal =
+  (typeof ENCODE_JOB_FAILURE_SIGNALS)[number];
+export type EncodeJobFailureEvidence =
+  | { kind: "exit_status"; exitStatus: number }
+  | { kind: "signal"; signal: EncodeJobFailureSignal }
+  | { kind: "timeout"; timeoutSeconds: number };
+
+export interface EncodeJobFailureReportInput {
+  schemaVersion: (typeof ENCODE_JOB_FAILURE_REPORT_SCHEMA_VERSIONS)[number];
+  reasonCode: (typeof ENCODE_JOB_FAILURE_REASON_CODES)[number];
+  phase: (typeof ENCODE_JOB_FAILURE_PHASES)[number];
+  retryability: (typeof ENCODE_JOB_FAILURE_RETRYABILITIES)[number];
+  diagnostic?: string | null;
+  evidence: EncodeJobFailureEvidence;
+}
+
+export interface EncodeJobFailureReport extends EncodeJobFailureReportInput {
+  id: EncodeJobFailureReportId;
+  encodeJobId: EncodeJobId;
+  workerKind: "encode_worker";
+  diagnostic: string | null;
+  occurredAt: Date;
+  createdAt: Date;
+}
+
 export interface EncodeJobRequeueOptions {
   outputPath?: string;
   priority?: number;
@@ -1236,6 +1269,12 @@ export interface EncodeJobAccess {
     errorMessage: string,
     options?: EncodeJobFailureOptions,
   ): EncodeJob;
+  failWithReport(
+    claim: RunningEncodeJob,
+    report: EncodeJobFailureReportInput,
+    options?: EncodeJobFailureOptions,
+  ): EncodeJob;
+  listFailureReports(ids: readonly EncodeJobId[]): EncodeJobFailureReport[];
   requeue(id: EncodeJobId, options?: EncodeJobRequeueOptions): EncodeJob;
 }
 
@@ -1287,6 +1326,7 @@ export interface ConsistentReadAccess {
     | "listDiscSelectionCorrectionEncodeJobLinks"
     | "listDiscSelectionCorrectionRetainedOutputSummaries"
     | "listCorrectionLinks"
+    | "listFailureReports"
     | "listRetainedOutputSummaries"
   >;
 }

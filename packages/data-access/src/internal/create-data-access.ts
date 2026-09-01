@@ -61,6 +61,7 @@ import {
   discInspections,
   discSelectionSupersessions,
   discSelections,
+  encodeJobFailureReports,
   encodeJobs,
   encodingProfiles,
   legacyCutoverStagedSidecars,
@@ -125,6 +126,11 @@ import {
   validateEncodeQueueSearchQuery,
 } from "../encode-queue-search.js";
 import {
+  ENCODE_JOB_FAILURE_REPORT_HISTORY_LIMIT,
+  validateEncodeJobFailureReport,
+  type ValidatedEncodeJobFailureReportInput,
+} from "../encode-job-failure-report.js";
+import {
   DomainInvariantError,
   InvalidStatusTransitionError,
   RecordNotFoundError,
@@ -169,6 +175,8 @@ import type {
   EncodeJobId,
   EncodeJob,
   EncodeJobFailureOptions,
+  EncodeJobFailureReport,
+  EncodeJobFailureReportId,
   EncodeJobPartialCleanup,
   EncodeJobPublicationProvenance,
   EncodeJobProgress,
@@ -218,6 +226,11 @@ const DISC_SELECTION_SUPERSESSION_LIMIT = 100;
 const DISC_SELECTION_SUPERSESSION_HISTORY_LIMIT = 101;
 const DISC_SELECTION_CORRECTION_ENCODE_JOB_LINK_LIMIT = 101;
 const DISC_SELECTION_CORRECTION_RETAINED_OUTPUT_SUMMARY_LIMIT = 101;
+const ENCODE_JOB_FAILURE_REPORT_JOB_LIMIT = 400;
+
+interface EncodeJobAttemptFailureOptions extends EncodeJobFailureOptions {
+  failureReport?: ValidatedEncodeJobFailureReportInput;
+}
 const MEDIA_ITEM_SEARCH_LIMIT = 100;
 const ARCHIVE_READ_FAILURE_MESSAGES = {
   unknown: "The Optical Drive returned an unclassified read failure",
@@ -356,6 +369,59 @@ function asClaimedEncodeJob(job: EncodeJob): ClaimedEncodeJob {
     throw new DomainInvariantError("Claimed Encode Job has no active claim");
   }
   return job as ClaimedEncodeJob;
+}
+
+function toEncodeJobFailureReport(
+  row: typeof encodeJobFailureReports.$inferSelect,
+): EncodeJobFailureReport {
+  const { exitStatus, schemaVersion, signal, timeoutSeconds, ...report } = row;
+  if (schemaVersion !== 1) {
+    throw new DomainInvariantError(
+      "Encode Job Failure Report schema version is unsupported",
+    );
+  }
+  const evidence = exitStatus !== null
+    ? { kind: "exit_status" as const, exitStatus }
+    : signal !== null
+      ? { kind: "signal" as const, signal }
+      : timeoutSeconds !== null
+        ? { kind: "timeout" as const, timeoutSeconds }
+        : null;
+  if (evidence === null) {
+    throw new DomainInvariantError(
+      "Encode Job Failure Report has no valid evidence",
+    );
+  }
+  return { ...report, schemaVersion, evidence };
+}
+
+function encodeJobFailureReportRecord(
+  encodeJobId: EncodeJobId,
+  report: ValidatedEncodeJobFailureReportInput,
+  occurredAt: Date,
+): typeof encodeJobFailureReports.$inferInsert {
+  return {
+    id: newId<EncodeJobFailureReportId>(),
+    encodeJobId,
+    schemaVersion: report.schemaVersion,
+    workerKind: "encode_worker",
+    reasonCode: report.reasonCode,
+    phase: report.phase,
+    retryability: report.retryability,
+    diagnostic: report.diagnostic,
+    exitStatus:
+      report.evidence.kind === "exit_status"
+        ? report.evidence.exitStatus
+        : null,
+    signal:
+      report.evidence.kind === "signal" ? report.evidence.signal : null,
+    timeoutSeconds:
+      report.evidence.kind === "timeout"
+        ? report.evidence.timeoutSeconds
+        : null,
+    occurredAt,
+    createdAt: occurredAt,
+  };
 }
 const archiveUsesCurrentDvdContentId = sql<boolean>`
   length(${originalDiscArchives.fingerprint}) = 71
@@ -3152,6 +3218,19 @@ export function createDataAccessInternal(
         ) {
           clearCorrectedEncodePublicationAuthority(transaction, updated.id);
         }
+        if (
+          updated &&
+          update.status === "failed" &&
+          failureOptions?.failureReport
+        ) {
+          transaction.insert(encodeJobFailureReports).values(
+            encodeJobFailureReportRecord(
+              updated.id,
+              failureOptions.failureReport,
+              update.updatedAt,
+            ),
+          ).run();
+        }
         return updated;
       }, { behavior: "immediate" }),
     updateProgressAttempt: (claim, update, details, failureOptions) =>
@@ -3180,6 +3259,19 @@ export function createDataAccessInternal(
           !failureOptions?.preserveReplacementAuthority
         ) {
           clearCorrectedEncodePublicationAuthority(transaction, updated.id);
+        }
+        if (
+          updated &&
+          update.status === "failed" &&
+          failureOptions?.failureReport
+        ) {
+          transaction.insert(encodeJobFailureReports).values(
+            encodeJobFailureReportRecord(
+              updated.id,
+              failureOptions.failureReport,
+              update.updatedAt,
+            ),
+          ).run();
         }
         return updated;
       }, { behavior: "immediate" }),
@@ -3288,7 +3380,7 @@ export function createDataAccessInternal(
     EncodeJobRequeueOptions,
     void,
     Pick<EncodeJobProgress, "etaSeconds" | "phase">,
-    EncodeJobFailureOptions
+    EncodeJobAttemptFailureOptions
   >;
 
   const encodeJobQueue = createJobQueueController({
@@ -3830,6 +3922,8 @@ export function createDataAccessInternal(
               .listDiscSelectionCorrectionRetainedOutputSummaries(options),
           listCorrectionLinks: (ids) =>
             access.encodeJobs.listCorrectionLinks(ids),
+          listFailureReports: (ids) =>
+            access.encodeJobs.listFailureReports(ids),
           listRetainedOutputSummaries: (ids) =>
             access.encodeJobs.listRetainedOutputSummaries(ids),
         },
@@ -10625,6 +10719,37 @@ export function createDataAccessInternal(
         return encodeJobQueue.complete(claim, undefined);
       },
       fail: encodeJobQueue.fail,
+      failWithReport(claim, reportInput, options) {
+        const report = validateEncodeJobFailureReport(reportInput);
+        return encodeJobQueue.fail(
+          claim,
+          report.reasonCode === "command_timeout"
+            ? "HandBrake command timed out"
+            : "HandBrake command failed",
+          { ...options, failureReport: report },
+        );
+      },
+      listFailureReports(ids) {
+        const uniqueIds = [...new Set(ids)];
+        if (uniqueIds.length > ENCODE_JOB_FAILURE_REPORT_JOB_LIMIT) {
+          throw new DomainInvariantError(
+            `Encode Job Failure Report lookup cannot exceed ${ENCODE_JOB_FAILURE_REPORT_JOB_LIMIT} jobs`,
+          );
+        }
+        return uniqueIds.flatMap((id) =>
+          database
+            .select()
+            .from(encodeJobFailureReports)
+            .where(eq(encodeJobFailureReports.encodeJobId, id))
+            .orderBy(
+              desc(encodeJobFailureReports.occurredAt),
+              desc(encodeJobFailureReports.id),
+            )
+            .limit(ENCODE_JOB_FAILURE_REPORT_HISTORY_LIMIT)
+            .all()
+            .map(toEncodeJobFailureReport),
+        );
+      },
       requeue(id, options) {
         const outputPath = options?.outputPath === undefined
           ? undefined

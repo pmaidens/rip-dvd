@@ -678,7 +678,7 @@ describe("data-access facade", () => {
         "disc_selection_supersessions",
       ]),
     );
-    expect(identifierTables).toHaveLength(17);
+    expect(identifierTables).toHaveLength(18);
     expect(
       identifierTables.every(({ name, sql }) =>
         name === "legacy_cutover_staged_sidecars"
@@ -8086,6 +8086,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
+        name: "20260901172324_glorious_cargill",
+      },
+      {
         name: "20260828164042_married_lady_ursula",
       },
       {
@@ -8111,9 +8114,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260822185006_burly_northstar",
-      },
-      {
-        name: "20260822183552_bounded-disc-settling",
       },
     ]);
     expect(

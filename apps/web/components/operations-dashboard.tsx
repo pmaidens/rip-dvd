@@ -1088,12 +1088,21 @@ export function DashboardView({
   onVerifyFilesystem?: (target: FilesystemVerificationTarget, id: string) => void;
   verifyingFilesystemTarget?: string | null;
 }) {
-  const [activeInvestigation, setActiveInvestigation] = useState<{
-    kind: "archive-job" | "disc-inspection";
-    subjectId: string;
-    trigger: HTMLButtonElement;
-    fallback: HTMLElement | null;
-  } | null>(null);
+  const [activeInvestigation, setActiveInvestigation] = useState<
+    | {
+        kind: "archive-job" | "disc-inspection";
+        subjectId: string;
+        trigger: HTMLButtonElement;
+        fallback: HTMLElement | null;
+      }
+    | {
+        kind: "encode-job";
+        subjectId: DashboardEncodeJob["id"];
+        trigger: HTMLButtonElement;
+        fallback: null;
+      }
+    | null
+  >(null);
   const catalogReviewPage =
     state.catalogReview.status === "loaded"
       ? state.catalogReview.page
@@ -1121,29 +1130,43 @@ export function DashboardView({
         ),
       };
   const activeInvestigationResolution = activeInvestigation === null
-    ? { details: undefined, sourceLoaded: true }
+    ? { investigations: undefined, sourceLoaded: true }
     : activeInvestigation.kind === "archive-job"
       ? {
-          details: state.archiveJobs.status === "loaded"
-            ? state.archiveJobs.items.find(
+          investigations: state.archiveJobs.status === "loaded"
+            ? [state.archiveJobs.items.find(
                 (job) => job.id === activeInvestigation.subjectId,
-              )?.investigation
+              )?.investigation].filter(
+                (investigation) => investigation !== undefined,
+              )
             : undefined,
           sourceLoaded: state.archiveJobs.status === "loaded",
         }
-      : {
-          details: state.opticalDrives.status === "loaded"
-            ? state.opticalDrives.items
-                .find(
-                  (drive) =>
-                    drive.currentInspection?.id ===
-                      activeInvestigation.subjectId,
-                )
-                ?.currentInspection?.investigation
-            : undefined,
-          sourceLoaded: state.opticalDrives.status === "loaded",
-        };
-  const activeInvestigationDetails = activeInvestigationResolution.details;
+      : activeInvestigation.kind === "disc-inspection"
+        ? {
+            investigations: state.opticalDrives.status === "loaded"
+              ? [state.opticalDrives.items
+                  .find(
+                    (drive) =>
+                      drive.currentInspection?.id ===
+                        activeInvestigation.subjectId,
+                  )
+                  ?.currentInspection?.investigation].filter(
+                    (investigation) => investigation !== undefined,
+                  )
+              : undefined,
+            sourceLoaded: state.opticalDrives.status === "loaded",
+          }
+        : {
+            investigations: state.encodeJobs.status === "loaded"
+              ? state.encodeJobs.items.find(
+                  (job) => job.id === activeInvestigation.subjectId,
+                )?.investigations
+              : undefined,
+            sourceLoaded: state.encodeJobs.status === "loaded",
+          };
+  const activeInvestigations = activeInvestigationResolution.investigations;
+  const activeInvestigationDetails = activeInvestigations?.[0];
   useEffect(() => {
     if (
       activeInvestigation !== null &&
@@ -1294,6 +1317,21 @@ export function DashboardView({
             progressPercent={job.progressPercent}
             progressDetail={encodeProgressDetail(job)}
             failureDetail={job.failureDetail}
+            failureAction={job.investigations?.[0] ? (
+              <button
+                className="investigate-action"
+                type="button"
+                onClick={(event) =>
+                  setActiveInvestigation({
+                    kind: "encode-job",
+                    subjectId: job.id,
+                    trigger: event.currentTarget,
+                    fallback: null,
+                  })}
+              >
+                Investigate
+              </button>
+            ) : undefined}
             annotation={job.discSelectionCorrection || job.correctedReplacement ? (
               <div className="selection-correction-history">
                 {job.correctedReplacement?.predecessorId ? (
@@ -1331,6 +1369,20 @@ export function DashboardView({
             verification={toFilesystemVerificationDisplay(job)}
             action={
               <div className="operation-actions">
+                {job.status !== "failed" && job.investigations?.[0] ? (
+                  <button
+                    type="button"
+                    onClick={(event) =>
+                      setActiveInvestigation({
+                        kind: "encode-job",
+                        subjectId: job.id,
+                        trigger: event.currentTarget,
+                        fallback: null,
+                      })}
+                  >
+                    Investigate prior failures
+                  </button>
+                ) : null}
                 {job.status === "queued" || job.status === "running" ? (
                   <button
                     type="button"
@@ -1575,6 +1627,7 @@ export function DashboardView({
       {activeInvestigation && activeInvestigationDetails ? (
         <InvestigationPanel
           investigation={activeInvestigationDetails}
+          investigations={activeInvestigations}
           returnFocusTo={activeInvestigation.trigger}
           returnFocusFallback={activeInvestigation.fallback}
           onClose={() => setActiveInvestigation(null)}

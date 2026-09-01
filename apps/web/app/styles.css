@@ -2797,6 +2797,26 @@ h3 {
   padding: 1.25rem 1.4rem 1.4rem;
 }
 
+.investigation-report-selector {
+  display: grid;
+  gap: 0.4rem;
+  min-width: 0;
+  color: #b8c8c3;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.investigation-report-selector select {
+  width: 100%;
+  min-width: 0;
+  min-height: 2.6rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid #365149;
+  border-radius: 0.55rem;
+  background: #10231e;
+  color: #eef4f1;
+}
+
 .investigation-summary,
 .investigation-evidence dl {
   display: grid;
