@@ -127,6 +127,8 @@ import {
   validateEncodeQueueSearchQuery,
 } from "../encode-queue-search.js";
 import {
+  encodeJobFailureEvidenceContext,
+  encodeJobFailureEvidenceFromContext,
   ENCODE_JOB_FAILURE_REPORT_HISTORY_LIMIT,
   validateEncodeJobFailureReport,
   type ValidatedEncodeJobFailureReportInput,
@@ -176,7 +178,6 @@ import type {
   EncodeJobId,
   EncodeJob,
   EncodeJobFailureOptions,
-  EncodeJobFailureEvidence,
   EncodeJobFailureReport,
   EncodeJobFailureReportId,
   EncodeJobPartialCleanup,
@@ -413,7 +414,7 @@ function toEncodeJobFailureReport(
           : validationCheck !== null
             ? { kind: "validation_check" as const, check: validationCheck }
             : context !== null
-              ? failureEvidenceFromContext(report.reasonCode, context)
+              ? encodeJobFailureEvidenceFromContext(report.reasonCode, context)
               : { kind: "none" as const };
   if (evidence === null) {
     throw new DomainInvariantError(
@@ -421,65 +422,6 @@ function toEncodeJobFailureReport(
     );
   }
   return { ...report, schemaVersion, evidence };
-}
-
-function failureEvidenceFromContext(
-  reasonCode: EncodeJobFailureReport["reasonCode"],
-  context: (typeof encodeJobFailureReports.$inferSelect)["context"],
-): EncodeJobFailureEvidence | null {
-  if (reasonCode === "cleanup_failed") {
-    return context === "partial_output" ||
-        context === "replacement_artifact" ||
-        context === "published_output" ||
-        context === "publication_completion"
-      ? { kind: "cleanup", operation: context }
-      : null;
-  }
-  if (reasonCode === "publication_failed") {
-    return context === "publication_mutation" ||
-        context === "publication_completion"
-      ? { kind: "publication", operation: context }
-      : null;
-  }
-  if (reasonCode === "lease_expired") {
-    return context === "job_claim" || context === "publication_cleanup"
-      ? { kind: "lease", scope: context }
-      : null;
-  }
-  if (reasonCode === "worker_interrupted") {
-    return context === "worker_shutdown" ||
-        context === "publication_completion"
-      ? { kind: "interruption", source: context }
-      : null;
-  }
-  if (reasonCode === "publication_recovery_failed") {
-    return context === "publication_recovery" || context === "cleanup_recovery"
-      ? { kind: "recovery", operation: context }
-      : null;
-  }
-  return null;
-}
-
-function failureEvidenceContext(
-  evidence: EncodeJobFailureEvidence,
-): (typeof encodeJobFailureReports.$inferInsert)["context"] {
-  switch (evidence.kind) {
-    case "cleanup":
-    case "publication":
-    case "recovery":
-      return evidence.operation;
-    case "lease":
-      return evidence.scope;
-    case "interruption":
-      return evidence.source;
-    case "exit_status":
-    case "signal":
-    case "timeout":
-    case "duration":
-    case "validation_check":
-    case "none":
-      return null;
-  }
 }
 
 function encodeJobFailureReportRecord(
@@ -518,7 +460,7 @@ function encodeJobFailureReportRecord(
       report.evidence.kind === "duration"
         ? report.evidence.observedSeconds
         : null,
-    context: failureEvidenceContext(report.evidence),
+    context: encodeJobFailureEvidenceContext(report.evidence),
     occurredAt,
     createdAt: occurredAt,
   };
@@ -10018,7 +9960,7 @@ export function createDataAccessInternal(
         }
         return finalized;
       },
-      recoverExpiredPublicationMutation(cleanup) {
+      recoverExpiredPublicationMutation(cleanup, recoveryFailureReportInput) {
         if (cleanup.leaseToken === null) {
           throw new DomainInvariantError(
             "Encode Job publication mutation recovery requires fenced provenance",
@@ -10037,6 +9979,23 @@ export function createDataAccessInternal(
           diagnostic: "Encode publication cleanup lease expired",
           evidence: { kind: "lease", scope: "publication_cleanup" },
         });
+        const recoveryFailureReport = recoveryFailureReportInput === undefined
+          ? undefined
+          : validateEncodeJobFailureReport(recoveryFailureReportInput);
+        if (
+          recoveryFailureReport !== undefined &&
+          (recoveryFailureReport.reasonCode !==
+              "publication_recovery_failed" ||
+            recoveryFailureReport.evidence.kind !== "recovery" ||
+            recoveryFailureReport.evidence.operation !==
+              (cleanup.publicationPending
+                ? "publication_recovery"
+                : "cleanup_recovery"))
+        ) {
+          throw new DomainInvariantError(
+            "Expired Encode publication recovery report reason is invalid",
+          );
+        }
         return database.transaction((transaction) => {
           const updated = transaction
             .update(encodeJobs)
@@ -10069,7 +10028,12 @@ export function createDataAccessInternal(
           appendEncodeJobFailureReports(
             transaction,
             updated.id,
-            [report],
+            [
+              report,
+              ...(recoveryFailureReport === undefined
+                ? []
+                : [recoveryFailureReport]),
+            ],
             timestamp,
           );
           return updated;

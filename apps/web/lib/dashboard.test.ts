@@ -232,6 +232,45 @@ describe("readDashboardSnapshot", () => {
     );
   });
 
+  it("keeps an unclassified primary failure beside its cleanup report", () => {
+    const access = dataAccessFixture.create();
+    const { job } = seedEncodeJob(access);
+    const claim = access.encodeJobs.claimNext("dashboard-cleanup-worker");
+    if (!claim) {
+      throw new Error("Expected dashboard cleanup Encode Job claim");
+    }
+    access.encodeJobs.failWithReports(
+      claim,
+      "Output validation could not read the encoded file",
+      [{
+        schemaVersion: 1,
+        reasonCode: "cleanup_failed",
+        phase: "cleanup",
+        retryability: "after_action",
+        diagnostic: "/private/output.mkv could not be quarantined",
+        evidence: { kind: "cleanup", operation: "partial_output" },
+      }],
+    );
+
+    const snapshot = readDashboardSnapshot(access);
+    const failedJob = snapshot.encodeJobs.status === "loaded"
+      ? snapshot.encodeJobs.items.find(({ id }) => id === job.id)
+      : undefined;
+
+    expect(failedJob?.investigations).toEqual([
+      expect.objectContaining({
+        reasonCode: "encode_failure.legacy",
+        explanation:
+          "The worker reported an unclassified failure. Check the worker logs for the full diagnostic.",
+      }),
+      expect.objectContaining({
+        reasonCode: "encode.cleanup_failed",
+        failedPhase: "Cleanup",
+      }),
+    ]);
+    expect(JSON.stringify(failedJob)).not.toContain("/private/output.mkv");
+  });
+
   it("keeps a terminal Encode Job outcome beside its Disc Selection correction", () => {
     const access = dataAccessFixture.create();
     const { archive, job, selection } = seedEncodeJob(access);

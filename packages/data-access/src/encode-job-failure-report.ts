@@ -1,5 +1,8 @@
 import { DomainInvariantError } from "./errors.js";
-import type { EncodeJobFailureReportInput } from "./types.js";
+import type {
+  EncodeJobFailureEvidence,
+  EncodeJobFailureReportInput,
+} from "./types.js";
 
 export const ENCODE_JOB_FAILURE_REPORT_SCHEMA_VERSIONS = [1] as const;
 export const ENCODE_JOB_FAILURE_REASON_CODES = [
@@ -104,25 +107,102 @@ export interface ValidatedEncodeJobFailureReportInput
   diagnostic: string | null;
 }
 
-const CLEANUP_OPERATIONS = [
+export const ENCODE_JOB_FAILURE_CLEANUP_OPERATIONS = [
   "partial_output",
   "replacement_artifact",
   "published_output",
   "publication_completion",
 ] as const;
-const PUBLICATION_OPERATIONS = [
+export const ENCODE_JOB_FAILURE_PUBLICATION_OPERATIONS = [
   "publication_mutation",
   "publication_completion",
 ] as const;
-const LEASE_SCOPES = ["job_claim", "publication_cleanup"] as const;
-const INTERRUPTION_SOURCES = [
+export const ENCODE_JOB_FAILURE_LEASE_SCOPES = [
+  "job_claim",
+  "publication_cleanup",
+] as const;
+export const ENCODE_JOB_FAILURE_INTERRUPTION_SOURCES = [
   "worker_shutdown",
   "publication_completion",
 ] as const;
-const RECOVERY_OPERATIONS = [
+export const ENCODE_JOB_FAILURE_RECOVERY_OPERATIONS = [
   "publication_recovery",
   "cleanup_recovery",
 ] as const;
+
+export type EncodeJobFailureContext =
+  (typeof ENCODE_JOB_FAILURE_CONTEXTS)[number];
+
+function includesFailureContext<
+  const Values extends readonly EncodeJobFailureContext[],
+>(
+  values: Values,
+  context: EncodeJobFailureContext | null,
+): context is Values[number] {
+  return context !== null && values.some((value) => value === context);
+}
+
+export function encodeJobFailureEvidenceFromContext(
+  reasonCode: EncodeJobFailureReportInput["reasonCode"],
+  context: EncodeJobFailureContext | null,
+): EncodeJobFailureEvidence | null {
+  if (
+    reasonCode === "cleanup_failed" &&
+    includesFailureContext(ENCODE_JOB_FAILURE_CLEANUP_OPERATIONS, context)
+  ) {
+    return { kind: "cleanup", operation: context };
+  }
+  if (
+    reasonCode === "publication_failed" &&
+    includesFailureContext(
+      ENCODE_JOB_FAILURE_PUBLICATION_OPERATIONS,
+      context,
+    )
+  ) {
+    return { kind: "publication", operation: context };
+  }
+  if (
+    reasonCode === "lease_expired" &&
+    includesFailureContext(ENCODE_JOB_FAILURE_LEASE_SCOPES, context)
+  ) {
+    return { kind: "lease", scope: context };
+  }
+  if (
+    reasonCode === "worker_interrupted" &&
+    includesFailureContext(
+      ENCODE_JOB_FAILURE_INTERRUPTION_SOURCES,
+      context,
+    )
+  ) {
+    return { kind: "interruption", source: context };
+  }
+  if (
+    reasonCode === "publication_recovery_failed" &&
+    includesFailureContext(ENCODE_JOB_FAILURE_RECOVERY_OPERATIONS, context)
+  ) {
+    return { kind: "recovery", operation: context };
+  }
+  return null;
+}
+
+export function encodeJobFailureEvidenceContext(
+  evidence: EncodeJobFailureEvidence,
+): EncodeJobFailureContext | null {
+  switch (evidence.kind) {
+    case "cleanup":
+    case "publication":
+    case "recovery":
+      return evidence.operation;
+    case "lease":
+      return evidence.scope;
+    case "interruption":
+      return evidence.source;
+    case "exit_status":
+    case "signal":
+    case "timeout":
+      return null;
+  }
+}
 
 function requireAllowlistedKeys(
   value: unknown,
@@ -295,7 +375,9 @@ export function validateEncodeJobFailureReport(
       input.phase !== "cleanup" ||
       input.retryability !== "after_action" ||
       input.evidence.kind !== "cleanup" ||
-      !CLEANUP_OPERATIONS.includes(input.evidence.operation)
+      !ENCODE_JOB_FAILURE_CLEANUP_OPERATIONS.includes(
+        input.evidence.operation,
+      )
     ) {
       throw new DomainInvariantError(
         "Encode Job Failure Report cleanup evidence is invalid",
@@ -306,7 +388,9 @@ export function validateEncodeJobFailureReport(
       input.phase !== "publication" ||
       input.retryability !== "after_action" ||
       input.evidence.kind !== "publication" ||
-      !PUBLICATION_OPERATIONS.includes(input.evidence.operation)
+      !ENCODE_JOB_FAILURE_PUBLICATION_OPERATIONS.includes(
+        input.evidence.operation,
+      )
     ) {
       throw new DomainInvariantError(
         "Encode Job Failure Report publication evidence is invalid",
@@ -316,7 +400,7 @@ export function validateEncodeJobFailureReport(
     if (
       input.retryability !== "after_action" ||
       input.evidence.kind !== "lease" ||
-      !LEASE_SCOPES.includes(input.evidence.scope) ||
+      !ENCODE_JOB_FAILURE_LEASE_SCOPES.includes(input.evidence.scope) ||
       (input.evidence.scope === "publication_cleanup" &&
         input.phase !== "publication") ||
       (input.evidence.scope === "job_claim" &&
@@ -330,7 +414,9 @@ export function validateEncodeJobFailureReport(
     if (
       input.retryability !== "after_action" ||
       input.evidence.kind !== "interruption" ||
-      !INTERRUPTION_SOURCES.includes(input.evidence.source) ||
+      !ENCODE_JOB_FAILURE_INTERRUPTION_SOURCES.includes(
+        input.evidence.source,
+      ) ||
       (input.evidence.source === "publication_completion" &&
         input.phase !== "publication") ||
       input.phase === "cleanup" ||
@@ -345,7 +431,9 @@ export function validateEncodeJobFailureReport(
       input.phase !== "recovery" ||
       input.retryability !== "after_action" ||
       input.evidence.kind !== "recovery" ||
-      !RECOVERY_OPERATIONS.includes(input.evidence.operation)
+      !ENCODE_JOB_FAILURE_RECOVERY_OPERATIONS.includes(
+        input.evidence.operation,
+      )
     ) {
       throw new DomainInvariantError(
         "Encode Job Failure Report recovery evidence is invalid",

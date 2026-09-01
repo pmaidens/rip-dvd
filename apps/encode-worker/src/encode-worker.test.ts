@@ -5656,6 +5656,79 @@ describe("encode worker polling", () => {
     fixture.access.close();
   });
 
+  it("records an active recovery failure when its expired lease is recovered", async () => {
+    vi.useFakeTimers();
+    const fixture = createQueuedJob();
+    const claim = fixture.access.encodeJobs.claimNext("expired-recovery");
+    if (!claim) {
+      throw new Error("Expected the expired recovery claim");
+    }
+    mkdirSync(fixture.mediaLibraryPath, { recursive: true });
+    const canonicalFinalPath = join(
+      realpathSync(fixture.mediaLibraryPath),
+      basename(fixture.outputPath),
+    );
+    const partialPath = claimPartialPath(
+      canonicalFinalPath,
+      claim.claimToken,
+    );
+    writeFileSync(partialPath, "accepted before recovery failure", {
+      flag: "wx",
+    });
+    const publication = fixture.access.encodeJobs.registerPartialCleanup(
+      claim,
+      { publicationPending: true },
+    );
+    fixture.access.encodeJobs.beginPublicationMutation(claim, publication);
+    linkSync(partialPath, canonicalFinalPath);
+    vi.advanceTimersByTime(ENCODE_JOB_LEASE_DURATION_MS + 1);
+    const recoveryAccess: DataAccess = {
+      ...fixture.access,
+      encodeJobs: {
+        ...fixture.access.encodeJobs,
+        completePublishedMutation() {
+          throw new Error("simulated active publication recovery failure");
+        },
+      },
+    };
+
+    await pollEncodeWorker({
+      access: recoveryAccess,
+      concurrency: 1,
+      log: vi.fn(),
+      mediaLibraryPath: fixture.mediaLibraryPath,
+      originalsLibraryPath: fixture.originalsLibraryPath,
+      runner: { run: vi.fn() },
+      signal: new AbortController().signal,
+    });
+
+    expect(fixture.access.encodeJobs.list()).toEqual([
+      expect.objectContaining({
+        id: fixture.job.id,
+        partialCleanupClaimToken: null,
+        publicationPending: false,
+        status: "completed",
+      }),
+    ]);
+    expect(fixture.access.encodeJobs.listFailureReports([fixture.job.id]))
+      .toEqual([
+        expect.objectContaining({
+          reasonCode: "publication_recovery_failed",
+          phase: "recovery",
+          evidence: {
+            kind: "recovery",
+            operation: "publication_recovery",
+          },
+        }),
+        expect.objectContaining({
+          reasonCode: "lease_expired",
+          phase: "publication",
+          evidence: { kind: "lease", scope: "publication_cleanup" },
+        }),
+      ]);
+    fixture.access.close();
+  });
+
   it.each([
     { kind: "initial", reencode: false },
     { kind: "re-encode", reencode: true },

@@ -1275,6 +1275,7 @@ export interface EncodeJobAccess {
   ): EncodeJob;
   recoverExpiredPublicationMutation(
     cleanup: EncodeJobPartialCleanup,
+    recoveryFailureReport?: EncodeJobFailureReportInput,
   ): EncodeJob;
   listExpiredCancellationClaims(): ClaimedEncodeJob[];
   completeExpiredCancellation(
