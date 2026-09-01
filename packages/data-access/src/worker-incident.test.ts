@@ -172,6 +172,12 @@ describe("Worker Incident data access", () => {
         ...archiveRecoveryFailure,
         workerKind: "encode",
       },
+      {
+        ...archiveRecoveryFailure,
+        workerKind: "encode",
+        reasonCode: "publication_recovery_failure",
+        phase: "publication_recovery",
+      },
     ]) {
       expect(() =>
         access.workerIncidents.record(

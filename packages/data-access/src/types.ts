@@ -17,6 +17,7 @@ import type {
   DISC_SELECTION_KINDS,
   ENCODE_JOB_STATUSES,
   ENCODE_PROGRESS_PHASES,
+  ENCODE_WORKER_INCIDENT_RECOVERY_AREAS,
   FILESYSTEM_VERIFICATION_STATUSES,
   MEDIA_DOMAINS,
   MEDIA_ITEM_KINDS,
@@ -91,6 +92,8 @@ export type WorkerIncidentRetryability =
   (typeof WORKER_INCIDENT_RETRYABILITIES)[number];
 export type WorkerIncidentRecoveryArea =
   (typeof WORKER_INCIDENT_RECOVERY_AREAS)[number];
+export type EncodeWorkerIncidentRecoveryArea =
+  (typeof ENCODE_WORKER_INCIDENT_RECOVERY_AREAS)[number];
 
 declare const domainIdBrand: unique symbol;
 type DomainId<Name extends string> = string & {

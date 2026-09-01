@@ -1,7 +1,7 @@
 import type {
   DataAccess,
+  EncodeWorkerIncidentRecoveryArea,
   WorkerIncidentIdentity,
-  WorkerIncidentRecoveryArea,
 } from "@rip-dvd/data-access";
 
 import { normalizeErrorMessage } from "./normalize-error-message.js";
@@ -18,7 +18,9 @@ const pollIncident = {
   evidence: {},
 } as const;
 
-function publicationRecoveryIncident(recoveryArea: WorkerIncidentRecoveryArea) {
+function publicationRecoveryIncident(
+  recoveryArea: EncodeWorkerIncidentRecoveryArea,
+) {
   return {
     workerKind: "encode",
     reasonCode: "publication_recovery_failure",
@@ -79,14 +81,14 @@ export function resolveEncodePollIncident(
 
 export function recordEncodePublicationRecoveryIncident(
   options: EncodeWorkerIncidentOptions,
-  recoveryArea: WorkerIncidentRecoveryArea,
+  recoveryArea: EncodeWorkerIncidentRecoveryArea,
 ): void {
   recordIncident(options, publicationRecoveryIncident(recoveryArea));
 }
 
 export function resolveEncodePublicationRecoveryIncident(
   options: EncodeWorkerIncidentOptions,
-  recoveryArea: WorkerIncidentRecoveryArea,
+  recoveryArea: EncodeWorkerIncidentRecoveryArea,
 ): void {
   resolveIncident(options, publicationRecoveryIncident(recoveryArea));
 }
