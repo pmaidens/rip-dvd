@@ -41,6 +41,7 @@ const sectionNames = [
   "Optical Drives",
   "Detected Discs",
   "Archive Jobs",
+  "Worker Incidents",
   "Encode Jobs",
   "Catalog Review",
 ];
@@ -547,7 +548,7 @@ describe("DashboardView", () => {
     });
 
     expectEverySection(html);
-    expect(html.match(/data-state="empty"/g)).toHaveLength(5);
+    expect(html.match(/data-state="empty"/g)).toHaveLength(6);
     expect(html).toContain("No Optical Drives have been discovered.");
     expect(html).toContain("No discs are currently in an Optical Drive.");
     expect(html).toContain(
@@ -677,7 +678,7 @@ describe("DashboardView", () => {
 
   it.each([
     ["discs", ["Optical Drives", "Detected Discs", "Archive Jobs"]],
-    ["encoding", ["Encode Jobs"]],
+    ["encoding", ["Worker Incidents", "Encode Jobs"]],
     ["catalog", ["Catalog Review"]],
   ] as const)("renders only the %s detail-page sections", (section, expected) => {
     const html = renderToStaticMarkup(
@@ -1911,7 +1912,7 @@ describe("DashboardView", () => {
     });
 
     expect(html.match(/data-state="populated"/g)).toHaveLength(2);
-    expect(html.match(/data-state="empty"/g)).toHaveLength(1);
+    expect(html.match(/data-state="empty"/g)).toHaveLength(2);
     expect(html.match(/data-state="loading"/g)).toHaveLength(1);
     expect(html.match(/data-state="error"/g)).toHaveLength(1);
     expect(html).toContain("Upper drive");
@@ -2181,6 +2182,7 @@ function mutationDashboardState(
       ],
     },
     archiveJobs: { status: "loaded", items: [] },
+    workerIncidents: { status: "loaded", items: [] },
     encodeJobs: {
       status: "loaded",
       items: [
@@ -2350,6 +2352,7 @@ it("keeps the selected Reviewed filters across live dashboard snapshots", async 
     opticalDrives: { status: "loaded", items: [] },
     detectedDiscs: { status: "loaded", items: [] },
     archiveJobs: { status: "loaded", items: [] },
+    workerIncidents: { status: "loaded", items: [] },
     encodeJobs: { status: "loaded", items: [] },
     catalogReview: { status: "loaded", items: [] },
   };

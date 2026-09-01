@@ -20,6 +20,7 @@ type SnapshotOverrides = {
   archiveRequests?: Partial<ConsistentReadAccess["archiveRequests"]>;
   archiveJobs?: Partial<ConsistentReadAccess["archiveJobs"]>;
   encodeJobs?: Partial<ConsistentReadAccess["encodeJobs"]>;
+  workerIncidents?: Partial<ConsistentReadAccess["workerIncidents"]>;
 };
 
 export function completeCatalogReview(
@@ -68,6 +69,10 @@ export function withSnapshotOverrides(
           encodeJobs: {
             ...snapshotAccess.encodeJobs,
             ...overrides.encodeJobs,
+          },
+          workerIncidents: {
+            ...snapshotAccess.workerIncidents,
+            ...overrides.workerIncidents,
           },
         }),
       );

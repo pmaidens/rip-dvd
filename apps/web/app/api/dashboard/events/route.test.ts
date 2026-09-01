@@ -376,6 +376,48 @@ describe("GET /api/dashboard/events", () => {
     expect(event).not.toContain("/media/");
   });
 
+  it("streams Encode Worker Incident activation and recovery through the existing connection", async () => {
+    vi.useFakeTimers();
+    const access = dataAccessFixture.create();
+    const abortController = new AbortController();
+    const response = createDashboardEventResponse(access, {
+      signal: abortController.signal,
+      pollIntervalMs: 1_000,
+    });
+    const reader = response.body!.getReader();
+    await reader.read();
+    const identity = {
+      workerKind: "encode",
+      reasonCode: "poll_failure",
+      phase: "polling",
+      evidence: {},
+    } as const;
+
+    const incident = access.workerIncidents.record({
+      ...identity,
+      schemaVersion: 1,
+      retryability: "automatic",
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    const activeEvent = new TextDecoder().decode(
+      (await reader.read()).value,
+    );
+    expect(activeEvent).toContain(`"id":"${incident.id}"`);
+    expect(activeEvent).toContain('"status":"active"');
+    expect(activeEvent).toContain('"occurrenceCount":1');
+    expect(activeEvent).not.toContain('"investigation"');
+
+    access.workerIncidents.resolve(identity);
+    await vi.advanceTimersByTimeAsync(1_000);
+    const recoveredEvent = new TextDecoder().decode(
+      (await reader.read()).value,
+    );
+    abortController.abort();
+    expect(recoveredEvent).toContain(`"id":"${incident.id}"`);
+    expect(recoveredEvent).toContain('"status":"recovered"');
+    expect(recoveredEvent).toContain('"resolvedAt":"');
+  });
+
   it("streams Archive Job progress, failure, completion, and catalog review from SQLite", async () => {
     vi.useFakeTimers();
     const access = dataAccessFixture.create();

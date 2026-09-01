@@ -676,6 +676,7 @@ describe("data-access facade", () => {
         "disc_inspection_attempts",
         "disc_inspections",
         "disc_selection_supersessions",
+        "worker_incidents",
       ]),
     );
     expect(identifierTables).toHaveLength(18);
@@ -8089,6 +8090,9 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         name: "20260901172324_glorious_cargill",
       },
       {
+        name: "20260901170633_big_sasquatch",
+      },
+      {
         name: "20260828164042_married_lady_ursula",
       },
       {
@@ -8111,9 +8115,6 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
       },
       {
         name: "20260822193801_safe_proteus",
-      },
-      {
-        name: "20260822185006_burly_northstar",
       },
     ]);
     expect(

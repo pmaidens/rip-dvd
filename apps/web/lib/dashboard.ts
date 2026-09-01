@@ -27,6 +27,8 @@ import type {
   OriginalDiscArchive,
   OriginalDiscArchiveId,
   UnreadableSectorRange,
+  WorkerIncident,
+  WorkerIncidentRecoveryArea,
 } from "@rip-dvd/data-access";
 import {
   archiveBoundaryEvidenceFromRecord,
@@ -40,6 +42,7 @@ import {
 import {
   DASHBOARD_ACTIVE_DISC_LIMIT,
   DASHBOARD_ACTIVE_JOB_LIMIT,
+  DASHBOARD_ACTIVITY_HISTORY_LIMIT,
 } from "./dashboard-bounds";
 import { isArchiveJobRetryable } from "./archive-job-retryability";
 import { isTerminalEncodeJobStatus } from "./encode-job-status";
@@ -162,6 +165,20 @@ export interface DashboardEncodeJob {
   verifiedAt?: string | null;
 }
 
+export interface DashboardWorkerIncident {
+  id: string;
+  activityRevision: string;
+  worker: string;
+  status: "active" | "recovered";
+  reasonCode: string;
+  phase: string;
+  occurrenceCount: number;
+  firstObservedAt: string;
+  lastObservedAt: string;
+  resolvedAt: string | null;
+  investigation?: DashboardInvestigation;
+}
+
 export interface DashboardCatalogReviewItem {
   id: string;
   activityRevision?: string;
@@ -195,7 +212,8 @@ export type DashboardStatus =
   | DiscInspectionStatus
   | ArchiveRequestStatus
   | ArchiveJobStatus
-  | EncodeJobStatus;
+  | EncodeJobStatus
+  | DashboardWorkerIncident["status"];
 
 export type DashboardSectionResult<T> =
   | { status: "loaded"; items: T[]; page?: DashboardPage }
@@ -206,6 +224,7 @@ export interface DashboardSnapshot {
   opticalDrives: DashboardSectionResult<DashboardOpticalDrive>;
   detectedDiscs: DashboardSectionResult<DashboardDetectedDisc>;
   archiveJobs: DashboardSectionResult<DashboardArchiveJob>;
+  workerIncidents: DashboardSectionResult<DashboardWorkerIncident>;
   encodeJobs: DashboardSectionResult<DashboardEncodeJob>;
   catalogReview: DashboardSectionResult<DashboardCatalogReviewItem>;
 }
@@ -762,6 +781,83 @@ function encodeJobFailureReportInvestigation(
   };
 }
 
+const WORKER_INCIDENT_RECOVERY_AREA_LABELS: Record<
+  WorkerIncidentRecoveryArea,
+  string
+> = {
+  active_publication: "Active publication",
+  expired_publication_mutation: "Expired publication mutation",
+  expired_encode_job_claim: "Expired Encode Job claim",
+  expired_cancellation: "Expired cancellation",
+  pending_partial_cleanup: "Pending partial cleanup",
+};
+
+function workerIncidentInvestigation(
+  incident: WorkerIncident,
+): DashboardInvestigation {
+  const recovered = incident.resolvedAt !== null;
+  const technicalEvidence: DashboardInvestigation["technicalEvidence"] = [
+    { label: "Occurrence count", value: String(incident.occurrenceCount) },
+    {
+      label: "First observed",
+      value: incident.firstObservedAt.toISOString(),
+    },
+    {
+      label: "Last observed",
+      value: incident.lastObservedAt.toISOString(),
+    },
+    ...(incident.resolvedAt === null
+      ? []
+      : [{
+          label: "Recovered",
+          value: incident.resolvedAt.toISOString(),
+        }]),
+    ...("recoveryArea" in incident.evidence
+      ? [{
+          label: "Recovery area",
+          value:
+            WORKER_INCIDENT_RECOVERY_AREA_LABELS[
+              incident.evidence.recoveryArea
+            ],
+        }]
+      : []),
+  ];
+  const presentation = incident.reasonCode === "poll_failure"
+    ? {
+        explanation:
+          "The Encode Worker could not finish a polling pass for available work.",
+        suggestedAction: recovered
+          ? "No action is needed. The Encode Worker completed a later polling pass."
+          : "Check the Encode Worker stdout and database health. The worker will retry the polling pass automatically.",
+      }
+    : {
+        explanation:
+          "The Encode Worker could not finish part of publication recovery.",
+        suggestedAction: recovered
+          ? "No action is needed. The Encode Worker completed a later recovery pass."
+          : "Check the Encode Worker stdout and media-library availability. The worker will retry publication recovery automatically.",
+      };
+  return {
+    incidentId: incident.id,
+    worker: "Encode Worker",
+    subjectType: "Worker Incident",
+    subjectId: incident.id,
+    attempt: null,
+    reasonCode: `worker.${incident.reasonCode}`,
+    failedPhase: incident.phase === "polling"
+      ? "Polling"
+      : "Publication recovery",
+    occurredAt: incident.lastObservedAt.toISOString(),
+    retryability: "not_appropriate",
+    retryabilityDetail: recovered
+      ? "The Encode Worker recovered without an operator retry."
+      : "The Encode Worker retries this phase automatically; there is no operator retry action.",
+    explanation: presentation.explanation,
+    suggestedAction: presentation.suggestedAction,
+    technicalEvidence,
+  };
+}
+
 function legacyEncodeJobInvestigation(
   job: EncodeJob,
   canRetry: boolean,
@@ -897,7 +993,7 @@ function readDashboardSnapshotRecords(
               activeLimit: DASHBOARD_ACTIVE_JOB_LIMIT,
               historyLimit: activityLimit,
             },
-          },
+      },
     ),
   );
   const encodeJobFailureReportSource = readSource(() =>
@@ -906,6 +1002,12 @@ function readDashboardSnapshotRecords(
       : access.encodeJobs.listFailureReports(
           encodeJobSource.value.map((job) => job.id),
         )
+  );
+  const workerIncidentSource = readSource(() =>
+    access.workerIncidents.list({
+      workerKind: "encode",
+      resolvedLimit: activityLimit ?? DASHBOARD_ACTIVITY_HISTORY_LIMIT,
+    }),
   );
   const encodeJobLinkSource = readSource(() =>
     encodeJobSource.status === "error"
@@ -1461,6 +1563,30 @@ function readDashboardSnapshotRecords(
           );
         })();
 
+  const workerIncidents = workerIncidentSource.status === "error"
+    ? unavailable<DashboardWorkerIncident>()
+    : loaded(
+        workerIncidentSource.value.map((incident): DashboardWorkerIncident => ({
+          id: incident.id,
+          activityRevision: [
+            incident.lastObservedAt.toISOString(),
+            incident.occurrenceCount,
+            incident.resolvedAt?.toISOString() ?? "active",
+          ].join(":"),
+          worker: "Encode Worker",
+          status: incident.resolvedAt === null ? "active" : "recovered",
+          reasonCode: `worker.${incident.reasonCode}`,
+          phase: incident.phase,
+          occurrenceCount: incident.occurrenceCount,
+          firstObservedAt: incident.firstObservedAt.toISOString(),
+          lastObservedAt: incident.lastObservedAt.toISOString(),
+          resolvedAt: incident.resolvedAt?.toISOString() ?? null,
+          ...(includeInvestigations
+            ? { investigation: workerIncidentInvestigation(incident) }
+            : {}),
+        })),
+      );
+
   const catalogReview =
     archiveSource.status === "error"
       ? unavailable<DashboardCatalogReviewItem>()
@@ -1530,6 +1656,7 @@ function readDashboardSnapshotRecords(
     opticalDrives,
     detectedDiscs,
     archiveJobs,
+    workerIncidents,
     encodeJobs,
     catalogReview,
   };

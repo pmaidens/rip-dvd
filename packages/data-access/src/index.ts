@@ -52,7 +52,6 @@ export {
   isCorrectedEncodePredecessorReady,
   isEncodeJobSafelyTerminal,
 } from "./corrected-encode-readiness.js";
-
 export * from "./errors.js";
 export * from "./dvd-scan.js";
 export {
@@ -65,6 +64,12 @@ export {
   DVD_SALVAGE_REJECTION_DESCRIPTIONS,
   MAX_MEDIA_ITEM_HIERARCHY_DEPTH,
   MEDIA_ITEM_KINDS,
+  WORKER_INCIDENT_PHASES,
+  WORKER_INCIDENT_REASON_CODES,
+  WORKER_INCIDENT_RECOVERY_AREAS,
+  WORKER_INCIDENT_RETRYABILITIES,
+  WORKER_INCIDENT_SCHEMA_VERSIONS,
+  WORKER_KINDS,
 } from "./domain-values.js";
 export type { DvdSalvageRejectionReason } from "./domain-values.js";
 export type * from "./types.js";
