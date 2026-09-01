@@ -975,6 +975,7 @@ export const encodeJobFailureReports = sqliteTable(
     expectedSeconds: real("expected_seconds"),
     observedSeconds: real("observed_seconds"),
     context: text("context", { enum: ENCODE_JOB_FAILURE_CONTEXTS }),
+    sequence: integer("sequence").notNull(),
     occurredAt: integer("occurred_at", { mode: "timestamp_ms" }).notNull(),
     createdAt: createdAt(),
   },
@@ -1005,6 +1006,10 @@ export const encodeJobFailureReports = sqliteTable(
       sql`${table.diagnostic} is null or (typeof(${table.diagnostic}) = 'text' and length(${table.diagnostic}) between 1 and ${sql.raw(String(ENCODE_JOB_FAILURE_DIAGNOSTIC_MAX_LENGTH))})`,
     ),
     check(
+      "encode_job_failure_reports_sequence_check",
+      sql`typeof(${table.sequence}) = 'integer' and ${table.sequence} >= 1`,
+    ),
+    check(
       "encode_job_failure_reports_evidence_check",
       sql`(${table.reasonCode} = 'command_failed' and ${table.timeoutSeconds} is null and ${table.validationCheck} is null and ${table.expectedSeconds} is null and ${table.observedSeconds} is null and ${table.context} is null and ((typeof(${table.exitStatus}) = 'integer' and ${table.exitStatus} between 1 and 255 and ${table.signal} is null) or (${table.exitStatus} is null and ${table.signal} in (${sqliteStringLiterals(ENCODE_JOB_FAILURE_SIGNALS)})))) or (${table.reasonCode} = 'command_timeout' and ${table.exitStatus} is null and ${table.signal} is null and typeof(${table.timeoutSeconds}) = 'integer' and ${table.timeoutSeconds} between 1 and 604800 and ${table.validationCheck} is null and ${table.expectedSeconds} is null and ${table.observedSeconds} is null and ${table.context} is null) or (${table.reasonCode} = 'output_validation_failed' and ${table.exitStatus} is null and ${table.signal} is null and ${table.timeoutSeconds} is null and ${table.context} is null and ((${table.validationCheck} in (${sqliteStringLiterals(ENCODE_JOB_FAILURE_VALIDATION_CHECKS)}) and ${table.expectedSeconds} is null and ${table.observedSeconds} is null) or (${table.validationCheck} is null and typeof(${table.expectedSeconds}) in ('integer', 'real') and ${table.expectedSeconds} > 0 and ${table.expectedSeconds} <= 604800 and typeof(${table.observedSeconds}) in ('integer', 'real') and ${table.observedSeconds} >= 0 and ${table.observedSeconds} <= 604800))) or (${table.reasonCode} in ('input_unavailable', 'invalid_configuration', 'output_conflict', 'unsafe_output_state', 'unknown_failure') and ${table.exitStatus} is null and ${table.signal} is null and ${table.timeoutSeconds} is null and ${table.validationCheck} is null and ${table.expectedSeconds} is null and ${table.observedSeconds} is null and ${table.context} is null) or (${table.reasonCode} = 'cleanup_failed' and ${table.exitStatus} is null and ${table.signal} is null and ${table.timeoutSeconds} is null and ${table.validationCheck} is null and ${table.expectedSeconds} is null and ${table.observedSeconds} is null and ${table.context} in ('partial_output', 'replacement_artifact', 'published_output', 'publication_completion')) or (${table.reasonCode} = 'publication_failed' and ${table.exitStatus} is null and ${table.signal} is null and ${table.timeoutSeconds} is null and ${table.validationCheck} is null and ${table.expectedSeconds} is null and ${table.observedSeconds} is null and ${table.context} in ('publication_mutation', 'publication_completion')) or (${table.reasonCode} = 'lease_expired' and ${table.exitStatus} is null and ${table.signal} is null and ${table.timeoutSeconds} is null and ${table.validationCheck} is null and ${table.expectedSeconds} is null and ${table.observedSeconds} is null and ${table.context} in ('job_claim', 'publication_cleanup')) or (${table.reasonCode} = 'worker_interrupted' and ${table.exitStatus} is null and ${table.signal} is null and ${table.timeoutSeconds} is null and ${table.validationCheck} is null and ${table.expectedSeconds} is null and ${table.observedSeconds} is null and ${table.context} in ('worker_shutdown', 'publication_completion')) or (${table.reasonCode} = 'publication_recovery_failed' and ${table.exitStatus} is null and ${table.signal} is null and ${table.timeoutSeconds} is null and ${table.validationCheck} is null and ${table.expectedSeconds} is null and ${table.observedSeconds} is null and ${table.context} in ('publication_recovery', 'cleanup_recovery'))`,
     ),
@@ -1012,10 +1017,9 @@ export const encodeJobFailureReports = sqliteTable(
       "encode_job_failure_reports_reason_phase_check",
       sql`${table.reasonCode} in ('input_unavailable', 'invalid_configuration', 'output_conflict', 'unsafe_output_state', 'output_validation_failed', 'unknown_failure') or (${table.reasonCode} in ('command_failed', 'command_timeout') and ${table.phase} in ('scanning', 'previewing', 'encoding') and ${table.retryability} = 'appropriate') or (${table.reasonCode} = 'cleanup_failed' and ${table.phase} = 'cleanup' and ${table.retryability} = 'after_action') or (${table.reasonCode} = 'publication_failed' and ${table.phase} = 'publication' and ${table.retryability} = 'after_action') or (${table.reasonCode} = 'lease_expired' and ${table.retryability} = 'after_action' and ((${table.context} = 'publication_cleanup' and ${table.phase} = 'publication') or (${table.context} = 'job_claim' and ${table.phase} in ('preparation', 'scanning', 'previewing', 'encoding', 'validation', 'publication')))) or (${table.reasonCode} = 'worker_interrupted' and ${table.retryability} = 'after_action' and ((${table.context} = 'publication_completion' and ${table.phase} = 'publication') or (${table.context} = 'worker_shutdown' and ${table.phase} in ('preparation', 'scanning', 'previewing', 'encoding', 'validation', 'publication')))) or (${table.reasonCode} = 'publication_recovery_failed' and ${table.phase} = 'recovery' and ${table.retryability} = 'after_action')`,
     ),
-    index("encode_job_failure_reports_job_occurred_idx").on(
+    index("encode_job_failure_reports_job_sequence_idx").on(
       table.encodeJobId,
-      table.occurredAt,
-      table.id,
+      table.sequence,
     ),
   ],
 );

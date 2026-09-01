@@ -389,6 +389,7 @@ function toEncodeJobFailureReport(
     expectedSeconds,
     observedSeconds,
     schemaVersion,
+    sequence: _sequence,
     signal,
     timeoutSeconds,
     validationCheck,
@@ -427,6 +428,7 @@ function toEncodeJobFailureReport(
 function encodeJobFailureReportRecord(
   encodeJobId: EncodeJobId,
   report: ValidatedEncodeJobFailureReportInput,
+  sequence: number,
   occurredAt: Date,
 ): typeof encodeJobFailureReports.$inferInsert {
   return {
@@ -461,6 +463,7 @@ function encodeJobFailureReportRecord(
         ? report.evidence.observedSeconds
         : null,
     context: encodeJobFailureEvidenceContext(report.evidence),
+    sequence,
     occurredAt,
     createdAt: occurredAt,
   };
@@ -1257,23 +1260,85 @@ export function createDataAccessInternal(
     if (encodeJobId === undefined || reports === undefined) {
       return;
     }
-    const latestOccurredAt = transaction
-      .select({ occurredAt: encodeJobFailureReports.occurredAt })
+    const latestSequence = transaction
+      .select({ sequence: encodeJobFailureReports.sequence })
       .from(encodeJobFailureReports)
       .where(eq(encodeJobFailureReports.encodeJobId, encodeJobId))
-      .orderBy(desc(encodeJobFailureReports.occurredAt))
+      .orderBy(desc(encodeJobFailureReports.sequence))
       .limit(1)
-      .get()?.occurredAt;
-    const firstOccurredAt = latestOccurredAt !== undefined &&
-        latestOccurredAt.getTime() >= occurredAt.getTime()
-      ? new Date(latestOccurredAt.getTime() + 1)
-      : occurredAt;
+      .get()?.sequence ?? 0;
     for (const [index, report] of reports.entries()) {
-      const reportOccurredAt = new Date(firstOccurredAt.getTime() + index);
       transaction.insert(encodeJobFailureReports).values(
-        encodeJobFailureReportRecord(encodeJobId, report, reportOccurredAt),
+        encodeJobFailureReportRecord(
+          encodeJobId,
+          report,
+          latestSequence + index + 1,
+          occurredAt,
+        ),
       ).run();
     }
+  }
+
+  function completeEncodeCancellation(
+    claim: RunningEncodeJob,
+    reports: readonly ValidatedEncodeJobFailureReportInput[] = [],
+  ): EncodeJob {
+    const timestamp = now();
+    const cleanupPending = reports.length > 0;
+    return database.transaction((transaction) => {
+      const cancelled = transaction
+        .update(encodeJobs)
+        .set({
+          status: "cancelled",
+          reservesOutputPath: sql`case when exists (
+            select 1 from encode_jobs as corrected_replacement
+            where corrected_replacement.predecessor_encode_job_id = ${claim.id}
+              and corrected_replacement.output_path = ${claim.outputPath}
+              and corrected_replacement.reserves_output_path = 1
+          ) then 0 else ${claim.replaceExistingOutput ? 1 : 0} end`,
+          partialCleanupOutputPath: cleanupPending ? claim.outputPath : null,
+          partialCleanupClaimToken: cleanupPending ? claim.claimToken : null,
+          partialCleanupLeaseToken: null,
+          publicationPending: false,
+          publicationCompletionPending: false,
+          progressEtaSeconds: null,
+          claimedBy: null,
+          claimToken: null,
+          claimedAt: null,
+          completedAt: claim.completedAt,
+          errorMessage: null,
+          updatedAt: timestamp,
+        })
+        .where(and(
+          eq(encodeJobs.id, claim.id),
+          eq(encodeJobs.status, "cancellation_requested"),
+          eq(encodeJobs.claimToken, claim.claimToken),
+          isNull(encodeJobs.partialCleanupLeaseToken),
+          eq(encodeJobs.publicationPending, false),
+          eq(encodeJobs.publicationCompletionPending, false),
+          cleanupPending
+            ? undefined
+            : and(
+                isNull(encodeJobs.partialCleanupOutputPath),
+                isNull(encodeJobs.partialCleanupClaimToken),
+              ),
+        ))
+        .returning()
+        .get();
+      if (!cancelled) {
+        throw new StaleJobAttemptError("encode job", claim.id);
+      }
+      appendEncodeJobFailureReports(
+        transaction,
+        cancelled.id,
+        reports,
+        timestamp,
+      );
+      if (!cleanupPending) {
+        clearCorrectedEncodePublicationAuthority(transaction, cancelled.id);
+      }
+      return cancelled;
+    }, { behavior: "immediate" });
   }
 
   function uniqueDeclaredByteCount(
@@ -9629,49 +9694,21 @@ export function createDataAccessInternal(
         return asClaimedEncodeJob(renewed);
       },
       completeCancellation(claim) {
-        const timestamp = now();
-        return database.transaction((transaction) => {
-          const cancelled = transaction
-            .update(encodeJobs)
-            .set({
-              status: "cancelled",
-              reservesOutputPath: sql`case when exists (
-                select 1 from encode_jobs as corrected_replacement
-                where corrected_replacement.predecessor_encode_job_id = ${claim.id}
-                  and corrected_replacement.output_path = ${claim.outputPath}
-                  and corrected_replacement.reserves_output_path = 1
-              ) then 0 else ${claim.replaceExistingOutput ? 1 : 0} end`,
-              partialCleanupOutputPath: null,
-              partialCleanupClaimToken: null,
-              partialCleanupLeaseToken: null,
-              publicationPending: false,
-              publicationCompletionPending: false,
-              progressEtaSeconds: null,
-              claimedBy: null,
-              claimToken: null,
-              claimedAt: null,
-              completedAt: claim.completedAt,
-              errorMessage: null,
-              updatedAt: timestamp,
-            })
-            .where(and(
-              eq(encodeJobs.id, claim.id),
-              eq(encodeJobs.status, "cancellation_requested"),
-              eq(encodeJobs.claimToken, claim.claimToken),
-              isNull(encodeJobs.partialCleanupOutputPath),
-              isNull(encodeJobs.partialCleanupClaimToken),
-              isNull(encodeJobs.partialCleanupLeaseToken),
-              eq(encodeJobs.publicationPending, false),
-              eq(encodeJobs.publicationCompletionPending, false),
-            ))
-            .returning()
-            .get();
-          if (!cancelled) {
-            throw new StaleJobAttemptError("encode job", claim.id);
-          }
-          clearCorrectedEncodePublicationAuthority(transaction, cancelled.id);
-          return cancelled;
-        }, { behavior: "immediate" });
+        return completeEncodeCancellation(claim);
+      },
+      completeCancellationWithReports(claim, reportInputs) {
+        if (reportInputs.length === 0 || reportInputs.length > 10) {
+          throw new DomainInvariantError(
+            "Encode Job cancellation cleanup must include between one and ten reports",
+          );
+        }
+        const reports = reportInputs.map(validateEncodeJobFailureReport);
+        if (reports.some(({ reasonCode }) => reasonCode !== "cleanup_failed")) {
+          throw new DomainInvariantError(
+            "Encode Job cancellation cleanup report reason is invalid",
+          );
+        }
+        return completeEncodeCancellation(claim, reports);
       },
       beginPublicationMutation(claim, cleanup, retainedOutputPath) {
         if (!cleanup.publicationPending || cleanup.leaseToken !== null) {
@@ -10939,7 +10976,12 @@ export function createDataAccessInternal(
             .from(encodeJobs)
             .where(and(
               eq(encodeJobs.id, cleanup.jobId),
-              inArray(encodeJobs.status, ["running", "failed", "completed"]),
+              inArray(encodeJobs.status, [
+                "running",
+                "failed",
+                "completed",
+                "cancelled",
+              ]),
               eq(encodeJobs.partialCleanupOutputPath, cleanup.outputPath),
               eq(encodeJobs.partialCleanupClaimToken, cleanup.claimToken),
               eq(encodeJobs.publicationPending, cleanup.publicationPending),
@@ -10981,8 +11023,7 @@ export function createDataAccessInternal(
             .from(encodeJobFailureReports)
             .where(eq(encodeJobFailureReports.encodeJobId, id))
             .orderBy(
-              desc(encodeJobFailureReports.occurredAt),
-              desc(encodeJobFailureReports.id),
+              desc(encodeJobFailureReports.sequence),
             )
             .limit(ENCODE_JOB_FAILURE_REPORT_HISTORY_LIMIT)
             .all()

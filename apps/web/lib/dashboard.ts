@@ -880,76 +880,26 @@ interface EncodeFailureEvidencePresentation {
 function encodeFailureEvidencePresentation(
   report: EncodeJobFailureReport,
 ): EncodeFailureEvidencePresentation {
-  switch (report.evidence.kind) {
-    case "exit_status":
-      return {
-        ...ENCODE_FAILURE_PRESENTATIONS.command_failed,
-        technicalEvidence: [{
-          label: "Exit status",
-          value: String(report.evidence.exitStatus),
-        }],
-      };
-    case "signal":
-      return {
-        ...ENCODE_FAILURE_PRESENTATIONS.command_failed,
+  const presentation = report.evidence.kind === "signal"
+    ? {
+        ...ENCODE_FAILURE_PRESENTATIONS[report.reasonCode],
         explanation: "HandBrake stopped after receiving a process signal.",
-        technicalEvidence: [{
-          label: "Termination signal",
-          value: report.evidence.signal,
-        }],
-      };
-    case "timeout":
-      return {
-        ...ENCODE_FAILURE_PRESENTATIONS.command_timeout,
-        technicalEvidence: [{
-          label: "Timeout limit",
-          value: `${report.evidence.timeoutSeconds} seconds`,
-        }],
-      };
-    case "duration":
-      return {
-        technicalEvidence: [
-          {
-            label: "Expected duration",
-            value: `${report.evidence.expectedSeconds} seconds`,
-          },
-          {
-            label: "Observed duration",
-            value: `${report.evidence.observedSeconds} seconds`,
-          },
-        ],
-        explanation:
-          "The encoded file is materially shorter than the selected DVD title.",
-        suggestedAction:
-          "Verify the selected DVD title and source metadata, then retry the Encode Job.",
-      };
-    case "validation_check": {
-      const presentation =
-        ENCODE_VALIDATION_CHECK_PRESENTATIONS[report.evidence.check];
-      return {
-        technicalEvidence: [{
-          label: "Validation check",
-          value: presentation.evidence,
-        }],
-        explanation: presentation.explanation,
-        suggestedAction: presentation.suggestedAction,
-      };
-    }
-    case "none":
-      return {
-        ...ENCODE_FAILURE_PRESENTATIONS[report.reasonCode],
-        technicalEvidence: [],
-      };
-    case "cleanup":
-    case "publication":
-    case "lease":
-    case "interruption":
-    case "recovery":
-      return {
-        ...ENCODE_FAILURE_PRESENTATIONS[report.reasonCode],
-        technicalEvidence: encodeFailureEvidence(report.evidence),
-      };
-  }
+      }
+    : report.evidence.kind === "duration"
+      ? {
+          explanation:
+            "The encoded file is materially shorter than the selected DVD title.",
+          suggestedAction:
+            "Verify the selected DVD title and source metadata, then retry the Encode Job.",
+        }
+      : report.evidence.kind === "validation_check"
+        ? ENCODE_VALIDATION_CHECK_PRESENTATIONS[report.evidence.check]
+        : ENCODE_FAILURE_PRESENTATIONS[report.reasonCode];
+  return {
+    explanation: presentation.explanation,
+    suggestedAction: presentation.suggestedAction,
+    technicalEvidence: encodeFailureEvidence(report.evidence),
+  };
 }
 
 function encodeFailureRetryGuidance(

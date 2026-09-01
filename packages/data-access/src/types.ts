@@ -1261,6 +1261,10 @@ export interface EncodeJobAccess {
   claimNext(workerId: string): RunningEncodeJob | null;
   renewClaim(claim: RunningEncodeJob): ClaimedEncodeJob;
   completeCancellation(claim: RunningEncodeJob): EncodeJob;
+  completeCancellationWithReports(
+    claim: RunningEncodeJob,
+    reports: readonly EncodeJobFailureReportInput[],
+  ): EncodeJob;
   beginPublicationMutation(
     claim: RunningEncodeJob,
     cleanup: EncodeJobPartialCleanup,

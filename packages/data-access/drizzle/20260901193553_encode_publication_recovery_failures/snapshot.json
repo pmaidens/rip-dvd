@@ -1,7 +1,7 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "73b70a9a-011c-47e1-a492-12b699d1fe4d",
+  "id": "b101d957-9b05-47fb-8ed3-5f0be074059e",
   "prevIds": [
     "53253709-3d15-4c3f-a140-e5ddf944d067",
     "f12a8672-2002-4176-8bb6-b6b93e74c447"
@@ -1410,6 +1410,16 @@
       "default": null,
       "generated": null,
       "name": "context",
+      "entityType": "columns",
+      "table": "encode_job_failure_reports"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "sequence",
       "entityType": "columns",
       "table": "encode_job_failure_reports"
     },
@@ -3450,18 +3460,14 @@
           "isExpression": false
         },
         {
-          "value": "occurred_at",
-          "isExpression": false
-        },
-        {
-          "value": "id",
+          "value": "sequence",
           "isExpression": false
         }
       ],
       "isUnique": false,
       "where": null,
       "origin": "manual",
-      "name": "encode_job_failure_reports_job_occurred_idx",
+      "name": "encode_job_failure_reports_job_sequence_idx",
       "entityType": "indexes",
       "table": "encode_job_failure_reports"
     },
@@ -4068,6 +4074,12 @@
       "table": "encode_job_failure_reports"
     },
     {
+      "value": "typeof(\"sequence\") = 'integer' and \"sequence\" >= 1",
+      "name": "encode_job_failure_reports_sequence_check",
+      "entityType": "checks",
+      "table": "encode_job_failure_reports"
+    },
+    {
       "value": "(\"reason_code\" = 'command_failed' and \"timeout_seconds\" is null and \"validation_check\" is null and \"expected_seconds\" is null and \"observed_seconds\" is null and \"context\" is null and ((typeof(\"exit_status\") = 'integer' and \"exit_status\" between 1 and 255 and \"signal\" is null) or (\"exit_status\" is null and \"signal\" in ('SIGABRT', 'SIGALRM', 'SIGBREAK', 'SIGBUS', 'SIGCHLD', 'SIGCONT', 'SIGFPE', 'SIGHUP', 'SIGILL', 'SIGINT', 'SIGIO', 'SIGIOT', 'SIGKILL', 'SIGLOST', 'SIGPIPE', 'SIGPOLL', 'SIGPROF', 'SIGPWR', 'SIGQUIT', 'SIGSEGV', 'SIGSTKFLT', 'SIGSTOP', 'SIGSYS', 'SIGTERM', 'SIGTRAP', 'SIGTSTP', 'SIGTTIN', 'SIGTTOU', 'SIGUNUSED', 'SIGURG', 'SIGUSR1', 'SIGUSR2', 'SIGVTALRM', 'SIGWINCH', 'SIGXCPU', 'SIGXFSZ', 'SIGINFO')))) or (\"reason_code\" = 'command_timeout' and \"exit_status\" is null and \"signal\" is null and typeof(\"timeout_seconds\") = 'integer' and \"timeout_seconds\" between 1 and 604800 and \"validation_check\" is null and \"expected_seconds\" is null and \"observed_seconds\" is null and \"context\" is null) or (\"reason_code\" = 'output_validation_failed' and \"exit_status\" is null and \"signal\" is null and \"timeout_seconds\" is null and \"context\" is null and ((\"validation_check\" in ('subtitle_streams', 'subtitle_packets', 'subtitle_cleanup', 'video_metadata', 'duration_metadata', 'video_packets', 'audio_timing', 'video_decode', 'output_file') and \"expected_seconds\" is null and \"observed_seconds\" is null) or (\"validation_check\" is null and typeof(\"expected_seconds\") in ('integer', 'real') and \"expected_seconds\" > 0 and \"expected_seconds\" <= 604800 and typeof(\"observed_seconds\") in ('integer', 'real') and \"observed_seconds\" >= 0 and \"observed_seconds\" <= 604800))) or (\"reason_code\" in ('input_unavailable', 'invalid_configuration', 'output_conflict', 'unsafe_output_state', 'unknown_failure') and \"exit_status\" is null and \"signal\" is null and \"timeout_seconds\" is null and \"validation_check\" is null and \"expected_seconds\" is null and \"observed_seconds\" is null and \"context\" is null) or (\"reason_code\" = 'cleanup_failed' and \"exit_status\" is null and \"signal\" is null and \"timeout_seconds\" is null and \"validation_check\" is null and \"expected_seconds\" is null and \"observed_seconds\" is null and \"context\" in ('partial_output', 'replacement_artifact', 'published_output', 'publication_completion')) or (\"reason_code\" = 'publication_failed' and \"exit_status\" is null and \"signal\" is null and \"timeout_seconds\" is null and \"validation_check\" is null and \"expected_seconds\" is null and \"observed_seconds\" is null and \"context\" in ('publication_mutation', 'publication_completion')) or (\"reason_code\" = 'lease_expired' and \"exit_status\" is null and \"signal\" is null and \"timeout_seconds\" is null and \"validation_check\" is null and \"expected_seconds\" is null and \"observed_seconds\" is null and \"context\" in ('job_claim', 'publication_cleanup')) or (\"reason_code\" = 'worker_interrupted' and \"exit_status\" is null and \"signal\" is null and \"timeout_seconds\" is null and \"validation_check\" is null and \"expected_seconds\" is null and \"observed_seconds\" is null and \"context\" in ('worker_shutdown', 'publication_completion')) or (\"reason_code\" = 'publication_recovery_failed' and \"exit_status\" is null and \"signal\" is null and \"timeout_seconds\" is null and \"validation_check\" is null and \"expected_seconds\" is null and \"observed_seconds\" is null and \"context\" in ('publication_recovery', 'cleanup_recovery'))",
       "name": "encode_job_failure_reports_evidence_check",
       "entityType": "checks",
@@ -4098,7 +4110,7 @@
       "table": "encode_jobs"
     },
     {
-      "value": "\"progress_phase\" is null or \"progress_phase\" in ('scanning', 'previewing', 'encoding')",
+      "value": "\"progress_phase\" is null or \"progress_phase\" in ('scanning', 'previewing', 'encoding', 'validation')",
       "name": "encode_jobs_progress_phase_check",
       "entityType": "checks",
       "table": "encode_jobs"

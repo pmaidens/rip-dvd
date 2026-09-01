@@ -214,6 +214,90 @@ describe("Encode Job Failure Reports", () => {
     ]);
   });
 
+  it("keeps cancellation terminal while retaining fenced cleanup reports", () => {
+    const { access, job } = createEncodeJobFixture();
+    const claimed = claim(access);
+    access.encodeJobs.requestCancellation(job.id);
+
+    const cancelled = access.encodeJobs.completeCancellationWithReports(
+      claimed,
+      [cleanupFailure("cancellation quarantine failed")],
+    );
+    const cleanup = {
+      jobId: job.id,
+      outputPath: claimed.outputPath,
+      claimToken: claimed.claimToken,
+      leaseToken: null,
+      publicationPending: false,
+    };
+
+    expect(cancelled).toMatchObject({
+      status: "cancelled",
+      partialCleanupOutputPath: claimed.outputPath,
+      partialCleanupClaimToken: claimed.claimToken,
+    });
+    access.encodeJobs.recordCleanupFailureReport(
+      cleanup,
+      cleanupFailure("automatic cleanup retry failed"),
+    );
+    expect(access.encodeJobs.listFailureReports([job.id])).toEqual([
+      expect.objectContaining({
+        reasonCode: "cleanup_failed",
+        diagnostic: "automatic cleanup retry failed",
+      }),
+      expect.objectContaining({
+        reasonCode: "cleanup_failed",
+        diagnostic: "cancellation quarantine failed",
+      }),
+    ]);
+    expect(access.encodeJobs.completePartialCleanup(cleanup)).toMatchObject({
+      status: "cancelled",
+      partialCleanupOutputPath: null,
+      partialCleanupClaimToken: null,
+    });
+  });
+
+  it("orders reports by insertion sequence without changing occurrence time", () => {
+    vi.useFakeTimers();
+    const firstOccurrence = new Date("2026-09-01T12:00:00.000Z");
+    vi.setSystemTime(firstOccurrence);
+    const { access, job } = createEncodeJobFixture();
+    access.encodeJobs.failWithReports(
+      claim(access),
+      "HandBrake command failed",
+      [commandFailure(41, "first primary"), cleanupFailure("first cleanup")],
+    );
+
+    expect(
+      access.encodeJobs.listFailureReports([job.id]).map(({ occurredAt }) =>
+        occurredAt
+      ),
+    ).toEqual([firstOccurrence, firstOccurrence]);
+
+    access.encodeJobs.requeue(job.id);
+    const clockRollbackOccurrence = new Date("2026-09-01T11:00:00.000Z");
+    vi.setSystemTime(clockRollbackOccurrence);
+    access.encodeJobs.failWithReport(
+      claim(access),
+      commandFailure(42, "after clock rollback"),
+    );
+
+    expect(access.encodeJobs.listFailureReports([job.id])).toEqual([
+      expect.objectContaining({
+        diagnostic: "after clock rollback",
+        occurredAt: clockRollbackOccurrence,
+      }),
+      expect.objectContaining({
+        diagnostic: "first cleanup",
+        occurredAt: firstOccurrence,
+      }),
+      expect.objectContaining({
+        diagnostic: "first primary",
+        occurredAt: firstOccurrence,
+      }),
+    ]);
+  });
+
   it("fences cleanup reports by the current cleanup lease", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-01T12:00:00.000Z"));

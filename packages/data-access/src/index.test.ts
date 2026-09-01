@@ -8088,7 +8088,7 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
-        name: "20260901191117_encode_publication_recovery_failures",
+        name: "20260901193553_encode_publication_recovery_failures",
       },
       {
         name: "20260901183135_encode_preparation_validation_failures",
