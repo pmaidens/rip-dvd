@@ -319,6 +319,23 @@ function recordCleanupFailure(
   }
 }
 
+function recordClaimFailure(
+  claim: RunningEncodeJob,
+  report: EncodeJobFailureReportInput,
+  label: string,
+  options: EncodePublicationOptions,
+): void {
+  try {
+    options.access.encodeJobs.recordFailureReport(claim, report);
+  } catch (error) {
+    options.log(
+      `${label} Failure Report could not be persisted: ${
+        normalizeErrorMessage(error)
+      }`,
+    );
+  }
+}
+
 export interface AtomicPathExchange {
   exchange(firstPath: string, secondPath: string): void;
 }
@@ -2064,18 +2081,12 @@ export async function executeEncodeClaim(
     }
   } catch (error) {
     if (error instanceof PendingPublicationRecoveryError) {
-      try {
-        options.access.encodeJobs.recordFailureReport(
-          claim,
-          publicationFailureReport(error, publicationOperation),
-        );
-      } catch (reportError) {
-        options.log(
-          `Encode publication Failure Report could not be persisted: ${
-            normalizeErrorMessage(reportError)
-          }`,
-        );
-      }
+      recordClaimFailure(
+        claim,
+        publicationFailureReport(error, publicationOperation),
+        "Encode publication",
+        options,
+      );
       options.log(
         `Encode publication mutation requires reconciliation: ${error.message}`,
       );
@@ -2136,19 +2147,20 @@ export async function executeEncodeClaim(
           }`,
         );
         if (options.signal.aborted) {
-          try {
-            options.access.encodeJobs.recordFailureReport(
-              claim,
-              interruptionFailureReport(error, failurePhase),
-            );
-          } catch (reportError) {
-            options.log(
-              `Encode interruption Failure Report could not be persisted: ${
-                normalizeErrorMessage(reportError)
-              }`,
-            );
-          }
+          recordClaimFailure(
+            claim,
+            interruptionFailureReport(error, failurePhase),
+            "Encode interruption",
+            options,
+          );
           throw error;
+        }
+        if (pendingPartialCleanup !== undefined) {
+          recordCleanupFailure(
+            pendingPartialCleanup,
+            publicationFailureReport(error, publicationOperation),
+            options,
+          );
         }
         return;
       }
