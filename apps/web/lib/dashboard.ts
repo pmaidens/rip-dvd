@@ -1849,13 +1849,15 @@ function readDashboardSnapshotRecords(
               const primaryFailureIsUnclassified = job.status === "failed" &&
                 includeInvestigations &&
                 !failureReports.some(
-                  ({ reasonCode }) => reasonCode !== "cleanup_failed",
+                  ({ reasonCode }) =>
+                    reasonCode !== "cleanup_failed" &&
+                    reasonCode !== "publication_recovery_failed",
                 );
               const investigations = [
+                ...structuredInvestigations,
                 ...(primaryFailureIsUnclassified
                   ? [legacyEncodeJobInvestigation(job, canRequeue)]
                   : []),
-                ...structuredInvestigations,
               ];
               return {
                 id: job.id,

@@ -547,12 +547,12 @@ it("migrates command reports and accepts every new Encode failure category", () 
   sqlite.close();
 });
 
-it("preserves existing command Failure Reports when adding post-command evidence", () => {
+it("preserves every previously accepted command Failure Report", () => {
   const databasePath = createDatabasePath(
     "rip-dvd-post-command-report-migration-",
   );
   const previousMigrations = createMigrationsThrough(
-    "20260901172324_glorious_cargill",
+    "20260901183135_encode_preparation_validation_failures",
   );
   const previousAccess = createLegacySidecarDataAccess({
     databasePath,
@@ -583,8 +583,8 @@ it("preserves existing command Failure Reports when adding post-command evidence
       timeout_seconds,
       occurred_at,
       created_at
-    ) VALUES (?, ?, 1, 'encode_worker', 'command_failed', 'encoding',
-      'appropriate', ?, 19, NULL, NULL, ?, ?)
+    ) VALUES (?, ?, 1, 'encode_worker', 'command_failed', 'validation',
+      'after_action', ?, 19, NULL, NULL, ?, ?)
   `).run(
     "previous-command-failure-report",
     job.id,
@@ -599,8 +599,8 @@ it("preserves existing command Failure Reports when adding post-command evidence
     expect.objectContaining({
       id: "previous-command-failure-report",
       reasonCode: "command_failed",
-      phase: "encoding",
-      retryability: "appropriate",
+      phase: "validation",
+      retryability: "after_action",
       diagnostic: "previous private diagnostic",
       evidence: { kind: "exit_status", exitStatus: 19 },
     }),
