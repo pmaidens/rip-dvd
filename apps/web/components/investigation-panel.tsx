@@ -12,6 +12,7 @@ import {
 interface InvestigationPanelProps {
   investigation: DashboardInvestigation;
   returnFocusTo: HTMLButtonElement | null;
+  returnFocusFallback?: HTMLElement | null;
   onClose(): void;
 }
 
@@ -25,6 +26,7 @@ const FOCUSABLE_SELECTOR = [
 export function InvestigationPanel({
   investigation,
   returnFocusTo,
+  returnFocusFallback = null,
   onClose,
 }: InvestigationPanelProps) {
   const panelRef = useRef<HTMLDivElement>(null);
@@ -37,8 +39,15 @@ export function InvestigationPanel({
 
   useEffect(() => {
     closeButtonRef.current?.focus();
-    return () => returnFocusTo?.focus();
-  }, [returnFocusTo]);
+    return () => {
+      const focusTarget = returnFocusTo?.isConnected
+        ? returnFocusTo
+        : returnFocusFallback?.isConnected
+          ? returnFocusFallback
+          : null;
+      focusTarget?.focus();
+    };
+  }, [returnFocusFallback, returnFocusTo]);
 
   const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (event.key === "Escape") {

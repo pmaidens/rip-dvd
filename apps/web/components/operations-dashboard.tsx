@@ -436,6 +436,7 @@ function DiscInspectionItem({
   onInvestigate(
     inspectionId: string,
     trigger: HTMLButtonElement,
+    fallback: HTMLElement | null,
   ): void;
   busy: boolean;
 }) {
@@ -554,7 +555,13 @@ function DiscInspectionItem({
               className="investigate-action"
               type="button"
               onClick={(event) =>
-                onInvestigate(inspection.id, event.currentTarget)}
+                onInvestigate(
+                  inspection.id,
+                  event.currentTarget,
+                  event.currentTarget.closest<HTMLElement>(
+                    "article.operation-item",
+                  ),
+                )}
             >
               Investigate
             </button>
@@ -1085,6 +1092,7 @@ export function DashboardView({
     kind: "archive-job" | "disc-inspection";
     subjectId: string;
     trigger: HTMLButtonElement;
+    fallback: HTMLElement | null;
   } | null>(null);
   const catalogReviewPage =
     state.catalogReview.status === "loaded"
@@ -1112,30 +1120,34 @@ export function DashboardView({
           },
         ),
       };
-  const activeInvestigationDetails = activeInvestigation === null
-    ? undefined
+  const activeInvestigationResolution = activeInvestigation === null
+    ? { details: undefined, sourceLoaded: true }
     : activeInvestigation.kind === "archive-job"
-      ? state.archiveJobs.status === "loaded"
-        ? state.archiveJobs.items.find(
-            (job) => job.id === activeInvestigation.subjectId,
-          )?.investigation
-        : undefined
-      : state.opticalDrives.status === "loaded"
-        ? state.opticalDrives.items
-            .find(
-              (drive) =>
-                drive.currentInspection?.id === activeInvestigation.subjectId,
-            )
-            ?.currentInspection?.investigation
-        : undefined;
-  const activeInvestigationSourceLoaded = activeInvestigation === null ||
-    (activeInvestigation.kind === "archive-job"
-      ? state.archiveJobs.status === "loaded"
-      : state.opticalDrives.status === "loaded");
+      ? {
+          details: state.archiveJobs.status === "loaded"
+            ? state.archiveJobs.items.find(
+                (job) => job.id === activeInvestigation.subjectId,
+              )?.investigation
+            : undefined,
+          sourceLoaded: state.archiveJobs.status === "loaded",
+        }
+      : {
+          details: state.opticalDrives.status === "loaded"
+            ? state.opticalDrives.items
+                .find(
+                  (drive) =>
+                    drive.currentInspection?.id ===
+                      activeInvestigation.subjectId,
+                )
+                ?.currentInspection?.investigation
+            : undefined,
+          sourceLoaded: state.opticalDrives.status === "loaded",
+        };
+  const activeInvestigationDetails = activeInvestigationResolution.details;
   useEffect(() => {
     if (
       activeInvestigation !== null &&
-      activeInvestigationSourceLoaded &&
+      activeInvestigationResolution.sourceLoaded &&
       activeInvestigationDetails === undefined
     ) {
       setActiveInvestigation(null);
@@ -1143,7 +1155,7 @@ export function DashboardView({
   }, [
     activeInvestigation,
     activeInvestigationDetails,
-    activeInvestigationSourceLoaded,
+    activeInvestigationResolution.sourceLoaded,
   ]);
   return (
     <>
@@ -1156,7 +1168,7 @@ export function DashboardView({
         state={state.opticalDrives}
         emptyMessage="No Optical Drives have been discovered."
         renderItem={(drive) => (
-          <article className="operation-item" key={drive.id}>
+          <article className="operation-item" key={drive.id} tabIndex={-1}>
             <div className="item-heading">
               <div>
                 <h3>{drive.displayName}</h3>
@@ -1171,11 +1183,12 @@ export function DashboardView({
               <DiscInspectionItem
                 inspection={drive.currentInspection}
                 onRetry={onRetryDiscInspection}
-                onInvestigate={(subjectId, trigger) =>
+                onInvestigate={(subjectId, trigger, fallback) =>
                   setActiveInvestigation({
                     kind: "disc-inspection",
                     subjectId,
                     trigger,
+                    fallback,
                   })}
                 busy={busyWorkflowId === drive.currentInspection.id}
               />
@@ -1220,6 +1233,7 @@ export function DashboardView({
                   kind: "archive-job",
                   subjectId: archiveJobId,
                   trigger,
+                  fallback: null,
                 })}
             />
             {group.older.length > 0 ? (
@@ -1245,6 +1259,7 @@ export function DashboardView({
                                 kind: "archive-job",
                                 subjectId: attempt.id,
                                 trigger: event.currentTarget,
+                                fallback: null,
                               })}
                           >
                             Investigate
@@ -1561,6 +1576,7 @@ export function DashboardView({
         <InvestigationPanel
           investigation={activeInvestigationDetails}
           returnFocusTo={activeInvestigation.trigger}
+          returnFocusFallback={activeInvestigation.fallback}
           onClose={() => setActiveInvestigation(null)}
         />
       ) : null}

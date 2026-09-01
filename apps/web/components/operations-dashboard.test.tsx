@@ -1140,6 +1140,7 @@ describe("DashboardView", () => {
     const trigger = [...container.querySelectorAll("button")].find(
       (button) => button.textContent === "Investigate",
     )!;
+    const driveCard = trigger.closest<HTMLElement>("article.operation-item")!;
     await act(async () => trigger.click());
 
     let dialog = container.querySelector<HTMLElement>('[role="dialog"]')!;
@@ -1213,6 +1214,7 @@ describe("DashboardView", () => {
       );
     });
     expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.activeElement).toBe(driveCard);
 
     const terminal = failedDiscInspection("failed-inspection", {
       activityRevision: "2026-08-31T09:01:00.000Z",
