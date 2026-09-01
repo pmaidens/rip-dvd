@@ -10,6 +10,7 @@ import { promisify } from "node:util";
 import { describe, expect, it, vi } from "vitest";
 
 import { DiscInspectionError } from "./disc-inspection-error.js";
+import { commandFailure } from "./optical-drive-command-runner.js";
 import {
   createLinuxOpticalDriveHardware,
   createNodeCommandRunner,
@@ -255,6 +256,28 @@ describe("Linux Optical Drive hardware boundary", () => {
     } finally {
       await rm(directory, { force: true, recursive: true });
     }
+  });
+
+  it("preserves and reports an Optical Drive command termination signal", async () => {
+    const runner = createNodeCommandRunner();
+
+    const result = await runner.run(
+      process.execPath,
+      ["-e", 'process.kill(process.pid, "SIGSEGV")'],
+      {
+        maxBufferBytes: 1_024,
+        signal: new AbortController().signal,
+        timeoutMs: 5_000,
+      },
+    );
+
+    expect(result).toMatchObject({
+      exitCode: null,
+      signal: "SIGSEGV",
+    });
+    expect(commandFailure("lsdvd", result).message).toBe(
+      "lsdvd terminated by signal SIGSEGV",
+    );
   });
 
   it.each(["stdout", "stderr"])(
