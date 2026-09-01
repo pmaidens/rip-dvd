@@ -676,10 +676,11 @@ describe("data-access facade", () => {
         "disc_inspection_attempts",
         "disc_inspections",
         "disc_selection_supersessions",
+        "encode_job_failure_reports",
         "worker_incidents",
       ]),
     );
-    expect(identifierTables).toHaveLength(18);
+    expect(identifierTables).toHaveLength(19);
     expect(
       identifierTables.every(({ name, sql }) =>
         name === "legacy_cutover_staged_sidecars"
@@ -8087,10 +8088,10 @@ INSERT INTO __drizzle_migrations (hash, created_at, name) VALUES
         .all(),
     ).toEqual([
       {
-        name: "20260901172324_glorious_cargill",
+        name: "20260901175437_reflective_tattoo",
       },
       {
-        name: "20260901170633_big_sasquatch",
+        name: "20260901172324_glorious_cargill",
       },
       {
         name: "20260828164042_married_lady_ursula",

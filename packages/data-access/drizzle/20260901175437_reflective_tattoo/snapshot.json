@@ -1,9 +1,9 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "b826dde0-5c84-4f4b-a24c-225a4c70cc8a",
+  "id": "d7e561ef-1338-45a1-8a4c-38da94fd8564",
   "prevIds": [
-    "ee6e6382-37b9-4aa3-8867-2349f064b454"
+    "33a04041-7c1e-46a5-ad6f-be75790c688f"
   ],
   "ddl": [
     {
@@ -36,6 +36,10 @@
     },
     {
       "name": "disc_selections",
+      "entityType": "tables"
+    },
+    {
+      "name": "encode_job_failure_reports",
       "entityType": "tables"
     },
     {
@@ -1257,6 +1261,136 @@
       "name": "updated_at",
       "entityType": "columns",
       "table": "disc_selections"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "id",
+      "entityType": "columns",
+      "table": "encode_job_failure_reports"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "encode_job_id",
+      "entityType": "columns",
+      "table": "encode_job_failure_reports"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "schema_version",
+      "entityType": "columns",
+      "table": "encode_job_failure_reports"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "'encode_worker'",
+      "generated": null,
+      "name": "worker_kind",
+      "entityType": "columns",
+      "table": "encode_job_failure_reports"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "reason_code",
+      "entityType": "columns",
+      "table": "encode_job_failure_reports"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "phase",
+      "entityType": "columns",
+      "table": "encode_job_failure_reports"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "retryability",
+      "entityType": "columns",
+      "table": "encode_job_failure_reports"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "diagnostic",
+      "entityType": "columns",
+      "table": "encode_job_failure_reports"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "exit_status",
+      "entityType": "columns",
+      "table": "encode_job_failure_reports"
+    },
+    {
+      "type": "text",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "signal",
+      "entityType": "columns",
+      "table": "encode_job_failure_reports"
+    },
+    {
+      "type": "integer",
+      "notNull": false,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "timeout_seconds",
+      "entityType": "columns",
+      "table": "encode_job_failure_reports"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "occurred_at",
+      "entityType": "columns",
+      "table": "encode_job_failure_reports"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "created_at",
+      "entityType": "columns",
+      "table": "encode_job_failure_reports"
     },
     {
       "type": "text",
@@ -2720,6 +2854,21 @@
     },
     {
       "columns": [
+        "encode_job_id"
+      ],
+      "tableTo": "encode_jobs",
+      "columnsTo": [
+        "id"
+      ],
+      "onUpdate": "NO ACTION",
+      "onDelete": "RESTRICT",
+      "nameExplicit": false,
+      "name": "fk_encode_job_failure_reports_encode_job_id_encode_jobs_id_fk",
+      "entityType": "fks",
+      "table": "encode_job_failure_reports"
+    },
+    {
+      "columns": [
         "predecessor_encode_job_id"
       ],
       "tableTo": "encode_jobs",
@@ -2933,6 +3082,15 @@
       "nameExplicit": false,
       "name": "disc_selections_pk",
       "table": "disc_selections",
+      "entityType": "pks"
+    },
+    {
+      "columns": [
+        "id"
+      ],
+      "nameExplicit": false,
+      "name": "encode_job_failure_reports_pk",
+      "table": "encode_job_failure_reports",
       "entityType": "pks"
     },
     {
@@ -3243,6 +3401,28 @@
       "name": "disc_selections_media_item_idx",
       "entityType": "indexes",
       "table": "disc_selections"
+    },
+    {
+      "columns": [
+        {
+          "value": "encode_job_id",
+          "isExpression": false
+        },
+        {
+          "value": "occurred_at",
+          "isExpression": false
+        },
+        {
+          "value": "id",
+          "isExpression": false
+        }
+      ],
+      "isUnique": false,
+      "where": null,
+      "origin": "manual",
+      "name": "encode_job_failure_reports_job_occurred_idx",
+      "entityType": "indexes",
+      "table": "encode_job_failure_reports"
     },
     {
       "columns": [
@@ -3803,6 +3983,54 @@
       "name": "disc_selections_shape_check",
       "entityType": "checks",
       "table": "disc_selections"
+    },
+    {
+      "value": "\"id\" is not null",
+      "name": "encode_job_failure_reports_id_not_null",
+      "entityType": "checks",
+      "table": "encode_job_failure_reports"
+    },
+    {
+      "value": "\"schema_version\" in (1)",
+      "name": "encode_job_failure_reports_schema_version_check",
+      "entityType": "checks",
+      "table": "encode_job_failure_reports"
+    },
+    {
+      "value": "\"worker_kind\" = 'encode_worker'",
+      "name": "encode_job_failure_reports_worker_kind_check",
+      "entityType": "checks",
+      "table": "encode_job_failure_reports"
+    },
+    {
+      "value": "\"reason_code\" in ('command_failed', 'command_timeout')",
+      "name": "encode_job_failure_reports_reason_code_check",
+      "entityType": "checks",
+      "table": "encode_job_failure_reports"
+    },
+    {
+      "value": "\"phase\" in ('encoding')",
+      "name": "encode_job_failure_reports_phase_check",
+      "entityType": "checks",
+      "table": "encode_job_failure_reports"
+    },
+    {
+      "value": "\"retryability\" in ('appropriate')",
+      "name": "encode_job_failure_reports_retryability_check",
+      "entityType": "checks",
+      "table": "encode_job_failure_reports"
+    },
+    {
+      "value": "\"diagnostic\" is null or (typeof(\"diagnostic\") = 'text' and length(\"diagnostic\") between 1 and 500)",
+      "name": "encode_job_failure_reports_diagnostic_check",
+      "entityType": "checks",
+      "table": "encode_job_failure_reports"
+    },
+    {
+      "value": "(\"reason_code\" = 'command_failed' and \"timeout_seconds\" is null and ((typeof(\"exit_status\") = 'integer' and \"exit_status\" between 1 and 255 and \"signal\" is null) or (\"exit_status\" is null and \"signal\" in ('SIGABRT', 'SIGALRM', 'SIGBREAK', 'SIGBUS', 'SIGCHLD', 'SIGCONT', 'SIGFPE', 'SIGHUP', 'SIGILL', 'SIGINT', 'SIGIO', 'SIGIOT', 'SIGKILL', 'SIGLOST', 'SIGPIPE', 'SIGPOLL', 'SIGPROF', 'SIGPWR', 'SIGQUIT', 'SIGSEGV', 'SIGSTKFLT', 'SIGSTOP', 'SIGSYS', 'SIGTERM', 'SIGTRAP', 'SIGTSTP', 'SIGTTIN', 'SIGTTOU', 'SIGUNUSED', 'SIGURG', 'SIGUSR1', 'SIGUSR2', 'SIGVTALRM', 'SIGWINCH', 'SIGXCPU', 'SIGXFSZ', 'SIGINFO')))) or (\"reason_code\" = 'command_timeout' and \"exit_status\" is null and \"signal\" is null and typeof(\"timeout_seconds\") = 'integer' and \"timeout_seconds\" between 1 and 604800)",
+      "name": "encode_job_failure_reports_evidence_check",
+      "entityType": "checks",
+      "table": "encode_job_failure_reports"
     },
     {
       "value": "\"id\" is not null",
