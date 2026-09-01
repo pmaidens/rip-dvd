@@ -258,7 +258,7 @@ describe("Linux Optical Drive hardware boundary", () => {
     }
   });
 
-  it("preserves and reports a device command termination signal", async () => {
+  it("preserves and reports an Optical Drive command termination signal", async () => {
     const runner = createNodeCommandRunner();
 
     const result = await runner.run(
